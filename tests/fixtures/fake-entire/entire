@@ -1,0 +1,19 @@
+#!/bin/sh
+# A stand-in for the real `entire` binary, used by rift's integration tests.
+# Integration tests point RIFT_ENTIRE_BIN at a copy of this script.
+case "$1" in
+  version)
+    echo "Entire CLI 0.6.2-fake"
+    ;;
+  status)
+    echo '{"fake":true,"status":"ok"}'
+    ;;
+  __fail)
+    echo "fake-entire: simulated failure" >&2
+    exit 3
+    ;;
+  *)
+    echo "fake-entire: $*"
+    ;;
+esac
+exit 0

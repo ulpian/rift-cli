@@ -1,0 +1,5 @@
+{
+  "project_id": "rift_demo_project",
+  "org_id": "rift_demo_org",
+  "agents": ["claude-code", "codex"]
+}

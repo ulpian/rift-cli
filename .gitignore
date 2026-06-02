@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target
+
+# Backup files from rustfmt
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+*.swp
+.idea/
+
+# Agent / tooling local overrides (committed files are the shared defaults)
+.claude/settings.local.json
+.mcp.local.json
+
+# Local read-side caches (regenerable from the checkpoint branch)
+**/*.duckdb
+**/*.sqlite
+
+# NOTE: Cargo.lock is intentionally committed (this workspace produces a binary).

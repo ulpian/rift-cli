@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+license = "MIT"
+repository = "https://github.com/ulpian/rift-cli"
+authors = ["Ulpian Morina"]
+
+[workspace.dependencies]
+# Internal crates
+rift-core = { path = "crates/rift-core" }
+rift-entire = { path = "crates/rift-entire" }
+rift-redact = { path = "crates/rift-redact" }
+rift-tui = { path = "crates/rift-tui" }
+
+# CLI / TUI
+clap = { version = "4.6", features = ["derive", "env"] }
+ratatui = "0.30"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors / logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Utilities
+regex = "1"
+which = "8"
+walkdir = "2"
+figment = { version = "0.10", features = ["toml", "env"] }
+toml = "0.8"
+jiff = "0.2"
+
+# Dev / testing
+assert_cmd = "2.2"
+predicates = "3.1"
+tempfile = "3"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

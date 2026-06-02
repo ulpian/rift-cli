@@ -1,0 +1,55 @@
+{
+  "$comment": "Machine-readable manifest of repo dev tasks. The runner is ./skills.sh (run `./skills.sh <name>`). Keep names in sync with skills.sh; see SKILLS.md.",
+  "skills": [
+    {
+      "name": "fmt",
+      "description": "Format all crates with rustfmt.",
+      "command": "cargo fmt --all"
+    },
+    {
+      "name": "fmt-check",
+      "description": "Verify formatting without writing changes.",
+      "command": "cargo fmt --all --check"
+    },
+    {
+      "name": "lint",
+      "description": "Clippy across the workspace with warnings denied.",
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+    },
+    {
+      "name": "test",
+      "description": "Run the full workspace test suite.",
+      "command": "cargo test --workspace --all-features"
+    },
+    {
+      "name": "build",
+      "description": "Debug build of the whole workspace.",
+      "command": "cargo build --workspace"
+    },
+    {
+      "name": "release",
+      "description": "Optimized release build (matches CI's final step).",
+      "command": "cargo build --workspace --release"
+    },
+    {
+      "name": "check",
+      "description": "Pre-push gate: fmt-check + lint + test.",
+      "command": "skills.sh fmt-check && skills.sh lint && skills.sh test"
+    },
+    {
+      "name": "run",
+      "description": "Run the rift binary; forwards trailing args (e.g. `run scan .`).",
+      "command": "cargo run -p rift-cli --"
+    },
+    {
+      "name": "tui",
+      "description": "Launch the TUI dashboard.",
+      "command": "cargo run -p rift-cli -- tui"
+    },
+    {
+      "name": "smoke",
+      "description": "Quick end-to-end: scan the fixture repo and dry-run redaction.",
+      "command": "cargo run -q -p rift-cli -- scan tests/fixtures/repo && cargo run -q -p rift-cli -- redact --dry-run --store tests/fixtures/repo/checkpoints"
+    }
+  ]
+}
