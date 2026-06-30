@@ -368,6 +368,23 @@ const SESSION_TRANSITION_COLUMNS: &[Column] = &[
     Column::int("schema_version"),
 ];
 
+// Per-canonical-event idempotency index (P8 S2). One row per *logical* event;
+// the content/identity-derived key is its identity, so a re-delivered hook is a
+// true no-op (no double-count, the chain never gets a duplicate leaf). Distinct
+// from `agent_hook_event` (one row per hook *receipt*) — a single hook fans out to
+// several canonical events, each needing independent idempotent capture.
+const CAPTURED_EVENT_COLUMNS: &[Column] = &[
+    Column::text("idempotency_key"), // = sha256(agent ‖ session ‖ verb ‖ event_ordinal ‖ payload_sha256)
+    Column::text("session_id"),
+    Column::int("turn_ordinal"),
+    Column::int("event_ordinal"),
+    Column::text("kind"),  // canonical EventKind token
+    Column::text("trust"), // canonical Trust token
+    Column::text("payload_sha256"),
+    Column::int("occurred_at_ms"),
+    Column::int("schema_version"),
+];
+
 // The `rift hooks <agent> <verb>` contract audit (content-addressed → idempotent).
 const AGENT_HOOK_EVENT_COLUMNS: &[Column] = &[
     Column::text("hook_event_id"), // hash(agent, verb, session, ordinal, payload_hash)
@@ -376,6 +393,18 @@ const AGENT_HOOK_EVENT_COLUMNS: &[Column] = &[
     Column::text_null("session_id"), // may be NULL pre-session-start
     Column::int("received_at"),
     Column::text("outcome"), // 'recorded' | 'deferred' | 'skipped-unknown-verb'
+    Column::int("schema_version"),
+];
+
+// Agent enable/disable history (P8 S3). enable/disable are *events*, not a mutable
+// "enabled" boolean (04 §4.3 rule 2) — so the history of which agents were wired
+// when is auditable and 4NF-clean (one row per action).
+const AGENT_ENABLEMENT_COLUMNS: &[Column] = &[
+    Column::text("change_id"), // = sha256(agent ‖ action ‖ changed_at ‖ wired_hooks_hash)
+    Column::text("agent"),
+    Column::text("action"), // 'enable' | 'disable'
+    Column::int("changed_at"),
+    Column::text("wired_hooks_hash"), // sha256 over the wired hook config (provenance)
     Column::int("schema_version"),
 ];
 
@@ -596,6 +625,18 @@ const TABLES: &[CanonicalTable] = &[
         unique: NO_UNIQUE,
     },
     CanonicalTable {
+        name: "captured_event",
+        columns: CAPTURED_EVENT_COLUMNS,
+        primary_key: &["idempotency_key"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "agent_enablement",
+        columns: AGENT_ENABLEMENT_COLUMNS,
+        primary_key: &["change_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
         name: "archive_decision",
         columns: ARCHIVE_DECISION_COLUMNS,
         primary_key: &["decision_id"],
@@ -783,6 +824,8 @@ mod tests {
             "shadow_branch_event",
             "session_transition",
             "agent_hook_event",
+            "captured_event",
+            "agent_enablement",
             "archive_decision",
             "substrate_install",
             "substrate_block_event",

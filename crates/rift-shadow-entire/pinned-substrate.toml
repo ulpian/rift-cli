@@ -1,0 +1,63 @@
+# pinned-substrate.toml — the ONE capture-backend build this Rift release may run.
+#
+# This file is `include_str!`-embedded into the binary (P1 S1) so an on-disk edit
+# cannot trick the running wrapper. It pins, per OS/arch, the upstream release
+# download URL and the SHA-256 of the **extracted binary** (not the archive): the
+# wrapper downloads the release archive, extracts the binary, and refuses to
+# install anything whose bytes do not hash to the value below. So the backend we
+# exec is exactly the one pinned here, or we do not run.
+#
+# `sha256` is the hash of the extracted `entire`/`entire.exe` member, derived at
+# pin-cut from the archives published with the upstream release (whose archive
+# checksums were cross-checked against the release's `checksums.txt`). A new
+# upstream version is a new Rift release (the pin is release-coupled; there is no
+# independent "upgrade the backend" command).
+#
+# No binary is committed to this repo — only this pin. The download happens at
+# `rift setup` time (P1 B2) from the upstream GitHub releases, production tags only.
+
+schema = 1
+substrate_version = "0.7.7"
+rift_release = "0.1.0"
+
+# macOS — Apple Silicon
+[[asset]]
+os = "macos"
+arch = "aarch64"
+url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_darwin_arm64.tar.gz"
+sha256 = "3c5225f369227d3ccdbe444511c6b4c22ddcc9aafd6f93e77b61aa3bdbe79b50"
+
+# macOS — Intel
+[[asset]]
+os = "macos"
+arch = "x86_64"
+url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_darwin_amd64.tar.gz"
+sha256 = "bf8e9538f17ca9be63d7217fcb5f14956b29a3f1b7c7f8192d7b5008850fa598"
+
+# Linux — x86_64
+[[asset]]
+os = "linux"
+arch = "x86_64"
+url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_linux_amd64.tar.gz"
+sha256 = "d309a5bed28f2a5c5eae8874769bb8f1115402c19d5752490443af10b4bd4947"
+
+# Linux — aarch64
+[[asset]]
+os = "linux"
+arch = "aarch64"
+url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_linux_arm64.tar.gz"
+sha256 = "da5e83ef835dfd1d39dc3489ddf04a611a94a583b43455c3fe6aa12a43031fdc"
+
+# Windows — x86_64
+[[asset]]
+os = "windows"
+arch = "x86_64"
+url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_windows_amd64.zip"
+sha256 = "1230f9a4ee48e4e6221a0ec73bd74d2e49fb04b7d0fbd211b4d69d093471cb1e"
+
+# Windows — aarch64
+[[asset]]
+os = "windows"
+arch = "aarch64"
+url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_windows_arm64.zip"
+sha256 = "9a909705b89b6b6bbf66120a7a563ea306185e20d959ccbe877563b8a31d5d47"

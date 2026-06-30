@@ -13,6 +13,9 @@ fn rift(config_dir: &Path, cwd: &Path, args: &[&str]) -> Output {
         .current_dir(cwd)
         .env("RIFT_CONFIG_DIR", config_dir)
         .env("RIFT_HEADLESS", "1")
+        // `rift setup` provisions the capture backend by default; keep the test
+        // hermetic and offline.
+        .env("RIFT_NO_PROVISION", "1")
         .output()
         .expect("spawn rift binary")
 }

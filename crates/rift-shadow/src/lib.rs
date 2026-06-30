@@ -21,8 +21,39 @@ pub use rift_shadow_entire as entire;
 pub use rift_shadow_hooks as hooks;
 pub use rift_shadow_redact as redact;
 
+pub mod backend;
+pub mod bridge;
+pub mod condense;
+pub mod executor;
+pub mod parity;
+pub mod provision;
+
+pub use backend::{
+    persist_divergences, Capability, Divergence, EntireBackend, NativeBackend, Route, RouteTable,
+    RoutedBackend, ShadowBackend,
+};
+pub use bridge::{ingest_hook, trigger_for};
+pub use condense::{condense, CheckpointId};
+pub use executor::{run_decision, RepoSerializer};
+pub use parity::{parity_report, run_parity, Fidelity, ParityCase, ParityResult};
+pub use provision::{provision_and_audit, record_block};
+
 use rift_core::{Result, SecretBytes, Sha256Id};
-use rift_shadow_hooks::{dispatch, AdapterRegistry, CanonicalEvent, RawHook};
+use rift_shadow_hooks::{dispatch, AdapterRegistry, CanonicalEvent, EventLeaf, RawHook};
+
+/// One content-addressed id helper: lowercase-hex SHA-256 over the concatenation
+/// of `parts`. Used to derive the idempotent keys the append-only writers expect.
+#[must_use]
+pub(crate) fn sha256_hex(parts: &[&[u8]]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for p in parts {
+        h.update(p);
+    }
+    let mut b = [0u8; 32];
+    b.copy_from_slice(&h.finalize());
+    Sha256Id::from_bytes(b).to_hex()
+}
 
 /// Scaffold/status string (kept for the bin entrypoint and smoke tests).
 #[must_use]
@@ -55,7 +86,7 @@ pub fn capture(raw: &RawHook, registry: &AdapterRegistry) -> Result<Vec<Canonica
 /// tamper-evidence witness.
 #[must_use]
 pub fn checkpoint_merkle_root(events: &[CanonicalEvent]) -> Sha256Id {
-    let leaves: Vec<Sha256Id> = events.iter().map(CanonicalEvent::leaf).collect();
+    let leaves: Vec<Sha256Id> = events.iter().map(EventLeaf::leaf).collect();
     rift_hashchain::merkle_root(&leaves)
 }
 
@@ -64,11 +95,11 @@ pub fn checkpoint_merkle_root(events: &[CanonicalEvent]) -> Sha256Id {
 ///
 /// # Errors
 /// [`rift_core::RiftError::Integrity`] on divergence.
-pub fn verify(
-    store: &rift_store::SqliteStore,
+pub async fn verify(
+    store: &impl rift_store::CanonicalStore,
     source: &impl rift_store::ChainSource,
 ) -> Result<rift_store::VerifyReport> {
-    rift_store::verify_against_source(store, source)
+    rift_store::verify_against_source(store, source).await
 }
 
 #[cfg(test)]
@@ -81,7 +112,7 @@ mod tests {
 
     fn raw(verb: &str) -> RawHook {
         RawHook {
-            agent: rift_shadow_hooks::AgentId::ClaudeCode,
+            agent: rift_shadow_hooks::AgentId::CLAUDE_CODE,
             verb: verb.into(),
             session: "01JSESSION".into(),
             turn: 0,

@@ -1,0 +1,6 @@
+{
+  "id": "a3b2c4d5",
+  "session_ids": ["sess_demo_01"],
+  "strategy": "manual-commit",
+  "files_touched": ["src/billing/retry.ts"]
+}

@@ -14,7 +14,6 @@
 use rift_core::{Result, RiftError, Sha256Id};
 use rift_hashchain::{verify_chain, ChainLink};
 
-use crate::sqlite_store::SqliteStore;
 use crate::{CanonicalStore, Value};
 
 /// A checkpoint integrity record to persist (insert-only).
@@ -58,26 +57,28 @@ pub struct VerifyReport {
 ///
 /// # Errors
 /// [`RiftError::Storage`]/[`RiftError::Immutability`] on insert failure.
-pub fn record_checkpoint(store: &SqliteStore, c: &CheckpointRecord) -> Result<()> {
-    store.insert(
-        "checkpoint",
-        &[
-            "checkpoint_id",
-            "strategy",
-            "created_at",
-            "merkle_root",
-            "prev_hash",
-            "schema_version",
-        ],
-        &[
-            Value::text(c.checkpoint_id.to_hex()),
-            Value::text(c.strategy.clone()),
-            Value::Int(c.created_at),
-            Value::text(c.merkle_root.to_hex()),
-            c.prev.map_or(Value::Null, |p| Value::text(p.to_hex())),
-            Value::Int(c.schema_version),
-        ],
-    )
+pub async fn record_checkpoint(store: &impl CanonicalStore, c: &CheckpointRecord) -> Result<()> {
+    store
+        .insert(
+            "checkpoint",
+            &[
+                "checkpoint_id",
+                "strategy",
+                "created_at",
+                "merkle_root",
+                "prev_hash",
+                "schema_version",
+            ],
+            &[
+                Value::text(c.checkpoint_id.to_hex()),
+                Value::text(c.strategy.clone()),
+                Value::Int(c.created_at),
+                Value::text(c.merkle_root.to_hex()),
+                c.prev.map_or(Value::Null, |p| Value::text(p.to_hex())),
+                Value::Int(c.schema_version),
+            ],
+        )
+        .await
 }
 
 /// Read the stored checkpoint chain as [`ChainLink`]s.
@@ -85,13 +86,20 @@ pub fn record_checkpoint(store: &SqliteStore, c: &CheckpointRecord) -> Result<()
 /// # Errors
 /// [`RiftError::Storage`] on query failure, [`RiftError::Validity`] if a stored
 /// hash is malformed.
-pub fn read_stored_links(store: &SqliteStore) -> Result<Vec<ChainLink>> {
+pub async fn read_stored_links(store: &impl CanonicalStore) -> Result<Vec<ChainLink>> {
+    let rows = store
+        .query(
+            "SELECT checkpoint_id, merkle_root, prev_hash FROM checkpoint \
+             ORDER BY created_at, checkpoint_id",
+            &[],
+        )
+        .await?;
     let mut out = Vec::new();
-    for (id, root, prev) in store.stored_checkpoint_links()? {
+    for r in rows {
         out.push(ChainLink {
-            checkpoint_id: Sha256Id::parse_hex(&id)?,
-            merkle_root: Sha256Id::parse_hex(&root)?,
-            prev: match prev {
+            checkpoint_id: Sha256Id::parse_hex(&r.get_text(0)?)?,
+            merkle_root: Sha256Id::parse_hex(&r.get_text(1)?)?,
+            prev: match r.get_opt_text(2)? {
                 Some(p) => Some(Sha256Id::parse_hex(&p)?),
                 None => None,
             },
@@ -108,13 +116,13 @@ pub fn read_stored_links(store: &SqliteStore) -> Result<Vec<ChainLink>> {
 ///
 /// # Errors
 /// [`RiftError::Integrity`] naming the divergence (no payload bytes).
-pub fn verify_against_source(
-    store: &SqliteStore,
+pub async fn verify_against_source(
+    store: &impl CanonicalStore,
     source: &impl ChainSource,
 ) -> Result<VerifyReport> {
     let expected = source.links()?;
     verify_chain(&expected)?;
-    let stored = read_stored_links(store)?;
+    let stored = read_stored_links(store).await?;
     if stored.len() != expected.len() {
         return Err(RiftError::integrity(format!(
             "projection has {} checkpoints, canonical source has {}",
@@ -160,59 +168,73 @@ pub struct CostFact {
 ///
 /// # Errors
 /// [`RiftError::Storage`] on insert failure.
-pub fn record_cost_fact(store: &SqliteStore, f: &CostFact) -> Result<()> {
-    store.insert(
-        "cost_fact",
-        &[
-            "cost_fact_id",
-            "call_id",
-            "amount_micros",
-            "valid_from",
-            "valid_to",
-            "recorded_at",
-            "supersedes_id",
-            "schema_version",
-        ],
-        &[
-            Value::text(f.cost_fact_id.clone()),
-            Value::text(f.call_id.clone()),
-            Value::Int(f.amount_micros),
-            Value::Int(f.valid_from),
-            f.valid_to.map_or(Value::Null, Value::Int),
-            Value::Int(f.recorded_at),
-            f.supersedes_id.clone().map_or(Value::Null, Value::text),
-            Value::Int(f.schema_version),
-        ],
-    )
+pub async fn record_cost_fact(store: &impl CanonicalStore, f: &CostFact) -> Result<()> {
+    store
+        .insert(
+            "cost_fact",
+            &[
+                "cost_fact_id",
+                "call_id",
+                "amount_micros",
+                "valid_from",
+                "valid_to",
+                "recorded_at",
+                "supersedes_id",
+                "schema_version",
+            ],
+            &[
+                Value::text(f.cost_fact_id.clone()),
+                Value::text(f.call_id.clone()),
+                Value::Int(f.amount_micros),
+                Value::Int(f.valid_from),
+                f.valid_to.map_or(Value::Null, Value::Int),
+                Value::Int(f.recorded_at),
+                f.supersedes_id.clone().map_or(Value::Null, Value::text),
+                Value::Int(f.schema_version),
+            ],
+        )
+        .await
 }
 
 /// The current believed cost for a call (latest `recorded_at`).
 ///
 /// # Errors
 /// [`RiftError::Storage`] on query failure.
-pub fn current_cost_micros(store: &SqliteStore, call_id: &str) -> Result<Option<i64>> {
-    store.query_opt_i64(
-        "SELECT amount_micros FROM cost_fact WHERE call_id = ? \
-         ORDER BY recorded_at DESC, cost_fact_id DESC LIMIT 1",
-        &[Value::text(call_id)],
-    )
+pub async fn current_cost_micros(
+    store: &impl CanonicalStore,
+    call_id: &str,
+) -> Result<Option<i64>> {
+    store
+        .query_opt_i64(
+            "SELECT amount_micros FROM cost_fact WHERE call_id = ? \
+             ORDER BY recorded_at DESC, cost_fact_id DESC LIMIT 1",
+            &[Value::text(call_id)],
+        )
+        .await
 }
 
 /// The cost we believed for a call *as of* a transaction time.
 ///
 /// # Errors
 /// [`RiftError::Storage`] on query failure.
-pub fn cost_belief_as_of(store: &SqliteStore, call_id: &str, as_of: i64) -> Result<Option<i64>> {
-    store.query_opt_i64(
-        "SELECT amount_micros FROM cost_fact WHERE call_id = ? AND recorded_at <= ? \
-         ORDER BY recorded_at DESC LIMIT 1",
-        &[Value::text(call_id), Value::Int(as_of)],
-    )
+pub async fn cost_belief_as_of(
+    store: &impl CanonicalStore,
+    call_id: &str,
+    as_of: i64,
+) -> Result<Option<i64>> {
+    store
+        .query_opt_i64(
+            "SELECT amount_micros FROM cost_fact WHERE call_id = ? AND recorded_at <= ? \
+             ORDER BY recorded_at DESC LIMIT 1",
+            &[Value::text(call_id), Value::Int(as_of)],
+        )
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SqliteStore;
 
     struct Fixture(Vec<ChainLink>);
     impl ChainSource for Fixture {
@@ -246,51 +268,51 @@ mod tests {
         }
     }
 
-    #[test]
-    fn records_and_reads_checkpoint_chain() {
+    #[tokio::test]
+    async fn records_and_reads_checkpoint_chain() {
         let s = store();
         let chain = [ckpt(1, None, 1), ckpt(2, Some(1), 2), ckpt(3, Some(2), 3)];
         for c in &chain {
-            record_checkpoint(&s, c).unwrap();
+            record_checkpoint(&s, c).await.unwrap();
         }
-        let links = read_stored_links(&s).unwrap();
+        let links = read_stored_links(&s).await.unwrap();
         assert_eq!(links.len(), 3);
         assert_eq!(links[0].prev, None);
         assert_eq!(links[1].prev, Some(Sha256Id::from_bytes([1; 32])));
     }
 
-    #[test]
-    fn verify_passes_on_untampered_fixture() {
+    #[tokio::test]
+    async fn verify_passes_on_untampered_fixture() {
         let s = store();
         let chain = [ckpt(1, None, 1), ckpt(2, Some(1), 2)];
         for c in &chain {
-            record_checkpoint(&s, c).unwrap();
+            record_checkpoint(&s, c).await.unwrap();
         }
         let source = Fixture(chain.iter().map(link_of).collect());
-        let report = verify_against_source(&s, &source).unwrap();
+        let report = verify_against_source(&s, &source).await.unwrap();
         assert!(report.ok);
         assert_eq!(report.checkpoints, 2);
     }
 
-    #[test]
-    fn tampered_projection_root_is_detected() {
+    #[tokio::test]
+    async fn tampered_projection_root_is_detected() {
         let s = store();
         let chain = [ckpt(1, None, 1), ckpt(2, Some(1), 2)];
         for c in &chain {
-            record_checkpoint(&s, c).unwrap();
+            record_checkpoint(&s, c).await.unwrap();
         }
         // The authoritative source has a *different* root for checkpoint 2 →
         // the projection (stored) diverges from canonical git.
         let mut authoritative: Vec<ChainLink> = chain.iter().map(link_of).collect();
         authoritative[1].merkle_root = Sha256Id::from_bytes([222; 32]);
-        let err = verify_against_source(&s, &Fixture(authoritative));
+        let err = verify_against_source(&s, &Fixture(authoritative)).await;
         assert!(matches!(err, Err(RiftError::Integrity(_))), "got {err:?}");
     }
 
-    #[test]
-    fn broken_chain_link_is_detected() {
+    #[tokio::test]
+    async fn broken_chain_link_is_detected() {
         let s = store();
-        record_checkpoint(&s, &ckpt(1, None, 1)).unwrap();
+        record_checkpoint(&s, &ckpt(1, None, 1)).await.unwrap();
         // authoritative chain has a broken prev (genesis with a prev)
         let bad = vec![ChainLink {
             checkpoint_id: Sha256Id::from_bytes([1; 32]),
@@ -298,13 +320,13 @@ mod tests {
             prev: Some(Sha256Id::from_bytes([9; 32])),
         }];
         assert!(matches!(
-            verify_against_source(&s, &Fixture(bad)),
+            verify_against_source(&s, &Fixture(bad)).await,
             Err(RiftError::Integrity(_))
         ));
     }
 
-    #[test]
-    fn cost_reconciliation_supersedes_estimate() {
+    #[tokio::test]
+    async fn cost_reconciliation_supersedes_estimate() {
         let s = store();
         record_cost_fact(
             &s,
@@ -319,6 +341,7 @@ mod tests {
                 schema_version: 1,
             },
         )
+        .await
         .unwrap();
         record_cost_fact(
             &s,
@@ -333,18 +356,23 @@ mod tests {
                 schema_version: 1,
             },
         )
+        .await
         .unwrap();
 
-        assert_eq!(s.count("cost_fact").unwrap(), 2, "both beliefs persist");
-        assert_eq!(current_cost_micros(&s, "call_1").unwrap(), Some(90)); // latest
-        assert_eq!(cost_belief_as_of(&s, "call_1", 1).unwrap(), Some(100)); // as of recorded_at=1
-        assert_eq!(cost_belief_as_of(&s, "call_1", 2).unwrap(), Some(90));
+        assert_eq!(
+            s.count("cost_fact").await.unwrap(),
+            2,
+            "both beliefs persist"
+        );
+        assert_eq!(current_cost_micros(&s, "call_1").await.unwrap(), Some(90)); // latest
+        assert_eq!(cost_belief_as_of(&s, "call_1", 1).await.unwrap(), Some(100)); // as of recorded_at=1
+        assert_eq!(cost_belief_as_of(&s, "call_1", 2).await.unwrap(), Some(90));
     }
 
-    #[test]
-    fn current_cost_is_none_for_unknown_call() {
+    #[tokio::test]
+    async fn current_cost_is_none_for_unknown_call() {
         let s = store();
-        assert_eq!(current_cost_micros(&s, "unknown").unwrap(), None);
-        assert_eq!(cost_belief_as_of(&s, "unknown", 5).unwrap(), None);
+        assert_eq!(current_cost_micros(&s, "unknown").await.unwrap(), None);
+        assert_eq!(cost_belief_as_of(&s, "unknown", 5).await.unwrap(), None);
     }
 }

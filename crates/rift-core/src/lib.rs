@@ -21,6 +21,7 @@
 #![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
 
 mod error;
+pub mod event;
 pub mod id;
 pub mod identity;
 pub mod immutable;
@@ -28,6 +29,7 @@ pub mod redacted;
 pub mod time;
 
 pub use error::{Result, RiftError};
+pub use event::{AgentId, CanonicalEvent, EventKind, Trust};
 pub use id::{
     Blake3Id, CallId, CheckpointId, CounterUlidSource, FileRevisionId, MonotonicUlidSource, RepoId,
     SessionId, Sha256Id, SummaryId, ToolCallId, TurnId, Ulid, UlidSource,

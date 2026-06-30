@@ -11,8 +11,8 @@ use rift_store::{
     Value,
 };
 
-#[test]
-fn public_api_is_append_only_and_usable() {
+#[tokio::test]
+async fn public_api_is_append_only_and_usable() {
     let store = SqliteStore::open_in_memory().expect("open in-memory store");
     store
         .create_canonical_schema()
@@ -39,6 +39,7 @@ fn public_api_is_append_only_and_usable() {
                 Value::Int(1),
             ],
         )
+        .await
         .expect("insert session");
 
     // A correction is a NEW row that supersedes — the only mutation is INSERT.
@@ -55,9 +56,10 @@ fn public_api_is_append_only_and_usable() {
                 Value::Int(1),
             ],
         )
+        .await
         .expect("insert superseding row");
 
-    assert_eq!(store.count("session").expect("count"), 2);
+    assert_eq!(store.count("session").await.expect("count"), 2);
     assert!(!canonical_tables().is_empty());
 }
 

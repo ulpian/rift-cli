@@ -15,6 +15,17 @@ workspace = true
 # default so headless/CI builds use the in-memory backend; the round-trip logic
 # is tested without it via the KeychainBackend seam.
 keyring = ["dep:keyring"]
+# NOTE — TURSO DEPENDENCY DEFERRED (P3 review, do not re-add without re-review):
+# the native-async `TursoStore` engine was spiked and implemented behind the
+# Store/StoreConn seam, but the `turso` dependency is intentionally NOT declared
+# here. Pulling it in adds `git2` (a build-dep of turso's `built` crate) carrying
+# RUSTSEC-2026-0183/-0184 (unsound) + unmaintained `paste` to the lockfile, for an
+# engine that — on the pinned 0.1.5 BETA — lacks CREATE TRIGGER, STRICT, and any
+# encryption option (so it cannot host the SQL-layer immutability guard anyway).
+# The reference impl is archived next to the spike findings; re-evaluate before
+# wiring. See:
+#   plan_v1/build-plan/stage-01-foundations/phase-03-turso-storage-foundation/SPIKE-RESULTS.md
+#   plan_v1/build-plan/stage-01-foundations/phase-03-turso-storage-foundation/turso_store.reference.rs
 
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
@@ -22,12 +33,18 @@ rift-hashchain = { version = "0.0.1", path = "../rift-hashchain" }
 rift-crypto = { version = "0.0.1", path = "../rift-crypto" }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
+# The storage seam (Store/StoreConn/CanonicalStore) is async so an async-native
+# engine (the deferred Turso target) and future Canopy/MCP readers fit without a
+# block_on hazard.
+async-trait = { workspace = true }
 keyring = { workspace = true, optional = true }
-# Production target (async, MVCC, vectors) — wired behind the same CanonicalStore
-# trait once the slice graduates: turso = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Drive the async seam from synchronous test bodies (a current-thread runtime),
+# and back the encryption/Turso integration tests.
+tokio = { workspace = true }
+tempfile = { workspace = true }
 # Mint a real `RedactedBytes` through the actual pipeline in the durable-surface
 # test, so `RedactedBytes::seal` keeps its single production call site in the
 # redaction crate (acyclic: rift-shadow-redact depends only on rift-core).

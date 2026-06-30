@@ -18,6 +18,12 @@
     clippy::cast_precision_loss
 )]
 
+pub mod diff;
+pub use diff::{
+    changed_hunk_id, diff_attributable, diff_lines, file_revision_id, is_attributable, Hunk,
+    MAX_DIFF_BYTES,
+};
+
 /// Who authored an edit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ::serde::Serialize, ::serde::Deserialize)]
 pub enum Actor {

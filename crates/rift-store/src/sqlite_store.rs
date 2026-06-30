@@ -1,21 +1,31 @@
-//! Synchronous, SQLite-backed reference implementation of [`CanonicalStore`].
+//! Synchronous SQLite reference implementation of the [`Store`] seam.
 //!
 //! Runs the exact DDL and triggers from [`crate::schema`]. Because SQLite and
 //! Turso share SQL semantics, the append-only guarantees proven here transfer to
 //! the production Turso store unchanged. The store also carries the
-//! migration-engine and integrity-read primitives the [`crate::migrate`] and
-//! [`crate::integrity`] modules build on.
+//! migration-engine and introspection primitives the [`crate::migrate`] module
+//! builds on.
+//!
+//! The seam is async (so the async-native Turso engine fits), but this reference
+//! impl wraps a single `rusqlite::Connection` behind a [`std::sync::Mutex`]: each
+//! async method locks, runs synchronously (rusqlite is sync), and releases the
+//! guard *before* returning — no guard is ever held across an `.await` (there are
+//! none), so the futures are `Send` and the default build needs no async runtime.
 
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use async_trait::async_trait;
 use rift_core::{Result, RiftError};
 use rusqlite::Connection;
 
-use crate::schema::{canonical_tables, CanonicalTable};
+use crate::schema::canonical_tables;
+use crate::store::{Row, Store, StoreConn, StoreDescriptor};
 use crate::value::Value;
-use crate::CanonicalStore;
 
-/// A SQLite-backed append-only store.
+/// A SQLite-backed append-only store (the always-available reference engine).
 pub struct SqliteStore {
-    conn: Connection,
+    conn: Arc<Mutex<Connection>>,
+    desc: StoreDescriptor,
 }
 
 impl SqliteStore {
@@ -25,7 +35,7 @@ impl SqliteStore {
     /// Returns [`RiftError::Storage`] if the connection or pragmas fail.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(map_sql)?;
-        Self::init(conn)
+        Self::init(conn, ":memory:")
     }
 
     /// Open (or create) a store at `path`.
@@ -33,23 +43,40 @@ impl SqliteStore {
     /// # Errors
     /// Returns [`RiftError::Storage`] if the database cannot be opened.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let conn = Connection::open(path).map_err(map_sql)?;
-        Self::init(conn)
+        let p = path.as_ref();
+        let display = p.display().to_string();
+        let conn = Connection::open(p).map_err(map_sql)?;
+        Self::init(conn, display)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(conn: Connection, path: impl Into<String>) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)
             .map_err(map_sql)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            desc: StoreDescriptor::new(path),
+        })
     }
 
-    /// Borrow the underlying connection (crate-internal; for migrations and
-    /// read-side integrity/cost queries — canonical *writes* still go through
-    /// [`CanonicalStore::insert`], and the triggers guard against mutation
-    /// regardless of path).
-    #[allow(dead_code)] // used by migration tests + future read-side modules (Stage 3)
-    pub(crate) fn connection(&self) -> &Connection {
-        &self.conn
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| RiftError::storage("sqlite connection mutex poisoned"))
+    }
+
+    /// Run `f` with the locked connection (test-only sync read path used by the
+    /// migration tests; canonical *writes* still go through the append-only DAO,
+    /// and the triggers guard against mutation regardless).
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] mapping any rusqlite error.
+    #[cfg(test)]
+    pub(crate) fn with_conn<R>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<R>,
+    ) -> Result<R> {
+        let conn = self.lock()?;
+        f(&conn).map_err(map_sql)
     }
 
     /// Create every canonical table from the registry plus its append-only guard
@@ -59,15 +86,18 @@ impl SqliteStore {
     /// # Errors
     /// Returns [`RiftError::Migration`] if any DDL fails.
     pub fn create_canonical_schema(&self) -> Result<()> {
+        let conn = self.lock()?;
         for table in canonical_tables() {
-            self.register_canonical_table(table)?;
+            conn.execute_batch(&table.create_table_sql())
+                .map_err(map_migration)?;
+            conn.execute_batch(&table.guard_trigger_sql())
+                .map_err(map_migration)?;
         }
         Ok(())
     }
 
     /// Names of every user table in the projection (`type='table'`), excluding
-    /// SQLite's internal `sqlite_*` tables. Read-only introspection used by the
-    /// immutability keystone test and projection doctor.
+    /// SQLite's internal `sqlite_*` tables.
     ///
     /// # Errors
     /// [`RiftError::Storage`] if the query fails.
@@ -75,7 +105,7 @@ impl SqliteStore {
         self.master_names("table")
     }
 
-    /// Names of every trigger in the projection (`type='trigger'`). Read-only.
+    /// Names of every trigger in the projection (`type='trigger'`).
     ///
     /// # Errors
     /// [`RiftError::Storage`] if the query fails.
@@ -83,10 +113,9 @@ impl SqliteStore {
         self.master_names("trigger")
     }
 
-    /// `sqlite_master` names of a given object `kind`, excluding `sqlite_*`.
     fn master_names(&self, kind: &str) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
+        let conn = self.lock()?;
+        let mut stmt = conn
             .prepare(
                 "SELECT name FROM sqlite_master \
                  WHERE type = ? AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -107,8 +136,8 @@ impl SqliteStore {
     /// # Errors
     /// [`RiftError::Migration`] if the DDL fails.
     pub fn ensure_meta(&self) -> Result<()> {
-        self.conn
-            .execute_batch(crate::migrate::META_SQL)
+        let conn = self.lock()?;
+        conn.execute_batch(crate::migrate::META_SQL)
             .map_err(map_migration)
     }
 
@@ -117,8 +146,8 @@ impl SqliteStore {
     /// # Errors
     /// [`RiftError::Storage`] if the query fails.
     pub(crate) fn applied_migrations(&self) -> Result<Vec<(u32, String)>> {
-        let mut stmt = self
-            .conn
+        let conn = self.lock()?;
+        let mut stmt = conn
             .prepare("SELECT version, checksum FROM _migrations ORDER BY version")
             .map_err(map_sql)?;
         let rows = stmt
@@ -148,7 +177,8 @@ impl SqliteStore {
         checksum: &str,
         applied_at: &str,
     ) -> Result<()> {
-        let tx = self.conn.unchecked_transaction().map_err(map_migration)?;
+        let conn = self.lock()?;
+        let tx = conn.unchecked_transaction().map_err(map_migration)?;
         tx.execute_batch(sql).map_err(map_migration)?;
         tx.execute(
             "INSERT INTO _migrations(version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
@@ -159,25 +189,72 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Read the stored checkpoint chain as `(checkpoint_id, merkle_root,
-    /// prev_hash)` ordered by `created_at`.
-    ///
-    /// # Errors
-    /// [`RiftError::Storage`] if the query fails.
-    pub(crate) fn stored_checkpoint_links(&self) -> Result<Vec<(String, String, Option<String>)>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT checkpoint_id, merkle_root, prev_hash FROM checkpoint \
-                 ORDER BY created_at, checkpoint_id",
-            )
+    /// Diagnostic / test-only raw execution. Deliberately **not** part of the
+    /// append-only contract: it exists so tests can prove the database triggers
+    /// reject mutation even when SQL bypasses the DAO.
+    #[cfg(test)]
+    pub(crate) fn execute_raw(&self, sql: &str) -> Result<usize> {
+        let conn = self.lock()?;
+        conn.execute(sql, ()).map_err(map_sql)
+    }
+}
+
+/// A connection handle sharing the store's single rusqlite connection (serialized
+/// by the mutex). For the reference engine, "per-call connection" is a cheap clone
+/// of the `Arc`.
+struct SqliteConn {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl SqliteConn {
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| RiftError::storage("sqlite connection mutex poisoned"))
+    }
+}
+
+#[async_trait]
+impl Store for SqliteStore {
+    async fn conn(&self) -> Result<Box<dyn StoreConn>> {
+        Ok(Box::new(SqliteConn {
+            conn: Arc::clone(&self.conn),
+        }))
+    }
+
+    fn descriptor(&self) -> &StoreDescriptor {
+        &self.desc
+    }
+}
+
+#[async_trait]
+impl StoreConn for SqliteConn {
+    async fn execute(&self, sql: &str, params: &[Value]) -> Result<u64> {
+        let conn = self.lock()?;
+        let bound: Vec<rusqlite::types::Value> = params.iter().map(Into::into).collect();
+        let n = conn
+            .execute(sql, rusqlite::params_from_iter(bound))
             .map_err(map_sql)?;
+        Ok(n as u64)
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute_batch(sql).map_err(map_migration)
+    }
+
+    async fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
+        let conn = self.lock()?;
+        let bound: Vec<rusqlite::types::Value> = params.iter().map(Into::into).collect();
+        let mut stmt = conn.prepare(sql).map_err(map_sql)?;
+        let col_count = stmt.column_count();
         let rows = stmt
-            .query_map([], |row| {
-                let id: String = row.get(0)?;
-                let root: String = row.get(1)?;
-                let prev: Option<String> = row.get(2)?;
-                Ok((id, root, prev))
+            .query_map(rusqlite::params_from_iter(bound), |row| {
+                let mut cols = Vec::with_capacity(col_count);
+                for i in 0..col_count {
+                    cols.push(from_rusqlite(row.get::<_, rusqlite::types::Value>(i)?));
+                }
+                Ok(Row::new(cols))
             })
             .map_err(map_sql)?;
         let mut out = Vec::new();
@@ -186,68 +263,18 @@ impl SqliteStore {
         }
         Ok(out)
     }
-
-    /// Query a single optional `i64` (e.g. "current belief" cost).
-    ///
-    /// # Errors
-    /// [`RiftError::Storage`] if the query fails.
-    pub(crate) fn query_opt_i64(&self, sql: &str, params: &[Value]) -> Result<Option<i64>> {
-        let bound: Vec<rusqlite::types::Value> = params.iter().map(Into::into).collect();
-        let mut stmt = self.conn.prepare(sql).map_err(map_sql)?;
-        let mut rows = stmt
-            .query(rusqlite::params_from_iter(bound))
-            .map_err(map_sql)?;
-        match rows.next().map_err(map_sql)? {
-            Some(row) => Ok(Some(row.get(0).map_err(map_sql)?)),
-            None => Ok(None),
-        }
-    }
-
-    /// Diagnostic / test-only raw execution. Deliberately **not** part of the
-    /// public append-only contract: it exists so tests can prove the database
-    /// triggers reject mutation even when SQL bypasses [`CanonicalStore::insert`].
-    #[cfg(test)]
-    pub(crate) fn execute_raw(&self, sql: &str) -> Result<usize> {
-        self.conn.execute(sql, ()).map_err(map_sql)
-    }
 }
 
-impl CanonicalStore for SqliteStore {
-    fn register_canonical_table(&self, table: &CanonicalTable) -> Result<()> {
-        self.conn
-            .execute_batch(&table.create_table_sql())
-            .map_err(map_migration)?;
-        self.conn
-            .execute_batch(&table.guard_trigger_sql())
-            .map_err(map_migration)?;
-        Ok(())
-    }
-
-    fn insert(&self, table: &str, columns: &[&str], values: &[Value]) -> Result<()> {
-        if columns.len() != values.len() {
-            return Err(RiftError::storage(format!(
-                "insert into {table}: {} columns but {} values",
-                columns.len(),
-                values.len()
-            )));
-        }
-        let placeholders = vec!["?"; columns.len()].join(", ");
-        let sql = format!(
-            "INSERT INTO {table} ({}) VALUES ({placeholders})",
-            columns.join(", ")
-        );
-        let bound: Vec<rusqlite::types::Value> = values.iter().map(Into::into).collect();
-        self.conn
-            .execute(&sql, rusqlite::params_from_iter(bound))
-            .map_err(map_sql)?;
-        Ok(())
-    }
-
-    fn count(&self, table: &str) -> Result<i64> {
-        let sql = format!("SELECT COUNT(*) FROM {table}");
-        self.conn
-            .query_row(&sql, (), |row| row.get(0))
-            .map_err(map_sql)
+/// Convert a rusqlite value into the engine-neutral [`Value`]. `REAL` never
+/// occurs (floats never reach the store, `04 §4.2`); it is rendered as text
+/// defensively rather than silently truncated.
+fn from_rusqlite(v: rusqlite::types::Value) -> Value {
+    match v {
+        rusqlite::types::Value::Null => Value::Null,
+        rusqlite::types::Value::Integer(i) => Value::Int(i),
+        rusqlite::types::Value::Text(s) => Value::Text(s),
+        rusqlite::types::Value::Blob(b) => Value::Blob(b),
+        rusqlite::types::Value::Real(r) => Value::Text(r.to_string()),
     }
 }
 
@@ -274,7 +301,17 @@ fn map_migration(error: rusqlite::Error) -> RiftError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::{canonical_tables, CanonicalTable};
+    use crate::CanonicalStore;
     use proptest::prelude::*;
+
+    /// Drive an async seam call to completion from a synchronous test body.
+    fn block<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(f)
+    }
 
     /// Build a valid row for a table from its column types.
     fn sample_values(table: &CanonicalTable) -> Vec<Value> {
@@ -303,10 +340,8 @@ mod tests {
         let store = migrated_store();
         for table in canonical_tables() {
             let cols: Vec<&str> = table.columns.iter().map(|c| c.name).collect();
-            store
-                .insert(table.name, &cols, &sample_values(table))
-                .unwrap();
-            assert_eq!(store.count(table.name).unwrap(), 1);
+            block(store.insert(table.name, &cols, &sample_values(table))).unwrap();
+            assert_eq!(block(store.count(table.name)).unwrap(), 1);
 
             let first = table.columns.first().expect("table has columns").name;
             let upd = store.execute_raw(&format!("UPDATE {} SET {first} = {first}", table.name));
@@ -323,14 +358,14 @@ mod tests {
                 table.name
             );
 
-            assert_eq!(store.count(table.name).unwrap(), 1);
+            assert_eq!(block(store.count(table.name)).unwrap(), 1);
         }
     }
 
     #[test]
     fn insert_with_mismatched_column_value_counts_is_rejected() {
         let store = migrated_store();
-        let err = store.insert("session", &["session_id", "agent"], &[Value::text("s")]);
+        let err = block(store.insert("session", &["session_id", "agent"], &[Value::text("s")]));
         assert!(
             matches!(err, Err(RiftError::Storage(_))),
             "length mismatch should be a Storage error, got {err:?}"
@@ -359,35 +394,33 @@ mod tests {
             "prev_hash",
             "schema_version",
         ];
-        store
-            .insert(
-                "checkpoint",
-                &cols,
-                &[
-                    Value::text("ckpt_1"),
-                    Value::text("manual-commit"),
-                    Value::Int(1),
-                    Value::text("root_a"),
-                    Value::Null,
-                    Value::Int(1),
-                ],
-            )
-            .unwrap();
-        store
-            .insert(
-                "checkpoint",
-                &cols,
-                &[
-                    Value::text("ckpt_2"),
-                    Value::text("manual-commit"),
-                    Value::Int(2),
-                    Value::text("root_b"),
-                    Value::text("ckpt_1"),
-                    Value::Int(1),
-                ],
-            )
-            .unwrap();
-        assert_eq!(store.count("checkpoint").unwrap(), 2);
+        block(store.insert(
+            "checkpoint",
+            &cols,
+            &[
+                Value::text("ckpt_1"),
+                Value::text("manual-commit"),
+                Value::Int(1),
+                Value::text("root_a"),
+                Value::Null,
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        block(store.insert(
+            "checkpoint",
+            &cols,
+            &[
+                Value::text("ckpt_2"),
+                Value::text("manual-commit"),
+                Value::Int(2),
+                Value::text("root_b"),
+                Value::text("ckpt_1"),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(block(store.count("checkpoint")).unwrap(), 2);
     }
 
     /// Re-inserting the same primary key is rejected (uniqueness holds; real
@@ -411,8 +444,8 @@ mod tests {
             Value::Null,
             Value::Int(1),
         ];
-        store.insert("checkpoint", &cols, &row).unwrap();
-        assert!(store.insert("checkpoint", &cols, &row).is_err());
+        block(store.insert("checkpoint", &cols, &row)).unwrap();
+        assert!(block(store.insert("checkpoint", &cols, &row)).is_err());
     }
 
     proptest! {
@@ -429,7 +462,7 @@ mod tests {
             let table = *tables.get(table_idx).expect("index within range");
             let store = migrated_store();
             let cols: Vec<&str> = table.columns.iter().map(|c| c.name).collect();
-            store.insert(table.name, &cols, &sample_values(&table)).unwrap();
+            block(store.insert(table.name, &cols, &sample_values(&table))).unwrap();
 
             let stmt = if as_update {
                 let first = table.columns.first().expect("table has columns").name;
@@ -439,7 +472,7 @@ mod tests {
             };
             let result = store.execute_raw(&stmt);
             prop_assert!(matches!(result, Err(RiftError::Immutability(_))));
-            prop_assert_eq!(store.count(table.name).unwrap(), 1);
+            prop_assert_eq!(block(store.count(table.name)).unwrap(), 1);
         }
     }
 }

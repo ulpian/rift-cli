@@ -10,10 +10,23 @@ description = "v0.1 silent capture-backend wrapper: version-pinned (SHA-256), au
 [lints]
 workspace = true
 
+[features]
+# Production HTTP download + archive extraction for binary provisioning (P1 B2).
+# Off for the pure seam logic; the bin turns it on by default. Tests use the
+# in-memory fetcher regardless. The extracted binary stays fail-closed by SHA-256.
+provision-http = ["dep:ureq", "dep:flate2", "dep:tar", "dep:zip"]
+
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+ureq = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = { workspace = true }

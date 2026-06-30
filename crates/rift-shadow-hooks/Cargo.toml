@@ -13,9 +13,20 @@ workspace = true
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 rift-hashchain = { version = "0.0.1", path = "../rift-hashchain" }
+# Plugin SDK + first-party adapters (the built-in registry).
+rift-agent = { version = "0.0.1", path = "../rift-agent" }
+rift-agent-claude-code = { version = "0.0.1", path = "../rift-agent-claude-code" }
+rift-agent-codex = { version = "0.0.1", path = "../rift-agent-codex" }
+rift-agent-gemini = { version = "0.0.1", path = "../rift-agent-gemini" }
+rift-agent-cursor = { version = "0.0.1", path = "../rift-agent-cursor" }
+rift-agent-copilot = { version = "0.0.1", path = "../rift-agent-copilot" }
+rift-agent-opencode = { version = "0.0.1", path = "../rift-agent-opencode" }
+rift-agent-factory-droid = { version = "0.0.1", path = "../rift-agent-factory-droid" }
+rift-agent-ollama = { version = "0.0.1", path = "../rift-agent-ollama" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = { workspace = true }

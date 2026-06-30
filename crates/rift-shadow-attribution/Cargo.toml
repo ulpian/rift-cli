@@ -13,9 +13,9 @@ workspace = true
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 serde = { workspace = true }
-# The diff-capture layer (H_i/A_i/C boundaries) uses gix + imara-diff to feed
-# these pure-logic functions; enable when wiring the capture path:
-# imara-diff = { workspace = true }
+sha2 = { workspace = true }
+# Diff-capture layer (H_i/A_i/C boundaries → hunks) for line attribution.
+imara-diff = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

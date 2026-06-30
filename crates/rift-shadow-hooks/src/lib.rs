@@ -21,90 +21,26 @@ use std::collections::BTreeMap;
 use rift_core::{Result, RiftError, Sha256Id};
 use sha2::{Digest, Sha256};
 
-/// The agent-independent canonical event vocabulary.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventKind {
-    /// A session began.
-    SessionStart,
-    /// A session ended.
-    SessionEnd,
-    /// A context compaction occurred.
-    SessionCompaction,
-    /// A turn began.
-    TurnStart,
-    /// A turn ended.
-    TurnEnd,
-    /// The user submitted a prompt.
-    PromptSubmit,
-    /// The model produced a response.
-    PromptResponse,
-    /// A tool was invoked.
-    ToolCall,
-    /// A tool returned a result.
-    ToolResult,
-    /// A file was edited.
-    FileEdit,
-    /// A subagent began.
-    SubagentStart,
-    /// A subagent ended.
-    SubagentEnd,
-}
+pub mod install;
+pub mod push;
+pub mod session_cache;
+pub mod strategy;
+pub mod trailers;
+pub mod wire;
 
-/// Source-trust classification carried on every event payload (so untrusted
-/// content is never later served as instruction-shaped text — `05` §5.4/§5.5).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Trust {
-    /// Structural code fact (file edit).
-    CodeFact,
-    /// Git fact (commit/branch).
-    GitFact,
-    /// Test runner output.
-    TestOutput,
-    /// Arbitrary tool output (untrusted).
-    ToolOutputUntrusted,
-    /// Transcript / prompt text (untrusted).
-    TranscriptUntrusted,
-}
+pub use install::{install_hooks, shim_text, HookInstall, HOOK_NAMES};
+pub use push::{screen_push, PushDecision, PushRef};
+pub use session_cache::{cache_path, read_cache, write_cache, SessionCache};
+pub use strategy::{decide, ArchiveDecision, ArchiveReason, GitEvent, StrategyKind, TriggerCtx};
+pub use trailers::{AttributionSummary, Trailers};
+pub use wire::{build_raw_hook, parse_bounded, schema_json, MAX_DEPTH, MAX_STDIN_BYTES};
 
-/// A normalized, agent-independent capture event. Serialized canonically (fixed
-/// field order) for hashing; content-addressed by `payload_sha256` for
-/// idempotent re-ingest.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CanonicalEvent {
-    /// Contract schema version.
-    pub schema: u32,
-    /// Session id (native id mapped to a Rift id upstream).
-    pub session: String,
-    /// Turn ordinal within the session.
-    pub turn_ordinal: u32,
-    /// Event ordinal within the turn.
-    pub event_ordinal: u32,
-    /// What happened.
-    pub kind: EventKind,
-    /// Source-trust class of the payload.
-    pub trust: Trust,
-    /// Transaction-time (epoch ms).
-    pub occurred_at_ms: i64,
-    /// Content address of the (redacted) payload.
-    pub payload_sha256: Sha256Id,
-}
-
-impl CanonicalEvent {
-    /// Deterministic canonical bytes (fixed field order) — the leaf preimage.
-    #[must_use]
-    pub fn canonical_bytes(&self) -> Vec<u8> {
-        // serde_json over a struct emits fields in declaration order → deterministic.
-        serde_json::to_vec(self).unwrap_or_default()
-    }
-
-    /// The SHA-256 Merkle leaf for this event (domain-separated, substrate-compatible).
-    #[must_use]
-    pub fn leaf(&self) -> Sha256Id {
-        rift_hashchain::leaf_hash(&self.canonical_bytes())
-    }
-}
+// The canonical event schema is the stable agent↔ledger contract and lives in
+// `rift-core` (P8 S2) so the plugin SDK and this ingest layer share one authority.
+// Re-exported here so existing `rift_shadow::hooks::…` imports keep resolving.
+pub use rift_core::{AgentId, CanonicalEvent, EventKind, Trust};
+// `event.leaf()` is derived in the hash layer (kept out of `rift-core`).
+pub use rift_hashchain::EventLeaf;
 
 fn sha256(bytes: &[u8]) -> Sha256Id {
     let mut h = Sha256::new();
@@ -112,23 +48,6 @@ fn sha256(bytes: &[u8]) -> Sha256Id {
     let mut b = [0u8; 32];
     b.copy_from_slice(&h.finalize());
     Sha256Id::from_bytes(b)
-}
-
-/// A first-party agent identity (closed set; unknown agents are refused).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum AgentId {
-    /// Claude Code.
-    ClaudeCode,
-    /// OpenAI Codex.
-    Codex,
-    /// Cursor.
-    Cursor,
-    /// GitHub Copilot CLI.
-    CopilotCli,
-    /// Gemini.
-    Gemini,
-    /// OpenCode.
-    OpenCode,
 }
 
 /// A raw hook invocation: one agent verb + its single JSON payload (read from
@@ -149,130 +68,94 @@ pub struct RawHook {
     pub payload: serde_json::Value,
 }
 
-/// An adapter mapping one agent's native verbs onto canonical events.
-pub trait AgentAdapter {
-    /// The agent this adapter handles.
-    fn agent(&self) -> AgentId;
-    /// Map one raw hook to zero-or-more canonical events. An unknown verb yields
-    /// an empty vec (skipped), never an error.
-    ///
-    /// # Errors
-    /// [`RiftError`] only on a malformed payload that cannot be content-addressed.
-    fn normalize(&self, raw: &RawHook) -> Result<Vec<CanonicalEvent>>;
-}
+// The plugin SDK trait and its companion types live in `rift-agent` (P8 S2).
+// Re-exported so callers build the registry from one import surface; the SDK
+// adapters have **no** redaction/chain authority — this ingest layer owns it.
+pub use rift_agent::{idempotency_key, AdapterError, AgentAdapter, CompatNotes, TokenUsage};
 
 fn payload_hash(payload: &serde_json::Value) -> Sha256Id {
     sha256(&serde_json::to_vec(payload).unwrap_or_default())
 }
 
-/// The Claude Code adapter.
-pub struct ClaudeCodeAdapter;
-
-impl ClaudeCodeAdapter {
-    fn tool_name(raw: &RawHook) -> Option<&str> {
-        raw.payload
-            .get("tool_name")
-            .and_then(serde_json::Value::as_str)
-    }
-}
-
-impl AgentAdapter for ClaudeCodeAdapter {
-    fn agent(&self) -> AgentId {
-        AgentId::ClaudeCode
-    }
-
-    fn normalize(&self, raw: &RawHook) -> Result<Vec<CanonicalEvent>> {
-        let hash = payload_hash(&raw.payload);
-        let mut events = Vec::new();
-        let push = |kind: EventKind, trust: Trust, events: &mut Vec<CanonicalEvent>| {
-            let ordinal = u32::try_from(events.len()).unwrap_or(0);
-            events.push(CanonicalEvent {
-                schema: 1,
-                session: raw.session.clone(),
-                turn_ordinal: raw.turn,
-                event_ordinal: ordinal,
-                kind,
-                trust,
-                occurred_at_ms: raw.occurred_at_ms,
-                payload_sha256: hash,
-            });
-        };
-        match raw.verb.as_str() {
-            "SessionStart" => push(EventKind::SessionStart, Trust::GitFact, &mut events),
-            "Stop" => push(EventKind::SessionEnd, Trust::GitFact, &mut events),
-            "UserPromptSubmit" => push(
-                EventKind::PromptSubmit,
-                Trust::TranscriptUntrusted,
-                &mut events,
-            ),
-            "PreToolUse" => {
-                push(EventKind::ToolCall, Trust::CodeFact, &mut events);
-                if matches!(Self::tool_name(raw), Some("Edit" | "Write" | "MultiEdit")) {
-                    push(EventKind::FileEdit, Trust::CodeFact, &mut events);
-                }
-            }
-            "PostToolUse" => {
-                push(
-                    EventKind::ToolResult,
-                    Trust::ToolOutputUntrusted,
-                    &mut events,
-                );
-            }
-            "SubagentStart" => push(EventKind::SubagentStart, Trust::GitFact, &mut events),
-            "SubagentStop" => push(EventKind::SubagentEnd, Trust::GitFact, &mut events),
-            _ => {} // unknown verb → skipped, no error
-        }
-        Ok(events)
-    }
-}
-
-/// A closed registry of first-party adapters.
+/// A registry of agent adapters, keyed by the agent's string token so that
+/// third-party adapters (open [`AgentId`]) can register alongside first-party ones.
 #[derive(Default)]
 pub struct AdapterRegistry {
-    map: BTreeMap<u8, Box<dyn AgentAdapter>>,
-}
-
-fn agent_key(a: AgentId) -> u8 {
-    match a {
-        AgentId::ClaudeCode => 0,
-        AgentId::Codex => 1,
-        AgentId::Cursor => 2,
-        AgentId::CopilotCli => 3,
-        AgentId::Gemini => 4,
-        AgentId::OpenCode => 5,
-    }
+    map: BTreeMap<String, Box<dyn AgentAdapter>>,
 }
 
 impl AdapterRegistry {
-    /// A registry with the built-in first-party adapters.
+    /// A registry with the built-in first-party adapters (the eight P8 S3 agents).
     #[must_use]
     pub fn with_builtin() -> Self {
         let mut r = Self::default();
-        r.register(Box::new(ClaudeCodeAdapter));
+        r.register(Box::new(rift_agent_claude_code::ClaudeCodeAdapter));
+        r.register(Box::new(rift_agent_codex::CodexAdapter));
+        r.register(Box::new(rift_agent_gemini::GeminiAdapter));
+        r.register(Box::new(rift_agent_cursor::CursorAdapter));
+        r.register(Box::new(rift_agent_copilot::CopilotAdapter));
+        r.register(Box::new(rift_agent_opencode::OpenCodeAdapter));
+        r.register(Box::new(rift_agent_factory_droid::FactoryDroidAdapter));
+        r.register(Box::new(rift_agent_ollama::OllamaAdapter));
         r
     }
 
-    /// Register an adapter.
+    /// Register an adapter (keyed by its [`AgentId`] token).
     pub fn register(&mut self, adapter: Box<dyn AgentAdapter>) {
-        self.map.insert(agent_key(adapter.agent()), adapter);
+        self.map
+            .insert(adapter.agent_id().as_str().to_owned(), adapter);
     }
 
     /// Look up an adapter by agent.
     #[must_use]
-    pub fn get(&self, agent: AgentId) -> Option<&dyn AgentAdapter> {
-        self.map.get(&agent_key(agent)).map(AsRef::as_ref)
+    pub fn get(&self, agent: &AgentId) -> Option<&dyn AgentAdapter> {
+        self.map.get(agent.as_str()).map(AsRef::as_ref)
+    }
+
+    /// Whether an adapter is registered for `agent`.
+    #[must_use]
+    pub fn contains(&self, agent: &AgentId) -> bool {
+        self.map.contains_key(agent.as_str())
+    }
+
+    /// The agents this registry can capture (sorted by token).
+    #[must_use]
+    pub fn agents(&self) -> Vec<AgentId> {
+        self.map.keys().map(|k| AgentId::new(k.clone())).collect()
     }
 }
 
-/// Dispatch a raw hook through the registry.
+/// Dispatch a raw hook through the registry: map the agent's native verb to
+/// canonical events via the SDK adapter, then **stamp** the envelope-derived
+/// fields (session, ordinals, time, redacted-payload hash) that the SDK has no
+/// authority to set. An unknown verb is *not* an error here — it yields an empty
+/// event set so the ingest layer records it as a skipped hook receipt (the
+/// adapter still errors on it, which the conformance kit asserts).
 ///
 /// # Errors
-/// [`RiftError::NotFound`] if the agent is unknown (closed registry).
+/// [`RiftError::NotFound`] if no adapter is registered for the agent;
+/// [`RiftError::Validity`] if the adapter rejects the payload as malformed.
 pub fn dispatch(raw: &RawHook, reg: &AdapterRegistry) -> Result<Vec<CanonicalEvent>> {
     let adapter = reg
-        .get(raw.agent)
+        .get(&raw.agent)
         .ok_or_else(|| RiftError::NotFound("unknown agent".into()))?;
-    adapter.normalize(raw)
+    let mut events = match adapter.map(&raw.verb, &raw.payload) {
+        Ok(events) => events,
+        // Unknown verb → recorded upstream as "skipped-unknown-verb" (never a hard fail).
+        Err(AdapterError::UnknownVerb(_)) => Vec::new(),
+        Err(e @ AdapterError::MalformedPayload(_)) => {
+            return Err(RiftError::validity(format!("adapter: {e}")))
+        }
+    };
+    let hash = payload_hash(&raw.payload);
+    for (i, ev) in events.iter_mut().enumerate() {
+        ev.session.clone_from(&raw.session);
+        ev.turn_ordinal = raw.turn;
+        ev.event_ordinal = u32::try_from(i).unwrap_or(0);
+        ev.occurred_at_ms = raw.occurred_at_ms;
+        ev.payload_sha256 = hash;
+    }
+    Ok(events)
 }
 
 // --- session state machine --------------------------------------------------
@@ -292,6 +175,20 @@ pub enum SessionState {
     Ended,
 }
 
+impl SessionState {
+    /// The canonical lowercase token used in the cache + `session_transition` audit.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Active => "active",
+            Self::Compacting => "compacting",
+            Self::Ending => "ending",
+            Self::Ended => "ended",
+        }
+    }
+}
+
 /// Triggers that drive the state machine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Trigger {
@@ -307,6 +204,22 @@ pub enum Trigger {
     IdleTimeout,
     /// Condense finished.
     CondenseDone,
+}
+
+impl Trigger {
+    /// The canonical lowercase token used in the `session_transition` audit
+    /// (`trigger_kind` column).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Compaction => "compaction",
+            Self::CompactionDone => "compaction-done",
+            Self::End => "end",
+            Self::IdleTimeout => "idle-timeout",
+            Self::CondenseDone => "condense-done",
+        }
+    }
 }
 
 /// A requested side effect (handed to the checkpoint strategy, not run here).
@@ -359,32 +272,7 @@ pub fn step(state: SessionState, trigger: Trigger) -> Result<Transition> {
     })
 }
 
-// --- checkpoint strategies --------------------------------------------------
-
-/// How checkpoints are archived.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum CheckpointStrategy {
-    /// Archive only at `git commit` (never pollutes the active branch). Default.
-    #[default]
-    ManualCommit,
-    /// Archive on every turn boundary (heavier; opt-in).
-    PerTurn,
-}
-
-impl CheckpointStrategy {
-    /// Whether a `post-commit` git event should trigger archival under this
-    /// strategy.
-    #[must_use]
-    pub fn archives_on_commit(self) -> bool {
-        matches!(self, Self::ManualCommit)
-    }
-
-    /// Whether a turn-end should trigger archival under this strategy.
-    #[must_use]
-    pub fn archives_on_turn_end(self) -> bool {
-        matches!(self, Self::PerTurn)
-    }
-}
+// Checkpoint strategies live in [`strategy`] (the four-strategy pure `decide`).
 
 #[cfg(test)]
 mod tests {
@@ -392,7 +280,7 @@ mod tests {
 
     fn raw(verb: &str, payload: serde_json::Value) -> RawHook {
         RawHook {
-            agent: AgentId::ClaudeCode,
+            agent: AgentId::CLAUDE_CODE,
             verb: verb.into(),
             session: "01JSESSION".into(),
             turn: 1,
@@ -414,14 +302,19 @@ mod tests {
     }
 
     #[test]
-    fn session_start_stop_map() {
+    fn session_start_turn_end_session_end_map() {
         let reg = AdapterRegistry::with_builtin();
         assert_eq!(
             dispatch(&raw("SessionStart", serde_json::json!({})), &reg).unwrap()[0].kind,
             EventKind::SessionStart
         );
+        // `Stop` ends a turn; `SessionEnd` ends the session (distinct canonical kinds).
         assert_eq!(
             dispatch(&raw("Stop", serde_json::json!({})), &reg).unwrap()[0].kind,
+            EventKind::TurnEnd
+        );
+        assert_eq!(
+            dispatch(&raw("SessionEnd", serde_json::json!({})), &reg).unwrap()[0].kind,
             EventKind::SessionEnd
         );
     }
@@ -518,12 +411,11 @@ mod tests {
     }
 
     #[test]
-    fn manual_commit_strategy_archives_on_commit() {
-        let s = CheckpointStrategy::default();
-        assert_eq!(s, CheckpointStrategy::ManualCommit);
-        assert!(s.archives_on_commit());
-        assert!(!s.archives_on_turn_end());
-        assert!(CheckpointStrategy::PerTurn.archives_on_turn_end());
+    fn state_and_trigger_audit_tokens() {
+        assert_eq!(SessionState::Active.as_str(), "active");
+        assert_eq!(SessionState::Ended.as_str(), "ended");
+        assert_eq!(Trigger::CondenseDone.as_str(), "condense-done");
+        assert_eq!(Trigger::Start.as_str(), "start");
     }
 
     proptest::proptest! {

@@ -19,7 +19,7 @@ impl ChainSource for OneLink {
 
 fn hook(verb: &str, turn: u32, payload: serde_json::Value) -> RawHook {
     RawHook {
-        agent: AgentId::ClaudeCode,
+        agent: AgentId::CLAUDE_CODE,
         verb: verb.into(),
         session: "01JE2E".into(),
         turn,
@@ -28,8 +28,8 @@ fn hook(verb: &str, turn: u32, payload: serde_json::Value) -> RawHook {
     }
 }
 
-#[test]
-fn capture_to_immutable_ledger_to_verify() {
+#[tokio::test]
+async fn capture_to_immutable_ledger_to_verify() {
     let reg = AdapterRegistry::with_builtin();
 
     // 1. capture a scripted session; the prompt payload carries a seeded AWS key.
@@ -63,6 +63,7 @@ fn capture_to_immutable_ledger_to_verify() {
             schema_version: 1,
         },
     )
+    .await
     .unwrap();
 
     // 4. verify the projection against the authoritative (git-equivalent) chain.
@@ -71,7 +72,7 @@ fn capture_to_immutable_ledger_to_verify() {
         merkle_root: root,
         prev: None,
     });
-    let report = verify(&store, &source).unwrap();
+    let report = verify(&store, &source).await.unwrap();
     assert!(report.ok);
     assert_eq!(report.checkpoints, 1);
 }

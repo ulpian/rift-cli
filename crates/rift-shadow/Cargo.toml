@@ -10,9 +10,16 @@ description = "rift-shadow: git-native, immutable system of record for AI agent 
 [lints]
 workspace = true
 
+[features]
+# Forward the optional production HTTP download (P1 B2) to the wrapper. Off by
+# default so library builds/tests stay network-free; the bin opts in.
+provision-http = ["rift-shadow-entire/provision-http"]
+
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 rift-hashchain = { version = "0.0.1", path = "../rift-hashchain" }
+# Native git write plumbing for the NativeBackend (P7 S3).
+rift-git = { version = "0.0.1", path = "../rift-git" }
 rift-store = { version = "0.0.1", path = "../rift-store" }
 rift-shadow-entire = { version = "0.0.1", path = "../rift-shadow-entire" }
 rift-shadow-hooks = { version = "0.0.1", path = "../rift-shadow-hooks" }
@@ -20,3 +27,10 @@ rift-shadow-redact = { version = "0.0.1", path = "../rift-shadow-redact" }
 rift-shadow-attribution = { version = "0.0.1", path = "../rift-shadow-attribution" }
 rift-shadow-cost = { version = "0.0.1", path = "../rift-shadow-cost" }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+# Per-repo serialized checkpoint archival (deferred off the git critical path).
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }

@@ -65,13 +65,13 @@ impl ChainSource for FixtureSource {
 ///
 /// A persisted projection is verified as-is on re-runs (records only when empty),
 /// so a second call with a divergent `source` detects the divergence.
-fn verify_projection(db_path: &Path, source: &impl ChainSource) -> Result<VerifyReport> {
+async fn verify_projection(db_path: &Path, source: &impl ChainSource) -> Result<VerifyReport> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let store = SqliteStore::open(db_path)?;
     store.create_canonical_schema()?;
-    if store.count("checkpoint")? == 0 {
+    if store.count("checkpoint").await? == 0 {
         for link in source.links()? {
             record_checkpoint(
                 &store,
@@ -83,15 +83,16 @@ fn verify_projection(db_path: &Path, source: &impl ChainSource) -> Result<Verify
                     prev: link.prev,
                     schema_version: 1,
                 },
-            )?;
+            )
+            .await?;
         }
     }
-    verify_against_source(&store, source)
+    verify_against_source(&store, source).await
 }
 
 /// A stable [`RepoId`] for `dir` — content-addressed over its canonical path so
 /// each working tree gets its own projection directory.
-fn repo_id_for(dir: &Path) -> Result<RepoId> {
+pub(crate) fn repo_id_for(dir: &Path) -> Result<RepoId> {
     let canon = std::fs::canonicalize(dir)?;
     let slug = leaf_hash(canon.to_string_lossy().as_bytes()).to_hex();
     RepoId::new(&slug[..32])
@@ -99,8 +100,12 @@ fn repo_id_for(dir: &Path) -> Result<RepoId> {
 
 /// Verify under an explicit cache `root` and `repo` (the seam the e2e test drives
 /// with a tempdir + an injected source).
-fn verify_under(root: &Path, repo: &RepoId, source: &impl ChainSource) -> Result<VerifyReport> {
-    verify_projection(&projection_db_under(root, repo), source)
+async fn verify_under(
+    root: &Path,
+    repo: &RepoId,
+    source: &impl ChainSource,
+) -> Result<VerifyReport> {
+    verify_projection(&projection_db_under(root, repo), source).await
 }
 
 /// `rift verify`: re-derive the fixture chain and cross-check the projection for
@@ -111,11 +116,21 @@ fn verify_under(root: &Path, repo: &RepoId, source: &impl ChainSource) -> Result
 /// [`RiftError::Integrity`] on tamper; [`RiftError::Io`]/[`RiftError::Storage`]
 /// if the projection cannot be opened or migrated.
 pub(crate) fn run() -> Result<()> {
+    // `main` is synchronous; the store seam is async (Turso-shaped). Drive it on a
+    // short-lived current-thread runtime confined to this command — the async
+    // readers (Canopy/MCP) get their own runtime when they land.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    rt.block_on(run_async())
+}
+
+async fn run_async() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let repo = repo_id_for(&cwd)?;
     let root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
     let db = projection_db_under(&root, &repo);
-    let report = verify_under(&root, &repo, &FixtureSource::parse(FIXTURE))?;
+    let report = verify_under(&root, &repo, &FixtureSource::parse(FIXTURE)).await?;
     println!(
         "rift verify: OK — re-derived {} checkpoint(s) from the fixture match the projection",
         report.checkpoints
@@ -134,35 +149,39 @@ mod tests {
         RepoId::new("test-repo").unwrap()
     }
 
-    #[test]
-    fn creates_projection_and_verifies_fixture() {
+    #[tokio::test]
+    async fn creates_projection_and_verifies_fixture() {
         let tmp = tempfile::tempdir().unwrap();
-        let report = verify_under(tmp.path(), &repo(), &FixtureSource::parse(FIXTURE)).unwrap();
+        let report = verify_under(tmp.path(), &repo(), &FixtureSource::parse(FIXTURE))
+            .await
+            .unwrap();
         assert!(report.ok);
         assert_eq!(report.checkpoints, 1);
         // The on-disk projection was created + migrated under <root>/rift/<repo>/.
         assert!(projection_db_under(tmp.path(), &repo()).exists());
     }
 
-    #[test]
-    fn re_run_on_persisted_projection_still_verifies() {
+    #[tokio::test]
+    async fn re_run_on_persisted_projection_still_verifies() {
         let tmp = tempfile::tempdir().unwrap();
         let src = FixtureSource::parse(FIXTURE);
-        verify_under(tmp.path(), &repo(), &src).unwrap();
+        verify_under(tmp.path(), &repo(), &src).await.unwrap();
         // Second call re-opens the persisted db (no re-insert) and re-verifies.
-        let again = verify_under(tmp.path(), &repo(), &src).unwrap();
+        let again = verify_under(tmp.path(), &repo(), &src).await.unwrap();
         assert!(again.ok);
     }
 
-    #[test]
-    fn divergent_source_is_detected_as_integrity_error() {
+    #[tokio::test]
+    async fn divergent_source_is_detected_as_integrity_error() {
         let tmp = tempfile::tempdir().unwrap();
         // Populate from the real fixture.
-        verify_under(tmp.path(), &repo(), &FixtureSource::parse(FIXTURE)).unwrap();
+        verify_under(tmp.path(), &repo(), &FixtureSource::parse(FIXTURE))
+            .await
+            .unwrap();
         // A different fixture → different Merkle root → the stored projection
         // (built from the original) no longer matches the authoritative source.
         let tampered = FixtureSource::parse("different leaf\nanother line\n");
-        let err = verify_under(tmp.path(), &repo(), &tampered);
+        let err = verify_under(tmp.path(), &repo(), &tampered).await;
         assert!(matches!(err, Err(RiftError::Integrity(_))), "got {err:?}");
     }
 

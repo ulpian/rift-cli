@@ -5,5 +5,10 @@
 # transitive of `jiff` (its `defmt` feature, which we do not enable). `jiff`
 # itself enters via `gix-date`. Nothing we build links it. Keep this in lockstep
 # with deny.toml; drop both ignores if `jiff` removes the dep.
+#
+# NOTE (P3 review): when the deferred `turso` dependency is wired back (see
+# phase-03 SPIKE-RESULTS.md), add RUSTSEC-2026-0183 / -0184 (`git2` unsound) and
+# RUSTSEC-2024-0436 (`paste` unmaintained) here and in deny.toml — they reach the
+# lockfile only via that optional, default-off feature.
 [advisories]
 ignore = ["RUSTSEC-2026-0173"]

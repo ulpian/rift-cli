@@ -66,3 +66,6 @@ jobs:
         with: { components: "miri, rust-src" }
       # Advisory (|| true) until the FFI seams carry `unsafe` to certify UB-free.
       - run: cargo +nightly miri test -p rift-canopy -p rift-fff || true
+  # NOTE: a Turso advisory job was removed with the turso dependency (P3 review —
+  # see phase-03 SPIKE-RESULTS.md). Restore it (clippy + test `-p rift-store
+  # --features turso`, continue-on-error) if/when the turso dep is wired back.

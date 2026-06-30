@@ -16,6 +16,8 @@ libfuzzer-sys = "0.4"
 rift-config = { path = "../crates/rift-config", version = "0.0.1" }
 rift-core = { path = "../crates/rift-core", version = "0.0.1" }
 rift-shadow-redact = { path = "../crates/rift-shadow-redact", version = "0.0.1" }
+rift-shadow-attribution = { path = "../crates/rift-shadow-attribution", version = "0.0.1" }
+rift-shadow-hooks = { path = "../crates/rift-shadow-hooks", version = "0.0.1" }
 
 # Untrusted-byte parsers get a fuzz target as they land (06 §6.1 / §5.9).
 # Still pending: checkpoint_artifact (Stage 2 C1 bridge), mcp_request (Stage 3 P5),
@@ -28,8 +30,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "run_hook"
+path = "fuzz_targets/run_hook.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "redact"
 path = "fuzz_targets/redact.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diff"
+path = "fuzz_targets/diff.rs"
 test = false
 doc = false
 bench = false

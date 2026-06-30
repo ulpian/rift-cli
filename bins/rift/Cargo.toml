@@ -18,8 +18,13 @@ path = "src/main.rs"
 # Default build launches the interactive Canopy TUI (xre terminal backend).
 # `--no-default-features` yields an ASCII-only, dependency-light binary that
 # still runs the subcommands and the headless one-frame dashboard.
-default = ["tui"]
+default = ["tui", "provision-http"]
 tui = ["rift-canopy/xre"]
+# Real capture-backend download + extract for `rift setup` (P1 B2) — ON by default
+# so `rift setup` provisions the backend from the upstream GitHub releases. A
+# `--no-default-features` build (or `rift setup --no-provision` / `RIFT_NO_PROVISION`)
+# skips it for offline/CI use; tests set `RIFT_NO_PROVISION` to stay network-free.
+provision-http = ["rift-shadow/provision-http"]
 
 [dependencies]
 rift-core = { version = "0.0.1", path = "../../crates/rift-core" }
@@ -29,8 +34,15 @@ rift-registry = { version = "0.0.1", path = "../../crates/rift-registry" }
 # `rift verify` re-derives a hash chain and cross-checks it against the projection.
 rift-store = { version = "0.0.1", path = "../../crates/rift-store" }
 rift-hashchain = { version = "0.0.1", path = "../../crates/rift-hashchain" }
-# Enable at implementation: clap, tracing, tracing-subscriber, tokio
+# `rift verify` drives the async store seam on a short-lived current-thread runtime.
+tokio = { workspace = true }
+# `rift hooks <agent> <verb>` parses the stdin-JSON capture contract.
+serde_json = { workspace = true }
+# The command-line surface (P8 S1): clap-derive tree, exit codes, --json contract.
+clap = { workspace = true }
+# `rift enable/disable` and the projection-read query commands need the agent SDK
+# (verb lists / compat notes) and the recall substrate (checkpoint listing).
+rift-agent = { version = "0.0.1", path = "../../crates/rift-agent" }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tempfile = { workspace = true }

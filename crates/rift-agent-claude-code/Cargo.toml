@@ -1,0 +1,16 @@
+[package]
+name = "rift-agent-claude-code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "First-party Rift adapter for Claude Code: maps its native hook lifecycle to canonical events."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-agent = { version = "0.0.1", path = "../rift-agent" }
+serde_json = { workspace = true }

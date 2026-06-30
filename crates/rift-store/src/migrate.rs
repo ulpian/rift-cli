@@ -184,8 +184,8 @@ mod tests {
         SqliteStore::open_in_memory().unwrap()
     }
 
-    #[test]
-    fn applies_pending_migrations_in_order() {
+    #[tokio::test]
+    async fn applies_pending_migrations_in_order() {
         let s = store();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(out.applied, 2);
@@ -210,6 +210,7 @@ mod tests {
                 Value::Int(1),
             ],
         )
+        .await
         .unwrap();
     }
 
@@ -268,17 +269,33 @@ mod tests {
         assert!(is_additive(&canonical_schema_sql()).is_ok());
     }
 
+    /// The destructive-DDL CI gate, made explicit and order-independent: every
+    /// migration in the **shipping** set must be additive. A future migration that
+    /// sneaks a `DROP`/`RENAME` in fails here, not only when it happens to apply.
+    #[test]
+    fn every_default_migration_is_additive() {
+        for m in default_migrations() {
+            is_additive(&m.sql).unwrap_or_else(|e| {
+                panic!(
+                    "shipping migration {} ({}) is non-additive: {e}",
+                    m.version, m.name
+                )
+            });
+        }
+    }
+
     #[test]
     fn per_table_schema_version_is_tracked() {
         let s = store();
         apply_migrations(&s, &default_migrations()).unwrap();
         let n: i64 = s
-            .connection()
-            .query_row(
-                "SELECT COUNT(*) FROM _schema_version WHERE schema_version = 1",
-                [],
-                |r| r.get(0),
-            )
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM _schema_version WHERE schema_version = 1",
+                    [],
+                    |r| r.get(0),
+                )
+            })
             .unwrap();
         assert!(n >= 1, "expected per-table schema_version rows, got {n}");
     }

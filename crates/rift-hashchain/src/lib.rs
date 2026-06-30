@@ -69,6 +69,24 @@ pub fn leaf_hash(canonical_event_bytes: &[u8]) -> Sha256Id {
     finalize(h)
 }
 
+/// Extension trait deriving a [`CanonicalEvent`](rift_core::CanonicalEvent)'s
+/// Merkle leaf from its canonical bytes.
+///
+/// The canonical event type lives in `rift-core` (the schema authority, P8 S2),
+/// which deliberately does **not** depend on this hash layer; the leaf derivation
+/// lives here instead so the dependency graph stays acyclic. Bring this trait
+/// into scope (`use rift_hashchain::EventLeaf;`) to call `event.leaf()`.
+pub trait EventLeaf {
+    /// The SHA-256 Merkle leaf for this event (domain-separated, substrate-compatible).
+    fn leaf(&self) -> Sha256Id;
+}
+
+impl EventLeaf for rift_core::CanonicalEvent {
+    fn leaf(&self) -> Sha256Id {
+        leaf_hash(&self.canonical_bytes())
+    }
+}
+
 /// Internal Merkle node over two children: `SHA-256(0x01 ‖ left ‖ right)`.
 #[must_use]
 pub fn node_hash(left: &Sha256Id, right: &Sha256Id) -> Sha256Id {

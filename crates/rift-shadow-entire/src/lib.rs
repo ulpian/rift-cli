@@ -18,9 +18,20 @@
 #![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rift_core::Sha256Id;
 use sha2::{Digest, Sha256};
+
+pub mod pin;
+pub use pin::{InstallReport, PinnedSubstrate, SubstrateAsset, SubstrateFetcher};
+
+/// Production HTTP(S) download (the only network call). Behind `provision-http`
+/// so the default build/tests stay network-free and use the in-memory fetcher.
+#[cfg(feature = "provision-http")]
+pub mod fetch;
+#[cfg(feature = "provision-http")]
+pub use fetch::HttpFetcher;
 
 /// Errors from the capture-backend seam. Messages are Rift-voiced and never name
 /// the upstream tool.
@@ -274,12 +285,69 @@ impl EntireRunner for MockRunner {
     }
 }
 
+/// Limits applied to a wrapped spawn so a hung or chatty backend can never wedge
+/// or flood the developer's git op.
+#[derive(Clone, Copy, Debug)]
+pub struct SpawnLimits {
+    /// Wall-clock budget for the child. (Enforcement of the hard kill lands with
+    /// the real spawn at release-cut; carried here so the contract is fixed now.)
+    pub wall: Duration,
+    /// Cap on captured stdout bytes (truncated past this; applied today).
+    pub max_output_bytes: usize,
+}
+
+impl Default for SpawnLimits {
+    fn default() -> Self {
+        Self {
+            wall: Duration::from_secs(30),
+            max_output_bytes: 1 << 20, // 1 MiB
+        }
+    }
+}
+
+/// The minimal, scrubbed environment the wrapped child runs with (P1 S3 egress
+/// layer). We start from an empty env (`env_clear`, dropping any `*_TOKEN`/
+/// `*_API_*`/telemetry vars) and add only a sanitized `PATH` plus **dead proxies**
+/// so a naive HTTP client in the child dead-ends — belt-and-suspenders with the
+/// arg-level screen. The OS-level network sandbox (namespace / `sandbox-exec`)
+/// is the deferred, feature-gated hardening that composes on top at release-cut;
+/// the fail-closed rule is *no network*, never "fall open to a networked child".
+#[must_use]
+pub fn scrubbed_capture_env() -> Vec<(&'static str, &'static str)> {
+    const DEAD: &str = "http://127.0.0.1:0";
+    vec![
+        ("PATH", "/usr/bin:/bin"),
+        ("HTTP_PROXY", DEAD),
+        ("HTTPS_PROXY", DEAD),
+        ("ALL_PROXY", DEAD),
+        ("http_proxy", DEAD),
+        ("https_proxy", DEAD),
+        ("all_proxy", DEAD),
+        ("RIFT_LOCAL_ONLY", "1"),
+        ("DO_NOT_TRACK", "1"),
+    ]
+}
+
 /// The production runner: spawns the pinned binary by absolute path with a
-/// cleared environment, screening the verb first. (Spawn is exercised by the
-/// integration suite against a fake backend script, not in unit tests.)
+/// cleared+scrubbed environment, screening the verb first. (Spawn is exercised by
+/// the integration suite against a fake backend script, not in unit tests; the
+/// hard wall-clock kill + OS sandbox land with the real provision at release-cut.)
 pub struct SystemRunner {
     /// Absolute path to the pinned, verified backend binary.
     pub binary: PathBuf,
+    /// Spawn limits (output cap today; wall-kill at release-cut).
+    pub limits: SpawnLimits,
+}
+
+impl SystemRunner {
+    /// A runner for the verified `binary` with default [`SpawnLimits`].
+    #[must_use]
+    pub fn new(binary: PathBuf) -> Self {
+        Self {
+            binary,
+            limits: SpawnLimits::default(),
+        }
+    }
 }
 
 impl EntireRunner for SystemRunner {
@@ -299,12 +367,15 @@ impl EntireRunner for SystemRunner {
             .args(&argv)
             .current_dir(&cwd)
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
+            .envs(scrubbed_capture_env())
             .output()
             .map_err(|_| SubstrateError::Unavailable)?;
+        // Cap captured output so a chatty backend can't flood memory.
+        let mut bytes = output.stdout;
+        bytes.truncate(self.limits.max_output_bytes);
         Ok(RunOutcome {
             exit: ExitClass::from_code(output.status.code()),
-            stdout: rebrand(&output.stdout),
+            stdout: rebrand(&bytes),
         })
     }
 }
@@ -387,6 +458,21 @@ mod tests {
         assert_eq!(ExitClass::from_code(Some(2)), ExitClass::BadUsage);
         assert_eq!(ExitClass::from_code(None), ExitClass::BackendInternal);
         assert_eq!(ExitClass::from_code(Some(134)), ExitClass::BackendInternal);
+    }
+
+    #[test]
+    fn scrubbed_env_dead_ends_network_and_drops_secrets() {
+        let env = scrubbed_capture_env();
+        let map: std::collections::HashMap<_, _> = env.iter().copied().collect();
+        // naive HTTP clients dead-end on an unreachable proxy
+        assert_eq!(map.get("HTTP_PROXY"), Some(&"http://127.0.0.1:0"));
+        assert_eq!(map.get("HTTPS_PROXY"), Some(&"http://127.0.0.1:0"));
+        assert!(map.contains_key("PATH"));
+        // the allowlist carries no secret-shaped vars (env_clear drops the rest)
+        assert!(!env
+            .iter()
+            .any(|(k, _)| k.to_ascii_uppercase().contains("TOKEN")
+                || k.to_ascii_uppercase().contains("API")));
     }
 
     #[test]

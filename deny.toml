@@ -8,6 +8,13 @@ yanked = "deny"
 # legitimately via `gix-date`. Nothing we build links it. Re-evaluate if `jiff`
 # drops the dep or a real vulnerability is filed. `cargo audit --deny warnings`
 # carries the same ignore in `.cargo/audit.toml`.
+#
+# NOTE (P3 review): when the deferred `turso` dependency is wired back (see
+# phase-03 SPIKE-RESULTS.md), it pulls advisory-bearing transitives that must be
+# ignored HERE and in `.cargo/audit.toml` (they reach the lockfile only via that
+# optional, default-off feature): RUSTSEC-2026-0183 / -0184 (`git2` unsound — a
+# build-dep of turso's `built`; unsound APIs never called) and RUSTSEC-2024-0436
+# (`paste` unmaintained — a `turso_core` proc-macro).
 ignore = ["RUSTSEC-2026-0173"]
 
 [bans]
@@ -26,6 +33,11 @@ version = 2
 # our own source. Re-evaluate if a core dependency adopts it.
 allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "MPL-2.0"]
 confidence-threshold = 0.9
+# `webpki-roots` ships the Mozilla CA-certificate *data* set under the Community
+# Data License Agreement – Permissive 2.0 (a permissive *data* license, not code).
+# It is pulled by `ureq`'s rustls root store ONLY on the capture-backend download
+# path (P1 B2, the `provision-http` feature). Scoped to that one crate.
+exceptions = [{ name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] }]
 
 [sources]
 unknown-registry = "deny"

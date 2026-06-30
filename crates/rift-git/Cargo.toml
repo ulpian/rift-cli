@@ -1,0 +1,20 @@
+[package]
+name = "rift-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native git plumbing (P7 S3): worktree/common-dir discovery, additive object writes behind a RedactedBytes type wall, and the argv-safe shell-out to `git` for reset/checkout."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Construct a RedactedBytes via the sanctioned redaction gate (its sole constructor).
+rift-shadow-redact = { version = "0.0.1", path = "../rift-shadow-redact" }
