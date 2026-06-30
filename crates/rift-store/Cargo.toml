@@ -1,0 +1,23 @@
+[package]
+name = "rift-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Append-only store: migrations, 4NF/5NF schema, immutability guards, hash-chain integrity, column encryption (rusqlite reference impl; Turso is the production target)."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+rift-hashchain = { path = "../rift-hashchain" }
+rift-crypto = { path = "../rift-crypto" }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+# Production target (async, MVCC, vectors) — wired behind the same CanonicalStore
+# trait once the slice graduates: turso = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

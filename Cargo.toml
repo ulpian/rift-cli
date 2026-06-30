@@ -1,51 +1,163 @@
+# Rift — Cargo workspace (scaffold)
+# Generated as part of the Rift build plan. Crate stubs are std-only so the
+# workspace builds offline; the real third-party dependencies are pinned in
+# [workspace.dependencies] below and referenced (commented) in each crate,
+# ready to enable as implementation begins. See build-plan/ for the full plan.
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = [
+  "crates/rift-core",
+  "crates/rift-config",
+  "crates/rift-crypto",
+  "crates/rift-hashchain",
+  "crates/rift-store",
+  "crates/rift-shadow",
+  "crates/rift-shadow-entire",
+  "crates/rift-shadow-hooks",
+  "crates/rift-shadow-attribution",
+  "crates/rift-shadow-redact",
+  "crates/rift-shadow-cost",
+  "crates/rift-recall-types",
+  "crates/rift-recall-substrate",
+  "crates/rift-recall-ledger",
+  "crates/rift-recall-validity",
+  "crates/rift-recall-rank",
+  "crates/rift-recall-pack",
+  "crates/rift-recall-policy",
+  "crates/rift-recall-mcp",
+  "crates/rift-recall-events",
+  "crates/rift-canopy",
+  "crates/rift-registry",
+  "crates/rift-fff",
+  "crates/rift-codegraph",
+  "crates/rift-nic-gauge",
+  "bins/rift",
+  "bins/rift-memd",
+]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
-rust-version = "1.86"
-license = "MIT"
-repository = "https://github.com/ulpian/rift-cli"
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/ulpian/rift"
 authors = ["Ulpian Morina"]
 
+# ---------------------------------------------------------------------------
+# Pinned external dependencies (single source of truth).
+# Versions marked (verify) should be re-checked against crates.io at the moment
+# the crate is first wired in; turso is BETA and pre-1.0.
+# ---------------------------------------------------------------------------
 [workspace.dependencies]
-# Internal crates
-rift-core = { path = "crates/rift-core" }
-rift-entire = { path = "crates/rift-entire" }
-rift-redact = { path = "crates/rift-redact" }
-rift-tui = { path = "crates/rift-tui" }
-
-# CLI / TUI
-clap = { version = "4.6", features = ["derive", "env"] }
-ratatui = "0.30"
-
-# Serialization
+# Storage — Turso (SQLite-compatible Rust rewrite: MVCC, async, native vectors)
+turso = "0.1"                  # (verify) BETA; cargo add turso tokio --features tokio/full
+# Reference store for the testable vertical slice: SQLite-compatible, synchronous,
+# runs the SAME SQL/triggers Turso will. Production target stays `turso` behind the seam.
+rusqlite = { version = "0.32", features = ["bundled"] }   # (verify) needs a C compiler (bundled SQLite)
+# TUI / 3D render engine (first-party)
+# xRenderEngine (xre) 0.2 — depend on the terminal + 2D TUI layers directly, NOT the
+# `xre-rs` facade: the facade pulls xre-engine (ECS), xre-render (software 3D) and
+# xre-cello (scene/OBJ) as non-optional deps, which a 2D dashboard does not need.
+# `default-features = false` on xre-tui drops its `render` (Viewport3D) + `parallel`
+# (rayon) defaults, leaving just crossterm + glam + unicode-width.
+xre-core = { version = "0.2", default-features = false }
+xre-term = { version = "0.2", default-features = false }
+xre-tui = { version = "0.2", default-features = false }
+# MCP server SDK (official)
+rmcp = { version = "0.16", features = ["server", "transport-io", "macros"] } # (verify)
+# Git plumbing (pure-Rust, read-side)
+gix = "0.66"                   # (verify) gitoxide
+# Diff / hunks
+imara-diff = "0.1"             # (verify)
+# Hashing
+blake3 = "1"
+sha2 = "0.10"
+# Symbols (Phase 7 dependency-aware expansion)
+tree-sitter = "0.24"           # (verify)
+# Tokenization (budget enforcement within ~5% of billing tokenizers)
+tiktoken-rs = "0.6"            # (verify)
+# Optional packages
+fff-search = "0.1"             # (verify) dmtrKovalenko/fff core
+codegraph = "0.2"              # anvanster/codegraph graph DB
+# In-memory graph working set
+petgraph = "0.6"
+# Async / parallel
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "time"] }
+rayon = "1"
+# CLI / errors / logging
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Serde
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# Errors / logging
-anyhow = "1"
-thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-
-# Utilities
-regex = "1"
-which = "8"
-walkdir = "2"
-figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"
-jiff = "0.2"
+# Redaction (linear-time, no backreferences → ReDoS-safe)
+regex = "1"
+# Security / secrets hygiene
+zeroize = { version = "1", features = ["derive"] }
+secrecy = "0.10"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"                  # envelope-key derivation (HKDF-SHA256)
+getrandom = "0.2"             # OS CSPRNG for keys/nonces (no rand_core version dance)
+keyring = "3"                  # OS keychain (optional feature in rift-store)
+# Testing
+insta = "1"
+proptest = "1"
+criterion = "0.5"
+tempfile = "3"               # on-disk fixtures for the gix substrate reader (dev-only)
 
-# Dev / testing
-assert_cmd = "2.2"
-predicates = "3.1"
-tempfile = "3"
+# ---------------------------------------------------------------------------
+# Workspace-wide lints. Security posture: deny unsafe by default (crates that
+# must use FFI override locally with #![allow(unsafe_code)] + justification).
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
 
 [workspace.lints.clippy]
+# Groups get a lower priority than the individual lints below, so a specific
+# lint always wins over its group (and silences the "same priority" warning).
 all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Security-relevant lints stay on (a panic in a hook must not abort a git op).
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "warn"
+# indexing/slicing in this codebase is bounds-checked by construction (fixed-size
+# arrays, length-checked ranges, `chunks_exact`); the "never crash a developer's
+# git op" guarantee is carried by `unwrap`/`expect`/`panic` staying denied above.
+indexing_slicing = "allow"
+# Purely-stylistic pedantic lints we accept project-wide (not correctness or
+# security): intentional numeric casts for display/estimates, closures after
+# statements, broad-but-deliberate signatures, exact float comparisons in tests.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+items_after_statements = "allow"
+too_many_arguments = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+match_wildcard_for_single_variants = "allow"
+ref_option = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"
+should_implement_trait = "allow"
+format_push_string = "allow"
+float_cmp = "allow"
+module_name_repetitions = "allow"
+doc_markdown = "allow"
 
-[workspace.lints.rust]
-unsafe_code = "forbid"
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+panic = "unwind"

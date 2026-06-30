@@ -1,0 +1,28 @@
+[package]
+name = "rift-canopy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "rift-canopy TUI: 3-column dashboard, nic-gauge, slash-command palette, splash — behind a RenderBackend seam with an ASCII fallback."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The first-party xRenderEngine terminal + 2D TUI layers plug in behind the
+# RenderBackend seam (live raw-mode loop, panels, widgets); the ASCII fallback is
+# always available. We depend on the term/core/tui layers directly rather than
+# the `xre-rs` facade, which would also pull the 3D engine + ECS + scene loader.
+xre = ["dep:xre-core", "dep:xre-term", "dep:xre-tui"]
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+xre-core = { workspace = true, optional = true }
+xre-term = { workspace = true, optional = true }
+xre-tui = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -18,9 +18,10 @@ Available tasks (./skills.sh <task>):
   build        Debug build of the whole workspace
   release      Optimized release build (matches CI)
   check        Pre-push gate: fmt-check + lint + test
-  run [args]   Run the rift binary, forwarding args (e.g. run scan .)
-  tui          Launch the TUI dashboard
-  smoke        Quick end-to-end: scan fixture + dry-run redact
+  run [args]   Run the rift binary, forwarding args (e.g. run -- status)
+  tui          Launch the Canopy dashboard (bare `rift`)
+  memd [args]  Run the rift-memd recall binary (e.g. memd -- serve)
+  smoke        Quick smoke: rift + rift-memd report status
 EOF
 }
 
@@ -53,16 +54,22 @@ case "$task" in
     "$0" fmt-check && "$0" lint && "$0" test
     ;;
   run)
-    # Allow an optional `--` separator: `./skills.sh run -- scan .`
+    # Allow an optional `--` separator: `./skills.sh run -- status`
     [ "${1:-}" = "--" ] && shift || true
-    cargo run -p rift-cli -- "$@"
+    cargo run -p rift -- "$@"
     ;;
   tui)
-    cargo run -p rift-cli -- tui "$@"
+    # Bare `rift` (no subcommand) launches Canopy.
+    cargo run -p rift
+    ;;
+  memd)
+    [ "${1:-}" = "--" ] && shift || true
+    cargo run -p rift-memd -- "$@"
     ;;
   smoke)
-    cargo run -q -p rift-cli -- scan tests/fixtures/repo
-    cargo run -q -p rift-cli -- redact --dry-run --store tests/fixtures/repo/checkpoints
+    # Quick smoke: the two binaries report status and the recall plane is up.
+    cargo run -q -p rift -- status
+    cargo run -q -p rift-memd -- status
     ;;
   *)
     echo "unknown task: $task" >&2

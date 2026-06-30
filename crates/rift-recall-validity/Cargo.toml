@@ -1,0 +1,19 @@
+[package]
+name = "rift-recall-validity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hash-bound summary store + validity engine (stale = structurally unreturnable) + deterministic extractors + the four-state envelope builder."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+rift-recall-types = { path = "../rift-recall-types" }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

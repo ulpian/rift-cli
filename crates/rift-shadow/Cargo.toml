@@ -1,0 +1,22 @@
+[package]
+name = "rift-shadow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "rift-shadow: git-native, immutable system of record for AI agent sessions (capture + verify facade)."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+rift-hashchain = { path = "../rift-hashchain" }
+rift-store = { path = "../rift-store" }
+rift-shadow-entire = { path = "../rift-shadow-entire" }
+rift-shadow-hooks = { path = "../rift-shadow-hooks" }
+rift-shadow-redact = { path = "../rift-shadow-redact" }
+rift-shadow-attribution = { path = "../rift-shadow-attribution" }
+rift-shadow-cost = { path = "../rift-shadow-cost" }
+serde_json = { workspace = true }

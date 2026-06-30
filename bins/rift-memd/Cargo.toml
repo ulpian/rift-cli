@@ -1,0 +1,23 @@
+[package]
+name = "rift-memd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "rift-total-recall binary: ingest | rebuild | doctor | diff-since | serve --mcp."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rift-memd"
+path = "src/main.rs"
+
+[dependencies]
+rift-core = { path = "../../crates/rift-core" }
+rift-recall-ledger = { path = "../../crates/rift-recall-ledger" }
+rift-recall-mcp = { path = "../../crates/rift-recall-mcp" }
+rift-recall-substrate = { path = "../../crates/rift-recall-substrate" }
+clap = { workspace = true }
+# Enable at implementation: tokio, rmcp, tracing (Phase 5 / Stage 6)

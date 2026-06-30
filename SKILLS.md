@@ -1,6 +1,6 @@
 # SKILLS.md
 
-Repo "skills" are the named developer tasks for rift-cli. They are runnable via
+Repo "skills" are the named developer tasks for Rift. They are runnable via
 the [`skills.sh`](skills.sh) wrapper and described machine-readably in
 [`skills.json`](skills.json).
 
@@ -22,9 +22,10 @@ the [`skills.sh`](skills.sh) wrapper and described machine-readably in
 | `build`     | Debug build                                              | `cargo build --workspace` |
 | `release`   | Optimized release build (matches CI)                     | `cargo build --workspace --release` |
 | `check`     | **Pre-push gate**: `fmt-check` + `lint` + `test`         | — |
-| `run`       | Run the `rift` binary, forwarding args (`run scan .`)    | `cargo run -p rift-cli -- …` |
-| `tui`       | Launch the TUI dashboard                                 | `cargo run -p rift-cli -- tui` |
-| `smoke`     | End-to-end: scan the fixture repo + dry-run redaction    | — |
+| `run`       | Run the `rift` binary, forwarding args (`run -- status`) | `cargo run -p rift -- …` |
+| `tui`       | Launch the Canopy dashboard (bare `rift`)                | `cargo run -p rift` |
+| `memd`      | Run the `rift-memd` recall binary (`memd -- serve`)      | `cargo run -p rift-memd -- …` |
+| `smoke`     | Quick smoke: `rift` + `rift-memd` report status          | — |
 
 ## Conventions
 

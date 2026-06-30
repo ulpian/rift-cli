@@ -1,0 +1,35 @@
+[package]
+name = "rift"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rift CLI + TUI entrypoint. Bare `rift` launches Canopy; subcommands drive rift-shadow."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rift"
+path = "src/main.rs"
+
+[features]
+# Default build launches the interactive Canopy TUI (xre terminal backend).
+# `--no-default-features` yields an ASCII-only, dependency-light binary that
+# still runs the subcommands and the headless one-frame dashboard.
+default = ["tui"]
+tui = ["rift-canopy/xre"]
+
+[dependencies]
+rift-core = { path = "../../crates/rift-core" }
+rift-shadow = { path = "../../crates/rift-shadow" }
+rift-canopy = { path = "../../crates/rift-canopy" }
+rift-registry = { path = "../../crates/rift-registry" }
+# Enable at implementation: clap, tracing, tracing-subscriber, tokio
+
+[dev-dependencies]
+rift-store = { path = "../../crates/rift-store" }
+rift-hashchain = { path = "../../crates/rift-hashchain" }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

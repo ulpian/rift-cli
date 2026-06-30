@@ -1,0 +1,21 @@
+[package]
+name = "rift-codegraph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional: code-relationship graph (callers/callees/impact). The codegraph crate + tree-sitter variants are the production backend behind this seam."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+# Production backend (graph DB + tree-sitter language variants) plugs in behind
+# the CodeGraph seam:
+# codegraph = { workspace = true }
+# tree-sitter = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

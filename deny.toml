@@ -1,0 +1,24 @@
+# cargo-deny — supply-chain gate (run in CI). See build-plan stage-01 phase-02.
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"          # no wildcard version reqs in our own manifests
+allow = []
+deny = [
+  { name = "openssl-sys" }, # prefer rustls; avoid system OpenSSL
+]
+
+[licenses]
+version = 2
+# Permissive + the licenses our chosen deps actually use. Tighten over time.
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

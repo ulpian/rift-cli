@@ -1,0 +1,20 @@
+[package]
+name = "rift-shadow-cost"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Four-class token/cost model, versioned bitemporal price tables, and a token estimator."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+serde = { workspace = true }
+# Billing-grade tokenization (within ~5% of provider tokenizers) plugs in here:
+# tiktoken-rs = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

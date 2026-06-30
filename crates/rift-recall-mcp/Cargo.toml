@@ -1,0 +1,23 @@
+[package]
+name = "rift-recall-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded recall MCP tool surface + budget/policy middleware (rmcp stdio transport is the seam)."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+rift-recall-types = { path = "../rift-recall-types" }
+rift-recall-policy = { path = "../rift-recall-policy" }
+rift-recall-events = { path = "../rift-recall-events" }
+# Agent-spawned stdio MCP transport plugs in here (process lifetime = session):
+# rmcp = { workspace = true }
+
+[dev-dependencies]
+rift-config = { path = "../rift-config" }
+proptest = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "rift-recall-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Recall serving policy: per-turn budgets, sensitive-path gates, trust enforcement, audited exact retrieval."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+rift-config = { path = "../rift-config" }
+rift-recall-types = { path = "../rift-recall-types" }
+
+[dev-dependencies]
+proptest = { workspace = true }

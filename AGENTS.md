@@ -1,37 +1,48 @@
 # AGENTS.md
 
-Instructions for AI coding agents working in this repo (Codex, Cursor, Gemini,
-OpenCode, and others that read `AGENTS.md`). Claude Code reads
-[CLAUDE.md](CLAUDE.md), which is the fuller version of this file; agent-specific
-overrides live in [.agents/](.agents/).
+Instructions for AI coding agents (Codex, Cursor, Gemini, OpenCode, and others
+that read `AGENTS.md`). Claude Code reads [CLAUDE.md](CLAUDE.md), the fuller
+version; per-agent overrides live in [.agents/](.agents/).
 
 ## TL;DR
 
-- Rust workspace for `rift`, a CLI that wraps the `entire` CLI. Crates:
-  `rift-cli` (binary), `rift-entire` (wrapper), `rift-core` (domain),
-  `rift-redact` (redaction), `rift-tui` (dashboard).
-- Toolchain is pinned in `rust-toolchain.toml` (≥ 1.86 required by ratatui).
-- The `entire` binary must be on `PATH` (or set `RIFT_ENTIRE_BIN`).
+- **Rift** is a Rust TUI + CLI for AI-assisted engineering: capture every agent
+  session into an immutable, tamper-evident, git-native ledger (**rift-shadow**),
+  project a memory-delta validity graph agents read deltas from
+  (**rift-total-recall**), and show it in a terminal dashboard (**rift-canopy**).
+- ~25-crate Cargo workspace under `crates/` + `bins/`. Toolchain pinned in
+  `rust-toolchain.toml` (1.96.0; MSRV 1.94). `rusqlite` is `bundled` → needs a C
+  compiler.
 
 ## Before you push
-
-Run the full gate — it must pass:
 
 ```bash
 ./skills.sh check     # fmt --check + clippy -D warnings + test
 ```
 
-Individual tasks: `./skills.sh {fmt,lint,test,build,run}` (see
-[SKILLS.md](SKILLS.md)). CI runs the same gate plus a release build.
+CI runs the same gate across three OSes plus a release build, `cargo deny`, and
+`cargo audit`.
 
 ## Conventions (do not break)
 
-- Call `entire` only through the `EntireRunner` trait, never `Command` directly.
-- New `entire` subcommands need no code — they fall through `external_subcommand`.
-- Git access is via the `GitReader` trait (shell-out), not `git2`/`gix`.
-- `rift redact` edits working-tree copies only (atomic write + `--dry-run`).
-- Libraries use `thiserror`; the binary uses `anyhow`. Keep code clippy-clean
-  (`-D warnings`); `unsafe` is forbidden.
-- Commit `Cargo.lock`.
+- **Immutable canonical data.** No `UPDATE`/`DELETE` on canonical tables —
+  corrections are new superseding rows. Adding a canonical table means adding it
+  to the `rift-store` registry *with* its append-only guard triggers, or CI's
+  property test fails.
+- **Redaction is a one-way type gate.** Raw bytes are `SecretBytes`; durable
+  writes accept only `RedactedBytes`, constructed *only* in
+  `rift-shadow-redact::redact`. Never add another constructor or a `From<Vec<u8>>`.
+- **Use the seams.** Turso → `CanonicalStore`; Entire → `EntireRunner`; gix →
+  `SubstrateReader`; rmcp → `McpServer`; xre-rs → `RenderBackend`. Implement and
+  test logic behind the seam; never call the external engine directly elsewhere.
+- **Hashing:** SHA-256 (`rift-hashchain`) for substrate-compatible values; blake3
+  for internal handles. Distinct id types — never interchange.
+- **Errors:** libraries use `thiserror`/`rift_core::RiftError`; bins use `anyhow`.
+  Errors carry identifiers/reasons, never key or transcript bytes.
+- **Config is `.rift/config.toml`** (TOML, `deny_unknown_fields`, secure
+  defaults). Built-in sensitive paths are non-droppable.
+- **`#![forbid(unsafe_code)]`** workspace-wide; keep clippy `-D warnings` clean;
+  inject the clock/RNG/identity in tests (no wall-clock, no network).
 
-See [CLAUDE.md](CLAUDE.md) for the full architecture notes and gotchas.
+See [CLAUDE.md](CLAUDE.md) for the full crate map and gotchas, and
+[SECURITY.md](SECURITY.md) for the threat model.

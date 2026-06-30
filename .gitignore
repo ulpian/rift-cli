@@ -15,8 +15,12 @@
 .claude/settings.local.json
 .mcp.local.json
 
-# Local read-side caches (regenerable from the checkpoint branch)
+# Local read-side caches (regenerable from the checkpoint branch / Turso projection)
 **/*.duckdb
 **/*.sqlite
+*.db
+*.db-wal
+*.db-shm
+/.cache
 
 # NOTE: Cargo.lock is intentionally committed (this workspace produces a binary).

@@ -1,0 +1,21 @@
+[package]
+name = "rift-shadow-hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Git + agent hook lifecycle capture: canonical events, agent adapters, session state machine, checkpoint strategies."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+rift-hashchain = { path = "../rift-hashchain" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

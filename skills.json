@@ -38,18 +38,23 @@
     },
     {
       "name": "run",
-      "description": "Run the rift binary; forwards trailing args (e.g. `run scan .`).",
-      "command": "cargo run -p rift-cli --"
+      "description": "Run the rift binary; forwards trailing args (e.g. `run -- status`).",
+      "command": "cargo run -p rift --"
     },
     {
       "name": "tui",
-      "description": "Launch the TUI dashboard.",
-      "command": "cargo run -p rift-cli -- tui"
+      "description": "Launch the Canopy dashboard (bare `rift`).",
+      "command": "cargo run -p rift"
+    },
+    {
+      "name": "memd",
+      "description": "Run the rift-memd recall binary; forwards trailing args (e.g. `memd -- serve`).",
+      "command": "cargo run -p rift-memd --"
     },
     {
       "name": "smoke",
-      "description": "Quick end-to-end: scan the fixture repo and dry-run redaction.",
-      "command": "cargo run -q -p rift-cli -- scan tests/fixtures/repo && cargo run -q -p rift-cli -- redact --dry-run --store tests/fixtures/repo/checkpoints"
+      "description": "Quick smoke: rift and rift-memd report status.",
+      "command": "cargo run -q -p rift -- status && cargo run -q -p rift-memd -- status"
     }
   ]
 }

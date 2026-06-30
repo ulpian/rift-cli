@@ -1,0 +1,18 @@
+[package]
+name = "rift-recall-ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Delta ledger metrics (repeated/avoidable context rate) and the scope-containment model."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

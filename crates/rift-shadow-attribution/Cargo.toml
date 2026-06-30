@@ -1,0 +1,21 @@
+[package]
+name = "rift-shadow-attribution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Human-vs-agent line attribution math (LIFO ownership) and confidence scoring."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+serde = { workspace = true }
+# The diff-capture layer (H_i/A_i/C boundaries) uses gix + imara-diff to feed
+# these pure-logic functions; enable when wiring the capture path:
+# imara-diff = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
