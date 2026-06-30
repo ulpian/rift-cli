@@ -36,6 +36,9 @@
 
 pub mod crypto;
 pub mod integrity;
+pub mod keychain;
+#[cfg(feature = "keyring")]
+pub mod keychain_os;
 pub mod migrate;
 pub mod paths;
 pub mod schema;
@@ -47,6 +50,9 @@ pub use integrity::{
     cost_belief_as_of, current_cost_micros, record_checkpoint, record_cost_fact,
     verify_against_source, ChainSource, CheckpointRecord, CostFact, VerifyReport,
 };
+pub use keychain::{KeychainBackend, KeyringKeyStore, MemoryKeychain};
+#[cfg(feature = "keyring")]
+pub use keychain_os::OsKeychain;
 pub use migrate::{apply_migrations, default_migrations, Migration, MigrationOutcome};
 pub use paths::{
     default_projection_db, default_projection_dir, projection_db_under, projection_dir_under,

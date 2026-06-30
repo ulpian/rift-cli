@@ -106,7 +106,14 @@ secrecy = "0.10"
 chacha20poly1305 = "0.10"
 hkdf = "0.12"                  # envelope-key derivation (HKDF-SHA256)
 getrandom = "0.2"             # OS CSPRNG for keys/nonces (no rand_core version dance)
-keyring = "3"                  # OS keychain (optional feature in rift-store)
+# OS keychain (optional `keyring` feature in rift-store). Native backends only
+# (no dbus/secret-service) so it compiles on headless CI across all three OSes:
+# Security.framework (macOS), Credential Manager (Windows), kernel keyutils (Linux).
+keyring = { version = "3", default-features = false, features = [
+  "apple-native",
+  "windows-native",
+  "linux-native",
+] }
 # Testing
 insta = "1"
 proptest = "1"
