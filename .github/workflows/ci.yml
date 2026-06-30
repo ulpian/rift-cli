@@ -58,8 +58,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Dated nightly pin (reproducible miri); scoped to the FFI-bearing crates.
-      - uses: dtolnay/rust-toolchain@nightly-2026-06-02
+      # @nightly auto-selects the latest nightly that actually carries the
+      # requested components (robust — a hardcoded `nightly-YYYY-MM-DD` is not a
+      # valid dtolnay/rust-toolchain ref and may lack miri); scoped to the
+      # FFI-bearing crates.
+      - uses: dtolnay/rust-toolchain@nightly
         with: { components: "miri, rust-src" }
       # Advisory (|| true) until the FFI seams carry `unsafe` to certify UB-free.
       - run: cargo +nightly miri test -p rift-canopy -p rift-fff || true
