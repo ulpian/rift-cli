@@ -11,7 +11,7 @@ description = "v0.1 silent capture-backend wrapper: version-pinned (SHA-256), au
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 

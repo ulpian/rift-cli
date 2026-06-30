@@ -4,7 +4,12 @@
 //! guarantee — there is no such method on [`rift_store::CanonicalStore`].
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use rift_store::{canonical_tables, CanonicalStore, SqliteStore, Value};
+use std::collections::BTreeSet;
+
+use rift_store::{
+    apply_migrations, canonical_tables, default_migrations, CanonicalStore, Migration, SqliteStore,
+    Value,
+};
 
 #[test]
 fn public_api_is_append_only_and_usable() {
@@ -43,4 +48,84 @@ fn public_api_is_append_only_and_usable() {
 
     assert_eq!(store.count("session").expect("count"), 2);
     assert!(!canonical_tables().is_empty());
+}
+
+/// Real (non-infra) tables that are **not** registered canonical tables — i.e.
+/// tables that exist in the projection without an append-only guard. Infra tables
+/// (`_migrations`, `_schema_version`) are underscore-prefixed and exempt. Empty
+/// ⇒ healthy; non-empty ⇒ a table was created without being registered.
+fn unguarded_tables(store: &SqliteStore) -> Vec<String> {
+    let registered: BTreeSet<&str> = canonical_tables().iter().map(|t| t.name).collect();
+    store
+        .table_names()
+        .expect("read table names")
+        .into_iter()
+        .filter(|n| !n.starts_with('_') && !registered.contains(n.as_str()))
+        .collect()
+}
+
+/// The forgotten-registration keystone: after a full production migration, every
+/// real table must be a registered canonical table, and every registered table
+/// must carry **both** append-only guard triggers. This makes the project
+/// guarantee executable — *add a canonical table without its guard and CI goes
+/// red* — because the registry is the single source of truth the triggers and
+/// this assertion both derive from.
+#[test]
+fn every_db_table_is_registered_or_infra() {
+    let store = SqliteStore::open_in_memory().expect("open store");
+    apply_migrations(&store, &default_migrations()).expect("apply migrations");
+
+    // (1) No real table exists without being registered (hence without a guard).
+    assert!(
+        unguarded_tables(&store).is_empty(),
+        "unregistered (unguarded) tables present: {:?} — register them in \
+         canonical_tables() so they get append-only triggers",
+        unguarded_tables(&store)
+    );
+
+    // (2) Every registered table actually exists and has both guard triggers.
+    let tables: BTreeSet<String> = store.table_names().expect("tables").into_iter().collect();
+    let triggers: BTreeSet<String> = store
+        .trigger_names()
+        .expect("triggers")
+        .into_iter()
+        .collect();
+    for table in canonical_tables() {
+        let name = table.name;
+        assert!(
+            tables.contains(name),
+            "registered table `{name}` is missing"
+        );
+        assert!(
+            triggers.contains(&format!("{name}_no_update")),
+            "`{name}` is missing its append-only UPDATE guard"
+        );
+        assert!(
+            triggers.contains(&format!("{name}_no_delete")),
+            "`{name}` is missing its append-only DELETE guard"
+        );
+    }
+    assert!(!canonical_tables().is_empty());
+}
+
+/// Canary proving the keystone *bites*: a migration that creates a canonical-shaped
+/// table but never registers it (so it never gets triggers) is flagged.
+#[test]
+fn forgotten_registration_is_caught() {
+    let store = SqliteStore::open_in_memory().expect("open store");
+    apply_migrations(&store, &default_migrations()).expect("apply base migrations");
+    // A developer adds a data table via a migration but forgets canonical_tables().
+    let rogue = vec![Migration {
+        version: 3,
+        name: "rogue_unregistered",
+        sql: "CREATE TABLE IF NOT EXISTS audit_log \
+              (id INTEGER PRIMARY KEY, note TEXT) STRICT;"
+            .to_string(),
+    }];
+    apply_migrations(&store, &rogue).expect("apply rogue migration");
+    assert_eq!(
+        unguarded_tables(&store),
+        vec!["audit_log".to_string()],
+        "the keystone must flag an unregistered table"
+    );
 }

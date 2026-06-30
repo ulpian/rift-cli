@@ -11,9 +11,20 @@
 //! capture backend. `setup` registers the current directory into the global
 //! project registry — the same registry the dashboard reads and the `a` key
 //! writes — so the two paths to "add a project" share one source of truth.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use rift_canopy::{App, AsciiBackend, ProjStatus, Project, Rect, RenderBackend, SplashState};
 use rift_registry::{default_registry_path, ProjectRegistry};
+
+mod verify;
 
 /// Project the registry onto Canopy's view model (all projects start `Idle`;
 /// live status arrives once capture is wired).
@@ -119,9 +130,7 @@ fn main() -> rift_core::Result<()> {
         None => launch_canopy()?,
         Some("setup") => cmd_setup()?,
         Some("status") => println!("{}", rift_shadow::status()),
-        Some("verify") => {
-            println!("rift verify: re-derives the hash chain (see `rift-memd`/store)");
-        }
+        Some("verify") => verify::run()?,
         Some(cmd @ ("scan" | "redact" | "memory" | "config")) => {
             println!(
                 "rift {cmd}: handled by Rift (rest of args: {:?})",

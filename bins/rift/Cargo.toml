@@ -22,14 +22,15 @@ default = ["tui"]
 tui = ["rift-canopy/xre"]
 
 [dependencies]
-rift-core = { path = "../../crates/rift-core" }
-rift-shadow = { path = "../../crates/rift-shadow" }
-rift-canopy = { path = "../../crates/rift-canopy" }
-rift-registry = { path = "../../crates/rift-registry" }
+rift-core = { version = "0.0.1", path = "../../crates/rift-core" }
+rift-shadow = { version = "0.0.1", path = "../../crates/rift-shadow" }
+rift-canopy = { version = "0.0.1", path = "../../crates/rift-canopy" }
+rift-registry = { version = "0.0.1", path = "../../crates/rift-registry" }
+# `rift verify` re-derives a hash chain and cross-checks it against the projection.
+rift-store = { version = "0.0.1", path = "../../crates/rift-store" }
+rift-hashchain = { version = "0.0.1", path = "../../crates/rift-hashchain" }
 # Enable at implementation: clap, tracing, tracing-subscriber, tokio
 
 [dev-dependencies]
-rift-store = { path = "../../crates/rift-store" }
-rift-hashchain = { path = "../../crates/rift-hashchain" }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

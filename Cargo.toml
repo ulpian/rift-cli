@@ -65,8 +65,11 @@ xre-term = { version = "0.2", default-features = false }
 xre-tui = { version = "0.2", default-features = false }
 # MCP server SDK (official)
 rmcp = { version = "0.16", features = ["server", "transport-io", "macros"] } # (verify)
-# Git plumbing (pure-Rust, read-side)
-gix = "0.66"                   # (verify) gitoxide
+# Git plumbing (pure-Rust, read-side). Pinned high enough to clear RUSTSEC-2025-0001
+# (gix-worktree-state ≥0.17), -2025-0021 (gix-features ≥0.41), and -2025-0140
+# (gix-date ≥0.12); we use only the read-side surface (open/Tree/ObjectId), so the
+# bump is API-stable.
+gix = "0.78"                   # gitoxide
 # Diff / hunks
 imara-diff = "0.1"             # (verify)
 # Hashing

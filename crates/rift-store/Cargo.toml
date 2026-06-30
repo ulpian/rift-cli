@@ -11,9 +11,9 @@ description = "Append-only store: migrations, 4NF/5NF schema, immutability guard
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
-rift-hashchain = { path = "../rift-hashchain" }
-rift-crypto = { path = "../rift-crypto" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-hashchain = { version = "0.0.1", path = "../rift-hashchain" }
+rift-crypto = { version = "0.0.1", path = "../rift-crypto" }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
 # Production target (async, MVCC, vectors) — wired behind the same CanonicalStore

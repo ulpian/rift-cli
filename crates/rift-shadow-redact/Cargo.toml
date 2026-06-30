@@ -11,7 +11,7 @@ description = "Two-pass redaction pipeline: vendor-secret/credential/PII detecto
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 regex = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }

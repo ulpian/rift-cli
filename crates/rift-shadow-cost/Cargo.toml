@@ -11,7 +11,7 @@ description = "Four-class token/cost model, versioned bitemporal price tables, a
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 serde = { workspace = true }
 # Billing-grade tokenization (within ~5% of provider tokenizers) plugs in here:
 # tiktoken-rs = { workspace = true }

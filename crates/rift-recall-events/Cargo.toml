@@ -11,7 +11,7 @@ description = "memd.* serving events with tokens_returned/avoided + the `rift ho
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

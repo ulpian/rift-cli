@@ -18,9 +18,9 @@ default = ["gix"]
 gix = ["dep:gix"]
 
 [dependencies]
-rift-core = { path = "../rift-core" }
-rift-recall-types = { path = "../rift-recall-types" }
-rift-recall-ledger = { path = "../rift-recall-ledger" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+rift-recall-ledger = { version = "0.0.1", path = "../rift-recall-ledger" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Plain SHA-256 of worktree file bytes, to match read-time `content_sha256`.

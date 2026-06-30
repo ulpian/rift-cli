@@ -11,7 +11,7 @@ description = "Task-aware ranking signals (focus/error overlap, recency) with ou
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 
 [dev-dependencies]
 proptest = { workspace = true }

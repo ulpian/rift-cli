@@ -11,7 +11,7 @@ description = "Optional: frecency-ranked fuzzy file search (the fff-search core 
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 # Production warm-index backend plugs in behind FileSearch:
 # fff-search = { workspace = true }
 

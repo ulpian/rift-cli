@@ -11,7 +11,7 @@ description = "Human-vs-agent line attribution math (LIFO ownership) and confide
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 serde = { workspace = true }
 # The diff-capture layer (H_i/A_i/C boundaries) uses gix + imara-diff to feed
 # these pure-logic functions; enable when wiring the capture path:

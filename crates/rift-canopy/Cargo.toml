@@ -19,7 +19,7 @@ default = []
 xre = ["dep:xre-core", "dep:xre-term", "dep:xre-tui"]
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 xre-core = { workspace = true, optional = true }
 xre-term = { workspace = true, optional = true }
 xre-tui = { workspace = true, optional = true }

@@ -11,8 +11,8 @@ description = "Context-pack compiler: edge-placed sections, hard token ceiling, 
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
-rift-recall-types = { path = "../rift-recall-types" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
 
 [dev-dependencies]
 proptest = { workspace = true }

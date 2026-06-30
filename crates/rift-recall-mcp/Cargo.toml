@@ -11,13 +11,13 @@ description = "Bounded recall MCP tool surface + budget/policy middleware (rmcp 
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
-rift-recall-types = { path = "../rift-recall-types" }
-rift-recall-policy = { path = "../rift-recall-policy" }
-rift-recall-events = { path = "../rift-recall-events" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+rift-recall-policy = { version = "0.0.1", path = "../rift-recall-policy" }
+rift-recall-events = { version = "0.0.1", path = "../rift-recall-events" }
 # Agent-spawned stdio MCP transport plugs in here (process lifetime = session):
 # rmcp = { workspace = true }
 
 [dev-dependencies]
-rift-config = { path = "../rift-config" }
+rift-config = { version = "0.0.1", path = "../rift-config" }
 proptest = { workspace = true }

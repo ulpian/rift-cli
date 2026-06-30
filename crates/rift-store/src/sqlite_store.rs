@@ -65,6 +65,43 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Names of every user table in the projection (`type='table'`), excluding
+    /// SQLite's internal `sqlite_*` tables. Read-only introspection used by the
+    /// immutability keystone test and projection doctor.
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] if the query fails.
+    pub fn table_names(&self) -> Result<Vec<String>> {
+        self.master_names("table")
+    }
+
+    /// Names of every trigger in the projection (`type='trigger'`). Read-only.
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] if the query fails.
+    pub fn trigger_names(&self) -> Result<Vec<String>> {
+        self.master_names("trigger")
+    }
+
+    /// `sqlite_master` names of a given object `kind`, excluding `sqlite_*`.
+    fn master_names(&self, kind: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = ? AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .map_err(map_sql)?;
+        let rows = stmt
+            .query_map([kind], |row| row.get::<_, String>(0))
+            .map_err(map_sql)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(map_sql)?);
+        }
+        Ok(out)
+    }
+
     /// Create the migration meta tables (idempotent).
     ///
     /// # Errors

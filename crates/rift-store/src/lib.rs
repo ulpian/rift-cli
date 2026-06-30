@@ -37,6 +37,7 @@
 pub mod crypto;
 pub mod integrity;
 pub mod migrate;
+pub mod paths;
 pub mod schema;
 mod sqlite_store;
 mod value;
@@ -47,6 +48,10 @@ pub use integrity::{
     verify_against_source, ChainSource, CheckpointRecord, CostFact, VerifyReport,
 };
 pub use migrate::{apply_migrations, default_migrations, Migration, MigrationOutcome};
+pub use paths::{
+    default_projection_db, default_projection_dir, projection_db_under, projection_dir_under,
+    resolve_cache_root,
+};
 pub use schema::{canonical_table, canonical_tables, is_canonical_table, CanonicalTable, Column};
 pub use sqlite_store::SqliteStore;
 pub use value::Value;

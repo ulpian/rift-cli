@@ -11,7 +11,7 @@ description = "Optional: code-relationship graph (callers/callees/impact). The c
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 # Production backend (graph DB + tree-sitter language variants) plugs in behind
 # the CodeGraph seam:
 # codegraph = { workspace = true }

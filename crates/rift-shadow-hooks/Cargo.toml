@@ -11,8 +11,8 @@ description = "Git + agent hook lifecycle capture: canonical events, agent adapt
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
-rift-hashchain = { path = "../rift-hashchain" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-hashchain = { version = "0.0.1", path = "../rift-hashchain" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

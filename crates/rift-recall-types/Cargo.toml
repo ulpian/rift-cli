@@ -11,7 +11,7 @@ description = "Shared recall types: content-addressed handles, the four-state re
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

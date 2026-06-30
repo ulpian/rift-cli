@@ -2,7 +2,13 @@
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# RUSTSEC-2026-0173: `proc-macro-error2` is *unmaintained* (informational, not a
+# vulnerability). It is an OPTIONAL, never-compiled transitive of `jiff` (jiff's
+# `defmt` embedded-logging feature, which we do not enable); `jiff` itself enters
+# legitimately via `gix-date`. Nothing we build links it. Re-evaluate if `jiff`
+# drops the dep or a real vulnerability is filed. `cargo audit --deny warnings`
+# carries the same ignore in `.cargo/audit.toml`.
+ignore = ["RUSTSEC-2026-0173"]
 
 [bans]
 multiple-versions = "warn"
@@ -15,7 +21,10 @@ deny = [
 [licenses]
 version = 2
 # Permissive + the licenses our chosen deps actually use. Tighten over time.
-allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+# MPL-2.0 is weak (file-level) copyleft and acceptable for a linked dependency
+# (pulled transitively by `uluru` via `gix-pack`); it imposes no obligation on
+# our own source. Re-evaluate if a core dependency adopts it.
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "MPL-2.0"]
 confidence-threshold = 0.9
 
 [sources]

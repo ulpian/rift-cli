@@ -11,7 +11,7 @@ description = "Delta ledger metrics (repeated/avoidable context rate) and the sc
 workspace = true
 
 [dependencies]
-rift-core = { path = "../rift-core" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
 serde = { workspace = true }
 
 [dev-dependencies]

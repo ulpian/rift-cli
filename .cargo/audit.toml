@@ -1,0 +1,9 @@
+# cargo-audit config — mirrors deny.toml's [advisories].ignore.
+#
+# RUSTSEC-2026-0173 (`proc-macro-error2` unmaintained) is informational, not a
+# vulnerability, and reaches the lockfile only as an OPTIONAL, never-compiled
+# transitive of `jiff` (its `defmt` feature, which we do not enable). `jiff`
+# itself enters via `gix-date`. Nothing we build links it. Keep this in lockstep
+# with deny.toml; drop both ignores if `jiff` removes the dep.
+[advisories]
+ignore = ["RUSTSEC-2026-0173"]

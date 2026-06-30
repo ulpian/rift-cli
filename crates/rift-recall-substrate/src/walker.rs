@@ -201,9 +201,8 @@ impl ShardWalker {
         let rel_path = Path::new(&checkpoint_id[..2])
             .join(&checkpoint_id[2..])
             .join(rel);
-        let mut buf = Vec::new();
         let entry = root
-            .lookup_entry_by_path(&rel_path, &mut buf)
+            .lookup_entry_by_path(&rel_path)
             .map_err(|e| RiftError::substrate(format!("tree lookup: {e}")))?;
         match entry {
             Some(e) if e.mode().is_blob() => {
