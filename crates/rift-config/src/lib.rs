@@ -254,6 +254,28 @@ impl EffectiveConfig {
         Self::from_config(RiftConfig::secure_default())
     }
 
+    /// Parse + validate config from raw TOML source — the file-less entry used by
+    /// the fuzz target and property tests.
+    ///
+    /// # Errors
+    /// [`RiftError::Config`] on a TOML parse error or any validation problem.
+    pub fn from_toml_str(src: &str) -> Result<Self> {
+        let cfg: RiftConfig = toml::from_str(src).map_err(|e| RiftError::config(e.to_string()))?;
+        Self::from_config(cfg)
+    }
+
+    /// Parse + validate config from raw bytes (TOML is UTF-8). The untrusted-input
+    /// entry: for *any* byte slice this returns a `Result` — it never panics,
+    /// hangs, or allocates unboundedly (06 §6.1.6 / §5.9).
+    ///
+    /// # Errors
+    /// [`RiftError::Config`] on non-UTF-8 input, a TOML parse error, or validation.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let src = std::str::from_utf8(bytes)
+            .map_err(|_| RiftError::config("config source is not valid UTF-8"))?;
+        Self::from_toml_str(src)
+    }
+
     /// Validate a raw config and produce the effective config.
     ///
     /// # Errors
@@ -486,9 +508,25 @@ mod tests {
     use super::*;
 
     fn parse(toml_src: &str) -> Result<EffectiveConfig> {
-        let cfg: RiftConfig =
-            toml::from_str(toml_src).map_err(|e| RiftError::config(e.to_string()))?;
-        EffectiveConfig::from_config(cfg)
+        EffectiveConfig::from_toml_str(toml_src)
+    }
+
+    proptest::proptest! {
+        /// The Stage-1 untrusted parser must never panic/hang/OOM on arbitrary
+        /// bytes — it returns a `Result` for any input (06 §6.1.6). Runs in the
+        /// normal `cargo test` job, so it gates without nightly/libFuzzer.
+        #[test]
+        fn parser_never_panics_on_arbitrary_bytes(
+            bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)
+        ) {
+            let _ = EffectiveConfig::from_bytes(&bytes);
+        }
+
+        /// Same contract over arbitrary UTF-8 text (exercises the TOML grammar).
+        #[test]
+        fn parser_never_panics_on_arbitrary_text(s in ".*") {
+            let _ = EffectiveConfig::from_toml_str(&s);
+        }
     }
 
     #[test]

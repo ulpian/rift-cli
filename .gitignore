@@ -1,6 +1,12 @@
 # Rust build artifacts
 /target
 
+# cargo-fuzz build output + crash artifacts (seed corpora ARE committed)
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/Cargo.lock
+
 # Backup files from rustfmt
 **/*.rs.bk
 

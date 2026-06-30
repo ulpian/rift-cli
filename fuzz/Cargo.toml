@@ -1,0 +1,29 @@
+# cargo-fuzz package — a SEPARATE workspace (own [workspace] table) so the main
+# `cargo build/test --workspace` on stable never tries to build it; it needs a
+# nightly toolchain + libFuzzer. Run with: `cargo +nightly fuzz run config_parse`.
+[package]
+name = "rift-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.94"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rift-config = { path = "../crates/rift-config", version = "0.0.1" }
+
+# Only the Stage-1 untrusted parser exists today. The other targets the testing
+# strategy names — checkpoint_artifact (Stage 2), mcp_request (Stage 3 P5),
+# fff_query (Stage 5 P2), tool_result_template (Stage 3) — are added as their
+# parsers land; their code does not exist yet.
+[[bin]]
+name = "config_parse"
+path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
