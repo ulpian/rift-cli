@@ -1,0 +1,10 @@
+# Security-critical crates gated at >=95% line coverage (build-plan stage-01
+# phase-02 step-05; testing-strategy 06 section 6.3). Adding a crate here is a
+# one-line, reviewable change. Blank lines and '#' comments are ignored.
+# `cargo run -p xtask -- check-coverage <cov.json>` enforces the threshold and
+# fails CLOSED if a listed crate is absent from the coverage report.
+rift-crypto
+rift-hashchain
+rift-store
+rift-recall-policy
+rift-shadow-redact

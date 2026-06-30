@@ -340,4 +340,11 @@ mod tests {
         assert_eq!(cost_belief_as_of(&s, "call_1", 1).unwrap(), Some(100)); // as of recorded_at=1
         assert_eq!(cost_belief_as_of(&s, "call_1", 2).unwrap(), Some(90));
     }
+
+    #[test]
+    fn current_cost_is_none_for_unknown_call() {
+        let s = store();
+        assert_eq!(current_cost_micros(&s, "unknown").unwrap(), None);
+        assert_eq!(cost_belief_as_of(&s, "unknown", 5).unwrap(), None);
+    }
 }

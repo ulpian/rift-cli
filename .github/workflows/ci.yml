@@ -19,6 +19,32 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --release
+  # Proves the declared MSRV floor (rust-version = 1.94) actually compiles, even
+  # though the dev/build toolchain is pinned to 1.96.0 (rust-toolchain.toml).
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-features
+  # Coverage as a gate, not a dashboard: ≥85% line workspace-wide, plus ≥95% for
+  # the security-critical crates (ci/security-crates.txt) enforced by xtask.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+        with: { components: "llvm-tools-preview" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-llvm-cov --locked
+      # Run the instrumented suite once; render reports from the same data.
+      - run: cargo llvm-cov --workspace --all-features --no-report
+      - run: cargo llvm-cov report --lcov --output-path lcov.info --fail-under-lines 85
+      - run: cargo llvm-cov report --json --output-path cov.json
+      - run: cargo run -p xtask -- check-coverage cov.json   # per-crate ≥95% gate
+      - uses: actions/upload-artifact@v4
+        with: { name: coverage-lcov, path: lcov.info }
   security:
     runs-on: ubuntu-latest
     steps:
@@ -26,11 +52,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cargo-deny cargo-audit --locked
       - run: cargo deny check
-      - run: cargo audit --deny warnings
+      - run: cargo audit --deny warnings   # honours .cargo/audit.toml ignores
   miri:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with: { components: "miri" }
-      - run: cargo +nightly miri test --workspace || true   # advisory until UB-free certified
+      # Dated nightly pin (reproducible miri); scoped to the FFI-bearing crates.
+      - uses: dtolnay/rust-toolchain@nightly-2026-06-02
+        with: { components: "miri, rust-src" }
+      # Advisory (|| true) until the FFI seams carry `unsafe` to certify UB-free.
+      - run: cargo +nightly miri test -p rift-canopy -p rift-fff || true

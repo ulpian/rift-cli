@@ -327,6 +327,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn insert_with_mismatched_column_value_counts_is_rejected() {
+        let store = migrated_store();
+        let err = store.insert("session", &["session_id", "agent"], &[Value::text("s")]);
+        assert!(
+            matches!(err, Err(RiftError::Storage(_))),
+            "length mismatch should be a Storage error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn introspection_lists_user_tables_and_triggers() {
+        let store = migrated_store();
+        let tables = store.table_names().unwrap();
+        assert!(tables.iter().any(|t| t == "checkpoint"));
+        assert!(!tables.iter().any(|t| t.starts_with("sqlite_")));
+        let triggers = store.trigger_names().unwrap();
+        assert!(triggers.iter().any(|t| t == "checkpoint_no_update"));
+    }
+
     /// Appending is allowed; a "correction" is a new, superseding row.
     #[test]
     fn append_and_supersede_are_allowed() {

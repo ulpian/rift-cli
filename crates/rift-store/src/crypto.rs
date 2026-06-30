@@ -146,4 +146,14 @@ mod tests {
         let k = ks.repo_dek(&repo).unwrap();
         assert_eq!(k.expose(), dek().expose());
     }
+
+    #[test]
+    fn generated_memory_keystore_roundtrips_a_column() {
+        let ks = MemoryKeyStore::generate().unwrap();
+        let repo = RepoId::new("repo-x").unwrap();
+        let k = ks.repo_dek(&repo).unwrap();
+        let ct = encrypt_column(&k, "t", "c", "r", b"hi").unwrap();
+        let pt = decrypt_column(&k, "t", "c", "r", &ct).unwrap();
+        assert_eq!(pt.as_slice(), b"hi");
+    }
 }

@@ -285,5 +285,23 @@ mod tests {
     fn canonical_table_lookup() {
         assert!(is_canonical_table("cost_fact"));
         assert!(!is_canonical_table("_migrations"));
+        // An unregistered name has no entry (the None arm of canonical_table).
+        assert!(canonical_table("does_not_exist").is_none());
+    }
+
+    #[test]
+    fn column_builders_set_type_and_nullability() {
+        // The registry builds columns in `const` context (no runtime coverage),
+        // so exercise the builders at runtime here.
+        assert_eq!(Column::text("a").sql_type, "TEXT");
+        assert!(Column::text("a").not_null);
+        assert_eq!(Column::text_null("b").sql_type, "TEXT");
+        assert!(!Column::text_null("b").not_null);
+        assert_eq!(Column::int("c").sql_type, "INTEGER");
+        assert!(Column::int("c").not_null);
+        assert_eq!(Column::int_null("d").sql_type, "INTEGER");
+        assert!(!Column::int_null("d").not_null);
+        assert_eq!(Column::blob("e").sql_type, "BLOB");
+        assert!(Column::blob("e").not_null);
     }
 }

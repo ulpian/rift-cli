@@ -33,6 +33,7 @@ members = [
   "crates/rift-nic-gauge",
   "bins/rift",
   "bins/rift-memd",
+  "xtask",
 ]
 
 [workspace.package]

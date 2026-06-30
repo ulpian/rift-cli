@@ -123,4 +123,15 @@ mod tests {
         assert!(db.starts_with(&dir));
         assert_eq!(dir, PathBuf::from("/cache/rift/abc123"));
     }
+
+    #[test]
+    fn from_helpers_and_machine_defaults_are_exercised() {
+        assert_eq!(
+            projection_dir_from(env_of(&[("RIFT_CACHE_DIR", "/c")]), &repo()),
+            PathBuf::from("/c/rift/abc123")
+        );
+        // default_* read the real process env; exercise them (path is machine-dependent).
+        assert!(default_projection_dir(&repo()).ends_with(PathBuf::from("rift").join("abc123")));
+        assert!(default_projection_db(&repo()).ends_with("projection.db"));
+    }
 }
