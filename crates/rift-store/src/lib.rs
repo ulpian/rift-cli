@@ -35,6 +35,7 @@
 #![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
 
 pub mod crypto;
+pub mod durable;
 pub mod integrity;
 pub mod keychain;
 #[cfg(feature = "keyring")]
@@ -46,6 +47,7 @@ mod sqlite_store;
 mod value;
 
 pub use crypto::{decrypt_column, encrypt_column, KeyStore, MemoryKeyStore};
+pub use durable::{DurableWrite, LocalOnlyShadowWrite, ObjectKind, SyncWrite};
 pub use integrity::{
     cost_belief_as_of, current_cost_micros, record_checkpoint, record_cost_fact,
     verify_against_source, ChainSource, CheckpointRecord, CostFact, VerifyReport,

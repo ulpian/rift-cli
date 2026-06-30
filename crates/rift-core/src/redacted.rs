@@ -76,6 +76,20 @@ pub struct RedactionProvenance {
 /// `From<Vec<u8>>`/`From<&str>` and no mutable accessor — read-only views only.
 /// `Debug` is **not** derived: redacted ≠ non-sensitive, so the bytes never land
 /// in a log line by accident.
+///
+/// These guarantees are **compile-time** (`05-security` §5.4). A raw buffer
+/// cannot be fabricated into a `RedactedBytes` by a struct literal (the fields are
+/// private):
+///
+/// ```compile_fail
+/// let _ = rift_core::RedactedBytes { bytes: vec![1u8, 2, 3], provenance: unimplemented!() };
+/// ```
+///
+/// …and there is no `From<Vec<u8>>` conversion, so raw bytes can never be coerced:
+///
+/// ```compile_fail
+/// let _: rift_core::RedactedBytes = vec![1u8, 2, 3].into();
+/// ```
 #[derive(Clone)]
 pub struct RedactedBytes {
     bytes: Vec<u8>,

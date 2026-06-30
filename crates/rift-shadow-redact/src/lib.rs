@@ -85,10 +85,18 @@ struct Span {
     id: String,
 }
 
-/// A set of redaction rule packs (built-in + additive org packs).
+/// A set of redaction rule packs (built-in + additive org packs) plus an
+/// allowlist. Packs can only ever *broaden* coverage; the allowlist can only ever
+/// *subtract* a redaction (keep a known-safe value) — neither can weaken the gate
+/// in a way that leaks a secret (fail-safe, `05-security` §5.4).
 pub struct RulePackSet {
     extra: Vec<ShapeDetector>,
     versions: Vec<String>,
+    /// SHA-256 of values that are deliberately kept (e.g. a public docs example
+    /// key). A detected span whose exact value hashes to one of these is *not*
+    /// masked, but is still counted (`report.allowlisted`) — proving it was seen
+    /// and kept, not missed.
+    allow: Vec<Sha256Id>,
 }
 
 impl Default for RulePackSet {
@@ -104,7 +112,17 @@ impl RulePackSet {
         Self {
             extra: Vec::new(),
             versions: vec!["builtin@2026.06.0".to_string()],
+            allow: Vec::new(),
         }
+    }
+
+    /// Allowlist a specific value by its content (subtract-only): a detected span
+    /// whose exact text equals `value` is kept rather than masked, and counted
+    /// under `report.allowlisted`. An allowlist entry can never *add* a leak.
+    #[must_use]
+    pub fn with_allowlisted_value(mut self, value: &str) -> Self {
+        self.allow.push(sha256(value.as_bytes()));
+        self
     }
 
     /// Add an org-pack vendor-secret detector (additive; can only *add* coverage).
@@ -148,6 +166,10 @@ pub struct RedactionReport {
     pub by_class: BTreeMap<DetectorClass, u32>,
     /// Aggregate masked byte length (size, not content).
     pub bytes_masked: u64,
+    /// Spans that matched a detector but were deliberately kept via the allowlist
+    /// (seen and kept, not missed).
+    #[serde(default)]
+    pub allowlisted: u32,
     /// Exactly which rule packs/versions ran.
     pub rule_pack_versions: Vec<String>,
     /// SHA-256 of the raw input (for recompute-verify).
@@ -409,6 +431,7 @@ fn mask(
         by_detector,
         by_class,
         bytes_masked,
+        allowlisted: 0,
         rule_pack_versions: versions,
         input_sha256,
     };
@@ -437,7 +460,24 @@ pub fn redact_with(raw: &SecretBytes, packs: &RulePackSet) -> Result<RedactionOu
     spans.extend(shape_spans(&text, pii_detectors()));
 
     let merged = coalesce(spans);
-    let (masked, report) = mask(&text, &merged, input_sha256, packs.version_set());
+    // Allowlist is subtract-only: drop spans whose exact value is allowlisted
+    // (kept, not masked) and count them, so the report proves the value was seen
+    // and deliberately kept rather than missed.
+    let mut allowlisted = 0u32;
+    let chosen: Vec<Span> = merged
+        .into_iter()
+        .filter(|s| {
+            let keep_unmasked = packs
+                .allow
+                .contains(&sha256(&text.as_bytes()[s.start..s.end]));
+            if keep_unmasked {
+                allowlisted += 1;
+            }
+            !keep_unmasked
+        })
+        .collect();
+    let (masked, mut report) = mask(&text, &chosen, input_sha256, packs.version_set());
+    report.allowlisted = allowlisted;
     let redacted_sha256 = sha256(masked.as_bytes());
     let provenance = RedactionProvenance {
         rule_pack_versions: packs.version_set(),
@@ -536,6 +576,110 @@ mod tests {
                                                    // both replaced by the same fixed placeholder regardless of secret bytes
         assert!(short.contains("[REDACTED:vendor]"));
         assert!(long.contains("[REDACTED:vendor]"));
+    }
+
+    #[test]
+    fn allowlist_subtracts_redaction() {
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        let packs = RulePackSet::builtin().with_allowlisted_value(key);
+        let o = redact_with(
+            &SecretBytes::from(format!("docs example {key} here").as_str()),
+            &packs,
+        )
+        .unwrap();
+        let m = String::from_utf8(o.redacted.as_slice().to_vec()).unwrap();
+        // the allowlisted value is kept verbatim, counted, and NOT masked
+        assert!(m.contains(key), "allowlisted value must be kept: {m}");
+        assert_eq!(o.report.allowlisted, 1);
+        // without the allowlist the same value is masked
+        let plain = masked(&format!("docs example {key} here"));
+        assert!(!plain.contains(key));
+    }
+
+    /// Zero false-negatives: a corpus of known secret shapes must never survive.
+    #[test]
+    fn seeded_secret_corpus_zero_false_negatives() {
+        let google = format!("AIza{}", "a".repeat(35));
+        let entropy = "Zx9Qw3eR7tY2uI8oP1aS5dF6gH0jK4lZ3xC7vB9nM2qWeRt";
+        let secrets = [
+            "AKIAIOSFODNN7EXAMPLE",
+            "ghp_0123456789abcdef0123456789abcdef0123",
+            "sk_live_0123456789abcdef0123",
+            "xoxb-0123456789-abcdefghij",
+            google.as_str(),
+            entropy,
+        ];
+        for s in secrets {
+            let m = masked(&format!("prefix {s} suffix"));
+            assert!(
+                !m.contains(s),
+                "seeded secret survived redaction: {s} -> {m}"
+            );
+        }
+    }
+
+    /// Smuggling: zero-width characters interleaved into a secret are normalized
+    /// away first, so the reassembled secret is still caught (and never emitted).
+    #[test]
+    fn smuggling_zero_width_is_still_caught() {
+        let zwsp = '\u{200B}';
+        let smuggled = format!("key=AKIA{zwsp}IOSFODNN7{zwsp}EXAMPLE end");
+        let m = masked(&smuggled);
+        assert!(
+            !m.contains("AKIAIOSFODNN7EXAMPLE"),
+            "zero-width-smuggled secret must not survive: {m}"
+        );
+        assert!(m.contains("[REDACTED:vendor]"));
+    }
+
+    /// The mint of `RedactedBytes::seal` is confined to this (the redaction) crate.
+    /// `rift-core` *defines* `seal` (as `pub fn seal(`, which this call-pattern
+    /// does not match) and is its type's home; no other crate may mint. This makes
+    /// the single-call-site rule (P5 S2) executable — add a mint elsewhere and CI
+    /// goes red.
+    #[test]
+    fn seal_is_minted_only_in_the_redaction_crate() {
+        fn visit(dir: &std::path::Path, f: &mut impl FnMut(&std::path::Path, &str)) {
+            for entry in std::fs::read_dir(dir).expect("read_dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "target") {
+                        continue;
+                    }
+                    visit(&path, f);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let contents = std::fs::read_to_string(&path).unwrap_or_default();
+                    f(&path, &contents);
+                }
+            }
+        }
+        let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir")
+            .to_path_buf();
+        let needle = ["RedactedBytes", "::seal("].concat(); // avoid self-matching this literal
+        let mut here = 0usize;
+        let mut offenders = Vec::new();
+        visit(&crates_dir, &mut |path, contents| {
+            let count = contents.matches(needle.as_str()).count();
+            if count == 0 {
+                return;
+            }
+            let p = path.to_string_lossy().to_string();
+            if p.contains("rift-shadow-redact") {
+                here += count;
+            } else if !p.contains("rift-core") {
+                offenders.push(format!("{p} ({count})"));
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "RedactedBytes::seal minted outside the redaction crate: {offenders:?}"
+        );
+        assert!(
+            here >= 1,
+            "expected the single production mint in this crate"
+        );
     }
 
     #[test]

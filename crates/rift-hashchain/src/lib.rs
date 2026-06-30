@@ -8,11 +8,27 @@
 //! `content_hash.txt` and the tamper chain are SHA-256 — see the dossier §3.6);
 //! `blake3` is deliberately *not* used here.
 //!
-//! Domain separation (`0x00` for leaves, `0x01` for internal nodes) prevents
-//! second-preimage confusion between leaves and nodes. Odd levels duplicate the
-//! last node; the empty tree has a fixed [`empty_root`]. The crate is pure: no
-//! I/O, no clock, no RNG — trivially testable and callable from both the store
-//! and the capture path.
+//! Domain separation (`0x00` leaves, `0x01` internal nodes, `0x02` empty root,
+//! `0x03` checkpoint root, `0x04` commit hash) prevents second-preimage confusion
+//! between the layers. Odd Merkle levels duplicate the last node; the empty tree
+//! has a fixed [`empty_root`]. The crate is pure: no I/O, no clock, no RNG —
+//! trivially testable and callable from both the store and the capture path.
+//!
+//! ## The chain layers (P5 S3)
+//!
+//! 1. **leaf** — [`leaf_hash`] over an event's canonical bytes.
+//! 2. **session root** — [`session_root`] (a Merkle tree over a session's ordered
+//!    leaves).
+//! 3. **checkpoint root** — [`checkpoint_root`] binds a checkpoint's session roots
+//!    to its cost and attribution summary hashes.
+//! 4. **commit hash** — [`checkpoint_commit_hash`] chains each checkpoint to its
+//!    parent, so altering checkpoint *k* invalidates *k* and every successor.
+//!
+//! The `blake3` vs `sha2` role split P5 S3 mandates is already provided by
+//! [`rift_core::Sha256Id`] (substrate/chain) vs [`rift_core::Blake3Id`] (internal
+//! handles): they are distinct types with no conversion between them, so a blake3
+//! handle can never masquerade as a chain hash. A `trybuild` compile-fail proof of
+//! that non-conversion ships with the redaction type-enforcement work.
 //!
 //! > **(verify)** the substrate's exact leaf/node prefixing and odd-leaf rule.
 //! > If the Entire write path differs, *match it* — byte-compatibility with
@@ -30,6 +46,8 @@ use sha2::{Digest, Sha256};
 
 const LEAF_PREFIX: u8 = 0x00;
 const NODE_PREFIX: u8 = 0x01;
+const CHECKPOINT_PREFIX: u8 = 0x03;
+const COMMIT_PREFIX: u8 = 0x04;
 
 fn finalize(hasher: Sha256) -> Sha256Id {
     let out = hasher.finalize();
@@ -94,6 +112,58 @@ pub fn merkle_root(leaves: &[Sha256Id]) -> Sha256Id {
         level = next;
     }
     level[0]
+}
+
+/// A session's root: a Merkle tree over its **ordered** event leaves (P5 S3
+/// layer 1). Ordering — by `(turn_ordinal, event_ordinal)` at the call site — is
+/// part of the commitment. This is [`merkle_root`] named for its chain layer.
+#[must_use]
+pub fn session_root(leaves: &[Sha256Id]) -> Sha256Id {
+    merkle_root(leaves)
+}
+
+/// The checkpoint root (P5 S3 layer 2):
+/// `SHA-256(0x03 ‖ session_root* ‖ cost_summary ‖ attribution_summary)`.
+///
+/// Binds *what happened* (the session roots, in `SessionInCheckpoint` ordinal
+/// order) to *what we computed about it* (the canonical cost and attribution
+/// rollup hashes) — so tampering with a cost number or an attribution count is as
+/// detectable as tampering with an event. `session_roots` order is part of the
+/// commitment.
+#[must_use]
+pub fn checkpoint_root(
+    session_roots: &[Sha256Id],
+    cost_summary: &Sha256Id,
+    attribution_summary: &Sha256Id,
+) -> Sha256Id {
+    let mut h = Sha256::new();
+    h.update([CHECKPOINT_PREFIX]);
+    for r in session_roots {
+        h.update(r.as_bytes());
+    }
+    h.update(cost_summary.as_bytes());
+    h.update(attribution_summary.as_bytes());
+    finalize(h)
+}
+
+/// The chained commit hash for a checkpoint (P5 S3 layer 3):
+/// `SHA-256(0x04 ‖ parent_or_zero ‖ checkpoint_root ‖ meta)`.
+///
+/// Genesis uses a fixed all-zero parent. The chain is a hash-linked list
+/// (`commit_hash_n = H(commit_hash_{n-1} ‖ checkpoint_root_n ‖ meta_n)`), so
+/// mutating checkpoint *k* invalidates `commit_hash_k` and every successor.
+#[must_use]
+pub fn checkpoint_commit_hash(
+    parent: Option<&Sha256Id>,
+    checkpoint_root: &Sha256Id,
+    meta: &[u8],
+) -> Sha256Id {
+    let mut h = Sha256::new();
+    h.update([COMMIT_PREFIX]);
+    h.update(parent.map_or([0u8; 32], |p| *p.as_bytes()));
+    h.update(checkpoint_root.as_bytes());
+    h.update(meta);
+    finalize(h)
 }
 
 /// Verify a single checkpoint's claimed root against recomputed leaves.
@@ -243,6 +313,43 @@ mod tests {
             &node_hash(&leaf(3), &leaf(3)),
         );
         assert_eq!(three, expected);
+    }
+
+    #[test]
+    fn session_root_is_merkle_root() {
+        let leaves = [leaf(1), leaf(2), leaf(3)];
+        assert_eq!(session_root(&leaves), merkle_root(&leaves));
+    }
+
+    #[test]
+    fn checkpoint_root_binds_summaries_and_order() {
+        let s1 = session_root(&[leaf(1), leaf(2)]);
+        let s2 = session_root(&[leaf(3)]);
+        let cost = leaf(10);
+        let attr = leaf(11);
+        let base = checkpoint_root(&[s1, s2], &cost, &attr);
+        // changing either summary changes the root
+        assert_ne!(base, checkpoint_root(&[s1, s2], &leaf(99), &attr));
+        assert_ne!(base, checkpoint_root(&[s1, s2], &cost, &leaf(99)));
+        // session-root order is part of the commitment
+        assert_ne!(base, checkpoint_root(&[s2, s1], &cost, &attr));
+        // domain separation: a checkpoint root is not a bare merkle root
+        assert_ne!(base, merkle_root(&[s1, s2, cost, attr]));
+    }
+
+    #[test]
+    fn commit_hash_chains_to_parent_root_and_meta() {
+        let root = leaf(5);
+        let genesis = checkpoint_commit_hash(None, &root, b"meta");
+        let parented = checkpoint_commit_hash(Some(&genesis), &root, b"meta");
+        // genesis (zero parent) differs from a parented commit of the same root
+        assert_ne!(genesis, parented);
+        // depends on the checkpoint root
+        assert_ne!(genesis, checkpoint_commit_hash(None, &leaf(6), b"meta"));
+        // depends on the meta bytes
+        assert_ne!(genesis, checkpoint_commit_hash(None, &root, b"meta2"));
+        // deterministic
+        assert_eq!(genesis, checkpoint_commit_hash(None, &root, b"meta"));
     }
 
     #[test]

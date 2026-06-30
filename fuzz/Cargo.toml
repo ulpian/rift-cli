@@ -14,14 +14,22 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rift-config = { path = "../crates/rift-config", version = "0.0.1" }
+rift-core = { path = "../crates/rift-core", version = "0.0.1" }
+rift-shadow-redact = { path = "../crates/rift-shadow-redact", version = "0.0.1" }
 
-# Only the Stage-1 untrusted parser exists today. The other targets the testing
-# strategy names — checkpoint_artifact (Stage 2), mcp_request (Stage 3 P5),
-# fff_query (Stage 5 P2), tool_result_template (Stage 3) — are added as their
-# parsers land; their code does not exist yet.
+# Untrusted-byte parsers get a fuzz target as they land (06 §6.1 / §5.9).
+# Still pending: checkpoint_artifact (Stage 2 C1 bridge), mcp_request (Stage 3 P5),
+# fff_query (Stage 5 P2).
 [[bin]]
 name = "config_parse"
 path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "redact"
+path = "fuzz_targets/redact.rs"
 test = false
 doc = false
 bench = false

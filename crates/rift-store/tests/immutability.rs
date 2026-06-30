@@ -18,7 +18,14 @@ fn public_api_is_append_only_and_usable() {
         .create_canonical_schema()
         .expect("create canonical schema");
 
-    let cols = ["session_id", "agent", "model_primary", "started_at"];
+    let cols = [
+        "session_id",
+        "agent",
+        "model_primary",
+        "repo_id",
+        "started_at",
+        "schema_version",
+    ];
     store
         .insert(
             "session",
@@ -27,7 +34,9 @@ fn public_api_is_append_only_and_usable() {
                 Value::text("sess_1"),
                 Value::text("claude_code"),
                 Value::text("claude-sonnet"),
+                Value::text("repo_1"),
                 Value::Int(100),
+                Value::Int(1),
             ],
         )
         .expect("insert session");
@@ -41,7 +50,9 @@ fn public_api_is_append_only_and_usable() {
                 Value::text("sess_1b"),
                 Value::text("claude_code"),
                 Value::text("claude-opus"),
+                Value::text("repo_1"),
                 Value::Int(101),
+                Value::Int(1),
             ],
         )
         .expect("insert superseding row");

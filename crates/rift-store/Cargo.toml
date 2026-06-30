@@ -28,3 +28,7 @@ keyring = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Mint a real `RedactedBytes` through the actual pipeline in the durable-surface
+# test, so `RedactedBytes::seal` keeps its single production call site in the
+# redaction crate (acyclic: rift-shadow-redact depends only on rift-core).
+rift-shadow-redact = { version = "0.0.1", path = "../rift-shadow-redact" }

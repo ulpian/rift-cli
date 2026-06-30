@@ -145,6 +145,16 @@ byte_id!(
     /// A SHA-256 content address. SHA-256 is used where **substrate
     /// byte-compatibility** is required (the checkpoint `content_hash.txt` and
     /// the tamper chain are SHA-256). Not interchangeable with [`Blake3Id`].
+    ///
+    /// The SHA-256 (chain/substrate) vs blake3 (internal handle) role split that
+    /// `05-security` §5.4 / the hash-chain step mandate is enforced by these being
+    /// **distinct types with no conversion** — a blake3 handle can never
+    /// masquerade as a chain hash:
+    ///
+    /// ```compile_fail
+    /// let b = rift_core::Blake3Id::from_bytes([0u8; 32]);
+    /// let _s: rift_core::Sha256Id = b;
+    /// ```
     Sha256Id,
     "sha256"
 );

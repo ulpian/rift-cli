@@ -2372,6 +2372,7 @@ dependencies = [
  "rift-core",
  "rift-crypto",
  "rift-hashchain",
+ "rift-shadow-redact",
  "rusqlite",
  "sha2",
 ]

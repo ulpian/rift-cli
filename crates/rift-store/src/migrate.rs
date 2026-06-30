@@ -193,11 +193,20 @@ mod tests {
         // canonical tables exist (insert succeeds)
         s.insert(
             "session",
-            &["session_id", "agent", "model_primary", "started_at"],
+            &[
+                "session_id",
+                "agent",
+                "model_primary",
+                "repo_id",
+                "started_at",
+                "schema_version",
+            ],
             &[
                 Value::text("sess_1"),
                 Value::text("a"),
                 Value::text("m"),
+                Value::text("repo_1"),
+                Value::Int(1),
                 Value::Int(1),
             ],
         )
