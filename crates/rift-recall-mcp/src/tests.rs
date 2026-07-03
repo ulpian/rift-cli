@@ -162,7 +162,7 @@ fn known_state_returns_four_state_envelopes_and_is_scope_bounded() {
         assert!(FOUR_STATES.contains(&st), "unexpected state {st}");
     }
     assert!(matches!(resp.event, MemdEvent::ManifestServed { .. }));
-    assert_eq!(resp.tokenizer, tokens::TOKENIZER);
+    assert_eq!(resp.tokenizer, rift_tokens::TOKENIZER);
 }
 
 #[test]

@@ -19,7 +19,15 @@
 //! heuristic; a billing-grade tokenizer (`tiktoken-rs`) plugs in behind
 //! [`estimate_tokens`] when exactness is needed.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 /// The four billable token classes for one model call (1:1 with a call, kept a
 /// separate relation so the classes evolve independently — `04` §4.2).
@@ -123,7 +131,7 @@ impl PriceTable {
 pub enum CounterMethod {
     /// Counts the provider returned in the API response (most authoritative).
     ProviderReported,
-    /// An exact BPE tokenizer (e.g. `tiktoken`) — reserved; not yet wired.
+    /// An exact BPE tokenizer (`rift-tokens` / `cl100k_base`, via [`BpeTokenizer`]).
     Tiktoken,
     /// The built-in deterministic heuristic estimator (the offline floor).
     Heuristic,
@@ -162,6 +170,30 @@ impl Tokenizer for HeuristicTokenizer {
     }
     fn method(&self) -> CounterMethod {
         CounterMethod::Heuristic
+    }
+}
+
+/// The billing-grade tokenizer (ADR-0006): counts through `rift-tokens`
+/// (`cl100k_base`) — the same single authority ledger metrics and pack budgets
+/// use — and reports [`CounterMethod::Tiktoken`] provenance. If the BPE cannot
+/// initialize, counts silently degrade to the conservative fallback and the
+/// provenance honestly reports [`CounterMethod::Heuristic`].
+///
+/// Used as the estimate fallback when an adapter reports no provider counts;
+/// provider-reported counts always win when present (P6 S1).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BpeTokenizer;
+
+impl Tokenizer for BpeTokenizer {
+    fn count(&self, text: &str) -> u64 {
+        u64::from(rift_tokens::count(text))
+    }
+    fn method(&self) -> CounterMethod {
+        if rift_tokens::provenance() == rift_tokens::TOKENIZER {
+            CounterMethod::Tiktoken
+        } else {
+            CounterMethod::Heuristic
+        }
     }
 }
 

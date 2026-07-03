@@ -20,7 +20,15 @@
 //! now the read side stays in `rift-recall-substrate` (gix) and this crate owns the
 //! write side + worktree discovery + the destructive-op shell-out.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -291,14 +299,43 @@ pub fn git_checkout(repo: &RepoPaths, refspec: &str) -> Result<()> {
 /// # Errors
 /// [`RiftError::Storage`] if `git` cannot be spawned or exits non-zero.
 pub fn run_git(repo: &RepoPaths, args: &[String]) -> Result<()> {
-    let output = Command::new("git")
+    run_git_capture(repo, args, &[]).map(|_| ())
+}
+
+/// [`run_git`], returning captured stdout bytes and feeding `stdin` to the
+/// child. The argv-array, explicit-env discipline is identical; stdout is the
+/// **only** channel read back (stderr is dropped, never surfaced).
+///
+/// # Errors
+/// [`RiftError::Storage`] if `git` cannot be spawned or exits non-zero.
+pub fn run_git_capture(repo: &RepoPaths, args: &[String], stdin: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = Command::new("git")
         .args(args)
         .env("GIT_DIR", &repo.git_dir)
         .env("GIT_WORK_TREE", &repo.work_tree)
-        .output()
+        .stdin(if stdin.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| RiftError::storage(format!("git invocation failed: {e}")))?;
+    if !stdin.is_empty() {
+        if let Some(mut pipe) = child.stdin.take() {
+            pipe.write_all(stdin)
+                .map_err(|e| RiftError::storage(format!("git stdin failed: {e}")))?;
+        }
+    }
+    let output = child
+        .wait_with_output()
         .map_err(|e| RiftError::storage(format!("git invocation failed: {e}")))?;
     if output.status.success() {
-        Ok(())
+        Ok(output.stdout)
     } else {
         // Carry the exit code only — never stdout/stderr bytes (no transcript leak).
         Err(RiftError::storage(format!(
@@ -306,6 +343,61 @@ pub fn run_git(repo: &RepoPaths, args: &[String]) -> Result<()> {
             output.status.code().unwrap_or(-1)
         )))
     }
+}
+
+/// The worktree paths that differ from HEAD (modified/added/deleted, staged or
+/// not, plus untracked files) via `git status --porcelain -z`. Paths are
+/// worktree-relative; rename records yield the **new** path.
+///
+/// # Errors
+/// [`RiftError::Storage`] if `git` cannot be spawned or exits non-zero.
+pub fn changed_worktree_paths(repo: &RepoPaths) -> Result<Vec<String>> {
+    let out = run_git_capture(
+        repo,
+        &[
+            "status".into(),
+            "--porcelain=v1".into(),
+            "-z".into(),
+            "--untracked-files=all".into(),
+        ],
+        &[],
+    )?;
+    let mut paths = Vec::new();
+    let mut fields = out.split(|b| *b == 0);
+    while let Some(entry) = fields.next() {
+        if entry.len() < 4 {
+            continue; // status entries are `XY <path>`; anything shorter is noise
+        }
+        let status = entry.get(..2).unwrap_or_default();
+        let path = String::from_utf8_lossy(entry.get(3..).unwrap_or_default()).into_owned();
+        // A rename record (`R`/`C` in either column) is followed by the ORIGIN
+        // path as its own NUL field — consume it; the new path is what changed.
+        if status.contains(&b'R') || status.contains(&b'C') {
+            let _ = fields.next();
+        }
+        if !path.is_empty() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// Hash `bytes` as a git blob **and write it into the object store**
+/// (`git hash-object -w --stdin`), returning the blob oid (hex, repo hash
+/// algorithm). Local-only plumbing: blobs are unreachable objects unless later
+/// referenced, and are what makes turn-boundary content addressable.
+///
+/// # Errors
+/// [`RiftError::Storage`] if `git` cannot be spawned or exits non-zero.
+pub fn hash_object_write(repo: &RepoPaths, bytes: &[u8]) -> Result<String> {
+    let out = run_git_capture(
+        repo,
+        &["hash-object".into(), "-w".into(), "--stdin".into()],
+        bytes,
+    )?;
+    Ok(String::from_utf8_lossy(&out).trim().to_owned())
 }
 
 #[cfg(test)]

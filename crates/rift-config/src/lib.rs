@@ -17,7 +17,15 @@
 //! explicit `acknowledge_risk`, built-in sensitive paths are unioned in and
 //! cannot be dropped, and validation **aggregates** every problem at once.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 pub mod features;
 mod glob;
@@ -150,6 +158,26 @@ pub struct CapturePolicy {
     /// Capture token usage.
     #[serde(default = "default_true")]
     pub token_usage: bool,
+    /// The base checkpoint strategy (`manual-commit` default, `on-pr`,
+    /// `scheduled`, `policy-driven`). Policy-driven always composes on top:
+    /// a sensitive-path touch archives under any base.
+    #[serde(default = "default_checkpoint_strategy")]
+    pub checkpoint_strategy: String,
+    /// The `scheduled` strategy's interval, in minutes (≥ 1).
+    #[serde(default = "default_schedule_interval_minutes")]
+    pub schedule_interval_minutes: u32,
+}
+
+/// The four checkpoint-strategy tokens (GLOSSARY "Checkpoint strategy").
+pub const CHECKPOINT_STRATEGIES: &[&str] =
+    &["manual-commit", "on-pr", "scheduled", "policy-driven"];
+
+fn default_checkpoint_strategy() -> String {
+    "manual-commit".to_string()
+}
+
+fn default_schedule_interval_minutes() -> u32 {
+    30
 }
 
 impl Default for CapturePolicy {
@@ -159,6 +187,8 @@ impl Default for CapturePolicy {
             acknowledge_risk: false,
             tool_calls: true,
             token_usage: true,
+            checkpoint_strategy: default_checkpoint_strategy(),
+            schedule_interval_minutes: default_schedule_interval_minutes(),
         }
     }
 }
@@ -219,6 +249,8 @@ pub struct EffectiveConfig {
     raw_transcripts: bool,
     capture_tool_calls: bool,
     capture_token_usage: bool,
+    checkpoint_strategy: String,
+    schedule_interval_minutes: u32,
     entropy_threshold: f32,
     extra_patterns: Vec<String>,
     default_retention_class: String,
@@ -330,6 +362,16 @@ impl EffectiveConfig {
             );
         }
 
+        if !CHECKPOINT_STRATEGIES.contains(&cfg.capture.checkpoint_strategy.as_str()) {
+            errors.push(format!(
+                "capture.checkpoint_strategy {:?} is not one of {CHECKPOINT_STRATEGIES:?}",
+                cfg.capture.checkpoint_strategy
+            ));
+        }
+        if cfg.capture.schedule_interval_minutes == 0 {
+            errors.push("capture.schedule_interval_minutes must be >= 1".to_string());
+        }
+
         if cfg.retention.default_class.is_empty() {
             errors.push("retention.default_class must not be empty".to_string());
         } else if !cfg.retention.classes.is_empty()
@@ -388,6 +430,8 @@ impl EffectiveConfig {
             raw_transcripts: cfg.capture.raw_transcripts,
             capture_tool_calls: cfg.capture.tool_calls,
             capture_token_usage: cfg.capture.token_usage,
+            checkpoint_strategy: cfg.capture.checkpoint_strategy,
+            schedule_interval_minutes: cfg.capture.schedule_interval_minutes,
             entropy_threshold: cfg.redaction.entropy_threshold,
             extra_patterns: extra,
             default_retention_class: cfg.retention.default_class,
@@ -413,6 +457,11 @@ impl EffectiveConfig {
         field("raw_transcripts", &self.raw_transcripts.to_string());
         field("capture_tool_calls", &self.capture_tool_calls.to_string());
         field("capture_token_usage", &self.capture_token_usage.to_string());
+        field("checkpoint_strategy", &self.checkpoint_strategy);
+        field(
+            "schedule_interval_minutes",
+            &self.schedule_interval_minutes.to_string(),
+        );
         field(
             "entropy_threshold",
             &format!("{:.4}", f64::from(self.entropy_threshold)),
@@ -464,6 +513,19 @@ impl EffectiveConfig {
     #[must_use]
     pub fn is_sensitive_path(&self, path: &str) -> bool {
         self.sensitive_paths.iter().any(|g| glob_match(g, path))
+    }
+
+    /// The configured base checkpoint strategy token (one of
+    /// [`CHECKPOINT_STRATEGIES`]; default `manual-commit`).
+    #[must_use]
+    pub fn checkpoint_strategy(&self) -> &str {
+        &self.checkpoint_strategy
+    }
+
+    /// The `scheduled` strategy's interval in milliseconds.
+    #[must_use]
+    pub fn schedule_interval_ms(&self) -> i64 {
+        i64::from(self.schedule_interval_minutes) * 60_000
     }
 
     /// Whether `model` is allowed: deny wins; empty allow = allow-all.
@@ -575,7 +637,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// Contract snapshots (step-04 test plan): a representative effective
     /// config's Debug view and a multi-problem aggregated validation report,
     /// pinned so a shape change is a reviewable diff.

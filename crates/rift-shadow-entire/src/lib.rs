@@ -14,7 +14,15 @@
 //! verb screen, version-pin verification, and output rebranding. The actual
 //! subprocess spawn lives behind the trait so it is testable offline.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -25,7 +33,7 @@ use rift_core::Sha256Id;
 use sha2::{Digest, Sha256};
 
 pub mod pin;
-pub use pin::{InstallReport, PinnedSubstrate, SubstrateAsset, SubstrateFetcher};
+pub use pin::{sha256_hex_of, InstallReport, PinnedSubstrate, SubstrateAsset, SubstrateFetcher};
 
 /// Production HTTP(S) download (the only network call). Behind `provision-http`
 /// so the default build/tests stay network-free and use the in-memory fetcher.
@@ -223,7 +231,8 @@ fn replace_ci(haystack: &str, needle: &str, replacement: &str) -> String {
     result
 }
 
-/// Normalized exit classification.
+/// Normalized exit classification — the complete P1 S2 vocabulary. Scripts key
+/// off the class, never a raw upstream code.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ExitClass {
     /// Success.
@@ -232,12 +241,21 @@ pub enum ExitClass {
     BadUsage,
     /// Nothing to do.
     NothingToDo,
+    /// A transient failure (spawn/network/timeout) — safe to retry.
+    RetryableTransient,
+    /// Refused on an integrity check (pinned-hash mismatch) — never retried
+    /// blindly; the bytes on offer are not the bytes we pinned.
+    IntegrityRefused,
     /// Backend internal failure (crash / unknown code).
     BackendInternal,
 }
 
 impl ExitClass {
-    /// Classify a raw process exit code.
+    /// Classify a raw process exit code. Only the verified upstream codes map to
+    /// specific classes; anything else (including a crash) is `BackendInternal`.
+    /// The transient/integrity classes are produced by the wrapper layer itself
+    /// (see [`ExitClass::from_error`]) — the upstream binary has no verified
+    /// numeric code for them.
     #[must_use]
     pub fn from_code(code: Option<i32>) -> Self {
         match code {
@@ -245,6 +263,20 @@ impl ExitClass {
             Some(2) => Self::BadUsage,
             Some(3) => Self::NothingToDo,
             _ => Self::BackendInternal,
+        }
+    }
+
+    /// Classify a seam error into the exit vocabulary (total). This is where the
+    /// wrapper's own failure taxonomy — refusals it makes *before or around* the
+    /// child process — joins the same vocabulary callers already handle.
+    #[must_use]
+    pub fn from_error(e: &SubstrateError) -> Self {
+        match e {
+            SubstrateError::Unavailable | SubstrateError::Timeout => Self::RetryableTransient,
+            SubstrateError::Integrity => Self::IntegrityRefused,
+            // Screened-out invocations and unsupported platforms never spawned:
+            // the request as issued cannot be run here.
+            SubstrateError::Blocked | SubstrateError::Platform => Self::BadUsage,
         }
     }
 }
@@ -511,6 +543,30 @@ mod tests {
         assert_eq!(ExitClass::from_code(Some(2)), ExitClass::BadUsage);
         assert_eq!(ExitClass::from_code(None), ExitClass::BackendInternal);
         assert_eq!(ExitClass::from_code(Some(134)), ExitClass::BackendInternal);
+    }
+
+    #[test]
+    fn exit_error_mapping_is_total_over_the_seam_taxonomy() {
+        assert_eq!(
+            ExitClass::from_error(&SubstrateError::Unavailable),
+            ExitClass::RetryableTransient
+        );
+        assert_eq!(
+            ExitClass::from_error(&SubstrateError::Timeout),
+            ExitClass::RetryableTransient
+        );
+        assert_eq!(
+            ExitClass::from_error(&SubstrateError::Integrity),
+            ExitClass::IntegrityRefused
+        );
+        assert_eq!(
+            ExitClass::from_error(&SubstrateError::Blocked),
+            ExitClass::BadUsage
+        );
+        assert_eq!(
+            ExitClass::from_error(&SubstrateError::Platform),
+            ExitClass::BadUsage
+        );
     }
 
     #[test]

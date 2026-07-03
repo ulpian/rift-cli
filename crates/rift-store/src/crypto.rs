@@ -175,7 +175,13 @@ impl<K: KeyStore> DekCipher<K> {
 }
 
 impl<K: KeyStore + Send + Sync> ColumnCipher for DekCipher<K> {
-    fn encrypt(&self, table: &str, column: &str, row_id: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+    fn encrypt(
+        &self,
+        table: &str,
+        column: &str,
+        row_id: &str,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>> {
         let dek = self.keys.repo_dek(&self.repo_id)?;
         let mut out = Vec::with_capacity(1 + NONCE_LEN + plaintext.len() + 16);
         out.push(FRAME_AEAD);
@@ -187,7 +193,9 @@ impl<K: KeyStore + Send + Sync> ColumnCipher for DekCipher<K> {
         match stored.split_first() {
             Some((&FRAME_AEAD, rest)) => {
                 let dek = self.keys.repo_dek(&self.repo_id)?;
-                Ok(decrypt_column(&dek, table, column, row_id, rest)?.as_slice().to_vec())
+                Ok(decrypt_column(&dek, table, column, row_id, rest)?
+                    .as_slice()
+                    .to_vec())
             }
             Some((&FRAME_PLAIN, rest)) => Ok(rest.to_vec()),
             _ => Err(RiftError::crypto(format!(
@@ -245,22 +253,43 @@ mod tests {
         let plain = PlainCipher;
 
         // AEAD round-trip; stored form is framed ciphertext.
-        let stored = enc.encrypt("digest_blob", "bytes", "ref1", b"payload").unwrap();
+        let stored = enc
+            .encrypt("digest_blob", "bytes", "ref1", b"payload")
+            .unwrap();
         assert_eq!(stored[0], FRAME_AEAD);
         assert!(!stored.windows(7).any(|w| w == b"payload"));
-        assert_eq!(enc.decrypt("digest_blob", "bytes", "ref1", &stored).unwrap(), b"payload");
+        assert_eq!(
+            enc.decrypt("digest_blob", "bytes", "ref1", &stored)
+                .unwrap(),
+            b"payload"
+        );
 
         // Relocation fails (AAD binds the slot).
-        assert!(enc.decrypt("digest_blob", "bytes", "ref2", &stored).is_err());
+        assert!(enc
+            .decrypt("digest_blob", "bytes", "ref2", &stored)
+            .is_err());
 
         // Plain frame: written by PlainCipher, readable by both.
-        let plain_stored = plain.encrypt("digest_blob", "bytes", "ref1", b"payload").unwrap();
+        let plain_stored = plain
+            .encrypt("digest_blob", "bytes", "ref1", b"payload")
+            .unwrap();
         assert_eq!(plain_stored[0], FRAME_PLAIN);
-        assert_eq!(plain.decrypt("digest_blob", "bytes", "ref1", &plain_stored).unwrap(), b"payload");
-        assert_eq!(enc.decrypt("digest_blob", "bytes", "ref1", &plain_stored).unwrap(), b"payload");
+        assert_eq!(
+            plain
+                .decrypt("digest_blob", "bytes", "ref1", &plain_stored)
+                .unwrap(),
+            b"payload"
+        );
+        assert_eq!(
+            enc.decrypt("digest_blob", "bytes", "ref1", &plain_stored)
+                .unwrap(),
+            b"payload"
+        );
 
         // Encrypted frame without custody fails closed; junk frames fail everywhere.
-        assert!(plain.decrypt("digest_blob", "bytes", "ref1", &stored).is_err());
+        assert!(plain
+            .decrypt("digest_blob", "bytes", "ref1", &stored)
+            .is_err());
         assert!(plain.decrypt("t", "c", "r", &[0x7f, 1, 2]).is_err());
         assert!(enc.decrypt("t", "c", "r", &[]).is_err());
     }

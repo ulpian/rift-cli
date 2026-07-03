@@ -30,6 +30,23 @@ use crate::{attribute, confidence, factors_from_signals, Actor, LineAttribution}
 /// The attribution method version stamped on rows produced here (provenance).
 pub const METHOD_VERSION: &str = "commit-diff@1";
 
+/// One per-hunk attribution category count — the irreducible fact the per-file
+/// rollup sums (P2 S5's `attribution_hunk` grain).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HunkAttribution {
+    /// The hunk's ordinal within the file's committed diff.
+    pub hunk_ordinal: u32,
+    /// New-side start line (0-based, the diff convention).
+    pub new_start: u32,
+    /// New-side length.
+    pub new_len: u32,
+    /// `agent_added` | `human_added` | `human_modified_agent` |
+    /// `agent_removed_by_human` | `unknown`.
+    pub category: String,
+    /// Lines of this hunk in that category.
+    pub line_count: u32,
+}
+
 /// One changed file in a commit's `C` diff: its head revision, the committed
 /// hunks, and the (commit-boundary) attribution.
 #[derive(Clone, Debug)]
@@ -44,10 +61,15 @@ pub struct FileChange {
     pub head_content_sha256: Sha256Id,
     /// The committed-diff hunks (`diff(parent → commit)` for this file).
     pub hunks: Vec<Hunk>,
-    /// Per-file authorship counts (all `unknown` at the commit boundary).
+    /// Per-file authorship counts (all `unknown` at the commit boundary; the
+    /// turn-boundary replay in `rift-shadow` enriches them).
     pub attribution: LineAttribution,
+    /// Per-hunk category counts (empty until the turn replay fills them).
+    pub hunk_categories: Vec<HunkAttribution>,
     /// Confidence in `[0,1]` (low at the commit boundary — capture is incomplete).
     pub confidence: f64,
+    /// The attribution method that produced these counts (provenance).
+    pub method_version: String,
     /// Whether the file was line-attributable (text + within the size cap).
     pub attributable: bool,
 }
@@ -149,7 +171,9 @@ pub fn capture_commit(reader: &impl BlobReader, commit_hex: &str) -> Result<Comm
             head_content_sha256: sha256_of(&new_bytes),
             hunks,
             attribution,
+            hunk_categories: Vec::new(),
             confidence: confidence(&factors),
+            method_version: METHOD_VERSION.to_owned(),
             attributable,
         });
     }

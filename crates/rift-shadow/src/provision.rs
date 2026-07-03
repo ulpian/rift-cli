@@ -17,9 +17,25 @@ use rift_store::{
 use crate::sha256_hex;
 
 /// Map a wrapper error into a Rift-voiced error that never names the upstream tool
-/// and carries no key/transcript bytes (only the seam's own Rift-voiced message).
+/// and carries no key/transcript bytes — **class-preserving**, so the CLI can emit
+/// the exit-code contract (integrity-refused vs retryable-transient vs
+/// precondition) instead of one generic failure.
 fn map_err(e: SubstrateError) -> RiftError {
-    RiftError::storage(format!("capture backend provisioning failed: {e}"))
+    match e {
+        SubstrateError::Integrity => RiftError::Integrity(
+            "capture backend failed its pinned checksum; refusing to install".into(),
+        ),
+        SubstrateError::Unavailable | SubstrateError::Timeout => RiftError::Substrate(
+            "capture backend download failed (transient; retry `rift init`)".into(),
+        ),
+        SubstrateError::Platform => {
+            RiftError::Validity("this platform has no pinned capture backend".into())
+        }
+        SubstrateError::Blocked => {
+            RiftError::PolicyDenied("capture backend invocation refused".into())
+        }
+        other => RiftError::storage(format!("capture backend provisioning failed: {other}")),
+    }
 }
 
 /// Provision the pinned backend and record the append-only `substrate_install`
@@ -47,6 +63,43 @@ pub async fn provision_and_audit(
     };
     record_substrate_install(store, &row).await?;
     Ok(report)
+}
+
+/// Record a provisioning **skip** as an append-only `substrate_install` audit row
+/// (ADR-0001: "every provisioning *and every skip* is recorded"). The row reuses
+/// the install relation: `substrate_sha256` names the pinned build the decision
+/// was about (empty when the platform has no pin), and `install_root` carries the
+/// `skipped:<reason>` marker instead of a path. Each skip event is time-distinct,
+/// so repeated opt-outs each leave a row.
+///
+/// # Errors
+/// [`RiftError::Storage`] on insert failure.
+pub async fn record_provision_skip(
+    store: &impl CanonicalStore,
+    pin: Option<&PinnedSubstrate>,
+    reason: &str,
+    now_ms: i64,
+) -> Result<()> {
+    let pinned_sha = pin.map(|p| p.asset.sha256.to_hex()).unwrap_or_default();
+    let rift_release = pin.map(|p| p.rift_release.clone()).unwrap_or_default();
+    let row = SubstrateInstallRow {
+        install_id: sha256_hex(&[
+            b"provision-skip",
+            b"\0",
+            pinned_sha.as_bytes(),
+            b"\0",
+            reason.as_bytes(),
+            b"\0",
+            now_ms.to_string().as_bytes(),
+        ]),
+        substrate_sha256: pinned_sha,
+        rift_release,
+        install_root: format!("skipped:{reason}"),
+        verified_at: now_ms,
+        schema_version: 1,
+    };
+    record_substrate_install(store, &row).await?;
+    Ok(())
 }
 
 /// Record a default-deny refusal of a wrapped invocation (P1 S3 audit). `verb` is
@@ -138,6 +191,51 @@ mod tests {
             1,
             "same hash → no new row"
         );
+    }
+
+    #[tokio::test]
+    async fn skip_is_audited_append_only_on_both_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = pin_for(b"bytes", dir.path().to_path_buf());
+        let s = store();
+        // With a resolved pin: the skip names the declined build.
+        record_provision_skip(&s, Some(&pin), "no-provision-flag", 10)
+            .await
+            .unwrap();
+        // Without one (unsupported platform): still recorded.
+        record_provision_skip(&s, None, "RIFT_NO_PROVISION", 20)
+            .await
+            .unwrap();
+        // A later identical opt-out is a distinct decision (time-distinct id).
+        record_provision_skip(&s, Some(&pin), "no-provision-flag", 30)
+            .await
+            .unwrap();
+        assert_eq!(s.count("substrate_install").await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn provisioning_error_classes_are_preserved() {
+        use rift_core::RiftError;
+        assert!(matches!(
+            map_err(SubstrateError::Integrity),
+            RiftError::Integrity(_)
+        ));
+        assert!(matches!(
+            map_err(SubstrateError::Unavailable),
+            RiftError::Substrate(_)
+        ));
+        assert!(matches!(
+            map_err(SubstrateError::Timeout),
+            RiftError::Substrate(_)
+        ));
+        assert!(matches!(
+            map_err(SubstrateError::Platform),
+            RiftError::Validity(_)
+        ));
+        assert!(matches!(
+            map_err(SubstrateError::Blocked),
+            RiftError::PolicyDenied(_)
+        ));
     }
 
     #[tokio::test]

@@ -361,6 +361,45 @@ CREATE TABLE turn (
   UNIQUE (session_id, ordinal)
 ) STRICT
 
+-- table turn_boundary_file
+CREATE TABLE turn_boundary_file (
+  snapshot_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  blob_oid TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (snapshot_id, path)
+) STRICT
+
+-- table turn_boundary_snapshot
+CREATE TABLE turn_boundary_snapshot (
+  snapshot_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  turn_ordinal INTEGER NOT NULL,
+  boundary TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  worktree_hash TEXT NOT NULL,
+  captured_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (snapshot_id),
+  UNIQUE (session_id, turn_ordinal, boundary)
+) STRICT
+
+-- table turn_diff_hunk
+CREATE TABLE turn_diff_hunk (
+  hunk_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  turn_ordinal INTEGER NOT NULL,
+  edit_kind TEXT NOT NULL,
+  path TEXT NOT NULL,
+  old_start INTEGER NOT NULL,
+  old_len INTEGER NOT NULL,
+  new_start INTEGER NOT NULL,
+  new_len INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (hunk_id)
+) STRICT
+
 -- table verification_divergence
 CREATE TABLE verification_divergence (
   run_id TEXT NOT NULL,
@@ -557,6 +596,24 @@ CREATE TRIGGER tool_reads_file_no_delete BEFORE DELETE ON tool_reads_file BEGIN 
 
 -- trigger tool_reads_file_no_update
 CREATE TRIGGER tool_reads_file_no_update BEFORE UPDATE ON tool_reads_file BEGIN SELECT RAISE(ABORT, 'rift: tool_reads_file is append-only (UPDATE forbidden)'); END
+
+-- trigger turn_boundary_file_no_delete
+CREATE TRIGGER turn_boundary_file_no_delete BEFORE DELETE ON turn_boundary_file BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_file is append-only (DELETE forbidden)'); END
+
+-- trigger turn_boundary_file_no_update
+CREATE TRIGGER turn_boundary_file_no_update BEFORE UPDATE ON turn_boundary_file BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_file is append-only (UPDATE forbidden)'); END
+
+-- trigger turn_boundary_snapshot_no_delete
+CREATE TRIGGER turn_boundary_snapshot_no_delete BEFORE DELETE ON turn_boundary_snapshot BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_snapshot is append-only (DELETE forbidden)'); END
+
+-- trigger turn_boundary_snapshot_no_update
+CREATE TRIGGER turn_boundary_snapshot_no_update BEFORE UPDATE ON turn_boundary_snapshot BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_snapshot is append-only (UPDATE forbidden)'); END
+
+-- trigger turn_diff_hunk_no_delete
+CREATE TRIGGER turn_diff_hunk_no_delete BEFORE DELETE ON turn_diff_hunk BEGIN SELECT RAISE(ABORT, 'rift: turn_diff_hunk is append-only (DELETE forbidden)'); END
+
+-- trigger turn_diff_hunk_no_update
+CREATE TRIGGER turn_diff_hunk_no_update BEFORE UPDATE ON turn_diff_hunk BEGIN SELECT RAISE(ABORT, 'rift: turn_diff_hunk is append-only (UPDATE forbidden)'); END
 
 -- trigger turn_no_delete
 CREATE TRIGGER turn_no_delete BEFORE DELETE ON turn BEGIN SELECT RAISE(ABORT, 'rift: turn is append-only (DELETE forbidden)'); END

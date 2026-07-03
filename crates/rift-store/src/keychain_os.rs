@@ -53,8 +53,12 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let dek1 = rt.block_on(ks.provision_repo_dek(&store, &repo, 1)).unwrap();
-        let dek2 = rt.block_on(ks.provision_repo_dek(&store, &repo, 2)).unwrap();
+        let dek1 = rt
+            .block_on(ks.provision_repo_dek(&store, &repo, 1))
+            .unwrap();
+        let dek2 = rt
+            .block_on(ks.provision_repo_dek(&store, &repo, 2))
+            .unwrap();
         assert_eq!(dek1.expose(), dek2.expose());
     }
 }

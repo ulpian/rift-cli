@@ -82,6 +82,26 @@ impl EventKind {
             Self::SubagentEnd => "subagent_end",
         }
     }
+
+    /// Parse the [`EventKind::as_str`] token back to the kind — the artifact
+    /// bridge's re-derivation path (`full.jsonl` carries the token). Total
+    /// round-trip with `as_str`; an unknown token is `None`, never a guess.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == token)
+    }
+
+    /// The trust class the first-party ingest assigns to this kind's payload —
+    /// the single mapping both event sources share, so a bridge-derived row can
+    /// never carry a *higher* trust than its hook-derived twin.
+    #[must_use]
+    pub fn default_trust(self) -> Trust {
+        match self {
+            Self::FileEdit => Trust::CodeFact,
+            Self::ToolResult => Trust::ToolOutputUntrusted,
+            _ => Trust::TranscriptUntrusted,
+        }
+    }
 }
 
 /// Source-trust classification carried on every event payload (so untrusted

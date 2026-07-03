@@ -15,49 +15,50 @@
 #
 # No binary is committed to this repo — only this pin. The download happens at
 # `rift setup` time (P1 B2) from the upstream GitHub releases, production tags only.
+# Re-cut with `cargo run -p xtask -- pin-cut <version>` (the scripted pin-cut).
 
 schema = 1
-substrate_version = "0.7.7"
+substrate_version = "0.7.8"
 rift_release = "0.1.0"
 
 # macOS — Apple Silicon
 [[asset]]
 os = "macos"
 arch = "aarch64"
-url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_darwin_arm64.tar.gz"
-sha256 = "3c5225f369227d3ccdbe444511c6b4c22ddcc9aafd6f93e77b61aa3bdbe79b50"
+url = "https://github.com/entireio/cli/releases/download/v0.7.8/entire_darwin_arm64.tar.gz"
+sha256 = "422a3c0ecdc22b29eeb6e39a8f11394b5804c8d3c79fd4d1047819fedd71da38"
 
 # macOS — Intel
 [[asset]]
 os = "macos"
 arch = "x86_64"
-url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_darwin_amd64.tar.gz"
-sha256 = "bf8e9538f17ca9be63d7217fcb5f14956b29a3f1b7c7f8192d7b5008850fa598"
+url = "https://github.com/entireio/cli/releases/download/v0.7.8/entire_darwin_amd64.tar.gz"
+sha256 = "356662b6755537369ddf5ac46ae5fdfb740d9eb208ca554de461e9506e425060"
 
 # Linux — x86_64
 [[asset]]
 os = "linux"
 arch = "x86_64"
-url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_linux_amd64.tar.gz"
-sha256 = "d309a5bed28f2a5c5eae8874769bb8f1115402c19d5752490443af10b4bd4947"
+url = "https://github.com/entireio/cli/releases/download/v0.7.8/entire_linux_amd64.tar.gz"
+sha256 = "8757dcd74d466cc959da05d039e2d07e46b7ea6e5fc9ca3471bd7faa9401a8e4"
 
 # Linux — aarch64
 [[asset]]
 os = "linux"
 arch = "aarch64"
-url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_linux_arm64.tar.gz"
-sha256 = "da5e83ef835dfd1d39dc3489ddf04a611a94a583b43455c3fe6aa12a43031fdc"
+url = "https://github.com/entireio/cli/releases/download/v0.7.8/entire_linux_arm64.tar.gz"
+sha256 = "cc1736d4efa90a773411b1640ee87d922687f6fd7e130cf85da6a7c755924776"
 
 # Windows — x86_64
 [[asset]]
 os = "windows"
 arch = "x86_64"
-url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_windows_amd64.zip"
-sha256 = "1230f9a4ee48e4e6221a0ec73bd74d2e49fb04b7d0fbd211b4d69d093471cb1e"
+url = "https://github.com/entireio/cli/releases/download/v0.7.8/entire_windows_amd64.zip"
+sha256 = "a8cbdeee24c3f0d0cb9c485341bb907f283d27ddaf5f09b12e4c3c194a81adeb"
 
 # Windows — aarch64
 [[asset]]
 os = "windows"
 arch = "aarch64"
-url = "https://github.com/entireio/cli/releases/download/v0.7.7/entire_windows_arm64.zip"
-sha256 = "9a909705b89b6b6bbf66120a7a563ea306185e20d959ccbe877563b8a31d5d47"
+url = "https://github.com/entireio/cli/releases/download/v0.7.8/entire_windows_arm64.zip"
+sha256 = "5b17c763d857126c8d18f7ac944fe44e90bf7c84dd032a88b1b19de9784d0f13"

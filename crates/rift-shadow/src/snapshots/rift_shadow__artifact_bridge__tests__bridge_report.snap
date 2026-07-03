@@ -1,0 +1,10 @@
+---
+source: crates/rift-shadow/src/artifact_bridge.rs
+expression: r.render()
+---
+bridge: rift/checkpoints/v1
+  shards: 2 seen, 1 projected, 1 refused
+  refused cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd: missing redaction report
+  events: 4 derived, 4 inserted
+  parse issues: 0
+  watermark: cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd

@@ -85,20 +85,39 @@ async fn apply_trigger(
     }
 }
 
-/// Ingest one raw agent hook end-to-end. Returns the resulting session phase and
-/// any effects the caller's executor should run (e.g. condense).
+/// What one hook ingest produced: the session phase, the effects the caller's
+/// executor should run, and the turn boundaries this hook closed (the caller
+/// runs the working-tree snapshotter for each — it needs the worktree, which
+/// the ingest layer deliberately does not touch).
+#[derive(Debug)]
+pub struct IngestOutcome {
+    /// The session phase after the state machine advanced.
+    pub state: SessionState,
+    /// Effects for the caller's executor (e.g. `RequestCondense`).
+    pub effects: Vec<Effect>,
+    /// Turn boundaries closed by this hook: `(turn_ordinal, boundary)`.
+    pub boundaries: Vec<(u32, crate::turn_boundary::Boundary)>,
+}
+
+/// Ingest one raw agent hook end-to-end: the append-only receipt, the per-event
+/// idempotency index, the **normalized projection** (session / turn / model-call
+/// / tool-call / token-usage / cost — the same projector the artifact bridge
+/// replays, ADR-0002), and the session state machine. Returns the resulting
+/// session phase, effects, and any turn boundaries the caller must snapshot.
 ///
 /// # Errors
 /// [`rift_core::RiftError`] only on a storage failure or a malformed payload that
 /// cannot be content-addressed; the caller swallows it at the hook boundary.
+#[allow(clippy::too_many_lines)] // one linear ingest pass; each write is one appended fact
 pub async fn ingest_hook(
     raw: &RawHook,
     registry: &AdapterRegistry,
     store: &impl CanonicalStore,
     git_dir: &Path,
     agent_label: &str,
+    repo_id: &str,
     now_ms: i64,
-) -> Result<(SessionState, Vec<Effect>)> {
+) -> Result<IngestOutcome> {
     let events = dispatch(raw, registry)?;
 
     // Append-only hook receipt (idempotent on its content address).
@@ -164,6 +183,27 @@ pub async fn ingest_hook(
         .await?;
     }
 
+    // Normalized projection (P2 S3): the same pure mapping the artifact bridge
+    // replays over re-derived events, so both sources' rows union to a no-op.
+    let facts = crate::project::payload_facts(&raw.payload);
+    let ctx = crate::project::ProjectionCtx {
+        agent: agent_label,
+        repo_id,
+    };
+    for ev in &events {
+        crate::project::project_event(store, ev, &facts, ctx).await?;
+    }
+    // Provider-reported token usage (never fabricated): attaches to the LAST
+    // event of this hook's fan-out — the result/turn-end fact that carried it.
+    if let Some(usage) = registry
+        .get(&raw.agent)
+        .and_then(|a| a.usage(&raw.verb, &raw.payload))
+    {
+        if let Some(anchor) = events.last() {
+            crate::project::project_usage(store, anchor, &facts, ctx, &usage, now_ms).await?;
+        }
+    }
+
     // Current phase (Idle if no cache yet).
     let existing = session_cache::read_cache(git_dir, &raw.session)?;
     let mut state = existing
@@ -198,7 +238,30 @@ pub async fn ingest_hook(
     cache.updated_at_ms = now_ms;
     session_cache::write_cache(git_dir, &cache)?;
 
-    Ok((state, effects))
+    // The turn boundaries this hook closed (P4 S2): a prompt submission /
+    // turn-start closes the human's H_i window; a turn-end closes the agent's
+    // A_i window. Deduped per (ordinal, boundary).
+    let mut boundaries: Vec<(u32, crate::turn_boundary::Boundary)> = Vec::new();
+    for ev in &events {
+        let b = match ev.kind {
+            EventKind::TurnStart | EventKind::PromptSubmit => {
+                Some(crate::turn_boundary::Boundary::Start)
+            }
+            EventKind::TurnEnd => Some(crate::turn_boundary::Boundary::End),
+            _ => None,
+        };
+        if let Some(b) = b {
+            if !boundaries.contains(&(ev.turn_ordinal, b)) {
+                boundaries.push((ev.turn_ordinal, b));
+            }
+        }
+    }
+
+    Ok(IngestOutcome {
+        state,
+        effects,
+        boundaries,
+    })
 }
 
 /// Drive the `Ending → Ended` transition after a condense completes, refreshing
@@ -263,31 +326,49 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let git_dir = tmp.path();
 
-        let (st1, _) = ingest_hook(
+        let o1 = ingest_hook(
             &raw("SessionStart", 0),
             &reg,
             &s,
             git_dir,
             "claude-code",
+            "repo-1",
             10,
         )
         .await
         .unwrap();
-        assert_eq!(st1, SessionState::Active);
+        assert_eq!(o1.state, SessionState::Active);
 
         // a tool event keeps ACTIVE (no transition) but records the hook receipt
-        let (st2, fx2) = ingest_hook(&raw("PreToolUse", 1), &reg, &s, git_dir, "claude-code", 11)
-            .await
-            .unwrap();
-        assert_eq!(st2, SessionState::Active);
-        assert!(fx2.is_empty());
+        let o2 = ingest_hook(
+            &raw("PreToolUse", 1),
+            &reg,
+            &s,
+            git_dir,
+            "claude-code",
+            "repo-1",
+            11,
+        )
+        .await
+        .unwrap();
+        assert_eq!(o2.state, SessionState::Active);
+        assert!(o2.effects.is_empty());
+        assert!(o2.boundaries.is_empty(), "a tool event is not a boundary");
 
         // `SessionEnd` (not `Stop`, which is a turn boundary) drives the End transition.
-        let (st3, fx3) = ingest_hook(&raw("SessionEnd", 2), &reg, &s, git_dir, "claude-code", 12)
-            .await
-            .unwrap();
-        assert_eq!(st3, SessionState::Ending);
-        assert!(fx3.contains(&Effect::RequestCondense));
+        let o3 = ingest_hook(
+            &raw("SessionEnd", 2),
+            &reg,
+            &s,
+            git_dir,
+            "claude-code",
+            "repo-1",
+            12,
+        )
+        .await
+        .unwrap();
+        assert_eq!(o3.state, SessionState::Ending);
+        assert!(o3.effects.contains(&Effect::RequestCondense));
 
         // two real transitions recorded (Idle→Active, Active→Ending)
         assert_eq!(s.count("session_transition").await.unwrap(), 2);
@@ -321,13 +402,13 @@ mod tests {
         let mut edit = raw("PreToolUse", 1);
         edit.payload = serde_json::json!({"tool_name": "Edit"});
 
-        ingest_hook(&edit, &reg, &s, git_dir, "claude-code", 10)
+        ingest_hook(&edit, &reg, &s, git_dir, "claude-code", "repo-1", 10)
             .await
             .unwrap();
         assert_eq!(s.count("captured_event").await.unwrap(), 2);
 
         // Re-deliver the identical hook: same idempotency keys → no new rows.
-        ingest_hook(&edit, &reg, &s, git_dir, "claude-code", 99)
+        ingest_hook(&edit, &reg, &s, git_dir, "claude-code", "repo-1", 99)
             .await
             .unwrap();
         assert_eq!(
@@ -339,7 +420,7 @@ mod tests {
         // A distinct turn is a distinct logical event → new rows.
         let mut edit2 = edit.clone();
         edit2.turn = 2;
-        ingest_hook(&edit2, &reg, &s, git_dir, "claude-code", 100)
+        ingest_hook(&edit2, &reg, &s, git_dir, "claude-code", "repo-1", 100)
             .await
             .unwrap();
         assert_eq!(s.count("captured_event").await.unwrap(), 4);

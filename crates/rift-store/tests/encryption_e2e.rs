@@ -66,7 +66,9 @@ async fn db_file_bytes_do_not_contain_plaintext_sensitive_value() {
             .await
             .unwrap();
         let ct = rows[0].get_blob(0).unwrap();
-        let pt = enc.decrypt_value("digest_blob", "bytes", "ref-1", &ct).unwrap();
+        let pt = enc
+            .decrypt_value("digest_blob", "bytes", "ref-1", &ct)
+            .unwrap();
         assert_eq!(pt.as_slice(), sentinel, "decrypt recovers the plaintext");
 
         // Anti-relocation: the AAD binds ciphertext to (table, column, row_id).
@@ -145,7 +147,9 @@ async fn kek_rotation_keeps_on_disk_ciphertext_decryptable() {
             .await
             .unwrap();
         let ct = rows[0].get_blob(0).unwrap();
-        let pt = enc.decrypt_value("digest_blob", "bytes", "ref-1", &ct).unwrap();
+        let pt = enc
+            .decrypt_value("digest_blob", "bytes", "ref-1", &ct)
+            .unwrap();
         assert_eq!(pt.as_slice(), sentinel);
         assert_eq!(store.count("key_metadata").await.unwrap(), 2);
     }
@@ -165,7 +169,10 @@ async fn lost_keychain_entry_triggers_rebuild_not_dataloss() {
         let store = open_recall(&db);
         // Encrypt + store under the KEK custodied by keychain A.
         let custody_a = KeyringKeyStore::new(MemoryKeychain::new());
-        let dek = custody_a.provision_repo_dek(&store, &repo, 1).await.unwrap();
+        let dek = custody_a
+            .provision_repo_dek(&store, &repo, 1)
+            .await
+            .unwrap();
         let keys = MemoryKeyStore::new(dek);
         let enc = EncryptingStore::new(&store, &keys, repo.clone());
         enc.insert_encrypted(

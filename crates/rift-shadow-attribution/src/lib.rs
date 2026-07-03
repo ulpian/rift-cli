@@ -11,7 +11,15 @@
 //! record that it was agent-derived (`human_modified_agent`) so acceptance and
 //! coaching metrics stay honest (`05-security` §5.8 — coaching, not ranking).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 #![allow(
     clippy::module_name_repetitions,
     clippy::doc_markdown,
@@ -20,11 +28,13 @@
 
 pub mod capture;
 pub mod diff;
-pub use capture::{capture_commit, CommitCapture, FileChange};
+pub mod replay;
+pub use capture::{capture_commit, CommitCapture, FileChange, HunkAttribution};
 pub use diff::{
     changed_hunk_id, diff_attributable, diff_lines, file_revision_id, is_attributable, Hunk,
     MAX_DIFF_BYTES,
 };
+pub use replay::{committed_writers, replay, ReplayedFile, TurnEdit};
 
 /// Who authored an edit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ::serde::Serialize, ::serde::Deserialize)]

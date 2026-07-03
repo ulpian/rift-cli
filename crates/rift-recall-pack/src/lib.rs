@@ -9,7 +9,15 @@
 //! exceed [`MAX_PACK_TOKENS`]) and is deterministic for identical inputs, so an
 //! unchanged pack re-serves byte-identically (cache-friendly stable prefix).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 /// Default target pack size (tokens).
 pub const DEFAULT_PACK_TOKENS: u32 = 1200;
@@ -19,9 +27,9 @@ pub const MAX_PACK_TOKENS: u32 = 4000;
 const CRITICAL_TAIL_CAP: u32 = 250;
 
 fn est_tokens(s: &str) -> u32 {
-    u32::try_from(s.chars().count() / 4)
-        .unwrap_or(u32::MAX)
-        .max(1)
+    // The one workspace counting authority (ADR-0006); floor of 1 so no pack
+    // item is ever budget-free.
+    rift_tokens::count(s).max(1)
 }
 
 /// A unit of pack content with its estimated token cost.

@@ -113,6 +113,14 @@ fn sha256_of(bytes: &[u8]) -> Sha256Id {
     Sha256Id::from_bytes(got)
 }
 
+/// Lowercase-hex SHA-256 of `bytes` — the exact digest the pin verifies with.
+/// Exported for the scripted pin-cut (`xtask pin-cut`), which must hash archives
+/// and extracted binaries with the same code path the installer uses.
+#[must_use]
+pub fn sha256_hex_of(bytes: &[u8]) -> String {
+    sha256_of(bytes).to_hex()
+}
+
 fn parse_manifest(s: &str) -> Result<Manifest, SubstrateError> {
     toml::from_str(s).map_err(|_| SubstrateError::Unavailable)
 }

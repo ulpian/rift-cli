@@ -30,8 +30,22 @@ use rift_store::{
 
 use crate::sha256_hex;
 
+/// Class-preserving map of a seam error into `RiftError`, so callers (and the
+/// CLI's exit contract) can distinguish an integrity refusal from a transient
+/// failure from a policy block without string-sniffing.
 fn map_archive_err(e: SubstrateError) -> RiftError {
-    RiftError::storage(format!("capture backend archive failed: {e}"))
+    match e {
+        SubstrateError::Integrity => {
+            RiftError::Integrity("capture backend failed its pinned checksum".into())
+        }
+        SubstrateError::Unavailable | SubstrateError::Timeout => {
+            RiftError::Substrate(format!("capture backend archive failed (transient): {e}"))
+        }
+        SubstrateError::Blocked => {
+            RiftError::PolicyDenied("capture backend invocation refused (local-only)".into())
+        }
+        other => RiftError::storage(format!("capture backend archive failed: {other}")),
+    }
 }
 
 /// One write-side capability that can be routed independently.

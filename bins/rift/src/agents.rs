@@ -45,8 +45,10 @@ pub(crate) async fn enable(store: &SqliteStore, agent_token: &str, now_ms: i64) 
     let reg = AdapterRegistry::with_builtin();
     let Some(adapter) = reg.get(&agent) else {
         let known: Vec<String> = reg.agents().iter().map(|a| a.as_str().to_owned()).collect();
+        // A precondition, not a generic failure: the command is well-formed but
+        // no built-in adapter exists for this agent (exit contract, P8 S1).
         return Ok(Outcome::coded(
-            exit::FAILURE,
+            exit::PRECONDITION,
             format!(
                 "no adapter for agent {agent_token:?}; known: {}",
                 known.join(", ")

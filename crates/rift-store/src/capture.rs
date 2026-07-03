@@ -5,9 +5,11 @@
 //! set-union, db-design §4.4/§4.7). They never UPDATE/DELETE — corrections are new
 //! superseding rows handled by the event bridge.
 //!
-//! Only the content-addressed diff-capture relations (`file_revision`,
-//! `changed_hunk`) live here today; the session/turn/tool projection writers land
-//! with the event bridge (P1 S4).
+//! Covers the full normalized capture model (M1): the diff-capture relations,
+//! the session/turn/model-call/tool-call decomposition (P2 S3), token usage,
+//! the turn-boundary relations (P4 S2), the ingest watermark (P1 S4), and the
+//! hook/wrapper audit relations. Ids are content-addressed by the caller
+//! (`rift-shadow`'s shared id-derivation module), never here.
 
 use rift_core::Result;
 
@@ -220,6 +222,73 @@ pub async fn record_price(store: &impl CanonicalStore, r: &PriceTableRow) -> Res
             ],
         )
         .await
+}
+
+/// The four effective per-MTok prices for one model, resolved bitemporally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectivePrices {
+    /// micro-currency per 1M uncached input tokens.
+    pub uncached_input: i64,
+    /// micro-currency per 1M cached input tokens.
+    pub cached_input: i64,
+    /// micro-currency per 1M cache-creation tokens.
+    pub cache_creation: i64,
+    /// micro-currency per 1M output tokens.
+    pub output: i64,
+}
+
+/// Resolve one class's effective price: in force at `valid_at` per the belief
+/// held at `as_of` (bitemporal, P6 S3): latest `valid_from ≤ valid_at`, then
+/// latest `recorded_at ≤ as_of`, deterministic tie-break on `price_id`.
+async fn effective_class_price(
+    store: &impl CanonicalStore,
+    model: &str,
+    token_class: &str,
+    valid_at: i64,
+    as_of: i64,
+) -> Result<Option<i64>> {
+    store
+        .query_opt_i64(
+            "SELECT unit_price_micros FROM price_table \
+             WHERE model = ?1 AND token_class = ?2 \
+               AND valid_from <= ?3 AND (valid_to IS NULL OR valid_to > ?3) \
+               AND recorded_at <= ?4 \
+             ORDER BY valid_from DESC, recorded_at DESC, price_id DESC LIMIT 1",
+            &[
+                Value::text(model.to_owned()),
+                Value::text(token_class.to_owned()),
+                Value::Int(valid_at),
+                Value::Int(as_of),
+            ],
+        )
+        .await
+}
+
+/// Resolve all four classes for `model`, or `None` if any class has no price on
+/// file — a partial catalog never produces a partially-priced cost fact.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn effective_prices(
+    store: &impl CanonicalStore,
+    model: &str,
+    valid_at: i64,
+    as_of: i64,
+) -> Result<Option<EffectivePrices>> {
+    let (Some(uncached_input), Some(cached_input), Some(cache_creation), Some(output)) = (
+        effective_class_price(store, model, "uncached_input", valid_at, as_of).await?,
+        effective_class_price(store, model, "cached_input", valid_at, as_of).await?,
+        effective_class_price(store, model, "cache_creation", valid_at, as_of).await?,
+        effective_class_price(store, model, "output", valid_at, as_of).await?,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(EffectivePrices {
+        uncached_input,
+        cached_input,
+        cache_creation,
+        output,
+    }))
 }
 
 /// A per-file `attribution` rollup row, keyed by `(checkpoint, file_revision)`
@@ -778,6 +847,762 @@ pub async fn record_verification_divergence(
             ],
         )
         .await
+}
+
+// ----- normalized session / turn / call writers (P1 S4 · P2 S3) -------------
+//
+// The decomposed model both event sources project into: agent hooks live, the
+// artifact bridge authoritatively (ADR-0002). Every id is content-addressed by
+// `rift-shadow`'s shared id-derivation module, so hook-rows ∪ bridge-rows is a
+// set-union no-op by construction.
+
+/// A `session` row (P2 S3): one agent session.
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    /// Content-addressed session id (derived from the agent's native id).
+    pub session_id: String,
+    /// The agent (`claude-code` | …).
+    pub agent: String,
+    /// The headline model (may be empty until a model call reports one).
+    pub model_primary: String,
+    /// The repo this session ran in.
+    pub repo_id: String,
+    /// Valid-time (epoch ms).
+    pub started_at: i64,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `session` (idempotent on its content-addressed key).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_session(store: &impl CanonicalStore, r: &SessionRow) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "session",
+            &[
+                "session_id",
+                "agent",
+                "model_primary",
+                "repo_id",
+                "started_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.session_id.clone()),
+                Value::text(r.agent.clone()),
+                Value::text(r.model_primary.clone()),
+                Value::text(r.repo_id.clone()),
+                Value::Int(r.started_at),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// A `session_event` row: lifecycle as events, never a mutable status column.
+#[derive(Debug, Clone)]
+pub struct SessionEventRow {
+    /// Content-addressed event id.
+    pub event_id: String,
+    /// The session.
+    pub session_id: String,
+    /// `start` | `end` | `compaction`.
+    pub kind: String,
+    /// Valid-time (epoch ms).
+    pub occurred_at: i64,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `session_event` (idempotent on its content-addressed key).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_session_event(
+    store: &impl CanonicalStore,
+    r: &SessionEventRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "session_event",
+            &[
+                "event_id",
+                "session_id",
+                "kind",
+                "occurred_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.event_id.clone()),
+                Value::text(r.session_id.clone()),
+                Value::text(r.kind.clone()),
+                Value::Int(r.occurred_at),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// A `turn` row: one prompt→response cycle within a session.
+#[derive(Debug, Clone)]
+pub struct TurnRow {
+    /// Content-addressed turn id (`session ‖ ordinal`).
+    pub turn_id: String,
+    /// The session.
+    pub session_id: String,
+    /// Order within the session.
+    pub ordinal: i64,
+    /// Valid-time (epoch ms).
+    pub started_at: i64,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `turn` (idempotent on its content-addressed key; the
+/// `UNIQUE(session_id, ordinal)` constraint also absorbs replays).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_turn(store: &impl CanonicalStore, r: &TurnRow) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "turn",
+            &[
+                "turn_id",
+                "session_id",
+                "ordinal",
+                "started_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.turn_id.clone()),
+                Value::text(r.session_id.clone()),
+                Value::Int(r.ordinal),
+                Value::Int(r.started_at),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// A `model_call` row: one LLM invocation within a turn.
+#[derive(Debug, Clone)]
+pub struct ModelCallRow {
+    /// Content-addressed call id.
+    pub call_id: String,
+    /// The turn.
+    pub turn_id: String,
+    /// The model invoked (may differ from `session.model_primary`).
+    pub model: String,
+    /// Valid-time (epoch ms).
+    pub started_at: i64,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `model_call` (idempotent on its content-addressed key).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_model_call(store: &impl CanonicalStore, r: &ModelCallRow) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "model_call",
+            &[
+                "call_id",
+                "turn_id",
+                "model",
+                "started_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.call_id.clone()),
+                Value::text(r.turn_id.clone()),
+                Value::text(r.model.clone()),
+                Value::Int(r.started_at),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// A `tool_call` row: one tool invocation within a turn.
+#[derive(Debug, Clone)]
+pub struct ToolCallRow {
+    /// Content-addressed tool-call id.
+    pub tool_call_id: String,
+    /// The turn.
+    pub turn_id: String,
+    /// The tool, agent-namespaced.
+    pub tool_name: String,
+    /// Valid-time (epoch ms).
+    pub started_at: i64,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `tool_call` (idempotent on its content-addressed key).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_tool_call(store: &impl CanonicalStore, r: &ToolCallRow) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "tool_call",
+            &[
+                "tool_call_id",
+                "turn_id",
+                "tool_name",
+                "started_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.tool_call_id.clone()),
+                Value::text(r.turn_id.clone()),
+                Value::text(r.tool_name.clone()),
+                Value::Int(r.started_at),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// Record a `tool_reads_file` link (M:N, its own relation — 4NF).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_tool_reads_file(
+    store: &impl CanonicalStore,
+    tool_call_id: &str,
+    file_revision_id: &str,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "tool_reads_file",
+            &["tool_call_id", "file_revision_id"],
+            &[
+                Value::text(tool_call_id.to_owned()),
+                Value::text(file_revision_id.to_owned()),
+            ],
+        )
+        .await
+}
+
+/// Record a `tool_edits_file` link (distinct from reads — they vary independently).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_tool_edits_file(
+    store: &impl CanonicalStore,
+    tool_call_id: &str,
+    file_revision_id: &str,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "tool_edits_file",
+            &["tool_call_id", "file_revision_id"],
+            &[
+                Value::text(tool_call_id.to_owned()),
+                Value::text(file_revision_id.to_owned()),
+            ],
+        )
+        .await
+}
+
+/// A `subagent_session` row: a child session linked to its parent turn.
+#[derive(Debug, Clone)]
+pub struct SubagentSessionRow {
+    /// The child session (FK: session).
+    pub child_session_id: String,
+    /// The parent turn (FK: turn).
+    pub parent_turn_id: String,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `subagent_session` (idempotent on the child id).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_subagent_session(
+    store: &impl CanonicalStore,
+    r: &SubagentSessionRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "subagent_session",
+            &["child_session_id", "parent_turn_id", "schema_version"],
+            &[
+                Value::text(r.child_session_id.clone()),
+                Value::text(r.parent_turn_id.clone()),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// A `session_in_checkpoint` row: the M:N checkpoint↔session link.
+#[derive(Debug, Clone)]
+pub struct SessionInCheckpointRow {
+    /// The checkpoint.
+    pub checkpoint_id: String,
+    /// The session.
+    pub session_id: String,
+    /// Order within the checkpoint.
+    pub ordinal: i64,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `session_in_checkpoint` (idempotent on the composite key).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_session_in_checkpoint(
+    store: &impl CanonicalStore,
+    r: &SessionInCheckpointRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "session_in_checkpoint",
+            &["checkpoint_id", "session_id", "ordinal", "schema_version"],
+            &[
+                Value::text(r.checkpoint_id.clone()),
+                Value::text(r.session_id.clone()),
+                Value::Int(r.ordinal),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// An `attribution_hunk` row: the per-hunk detail the per-file rollup sums.
+#[derive(Debug, Clone)]
+pub struct AttributionHunkRow {
+    /// The anchoring checkpoint.
+    pub checkpoint_id: String,
+    /// The file revision.
+    pub file_revision_id: String,
+    /// Hunk order within the file's diff.
+    pub hunk_ordinal: i64,
+    /// New-side start line.
+    pub new_start: i64,
+    /// New-side length.
+    pub new_len: i64,
+    /// One of `agent_added` | `human_added` | `human_modified_agent` |
+    /// `agent_removed_by_human` | `unknown`.
+    pub category: String,
+    /// Lines in this hunk attributed to `category`.
+    pub line_count: i64,
+    /// Confidence × 1000 (0..=1000).
+    pub confidence_milli: i64,
+    /// The attribution method version that produced this row.
+    pub method_version: String,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record an `attribution_hunk` (idempotent on the composite key).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_attribution_hunk(
+    store: &impl CanonicalStore,
+    r: &AttributionHunkRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "attribution_hunk",
+            &[
+                "checkpoint_id",
+                "file_revision_id",
+                "hunk_ordinal",
+                "new_start",
+                "new_len",
+                "category",
+                "line_count",
+                "confidence_milli",
+                "method_version",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.checkpoint_id.clone()),
+                Value::text(r.file_revision_id.clone()),
+                Value::Int(r.hunk_ordinal),
+                Value::Int(r.new_start),
+                Value::Int(r.new_len),
+                Value::text(r.category.clone()),
+                Value::Int(r.line_count),
+                Value::Int(r.confidence_milli),
+                Value::text(r.method_version.clone()),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+// ----- ingest watermark (P1 S4) ---------------------------------------------
+
+/// An `ingest_watermark` row: the append-only record of the last checkpoint
+/// commit ingested per branch. Re-ingest from the watermark is a no-op on
+/// already-seen content; the latest row per branch is the high-water mark.
+#[derive(Debug, Clone)]
+pub struct IngestWatermarkRow {
+    /// `= sha256(branch ‖ branch_tip)` (hex) — re-recording the same tip is a no-op.
+    pub watermark_id: String,
+    /// The ingested branch (`rift/checkpoints/v1`).
+    pub branch: String,
+    /// The branch tip (git oid, hex) at ingest time.
+    pub branch_tip: String,
+    /// Transaction-time (epoch ms).
+    pub ingested_at: i64,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record an `ingest_watermark` advance (idempotent on `(branch, tip)`).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_ingest_watermark(
+    store: &impl CanonicalStore,
+    r: &IngestWatermarkRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "ingest_watermark",
+            &[
+                "watermark_id",
+                "branch",
+                "branch_tip",
+                "ingested_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.watermark_id.clone()),
+                Value::text(r.branch.clone()),
+                Value::text(r.branch_tip.clone()),
+                Value::Int(r.ingested_at),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// When the given session last actually archived (`archive_decision` with
+/// `archived = true`), if ever — the scheduled strategy's reference point.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn latest_archive_ms(
+    store: &impl CanonicalStore,
+    session_id: &str,
+) -> Result<Option<i64>> {
+    store
+        .query_opt_i64(
+            "SELECT decided_at FROM archive_decision \
+             WHERE session_id = ?1 AND archived = 1 \
+             ORDER BY decided_at DESC, decision_id DESC LIMIT 1",
+            &[Value::text(session_id.to_owned())],
+        )
+        .await
+}
+
+/// The most recently recorded branch tip for `branch`, if any — where the
+/// bridge resumes from. Append-only reads: latest `ingested_at` wins (ties
+/// broken by `watermark_id` for determinism).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn latest_ingest_watermark(
+    store: &impl CanonicalStore,
+    branch: &str,
+) -> Result<Option<String>> {
+    let rows = store
+        .query(
+            "SELECT branch_tip FROM ingest_watermark WHERE branch = ?1 \
+             ORDER BY ingested_at DESC, watermark_id DESC LIMIT 1",
+            &[Value::text(branch.to_owned())],
+        )
+        .await?;
+    match rows.first() {
+        Some(r) => Ok(Some(r.get_text(0)?)),
+        None => Ok(None),
+    }
+}
+
+// ----- turn boundaries (P4 S2, pulled into M1) -------------------------------
+
+/// A `turn_boundary_snapshot` row: the working-tree observation that closes an
+/// H_i (`start`, human) or A_i (`end`, agent) edit window.
+#[derive(Debug, Clone)]
+pub struct TurnBoundarySnapshotRow {
+    /// `= sha256(session_id ‖ turn_ordinal ‖ boundary)` (hex).
+    pub snapshot_id: String,
+    /// The session.
+    pub session_id: String,
+    /// The turn ordinal this boundary belongs to.
+    pub turn_ordinal: i64,
+    /// `start` | `end`.
+    pub boundary: String,
+    /// Whose edit window this boundary closes: `human` | `agent`.
+    pub actor: String,
+    /// Content hash over the boundary's `(path, content_sha256)` set.
+    pub worktree_hash: String,
+    /// Valid-time (epoch ms).
+    pub captured_at: i64,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `turn_boundary_snapshot` (idempotent on its content-addressed key).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_turn_boundary_snapshot(
+    store: &impl CanonicalStore,
+    r: &TurnBoundarySnapshotRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "turn_boundary_snapshot",
+            &[
+                "snapshot_id",
+                "session_id",
+                "turn_ordinal",
+                "boundary",
+                "actor",
+                "worktree_hash",
+                "captured_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.snapshot_id.clone()),
+                Value::text(r.session_id.clone()),
+                Value::Int(r.turn_ordinal),
+                Value::text(r.boundary.clone()),
+                Value::text(r.actor.clone()),
+                Value::text(r.worktree_hash.clone()),
+                Value::Int(r.captured_at),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// A `turn_boundary_file` row: one file's content hash at a boundary. Only
+/// hashes/oids are durable — the bytes stay in the local git object store.
+#[derive(Debug, Clone)]
+pub struct TurnBoundaryFileRow {
+    /// The boundary snapshot (FK).
+    pub snapshot_id: String,
+    /// File path.
+    pub path: String,
+    /// Git blob oid of the file bytes at this boundary (hex).
+    pub blob_oid: String,
+    /// Content hash of those bytes (hex).
+    pub content_sha256: String,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `turn_boundary_file` (idempotent on `(snapshot, path)`).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_turn_boundary_file(
+    store: &impl CanonicalStore,
+    r: &TurnBoundaryFileRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "turn_boundary_file",
+            &[
+                "snapshot_id",
+                "path",
+                "blob_oid",
+                "content_sha256",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.snapshot_id.clone()),
+                Value::text(r.path.clone()),
+                Value::text(r.blob_oid.clone()),
+                Value::text(r.content_sha256.clone()),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// A `turn_diff_hunk` row: one H_i/A_i hunk (coordinates only) — the edit-stack
+/// input the LIFO attribution replay consumes at commit time.
+#[derive(Debug, Clone)]
+pub struct TurnDiffHunkRow {
+    /// `= sha256(session ‖ ordinal ‖ edit_kind ‖ path ‖ coords)` (hex).
+    pub hunk_id: String,
+    /// The session.
+    pub session_id: String,
+    /// The turn ordinal.
+    pub turn_ordinal: i64,
+    /// `human` (H_i) | `agent` (A_i).
+    pub edit_kind: String,
+    /// File path (boundary-time; renames resolve at commit).
+    pub path: String,
+    /// Old-side start line.
+    pub old_start: i64,
+    /// Old-side length.
+    pub old_len: i64,
+    /// New-side start line.
+    pub new_start: i64,
+    /// New-side length.
+    pub new_len: i64,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a `turn_diff_hunk` (idempotent on its content-addressed key).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_turn_diff_hunk(
+    store: &impl CanonicalStore,
+    r: &TurnDiffHunkRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "turn_diff_hunk",
+            &[
+                "hunk_id",
+                "session_id",
+                "turn_ordinal",
+                "edit_kind",
+                "path",
+                "old_start",
+                "old_len",
+                "new_start",
+                "new_len",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.hunk_id.clone()),
+                Value::text(r.session_id.clone()),
+                Value::Int(r.turn_ordinal),
+                Value::text(r.edit_kind.clone()),
+                Value::text(r.path.clone()),
+                Value::Int(r.old_start),
+                Value::Int(r.old_len),
+                Value::Int(r.new_start),
+                Value::Int(r.new_len),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// The per-file rows of the session's **latest** boundary snapshot (the state
+/// the next boundary diffs against). Ordering: highest turn ordinal wins, and
+/// within a turn `end` supersedes `start`.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn latest_turn_boundary_files(
+    store: &impl CanonicalStore,
+    session_id: &str,
+) -> Result<Vec<TurnBoundaryFileRow>> {
+    let rows = store
+        .query(
+            "SELECT f.snapshot_id, f.path, f.blob_oid, f.content_sha256, f.schema_version \
+             FROM turn_boundary_file f WHERE f.snapshot_id = (\
+               SELECT s.snapshot_id FROM turn_boundary_snapshot s \
+               WHERE s.session_id = ?1 \
+               ORDER BY s.turn_ordinal DESC, \
+                        CASE s.boundary WHEN 'end' THEN 1 ELSE 0 END DESC, \
+                        s.snapshot_id DESC LIMIT 1) \
+             ORDER BY f.path ASC",
+            &[Value::text(session_id.to_owned())],
+        )
+        .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        out.push(TurnBoundaryFileRow {
+            snapshot_id: r.get_text(0)?,
+            path: r.get_text(1)?,
+            blob_oid: r.get_text(2)?,
+            content_sha256: r.get_text(3)?,
+            schema_version: r.get_i64(4)?,
+        });
+    }
+    Ok(out)
+}
+
+/// How many `start` / `end` boundary snapshots exist for a session — the
+/// capture-coverage signal attribution confidence keys off.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn turn_boundary_counts(
+    store: &impl CanonicalStore,
+    session_id: &str,
+) -> Result<(i64, i64)> {
+    let starts = store
+        .query_opt_i64(
+            "SELECT COUNT(*) FROM turn_boundary_snapshot \
+             WHERE session_id = ?1 AND boundary = 'start'",
+            &[Value::text(session_id.to_owned())],
+        )
+        .await?
+        .unwrap_or(0);
+    let ends = store
+        .query_opt_i64(
+            "SELECT COUNT(*) FROM turn_boundary_snapshot \
+             WHERE session_id = ?1 AND boundary = 'end'",
+            &[Value::text(session_id.to_owned())],
+        )
+        .await?
+        .unwrap_or(0);
+    Ok((starts, ends))
+}
+
+/// All `turn_diff_hunk` rows for one session, in replay order: by turn ordinal,
+/// then H (human) before A (agent) within a turn — the LIFO edit-stack order
+/// `[H_0, A_0, H_1, A_1, …]` — then by path/position for determinism.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn turn_diff_hunks_for_session(
+    store: &impl CanonicalStore,
+    session_id: &str,
+) -> Result<Vec<TurnDiffHunkRow>> {
+    let rows = store
+        .query(
+            "SELECT hunk_id, session_id, turn_ordinal, edit_kind, path, \
+                    old_start, old_len, new_start, new_len, schema_version \
+             FROM turn_diff_hunk WHERE session_id = ?1 \
+             ORDER BY turn_ordinal ASC, \
+                      CASE edit_kind WHEN 'human' THEN 0 ELSE 1 END ASC, \
+                      path ASC, new_start ASC, hunk_id ASC",
+            &[Value::text(session_id.to_owned())],
+        )
+        .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        out.push(TurnDiffHunkRow {
+            hunk_id: r.get_text(0)?,
+            session_id: r.get_text(1)?,
+            turn_ordinal: r.get_i64(2)?,
+            edit_kind: r.get_text(3)?,
+            path: r.get_text(4)?,
+            old_start: r.get_i64(5)?,
+            old_len: r.get_i64(6)?,
+            new_start: r.get_i64(7)?,
+            new_len: r.get_i64(8)?,
+            schema_version: r.get_i64(9)?,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

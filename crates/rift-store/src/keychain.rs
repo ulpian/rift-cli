@@ -157,13 +157,17 @@ impl<B: KeychainBackend> KeyringKeyStore<B> {
     ) -> Result<DataKey> {
         let kek = self.load_or_create_kek(repo_id)?;
         if let Some(row) = latest_key_metadata(store, repo_id.as_str()).await? {
-            return unwrap_dek(&kek, &row.wrapped_dek, &Self::wrap_aad(repo_id, row.generation))
-                .map_err(|_| {
-                    RiftError::crypto(
-                        "keychain KEK cannot unwrap the stored DEK (keychain entry \
+            return unwrap_dek(
+                &kek,
+                &row.wrapped_dek,
+                &Self::wrap_aad(repo_id, row.generation),
+            )
+            .map_err(|_| {
+                RiftError::crypto(
+                    "keychain KEK cannot unwrap the stored DEK (keychain entry \
                          lost or replaced) — rebuild the projection",
-                    )
-                });
+                )
+            });
         }
         let dek = DataKey::generate()?;
         let wrapped = wrap_dek(&kek, &dek, &Self::wrap_aad(repo_id, 1))?;
@@ -301,7 +305,10 @@ mod tests {
 
         // Rotation superseded, never overwrote: both generations persist.
         assert_eq!(s.count("key_metadata").await.unwrap(), 2);
-        let latest = crate::latest_key_metadata(&s, "repo-1").await.unwrap().unwrap();
+        let latest = crate::latest_key_metadata(&s, "repo-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(latest.generation, 2);
         assert!(latest.supersedes_id.is_some());
     }

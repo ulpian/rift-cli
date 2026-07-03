@@ -7,6 +7,9 @@
 //! * `ci-meta` — the CI/lint meta-checks (required jobs, read-only workflow
 //!   permissions, lint-table baseline, no unsafe, no crate-root blanket allows,
 //!   no schema fast-path in bins).
+//! * `pin-cut <version>` — the scripted capture-backend pin-cut (ADR-0007):
+//!   cross-checks the upstream archives against the release's `checksums.txt`
+//!   and rewrites `pinned-substrate.toml` with extracted-binary hashes.
 //!
 //! The topology/toolchain guards run separately as `cargo test -p xtask`.
 #![forbid(unsafe_code)]
@@ -52,6 +55,23 @@ fn main() -> Result<(), String> {
             println!("ci-meta: all checks pass");
             Ok(())
         }
-        _ => Err("usage: xtask <check-coverage <cov.json> | ci-meta>".to_string()),
+        Some("pin-cut") => {
+            let version = args
+                .get(1)
+                .ok_or_else(|| "usage: xtask pin-cut <version>  (e.g. 0.7.8)".to_string())?;
+            let summary = xtask::pin_cut::run(&workspace_root(), version)?;
+            print!("{summary}");
+            Ok(())
+        }
+        Some("gate-m1") => {
+            let violations = xtask::gate_m1::run(&workspace_root())?;
+            fail_with(&violations, "gate-m1")?;
+            println!("gate-m1: all checks pass");
+            Ok(())
+        }
+        _ => Err(
+            "usage: xtask <check-coverage <cov.json> | ci-meta | pin-cut <version> | gate-m1>"
+                .to_string(),
+        ),
     }
 }

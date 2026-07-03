@@ -521,11 +521,11 @@ const KEY_METADATA_COLUMNS: &[Column] = &[
 // Local-only identity (phase-04 step-03): one row per distinct observed
 // identity state; a change appends a new snapshot superseding the prior one.
 const DEVELOPER_IDENTITY_SNAPSHOT_COLUMNS: &[Column] = &[
-    Column::text("snapshot_id"),          // content-addressed over the identity fields
-    Column::text("developer_id"),         // salted blake3 (never the raw email)
-    Column::text("git_author_name"),      // display only
+    Column::text("snapshot_id"), // content-addressed over the identity fields
+    Column::text("developer_id"), // salted blake3 (never the raw email)
+    Column::text("git_author_name"), // display only
     Column::text("git_email_normalized"), // normalization basis of developer_id
-    Column::text("machine_id"),           // salted blake3 (never the raw fingerprint)
+    Column::text("machine_id"),  // salted blake3 (never the raw fingerprint)
     Column::int("observed_at"),
     Column::text_null("supersedes_id"),
     Column::int("schema_version"),
@@ -542,6 +542,48 @@ const SESSION_BINDING_COLUMNS: &[Column] = &[
     Column::text("basis"),           // BindingBasis::as_str token
     Column::int("recorded_at"),
     Column::text_null("supersedes_id"),
+    Column::int("schema_version"),
+];
+
+// ----- Turn boundaries (P4 S2, pulled into M1) ------------------------------
+//
+// The working-tree state observed at a turn boundary: `start` closes the
+// human's H_i window (edits since the previous turn ended), `end` closes the
+// agent's A_i window (edits within the turn). Only hashes and hunk coordinates
+// are durable — file bytes stay in the local git object store, never here.
+
+const TURN_BOUNDARY_SNAPSHOT_COLUMNS: &[Column] = &[
+    Column::text("snapshot_id"), // = sha256(session_id ‖ turn_ordinal ‖ boundary)
+    Column::text("session_id"),
+    Column::int("turn_ordinal"),
+    Column::text("boundary"),      // 'start' | 'end'
+    Column::text("actor"),         // whose window this boundary closes: 'human' | 'agent'
+    Column::text("worktree_hash"), // content hash over the boundary's (path, sha256) set
+    Column::int("captured_at"),
+    Column::int("schema_version"),
+];
+
+// Per-file content hash at one boundary. FK: turn_boundary_snapshot.
+const TURN_BOUNDARY_FILE_COLUMNS: &[Column] = &[
+    Column::text("snapshot_id"),
+    Column::text("path"),
+    Column::text("blob_oid"), // git blob oid of the file bytes at this boundary
+    Column::text("content_sha256"), // content hash of those bytes
+    Column::int("schema_version"),
+];
+
+// One H_i/A_i diff hunk (coordinates only), the edit-stack input the LIFO
+// attribution replay consumes at commit time.
+const TURN_DIFF_HUNK_COLUMNS: &[Column] = &[
+    Column::text("hunk_id"), // = sha256(session ‖ ordinal ‖ edit_kind ‖ path ‖ coords)
+    Column::text("session_id"),
+    Column::int("turn_ordinal"),
+    Column::text("edit_kind"), // 'human' (H_i) | 'agent' (A_i)
+    Column::text("path"),
+    Column::int("old_start"),
+    Column::int("old_len"),
+    Column::int("new_start"),
+    Column::int("new_len"),
     Column::int("schema_version"),
 ];
 
@@ -758,6 +800,25 @@ const TABLES: &[CanonicalTable] = &[
         primary_key: &["binding_id"],
         unique: NO_UNIQUE,
     },
+    // --- capture v4 additive (turn boundaries, P4 S2): past the identity set --
+    CanonicalTable {
+        name: "turn_boundary_snapshot",
+        columns: TURN_BOUNDARY_SNAPSHOT_COLUMNS,
+        primary_key: &["snapshot_id"],
+        unique: &[&["session_id", "turn_ordinal", "boundary"]],
+    },
+    CanonicalTable {
+        name: "turn_boundary_file",
+        columns: TURN_BOUNDARY_FILE_COLUMNS,
+        primary_key: &["snapshot_id", "path"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "turn_diff_hunk",
+        columns: TURN_DIFF_HUNK_COLUMNS,
+        primary_key: &["hunk_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// Frozen v1 prefix of the capture registry: the tables shipped in the
@@ -778,12 +839,29 @@ pub(crate) fn capture_v1_tables() -> &'static [CanonicalTable] {
     &TABLES[..CAPTURE_V1_TABLE_COUNT]
 }
 
-/// Capture tables added after the v1 freeze (each ships in its own additive
-/// migration; empty until a post-v1 table lands).
+/// Boundary after the v3 (`capture_identity`) tables. Like the v1 freeze, this
+/// slice end is locked once v3 has shipped: the identity migration's SQL is
+/// generated from exactly `TABLES[CAPTURE_V1_TABLE_COUNT..CAPTURE_IDENTITY_TABLE_COUNT]`,
+/// so later tables must append past it and ship in their own migration.
+pub(crate) const CAPTURE_IDENTITY_TABLE_COUNT: usize = 32;
+
+/// Boundary after the v4 (`capture_turn_boundary`) tables — the current end of
+/// the capture registry. The next additive capture migration starts here.
+pub(crate) const CAPTURE_TURN_BOUNDARY_TABLE_COUNT: usize = 35;
+
+/// The v3 `capture_identity` tables (frozen once shipped — see
+/// [`CAPTURE_IDENTITY_TABLE_COUNT`]).
 #[must_use]
 #[allow(clippy::indexing_slicing)] // same compile-time bound as above
-pub(crate) fn capture_post_v1_tables() -> &'static [CanonicalTable] {
-    &TABLES[CAPTURE_V1_TABLE_COUNT..]
+pub(crate) fn capture_identity_tables() -> &'static [CanonicalTable] {
+    &TABLES[CAPTURE_V1_TABLE_COUNT..CAPTURE_IDENTITY_TABLE_COUNT]
+}
+
+/// The v4 `capture_turn_boundary` tables (P4 S2, pulled into M1).
+#[must_use]
+#[allow(clippy::indexing_slicing)] // same compile-time bound as above
+pub(crate) fn capture_turn_boundary_tables() -> &'static [CanonicalTable] {
+    &TABLES[CAPTURE_IDENTITY_TABLE_COUNT..CAPTURE_TURN_BOUNDARY_TABLE_COUNT]
 }
 
 /// The registry of canonical (append-only) tables. The immutability property
@@ -1374,6 +1452,10 @@ mod tests {
             "ingest_watermark",
             "verification_run",
             "verification_divergence",
+            // turn-boundary attribution (P4 S2, pulled into M1)
+            "turn_boundary_snapshot",
+            "turn_boundary_file",
+            "turn_diff_hunk",
         ] {
             assert!(is_canonical_table(required), "missing table {required}");
         }

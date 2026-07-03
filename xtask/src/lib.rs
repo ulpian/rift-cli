@@ -28,6 +28,8 @@ use toml::Value;
 
 pub mod ci_meta;
 pub mod coverage;
+pub mod gate_m1;
+pub mod pin_cut;
 
 /// A fallible meta-check: `Ok(violations)` (empty ⇒ healthy) or a hard `Err`
 /// (a manifest could not be read or parsed).
@@ -271,7 +273,13 @@ pub fn check_member_inheritance(root: &Path) -> Check {
         if !lints_ws {
             violations.push(format!("{m}: missing `[lints] workspace = true`"));
         }
-        for field in ["version", "edition", "rust-version", "license", "repository"] {
+        for field in [
+            "version",
+            "edition",
+            "rust-version",
+            "license",
+            "repository",
+        ] {
             let inherits = manifest
                 .get("package")
                 .and_then(|p| p.get(field))

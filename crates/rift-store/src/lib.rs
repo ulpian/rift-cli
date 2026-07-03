@@ -60,27 +60,35 @@ pub mod store;
 mod value;
 
 pub use capture::{
-    confidence_to_milli, record_agent_enablement, record_agent_hook_event, record_archive_decision,
-    record_attribution, record_captured_event, record_changed_hunk, record_file_revision,
-    record_price, record_session_transition, record_substrate_block_event,
-    record_substrate_install, record_token_usage, record_verification_divergence,
-    record_verification_run, AgentEnablementRow, AgentHookEventRow, ArchiveDecisionRow,
-    AttributionRow, CapturedEventRow, ChangedHunkRow, FileRevisionRow, PriceTableRow,
-    SessionTransitionRow, SubstrateBlockEventRow, SubstrateInstallRow, TokenUsageRow,
-    VerificationDivergenceRow, VerificationRunRow,
+    confidence_to_milli, effective_prices, latest_archive_ms, latest_ingest_watermark,
+    latest_turn_boundary_files, record_agent_enablement, record_agent_hook_event,
+    record_archive_decision, record_attribution, record_attribution_hunk, record_captured_event,
+    record_changed_hunk, record_file_revision, record_ingest_watermark, record_model_call,
+    record_price, record_session, record_session_event, record_session_in_checkpoint,
+    record_session_transition, record_subagent_session, record_substrate_block_event,
+    record_substrate_install, record_token_usage, record_tool_call, record_tool_edits_file,
+    record_tool_reads_file, record_turn, record_turn_boundary_file, record_turn_boundary_snapshot,
+    record_turn_diff_hunk, record_verification_divergence, record_verification_run,
+    turn_boundary_counts, turn_diff_hunks_for_session, AgentEnablementRow, AgentHookEventRow,
+    ArchiveDecisionRow, AttributionHunkRow, AttributionRow, CapturedEventRow, ChangedHunkRow,
+    EffectivePrices, FileRevisionRow, IngestWatermarkRow, ModelCallRow, PriceTableRow,
+    SessionEventRow, SessionInCheckpointRow, SessionRow, SessionTransitionRow, SubagentSessionRow,
+    SubstrateBlockEventRow, SubstrateInstallRow, TokenUsageRow, ToolCallRow, TurnBoundaryFileRow,
+    TurnBoundarySnapshotRow, TurnDiffHunkRow, TurnRow, VerificationDivergenceRow,
+    VerificationRunRow,
 };
 pub use crypto::{
     decrypt_column, encrypt_column, ColumnCipher, DekCipher, KeyStore, MemoryKeyStore, PlainCipher,
 };
 pub use durable::{DurableWrite, LocalOnlyShadowWrite, ObjectKind, SyncWrite};
 pub use encrypted_dao::EncryptingStore;
-pub use integrity::{
-    cost_belief_as_of, current_cost_micros, record_checkpoint, record_cost_fact,
-    verify_against_source, ChainSource, CheckpointRecord, CostFact, VerifyReport,
-};
 pub use identity_store::{
     latest_binding_for_session, latest_identity_snapshot, record_identity_snapshot,
     record_session_binding, unbound_session_ids,
+};
+pub use integrity::{
+    cost_belief_as_of, current_cost_micros, record_checkpoint, record_checkpoint_if_new,
+    record_cost_fact, verify_against_source, ChainSource, CheckpointRecord, CostFact, VerifyReport,
 };
 pub use key_metadata::{
     key_metadata_for_generation, latest_key_metadata, record_key_metadata, KeyMetadataRow,

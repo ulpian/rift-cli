@@ -29,11 +29,13 @@ EffectiveConfig {
     raw_transcripts: false,
     capture_tool_calls: true,
     capture_token_usage: true,
+    checkpoint_strategy: "manual-commit",
+    schedule_interval_minutes: 30,
     entropy_threshold: 4.5,
     extra_patterns: [],
     default_retention_class: "standard",
     retention_classes: [
         "standard",
     ],
-    policy_hash: Blake3Id(d075324f355fcac81ba52f0b3a59b7652981591eaa73afca0c86caa2bd8dd6c6),
+    policy_hash: Blake3Id(9ea8029e35272fc232260cc8028f35e3fa67c12b49d832c2263ab36479928548),
 }

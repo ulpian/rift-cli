@@ -128,7 +128,11 @@ fn enable_unknown_agent_fails_cleanly() {
         repo.path(),
         &["enable", "--agent", "not-an-agent"],
     );
-    assert_eq!(code(&out), 1, "unknown agent is a clean failure (exit 1)");
+    assert_eq!(
+        code(&out),
+        4,
+        "no adapter for the agent is a precondition failure (exit 4)"
+    );
 }
 
 #[test]

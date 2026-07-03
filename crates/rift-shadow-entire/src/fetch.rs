@@ -59,6 +59,22 @@ impl HttpFetcher {
         }
     }
 
+    /// Download the raw (un-extracted) archive bytes at `url`, HTTPS-only.
+    ///
+    /// Used by the scripted pin-cut (P1 S1), which must hash the **archive**
+    /// against the upstream checksum manifest before deriving the
+    /// extracted-binary pin. Production provisioning goes through
+    /// [`SubstrateFetcher::fetch`], which extracts.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Unavailable`] on a non-HTTPS URL or download failure.
+    pub fn download_raw(&self, url: &str) -> Result<Vec<u8>, SubstrateError> {
+        if !url.starts_with("https://") {
+            return Err(SubstrateError::Unavailable);
+        }
+        self.download(url)
+    }
+
     /// Download the raw archive bytes at `url`.
     fn download(&self, url: &str) -> Result<Vec<u8>, SubstrateError> {
         let mut response = self
@@ -99,7 +115,15 @@ impl SubstrateFetcher for HttpFetcher {
 /// Extract the capture binary from a release archive, dispatching on the URL's
 /// archive extension. The binary is the member at the archive root. (`*.tar.gz`
 /// and `*.tgz` both report a `gz` extension.)
-fn extract_binary(archive: &[u8], url: &str) -> Result<Vec<u8>, SubstrateError> {
+///
+/// Public so the scripted pin-cut derives the pinned extracted-binary hash
+/// through **exactly** the extraction path production provisioning uses — the
+/// pin and the installer can never disagree about what "the binary" is.
+///
+/// # Errors
+/// [`SubstrateError::Unavailable`] on an unknown archive extension, a corrupt
+/// archive, or a missing binary member.
+pub fn extract_binary(archive: &[u8], url: &str) -> Result<Vec<u8>, SubstrateError> {
     let ext = std::path::Path::new(url)
         .extension()
         .and_then(|e| e.to_str())

@@ -22,11 +22,12 @@ use std::path::Path;
 
 use rift_core::{Result, SecretBytes};
 use rift_git::BlobReader;
-use rift_shadow_attribution::{capture::METHOD_VERSION, capture_commit, CommitCapture};
+use rift_shadow_attribution::{capture_commit, CommitCapture};
 use rift_shadow_hooks::strategy::ArchiveDecision;
 use rift_store::{
-    confidence_to_milli, record_attribution, record_changed_hunk, record_file_revision,
-    AttributionRow, CanonicalStore, ChangedHunkRow, FileRevisionRow,
+    confidence_to_milli, record_attribution, record_attribution_hunk, record_changed_hunk,
+    record_file_revision, AttributionHunkRow, AttributionRow, CanonicalStore, ChangedHunkRow,
+    FileRevisionRow,
 };
 
 use crate::backend::ShadowBackend;
@@ -88,12 +89,32 @@ pub async fn persist_commit_capture(
                     human_modified_agent: i64::from(a.human_modified_agent_lines),
                     agent_removed_by_human: i64::from(a.agent_removed_by_human),
                     confidence_milli: confidence_to_milli(f.confidence),
-                    method_version: METHOD_VERSION.to_owned(),
+                    method_version: f.method_version.clone(),
                     supersedes_pk: None,
                     schema_version: 1,
                 },
             )
             .await?;
+            // The per-hunk detail the rollup sums (present once the turn
+            // replay has enriched the capture).
+            for hc in &f.hunk_categories {
+                record_attribution_hunk(
+                    store,
+                    &AttributionHunkRow {
+                        checkpoint_id: ckpt.to_owned(),
+                        file_revision_id: file_revision_id.clone(),
+                        hunk_ordinal: i64::from(hc.hunk_ordinal),
+                        new_start: i64::from(hc.new_start),
+                        new_len: i64::from(hc.new_len),
+                        category: hc.category.clone(),
+                        line_count: i64::from(hc.line_count),
+                        confidence_milli: confidence_to_milli(f.confidence),
+                        method_version: f.method_version.clone(),
+                        schema_version: 1,
+                    },
+                )
+                .await?;
+            }
         }
     }
     Ok(capture.files.len())
@@ -125,6 +146,38 @@ pub async fn archive_and_capture(
     // Compute the read-only capture first, so a backend archive failure never costs
     // us the durable `C`-diff facts.
     let capture = capture_commit(reader, commit_hex)?;
+    archive_and_capture_with(
+        &capture,
+        backend,
+        store,
+        repo,
+        commit_hex,
+        session,
+        raw_capture,
+        decision,
+        now_ms,
+    )
+    .await
+}
+
+/// [`archive_and_capture`] over a **precomputed** [`CommitCapture`] — for callers
+/// that already diffed the commit (e.g. to evaluate the sensitive-path trigger)
+/// and must not pay for the diff twice.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if the archive or an insert fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn archive_and_capture_with(
+    capture: &CommitCapture,
+    backend: &impl ShadowBackend,
+    store: &impl CanonicalStore,
+    repo: &Path,
+    commit_hex: &str,
+    session: &str,
+    raw_capture: &SecretBytes,
+    decision: ArchiveDecision,
+    now_ms: i64,
+) -> Result<Option<CheckpointId>> {
     let archive = run_decision(
         backend,
         store,
@@ -143,7 +196,7 @@ pub async fn archive_and_capture(
         Ok(c) => c.clone(),
         Err(_) => None,
     };
-    persist_commit_capture(store, &capture, checkpoint.as_deref()).await?;
+    persist_commit_capture(store, capture, checkpoint.as_deref()).await?;
     archive
 }
 

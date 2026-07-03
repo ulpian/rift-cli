@@ -12,9 +12,15 @@
 //! exactly one `memd.*` event carrying honest `returned`/`avoided` token figures
 //! — so every serve decision is audited (the serve↔event bijection).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
-
-pub mod tokens;
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use std::collections::BTreeSet;
 
@@ -339,7 +345,7 @@ impl<'a> McpServer<'a> {
             let handle = format!("file:{}@sha256:{}", c.path, lc.content_sha256);
             // The manifest line cost (honest): the descriptor we inline per entry.
             let descriptor = format!("{} {}", c.path, lc.content_sha256);
-            let line_cost = tokens::count(&descriptor);
+            let line_cost = rift_tokens::count(&descriptor);
             if !self.budget.try_tokens(line_cost) {
                 truncated = true; // budget cut the manifest; rest available by handle
                 break;
@@ -497,7 +503,7 @@ impl<'a> McpServer<'a> {
             let lo = r.get_i64(0).unwrap_or(0).max(0);
             let len = r.get_i64(1).unwrap_or(0).max(0);
             let view = json!({ "lo": lo, "hi": lo + len });
-            let cost = tokens::count(&view.to_string());
+            let cost = rift_tokens::count(&view.to_string());
             if !self.budget.try_tokens(cost) {
                 omitted += 1;
                 continue;
@@ -552,7 +558,7 @@ impl<'a> McpServer<'a> {
             (Some(bound), Some(lc)) if bound == lc.content_sha256 => {
                 // valid: the bound source is still current.
                 let summary = format!("summary bound to {bound}");
-                let cost = tokens::count(&summary);
+                let cost = rift_tokens::count(&summary);
                 let _ = self.budget.try_tokens(cost);
                 (
                     json!({ "state": "summary", "path": path, "source_hash": bound, "summary": summary }),
@@ -614,7 +620,7 @@ impl<'a> McpServer<'a> {
                     .map_err(|e| ToolError::Internal(e.to_string()))?
                     .map(|b| String::from_utf8_lossy(&b).into_owned())
                     .unwrap_or_default();
-                let returned = self.charge(tokens::count(&body));
+                let returned = self.charge(rift_tokens::count(&body));
                 let payload = json!({
                     "tool": "retrieve_exact",
                     "result": { "state": "exact", "path": path, "body": body },
@@ -721,7 +727,7 @@ impl<'a> McpServer<'a> {
         };
         let pack = rift_recall_pack::compile(&pack_req);
         let rendered = pack.render();
-        let returned = self.charge(tokens::count(&rendered));
+        let returned = self.charge(rift_tokens::count(&rendered));
         let avoided = ranked
             .iter()
             .map(|l| l.candidate.est_tokens)
@@ -766,7 +772,7 @@ impl<'a> McpServer<'a> {
             tool,
             estimated_tokens_returned: returned,
             estimated_tokens_avoided: avoided,
-            tokenizer: tokens::TOKENIZER,
+            tokenizer: rift_tokens::TOKENIZER,
             payload,
             event,
         }

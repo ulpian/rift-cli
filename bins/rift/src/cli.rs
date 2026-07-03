@@ -61,7 +61,15 @@ pub(crate) enum ColorChoice {
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
     /// Scaffold `.rift/`, install git hooks, init the projection, provision the backend.
-    #[command(alias = "setup")]
+    #[command(
+        alias = "setup",
+        long_about = "Scaffold `.rift/`, install git hooks, and \
+        initialize the projection.\n\nBy default this also downloads and installs Rift's \
+        pinned, checksum-verified local capture backend (local-only; no telemetry, no \
+        cloud). Opt out with `--no-provision` or `RIFT_NO_PROVISION=1` — capture then \
+        stays inert until you re-run `rift init`. Both the install and the skip are \
+        recorded in the append-only audit ledger."
+    )]
     Init(InitArgs),
     /// One-shot snapshot of capture / projection / verify health.
     Status,
@@ -73,6 +81,9 @@ pub(crate) enum Command {
     Disable(AgentArgs),
     /// Re-derive the hash chain and cross-check the projection (its own exit codes).
     Verify,
+    /// Rebuild the projection from the redacted checkpoint branch (the artifact
+    /// bridge). Idempotent: over a live projection it inserts nothing new.
+    Rebuild,
     /// Inspect checkpoints.
     #[command(subcommand)]
     Checkpoint(CheckpointCmd),
@@ -93,7 +104,8 @@ pub(crate) enum Command {
 /// `rift init` / `rift setup`.
 #[derive(Args, Debug)]
 pub(crate) struct InitArgs {
-    /// Skip provisioning the capture backend.
+    /// Skip installing the local capture backend (recorded as an audited skip;
+    /// capture stays inert). Also honored via `RIFT_NO_PROVISION=1`.
     #[arg(long)]
     pub(crate) no_provision: bool,
 }
@@ -173,12 +185,18 @@ pub(crate) mod exit {
     pub(crate) const USAGE: i32 = 2;
     /// Not initialized / not a Rift repo (run `rift init`).
     pub(crate) const NOT_INIT: i32 = 3;
-    /// A precondition failed (e.g. dirty state where a clean one is required).
-    /// Part of the stable contract; not yet emitted by any command.
-    #[allow(dead_code)]
+    /// A precondition failed (e.g. an unsupported platform, or no adapter for
+    /// the named agent — the environment is not in the state the command needs).
     pub(crate) const PRECONDITION: i32 = 4;
+    /// Refused on an integrity check (pinned-backend checksum, migration-ledger
+    /// tamper). Not retryable: the bytes on offer are not the bytes we pinned.
+    /// (sysexits `EX_DATAERR`.)
+    pub(crate) const INTEGRITY: i32 = 65;
     /// Unexpected internal error (a bug) — never silently 0.
     pub(crate) const INTERNAL: i32 = 70;
+    /// A transient failure (backend download/spawn/timeout) — safe to retry.
+    /// (sysexits `EX_TEMPFAIL`.)
+    pub(crate) const RETRYABLE: i32 = 75;
 }
 
 /// A command result: an exit code plus dual-rendered output (human + JSON), so the

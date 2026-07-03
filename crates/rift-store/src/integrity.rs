@@ -81,6 +81,40 @@ pub async fn record_checkpoint(store: &impl CanonicalStore, c: &CheckpointRecord
         .await
 }
 
+/// [`record_checkpoint`] with idempotent set-union semantics: re-recording an
+/// already-present checkpoint id is a no-op (`false`), never an error — what
+/// the crash-resumable artifact bridge needs (P1 S4). The strict variant stays
+/// for writers that must detect duplication.
+///
+/// # Errors
+/// [`RiftError::Storage`]/[`RiftError::Immutability`] on a non-conflict failure.
+pub async fn record_checkpoint_if_new(
+    store: &impl CanonicalStore,
+    c: &CheckpointRecord,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "checkpoint",
+            &[
+                "checkpoint_id",
+                "strategy",
+                "created_at",
+                "merkle_root",
+                "prev_hash",
+                "schema_version",
+            ],
+            &[
+                Value::text(c.checkpoint_id.to_hex()),
+                Value::text(c.strategy.clone()),
+                Value::Int(c.created_at),
+                Value::text(c.merkle_root.to_hex()),
+                c.prev.map_or(Value::Null, |p| Value::text(p.to_hex())),
+                Value::Int(c.schema_version),
+            ],
+        )
+        .await
+}
+
 /// Read the stored checkpoint chain as [`ChainLink`]s, ordered by **prev-hash
 /// linkage** from the genesis link — the chain's own structure, never a
 /// timestamp sort (same-millisecond checkpoints would tie there and produce a

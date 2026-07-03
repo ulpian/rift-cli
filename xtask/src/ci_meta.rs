@@ -42,7 +42,12 @@ pub fn required_jobs_present(root: &Path) -> Result<Vec<String>, String> {
     Ok(REQUIRED_JOBS
         .iter()
         .filter(|j| !ci.contains(&format!("\n  {j}")))
-        .map(|j| format!("ci.yml: required job `{}` is missing", j.trim_end_matches(':')))
+        .map(|j| {
+            format!(
+                "ci.yml: required job `{}` is missing",
+                j.trim_end_matches(':')
+            )
+        })
         .collect())
 }
 
@@ -163,7 +168,10 @@ pub fn unsafe_only_in_sanctioned_modules(root: &Path) -> Result<Vec<String>, Str
         for (i, line) in text.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
             if NEEDLES.iter().any(|n| code.contains(n)) {
-                v.push(format!("{rel}:{}: `unsafe` outside a sanctioned module", i + 1));
+                v.push(format!(
+                    "{rel}:{}: `unsafe` outside a sanctioned module",
+                    i + 1
+                ));
             }
         }
     }
@@ -216,10 +224,7 @@ pub fn no_schema_fastpath_in_bins(root: &Path) -> Result<Vec<String>, String> {
             continue;
         }
         let text = std::fs::read_to_string(&f).map_err(|e| format!("read {rel}: {e}"))?;
-        let production = text
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap_or("");
+        let production = text.split("#[cfg(test)]").next().unwrap_or("");
         if production.contains("create_canonical_schema") {
             v.push(format!(
                 "{rel}: `create_canonical_schema` in production bin code — open the \

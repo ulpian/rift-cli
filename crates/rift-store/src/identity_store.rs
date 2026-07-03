@@ -269,7 +269,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(rows[0].get_opt_text(0).unwrap().as_deref(), Some(id_a.as_str()));
+        assert_eq!(
+            rows[0].get_opt_text(0).unwrap().as_deref(),
+            Some(id_a.as_str())
+        );
     }
 
     #[tokio::test]
@@ -291,7 +294,10 @@ mod tests {
         let id2 = record_session_binding(&s, "sess_1", &b2).await.unwrap();
         assert_ne!(id1, id2);
         assert_eq!(s.count("session_binding").await.unwrap(), 2);
-        let (latest, _) = latest_binding_for_session(&s, "sess_1").await.unwrap().unwrap();
+        let (latest, _) = latest_binding_for_session(&s, "sess_1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(latest, id2);
         // Append-only: the superseded row cannot be mutated away.
         assert!(matches!(
@@ -308,7 +314,10 @@ mod tests {
         assert_eq!(unbound_session_ids(&s).await.unwrap().len(), 2);
         let b = binding_evidence(&alice(), Timestamp::from_millis(1));
         record_session_binding(&s, "sess_1", &b).await.unwrap();
-        assert_eq!(unbound_session_ids(&s).await.unwrap(), vec!["sess_2".to_string()]);
+        assert_eq!(
+            unbound_session_ids(&s).await.unwrap(),
+            vec!["sess_2".to_string()]
+        );
     }
 
     async fn seed_session(s: &SqliteStore, id: &str) {

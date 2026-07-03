@@ -10,8 +10,9 @@
 //! `doctor`, `enable`/`disable`, `verify`, `checkpoint`, `session`, `explain`,
 //! `gc`, `configure`, and the hidden `hooks` wire entry. Every subcommand is
 //! short-lived (no daemon); query commands are read-only over the projection. The
-//! exit-code contract (`0/1/2/3/4/70`, with `verify` carrying its own) is mapped
-//! here from each command's typed [`cli::Outcome`].
+//! exit-code contract (`0/1/2/3/4/70`, plus `65` integrity-refused and `75`
+//! retryable-transient, with `verify` carrying its own) is mapped here from each
+//! command's typed [`cli::Outcome`].
 #![cfg_attr(
     test,
     allow(
@@ -88,8 +89,14 @@ fn main() -> ExitCode {
         Ok(outcome) => emit(&cli, &outcome),
         Err(e) => {
             // A clean non-zero exit with a message — never a panic/backtrace.
+            // An integrity refusal (e.g. the migration ledger's tamper lock)
+            // keeps its class; everything else is a generic failure.
+            let code = match &e {
+                rift_core::RiftError::Integrity(_) => exit::INTEGRITY,
+                _ => exit::FAILURE,
+            };
             eprintln!("rift: {e}");
-            ExitCode::from(u8::try_from(exit::FAILURE).unwrap_or(1))
+            ExitCode::from(u8::try_from(code).unwrap_or(1))
         }
     }
 }
@@ -101,6 +108,7 @@ fn route(_cli: &Cli, cmd: &Command) -> rift_core::Result<Outcome> {
         Command::Init(a) => cmd_init(a),
         Command::Doctor => Ok(cmd_doctor()),
         Command::Verify => Ok(verify_outcome()),
+        Command::Rebuild => cmd_rebuild(),
         Command::Configure(a) => cmd_configure(a),
         // enable/disable mutate; they may run before `init` and create `.rift/`.
         Command::Enable(a) => {
@@ -257,14 +265,39 @@ fn cmd_init(args: &InitArgs) -> rift_core::Result<Outcome> {
         human.push_str("git hooks: skipped (not a git repo)\n");
     }
 
-    provision_if_requested(args.no_provision)?;
+    let provision = provision_if_requested(args.no_provision)?;
+    human.push_str(&provision.line);
 
     let json = serde_json::json!({
         "registered": name,
         "newly_registered": added,
         "config": cfg.display().to_string(),
+        "capture_backend": provision.json,
     });
-    Ok(Outcome::ok(human.trim_end().to_owned(), json))
+    Ok(Outcome::coded(
+        provision.code,
+        human.trim_end().to_owned(),
+        json,
+    ))
+}
+
+/// The provisioning leg's contribution to `rift init`'s outcome: a human line,
+/// a JSON fragment, and the exit code (0 unless provisioning itself failed —
+/// scaffold/hooks/registry above are already durable either way).
+struct ProvisionOutcome {
+    line: String,
+    json: serde_json::Value,
+    code: i32,
+}
+
+impl ProvisionOutcome {
+    fn ok(line: String, json: serde_json::Value) -> Self {
+        Self {
+            line,
+            json,
+            code: exit::OK,
+        }
+    }
 }
 
 /// `rift doctor`: report capture-backend readiness without any network I/O.
@@ -297,25 +330,80 @@ fn cmd_configure(args: &ConfigureArgs) -> rift_core::Result<Outcome> {
     }
 }
 
-/// `rift verify`: carries its own exit contract (P5 S4 subset): 0 ok, 1 tamper, 70 internal.
+/// `rift verify`: carries its own granular exit contract (P5 S4): 0 ok,
+/// 1 tamper, 3 redaction, 5 structure, 70 internal.
 fn verify_outcome() -> Outcome {
+    use verify::Verdict;
     match verify::run() {
-        Ok(()) => Outcome::coded(
-            exit::OK,
-            "verify: ok",
-            serde_json::json!({ "verify": "ok" }),
-        ),
-        Err(rift_core::RiftError::Integrity(m)) => Outcome::coded(
-            1,
-            format!("verify: tamper detected ({m})"),
-            serde_json::json!({ "verify": "tamper", "detail": m }),
-        ),
+        Ok(summary) => {
+            let base = format!(
+                "re-derived {} checkpoint(s) from {}; {} shard(s) redaction/Merkle-checked",
+                summary.checkpoints, summary.source, summary.shards_checked
+            );
+            match summary.verdict {
+                Verdict::Ok => Outcome::coded(
+                    exit::OK,
+                    format!("verify: OK — {base}"),
+                    serde_json::json!({ "verify": "ok", "checkpoints": summary.checkpoints,
+                                        "shards_checked": summary.shards_checked }),
+                ),
+                Verdict::Tamper(d) => Outcome::coded(
+                    1,
+                    format!("verify: TAMPER — {d} ({base})"),
+                    serde_json::json!({ "verify": "tamper", "detail": d }),
+                ),
+                Verdict::Redaction(d) => Outcome::coded(
+                    3,
+                    format!("verify: REDACTION — {d} ({base})"),
+                    serde_json::json!({ "verify": "redaction", "detail": d }),
+                ),
+                Verdict::Structure(d) => Outcome::coded(
+                    5,
+                    format!("verify: STRUCTURE — {d} ({base})"),
+                    serde_json::json!({ "verify": "structure", "detail": d }),
+                ),
+            }
+        }
         Err(e) => Outcome::coded(
             exit::INTERNAL,
             format!("verify: internal error ({e})"),
             serde_json::json!({ "verify": "internal", "detail": e.to_string() }),
         ),
     }
+}
+
+/// `rift rebuild`: run the artifact bridge — rebuild the projection from the
+/// redacted checkpoint branch alone (delete `projection.db` first for a
+/// from-scratch rebuild; over a live projection it is a set-union no-op).
+fn cmd_rebuild() -> rift_core::Result<Outcome> {
+    let cwd = std::env::current_dir()?;
+    let repo_id = verify::repo_id_for(&cwd)?;
+    let store = open_projection()?;
+    let Ok(reader) = rift_recall_substrate::GixSubstrate::open(&cwd) else {
+        return Ok(Outcome::coded(
+            exit::NOT_INIT,
+            "rebuild: not a git repository",
+            serde_json::json!({ "error": "not_a_repo" }),
+        ));
+    };
+    let rt = runtime()?;
+    let report = rt.block_on(rift_shadow::ingest_from_substrate(
+        &store,
+        &reader,
+        &repo_id.to_string(),
+        "claude-code",
+        hooks::now_ms(),
+    ))?;
+    let json = serde_json::json!({
+        "branch": report.branch,
+        "shards_seen": report.shards_seen,
+        "shards_projected": report.shards_projected,
+        "refused": report.refused.len(),
+        "events_derived": report.events_derived,
+        "events_inserted": report.events_inserted,
+        "watermark": report.tip,
+    });
+    Ok(Outcome::ok(report.render().trim_end().to_owned(), json))
 }
 
 // --- Canopy + registry helpers ----------------------------------------------
@@ -414,52 +502,112 @@ fn backend_status() -> &'static str {
     }
 }
 
+/// Record a provisioning **skip** (append-only, ADR-0001: every skip is audited).
+/// Best-effort: a store hiccup annotates the line but never fails `init`.
+fn audit_provision_skip(reason: &str) -> Option<String> {
+    let pin = rift_shadow::entire::PinnedSubstrate::from_embedded().ok();
+    let audit = hooks::projection_db()
+        .and_then(rift_store::open_capture_projection)
+        .and_then(|store| {
+            runtime()?.block_on(rift_shadow::record_provision_skip(
+                &store,
+                pin.as_ref(),
+                reason,
+                hooks::now_ms(),
+            ))
+        });
+    match audit {
+        Ok(()) => None,
+        Err(e) => Some(format!(" [skip-audit failed: {e}]")),
+    }
+}
+
 /// Provision the capture backend from the upstream release — the **default** for
-/// `rift init`. Idempotent and fail-closed (a bad download is never executed).
-/// Skipped by `--no-provision` or `RIFT_NO_PROVISION`.
+/// `rift init` (ADR-0001). Idempotent and fail-closed (a bad download is never
+/// executed). Skipped by `--no-provision` or `RIFT_NO_PROVISION` — the skip is
+/// recorded append-only, like the provision itself.
+///
+/// The exit contribution distinguishes the failure classes (user story 21):
+/// integrity refusal → [`exit::INTEGRITY`], transient download failure →
+/// [`exit::RETRYABLE`], unsupported platform → [`exit::PRECONDITION`].
 #[cfg(feature = "provision-http")]
-fn provision_if_requested(no_provision: bool) -> rift_core::Result<()> {
-    let opted_out = no_provision || std::env::var_os("RIFT_NO_PROVISION").is_some();
-    if opted_out {
-        println!(
-            "  capture backend: {} (provisioning skipped)",
-            backend_status()
-        );
-        return Ok(());
+fn provision_if_requested(no_provision: bool) -> rift_core::Result<ProvisionOutcome> {
+    if let Some(reason) = skip_reason(no_provision) {
+        let note = audit_provision_skip(reason).unwrap_or_default();
+        return Ok(ProvisionOutcome::ok(
+            format!(
+                "capture backend: {} (provisioning skipped: {reason}; skip recorded){note}",
+                backend_status()
+            ),
+            serde_json::json!({ "status": backend_status(), "skipped": reason }),
+        ));
     }
     let pin = match rift_shadow::entire::PinnedSubstrate::from_embedded() {
         Ok(p) => p,
         Err(e) => {
-            println!("  capture backend: unavailable ({e})");
-            return Ok(());
+            // No pinned asset for this platform: a precondition, not a bug.
+            return Ok(ProvisionOutcome {
+                line: format!("capture backend: unavailable ({e})"),
+                json: serde_json::json!({ "status": "unsupported-platform" }),
+                code: exit::PRECONDITION,
+            });
         }
     };
     let store = rift_store::open_capture_projection(hooks::projection_db()?)?;
     let rt = runtime()?;
     let fetcher = rift_shadow::entire::HttpFetcher::new();
-    if backend_status() != "ready" {
-        println!("  capture backend: downloading…");
-    }
     match rt.block_on(rift_shadow::provision_and_audit(
         &pin,
         &fetcher,
         &store,
         hooks::now_ms(),
     )) {
-        Ok(_) => println!("  capture backend: ready"),
-        Err(e) => println!("  capture backend: needs-setup ({e})"),
+        Ok(_) => Ok(ProvisionOutcome::ok(
+            "capture backend: ready".into(),
+            serde_json::json!({ "status": "ready" }),
+        )),
+        Err(e) => {
+            let code = match &e {
+                rift_core::RiftError::Integrity(_) => exit::INTEGRITY,
+                rift_core::RiftError::Substrate(_) => exit::RETRYABLE,
+                rift_core::RiftError::Validity(_) | rift_core::RiftError::PolicyDenied(_) => {
+                    exit::PRECONDITION
+                }
+                _ => exit::FAILURE,
+            };
+            Ok(ProvisionOutcome {
+                line: format!("capture backend: needs-setup ({e})"),
+                json: serde_json::json!({ "status": "needs-setup", "detail": e.to_string() }),
+                code,
+            })
+        }
     }
-    Ok(())
 }
 
-/// Without the `provision-http` feature, provisioning support is not built in.
+/// Without the `provision-http` feature, provisioning support is not built in;
+/// the (structural) skip is still audited.
 #[cfg(not(feature = "provision-http"))]
-fn provision_if_requested(_no_provision: bool) -> rift_core::Result<()> {
-    println!(
-        "  capture backend: {} (built without provisioning support)",
-        backend_status()
-    );
-    Ok(())
+fn provision_if_requested(no_provision: bool) -> rift_core::Result<ProvisionOutcome> {
+    let reason = skip_reason(no_provision).unwrap_or("no-provision-build");
+    let note = audit_provision_skip(reason).unwrap_or_default();
+    Ok(ProvisionOutcome::ok(
+        format!(
+            "capture backend: {} (built without provisioning support; skip recorded){note}",
+            backend_status()
+        ),
+        serde_json::json!({ "status": backend_status(), "skipped": reason }),
+    ))
+}
+
+/// The explicit opt-out reason, if any (`--no-provision` beats the env var).
+fn skip_reason(no_provision: bool) -> Option<&'static str> {
+    if no_provision {
+        Some("no-provision-flag")
+    } else if std::env::var_os("RIFT_NO_PROVISION").is_some() {
+        Some("RIFT_NO_PROVISION")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

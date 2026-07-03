@@ -84,14 +84,20 @@ fn run_git_hook(args: &[String]) -> ! {
                 eprintln!("rift: refusing to push internal rift/* refs");
                 std::process::exit(1);
             }
-            PushDecision::Allow => std::process::exit(0),
+            PushDecision::Allow => {
+                // A push of real refs is the local `on-pr` signal (a PR opens /
+                // updates when the branch leaves the machine). Guarded: the
+                // archive can defer, the push itself is already allowed.
+                let git_dir = flag(args, "--git-dir");
+                capture_guarded(|| on_pr_archive(git_dir.as_deref()));
+            }
         }
     }
     // All other hooks: run capture work guarded so nothing can abort the git op.
     // The hook's `--git-dir` identifies the target repo (cwd is unreliable — a GUI
     // client may run the shim from anywhere), so capture never touches the wrong tree.
     let git_dir = flag(args, "--git-dir");
-    capture_guarded(|| capture_for(name, git_dir.as_deref()));
+    capture_guarded(|| capture_for(name, git_dir.as_deref(), forwarded(args)));
 }
 
 /// Read `pre-push` stdin (`<local> <lsha> <remote> <rsha>` lines) and screen it.
@@ -113,14 +119,209 @@ fn screen_stdin_push() -> PushDecision {
 /// swallows a panic.
 // The injected panic exists precisely to exercise the never-block guard — the one
 // place a panic is intentional, and it is always swallowed by `capture_guarded`.
-fn capture_for(name: &str, git_dir: Option<&str>) -> Result<()> {
+fn capture_for(name: &str, git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
     assert!(
         std::env::var_os("RIFT_HOOK_TEST_PANIC").is_none(),
         "injected capture panic (must be swallowed)"
     );
-    if name == "post-commit" {
-        capture_post_commit(git_dir)?;
+    match name {
+        "post-commit" => capture_post_commit(git_dir)?,
+        // Trailer injection (P3 S1): `prepare-commit-msg` appends the Rift
+        // trailers when a session is live; `commit-msg` normalizes them
+        // idempotently. Both only rewrite the message file — never reject.
+        "prepare-commit-msg" => trailer_prepare(git_dir, fwd)?,
+        "commit-msg" => trailer_normalize(fwd)?,
+        _ => {}
     }
+    Ok(())
+}
+
+/// The forwarded hook args (everything after the `--` separator).
+fn forwarded(args: &[String]) -> &[String] {
+    args.iter()
+        .position(|a| a == "--")
+        .map_or(&[], |i| args.get(i + 1..).unwrap_or(&[]))
+}
+
+/// The raw session capture bytes handed to condense. Empty in v0.1 (the wrapped
+/// backend owns the shard content); the ONE definition shared by the archive
+/// path and the trailer's checkpoint-id prediction, so the predicted id and the
+/// archived id can never diverge.
+fn session_raw_capture() -> rift_core::SecretBytes {
+    rift_core::SecretBytes::new(Vec::new())
+}
+
+/// Map the validated config token to the strategy enum.
+fn strategy_kind(token: &str) -> rift_shadow::hooks::strategy::StrategyKind {
+    use rift_shadow::hooks::strategy::StrategyKind;
+    match token {
+        "on-pr" => StrategyKind::OnPr,
+        "scheduled" => StrategyKind::Scheduled,
+        "policy-driven" => StrategyKind::PolicyDriven,
+        _ => StrategyKind::ManualCommit,
+    }
+}
+
+/// Load the effective config for a worktree (secure defaults when absent/broken —
+/// a config problem must never block a git op).
+fn effective_config(work_tree: &Path) -> rift_config::EffectiveConfig {
+    rift_config::EffectiveConfig::load(&work_tree.join(".rift"))
+        .or_else(|_| rift_config::EffectiveConfig::secure_default())
+        .unwrap_or_else(|_| {
+            rift_config::EffectiveConfig::secure_default()
+                .unwrap_or_else(|_| unreachable!("secure default config is infallible"))
+        })
+}
+
+/// `prepare-commit-msg`: inject the `Rift-Checkpoint`/`Rift-Attribution`
+/// trailers when a session is live. The checkpoint id is the **predicted**
+/// condense id (computable pre-commit; the post-commit archive then makes it
+/// true); attribution is the live turn-boundary preview. Never rejects — any
+/// failure leaves the message untouched.
+fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
+    use rift_shadow::hooks::session_cache::live_sessions;
+    use rift_shadow::hooks::trailers::{self, Trailers};
+
+    let Some(msg_file) = fwd.first() else {
+        return Ok(());
+    };
+    // Merge/squash/amend messages come with a `source` arg — leave them alone
+    // (the spec's trailer applies to fresh commit messages).
+    if fwd.len() > 1 && fwd.get(1).is_some_and(|s| s == "merge" || s == "squash") {
+        return Ok(());
+    }
+    let start = match git_dir.and_then(|gd| work_tree_from_git_dir(Path::new(gd))) {
+        Some(work_tree) => work_tree,
+        None => std::env::current_dir()?,
+    };
+    let repo = rift_git::discover(&start)?;
+    let Some(sess) = live_sessions(&repo.git_dir)?.into_iter().next() else {
+        return Ok(());
+    };
+
+    let checkpoint_id =
+        rift_shadow::predicted_checkpoint_id(&sess.session_id, &session_raw_capture())?;
+    let store = rift_store::open_capture_projection(projection_db_for(&repo.work_tree)?)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    let attribution = rt.block_on(rift_shadow::attribution_preview(
+        &store,
+        &sess.agent,
+        &sess.session_id,
+    ))?;
+
+    let message = std::fs::read_to_string(msg_file)?;
+    let injected = trailers::inject(
+        &message,
+        &Trailers {
+            checkpoint_id: Some(checkpoint_id),
+            attribution,
+        },
+    );
+    if injected != message {
+        std::fs::write(msg_file, injected)?;
+    }
+    Ok(())
+}
+
+/// `commit-msg`: normalize Rift trailers idempotently (dedup, canonical order).
+/// Never rejects the commit.
+fn trailer_normalize(fwd: &[String]) -> Result<()> {
+    use rift_shadow::hooks::trailers;
+    let Some(msg_file) = fwd.first() else {
+        return Ok(());
+    };
+    let message = std::fs::read_to_string(msg_file)?;
+    let normalized = trailers::normalize(&message);
+    if normalized != message {
+        std::fs::write(msg_file, normalized)?;
+    }
+    Ok(())
+}
+
+/// `pre-push` (after the ref screen allowed the push): the local `on-pr` driver.
+/// When the configured base strategy is `on-pr` and a session is live, a push of
+/// real refs is the PR-update signal and archives a checkpoint.
+fn on_pr_archive(git_dir: Option<&str>) -> Result<()> {
+    use rift_shadow::hooks::session_cache::live_sessions;
+    use rift_shadow::hooks::strategy::{decide, GitEvent, TriggerCtx};
+
+    let start = match git_dir.and_then(|gd| work_tree_from_git_dir(Path::new(gd))) {
+        Some(work_tree) => work_tree,
+        None => std::env::current_dir()?,
+    };
+    let repo = rift_git::discover(&start)?;
+    let cfg = effective_config(&repo.work_tree);
+    if cfg.checkpoint_strategy() != "on-pr" {
+        return Ok(());
+    }
+    let Some(sess) = live_sessions(&repo.git_dir)?.into_iter().next() else {
+        return Ok(());
+    };
+    let reader = rift_git::GixBlobReader::open(&repo.work_tree)?;
+    let Some(commit) = reader.head_hex()? else {
+        return Ok(());
+    };
+    let store = rift_store::open_capture_projection(projection_db_for(&repo.work_tree)?)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    let now = now_ms();
+    let last = rt.block_on(rift_store::latest_archive_ms(&store, &sess.session_id))?;
+    let decision = decide(
+        strategy_kind(cfg.checkpoint_strategy()),
+        &TriggerCtx {
+            git_event: Some(GitEvent::PrSignal),
+            session_state: state_from_token(&sess.state),
+            sensitive_path_touched: false,
+            clock_ms: now,
+            last_archive_ms: last,
+            schedule_interval_ms: cfg.schedule_interval_ms(),
+        },
+    );
+    if decision.archive {
+        archive_now(
+            &rt,
+            &store,
+            &repo.work_tree,
+            &commit,
+            &sess.session_id,
+            decision,
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// Run one live archive through the routed wrapper backend (a no-op when the
+/// backend is not provisioned — capture never blocks the git op).
+fn archive_now(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    work_tree: &Path,
+    commit: &str,
+    session: &str,
+    decision: rift_shadow::hooks::strategy::ArchiveDecision,
+    now: i64,
+) -> Result<()> {
+    use rift_shadow::backend::{EntireBackend, NativeBackend, RouteTable, RoutedBackend};
+    use rift_shadow::entire::SystemRunner;
+
+    let Some(binary) = provisioned_binary() else {
+        tracing::debug!("archive skipped: capture backend not provisioned");
+        return Ok(());
+    };
+    let runner = SystemRunner::new(binary);
+    let backend = RoutedBackend::new(
+        EntireBackend::new(&runner),
+        NativeBackend,
+        RouteTable::all_wrapper(),
+    );
+    let raw = session_raw_capture();
+    rt.block_on(rift_shadow::run_decision(
+        &backend, store, work_tree, session, &raw, decision, commit, now,
+    ))?;
     Ok(())
 }
 
@@ -152,7 +353,12 @@ fn work_tree_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
         // `<worktree>/.git` → the worktree root is its parent.
         return Path::new(s.trim()).parent().map(Path::to_path_buf);
     }
-    git_dir.parent().map(Path::to_path_buf)
+    // A bare relative `--git-dir .git` (git's default hook env) has an EMPTY
+    // parent — that means "the worktree is the cwd", so let callers fall back.
+    match git_dir.parent() {
+        Some(p) if !p.as_os_str().is_empty() => Some(p.to_path_buf()),
+        _ => None,
+    }
 }
 
 /// Parse a cached phase token into a [`SessionState`] (default `Idle`).
@@ -167,14 +373,17 @@ fn state_from_token(token: &str) -> rift_shadow::hooks::SessionState {
     }
 }
 
-/// `post-commit`: capture the committed diff (`C`), and — when a live agent session
-/// under manual-commit decides to archive and the backend is provisioned — run the
-/// real backend archive, anchoring the per-file attribution to the new checkpoint.
+/// `post-commit`: capture the committed diff (`C`), and — when a live agent
+/// session's configured strategy decides to archive and the backend is
+/// provisioned — run the real backend archive, anchoring the per-file
+/// attribution to the new checkpoint. The sensitive-path trigger (P3 S4) is
+/// evaluated from the configured globs over the commit's changed paths, and
+/// composes over any base strategy.
 fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
     use rift_shadow::backend::{EntireBackend, NativeBackend, RouteTable, RoutedBackend};
     use rift_shadow::entire::SystemRunner;
     use rift_shadow::hooks::session_cache::live_sessions;
-    use rift_shadow::hooks::strategy::{decide, GitEvent, StrategyKind, TriggerCtx};
+    use rift_shadow::hooks::strategy::{decide, GitEvent, TriggerCtx};
 
     // Resolve the target work tree from the hook's `--git-dir` (linked-worktree
     // aware), else cwd. Worktree-safe `discover` then handles the `.git`-file case.
@@ -204,18 +413,36 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
         now,
     ));
 
-    // A live agent session under manual-commit archives on post-commit; with the
-    // backend provisioned this is the real pinned-binary spawn.
+    // The committed diff, computed once: it feeds the sensitive-path trigger,
+    // the turn-boundary attribution replay, and the durable C-diff facts.
+    let mut capture = rift_shadow::attribution::capture_commit(&reader, &commit)?;
+    let cfg = effective_config(&repo.work_tree);
+    let sensitive_path_touched = capture.files.iter().any(|f| cfg.is_sensitive_path(&f.path));
+
+    // A live agent session under the configured strategy may archive now; with
+    // the backend provisioned this is the real pinned-binary spawn.
     if let Some(sess) = live_sessions(&repo.git_dir)?.into_iter().next() {
+        // Turn-boundary attribution (P4 S2): replay the session's H_i/A_i edit
+        // stack through the LIFO engine so committed lines resolve to
+        // agent/human instead of all-unknown. Best-effort — a replay failure
+        // leaves the honest unknown counts.
+        let _ = rt.block_on(rift_shadow::enrich_attribution(
+            &store,
+            &reader,
+            &sess.agent,
+            &sess.session_id,
+            &mut capture,
+        ));
+        let last = rt.block_on(rift_store::latest_archive_ms(&store, &sess.session_id))?;
         let decision = decide(
-            StrategyKind::ManualCommit,
+            strategy_kind(cfg.checkpoint_strategy()),
             &TriggerCtx {
                 git_event: Some(GitEvent::PostCommit),
                 session_state: state_from_token(&sess.state),
-                sensitive_path_touched: false,
+                sensitive_path_touched,
                 clock_ms: now,
-                last_archive_ms: None,
-                schedule_interval_ms: 0,
+                last_archive_ms: last,
+                schedule_interval_ms: cfg.schedule_interval_ms(),
             },
         );
         if decision.archive {
@@ -226,9 +453,9 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
                     NativeBackend,
                     RouteTable::all_wrapper(),
                 );
-                let raw = rift_core::SecretBytes::new(Vec::new());
-                rt.block_on(rift_shadow::archive_and_capture(
-                    &reader,
+                let raw = session_raw_capture();
+                rt.block_on(rift_shadow::archive_and_capture_with(
+                    &capture,
                     &backend,
                     &store,
                     &repo.work_tree,
@@ -245,7 +472,6 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
 
     // No live session or no provisioned backend: still record the durable C-diff
     // facts (file_revision + changed_hunk); attribution waits for a checkpoint.
-    let capture = rift_shadow::attribution::capture_commit(&reader, &commit)?;
     rt.block_on(rift_shadow::persist_commit_capture(&store, &capture, None))?;
     Ok(())
 }
@@ -287,17 +513,23 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
 
     let git_dir = resolve_git_dir(None);
     let store = rift_store::open_capture_projection(projection_db()?)?;
+    let repo_id = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::verify::repo_id_for(&cwd).ok())
+        .map(|r| r.to_string())
+        .unwrap_or_default();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
-    rt.block_on(async {
-        ingest_hook(
+    let outcome = rt.block_on(async {
+        let out = ingest_hook(
             &raw,
             &AdapterRegistry::with_builtin(),
             &store,
             &git_dir,
             agent,
+            &repo_id,
             now_ms(),
         )
         .await?;
@@ -306,8 +538,115 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
         if let Ok(cwd) = std::env::current_dir() {
             let _ = crate::identity::bind_new_sessions(&store, &cwd, now_ms()).await;
         }
-        Ok::<(), rift_core::RiftError>(())
+        Ok::<_, rift_core::RiftError>(out)
     })?;
+    // Turn-boundary working-tree snapshots (P4 S2): close the H_i/A_i windows
+    // this hook implied. Best-effort — never fails the agent's hook.
+    let _ = snapshot_boundaries(&rt, &store, agent, &raw.session, &outcome.boundaries);
+    // Post-ingest strategy drivers (P3 S4): the session-end condense effect and
+    // the scheduled interval. Best-effort — never fails the agent's hook.
+    let _ = drive_post_ingest(
+        &rt,
+        &store,
+        &raw.session,
+        agent,
+        outcome.state,
+        &outcome.effects,
+    );
+    Ok(())
+}
+
+/// Capture the working-tree snapshot for each boundary this hook closed.
+fn snapshot_boundaries(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    agent: &str,
+    session: &str,
+    boundaries: &[(u32, rift_shadow::Boundary)],
+) -> Result<()> {
+    if boundaries.is_empty() {
+        return Ok(());
+    }
+    let cwd = std::env::current_dir()?;
+    let repo = rift_git::discover(&cwd)?;
+    let reader = rift_git::GixBlobReader::open(&repo.work_tree)?;
+    let head = reader.head_hex()?;
+    for (ordinal, boundary) in boundaries {
+        rt.block_on(rift_shadow::capture_boundary(
+            store,
+            &repo,
+            &reader,
+            head.as_deref(),
+            agent,
+            session,
+            *ordinal,
+            *boundary,
+            now_ms(),
+        ))?;
+    }
+    Ok(())
+}
+
+/// Run the archive work an agent hook may have triggered: the state machine's
+/// `RequestCondense` effect (session end), and the `scheduled` strategy's
+/// interval check. A missing repo/HEAD/backend defers silently.
+fn drive_post_ingest(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    session: &str,
+    agent: &str,
+    state: rift_shadow::hooks::SessionState,
+    effects: &[rift_shadow::hooks::Effect],
+) -> Result<()> {
+    use rift_shadow::hooks::strategy::{decide, ArchiveDecision, ArchiveReason, TriggerCtx};
+    use rift_shadow::hooks::Effect;
+
+    let cwd = std::env::current_dir()?;
+    let repo = rift_git::discover(&cwd)?;
+    let reader = rift_git::GixBlobReader::open(&repo.work_tree)?;
+    let Some(commit) = reader.head_hex()? else {
+        return Ok(());
+    };
+    let cfg = effective_config(&repo.work_tree);
+    let base = strategy_kind(cfg.checkpoint_strategy());
+    let now = now_ms();
+
+    if effects.contains(&Effect::RequestCondense) {
+        // The session ended: condense now (the effect is the state machine's
+        // explicit request), then drive Ending → Ended.
+        let decision = ArchiveDecision {
+            archive: true,
+            reason: ArchiveReason::SessionEnd,
+            strategy: base,
+        };
+        archive_now(rt, store, &repo.work_tree, &commit, session, decision, now)?;
+        let _ = rt.block_on(rift_shadow::bridge::mark_condense_done(
+            store,
+            &repo.git_dir,
+            session,
+            agent,
+            now,
+        ));
+        return Ok(());
+    }
+
+    // The scheduled strategy fires from agent activity too — a long session
+    // without commits still checkpoints on its interval.
+    let last = rt.block_on(rift_store::latest_archive_ms(store, session))?;
+    let decision = decide(
+        base,
+        &TriggerCtx {
+            git_event: None,
+            session_state: state,
+            sensitive_path_touched: false,
+            clock_ms: now,
+            last_archive_ms: last,
+            schedule_interval_ms: cfg.schedule_interval_ms(),
+        },
+    );
+    if decision.archive {
+        archive_now(rt, store, &repo.work_tree, &commit, session, decision, now)?;
+    }
     Ok(())
 }
 

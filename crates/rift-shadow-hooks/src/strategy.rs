@@ -53,6 +53,8 @@ pub enum ArchiveReason {
     Schedule,
     /// A sensitive path was touched (composition overlay).
     SensitivePath,
+    /// The session ended (the state machine's `RequestCondense` effect).
+    SessionEnd,
 }
 
 impl ArchiveReason {
@@ -64,6 +66,7 @@ impl ArchiveReason {
             Self::Pr => "pr",
             Self::Schedule => "schedule",
             Self::SensitivePath => "sensitive-path",
+            Self::SessionEnd => "session-end",
         }
     }
 }

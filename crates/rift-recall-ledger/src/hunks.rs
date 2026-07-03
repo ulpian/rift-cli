@@ -175,11 +175,13 @@ pub struct HunkPage {
     pub overflow_handle: Option<Handle>,
 }
 
-/// A token estimate placeholder (`bytes/4`); the `tiktoken-rs` estimator is a
-/// follow-up. Rounds up so the budget ceiling is never breached by estimation.
+/// The honest token count for hunk budgeting — the one workspace counting
+/// authority (`rift-tokens`, ADR-0006), replacing the old `bytes/4` placeholder.
+/// Non-empty-or-not, the cost floor stays ≥ 1 so budget math never treats a
+/// hunk as free.
 #[must_use]
 pub fn estimate_tokens(text: &str) -> u32 {
-    u32::try_from(text.len() / 4 + 1).unwrap_or(u32::MAX)
+    rift_tokens::count(text).max(1)
 }
 
 /// Serve changed hunks for `(path, new_rev)` under a token budget. When the

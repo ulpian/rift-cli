@@ -13,7 +13,15 @@
 //! checkpoint strategy, never side effects inside the transition. Illegal
 //! transitions are refused (logged, swallowed at the hook boundary), never panic.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use std::collections::BTreeMap;
 
@@ -70,6 +78,9 @@ pub struct RawHook {
 // The plugin SDK trait and its companion types live in `rift-agent` (P8 S2).
 // Re-exported so callers build the registry from one import surface; the SDK
 // adapters have **no** redaction/chain authority — this ingest layer owns it.
+/// Alias distinguishing the adapter-facing optional usage report from the
+/// four-class `rift_shadow_cost::TokenUsage` (both are in scope in `rift-shadow`).
+pub use rift_agent::TokenUsage as AdapterTokenUsage;
 pub use rift_agent::{idempotency_key, AdapterError, AgentAdapter, CompatNotes, TokenUsage};
 
 fn payload_hash(payload: &serde_json::Value) -> Sha256Id {

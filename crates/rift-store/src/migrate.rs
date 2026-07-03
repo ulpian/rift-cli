@@ -35,6 +35,31 @@ CREATE TABLE IF NOT EXISTS _schema_version (\n\
   schema_version INTEGER NOT NULL\n\
 ) STRICT;";
 
+/// The M1 price seed (P6 S3): a versioned starting catalog, in **micro-USD per
+/// MILLION tokens**, for the models the first-party adapters report. Prices are
+/// data, not code constants — this seed is simply the first append. Provenance:
+/// the provider's public per-MTok pricing as of the M1 pin date (2026-07);
+/// `valid_from = 0` (in force since before capture began), `recorded_at` fixed
+/// at 2026-07-01T00:00:00Z for migration byte-stability. A price change or
+/// correction is a NEW superseding row (`record_price` / a later migration) —
+/// never an UPDATE. Models without a seeded price simply produce no cost fact
+/// (honest absence beats a fabricated number).
+pub(crate) const PRICE_SEED_SQL: &str = "\
+INSERT INTO price_table (price_id, model, token_class, unit_price_micros, currency, valid_from, valid_to, recorded_at, supersedes_id, schema_version) VALUES
+  ('m1seed-claude-sonnet-4-5-uncached_input', 'claude-sonnet-4-5', 'uncached_input', 3000000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-sonnet-4-5-cached_input',   'claude-sonnet-4-5', 'cached_input',    300000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-sonnet-4-5-cache_creation', 'claude-sonnet-4-5', 'cache_creation', 3750000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-sonnet-4-5-output',         'claude-sonnet-4-5', 'output',        15000000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-opus-4-1-uncached_input',   'claude-opus-4-1',   'uncached_input', 15000000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-opus-4-1-cached_input',     'claude-opus-4-1',   'cached_input',    1500000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-opus-4-1-cache_creation',   'claude-opus-4-1',   'cache_creation', 18750000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-opus-4-1-output',           'claude-opus-4-1',   'output',         75000000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-haiku-4-5-uncached_input',  'claude-haiku-4-5',  'uncached_input',  1000000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-haiku-4-5-cached_input',    'claude-haiku-4-5',  'cached_input',     100000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-haiku-4-5-cache_creation',  'claude-haiku-4-5',  'cache_creation',  1250000, 'USD', 0, NULL, 1782864000000, NULL, 1),
+  ('m1seed-claude-haiku-4-5-output',          'claude-haiku-4-5',  'output',          5000000, 'USD', 0, NULL, 1782864000000, NULL, 1);
+";
+
 /// One migration: an ordered, checksum-locked unit of additive DDL.
 #[derive(Debug, Clone)]
 pub struct Migration {
@@ -208,19 +233,17 @@ pub fn canonical_schema_sql() -> String {
     sql
 }
 
-/// The v3 additive capture migration: the local-only identity relations
-/// (`developer_identity_snapshot`, `session_binding`) from phase-04 step-03.
-#[must_use]
-pub fn capture_identity_schema_sql() -> String {
-    use crate::schema::capture_post_v1_tables;
+/// Render one additive capture migration from a registry slice: DDL + guard
+/// triggers + the per-table `_schema_version` seed rows.
+fn capture_slice_sql(tables: &'static [crate::schema::CanonicalTable]) -> String {
     let mut sql = String::new();
-    for table in capture_post_v1_tables() {
+    for table in tables {
         sql.push_str(&table.create_table_sql());
         sql.push('\n');
         sql.push_str(&table.guard_trigger_sql());
         sql.push('\n');
     }
-    for table in capture_post_v1_tables() {
+    for table in tables {
         sql.push_str(&format!(
             "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
             table.name
@@ -229,8 +252,29 @@ pub fn capture_identity_schema_sql() -> String {
     sql
 }
 
-/// The default migration set: meta tables, the canonical schema, then the
-/// identity relations.
+/// The v3 additive capture migration: the local-only identity relations
+/// (`developer_identity_snapshot`, `session_binding`) from phase-04 step-03.
+/// Generated from the **bounded** identity slice, so later registry growth can
+/// never perturb its checksum-locked bytes.
+#[must_use]
+pub fn capture_identity_schema_sql() -> String {
+    capture_slice_sql(crate::schema::capture_identity_tables())
+}
+
+/// The v4 additive capture migration (M1 / P4 S2): the turn-boundary relations
+/// (`turn_boundary_snapshot`, `turn_boundary_file`, `turn_diff_hunk`) that make
+/// H_i/A_i attribution replay possible, plus the M1 price seed (see
+/// [`PRICE_SEED_SQL`]) so cost facts compute against a versioned catalog from
+/// first open.
+#[must_use]
+pub fn capture_turn_boundary_schema_sql() -> String {
+    let mut sql = capture_slice_sql(crate::schema::capture_turn_boundary_tables());
+    sql.push_str(PRICE_SEED_SQL);
+    sql
+}
+
+/// The default migration set: meta tables, the canonical schema, the identity
+/// relations, then the turn-boundary relations (+ price seed).
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
     vec![
@@ -248,6 +292,11 @@ pub fn default_migrations() -> Vec<Migration> {
             version: 3,
             name: "capture_identity",
             sql: capture_identity_schema_sql(),
+        },
+        Migration {
+            version: 4,
+            name: "capture_turn_boundary",
+            sql: capture_turn_boundary_schema_sql(),
         },
     ]
 }
@@ -547,8 +596,8 @@ mod tests {
     async fn applies_pending_migrations_in_order() {
         let s = store();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
-        assert_eq!(out.applied, 3);
-        assert_eq!(out.high_water, 3);
+        assert_eq!(out.applied, 4);
+        assert_eq!(out.high_water, 4);
         // canonical tables exist (insert succeeds)
         s.insert(
             "session",
@@ -579,13 +628,15 @@ mod tests {
     #[tokio::test]
     async fn seam_runner_matches_reference_runner() {
         let s = store();
-        let out = apply_migrations_on(&s, &default_migrations()).await.unwrap();
-        assert_eq!(out.applied, 3);
-        assert_eq!(out.high_water, 3);
+        let out = apply_migrations_on(&s, &default_migrations())
+            .await
+            .unwrap();
+        assert_eq!(out.applied, 4);
+        assert_eq!(out.high_water, 4);
         // The sync runner sees everything applied (same _migrations ledger).
         let again = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 3);
+        assert_eq!(again.skipped, 4);
         // And the tamper lock holds through the seam.
         let mut edited = default_migrations();
         edited[1].sql.push_str("\n-- tampered");
@@ -595,7 +646,7 @@ mod tests {
         ));
         // A failed migration mid-run leaves no partial schema (tx rollback).
         let bad = vec![Migration {
-            version: 4,
+            version: 5,
             name: "bad_ddl",
             sql: "CREATE TABLE IF NOT EXISTS half (x INTEGER PRIMARY KEY) STRICT;\n\
                   THIS IS NOT SQL;"
@@ -615,7 +666,7 @@ mod tests {
         /// schema as one full apply, with prefix members skipped (checksums
         /// verified), never re-applied.
         #[test]
-        fn apply_then_apply_is_noop(split in 0usize..=3) {
+        fn apply_then_apply_is_noop(split in 0usize..=4) {
             let migs = default_migrations();
             let s = store();
             let first = apply_migrations(&s, &migs[..split]).unwrap();
@@ -623,7 +674,7 @@ mod tests {
             let rest = apply_migrations(&s, &migs).unwrap();
             proptest::prop_assert_eq!(rest.skipped, split);
             proptest::prop_assert_eq!(rest.applied, migs.len() - split);
-            proptest::prop_assert_eq!(rest.high_water, 3);
+            proptest::prop_assert_eq!(rest.high_water, 4);
 
             let fresh = store();
             apply_migrations(&fresh, &migs).unwrap();
@@ -638,7 +689,7 @@ mod tests {
         apply_migrations(&s, &default_migrations()).unwrap();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(out.applied, 0);
-        assert_eq!(out.skipped, 3);
+        assert_eq!(out.skipped, 4);
     }
 
     /// The additive contract for the recall projection: `recall_core` (v1) must
@@ -776,14 +827,13 @@ mod tests {
         // false positives under the old scan — all additive, all accepted:
         assert!(is_additive("-- do not DROP TABLE anything\nCREATE TABLE IF NOT EXISTS z (a INTEGER PRIMARY KEY) STRICT;").is_ok());
         assert!(is_additive("/* RENAME TO is forbidden */ CREATE TABLE IF NOT EXISTS z (a INTEGER PRIMARY KEY) STRICT;").is_ok());
-        assert!(
-            is_additive("INSERT INTO note(body) VALUES ('how to DROP TABLE safely');").is_ok()
-        );
+        assert!(is_additive("INSERT INTO note(body) VALUES ('how to DROP TABLE safely');").is_ok());
         // trigger bodies legitimately contain BEFORE UPDATE/DELETE — never
         // statement-initial, so they stay clean:
         assert!(is_additive(&recall_canonical_schema_sql()).is_ok());
         assert!(is_additive(&canopy_canonical_schema_sql()).is_ok());
         assert!(is_additive(&capture_identity_schema_sql()).is_ok());
+        assert!(is_additive(&capture_turn_boundary_schema_sql()).is_ok());
     }
 
     /// The destructive-DDL CI gate, made explicit and order-independent: every
@@ -818,21 +868,52 @@ mod tests {
         );
     }
 
-    /// The frozen prefix covers the whole registry today; anything appended
-    /// later must land past the freeze point (and in its own migration).
+    /// Same contract for the shipped additive migrations: once a version has
+    /// been applied anywhere, its generated bytes are frozen. Registry growth
+    /// belongs in a NEW slice + migration (see `capture_registry_growth_…`).
     #[test]
-    fn capture_registry_growth_lands_past_v1_freeze() {
-        use crate::schema::{canonical_tables, capture_post_v1_tables};
+    fn shipped_capture_migrations_are_byte_stable() {
         assert_eq!(
-            capture_v1_tables().len() + capture_post_v1_tables().len(),
-            canonical_tables().len()
+            checksum_hex(&capture_identity_schema_sql()),
+            "189e0ec139713ae08f93fa6a8224375d60105354b14536432dbb173b7514ff33",
+            "capture_identity (v3) migration SQL changed — frozen once shipped"
         );
         assert_eq!(
-            capture_v1_tables()
-                .last()
-                .map(|t| t.name),
+            checksum_hex(&capture_turn_boundary_schema_sql()),
+            "ac8b1ac35ba0a943b5a4bc7fcbf285e4d321214d091cce10b91ea7b1a886d243",
+            "capture_turn_boundary (v4) migration SQL changed — frozen once shipped"
+        );
+    }
+
+    /// Every capture table lands in exactly one migration slice, and the frozen
+    /// boundaries hold: growing or reordering a shipped slice would change its
+    /// checksum-locked SQL on every deployed projection.
+    #[test]
+    fn capture_registry_growth_lands_past_frozen_boundaries() {
+        use crate::schema::{
+            canonical_tables, capture_identity_tables, capture_turn_boundary_tables,
+        };
+        assert_eq!(
+            capture_v1_tables().len()
+                + capture_identity_tables().len()
+                + capture_turn_boundary_tables().len(),
+            canonical_tables().len(),
+            "a new capture table must extend a NEW slice (and migration), not fall between"
+        );
+        assert_eq!(
+            capture_v1_tables().last().map(|t| t.name),
             Some("key_metadata"),
             "the v1 freeze boundary moved — canonical_core's checksum will break"
+        );
+        assert_eq!(
+            capture_identity_tables().last().map(|t| t.name),
+            Some("session_binding"),
+            "the v3 boundary moved — capture_identity's checksum will break"
+        );
+        assert_eq!(
+            capture_turn_boundary_tables().last().map(|t| t.name),
+            Some("turn_diff_hunk"),
+            "the v4 boundary moved — capture_turn_boundary's checksum will break"
         );
     }
 
@@ -861,7 +942,7 @@ mod tests {
         let migs: i64 = again
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0)))
             .unwrap();
-        assert_eq!(migs, 3);
+        assert_eq!(migs, 4);
     }
 
     /// The step-05 filesystem control: a projection opened through the standard

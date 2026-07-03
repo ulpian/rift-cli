@@ -62,6 +62,15 @@ cargo run -p rift-memd -- serve  # the recall plane / MCP surface
 
 `rusqlite` is built `bundled`, so a C compiler is required.
 
+### Capture backend provisioning
+
+`rift init` **installs a local capture backend by default**: a pinned,
+checksum-verified binary placed in a Rift-private directory (never on `PATH`),
+run local-only — its cloud/auth verbs are refused, its environment scrubbed,
+and no telemetry leaves the machine. Opt out with `rift init --no-provision`
+or `RIFT_NO_PROVISION=1`; capture then stays inert. Both the install and the
+skip are recorded as append-only audit rows (ADR-0001).
+
 ## Develop
 
 Common tasks run through [`skills.sh`](skills.sh) (see [SKILLS.md](SKILLS.md)):

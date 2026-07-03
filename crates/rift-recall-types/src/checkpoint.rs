@@ -125,9 +125,143 @@ pub struct TokenEstimate {
     pub output_tokens: u32,
 }
 
+/// `redaction_report.json` — the counts-only proof that redaction ran over a
+/// shard (ADR-0002; parsed leniently, judged strictly by the bridge).
+#[derive(Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct RedactionReportFacts {
+    /// Total spans masked.
+    #[serde(default)]
+    pub total_spans: u32,
+    /// Count per detector id.
+    #[serde(default)]
+    pub by_detector: std::collections::BTreeMap<String, u32>,
+    /// Count per detector class (class token as a string — lenient).
+    #[serde(default)]
+    pub by_class: std::collections::BTreeMap<String, u32>,
+    /// Aggregate masked byte length.
+    #[serde(default)]
+    pub bytes_masked: u64,
+    /// Spans deliberately kept via the allowlist.
+    #[serde(default)]
+    pub allowlisted: u32,
+    /// Exactly which rule packs/versions ran.
+    #[serde(default)]
+    pub rule_pack_versions: Vec<String>,
+    /// SHA-256 (hex) of the raw input — the recompute-verify anchor.
+    #[serde(default)]
+    pub input_sha256: Option<String>,
+}
+
+impl RedactionReportFacts {
+    /// Whether the report is **structurally valid** for projection: it names at
+    /// least one rule pack that ran and carries the input content address. The
+    /// bridge refuses shards whose report fails this (ADR-0002 strict layer);
+    /// the lenient parser merely enumerates.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        !self.rule_pack_versions.is_empty()
+            && self
+                .input_sha256
+                .as_deref()
+                .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
+}
+
+/// One `full.jsonl` line — a canonical event as archived (the authoritative
+/// event stream the bridge re-derives rows from).
+#[derive(Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct FullEventRecord {
+    /// The agent's native session id.
+    #[serde(default, alias = "session_id")]
+    pub session: String,
+    /// Turn ordinal within the session.
+    #[serde(default, alias = "turn")]
+    pub turn_ordinal: u32,
+    /// Event ordinal within the turn.
+    #[serde(default, alias = "event")]
+    pub event_ordinal: u32,
+    /// The canonical event kind token (`session.start`, `tool.call`, …).
+    #[serde(default)]
+    pub kind: String,
+    /// The native hook verb that produced the event (idempotency-key input).
+    #[serde(default)]
+    pub verb: String,
+    /// The agent token (`claude-code` | …), when recorded per event.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Transaction time (epoch ms).
+    #[serde(default, alias = "occurred_at")]
+    pub occurred_at_ms: i64,
+    /// Content address of the (redacted) payload, as archived.
+    #[serde(default)]
+    pub payload_sha256: Option<String>,
+    /// The redacted payload (identity fields only are read back).
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+/// One `tasks/` entry — a subagent task record.
+#[derive(Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct TaskRecord {
+    /// The task id.
+    #[serde(default, alias = "id")]
+    pub task_id: Option<String>,
+    /// The parent session's native id.
+    #[serde(default, alias = "session_id")]
+    pub parent_session: Option<String>,
+    /// The parent turn ordinal.
+    #[serde(default, alias = "turn")]
+    pub parent_turn_ordinal: u32,
+    /// The child (subagent) session's native id.
+    #[serde(default, alias = "subagent_session_id", alias = "child_session_id")]
+    pub child_session: Option<String>,
+    /// The task kind, when recorded.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redaction_report_validity_requires_packs_and_hash() {
+        let ok: RedactionReportFacts = serde_json::from_str(&format!(
+            r#"{{"rule_pack_versions":["builtin@1"],"input_sha256":"{}"}}"#,
+            "a".repeat(64)
+        ))
+        .unwrap();
+        assert!(ok.is_valid());
+        let no_packs: RedactionReportFacts =
+            serde_json::from_str(&format!(r#"{{"input_sha256":"{}"}}"#, "a".repeat(64))).unwrap();
+        assert!(!no_packs.is_valid());
+        let bad_hash: RedactionReportFacts =
+            serde_json::from_str(r#"{"rule_pack_versions":["x"],"input_sha256":"zz"}"#).unwrap();
+        assert!(!bad_hash.is_valid());
+    }
+
+    #[test]
+    fn full_event_record_accepts_aliases_and_defaults() {
+        let e: FullEventRecord = serde_json::from_str(
+            r#"{"session_id":"s1","turn":2,"event":1,"kind":"tool.call","verb":"PreToolUse","future":true}"#,
+        )
+        .unwrap();
+        assert_eq!(e.session, "s1");
+        assert_eq!(e.turn_ordinal, 2);
+        assert_eq!(e.event_ordinal, 1);
+        assert_eq!(e.kind, "tool.call");
+    }
+
+    #[test]
+    fn task_record_aliases() {
+        let t: TaskRecord = serde_json::from_str(
+            r#"{"id":"t1","session_id":"s1","turn":3,"subagent_session_id":"c1"}"#,
+        )
+        .unwrap();
+        assert_eq!(t.task_id.as_deref(), Some("t1"));
+        assert_eq!(t.child_session.as_deref(), Some("c1"));
+        assert_eq!(t.parent_turn_ordinal, 3);
+    }
 
     #[test]
     fn metadata_ignores_unknown_and_accepts_entire_alias() {

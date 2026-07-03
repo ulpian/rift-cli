@@ -12,7 +12,15 @@
 //! into a Merkle root for a checkpoint — and the `verify` façade that cross-checks
 //! the rebuildable projection against the canonical chain.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 pub use rift_shadow_attribution as attribution;
 pub use rift_shadow_cost as cost;
@@ -20,24 +28,30 @@ pub use rift_shadow_entire as entire;
 pub use rift_shadow_hooks as hooks;
 pub use rift_shadow_redact as redact;
 
+pub mod artifact_bridge;
 pub mod backend;
 pub mod bridge;
 pub mod commit_capture;
 pub mod condense;
 pub mod executor;
+pub mod ids;
 pub mod parity;
+pub mod project;
 pub mod provision;
+pub mod turn_boundary;
 
+pub use artifact_bridge::{ingest_from_substrate, BridgeReport, RefusedShard, CHECKPOINT_BRANCH};
 pub use backend::{
     persist_divergences, Capability, Divergence, EntireBackend, NativeBackend, Route, RouteTable,
     RoutedBackend, ShadowBackend,
 };
-pub use bridge::{ingest_hook, trigger_for};
-pub use commit_capture::{archive_and_capture, persist_commit_capture};
-pub use condense::{condense, CheckpointId};
+pub use bridge::{ingest_hook, trigger_for, IngestOutcome};
+pub use commit_capture::{archive_and_capture, archive_and_capture_with, persist_commit_capture};
+pub use condense::{condense, predicted_checkpoint_id, CheckpointId};
 pub use executor::{run_decision, RepoSerializer};
 pub use parity::{parity_report, run_parity, Fidelity, ParityCase, ParityResult};
-pub use provision::{provision_and_audit, record_block};
+pub use provision::{provision_and_audit, record_block, record_provision_skip};
+pub use turn_boundary::{attribution_preview, capture_boundary, enrich_attribution, Boundary};
 
 use rift_core::{Result, SecretBytes, Sha256Id};
 use rift_shadow_hooks::{dispatch, AdapterRegistry, CanonicalEvent, EventLeaf, RawHook};

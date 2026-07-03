@@ -176,14 +176,118 @@ async fn verify_under(
     verify_projection(&projection_db_under(root, repo), source).await
 }
 
-/// `rift verify`: re-derive the fixture chain and cross-check the projection for
-/// the current working directory. Prints a report; returns
-/// [`RiftError::Integrity`] (non-zero exit) on divergence.
+/// The granular verify verdict (P5 S4). Ordered by severity: a tamper beats a
+/// redaction problem beats a structure problem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// Everything re-derived and matched.
+    Ok,
+    /// Git ↔ recomputed / projection mismatch (exit 1 — a security incident).
+    Tamper(String),
+    /// A shard's redaction report is missing/invalid (exit 3).
+    Redaction(String),
+    /// A shard artifact is malformed (exit 5 — not tamper).
+    Structure(String),
+}
+
+/// The verify result the CLI renders + maps to the P5 S4 exit contract.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifySummary {
+    /// Checkpoints cross-checked against the projection chain.
+    pub(crate) checkpoints: usize,
+    /// Shards that got the per-shard redaction/Merkle passes.
+    pub(crate) shards_checked: usize,
+    /// Which authoritative source was used.
+    pub(crate) source: &'static str,
+    /// The worst finding.
+    pub(crate) verdict: Verdict,
+}
+
+/// Per-shard passes (P5 S4 extension, PRD-M1 W3): re-verify each shard's
+/// redaction report and recompute its Merkle root from the recorded leaves.
+/// Returns `(shards_checked, worst_verdict)`.
+fn shard_passes(reader: &impl SubstrateReader) -> Result<(usize, Verdict)> {
+    use rift_recall_substrate::parse;
+
+    let mut worst = Verdict::Ok;
+    // Severity: Tamper > Redaction > Structure > Ok. Never downgrade.
+    let mut raise = |v: Verdict| {
+        let rank = |x: &Verdict| match x {
+            Verdict::Tamper(_) => 3,
+            Verdict::Redaction(_) => 2,
+            Verdict::Structure(_) => 1,
+            Verdict::Ok => 0,
+        };
+        if rank(&v) > rank(&worst) {
+            worst = v;
+        }
+    };
+
+    let shards = reader.checkpoints()?;
+    let mut checked = 0usize;
+    for shard in &shards {
+        let id = shard.checkpoint_id.as_str();
+        checked += 1;
+
+        // Redaction re-verification: the report must exist and be valid.
+        match reader.read_artifact(id, "redaction_report.json")? {
+            None => raise(Verdict::Redaction(format!(
+                "{id}: missing redaction report"
+            ))),
+            Some(bytes) => {
+                let out = parse::parse_redaction_report(&bytes, id);
+                if !out.is_clean() {
+                    raise(Verdict::Structure(format!(
+                        "{id}: redaction report is malformed"
+                    )));
+                } else if !out.value.is_valid() {
+                    raise(Verdict::Redaction(format!(
+                        "{id}: redaction report is invalid"
+                    )));
+                }
+            }
+        }
+
+        // Merkle recompute: when the shard records its event leaves, the root
+        // derived from them must equal the recorded root.
+        if let Some(bytes) = reader.read_artifact(id, "merkle_leaf.txt")? {
+            let leaves = parse::parse_merkle_leaves(&bytes, id);
+            if !leaves.is_clean() {
+                raise(Verdict::Structure(format!("{id}: malformed merkle leaves")));
+            }
+            let parsed: Vec<Sha256Id> = leaves
+                .value
+                .iter()
+                .filter_map(|h| Sha256Id::parse_hex(h).ok())
+                .collect();
+            if !parsed.is_empty() {
+                let recomputed = merkle_root(&parsed);
+                let recorded = reader
+                    .read_artifact(id, MERKLE_ROOT_ARTIFACT)?
+                    .and_then(|b| parse_root_hex(&b))
+                    .or_else(|| Sha256Id::parse_hex(id).ok());
+                if let Some(recorded) = recorded {
+                    if recomputed != recorded {
+                        raise(Verdict::Tamper(format!(
+                            "{id}: recomputed Merkle root does not match the recorded root"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok((checked, worst))
+}
+
+/// `rift verify`: re-derive the chain from the authoritative source, cross-check
+/// the projection, and run the per-shard redaction/Merkle passes. The outcome is
+/// **returned**, not thrown — the CLI maps it to the granular exit contract.
 ///
 /// # Errors
-/// [`RiftError::Integrity`] on tamper; [`RiftError::Io`]/[`RiftError::Storage`]
-/// if the projection cannot be opened or migrated.
-pub(crate) fn run() -> Result<()> {
+/// [`RiftError::Io`]/[`RiftError::Storage`] if the projection cannot be opened
+/// or migrated (internal problems — exit 70); never for tamper/redaction
+/// findings, which are verdicts.
+pub(crate) fn run() -> Result<VerifySummary> {
     // `main` is synchronous; the store seam is async (Turso-shaped). Drive it on a
     // short-lived current-thread runtime confined to this command — the async
     // readers (Canopy/MCP) get their own runtime when they land.
@@ -193,7 +297,7 @@ pub(crate) fn run() -> Result<()> {
     rt.block_on(run_async())
 }
 
-async fn run_async() -> Result<()> {
+async fn run_async() -> Result<VerifySummary> {
     let cwd = std::env::current_dir()?;
     let repo = repo_id_for(&cwd)?;
     let root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
@@ -201,20 +305,87 @@ async fn run_async() -> Result<()> {
 
     // Prefer the git-authoritative source (re-derive from `rift/checkpoints/v1`);
     // fall back to the committed fixture skeleton on a fresh repo with no branch.
-    let (report, source_label) = match git_source(&cwd)? {
-        Some(source) => (verify_under(&root, &repo, &source).await?, "git"),
+    let (chain_outcome, source_label, shard_outcome) = match git_source(&cwd)? {
+        Some(source) => {
+            let chain = verify_under(&root, &repo, &source).await;
+            // The per-shard passes re-open the reader (cheap; object access only).
+            let shards = match GixSubstrate::open(&cwd) {
+                Ok(reader) => shard_passes(&reader)?,
+                Err(_) => (0, Verdict::Ok),
+            };
+            (chain, "git", shards)
+        }
         None => (
-            verify_under(&root, &repo, &FixtureSource::parse(FIXTURE)).await?,
+            verify_under(&root, &repo, &FixtureSource::parse(FIXTURE)).await,
             "fixture (no checkpoint branch yet)",
+            (0, Verdict::Ok),
         ),
     };
-    println!(
-        "rift verify: OK — re-derived {} checkpoint(s) from {source_label} match the projection",
-        report.checkpoints
-    );
+
+    let (checkpoints, verdict) = match chain_outcome {
+        Ok(report) => (report.checkpoints, shard_outcome.1),
+        // A chain divergence is a tamper verdict; it outranks any shard finding.
+        Err(rift_core::RiftError::Integrity(m)) => (0, Verdict::Tamper(m)),
+        Err(e) => return Err(e),
+    };
+    let summary = VerifySummary {
+        checkpoints,
+        shards_checked: shard_outcome.0,
+        source: source_label,
+        verdict,
+    };
     println!("  repo_id:    {repo}");
     println!("  projection: {}", db.display());
-    Ok(())
+    record_verification(&root, &repo, &summary).await;
+    Ok(summary)
+}
+
+/// Persist the verification outcome append-only (`verification_run` + one
+/// `verification_divergence` per finding). Best-effort: verify's exit code is
+/// the contract; a store hiccup must not turn a clean verify into a failure.
+async fn record_verification(root: &Path, repo: &RepoId, summary: &VerifySummary) {
+    use rift_store::{VerificationDivergenceRow, VerificationRunRow};
+
+    let Ok(store) = rift_store::open_capture_projection(projection_db_under(root, repo)) else {
+        return;
+    };
+    let now = crate::hooks::now_ms();
+    let (code, detail) = match &summary.verdict {
+        Verdict::Ok => (0, None),
+        Verdict::Tamper(d) => (1, Some(("CheckpointRoot", d.clone()))),
+        Verdict::Redaction(d) => (3, Some(("Redaction", d.clone()))),
+        Verdict::Structure(d) => (5, Some(("Leaf", d.clone()))),
+    };
+    let outcome_sha =
+        leaf_hash(format!("{code}:{}:{now}", summary.checkpoints).as_bytes()).to_hex();
+    let run_id = format!("vrun-{outcome_sha}");
+    let _ = rift_store::record_verification_run(
+        &store,
+        &VerificationRunRow {
+            run_id: run_id.clone(),
+            branch: "rift/checkpoints/v1".to_owned(),
+            exit_code: code,
+            checked_at: now,
+            outcome_sha256: outcome_sha,
+            schema_version: 1,
+        },
+    )
+    .await;
+    if let Some((layer, d)) = detail {
+        let _ = rift_store::record_verification_divergence(
+            &store,
+            &VerificationDivergenceRow {
+                run_id,
+                ordinal: 0,
+                checkpoint_id: d.split(':').next().unwrap_or_default().to_owned(),
+                layer: layer.to_owned(),
+                site: "GitVsRecomputed".to_owned(),
+                detail: d,
+                schema_version: 1,
+            },
+        )
+        .await;
+    }
 }
 
 #[cfg(test)]

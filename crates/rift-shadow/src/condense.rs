@@ -27,6 +27,19 @@ fn checkpoint_id_for(session: &str, redacted: &[u8]) -> CheckpointId {
     sha256_hex(&[session.as_bytes(), b"\0", content.as_bytes()])
 }
 
+/// The checkpoint id `condense` will derive for `(session, raw_capture)` —
+/// computable **before** the archive runs (it depends only on the session and
+/// the redacted capture, never the commit oid), which is what lets
+/// `prepare-commit-msg` inject a `Rift-Checkpoint` trailer that the post-commit
+/// archive then makes true.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if redaction fails.
+pub fn predicted_checkpoint_id(session: &str, raw_capture: &SecretBytes) -> Result<CheckpointId> {
+    let out = rift_shadow_redact::redact(raw_capture)?;
+    Ok(checkpoint_id_for(session, out.redacted.as_slice()))
+}
+
 /// Condense raw shadow capture into a durable, redacted checkpoint and record the
 /// `archive_decision`. `commit_oid` is the anchoring commit (HEAD) the substrate
 /// archives against.
@@ -55,7 +68,16 @@ pub async fn condense(
         repo: repo.to_path_buf(),
         commit: commit_oid.to_owned(),
     };
-    backend.archive_checkpoint(&intent)?;
+    if let Err(e) = backend.archive_checkpoint(&intent) {
+        // A default-deny refusal is an audited fact (P1 S3), not just an error:
+        // the archive root verb is the refused token. Audit best-effort — the
+        // refusal itself must still surface even if the audit insert fails.
+        if matches!(e, rift_core::RiftError::PolicyDenied(_)) {
+            let _ =
+                crate::provision::record_block(store, "checkpoint", "screen-refused", now_ms).await;
+        }
+        return Err(e);
+    }
 
     record_archive_decision(
         store,
@@ -149,6 +171,40 @@ mod tests {
         assert_eq!(s.count("archive_decision").await.unwrap(), 1);
         // the substrate archive was invoked through the screened seam
         assert_eq!(runner.calls.borrow().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_refused_archive_is_audited_as_a_block_event() {
+        use crate::backend::ShadowBackend;
+
+        /// A backend that refuses every archive as a policy block (screen refusal).
+        struct RefusingBackend;
+        impl ShadowBackend for RefusingBackend {
+            fn archive_checkpoint(&self, _intent: &CaptureIntent) -> rift_core::Result<()> {
+                Err(rift_core::RiftError::PolicyDenied("refused".into()))
+            }
+        }
+
+        let s = store();
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let out = condense(
+            &RefusingBackend,
+            &s,
+            std::path::Path::new("/r"),
+            "01JSESSION",
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1,
+        )
+        .await;
+        assert!(matches!(out, Err(rift_core::RiftError::PolicyDenied(_))));
+        assert_eq!(
+            s.count("substrate_block_event").await.unwrap(),
+            1,
+            "the refusal left an append-only audit row"
+        );
     }
 
     #[tokio::test]
