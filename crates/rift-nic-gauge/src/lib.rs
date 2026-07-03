@@ -5,7 +5,15 @@
 //! tokens, fully local. Canopy renders the resulting percentage as a five-state
 //! Smart→Dumb bar in column 3.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 /// The context fullness of a thread, as a percentage `0..=100`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

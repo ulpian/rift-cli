@@ -4,7 +4,12 @@
 //! Covers: shard enumeration, artifact reads, the read-only invariant, the
 //! traversal guard, and the headline metric (`tokens_avoided > 0`).
 #![cfg(feature = "gix")]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use std::collections::BTreeSet;
 use std::path::Path;

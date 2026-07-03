@@ -259,12 +259,26 @@ mod tests {
         let cur = sha256_hex(source);
 
         // unchanged → Valid (bytes attached)
-        match block(resolve(&store, &PlainCipher, &snapshot("src/main.rs", &cur), &key)).unwrap() {
+        match block(resolve(
+            &store,
+            &PlainCipher,
+            &snapshot("src/main.rs", &cur),
+            &key,
+        ))
+        .unwrap()
+        {
             Validity::Valid(s) => assert_eq!(s.digest(), b"digest"),
             other => panic!("expected Valid, got {:?}", validity_tag(&other)),
         }
         // changed → Invalid (no bytes)
-        match block(resolve(&store, &PlainCipher, &snapshot("src/main.rs", "different"), &key)).unwrap() {
+        match block(resolve(
+            &store,
+            &PlainCipher,
+            &snapshot("src/main.rs", "different"),
+            &key,
+        ))
+        .unwrap()
+        {
             Validity::Invalid { .. } => {}
             other => panic!("expected Invalid, got {:?}", validity_tag(&other)),
         }
@@ -274,8 +288,22 @@ mod tests {
     fn invalid_appends_invalidated_by_edge() {
         let store = recall_store();
         let source = b"x\n";
-        let key = block(put_summary(&store, &PlainCipher, "a.rs", source, versions(), b"d")).unwrap();
-        let _ = block(resolve(&store, &PlainCipher, &snapshot("a.rs", "changed"), &key)).unwrap();
+        let key = block(put_summary(
+            &store,
+            &PlainCipher,
+            "a.rs",
+            source,
+            versions(),
+            b"d",
+        ))
+        .unwrap();
+        let _ = block(resolve(
+            &store,
+            &PlainCipher,
+            &snapshot("a.rs", "changed"),
+            &key,
+        ))
+        .unwrap();
         let n = block(store.query(
             "SELECT count(*) FROM graph_edge WHERE kind='invalidated_by'",
             &[],
@@ -288,7 +316,15 @@ mod tests {
     fn revert_makes_valid_again() {
         let store = recall_store();
         let source = b"y\n";
-        let key = block(put_summary(&store, &PlainCipher, "b.rs", source, versions(), b"d")).unwrap();
+        let key = block(put_summary(
+            &store,
+            &PlainCipher,
+            "b.rs",
+            source,
+            versions(),
+            b"d",
+        ))
+        .unwrap();
         let cur = sha256_hex(source);
         // changed → Invalid
         assert!(matches!(
@@ -334,7 +370,12 @@ mod tests {
             let cipher = DekCipher::new(MemoryKeyStore::new(dek), repo.clone());
 
             let key = block(put_summary(
-                &store, &cipher, "s.rs", source, versions(), sentinel,
+                &store,
+                &cipher,
+                "s.rs",
+                source,
+                versions(),
+                sentinel,
             ))
             .unwrap();
 

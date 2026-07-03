@@ -14,7 +14,15 @@
 //! * **Envelope** ([`envelope_for`]): the single way to construct a served
 //!   artifact; `known_unchanged` requires *both* same-hash-seen and `Valid`.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 pub mod trust;
 

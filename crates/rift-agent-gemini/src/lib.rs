@@ -4,7 +4,15 @@
 //! tier-1 counts); the native verb names are pinned here and `(verify)` against
 //! the current Gemini CLI hook surface.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use rift_agent::{event, AdapterError, AgentAdapter, CompatNotes, TokenUsage};
 use rift_core::{AgentId, CanonicalEvent, EventKind, Trust};

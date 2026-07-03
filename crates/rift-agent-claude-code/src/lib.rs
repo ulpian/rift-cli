@@ -5,7 +5,15 @@
 //! **turn**, while `SessionEnd` terminates the **session** — they map to distinct
 //! canonical kinds (`TurnEnd` vs `SessionEnd`).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use rift_agent::{event, AdapterError, AgentAdapter, CompatNotes, TokenUsage};
 use rift_core::{AgentId, CanonicalEvent, EventKind, Trust};

@@ -17,7 +17,15 @@
 //! secret. All regexes are linear-time (`regex` crate, no backreferences), so a
 //! hostile input cannot wedge the pipeline (`05-security` §5.5).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;

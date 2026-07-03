@@ -220,7 +220,11 @@ mod tests {
         }
         match p[0] {
             b'*' if p.get(1) == Some(&b'*') => {
-                let rest: &[u8] = if p.get(2) == Some(&b'/') { &p[3..] } else { &p[2..] };
+                let rest: &[u8] = if p.get(2) == Some(&b'/') {
+                    &p[3..]
+                } else {
+                    &p[2..]
+                };
                 (0..=t.len()).any(|i| reference_matches(rest, &t[i..]))
             }
             b'*' => {

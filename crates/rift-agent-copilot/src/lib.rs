@@ -4,7 +4,15 @@
 //! maps the session/prompt/tool points and records gaps in
 //! [`compat_notes`](AgentAdapter::compat_notes).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use rift_agent::{event, AdapterError, AgentAdapter, CompatNotes};
 use rift_core::{AgentId, CanonicalEvent, EventKind, Trust};

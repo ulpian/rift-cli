@@ -8,7 +8,15 @@
 //! never a floating path — so a forged or stale handle can never serve wrong
 //! bytes (`05-security` §5.5).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use core::fmt;
 use core::str::FromStr;

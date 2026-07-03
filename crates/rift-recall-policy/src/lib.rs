@@ -8,7 +8,15 @@
 //! retrieval yields an [`AuditDecision::Allow`] carrying the audit record the
 //! caller must emit through `rift hooks memd`.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use rift_config::EffectiveConfig;
 use rift_recall_types::{OmitReason, Trust};

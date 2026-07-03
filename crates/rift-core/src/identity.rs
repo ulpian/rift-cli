@@ -370,7 +370,10 @@ mod tests {
             Timestamp::from_millis(1),
         );
         assert_eq!(b.basis, BindingBasis::GitEmailOnly);
-        assert!(b.confidence.value() > 0.5, "email evidence beats machine default");
+        assert!(
+            b.confidence.value() > 0.5,
+            "email evidence beats machine default"
+        );
         // and the developer id is still derived from the email
         let snap = snapshot(&src, Timestamp::from_millis(1));
         assert_eq!(b.developer, snap.developer);

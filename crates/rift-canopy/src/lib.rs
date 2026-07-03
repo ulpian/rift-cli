@@ -9,7 +9,15 @@
 //! command parser, the splash timeline) is pure and rendered through that seam,
 //! so it is fully testable without a real terminal.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 pub mod app;
 pub mod col1;

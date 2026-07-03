@@ -6,7 +6,15 @@
 //! `projection.db`): they open the recall store, ingest the gix-backed substrate
 //! read-only, and report scope-bounded delta-ledger numbers from the graph.
 //! `serve --mcp` speaks MCP over `rmcp` stdio (see [`mcp_serve`]).
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use std::path::{Path, PathBuf};
 

@@ -15,7 +15,15 @@
 //! addressing, `04-database-design` §4.4). Local-only: a reader refuses to run
 //! against a remote (the shadow data is raw and never leaves the machine).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use std::collections::BTreeMap;
 

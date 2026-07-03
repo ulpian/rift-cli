@@ -7,7 +7,15 @@
 //! via `rift hooks memd <verb>` with JSON on stdin (the plugin-protocol
 //! convention), which redacts, chains, and stores it like any other event.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use sha2::{Digest, Sha256};
 

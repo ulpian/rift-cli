@@ -16,7 +16,15 @@
 //! `…/05-security-model-and-threat-model.md` for the rules these types encode.
 #![forbid(unsafe_code)]
 // Tests legitimately use unwrap/expect/panic; keep library code clean of them.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 mod error;
 pub mod event;

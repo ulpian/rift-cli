@@ -38,7 +38,15 @@
 //! crate's tests (`construction_is_pinned_by_hex_vectors`): any change to the
 //! construction is a reviewable, breaking diff, never a silent drift.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use rift_core::{Result, RiftError, Sha256Id};
 use sha2::{Digest, Sha256};
@@ -330,11 +338,23 @@ mod tests {
     /// independent implementation (python hashlib).
     #[test]
     fn construction_is_pinned_by_hex_vectors() {
-        assert_eq!(empty_root().to_hex(), "e2c3e6f55658a556f4403ed646adbc7326b09fcbb23f3df593e7c0de60e64794");
-        assert_eq!(leaf_hash(b"x").to_hex(), "3c7e9bc930dc93f01fa69985ef242d9f9e861f3c5355aa24ce5ef4b4b8a70ccb");
-        assert_eq!(merkle_root(&[leaf(1), leaf(2)]).to_hex(), "6bcf0e2e93e0a18e22789aee965e6553f4fbe93f0acfc4a705d691c8311c4965");
+        assert_eq!(
+            empty_root().to_hex(),
+            "e2c3e6f55658a556f4403ed646adbc7326b09fcbb23f3df593e7c0de60e64794"
+        );
+        assert_eq!(
+            leaf_hash(b"x").to_hex(),
+            "3c7e9bc930dc93f01fa69985ef242d9f9e861f3c5355aa24ce5ef4b4b8a70ccb"
+        );
+        assert_eq!(
+            merkle_root(&[leaf(1), leaf(2)]).to_hex(),
+            "6bcf0e2e93e0a18e22789aee965e6553f4fbe93f0acfc4a705d691c8311c4965"
+        );
         // three leaves: the odd level duplicates the LAST node (never carries)
-        assert_eq!(merkle_root(&[leaf(1), leaf(2), leaf(3)]).to_hex(), "d10d803ddb112e8bab6820729655f564e52117c0b1aa14fb264b81282d36f9a4");
+        assert_eq!(
+            merkle_root(&[leaf(1), leaf(2), leaf(3)]).to_hex(),
+            "d10d803ddb112e8bab6820729655f564e52117c0b1aa14fb264b81282d36f9a4"
+        );
         assert_eq!(
             checkpoint_root(&[leaf(1)], &leaf(2), &leaf(3)).to_hex(),
             "a33a16ff6a705953626ddd1fbf7f528f3d05c45fa8a4a941638e080c5d1b2b66"

@@ -13,7 +13,15 @@
 //! last-N checkpoints); a query never returns rows outside its declared scope
 //! (W14, `05-security` §5.5).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 #![allow(
     clippy::module_name_repetitions,
     clippy::doc_markdown,
