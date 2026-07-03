@@ -15,6 +15,13 @@ This repo implements the local toolchain described in
 (sync, web dashboard, forecasting) is Stage 7 outlook only — out of scope here,
 but every local decision is made *sync-ready*.
 
+Where implementation deliberately deviates from or refines the spec, the
+decision is recorded in [`docs/adr/`](docs/adr/) — ADRs supersede the spec
+text they name. Domain vocabulary is defined in
+[`docs/GLOSSARY.md`](docs/GLOSSARY.md) (use those terms with those meanings),
+and the executable plans for the current milestones live in
+[`docs/prd/`](docs/prd/).
+
 The three core packages, three optional ones, and one storage substrate:
 
 | Package | Role |
