@@ -13,7 +13,15 @@ workspace = true
 
 [dependencies]
 toml = { workspace = true }
+tempfile = { workspace = true }
+rift-store = { version = "0.0.1", path = "../crates/rift-store" }
+tokio = { workspace = true }
+rift-core = { version = "0.0.1", path = "../crates/rift-core" }
+rift-hashchain = { version = "0.0.1", path = "../crates/rift-hashchain" }
 serde_json = { workspace = true }
+# The scripted pin-cut (`xtask pin-cut`) reuses the wrapper's own fetch/extract
+# path so the pin is derived exactly the way production provisioning verifies it.
+rift-shadow-entire = { path = "../crates/rift-shadow-entire", features = ["provision-http"] }
 
 [dev-dependencies]
 # Committed crate-graph adjacency snapshot (step-01 exit criterion).

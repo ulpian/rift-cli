@@ -18,6 +18,8 @@ rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
 rift-recall-substrate = { version = "0.0.1", path = "../rift-recall-substrate", default-features = false }
 # The append-only recall.db projection (CanonicalStore, SqliteStore, migrations).
 rift-store = { version = "0.0.1", path = "../rift-store" }
+# The one token-counting authority (ADR-0006) — replaces the bytes/4 placeholder.
+rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
 # The validity core (hash-bound key, sealed ValidSummary, pure `classify`); the
 # ledger backs it durably with the summary_binding/digest_blob tables.
 rift-recall-validity = { version = "0.0.1", path = "../rift-recall-validity" }

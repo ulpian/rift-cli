@@ -26,6 +26,11 @@ rift-shadow-hooks = { version = "0.0.1", path = "../rift-shadow-hooks" }
 rift-shadow-redact = { version = "0.0.1", path = "../rift-shadow-redact" }
 rift-shadow-attribution = { version = "0.0.1", path = "../rift-shadow-attribution" }
 rift-shadow-cost = { version = "0.0.1", path = "../rift-shadow-cost" }
+# The single parser home (ADR-0002): the artifact bridge reads checkpoint shards
+# through the substrate seam + lenient parsers. gix stays off — the production
+# reader is constructed by the bin; tests use MemorySubstrate.
+rift-recall-substrate = { version = "0.0.1", path = "../rift-recall-substrate", default-features = false }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 # Per-repo serialized checkpoint archival (deferred off the git critical path).
@@ -33,4 +38,6 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The bridge report is a snapshot-locked contract (PRD-M1 testing decisions).
+insta = { workspace = true }
 proptest = { workspace = true }

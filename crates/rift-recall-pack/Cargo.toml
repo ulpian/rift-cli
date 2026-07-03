@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+# The one token-counting authority (ADR-0006) backs pack budgeting.
+rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
 
 [dev-dependencies]
 proptest = { workspace = true }

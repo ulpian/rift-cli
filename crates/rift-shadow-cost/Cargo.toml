@@ -13,8 +13,8 @@ workspace = true
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 serde = { workspace = true }
-# Billing-grade tokenization (within ~5% of provider tokenizers) plugs in here:
-# tiktoken-rs = { workspace = true }
+# Billing-grade tokenization (ADR-0006): the one workspace counting authority.
+rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
 
 [dev-dependencies]
 proptest = { workspace = true }

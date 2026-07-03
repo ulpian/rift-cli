@@ -2760,6 +2760,7 @@ dependencies = [
  "rift-recall-types",
  "rift-recall-validity",
  "rift-store",
+ "rift-tokens",
  "serde",
  "sha2",
  "tempfile",
@@ -2782,11 +2783,11 @@ dependencies = [
  "rift-recall-types",
  "rift-recall-validity",
  "rift-store",
+ "rift-tokens",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
- "tiktoken-rs",
  "tokio",
 ]
 
@@ -2797,6 +2798,7 @@ dependencies = [
  "proptest",
  "rift-core",
  "rift-recall-types",
+ "rift-tokens",
 ]
 
 [[package]]
@@ -2875,10 +2877,13 @@ dependencies = [
 name = "rift-shadow"
 version = "0.0.1"
 dependencies = [
+ "insta",
  "proptest",
  "rift-core",
  "rift-git",
  "rift-hashchain",
+ "rift-recall-substrate",
+ "rift-recall-types",
  "rift-shadow-attribution",
  "rift-shadow-cost",
  "rift-shadow-entire",
@@ -2909,6 +2914,7 @@ version = "0.0.1"
 dependencies = [
  "proptest",
  "rift-core",
+ "rift-tokens",
  "serde",
 ]
 
@@ -2979,6 +2985,13 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "rift-tokens"
+version = "0.0.1"
+dependencies = [
+ "tiktoken-rs",
 ]
 
 [[package]]
@@ -4183,7 +4196,13 @@ name = "xtask"
 version = "0.0.1"
 dependencies = [
  "insta",
+ "rift-core",
+ "rift-hashchain",
+ "rift-shadow-entire",
+ "rift-store",
  "serde_json",
+ "tempfile",
+ "tokio",
  "toml",
 ]
 

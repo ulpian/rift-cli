@@ -13,8 +13,9 @@ workspace = true
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 serde = { workspace = true }
+# `full.jsonl` records carry a redacted JSON payload (identity fields only).
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 proptest = { workspace = true }

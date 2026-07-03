@@ -36,6 +36,7 @@ members = [
   "crates/rift-recall-policy",
   "crates/rift-recall-mcp",
   "crates/rift-recall-events",
+  "crates/rift-tokens",
   "crates/rift-canopy",
   "crates/rift-registry",
   "crates/rift-fff",
