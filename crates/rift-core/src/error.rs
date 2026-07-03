@@ -154,7 +154,7 @@ mod tests {
             RiftError::Crypto(reason.into()),
             RiftError::Integrity(reason.into()),
             RiftError::NotFound(reason.into()),
-            RiftError::Io(std::io::Error::new(std::io::ErrorKind::Other, reason.to_string())),
+            RiftError::Io(std::io::Error::other(reason.to_string())),
             RiftError::Serde(reason.into()),
             RiftError::Other(reason.into()),
         ]

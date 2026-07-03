@@ -15,7 +15,15 @@
 //! draws from the OS CSPRNG; a fixed nonce is catastrophic for ChaCha20-Poly1305
 //! and the API never encourages one.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce as CcNonce};
@@ -390,10 +398,7 @@ mod tests {
     /// swapped parameter produces a different ciphertext and fails here.
     #[test]
     fn aead_matches_rfc8439_vector() {
-        let key_bytes: [u8; KEY_LEN] = (0x80..=0x9f)
-            .collect::<Vec<u8>>()
-            .try_into()
-            .unwrap();
+        let key_bytes: [u8; KEY_LEN] = (0x80..=0x9f).collect::<Vec<u8>>().try_into().unwrap();
         let key = DataKey::from_bytes(key_bytes);
         let nonce = Nonce::from_bytes([
             0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
@@ -404,7 +409,11 @@ mod tests {
         let plaintext = b"Ladies and Gentlemen of the class of '99: \
 If I could offer you only one tip for the future, sunscreen would be it.";
         let ct = seal(&key, &nonce, plaintext, &aad).unwrap();
-        let hex: String = ct.iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = ct.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
         assert_eq!(
             hex,
             // ciphertext ‖ tag from RFC 8439 §2.8.2
@@ -429,7 +438,11 @@ If I could offer you only one tip for the future, sunscreen would be it.";
         let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
         let mut okm = [0u8; 42];
         hk.expand(&info, &mut okm).unwrap();
-        let hex: String = okm.iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = okm.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
         assert_eq!(
             hex,
             "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf\
@@ -445,7 +458,11 @@ If I could offer you only one tip for the future, sunscreen would be it.";
         let org = DataKey::from_bytes([7u8; KEY_LEN]);
         let repo = RepoId::new("repo-a").unwrap();
         let dek = derive_repo_dek(&org, &repo).unwrap();
-        let hex: String = dek.expose().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = dek.expose().iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
         assert_eq!(
             hex,
             "d5c755c6a187503a06d1369e5276654603161c41c6dde4a66ad6c975ca012aeb"
