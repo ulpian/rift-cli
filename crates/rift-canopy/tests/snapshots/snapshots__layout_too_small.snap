@@ -1,0 +1,7 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "render_at(22, 5)"
+---
+
+
+Terminal too small (ne

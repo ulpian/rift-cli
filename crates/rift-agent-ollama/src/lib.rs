@@ -9,7 +9,7 @@
 //! (prompt/response) and read token usage from the runtime's response metadata
 //! where present (`prompt_eval_count`/`eval_count`); absent usage stays absent.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use rift_agent::{event, AdapterError, AgentAdapter, CompatNotes, TokenUsage};
 use rift_core::{AgentId, CanonicalEvent, EventKind, Trust};

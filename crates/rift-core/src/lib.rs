@@ -16,9 +16,7 @@
 //! `…/05-security-model-and-threat-model.md` for the rules these types encode.
 #![forbid(unsafe_code)]
 // Tests legitimately use unwrap/expect/panic; keep library code clean of them.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-// Style-only pedantic lints we deliberately accept (not correctness/security).
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 mod error;
 pub mod event;
@@ -31,11 +29,12 @@ pub mod time;
 pub use error::{Result, RiftError};
 pub use event::{AgentId, CanonicalEvent, EventKind, Trust};
 pub use id::{
-    Blake3Id, CallId, CheckpointId, CounterUlidSource, FileRevisionId, MonotonicUlidSource, RepoId,
-    SessionId, Sha256Id, SummaryId, ToolCallId, TurnId, Ulid, UlidSource,
+    Blake3Id, CallId, CheckpointId, CounterUlidSource, FileRevisionId, MonotonicUlidSource,
+    ProjectId, RepoId, SessionId, Sha256Id, SummaryId, ToolCallId, TurnId, Ulid, UlidSource,
 };
 pub use identity::{
-    BindingBasis, Confidence, DeveloperId, FixtureIdentity, IdentitySnapshot, IdentitySource,
+    bind_session, binding_basis, binding_evidence, snapshot as identity_snapshot, BindingBasis,
+    BindingEvidence, Confidence, DeveloperId, FixtureIdentity, IdentitySnapshot, IdentitySource,
     MachineId, SessionBinding,
 };
 pub use immutable::{CanonicalEntity, Immutable};

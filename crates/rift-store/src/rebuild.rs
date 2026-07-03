@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use rift_core::Result;
 
-use crate::migrate::{apply_migrations, default_migrations};
+use crate::migrate::default_migrations;
 use crate::SqliteStore;
 
 /// Delete the projection DB (and its SQLite sidecars) at `path`, then open a fresh,
@@ -25,14 +25,8 @@ pub fn rebuild(path: &Path) -> Result<SqliteStore> {
     remove_if_exists(path)?;
     remove_if_exists(&sidecar(path, "-wal"))?;
     remove_if_exists(&sidecar(path, "-shm"))?;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let store = SqliteStore::open(path)?;
-    apply_migrations(&store, &default_migrations())?;
-    Ok(store)
+    // Re-create through the standard open path (migrations + owner-only perms).
+    crate::migrate::open_migrated(path, &default_migrations())
 }
 
 fn remove_if_exists(p: &Path) -> Result<()> {
@@ -52,6 +46,7 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migrate::apply_migrations;
     use crate::{CanonicalStore, Value};
 
     #[tokio::test]

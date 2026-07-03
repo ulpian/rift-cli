@@ -12,8 +12,7 @@
 //! envelope. This keeps the trust boundary at `rift hooks`, even for third-party
 //! adapters that run in their own process.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use rift_core::{AgentId, CanonicalEvent, EventKind, Sha256Id, Trust};
 

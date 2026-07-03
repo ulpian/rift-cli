@@ -2,7 +2,7 @@
 //! crate (e.g. `rift-shadow`) would. The fact that this file cannot call an
 //! `update`/`delete` is itself the compile-time half of the immutability
 //! guarantee — there is no such method on [`rift_store::CanonicalStore`].
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::collections::BTreeSet;
 
@@ -61,6 +61,29 @@ async fn public_api_is_append_only_and_usable() {
 
     assert_eq!(store.count("session").await.expect("count"), 2);
     assert!(!canonical_tables().is_empty());
+}
+
+/// Identifier binding (04 §4.3 type layer): a table or column that resolves in
+/// no registry is refused before any SQL is built — the DAO's identifier
+/// surface cannot be used as an injection vector even by careless future code.
+#[tokio::test]
+async fn unregistered_identifiers_are_refused() {
+    let store = SqliteStore::open_in_memory().expect("open store");
+    store.create_canonical_schema().expect("schema");
+
+    let err = store
+        .insert("sqlite_master; --", &["x"], &[Value::Int(1)])
+        .await;
+    assert!(err.is_err(), "unknown table must be refused");
+    let err = store
+        .insert(
+            "session",
+            &["session_id; DROP TABLE session"],
+            &[Value::Int(1)],
+        )
+        .await;
+    assert!(err.is_err(), "unknown column must be refused");
+    assert!(store.count("not_a_table").await.is_err());
 }
 
 /// Real (non-infra) tables that are **not** registered canonical tables — i.e.
@@ -129,7 +152,7 @@ fn forgotten_registration_is_caught() {
     apply_migrations(&store, &default_migrations()).expect("apply base migrations");
     // A developer adds a data table via a migration but forgets canonical_tables().
     let rogue = vec![Migration {
-        version: 3,
+        version: 4,
         name: "rogue_unregistered",
         sql: "CREATE TABLE IF NOT EXISTS audit_log \
               (id INTEGER PRIMARY KEY, note TEXT) STRICT;"

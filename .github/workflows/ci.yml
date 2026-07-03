@@ -4,20 +4,45 @@ on:
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
+  # Cheap single-leg gates first: a fmt/clippy failure reports in minutes
+  # without burning three OS legs (step-01 job graph).
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+        with: { components: "rustfmt" }
+      - run: cargo fmt --all --check
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+        with: { components: "clippy" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
   test:
     strategy:
+      # A Windows-only break must stay visible even when Linux fails first.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96
-        with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+  release-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --release
   # Proves the declared MSRV floor (rust-version = 1.94) actually compiles, even
   # though the dev/build toolchain is pinned to 1.96.0 (rust-toolchain.toml).
@@ -28,22 +53,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-features
-  # Coverage as a gate, not a dashboard: ≥85% line workspace-wide, plus ≥95% for
-  # the security-critical crates (ci/security-crates.txt) enforced by xtask.
+  # Coverage as a gate, not a dashboard: ≥85% line workspace-wide + ≥75% branch
+  # workspace-wide + ≥95% line for the security crates (ci/security-crates.txt),
+  # enforced by xtask. Branch instrumentation (`--branch`) requires a nightly
+  # rustc, so this job (only) runs nightly; the thresholds gate the same code.
   coverage:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96
+      - uses: dtolnay/rust-toolchain@nightly
         with: { components: "llvm-tools-preview" }
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-llvm-cov --locked
-      # Run the instrumented suite once; render reports from the same data.
-      - run: cargo llvm-cov --workspace --all-features --no-report
-      # keychain_os.rs is an untestable OS-I/O boundary (real-keychain only) — excluded.
+      # Run the instrumented suite once (with branch data); render reports from
+      # the same run. keychain_os.rs is an untestable OS-I/O boundary — excluded.
+      - run: cargo llvm-cov --workspace --all-features --branch --no-report
       - run: cargo llvm-cov report --lcov --output-path lcov.info --fail-under-lines 85 --ignore-filename-regex 'keychain_os\.rs'
       - run: cargo llvm-cov report --json --output-path cov.json --ignore-filename-regex 'keychain_os\.rs'
-      - run: cargo run -p xtask -- check-coverage cov.json   # per-crate ≥95% gate
+      - run: cargo run -p xtask -- check-coverage cov.json   # per-crate ≥95% line + ≥75% branch
+      # Coverage-drop signal on every PR (step-05): the summary lands in the
+      # job summary page, so a large-but-above-threshold drop is visible.
+      - run: cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with: { name: coverage-lcov, path: lcov.info }
   security:
@@ -54,18 +84,54 @@ jobs:
       - run: cargo install cargo-deny cargo-audit --locked
       - run: cargo deny check
       - run: cargo audit --deny warnings   # honours .cargo/audit.toml ignores
+  # Guards on the guards (step-01/step-03 meta-checks): required jobs, read-only
+  # workflow permissions, the lint-table baseline, no unsafe, no crate-root
+  # blanket allows, no schema fast-path in bins — plus actionlint on this file.
+  ci-meta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -p xtask -- ci-meta
+      # actionlint validates the workflow YAML itself (tag-pinned docker image,
+      # consistent with the repo's documented tag-pinning posture).
+      - run: docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:latest -color
+  # Every fuzz target survives a smoke budget on PRs (step-04). A crash here is
+  # a real finding, not flakiness — the job is required. Long-budget runs are
+  # scheduled in fuzz-nightly.yml.
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: "fuzz" }
+      - run: cargo install cargo-fuzz --locked
+      - name: fuzz each target for 60s
+        working-directory: fuzz
+        run: |
+          for t in config_parse run_hook redact diff glob_match checkpoint_artifact mcp_request; do
+            cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=25
+          done
   miri:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # @nightly auto-selects the latest nightly that actually carries the
-      # requested components (robust — a hardcoded `nightly-YYYY-MM-DD` is not a
-      # valid dtolnay/rust-toolchain ref and may lack miri); scoped to the
-      # FFI-bearing crates.
+      # requested components. Scope: the security crates whose zeroize/AEAD drop
+      # paths phase-04 requires miri-clean, plus the FFI-bearing crates.
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: "miri, rust-src" }
-      # Advisory (|| true) until the FFI seams carry `unsafe` to certify UB-free.
-      - run: cargo +nightly miri test -p rift-canopy -p rift-fff || true
+      # Advisory until the first real `unsafe`/FFI module lands (promotion
+      # condition, step-04) — but visibly so: continue-on-error surfaces the
+      # failure state in the UI instead of `|| true` swallowing it.
+      - run: cargo +nightly miri test -p rift-crypto -p rift-hashchain -p rift-canopy -p rift-fff
+        continue-on-error: true
+  # NOTE: ASAN/TSAN advisory jobs are deferred until the first unsafe/FFI seam
+  # lands — the workspace is #![forbid(unsafe_code)] end-to-end today, so there
+  # is no undefined-behavior surface for the sanitizers to exercise (see
+  # plan_v1/build-plan/stage-01-foundations/ERRATA.md).
   # NOTE: a Turso advisory job was removed with the turso dependency (P3 review —
   # see phase-03 SPIKE-RESULTS.md). Restore it (clippy + test `-p rift-store
   # --features turso`, continue-on-error) if/when the turso dep is wired back.

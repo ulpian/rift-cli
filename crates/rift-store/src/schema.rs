@@ -45,6 +45,12 @@ pub struct Column {
     pub sql_type: &'static str,
     /// Whether the column is `NOT NULL`.
     pub not_null: bool,
+    /// A closed value set. When non-empty, the DDL emits
+    /// `CHECK (<name> IN ('a','b',…))` so the engine rejects any other value
+    /// (the recall graph's `kind` enums use this — semantic kinds are refused
+    /// until a Phase-7 migration widens the set), and the registry-driven
+    /// immutability test seeds a *valid* sample from `one_of[0]`.
+    pub one_of: &'static [&'static str],
 }
 
 impl Column {
@@ -55,6 +61,7 @@ impl Column {
             name,
             sql_type: "TEXT",
             not_null: true,
+            one_of: &[],
         }
     }
 
@@ -66,6 +73,19 @@ impl Column {
             name,
             sql_type: "TEXT",
             not_null: false,
+            one_of: &[],
+        }
+    }
+
+    /// A `NOT NULL TEXT` column constrained to a closed value set via a SQL
+    /// `CHECK (… IN (…))` (e.g. a graph node/edge `kind`).
+    #[must_use]
+    pub const fn text_one_of(name: &'static str, values: &'static [&'static str]) -> Self {
+        Self {
+            name,
+            sql_type: "TEXT",
+            not_null: true,
+            one_of: values,
         }
     }
 
@@ -76,6 +96,7 @@ impl Column {
             name,
             sql_type: "INTEGER",
             not_null: true,
+            one_of: &[],
         }
     }
 
@@ -86,6 +107,7 @@ impl Column {
             name,
             sql_type: "INTEGER",
             not_null: false,
+            one_of: &[],
         }
     }
 
@@ -96,6 +118,7 @@ impl Column {
             name,
             sql_type: "BLOB",
             not_null: true,
+            one_of: &[],
         }
     }
 }
@@ -122,7 +145,18 @@ impl CanonicalTable {
             .iter()
             .map(|c| {
                 let null = if c.not_null { " NOT NULL" } else { "" };
-                format!("  {} {}{null}", c.name, c.sql_type)
+                let check = if c.one_of.is_empty() {
+                    String::new()
+                } else {
+                    let set = c
+                        .one_of
+                        .iter()
+                        .map(|v| format!("'{v}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(" CHECK ({} IN ({set}))", c.name)
+                };
+                format!("  {} {}{null}{check}", c.name, c.sql_type)
             })
             .collect::<Vec<_>>()
             .join(",\n");
@@ -484,6 +518,33 @@ const KEY_METADATA_COLUMNS: &[Column] = &[
     Column::int("schema_version"),
 ];
 
+// Local-only identity (phase-04 step-03): one row per distinct observed
+// identity state; a change appends a new snapshot superseding the prior one.
+const DEVELOPER_IDENTITY_SNAPSHOT_COLUMNS: &[Column] = &[
+    Column::text("snapshot_id"),          // content-addressed over the identity fields
+    Column::text("developer_id"),         // salted blake3 (never the raw email)
+    Column::text("git_author_name"),      // display only
+    Column::text("git_email_normalized"), // normalization basis of developer_id
+    Column::text("machine_id"),           // salted blake3 (never the raw fingerprint)
+    Column::int("observed_at"),
+    Column::text_null("supersedes_id"),
+    Column::int("schema_version"),
+];
+
+// Session→developer attribution with explicit evidence + confidence; a
+// correction is a NEW binding row superseding the prior one (04 §4.3).
+const SESSION_BINDING_COLUMNS: &[Column] = &[
+    Column::text("binding_id"), // content-addressed over (session, developer, basis)
+    Column::text("session_id"),
+    Column::text("developer_id"),
+    Column::text("machine_id"),
+    Column::int("confidence_milli"), // confidence × 1000 (0..=1000)
+    Column::text("basis"),           // BindingBasis::as_str token
+    Column::int("recorded_at"),
+    Column::text_null("supersedes_id"),
+    Column::int("schema_version"),
+];
+
 const NO_UNIQUE: &[&[&str]] = &[];
 
 const TABLES: &[CanonicalTable] = &[
@@ -682,7 +743,48 @@ const TABLES: &[CanonicalTable] = &[
         primary_key: &["key_id"],
         unique: NO_UNIQUE,
     },
+    // --- capture v3 additive (identity): past CAPTURE_V1_TABLE_COUNT ---------
+    // Local-only developer identity (phase-04 step-03): hashed ids only, the
+    // raw email/fingerprint never reach the projection; corrections supersede.
+    CanonicalTable {
+        name: "developer_identity_snapshot",
+        columns: DEVELOPER_IDENTITY_SNAPSHOT_COLUMNS,
+        primary_key: &["snapshot_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "session_binding",
+        columns: SESSION_BINDING_COLUMNS,
+        primary_key: &["binding_id"],
+        unique: NO_UNIQUE,
+    },
 ];
+
+/// Frozen v1 prefix of the capture registry: the tables shipped in the
+/// `canonical_core` migration, whose SQL is checksum-locked once applied.
+/// Append new tables AFTER this index and ship them in a NEW migration —
+/// growing or reordering the prefix would change `canonical_core`'s generated
+/// SQL and trip the checksum lock on every existing projection. Same contract
+/// as [`RECALL_V1_TABLE_COUNT`]; `capture_core_v1_sql_is_byte_stable` (in
+/// `crate::migrate`) pins the generated bytes.
+pub(crate) const CAPTURE_V1_TABLE_COUNT: usize = 30;
+
+/// The frozen v1 capture tables (the `canonical_core` migration source).
+#[must_use]
+// indexing_slicing: compile-time constant bound; `capture_registry_growth_
+// lands_past_v1_freeze` pins the boundary, and any drift panics in every test.
+#[allow(clippy::indexing_slicing)]
+pub(crate) fn capture_v1_tables() -> &'static [CanonicalTable] {
+    &TABLES[..CAPTURE_V1_TABLE_COUNT]
+}
+
+/// Capture tables added after the v1 freeze (each ships in its own additive
+/// migration; empty until a post-v1 table lands).
+#[must_use]
+#[allow(clippy::indexing_slicing)] // same compile-time bound as above
+pub(crate) fn capture_post_v1_tables() -> &'static [CanonicalTable] {
+    &TABLES[CAPTURE_V1_TABLE_COUNT..]
+}
 
 /// The registry of canonical (append-only) tables. The immutability property
 /// test iterates this, so every entry must have its guard triggers.
@@ -697,11 +799,451 @@ pub fn canonical_table(name: &str) -> Option<&'static CanonicalTable> {
     TABLES.iter().find(|t| t.name == name)
 }
 
+/// Look up a table across **all three** registries (capture, recall, canopy) —
+/// the identifier-validation source for the insert DAO: a table name that
+/// resolves nowhere is refused before any SQL is built.
+#[must_use]
+pub fn any_registry_table(name: &str) -> Option<&'static CanonicalTable> {
+    canonical_table(name)
+        .or_else(|| recall_canonical_table(name))
+        .or_else(|| canopy_canonical_table(name))
+}
+
 /// Whether `name` is a registered canonical table (used by the additive-migration
 /// guard so a migration cannot destructively rewrite canonical data).
 #[must_use]
 pub fn is_canonical_table(name: &str) -> bool {
     canonical_table(name).is_some()
+        || recall_canonical_table(name).is_some()
+        || canopy_canonical_table(name).is_some()
+}
+
+// =========================================================================
+// Stage 3 — the recall projection (`recall.db`)
+// =========================================================================
+//
+// A SEPARATE registry + database file from the M1 capture projection
+// (`projection.db`): the recall graph is the read-side, rebuildable delta
+// ledger, and `rift-memd rebuild` destroys only `recall.db`. It reuses this
+// crate's migration + immutability machinery (registered canonical → guard
+// triggers → the registry-driven property test) via [`recall_canonical_tables`].
+//
+// The model is the generic node/edge graph from `04-database-design §4.5`:
+// `graph_node` + typed `graph_edge`, with the **payload of each node kind in
+// its own typed `n_*` relation** (4NF). Mechanical facts only — the `kind`
+// columns are `CHECK`-constrained to the v1 set, so a semantic kind
+// (`similar_to`/`touches`/`frame`) is refused until a Phase-7 migration widens
+// the set. Foreign keys are documented in comments, not emitted as SQL
+// `REFERENCES` — same posture as the M1 capture schema (the single writer
+// guarantees referential integrity; enforced FKs are a Stage-6 item).
+
+/// The v1 **mechanical** node kinds. The full set is declared now (even for the
+/// typed tables deferred to the follow-up) so the `CHECK` never needs widening;
+/// semantic kinds are simply absent and therefore rejected.
+pub const RECALL_NODE_KINDS: &[&str] = &[
+    "Checkpoint",
+    "Session",
+    "Turn",
+    "ModelCall",
+    "TokenUsage",
+    "CostEstimate",
+    "ToolCall",
+    "ToolResult",
+    "FileRevision",
+    "FileRead",
+    "ChangedHunk",
+    "TestRun",
+    "ErrorSignature",
+    "Commit",
+    "Branch",
+    "PR",
+    "Summary",
+    "Handle",
+];
+
+/// The v1 **mechanical** edge kinds (incl. the retention-lineage edges). A
+/// semantic edge (`similar_to`/`touches`/`frame`) is not here, so the `CHECK`
+/// on `graph_edge.kind` rejects it until Phase 7 adds it by migration.
+pub const RECALL_EDGE_KINDS: &[&str] = &[
+    "created",
+    "linked_to",
+    "called",
+    "read",
+    "produced",
+    "changed",
+    "in",
+    "failed_with",
+    "spent",
+    "binds",
+    "invalidated_by",
+    "derived_from",
+    "deletion_depends_on",
+];
+
+// --- generic graph ---------------------------------------------------------
+const GRAPH_NODE_COLUMNS: &[Column] = &[
+    Column::text("node_id"),                        // content hash or identity id
+    Column::text_one_of("kind", RECALL_NODE_KINDS), // CHECK-constrained to v1
+    Column::text("ref_id"),                         // FK into the kind's typed table (comment-FK)
+    Column::int("created_at"),                      // transaction-time (epoch ms)
+    Column::int("schema_version"),
+];
+// Typed edges are their OWN relation (4NF). `UNIQUE(from,to,kind)` makes
+// re-ingest a set-union no-op (04 §4.4).
+const GRAPH_EDGE_COLUMNS: &[Column] = &[
+    Column::text("edge_id"),
+    Column::text("from_node"), // → graph_node(node_id) (comment-FK)
+    Column::text("to_node"),   // → graph_node(node_id) (comment-FK)
+    Column::text_one_of("kind", RECALL_EDGE_KINDS),
+    Column::int("created_at"),
+];
+const EDGE_UNIQUE: &[&[&str]] = &[&["from_node", "to_node", "kind"]];
+
+// --- typed payload relations (the core subset that carries v1 data) --------
+const N_CHECKPOINT_COLUMNS: &[Column] = &[
+    Column::text("node_id"), // = checkpoint_id
+    Column::text("dialect"), // 'rift' | 'entire'
+    Column::int("ordinal"),  // deterministic walk position
+    Column::text_null("prev_checkpoint"),
+    Column::text_null("strategy"),
+    Column::text_null("merkle_root"),
+    Column::text_null("developer"), // owning developer (scope axis; NULL = current)
+];
+const N_SESSION_COLUMNS: &[Column] = &[
+    Column::text("node_id"),        // = session id
+    Column::text_null("developer"), // scope axis (NULL = current/unknown)
+];
+const N_TOOL_CALL_COLUMNS: &[Column] = &[
+    Column::text("node_id"),       // = tool_use_id
+    Column::text("checkpoint_id"), // denormalized for scope filtering
+    Column::text("tool_use_id"),
+    Column::text_null("tool_name"),
+];
+// A path@hash is ONE immutable fact: node_id = sha256(path ‖ 0x00 ‖ content_sha256)
+// (mirrors the M1 `file_revision` keying), so the same path@content dedupes
+// across checkpoints yet two paths with identical content stay distinct.
+const N_FILE_REVISION_COLUMNS: &[Column] = &[
+    Column::text("node_id"),
+    Column::text("path"),
+    Column::text("blob_oid"), // = content_sha256 in v1 (real git OID: follow-up)
+    Column::text("content_sha256"), // the validity comparator (worktree hasher emits SHA-256)
+    Column::int("size"),
+];
+// The irreducible (tool_call, file_revision, range) read triple (5NF). Carries
+// the captured `input_tokens` + a deterministic `read_ordinal` so the metric
+// can rank 2nd..Nth reads without a tokenizer.
+const N_FILE_READ_COLUMNS: &[Column] = &[
+    Column::text("node_id"),
+    Column::text("checkpoint_id"), // denormalized for scope filtering
+    Column::text("tool_call_id"),
+    Column::text("file_revision"), // → n_file_revision(node_id) (comment-FK)
+    Column::int("input_tokens"),
+    Column::int("read_ordinal"), // shard.ordinal * 1e6 + index (deterministic)
+    Column::int_null("byte_range_lo"),
+    Column::int_null("byte_range_hi"),
+];
+const N_TOKEN_USAGE_COLUMNS: &[Column] = &[
+    Column::text("node_id"),
+    Column::text("checkpoint_id"),
+    Column::text("call_id"),
+    Column::int("uncached_in"),
+    Column::int("cached_in"),
+    Column::int("cache_write"),
+    Column::int("output"),
+];
+const N_CHANGED_HUNK_COLUMNS: &[Column] = &[
+    Column::text("node_id"),   // = sha256(old_rev ‖ new_rev ‖ ranges)
+    Column::text("commit_id"), // = the checkpoint id grouping the change in v1
+    Column::text("file_revision"),
+    Column::int_null("old_start"),
+    Column::int_null("old_len"),
+    Column::int_null("new_start"),
+    Column::int_null("new_len"),
+    Column::int("is_binary"), // 1 = whole-file binary hunk (never line-diffed)
+];
+
+// --- validity / digest store (P3) ------------------------------------------
+// summary_id = sha256(source ‖ extractor_ver ‖ policy_ver ‖ redaction_ver).
+// NO `embedding` column in v1 (rusqlite has no native vector; Turso adds it —
+// see the `rift-turso-rewrite-deferral` memory). Validity is COMPUTED, so there
+// is deliberately no mutable `valid`/`status` column.
+const SUMMARY_BINDING_COLUMNS: &[Column] = &[
+    Column::text("summary_id"),
+    Column::text("path"),
+    Column::text("source_sha256"),
+    Column::text("bound_blob_oid"),
+    Column::int("extractor_ver"),
+    Column::int("policy_ver"),
+    Column::int("redaction_ver"),
+    Column::text("digest_ref"), // → digest_blob(digest_ref)
+    Column::int("created_at"),
+];
+// The content-addressed digest store (digest_ref = sha256(bytes)).
+const DIGEST_BLOB_COLUMNS: &[Column] = &[
+    Column::text("digest_ref"),
+    Column::blob("bytes"),
+    Column::int("created_at"),
+];
+
+// --- lineage (W12) + metric trend ------------------------------------------
+const RETENTION_LINEAGE_COLUMNS: &[Column] = &[
+    Column::text("node_id"),
+    Column::text("source_artifact"),
+    Column::text("retention_class"), // 'mechanical' | 'derived' | 'sensitive-derived'
+    Column::text_null("derived_from"),
+    Column::text_null("deletion_depends_on"),
+    Column::int("created_at"),
+];
+const METRIC_SNAPSHOT_COLUMNS: &[Column] = &[
+    Column::text("snapshot_id"), // ULID
+    Column::text("scope_hash"),
+    Column::int("total_input_tokens"),
+    Column::int("repeated_read_tokens"),
+    Column::int("avoidable_tokens"),
+    Column::int("computed_at"),
+];
+
+// --- outcome labels (P4 S2, W8) --------------------------------------------
+// Bitemporal, append-only beliefs about a subject's lifecycle, derived from the
+// git lifecycle (reachability/revert/branch state), NEVER an agent assertion. A
+// correction is a NEW row whose `supersedes` points at the prior belief — there
+// is no mutable `effective`/`current` flag; the effective label is COMPUTED
+// (latest non-superseded as-of a query time). `label_id` is content-addressed
+// (`sha256(subject ‖ kind ‖ valid_from ‖ evidence)`) so re-derivation on rebuild
+// is an idempotent set-union.
+/// The closed set of outcome-label subject kinds (mirrors `LabelSubject`).
+pub const OUTCOME_LABEL_SUBJECT_KINDS: &[&str] = &["session", "checkpoint", "file_revision"];
+/// The closed set of outcome-label kinds (mirrors `rift_recall_types::OUTCOME_KINDS`).
+pub const OUTCOME_LABEL_KINDS: &[&str] = &[
+    "merged",
+    "tests_passed",
+    "reverted",
+    "abandoned",
+    "low_human_mod",
+    "high_human_mod",
+];
+const OUTCOME_LABEL_COLUMNS: &[Column] = &[
+    Column::text("label_id"), // = sha256(subject ‖ kind ‖ valid_from ‖ evidence)
+    Column::text_one_of("subject_kind", OUTCOME_LABEL_SUBJECT_KINDS),
+    Column::text("subject_id"),
+    Column::text_one_of("kind", OUTCOME_LABEL_KINDS),
+    Column::int("valid_from"), // valid-time: when it became true in the world
+    Column::int("observed_at"), // transaction-time: when Rift learned it
+    Column::text("evidence_ref"), // commit oid / CI id / attribution snapshot
+    Column::text_null("supersedes"), // → outcome_label(label_id) (comment-FK); NULL = original
+];
+
+const RECALL_TABLES: &[CanonicalTable] = &[
+    CanonicalTable {
+        name: "graph_node",
+        columns: GRAPH_NODE_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "graph_edge",
+        columns: GRAPH_EDGE_COLUMNS,
+        primary_key: &["edge_id"],
+        unique: EDGE_UNIQUE,
+    },
+    CanonicalTable {
+        name: "n_checkpoint",
+        columns: N_CHECKPOINT_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "n_session",
+        columns: N_SESSION_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "n_tool_call",
+        columns: N_TOOL_CALL_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "n_file_revision",
+        columns: N_FILE_REVISION_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "n_file_read",
+        columns: N_FILE_READ_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "n_token_usage",
+        columns: N_TOKEN_USAGE_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "n_changed_hunk",
+        columns: N_CHANGED_HUNK_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "summary_binding",
+        columns: SUMMARY_BINDING_COLUMNS,
+        primary_key: &["summary_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "digest_blob",
+        columns: DIGEST_BLOB_COLUMNS,
+        primary_key: &["digest_ref"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "retention_lineage",
+        columns: RETENTION_LINEAGE_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "metric_snapshot",
+        columns: METRIC_SNAPSHOT_COLUMNS,
+        primary_key: &["snapshot_id"],
+        unique: NO_UNIQUE,
+    },
+    // --- v2 additive (P4 S2): [RECALL_V1_TABLE_COUNT, RECALL_V2_TABLE_COUNT) --
+    CanonicalTable {
+        name: "outcome_label",
+        columns: OUTCOME_LABEL_COLUMNS,
+        primary_key: &["label_id"],
+        unique: NO_UNIQUE,
+    },
+    // --- v3 additive (Layer-2 custody): everything past RECALL_V2_TABLE_COUNT.
+    // recall.db carries its own wrapped-DEK custody rows (same shape as the
+    // capture projection's table) so each projection is self-contained.
+    CanonicalTable {
+        name: "key_metadata",
+        columns: KEY_METADATA_COLUMNS,
+        primary_key: &["key_id"],
+        unique: NO_UNIQUE,
+    },
+];
+
+/// The number of v1 (`recall_core` migration) recall tables. Tables after this
+/// index were introduced by later **additive** migrations, so the v1 migration
+/// builds only from the prefix and its checksum stays stable when the registry
+/// grows (the additive-only, checksum-locked migration contract).
+pub(crate) const RECALL_V1_TABLE_COUNT: usize = 13;
+
+/// One past the last v2 (`recall_outcome_labels` migration) table.
+pub(crate) const RECALL_V2_TABLE_COUNT: usize = 14;
+
+/// The v1 recall tables (the `recall_core` migration's source of truth).
+#[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
+pub(crate) fn recall_v1_tables() -> &'static [CanonicalTable] {
+    &RECALL_TABLES[..RECALL_V1_TABLE_COUNT]
+}
+
+/// The v2-additive recall tables (the `recall_outcome_labels` migration).
+#[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
+pub(crate) fn recall_v2_outcome_tables() -> &'static [CanonicalTable] {
+    &RECALL_TABLES[RECALL_V1_TABLE_COUNT..RECALL_V2_TABLE_COUNT]
+}
+
+/// The v3-additive recall tables (the `recall_key_custody` migration).
+#[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
+pub(crate) fn recall_v3_custody_tables() -> &'static [CanonicalTable] {
+    &RECALL_TABLES[RECALL_V2_TABLE_COUNT..]
+}
+
+/// Secondary indexes for the recall graph (appended after the tables in the
+/// recall migration). Additive; tuned against the metric/scope/hunk queries.
+pub const RECALL_INDEX_SQL: &str = "\
+CREATE INDEX IF NOT EXISTS idx_node_kind ON graph_node(kind);\n\
+CREATE INDEX IF NOT EXISTS idx_edge_from ON graph_edge(from_node, kind);\n\
+CREATE INDEX IF NOT EXISTS idx_edge_to   ON graph_edge(to_node, kind);\n\
+CREATE INDEX IF NOT EXISTS idx_fread_rev  ON n_file_read(file_revision);\n\
+CREATE INDEX IF NOT EXISTS idx_fread_ckpt ON n_file_read(checkpoint_id);\n";
+
+/// Secondary index for the outcome-label store (the v2 additive migration).
+/// Looks up a subject's belief history for effective-label resolution.
+pub const RECALL_OUTCOME_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_outcome_subject ON outcome_label(subject_kind, subject_id);\n";
+
+/// The registry of recall (`recall.db`) canonical tables (v1 core + additive).
+/// The immutability property test iterates this **in addition to**
+/// [`canonical_tables`], so every recall table gets its append-only guard for free.
+#[must_use]
+pub fn recall_canonical_tables() -> &'static [CanonicalTable] {
+    RECALL_TABLES
+}
+
+/// Look up a recall canonical table by name.
+#[must_use]
+pub fn recall_canonical_table(name: &str) -> Option<&'static CanonicalTable> {
+    RECALL_TABLES.iter().find(|t| t.name == name)
+}
+
+// --- Canopy UI-state (Stage 4 P4 S1 / P5 S2) -------------------------------
+// Machine-global, append-only UI facts: which projects the dashboard watches and
+// each project's feature-toggle intent. A SEPARATE registry + db file
+// (`ui-state.db`) from the per-repo capture projection, so these never touch
+// capture data — yet they still obey the immutability discipline (04 §4.3): an
+// `op`/`desired` change is a NEW event row (never an in-place UPDATE), and the
+// current state is the fold of the latest-valid event per key. `op`/`feature` are
+// plain `TEXT` validated at the Rust writer (the M1 "CHECK deferred" posture), so
+// the store stays decoupled from Canopy's enum spelling.
+
+const CANOPY_PROJECT_EVENT_COLUMNS: &[Column] = &[
+    Column::text("event_id"),        // ULID
+    Column::text("project_id"),      // stable per registered project
+    Column::text("op"),              // 'added' | 'removed' | 'relabeled' | 'reordered'
+    Column::text_null("repo_id"),    // set on 'added'
+    Column::text_null("path"),       // set on 'added'
+    Column::text_null("label"),      // set on 'added'/'relabeled'
+    Column::int_null("order_key"),   // set on 'reordered'
+    Column::text_null("supersedes"), // prior event_id this corrects (04 §4.3)
+    Column::int("created_at"),       // transaction-time (epoch ms)
+];
+
+const CANOPY_TOGGLE_EVENT_COLUMNS: &[Column] = &[
+    Column::text("event_id"),        // ULID
+    Column::text("project_id"),      // FK: a canopy_project_event.project_id (comment-FK)
+    Column::text("feature"), // 'fff' | 'codegraph' | 'codegraph-typescript' | … | 'rift-total-recall'
+    Column::int("desired"),  // 1 = on, 0 = off (the user's intent at this time)
+    Column::text_null("supersedes"), // prior event_id for this (project,feature)
+    Column::int("created_at"), // transaction-time (epoch ms)
+];
+
+const CANOPY_TABLES: &[CanonicalTable] = &[
+    CanonicalTable {
+        name: "canopy_project_event",
+        columns: CANOPY_PROJECT_EVENT_COLUMNS,
+        primary_key: &["event_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "canopy_toggle_event",
+        columns: CANOPY_TOGGLE_EVENT_COLUMNS,
+        primary_key: &["event_id"],
+        unique: NO_UNIQUE,
+    },
+];
+
+/// The registry of canopy UI-state (`ui-state.db`) canonical tables. Machine-
+/// global and append-only, iterated by the immutability property test **in
+/// addition to** [`canonical_tables`]/[`recall_canonical_tables`], so every
+/// canopy table gets its append-only guard for free.
+#[must_use]
+pub fn canopy_canonical_tables() -> &'static [CanonicalTable] {
+    CANOPY_TABLES
+}
+
+/// Look up a canopy canonical table by name.
+#[must_use]
+pub fn canopy_canonical_table(name: &str) -> Option<&'static CanonicalTable> {
+    CANOPY_TABLES.iter().find(|t| t.name == name)
 }
 
 #[cfg(test)]

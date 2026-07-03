@@ -84,6 +84,21 @@ impl Row {
         }
     }
 
+    /// Read column `i` as an optional `i64` (`NULL` → `None`).
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] if the index is out of range or the value is neither
+    /// an integer nor `NULL`.
+    pub fn get_opt_i64(&self, i: usize) -> Result<Option<i64>> {
+        match self.col(i)? {
+            Value::Int(v) => Ok(Some(*v)),
+            Value::Null => Ok(None),
+            _ => Err(RiftError::storage(format!(
+                "column {i} is not an integer/null"
+            ))),
+        }
+    }
+
     /// Read column `i` as text.
     ///
     /// # Errors
@@ -130,6 +145,59 @@ pub enum TxMode {
     Concurrent,
 }
 
+/// Whether a store engine can *push* change notifications or must be *polled*.
+///
+/// The always-available rusqlite reference engine is [`NotifyCap::PollOnly`]: a
+/// change observer watches an append cursor
+/// ([`crate::CanonicalStore::read_watermark`]) on an interval. A future Turso
+/// engine can report [`NotifyCap::Native`] and drive the *same* observer from its
+/// native subscription without polling — the seam keeps the observer engine-blind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyCap {
+    /// The engine pushes change notifications (Turso native subscribe).
+    Native,
+    /// The engine must be polled (the rusqlite reference engine).
+    PollOnly,
+}
+
+/// A transaction handle: statements grouped atomically, finished by exactly one
+/// of [`StoreTx::commit`] / [`StoreTx::rollback`] (dropping an unfinished
+/// transaction rolls back, best-effort). The reference engine serializes all
+/// statements on one connection, so isolation between concurrently-held handles
+/// is cooperative — the projection's writers are single-threaded by design.
+#[async_trait]
+pub trait StoreTx: Send {
+    /// Execute a parameterized statement inside the transaction.
+    ///
+    /// # Errors
+    /// As [`StoreConn::execute`].
+    async fn execute(&self, sql: &str, params: &[Value]) -> Result<u64>;
+
+    /// Execute a (multi-statement) DDL batch inside the transaction.
+    ///
+    /// # Errors
+    /// [`RiftError::Migration`] on failure.
+    async fn execute_batch(&self, sql: &str) -> Result<()>;
+
+    /// Run a parameterized query inside the transaction.
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] on failure.
+    async fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>>;
+
+    /// Commit the transaction.
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] if the commit fails (the transaction is rolled back).
+    async fn commit(self: Box<Self>) -> Result<()>;
+
+    /// Roll the transaction back explicitly.
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] if the rollback itself fails.
+    async fn rollback(self: Box<Self>) -> Result<()>;
+}
+
 /// A connection handle. Parameterized read/write over the engine; never exposes
 /// engine types to callers.
 #[async_trait]
@@ -152,6 +220,14 @@ pub trait StoreConn: Send + Sync {
     /// # Errors
     /// [`RiftError::Storage`] on failure.
     async fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>>;
+
+    /// Begin a transaction. [`TxMode::Concurrent`] requests MVCC where the
+    /// engine supports it; the rusqlite reference engine treats it as
+    /// [`TxMode::Deferred`].
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] if the transaction cannot be started.
+    async fn begin(&self, mode: TxMode) -> Result<Box<dyn StoreTx + '_>>;
 }
 
 /// An engine-agnostic store. Hands out [`StoreConn`] handles; the append-only

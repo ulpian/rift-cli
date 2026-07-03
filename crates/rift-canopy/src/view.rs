@@ -1,0 +1,721 @@
+//! The pure dashboard renderer: `view::draw(&ViewModel, &mut Frame)`.
+//!
+//! The single renderer both backends flush — no `&mut AppState`, no I/O, no
+//! engine types — so it is a deterministic function of the snapshot and every
+//! panel step's headless/snapshot test reuses it. Ports the three-column layout
+//! the live xre path used into pure [`Frame`] drawing.
+
+use crate::col2::sanitize_for_terminal;
+use crate::gauge::{render_bar, GaugeState};
+use crate::layout::{
+    choose_mode, command_split, single_panel, solve, two_col, LayoutMode, Rect, MIN_NOTICE_COLS,
+    MIN_NOTICE_ROWS,
+};
+use crate::render::frame::{Color, Frame, Style};
+use crate::state::ViewModel;
+use crate::{EntryKind, Mode, Panel, ProjectStatus};
+
+/// The Rift accent color (title + selection).
+const ACCENT: Style = Style::fg(Color::Rgb(0x6c, 0xe0, 0x9a));
+
+/// Render the whole dashboard for `vm` into `frame`, choosing the responsive
+/// layout tier for the current size (P3 S2).
+pub fn draw(vm: &ViewModel, frame: &mut Frame) {
+    let area = frame.rect();
+    if area.w == 0 || area.h == 0 {
+        return;
+    }
+
+    // Below the minimum, show only the centered notice (no title/panels).
+    if choose_mode(vm.size) == LayoutMode::TooSmall {
+        draw_too_small(frame, area);
+        return;
+    }
+
+    draw_title(vm, frame, area);
+    let body = Rect {
+        x: area.x,
+        y: area.y + 1,
+        w: area.w,
+        h: area.h.saturating_sub(1),
+    };
+
+    if vm.show_wizard {
+        let (above, command) = command_split(body);
+        draw_wizard(vm, frame, above);
+        draw_command(vm, frame, command);
+        return;
+    }
+
+    match choose_mode(vm.size) {
+        LayoutMode::TwoCol => draw_two_col(vm, frame, body),
+        LayoutMode::SinglePanel => draw_single(vm, frame, body),
+        // Full3Col (TooSmall handled above).
+        _ => draw_full(vm, frame, body),
+    }
+}
+
+/// The Rift accent header row.
+fn draw_title(vm: &ViewModel, frame: &mut Frame, area: Rect) {
+    let mut header = String::from("RIFT — Canopy");
+    if let Some(s) = &vm.status {
+        header.push_str("   ");
+        header.push_str(s);
+    }
+    frame.put_str(area.x, area.y, &header, ACCENT);
+}
+
+/// The full 20/40/40 three-column grid.
+fn draw_full(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+    let r = solve(body, vm.focus);
+    if r.col1.h >= 2 {
+        draw_projects(vm, frame, r.col1);
+        draw_detail(vm, frame, r.col2);
+        draw_graphs(vm, frame, r.col3);
+    }
+    draw_command(vm, frame, r.command);
+}
+
+/// The two-column degraded grid: projects left, detail over graphs right.
+fn draw_two_col(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+    let r = two_col(body);
+    draw_projects(vm, frame, r.col1);
+    draw_detail(vm, frame, r.col2);
+    draw_graphs(vm, frame, r.col3);
+    draw_command(vm, frame, r.command);
+}
+
+/// The single-panel degraded layout: a tab strip + the focused panel.
+fn draw_single(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+    let (tabs, panel, command) = single_panel(body);
+    draw_tab_strip(vm, frame, tabs);
+    match vm.focus {
+        Panel::Detail => draw_detail(vm, frame, panel),
+        Panel::Graphs => draw_graphs(vm, frame, panel),
+        // Projects (and Command focus) show the projects panel.
+        Panel::Projects | Panel::Command => draw_projects(vm, frame, panel),
+    }
+    draw_command(vm, frame, command);
+}
+
+/// The `[Projects] Detail Graphs` tab strip for the single-panel layout.
+fn draw_tab_strip(vm: &ViewModel, frame: &mut Frame, tabs: Rect) {
+    if tabs.h == 0 {
+        return;
+    }
+    let mut strip = String::new();
+    for (panel, label) in [
+        (Panel::Projects, "Projects"),
+        (Panel::Detail, "Detail"),
+        (Panel::Graphs, "Graphs"),
+    ] {
+        if vm.focus == panel {
+            strip.push('[');
+            strip.push_str(label);
+            strip.push(']');
+        } else {
+            strip.push(' ');
+            strip.push_str(label);
+            strip.push(' ');
+        }
+    }
+    clip_at(frame, tabs.x, tabs.y, tabs.w, &strip, ACCENT);
+}
+
+/// The centered "terminal too small" notice.
+fn draw_too_small(frame: &mut Frame, area: Rect) {
+    let msg = format!("Terminal too small (need ≥ {MIN_NOTICE_COLS}×{MIN_NOTICE_ROWS})");
+    let len = u16::try_from(msg.chars().count()).unwrap_or(u16::MAX);
+    let x = area.x + area.w.saturating_sub(len) / 2;
+    let y = area.y + area.h / 2;
+    clip_at(frame, x, y, area.w, &msg, Style::DEFAULT);
+}
+
+/// The first-run hint, spanning the full column area so it stays readable.
+fn draw_wizard(vm: &ViewModel, frame: &mut Frame, above: Rect) {
+    let inner = frame.border(above, "projects", border_style(vm.focus == Panel::Projects));
+    clip_line(
+        frame,
+        inner,
+        0,
+        "No projects registered yet.",
+        Style::DEFAULT,
+    );
+    clip_line(
+        frame,
+        inner,
+        1,
+        "Press 'a' to add a project, or run `rift setup`.",
+        Style::DEFAULT,
+    );
+}
+
+/// The border style for a panel: accented when focused, plain otherwise.
+fn border_style(focused: bool) -> Style {
+    if focused {
+        ACCENT
+    } else {
+        Style::DEFAULT
+    }
+}
+
+/// Draw the bottom command / add-project bar (mode-aware), with a block cursor.
+fn draw_command(vm: &ViewModel, frame: &mut Frame, command: Rect) {
+    if command.h == 0 {
+        return;
+    }
+    let (btitle, prefix) = match vm.mode {
+        Mode::AddProject => ("add project (path)", ""),
+        _ => ("command", "/"),
+    };
+    let inner = frame.border(command, btitle, border_style(vm.focus == Panel::Command));
+    let line = format!("{prefix}{}\u{2588}", vm.command_line);
+    clip_line(frame, inner, 0, &line, Style::DEFAULT);
+}
+
+/// Column 1 — the project list, windowed to keep the selection in view.
+fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
+    let inner = frame.border(rect, "projects", border_style(vm.focus == Panel::Projects));
+    if vm.projects.is_empty() {
+        clip_line(
+            frame,
+            inner,
+            0,
+            "No projects yet — press 'a'",
+            Style::DEFAULT,
+        );
+        return;
+    }
+    let (start, end) = visible_window(vm.selected, vm.projects.len(), usize::from(inner.h));
+    let label_w = usize::from(inner.w).saturating_sub(4); // "> ● "
+    for (row, p) in vm.projects.iter().enumerate().take(end).skip(start) {
+        let Ok(dy) = u16::try_from(row.saturating_sub(start)) else {
+            break;
+        };
+        let style = if p.selected { ACCENT } else { Style::DEFAULT };
+        let cursor = if p.selected { '>' } else { ' ' };
+        // The label is untrusted (a directory name); sanitize before eliding.
+        let label = elide(&sanitize_for_terminal(&p.name), label_w);
+        let line = format!("{cursor} {} {label}", p.status.glyph());
+        clip_line(frame, inner, dy, &line, style);
+    }
+}
+
+/// Column 2 — the detail panel (project sections + nic-gauge), scrollable. Every
+/// projection-derived string (label, path, model name) is escape-sanitized before
+/// it can reach a cell, so untrusted capture data can never inject a terminal
+/// sequence (`05-security`).
+fn draw_detail(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
+    let inner = frame.border(rect, "detail", border_style(vm.focus == Panel::Detail));
+    let mut lines: Vec<String> = Vec::new();
+    match &vm.detail {
+        Some(d) => detail_lines(d, &mut lines, vm.toggle_cursor, vm.focus == Panel::Detail),
+        None => lines.push("no project selected".into()),
+    }
+    lines.push(String::new());
+    let gauge = GaugeState::from_pct(vm.context_pct);
+    lines.push(format!("context — {}", gauge.label()));
+    let bar_w = usize::from(inner.w).min(24);
+    lines.push(render_bar(vm.context_pct, bar_w));
+    render_lines(frame, inner, vm.detail_scroll, &lines);
+}
+
+/// Build the sectioned detail body (header · models · settings · capture ·
+/// features). An uninitialized project shows an init hint instead. `toggle_cursor`
+/// + `focused` drive the feature-toggle cursor highlight.
+fn detail_lines(
+    d: &crate::col2::DetailView,
+    lines: &mut Vec<String>,
+    toggle_cursor: usize,
+    focused: bool,
+) {
+    let kind = match d.kind {
+        EntryKind::Repo => "repo",
+        EntryKind::Worktree => "worktree",
+    };
+    lines.push(format!("{} ({kind})", sanitize_for_terminal(&d.label)));
+    lines.push(format!("path: {}", sanitize_for_terminal(&d.path)));
+    lines.push(format!("status: {}", status_label(d.status)));
+
+    if matches!(d.status, ProjectStatus::NotInitialized) {
+        lines.push(String::new());
+        lines.push("not initialized — run `rift init`".into());
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push("models".into());
+    if d.models.is_empty() {
+        lines.push("  (none yet)".into());
+    } else {
+        for m in &d.models {
+            lines.push(format!(
+                "  {} ×{}",
+                sanitize_for_terminal(&m.model),
+                m.calls
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("settings".into());
+    lines.push(format!(
+        "  sensitive paths: {}",
+        d.settings.sensitive_path_count
+    ));
+    lines.push(format!(
+        "  raw transcripts: {}",
+        on_off(d.settings.raw_transcripts)
+    ));
+    lines.push(format!(
+        "  tool calls: {}",
+        cap_skip(d.settings.captures_tool_calls)
+    ));
+    lines.push(format!(
+        "  token usage: {}",
+        cap_skip(d.settings.captures_token_usage)
+    ));
+
+    lines.push(String::new());
+    lines.push("capture".into());
+    lines.push(format!("  events: {}", d.capture.events));
+    lines.push(format!("  sessions: {}", d.capture.sessions));
+    lines.push(format!("  checkpoints: {}", d.capture.checkpoints));
+
+    lines.push(String::new());
+    lines.push("features".into());
+    for (i, row) in d.toggles.rows.iter().enumerate() {
+        // A cursor marker only when the detail panel is focused; variants indent.
+        let cursor = if focused && i == toggle_cursor {
+            '>'
+        } else {
+            ' '
+        };
+        let indent = if row.indent { "  " } else { "" };
+        let mut line = format!(
+            "{cursor} {indent}{} {}",
+            row.state.glyph(),
+            row.feature.label()
+        );
+        // A failed toggle shows its (sanitized) reason inline.
+        if let crate::col2::ToggleState::Failed(reason) = &row.state {
+            line.push_str(" — ");
+            line.push_str(&sanitize_for_terminal(reason));
+        }
+        lines.push(line);
+    }
+}
+
+/// "on"/"off" for a boolean setting.
+fn on_off(b: bool) -> &'static str {
+    if b {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+/// "captured"/"skipped" for a capture toggle.
+fn cap_skip(b: bool) -> &'static str {
+    if b {
+        "captured"
+    } else {
+        "skipped"
+    }
+}
+
+/// Column 3 — the graphs panel (recall savings + token sparkline), scrollable.
+fn draw_graphs(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
+    let inner = frame.border(rect, "graphs", border_style(vm.focus == Panel::Graphs));
+    let bar_w = usize::from(inner.w).min(24);
+    let lines = [
+        format!("recall savings: {}%", vm.savings_pct),
+        render_bar(vm.savings_pct, bar_w),
+        String::new(),
+        "tokens".to_string(),
+        sparkline(&vm.token_series),
+    ];
+    render_lines(frame, inner, vm.graphs_scroll, &lines);
+}
+
+/// Render `lines` into `area` starting at `offset` (the scroll top), clipping to
+/// the area's width and height.
+fn render_lines(frame: &mut Frame, area: Rect, offset: usize, lines: &[String]) {
+    for (dy, text) in lines.iter().skip(offset).enumerate() {
+        let Ok(y) = u16::try_from(dy) else { break };
+        if y >= area.h {
+            break;
+        }
+        clip_line(frame, area, y, text, Style::DEFAULT);
+    }
+}
+
+/// Print `text` on row `dy` of `area`, truncated to the area's width and dropped
+/// when it falls below the area — so a panel never bleeds into its neighbor.
+fn clip_line(frame: &mut Frame, area: Rect, dy: u16, text: &str, style: Style) {
+    if dy >= area.h {
+        return;
+    }
+    let max = usize::from(area.w);
+    let clipped: String = text.chars().take(max).collect();
+    frame.put_str(area.x, area.y + dy, &clipped, style);
+}
+
+/// Print `text` at `(x, y)`, clipped to `width` cells.
+fn clip_at(frame: &mut Frame, x: u16, y: u16, width: u16, text: &str, style: Style) {
+    let clipped: String = text.chars().take(usize::from(width)).collect();
+    frame.put_str(x, y, &clipped, style);
+}
+
+/// Truncate `s` to at most `w` display cells, appending an ellipsis when it is cut.
+fn elide(s: &str, w: usize) -> String {
+    let count = s.chars().count();
+    if count <= w {
+        return s.to_string();
+    }
+    match w {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let mut out: String = s.chars().take(w - 1).collect();
+            out.push('…');
+            out
+        }
+    }
+}
+
+/// The visible `[start, end)` slice of a `len`-item list of `height` rows that
+/// keeps `selected` in view (scroll-to-selection). Deterministic in its inputs.
+fn visible_window(selected: usize, len: usize, height: usize) -> (usize, usize) {
+    if height == 0 || len == 0 {
+        return (0, 0);
+    }
+    let h = height.min(len);
+    // Pin so `selected` stays within the window; clamp the top to the last page.
+    let start = selected.saturating_sub(h - 1).min(len - h);
+    (start, start + h)
+}
+
+/// A short human label for a project's live status.
+fn status_label(status: ProjectStatus) -> &'static str {
+    match status {
+        ProjectStatus::Running { .. } => "running",
+        ProjectStatus::PickingUp => "picking up",
+        ProjectStatus::Idle => "idle",
+        ProjectStatus::NotInitialized => "not initialized",
+        ProjectStatus::Error(_) => "error",
+    }
+}
+
+/// Render a `u64` series as block-glyph sparkline cells.
+fn sparkline(series: &[u64]) -> String {
+    const RAMP: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max = series.iter().copied().max().unwrap_or(0);
+    if max == 0 {
+        return "▁".repeat(series.len());
+    }
+    series
+        .iter()
+        .map(|v| {
+            let idx = (u128::from(*v) * (RAMP.len() as u128 - 1) / u128::from(max)) as usize;
+            *RAMP.get(idx).unwrap_or(&'▁')
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::frame::Size;
+    use crate::state::{update, AppState, Event, ProjectData};
+    use crate::{CaptureSummary, DetailView, ModelUsage, Project, ProjectStatus, SettingsSummary};
+
+    fn vm() -> ViewModel {
+        let mut s = AppState::new(
+            vec![
+                Project {
+                    name: "rift-cli".into(),
+                    path: "/r/rift-cli".into(),
+                    status: ProjectStatus::Running {
+                        since_ms: 0,
+                        active_sessions: 1,
+                    },
+                },
+                Project {
+                    name: "rift-site".into(),
+                    path: "/r/rift-site".into(),
+                    status: ProjectStatus::Idle,
+                },
+            ],
+            Size::new(120, 40),
+        );
+        s.app.splash.skip();
+        s.app.context_pct = 50;
+        s.app.savings_pct = 18;
+        s.app.token_series = vec![1, 4, 2, 8, 5];
+        s.snapshot()
+    }
+
+    fn render_to_text(vm: &ViewModel) -> String {
+        let mut f = Frame::new(vm.size);
+        draw(vm, &mut f);
+        let mut out = String::new();
+        for y in 0..f.height() {
+            for x in 0..f.width() {
+                out.push(f.get(x, y).map_or(' ', |c| c.ch));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn draws_three_panels_and_command_bar() {
+        let text = render_to_text(&vm());
+        assert!(text.contains("RIFT — Canopy"));
+        assert!(text.contains("projects"));
+        assert!(text.contains("rift-cli"));
+        assert!(text.contains("detail"));
+        assert!(text.contains("graphs"));
+        assert!(text.contains("recall savings: 18%"));
+        assert!(text.contains("context — Thinking"));
+    }
+
+    #[test]
+    fn wizard_when_empty() {
+        let mut s = AppState::new(vec![], Size::new(100, 30));
+        s.app.splash.skip();
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("No projects registered"));
+    }
+
+    #[test]
+    fn add_project_bar_shows_path() {
+        let mut s = AppState::new(vec![], Size::new(100, 30));
+        s.app.splash.skip();
+        s.app.mode = Mode::AddProject;
+        s.app.command_line = "/tmp/repo".into();
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("/tmp/repo"));
+        assert!(text.contains("add project"));
+    }
+
+    #[test]
+    fn focused_panel_border_is_highlighted() {
+        use crate::render::frame::Color;
+        use crate::Panel;
+        let accent = Color::Rgb(0x6c, 0xe0, 0x9a);
+
+        let mut s = AppState::new(
+            vec![Project {
+                name: "p".into(),
+                path: "/r/p".into(),
+                status: ProjectStatus::Idle,
+            }],
+            Size::new(120, 40),
+        );
+        s.app.splash.skip();
+        s.app.focus = Panel::Projects;
+        let mut f = Frame::new(s.size);
+        draw(&s.snapshot(), &mut f);
+
+        // col1's top-left corner sits at (0, 1), just below the title row.
+        let c1 = f.get(0, 1).unwrap();
+        assert_eq!(c1.ch, '╭');
+        assert_eq!(
+            c1.style.fg, accent,
+            "the focused panel's border is accented"
+        );
+
+        // At width 120 col1 is 24 wide, so col2's border begins at x = 24.
+        let c2 = f.get(24, 1).unwrap();
+        assert_eq!(c2.ch, '╭');
+        assert_ne!(
+            c2.style.fg, accent,
+            "an unfocused panel's border is not accented"
+        );
+    }
+
+    #[test]
+    fn tiny_terminal_does_not_panic() {
+        for (w, h) in [(0, 0), (1, 1), (2, 3), (5, 2)] {
+            let mut s = AppState::new(vec![], Size::new(w, h));
+            s.app.splash.skip();
+            let mut f = Frame::new(Size::new(w, h));
+            draw(&s.snapshot(), &mut f); // must not panic
+        }
+    }
+
+    /// A populated state at the given size, past the splash.
+    fn sized(w: u16, h: u16) -> AppState {
+        let mut s = AppState::new(
+            vec![
+                Project {
+                    name: "alpha".into(),
+                    path: "/r/alpha".into(),
+                    status: ProjectStatus::Idle,
+                },
+                Project {
+                    name: "beta".into(),
+                    path: "/r/beta".into(),
+                    status: ProjectStatus::Idle,
+                },
+            ],
+            Size::new(w, h),
+        );
+        s.app.splash.skip();
+        s
+    }
+
+    #[test]
+    fn two_col_stacks_detail_over_graphs() {
+        assert_eq!(choose_mode(Size::new(60, 20)), LayoutMode::TwoCol);
+        let text = render_to_text(&sized(60, 20).snapshot());
+        assert!(text.contains("projects"));
+        let detail_row = text.lines().position(|l| l.contains("detail"));
+        let graphs_row = text.lines().position(|l| l.contains("graphs"));
+        assert!(
+            detail_row < graphs_row && detail_row.is_some(),
+            "detail sits above graphs in two-column mode ({detail_row:?} < {graphs_row:?})"
+        );
+    }
+
+    #[test]
+    fn single_panel_tab_switches_active() {
+        assert_eq!(choose_mode(Size::new(40, 16)), LayoutMode::SinglePanel);
+        let mut s = sized(40, 16);
+
+        s.app.focus = Panel::Detail;
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("[Detail]"), "focused tab is bracketed");
+        // The detail panel leads with the selected project's header (its status).
+        assert!(text.contains("status:"), "the detail panel is shown");
+
+        s.app.focus = Panel::Graphs;
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("[Graphs]"));
+        assert!(text.contains("tokens"), "the graphs panel is shown");
+    }
+
+    #[test]
+    fn too_small_shows_notice_and_recovers() {
+        let text = render_to_text(&sized(20, 5).snapshot());
+        assert!(text.contains("too small"), "the notice is shown when tiny");
+        // Enlarging recovers the full dashboard.
+        let text = render_to_text(&sized(120, 40).snapshot());
+        assert!(!text.contains("too small"));
+        assert!(text.contains("projects"));
+    }
+
+    #[test]
+    fn long_names_truncate_with_ellipsis() {
+        let mut s = sized(120, 40);
+        s.app.projects = vec![Project {
+            name: "a-really-long-project-name-that-cannot-possibly-fit".into(),
+            path: "/r/x".into(),
+            status: ProjectStatus::Idle,
+        }];
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains('…'), "an over-long label is ellipsized");
+    }
+
+    /// A single-project state whose selected project's rich detail carries `model`.
+    fn state_with_detail(status: ProjectStatus, model: &str) -> AppState {
+        let mut s = AppState::new(
+            vec![Project {
+                name: "p".into(),
+                path: "/r/p".into(),
+                status,
+            }],
+            Size::new(120, 40),
+        );
+        s.app.splash.skip();
+        update(
+            &mut s,
+            Event::ProjectData(ProjectData {
+                project: "/r/p".into(),
+                status,
+                detail: Some(DetailView {
+                    path: "/r/p".into(),
+                    label: "p".into(),
+                    kind: EntryKind::Repo,
+                    status,
+                    models: vec![ModelUsage {
+                        model: model.into(),
+                        calls: 3,
+                    }],
+                    settings: SettingsSummary::default(),
+                    capture: CaptureSummary::default(),
+                    toggles: crate::col2::ToggleView::default(),
+                }),
+            }),
+        );
+        s
+    }
+
+    #[test]
+    fn model_name_with_ansi_escape_is_sanitized() {
+        // A hostile model name carrying an SGR escape must not reach any cell as a
+        // control character — the ESC is stripped, the inert text remains.
+        let s = state_with_detail(ProjectStatus::Idle, "evil\x1b[31mmodel");
+        let mut f = Frame::new(s.size);
+        draw(&s.snapshot(), &mut f);
+        for y in 0..f.height() {
+            for x in 0..f.width() {
+                if let Some(cell) = f.get(x, y) {
+                    assert!(
+                        !cell.ch.is_control(),
+                        "cell ({x},{y}) holds a control char {:?}",
+                        cell.ch
+                    );
+                }
+            }
+        }
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("evil[31mmodel"), "the inert text survives");
+    }
+
+    #[test]
+    fn uninitialized_project_shows_init_hint() {
+        let s = state_with_detail(ProjectStatus::NotInitialized, "unused");
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("not initialized"));
+        assert!(text.contains("rift init"));
+    }
+
+    #[test]
+    fn detail_renders_sections_when_ready() {
+        let s = state_with_detail(ProjectStatus::Idle, "claude-opus");
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("models"));
+        assert!(text.contains("claude-opus"));
+        assert!(text.contains("settings"));
+        assert!(text.contains("capture"));
+    }
+
+    proptest::proptest! {
+        /// Every terminal size yields a renderable layout — no panic, at any size.
+        #[test]
+        fn every_size_yields_a_renderable_layout(w in 0u16..400, h in 0u16..400) {
+            let s = sized(w, h);
+            let mut f = Frame::new(Size::new(w, h));
+            draw(&s.snapshot(), &mut f); // must not panic at any size
+        }
+
+        /// No arbitrary detail string (model name) ever leaves a control character
+        /// in a rendered cell — the sanitize gate holds for any bytes.
+        #[test]
+        fn no_control_chars_in_any_cell_for_arbitrary_model(model in ".*") {
+            let s = state_with_detail(ProjectStatus::Idle, &model);
+            let mut f = Frame::new(s.size);
+            draw(&s.snapshot(), &mut f);
+            for y in 0..f.height() {
+                for x in 0..f.width() {
+                    if let Some(cell) = f.get(x, y) {
+                        proptest::prop_assert!(!cell.ch.is_control());
+                    }
+                }
+            }
+        }
+    }
+}

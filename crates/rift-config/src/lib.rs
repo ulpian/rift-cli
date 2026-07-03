@@ -17,8 +17,7 @@
 //! explicit `acknowledge_risk`, built-in sensitive paths are unioned in and
 //! cannot be dropped, and validation **aggregates** every problem at once.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 pub mod features;
 mod glob;
@@ -28,7 +27,7 @@ use std::path::Path;
 use rift_core::{Blake3Id, RepoId, Result, RiftError};
 
 pub use features::{Feature, FeatureRegistry, Trust as FeatureTrust};
-pub use glob::glob_match;
+pub use glob::{glob_match, wildcard_count, MAX_PATTERN_LEN, MAX_WILDCARDS};
 
 /// Schema versions this build understands.
 const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[1];
@@ -280,6 +279,7 @@ impl EffectiveConfig {
     ///
     /// # Errors
     /// [`RiftError::Config`] aggregating every validation problem.
+    #[allow(clippy::too_many_lines)] // one linear validation pass; splitting would obscure it
     pub fn from_config(cfg: RiftConfig) -> Result<Self> {
         let mut errors: Vec<String> = Vec::new();
 
@@ -301,6 +301,17 @@ impl EffectiveConfig {
                 errors.push(format!("empty glob in {where_}"));
             } else if g.contains('\0') {
                 errors.push(format!("glob in {where_} contains NUL"));
+            } else if g.len() > glob::MAX_PATTERN_LEN {
+                errors.push(format!(
+                    "glob in {where_} exceeds {} bytes (got {})",
+                    glob::MAX_PATTERN_LEN,
+                    g.len()
+                ));
+            } else if glob::wildcard_count(g) > glob::MAX_WILDCARDS {
+                errors.push(format!(
+                    "glob in {where_} has more than {} wildcards",
+                    glob::MAX_WILDCARDS
+                ));
             }
         };
         for g in &cfg.paths.sensitive_paths {
@@ -562,6 +573,31 @@ mod tests {
             Err(RiftError::Config(m)) => assert!(m.contains("both allow and deny")),
             other => panic!("expected config error, got {other:?}"),
         }
+    }
+
+    #[test]
+    /// Contract snapshots (step-04 test plan): a representative effective
+    /// config's Debug view and a multi-problem aggregated validation report,
+    /// pinned so a shape change is a reviewable diff.
+    #[test]
+    fn effective_config_and_error_report_snapshots() {
+        let cfg = parse(
+            "schema_version = 1\n\
+             [project]\nname = \"demo\"\nrepo_id = \"repo-demo\"\n\
+             [models]\ndeny = [\"gpt-3*\"]\n\
+             [paths]\nsensitive_paths = [\"secrets/**\"]\n\
+             [capture]\ntool_calls = true\n",
+        )
+        .expect("valid config");
+        insta::assert_snapshot!("effective_config_debug", format!("{cfg:#?}"));
+
+        let err = parse(
+            "schema_version = 99\n[project]\nname = \"x\"\n\
+             [paths]\nsensitive_paths = [\"\"]\n\
+             [models]\nallow = [\"m1\"]\ndeny = [\"m1\"]\n",
+        )
+        .expect_err("three validation problems");
+        insta::assert_snapshot!("aggregated_validation_report", err.to_string());
     }
 
     #[test]

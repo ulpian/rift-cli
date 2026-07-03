@@ -75,6 +75,9 @@ pub enum BindingBasis {
     GitAuthorMatch,
     /// An explicit environment override supplied the identity.
     EnvOverride,
+    /// Git email present without an author name — still email-derived identity,
+    /// slightly weaker corroboration than a full author match.
+    GitEmailOnly,
     /// Only a machine default was available (e.g. detached/CI context).
     MachineDefault,
     /// No reliable signal / conflicting signals — bound at low confidence.
@@ -88,9 +91,22 @@ impl BindingBasis {
         Confidence::new(match self {
             Self::EnvOverride => 0.99,
             Self::GitAuthorMatch => 0.90,
+            Self::GitEmailOnly => 0.75,
             Self::MachineDefault => 0.40,
             Self::Ambiguous => 0.10,
         })
+    }
+
+    /// Stable storage token for the basis (the projection's `basis` column).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GitAuthorMatch => "git_author_match",
+            Self::EnvOverride => "env_override",
+            Self::GitEmailOnly => "git_email_only",
+            Self::MachineDefault => "machine_default",
+            Self::Ambiguous => "ambiguous",
+        }
     }
 }
 
@@ -127,15 +143,18 @@ pub struct SessionBinding {
 }
 
 /// Injectable source of the local identity inputs. Production reads git config /
-/// the OS; tests supply a [`FixtureIdentity`]. The trait has **no network
-/// methods** — identity derivation is local-only by construction.
+/// the OS (`rift-git`'s `GitConfigIdentity`); tests supply a
+/// [`FixtureIdentity`]. The trait has **no network methods** — identity
+/// derivation is local-only by construction.
 pub trait IdentitySource {
     /// Git `user.name`, if configured.
     fn git_author_name(&self) -> Option<String>;
     /// Git `user.email`, if configured.
     fn git_email(&self) -> Option<String>;
-    /// A platform machine fingerprint (read transiently, never persisted raw).
-    fn machine_fingerprint(&self) -> Option<String>;
+    /// A platform machine fingerprint. Read transiently and never persisted
+    /// raw — the buffer is zeroized on drop (Step 1 hygiene types), only the
+    /// salted hash ([`MachineId`]) survives.
+    fn machine_fingerprint(&self) -> Option<zeroize::Zeroizing<String>>;
     /// A per-install random salt (custodied in the OS keychain in production).
     fn install_salt(&self) -> [u8; 32];
     /// An explicit environment identity override, if any.
@@ -169,14 +188,63 @@ pub fn snapshot(src: &impl IdentitySource, at: Timestamp) -> IdentitySnapshot {
         .as_deref()
         .map(normalize_email)
         .unwrap_or_default();
-    // The raw fingerprint is read transiently and never stored.
-    let fingerprint = src.machine_fingerprint().unwrap_or_default();
+    // The raw fingerprint is read transiently (zeroized on drop) — only its
+    // salted hash survives this scope.
+    let fingerprint = src.machine_fingerprint();
+    let machine = derive_machine(&salt, fingerprint.as_deref().map_or("", String::as_str));
     IdentitySnapshot {
         developer: derive_developer(&salt, &normalized),
         git_author_name: src.git_author_name().unwrap_or_default(),
         git_email_normalized: normalized,
-        machine: derive_machine(&salt, &fingerprint),
+        machine,
         observed_at: at,
+    }
+}
+
+/// The honest evidence basis the source's current signals support.
+pub fn binding_basis(src: &impl IdentitySource) -> BindingBasis {
+    if src.env_developer_override().is_some() {
+        BindingBasis::EnvOverride
+    } else if src.git_email().is_some() {
+        if src.git_author_name().is_some() {
+            BindingBasis::GitAuthorMatch
+        } else {
+            BindingBasis::GitEmailOnly
+        }
+    } else if src.machine_fingerprint().is_some() {
+        BindingBasis::MachineDefault
+    } else {
+        BindingBasis::Ambiguous
+    }
+}
+
+/// Session-independent binding evidence: what [`bind_session`] attaches to a
+/// session id. The capture projection keys sessions by their agent-supplied
+/// TEXT ids, so the store layer binds `(session_id_str, BindingEvidence)`.
+#[derive(Clone, Debug, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+pub struct BindingEvidence {
+    /// The developer the evidence points at.
+    pub developer: DeveloperId,
+    /// The machine the evidence was observed on.
+    pub machine: MachineId,
+    /// How sure the evidence makes us.
+    pub confidence: Confidence,
+    /// What the evidence is.
+    pub basis: BindingBasis,
+    /// Transaction-time the evidence was gathered.
+    pub recorded_at: Timestamp,
+}
+
+/// Gather the current binding evidence from `src` at time `at`.
+pub fn binding_evidence(src: &impl IdentitySource, at: Timestamp) -> BindingEvidence {
+    let snap = snapshot(src, at);
+    let basis = binding_basis(src);
+    BindingEvidence {
+        developer: snap.developer,
+        machine: snap.machine,
+        confidence: basis.default_confidence(),
+        basis,
+        recorded_at: at,
     }
 }
 
@@ -186,23 +254,14 @@ pub fn bind_session(
     session_id: SessionId,
     at: Timestamp,
 ) -> SessionBinding {
-    let snap = snapshot(src, at);
-    let basis = if src.env_developer_override().is_some() {
-        BindingBasis::EnvOverride
-    } else if src.git_email().is_some() && src.git_author_name().is_some() {
-        BindingBasis::GitAuthorMatch
-    } else if src.machine_fingerprint().is_some() {
-        BindingBasis::MachineDefault
-    } else {
-        BindingBasis::Ambiguous
-    };
+    let e = binding_evidence(src, at);
     SessionBinding {
         session_id,
-        developer: snap.developer,
-        machine: snap.machine,
-        confidence: basis.default_confidence(),
-        basis,
-        recorded_at: at,
+        developer: e.developer,
+        machine: e.machine,
+        confidence: e.confidence,
+        basis: e.basis,
+        recorded_at: e.recorded_at,
     }
 }
 
@@ -229,8 +288,8 @@ impl IdentitySource for FixtureIdentity {
     fn git_email(&self) -> Option<String> {
         self.email.clone()
     }
-    fn machine_fingerprint(&self) -> Option<String> {
-        self.fingerprint.clone()
+    fn machine_fingerprint(&self) -> Option<zeroize::Zeroizing<String>> {
+        self.fingerprint.clone().map(zeroize::Zeroizing::new)
     }
     fn install_salt(&self) -> [u8; 32] {
         self.salt
@@ -299,6 +358,22 @@ mod tests {
         );
         assert_eq!(b.basis, BindingBasis::GitAuthorMatch);
         assert!(b.confidence.value() >= 0.9);
+    }
+
+    #[test]
+    fn email_without_name_is_email_based_not_machine_default() {
+        let mut src = alice();
+        src.name = None; // a common real-world config: email set, no user.name
+        let b = bind_session(
+            &src,
+            SessionId::new(Ulid::from_u128(1)),
+            Timestamp::from_millis(1),
+        );
+        assert_eq!(b.basis, BindingBasis::GitEmailOnly);
+        assert!(b.confidence.value() > 0.5, "email evidence beats machine default");
+        // and the developer id is still derived from the email
+        let snap = snapshot(&src, Timestamp::from_millis(1));
+        assert_eq!(b.developer, snap.developer);
     }
 
     #[test]

@@ -18,3 +18,5 @@ blake3 = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Contract snapshots: representative EffectiveConfig + aggregated error report.
+insta = { workspace = true }

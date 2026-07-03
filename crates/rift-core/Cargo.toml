@@ -20,3 +20,5 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Contract snapshot of every RiftError Display form (step-03 test plan).
+insta = { workspace = true }

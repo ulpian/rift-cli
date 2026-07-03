@@ -31,6 +31,11 @@ pub struct CheckpointMetadata {
     /// Session ids this checkpoint covers (Entire spells it `session_ids`).
     #[serde(default, alias = "session_ids")]
     pub sessions: Vec<String>,
+    /// The working-tree commit oid (hex) this checkpoint captured, when the
+    /// capture side records it. Used by the outcome-label deriver (P4 S2) to map
+    /// a checkpoint to a real commit for reachability; absent ⇒ no outcome label.
+    #[serde(default, alias = "commit_oid", alias = "head")]
+    pub commit: Option<String>,
 }
 
 /// One per-file authorship fact from `attribution.json`.

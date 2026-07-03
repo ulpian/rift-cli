@@ -31,13 +31,12 @@
         clippy::indexing_slicing
     )
 )]
-// Style-only pedantic lints we deliberately accept (not correctness/security).
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
 
 pub mod capture;
 pub mod crypto;
 pub mod durable;
 pub mod encrypted_dao;
+pub mod identity_store;
 pub mod integrity;
 pub mod key_metadata;
 pub mod keychain;
@@ -70,12 +69,18 @@ pub use capture::{
     SessionTransitionRow, SubstrateBlockEventRow, SubstrateInstallRow, TokenUsageRow,
     VerificationDivergenceRow, VerificationRunRow,
 };
-pub use crypto::{decrypt_column, encrypt_column, KeyStore, MemoryKeyStore};
+pub use crypto::{
+    decrypt_column, encrypt_column, ColumnCipher, DekCipher, KeyStore, MemoryKeyStore, PlainCipher,
+};
 pub use durable::{DurableWrite, LocalOnlyShadowWrite, ObjectKind, SyncWrite};
 pub use encrypted_dao::EncryptingStore;
 pub use integrity::{
     cost_belief_as_of, current_cost_micros, record_checkpoint, record_cost_fact,
     verify_against_source, ChainSource, CheckpointRecord, CostFact, VerifyReport,
+};
+pub use identity_store::{
+    latest_binding_for_session, latest_identity_snapshot, record_identity_snapshot,
+    record_session_binding, unbound_session_ids,
 };
 pub use key_metadata::{
     key_metadata_for_generation, latest_key_metadata, record_key_metadata, KeyMetadataRow,
@@ -83,16 +88,25 @@ pub use key_metadata::{
 pub use keychain::{KeychainBackend, KeyringKeyStore, MemoryKeychain};
 #[cfg(feature = "keyring")]
 pub use keychain_os::OsKeychain;
-pub use migrate::{apply_migrations, default_migrations, Migration, MigrationOutcome};
+pub use migrate::{
+    apply_migrations, apply_migrations_on, canopy_canonical_schema_sql, canopy_migrations,
+    default_migrations, open_capture_projection, open_migrated, recall_canonical_schema_sql,
+    recall_migrations, Migration, MigrationOutcome,
+};
 pub use paths::{
-    default_projection_db, default_projection_dir, projection_db_under, projection_dir_under,
-    resolve_cache_root,
+    canopy_ui_db_from, canopy_ui_db_under, default_canopy_ui_db, default_projection_db,
+    default_projection_dir, default_recall_db, projection_db_under, projection_dir_under,
+    recall_db_from, recall_db_under, resolve_cache_root,
 };
 pub use rebuild::rebuild;
-pub use schema::{canonical_table, canonical_tables, is_canonical_table, CanonicalTable, Column};
+pub use schema::{
+    any_registry_table, canonical_table, canonical_tables, canopy_canonical_table,
+    canopy_canonical_tables, is_canonical_table, recall_canonical_table, recall_canonical_tables,
+    CanonicalTable, Column, RECALL_EDGE_KINDS, RECALL_NODE_KINDS,
+};
 pub use sensitive::{is_sensitive_column, sensitive_columns, SensitiveColumn};
 pub use sqlite_store::SqliteStore;
-pub use store::{Row, Store, StoreConn, StoreDescriptor, TxMode};
+pub use store::{NotifyCap, Row, Store, StoreConn, StoreDescriptor, StoreTx, TxMode};
 pub use value::Value;
 
 use async_trait::async_trait;
@@ -153,10 +167,89 @@ pub trait CanonicalStore: Send + Sync {
     /// # Errors
     /// [`rift_core::RiftError::Storage`] on failure.
     async fn query_opt_i64(&self, sql: &str, params: &[Value]) -> Result<Option<i64>>;
+
+    /// Insert a typed row: table/column identifiers are the row type's
+    /// compile-time constants (no free-string identifiers at the call site).
+    ///
+    /// # Errors
+    /// As [`CanonicalStore::insert`].
+    async fn insert_row<R: CanonicalRow + Sync>(&self, row: &R) -> Result<()>
+    where
+        Self: Sized,
+    {
+        self.insert(R::TABLE, R::COLUMNS, &row.values()).await
+    }
+
+    /// [`CanonicalStore::insert_or_ignore`] for a typed row (idempotent
+    /// set-union for content-addressed keys).
+    ///
+    /// # Errors
+    /// As [`CanonicalStore::insert_or_ignore`].
+    async fn insert_row_or_ignore<R: CanonicalRow + Sync>(&self, row: &R) -> Result<bool>
+    where
+        Self: Sized,
+    {
+        self.insert_or_ignore(R::TABLE, R::COLUMNS, &row.values())
+            .await
+    }
+
+    /// A cheap, monotone-under-append **cursor** over `table`: it increases when
+    /// rows are appended and *resets backward* only when the projection is rebuilt
+    /// from git (the file is recreated, `04 §4.1`). A change observer polls this to
+    /// decide *when* to re-read — the value is advisory, never authoritative (git
+    /// stays canonical), so a missed or duplicated read only delays or repeats a
+    /// query. The reference engine derives it from [`CanonicalStore::count`]; a
+    /// native-notify engine may override it with an engine cursor.
+    ///
+    /// # Errors
+    /// [`rift_core::RiftError::Storage`] if the query fails.
+    async fn read_watermark(&self, table: &str) -> Result<i64> {
+        self.count(table).await
+    }
+
+    /// This engine's change-notification capability (see [`NotifyCap`]). The
+    /// rusqlite reference engine is [`NotifyCap::PollOnly`]; a future Turso engine
+    /// overrides this to [`NotifyCap::Native`] without touching any caller.
+    fn notify_capability(&self) -> NotifyCap {
+        NotifyCap::PollOnly
+    }
+}
+
+/// A typed, insertable canonical row: the table and column identifiers are
+/// **compile-time constants bound to the entity** — the identifier-binding half
+/// of the type layer (`04 §4.3`; step-03 "table/column names come from the
+/// impls, never from user input"). Values bind as `?` parameters. Rows are
+/// [`rift_core::Immutable`]: the only write paths are the insert methods below.
+pub trait CanonicalRow: rift_core::Immutable {
+    /// The canonical table this row belongs to (must be registered).
+    const TABLE: &'static str;
+    /// The column list, in [`CanonicalRow::values`] order.
+    const COLUMNS: &'static [&'static str];
+    /// The row's parameter values, in [`CanonicalRow::COLUMNS`] order.
+    fn values(&self) -> Vec<Value>;
+}
+
+/// Refuse any table name that resolves in no registry, and any column that is
+/// not on the resolved table's spec — identifiers never reach SQL unvalidated.
+fn validate_identifiers(table: &str, columns: &[&str]) -> Result<()> {
+    let Some(spec) = schema::any_registry_table(table) else {
+        return Err(rift_core::RiftError::storage(format!(
+            "unknown canonical table `{table}` (not in any registry)"
+        )));
+    };
+    for col in columns {
+        if !spec.columns.iter().any(|c| c.name == *col) {
+            return Err(rift_core::RiftError::storage(format!(
+                "`{col}` is not a column of canonical table `{table}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// One source of truth for the value-bearing INSERT SQL: builds `?` placeholders
-/// and never interpolates a value (the `all_queries_are_parameterized` posture).
+/// and never interpolates a value (the `all_queries_are_parameterized` posture);
+/// identifiers are pre-validated against the registries by the callers.
 fn insert_sql(verb: &str, table: &str, columns: &[&str]) -> String {
     let placeholders = vec!["?"; columns.len()].join(", ");
     format!(
@@ -175,6 +268,7 @@ impl<S: Store + ?Sized> CanonicalStore for S {
     }
 
     async fn insert(&self, table: &str, columns: &[&str], values: &[Value]) -> Result<()> {
+        validate_identifiers(table, columns)?;
         if columns.len() != values.len() {
             return Err(rift_core::RiftError::storage(format!(
                 "insert into {table}: {} columns but {} values",
@@ -193,6 +287,7 @@ impl<S: Store + ?Sized> CanonicalStore for S {
         columns: &[&str],
         values: &[Value],
     ) -> Result<bool> {
+        validate_identifiers(table, columns)?;
         if columns.len() != values.len() {
             return Err(rift_core::RiftError::storage(format!(
                 "insert into {table}: {} columns but {} values",
@@ -206,6 +301,7 @@ impl<S: Store + ?Sized> CanonicalStore for S {
     }
 
     async fn count(&self, table: &str) -> Result<i64> {
+        validate_identifiers(table, &[])?;
         let sql = format!("SELECT COUNT(*) FROM {table}");
         let rows = self.conn().await?.query(&sql, &[]).await?;
         rows.first().map_or(Ok(0), |r| r.get_i64(0))

@@ -62,9 +62,15 @@ Prefer the task runner; it is the single source of truth for common workflows:
 ./skills.sh run -- status   # run the rift binary with args
 ```
 
-Raw cargo equivalents work too. CI runs `fmt --check` + `clippy -D warnings` +
-`test` across macOS/Linux/Windows, plus a release build, `cargo deny`, and
-`cargo audit`.
+Raw cargo equivalents work too. CI: single-leg `fmt` + `clippy -D warnings`
+jobs, `test` across macOS/Linux/Windows (fail-fast off), a release build, an
+MSRV build, coverage gates (≥85% line + ≥75% branch workspace-wide; ≥95% line
+for `ci/security-crates.txt`, enforced by `xtask check-coverage`), `cargo
+deny`/`cargo audit`, a required 60s-per-target fuzz smoke (`fuzz/`), advisory
+miri, and `xtask ci-meta` (required jobs, read-only permissions, the
+`ci/lint-baseline.txt` lint-table lock, no `unsafe`, no crate-root blanket
+allows, no schema fast-path in bins). A scheduled `fuzz-nightly.yml` runs
+10-minute budgets daily.
 
 ## Workspace layout (maps 1:1 to `plan_v1/scaffold/`)
 
@@ -83,6 +89,10 @@ crates/
                     (hash-bound summaries), ledger metrics, ranking, pack compiler,
                     policy, events, bounded MCP, substrate reader (gix seam)
   rift-canopy       dashboard: layout, nic-gauge, command palette, splash, render seam
+  rift-git          native git plumbing: worktree discovery, blob-read seam,
+                    argv-safe shell-outs, the production IdentitySource
+  rift-registry     the machine-global project registry (config-dir resolver)
+  rift-agent*       the agent SDK + per-agent adapters (claude-code, codex, …)
   rift-fff / rift-codegraph / rift-nic-gauge   optional packages
 bins/
   rift              the `rift` entrypoint (Canopy + subcommands)
@@ -91,8 +101,11 @@ bins/
 
 Dependency direction is acyclic: everything depends on `rift-core`;
 `rift-store` → `rift-hashchain` + `rift-crypto`; `rift-shadow` → store + the
-shadow sub-crates; recall crates layer over `rift-recall-types`/`rift-store`;
-`rift-canopy` → `rift-core` only.
+shadow sub-crates; recall crates layer over `rift-recall-types`/`rift-store`
+(the ledger additionally backs validity/rank durably — see stage-01
+`ERRATA.md` D6); `rift-canopy` → `rift-core` + `rift-registry` (config-dir
+resolver only). The committed snapshot `xtask/src/snapshots/
+xtask__tests__crate_graph_adjacency.snap` is the reviewable adjacency list.
 
 ## Architecture conventions (don't break these)
 

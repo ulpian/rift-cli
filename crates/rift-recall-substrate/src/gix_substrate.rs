@@ -9,7 +9,7 @@ use std::path::Path;
 
 use rift_core::Result;
 
-use crate::{CheckpointShard, ShardWalker, SubstrateReader};
+use crate::{parse, CheckpointShard, CommitMeta, ShardWalker, SubstrateReader};
 
 /// A read-only, local-only substrate over one repository, backed by `gix`.
 pub struct GixSubstrate {
@@ -46,5 +46,26 @@ impl SubstrateReader for GixSubstrate {
     }
     fn read_artifact(&self, checkpoint_id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
         self.walker.read_artifact_any(checkpoint_id, rel)
+    }
+    fn integration_tips(&self) -> Result<Vec<String>> {
+        self.walker.integration_tips()
+    }
+    fn branch_tips(&self) -> Result<Vec<(String, String)>> {
+        self.walker.branch_tips()
+    }
+    fn commit_meta(&self, oid: &str) -> Result<Option<CommitMeta>> {
+        self.walker.commit_meta(oid)
+    }
+    fn checkpoint_commit(&self, checkpoint_id: &str) -> Result<Option<String>> {
+        // The capture side records the working commit it captured in the
+        // checkpoint header (`metadata.json`); resolve it when present. A
+        // checkpoint without a recorded commit simply yields no outcome label.
+        let Some(bytes) = self
+            .walker
+            .read_artifact_any(checkpoint_id, "metadata.json")?
+        else {
+            return Ok(None);
+        };
+        Ok(parse::parse_metadata(&bytes, checkpoint_id).value.commit)
     }
 }

@@ -9,8 +9,7 @@
 //! It lets an agent answer "who calls this?" with a graph query instead of a
 //! grep/Read discovery loop (the *don't fetch it* layer).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

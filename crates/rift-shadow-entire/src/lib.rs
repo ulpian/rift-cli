@@ -14,11 +14,12 @@
 //! verb screen, version-pin verification, and output rebranding. The actual
 //! subprocess spawn lives behind the trait so it is testable offline.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use rift_core::Sha256Id;
 use sha2::{Digest, Sha256};
@@ -363,18 +364,70 @@ impl EntireRunner for SystemRunner {
                 std::env::current_dir().map_err(|_| SubstrateError::Unavailable)?
             }
         };
-        let output = std::process::Command::new(&self.binary)
+        // Spawn with stdin closed and stdout/stderr piped: stdin null so the child
+        // can never block on a prompt; stdout drained on a thread so a full pipe
+        // can't wedge the child; stderr null so its bytes never reach the user.
+        let mut child = Command::new(&self.binary)
             .args(&argv)
             .current_dir(&cwd)
             .env_clear()
             .envs(scrubbed_capture_env())
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
             .map_err(|_| SubstrateError::Unavailable)?;
-        // Cap captured output so a chatty backend can't flood memory.
-        let mut bytes = output.stdout;
-        bytes.truncate(self.limits.max_output_bytes);
+
+        // Drain stdout on a thread and hand the captured (cap-bounded) bytes back
+        // over a channel the moment they're read, so a backend that spawned a
+        // grandchild holding the pipe open can never make us block on `join`.
+        let stdout = child.stdout.take();
+        let cap = u64::try_from(self.limits.max_output_bytes).unwrap_or(u64::MAX);
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout {
+                {
+                    let mut limited = (&mut out).take(cap);
+                    let _ = limited.read_to_end(&mut buf);
+                }
+                let _ = tx.send(buf); // deliver the captured output ASAP…
+                let _ = std::io::copy(&mut out, &mut std::io::sink()); // …then drain.
+            } else {
+                let _ = tx.send(buf);
+            }
+        });
+
+        // Poll for exit until the wall-clock budget, then hard-kill + reap. A hung
+        // or runaway backend can never wedge the developer's git op past `wall`.
+        let deadline = Instant::now() + self.limits.wall;
+        let exit = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status.code()),
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(SubstrateError::Timeout);
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                // A wait error: kill + reap so we never leave a zombie, then bail.
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(SubstrateError::Unavailable);
+                }
+            }
+        };
+
+        // Collect captured output with a short grace. The reader sends as soon as it
+        // has read the cap-bounded slice; if a surviving grandchild still holds the
+        // pipe it never sends, so we proceed with what we have rather than hang.
+        let bytes = rx
+            .recv_timeout(Duration::from_millis(250))
+            .unwrap_or_default();
+        let code = exit?;
         Ok(RunOutcome {
-            exit: ExitClass::from_code(output.status.code()),
+            exit: ExitClass::from_code(code),
             stdout: rebrand(&bytes),
         })
     }
@@ -480,6 +533,117 @@ mod tests {
         let r = MockRunner::default();
         r.run(&CaptureIntent::Status { repo: "/r".into() }).unwrap();
         assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_runner_spawns_real_binary_scrubbed_and_rebrands() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-backend");
+        let marker = dir.path().join("ran.marker");
+        {
+            let mut f = std::fs::File::create(&script).unwrap();
+            // Prove it ran (write a marker), echo a *branded* line (to be rewritten)
+            // and the scrubbed proxy env (to prove env_clear + scrubbed env applied).
+            writeln!(
+                f,
+                "#!/bin/sh\ntouch '{}'\necho 'Entire archived checkpoint'\necho \"proxy=$HTTP_PROXY\"\nexit 0",
+                marker.display()
+            )
+            .unwrap();
+        }
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = SystemRunner::new(script);
+        let out = runner
+            .run(&CaptureIntent::ArchiveCheckpoint {
+                repo: dir.path().to_path_buf(),
+                commit: "deadbeef".into(),
+            })
+            .unwrap();
+
+        assert_eq!(out.exit, ExitClass::Ok, "exit normalized to Ok");
+        assert!(
+            marker.exists(),
+            "the real binary was spawned by absolute path"
+        );
+        // The upstream brand is rewritten and never leaks.
+        assert!(!out.stdout.to_ascii_lowercase().contains("entire"));
+        assert!(out.stdout.to_ascii_lowercase().contains("checkpoint"));
+        // The scrubbed env reached the child: HTTP_PROXY is the dead proxy.
+        assert!(
+            out.stdout.contains("127.0.0.1:0"),
+            "child ran under the scrubbed egress env: {:?}",
+            out.stdout
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_runner_does_not_hang_on_grandchild_holding_stdout() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-backend");
+        {
+            let mut f = std::fs::File::create(&script).unwrap();
+            // The direct child exits 0, but backgrounds a `sleep` that INHERITS the
+            // stdout pipe — the classic case that would block a naive `join` on the
+            // reader. The runner must still return promptly (via the recv grace).
+            f.write_all(b"#!/bin/sh\nsleep 30 &\necho hi\nexit 0\n")
+                .unwrap();
+        }
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = SystemRunner::new(script);
+        let start = Instant::now();
+        let out = runner
+            .run(&CaptureIntent::Status {
+                repo: dir.path().to_path_buf(),
+            })
+            .unwrap();
+        // Clean exit is reported, and we returned in well under the 30s grandchild
+        // sleep (the reader's pipe never EOFs, so we proceed after the recv grace).
+        assert_eq!(out.exit, ExitClass::Ok);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "must not block on a grandchild holding the pipe"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_runner_hard_kills_on_timeout() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-backend");
+        {
+            let mut f = std::fs::File::create(&script).unwrap();
+            // `exec` so the killed child IS the single process holding the pipe —
+            // killing it closes stdout promptly (no orphaned writer to wait on).
+            f.write_all(b"#!/bin/sh\nexec sleep 30\n").unwrap();
+        }
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runner = SystemRunner {
+            binary: script,
+            limits: SpawnLimits {
+                wall: Duration::from_millis(150),
+                max_output_bytes: 1 << 20,
+            },
+        };
+        let start = Instant::now();
+        let res = runner.run(&CaptureIntent::Status {
+            repo: dir.path().to_path_buf(),
+        });
+        assert!(matches!(res, Err(SubstrateError::Timeout)));
+        // Returned near the 150ms budget, not after the 30s sleep.
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "must hard-kill near the wall budget"
+        );
     }
 
     proptest::proptest! {

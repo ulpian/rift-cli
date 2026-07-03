@@ -11,7 +11,7 @@
 //!   0; a capture error is swallowed and the process exits "deferred").
 
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rift_core::Result;
 use rift_shadow::bridge::ingest_hook;
@@ -88,7 +88,10 @@ fn run_git_hook(args: &[String]) -> ! {
         }
     }
     // All other hooks: run capture work guarded so nothing can abort the git op.
-    capture_guarded(|| capture_for(name));
+    // The hook's `--git-dir` identifies the target repo (cwd is unreliable — a GUI
+    // client may run the shim from anywhere), so capture never touches the wrong tree.
+    let git_dir = flag(args, "--git-dir");
+    capture_guarded(|| capture_for(name, git_dir.as_deref()));
 }
 
 /// Read `pre-push` stdin (`<local> <lsha> <remote> <rsha>` lines) and screen it.
@@ -102,17 +105,148 @@ fn screen_stdin_push() -> PushDecision {
     screen_push(&refs)
 }
 
-/// The (deferred) capture body for a commit-path hook. The heavy archival pipeline
-/// (gix diff-capture + condense) lands with the live loop; today this is a safe
-/// no-op so the hook proves the never-block contract end-to-end. A test hook lets
-/// the e2e suite verify the guard swallows a panic.
+/// The capture body for a commit-path hook. On `post-commit` it runs the live
+/// loop — diff-capture (P4 B3) and, when an agent session is live + the backend is
+/// provisioned, the real backend archive (P1 B2) — all behind the never-block
+/// guard, so a missing backend or a read error defers rather than aborting the
+/// developer's `git commit`. A test hook lets the e2e suite verify the guard
+/// swallows a panic.
 // The injected panic exists precisely to exercise the never-block guard — the one
 // place a panic is intentional, and it is always swallowed by `capture_guarded`.
-fn capture_for(_name: &str) -> Result<()> {
+fn capture_for(name: &str, git_dir: Option<&str>) -> Result<()> {
     assert!(
         std::env::var_os("RIFT_HOOK_TEST_PANIC").is_none(),
         "injected capture panic (must be swallowed)"
     );
+    if name == "post-commit" {
+        capture_post_commit(git_dir)?;
+    }
+    Ok(())
+}
+
+/// The per-repo projection db path for `work_tree` (honors `RIFT_CACHE_DIR`).
+fn projection_db_for(work_tree: &std::path::Path) -> Result<PathBuf> {
+    let repo = crate::verify::repo_id_for(work_tree)?;
+    let root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
+    Ok(rift_store::projection_db_under(&root, &repo))
+}
+
+/// Resolve the pinned, verified capture-backend binary if it is provisioned on
+/// disk. `None` (not yet set up / hash mismatch) means archive is skipped and only
+/// the read-only diff-capture runs. Never downloads, never names the upstream tool.
+fn provisioned_binary() -> Option<PathBuf> {
+    let pin = rift_shadow::entire::PinnedSubstrate::from_embedded().ok()?;
+    let bp = pin.binary_path();
+    (bp.exists() && pin.verify_on_disk(&bp).is_ok()).then_some(bp)
+}
+
+/// Resolve a worktree root from a hook's `--git-dir`, handling linked worktrees.
+///
+/// For a linked worktree git sets `GIT_DIR=<repo>/.git/worktrees/<name>`, which
+/// holds a `gitdir` file pointing at the worktree's `.git` file — its parent is the
+/// worktree root. (Naively taking `git_dir.parent()` would walk into
+/// `.git/worktrees` and `discover` up to the *main* worktree, capturing the wrong
+/// tree.) For the main worktree there is no `gitdir` file and the parent is correct.
+fn work_tree_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
+    if let Ok(s) = std::fs::read_to_string(git_dir.join("gitdir")) {
+        // `<worktree>/.git` → the worktree root is its parent.
+        return Path::new(s.trim()).parent().map(Path::to_path_buf);
+    }
+    git_dir.parent().map(Path::to_path_buf)
+}
+
+/// Parse a cached phase token into a [`SessionState`] (default `Idle`).
+fn state_from_token(token: &str) -> rift_shadow::hooks::SessionState {
+    use rift_shadow::hooks::SessionState;
+    match token {
+        "active" => SessionState::Active,
+        "compacting" => SessionState::Compacting,
+        "ending" => SessionState::Ending,
+        "ended" => SessionState::Ended,
+        _ => SessionState::Idle,
+    }
+}
+
+/// `post-commit`: capture the committed diff (`C`), and — when a live agent session
+/// under manual-commit decides to archive and the backend is provisioned — run the
+/// real backend archive, anchoring the per-file attribution to the new checkpoint.
+fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
+    use rift_shadow::backend::{EntireBackend, NativeBackend, RouteTable, RoutedBackend};
+    use rift_shadow::entire::SystemRunner;
+    use rift_shadow::hooks::session_cache::live_sessions;
+    use rift_shadow::hooks::strategy::{decide, GitEvent, StrategyKind, TriggerCtx};
+
+    // Resolve the target work tree from the hook's `--git-dir` (linked-worktree
+    // aware), else cwd. Worktree-safe `discover` then handles the `.git`-file case.
+    let start = match git_dir.and_then(|gd| work_tree_from_git_dir(Path::new(gd))) {
+        Some(work_tree) => work_tree,
+        None => std::env::current_dir()?,
+    };
+    let repo = rift_git::discover(&start)?;
+    // The just-created commit is HEAD. An unborn HEAD (no commit yet) means there is
+    // nothing to capture — return before touching the projection.
+    let reader = rift_git::GixBlobReader::open(&repo.work_tree)?;
+    let Some(commit) = reader.head_hex()? else {
+        return Ok(());
+    };
+
+    let store = rift_store::open_capture_projection(projection_db_for(&repo.work_tree)?)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    let now = now_ms();
+
+    // Bind any unbound sessions to the local developer identity (best-effort:
+    // identity failure must never fail the developer's git operation).
+    let _ = rt.block_on(crate::identity::bind_new_sessions(
+        &store,
+        &repo.work_tree,
+        now,
+    ));
+
+    // A live agent session under manual-commit archives on post-commit; with the
+    // backend provisioned this is the real pinned-binary spawn.
+    if let Some(sess) = live_sessions(&repo.git_dir)?.into_iter().next() {
+        let decision = decide(
+            StrategyKind::ManualCommit,
+            &TriggerCtx {
+                git_event: Some(GitEvent::PostCommit),
+                session_state: state_from_token(&sess.state),
+                sensitive_path_touched: false,
+                clock_ms: now,
+                last_archive_ms: None,
+                schedule_interval_ms: 0,
+            },
+        );
+        if decision.archive {
+            if let Some(binary) = provisioned_binary() {
+                let runner = SystemRunner::new(binary);
+                let backend = RoutedBackend::new(
+                    EntireBackend::new(&runner),
+                    NativeBackend,
+                    RouteTable::all_wrapper(),
+                );
+                let raw = rift_core::SecretBytes::new(Vec::new());
+                rt.block_on(rift_shadow::archive_and_capture(
+                    &reader,
+                    &backend,
+                    &store,
+                    &repo.work_tree,
+                    &commit,
+                    &sess.session_id,
+                    &raw,
+                    decision,
+                    now,
+                ))?;
+                return Ok(());
+            }
+        }
+    }
+
+    // No live session or no provisioned backend: still record the durable C-diff
+    // facts (file_revision + changed_hunk); attribution waits for a checkpoint.
+    let capture = rift_shadow::attribution::capture_commit(&reader, &commit)?;
+    rt.block_on(rift_shadow::persist_commit_capture(&store, &capture, None))?;
     Ok(())
 }
 
@@ -122,6 +256,7 @@ fn capture_guarded<F: FnOnce() -> Result<()>>(f: F) -> ! {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     if let Ok(Err(e)) = outcome {
         // Error variants carry identifiers/reasons only — never key/transcript bytes.
+        tracing::warn!(error = %e, "capture deferred");
         eprintln!("rift: capture deferred ({e})");
     }
     std::process::exit(0);
@@ -151,12 +286,7 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
     };
 
     let git_dir = resolve_git_dir(None);
-    let db = projection_db()?;
-    if let Some(parent) = db.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let store = rift_store::SqliteStore::open(&db)?;
-    store.create_canonical_schema()?;
+    let store = rift_store::open_capture_projection(projection_db()?)?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -170,7 +300,13 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
             agent,
             now_ms(),
         )
-        .await
+        .await?;
+        // Bind any newly-appeared sessions to the local developer identity
+        // (best-effort: identity failure must never fail the agent's hook).
+        if let Ok(cwd) = std::env::current_dir() {
+            let _ = crate::identity::bind_new_sessions(&store, &cwd, now_ms()).await;
+        }
+        Ok::<(), rift_core::RiftError>(())
     })?;
     Ok(())
 }
@@ -246,5 +382,30 @@ mod tests {
         // a non-existent explicit dir falls back to <cwd>/.git
         let fallback = resolve_git_dir(Some(PathBuf::from("/nope/.git")));
         assert!(fallback.ends_with(".git"));
+    }
+
+    #[test]
+    fn work_tree_resolution_handles_main_and_linked_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Main worktree: GIT_DIR = <repo>/.git, no `gitdir` file → work tree = <repo>.
+        let main_git = tmp.path().join("repo").join(".git");
+        std::fs::create_dir_all(&main_git).unwrap();
+        assert_eq!(
+            work_tree_from_git_dir(&main_git),
+            Some(tmp.path().join("repo"))
+        );
+
+        // Linked worktree: GIT_DIR = <repo>/.git/worktrees/feat, whose `gitdir` file
+        // points at the linked worktree's `.git` file → work tree is ITS parent, not
+        // the main worktree (the bug this guards against).
+        let wt_git = main_git.join("worktrees").join("feat");
+        std::fs::create_dir_all(&wt_git).unwrap();
+        let linked_wt = tmp.path().join("feat-checkout");
+        std::fs::write(
+            wt_git.join("gitdir"),
+            format!("{}\n", linked_wt.join(".git").display()),
+        )
+        .unwrap();
+        assert_eq!(work_tree_from_git_dir(&wt_git), Some(linked_wt));
     }
 }

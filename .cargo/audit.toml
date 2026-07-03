@@ -11,4 +11,6 @@
 # RUSTSEC-2024-0436 (`paste` unmaintained) here and in deny.toml — they reach the
 # lockfile only via that optional, default-off feature.
 [advisories]
+# Tracking: https://rustsec.org/advisories/RUSTSEC-2026-0173 — re-check at each
+# jiff/gix upgrade, remove when clear (mirrors deny.toml).
 ignore = ["RUSTSEC-2026-0173"]

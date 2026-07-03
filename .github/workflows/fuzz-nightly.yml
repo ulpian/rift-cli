@@ -1,0 +1,42 @@
+name: fuzz-nightly
+# Long-budget coverage-guided fuzzing (step-04): 10 minutes per target, daily.
+# PR CI runs the 60s smoke in ci.yml; this run goes deep and uploads any crash
+# artifacts + the grown corpus for triage.
+on:
+  schedule:
+    - cron: "17 3 * * *" # daily, off-peak
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fuzz-long:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          [
+            config_parse,
+            run_hook,
+            redact,
+            diff,
+            glob_match,
+            checkpoint_artifact,
+            mcp_request,
+          ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: "fuzz" }
+      - run: cargo install cargo-fuzz --locked
+      - name: fuzz ${{ matrix.target }} for 10 minutes
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600 -timeout=25
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

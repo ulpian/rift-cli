@@ -10,9 +10,21 @@ description = "Native git plumbing (P7 S3): worktree/common-dir discovery, addit
 [lints]
 workspace = true
 
+[features]
+# The gix-backed read seam (`GixBlobReader`) ships by default (builds offline),
+# but lives behind a feature so `--no-default-features` still builds the write
+# side + worktree discovery + the in-memory `MemoryBlobReader` with no gix.
+default = ["gix"]
+gix = ["dep:gix"]
+
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 sha2 = { workspace = true }
+# Transient machine-fingerprint hygiene (identity.rs): wiped after hashing.
+zeroize = { workspace = true }
+# Read-side git object access (blobs/trees) for diff-capture (P4 B3). We use only
+# the read surface (open/Tree/ObjectId), matching the workspace gix audit rationale.
+gix = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

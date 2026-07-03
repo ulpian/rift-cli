@@ -37,8 +37,8 @@ impl KeychainBackend for OsKeychain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::KeyStore;
     use crate::keychain::KeyringKeyStore;
+    use crate::SqliteStore;
     use rift_core::RepoId;
 
     // Runs only on a dev machine with a real keychain:
@@ -46,10 +46,15 @@ mod tests {
     #[test]
     #[ignore = "requires a real OS keychain"]
     fn real_os_keychain_roundtrip() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.create_canonical_schema().unwrap();
         let ks = KeyringKeyStore::with_service(OsKeychain, "rift-itest-DELETEME");
         let repo = RepoId::new("itest-repo").unwrap();
-        let dek1 = ks.repo_dek(&repo).unwrap();
-        let dek2 = ks.repo_dek(&repo).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dek1 = rt.block_on(ks.provision_repo_dek(&store, &repo, 1)).unwrap();
+        let dek2 = rt.block_on(ks.provision_repo_dek(&store, &repo, 2)).unwrap();
         assert_eq!(dek1.expose(), dek2.expose());
     }
 }

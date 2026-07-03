@@ -1,7 +1,7 @@
 //! Worktree hashing for the avoidable-context metric (Stage 3 Phase 1 Step 4,
 //! scoped to what the ledger needs).
 //!
-//! [`rift_recall_ledger::avoidable_context_rate`] compares each read's
+//! The ledger's `avoidable_context_rate` compares each read's
 //! `content_sha256` against the current worktree's hash for that path. The hash
 //! here MUST therefore be a **plain SHA-256 of the file bytes** — the same
 //! function capture records at read time — not the domain-separated

@@ -1,0 +1,20 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "render_at(36, 16)"
+---
+RIFT — Canopy
+[Projects] Detail  Graphs
+╭─ projects ───────────────────────╮
+│> ● rift-cli                      │
+│  ○ rift-site                     │
+│                                  │
+│                                  │
+│                                  │
+│                                  │
+│                                  │
+│                                  │
+│                                  │
+╰──────────────────────────────────╯
+╭─ command ────────────────────────╮
+│/█                                │
+╰──────────────────────────────────╯

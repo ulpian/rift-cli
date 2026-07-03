@@ -20,7 +20,6 @@ gix = ["dep:gix"]
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
-rift-recall-ledger = { version = "0.0.1", path = "../rift-recall-ledger" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Plain SHA-256 of worktree file bytes, to match read-time `content_sha256`.
@@ -32,3 +31,7 @@ gix = { workspace = true, optional = true }
 proptest = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
+# The delta ledger (FileRead, read_facts_*, RecallMetrics) now layers OVER the
+# substrate; the gix integration test exercises that path (dev-only back-edge,
+# which Cargo permits for dev-dependencies).
+rift-recall-ledger = { version = "0.0.1", path = "../rift-recall-ledger" }

@@ -1,0 +1,10 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: frame_text(&f)
+---
+
+       ____  ___ _____ _____
+     |  _ \|_ _|  ___|_   _|
+      | |_) || || |_    | |
+      |  _ < | ||  _|   | |
+      |_| \_\___|_|     |_|

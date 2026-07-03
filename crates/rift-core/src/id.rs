@@ -400,6 +400,12 @@ ulid_newtype!(
     /// Identifies a tool call within a turn (ULID).
     ToolCallId
 );
+ulid_newtype!(
+    /// Identifies a project the Canopy dashboard watches (ULID). Assigned once at
+    /// registration; the append-only `canopy_project_event` history keys every
+    /// later correction (remove/relabel/reorder) by this id.
+    ProjectId
+);
 
 sha_newtype!(
     /// Identifies a checkpoint on the `rift/checkpoints/v1` branch

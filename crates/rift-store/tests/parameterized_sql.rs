@@ -4,7 +4,7 @@
 //! `05-security` §5.7). This is a hermetic source scan over `crates/rift-store/src`
 //! — no engine, no network — so a regression that builds a query by string-
 //! interpolating a value fails CI.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::path::{Path, PathBuf};
 

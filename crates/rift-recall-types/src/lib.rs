@@ -8,13 +8,17 @@
 //! never a floating path — so a forged or stale handle can never serve wrong
 //! bytes (`05-security` §5.5).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use core::fmt;
 use core::str::FromStr;
 
 pub mod checkpoint;
+pub mod outcome;
+pub mod scope;
+
+pub use outcome::{LabelSubject, OutcomeKind, OUTCOME_KINDS};
+pub use scope::{BranchScope, CheckpointWindow, CrossScopeGrant, DeveloperScope, Scope};
 
 /// Source-trust classification of a served payload.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -37,6 +41,13 @@ impl Trust {
     #[must_use]
     pub fn allows_raw_inline(self) -> bool {
         matches!(self, Self::CodeFact | Self::GitFact | Self::TestOutput)
+    }
+
+    /// Whether this is an adversary-controllable (untrusted) class. Untrusted
+    /// payloads are served only as a neutral digest + handle (W9).
+    #[must_use]
+    pub fn is_untrusted(self) -> bool {
+        matches!(self, Self::ToolOutputUntrusted | Self::TranscriptUntrusted)
     }
 }
 
@@ -212,6 +223,9 @@ pub enum ArtifactState {
         handle: String,
         /// The content hash this claim is based on.
         basis_sha256: String,
+        /// The turn the agent last saw this hash (if known).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_seen_turn: Option<u64>,
     },
     /// A validity-checked digest is inline; source unchanged vs `basis_sha256`.
     SummaryIncluded {
@@ -221,6 +235,8 @@ pub enum ArtifactState {
         basis_sha256: String,
         /// The neutral digest.
         summary: String,
+        /// The hash-bound summary key (so a consumer can re-resolve it).
+        summary_key: String,
     },
     /// Exact bytes inline (policy-gated + audited).
     ExactIncluded {
@@ -230,11 +246,17 @@ pub enum ArtifactState {
         basis_sha256: String,
         /// The exact content.
         content: String,
+        /// The line range served, when a partial range (else the whole artifact).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<LineRange>,
     },
     /// Nothing inline; fetch via `handle` (manifest-first default / out of budget).
     AvailableByHandle {
         /// The retrieval handle.
         handle: String,
+        /// The basis content hash, when one is known (absent for deleted sources).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        basis_sha256: Option<String>,
         /// Why the content was omitted.
         reason: OmitReason,
     },
@@ -310,11 +332,13 @@ mod tests {
         let known = ArtifactState::KnownUnchanged {
             handle: "h".into(),
             basis_sha256: "x".into(),
+            last_seen_turn: None,
         };
         let summ = ArtifactState::SummaryIncluded {
             handle: "h".into(),
             basis_sha256: "x".into(),
             summary: "3 hunks".into(),
+            summary_key: "k".into(),
         };
         assert!(!known.carries_content());
         assert!(summ.carries_content());
@@ -327,6 +351,7 @@ mod tests {
             trust: Trust::CodeFact,
             state: ArtifactState::AvailableByHandle {
                 handle: "summary:k".into(),
+                basis_sha256: None,
                 reason: OmitReason::BudgetExhausted,
             },
             estimated_tokens_returned: 0,

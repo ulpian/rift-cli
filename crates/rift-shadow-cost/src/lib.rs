@@ -19,8 +19,7 @@
 //! heuristic; a billing-grade tokenizer (`tiktoken-rs`) plugs in behind
 //! [`estimate_tokens`] when exactness is needed.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 /// The four billable token classes for one model call (1:1 with a call, kept a
 /// separate relation so the classes evolve independently — `04` §4.2).
@@ -117,14 +116,93 @@ impl PriceTable {
     }
 }
 
-/// Estimate the token count of a UTF-8 string. A fast heuristic
-/// (`max(words, chars/4)`) — replace with `tiktoken-rs` for billing-grade
-/// exactness. Deterministic and never panics.
+/// How a call's token counts were derived (provenance for the `token_usage` row).
+/// More authoritative tiers are preferred when available; the heuristic is the
+/// always-available offline floor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize)]
+pub enum CounterMethod {
+    /// Counts the provider returned in the API response (most authoritative).
+    ProviderReported,
+    /// An exact BPE tokenizer (e.g. `tiktoken`) — reserved; not yet wired.
+    Tiktoken,
+    /// The built-in deterministic heuristic estimator (the offline floor).
+    Heuristic,
+}
+
+impl CounterMethod {
+    /// The `counter_method` token persisted with a `token_usage` row.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderReported => "provider_reported",
+            Self::Tiktoken => "tiktoken",
+            Self::Heuristic => "estimator:heuristic",
+        }
+    }
+}
+
+/// A token counter behind a seam, so a billing-grade tokenizer (`tiktoken-rs`) can
+/// drop in later without touching callers. The default impl is the heuristic.
+pub trait Tokenizer {
+    /// Count the tokens in `text`. Must be deterministic and never panic.
+    fn count(&self, text: &str) -> u64;
+
+    /// The provenance tier this tokenizer records.
+    fn method(&self) -> CounterMethod;
+}
+
+/// The built-in deterministic estimator (no model vocab, no network). It is the
+/// pluggable floor: a real BPE tokenizer can replace it behind [`Tokenizer`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeuristicTokenizer;
+
+impl Tokenizer for HeuristicTokenizer {
+    fn count(&self, text: &str) -> u64 {
+        estimate_tokens(text)
+    }
+    fn method(&self) -> CounterMethod {
+        CounterMethod::Heuristic
+    }
+}
+
+/// Flush an ASCII alphanumeric run to a token estimate: ~4 chars/token (English
+/// BPE rule of thumb), at least one token for a non-empty run.
+fn alnum_run_tokens(run: u64) -> u64 {
+    if run == 0 {
+        0
+    } else {
+        run.div_ceil(4)
+    }
+}
+
+/// Estimate the token count of a UTF-8 string with a deterministic, panic-free
+/// heuristic that is the pluggable floor behind [`Tokenizer`] (a billing-grade BPE
+/// tokenizer can replace it without touching callers).
+///
+/// It is sharper than a flat `chars/4`: ASCII alphanumeric runs cost ~4 chars per
+/// token, ASCII punctuation/symbols ~1 token each, and non-ASCII scalars (CJK,
+/// emoji) ~1 token each — closer to how real tokenizers split text. The estimate is
+/// **monotonic** (appending text never lowers the count), so it never undercounts a
+/// suffix.
 #[must_use]
 pub fn estimate_tokens(text: &str) -> u64 {
-    let chars = text.chars().count() as u64;
-    let words = text.split_whitespace().count() as u64;
-    (chars / 4).max(words)
+    let mut tokens: u64 = 0;
+    let mut alnum_run: u64 = 0;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            alnum_run += 1;
+            continue;
+        }
+        tokens += alnum_run_tokens(alnum_run);
+        alnum_run = 0;
+        if ch.is_whitespace() {
+            // Whitespace is absorbed into adjacent tokens — contributes nothing.
+        } else {
+            // ASCII punctuation/symbols and non-ASCII scalars (CJK/emoji) ≈ 1 token.
+            tokens += 1;
+        }
+    }
+    tokens + alnum_run_tokens(alnum_run)
 }
 
 #[cfg(test)]
@@ -233,6 +311,33 @@ mod tests {
         assert_eq!(u.total(), 10);
     }
 
+    #[test]
+    fn heuristic_is_sharper_than_flat_chars_over_four() {
+        // Punctuation-dense text: a flat chars/4 (=2) under-counts the symbols a
+        // real tokenizer splits; the heuristic charges 5 alnum (1 each) + 5 symbols
+        // (1 each) = 10, much closer.
+        let s = "a=b+c*d-e;";
+        assert_eq!(estimate_tokens(s), 10);
+        assert!(estimate_tokens(s) > (s.chars().count() as u64) / 4);
+        // CJK: each scalar ≈ 1 token (flat chars/4 would under-count by 4×).
+        assert_eq!(estimate_tokens("日本語"), 3);
+        // A pure word costs ~ceil(len/4).
+        assert_eq!(estimate_tokens("tokenization"), 3); // 12 chars → 3
+    }
+
+    #[test]
+    fn tokenizer_seam_reports_method() {
+        let t = HeuristicTokenizer;
+        assert_eq!(t.count("hello world"), estimate_tokens("hello world"));
+        assert_eq!(t.method(), CounterMethod::Heuristic);
+        assert_eq!(CounterMethod::Heuristic.as_str(), "estimator:heuristic");
+        assert_eq!(
+            CounterMethod::ProviderReported.as_str(),
+            "provider_reported"
+        );
+        assert_eq!(CounterMethod::Tiktoken.as_str(), "tiktoken");
+    }
+
     proptest::proptest! {
         /// Cost is monotonic in output tokens (more output never costs less).
         #[test]
@@ -240,6 +345,21 @@ mod tests {
             let a = TokenUsage { output: out_a, ..TokenUsage::default() };
             let b = TokenUsage { output: out_a + extra, ..TokenUsage::default() };
             proptest::prop_assert!(call_cost_micros(&b, &prices(), 0) >= call_cost_micros(&a, &prices(), 0));
+        }
+
+        /// The estimate is deterministic: same text → same count, every time.
+        #[test]
+        fn token_estimate_is_deterministic(s in ".{0,400}") {
+            proptest::prop_assert_eq!(estimate_tokens(&s), estimate_tokens(&s));
+        }
+
+        /// The estimate is monotonic: appending text never lowers the count, so a
+        /// suffix is never undercounted. (Whitespace-only text legitimately costs
+        /// 0, so the floor is "never decreases", not "always ≥ 1".)
+        #[test]
+        fn token_estimate_is_monotonic_under_append(a in ".{0,200}", b in ".{0,200}") {
+            let whole = format!("{a}{b}");
+            proptest::prop_assert!(estimate_tokens(&whole) >= estimate_tokens(&a));
         }
     }
 }

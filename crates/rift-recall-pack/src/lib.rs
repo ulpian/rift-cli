@@ -9,8 +9,7 @@
 //! exceed [`MAX_PACK_TOKENS`]) and is deterministic for identical inputs, so an
 //! unchanged pack re-serves byte-identically (cache-friendly stable prefix).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 /// Default target pack size (tokens).
 pub const DEFAULT_PACK_TOKENS: u32 = 1200;

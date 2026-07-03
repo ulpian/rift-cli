@@ -27,19 +27,18 @@
 //! The `blake3` vs `sha2` role split P5 S3 mandates is already provided by
 //! [`rift_core::Sha256Id`] (substrate/chain) vs [`rift_core::Blake3Id`] (internal
 //! handles): they are distinct types with no conversion between them, so a blake3
-//! handle can never masquerade as a chain hash. A `trybuild` compile-fail proof of
-//! that non-conversion ships with the redaction type-enforcement work.
+//! handle can never masquerade as a chain hash (proven by the `compile_fail`
+//! doctest on `rift_core::id`).
 //!
-//! > **(verify)** the substrate's exact leaf/node prefixing and odd-leaf rule.
-//! > If the Entire write path differs, *match it* — byte-compatibility with
-//! > `content_hash.txt` is non-negotiable. A fixture vector pins this.
+//! **The construction is Rift-native** (decision record:
+//! `plan_v1/build-plan/stage-01-foundations/ERRATA.md`): checkpoint hashing has
+//! no Entire equivalent to be byte-compatible with — the P7 parity harness
+//! compares native against native. The prefixes, odd-leaf rule, empty root, and
+//! all four layers are therefore **pinned by hard-coded hex vectors** in this
+//! crate's tests (`construction_is_pinned_by_hex_vectors`): any change to the
+//! construction is a reviewable, breaking diff, never a silent drift.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::doc_markdown,
-    clippy::indexing_slicing
-)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use rift_core::{Result, RiftError, Sha256Id};
 use sha2::{Digest, Sha256};
@@ -109,6 +108,7 @@ pub fn empty_root() -> Sha256Id {
 /// Merkle root over an ordered list of leaves. Empty → [`empty_root`]; odd
 /// levels duplicate the last node. Order is part of the commitment.
 #[must_use]
+#[allow(clippy::indexing_slicing)] // loop indices bounds-guarded at every branch
 pub fn merkle_root(leaves: &[Sha256Id]) -> Sha256Id {
     if leaves.is_empty() {
         return empty_root();
@@ -212,6 +212,7 @@ pub struct ChainLink {
 ///
 /// # Errors
 /// [`RiftError::Integrity`] naming the first divergent index (no payload bytes).
+#[allow(clippy::indexing_slicing)] // loop indices bounds-guarded at every branch
 pub fn verify_chain(links: &[ChainLink]) -> Result<()> {
     for (i, link) in links.iter().enumerate() {
         if i == 0 {
@@ -252,6 +253,7 @@ pub struct MerkleProof {
 ///
 /// # Errors
 /// [`RiftError::Validity`] if `index` is out of range.
+#[allow(clippy::indexing_slicing)] // loop indices bounds-guarded at every branch
 pub fn inclusion_proof(leaves: &[Sha256Id], index: usize) -> Result<MerkleProof> {
     if index >= leaves.len() {
         return Err(RiftError::validity("inclusion index out of range"));
@@ -316,6 +318,36 @@ mod tests {
         let l = leaf_hash(b"x");
         let n = node_hash(&l, &l);
         assert_ne!(l, n);
+    }
+
+    /// The Rift-native construction, pinned byte-exact (see the module doc and
+    /// `plan_v1/…/stage-01-foundations/ERRATA.md`): the domain prefixes
+    /// (0x00 leaf / 0x01 node / 0x02 empty / 0x03 checkpoint / 0x04 commit),
+    /// the empty-root constant, the odd-leaf duplicate-last rule, and the layer
+    /// compositions. Every other test in this crate is self-referential — this
+    /// one is not: changing ANY part of the construction fails here first, as a
+    /// reviewable diff of hex literals. Vectors cross-checked against an
+    /// independent implementation (python hashlib).
+    #[test]
+    fn construction_is_pinned_by_hex_vectors() {
+        assert_eq!(empty_root().to_hex(), "e2c3e6f55658a556f4403ed646adbc7326b09fcbb23f3df593e7c0de60e64794");
+        assert_eq!(leaf_hash(b"x").to_hex(), "3c7e9bc930dc93f01fa69985ef242d9f9e861f3c5355aa24ce5ef4b4b8a70ccb");
+        assert_eq!(merkle_root(&[leaf(1), leaf(2)]).to_hex(), "6bcf0e2e93e0a18e22789aee965e6553f4fbe93f0acfc4a705d691c8311c4965");
+        // three leaves: the odd level duplicates the LAST node (never carries)
+        assert_eq!(merkle_root(&[leaf(1), leaf(2), leaf(3)]).to_hex(), "d10d803ddb112e8bab6820729655f564e52117c0b1aa14fb264b81282d36f9a4");
+        assert_eq!(
+            checkpoint_root(&[leaf(1)], &leaf(2), &leaf(3)).to_hex(),
+            "a33a16ff6a705953626ddd1fbf7f528f3d05c45fa8a4a941638e080c5d1b2b66"
+        );
+        // genesis (all-zero parent) and a chained commit
+        assert_eq!(
+            checkpoint_commit_hash(None, &leaf(1), b"meta").to_hex(),
+            "2a8fb0627b6f5b0296e7aca845ef706210cea38835a21c2038f2ba49947cd9b7"
+        );
+        assert_eq!(
+            checkpoint_commit_hash(Some(&leaf(9)), &leaf(1), b"meta").to_hex(),
+            "b17e94f842f7f30132e4dddf7b2da20c1830dd166e46297931c1c1e3aa5826e9"
+        );
     }
 
     #[test]
@@ -443,9 +475,13 @@ mod tests {
             proptest::prop_assert_ne!(x, y);
         }
 
-        /// Any generated valid chain verifies; relinking a non-genesis link breaks it.
+        /// Any generated valid chain verifies; ANY single structural mutation —
+        /// relink, drop, swap-adjacent, or a corrupted genesis — at ANY position
+        /// breaks it. (Root tampering with intact linkage is detected one layer
+        /// up: `rift-store::verify_against_source` compares full `ChainLink`s,
+        /// roots included, against the authoritative source.)
         #[test]
-        fn chain_continuity(len in 2usize..16) {
+        fn chain_continuity(len in 3usize..16, pos in 1usize..15, mutation in 0u8..4) {
             let links: Vec<ChainLink> = (0..len)
                 .map(|i| {
                     let prev = if i == 0 { None } else { Some(u8::try_from(i).unwrap_or(0)) };
@@ -453,9 +489,21 @@ mod tests {
                 })
                 .collect();
             proptest::prop_assert!(verify_chain(&links).is_ok());
+
+            let pos = 1 + (pos % (len - 1)); // a random non-genesis index
             let mut tampered = links.clone();
-            tampered[1].prev = Some(Sha256Id::from_bytes([200; 32]));
-            proptest::prop_assert!(verify_chain(&tampered).is_err());
+            match mutation {
+                0 => tampered[pos].prev = Some(Sha256Id::from_bytes([200; 32])), // relink
+                1 => {
+                    let _ = tampered.remove(pos.min(len - 2)); // drop an interior link
+                }
+                2 => tampered.swap(pos - 1, pos), // reorder adjacent links
+                _ => tampered[0].prev = Some(Sha256Id::from_bytes([7; 32])), // corrupt genesis
+            }
+            proptest::prop_assert!(
+                verify_chain(&tampered).is_err(),
+                "mutation {} at {} must break the chain", mutation, pos
+            );
         }
     }
 }

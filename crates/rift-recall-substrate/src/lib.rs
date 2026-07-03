@@ -15,14 +15,12 @@
 //! addressing, `04-database-design` §4.4). Local-only: a reader refuses to run
 //! against a remote (the shadow data is raw and never leaves the machine).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use std::collections::BTreeMap;
 
 use rift_core::{Result, RiftError};
 
-pub mod ingest;
 pub mod parse;
 pub mod session;
 pub mod worktree;
@@ -106,8 +104,35 @@ pub struct CheckpointShard {
     pub ordinal: u64,
 }
 
+/// A commit's lifecycle metadata for outcome-label derivation (P4 S2). Hex oids
+/// only; no `gix` types cross the seam.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitMeta {
+    /// The commit oid (hex).
+    pub oid: String,
+    /// Parent commit oids (hex), in order (a merge has ≥ 2).
+    pub parents: Vec<String>,
+    /// Committer time in epoch milliseconds.
+    pub committed_ms: i64,
+    /// The first line of the commit message (used for revert detection).
+    pub summary: String,
+}
+
+/// The bound on the reachability walk in [`is_reachable`]: a fail-safe ceiling so
+/// derivation over a pathological history terminates without ever *fabricating* a
+/// "merged" label it could not prove.
+pub const MAX_REACHABILITY_WALK: usize = 100_000;
+
 /// Read-only access to the canonical substrate. `gix` types never appear here:
 /// object ids are hex `String`s so the trait stays backend-agnostic.
+///
+/// The git-graph methods ([`integration_tips`](SubstrateReader::integration_tips),
+/// [`branch_tips`](SubstrateReader::branch_tips),
+/// [`commit_meta`](SubstrateReader::commit_meta),
+/// [`checkpoint_commit`](SubstrateReader::checkpoint_commit)) carry **fail-safe
+/// default impls** that report "unknown" — a reader that cannot answer never
+/// causes a label to be derived, so absence of evidence is never mistaken for a
+/// positive outcome (P4 S2).
 pub trait SubstrateReader {
     /// Whether this reader is bound to a strictly-local repository (no remote).
     fn is_local_only(&self) -> bool;
@@ -131,6 +156,89 @@ pub trait SubstrateReader {
     /// # Errors
     /// Implementation-defined read errors.
     fn read_artifact(&self, checkpoint_id: &str, rel: &str) -> Result<Option<Vec<u8>>>;
+
+    /// The integration-branch tip commit oid(s) (e.g. `main`/`master`), hex.
+    /// Reachability from one of these is the **merged** signal (P4 S2). Default:
+    /// none (no integration branch discoverable ⇒ nothing merges).
+    ///
+    /// # Errors
+    /// Implementation-defined read errors.
+    fn integration_tips(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Every local working branch tip as `(branch_name, tip_oid_hex)`, EXCLUDING
+    /// the rift/entire shadow + checkpoint namespaces. Used for the **abandoned**
+    /// signal (a subject's branch absent ⇒ deleted). Default: none.
+    ///
+    /// # Errors
+    /// Implementation-defined read errors.
+    fn branch_tips(&self) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
+    /// Commit metadata by oid (parents, time, message). Default: unknown.
+    ///
+    /// # Errors
+    /// Implementation-defined read errors.
+    fn commit_meta(&self, _oid: &str) -> Result<Option<CommitMeta>> {
+        Ok(None)
+    }
+
+    /// The real working-tree commit a checkpoint captured, if resolvable (hex
+    /// oid). Default: unknown — so derivation simply produces no label for a
+    /// checkpoint whose commit cannot be resolved.
+    ///
+    /// # Errors
+    /// Implementation-defined read errors.
+    fn checkpoint_commit(&self, _checkpoint_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+/// Whether `ancestor` is reachable from `descendant` (i.e. `ancestor ⊑ descendant`
+/// in the commit DAG): a parent-walk from `descendant` over
+/// [`SubstrateReader::commit_meta`], bounded by `max_walk` commits.
+///
+/// **Fail-safe:** returns `false` if reachability cannot be *proven* within the
+/// bound or commit metadata is missing — it never guesses "reachable".
+///
+/// # Errors
+/// Propagates [`SubstrateReader::commit_meta`] read errors.
+pub fn is_reachable(
+    reader: &impl SubstrateReader,
+    ancestor: &str,
+    descendant: &str,
+    max_walk: usize,
+) -> Result<bool> {
+    use std::collections::BTreeSet;
+    if ancestor == descendant {
+        return Ok(true);
+    }
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut frontier: Vec<String> = vec![descendant.to_string()];
+    let mut steps = 0usize;
+    while let Some(oid) = frontier.pop() {
+        if steps >= max_walk {
+            return Ok(false);
+        }
+        steps += 1;
+        if !seen.insert(oid.clone()) {
+            continue;
+        }
+        let Some(meta) = reader.commit_meta(&oid)? else {
+            continue; // unknown commit: cannot extend this path (fail-safe)
+        };
+        for parent in meta.parents {
+            if parent == ancestor {
+                return Ok(true);
+            }
+            if !seen.contains(&parent) {
+                frontier.push(parent);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// The last-ingested watermark per branch (for incremental ingest).
@@ -190,6 +298,10 @@ pub struct MemorySubstrate {
     shards: Vec<CheckpointShard>,
     blobs: BTreeMap<String, Vec<u8>>,
     artifacts: BTreeMap<(String, String), Vec<u8>>,
+    commits: BTreeMap<String, CommitMeta>,
+    integration_tips: Vec<String>,
+    branches: Vec<(String, String)>,
+    checkpoint_commits: BTreeMap<String, String>,
 }
 
 impl MemorySubstrate {
@@ -223,6 +335,35 @@ impl MemorySubstrate {
             .insert((checkpoint_id.to_string(), rel.to_string()), bytes.to_vec());
         self
     }
+
+    /// Add a commit to the in-memory DAG.
+    #[must_use]
+    pub fn with_commit(mut self, meta: CommitMeta) -> Self {
+        self.commits.insert(meta.oid.clone(), meta);
+        self
+    }
+
+    /// Mark a commit oid as an integration-branch tip (the merged-into target).
+    #[must_use]
+    pub fn with_integration_tip(mut self, oid: &str) -> Self {
+        self.integration_tips.push(oid.to_string());
+        self
+    }
+
+    /// Register a working branch tip (`name`, `tip_oid`).
+    #[must_use]
+    pub fn with_branch(mut self, name: &str, tip_oid: &str) -> Self {
+        self.branches.push((name.to_string(), tip_oid.to_string()));
+        self
+    }
+
+    /// Link a checkpoint id to the working commit it captured.
+    #[must_use]
+    pub fn with_checkpoint_commit(mut self, checkpoint_id: &str, oid: &str) -> Self {
+        self.checkpoint_commits
+            .insert(checkpoint_id.to_string(), oid.to_string());
+        self
+    }
 }
 
 impl SubstrateReader for MemorySubstrate {
@@ -240,6 +381,18 @@ impl SubstrateReader for MemorySubstrate {
             .artifacts
             .get(&(checkpoint_id.to_string(), rel.to_string()))
             .cloned())
+    }
+    fn integration_tips(&self) -> Result<Vec<String>> {
+        Ok(self.integration_tips.clone())
+    }
+    fn branch_tips(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.branches.clone())
+    }
+    fn commit_meta(&self, oid: &str) -> Result<Option<CommitMeta>> {
+        Ok(self.commits.get(oid).cloned())
+    }
+    fn checkpoint_commit(&self, checkpoint_id: &str) -> Result<Option<String>> {
+        Ok(self.checkpoint_commits.get(checkpoint_id).cloned())
     }
 }
 
@@ -310,5 +463,56 @@ mod tests {
         );
         assert_eq!(sub().read_artifact("c1", "missing.json").unwrap(), None);
         assert_eq!(sub().read_artifact("cX", "tool_calls.jsonl").unwrap(), None);
+    }
+
+    fn commit(oid: &str, parents: &[&str], ms: i64, summary: &str) -> CommitMeta {
+        CommitMeta {
+            oid: oid.into(),
+            parents: parents.iter().map(|p| (*p).to_string()).collect(),
+            committed_ms: ms,
+            summary: summary.into(),
+        }
+    }
+
+    /// A small DAG: feature `f1` was merged into `main` (tip `m2`); `orphan`
+    /// never was. `main`: g0 → m1 → m2(merge of f1); feature: g0 → f1.
+    fn dag() -> MemorySubstrate {
+        MemorySubstrate::local()
+            .with_commit(commit("g0", &[], 0, "genesis"))
+            .with_commit(commit("f1", &["g0"], 10, "feature work"))
+            .with_commit(commit("m1", &["g0"], 20, "main work"))
+            .with_commit(commit("m2", &["m1", "f1"], 30, "merge feature"))
+            .with_commit(commit("orphan", &["g0"], 15, "unmerged work"))
+            .with_integration_tip("m2")
+    }
+
+    #[test]
+    fn reachable_when_merged_unreachable_when_not() {
+        let d = dag();
+        assert!(is_reachable(&d, "f1", "m2", MAX_REACHABILITY_WALK).unwrap());
+        assert!(is_reachable(&d, "g0", "m2", MAX_REACHABILITY_WALK).unwrap());
+        assert!(is_reachable(&d, "m2", "m2", MAX_REACHABILITY_WALK).unwrap()); // identity
+        assert!(!is_reachable(&d, "orphan", "m2", MAX_REACHABILITY_WALK).unwrap());
+        // direction matters: a descendant is not an ancestor of its parent
+        assert!(!is_reachable(&d, "m2", "f1", MAX_REACHABILITY_WALK).unwrap());
+    }
+
+    #[test]
+    fn reachability_is_fail_safe_on_missing_metadata_and_bound() {
+        let d = dag();
+        // unknown commit: cannot prove reachability → false (never guesses)
+        assert!(!is_reachable(&d, "g0", "ghost", MAX_REACHABILITY_WALK).unwrap());
+        // a zero bound cannot prove a non-trivial reachability
+        assert!(!is_reachable(&d, "f1", "m2", 0).unwrap());
+    }
+
+    #[test]
+    fn default_graph_methods_are_empty() {
+        // a bare reader (no git-graph data) reports "unknown" everywhere.
+        let bare = MemorySubstrate::local();
+        assert!(bare.integration_tips().unwrap().is_empty());
+        assert!(bare.branch_tips().unwrap().is_empty());
+        assert_eq!(bare.commit_meta("x").unwrap(), None);
+        assert_eq!(bare.checkpoint_commit("c").unwrap(), None);
     }
 }

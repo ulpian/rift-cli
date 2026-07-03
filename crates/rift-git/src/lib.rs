@@ -20,14 +20,20 @@
 //! now the read side stays in `rift-recall-substrate` (gix) and this crate owns the
 //! write side + worktree discovery + the destructive-op shell-out.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rift_core::{RedactedBytes, Result, RiftError, SecretBytes};
 use sha2::{Digest, Sha256};
+
+pub mod blob;
+pub mod identity;
+#[cfg(feature = "gix")]
+pub use blob::GixBlobReader;
+pub use blob::{BlobReader, MemoryBlobReader, TreeEntry};
+pub use identity::{GitConfigIdentity, ENV_DEVELOPER_OVERRIDE};
 
 /// Lowercase hex of a byte slice.
 fn to_hex(bytes: &[u8]) -> String {
@@ -100,6 +106,7 @@ fn build_paths(git_dir: PathBuf, common_dir: PathBuf, work_tree: PathBuf) -> Rep
     h.update(work_tree.to_string_lossy().as_bytes());
     let digest = h.finalize();
     let mut worktree_hash = [0u8; 6];
+    #[allow(clippy::indexing_slicing)] // SHA-256 output is always 32 bytes
     worktree_hash.copy_from_slice(&digest[..6]);
     RepoPaths {
         git_dir,

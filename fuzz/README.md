@@ -23,15 +23,20 @@ the input to the seed corpus.
 | Target | Parser | Status |
 |---|---|---|
 | `config_parse` | `rift_config::EffectiveConfig::from_bytes` | **live** |
-| `checkpoint_artifact` | rift-shadow checkpoint manifest | deferred — Stage 2 |
-| `mcp_request` | rmcp request decode | deferred — Stage 3 P5 |
+| `glob_match` | `rift_config::glob_match` (policy pattern × path) | **live** |
+| `run_hook` | `rift_shadow_hooks` stdin envelope + full entrypoint | **live** |
+| `redact` | `rift_shadow_redact` transcript redaction | **live** |
+| `diff` | `rift_shadow_attribution` unified-diff parse | **live** |
+| `checkpoint_artifact` | `rift_recall_substrate::parse` (all five shard entrypoints) | **live** |
+| `mcp_request` | `rift_recall_mcp::decode_request` | **live** |
 | `fff_query` | fff query language | deferred — Stage 5 P2 |
-| `tool_result_template` | tool-result templating | deferred — Stage 3 |
 
-Only `config_parse` exists today because it is the one untrusted parser present
-in Stage 1; the others are added as their parsers land. The proptest
-`parser_never_panics_on_arbitrary_bytes` in `rift-config` gates the same contract
-in the normal `cargo test` job (no nightly required).
+Every live target runs a 60-second smoke in PR CI (the required `fuzz-smoke`
+job in `.github/workflows/ci.yml`) and a 10-minute daily deep run
+(`fuzz-nightly.yml`, crash artifacts uploaded). Each fuzzed parser also carries
+a `never_panics`-style proptest in its own crate, gating the same contract in
+the normal `cargo test` job (no nightly required) — the fuzzer adds
+coverage-guided depth the proptest's random sampling cannot reach.
 
 Seed corpora live in `corpus/<target>/` and are committed (valid examples + tricky
 cases). Crash artifacts (`artifacts/`, `target/`) are git-ignored.

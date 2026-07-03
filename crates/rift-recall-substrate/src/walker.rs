@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use rift_core::{Result, RiftError};
 
-use crate::{CheckpointShard, Dialect};
+use crate::{CheckpointShard, CommitMeta, Dialect};
 
 fn is_hex(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -93,6 +93,104 @@ impl ShardWalker {
             .into_fully_peeled_id()
             .map_err(|e| RiftError::substrate(format!("peel ref: {e}")))?;
         Ok(Some(id.detach().to_string()))
+    }
+
+    /// The tip oid (hex) of an arbitrary fully-qualified ref, if it exists.
+    ///
+    /// # Errors
+    /// [`RiftError::Substrate`] on a peel failure.
+    pub fn ref_tip_hex(&self, full_ref: &str) -> Result<Option<String>> {
+        let Ok(reference) = self.repo.find_reference(full_ref) else {
+            return Ok(None);
+        };
+        let id = reference
+            .into_fully_peeled_id()
+            .map_err(|e| RiftError::substrate(format!("peel ref: {e}")))?;
+        Ok(Some(id.detach().to_string()))
+    }
+
+    /// The integration-branch tip oid(s) (`main`/`master`), in that preference
+    /// order — the merged-into targets for the outcome-label deriver (P4 S2).
+    ///
+    /// # Errors
+    /// [`RiftError::Substrate`] on a read failure.
+    pub fn integration_tips(&self) -> Result<Vec<String>> {
+        let mut tips = Vec::new();
+        for name in ["refs/heads/main", "refs/heads/master"] {
+            if let Some(h) = self.ref_tip_hex(name)? {
+                tips.push(h);
+            }
+        }
+        Ok(tips)
+    }
+
+    /// Every local working branch tip as `(short_name, tip_oid_hex)`, EXCLUDING
+    /// the `rift/` and `entire/` shadow + checkpoint namespaces.
+    ///
+    /// # Errors
+    /// [`RiftError::Substrate`] on a read failure.
+    pub fn branch_tips(&self) -> Result<Vec<(String, String)>> {
+        let platform = self
+            .repo
+            .references()
+            .map_err(|e| RiftError::substrate(format!("references: {e}")))?;
+        let iter = platform
+            .all()
+            .map_err(|e| RiftError::substrate(format!("iterate refs: {e}")))?;
+        let mut out = Vec::new();
+        for r in iter {
+            let reference = r.map_err(|e| RiftError::substrate(format!("ref: {e}")))?;
+            let full = reference.name().as_bstr().to_string();
+            let Some(short) = full.strip_prefix("refs/heads/") else {
+                continue;
+            };
+            if short.starts_with("rift/") || short.starts_with("entire/") {
+                continue; // shadow + checkpoint namespaces are not working branches
+            }
+            let short = short.to_string();
+            let id = reference
+                .into_fully_peeled_id()
+                .map_err(|e| RiftError::substrate(format!("peel ref: {e}")))?;
+            out.push((short, id.detach().to_string()));
+        }
+        Ok(out)
+    }
+
+    /// Commit metadata (parents, committer time, summary) by hex oid, if it
+    /// resolves to a commit object.
+    ///
+    /// # Errors
+    /// [`RiftError::Substrate`] on a decode failure of an existing commit.
+    pub fn commit_meta(&self, hex: &str) -> Result<Option<CommitMeta>> {
+        let Ok(oid) = gix::ObjectId::from_hex(hex.as_bytes()) else {
+            return Ok(None);
+        };
+        let Ok(object) = self.repo.find_object(oid) else {
+            return Ok(None);
+        };
+        let Ok(commit) = object.try_into_commit() else {
+            return Ok(None);
+        };
+        let parents: Vec<String> = commit
+            .parent_ids()
+            .map(|id| id.detach().to_string())
+            .collect();
+        let seconds = commit
+            .committer()
+            .map_err(|e| RiftError::substrate(format!("commit committer: {e}")))?
+            .seconds();
+        let committed_ms = seconds.saturating_mul(1000);
+        let raw = commit
+            .message_raw()
+            .map_err(|e| RiftError::substrate(format!("commit message: {e}")))?
+            .to_string();
+        let summary = raw.lines().next().unwrap_or("").to_string();
+        Ok(Some(CommitMeta {
+            oid: hex.to_string(),
+            parents,
+            committed_ms,
+            summary,
+        }))
     }
 
     /// Enumerate every checkpoint id for one dialect, in deterministic id order.

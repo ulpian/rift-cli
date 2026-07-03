@@ -141,15 +141,62 @@ mod tests {
         );
     }
 
-    /// The error type must never echo a "secret" sentinel as a *byte payload*;
-    /// only identifiers/reasons are allowed in constructors, and crypto failures
-    /// carry a content-free category (see 05 §5.4/§5.7).
+    /// Every variant's Display/Debug output for a given reason string.
+    fn all_variants(reason: &str) -> Vec<RiftError> {
+        vec![
+            RiftError::Immutability(reason.into()),
+            RiftError::Validity(reason.into()),
+            RiftError::PolicyDenied(reason.into()),
+            RiftError::Storage(reason.into()),
+            RiftError::Substrate(reason.into()),
+            RiftError::Migration(reason.into()),
+            RiftError::Config(reason.into()),
+            RiftError::Crypto(reason.into()),
+            RiftError::Integrity(reason.into()),
+            RiftError::NotFound(reason.into()),
+            RiftError::Io(std::io::Error::new(std::io::ErrorKind::Other, reason.to_string())),
+            RiftError::Serde(reason.into()),
+            RiftError::Other(reason.into()),
+        ]
+    }
+
+    /// The spec's `error_display_contains_no_byte_payload` contract, exhaustive
+    /// over EVERY variant (05 §5.4/§5.7): the rendered error is exactly
+    /// `<prefix><reason>` — the reason a call site passes is the *only* content
+    /// channel, so nothing the caller did not deliberately format in (key
+    /// bytes, transcript fragments, a secret sentinel from elsewhere) can leak
+    /// through the error type.
     #[test]
-    fn crypto_error_is_redaction_safe() {
-        let e = RiftError::crypto("aead tag verification failed");
-        let shown = e.to_string();
-        assert!(shown.contains("aead tag verification failed"));
-        assert!(!shown.contains("BEGIN PRIVATE KEY"));
+    fn error_display_contains_no_byte_payload() {
+        let reason = "reason-7f3a";
+        let secret_sentinel = "SECRET-SENTINEL-NEVER-PASSED-1c9d";
+        for e in all_variants(reason) {
+            let display = e.to_string();
+            let debug = format!("{e:?}");
+            // the display is exactly prefix + the passed reason, nothing more
+            assert!(
+                display.ends_with(reason),
+                "display must end with the passed reason: {display}"
+            );
+            assert!(
+                display.len() <= reason.len() + 32,
+                "display carries only a short static prefix: {display}"
+            );
+            // nothing that was never passed can appear in either rendering
+            assert!(!display.contains(secret_sentinel));
+            assert!(!debug.contains(secret_sentinel));
+        }
+    }
+
+    /// Contract guard: the exact Display form of every variant, snapshotted so
+    /// a changed (or newly leaky) rendering is a reviewable diff.
+    #[test]
+    fn display_forms_are_stable() {
+        let rendered: Vec<String> = all_variants("<reason>")
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        insta::assert_snapshot!("riferror_display_forms", rendered.join("\n"));
     }
 
     #[test]

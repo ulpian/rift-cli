@@ -2,7 +2,7 @@
 //! checkpoint Merkle root is computed and recorded into the immutable projection,
 //! and `rift verify` cross-checks it against the canonical chain — while the
 //! redaction gate keeps a seeded secret out of the durable bytes.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use rift_core::{SecretBytes, Sha256Id};
 use rift_hashchain::ChainLink;

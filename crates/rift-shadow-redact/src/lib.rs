@@ -17,12 +17,7 @@
 //! secret. All regexes are linear-time (`regex` crate, no backreferences), so a
 //! hostile input cannot wedge the pipeline (`05-security` §5.5).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::doc_markdown,
-    clippy::indexing_slicing
-)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -306,7 +301,10 @@ fn shannon_bits(token: &str) -> f64 {
         return 0.0;
     }
     for b in token.bytes() {
-        counts[b as usize] += 1;
+        // a u8 index into a 256-slot histogram cannot be out of range
+        if let Some(c) = counts.get_mut(usize::from(b)) {
+            *c += 1;
+        }
     }
     let n = len as f64;
     let mut bits = 0.0;
@@ -325,10 +323,10 @@ fn entropy_spans(text: &str) -> Vec<Span> {
         |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-');
     let mut spans = Vec::new();
     let mut i = 0;
-    while i < bytes.len() {
-        if is_token(bytes[i]) {
+    while let Some(&b) = bytes.get(i) {
+        if is_token(b) {
             let start = i;
-            while i < bytes.len() && is_token(bytes[i]) {
+            while bytes.get(i).copied().is_some_and(is_token) {
                 i += 1;
             }
             let tok = &text[start..i];
@@ -467,9 +465,10 @@ pub fn redact_with(raw: &SecretBytes, packs: &RulePackSet) -> Result<RedactionOu
     let chosen: Vec<Span> = merged
         .into_iter()
         .filter(|s| {
-            let keep_unmasked = packs
-                .allow
-                .contains(&sha256(&text.as_bytes()[s.start..s.end]));
+            let keep_unmasked = text
+                .as_bytes()
+                .get(s.start..s.end)
+                .is_some_and(|span| packs.allow.contains(&sha256(span)));
             if keep_unmasked {
                 allowlisted += 1;
             }

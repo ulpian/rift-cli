@@ -14,13 +14,14 @@
 //! * **Envelope** ([`envelope_for`]): the single way to construct a served
 //!   artifact; `known_unchanged` requires *both* same-hash-seen and `Valid`.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
+
+pub mod trust;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use rift_recall_types::{ArtifactState, Envelope, OmitReason, Trust};
+use rift_recall_types::{ArtifactState, Envelope, Handle, LineRange, OmitReason, Trust};
 use sha2::{Digest, Sha256};
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -209,8 +210,138 @@ pub enum Validity {
 /// A snapshot of the current worktree: path → current content hash (git OID).
 pub type WorktreeSnapshot = BTreeMap<String, String>;
 
-/// Resolve a summary key against the current worktree. A stale summary can never
-/// be returned as `Valid` — the OID re-check guarantees it.
+/// Classify a binding against the current worktree — the **pure** validity core,
+/// shared by the in-memory [`resolve`] and the durable recall.db resolver
+/// (`rift-recall-ledger`). `digest` is the already-fetched summary bytes (only
+/// needed for the `Valid` arm). A stale summary can never exit as `Valid`: the
+/// bound-hash re-check is structural, and [`ValidSummary`]'s constructor is
+/// sealed, so this is the single mint of a returnable summary.
+#[must_use]
+pub fn classify(
+    binding: &SummaryBinding,
+    snapshot: &WorktreeSnapshot,
+    digest: Option<Vec<u8>>,
+) -> Validity {
+    let Some(current_oid) = snapshot.get(&binding.path) else {
+        return Validity::Degraded {
+            key: binding.key.clone(),
+        };
+    };
+    if current_oid != &binding.bound_oid {
+        return Validity::Invalid {
+            key: binding.key.clone(),
+            now: current_oid.clone(),
+        };
+    }
+    match digest {
+        Some(bytes) => Validity::Valid(ValidSummary::sealed(
+            binding.key.clone(),
+            bytes,
+            binding.bound_oid.clone(),
+        )),
+        None => Validity::Degraded {
+            key: binding.key.clone(),
+        },
+    }
+}
+
+// --- handle resolution (Stage 3 Phase 3 Step 5) ----------------------------
+
+/// A seam onto immutable, content-addressed bytes — Git blobs by content hash
+/// and captured tool results by id. Kept minimal (no `gix`) so validity stays
+/// dependency-light; `rift-recall-ledger` implements it over the substrate.
+pub trait BlobResolver {
+    /// Candidate bytes for the file revision named by `(path, content_sha256)`.
+    /// Looked up **by content**, never by reading the current path off disk;
+    /// [`resolve_handle`] still self-validates the returned bytes.
+    fn file_blob(&self, path: &str, content_sha256: &str) -> Option<Vec<u8>>;
+    /// The captured tool-result bytes for a `tool_use_id`.
+    fn tool_result(&self, tool_use_id: &str) -> Option<Vec<u8>>;
+}
+
+/// What resolving a handle yields. `Unavailable` carries the reason; it is never
+/// "the current file at that path".
+pub enum Resolved {
+    /// Exact bytes (a Git blob or a captured tool result), range-sliced.
+    Bytes(Vec<u8>),
+    /// A validity-checked summary (from a `summary:` handle).
+    Summary(ValidSummary),
+    /// The named object is gone / stale / a hash mismatch — never wrong bytes.
+    Unavailable(OmitReason),
+}
+
+/// Slice `bytes` to a 1-based inclusive line range (lines split on `\n`, keeping
+/// terminators so concatenation round-trips).
+fn slice_lines(bytes: &[u8], range: LineRange) -> Vec<u8> {
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut start = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            if let Some(line) = bytes.get(start..=i) {
+                lines.push(line);
+            }
+            start = i + 1;
+        }
+    }
+    if let Some(tail) = bytes.get(start..) {
+        if !tail.is_empty() {
+            lines.push(tail);
+        }
+    }
+    let lo = (range.lo.max(1) as usize) - 1;
+    let hi = range.hi as usize; // inclusive → exclusive upper after clamp
+    let mut out = Vec::new();
+    for l in lines.get(lo..hi.min(lines.len())).unwrap_or(&[]) {
+        out.extend_from_slice(l);
+    }
+    out
+}
+
+/// Resolve a [`Handle`] to its **exact named bytes** (or `Unavailable`) — never
+/// the current file at the path. `file:` resolves by content hash and
+/// **self-validates** (resolved bytes must hash to the handle's `sha256`, else
+/// `Unavailable` — a hostile/path-traversal handle can never read arbitrary
+/// content); `log:` by captured-result id; `summary:` through `resolve_summary`
+/// (a stale summary handle yields `Unavailable`, never bytes).
+pub fn resolve_handle(
+    h: &Handle,
+    blobs: &dyn BlobResolver,
+    resolve_summary: impl FnOnce(&str) -> Validity,
+) -> Resolved {
+    match h {
+        Handle::File {
+            path,
+            sha256,
+            range,
+        } => {
+            let Some(bytes) = blobs.file_blob(path, sha256) else {
+                return Resolved::Unavailable(OmitReason::SourceDeletedOrRedacted);
+            };
+            if &sha256_hex(&bytes) != sha256 {
+                // self-validation: never serve bytes that don't match the handle
+                return Resolved::Unavailable(OmitReason::SourceDeletedOrRedacted);
+            }
+            match range {
+                Some(r) => Resolved::Bytes(slice_lines(&bytes, *r)),
+                None => Resolved::Bytes(bytes),
+            }
+        }
+        Handle::Log { tool_use_id } => match blobs.tool_result(tool_use_id) {
+            Some(bytes) => Resolved::Bytes(bytes),
+            None => Resolved::Unavailable(OmitReason::SourceDeletedOrRedacted),
+        },
+        Handle::Summary { key } => match resolve_summary(key) {
+            Validity::Valid(s) => Resolved::Summary(s),
+            Validity::Invalid { .. } => {
+                Resolved::Unavailable(OmitReason::SummaryInvalidSourceChanged)
+            }
+            Validity::Degraded { .. } => Resolved::Unavailable(OmitReason::SourceDeletedOrRedacted),
+        },
+    }
+}
+
+/// Resolve a summary key against the current worktree (in-memory reference store).
+/// A stale summary can never be returned as `Valid` — see [`classify`].
 #[must_use]
 pub fn resolve(
     store: &SummaryStore,
@@ -223,27 +354,8 @@ pub fn resolve(
             key: key.to_string(),
         };
     };
-    let Some(current_oid) = snapshot.get(&binding.path) else {
-        return Validity::Degraded {
-            key: key.to_string(),
-        };
-    };
-    if current_oid != &binding.bound_oid {
-        return Validity::Invalid {
-            key: key.to_string(),
-            now: current_oid.clone(),
-        };
-    }
-    match dg.get(&binding.digest_ref) {
-        Some(bytes) => Validity::Valid(ValidSummary::sealed(
-            key.to_string(),
-            bytes,
-            binding.bound_oid,
-        )),
-        None => Validity::Degraded {
-            key: key.to_string(),
-        },
-    }
+    let digest = dg.get(&binding.digest_ref);
+    classify(&binding, snapshot, digest)
 }
 
 // --- deterministic extractors ----------------------------------------------
@@ -422,6 +534,7 @@ pub fn envelope_for(
                 ArtifactState::KnownUnchanged {
                     handle: handle.to_string(),
                     basis_sha256: basis_sha256.to_string(),
+                    last_seen_turn: None, // turn-aware seen-tracking is a follow-up
                 },
                 0,
             );
@@ -438,6 +551,7 @@ pub fn envelope_for(
                     handle: handle.to_string(),
                     basis_sha256: basis_sha256.to_string(),
                     summary,
+                    summary_key: s.key().to_string(),
                 },
                 cost,
             );
@@ -445,6 +559,7 @@ pub fn envelope_for(
         return mk(
             ArtifactState::AvailableByHandle {
                 handle: handle.to_string(),
+                basis_sha256: Some(basis_sha256.to_string()),
                 reason: OmitReason::BudgetExhausted,
             },
             0,
@@ -461,20 +576,26 @@ pub fn envelope_for(
                     handle: handle.to_string(),
                     basis_sha256: basis_sha256.to_string(),
                     content: content.to_string(),
+                    range: None, // full-artifact exact; ranged exact is served via handles
                 },
                 cost,
             );
         }
     }
 
-    let reason = match validity {
-        Validity::Invalid { .. } => OmitReason::SummaryInvalidSourceChanged,
-        Validity::Degraded { .. } => OmitReason::SourceDeletedOrRedacted,
-        Validity::Valid(_) => OmitReason::BudgetExhausted,
+    let (reason, basis) = match validity {
+        Validity::Invalid { .. } => (
+            OmitReason::SummaryInvalidSourceChanged,
+            Some(basis_sha256.to_string()),
+        ),
+        // a deleted/redacted source has no current basis hash to disclose
+        Validity::Degraded { .. } => (OmitReason::SourceDeletedOrRedacted, None),
+        Validity::Valid(_) => (OmitReason::BudgetExhausted, Some(basis_sha256.to_string())),
     };
     mk(
         ArtifactState::AvailableByHandle {
             handle: handle.to_string(),
+            basis_sha256: basis,
             reason,
         },
         0,
@@ -491,6 +612,104 @@ mod tests {
             policy_version: 1,
             redaction_version: 1,
         }
+    }
+
+    /// A test resolver keyed by content hash (never by disk path).
+    struct MapResolver {
+        files: BTreeMap<(String, String), Vec<u8>>,
+        logs: BTreeMap<String, Vec<u8>>,
+    }
+    impl BlobResolver for MapResolver {
+        fn file_blob(&self, path: &str, content_sha256: &str) -> Option<Vec<u8>> {
+            self.files
+                .get(&(path.to_string(), content_sha256.to_string()))
+                .cloned()
+        }
+        fn tool_result(&self, tool_use_id: &str) -> Option<Vec<u8>> {
+            self.logs.get(tool_use_id).cloned()
+        }
+    }
+
+    #[test]
+    fn file_handle_resolves_by_hash_not_path() {
+        let bytes = b"line1\nline2\n".to_vec();
+        let sha = sha256_hex(&bytes);
+        let mut files = BTreeMap::new();
+        files.insert(("a.rs".to_string(), sha.clone()), bytes.clone());
+        let r = MapResolver {
+            files,
+            logs: BTreeMap::new(),
+        };
+        // resolving the OLD hash yields the OLD bytes regardless of disk state
+        let h = Handle::File {
+            path: "a.rs".into(),
+            sha256: sha,
+            range: None,
+        };
+        match resolve_handle(&h, &r, |_| Validity::Degraded { key: String::new() }) {
+            Resolved::Bytes(b) => assert_eq!(b, bytes),
+            _ => panic!("expected the named bytes"),
+        }
+        // a different (new) hash the resolver doesn't hold → Unavailable, never disk
+        let h2 = Handle::File {
+            path: "a.rs".into(),
+            sha256: "newhash".into(),
+            range: None,
+        };
+        assert!(matches!(
+            resolve_handle(&h2, &r, |_| Validity::Degraded { key: String::new() }),
+            Resolved::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn hash_mismatch_yields_unavailable() {
+        // resolver returns bytes that do NOT hash to the handle's sha → Unavailable
+        let mut files = BTreeMap::new();
+        files.insert(
+            ("a.rs".to_string(), "claimed".to_string()),
+            b"actually different".to_vec(),
+        );
+        let r = MapResolver {
+            files,
+            logs: BTreeMap::new(),
+        };
+        let h = Handle::File {
+            path: "a.rs".into(),
+            sha256: "claimed".into(),
+            range: None,
+        };
+        assert!(matches!(
+            resolve_handle(&h, &r, |_| Validity::Degraded { key: String::new() }),
+            Resolved::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn resolves_summary_handle_through_validity() {
+        let store = SummaryStore::new();
+        let dg = MemoryDigestStore::default();
+        let source = b"fn x() {}\n";
+        let key = store.put_summary(&dg, "x.rs", source, versions(), b"digest");
+        let mut snap = WorktreeSnapshot::new();
+        snap.insert("x.rs".to_string(), sha256_hex(source));
+        let r = MapResolver {
+            files: BTreeMap::new(),
+            logs: BTreeMap::new(),
+        };
+        // current source → Valid summary returned
+        let h = Handle::Summary { key: key.clone() };
+        match resolve_handle(&h, &r, |k| resolve(&store, &dg, &snap, k)) {
+            Resolved::Summary(s) => assert_eq!(s.digest(), b"digest"),
+            _ => panic!("expected a valid summary"),
+        }
+        // changed source → Unavailable (never bytes)
+        let mut changed = WorktreeSnapshot::new();
+        changed.insert("x.rs".to_string(), "different".to_string());
+        assert!(matches!(
+            resolve_handle(&h, &r, |k| resolve(&store, &dg, &changed, k)),
+            Resolved::Unavailable(_)
+        ));
     }
 
     #[test]

@@ -14,6 +14,7 @@ workspace = true
 rift-core = { version = "0.0.1", path = "../rift-core" }
 rift-config = { version = "0.0.1", path = "../rift-config" }
 rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

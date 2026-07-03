@@ -25,14 +25,18 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use rift_canopy::{App, AsciiBackend, ProjStatus, Project, Rect, RenderBackend, SplashState};
+use rift_canopy::{App, AsciiBackend, PersistOp, Project, Rect, SplashState};
 use rift_registry::{default_registry_path, ProjectRegistry};
 
 use cli::{exit, Cli, Command, ConfigureArgs, InitArgs, Outcome};
 
 mod agents;
+#[cfg(feature = "tui")]
+mod canopy_bus;
+mod canopy_store;
 mod cli;
 mod hooks;
+mod identity;
 mod query;
 mod verify;
 
@@ -40,12 +44,26 @@ mod verify;
 const DEFAULT_CONFIG: &str = "# Rift project configuration (.rift/config.toml).\n\
                               # Secure defaults apply when keys are absent.\n";
 
+/// Diagnostic logging (05 §5.7): structured `tracing` to stderr, opt-in via
+/// `RIFT_LOG` (off by default — hooks run inside the developer's git output).
+/// stdout stays the CLI's data contract; secrets cannot reach these events
+/// because the secret types have no `Debug`/`Display` (compile-enforced).
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_env("RIFT_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 fn main() -> ExitCode {
+    init_tracing();
     let cli = Cli::parse();
 
     // Bare `rift`: launch Canopy (TTY) or print a status-style frame (non-TTY).
     let Some(cmd) = cli.cmd.as_ref() else {
-        return match launch_canopy() {
+        return match launch_canopy(&cli) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("rift: {e}");
@@ -147,15 +165,10 @@ fn is_initialized() -> bool {
     std::env::current_dir().is_ok_and(|c| c.join(".rift").is_dir())
 }
 
-/// Open (creating if needed) the per-repo projection store with the canonical schema.
+/// Open (creating + migrating if needed) the per-repo projection store through
+/// the checksum-locked migration engine.
 fn open_projection() -> rift_core::Result<rift_store::SqliteStore> {
-    let db = hooks::projection_db()?;
-    if let Some(parent) = db.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let store = rift_store::SqliteStore::open(&db)?;
-    store.create_canonical_schema()?;
-    Ok(store)
+    rift_store::open_capture_projection(hooks::projection_db()?)
 }
 
 /// A short-lived current-thread async runtime for the store seam.
@@ -206,6 +219,19 @@ fn cmd_init(args: &InitArgs) -> rift_core::Result<Outcome> {
 
     // Best-effort projection init.
     let _ = open_projection();
+
+    // Also register into the append-only canopy UI-state store — the dashboard's
+    // source of truth (the TOML registry above is kept only for legacy import).
+    // Best-effort: `init` must never fail on a UI-store hiccup.
+    let cache_root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
+    if let Ok(cstore) = canopy_store::CanopyStore::open(&cache_root) {
+        let _ = cstore.apply(
+            &PersistOp::AddProject {
+                path: canon.to_string_lossy().into_owned(),
+            },
+            hooks::now_ms(),
+        );
+    }
 
     let mut human = if added {
         format!("registered {name} at {}\n", canon.display())
@@ -294,18 +320,6 @@ fn verify_outcome() -> Outcome {
 
 // --- Canopy + registry helpers ----------------------------------------------
 
-/// Project the registry onto Canopy's view model (all projects start `Idle`).
-fn registry_to_projects(reg: &ProjectRegistry) -> Vec<Project> {
-    reg.projects()
-        .iter()
-        .map(|p| Project {
-            name: p.name.clone(),
-            path: p.path.display().to_string(),
-            status: ProjStatus::Idle,
-        })
-        .collect()
-}
-
 /// Render one ASCII dashboard frame to stdout (the headless / fallback path).
 fn print_ascii_frame(projects: Vec<Project>) {
     let mut app = App::new(projects);
@@ -330,29 +344,17 @@ fn project_name(path: &std::path::Path) -> String {
     )
 }
 
-/// Register the directory at `path` into the global registry, returning the
-/// refreshed project list. Used by the dashboard's `a` key.
-#[cfg(feature = "tui")]
-fn register_project(path: &str) -> rift_core::Result<Vec<Project>> {
-    let canon = std::fs::canonicalize(path)?;
-    if !canon.is_dir() {
-        return Err(rift_core::RiftError::validity(format!(
-            "{} is not a directory",
-            canon.display()
-        )));
-    }
-    let reg_path = default_registry_path();
-    let mut reg = ProjectRegistry::load(&reg_path)?;
-    reg.add(project_name(&canon), canon);
-    reg.save(&reg_path)?;
-    Ok(registry_to_projects(&reg))
-}
-
 /// Launch the dashboard: interactive xre TUI when possible, else one ASCII frame.
-fn launch_canopy() -> rift_core::Result<()> {
-    let reg_path = default_registry_path();
-    let reg = ProjectRegistry::load(&reg_path)?;
-    let projects = registry_to_projects(&reg);
+///
+/// The dashboard's registry is the append-only canopy UI-state store; the legacy
+/// TOML registry is imported once (idempotent) so existing users keep their list.
+fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
+    let cache_root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
+    let cstore = canopy_store::CanopyStore::open(&cache_root)?;
+    // One-time import of the legacy mutable TOML registry (a no-op afterwards).
+    let reg = ProjectRegistry::load(&default_registry_path()).unwrap_or_default();
+    cstore.migrate_from_toml(&reg, hooks::now_ms())?;
+    let projects = cstore.projects()?;
 
     #[cfg(feature = "tui")]
     {
@@ -360,7 +362,29 @@ fn launch_canopy() -> rift_core::Result<()> {
         let interactive =
             std::io::stdout().is_terminal() && std::env::var_os("RIFT_HEADLESS").is_none();
         if interactive {
-            match rift_canopy::xre::run_tui(projects.clone(), register_project) {
+            let opts = rift_canopy::CanopyOpts {
+                ascii: cli.ascii,
+                skip_splash: cli.skip_splash
+                    || std::env::var("RIFT_SPLASH").is_ok_and(|v| v == "never"),
+            };
+            // Spawn the live data bus (P8), seeded to populate every registered
+            // project's status; it feeds updates in and takes requests back out.
+            let paths: Vec<String> = projects.iter().map(|p| p.path.clone()).collect();
+            let bus = canopy_bus::spawn(paths);
+            // Every registry mutation (add/remove/relabel/reorder/toggle) is an
+            // append-only write to the canopy store, returning the refreshed list.
+            let on_persist = |op: &PersistOp| cstore.apply(op, hooks::now_ms());
+            // Feature installs are Stage 5; until then the null manager accepts
+            // toggle actions without installing anything.
+            let mut manager = rift_canopy::NullFeatureManager;
+            match rift_canopy::app::live::run(
+                &opts,
+                projects.clone(),
+                on_persist,
+                bus.evt_rx,
+                bus.req_tx,
+                &mut manager,
+            ) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     eprintln!("rift: could not start the interactive dashboard: {e}");
@@ -369,6 +393,7 @@ fn launch_canopy() -> rift_core::Result<()> {
         }
     }
 
+    let _ = cli; // only consulted on the interactive path
     print_ascii_frame(projects);
     Ok(())
 }
@@ -409,12 +434,7 @@ fn provision_if_requested(no_provision: bool) -> rift_core::Result<()> {
             return Ok(());
         }
     };
-    let db = hooks::projection_db()?;
-    if let Some(parent) = db.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let store = rift_store::SqliteStore::open(&db)?;
-    store.create_canonical_schema()?;
+    let store = rift_store::open_capture_projection(hooks::projection_db()?)?;
     let rt = runtime()?;
     let fetcher = rift_shadow::entire::HttpFetcher::new();
     if backend_status() != "ready" {

@@ -4,14 +4,14 @@
 //! Covers: shard enumeration, artifact reads, the read-only invariant, the
 //! traversal guard, and the headline metric (`tokens_avoided > 0`).
 #![cfg(feature = "gix")]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-use rift_recall_ledger::RecallMetrics;
-use rift_recall_substrate::{ingest, worktree, Dialect, GixSubstrate, ShardWalker};
+use rift_recall_ledger::{ingest, RecallMetrics};
+use rift_recall_substrate::{worktree, Dialect, GixSubstrate, ShardWalker};
 
 /// Run `git` in `dir` with a fixed identity / no signing (deterministic).
 fn git(dir: &Path, args: &[&str]) {
@@ -213,4 +213,85 @@ fn count_objects(dir: &Path) -> String {
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Run `git` and return trimmed stdout (for `rev-parse`).
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "rift-test")
+        .env("GIT_AUTHOR_EMAIL", "test@rift.local")
+        .env("GIT_COMMITTER_NAME", "rift-test")
+        .env("GIT_COMMITTER_EMAIL", "test@rift.local")
+        .output()
+        .expect("spawn git");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The git-graph surface (P4 S2): `integration_tips`, `branch_tips`,
+/// `commit_meta`, and reachability against a **real** merged/unmerged history.
+#[test]
+fn gix_graph_surface_reflects_real_history() {
+    use rift_recall_substrate::{is_reachable, SubstrateReader, MAX_REACHABILITY_WALK};
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+
+    // main: c0 → c1
+    git(p, &["init", "-q", "-b", "main"]);
+    write(&p.join("a.txt"), "0\n");
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "c0"]);
+    let c0 = git_out(p, &["rev-parse", "HEAD"]);
+    write(&p.join("a.txt"), "1\n");
+    git(p, &["commit", "-qam", "c1"]);
+
+    // feature off c0, merged back into main with a merge commit
+    git(p, &["checkout", "-q", "-b", "feature", &c0]);
+    write(&p.join("b.txt"), "feat\n");
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "feature work"]);
+    let feat = git_out(p, &["rev-parse", "HEAD"]);
+    git(p, &["checkout", "-q", "main"]);
+    git(
+        p,
+        &["merge", "-q", "--no-ff", "-m", "merge feature", "feature"],
+    );
+    let main_tip = git_out(p, &["rev-parse", "HEAD"]);
+
+    // an orphan branch that is never merged
+    git(p, &["checkout", "-q", "-b", "orphan", &c0]);
+    write(&p.join("c.txt"), "orphan\n");
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "orphan work"]);
+    let orphan = git_out(p, &["rev-parse", "HEAD"]);
+    git(p, &["checkout", "-q", "main"]);
+
+    let sub = GixSubstrate::open(p).unwrap();
+
+    // integration tip is main's HEAD (a merge commit with two parents)
+    assert_eq!(sub.integration_tips().unwrap(), vec![main_tip.clone()]);
+    let merge_meta = sub.commit_meta(&main_tip).unwrap().expect("merge commit");
+    assert_eq!(merge_meta.parents.len(), 2, "no-ff merge has two parents");
+    assert_eq!(merge_meta.summary, "merge feature");
+    assert!(merge_meta.committed_ms > 0);
+
+    // branch tips include working branches, never a rift/entire namespace
+    let branches: BTreeSet<String> = sub
+        .branch_tips()
+        .unwrap()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert!(
+        branches.contains("main") && branches.contains("feature") && branches.contains("orphan")
+    );
+    assert!(!branches
+        .iter()
+        .any(|b| b.starts_with("rift/") || b.starts_with("entire/")));
+
+    // reachability: the merged feature commit is reachable from main; the orphan is not
+    assert!(is_reachable(&sub, &feat, &main_tip, MAX_REACHABILITY_WALK).unwrap());
+    assert!(!is_reachable(&sub, &orphan, &main_tip, MAX_REACHABILITY_WALK).unwrap());
 }

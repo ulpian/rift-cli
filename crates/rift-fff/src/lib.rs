@@ -6,7 +6,7 @@
 //! recency score), so the search logic is testable and there is a usable
 //! fallback when the warm index is absent.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 #![allow(
     clippy::module_name_repetitions,
     clippy::doc_markdown,
@@ -53,7 +53,7 @@ pub fn subsequence_score(query: &str, path: &str) -> Option<f64> {
     let mut first = None;
     let mut last = 0;
     for (i, c) in p.iter().enumerate() {
-        if qi < q.len() && *c == q[qi] {
+        if q.get(qi) == Some(c) {
             if first.is_none() {
                 first = Some(i);
             }

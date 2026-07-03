@@ -109,6 +109,47 @@ pub fn read_cache(git_dir: &Path, session_id: &str) -> Result<Option<SessionCach
     }
 }
 
+/// Read every session cache under `git_dir` whose phase is **live** (active,
+/// compacting, or ending) — the sessions a post-commit archive should condense.
+/// A missing/empty sessions dir yields an empty list; an unreadable individual
+/// file is skipped (never fatal — capture must not abort a git op).
+///
+/// # Errors
+/// [`RiftError::Io`] only if the sessions directory exists but cannot be listed.
+pub fn live_sessions(git_dir: &Path) -> Result<Vec<SessionCache>> {
+    const LIVE: &[&str] = &["active", "compacting", "ending"];
+    let dir = sessions_dir(git_dir);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(stem) = name
+            .to_string_lossy()
+            .strip_suffix(".json")
+            .map(str::to_owned)
+        else {
+            continue; // skip temp files / non-cache entries
+        };
+        if let Ok(Some(cache)) = read_cache(git_dir, &stem) {
+            if LIVE.contains(&cache.state.as_str()) {
+                out.push(cache);
+            }
+        }
+    }
+    // Deterministic order (most-recently-updated first), so a single archive
+    // target is stable across runs.
+    out.sort_by(|a, b| {
+        b.updated_at_ms
+            .cmp(&a.updated_at_ms)
+            .then(a.session_id.cmp(&b.session_id))
+    });
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +189,29 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "temp file must be renamed away");
+    }
+
+    #[test]
+    fn live_sessions_filters_by_phase_and_orders_recent_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gd = tmp.path();
+        assert!(live_sessions(gd).unwrap().is_empty(), "no dir → empty");
+        write_cache(gd, &SessionCache::new("s-idle", "claude-code", "idle", 1)).unwrap();
+        write_cache(gd, &SessionCache::new("s-ended", "claude-code", "ended", 2)).unwrap();
+        write_cache(
+            gd,
+            &SessionCache::new("s-active", "claude-code", "active", 5),
+        )
+        .unwrap();
+        write_cache(
+            gd,
+            &SessionCache::new("s-ending", "claude-code", "ending", 9),
+        )
+        .unwrap();
+        let live = live_sessions(gd).unwrap();
+        let ids: Vec<&str> = live.iter().map(|c| c.session_id.as_str()).collect();
+        // only active+ending, most-recent first
+        assert_eq!(ids, vec!["s-ending", "s-active"]);
     }
 
     #[test]

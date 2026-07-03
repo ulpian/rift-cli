@@ -6,19 +6,21 @@
 //! the re-derived one. A divergent source (the tamper case) surfaces as
 //! [`RiftError::Integrity`] and a non-zero exit.
 //!
-//! Scope: this is the *skeleton* the M0 gate calls for. The full authoritative
-//! re-derivation from canonical git (`verify_against_git` over
-//! `rift/checkpoints/v1`) lands in Stage 2; here the fixture is the authoritative
-//! source so the wiring — projection create/migrate, record, cross-check, report
-//! — is exercised end-to-end.
+//! The authoritative source is **git** ([`GitCheckpointSource`]): `rift verify`
+//! re-derives the checkpoint chain by walking `rift/checkpoints/v1` through the
+//! read-only gix [`SubstrateReader`] and cross-checks it against the projection. On
+//! a fresh repo with no checkpoint branch yet, it falls back to the committed
+//! fixture skeleton so the wiring (projection create/migrate, record, cross-check,
+//! report) still runs end-to-end (the M0 path).
 
 use std::path::Path;
 
-use rift_core::{RepoId, Result};
+use rift_core::{RepoId, Result, Sha256Id};
 use rift_hashchain::{leaf_hash, merkle_root, ChainLink};
+use rift_recall_substrate::{GixSubstrate, SubstrateReader};
 use rift_store::{
     paths::projection_db_under, record_checkpoint, verify_against_source, CanonicalStore,
-    ChainSource, CheckpointRecord, SqliteStore, VerifyReport,
+    ChainSource, CheckpointRecord, VerifyReport,
 };
 
 /// The committed single-checkpoint fixture (genesis event leaves, one per line).
@@ -60,17 +62,83 @@ impl ChainSource for FixtureSource {
     }
 }
 
+/// The per-shard artifact holding a checkpoint's Merkle root (lowercase hex). When
+/// absent the checkpoint id is treated as its own root (a content-addressed
+/// checkpoint). The exact upstream artifact name is `(verify)` at release-cut.
+const MERKLE_ROOT_ARTIFACT: &str = "merkle_root.txt";
+
+/// The **git-authoritative** chain source (P5 S4): re-derives the checkpoint chain
+/// by walking `rift/checkpoints/v1` through the read-only gix [`SubstrateReader`]
+/// — the production replacement for the committed fixture. Each shard yields a
+/// [`ChainLink`] whose `prev` comes from the substrate's deterministic walk order,
+/// so a re-walk of the same branch is byte-stable.
+struct GitCheckpointSource {
+    links: Vec<ChainLink>,
+}
+
+impl GitCheckpointSource {
+    /// Build the chain by walking `reader`'s checkpoint shards and reading each
+    /// shard's Merkle-root artifact (falling back to the checkpoint id as its own
+    /// root). Deterministic: the substrate walks shards in sorted id order.
+    ///
+    /// # Errors
+    /// [`RiftError::Validity`] if a shard's checkpoint id is not a 64-char SHA-256
+    /// hex; substrate read errors propagate.
+    fn from_reader(reader: &impl SubstrateReader) -> Result<Self> {
+        let mut links = Vec::new();
+        for shard in reader.checkpoints()? {
+            let checkpoint_id = Sha256Id::parse_hex(&shard.checkpoint_id)?;
+            let merkle_root = reader
+                .read_artifact(&shard.checkpoint_id, MERKLE_ROOT_ARTIFACT)?
+                .and_then(|bytes| parse_root_hex(&bytes))
+                .unwrap_or(checkpoint_id);
+            let prev = match &shard.prev {
+                Some(p) => Some(Sha256Id::parse_hex(p)?),
+                None => None,
+            };
+            links.push(ChainLink {
+                checkpoint_id,
+                merkle_root,
+                prev,
+            });
+        }
+        Ok(Self { links })
+    }
+}
+
+impl ChainSource for GitCheckpointSource {
+    fn links(&self) -> Result<Vec<ChainLink>> {
+        Ok(self.links.clone())
+    }
+}
+
+/// Parse a trimmed 64-char SHA-256 hex artifact into a [`Sha256Id`]; `None` if the
+/// bytes are not exactly one valid hex digest (tolerates a trailing newline).
+fn parse_root_hex(bytes: &[u8]) -> Option<Sha256Id> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    Sha256Id::parse_hex(text.trim()).ok()
+}
+
+/// The git-authoritative source for `repo_root`, or `None` when there is no
+/// checkpoint branch yet (a fresh repo / pre-capture), so the caller falls back to
+/// the M0 fixture skeleton. Opening a non-repository path is also `None`.
+fn git_source(repo_root: &Path) -> Result<Option<GitCheckpointSource>> {
+    let Ok(reader) = GixSubstrate::open(repo_root) else {
+        return Ok(None); // not a readable git repo → fixture skeleton
+    };
+    if reader.checkpoints()?.is_empty() {
+        return Ok(None); // no checkpoint branch yet
+    }
+    Ok(Some(GitCheckpointSource::from_reader(&reader)?))
+}
+
 /// Open (creating + migrating if absent) the projection at `db_path`, ensure the
 /// chain from `source` is recorded, then verify the stored chain against it.
 ///
 /// A persisted projection is verified as-is on re-runs (records only when empty),
 /// so a second call with a divergent `source` detects the divergence.
 async fn verify_projection(db_path: &Path, source: &impl ChainSource) -> Result<VerifyReport> {
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let store = SqliteStore::open(db_path)?;
-    store.create_canonical_schema()?;
+    let store = rift_store::open_capture_projection(db_path)?;
     if store.count("checkpoint").await? == 0 {
         for link in source.links()? {
             record_checkpoint(
@@ -130,9 +198,18 @@ async fn run_async() -> Result<()> {
     let repo = repo_id_for(&cwd)?;
     let root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
     let db = projection_db_under(&root, &repo);
-    let report = verify_under(&root, &repo, &FixtureSource::parse(FIXTURE)).await?;
+
+    // Prefer the git-authoritative source (re-derive from `rift/checkpoints/v1`);
+    // fall back to the committed fixture skeleton on a fresh repo with no branch.
+    let (report, source_label) = match git_source(&cwd)? {
+        Some(source) => (verify_under(&root, &repo, &source).await?, "git"),
+        None => (
+            verify_under(&root, &repo, &FixtureSource::parse(FIXTURE)).await?,
+            "fixture (no checkpoint branch yet)",
+        ),
+    };
     println!(
-        "rift verify: OK — re-derived {} checkpoint(s) from the fixture match the projection",
+        "rift verify: OK — re-derived {} checkpoint(s) from {source_label} match the projection",
         report.checkpoints
     );
     println!("  repo_id:    {repo}");
@@ -193,5 +270,76 @@ mod tests {
         let link = src.genesis_link();
         assert_eq!(link.checkpoint_id, link.merkle_root);
         assert!(link.prev.is_none());
+    }
+
+    use rift_recall_substrate::{CheckpointShard, Dialect, MemorySubstrate};
+
+    fn hex64(c: char) -> String {
+        String::from(c).repeat(64)
+    }
+
+    fn shard(id: &str, prev: Option<&str>, ordinal: u64) -> CheckpointShard {
+        CheckpointShard {
+            checkpoint_id: id.to_owned(),
+            dialect: Dialect::Rift,
+            prev: prev.map(str::to_owned),
+            ordinal,
+        }
+    }
+
+    #[test]
+    fn git_source_rederives_links_with_artifact_and_fallback_roots() {
+        let id_a = hex64('a');
+        let id_b = hex64('b');
+        let root_a = hex64('c'); // a has an explicit merkle-root artifact
+        let sub = MemorySubstrate::local()
+            .with_shard(shard(&id_a, None, 1))
+            .with_shard(shard(&id_b, Some(&id_a), 2))
+            .with_artifact(
+                &id_a,
+                MERKLE_ROOT_ARTIFACT,
+                format!("{root_a}\n").as_bytes(),
+            );
+
+        let source = GitCheckpointSource::from_reader(&sub).unwrap();
+        let links = source.links().unwrap();
+        assert_eq!(links.len(), 2);
+        // a: root from the artifact; prev None (genesis)
+        assert_eq!(links[0].checkpoint_id, Sha256Id::parse_hex(&id_a).unwrap());
+        assert_eq!(links[0].merkle_root, Sha256Id::parse_hex(&root_a).unwrap());
+        assert!(links[0].prev.is_none());
+        // b: no artifact → self-root; prev links to a (continuity)
+        assert_eq!(links[1].merkle_root, Sha256Id::parse_hex(&id_b).unwrap());
+        assert_eq!(links[1].prev, Some(Sha256Id::parse_hex(&id_a).unwrap()));
+        // the re-derived chain is internally continuous
+        rift_hashchain::verify_chain(&links).unwrap();
+    }
+
+    #[tokio::test]
+    async fn projection_verifies_against_git_source_and_detects_tamper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = MemorySubstrate::local()
+            .with_shard(shard(&hex64('a'), None, 1))
+            .with_shard(shard(&hex64('b'), Some(&hex64('a')), 2));
+        let source = GitCheckpointSource::from_reader(&sub).unwrap();
+        // Populate the projection from the git source, then verify it matches.
+        let report = verify_under(tmp.path(), &repo(), &source).await.unwrap();
+        assert!(report.ok);
+        assert_eq!(report.checkpoints, 2);
+
+        // A divergent source (a different second checkpoint) no longer matches the
+        // projection built from the original → tamper detected.
+        let tampered_sub = MemorySubstrate::local()
+            .with_shard(shard(&hex64('a'), None, 1))
+            .with_shard(shard(&hex64('d'), Some(&hex64('a')), 2));
+        let tampered = GitCheckpointSource::from_reader(&tampered_sub).unwrap();
+        let err = verify_under(tmp.path(), &repo(), &tampered).await;
+        assert!(matches!(err, Err(RiftError::Integrity(_))), "got {err:?}");
+    }
+
+    #[test]
+    fn malformed_checkpoint_id_is_validity_error() {
+        let sub = MemorySubstrate::local().with_shard(shard("not-hex", None, 1));
+        assert!(GitCheckpointSource::from_reader(&sub).is_err());
     }
 }

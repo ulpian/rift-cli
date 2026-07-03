@@ -1,0 +1,39 @@
+---
+source: crates/rift-config/src/lib.rs
+expression: "format!(\"{cfg:#?}\")"
+---
+EffectiveConfig {
+    schema_version: 1,
+    project_name: "demo",
+    repo_id: Some(
+        RepoId(
+            "repo-demo",
+        ),
+    ),
+    allow_models: [],
+    deny_models: [
+        "gpt-3*",
+    ],
+    sensitive_paths: [
+        "**/*.key",
+        "**/*.pem",
+        "**/*credentials*",
+        "**/*secret*",
+        "**/.env*",
+        "**/id_dsa",
+        "**/id_ecdsa",
+        "**/id_ed25519",
+        "**/id_rsa",
+        "secrets/**",
+    ],
+    raw_transcripts: false,
+    capture_tool_calls: true,
+    capture_token_usage: true,
+    entropy_threshold: 4.5,
+    extra_patterns: [],
+    default_retention_class: "standard",
+    retention_classes: [
+        "standard",
+    ],
+    policy_hash: Blake3Id(d075324f355fcac81ba52f0b3a59b7652981591eaa73afca0c86caa2bd8dd6c6),
+}

@@ -7,8 +7,7 @@
 //! via `rift hooks memd <verb>` with JSON on stdin (the plugin-protocol
 //! convention), which redacts, chains, and stores it like any other event.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use sha2::{Digest, Sha256};
 
@@ -55,6 +54,16 @@ pub enum MemdEvent {
         /// The invalidated handle.
         handle: String,
     },
+    /// A serve was refused (denied path/model, missing reason, untrusted-raw,
+    /// or transcript-disabled). The `reason` is a neutral, non-leaking tag — it
+    /// names *why*, never the withheld content. Audited so every serve decision
+    /// (granted or refused) has exactly one terminal event (W10).
+    Refused {
+        /// The target handle/path the agent asked for.
+        target: String,
+        /// The neutral refusal reason tag (e.g. `policy_denied_exact`).
+        reason: String,
+    },
 }
 
 impl MemdEvent {
@@ -67,6 +76,7 @@ impl MemdEvent {
             Self::ExactRetrieved { .. } => "exact_retrieved",
             Self::PackBuilt { .. } => "pack_built",
             Self::Invalidated { .. } => "invalidated",
+            Self::Refused { .. } => "refused",
         }
     }
 
@@ -86,7 +96,7 @@ impl MemdEvent {
                 estimated_tokens_avoided,
                 ..
             } => *estimated_tokens_avoided,
-            Self::ExactRetrieved { .. } | Self::Invalidated { .. } => 0,
+            Self::ExactRetrieved { .. } | Self::Invalidated { .. } | Self::Refused { .. } => 0,
         }
     }
 
@@ -169,5 +179,19 @@ mod tests {
             handle: "summary:k".into(),
         };
         assert_eq!(a.to_hook_json(), b.to_hook_json());
+    }
+
+    #[test]
+    fn refused_event_is_namespaced_and_leaks_no_content() {
+        let e = MemdEvent::Refused {
+            target: "file:secrets/.env@sha256:ab".into(),
+            reason: "policy_denied_exact".into(),
+        };
+        assert_eq!(e.verb(), "refused");
+        assert_eq!(e.tokens_avoided(), 0);
+        let v: serde_json::Value = serde_json::from_str(&e.to_hook_json()).unwrap();
+        assert_eq!(v["verb"], "memd.refused");
+        // the reason names *why*, never the withheld bytes
+        assert_eq!(v["payload"]["reason"], "policy_denied_exact");
     }
 }

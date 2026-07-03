@@ -2,7 +2,7 @@
 //! global registry, and a bare `rift` then lists that project instead of the
 //! empty-registry wizard. Runs the real binary with `RIFT_CONFIG_DIR` pointed at
 //! a tempdir (hermetic) and `RIFT_HEADLESS=1` (no interactive TUI).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::path::Path;
 use std::process::{Command, Output};

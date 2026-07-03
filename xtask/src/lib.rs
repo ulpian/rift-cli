@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use toml::Value;
 
+pub mod ci_meta;
 pub mod coverage;
 
 /// A fallible meta-check: `Ok(violations)` (empty ⇒ healthy) or a hard `Err`
@@ -103,6 +104,28 @@ fn dependency_graph(root: &Path) -> Result<BTreeMap<String, Vec<String>>, String
         graph.insert(name.clone(), workspace_dep_edges(manifest, &names));
     }
     Ok(graph)
+}
+
+/// Render the in-workspace crate dependency graph as a deterministic,
+/// human-reviewable adjacency list (step-01: an intentional topology change is
+/// a reviewable snapshot diff; an accidental one fails CI).
+///
+/// # Errors
+/// If a manifest cannot be read or parsed.
+pub fn render_crate_graph(root: &Path) -> Result<String, String> {
+    let graph = dependency_graph(root)?;
+    let mut out = String::new();
+    for (name, deps) in &graph {
+        out.push_str(name);
+        if deps.is_empty() {
+            out.push_str(" -> (none)");
+        } else {
+            out.push_str(" -> ");
+            out.push_str(&deps.join(", "));
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// Depth-first cycle detection over the in-workspace dependency graph.
@@ -248,7 +271,7 @@ pub fn check_member_inheritance(root: &Path) -> Check {
         if !lints_ws {
             violations.push(format!("{m}: missing `[lints] workspace = true`"));
         }
-        for field in ["edition", "rust-version"] {
+        for field in ["version", "edition", "rust-version", "license", "repository"] {
             let inherits = manifest
                 .get("package")
                 .and_then(|p| p.get(field))
@@ -419,5 +442,14 @@ rift-store = { path = \"../rift-store\" }
             .collect();
         let edges = workspace_dep_edges(&manifest, &names);
         assert_eq!(edges, vec!["rift-core".to_string()]); // dev-dep excluded, serde external
+    }
+
+    /// The committed crate-graph snapshot (step-01 exit criterion): the full
+    /// in-workspace adjacency list. New crates/edges are reviewable diffs here;
+    /// an unintended edge (e.g. a crate reaching around a seam) fails CI.
+    #[test]
+    fn crate_graph_snapshot() {
+        let rendered = render_crate_graph(&workspace_root()).expect("render graph");
+        insta::assert_snapshot!("crate_graph_adjacency", rendered);
     }
 }

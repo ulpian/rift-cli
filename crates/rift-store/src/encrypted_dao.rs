@@ -102,56 +102,41 @@ fn plaintext_bytes(v: &Value) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::crypto::MemoryKeyStore;
-    use crate::SqliteStore;
+    use crate::{apply_migrations, recall_migrations, SqliteStore};
     use rift_crypto::DataKey;
 
-    const KM_COLS: [&str; 9] = [
-        "key_id",
-        "repo_id",
-        "wrapped_dek",
-        "kek_ref",
-        "cipher",
-        "generation",
-        "recorded_at",
-        "supersedes_id",
-        "schema_version",
-    ];
+    const DIGEST_COLS: [&str; 3] = ["digest_ref", "bytes", "created_at"];
 
-    fn km_row(key_id: &str, wrapped: Vec<u8>) -> [Value; 9] {
-        [
-            Value::text(key_id),
-            Value::text("repo-1"),
-            Value::Blob(wrapped),
-            Value::text("kek/repo-1"),
-            Value::text("chacha20poly1305"),
-            Value::Int(1),
-            Value::Int(1),
-            Value::Null,
-            Value::Int(1),
-        ]
+    fn digest_row(digest_ref: &str, bytes: Vec<u8>) -> [Value; 3] {
+        [Value::text(digest_ref), Value::Blob(bytes), Value::Int(1)]
+    }
+
+    fn recall_store() -> SqliteStore {
+        let s = SqliteStore::open_in_memory().unwrap();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        s
     }
 
     #[tokio::test]
     async fn sensitive_column_is_ciphertext_and_decrypts() {
-        let store = SqliteStore::open_in_memory().unwrap();
-        store.create_canonical_schema().unwrap();
+        let store = recall_store();
         let keys = MemoryKeyStore::new(DataKey::from_bytes([5u8; 32]));
         let enc = EncryptingStore::new(&store, &keys, RepoId::new("repo-1").unwrap());
 
-        let sentinel = b"PLAINTEXT-KEY-SENTINEL".to_vec();
+        let sentinel = b"PLAINTEXT-DIGEST-SENTINEL".to_vec();
         enc.insert_encrypted(
-            "key_metadata",
-            "kid-1",
-            &KM_COLS,
-            &km_row("kid-1", sentinel.clone()),
+            "digest_blob",
+            "ref-1",
+            &DIGEST_COLS,
+            &digest_row("ref-1", sentinel.clone()),
         )
         .await
         .unwrap();
 
         let rows = store
             .query(
-                "SELECT wrapped_dek FROM key_metadata WHERE key_id = ?",
-                &[Value::text("kid-1")],
+                "SELECT bytes FROM digest_blob WHERE digest_ref = ?",
+                &[Value::text("ref-1")],
             )
             .await
             .unwrap();
@@ -165,49 +150,47 @@ mod tests {
         );
 
         let pt = enc
-            .decrypt_value("key_metadata", "wrapped_dek", "kid-1", &stored)
+            .decrypt_value("digest_blob", "bytes", "ref-1", &stored)
             .unwrap();
         assert_eq!(pt.as_slice(), sentinel.as_slice());
     }
 
     #[tokio::test]
     async fn relocated_ciphertext_fails_to_decrypt() {
-        let store = SqliteStore::open_in_memory().unwrap();
-        store.create_canonical_schema().unwrap();
+        let store = recall_store();
         let keys = MemoryKeyStore::new(DataKey::from_bytes([6u8; 32]));
         let enc = EncryptingStore::new(&store, &keys, RepoId::new("repo-1").unwrap());
 
         enc.insert_encrypted(
-            "key_metadata",
-            "kid-1",
-            &KM_COLS,
-            &km_row("kid-1", b"secret".to_vec()),
+            "digest_blob",
+            "ref-1",
+            &DIGEST_COLS,
+            &digest_row("ref-1", b"secret".to_vec()),
         )
         .await
         .unwrap();
         let rows = store
-            .query("SELECT wrapped_dek FROM key_metadata", &[])
+            .query("SELECT bytes FROM digest_blob", &[])
             .await
             .unwrap();
         let stored = rows[0].get_blob(0).unwrap();
         // Decrypting under a different row_id (AAD mismatch) must fail.
         assert!(matches!(
-            enc.decrypt_value("key_metadata", "wrapped_dek", "kid-OTHER", &stored),
+            enc.decrypt_value("digest_blob", "bytes", "ref-OTHER", &stored),
             Err(RiftError::Crypto(_))
         ));
     }
 
     #[tokio::test]
     async fn non_encryptable_sensitive_value_is_rejected() {
-        let store = SqliteStore::open_in_memory().unwrap();
-        store.create_canonical_schema().unwrap();
+        let store = recall_store();
         let keys = MemoryKeyStore::new(DataKey::from_bytes([7u8; 32]));
         let enc = EncryptingStore::new(&store, &keys, RepoId::new("repo-1").unwrap());
-        // wrapped_dek (sensitive) given as an Int → not an encryptable payload.
-        let mut row = km_row("kid-1", vec![]);
-        row[2] = Value::Int(99);
+        // bytes (sensitive) given as an Int → not an encryptable payload.
+        let mut row = digest_row("ref-1", vec![]);
+        row[1] = Value::Int(99);
         let err = enc
-            .insert_encrypted("key_metadata", "kid-1", &KM_COLS, &row)
+            .insert_encrypted("digest_blob", "ref-1", &DIGEST_COLS, &row)
             .await;
         assert!(matches!(err, Err(RiftError::Crypto(_))), "got {err:?}");
     }

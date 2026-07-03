@@ -12,8 +12,7 @@
 //! into a Merkle root for a checkpoint — and the `verify` façade that cross-checks
 //! the rebuildable projection against the canonical chain.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 pub use rift_shadow_attribution as attribution;
 pub use rift_shadow_cost as cost;
@@ -23,6 +22,7 @@ pub use rift_shadow_redact as redact;
 
 pub mod backend;
 pub mod bridge;
+pub mod commit_capture;
 pub mod condense;
 pub mod executor;
 pub mod parity;
@@ -33,6 +33,7 @@ pub use backend::{
     RoutedBackend, ShadowBackend,
 };
 pub use bridge::{ingest_hook, trigger_for};
+pub use commit_capture::{archive_and_capture, persist_commit_capture};
 pub use condense::{condense, CheckpointId};
 pub use executor::{run_decision, RepoSerializer};
 pub use parity::{parity_report, run_parity, Fidelity, ParityCase, ParityResult};

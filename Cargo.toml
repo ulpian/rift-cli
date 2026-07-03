@@ -172,10 +172,11 @@ expect_used = "warn"
 panic = "warn"
 todo = "warn"
 dbg_macro = "warn"
-# indexing/slicing in this codebase is bounds-checked by construction (fixed-size
-# arrays, length-checked ranges, `chunks_exact`); the "never crash a developer's
-# git op" guarantee is carried by `unwrap`/`expect`/`panic` staying denied above.
-indexing_slicing = "allow"
+# No un-audited `a[i]` that can panic (05 §5.4: a panic in a hook must not
+# abort the developer's git op). Sites indexing by construction-checked bounds
+# (fixed-size arrays, length-checked ranges, `chunks_exact`) carry a narrow,
+# justified `#[allow]` instead of a global downgrade.
+indexing_slicing = "warn"
 # Purely-stylistic pedantic lints we accept project-wide (not correctness or
 # security): intentional numeric casts for display/estimates, closures after
 # statements, broad-but-deliberate signatures, exact float comparisons in tests.

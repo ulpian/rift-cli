@@ -1,7 +1,7 @@
 //! End-to-end of the `clap` command surface (P8 S1): exit-code contract, the
 //! `--json` output contract, `init` + the read-only query commands, the
 //! `enable`/`disable` round-trip, and the Entire-never-surfaced guard.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::path::Path;
 use std::process::{Command, Output};

@@ -1,13 +1,31 @@
 //! `cargo run -p xtask -- <command>` — workspace tooling entrypoint.
 //!
-//! One command today: `check-coverage <cov.json>` enforces the per-crate ≥95%
-//! line-coverage gate for the security set (`ci/security-crates.txt`) over a
-//! `cargo llvm-cov --json` report, failing closed on a missing crate. The
-//! topology/toolchain guards run separately as `cargo test -p xtask`.
+//! * `check-coverage <cov.json>` — the per-crate ≥95% line gate for the security
+//!   set (`ci/security-crates.txt`) **and** the ≥75% workspace branch floor,
+//!   over a `cargo llvm-cov --json` report (run with `--branch`); fails closed
+//!   on a missing crate or absent branch data.
+//! * `ci-meta` — the CI/lint meta-checks (required jobs, read-only workflow
+//!   permissions, lint-table baseline, no unsafe, no crate-root blanket allows,
+//!   no schema fast-path in bins).
+//!
+//! The topology/toolchain guards run separately as `cargo test -p xtask`.
 #![forbid(unsafe_code)]
 
-use xtask::coverage::{check_crate_coverage, read_security_crates, SECURITY_THRESHOLD};
+use xtask::coverage::{
+    check_branch_floor, check_crate_coverage, read_security_crates, BRANCH_FLOOR,
+    SECURITY_THRESHOLD,
+};
 use xtask::workspace_root;
+
+fn fail_with(violations: &[String], what: &str) -> Result<(), String> {
+    if violations.is_empty() {
+        return Ok(());
+    }
+    for v in violations {
+        eprintln!("{what}: {v}");
+    }
+    Err(format!("{} {what} violation(s)", violations.len()))
+}
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -18,23 +36,22 @@ fn main() -> Result<(), String> {
                 .ok_or_else(|| "usage: xtask check-coverage <cov.json>".to_string())?;
             let json = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
             let crates = read_security_crates(&workspace_root())?;
-            let violations = check_crate_coverage(&json, &crates, SECURITY_THRESHOLD)?;
-            if violations.is_empty() {
-                println!(
-                    "coverage: all {} security crates >= {SECURITY_THRESHOLD:.0}% line coverage",
-                    crates.len()
-                );
-                Ok(())
-            } else {
-                for v in &violations {
-                    eprintln!("coverage gate: {v}");
-                }
-                Err(format!(
-                    "{} security crate(s) below {SECURITY_THRESHOLD:.0}%",
-                    violations.len()
-                ))
-            }
+            let mut violations = check_crate_coverage(&json, &crates, SECURITY_THRESHOLD)?;
+            violations.extend(check_branch_floor(&json, BRANCH_FLOOR)?);
+            fail_with(&violations, "coverage gate")?;
+            println!(
+                "coverage: all {} security crates >= {SECURITY_THRESHOLD:.0}% line, \
+                 workspace branches >= {BRANCH_FLOOR:.0}%",
+                crates.len()
+            );
+            Ok(())
         }
-        _ => Err("usage: xtask check-coverage <cov.json>".to_string()),
+        Some("ci-meta") => {
+            let violations = xtask::ci_meta::run_all(&workspace_root())?;
+            fail_with(&violations, "ci-meta")?;
+            println!("ci-meta: all checks pass");
+            Ok(())
+        }
+        _ => Err("usage: xtask <check-coverage <cov.json> | ci-meta>".to_string()),
     }
 }

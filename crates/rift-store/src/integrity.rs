@@ -81,22 +81,27 @@ pub async fn record_checkpoint(store: &impl CanonicalStore, c: &CheckpointRecord
         .await
 }
 
-/// Read the stored checkpoint chain as [`ChainLink`]s.
+/// Read the stored checkpoint chain as [`ChainLink`]s, ordered by **prev-hash
+/// linkage** from the genesis link — the chain's own structure, never a
+/// timestamp sort (same-millisecond checkpoints would tie there and produce a
+/// spurious divergence against a linkage-ordered source). A malformed topology
+/// is itself tamper evidence and fails closed.
 ///
 /// # Errors
 /// [`RiftError::Storage`] on query failure, [`RiftError::Validity`] if a stored
-/// hash is malformed.
+/// hash is malformed, [`RiftError::Integrity`] naming the checkpoint if the
+/// stored links do not form one connected, unbranched chain (no/duplicate
+/// genesis, fork, orphan, or cycle).
 pub async fn read_stored_links(store: &impl CanonicalStore) -> Result<Vec<ChainLink>> {
     let rows = store
         .query(
-            "SELECT checkpoint_id, merkle_root, prev_hash FROM checkpoint \
-             ORDER BY created_at, checkpoint_id",
+            "SELECT checkpoint_id, merkle_root, prev_hash FROM checkpoint",
             &[],
         )
         .await?;
-    let mut out = Vec::new();
+    let mut links = Vec::new();
     for r in rows {
-        out.push(ChainLink {
+        links.push(ChainLink {
             checkpoint_id: Sha256Id::parse_hex(&r.get_text(0)?)?,
             merkle_root: Sha256Id::parse_hex(&r.get_text(1)?)?,
             prev: match r.get_opt_text(2)? {
@@ -104,6 +109,53 @@ pub async fn read_stored_links(store: &impl CanonicalStore) -> Result<Vec<ChainL
                 None => None,
             },
         });
+    }
+    if links.is_empty() {
+        return Ok(links);
+    }
+
+    // Index by the prev pointer, refusing forks (two links sharing a prev).
+    let mut by_prev = std::collections::HashMap::with_capacity(links.len());
+    let mut genesis = None;
+    for link in &links {
+        match link.prev {
+            None => {
+                if genesis.is_some() {
+                    return Err(RiftError::integrity(format!(
+                        "stored chain has more than one genesis checkpoint ({})",
+                        link.checkpoint_id.to_hex()
+                    )));
+                }
+                genesis = Some(link);
+            }
+            Some(p) => {
+                if by_prev.insert(p, link).is_some() {
+                    return Err(RiftError::integrity(format!(
+                        "stored chain forks at checkpoint {}",
+                        link.checkpoint_id.to_hex()
+                    )));
+                }
+            }
+        }
+    }
+    let Some(mut current) = genesis else {
+        return Err(RiftError::integrity(
+            "stored chain has no genesis checkpoint (prev_hash NULL)",
+        ));
+    };
+
+    // Walk the linkage; anything unreached is an orphan (or a cycle).
+    let mut out = Vec::with_capacity(links.len());
+    out.push(*current);
+    while let Some(next) = by_prev.get(&current.checkpoint_id) {
+        out.push(**next);
+        current = next;
+    }
+    if out.len() != links.len() {
+        return Err(RiftError::integrity(format!(
+            "stored chain has {} checkpoint(s) unreachable from genesis",
+            links.len() - out.len()
+        )));
     }
     Ok(out)
 }
@@ -130,10 +182,11 @@ pub async fn verify_against_source(
             expected.len()
         )));
     }
-    for (i, (s, e)) in stored.iter().zip(expected.iter()).enumerate() {
+    for (s, e) in stored.iter().zip(expected.iter()) {
         if s != e {
             return Err(RiftError::integrity(format!(
-                "projection diverges from canonical source at checkpoint index {i}"
+                "projection diverges from canonical source at checkpoint {}",
+                e.checkpoint_id.to_hex()
             )));
         }
     }
@@ -224,8 +277,11 @@ pub async fn cost_belief_as_of(
 ) -> Result<Option<i64>> {
     store
         .query_opt_i64(
+            // Same two-key order as `current_cost_micros`: without the
+            // `cost_fact_id` tiebreak, same-millisecond reconciliations would
+            // make "as of now" disagree with "current".
             "SELECT amount_micros FROM cost_fact WHERE call_id = ? AND recorded_at <= ? \
-             ORDER BY recorded_at DESC LIMIT 1",
+             ORDER BY recorded_at DESC, cost_fact_id DESC LIMIT 1",
             &[Value::text(call_id), Value::Int(as_of)],
         )
         .await
@@ -268,6 +324,59 @@ mod tests {
         }
     }
 
+    proptest::proptest! {
+        /// The step-04 bitemporal invariant: for ANY set of recorded facts and
+        /// ANY probe time, `cost_belief_as_of` equals the reference model (the
+        /// latest fact recorded at-or-before the probe, two-key order), and the
+        /// belief as of the latest record time equals the current belief —
+        /// beliefs only advance at record boundaries, never drift between them.
+        #[test]
+        fn bitemporal_as_of_query_is_monotone(
+            amounts in proptest::collection::vec((0i64..5, 1i64..1000), 1..8),
+            probe in 0i64..6,
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            rt.block_on(async {
+                let s = store();
+                // fact ids are content-addressed-ish: index-suffixed, so the
+                // two-key tiebreak (recorded_at, cost_fact_id) is deterministic.
+                let mut facts = Vec::new();
+                for (i, (recorded_at, amount)) in amounts.iter().enumerate() {
+                    let f = CostFact {
+                        cost_fact_id: format!("cf-{i:03}"),
+                        call_id: "call-1".into(),
+                        amount_micros: *amount,
+                        valid_from: 0,
+                        valid_to: None,
+                        recorded_at: *recorded_at,
+                        supersedes_id: None,
+                        schema_version: 1,
+                    };
+                    record_cost_fact(&s, &f).await.unwrap();
+                    facts.push(f);
+                }
+                // Reference model: max by (recorded_at, cost_fact_id) among <= probe.
+                let expect = facts
+                    .iter()
+                    .filter(|f| f.recorded_at <= probe)
+                    .max_by(|a, b| {
+                        (a.recorded_at, &a.cost_fact_id).cmp(&(b.recorded_at, &b.cost_fact_id))
+                    })
+                    .map(|f| f.amount_micros);
+                let got = cost_belief_as_of(&s, "call-1", probe).await.unwrap();
+                proptest::prop_assert_eq!(got, expect);
+
+                // As of the latest record time, belief == current belief.
+                let latest = facts.iter().map(|f| f.recorded_at).max().unwrap_or(0);
+                proptest::prop_assert_eq!(
+                    cost_belief_as_of(&s, "call-1", latest).await.unwrap(),
+                    current_cost_micros(&s, "call-1").await.unwrap()
+                );
+                Ok(())
+            })?;
+        }
+    }
+
     #[tokio::test]
     async fn records_and_reads_checkpoint_chain() {
         let s = store();
@@ -279,6 +388,73 @@ mod tests {
         assert_eq!(links.len(), 3);
         assert_eq!(links[0].prev, None);
         assert_eq!(links[1].prev, Some(Sha256Id::from_bytes([1; 32])));
+    }
+
+    /// The stored chain is ordered by its OWN linkage, so timestamp collisions
+    /// (all `created_at` equal here) cannot reorder it — and the reader
+    /// double-checks continuity structurally.
+    #[tokio::test]
+    async fn chain_read_survives_created_at_ties() {
+        let s = store();
+        // Insert deliberately out of linkage order, all at the same tick, with
+        // checkpoint ids whose hex order (3 < 9 is false: [9] > [3]) fights the
+        // linkage order.
+        let chain = [ckpt(9, None, 7), ckpt(3, Some(9), 7), ckpt(5, Some(3), 7)];
+        record_checkpoint(&s, &chain[2]).await.unwrap();
+        record_checkpoint(&s, &chain[0]).await.unwrap();
+        record_checkpoint(&s, &chain[1]).await.unwrap();
+        let links = read_stored_links(&s).await.unwrap();
+        assert_eq!(
+            links,
+            chain.iter().map(link_of).collect::<Vec<_>>(),
+            "linkage order must win over insert/timestamp/hex order"
+        );
+    }
+
+    /// A malformed stored topology is tamper evidence, not a sort problem:
+    /// forks, orphans, and missing/duplicate genesis all fail closed.
+    #[tokio::test]
+    async fn malformed_chain_topology_fails_closed() {
+        // fork: two links share prev=1
+        let s = store();
+        for c in [ckpt(1, None, 1), ckpt(2, Some(1), 2), ckpt(3, Some(1), 3)] {
+            record_checkpoint(&s, &c).await.unwrap();
+        }
+        assert!(matches!(
+            read_stored_links(&s).await,
+            Err(RiftError::Integrity(_))
+        ));
+
+        // orphan: link 4 hangs off a prev that is not stored
+        let s = store();
+        for c in [ckpt(1, None, 1), ckpt(4, Some(7), 2)] {
+            record_checkpoint(&s, &c).await.unwrap();
+        }
+        assert!(matches!(
+            read_stored_links(&s).await,
+            Err(RiftError::Integrity(_))
+        ));
+
+        // duplicate genesis
+        let s = store();
+        for c in [ckpt(1, None, 1), ckpt(2, None, 2)] {
+            record_checkpoint(&s, &c).await.unwrap();
+        }
+        assert!(matches!(
+            read_stored_links(&s).await,
+            Err(RiftError::Integrity(_))
+        ));
+
+        // no genesis (cycle-ish: 5←6, 6←5 unrepresentable with content ids, so
+        // just two links whose prevs point at each other's absent parents)
+        let s = store();
+        for c in [ckpt(5, Some(6), 1), ckpt(6, Some(7), 2)] {
+            record_checkpoint(&s, &c).await.unwrap();
+        }
+        assert!(matches!(
+            read_stored_links(&s).await,
+            Err(RiftError::Integrity(_))
+        ));
     }
 
     #[tokio::test]

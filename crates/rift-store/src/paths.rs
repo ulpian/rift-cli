@@ -27,6 +27,35 @@ pub fn resolve_cache_root(env: impl Fn(&str) -> Option<String>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Restrict a projection to its owner: `0o700` on the containing directory and
+/// `0o600` on the DB file (unix). This is the filesystem leg of the residual-
+/// exposure mitigation for non-encrypted columns (phase-03 step-05 adversary
+/// #3, the local disk reader); SQLite creates `-wal`/`-shm` sidecars with the
+/// DB file's mode, so they inherit it. On Windows, `%LOCALAPPDATA%` is already
+/// scoped to the user profile's ACL; a tighter ACL story is Stage-6 hardening.
+///
+/// # Errors
+/// [`std::io::Error`] if permissions cannot be applied to an existing path.
+pub fn harden_projection_permissions(db_path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Some(dir) = db_path.parent() {
+            if dir.exists() {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        if db_path.exists() {
+            std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = db_path;
+    }
+    Ok(())
+}
+
 /// The projection directory for `repo` under an explicit cache `root`:
 /// `<root>/rift/<repo_id>/`.
 #[must_use]
@@ -64,6 +93,49 @@ pub fn default_projection_dir(repo: &RepoId) -> PathBuf {
 #[must_use]
 pub fn default_projection_db(repo: &RepoId) -> PathBuf {
     projection_db_from(|k| std::env::var(k).ok(), repo)
+}
+
+/// The Stage 3 recall projection database for `repo` under an explicit cache
+/// `root`: `<root>/rift/<repo_id>/recall.db`. A **separate** file from
+/// [`projection_db_under`] so `rift-memd rebuild` can destroy only the recall
+/// projection, leaving the M1 capture projection untouched.
+#[must_use]
+pub fn recall_db_under(root: &Path, repo: &RepoId) -> PathBuf {
+    projection_dir_under(root, repo).join("recall.db")
+}
+
+/// The recall projection database for `repo`, resolving the cache root from `env`.
+#[must_use]
+pub fn recall_db_from(env: impl Fn(&str) -> Option<String>, repo: &RepoId) -> PathBuf {
+    recall_db_under(&resolve_cache_root(env), repo)
+}
+
+/// The default recall projection database file for this machine — typically
+/// `~/.cache/rift/<repo_id>/recall.db`.
+#[must_use]
+pub fn default_recall_db(repo: &RepoId) -> PathBuf {
+    recall_db_from(|k| std::env::var(k).ok(), repo)
+}
+
+/// The machine-global canopy UI-state database under an explicit cache `root`:
+/// `<root>/rift/canopy/ui-state.db`. **Repo-independent** (the dashboard spans
+/// repos), so it lives under a fixed `canopy/` prefix rather than a `<repo_id>/`.
+#[must_use]
+pub fn canopy_ui_db_under(root: &Path) -> PathBuf {
+    root.join("rift").join("canopy").join("ui-state.db")
+}
+
+/// The canopy UI-state database, resolving the cache root from `env`.
+#[must_use]
+pub fn canopy_ui_db_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
+    canopy_ui_db_under(&resolve_cache_root(env))
+}
+
+/// The default canopy UI-state database for this machine — typically
+/// `~/.cache/rift/canopy/ui-state.db`.
+#[must_use]
+pub fn default_canopy_ui_db() -> PathBuf {
+    canopy_ui_db_from(|k| std::env::var(k).ok())
 }
 
 #[cfg(test)]
@@ -133,5 +205,19 @@ mod tests {
         // default_* read the real process env; exercise them (path is machine-dependent).
         assert!(default_projection_dir(&repo()).ends_with(PathBuf::from("rift").join("abc123")));
         assert!(default_projection_db(&repo()).ends_with("projection.db"));
+    }
+
+    #[test]
+    fn canopy_ui_db_is_machine_global_not_repo_scoped() {
+        // Repo-independent: a fixed `canopy/` prefix, never a `<repo_id>/`.
+        assert_eq!(
+            canopy_ui_db_from(env_of(&[("RIFT_CACHE_DIR", "/c")])),
+            PathBuf::from("/c/rift/canopy/ui-state.db")
+        );
+        assert_eq!(
+            canopy_ui_db_under(Path::new("/cache")),
+            PathBuf::from("/cache/rift/canopy/ui-state.db")
+        );
+        assert!(default_canopy_ui_db().ends_with("ui-state.db"));
     }
 }

@@ -15,9 +15,23 @@ rift-core = { version = "0.0.1", path = "../rift-core" }
 rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
 rift-recall-policy = { version = "0.0.1", path = "../rift-recall-policy" }
 rift-recall-events = { version = "0.0.1", path = "../rift-recall-events" }
-# Agent-spawned stdio MCP transport plugs in here (process lifetime = session):
-# rmcp = { workspace = true }
+# The handlers query the recall.db projection + the read-only substrate, rank the
+# results, build four-state envelopes, and compile packs. (All acyclic: none of
+# these depend on rift-recall-mcp.)
+rift-store = { version = "0.0.1", path = "../rift-store" }
+rift-recall-ledger = { version = "0.0.1", path = "../rift-recall-ledger" }
+rift-recall-validity = { version = "0.0.1", path = "../rift-recall-validity" }
+rift-recall-pack = { version = "0.0.1", path = "../rift-recall-pack" }
+rift-recall-rank = { version = "0.0.1", path = "../rift-recall-rank" }
+rift-recall-substrate = { version = "0.0.1", path = "../rift-recall-substrate", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+# Honest token accounting (returned/avoided) for every content-bearing response.
+tiktoken-rs = { workspace = true }
 
 [dev-dependencies]
 rift-config = { version = "0.0.1", path = "../rift-config" }
 proptest = { workspace = true }
+tokio = { workspace = true }

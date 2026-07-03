@@ -8,3 +8,7 @@ rift-hashchain
 rift-store
 rift-recall-policy
 rift-shadow-redact
+# Stage-3 W2 false-memory guard (build-plan stage-03 phase-03: ">=95%, security-critical").
+rift-recall-validity
+# Entire-binary pin/verification module (stage-02 phase-01 step-01 exit criterion).
+rift-shadow-entire

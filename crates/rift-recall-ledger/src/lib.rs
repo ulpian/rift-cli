@@ -13,12 +13,24 @@
 //! last-N checkpoints); a query never returns rows outside its declared scope
 //! (W14, `05-security` §5.5).
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 #![allow(
     clippy::module_name_repetitions,
     clippy::doc_markdown,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
 )]
+
+pub mod candidates;
+pub mod graph;
+pub mod hunks;
+pub mod ingest;
+pub mod metrics;
+pub mod outcome;
+pub mod scope_query;
+pub mod validity_store;
 
 use std::collections::BTreeSet;
 
@@ -123,44 +135,10 @@ impl RecallMetrics {
     }
 }
 
-/// Default scope for a recall query (W14). A query never returns facts outside
-/// this scope unless an explicit cross-scope flag is set.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Scope {
-    /// Current repo id.
-    pub repo: String,
-    /// Current branch.
-    pub branch: String,
-    /// Current developer id.
-    pub developer: String,
-    /// How many recent checkpoints are in scope.
-    pub last_n_checkpoints: u32,
-}
-
-/// A fact's scope coordinates (what it belongs to).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FactScope {
-    /// Repo id the fact belongs to.
-    pub repo: String,
-    /// Branch the fact belongs to.
-    pub branch: String,
-    /// Developer the fact belongs to.
-    pub developer: String,
-    /// How many checkpoints back the fact is (0 = newest).
-    pub checkpoint_age: u32,
-}
-
-impl Scope {
-    /// Whether `fact` is contained in this scope (same repo/branch/developer and
-    /// within the last-N checkpoints).
-    #[must_use]
-    pub fn contains(&self, fact: &FactScope) -> bool {
-        self.repo == fact.repo
-            && self.branch == fact.branch
-            && self.developer == fact.developer
-            && fact.checkpoint_age < self.last_n_checkpoints
-    }
-}
+// The scope *type* now lives in `rift-recall-types` (`Scope`/`CrossScopeGrant`,
+// shared with the MCP/pack consumers); the membership chokepoint that bounds
+// every query to it is [`scope_query::in_scope_nodes`]. The graph-backed,
+// scope-aware metrics are in [`metrics`].
 
 #[cfg(test)]
 mod tests {
@@ -220,38 +198,6 @@ mod tests {
             m.tokens_avoided > 0,
             "definition-of-done: tokens_avoided > 0"
         );
-    }
-
-    #[test]
-    fn scope_contains_only_in_scope_facts() {
-        let scope = Scope {
-            repo: "r".into(),
-            branch: "main".into(),
-            developer: "dev".into(),
-            last_n_checkpoints: 5,
-        };
-        let inside = FactScope {
-            repo: "r".into(),
-            branch: "main".into(),
-            developer: "dev".into(),
-            checkpoint_age: 2,
-        };
-        assert!(scope.contains(&inside));
-        let other_repo = FactScope {
-            repo: "x".into(),
-            ..inside.clone()
-        };
-        assert!(!scope.contains(&other_repo));
-        let too_old = FactScope {
-            checkpoint_age: 9,
-            ..inside.clone()
-        };
-        assert!(!scope.contains(&too_old));
-        let other_dev = FactScope {
-            developer: "mallory".into(),
-            ..inside
-        };
-        assert!(!scope.contains(&other_dev));
     }
 
     proptest::proptest! {

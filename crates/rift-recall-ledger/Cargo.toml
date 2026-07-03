@@ -12,7 +12,26 @@ workspace = true
 
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+# The read-only substrate seam (parsers, SubstrateReader, Watermark). gix is off:
+# the ledger ingests through the trait, never a concrete git backend.
+rift-recall-substrate = { version = "0.0.1", path = "../rift-recall-substrate", default-features = false }
+# The append-only recall.db projection (CanonicalStore, SqliteStore, migrations).
+rift-store = { version = "0.0.1", path = "../rift-store" }
+# The validity core (hash-bound key, sealed ValidSummary, pure `classify`); the
+# ledger backs it durably with the summary_binding/digest_blob tables.
+rift-recall-validity = { version = "0.0.1", path = "../rift-recall-validity" }
+# Task-aware ranking: the ledger builds scope-contained `rank::Candidate`s from
+# the graph (it owns the store queries + outcome labels). Acyclic: rank → core/types.
+rift-recall-rank = { version = "0.0.1", path = "../rift-recall-rank" }
 serde = { workspace = true }
+sha2 = { workspace = true }
+# Content-addressed line-range hunks between FileRevision pairs (pinned Histogram).
+imara-diff = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Drive the async ingest/metrics seam from synchronous test bodies.
+tokio = { workspace = true }
+# File-backed recall.db for the encrypted-at-rest sentinel keystone.
+tempfile = { workspace = true }

@@ -27,13 +27,18 @@ pub struct SensitiveColumn {
 
 /// The registry of application-encrypted columns.
 ///
-/// v1 enumerates `key_metadata.wrapped_dek` — the wrapped data-encryption key,
-/// the one BLOB column today whose payload is key material. As Stage-2 cost
-/// aggregates and Stage-3 summary bodies land (as `BLOB` payload columns), they
-/// are added here and inherit the same Layer-2 protection.
+/// Enumerates `digest_blob.bytes` — the Stage-3 hash-bound summary bodies
+/// (redacted-but-sensitive payloads, the step-05 Layer-2 table's first live
+/// row). As Stage-2 cost aggregates land as `BLOB` payload columns they are
+/// added here and inherit the same protection.
+///
+/// `key_metadata.wrapped_dek` is deliberately NOT registered: it is already
+/// AEAD ciphertext *by construction* (the DEK wrapped under the keychain KEK,
+/// [`crate::KeyringKeyStore`]) — encrypting it under the DEK it wraps would be
+/// circular.
 const SENSITIVE_COLUMNS: &[SensitiveColumn] = &[SensitiveColumn {
-    table: "key_metadata",
-    column: "wrapped_dek",
+    table: "digest_blob",
+    column: "bytes",
 }];
 
 /// The registry of columns to AEAD-encrypt at the application layer.
@@ -53,23 +58,34 @@ pub fn is_sensitive_column(table: &str, column: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::canonical_table;
+    use crate::schema::{canonical_table, canopy_canonical_table, recall_canonical_table};
+
+    /// Resolve a table across ALL THREE registries (capture / recall / canopy) —
+    /// sensitive columns may live in any projection.
+    fn any_registry_table(name: &str) -> Option<&'static crate::CanonicalTable> {
+        canonical_table(name)
+            .or_else(|| recall_canonical_table(name))
+            .or_else(|| canopy_canonical_table(name))
+    }
 
     #[test]
     fn registry_is_nonempty_and_membership_works() {
         assert!(!sensitive_columns().is_empty());
-        assert!(is_sensitive_column("key_metadata", "wrapped_dek"));
-        assert!(!is_sensitive_column("key_metadata", "key_id"));
+        assert!(is_sensitive_column("digest_blob", "bytes"));
+        assert!(!is_sensitive_column("digest_blob", "digest_ref"));
         assert!(!is_sensitive_column("checkpoint", "merkle_root"));
+        // wrapped_dek is protected by construction (KEK-wrapped), not Layer 2.
+        assert!(!is_sensitive_column("key_metadata", "wrapped_dek"));
     }
 
-    /// Every registered sensitive column must exist in the canonical schema and be
-    /// declared `BLOB` (so ciphertext fits). A typo or a non-BLOB target fails CI.
+    /// Every registered sensitive column must exist in one of the three schema
+    /// registries and be declared `BLOB` (so ciphertext fits). A typo or a
+    /// non-BLOB target fails CI.
     #[test]
     fn every_sensitive_column_exists_and_is_blob() {
         for s in sensitive_columns() {
-            let table = canonical_table(s.table)
-                .unwrap_or_else(|| panic!("sensitive table `{}` not in registry", s.table));
+            let table = any_registry_table(s.table)
+                .unwrap_or_else(|| panic!("sensitive table `{}` not in any registry", s.table));
             let col = table
                 .columns
                 .iter()

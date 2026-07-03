@@ -14,6 +14,63 @@ use serde_json::Value;
 /// The default per-crate line-coverage threshold for the security set.
 pub const SECURITY_THRESHOLD: f64 = 95.0;
 
+/// The workspace-wide branch-coverage floor (step-05: ≥75% branch).
+pub const BRANCH_FLOOR: f64 = 75.0;
+
+/// Workspace-wide branch coverage `(covered, total)` summed across every file
+/// in a `cargo llvm-cov --json` report. `total == 0` means the report carries
+/// no branch data (the instrumented run lacked `--branch`).
+fn workspace_branch_coverage(report: &Value) -> (u64, u64) {
+    let files = report
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|d| d.first())
+        .and_then(|d0| d0.get("files"))
+        .and_then(Value::as_array);
+    let mut covered = 0_u64;
+    let mut total = 0_u64;
+    if let Some(files) = files {
+        for file in files {
+            let branches = file.get("summary").and_then(|s| s.get("branches"));
+            covered += branches
+                .and_then(|b| b.get("covered"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            total += branches
+                .and_then(|b| b.get("count"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+        }
+    }
+    (covered, total)
+}
+
+/// Enforce the workspace branch floor over a `cargo llvm-cov --json` report.
+/// Fails **closed** if the report contains no branch data at all (the
+/// instrumented run must pass `--branch`).
+///
+/// # Errors
+/// If `json` is not valid JSON.
+pub fn check_branch_floor(json: &str, min_percent: f64) -> Result<Vec<String>, String> {
+    let report: Value =
+        serde_json::from_str(json).map_err(|e| format!("parse coverage json: {e}"))?;
+    let (covered, total) = workspace_branch_coverage(&report);
+    if total == 0 {
+        return Ok(vec![
+            "coverage report has no branch data — run cargo llvm-cov with --branch (fail-closed)"
+                .to_string(),
+        ]);
+    }
+    let pct = (covered as f64 / total as f64) * 100.0;
+    if pct < min_percent {
+        Ok(vec![format!(
+            "workspace branch coverage {pct:.2}% < {min_percent:.0}% ({covered}/{total})"
+        )])
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 /// Read the security-crate registry (`ci/security-crates.txt`): one crate per
 /// line, `#` comments and blanks ignored.
 ///

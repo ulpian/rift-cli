@@ -4,7 +4,7 @@
 //! (a task ≈ a turn). Native names are `(verify)` and pinned by the conformance
 //! fixtures.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use rift_agent::{event, AdapterError, AgentAdapter, CompatNotes};
 use rift_core::{AgentId, CanonicalEvent, EventKind, Trust};

@@ -41,6 +41,8 @@ keyring = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Committed DDL snapshot of all three projections (a schema change is reviewable).
+insta = { workspace = true }
 # Drive the async seam from synchronous test bodies (a current-thread runtime),
 # and back the encryption/Turso integration tests.
 tokio = { workspace = true }

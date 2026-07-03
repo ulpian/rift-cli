@@ -15,8 +15,7 @@
 //! draws from the OS CSPRNG; a fixed nonce is catastrophic for ChaCha20-Poly1305
 //! and the API never encourages one.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce as CcNonce};
@@ -32,6 +31,19 @@ pub const NONCE_LEN: usize = 12;
 
 /// A symmetric data key. **No** `Debug`/`Display`/`Serialize`; zeroized on drop.
 /// Read raw bytes only through [`DataKey::expose`] (a greppable, audited seam).
+///
+/// The hygiene is compiler-enforced — formatting or serializing a key does not
+/// compile (the phase-04 `key_type_cannot_be_debug_or_serialized` proof):
+///
+/// ```compile_fail
+/// let key = rift_crypto::DataKey::from_bytes([0u8; rift_crypto::KEY_LEN]);
+/// let _ = format!("{key:?}"); // no Debug — keys never reach logs
+/// ```
+///
+/// ```compile_fail
+/// let key = rift_crypto::DataKey::from_bytes([0u8; rift_crypto::KEY_LEN]);
+/// let _ = format!("{key}"); // no Display either
+/// ```
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct DataKey([u8; KEY_LEN]);
 
@@ -61,6 +73,11 @@ impl DataKey {
 }
 
 /// Plaintext that must be wiped after use (returned by [`open`]). No `Debug`.
+///
+/// ```compile_fail
+/// let pt = rift_crypto::SensitiveBytes::new(vec![1, 2, 3]);
+/// let _ = format!("{pt:?}"); // no Debug — decrypted plaintext never reaches logs
+/// ```
 #[derive(Zeroize, ZeroizeOnDrop, Clone, PartialEq, Eq)]
 pub struct SensitiveBytes(Vec<u8>);
 
@@ -167,6 +184,43 @@ pub fn open(key: &DataKey, nonce: &Nonce, ciphertext: &[u8], aad: &[u8]) -> Resu
     Ok(SensitiveBytes::new(pt))
 }
 
+/// Length of a wrapped key blob: `nonce ‖ AEAD(key) ‖ tag`.
+pub const WRAPPED_KEY_LEN: usize = NONCE_LEN + KEY_LEN + 16;
+
+/// Wrap (AEAD-seal) a DEK under a parent key (the envelope: KEK wraps DEK).
+/// Returns `nonce ‖ ciphertext ‖ tag` ([`WRAPPED_KEY_LEN`] bytes); the wrapped
+/// blob is safe to persist. `aad` binds the wrap to its context (repo id +
+/// generation) so a wrapped key cannot be relocated.
+///
+/// # Errors
+/// [`RiftError::Crypto`] on RNG or AEAD failure.
+pub fn wrap_dek(parent: &DataKey, dek: &DataKey, aad: &[u8]) -> Result<Vec<u8>> {
+    let nonce = Nonce::random()?;
+    let mut out = nonce.as_bytes().to_vec();
+    out.extend(seal(parent, &nonce, dek.expose(), aad)?);
+    Ok(out)
+}
+
+/// Unwrap a DEK produced by [`wrap_dek`]. Fails closed on tamper, a wrong
+/// parent key, or an AAD (context) mismatch.
+///
+/// # Errors
+/// [`RiftError::Crypto`] on length or authentication failure (carries no bytes).
+pub fn unwrap_dek(parent: &DataKey, wrapped: &[u8], aad: &[u8]) -> Result<DataKey> {
+    if wrapped.len() != WRAPPED_KEY_LEN {
+        return Err(RiftError::crypto("wrapped key has wrong length"));
+    }
+    let (n, ct) = wrapped.split_at(NONCE_LEN);
+    let mut nb = [0u8; NONCE_LEN];
+    nb.copy_from_slice(n);
+    let pt = open(parent, &Nonce::from_bytes(nb), ct, aad)?;
+    let mut bytes = [0u8; KEY_LEN];
+    bytes.copy_from_slice(pt.as_slice());
+    let dek = DataKey::from_bytes(bytes);
+    bytes.zeroize();
+    Ok(dek)
+}
+
 /// Derive a per-repo DEK from an org DEK: `HKDF-SHA256(salt=repo_id, ikm=org_dek)`.
 ///
 /// Deterministic and domain-separated; org scope is forward-looking for Stage 7
@@ -269,6 +323,44 @@ mod tests {
     }
 
     #[test]
+    fn wrap_unwrap_roundtrip_and_fail_closed() {
+        let kek = DataKey::from_bytes([9u8; KEY_LEN]);
+        let dek = DataKey::from_bytes([4u8; KEY_LEN]);
+        let aad = b"rift:wrapped-dek:repo-1:1";
+        let wrapped = wrap_dek(&kek, &dek, aad).unwrap();
+        assert_eq!(wrapped.len(), WRAPPED_KEY_LEN);
+        // the wrapped blob never contains the raw DEK bytes
+        assert!(!wrapped.windows(KEY_LEN).any(|w| w == dek.expose()));
+
+        let back = unwrap_dek(&kek, &wrapped, aad).unwrap();
+        assert_eq!(back.expose(), dek.expose());
+
+        // wrong parent key
+        let other = DataKey::from_bytes([1u8; KEY_LEN]);
+        assert!(matches!(
+            unwrap_dek(&other, &wrapped, aad),
+            Err(RiftError::Crypto(_))
+        ));
+        // relocated context (different repo/generation)
+        assert!(matches!(
+            unwrap_dek(&kek, &wrapped, b"rift:wrapped-dek:repo-2:1"),
+            Err(RiftError::Crypto(_))
+        ));
+        // wrong length / truncation
+        assert!(matches!(
+            unwrap_dek(&kek, &wrapped[..WRAPPED_KEY_LEN - 1], aad),
+            Err(RiftError::Crypto(_))
+        ));
+        // bit flip
+        let mut tampered = wrapped;
+        tampered[NONCE_LEN] ^= 0xFF;
+        assert!(matches!(
+            unwrap_dek(&kek, &tampered, aad),
+            Err(RiftError::Crypto(_))
+        ));
+    }
+
+    #[test]
     fn generate_produces_distinct_keys_and_nonces() {
         let a = DataKey::generate().unwrap();
         let b = DataKey::generate().unwrap();
@@ -291,5 +383,98 @@ mod tests {
             let pt = open(&key(), &n, &ct, &aad).unwrap();
             proptest::prop_assert_eq!(pt.as_slice(), plaintext.as_slice());
         }
+    }
+
+    /// RFC 8439 §2.8.2 known-answer vector: pins the ChaCha20-Poly1305 wiring
+    /// (key/nonce/AAD layout) to the IETF reference — a transposed argument or
+    /// swapped parameter produces a different ciphertext and fails here.
+    #[test]
+    fn aead_matches_rfc8439_vector() {
+        let key_bytes: [u8; KEY_LEN] = (0x80..=0x9f)
+            .collect::<Vec<u8>>()
+            .try_into()
+            .unwrap();
+        let key = DataKey::from_bytes(key_bytes);
+        let nonce = Nonce::from_bytes([
+            0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+        ]);
+        let aad = [
+            0x50u8, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+        ];
+        let plaintext = b"Ladies and Gentlemen of the class of '99: \
+If I could offer you only one tip for the future, sunscreen would be it.";
+        let ct = seal(&key, &nonce, plaintext, &aad).unwrap();
+        let hex: String = ct.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            // ciphertext ‖ tag from RFC 8439 §2.8.2
+            "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6\
+3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36\
+92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc\
+3ff4def08e4b7a9de576d26586cec64b6116\
+1ae10b594f09e26a7e902ecbd0600691"
+        );
+        let pt = open(&key, &nonce, &ct, &aad).unwrap();
+        assert_eq!(pt.as_slice(), plaintext.as_slice());
+    }
+
+    /// RFC 5869 A.1 (HKDF-SHA256 test case 1), driven through the same
+    /// `Hkdf::new` + `expand` sequence the derive functions use — pins the
+    /// salt-vs-ikm-vs-info parameter layout.
+    #[test]
+    fn hkdf_matches_rfc5869_vector() {
+        let ikm = [0x0bu8; 22];
+        let salt: Vec<u8> = (0x00..=0x0c).collect();
+        let info: Vec<u8> = (0xf0..=0xf9).collect();
+        let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
+        let mut okm = [0u8; 42];
+        hk.expand(&info, &mut okm).unwrap();
+        let hex: String = okm.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf\
+34007208d5b887185865"
+        );
+    }
+
+    /// Freezes the derivation layout of [`derive_repo_dek`] (salt = repo id,
+    /// info = "rift:repo-dek"): swapping salt and info would pass every
+    /// self-referential test but changes this pinned output.
+    #[test]
+    fn derive_repo_dek_layout_is_pinned() {
+        let org = DataKey::from_bytes([7u8; KEY_LEN]);
+        let repo = RepoId::new("repo-a").unwrap();
+        let dek = derive_repo_dek(&org, &repo).unwrap();
+        let hex: String = dek.expose().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "d5c755c6a187503a06d1369e5276654603161c41c6dde4a66ad6c975ca012aeb"
+        );
+    }
+
+    /// Random nonces never collide over a large batch (the spec's
+    /// `random_nonces_are_unique` requirement; 96-bit space, 10k draws).
+    #[test]
+    fn random_nonces_are_unique() {
+        let mut seen = std::collections::HashSet::with_capacity(10_000);
+        for _ in 0..10_000 {
+            assert!(
+                seen.insert(*Nonce::random().unwrap().as_bytes()),
+                "nonce collision — CSPRNG output repeated"
+            );
+        }
+    }
+
+    /// The zeroize contract is real, not just derived: wiping a clone zeroes
+    /// every byte (drop-order wiping itself is exercised under miri in CI).
+    #[test]
+    fn key_and_plaintext_zeroize_to_all_zero() {
+        let mut key = DataKey::from_bytes([0xAAu8; KEY_LEN]);
+        key.zeroize();
+        assert_eq!(key.expose(), &[0u8; KEY_LEN]);
+
+        let mut pt = SensitiveBytes::new(vec![0xBBu8; 64]);
+        pt.zeroize();
+        assert!(pt.as_slice().is_empty() || pt.as_slice().iter().all(|&b| b == 0));
     }
 }

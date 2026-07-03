@@ -218,7 +218,9 @@ pub(crate) async fn explain(store: &SqliteStore, reference: &str) -> Result<Outc
         }));
     }
     let mut json = ckpt.json;
-    json["attribution"] = serde_json::json!(files);
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("attribution".into(), serde_json::json!(files));
+    }
     Ok(Outcome::ok(human.trim_end().to_owned(), json))
 }
 

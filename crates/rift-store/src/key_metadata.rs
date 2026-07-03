@@ -11,22 +11,10 @@
 //! Determinism: `generation`/`recorded_at` are injected by the caller (no wall
 //! clock); `key_id` is content-addressed over the row's identifying fields.
 
-use rift_core::Result;
+use rift_core::{Immutable, Result};
 use sha2::{Digest, Sha256};
 
-use crate::{CanonicalStore, Value};
-
-const COLUMNS: [&str; 9] = [
-    "key_id",
-    "repo_id",
-    "wrapped_dek",
-    "kek_ref",
-    "cipher",
-    "generation",
-    "recorded_at",
-    "supersedes_id",
-    "schema_version",
-];
+use crate::{CanonicalRow, CanonicalStore, Value};
 
 const SELECT: &str = "SELECT key_id, repo_id, wrapped_dek, kek_ref, cipher, \
      generation, recorded_at, supersedes_id, schema_version FROM key_metadata";
@@ -75,28 +63,46 @@ impl KeyMetadataRow {
     }
 }
 
+impl Immutable for KeyMetadataRow {}
+
+impl CanonicalRow for KeyMetadataRow {
+    const TABLE: &'static str = "key_metadata";
+    const COLUMNS: &'static [&'static str] = &[
+        "key_id",
+        "repo_id",
+        "wrapped_dek",
+        "kek_ref",
+        "cipher",
+        "generation",
+        "recorded_at",
+        "supersedes_id",
+        "schema_version",
+    ];
+
+    fn values(&self) -> Vec<Value> {
+        vec![
+            Value::text(self.key_id.clone()),
+            Value::text(self.repo_id.clone()),
+            Value::Blob(self.wrapped_dek.clone()),
+            Value::text(self.kek_ref.clone()),
+            Value::text(self.cipher.clone()),
+            Value::Int(self.generation),
+            Value::Int(self.recorded_at),
+            self.supersedes_id.clone().map_or(Value::Null, Value::text),
+            Value::Int(self.schema_version),
+        ]
+    }
+}
+
 /// Record a key-metadata generation (insert-only).
 ///
 /// # Errors
 /// [`rift_core::RiftError::Storage`]/[`rift_core::RiftError::Immutability`] on failure.
-pub async fn record_key_metadata(store: &impl CanonicalStore, r: &KeyMetadataRow) -> Result<()> {
-    store
-        .insert(
-            "key_metadata",
-            &COLUMNS,
-            &[
-                Value::text(r.key_id.clone()),
-                Value::text(r.repo_id.clone()),
-                Value::Blob(r.wrapped_dek.clone()),
-                Value::text(r.kek_ref.clone()),
-                Value::text(r.cipher.clone()),
-                Value::Int(r.generation),
-                Value::Int(r.recorded_at),
-                r.supersedes_id.clone().map_or(Value::Null, Value::text),
-                Value::Int(r.schema_version),
-            ],
-        )
-        .await
+pub async fn record_key_metadata(
+    store: &(impl CanonicalStore + Sized),
+    r: &KeyMetadataRow,
+) -> Result<()> {
+    store.insert_row(r).await
 }
 
 /// The latest (highest-generation) key metadata for a repo — the read path used to

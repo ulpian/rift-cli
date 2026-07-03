@@ -13,8 +13,7 @@
 //! checkpoint strategy, never side effects inside the transition. Illegal
 //! transitions are refused (logged, swallowed at the hook boundary), never panic.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use std::collections::BTreeMap;
 

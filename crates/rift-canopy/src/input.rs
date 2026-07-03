@@ -32,16 +32,36 @@ pub enum CanopyKey {
     Esc,
     /// Delete the last character of the edit buffer.
     Backspace,
-    /// Move the selection up.
+    /// Move the selection / scroll up.
     Up,
-    /// Move the selection down.
+    /// Move the selection / scroll down.
     Down,
+    /// Cycle focus to the next panel.
+    Tab,
+    /// Cycle focus to the previous panel (Shift-Tab).
+    BackTab,
+    /// Move focus one column left.
+    Left,
+    /// Move focus one column right.
+    Right,
+    /// Scroll the focused panel up by a page.
+    PageUp,
+    /// Scroll the focused panel down by a page.
+    PageDown,
+    /// Reorder the selected item up (Shift-Up).
+    ShiftUp,
+    /// Reorder the selected item down (Shift-Down).
+    ShiftDown,
     /// A normalized quit request (e.g. Ctrl-C).
     Quit,
 }
 
 /// What the event loop should do after a key is handled. The state mutation has
 /// already been applied to [`App`]; this is only the externally-visible effect.
+///
+/// `RemoveProject`/`ReorderProject` carry no target: they act on the **currently
+/// selected** project, which the reducer resolves to a path when it builds the
+/// append-only [`crate::PersistOp`] (keeping the key handler free of ids/paths).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Nothing beyond the state mutation already applied.
@@ -50,6 +70,14 @@ pub enum Action {
     Quit,
     /// Register a project at the given (user-entered) path.
     AddProject(String),
+    /// Remove (hide) the currently selected project.
+    RemoveProject,
+    /// Reorder the currently selected project up (`true`) or down (`false`).
+    ReorderProject(bool),
+    /// Flip the feature toggle under the column-2 cursor.
+    ToggleFeature,
+    /// Retry (reinstall) the feature toggle under the column-2 cursor.
+    RetryFeature,
     /// Run a parsed slash command.
     RunCommand(Command),
 }
@@ -70,6 +98,7 @@ pub fn on_key(app: &mut App, key: CanopyKey) -> Action {
 }
 
 fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
+    use crate::Panel;
     match key {
         CanopyKey::Char('a') => {
             app.mode = Mode::AddProject;
@@ -78,23 +107,92 @@ fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
             Action::None
         }
         CanopyKey::Char('/') => {
+            app.set_focus(Panel::Command);
             app.mode = Mode::Command;
             app.command_line.clear();
             Action::None
         }
+        CanopyKey::Tab => {
+            app.cycle_focus(true);
+            Action::None
+        }
+        CanopyKey::BackTab => {
+            app.cycle_focus(false);
+            Action::None
+        }
+        CanopyKey::Left => {
+            app.move_focus(true);
+            Action::None
+        }
+        CanopyKey::Right => {
+            app.move_focus(false);
+            Action::None
+        }
         CanopyKey::Char('j') | CanopyKey::Down => {
-            app.select_next();
+            nav_vertical(app, true, false);
             Action::None
         }
         CanopyKey::Char('k') | CanopyKey::Up => {
-            app.select_prev();
+            nav_vertical(app, false, false);
             Action::None
         }
+        CanopyKey::PageDown => {
+            nav_vertical(app, true, true);
+            Action::None
+        }
+        CanopyKey::PageUp => {
+            nav_vertical(app, false, true);
+            Action::None
+        }
+        // Remove / reorder act on the selected project — only when the projects
+        // column is focused and a selection exists (else inert).
+        CanopyKey::Char('d' | 'x')
+            if app.focus == Panel::Projects && app.selected_project().is_some() =>
+        {
+            Action::RemoveProject
+        }
+        CanopyKey::ShiftUp if app.focus == Panel::Projects && app.selected_project().is_some() => {
+            Action::ReorderProject(true)
+        }
+        CanopyKey::ShiftDown
+            if app.focus == Panel::Projects && app.selected_project().is_some() =>
+        {
+            Action::ReorderProject(false)
+        }
+        // Column-2 feature toggles: Space / Enter / `t` flip the cursored toggle,
+        // `r` retries a failed one. Only when the detail panel is focused.
+        CanopyKey::Char(' ' | 't') | CanopyKey::Enter if app.focus == Panel::Detail => {
+            Action::ToggleFeature
+        }
+        CanopyKey::Char('r') if app.focus == Panel::Detail => Action::RetryFeature,
         CanopyKey::Char('q') | CanopyKey::Quit => {
             app.quit = true;
             Action::Quit
         }
+        // Other keys (incl. reorder/remove without a focused selection) are inert.
         _ => Action::None,
+    }
+}
+
+/// Route a vertical nav key to the focused panel: the projects list moves its
+/// selection; the detail panel moves the feature-toggle cursor; the graphs panel
+/// scrolls its viewport. `page` selects a larger jump. Pure — no I/O.
+fn nav_vertical(app: &mut App, down: bool, page: bool) {
+    use crate::Panel;
+    match app.focus {
+        Panel::Projects => {
+            let steps = if page { 10 } else { 1 };
+            for _ in 0..steps {
+                if down {
+                    app.select_next();
+                } else {
+                    app.select_prev();
+                }
+            }
+        }
+        Panel::Detail => app.move_toggle_cursor(down),
+        Panel::Graphs => app.scroll_focused(down, page),
+        Panel::Command => {}
     }
 }
 
@@ -138,20 +236,21 @@ fn on_key_editing(app: &mut App, key: CanopyKey) -> Action {
                 Mode::Normal => Action::None,
             }
         }
-        CanopyKey::Up | CanopyKey::Down => Action::None,
+        // Navigation/focus keys are inert while editing the command/path buffer.
+        _ => Action::None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ProjStatus, Project};
+    use crate::{Panel, Project, ProjectStatus};
 
     fn project(name: &str) -> Project {
         Project {
             name: name.into(),
             path: format!("/r/{name}"),
-            status: ProjStatus::Idle,
+            status: ProjectStatus::Idle,
         }
     }
 
@@ -278,6 +377,118 @@ mod tests {
         assert!(app.quit);
     }
 
+    #[test]
+    fn remove_and_reorder_keys_act_on_focused_projects() {
+        let mut app = ready(vec![project("a"), project("b")]);
+        assert_eq!(app.focus, Panel::Projects);
+        assert_eq!(
+            on_key(&mut app, CanopyKey::Char('d')),
+            Action::RemoveProject
+        );
+        assert_eq!(
+            on_key(&mut app, CanopyKey::Char('x')),
+            Action::RemoveProject
+        );
+        assert_eq!(
+            on_key(&mut app, CanopyKey::ShiftUp),
+            Action::ReorderProject(true)
+        );
+        assert_eq!(
+            on_key(&mut app, CanopyKey::ShiftDown),
+            Action::ReorderProject(false)
+        );
+    }
+
+    #[test]
+    fn remove_and_reorder_are_inert_when_projects_unfocused() {
+        let mut app = ready(vec![project("a")]);
+        app.set_focus(Panel::Detail);
+        assert_eq!(on_key(&mut app, CanopyKey::Char('d')), Action::None);
+        assert_eq!(on_key(&mut app, CanopyKey::ShiftUp), Action::None);
+    }
+
+    #[test]
+    fn remove_is_inert_with_no_projects() {
+        let mut app = ready(vec![]);
+        assert_eq!(on_key(&mut app, CanopyKey::Char('d')), Action::None);
+    }
+
+    #[test]
+    fn tab_navigation_order_through_on_key() {
+        let mut app = ready(vec![project("a")]);
+        assert_eq!(app.focus, Panel::Projects);
+        for expected in [
+            Panel::Detail,
+            Panel::Graphs,
+            Panel::Command,
+            Panel::Projects,
+        ] {
+            assert_eq!(on_key(&mut app, CanopyKey::Tab), Action::None);
+            assert_eq!(app.focus, expected);
+        }
+        // Shift-Tab reverses.
+        assert_eq!(on_key(&mut app, CanopyKey::BackTab), Action::None);
+        assert_eq!(app.focus, Panel::Command);
+    }
+
+    #[test]
+    fn arrows_scroll_focused_graphs_panel() {
+        let mut app = ready(vec![project("a"), project("b")]);
+        app.set_focus(Panel::Graphs);
+        on_key(&mut app, CanopyKey::Down);
+        assert_eq!(
+            app.scroll.graphs, 1,
+            "Down scrolls the focused graphs panel"
+        );
+        assert_eq!(
+            app.selected, 0,
+            "selection is unchanged when Projects isn't focused"
+        );
+        on_key(&mut app, CanopyKey::Up);
+        assert_eq!(app.scroll.graphs, 0);
+    }
+
+    #[test]
+    fn arrows_move_toggle_cursor_when_detail_focused() {
+        let mut app = ready(vec![project("a")]);
+        app.set_focus(Panel::Detail);
+        assert_eq!(app.toggle_cursor, 0);
+        on_key(&mut app, CanopyKey::Down);
+        assert_eq!(app.toggle_cursor, 1, "Down moves the toggle cursor");
+        on_key(&mut app, CanopyKey::Up);
+        assert_eq!(app.toggle_cursor, 0);
+        assert_eq!(app.scroll.detail, 0, "detail no longer scrolls via arrows");
+    }
+
+    #[test]
+    fn detail_focus_keys_flip_and_retry_toggles() {
+        let mut app = ready(vec![project("a")]);
+        app.set_focus(Panel::Detail);
+        assert_eq!(
+            on_key(&mut app, CanopyKey::Char(' ')),
+            Action::ToggleFeature
+        );
+        assert_eq!(
+            on_key(&mut app, CanopyKey::Char('t')),
+            Action::ToggleFeature
+        );
+        assert_eq!(on_key(&mut app, CanopyKey::Enter), Action::ToggleFeature);
+        assert_eq!(on_key(&mut app, CanopyKey::Char('r')), Action::RetryFeature);
+        // Inert when the detail panel is not focused.
+        app.set_focus(Panel::Projects);
+        assert_eq!(on_key(&mut app, CanopyKey::Char('t')), Action::None);
+    }
+
+    #[test]
+    fn focus_returns_to_previous_on_command_cancel() {
+        let mut app = ready(vec![project("a")]);
+        app.set_focus(Panel::Graphs);
+        on_key(&mut app, CanopyKey::Char('/')); // focuses Command, enters Command mode
+        assert_eq!(app.focus, Panel::Command);
+        assert_eq!(app.mode, Mode::Command);
+        assert_eq!(app.focus_prev, Panel::Graphs);
+    }
+
     proptest::proptest! {
         /// Any key sequence is panic-free and never drives the selection out of
         /// bounds (the reducer never mutates the project list itself).
@@ -302,6 +513,14 @@ mod tests {
             Just(CanopyKey::Backspace),
             Just(CanopyKey::Up),
             Just(CanopyKey::Down),
+            Just(CanopyKey::Tab),
+            Just(CanopyKey::BackTab),
+            Just(CanopyKey::Left),
+            Just(CanopyKey::Right),
+            Just(CanopyKey::PageUp),
+            Just(CanopyKey::PageDown),
+            Just(CanopyKey::ShiftUp),
+            Just(CanopyKey::ShiftDown),
             Just(CanopyKey::Quit),
         ]
     }

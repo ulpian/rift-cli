@@ -36,6 +36,14 @@ pub(crate) struct Cli {
     /// When to colorize output.
     #[arg(long, global = true, value_enum)]
     pub(crate) color: Option<ColorChoice>,
+
+    /// Force the Canopy dashboard's ASCII fallback renderer (no truecolor / 3D).
+    #[arg(long, global = true)]
+    pub(crate) ascii: bool,
+
+    /// Skip the Canopy startup splash (also honored: `RIFT_SPLASH=never`).
+    #[arg(long, global = true)]
+    pub(crate) skip_splash: bool,
 }
 
 /// Color policy for human output.

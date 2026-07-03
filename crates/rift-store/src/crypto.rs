@@ -24,8 +24,10 @@ pub trait KeyStore {
     fn repo_dek(&self, repo_id: &RepoId) -> Result<DataKey>;
 }
 
-/// An in-memory key store for tests and headless/CI environments where no OS
-/// keychain exists. Never writes a plaintext key to disk.
+/// An in-memory key store: holds an already-provisioned DEK for the process
+/// lifetime. Used for tests/headless environments AND as the production holder
+/// after [`crate::KeyringKeyStore::provision_repo_dek`] unwraps the envelope.
+/// Never writes a plaintext key to disk.
 pub struct MemoryKeyStore {
     dek: DataKey,
 }
@@ -97,6 +99,104 @@ pub fn decrypt_column(
     open(key, &Nonce::from_bytes(nb), ct, &aad(table, column, row_id))
 }
 
+/// Framing byte for a plaintext (uncustodied) sensitive value.
+const FRAME_PLAIN: u8 = 0x00;
+/// Framing byte for an AEAD-encrypted sensitive value.
+const FRAME_AEAD: u8 = 0x01;
+
+/// Value-level cipher seam for sensitive columns whose write/read paths live in
+/// crates that must stay key-blind (e.g. the recall ledger's digest bodies).
+/// The stored form is self-describing (`frame ‖ payload`) so plain rows written
+/// before key custody was available and encrypted rows coexist; which frames a
+/// given implementation *accepts* is its policy.
+pub trait ColumnCipher: Send + Sync {
+    /// Seal `plaintext` for the `(table, column, row_id)` slot into its stored form.
+    ///
+    /// # Errors
+    /// Implementation-defined (RNG/AEAD/key custody failure).
+    fn encrypt(&self, table: &str, column: &str, row_id: &str, plaintext: &[u8])
+        -> Result<Vec<u8>>;
+
+    /// Recover the plaintext of a stored value from its slot.
+    ///
+    /// # Errors
+    /// Implementation-defined (tamper, relocation, missing key custody).
+    fn decrypt(&self, table: &str, column: &str, row_id: &str, stored: &[u8]) -> Result<Vec<u8>>;
+}
+
+/// The no-custody cipher: stores plaintext (framed). For headless environments
+/// with no OS keychain — the documented residual-exposure path — and tests. It
+/// refuses to read encrypted values (no key), failing closed rather than
+/// returning ciphertext as data.
+pub struct PlainCipher;
+
+impl ColumnCipher for PlainCipher {
+    fn encrypt(
+        &self,
+        _table: &str,
+        _column: &str,
+        _row_id: &str,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(1 + plaintext.len());
+        out.push(FRAME_PLAIN);
+        out.extend_from_slice(plaintext);
+        Ok(out)
+    }
+
+    fn decrypt(&self, table: &str, column: &str, _row_id: &str, stored: &[u8]) -> Result<Vec<u8>> {
+        match stored.split_first() {
+            Some((&FRAME_PLAIN, rest)) => Ok(rest.to_vec()),
+            Some((&FRAME_AEAD, _)) => Err(RiftError::crypto(format!(
+                "{table}.{column} is encrypted but no key custody is available \
+                 (OS keychain required)"
+            ))),
+            _ => Err(RiftError::crypto(format!(
+                "{table}.{column} has an unrecognized storage frame"
+            ))),
+        }
+    }
+}
+
+/// The AEAD cipher over a provisioned per-repo DEK: encrypts on write, decrypts
+/// on read, and transparently passes through plain-framed rows written before
+/// key custody was available (the projection is rebuildable, so re-ingesting
+/// upgrades them).
+pub struct DekCipher<K: KeyStore> {
+    keys: K,
+    repo_id: RepoId,
+}
+
+impl<K: KeyStore> DekCipher<K> {
+    /// A cipher keyed for `repo_id` via `keys`.
+    pub fn new(keys: K, repo_id: RepoId) -> Self {
+        Self { keys, repo_id }
+    }
+}
+
+impl<K: KeyStore + Send + Sync> ColumnCipher for DekCipher<K> {
+    fn encrypt(&self, table: &str, column: &str, row_id: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let dek = self.keys.repo_dek(&self.repo_id)?;
+        let mut out = Vec::with_capacity(1 + NONCE_LEN + plaintext.len() + 16);
+        out.push(FRAME_AEAD);
+        out.extend(encrypt_column(&dek, table, column, row_id, plaintext)?);
+        Ok(out)
+    }
+
+    fn decrypt(&self, table: &str, column: &str, row_id: &str, stored: &[u8]) -> Result<Vec<u8>> {
+        match stored.split_first() {
+            Some((&FRAME_AEAD, rest)) => {
+                let dek = self.keys.repo_dek(&self.repo_id)?;
+                Ok(decrypt_column(&dek, table, column, row_id, rest)?.as_slice().to_vec())
+            }
+            Some((&FRAME_PLAIN, rest)) => Ok(rest.to_vec()),
+            _ => Err(RiftError::crypto(format!(
+                "{table}.{column} has an unrecognized storage frame"
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +237,32 @@ mod tests {
             decrypt_column(&k, "t", "c", "rowA", b"short"),
             Err(RiftError::Crypto(_))
         ));
+    }
+
+    #[test]
+    fn cipher_seam_roundtrips_and_frames_interoperate() {
+        let enc = DekCipher::new(MemoryKeyStore::new(dek()), RepoId::new("r").unwrap());
+        let plain = PlainCipher;
+
+        // AEAD round-trip; stored form is framed ciphertext.
+        let stored = enc.encrypt("digest_blob", "bytes", "ref1", b"payload").unwrap();
+        assert_eq!(stored[0], FRAME_AEAD);
+        assert!(!stored.windows(7).any(|w| w == b"payload"));
+        assert_eq!(enc.decrypt("digest_blob", "bytes", "ref1", &stored).unwrap(), b"payload");
+
+        // Relocation fails (AAD binds the slot).
+        assert!(enc.decrypt("digest_blob", "bytes", "ref2", &stored).is_err());
+
+        // Plain frame: written by PlainCipher, readable by both.
+        let plain_stored = plain.encrypt("digest_blob", "bytes", "ref1", b"payload").unwrap();
+        assert_eq!(plain_stored[0], FRAME_PLAIN);
+        assert_eq!(plain.decrypt("digest_blob", "bytes", "ref1", &plain_stored).unwrap(), b"payload");
+        assert_eq!(enc.decrypt("digest_blob", "bytes", "ref1", &plain_stored).unwrap(), b"payload");
+
+        // Encrypted frame without custody fails closed; junk frames fail everywhere.
+        assert!(plain.decrypt("digest_blob", "bytes", "ref1", &stored).is_err());
+        assert!(plain.decrypt("t", "c", "r", &[0x7f, 1, 2]).is_err());
+        assert!(enc.decrypt("t", "c", "r", &[]).is_err());
     }
 
     #[test]

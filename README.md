@@ -40,7 +40,7 @@ Rift makes AI-assisted engineering **legible, recoverable, and cheaper**:
 | Crate | Role |
 |---|---|
 | `rift-core` | Shared: errors, ids (hash + ULID), local identity, time, `RedactedBytes`/`SecretBytes`, immutability markers. |
-| `rift-config` | Policy-as-code (`.rift/config.toml`), a linear glob matcher, the optional-package `FeatureRegistry`. |
+| `rift-config` | Policy-as-code (`.rift/config.toml`), a backtracking-free glob matcher, the optional-package `FeatureRegistry`. |
 | `rift-crypto` | ChaCha20-Poly1305 AEAD, HKDF envelope keys, zeroized secret types. |
 | `rift-hashchain` | SHA-256 leaves, Merkle roots, the checkpoint chain, inclusion proofs. |
 | `rift-store` | Append-only store (rusqlite reference impl; **Turso** is the production target), migration engine, integrity chain, bitemporal cost facts, column encryption. |

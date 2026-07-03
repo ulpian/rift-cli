@@ -2,7 +2,7 @@
 //! install writes absolute-path shims, `pre-push` filters `rift/*` egress, the
 //! commit-path hooks never block even on a panic, and a GUI-style sparse `PATH`
 //! still runs the installed shim via its absolute path.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::io::Write as _;
 use std::path::Path;

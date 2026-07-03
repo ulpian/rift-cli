@@ -13,8 +13,7 @@
 //! deterministic under test; [`default_registry_path`] is the thin wrapper over
 //! the real process environment.
 #![forbid(unsafe_code)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-#![allow(clippy::module_name_repetitions, clippy::doc_markdown)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing))]
 
 use std::path::{Path, PathBuf};
 
