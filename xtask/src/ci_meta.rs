@@ -178,6 +178,67 @@ pub fn unsafe_only_in_sanctioned_modules(root: &Path) -> Result<Vec<String>, Str
     Ok(v)
 }
 
+/// One-based line numbers of blanket clippy `#![allow(...)]` inner attributes
+/// in `text`, reported at the attribute's opening line.
+///
+/// Catches both the single-line `#![allow(clippy::foo)]` form and the
+/// multi-line form
+///
+/// ```text
+/// #![allow(
+///     clippy::foo,
+///     clippy::bar
+/// )]
+/// ```
+///
+/// which the earlier line-prefix check missed, letting a crate-root blanket
+/// evade the gate simply by wrapping. The test-only
+/// `#![cfg_attr(test, allow(...))]` form is never matched — it opens with
+/// `#![cfg_attr`, not `#![allow(` — and blocks that name no `clippy::` lint
+/// (e.g. `#![allow(dead_code)]`) are left to the rust-lint policy.
+fn blanket_clippy_allow_lines(text: &str) -> Vec<usize> {
+    // Drop a trailing line comment before inspecting attribute syntax, so a
+    // `clippy::` mentioned only in a comment can neither trigger nor mask a
+    // match (mirrors the `unsafe` scanner above). `str::lines` already strips a
+    // trailing `\r`, so CRLF sources are handled.
+    fn code(line: &str) -> &str {
+        line.split("//").next().unwrap_or("")
+    }
+    let mut hits = Vec::new();
+    let mut it = text.lines().enumerate().peekable();
+    while let Some((start, first)) = it.next() {
+        // An `#![allow (...)]` inner attribute — whitespace between `allow` and
+        // `(` is legal Rust. The test-only `#![cfg_attr(test, allow(...))]` form
+        // and item attributes (`#[allow(...)]`, a single `#[`) are excluded:
+        // neither starts with `#![allow`.
+        let is_opener = code(first)
+            .trim_start()
+            .strip_prefix("#![allow")
+            .is_some_and(|rest| rest.trim_start().starts_with('('));
+        if !is_opener {
+            continue;
+        }
+        // Accumulate comment-stripped code from the opener to the closing `)]`,
+        // so a wrapped list reads as one attribute. Stop before a fresh
+        // inner-attr opener so a malformed, never-closed block cannot swallow
+        // the next one.
+        let mut block = code(first).trim().to_string();
+        while !block.contains(")]") {
+            let Some((_, next)) = it.peek() else { break };
+            if next.trim_start().starts_with("#![") {
+                break;
+            }
+            if let Some((_, line)) = it.next() {
+                block.push_str(code(line).trim());
+            }
+        }
+        if block.contains("clippy::") {
+            hits.push(start + 1);
+        }
+    }
+    hits
+}
+
 /// Crate roots carry no blanket `#![allow(clippy::...)]` of workspace-managed
 /// lints — the workspace table is the single policy point; site allows must be
 /// narrow and justified. (`#![cfg_attr(test, allow(...))]` is fine: test-only.)
@@ -195,15 +256,11 @@ pub fn no_blanket_allow_at_crate_root(root: &Path) -> Result<Vec<String>, String
         }
         let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
         let text = std::fs::read_to_string(&f).map_err(|e| format!("read {rel}: {e}"))?;
-        for (i, line) in text.lines().enumerate() {
-            let t = line.trim_start();
-            if t.starts_with("#![allow(clippy::") {
-                v.push(format!(
-                    "{rel}:{}: blanket crate-root `#![allow(clippy::…)]` — manage the lint \
-                     in [workspace.lints] or allow narrowly at the site",
-                    i + 1
-                ));
-            }
+        for line in blanket_clippy_allow_lines(&text) {
+            v.push(format!(
+                "{rel}:{line}: blanket crate-root `#![allow(clippy::…)]` — manage the lint \
+                 in [workspace.lints] or allow narrowly at the site"
+            ));
         }
     }
     Ok(v)
@@ -265,6 +322,57 @@ mod tests {
             "ci-meta violations:\n{}",
             violations.join("\n")
         );
+    }
+
+    #[test]
+    fn detects_single_line_blanket_clippy_allow() {
+        let src = "#![allow(clippy::pedantic)]\nfn f() {}\n";
+        assert_eq!(blanket_clippy_allow_lines(src), vec![1]);
+    }
+
+    #[test]
+    fn detects_multiline_blanket_clippy_allow() {
+        // The wrapped form that evaded the old line-prefix check.
+        let src = "//! doc\n#![allow(\n    clippy::doc_markdown,\n    \
+                   clippy::cast_precision_loss\n)]\n\npub fn g() {}\n";
+        assert_eq!(blanket_clippy_allow_lines(src), vec![2]);
+    }
+
+    #[test]
+    fn ignores_cfg_attr_test_allow() {
+        // Test-only allows are sanctioned and must never be flagged.
+        let src = "#![cfg_attr(\n    test,\n    allow(\n        \
+                   clippy::unwrap_used,\n        clippy::cast_possible_wrap\n    )\n)]\n";
+        assert!(blanket_clippy_allow_lines(src).is_empty());
+    }
+
+    #[test]
+    fn ignores_non_clippy_blanket_allow() {
+        // The gate governs clippy workspace lints; a rust-lint allow is out of scope.
+        let src = "#![allow(dead_code)]\n#![allow(\n    unused_variables\n)]\n";
+        assert!(blanket_clippy_allow_lines(src).is_empty());
+    }
+
+    #[test]
+    fn ignores_clippy_named_only_in_a_comment() {
+        // A clippy lint mentioned in a trailing comment must not flag a block
+        // whose attribute names no clippy lint.
+        let src = "#![allow(dead_code)] // TODO: consider clippy::pedantic here\nfn f() {}\n";
+        assert!(blanket_clippy_allow_lines(src).is_empty());
+    }
+
+    #[test]
+    fn catches_whitespace_before_the_paren() {
+        // `#![allow (clippy::all)]` is legal Rust and must not evade the gate.
+        let src = "#![allow (clippy::all)]\nfn main() {}\n";
+        assert_eq!(blanket_clippy_allow_lines(src), vec![1]);
+    }
+
+    #[test]
+    fn unclosed_block_does_not_swallow_the_next_opener() {
+        // A malformed never-closed opener must not absorb a following real blanket.
+        let src = "#![allow(dead_code\n#![allow(clippy::pedantic)]\nfn f() {}\n";
+        assert_eq!(blanket_clippy_allow_lines(src), vec![2]);
     }
 
     #[test]
