@@ -96,13 +96,31 @@ pub(crate) async fn enable(store: &SqliteStore, agent_token: &str, now_ms: i64) 
 
     record_event(store, agent_token, "enable", now_ms, &wired_hash).await?;
 
+    // Agent-native settings snippet (M2-15): for Claude Code, emit the exact
+    // hooks block to paste into `.claude/settings.local.json` — plain
+    // commands, no shim (the wire parser accepts native hook stdin directly).
+    let snippet_path = if agent == AgentId::CLAUDE_CODE {
+        let sp = descriptor_path(agent_token)?.with_file_name("claude-code.claude-settings.json");
+        let snippet = claude_settings_snippet(&rift_bin);
+        std::fs::write(&sp, serde_json::to_vec_pretty(&snippet).unwrap_or_default())?;
+        Some(sp)
+    } else {
+        None
+    };
+
     let note_line = if notes.best_effort {
         format!("\n  note: best-effort capture ({})", notes.note)
     } else {
         String::new()
     };
+    let snippet_line = snippet_path.as_ref().map_or_else(String::new, |sp| {
+        format!(
+            "\n  paste into .claude/settings.local.json: {}",
+            sp.display()
+        )
+    });
     let human = format!(
-        "enabled {agent_token}: wired {} hook(s) via {}\n  config: {}{note_line}",
+        "enabled {agent_token}: wired {} hook(s) via {}\n  config: {}{snippet_line}{note_line}",
         verbs.len(),
         rift_bin.display(),
         path.display(),
@@ -113,8 +131,43 @@ pub(crate) async fn enable(store: &SqliteStore, agent_token: &str, now_ms: i64) 
         "config": path.display().to_string(),
         "wired_hooks_hash": wired_hash,
         "best_effort": notes.best_effort,
+        "settings_snippet": snippet_path.map(|p| p.display().to_string()),
     });
     Ok(Outcome::ok(human, json))
+}
+
+/// The Claude Code hook events Rift captures, and whether the settings entry
+/// takes a tool matcher. `SubagentStart` has no Claude Code hook event, so the
+/// adapter verb list and this table deliberately differ by that one verb.
+const CLAUDE_CODE_HOOK_EVENTS: &[(&str, bool)] = &[
+    ("SessionStart", false),
+    ("UserPromptSubmit", false),
+    ("PreToolUse", true),
+    ("PostToolUse", true),
+    ("Stop", false),
+    ("SubagentStop", false),
+    ("PreCompact", false),
+    ("SessionEnd", false),
+];
+
+/// The ready-to-paste `.claude/settings.local.json` hooks block: one plain
+/// `rift hooks claude-code <event>` command per hook event (native stdin is
+/// accepted directly — no jq shim, M2-15).
+fn claude_settings_snippet(rift_bin: &std::path::Path) -> serde_json::Value {
+    let mut hooks = serde_json::Map::new();
+    for (event, has_matcher) in CLAUDE_CODE_HOOK_EVENTS {
+        let cmd = format!("'{}' hooks claude-code {event}", rift_bin.display());
+        let mut entry = serde_json::Map::new();
+        if *has_matcher {
+            entry.insert("matcher".to_owned(), "*".into());
+        }
+        entry.insert(
+            "hooks".to_owned(),
+            serde_json::json!([{ "type": "command", "command": cmd }]),
+        );
+        hooks.insert((*event).to_owned(), serde_json::json!([entry]));
+    }
+    serde_json::json!({ "hooks": hooks })
 }
 
 /// `rift disable --agent <x>`: remove the wiring descriptor (full round-trip).
@@ -149,7 +202,7 @@ fn verify_wiring(reg: &AdapterRegistry, agent: &AgentId, verbs: &[&str]) -> Resu
         agent: agent.clone(),
         verb: verb.to_owned(),
         session: "dry-run".to_owned(),
-        turn: 0,
+        turn: Some(0),
         occurred_at_ms: 0,
         payload: serde_json::json!({}),
     };
@@ -192,4 +245,28 @@ async fn record_event(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_settings_snippet_wires_plain_commands_no_shim() {
+        let s = claude_settings_snippet(std::path::Path::new("/opt/rift"));
+        let hooks = s["hooks"].as_object().unwrap();
+        assert_eq!(hooks.len(), CLAUDE_CODE_HOOK_EVENTS.len());
+        assert_eq!(
+            hooks["Stop"][0]["hooks"][0]["command"],
+            "'/opt/rift' hooks claude-code Stop"
+        );
+        assert_eq!(hooks["PreToolUse"][0]["matcher"], "*");
+        assert!(hooks["SessionStart"][0].get("matcher").is_none());
+        assert!(
+            !s.to_string().contains("jq"),
+            "native fallback retires the shim (M2-15)"
+        );
+        // SubagentStart has no Claude Code hook event — never emitted.
+        assert!(hooks.get("SubagentStart").is_none());
+    }
 }

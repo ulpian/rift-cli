@@ -18,6 +18,8 @@
 use rift_agent::{event, AdapterError, AgentAdapter, CompatNotes, TokenUsage};
 use rift_core::{AgentId, CanonicalEvent, EventKind, Trust};
 
+pub mod transcript;
+
 /// The Claude Code adapter.
 pub struct ClaudeCodeAdapter;
 

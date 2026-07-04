@@ -54,7 +54,11 @@ fn json_depth(v: &serde_json::Value) -> u32 {
 
 /// Build a [`RawHook`] from the wire inputs, **totally and safely** (the fuzz
 /// seam, §5.9). Validates the agent-token shape, bounds the stdin, and extracts
-/// the `session`/`turn`/`payload` envelope fields. Never panics; an unparsable,
+/// the `session`/`turn`/`payload` envelope fields. Input that carries none of
+/// the envelope keys but has a `session_id` string is accepted as an
+/// **agent-native** payload (e.g. Claude Code hook stdin): the session comes
+/// from `session_id`, the whole object becomes the payload, and the turn is
+/// left `None` for the ingest layer to derive. Never panics; an unparsable,
 /// oversized, or malformed payload is a clean error the caller swallows as
 /// "deferred" (the hook never fails the agent).
 ///
@@ -72,20 +76,28 @@ pub fn build_raw_hook(
         return Err(RiftError::validity("hook: malformed agent token"));
     }
     let json = parse_bounded(stdin)?;
-    let session = json
-        .get("session")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let turn = json
-        .get("turn")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|t| u32::try_from(t).ok())
-        .unwrap_or(0);
-    let payload = json
-        .get("payload")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    let is_envelope = json.get("session").is_some()
+        || json.get("turn").is_some()
+        || json.get("payload").is_some();
+    let (session, turn, payload) = if is_envelope {
+        (
+            json.get("session")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            json.get("turn")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|t| u32::try_from(t).ok()),
+            json.get("payload")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+    } else if let Some(sid) = json.get("session_id").and_then(serde_json::Value::as_str) {
+        // Native fallback: the agent's own hook shape, ingested whole.
+        (sid.to_owned(), None, json.clone())
+    } else {
+        (String::new(), None, serde_json::Value::Null)
+    };
     Ok(RawHook {
         agent: agent_id,
         verb: verb.to_owned(),
@@ -110,6 +122,7 @@ pub fn schema_json() -> serde_json::Value {
         "envelope": {
             "invocation": "rift hooks <agent> <verb>  (JSON on stdin)",
             "stdin_fields": { "session": "string", "turn": "u32", "payload": "object" },
+            "native_fallback": "an object with none of the envelope keys but a session_id string is ingested whole as the payload; session = session_id, turn derived at ingest",
             "canonical_event_fields": [
                 "schema_version", "session", "turn_ordinal", "event_ordinal",
                 "kind", "trust", "occurred_at_ms", "payload_sha256"
@@ -143,10 +156,34 @@ mod tests {
         let raw = build_raw_hook("claude-code", "PreToolUse", body, 42).unwrap();
         assert_eq!(raw.agent, AgentId::CLAUDE_CODE);
         assert_eq!(raw.session, "01J");
-        assert_eq!(raw.turn, 3);
+        assert_eq!(raw.turn, Some(3));
         assert_eq!(raw.occurred_at_ms, 42);
         // a malformed agent token is rejected, not panicked
         assert!(build_raw_hook("../evil", "v", b"{}", 0).is_err());
+    }
+
+    #[test]
+    fn build_raw_hook_accepts_native_shape_without_a_shim() {
+        // M2-15: Claude Code's native hook stdin — no envelope keys, a
+        // session_id string. The whole object is the payload; the turn is left
+        // for the ingest layer to derive.
+        let body =
+            br#"{"session_id":"2227d6bc","hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
+        let raw = build_raw_hook("claude-code", "PreToolUse", body, 7).unwrap();
+        assert_eq!(raw.session, "2227d6bc");
+        assert_eq!(raw.turn, None);
+        assert_eq!(raw.payload["tool_name"], "Bash");
+        assert_eq!(raw.payload["session_id"], "2227d6bc");
+
+        // Envelope keys win: a payload-bearing envelope never falls back.
+        let env = br#"{"session":"S","payload":{"session_id":"native"}}"#;
+        let raw = build_raw_hook("claude-code", "Stop", env, 0).unwrap();
+        assert_eq!(raw.session, "S");
+        // Neither shape matches → empty defaults, still total.
+        let neither = build_raw_hook("claude-code", "Stop", b"{\"x\":1}", 0).unwrap();
+        assert_eq!(neither.session, "");
+        assert_eq!(neither.turn, None);
+        assert!(neither.payload.is_null());
     }
 
     #[test]

@@ -42,6 +42,11 @@ pub use strategy::{decide, ArchiveDecision, ArchiveReason, GitEvent, StrategyKin
 pub use trailers::{AttributionSummary, Trailers};
 pub use wire::{build_raw_hook, parse_bounded, schema_json, MAX_DEPTH, MAX_STDIN_BYTES};
 
+// Claude Code's transcript-tail usage reader (M2-15), re-exported so the bin's
+// enrichment step reaches it through the existing hooks surface (no new
+// bin→adapter crate-graph edge; this crate already depends on the adapter).
+pub use rift_agent_claude_code::transcript;
+
 // The canonical event schema is the stable agent↔ledger contract and lives in
 // `rift-core` (P8 S2) so the plugin SDK and this ingest layer share one authority.
 // Re-exported here so existing `rift_shadow::hooks::…` imports keep resolving.
@@ -67,8 +72,10 @@ pub struct RawHook {
     pub verb: String,
     /// Session id.
     pub session: String,
-    /// Turn ordinal.
-    pub turn: u32,
+    /// Turn ordinal, when the wire carried one. `None` means the agent's
+    /// native hook shape carried no turn (M2-15) — the ingest layer derives
+    /// the ordinal from the event stream and the session cache.
+    pub turn: Option<u32>,
     /// Transaction-time (epoch ms).
     pub occurred_at_ms: i64,
     /// The agent-native payload (already redacted before durable write).
@@ -160,7 +167,9 @@ pub fn dispatch(raw: &RawHook, reg: &AdapterRegistry) -> Result<Vec<CanonicalEve
     let hash = payload_hash(&raw.payload);
     for (i, ev) in events.iter_mut().enumerate() {
         ev.session.clone_from(&raw.session);
-        ev.turn_ordinal = raw.turn;
+        // A wire with no turn stamps 0 here; the ingest layer re-stamps with
+        // the derived ordinal (it owns the session cache this needs).
+        ev.turn_ordinal = raw.turn.unwrap_or(0);
         ev.event_ordinal = u32::try_from(i).unwrap_or(0);
         ev.occurred_at_ms = raw.occurred_at_ms;
         ev.payload_sha256 = hash;
@@ -293,7 +302,7 @@ mod tests {
             agent: AgentId::CLAUDE_CODE,
             verb: verb.into(),
             session: "01JSESSION".into(),
-            turn: 1,
+            turn: Some(1),
             occurred_at_ms: 1000,
             payload,
         }

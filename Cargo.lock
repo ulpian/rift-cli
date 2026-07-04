@@ -2547,6 +2547,7 @@ dependencies = [
 name = "rift-agent-claude-code"
 version = "0.0.1"
 dependencies = [
+ "proptest",
  "rift-agent",
  "rift-core",
  "serde_json",

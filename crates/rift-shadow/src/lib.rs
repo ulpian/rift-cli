@@ -130,7 +130,7 @@ mod tests {
             agent: rift_shadow_hooks::AgentId::CLAUDE_CODE,
             verb: verb.into(),
             session: "01JSESSION".into(),
-            turn: 0,
+            turn: Some(0),
             occurred_at_ms: 1,
             payload: serde_json::json!({"text": "token=AKIAIOSFODNN7EXAMPLE"}),
         }

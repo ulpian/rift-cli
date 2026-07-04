@@ -22,7 +22,7 @@ fn hook(verb: &str, turn: u32, payload: serde_json::Value) -> RawHook {
         agent: AgentId::CLAUDE_CODE,
         verb: verb.into(),
         session: "01JE2E".into(),
-        turn,
+        turn: Some(turn),
         occurred_at_ms: i64::from(turn) + 1,
         payload,
     }

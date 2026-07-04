@@ -25,7 +25,7 @@ fn session_hooks() -> Vec<RawHook> {
         agent: AgentId::CLAUDE_CODE,
         verb: verb.into(),
         session: "native-dual".into(),
-        turn,
+        turn: Some(turn),
         occurred_at_ms: at,
         payload,
     };

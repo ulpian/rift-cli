@@ -507,9 +507,11 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
     // no panic). A malformed/oversized payload or agent token defers (no write).
     let mut body = Vec::new();
     std::io::stdin().read_to_end(&mut body)?;
-    let Ok(raw) = build_raw_hook(agent, &verb, &body, now_ms()) else {
+    let Ok(mut raw) = build_raw_hook(agent, &verb, &body, now_ms()) else {
         return Ok(()); // malformed/oversized/agent token → deferred
     };
+    enrich_native_usage(&mut raw);
+    let raw = raw;
 
     let git_dir = resolve_git_dir(None);
     let store = rift_store::open_capture_projection(projection_db()?)?;
@@ -554,6 +556,68 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
         &outcome.effects,
     );
     Ok(())
+}
+
+/// Native Claude Code hooks carry no `usage` fields; the transcript named by
+/// the payload's `transcript_path` holds the provider-reported numbers
+/// (M2-15). On a turn end, read a bounded tail and inject the turn's summed
+/// usage — and its model, for pricing — into the payload before ingest.
+/// Best-effort and honest: a missing, unreadable, or usage-free transcript
+/// leaves the fields absent, never fabricated.
+fn enrich_native_usage(raw: &mut rift_shadow::hooks::RawHook) {
+    use rift_shadow::hooks::transcript::{turn_usage_from_tail, MAX_TAIL_BYTES};
+    use rift_shadow::hooks::AgentId;
+
+    if raw.agent != AgentId::CLAUDE_CODE || raw.verb != "Stop" {
+        return;
+    }
+    let Some(obj) = raw.payload.as_object_mut() else {
+        return;
+    };
+    if obj.contains_key("usage") {
+        return; // provider-carried usage always wins
+    }
+    let Some(path) = obj
+        .get("transcript_path")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    let Some(tail) = read_tail(Path::new(path), MAX_TAIL_BYTES) else {
+        return;
+    };
+    let Some(turn) = turn_usage_from_tail(&tail) else {
+        return;
+    };
+    let mut usage = serde_json::Map::new();
+    for (key, count) in [
+        ("input_tokens", turn.usage.input),
+        ("output_tokens", turn.usage.output),
+        ("cache_read_input_tokens", turn.usage.cache_read),
+        ("cache_creation_input_tokens", turn.usage.cache_write),
+    ] {
+        if let Some(n) = count {
+            usage.insert(key.to_owned(), n.into());
+        }
+    }
+    obj.insert("usage".to_owned(), usage.into());
+    if let Some(model) = turn.model {
+        obj.entry("model".to_owned())
+            .or_insert_with(|| model.into());
+    }
+}
+
+/// Read at most `cap` bytes from the end of `path`. `None` on any I/O failure.
+fn read_tail(path: &Path, cap: u64) -> Option<Vec<u8>> {
+    use std::io::{Seek as _, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len > cap {
+        f.seek(SeekFrom::Start(len.saturating_sub(cap))).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// Capture the working-tree snapshot for each boundary this hook closed.

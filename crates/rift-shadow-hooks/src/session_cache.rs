@@ -32,6 +32,11 @@ pub struct SessionCache {
     pub agent: String,
     /// The current turn ordinal.
     pub current_turn_ordinal: u32,
+    /// Whether the current turn is still open (a prompt/turn-start has been
+    /// seen and no turn-end has closed it). Drives native turn-ordinal
+    /// derivation (M2-15); absent in pre-M2-15 cache files (reads as closed).
+    #[serde(default)]
+    pub turn_open: bool,
     /// The compaction boundary ordinal, if mid-compaction.
     pub compaction_boundary: Option<u32>,
     /// Transaction-time of the last update (epoch ms).
@@ -56,6 +61,7 @@ impl SessionCache {
             state: state.to_owned(),
             agent: agent.into(),
             current_turn_ordinal: 0,
+            turn_open: false,
             compaction_boundary: None,
             updated_at_ms: now_ms,
             native_id_map: BTreeMap::new(),

@@ -118,7 +118,21 @@ pub async fn ingest_hook(
     repo_id: &str,
     now_ms: i64,
 ) -> Result<IngestOutcome> {
-    let events = dispatch(raw, registry)?;
+    let mut events = dispatch(raw, registry)?;
+
+    // The current cache, read once: it feeds both turn derivation and the
+    // state machine's starting phase.
+    let existing = session_cache::read_cache(git_dir, &raw.session)?;
+
+    // The effective turn ordinal (M2-15): an envelope-carried ordinal is
+    // trusted verbatim; a wire with none (native agent hooks) derives it from
+    // the event stream — a prompt/turn-start on a closed turn opens the next
+    // ordinal, a turn-end closes the current one. Every event of this hook is
+    // re-stamped with the result.
+    let (turn, turn_open) = effective_turn(raw.turn, &events, existing.as_ref());
+    for ev in &mut events {
+        ev.turn_ordinal = turn;
+    }
 
     // Append-only hook receipt (idempotent on its content address).
     let payload_hash = sha256_hex(&[serde_json::to_vec(&raw.payload)
@@ -139,7 +153,7 @@ pub async fn ingest_hook(
                 b"\0",
                 raw.session.as_bytes(),
                 b"\0",
-                raw.turn.to_string().as_bytes(),
+                turn.to_string().as_bytes(),
                 b"\0",
                 payload_hash.as_bytes(),
             ]),
@@ -205,7 +219,6 @@ pub async fn ingest_hook(
     }
 
     // Current phase (Idle if no cache yet).
-    let existing = session_cache::read_cache(git_dir, &raw.session)?;
     let mut state = existing
         .as_ref()
         .and_then(|c| state_from_token(&c.state))
@@ -234,7 +247,8 @@ pub async fn ingest_hook(
     });
     cache.state = String::from(state.as_str());
     cache.agent = String::from(agent_label);
-    cache.current_turn_ordinal = raw.turn;
+    cache.current_turn_ordinal = turn;
+    cache.turn_open = turn_open;
     cache.updated_at_ms = now_ms;
     session_cache::write_cache(git_dir, &cache)?;
 
@@ -262,6 +276,29 @@ pub async fn ingest_hook(
         effects,
         boundaries,
     })
+}
+
+/// The effective turn ordinal for one hook, and whether a turn is open after
+/// it (M2-15). An envelope-carried ordinal is trusted verbatim. A wire with
+/// none (native agent hooks carry no turn) derives it: a prompt/turn-start on
+/// a closed turn opens ordinal N+1; further events ride the open turn; a
+/// turn-end closes it. A prompt queued mid-turn stays in the open turn.
+fn effective_turn(
+    envelope_turn: Option<u32>,
+    events: &[rift_shadow_hooks::CanonicalEvent],
+    cache: Option<&SessionCache>,
+) -> (u32, bool) {
+    let opens = events
+        .iter()
+        .any(|e| matches!(e.kind, EventKind::PromptSubmit | EventKind::TurnStart));
+    let ends = events.iter().any(|e| e.kind == EventKind::TurnEnd);
+    let (current, was_open) = cache.map_or((0, false), |c| (c.current_turn_ordinal, c.turn_open));
+    let turn = match envelope_turn {
+        Some(t) => t,
+        None if opens && !was_open => current.saturating_add(1),
+        None => current,
+    };
+    (turn, (was_open || opens) && !ends)
 }
 
 /// Drive the `Ending → Ended` transition after a condense completes, refreshing
@@ -306,7 +343,7 @@ mod tests {
             agent: AgentId::CLAUDE_CODE,
             verb: verb.into(),
             session: "01JSESSION".into(),
-            turn,
+            turn: Some(turn),
             occurred_at_ms: 1,
             payload: serde_json::json!({"tool_name": "Bash"}),
         }
@@ -419,11 +456,98 @@ mod tests {
 
         // A distinct turn is a distinct logical event → new rows.
         let mut edit2 = edit.clone();
-        edit2.turn = 2;
+        edit2.turn = Some(2);
         ingest_hook(&edit2, &reg, &s, git_dir, "claude-code", "repo-1", 100)
             .await
             .unwrap();
         assert_eq!(s.count("captured_event").await.unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn native_hooks_derive_turn_ordinals_from_the_event_stream() {
+        // M2-15: Claude Code's native stdin carries no turn. Ordinals derive:
+        // a prompt opens turn 1, tool events ride it, Stop closes it; the next
+        // prompt opens turn 2.
+        let s = store();
+        let reg = AdapterRegistry::with_builtin();
+        let tmp = tempfile::tempdir().unwrap();
+        let git_dir = tmp.path();
+        let native = |verb: &str, at: i64| RawHook {
+            agent: AgentId::CLAUDE_CODE,
+            verb: verb.into(),
+            session: "native-sess".into(),
+            turn: None,
+            occurred_at_ms: at,
+            payload: serde_json::json!({"session_id": "native-sess", "tool_name": "Bash"}),
+        };
+        let ingest = |raw: RawHook, at: i64| {
+            let (s, reg) = (&s, &reg);
+            async move {
+                ingest_hook(&raw, reg, s, git_dir, "claude-code", "repo-1", at)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        ingest(native("SessionStart", 10), 10).await;
+        let o = ingest(native("UserPromptSubmit", 20), 20).await;
+        assert_eq!(
+            o.boundaries,
+            vec![(1, crate::turn_boundary::Boundary::Start)],
+            "the first prompt opens turn 1"
+        );
+        ingest(native("PreToolUse", 30), 30).await;
+        let cache = session_cache::read_cache(git_dir, "native-sess")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cache.current_turn_ordinal, 1);
+        assert!(cache.turn_open, "tool events ride the open turn");
+
+        let o = ingest(native("Stop", 40), 40).await;
+        assert_eq!(o.boundaries, vec![(1, crate::turn_boundary::Boundary::End)]);
+        let o = ingest(native("UserPromptSubmit", 50), 50).await;
+        assert_eq!(
+            o.boundaries,
+            vec![(2, crate::turn_boundary::Boundary::Start)],
+            "the next prompt opens turn 2"
+        );
+        let o = ingest(native("Stop", 60), 60).await;
+        assert_eq!(o.boundaries, vec![(2, crate::turn_boundary::Boundary::End)]);
+        let cache = session_cache::read_cache(git_dir, "native-sess")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cache.current_turn_ordinal, 2);
+        assert!(!cache.turn_open);
+    }
+
+    #[test]
+    fn effective_turn_trusts_envelope_and_handles_queued_prompts() {
+        use rift_shadow_hooks::{CanonicalEvent, Trust};
+        let ev = |kind: EventKind| CanonicalEvent {
+            schema_version: 1,
+            session: String::new(),
+            turn_ordinal: 0,
+            event_ordinal: 0,
+            kind,
+            trust: Trust::GitFact,
+            occurred_at_ms: 0,
+            payload_sha256: rift_core::Sha256Id::from_bytes([0u8; 32]),
+        };
+        let mut cache = SessionCache::new("s", "claude-code", "active", 0);
+        cache.current_turn_ordinal = 4;
+        cache.turn_open = true;
+        // Envelope ordinal wins verbatim, even against a divergent cache.
+        let (t, _) = effective_turn(Some(9), &[ev(EventKind::ToolCall)], Some(&cache));
+        assert_eq!(t, 9);
+        // A prompt queued while the turn is open stays in the open turn.
+        let (t, open) = effective_turn(None, &[ev(EventKind::PromptSubmit)], Some(&cache));
+        assert_eq!((t, open), (4, true));
+        // No cache at all: the first prompt opens turn 1.
+        let (t, open) = effective_turn(None, &[ev(EventKind::PromptSubmit)], None);
+        assert_eq!((t, open), (1, true));
+        // A stray turn-end with nothing open stays honest at 0, closed.
+        let (t, open) = effective_turn(None, &[ev(EventKind::TurnEnd)], None);
+        assert_eq!((t, open), (0, false));
     }
 
     #[tokio::test]
