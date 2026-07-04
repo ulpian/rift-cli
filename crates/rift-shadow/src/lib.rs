@@ -37,19 +37,28 @@ pub mod executor;
 pub mod ids;
 pub mod parity;
 pub mod project;
+pub mod promotion;
 pub mod provision;
 pub mod turn_boundary;
 
 pub use artifact_bridge::{ingest_from_substrate, BridgeReport, RefusedShard, CHECKPOINT_BRANCH};
 pub use backend::{
-    persist_divergences, Capability, Divergence, EntireBackend, NativeBackend, Route, RouteTable,
-    RoutedBackend, ShadowBackend,
+    persist_divergences, ArchivedEvent, Capability, CheckpointArchive, Divergence, EntireBackend,
+    NativeBackend, RedactionReportView, Route, RouteTable, RoutedBackend, ShadowBackend,
+    NATIVE_CANON_VERSION, NATIVE_CHECKPOINT_REF,
 };
 pub use bridge::{ingest_hook, trigger_for, IngestOutcome};
 pub use commit_capture::{archive_and_capture, archive_and_capture_with, persist_commit_capture};
 pub use condense::{condense, predicted_checkpoint_id, CheckpointId};
 pub use executor::{run_decision, RepoSerializer};
-pub use parity::{parity_report, run_parity, Fidelity, ParityCase, ParityResult};
+pub use parity::{
+    all_match, anchors_from_fixture, anchors_root, capability_matches, fixture_archive,
+    fixture_names, parity_report, render_report, run_behavior, AnchorSource, Fidelity,
+    GoldenAnchors, ParityBehavior, ParityResult,
+};
+pub use promotion::{
+    can_promote_to_dual_run, can_promote_to_native, SoakEvidence, SOAK_MIN_CONSECUTIVE_CLEAN,
+};
 pub use provision::{provision_and_audit, record_block, record_provision_skip};
 pub use turn_boundary::{attribution_preview, capture_boundary, enrich_attribution, Boundary};
 

@@ -11,11 +11,10 @@
 use std::path::Path;
 
 use rift_core::{Result, SecretBytes};
-use rift_shadow_entire::CaptureIntent;
 use rift_shadow_hooks::strategy::{ArchiveReason, StrategyKind};
 use rift_store::{record_archive_decision, ArchiveDecisionRow, CanonicalStore};
 
-use crate::backend::ShadowBackend;
+use crate::backend::{CheckpointArchive, RedactionReportView, ShadowBackend};
 use crate::sha256_hex;
 
 /// A content-addressed checkpoint id (lowercase hex).
@@ -61,14 +60,28 @@ pub async fn condense(
     // checkpoint id is content-addressed over the *redacted* form.
     let out = rift_shadow_redact::redact(raw_capture)?;
     let checkpoint_id = checkpoint_id_for(session, out.redacted.as_slice());
+    let report = RedactionReportView::from_redact(&out.report);
 
     // The backend writes the shard. Behind the `ShadowBackend` seam this is the
-    // wrapper today (and the native rewrite once promoted, P7) — callers are agnostic.
-    let intent = CaptureIntent::ArchiveCheckpoint {
+    // wrapper today (and the native rewrite once promoted, P7) — callers are
+    // agnostic. The archive carries `repo`/`commit` for the wrapper and the full
+    // structural content (id, sessions, strategy, merkle root, redacted capture,
+    // redaction report) for the native writer. In v0.1 no per-turn event stream is
+    // threaded here yet, so the Merkle root is over the empty leaf set.
+    let archive = CheckpointArchive {
         repo: repo.to_path_buf(),
         commit: commit_oid.to_owned(),
+        checkpoint_id: checkpoint_id.clone(),
+        sessions: vec![session.to_owned()],
+        strategy: strategy.as_str().to_owned(),
+        prev_hash: None,
+        merkle_root: crate::checkpoint_merkle_root(&[]),
+        events: Vec::new(),
+        content: out.redacted,
+        report,
+        created_at_ms: now_ms,
     };
-    if let Err(e) = backend.archive_checkpoint(&intent) {
+    if let Err(e) = backend.archive_checkpoint(&archive) {
         // A default-deny refusal is an audited fact (P1 S3), not just an error:
         // the archive root verb is the refused token. Audit best-effort — the
         // refusal itself must still surface even if the audit insert fails.
@@ -180,7 +193,7 @@ mod tests {
         /// A backend that refuses every archive as a policy block (screen refusal).
         struct RefusingBackend;
         impl ShadowBackend for RefusingBackend {
-            fn archive_checkpoint(&self, _intent: &CaptureIntent) -> rift_core::Result<()> {
+            fn archive_checkpoint(&self, _archive: &CheckpointArchive) -> rift_core::Result<()> {
                 Err(rift_core::RiftError::PolicyDenied("refused".into()))
             }
         }

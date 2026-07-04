@@ -1,0 +1,86 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "'/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift' hooks claude-code PostToolUse",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "'/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift' hooks claude-code PreCompact",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "'/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift' hooks claude-code PreToolUse",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "'/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift' hooks claude-code SessionEnd",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "'/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift' hooks claude-code SessionStart",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "'/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift' hooks claude-code Stop",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "'/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift' hooks claude-code SubagentStop",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "'/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift' hooks claude-code UserPromptSubmit",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -36,6 +36,12 @@ pub struct CheckpointMetadata {
     /// a checkpoint to a real commit for reachability; absent ⇒ no outcome label.
     #[serde(default, alias = "commit_oid", alias = "head")]
     pub commit: Option<String>,
+    /// The redaction/canonicalization epoch (P7 migration decision, ADR-0018).
+    /// A native checkpoint carries `1`; a pre-rewrite (Entire) checkpoint omits
+    /// this field and is read as epoch `0`, so `verify` selects the matching leaf
+    /// canonicalization and the two epochs coexist.
+    #[serde(default)]
+    pub canon_version: Option<u32>,
 }
 
 /// One per-file authorship fact from `attribution.json`.

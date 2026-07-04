@@ -41,3 +41,7 @@ tempfile = { workspace = true }
 # The bridge report is a snapshot-locked contract (PRD-M1 testing decisions).
 insta = { workspace = true }
 proptest = { workspace = true }
+# The native-archive round-trip test reads the shard it wrote back through the
+# production gix substrate reader (cross-implementation verify, P7 story 17).
+rift-recall-substrate = { version = "0.0.1", path = "../rift-recall-substrate", features = ["gix"] }
+rift-git = { version = "0.0.1", path = "../rift-git", features = ["gix"] }

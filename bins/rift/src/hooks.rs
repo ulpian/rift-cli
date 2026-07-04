@@ -294,8 +294,11 @@ fn on_pr_archive(git_dir: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Run one live archive through the routed wrapper backend (a no-op when the
-/// backend is not provisioned — capture never blocks the git op).
+/// Run one live archive through the per-capability route table (P7 / ADR-0018,
+/// loaded from `.rift/rewrite.toml` — promotion is config, not a code edit). A
+/// `Native`-routed archive needs no wrapper binary; a `Wrapper`/`DualRun` archive
+/// defers when the pinned binary is not provisioned. Dual-run divergences are
+/// persisted append-only as the soak evidence. Capture never blocks the git op.
 fn archive_now(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
@@ -305,24 +308,58 @@ fn archive_now(
     decision: rift_shadow::hooks::strategy::ArchiveDecision,
     now: i64,
 ) -> Result<()> {
-    use rift_shadow::backend::{EntireBackend, NativeBackend, RouteTable, RoutedBackend};
+    use rift_shadow::backend::{
+        Capability, EntireBackend, NativeBackend, Route, RouteTable, RoutedBackend,
+    };
     use rift_shadow::entire::SystemRunner;
 
+    let repo = rift_git::discover(work_tree)?;
+    let routes = RouteTable::load(&repo.work_tree.join(".rift"));
+    let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
+    let raw = session_raw_capture();
+
+    // A fully-native archive writes the shard itself — no wrapper binary required.
+    if matches!(routes.route(Capability::Archive), Route::Native) {
+        rt.block_on(rift_shadow::run_decision(
+            &native, store, work_tree, session, &raw, decision, commit, now,
+        ))?;
+        return Ok(());
+    }
+
+    // Wrapper / DualRun: the pinned binary is required (defer if absent).
     let Some(binary) = provisioned_binary() else {
         tracing::debug!("archive skipped: capture backend not provisioned");
         return Ok(());
     };
+    let dual = matches!(routes.route(Capability::Archive), Route::DualRun);
     let runner = SystemRunner::new(binary);
-    let backend = RoutedBackend::new(
-        EntireBackend::new(&runner),
-        NativeBackend,
-        RouteTable::all_wrapper(),
-    );
-    let raw = session_raw_capture();
+    let backend = RoutedBackend::new(EntireBackend::new(&runner), native, routes);
     rt.block_on(rift_shadow::run_decision(
         &backend, store, work_tree, session, &raw, decision, commit, now,
     ))?;
+    if dual {
+        persist_dual_run(rt, store, &backend.take_divergences(), session, commit, now);
+    }
     Ok(())
+}
+
+/// Persist a dual-run window's divergences append-only (the soak evidence, P7
+/// story 21). Best-effort — capture never blocks the git op on a log write.
+fn persist_dual_run(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    divergences: &[rift_shadow::Divergence],
+    session: &str,
+    commit: &str,
+    now: i64,
+) {
+    let run_id = format!("dualrun-{session}-{commit}-{now}");
+    let _ = rt.block_on(rift_shadow::persist_divergences(
+        store,
+        &run_id,
+        divergences,
+        now,
+    ));
 }
 
 /// The per-repo projection db path for `work_tree` (honors `RIFT_CACHE_DIR`).
@@ -446,14 +483,31 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
             },
         );
         if decision.archive {
+            use rift_shadow::backend::{Capability, Route};
+            let routes = RouteTable::load(&repo.work_tree.join(".rift"));
+            let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
+            let raw = session_raw_capture();
+
+            // A fully-native archive writes the shard itself — no wrapper binary.
+            if matches!(routes.route(Capability::Archive), Route::Native) {
+                rt.block_on(rift_shadow::archive_and_capture_with(
+                    &capture,
+                    &native,
+                    &store,
+                    &repo.work_tree,
+                    &commit,
+                    &sess.session_id,
+                    &raw,
+                    decision,
+                    now,
+                ))?;
+                return Ok(());
+            }
+            // Wrapper / DualRun: archive through the pinned binary when provisioned.
             if let Some(binary) = provisioned_binary() {
+                let dual = matches!(routes.route(Capability::Archive), Route::DualRun);
                 let runner = SystemRunner::new(binary);
-                let backend = RoutedBackend::new(
-                    EntireBackend::new(&runner),
-                    NativeBackend,
-                    RouteTable::all_wrapper(),
-                );
-                let raw = session_raw_capture();
+                let backend = RoutedBackend::new(EntireBackend::new(&runner), native, routes);
                 rt.block_on(rift_shadow::archive_and_capture_with(
                     &capture,
                     &backend,
@@ -465,8 +519,20 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
                     decision,
                     now,
                 ))?;
+                if dual {
+                    persist_dual_run(
+                        &rt,
+                        &store,
+                        &backend.take_divergences(),
+                        &sess.session_id,
+                        &commit,
+                        now,
+                    );
+                }
                 return Ok(());
             }
+            // Wrapper/DualRun route but no provisioned binary: fall through and
+            // still record the durable C-diff facts (no checkpoint to anchor).
         }
     }
 

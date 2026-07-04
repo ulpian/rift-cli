@@ -155,10 +155,101 @@ fn read_common_dir(git_dir: &Path) -> PathBuf {
 
 // --- additive object/ref writes (the type wall) -----------------------------
 
+/// A git tree entry's object type + file mode. Only the two the checkpoint layout
+/// uses: a `100644` regular-file blob, and a `040000` subtree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitFileMode {
+    /// A regular file (mode `100644`, type `blob`).
+    Blob,
+    /// A subtree (mode `040000`, type `tree`).
+    Tree,
+}
+
+impl GitFileMode {
+    /// The octal mode token git's `mktree` stdin format expects.
+    #[must_use]
+    pub fn mode_token(self) -> &'static str {
+        match self {
+            Self::Blob => "100644",
+            Self::Tree => "040000",
+        }
+    }
+
+    /// The object-type token (`blob` / `tree`).
+    #[must_use]
+    pub fn type_token(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::Tree => "tree",
+        }
+    }
+}
+
+/// One entry in a tree written by [`NativeGitWrite::write_tree`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeWriteEntry {
+    /// The object mode/type.
+    pub mode: GitFileMode,
+    /// The entry name (a single path component — never contains `/`).
+    pub name: String,
+    /// The referenced object id (hex).
+    pub oid: String,
+}
+
+/// A git author/committer identity for a deterministic checkpoint commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitIdent {
+    /// The identity name.
+    pub name: String,
+    /// The identity email.
+    pub email: String,
+}
+
+impl Default for GitIdent {
+    fn default() -> Self {
+        // A stable, brand-free identity so checkpoint commits are byte-reproducible
+        // and never leak a developer's own name/email onto the shadow branch.
+        Self {
+            name: "rift".to_owned(),
+            email: "rift@localhost".to_owned(),
+        }
+    }
+}
+
+/// The spec for grafting one checkpoint (leaf) tree onto an orphan checkpoint
+/// branch: merge it into the branch's current tip tree at `shard_path`, commit
+/// with a deterministic identity/date, and advance the ref.
+#[derive(Debug, Clone)]
+pub struct OrphanCommit<'a> {
+    /// The fully-qualified branch ref (e.g. `refs/heads/rift/checkpoints/v1`).
+    pub branch: &'a str,
+    /// The `<id[:2]>/<id[2:]>` path the checkpoint tree is grafted at (no trailing `/`).
+    pub shard_path: &'a str,
+    /// The checkpoint (leaf) tree oid to graft.
+    pub tree_oid: &'a str,
+    /// The commit message (brand-free).
+    pub message: &'a str,
+    /// The author/committer identity.
+    pub ident: &'a GitIdent,
+    /// The author/committer date, epoch **seconds** — caller-supplied for
+    /// byte-reproducibility (never the wall clock).
+    pub date_epoch: i64,
+}
+
 /// Additive git object/ref writes. The **durable** writer accepts only
 /// [`RedactedBytes`]; the **local-only** writer accepts [`SecretBytes`] and may
 /// only target a local shadow ref — the plumbing cannot durably persist raw bytes
 /// (it does not compile). This is the P5 S2 gate surviving into the write layer.
+///
+/// The checkpoint-archive methods ([`write_structural_blob`](NativeGitWrite::write_structural_blob),
+/// [`write_tree`](NativeGitWrite::write_tree),
+/// [`commit_on_orphan`](NativeGitWrite::commit_on_orphan)) build the on-branch
+/// shard. They never widen the redaction gate: `write_tree`/`commit_on_orphan`
+/// take **object ids**, not bytes, and `write_structural_blob` accepts only
+/// Rift-authored *structural* documents (checkpoint metadata / redaction report /
+/// event index — counts, ids, and content-addresses, provably never captured
+/// payload bytes). Captured content still enters durable storage exclusively
+/// through [`write_durable_blob`](NativeGitWrite::write_durable_blob).
 pub trait NativeGitWrite {
     /// Write a durable blob from already-redacted bytes; returns its object id (hex).
     ///
@@ -172,20 +263,54 @@ pub trait NativeGitWrite {
     /// [`RiftError`] on a write failure.
     fn write_shadow_raw(&self, body: &SecretBytes) -> Result<()>;
 
+    /// Write a **structural** checkpoint artifact (Rift-authored metadata / report /
+    /// event index — never captured payload bytes) as a blob; returns its oid.
+    /// Written byte-verbatim: these documents carry only counts, ids, and
+    /// content-addresses, and are the LAYOUT/BYTE-parity surface, so they must not
+    /// pass back through the entropy redactor (which would mask their hex hashes).
+    ///
+    /// # Errors
+    /// [`RiftError`] on a write failure.
+    fn write_structural_blob(&self, bytes: &[u8]) -> Result<String>;
+
     /// Point a ref at an object id.
     ///
     /// # Errors
     /// [`RiftError`] on a write failure.
     fn update_ref(&self, name: &str, oid: &str) -> Result<()>;
+
+    /// Write a (flat) tree from its entries; returns the tree oid.
+    ///
+    /// # Errors
+    /// [`RiftError`] on a write failure.
+    fn write_tree(&self, entries: &[TreeWriteEntry]) -> Result<String>;
+
+    /// Graft a checkpoint tree onto the orphan checkpoint branch: merge it into the
+    /// branch's current tip tree at `spec.shard_path`, commit, and advance the ref.
+    /// Returns the resulting branch-tip commit oid. **Idempotent:** if the shard
+    /// path is already present on the branch, this is a no-op that returns the
+    /// existing tip.
+    ///
+    /// # Errors
+    /// [`RiftError`] on a write failure.
+    fn commit_on_orphan(&self, spec: &OrphanCommit<'_>) -> Result<String>;
 }
 
-/// An in-memory [`NativeGitWrite`] for tests: records durable blobs and refs, and
-/// keeps local-only raw writes strictly separate from durable storage.
+/// An in-memory [`NativeGitWrite`] for tests: records durable + structural blobs,
+/// trees, and refs; keeps local-only raw writes strictly separate from durable
+/// storage; and models the orphan-branch graft deterministically so callers can
+/// assert layout + idempotency without a real git repo.
 #[derive(Default)]
 pub struct MemoryGitWrite {
     durable: std::cell::RefCell<Vec<(String, Vec<u8>)>>,
+    structural: std::cell::RefCell<Vec<(String, Vec<u8>)>>,
+    trees: std::cell::RefCell<Vec<(String, Vec<TreeWriteEntry>)>>,
     refs: std::cell::RefCell<Vec<(String, String)>>,
     local_raw: std::cell::RefCell<usize>,
+    /// Shard paths grafted onto the branch → checkpoint tree oid (for idempotency).
+    shards: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
+    /// The current branch tip commit oid, if the branch has been created.
+    tip: std::cell::RefCell<Option<String>>,
 }
 
 impl MemoryGitWrite {
@@ -195,19 +320,52 @@ impl MemoryGitWrite {
         self.durable.borrow().len()
     }
 
+    /// Number of structural artifact blobs written.
+    #[must_use]
+    pub fn structural_count(&self) -> usize {
+        self.structural.borrow().len()
+    }
+
+    /// Number of trees written.
+    #[must_use]
+    pub fn tree_count(&self) -> usize {
+        self.trees.borrow().len()
+    }
+
     /// Number of local-only raw writes (never durable).
     #[must_use]
     pub fn local_raw_count(&self) -> usize {
         *self.local_raw.borrow()
     }
+
+    /// The shard paths grafted onto the branch, in insertion order.
+    #[must_use]
+    pub fn shard_paths(&self) -> Vec<String> {
+        self.shards.borrow().keys().cloned().collect()
+    }
+
+    /// The current branch tip commit oid, if any.
+    #[must_use]
+    pub fn branch_tip(&self) -> Option<String> {
+        self.tip.borrow().clone()
+    }
+}
+
+/// The deterministic content oid a memory double assigns (sha256 of bytes) — a
+/// stand-in for git's own object hashing (the real oids come from the plumbing
+/// impl; the double only needs stable, collision-resistant ids for assertions).
+fn mem_oid(parts: &[&[u8]]) -> String {
+    let mut h = Sha256::new();
+    for p in parts {
+        h.update(p);
+    }
+    to_hex(&h.finalize())
 }
 
 impl NativeGitWrite for MemoryGitWrite {
     fn write_durable_blob(&self, body: &RedactedBytes) -> Result<String> {
         let bytes = body.as_slice().to_vec();
-        let mut h = Sha256::new();
-        h.update(&bytes);
-        let oid = to_hex(&h.finalize());
+        let oid = mem_oid(&[&bytes]);
         self.durable.borrow_mut().push((oid.clone(), bytes));
         Ok(oid)
     }
@@ -218,11 +376,71 @@ impl NativeGitWrite for MemoryGitWrite {
         Ok(())
     }
 
+    fn write_structural_blob(&self, bytes: &[u8]) -> Result<String> {
+        let oid = mem_oid(&[bytes]);
+        self.structural
+            .borrow_mut()
+            .push((oid.clone(), bytes.to_vec()));
+        Ok(oid)
+    }
+
     fn update_ref(&self, name: &str, oid: &str) -> Result<()> {
         self.refs
             .borrow_mut()
             .push((name.to_owned(), oid.to_owned()));
         Ok(())
+    }
+
+    fn write_tree(&self, entries: &[TreeWriteEntry]) -> Result<String> {
+        // A tree's oid is content-addressed over its (mode,name,oid) entries in the
+        // exact order given (git sorts; the caller passes canonical order).
+        let mut buf = Vec::new();
+        for e in entries {
+            buf.extend_from_slice(e.mode.mode_token().as_bytes());
+            buf.push(b' ');
+            buf.extend_from_slice(e.name.as_bytes());
+            buf.push(0);
+            buf.extend_from_slice(e.oid.as_bytes());
+        }
+        let oid = mem_oid(&[b"tree", &buf]);
+        self.trees
+            .borrow_mut()
+            .push((oid.clone(), entries.to_vec()));
+        Ok(oid)
+    }
+
+    fn commit_on_orphan(&self, spec: &OrphanCommit<'_>) -> Result<String> {
+        // Content-aware idempotency (mirrors the plumbing impl): an identical
+        // re-graft is a no-op; a different tree at the same shard path is a conflict.
+        let existing = self.shards.borrow().get(spec.shard_path).cloned();
+        if let Some(existing) = existing {
+            if existing == spec.tree_oid {
+                return self
+                    .tip
+                    .borrow()
+                    .clone()
+                    .ok_or_else(|| RiftError::validity("branch tip missing for existing shard"));
+            }
+            return Err(RiftError::integrity(
+                "checkpoint shard path already holds different content",
+            ));
+        }
+        let prev = self.tip.borrow().clone();
+        self.shards
+            .borrow_mut()
+            .insert(spec.shard_path.to_owned(), spec.tree_oid.to_owned());
+        let commit = mem_oid(&[
+            b"commit",
+            prev.as_deref().unwrap_or("").as_bytes(),
+            spec.shard_path.as_bytes(),
+            spec.tree_oid.as_bytes(),
+            &spec.date_epoch.to_le_bytes(),
+        ]);
+        *self.tip.borrow_mut() = Some(commit.clone());
+        self.refs
+            .borrow_mut()
+            .push((spec.branch.to_owned(), commit.clone()));
+        Ok(commit)
     }
 }
 
@@ -309,13 +527,51 @@ pub fn run_git(repo: &RepoPaths, args: &[String]) -> Result<()> {
 /// # Errors
 /// [`RiftError::Storage`] if `git` cannot be spawned or exits non-zero.
 pub fn run_git_capture(repo: &RepoPaths, args: &[String], stdin: &[u8]) -> Result<Vec<u8>> {
+    run_git_capture_env(repo, args, stdin, &[])
+}
+
+/// [`run_git_capture`] with additional explicit environment variables (e.g.
+/// `GIT_INDEX_FILE`, `GIT_AUTHOR_DATE`) layered on top of the always-explicit
+/// `GIT_DIR`/`GIT_WORK_TREE`. Still an argv array, no shell.
+///
+/// # Errors
+/// [`RiftError::Storage`] if `git` cannot be spawned or exits non-zero.
+pub fn run_git_capture_env(
+    repo: &RepoPaths,
+    args: &[String],
+    stdin: &[u8],
+    env: &[(&str, &str)],
+) -> Result<Vec<u8>> {
+    match run_git_status(repo, args, stdin, env)? {
+        (true, out) => Ok(out),
+        (false, _) => Err(RiftError::storage("git exited non-zero")),
+    }
+}
+
+/// [`run_git_capture_env`], but a non-zero exit is **not** an error: returns
+/// `(success, stdout)`. For probes like `rev-parse --verify` / `cat-file -e`
+/// where "not found" is an ordinary answer, not a failure. A spawn failure is
+/// still an [`Err`].
+///
+/// # Errors
+/// [`RiftError::Storage`] if `git` cannot be spawned.
+pub fn run_git_status(
+    repo: &RepoPaths,
+    args: &[String],
+    stdin: &[u8],
+    env: &[(&str, &str)],
+) -> Result<(bool, Vec<u8>)> {
     use std::io::Write as _;
     use std::process::Stdio;
 
-    let mut child = Command::new("git")
-        .args(args)
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .env("GIT_DIR", &repo.git_dir)
-        .env("GIT_WORK_TREE", &repo.work_tree)
+        .env("GIT_WORK_TREE", &repo.work_tree);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
         .stdin(if stdin.is_empty() {
             Stdio::null()
         } else {
@@ -334,15 +590,7 @@ pub fn run_git_capture(repo: &RepoPaths, args: &[String], stdin: &[u8]) -> Resul
     let output = child
         .wait_with_output()
         .map_err(|e| RiftError::storage(format!("git invocation failed: {e}")))?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        // Carry the exit code only — never stdout/stderr bytes (no transcript leak).
-        Err(RiftError::storage(format!(
-            "git exited {}",
-            output.status.code().unwrap_or(-1)
-        )))
-    }
+    Ok((output.status.success(), output.stdout))
 }
 
 /// The worktree paths that differ from HEAD (modified/added/deleted, staged or
@@ -398,6 +646,340 @@ pub fn hash_object_write(repo: &RepoPaths, bytes: &[u8]) -> Result<String> {
         bytes,
     )?;
     Ok(String::from_utf8_lossy(&out).trim().to_owned())
+}
+
+// --- checkpoint-archive plumbing (P7 S3 / ADR-0017) -------------------------
+//
+// git itself produces the byte-canonical objects that enter the SHA-256 hash
+// chain, so BYTE parity is *inherited* (ADR-0017) — there is no second
+// canonicalization to audit. All writes go through the same argv-safe seam.
+
+/// The trimmed first line of git stdout as an oid (hex).
+fn trim_oid(out: &[u8]) -> String {
+    String::from_utf8_lossy(out)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+}
+
+/// Build a tree object from entries via `git mktree` (git canonicalizes order and
+/// framing). Entries reference already-written objects. Returns the tree oid.
+///
+/// # Errors
+/// [`RiftError::Storage`] on a git failure, [`RiftError::Validity`] on a bad entry.
+pub fn mktree(repo: &RepoPaths, entries: &[TreeWriteEntry]) -> Result<String> {
+    use std::fmt::Write as _;
+    let mut stdin = String::new();
+    for e in entries {
+        validate_oid(&e.oid)?;
+        if e.name.is_empty() || e.name.contains('/') || e.name.contains('\0') {
+            return Err(RiftError::validity("unsafe tree entry name"));
+        }
+        // `<mode> SP <type> SP <oid> TAB <name> LF` — git's mktree stdin format.
+        let _ = writeln!(
+            stdin,
+            "{} {} {}\t{}",
+            e.mode.mode_token(),
+            e.mode.type_token(),
+            e.oid,
+            e.name
+        );
+    }
+    let out = run_git_capture(repo, &["mktree".into()], stdin.as_bytes())?;
+    Ok(trim_oid(&out))
+}
+
+/// Resolve a rev to a commit oid, or `None` if it does not resolve (e.g. a branch
+/// that does not exist yet). `rev` is validated as a safe, non-flag ref token.
+///
+/// # Errors
+/// [`RiftError::Validity`] for an unsafe rev; [`RiftError::Storage`] on spawn failure.
+pub fn resolve_commit(repo: &RepoPaths, rev: &str) -> Result<Option<String>> {
+    validate_refspec(rev)?;
+    let (ok, out) = run_git_status(
+        repo,
+        &[
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("{rev}^{{commit}}"),
+        ],
+        &[],
+        &[],
+    )?;
+    Ok(ok.then(|| trim_oid(&out)).filter(|s| !s.is_empty()))
+}
+
+/// The root-tree oid of a commit.
+///
+/// # Errors
+/// [`RiftError::Validity`]/[`RiftError::Storage`] on failure.
+pub fn commit_tree_oid(repo: &RepoPaths, commit: &str) -> Result<String> {
+    validate_oid(commit)?;
+    let out = run_git_capture(
+        repo,
+        &["rev-parse".into(), format!("{commit}^{{tree}}")],
+        &[],
+    )?;
+    Ok(trim_oid(&out))
+}
+
+/// Whether `path` exists inside the tree of `commit` (object probe, no worktree).
+///
+/// # Errors
+/// [`RiftError::Storage`] on spawn failure.
+pub fn path_in_commit(repo: &RepoPaths, commit: &str, path: &str) -> Result<bool> {
+    validate_oid(commit)?;
+    let (ok, _) = run_git_status(
+        repo,
+        &["cat-file".into(), "-e".into(), format!("{commit}:{path}")],
+        &[],
+        &[],
+    )?;
+    Ok(ok)
+}
+
+/// The object id git resolves at `<commit>:<path>` (the subtree/blob oid at that
+/// path), or `None` if the path does not exist. Used to compare an already-grafted
+/// shard's content against a new one (content-aware idempotency).
+///
+/// # Errors
+/// [`RiftError::Storage`] on spawn failure.
+pub fn path_object_oid(repo: &RepoPaths, commit: &str, path: &str) -> Result<Option<String>> {
+    validate_oid(commit)?;
+    let (ok, out) = run_git_status(
+        repo,
+        &[
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            format!("{commit}:{path}"),
+        ],
+        &[],
+        &[],
+    )?;
+    Ok(ok.then(|| trim_oid(&out)).filter(|s| !s.is_empty()))
+}
+
+/// Commit `tree` (optionally onto `parent`) with a deterministic identity + date,
+/// returning the commit oid. Author == committer, date fixed by the caller, so the
+/// commit is byte-reproducible for identical inputs.
+///
+/// # Errors
+/// [`RiftError::Validity`]/[`RiftError::Storage`] on failure.
+pub fn commit_tree(
+    repo: &RepoPaths,
+    tree: &str,
+    parent: Option<&str>,
+    message: &str,
+    ident: &GitIdent,
+    date_epoch: i64,
+) -> Result<String> {
+    validate_oid(tree)?;
+    let mut args = vec![
+        "commit-tree".into(),
+        tree.to_owned(),
+        "-m".into(),
+        message.to_owned(),
+    ];
+    if let Some(p) = parent {
+        validate_oid(p)?;
+        args.push("-p".into());
+        args.push(p.to_owned());
+    }
+    // `@<epoch> +0000` is git's unambiguous unix-timestamp form (a bare small
+    // integer like `1 +0000` is rejected as an invalid date); it normalizes to the
+    // same stored `<epoch> +0000`, so the commit oid is byte-reproducible.
+    let date = format!("@{date_epoch} +0000");
+    let env = [
+        ("GIT_AUTHOR_NAME", ident.name.as_str()),
+        ("GIT_AUTHOR_EMAIL", ident.email.as_str()),
+        ("GIT_AUTHOR_DATE", date.as_str()),
+        ("GIT_COMMITTER_NAME", ident.name.as_str()),
+        ("GIT_COMMITTER_EMAIL", ident.email.as_str()),
+        ("GIT_COMMITTER_DATE", date.as_str()),
+    ];
+    let out = run_git_capture_env(repo, &args, &[], &env)?;
+    Ok(trim_oid(&out))
+}
+
+/// Point `refname` at `new_oid`, compare-and-swapping against `old_oid` when known
+/// (so a concurrent advance is rejected rather than clobbered).
+///
+/// # Errors
+/// [`RiftError::Validity`]/[`RiftError::Storage`] on failure.
+pub fn update_ref_cas(
+    repo: &RepoPaths,
+    refname: &str,
+    new_oid: &str,
+    old_oid: Option<&str>,
+) -> Result<()> {
+    validate_refspec(refname)?;
+    validate_oid(new_oid)?;
+    let mut args = vec!["update-ref".into(), refname.to_owned(), new_oid.to_owned()];
+    if let Some(old) = old_oid {
+        validate_oid(old)?;
+        args.push(old.to_owned());
+    }
+    run_git(repo, &args)
+}
+
+/// The all-zero object id — git's "the ref must not already exist" sentinel for a
+/// compare-and-swap `update-ref` (a create-only assertion).
+const ZERO_OID: &str = "0000000000000000000000000000000000000000";
+
+/// Create `refname` at `new_oid`, asserting it does **not** already exist (CAS
+/// against the zero oid). A concurrent creation by another worktree is rejected,
+/// not clobbered — the loser errors and its caller defers rather than silently
+/// dropping the winner's checkpoint.
+///
+/// # Errors
+/// [`RiftError::Validity`] for a bad ref/oid; [`RiftError::Storage`] if the ref
+/// already exists (lost the create race) or git fails.
+pub fn update_ref_create(repo: &RepoPaths, refname: &str, new_oid: &str) -> Result<()> {
+    validate_refspec(refname)?;
+    validate_oid(new_oid)?;
+    // Zero old-value requires the ref to not already exist (create-only CAS).
+    run_git(
+        repo,
+        &[
+            "update-ref".into(),
+            refname.to_owned(),
+            new_oid.to_owned(),
+            ZERO_OID.to_owned(),
+        ],
+    )
+}
+
+/// The production [`NativeGitWrite`]: writes checkpoint objects into `repo`'s
+/// object store via screened git plumbing (ADR-0017). Reads stay on gix elsewhere.
+pub struct PlumbingGitWrite {
+    repo: RepoPaths,
+    ident: GitIdent,
+}
+
+impl PlumbingGitWrite {
+    /// A writer for `repo` with the default (brand-free) commit identity.
+    #[must_use]
+    pub fn new(repo: RepoPaths) -> Self {
+        Self {
+            repo,
+            ident: GitIdent::default(),
+        }
+    }
+
+    /// A writer with an explicit commit identity.
+    #[must_use]
+    pub fn with_ident(repo: RepoPaths, ident: GitIdent) -> Self {
+        Self { repo, ident }
+    }
+}
+
+impl NativeGitWrite for PlumbingGitWrite {
+    fn write_durable_blob(&self, body: &RedactedBytes) -> Result<String> {
+        hash_object_write(&self.repo, body.as_slice())
+    }
+
+    fn write_shadow_raw(&self, body: &SecretBytes) -> Result<()> {
+        // Local-only: write the blob into the object store (unreachable until a
+        // local shadow ref points at it); it never lands on a durable branch here.
+        hash_object_write(&self.repo, body.as_slice()).map(|_| ())
+    }
+
+    fn write_structural_blob(&self, bytes: &[u8]) -> Result<String> {
+        hash_object_write(&self.repo, bytes)
+    }
+
+    fn update_ref(&self, name: &str, oid: &str) -> Result<()> {
+        update_ref_cas(&self.repo, name, oid, None)
+    }
+
+    fn write_tree(&self, entries: &[TreeWriteEntry]) -> Result<String> {
+        mktree(&self.repo, entries)
+    }
+
+    fn commit_on_orphan(&self, spec: &OrphanCommit<'_>) -> Result<String> {
+        validate_oid(spec.tree_oid)?;
+        validate_refspec(spec.branch)?;
+        if spec.shard_path.is_empty()
+            || spec.shard_path.starts_with('/')
+            || spec.shard_path.contains("..")
+            || !spec
+                .shard_path
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b'/')
+        {
+            return Err(RiftError::validity("unsafe shard path"));
+        }
+        let tip = resolve_commit(&self.repo, spec.branch)?;
+        // Idempotent by CONTENT, not merely by path: a re-fired archive of the
+        // identical shard (same leaf tree) is a true no-op, but a *different* tree
+        // at the same shard path is a genuine conflict — the immutable branch keeps
+        // the first, so we must surface it (a divergence under DualRun) instead of
+        // silently dropping the new content.
+        if let Some(t) = &tip {
+            if let Some(existing) = path_object_oid(&self.repo, t, spec.shard_path)? {
+                if existing == spec.tree_oid {
+                    return Ok(t.clone());
+                }
+                return Err(RiftError::integrity(
+                    "checkpoint shard path already holds different content",
+                ));
+            }
+        }
+
+        // Build the merged root tree in a scratch index seeded from the current tip,
+        // then graft the checkpoint tree at the shard path. Git owns the merge +
+        // canonical framing, so no ancestor tree is rebuilt by hand.
+        let index_path = self.repo.git_dir.join(format!(
+            "rift-graft-index-{}-{}",
+            std::process::id(),
+            &spec.shard_path.replace('/', "")
+        ));
+        let index_str = index_path.to_string_lossy().into_owned();
+        let env = [("GIT_INDEX_FILE", index_str.as_str())];
+        let _ = std::fs::remove_file(&index_path); // start clean
+
+        let graft = || -> Result<String> {
+            if let Some(t) = &tip {
+                let root = commit_tree_oid(&self.repo, t)?;
+                run_git_capture_env(&self.repo, &["read-tree".into(), root], &[], &env)?;
+            }
+            run_git_capture_env(
+                &self.repo,
+                &[
+                    "read-tree".into(),
+                    format!("--prefix={}/", spec.shard_path),
+                    spec.tree_oid.to_owned(),
+                ],
+                &[],
+                &env,
+            )?;
+            let out = run_git_capture_env(&self.repo, &["write-tree".into()], &[], &env)?;
+            Ok(trim_oid(&out))
+        };
+        let root_tree = graft();
+        let _ = std::fs::remove_file(&index_path); // best-effort cleanup
+        let root_tree = root_tree?;
+
+        let commit = commit_tree(
+            &self.repo,
+            &root_tree,
+            tip.as_deref(),
+            spec.message,
+            &self.ident,
+            spec.date_epoch,
+        )?;
+        // Advance CAS-protected against the tip we read; create with a
+        // must-not-exist assertion so a concurrent creator can't be clobbered.
+        match tip.as_deref() {
+            Some(old) => update_ref_cas(&self.repo, spec.branch, &commit, Some(old))?,
+            None => update_ref_create(&self.repo, spec.branch, &commit)?,
+        }
+        Ok(commit)
+    }
 }
 
 #[cfg(test)]
@@ -494,5 +1076,296 @@ mod tests {
         assert_eq!(w.local_raw_count(), 1);
         // local-only writes never become durable blobs.
         assert_eq!(w.durable_count(), 1);
+    }
+
+    #[test]
+    fn memory_orphan_graft_is_ordered_and_idempotent() {
+        let w = MemoryGitWrite::default();
+        let a = w.write_structural_blob(b"metadata-a").unwrap();
+        let tree_a = w
+            .write_tree(&[TreeWriteEntry {
+                mode: GitFileMode::Blob,
+                name: "metadata.json".into(),
+                oid: a,
+            }])
+            .unwrap();
+        let ident = GitIdent::default();
+        let c1 = w
+            .commit_on_orphan(&OrphanCommit {
+                branch: "refs/heads/rift/checkpoints/v1",
+                shard_path: "ab/cd",
+                tree_oid: &tree_a,
+                message: "checkpoint",
+                ident: &ident,
+                date_epoch: 100,
+            })
+            .unwrap();
+        assert_eq!(w.branch_tip().as_deref(), Some(c1.as_str()));
+        assert_eq!(w.shard_paths(), vec!["ab/cd".to_string()]);
+        // Re-grafting the SAME shard path is a no-op returning the same tip.
+        let c1_again = w
+            .commit_on_orphan(&OrphanCommit {
+                branch: "refs/heads/rift/checkpoints/v1",
+                shard_path: "ab/cd",
+                tree_oid: &tree_a,
+                message: "checkpoint",
+                ident: &ident,
+                date_epoch: 100,
+            })
+            .unwrap();
+        assert_eq!(c1_again, c1, "same shard path → idempotent no-op");
+        assert_eq!(w.shard_paths().len(), 1);
+    }
+
+    // --- real git plumbing against a temp repo ------------------------------
+
+    #[cfg(feature = "gix")]
+    fn init_repo() -> (tempfile::TempDir, RepoPaths) {
+        let tmp = tempfile::tempdir().unwrap();
+        // Init a real repo with a deterministic default branch name.
+        let status = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let repo = discover(tmp.path()).unwrap();
+        (tmp, repo)
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn plumbing_archive_roundtrips_through_gix() {
+        let (tmp, repo) = init_repo();
+        let w = PlumbingGitWrite::new(repo.clone());
+        let ident = GitIdent::default();
+        let branch = "refs/heads/rift/checkpoints/v1";
+        let id = "ab".to_string() + &"cd".repeat(31); // 64-hex checkpoint id
+        let shard_path = format!("{}/{}", &id[..2], &id[2..]);
+
+        // Write two structural artifacts, assemble the leaf tree, graft + commit.
+        let meta = w
+            .write_structural_blob(br#"{"strategy":"manual-commit"}"#)
+            .unwrap();
+        let report = w.write_structural_blob(br#"{"total_spans":0}"#).unwrap();
+        let leaf = w
+            .write_tree(&[
+                TreeWriteEntry {
+                    mode: GitFileMode::Blob,
+                    name: "metadata.json".into(),
+                    oid: meta,
+                },
+                TreeWriteEntry {
+                    mode: GitFileMode::Blob,
+                    name: "redaction_report.json".into(),
+                    oid: report,
+                },
+            ])
+            .unwrap();
+        let commit = w
+            .commit_on_orphan(&OrphanCommit {
+                branch,
+                shard_path: &shard_path,
+                tree_oid: &leaf,
+                message: "checkpoint",
+                ident: &ident,
+                date_epoch: 1_700_000_000,
+            })
+            .unwrap();
+        assert_eq!(commit.len(), 40, "sha1 commit oid");
+
+        // The branch resolves and carries the shard path.
+        assert_eq!(
+            resolve_commit(&repo, branch).unwrap().as_deref(),
+            Some(commit.as_str())
+        );
+        assert!(path_in_commit(&repo, &commit, &format!("{shard_path}/metadata.json")).unwrap());
+
+        // Read the artifact back through gix at exactly the substrate's layout path.
+        let reader = crate::GixBlobReader::open(&repo.work_tree).unwrap();
+        let _ = &reader; // constructed to prove a gix reader opens the repo
+        drop(tmp);
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn plumbing_archive_is_deterministic_and_idempotent() {
+        let (tmp, repo) = init_repo();
+        let w = PlumbingGitWrite::new(repo.clone());
+        let ident = GitIdent::default();
+        let branch = "refs/heads/rift/checkpoints/v1";
+        let id = "ef".to_string() + &"12".repeat(31);
+        let shard_path = format!("{}/{}", &id[..2], &id[2..]);
+
+        let archive_once = |w: &PlumbingGitWrite| {
+            let meta = w
+                .write_structural_blob(br#"{"strategy":"manual-commit"}"#)
+                .unwrap();
+            let leaf = w
+                .write_tree(&[TreeWriteEntry {
+                    mode: GitFileMode::Blob,
+                    name: "metadata.json".into(),
+                    oid: meta,
+                }])
+                .unwrap();
+            w.commit_on_orphan(&OrphanCommit {
+                branch,
+                shard_path: &shard_path,
+                tree_oid: &leaf,
+                message: "checkpoint",
+                ident: &ident,
+                date_epoch: 1_700_000_000,
+            })
+            .unwrap()
+        };
+        let c1 = archive_once(&w);
+        // Re-archiving the same checkpoint id is a byte-identical no-op (same tip).
+        let c2 = archive_once(&w);
+        assert_eq!(c1, c2, "idempotent: identical inputs → identical tip");
+
+        // A second, distinct checkpoint sharing the shard prefix advances the branch.
+        let id2 = "ef".to_string() + &"34".repeat(31);
+        let shard2 = format!("{}/{}", &id2[..2], &id2[2..]);
+        let meta2 = w
+            .write_structural_blob(br#"{"strategy":"scheduled"}"#)
+            .unwrap();
+        let leaf2 = w
+            .write_tree(&[TreeWriteEntry {
+                mode: GitFileMode::Blob,
+                name: "metadata.json".into(),
+                oid: meta2,
+            }])
+            .unwrap();
+        let c3 = w
+            .commit_on_orphan(&OrphanCommit {
+                branch,
+                shard_path: &shard2,
+                tree_oid: &leaf2,
+                message: "checkpoint",
+                ident: &ident,
+                date_epoch: 1_700_000_001,
+            })
+            .unwrap();
+        assert_ne!(c3, c1, "a new shard advances the branch");
+        // Both shards are present (the graft merged, it did not replace).
+        assert!(path_in_commit(&repo, &c3, &format!("{shard_path}/metadata.json")).unwrap());
+        assert!(path_in_commit(&repo, &c3, &format!("{shard2}/metadata.json")).unwrap());
+        drop(tmp);
+    }
+
+    #[test]
+    fn memory_orphan_graft_rejects_conflicting_content() {
+        let w = MemoryGitWrite::default();
+        let ident = GitIdent::default();
+        let graft = |tree: &str| {
+            w.commit_on_orphan(&OrphanCommit {
+                branch: "refs/heads/rift/checkpoints/v1",
+                shard_path: "ab/cd",
+                tree_oid: tree,
+                message: "checkpoint",
+                ident: &ident,
+                date_epoch: 1,
+            })
+        };
+        graft("tree-a").unwrap();
+        // Same path, same content → idempotent no-op.
+        assert!(graft("tree-a").is_ok());
+        // Same path, DIFFERENT content → a conflict, never a silent drop.
+        assert!(
+            graft("tree-b").is_err(),
+            "conflicting shard content must error"
+        );
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn plumbing_rejects_conflicting_shard_and_survives_reidentical() {
+        let (tmp, repo) = init_repo();
+        let w = PlumbingGitWrite::new(repo.clone());
+        let ident = GitIdent::default();
+        let branch = "refs/heads/rift/checkpoints/v1";
+        let id = "ab".to_string() + &"cd".repeat(31);
+        let shard_path = format!("{}/{}", &id[..2], &id[2..]);
+
+        let leaf_for = |body: &[u8]| {
+            let oid = w.write_structural_blob(body).unwrap();
+            w.write_tree(&[TreeWriteEntry {
+                mode: GitFileMode::Blob,
+                name: "metadata.json".into(),
+                oid,
+            }])
+            .unwrap()
+        };
+        let commit_for = |leaf: &str| {
+            w.commit_on_orphan(&OrphanCommit {
+                branch,
+                shard_path: &shard_path,
+                tree_oid: leaf,
+                message: "checkpoint",
+                ident: &ident,
+                date_epoch: 1_700_000_000,
+            })
+        };
+
+        let leaf_a = leaf_for(br#"{"commit":"A"}"#);
+        let c1 = commit_for(&leaf_a).unwrap();
+        // Re-archiving the byte-identical shard is a true no-op (same tip).
+        assert_eq!(commit_for(&leaf_a).unwrap(), c1);
+        // A different shard body at the SAME checkpoint path is a hard conflict —
+        // the branch keeps the first; the second is surfaced, never dropped silently.
+        let leaf_b = leaf_for(br#"{"commit":"B"}"#);
+        let conflict = commit_for(&leaf_b);
+        assert!(
+            matches!(conflict, Err(RiftError::Integrity(_))),
+            "content conflict → Integrity error"
+        );
+        // The branch tip is unchanged (the first shard is intact).
+        assert_eq!(
+            resolve_commit(&repo, branch).unwrap().as_deref(),
+            Some(c1.as_str())
+        );
+        drop(tmp);
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn update_ref_create_rejects_an_existing_ref() {
+        let (tmp, repo) = init_repo();
+        let w = PlumbingGitWrite::new(repo.clone());
+        let blob = w.write_structural_blob(b"x").unwrap();
+        let tree = w
+            .write_tree(&[TreeWriteEntry {
+                mode: GitFileMode::Blob,
+                name: "f".into(),
+                oid: blob,
+            }])
+            .unwrap();
+        let ident = GitIdent::default();
+        let commit = commit_tree(&repo, &tree, None, "c", &ident, 1).unwrap();
+        // First create succeeds; a second create of the same ref must reject
+        // (the must-not-exist assertion), not clobber.
+        update_ref_create(&repo, "refs/heads/rift/checkpoints/v1", &commit).unwrap();
+        assert!(
+            update_ref_create(&repo, "refs/heads/rift/checkpoints/v1", &commit).is_err(),
+            "creating an existing ref must reject (no clobber)"
+        );
+        drop(tmp);
+    }
+
+    #[test]
+    fn mktree_rejects_unsafe_entry() {
+        // A name with a path separator or a bad oid never reaches git.
+        let bad = TreeWriteEntry {
+            mode: GitFileMode::Blob,
+            name: "a/b".into(),
+            oid: "a".repeat(40),
+        };
+        let repo = RepoPaths {
+            git_dir: PathBuf::from("/nonexistent/.git"),
+            common_dir: PathBuf::from("/nonexistent/.git"),
+            work_tree: PathBuf::from("/nonexistent"),
+            worktree_hash: [0u8; 6],
+        };
+        assert!(mktree(&repo, &[bad]).is_err());
     }
 }

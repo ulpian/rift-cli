@@ -1,0 +1,17 @@
+---
+source: crates/rift-shadow/src/parity.rs
+expression: render_report(&report)
+---
+shadow_branch_naming         LAYOUT    Match
+shard_path_layout            LAYOUT    Match
+canonical_event_json         BYTE      Match
+metadata_json                BYTE      Match
+content_hash                 BYTE      Match
+checkpoint_root              BYTE      Match
+redaction_report             BYTE      Match
+token_capture                SEMANTIC  Match
+attribution                  SEMANTIC  Match
+manual_commit_non_pollution  SEMANTIC  Match
+git_mutations_additive       SEMANTIC  Match
+blocked_verbs_security       SEMANTIC  Match
+brand_absent                 SEMANTIC  Match

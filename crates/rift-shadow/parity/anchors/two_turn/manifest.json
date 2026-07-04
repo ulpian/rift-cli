@@ -1,0 +1,12 @@
+{
+  "artifacts": [
+    "content_hash.txt",
+    "full.jsonl",
+    "metadata.json",
+    "redaction_report.json"
+  ],
+  "checkpoint_id": "abcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "ref_name": "refs/heads/rift/checkpoints/v1",
+  "shard_path": "ab/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "source": "native-bootstrap"
+}

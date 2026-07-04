@@ -1,0 +1,58 @@
+{
+  "agent": "claude-code",
+  "compat": {
+    "best_effort": false,
+    "lifecycle_gaps": [],
+    "surfaces_token_usage": true
+  },
+  "hooks": [
+    {
+      "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift hooks claude-code SessionStart",
+      "verb": "SessionStart"
+    },
+    {
+      "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift hooks claude-code UserPromptSubmit",
+      "verb": "UserPromptSubmit"
+    },
+    {
+      "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift hooks claude-code PreToolUse",
+      "verb": "PreToolUse"
+    },
+    {
+      "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift hooks claude-code PostToolUse",
+      "verb": "PostToolUse"
+    },
+    {
+      "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift hooks claude-code Stop",
+      "verb": "Stop"
+    },
+    {
+      "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift hooks claude-code SubagentStart",
+      "verb": "SubagentStart"
+    },
+    {
+      "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift hooks claude-code SubagentStop",
+      "verb": "SubagentStop"
+    },
+    {
+      "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift hooks claude-code PreCompact",
+      "verb": "PreCompact"
+    },
+    {
+      "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift hooks claude-code SessionEnd",
+      "verb": "SessionEnd"
+    }
+  ],
+  "rift_bin": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift",
+  "verbs": [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "SessionEnd"
+  ]
+}

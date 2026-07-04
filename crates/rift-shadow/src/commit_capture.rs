@@ -297,13 +297,12 @@ mod tests {
 
     #[tokio::test]
     async fn diff_facts_survive_a_backend_archive_failure() {
-        use crate::backend::ShadowBackend;
-        use rift_shadow_entire::CaptureIntent;
+        use crate::backend::{CheckpointArchive, ShadowBackend};
 
         /// A backend whose archive always fails (a spawn/integrity error).
         struct FailingBackend;
         impl ShadowBackend for FailingBackend {
-            fn archive_checkpoint(&self, _intent: &CaptureIntent) -> Result<()> {
+            fn archive_checkpoint(&self, _archive: &CheckpointArchive) -> Result<()> {
                 Err(rift_core::RiftError::storage("backend exploded"))
             }
         }
