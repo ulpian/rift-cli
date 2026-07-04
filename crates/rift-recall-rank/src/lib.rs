@@ -24,12 +24,6 @@
         clippy::indexing_slicing
     )
 )]
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::doc_markdown,
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation
-)]
 
 use std::collections::BTreeSet;
 

@@ -20,11 +20,6 @@
         clippy::indexing_slicing
     )
 )]
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::doc_markdown,
-    clippy::cast_precision_loss
-)]
 
 pub mod capture;
 pub mod diff;

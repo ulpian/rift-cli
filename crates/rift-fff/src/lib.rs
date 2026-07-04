@@ -15,11 +15,6 @@
         clippy::indexing_slicing
     )
 )]
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::doc_markdown,
-    clippy::cast_precision_loss
-)]
 
 /// A file in the index with its frecency signals.
 #[derive(Clone, Debug, PartialEq)]
