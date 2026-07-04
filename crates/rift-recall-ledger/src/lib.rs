@@ -19,16 +19,10 @@
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        // small proptest loop indices cast to i64 ordinals/token counts
+        clippy::cast_possible_wrap
     )
-)]
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::doc_markdown,
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
 )]
 
 pub mod candidates;
