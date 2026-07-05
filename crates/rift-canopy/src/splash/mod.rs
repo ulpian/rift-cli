@@ -29,8 +29,6 @@ pub const TOTAL_FRAMES: u32 = 48;
 pub struct SplashState {
     frame: u32,
     skipped: bool,
-    /// Whether the rich backend is available (else ASCII fallback splash).
-    pub rich: bool,
 }
 
 impl Default for SplashState {
@@ -40,13 +38,12 @@ impl Default for SplashState {
 }
 
 impl SplashState {
-    /// A fresh splash (frame 0, rich backend assumed until told otherwise).
+    /// A fresh splash (frame 0).
     #[must_use]
     pub fn new() -> Self {
         Self {
             frame: 0,
             skipped: false,
-            rich: true,
         }
     }
 

@@ -158,8 +158,6 @@ const COLUMN_ORDER: [Panel; 3] = [Panel::Projects, Panel::Detail, Panel::Graphs]
 /// the reflow logic (P3 S2 / the column steps).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PanelScroll {
-    /// Column 1 (projects) viewport top.
-    pub projects: usize,
     /// Column 2 (detail) viewport top.
     pub detail: usize,
     /// Column 3 (graphs) viewport top.
@@ -284,15 +282,14 @@ impl App {
     }
 
     /// Scroll the focused panel's viewport by one row (or a page). The projects
-    /// panel scrolls its selection instead (handled by the caller); this adjusts
-    /// the detail/graphs viewport tops, clamped at 0 (upper bounds become
-    /// content-aware in P3 S2 / the column steps).
+    /// panel scrolls its selection and the detail panel moves its toggle cursor
+    /// (both handled by the caller); this adjusts the graphs viewport top,
+    /// clamped at 0 (the upper bound is applied by [`Self::clamp_scrolls`]).
     pub fn scroll_focused(&mut self, down: bool, page: bool) {
         let step: usize = if page { 10 } else { 1 };
         let slot = match self.focus {
-            Panel::Detail => &mut self.scroll.detail,
             Panel::Graphs => &mut self.scroll.graphs,
-            Panel::Projects | Panel::Command => return,
+            Panel::Projects | Panel::Detail | Panel::Command => return,
         };
         *slot = if down {
             slot.saturating_add(step)
@@ -306,7 +303,6 @@ impl App {
     /// (P3 S2) and the column steps.
     pub fn clamp_scrolls(&mut self, size: crate::render::frame::Size) {
         let cap = usize::from(size.h);
-        self.scroll.projects = self.scroll.projects.min(cap);
         self.scroll.detail = self.scroll.detail.min(cap);
         self.scroll.graphs = self.scroll.graphs.min(cap);
     }

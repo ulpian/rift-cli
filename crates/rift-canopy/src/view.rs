@@ -67,7 +67,7 @@ fn draw_title(vm: &ViewModel, frame: &mut Frame, area: Rect) {
 
 /// The full 20/40/40 three-column grid.
 fn draw_full(vm: &ViewModel, frame: &mut Frame, body: Rect) {
-    let r = solve(body, vm.focus);
+    let r = solve(body);
     if r.col1.h >= 2 {
         draw_projects(vm, frame, r.col1);
         draw_detail(vm, frame, r.col2);

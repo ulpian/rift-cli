@@ -87,11 +87,9 @@ pub struct PanelRects {
 /// Tile `area` into the 20/40/40 columns above a reserved command row. The
 /// columns and command row **exactly** cover `area` (no gaps/overlaps) and each
 /// column meets its minimum width when `area` is wide enough to host all three
-/// (guaranteed by `choose_mode`'s Full3Col threshold, P3 S2). `focus` is threaded
-/// for the degraded single-panel mode in P3 S2; it does not affect the full grid.
+/// (guaranteed by `choose_mode`'s Full3Col threshold, P3 S2).
 #[must_use]
-pub fn solve(area: Rect, focus: Focus) -> PanelRects {
-    let _ = focus; // consulted by the degraded modes (P3 S2)
+pub fn solve(area: Rect) -> PanelRects {
     let cmd_h = area.h.min(COMMAND_ROWS);
     let body_h = area.h.saturating_sub(cmd_h);
     let command = Rect {
@@ -315,7 +313,7 @@ mod tests {
 
     #[test]
     fn command_row_height_is_reserved() {
-        let r = solve(area(120, 40), Focus::Projects);
+        let r = solve(area(120, 40));
         assert_eq!(r.command.h, COMMAND_ROWS);
         assert_eq!(r.command.y, 40 - COMMAND_ROWS);
         assert_eq!(r.col1.h, 40 - COMMAND_ROWS);
@@ -344,7 +342,7 @@ mod tests {
 
     #[test]
     fn columns_abut_with_no_gap_or_overlap() {
-        let r = solve(area(137, 30), Focus::Detail);
+        let r = solve(area(137, 30));
         assert_eq!(r.col1.x, 0);
         assert_eq!(r.col2.x, r.col1.x + r.col1.w);
         assert_eq!(r.col3.x, r.col2.x + r.col2.w);
@@ -354,7 +352,7 @@ mod tests {
     #[test]
     fn zero_or_huge_size_never_panics() {
         for &(w, h) in &[(0, 0), (1, 1), (2, 3), (u16::MAX, u16::MAX), (u16::MAX, 1)] {
-            let r = solve(area(w, h), Focus::Graphs);
+            let r = solve(area(w, h));
             // command never exceeds the area height…
             assert!(r.command.h <= h);
             // …and the columns never exceed the area width.
@@ -372,7 +370,7 @@ mod tests {
             w in (MIN_COL1 + MIN_COL2 + MIN_COL3)..4000u16,
             h in (COMMAND_ROWS + 1)..300u16,
         ) {
-            let r = solve(area(w, h), Focus::Projects);
+            let r = solve(area(w, h));
             // horizontal: columns abut and cover the full width
             proptest::prop_assert_eq!(r.col1.x, 0);
             proptest::prop_assert_eq!(r.col2.x, r.col1.x + r.col1.w);
