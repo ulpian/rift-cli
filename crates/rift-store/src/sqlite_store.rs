@@ -64,13 +64,14 @@ impl SqliteStore {
             .map_err(|_| RiftError::storage("sqlite connection mutex poisoned"))
     }
 
-    /// Run `f` with the locked connection (test-only sync read path used by the
-    /// migration tests; canonical *writes* still go through the append-only DAO,
-    /// and the triggers guard against mutation regardless).
+    /// Run `f` with the locked connection — the crate-internal sync path used
+    /// by the migration tests and by [`crate::rebuild`]'s epoch carry-forward
+    /// (a sync context with no runtime). Canonical *writes* still go through
+    /// the append-only DAO, and the guard triggers hold regardless of the
+    /// entry point.
     ///
     /// # Errors
     /// [`RiftError::Storage`] mapping any rusqlite error.
-    #[cfg(test)]
     pub(crate) fn with_conn<R>(
         &self,
         f: impl FnOnce(&Connection) -> rusqlite::Result<R>,

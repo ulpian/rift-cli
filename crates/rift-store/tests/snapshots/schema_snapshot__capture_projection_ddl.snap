@@ -207,6 +207,14 @@ CREATE TABLE price_table (
   UNIQUE (model, token_class, valid_from, recorded_at)
 ) STRICT
 
+-- table projection_meta
+CREATE TABLE projection_meta (
+  key TEXT NOT NULL,
+  value INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (key)
+) STRICT
+
 -- table session
 CREATE TABLE session (
   session_id TEXT NOT NULL,
@@ -512,6 +520,12 @@ CREATE TRIGGER price_table_no_delete BEFORE DELETE ON price_table BEGIN SELECT R
 
 -- trigger price_table_no_update
 CREATE TRIGGER price_table_no_update BEFORE UPDATE ON price_table BEGIN SELECT RAISE(ABORT, 'rift: price_table is append-only (UPDATE forbidden)'); END
+
+-- trigger projection_meta_no_delete
+CREATE TRIGGER projection_meta_no_delete BEFORE DELETE ON projection_meta BEGIN SELECT RAISE(ABORT, 'rift: projection_meta is append-only (DELETE forbidden)'); END
+
+-- trigger projection_meta_no_update
+CREATE TRIGGER projection_meta_no_update BEFORE UPDATE ON projection_meta BEGIN SELECT RAISE(ABORT, 'rift: projection_meta is append-only (UPDATE forbidden)'); END
 
 -- trigger session_binding_no_delete
 CREATE TRIGGER session_binding_no_delete BEFORE DELETE ON session_binding BEGIN SELECT RAISE(ABORT, 'rift: session_binding is append-only (DELETE forbidden)'); END

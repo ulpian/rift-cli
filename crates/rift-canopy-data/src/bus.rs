@@ -10,18 +10,23 @@
 //! concurrent with capture). Any failure degrades to an `Error` status — never a
 //! panic — so the UI stays live even if a projection is missing or locked.
 //!
-//! **Change observation (P8 S2).** Beyond serving requests, the worker polls a
-//! [`WatermarkPoller`]: each tracked project's append cursor
-//! ([`rift_store::CanonicalStore::read_watermark`]) is re-read on an adaptive
-//! cadence (fast right after a change, slow when idle). An advancing cursor means
-//! new capture activity ([`ChangeKind::Ingested`]); a cursor that resets backward
-//! means the projection was rebuilt from git ([`ChangeKind::Rebuilt`]), which
-//! re-bootstraps every tracked project; a cursor that vanishes is
-//! [`ChangeKind::Unavailable`]. The observer is **non-authoritative** — it only
-//! decides *when* to re-read (git stays canonical), so a missed poll only delays
-//! and a duplicate only repeats a harmless read. The reference engine is
-//! [`rift_store::NotifyCap::PollOnly`]; a native-notify engine would drive the
-//! same path without polling.
+//! **Change observation (P8 S2 / ADR-0010).** Beyond serving requests, the
+//! worker polls a [`WatermarkPoller`]: each tracked project's
+//! `{cursor, epoch}` [`Watermark`] — the append cursor
+//! ([`rift_store::CanonicalStore::read_watermark`]) plus the rebuild epoch
+//! ([`rift_store::CanonicalStore::read_rebuild_epoch`]) — is re-read on an
+//! adaptive cadence (fast right after a change, slow when idle). A moved
+//! **epoch** means the projection was rebuilt from git
+//! ([`ChangeKind::Rebuilt`]), which re-bootstraps every tracked project — a
+//! rebuild that lands *more* rows than before is detected exactly like any
+//! other (the old cursor-regression heuristic is retired; it was blind to
+//! that case). A moved cursor at the same epoch is new capture activity
+//! ([`ChangeKind::Ingested`]); a watermark that vanishes is
+//! [`ChangeKind::Unavailable`]. The observer is **non-authoritative** — it
+//! only decides *when* to re-read (git stays canonical), so a missed poll
+//! only delays and a duplicate only repeats a harmless read. The reference
+//! engine is [`rift_store::NotifyCap::PollOnly`]; a native-notify engine
+//! would drive the same path without polling.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -122,11 +127,12 @@ fn worker(req_rx: &Receiver<DataRequest>, evt_tx: &Sender<Event>, root: &Path) {
     }
 }
 
-/// Read a project's status + cursor once, record the cursor as the observer's
-/// polling baseline (so the next poll only fires on genuinely newer changes), and
-/// emit the update. The rich detail is attached only when `path` is the `active`
-/// (foreground) project — building it reads several tables, so it stays scoped to
-/// the one project the user is looking at. Returns `Err(())` if the loop end is gone.
+/// Read a project's status + watermark once, record the watermark as the
+/// observer's polling baseline (so the next poll only fires on genuinely newer
+/// changes), and emit the update. The rich detail is attached only when `path`
+/// is the `active` (foreground) project — building it reads several tables, so
+/// it stays scoped to the one project the user is looking at. Returns
+/// `Err(())` if the loop end is gone.
 fn read_emit(
     observer: &mut WatermarkPoller,
     evt_tx: &Sender<Event>,
@@ -134,8 +140,8 @@ fn read_emit(
     path: String,
     active: Option<&str>,
 ) -> Result<(), ()> {
-    let (status, cursor) = read_project(root, &path);
-    observer.sync(&path, cursor);
+    let (status, mark) = read_project(root, &path);
+    observer.sync(&path, mark);
     let detail = if active == Some(path.as_str()) {
         Some(build_detail(root, &path, status))
     } else {
@@ -164,17 +170,18 @@ fn collect(req: DataRequest, out: &mut BTreeSet<String>, active: &mut Option<Str
     }
 }
 
-/// Read a project's live status **and** its append cursor from its own per-repo
-/// projection in a single open — read-only, scoped by the project's `repo_id`. The
-/// gathered facts (repo presence, projection readiness, the session phase file, the
-/// most-recent event's age) are fed to the pure [`derive_status`] truth table
-/// (P4 S2), so the classification is testable without a store; any failure degrades
-/// to an `Error`/`NotInitialized` status, never a panic.
+/// Read a project's live status **and** its `{cursor, epoch}` watermark from
+/// its own per-repo projection in a single open — read-only, scoped by the
+/// project's `repo_id`. The gathered facts (repo presence, projection
+/// readiness, the session phase file, the most-recent event's age) are fed to
+/// the pure [`derive_status`] truth table (P4 S2), so the classification is
+/// testable without a store; any failure degrades to an
+/// `Error`/`NotInitialized` status, never a panic.
 ///
-/// The cursor is `Some(n)` iff the projection is open and readable (`n` = the
-/// `captured_event` watermark), and `None` iff the projection is absent/unreadable
-/// — the same `None` the change observer treats as [`ChangeKind::Unavailable`].
-fn read_project(root: &Path, path: &str) -> (ProjectStatus, Option<i64>) {
+/// The watermark is `Some` iff the projection is open and readable, and `None`
+/// iff it is absent/unreadable — the same `None` the change observer treats as
+/// [`ChangeKind::Unavailable`].
+fn read_project(root: &Path, path: &str) -> (ProjectStatus, Option<Watermark>) {
     let dir = PathBuf::from(path);
     let now_ms = now_ms();
 
@@ -202,8 +209,8 @@ fn read_project(root: &Path, path: &str) -> (ProjectStatus, Option<i64>) {
         };
         return (status_of(true, projection, phase, None, now_ms), None);
     }
-    // The projection exists: open it once and read the cursor + freshest event.
-    let Some((cursor, last_ts)) = open_and_read(&db) else {
+    // The projection exists: open once, read the watermark + freshest event.
+    let Some((mark, last_ts)) = open_and_read(&db) else {
         return (
             status_of(true, ProjectionState::Unavailable, phase, None, now_ms),
             None,
@@ -212,7 +219,7 @@ fn read_project(root: &Path, path: &str) -> (ProjectStatus, Option<i64>) {
     let age = last_ts.map(|ts| now_ms.saturating_sub(ts));
     (
         status_of(true, ProjectionState::Ready, phase, age, now_ms),
-        Some(cursor),
+        Some(mark),
     )
 }
 
@@ -233,12 +240,14 @@ fn status_of(
     })
 }
 
-/// Open the projection read-only and return `(cursor, most-recent occurred_at)`,
-/// or `None` if it cannot be opened/read (→ [`ProjectionState::Unavailable`]).
-fn open_and_read(db: &Path) -> Option<(i64, Option<i64>)> {
+/// Open the projection read-only and return `(watermark, most-recent
+/// occurred_at)`, or `None` if it cannot be opened/read
+/// (→ [`ProjectionState::Unavailable`]).
+fn open_and_read(db: &Path) -> Option<(Watermark, Option<i64>)> {
     let store = SqliteStore::open(db).ok()?;
     let rt = runtime().ok()?;
     let cursor = rt.block_on(store.read_watermark("captured_event")).ok()?;
+    let epoch = rt.block_on(store.read_rebuild_epoch()).ok()?;
     // The freshest event's transaction time (0 rows → None, not an error).
     let last_ts = rt
         .block_on(store.query_opt_i64(
@@ -246,7 +255,7 @@ fn open_and_read(db: &Path) -> Option<(i64, Option<i64>)> {
             &[],
         ))
         .ok()?;
-    Some((cursor, last_ts))
+    Some((Watermark { cursor, epoch }, last_ts))
 }
 
 /// Read a project's session phase file (`<dir>/.rift/session.phase`). Absent →
@@ -378,11 +387,11 @@ fn read_projection_detail(root: &Path, dir: &Path) -> Option<(Vec<ModelUsage>, C
     Some((models, capture))
 }
 
-/// Read a project's append cursor (the projection's `captured_event` watermark),
-/// or `None` if the projection is missing/unreadable. The single tiny read the
-/// change observer polls; agrees with [`read_project`] on `None` (iff the
-/// projection is absent/unreadable).
-fn read_cursor(root: &Path, path: &str) -> Option<i64> {
+/// Read a project's `{cursor, epoch}` watermark, or `None` if the projection
+/// is missing/unreadable. The single tiny read the change observer polls;
+/// agrees with [`read_project`] on `None` (iff the projection is
+/// absent/unreadable).
+fn read_watermark_pair(root: &Path, path: &str) -> Option<Watermark> {
     let dir = PathBuf::from(path);
     let repo = repo_id_for(&dir).ok()?;
     let db = projection_db_under(root, &repo);
@@ -391,15 +400,28 @@ fn read_cursor(root: &Path, path: &str) -> Option<i64> {
     }
     let store = SqliteStore::open(&db).ok()?;
     let rt = runtime().ok()?;
-    rt.block_on(store.read_watermark("captured_event")).ok()
+    let cursor = rt.block_on(store.read_watermark("captured_event")).ok()?;
+    let epoch = rt.block_on(store.read_rebuild_epoch()).ok()?;
+    Some(Watermark { cursor, epoch })
 }
 
-/// How a tracked project's append cursor moved between polls.
+/// A projection's change watermark (ADR-0010): the append `cursor` moves on
+/// ingest; only a rebuild moves the `epoch`. The pair is complete — there is
+/// no projection change the pair cannot distinguish from quiet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Watermark {
+    /// The `captured_event` append cursor.
+    pub cursor: i64,
+    /// The rebuild epoch (0 for a never-rebuilt projection).
+    pub epoch: i64,
+}
+
+/// How a tracked project's watermark moved between polls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChangeKind {
-    /// New capture activity — the cursor advanced.
+    /// New capture activity — the cursor moved at the same epoch.
     Ingested,
-    /// The projection was rebuilt from git — the cursor reset backward.
+    /// The projection was rebuilt from git — the epoch moved.
     Rebuilt,
     /// The projection is (now) missing/unreadable.
     Unavailable,
@@ -421,15 +443,15 @@ const IDLE_INTERVAL: Duration = Duration::from_secs(2);
 /// How many quiet polls it takes to decay from the fast cadence back to idle.
 const ACTIVE_TICKS_AFTER_CHANGE: u8 = 8;
 
-/// The baseline change observer for the `PollOnly` reference engine: it re-reads
-/// each tracked project's append cursor on an adaptive interval and reports the
-/// diffs. A `Native`-capable engine (Turso subscribe) would push the same
-/// [`ChangeEvent`]s without polling.
+/// The baseline change observer for the `PollOnly` reference engine: it
+/// re-reads each tracked project's `{cursor, epoch}` watermark on an adaptive
+/// interval and reports the diffs. A `Native`-capable engine (Turso subscribe)
+/// would push the same [`ChangeEvent`]s without polling.
 struct WatermarkPoller {
     /// Cache root the projections live under.
     root: PathBuf,
-    /// project path → last-seen cursor (`None` once observed as unavailable).
-    seen: BTreeMap<String, Option<i64>>,
+    /// project path → last-seen watermark (`None` once observed as unavailable).
+    seen: BTreeMap<String, Option<Watermark>>,
     /// How many more fast-interval ticks remain before decaying to idle cadence.
     active_ticks: u8,
 }
@@ -457,29 +479,32 @@ impl WatermarkPoller {
         self.seen.keys().cloned()
     }
 
-    /// Record a project's freshly-observed cursor as the polling baseline (and
-    /// begin tracking it). Called after every request/observed read so the next
-    /// poll only fires on genuinely newer changes.
-    fn sync(&mut self, project: &str, cursor: Option<i64>) {
-        self.seen.insert(project.to_string(), cursor);
+    /// Record a project's freshly-observed watermark as the polling baseline
+    /// (and begin tracking it). Called after every request/observed read so the
+    /// next poll only fires on genuinely newer changes.
+    fn sync(&mut self, project: &str, mark: Option<Watermark>) {
+        self.seen.insert(project.to_string(), mark);
     }
 
-    /// Re-read every tracked project's cursor and report the diffs. Advancing the
-    /// cursor is [`ChangeKind::Ingested`]; a cursor that went *backward* means the
-    /// projection was rebuilt ([`ChangeKind::Rebuilt`]); a cursor that vanished is
-    /// [`ChangeKind::Unavailable`]. A quiet poll decays the cadence toward idle.
+    /// Re-read every tracked project's watermark and report the diffs. A moved
+    /// **epoch** is [`ChangeKind::Rebuilt`] (however the cursor moved — more
+    /// rows, fewer rows, or the same count); a moved cursor at the same epoch
+    /// is [`ChangeKind::Ingested`]; a vanished watermark is
+    /// [`ChangeKind::Unavailable`]. Cursor direction is deliberately **not** a
+    /// signal (ADR-0010 retired the regression heuristic). A quiet poll decays
+    /// the cadence toward idle.
     fn poll_once(&mut self) -> Vec<ChangeEvent> {
         let mut out = Vec::new();
         let paths: Vec<String> = self.seen.keys().cloned().collect();
         for path in paths {
             let prev = self.seen.get(&path).copied().flatten();
-            let now = read_cursor(&self.root, &path);
+            let now = read_watermark_pair(&self.root, &path);
             let kind = match (prev, now) {
-                (Some(p), Some(n)) if n > p => Some(ChangeKind::Ingested),
-                (Some(p), Some(n)) if n < p => Some(ChangeKind::Rebuilt),
+                (Some(p), Some(n)) if n.epoch != p.epoch => Some(ChangeKind::Rebuilt),
+                (Some(p), Some(n)) if n.cursor != p.cursor => Some(ChangeKind::Ingested),
                 (None, Some(_)) => Some(ChangeKind::Ingested),
                 (Some(_), None) => Some(ChangeKind::Unavailable),
-                // cursor unchanged, or still-unavailable → nothing to report.
+                // watermark unchanged, or still-unavailable → nothing to report.
                 (Some(_), Some(_)) | (None, None) => None,
             };
             self.seen.insert(path.clone(), now);
@@ -974,7 +999,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p", 2);
         let mut poller = WatermarkPoller::new(root.path().to_path_buf());
-        poller.sync(&path_of(&proj), Some(2)); // baseline
+        poller.sync(
+            &path_of(&proj),
+            Some(Watermark {
+                cursor: 2,
+                epoch: 0,
+            }),
+        ); // baseline
 
         append_events(root.path(), &proj, 2, 3); // now 5
 
@@ -996,9 +1027,16 @@ mod tests {
         let repo = repo_id_for(&proj).unwrap();
         let db = projection_db_under(root.path(), &repo);
         let mut poller = WatermarkPoller::new(root.path().to_path_buf());
-        poller.sync(&path_of(&proj), Some(5)); // baseline
+        poller.sync(
+            &path_of(&proj),
+            Some(Watermark {
+                cursor: 5,
+                epoch: 0,
+            }),
+        ); // baseline
 
-        // A rebuild recreates the projection empty (cursor resets 5 → 0).
+        // A rebuild bumps the epoch (0 → 1); the cursor also resets, but the
+        // epoch alone is the signal.
         rift_store::rebuild(&db).unwrap();
         assert_eq!(
             poller.poll_once(),
@@ -1008,8 +1046,8 @@ mod tests {
             }]
         );
 
-        // Capture re-populates (0 → 3 is an Ingested), then a second rebuild is a
-        // fresh Rebuilt — the "epoch bump" is re-detected, not swallowed.
+        // Capture re-populates (cursor 0 → 3 at the same epoch = Ingested),
+        // then a second rebuild is a fresh Rebuilt — re-detected, not swallowed.
         append_events(root.path(), &proj, 0, 3);
         assert_eq!(
             poller.poll_once(),
@@ -1029,13 +1067,125 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_landing_more_rows_is_still_detected() {
+        // The ADR-0010 blind spot, closed: a rebuild that lands MORE rows than
+        // the projection previously held is indistinguishable from ingest by
+        // cursor alone — the epoch is what detects it.
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 2);
+        let repo = repo_id_for(&proj).unwrap();
+        let db = projection_db_under(root.path(), &repo);
+        let mut poller = WatermarkPoller::new(root.path().to_path_buf());
+        poller.sync(
+            &path_of(&proj),
+            Some(Watermark {
+                cursor: 2,
+                epoch: 0,
+            }),
+        );
+
+        // Rebuild, then land MORE rows (5 > 2) before the next poll.
+        rift_store::rebuild(&db).unwrap();
+        append_events(root.path(), &proj, 0, 5);
+        assert_eq!(
+            poller.poll_once(),
+            vec![ChangeEvent {
+                project: path_of(&proj),
+                kind: ChangeKind::Rebuilt,
+            }],
+            "a rebuild with a net-larger projection must read as Rebuilt, not Ingested"
+        );
+    }
+
+    #[test]
+    fn cursor_regression_alone_is_not_rebuilt() {
+        // Cursor direction is retired as a signal: a baseline that is somehow
+        // AHEAD of the store (e.g. a stale in-memory baseline) re-reads as
+        // Ingested — only the epoch says Rebuilt.
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 3);
+        let mut poller = WatermarkPoller::new(root.path().to_path_buf());
+        poller.sync(
+            &path_of(&proj),
+            Some(Watermark {
+                cursor: 9,
+                epoch: 0,
+            }),
+        );
+        assert_eq!(
+            poller.poll_once(),
+            vec![ChangeEvent {
+                project: path_of(&proj),
+                kind: ChangeKind::Ingested,
+            }],
+            "a backward cursor at the same epoch re-reads, but never as Rebuilt"
+        );
+    }
+
+    proptest::proptest! {
+        /// The watermark never goes backwards without an epoch bump, over an
+        /// arbitrary interleaving of appends and rebuilds against a real store
+        /// (PRD-M4 testing decision).
+        #[test]
+        fn watermark_never_backward_without_epoch_bump(
+            ops in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::prelude::Strategy::prop_map(1usize..4, OpKind::Append),
+                    proptest::strategy::Just(OpKind::Rebuild),
+                ],
+                1..8,
+            ),
+        ) {
+            let root = tempfile::tempdir().unwrap();
+            let proj = make_project(root.path(), "p", 1);
+            let repo = repo_id_for(&proj).unwrap();
+            let db = projection_db_under(root.path(), &repo);
+
+            let mut prev = read_watermark_pair(root.path(), &path_of(&proj)).unwrap();
+            let mut appended = 1usize;
+            for op in ops {
+                match op {
+                    OpKind::Append(n) => {
+                        append_events(root.path(), &proj, appended, n);
+                        appended += n;
+                    }
+                    OpKind::Rebuild => {
+                        rift_store::rebuild(&db).unwrap();
+                        appended = 0;
+                    }
+                }
+                let now = read_watermark_pair(root.path(), &path_of(&proj)).unwrap();
+                proptest::prop_assert!(
+                    now.cursor >= prev.cursor || now.epoch > prev.epoch,
+                    "cursor went backward ({} -> {}) without an epoch bump ({} -> {})",
+                    prev.cursor, now.cursor, prev.epoch, now.epoch
+                );
+                prev = now;
+            }
+        }
+    }
+
+    /// One projection mutation for the watermark property test.
+    #[derive(Clone, Copy, Debug)]
+    enum OpKind {
+        Append(usize),
+        Rebuild,
+    }
+
+    #[test]
     fn missing_projection_is_unavailable_not_panic() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p", 2);
         let repo = repo_id_for(&proj).unwrap();
         let db = projection_db_under(root.path(), &repo);
         let mut poller = WatermarkPoller::new(root.path().to_path_buf());
-        poller.sync(&path_of(&proj), Some(2)); // baseline
+        poller.sync(
+            &path_of(&proj),
+            Some(Watermark {
+                cursor: 2,
+                epoch: 0,
+            }),
+        ); // baseline
 
         // The projection file disappears out from under the observer.
         std::fs::remove_file(&db).unwrap();
@@ -1055,7 +1205,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p", 1);
         let mut poller = WatermarkPoller::new(root.path().to_path_buf());
-        poller.sync(&path_of(&proj), Some(1));
+        poller.sync(
+            &path_of(&proj),
+            Some(Watermark {
+                cursor: 1,
+                epoch: 0,
+            }),
+        );
 
         // No underlying change: polling twice is idempotent (no spurious events).
         assert!(poller.poll_once().is_empty());
@@ -1080,7 +1236,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p", 1);
         let mut poller = WatermarkPoller::new(root.path().to_path_buf());
-        poller.sync(&path_of(&proj), Some(1));
+        poller.sync(
+            &path_of(&proj),
+            Some(Watermark {
+                cursor: 1,
+                epoch: 0,
+            }),
+        );
         assert_eq!(poller.interval(), IDLE_INTERVAL); // no activity yet
 
         append_events(root.path(), &proj, 1, 1); // a change

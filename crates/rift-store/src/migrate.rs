@@ -273,8 +273,17 @@ pub fn capture_turn_boundary_schema_sql() -> String {
     sql
 }
 
+/// The v5 additive capture migration (ADR-0010): the `projection_meta`
+/// key/value table carrying the rebuild epoch. Kept separate so adding it
+/// never perturbs the v1–v4 checksums; an absent epoch row reads as zero.
+#[must_use]
+pub fn capture_projection_meta_schema_sql() -> String {
+    capture_slice_sql(crate::schema::capture_projection_meta_tables())
+}
+
 /// The default migration set: meta tables, the canonical schema, the identity
-/// relations, then the turn-boundary relations (+ price seed).
+/// relations, the turn-boundary relations (+ price seed), then the
+/// projection-meta table (the ADR-0010 rebuild epoch).
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
     vec![
@@ -297,6 +306,11 @@ pub fn default_migrations() -> Vec<Migration> {
             version: 4,
             name: "capture_turn_boundary",
             sql: capture_turn_boundary_schema_sql(),
+        },
+        Migration {
+            version: 5,
+            name: "capture_projection_meta",
+            sql: capture_projection_meta_schema_sql(),
         },
     ]
 }
@@ -679,8 +693,8 @@ mod tests {
     async fn applies_pending_migrations_in_order() {
         let s = store();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
-        assert_eq!(out.applied, 4);
-        assert_eq!(out.high_water, 4);
+        assert_eq!(out.applied, 5);
+        assert_eq!(out.high_water, 5);
         // canonical tables exist (insert succeeds)
         s.insert(
             "session",
@@ -714,12 +728,12 @@ mod tests {
         let out = apply_migrations_on(&s, &default_migrations())
             .await
             .unwrap();
-        assert_eq!(out.applied, 4);
-        assert_eq!(out.high_water, 4);
+        assert_eq!(out.applied, 5);
+        assert_eq!(out.high_water, 5);
         // The sync runner sees everything applied (same _migrations ledger).
         let again = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 4);
+        assert_eq!(again.skipped, 5);
         // And the tamper lock holds through the seam.
         let mut edited = default_migrations();
         edited[1].sql.push_str("\n-- tampered");
@@ -757,7 +771,7 @@ mod tests {
             let rest = apply_migrations(&s, &migs).unwrap();
             proptest::prop_assert_eq!(rest.skipped, split);
             proptest::prop_assert_eq!(rest.applied, migs.len() - split);
-            proptest::prop_assert_eq!(rest.high_water, 4);
+            proptest::prop_assert_eq!(rest.high_water, 5);
 
             let fresh = store();
             apply_migrations(&fresh, &migs).unwrap();
@@ -772,7 +786,7 @@ mod tests {
         apply_migrations(&s, &default_migrations()).unwrap();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(out.applied, 0);
-        assert_eq!(out.skipped, 4);
+        assert_eq!(out.skipped, 5);
     }
 
     /// The additive contract for the recall projection: `recall_core` (v1) must
@@ -999,12 +1013,14 @@ mod tests {
     #[test]
     fn capture_registry_growth_lands_past_frozen_boundaries() {
         use crate::schema::{
-            canonical_tables, capture_identity_tables, capture_turn_boundary_tables,
+            canonical_tables, capture_identity_tables, capture_projection_meta_tables,
+            capture_turn_boundary_tables,
         };
         assert_eq!(
             capture_v1_tables().len()
                 + capture_identity_tables().len()
-                + capture_turn_boundary_tables().len(),
+                + capture_turn_boundary_tables().len()
+                + capture_projection_meta_tables().len(),
             canonical_tables().len(),
             "a new capture table must extend a NEW slice (and migration), not fall between"
         );
@@ -1022,6 +1038,11 @@ mod tests {
             capture_turn_boundary_tables().last().map(|t| t.name),
             Some("turn_diff_hunk"),
             "the v4 boundary moved — capture_turn_boundary's checksum will break"
+        );
+        assert_eq!(
+            capture_projection_meta_tables().last().map(|t| t.name),
+            Some("projection_meta"),
+            "the v5 boundary moved — capture_projection_meta's checksum will break"
         );
     }
 
@@ -1050,7 +1071,7 @@ mod tests {
         let migs: i64 = again
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0)))
             .unwrap();
-        assert_eq!(migs, 4);
+        assert_eq!(migs, 5);
     }
 
     /// The step-05 filesystem control: a projection opened through the standard

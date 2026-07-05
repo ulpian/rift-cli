@@ -819,6 +819,24 @@ const TABLES: &[CanonicalTable] = &[
         primary_key: &["hunk_id"],
         unique: NO_UNIQUE,
     },
+    // --- capture v5 additive (projection meta, ADR-0010): past the v4 set ------
+    // Key/value projection facts; today exactly one key ('rebuild_epoch'). The
+    // row is written once per projection lifetime — `rift_store::rebuild`
+    // recreates the file and inserts old-epoch+1 — so the append-only guards
+    // hold without any UPDATE. An absent row reads as epoch 0.
+    CanonicalTable {
+        name: "projection_meta",
+        columns: PROJECTION_META_COLUMNS,
+        primary_key: &["key"],
+        unique: NO_UNIQUE,
+    },
+];
+
+/// Columns for the v5 `projection_meta` key/value table (ADR-0010).
+const PROJECTION_META_COLUMNS: &[Column] = &[
+    Column::text("key"),  // e.g. 'rebuild_epoch'
+    Column::int("value"), // the integer fact
+    Column::int("schema_version"),
 ];
 
 /// Frozen v1 prefix of the capture registry: the tables shipped in the
@@ -845,9 +863,13 @@ pub(crate) fn capture_v1_tables() -> &'static [CanonicalTable] {
 /// so later tables must append past it and ship in their own migration.
 pub(crate) const CAPTURE_IDENTITY_TABLE_COUNT: usize = 32;
 
-/// Boundary after the v4 (`capture_turn_boundary`) tables — the current end of
-/// the capture registry. The next additive capture migration starts here.
+/// Boundary after the v4 (`capture_turn_boundary`) tables. Frozen once v4
+/// shipped; later tables append past it and ship in their own migration.
 pub(crate) const CAPTURE_TURN_BOUNDARY_TABLE_COUNT: usize = 35;
+
+/// Boundary after the v5 (`capture_projection_meta`) table — the current end
+/// of the capture registry. The next additive capture migration starts here.
+pub(crate) const CAPTURE_PROJECTION_META_TABLE_COUNT: usize = 36;
 
 /// The v3 `capture_identity` tables (frozen once shipped — see
 /// [`CAPTURE_IDENTITY_TABLE_COUNT`]).
@@ -862,6 +884,13 @@ pub(crate) fn capture_identity_tables() -> &'static [CanonicalTable] {
 #[allow(clippy::indexing_slicing)] // same compile-time bound as above
 pub(crate) fn capture_turn_boundary_tables() -> &'static [CanonicalTable] {
     &TABLES[CAPTURE_IDENTITY_TABLE_COUNT..CAPTURE_TURN_BOUNDARY_TABLE_COUNT]
+}
+
+/// The v5 `capture_projection_meta` table (ADR-0010's rebuild epoch).
+#[must_use]
+#[allow(clippy::indexing_slicing)] // same compile-time bound as above
+pub(crate) fn capture_projection_meta_tables() -> &'static [CanonicalTable] {
+    &TABLES[CAPTURE_TURN_BOUNDARY_TABLE_COUNT..CAPTURE_PROJECTION_META_TABLE_COUNT]
 }
 
 /// The registry of canonical (append-only) tables. The immutability property

@@ -216,6 +216,26 @@ pub trait CanonicalStore: Send + Sync {
         self.count(table).await
     }
 
+    /// The projection's **rebuild epoch** (ADR-0010): bumped by
+    /// [`crate::rebuild::rebuild`], never by ingest — so `{cursor, epoch}` is a
+    /// complete watermark and a rebuild that lands *more* rows than before is
+    /// still detected. Absent (a pre-epoch projection, a missing row, or an
+    /// unreadable meta table) reads as **zero**; availability is the cursor
+    /// read's job, so this read never turns a probe into an error.
+    ///
+    /// # Errors
+    /// None in practice (absence and unreadability both read as zero); the
+    /// `Result` is kept for engine implementations with fallible transports.
+    async fn read_rebuild_epoch(&self) -> Result<i64> {
+        let read = self
+            .query_opt_i64(
+                "SELECT value FROM projection_meta WHERE key = 'rebuild_epoch'",
+                &[],
+            )
+            .await;
+        Ok(read.unwrap_or(None).unwrap_or(0))
+    }
+
     /// This engine's change-notification capability (see [`NotifyCap`]). The
     /// rusqlite reference engine is [`NotifyCap::PollOnly`]; a future Turso engine
     /// overrides this to [`NotifyCap::Native`] without touching any caller.
