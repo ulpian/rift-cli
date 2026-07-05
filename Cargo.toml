@@ -39,6 +39,7 @@ members = [
   "crates/rift-recall-eval",
   "crates/rift-tokens",
   "crates/rift-canopy",
+  "crates/rift-canopy-data",
   "crates/rift-registry",
   "crates/rift-fff",
   "crates/rift-codegraph",

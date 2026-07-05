@@ -96,6 +96,8 @@ crates/
                     (hash-bound summaries), ledger metrics, ranking, pack compiler,
                     policy, events, bounded MCP, substrate reader (gix seam)
   rift-canopy       dashboard: layout, nic-gauge, command palette, splash, render seam
+  rift-canopy-data  the dashboard's data plane (ADR-0009): bus + worker, watermark
+                    poller, append-only UI-facts store, status/detail builders, feeds
   rift-git          native git plumbing: worktree discovery, blob-read seam,
                     argv-safe shell-outs, the production IdentitySource
   rift-registry     the machine-global project registry (config-dir resolver)

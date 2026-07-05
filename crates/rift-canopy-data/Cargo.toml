@@ -1,0 +1,29 @@
+[package]
+name = "rift-canopy-data"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canopy's data plane (ADR-0009): the live bus and worker, the watermark poller, the append-only UI-facts store, the status/detail builders, and the graph feeds."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+# The dashboard's shared event/snapshot types (the edge points THIS way only:
+# rift-canopy never imports the data plane — ADR-0009).
+rift-canopy = { version = "0.0.1", path = "../rift-canopy" }
+# Read-only projection access + the append-only UI-facts store engine.
+rift-store = { version = "0.0.1", path = "../rift-store" }
+# The column-2 settings summary reads a project's effective policy.
+rift-config = { version = "0.0.1", path = "../rift-config" }
+# Repo identity (the projection scope key) + worktree plumbing.
+rift-git = { version = "0.0.1", path = "../rift-git" }
+# The rift-store seam is async; reads run on short-lived current-thread runtimes.
+tokio = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

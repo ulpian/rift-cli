@@ -1,9 +1,8 @@
 ---
 source: xtask/src/lib.rs
-assertion_line: 461
 expression: rendered
 ---
-rift -> rift-agent, rift-canopy, rift-config, rift-core, rift-git, rift-hashchain, rift-recall-ledger, rift-recall-mcp, rift-recall-policy, rift-recall-substrate, rift-recall-types, rift-registry, rift-shadow, rift-store, rift-tokens
+rift -> rift-agent, rift-canopy, rift-canopy-data, rift-config, rift-core, rift-git, rift-hashchain, rift-recall-ledger, rift-recall-mcp, rift-recall-policy, rift-recall-substrate, rift-recall-types, rift-registry, rift-shadow, rift-store, rift-tokens
 rift-agent -> rift-core
 rift-agent-claude-code -> rift-agent, rift-core
 rift-agent-codex -> rift-agent, rift-core
@@ -14,6 +13,7 @@ rift-agent-gemini -> rift-agent, rift-core
 rift-agent-ollama -> rift-agent, rift-core
 rift-agent-opencode -> rift-agent, rift-core
 rift-canopy -> rift-core, rift-registry
+rift-canopy-data -> rift-canopy, rift-config, rift-core, rift-git, rift-store
 rift-codegraph -> rift-core
 rift-config -> rift-core
 rift-core -> (none)

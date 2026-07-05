@@ -30,6 +30,9 @@ provision-http = ["rift-shadow/provision-http"]
 rift-core = { version = "0.0.1", path = "../../crates/rift-core" }
 rift-shadow = { version = "0.0.1", path = "../../crates/rift-shadow" }
 rift-canopy = { version = "0.0.1", path = "../../crates/rift-canopy" }
+# The dashboard's data plane (ADR-0009): the bus, poller, and UI-facts store
+# the binary wires into the live loop.
+rift-canopy-data = { version = "0.0.1", path = "../../crates/rift-canopy-data" }
 rift-registry = { version = "0.0.1", path = "../../crates/rift-registry" }
 # The dashboard's column-2 detail reads a project's effective policy (sensitive
 # path count, capture toggles) to summarize its settings (P5 S1).
