@@ -448,6 +448,7 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
     let _ = rt.block_on(crate::identity::bind_new_sessions(
         &store,
         &repo.work_tree,
+        crate::identity::install_salt(),
         now,
     ));
 
@@ -705,7 +706,8 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
         // Bind any newly-appeared sessions to the local developer identity
         // (best-effort: identity failure must never fail the agent's hook).
         if let Ok(cwd) = std::env::current_dir() {
-            let _ = crate::identity::bind_new_sessions(&store, &cwd, now_ms()).await;
+            let salt = crate::identity::install_salt();
+            let _ = crate::identity::bind_new_sessions(&store, &cwd, salt, now_ms()).await;
         }
         Ok::<_, rift_core::RiftError>(out)
     })?;

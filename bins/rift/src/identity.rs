@@ -52,9 +52,14 @@ fn salt_from_file(cache_root: &Path) -> Option<[u8; 32]> {
 }
 
 /// The per-install salt: keychain → file fallback → zero (documented order).
+/// `RIFT_NO_KEYCHAIN` skips straight to the file fallback — the OS keychain
+/// can pop an interactive authorization prompt for a freshly-built binary,
+/// which a headless run (CI, gate scripts, agents) can never answer.
 pub(crate) fn install_salt() -> [u8; 32] {
-    if let Some(salt) = salt_from_keychain(&rift_store::OsKeychain) {
-        return salt;
+    if std::env::var_os("RIFT_NO_KEYCHAIN").is_none() {
+        if let Some(salt) = salt_from_keychain(&rift_store::OsKeychain) {
+            return salt;
+        }
     }
     let root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
     salt_from_file(&root).unwrap_or([0u8; 32])
@@ -62,17 +67,19 @@ pub(crate) fn install_salt() -> [u8; 32] {
 
 /// Observe the local identity for `work_tree` and bind every projection
 /// session that has no binding yet. Idempotent; best-effort (never fails the
-/// hook — the caller ignores the `Result`).
+/// hook — the caller ignores the `Result`). The `salt` is injected (callers
+/// pass [`install_salt`]) so no test can reach the OS keychain.
 pub(crate) async fn bind_new_sessions(
     store: &SqliteStore,
     work_tree: &Path,
+    salt: [u8; 32],
     now_ms: i64,
 ) -> rift_core::Result<()> {
     let unbound = unbound_session_ids(store).await?;
     if unbound.is_empty() {
         return Ok(());
     }
-    let src = GitConfigIdentity::new(work_tree, install_salt());
+    let src = GitConfigIdentity::new(work_tree, salt);
     let at = Timestamp::from_millis(now_ms);
     record_identity_snapshot(store, &identity_snapshot(&src, at)).await?;
     let evidence = binding_evidence(&src, at);
@@ -115,11 +122,17 @@ mod tests {
             .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
-        bind_new_sessions(&store, tmp.path(), 1).await.unwrap();
+        // Salt injected: the test must never reach the OS keychain (a fresh
+        // binary triggers an interactive ACL prompt that hangs headless runs).
+        bind_new_sessions(&store, tmp.path(), [7u8; 32], 1)
+            .await
+            .unwrap();
         assert_eq!(store.count("session_binding").await.unwrap(), 1);
         assert_eq!(store.count("developer_identity_snapshot").await.unwrap(), 1);
         // Re-running binds nothing new (idempotent across hook invocations).
-        bind_new_sessions(&store, tmp.path(), 2).await.unwrap();
+        bind_new_sessions(&store, tmp.path(), [7u8; 32], 2)
+            .await
+            .unwrap();
         assert_eq!(store.count("session_binding").await.unwrap(), 1);
     }
 
