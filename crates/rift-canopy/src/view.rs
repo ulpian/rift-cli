@@ -397,7 +397,7 @@ fn visible_window(selected: usize, len: usize, height: usize) -> (usize, usize) 
 }
 
 /// A short human label for a project's live status.
-fn status_label(status: ProjectStatus) -> &'static str {
+pub(crate) fn status_label(status: ProjectStatus) -> &'static str {
     match status {
         ProjectStatus::Running { .. } => "running",
         ProjectStatus::PickingUp => "picking up",
@@ -408,7 +408,7 @@ fn status_label(status: ProjectStatus) -> &'static str {
 }
 
 /// Render a `u64` series as block-glyph sparkline cells.
-fn sparkline(series: &[u64]) -> String {
+pub(crate) fn sparkline(series: &[u64]) -> String {
     const RAMP: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let max = series.iter().copied().max().unwrap_or(0);
     if max == 0 {

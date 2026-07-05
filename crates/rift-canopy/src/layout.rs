@@ -6,8 +6,6 @@
 //! responsive degradation ladder (Full3Col → TwoCol → SinglePanel → TooSmall)
 //! lands in P3 S2; this step delivers the nominal grid + the exact-tiling solver.
 
-use crate::Panel;
-
 /// A rectangle in terminal cells.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rect {
@@ -20,9 +18,6 @@ pub struct Rect {
     /// Height in cells.
     pub h: u16,
 }
-
-/// Which panel currently holds focus (the spec's `Focus`; identical to [`Panel`]).
-pub type Focus = Panel;
 
 /// Rows reserved for the bottom command panel (1 input line + border).
 pub const COMMAND_ROWS: u16 = 3;

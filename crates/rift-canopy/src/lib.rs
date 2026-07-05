@@ -44,11 +44,11 @@ pub use col2::{
 pub use command::{autocomplete, parse_command, Command, COMMANDS};
 pub use gauge::{render_bar, GaugeState};
 pub use input::{on_key, Action, CanopyKey, Mode};
-pub use layout::{solve, Focus, PanelRects, Rect};
+pub use layout::{solve, PanelRects, Rect};
 pub use render::{select_backend, AsciiBackend, Capabilities, Frame, RenderBackend};
 pub use splash::SplashState;
 pub use state::{
-    update, AppState, DataRequest, Effects, Event, Flow, PersistOp, ProjectData, ViewModel,
+    update, AppState, DataRequest, Effects, Event, Flow, Focus, PersistOp, ProjectData, ViewModel,
 };
 
 /// Scaffold/status string (kept for the bin entrypoint and smoke tests).

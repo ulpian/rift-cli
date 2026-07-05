@@ -13,7 +13,8 @@ use super::frame::Frame;
 use super::{Capabilities, RenderBackend, RenderError};
 use crate::gauge::render_bar;
 use crate::layout::Rect;
-use crate::{App, Mode, ProjectStatus};
+use crate::view::{sparkline, status_label};
+use crate::{App, Mode};
 
 /// The render frame for the legacy line renderer: one string per row.
 pub type Lines = Vec<String>;
@@ -109,33 +110,6 @@ impl RenderBackend for AsciiBackend {
         out.write_all(buf.as_bytes())
             .and_then(|()| out.flush())
             .map_err(|e| RenderError::Terminal(e.to_string()))
-    }
-}
-
-/// Render a `u64` series as block-glyph sparkline cells.
-fn sparkline(series: &[u64]) -> String {
-    const RAMP: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let max = series.iter().copied().max().unwrap_or(0);
-    if max == 0 {
-        return "▁".repeat(series.len());
-    }
-    series
-        .iter()
-        .map(|v| {
-            let idx = (u128::from(*v) * (RAMP.len() as u128 - 1) / u128::from(max)) as usize;
-            *RAMP.get(idx).unwrap_or(&'▁')
-        })
-        .collect()
-}
-
-/// A short human label for a project's live status.
-fn status_label(s: ProjectStatus) -> &'static str {
-    match s {
-        ProjectStatus::Running { .. } => "running",
-        ProjectStatus::PickingUp => "picking up",
-        ProjectStatus::Idle => "idle",
-        ProjectStatus::NotInitialized => "not initialized",
-        ProjectStatus::Error(_) => "error",
     }
 }
 
