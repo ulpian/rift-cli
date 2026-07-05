@@ -54,7 +54,7 @@ fn dashboard_state() -> AppState {
 
 #[test]
 fn golden_dashboard_frame() {
-    let s = dashboard_state();
+    let mut s = dashboard_state();
     let mut f = Frame::new(s.size);
     rift_canopy::view::draw(&s.snapshot(), &mut f);
     insta::assert_snapshot!("dashboard", frame_text(&f));

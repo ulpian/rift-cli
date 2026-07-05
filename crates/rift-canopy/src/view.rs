@@ -192,8 +192,9 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
         let Ok(dy) = u16::try_from(row.saturating_sub(start)) else {
             break;
         };
-        let style = if p.selected { ACCENT } else { Style::DEFAULT };
-        let cursor = if p.selected { '>' } else { ' ' };
+        let selected = row == vm.selected;
+        let style = if selected { ACCENT } else { Style::DEFAULT };
+        let cursor = if selected { '>' } else { ' ' };
         // The label is untrusted (a directory name); sanitize before eliding.
         let label = elide(&sanitize_for_terminal(&p.name), label_w);
         let line = format!("{cursor} {} {label}", p.status.glyph());
@@ -657,7 +658,7 @@ mod tests {
     fn model_name_with_ansi_escape_is_sanitized() {
         // A hostile model name carrying an SGR escape must not reach any cell as a
         // control character — the ESC is stripped, the inert text remains.
-        let s = state_with_detail(ProjectStatus::Idle, "evil\x1b[31mmodel");
+        let mut s = state_with_detail(ProjectStatus::Idle, "evil\x1b[31mmodel");
         let mut f = Frame::new(s.size);
         draw(&s.snapshot(), &mut f);
         for y in 0..f.height() {
@@ -677,7 +678,7 @@ mod tests {
 
     #[test]
     fn uninitialized_project_shows_init_hint() {
-        let s = state_with_detail(ProjectStatus::NotInitialized, "unused");
+        let mut s = state_with_detail(ProjectStatus::NotInitialized, "unused");
         let text = render_to_text(&s.snapshot());
         assert!(text.contains("not initialized"));
         assert!(text.contains("rift init"));
@@ -685,7 +686,7 @@ mod tests {
 
     #[test]
     fn detail_renders_sections_when_ready() {
-        let s = state_with_detail(ProjectStatus::Idle, "claude-opus");
+        let mut s = state_with_detail(ProjectStatus::Idle, "claude-opus");
         let text = render_to_text(&s.snapshot());
         assert!(text.contains("models"));
         assert!(text.contains("claude-opus"));
@@ -697,7 +698,7 @@ mod tests {
         /// Every terminal size yields a renderable layout — no panic, at any size.
         #[test]
         fn every_size_yields_a_renderable_layout(w in 0u16..400, h in 0u16..400) {
-            let s = sized(w, h);
+            let mut s = sized(w, h);
             let mut f = Frame::new(Size::new(w, h));
             draw(&s.snapshot(), &mut f); // must not panic at any size
         }
@@ -706,7 +707,7 @@ mod tests {
         /// in a rendered cell — the sanitize gate holds for any bytes.
         #[test]
         fn no_control_chars_in_any_cell_for_arbitrary_model(model in ".*") {
-            let s = state_with_detail(ProjectStatus::Idle, &model);
+            let mut s = state_with_detail(ProjectStatus::Idle, &model);
             let mut f = Frame::new(s.size);
             draw(&s.snapshot(), &mut f);
             for y in 0..f.height() {

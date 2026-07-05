@@ -182,8 +182,14 @@ pub struct AppState {
     /// Idle-tick counter driving the background re-stat cadence (never dirties).
     tick: u32,
     /// The bus-computed rich detail for the active project (keyed by its path);
-    /// the snapshot uses it when it matches the selection, else a thin fallback.
-    detail: Option<DetailView>,
+    /// the snapshot shares it when it matches the selection, else a thin fallback.
+    detail: Option<Arc<DetailView>>,
+    /// The last snapshot's project rows, shared with every [`ViewModel`] until the
+    /// underlying projects change (checked by cheap comparison in [`Self::snapshot`],
+    /// so a stale row can never be served).
+    rows_cache: Arc<Vec<ProjectRow>>,
+    /// The last snapshot's token series, shared likewise.
+    series_cache: Arc<Vec<u64>>,
 }
 
 impl AppState {
@@ -196,6 +202,8 @@ impl AppState {
             tick: 0,
             dirty: true,
             detail: None,
+            rows_cache: Arc::new(Vec::new()),
+            series_cache: Arc::new(Vec::new()),
         }
     }
 
@@ -218,8 +226,8 @@ impl AppState {
             }
         }
         if let Some(detail) = &pd.detail {
-            if self.detail.as_ref() != Some(detail) {
-                self.detail = Some(detail.clone());
+            if self.detail.as_deref() != Some(detail) {
+                self.detail = Some(Arc::new(detail.clone()));
                 changed = true;
             }
         }
@@ -246,36 +254,52 @@ impl AppState {
     }
 
     /// Derive the immutable render snapshot the renderer consumes.
+    ///
+    /// The project rows, token series, and rich detail are **shared** (`Arc`)
+    /// rather than deep-cloned per frame: each cache is compared against the
+    /// live state and rebuilt only when it actually differs — so a snapshot is
+    /// O(compare) on quiet data, and a mutation is always visible in the next
+    /// snapshot (the comparison, not an invalidation hook, is the truth).
     #[must_use]
-    pub fn snapshot(&self) -> ViewModel {
-        let projects: Vec<ProjectRow> = self
-            .app
-            .projects
-            .iter()
-            .enumerate()
-            .map(|(i, p)| ProjectRow {
-                name: p.name.clone(),
-                status: p.status,
-                selected: i == self.app.selected,
-            })
-            .collect();
+    pub fn snapshot(&mut self) -> ViewModel {
+        let rows_match = self.rows_cache.len() == self.app.projects.len()
+            && self
+                .rows_cache
+                .iter()
+                .zip(&self.app.projects)
+                .all(|(r, p)| r.status == p.status && r.name == p.name);
+        if !rows_match {
+            self.rows_cache = Arc::new(
+                self.app
+                    .projects
+                    .iter()
+                    .map(|p| ProjectRow {
+                        name: p.name.clone(),
+                        status: p.status,
+                    })
+                    .collect(),
+            );
+        }
+        if *self.series_cache != self.app.token_series {
+            self.series_cache = Arc::new(self.app.token_series.clone());
+        }
         // Prefer the bus-computed rich detail when it is for the selected project;
         // otherwise a thin fallback keeps the panel populated until it arrives.
         let detail = self.app.selected_project().map(|p| match &self.detail {
-            Some(d) if d.path == p.path => d.clone(),
-            _ => DetailView::thin(p.path.clone(), p.name.clone(), p.status),
+            Some(d) if d.path == p.path => Arc::clone(d),
+            _ => Arc::new(DetailView::thin(p.path.clone(), p.name.clone(), p.status)),
         });
         ViewModel {
             size: self.size,
             focus: self.app.focus,
             mode: self.app.mode,
             show_wizard: self.app.show_wizard,
-            projects: Arc::new(projects),
+            projects: Arc::clone(&self.rows_cache),
             selected: self.app.selected,
             detail,
             context_pct: self.app.context_pct,
             savings_pct: self.app.savings_pct,
-            token_series: Arc::new(self.app.token_series.clone()),
+            token_series: Arc::clone(&self.series_cache),
             detail_scroll: self.app.scroll.detail,
             graphs_scroll: self.app.scroll.graphs,
             toggle_cursor: self.app.toggle_cursor,
@@ -341,7 +365,7 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
                 }
                 // Flipping/retrying a feature reads the selected project's current
                 // toggle states (from the stored detail) to plan the change.
-                Action::ToggleFeature => toggle_flow(&s.app, s.detail.as_ref()),
+                Action::ToggleFeature => toggle_flow(&s.app, s.detail.as_deref()),
                 Action::RetryFeature => retry_flow(&s.app),
                 other => fold_action(other),
             };
@@ -441,15 +465,15 @@ fn retry_flow(app: &App) -> Flow {
     })
 }
 
-/// One project row in the render snapshot.
+/// One project row in the render snapshot. Selection is not a row property —
+/// the renderer derives it from [`ViewModel::selected`] — so the shared row
+/// list never rebuilds on a selection move.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectRow {
     /// Display name.
     pub name: String,
     /// Live status.
     pub status: ProjectStatus,
-    /// Whether this row is the current selection.
-    pub selected: bool,
 }
 
 /// The immutable per-frame render input. Cheap to clone (Arc-shared vectors).
@@ -463,12 +487,12 @@ pub struct ViewModel {
     pub mode: Mode,
     /// Whether to show the first-run wizard.
     pub show_wizard: bool,
-    /// Column-1 project rows.
+    /// Column-1 project rows (shared, rebuilt only when the rows change).
     pub projects: Arc<Vec<ProjectRow>>,
-    /// The selected project's index (for reflow / scroll-to-selection).
+    /// The selected project's index (selection highlight + scroll-to-selection).
     pub selected: usize,
-    /// Column-2 selected-project detail.
-    pub detail: Option<DetailView>,
+    /// Column-2 selected-project detail (shared with the state's cached copy).
+    pub detail: Option<Arc<DetailView>>,
     /// Context-window % (nic-gauge).
     pub context_pct: u8,
     /// Recall savings %.
@@ -908,12 +932,48 @@ mod tests {
 
     #[test]
     fn snapshot_is_deterministic_for_unchanged_state() {
-        let s = ready(vec![project("a"), project("b")]);
+        let mut s = ready(vec![project("a"), project("b")]);
         let v1 = s.snapshot();
         let v2 = s.snapshot();
         assert_eq!(*v1.projects, *v2.projects);
         assert_eq!(v1.size, v2.size);
         assert_eq!(v1.command_line, v2.command_line);
+        // The unchanged rows/series are *shared*, not re-allocated per frame.
+        assert!(Arc::ptr_eq(&v1.projects, &v2.projects));
+        assert!(Arc::ptr_eq(&v1.token_series, &v2.token_series));
+    }
+
+    #[test]
+    fn mutation_is_visible_in_next_snapshot() {
+        // The Arc sharing must never serve stale state: a held old snapshot and a
+        // post-mutation snapshot disagree exactly where the mutation happened.
+        let mut s = ready(vec![project("a"), project("b")]);
+        let before = s.snapshot();
+        update(
+            &mut s,
+            Event::ProjectData(ProjectData {
+                project: "/r/a".into(),
+                status: ProjectStatus::Running {
+                    since_ms: 7,
+                    active_sessions: 1,
+                },
+                detail: None,
+            }),
+        );
+        let after = s.snapshot();
+        assert_eq!(before.projects[0].status, ProjectStatus::Idle);
+        assert!(matches!(
+            after.projects[0].status,
+            ProjectStatus::Running { .. }
+        ));
+        // A direct (non-reducer) mutation is caught by the comparison too.
+        s.app.projects[1].name = "renamed".into();
+        let direct = s.snapshot();
+        assert_eq!(direct.projects[1].name, "renamed");
+        assert_eq!(
+            after.projects[1].name, "b",
+            "the held snapshot is immutable"
+        );
     }
 
     #[test]
@@ -921,8 +981,7 @@ mod tests {
         let mut s = ready(vec![project("a"), project("b")]);
         update(&mut s, Event::Key(CanopyKey::Down));
         let v = s.snapshot();
-        assert!(v.projects[1].selected);
-        assert!(!v.projects[0].selected);
+        assert_eq!(v.selected, 1);
         assert_eq!(v.detail.unwrap().path, "/r/b");
     }
 
