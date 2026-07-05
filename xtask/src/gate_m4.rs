@@ -62,24 +62,28 @@ impl Scratch {
     }
 
     /// The scratch repo's projection database path (created by seeding).
-    fn projection_db(&self) -> PathBuf {
-        rift_store::projection_db_under(&self.cache, &repo_id(&self.repo))
+    fn projection_db(&self) -> Result<PathBuf, String> {
+        Ok(rift_store::projection_db_under(
+            &self.cache,
+            &repo_id(&self.repo)?,
+        ))
     }
 
     /// The scratch repo's recall database path.
-    fn recall_db(&self) -> PathBuf {
-        rift_store::recall_db_under(&self.cache, &repo_id(&self.repo))
+    fn recall_db(&self) -> Result<PathBuf, String> {
+        Ok(rift_store::recall_db_under(
+            &self.cache,
+            &repo_id(&self.repo)?,
+        ))
     }
 }
 
 /// The repo id the binary derives (pinned formula: leaf-hash of the canonical
 /// path, first 32 hex — see `rift_git::repo_id_for`).
-fn repo_id(dir: &Path) -> rift_core::RepoId {
+fn repo_id(dir: &Path) -> Result<rift_core::RepoId, String> {
     let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let hex = rift_hashchain::leaf_hash(canon.to_string_lossy().as_bytes()).to_hex();
-    rift_core::RepoId::new(hex.get(..32).unwrap_or(&hex)).unwrap_or_else(|_| {
-        rift_core::RepoId::new("gatefallbackgatefallbackgatefall").expect("static id")
-    })
+    rift_core::RepoId::new(hex.get(..32).unwrap_or(&hex)).map_err(|e| format!("repo id: {e}"))
 }
 
 fn run_cmd(program: &Path, args: &[&str], cwd: &Path, env: &[(String, String)]) -> (i32, String) {
@@ -123,16 +127,22 @@ fn build_rift(root: &Path) -> Result<PathBuf, String> {
 }
 
 /// A short-lived runtime for the seeding writes.
-fn rt() -> tokio::runtime::Runtime {
+fn rt() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .build()
-        .expect("current-thread runtime")
+        .map_err(|e| format!("runtime: {e}"))
 }
 
 /// Seed one captured session + a usage-bearing model call into the projection.
-fn seed_projection(db: &Path, call_id: &str, t: i64, classes: (i64, i64, i64, i64)) {
-    let store = rift_store::open_capture_projection(db).expect("open projection");
-    let rt = rt();
+fn seed_projection(
+    db: &Path,
+    call_id: &str,
+    t: i64,
+    classes: (i64, i64, i64, i64),
+) -> Result<(), String> {
+    let store =
+        rift_store::open_capture_projection(db).map_err(|e| format!("open projection: {e}"))?;
+    let rt = rt()?;
     // The session row (idempotent per id; ignore a duplicate on re-seed).
     let _ = rt.block_on(store.insert_or_ignore(
         "session",
@@ -170,7 +180,7 @@ fn seed_projection(db: &Path, call_id: &str, t: i64, classes: (i64, i64, i64, i6
             Value::Int(1),
         ],
     ))
-    .expect("seed model_call");
+    .map_err(|e| format!("seed model_call: {e}"))?;
     rt.block_on(store.insert(
         "token_usage",
         &[
@@ -192,17 +202,18 @@ fn seed_projection(db: &Path, call_id: &str, t: i64, classes: (i64, i64, i64, i6
             Value::Int(1),
         ],
     ))
-    .expect("seed token_usage");
+    .map_err(|e| format!("seed token_usage: {e}"))?;
+    Ok(())
 }
 
 /// Seed served `memd.*` audit events into the recall projection.
-fn seed_recall(db: &Path, events: &[(i64, i64)]) {
+fn seed_recall(db: &Path, events: &[(i64, i64)]) -> Result<(), String> {
     if let Some(parent) = db.parent() {
-        std::fs::create_dir_all(parent).expect("recall dir");
+        std::fs::create_dir_all(parent).map_err(|e| format!("recall dir: {e}"))?;
     }
-    let store =
-        rift_store::open_migrated(db, &rift_store::recall_migrations()).expect("open recall.db");
-    let rt = rt();
+    let store = rift_store::open_migrated(db, &rift_store::recall_migrations())
+        .map_err(|e| format!("open recall.db: {e}"))?;
+    let rt = rt()?;
     for (i, (t, avoided)) in events.iter().enumerate() {
         rt.block_on(store.insert(
             "memd_audit_event",
@@ -227,24 +238,26 @@ fn seed_recall(db: &Path, events: &[(i64, i64)]) {
                 Value::Int(1),
             ],
         ))
-        .expect("seed memd audit event");
+        .map_err(|e| format!("seed memd audit event: {e}"))?;
     }
+    Ok(())
 }
 
 /// Write a live per-session cache entry (what the capture hooks maintain).
-fn seed_session_cache(repo: &Path) {
+fn seed_session_cache(repo: &Path) -> Result<(), String> {
     let dir = repo.join(".git").join("rift-sessions");
-    std::fs::create_dir_all(&dir).expect("sessions dir");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("sessions dir: {e}"))?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(0))
-        .unwrap_or(0);
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0));
     let body = format!(
         r#"{{"schema":1,"session_id":"gate-session","state":"active","agent":"claude-code",
             "current_turn_ordinal":2,"turn_open":true,"compaction_boundary":null,
             "updated_at_ms":{now_ms},"native_id_map":{{}}}}"#
     );
-    std::fs::write(dir.join("gate-session.json"), body).expect("session cache");
+    std::fs::write(dir.join("gate-session.json"), body)
+        .map_err(|e| format!("session cache: {e}"))?;
+    Ok(())
 }
 
 /// The six live-section markers asserted on a seeded frame.
@@ -309,19 +322,19 @@ pub fn run(root: &Path) -> Result<Vec<String>, String> {
 
     // ---- seed: captured tokens + served memd events + a live session -------
     seed_projection(
-        &scratch.projection_db(),
+        &scratch.projection_db()?,
         "c1",
         1_000,
         (5_000, 48_000, 3_300, 9_100),
-    );
+    )?;
     seed_projection(
-        &scratch.projection_db(),
+        &scratch.projection_db()?,
         "c2",
         60_000,
         (20_000, 100_000, 0, 4_000),
-    );
-    seed_recall(&scratch.recall_db(), &[(1_000, 500), (30_000, 1_500)]);
-    seed_session_cache(&scratch.repo);
+    )?;
+    seed_recall(&scratch.recall_db()?, &[(1_000, 500), (30_000, 1_500)])?;
+    seed_session_cache(&scratch.repo)?;
 
     // ---- frame 1: all six sections live -------------------------------------
     let (code, frame1) = scratch.rift(&[]);
@@ -353,8 +366,8 @@ pub fn run(root: &Path) -> Result<Vec<String>, String> {
     );
 
     // ---- rebuild mid-run: epoch bump + different facts → fresh read ---------
-    rift_store::rebuild(&scratch.projection_db()).map_err(|e| format!("rebuild: {e}"))?;
-    seed_projection(&scratch.projection_db(), "n1", 2_000, (300, 0, 0, 100));
+    rift_store::rebuild(&scratch.projection_db()?).map_err(|e| format!("rebuild: {e}"))?;
+    seed_projection(&scratch.projection_db()?, "n1", 2_000, (300, 0, 0, 100))?;
     let (code, frame2) = scratch.rift(&[]);
     violation(&mut v, code == 0, "headless dashboard (frame 2) failed");
     violation(
