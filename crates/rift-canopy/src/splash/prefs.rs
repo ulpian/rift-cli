@@ -8,6 +8,12 @@
 //! Writes are whole-file "latest-wins" — the superseding-write model for a
 //! single-value preference. The path is env-injectable (`RIFT_CONFIG_DIR`), so
 //! tests are hermetic.
+//!
+//! **Deliberate stay-behind (ADR-0009).** This is the one persistence path that
+//! lives in `rift-canopy` rather than the `rift-canopy-data` plane: moving it
+//! would need the forbidden reverse edge (`rift-canopy` → `rift-canopy-data`),
+//! and the splash needs its prefs before any data plane exists. The crate's
+//! small `toml`/`serde` dependency is accepted for exactly this module.
 
 use std::path::PathBuf;
 
