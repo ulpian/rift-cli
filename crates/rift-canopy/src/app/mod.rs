@@ -216,7 +216,7 @@ mod tests {
     use crate::render::frame::{Frame, Size};
     use crate::render::Capabilities;
     use crate::state::Event;
-    use crate::{CanopyKey, NullFeatureManager};
+    use crate::{CanopyKey, EntryKind, NullFeatureManager};
 
     /// A render backend that counts presents (the headless loop probe).
     struct MockBackend {
@@ -294,11 +294,13 @@ mod tests {
                     name: "a".into(),
                     path: "/a".into(),
                     status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
                 },
                 Project {
                     name: "b".into(),
                     path: "/b".into(),
                     status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
                 },
             ],
             Size::new(80, 24),
@@ -379,6 +381,7 @@ mod tests {
                 name: "x".into(),
                 path: path.clone(),
                 status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
             }])
         };
         event_loop(
@@ -417,6 +420,7 @@ mod tests {
                 name: "a".into(),
                 path: "/r/a".into(),
                 status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
             }],
             Size::new(80, 24),
         );
@@ -426,6 +430,7 @@ mod tests {
                 name: "a".into(),
                 path: "/r/a".into(),
                 status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
             }])
         };
         event_loop(

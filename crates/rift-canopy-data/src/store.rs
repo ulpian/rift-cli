@@ -12,8 +12,8 @@
 use std::path::Path;
 
 use rift_canopy::{
-    current_registry, current_toggles, toggle_view, PersistOp, Project, ProjectEntry, ProjectEvent,
-    ProjectOp, ProjectStatus, ToggleEvent, ToggleView,
+    current_registry, current_toggles, toggle_view, EntryKind, PersistOp, Project, ProjectEntry,
+    ProjectEvent, ProjectOp, ProjectStatus, ToggleEvent, ToggleView,
 };
 use rift_core::{MonotonicUlidSource, ProjectId, Result, RiftError, UlidSource};
 use rift_git::repo_id_for;
@@ -63,21 +63,50 @@ impl CanopyStore {
         })
     }
 
-    /// The current registry, folded from the event log and projected onto Canopy's
-    /// [`Project`] view (status starts `Idle`; the live bus refines it).
+    /// The current registry, folded from the event log and projected onto
+    /// Canopy's [`Project`] view (status starts `Idle`; the live bus refines
+    /// it), with each repository's **linked worktrees** listed as child rows
+    /// directly under it (M4-07, user story 11). Worktree rows are derived
+    /// from git — never persisted — and carry the minimal honest semantics:
+    /// the directory name as the label, [`EntryKind::Worktree`], and a status
+    /// derived for their own path like any row (a worktree that was never
+    /// `rift init`ed honestly reads NotInitialized). A worktree that is
+    /// itself a registered project keeps its own registry row instead.
     ///
     /// # Errors
     /// [`RiftError::Storage`] if the log cannot be read.
     pub fn projects(&self) -> Result<Vec<Project>> {
         let entries = self.registry()?;
-        Ok(entries
-            .into_iter()
-            .map(|e| Project {
+        let registered: std::collections::BTreeSet<String> =
+            entries.iter().map(|e| e.path.clone()).collect();
+        let mut out = Vec::new();
+        for e in entries {
+            let repo_path = std::path::PathBuf::from(&e.path);
+            out.push(Project {
                 name: e.label,
                 path: e.path,
                 status: ProjectStatus::Idle,
-            })
-            .collect())
+                kind: EntryKind::Repo,
+            });
+            // Children: this repository's linked worktrees (best-effort — a
+            // non-git or unreadable repo simply has none).
+            let Ok(paths) = rift_git::discover(&repo_path) else {
+                continue;
+            };
+            for wt in rift_git::list_worktrees(&paths) {
+                let wt_path = wt.work_tree.to_string_lossy().into_owned();
+                if registered.contains(&wt_path) {
+                    continue; // it has its own registry row
+                }
+                out.push(Project {
+                    name: wt.name,
+                    path: wt_path,
+                    status: ProjectStatus::Idle,
+                    kind: EntryKind::Worktree,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Apply one append-only persistence op and return the refreshed project list.
@@ -627,6 +656,83 @@ mod tests {
             cs.events().unwrap().len(),
             n,
             "no event appended off the end"
+        );
+    }
+
+    /// Hand-build the exact `git worktree add` file layout under `repo`.
+    fn add_worktree_fixture(repo: &Path, name: &str) -> String {
+        let wt = repo.parent().unwrap().join(name);
+        std::fs::create_dir_all(&wt).unwrap();
+        let admin = repo.join(".git").join("worktrees").join(name);
+        std::fs::create_dir_all(&admin).unwrap();
+        let dot_git = wt.join(".git");
+        std::fs::write(&dot_git, format!("gitdir: {}\n", admin.display())).unwrap();
+        std::fs::write(admin.join("gitdir"), format!("{}\n", dot_git.display())).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        wt.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn linked_worktrees_list_as_child_rows_under_their_repo() {
+        let (dir, cs) = store();
+        let repo = make_dir(dir.path(), "repo");
+        std::fs::create_dir_all(std::path::Path::new(&repo).join(".git")).unwrap();
+        let wt_path = add_worktree_fixture(std::path::Path::new(&repo), "feature-wt");
+        cs.apply(&PersistOp::AddProject { path: repo.clone() }, 1)
+            .unwrap();
+
+        let projects = cs.projects().unwrap();
+        assert_eq!(projects.len(), 2, "repo + its worktree child");
+        assert_eq!(projects[0].path, repo);
+        assert_eq!(projects[0].kind, EntryKind::Repo);
+        assert_eq!(projects[1].name, "feature-wt");
+        assert_eq!(projects[1].path, wt_path);
+        assert_eq!(
+            projects[1].kind,
+            EntryKind::Worktree,
+            "the child row carries the reserved Worktree kind"
+        );
+    }
+
+    #[test]
+    fn repo_without_worktrees_renders_exactly_as_today() {
+        let (dir, cs) = store();
+        let repo = make_dir(dir.path(), "plain");
+        std::fs::create_dir_all(std::path::Path::new(&repo).join(".git")).unwrap();
+        cs.apply(&PersistOp::AddProject { path: repo.clone() }, 1)
+            .unwrap();
+        let projects = cs.projects().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].kind, EntryKind::Repo);
+    }
+
+    #[test]
+    fn a_registered_worktree_keeps_its_own_row_not_a_duplicate_child() {
+        let (dir, cs) = store();
+        let repo = make_dir(dir.path(), "repo");
+        std::fs::create_dir_all(std::path::Path::new(&repo).join(".git")).unwrap();
+        let wt_path = add_worktree_fixture(std::path::Path::new(&repo), "wt-own");
+        cs.apply(&PersistOp::AddProject { path: repo.clone() }, 1)
+            .unwrap();
+        cs.apply(
+            &PersistOp::AddProject {
+                path: wt_path.clone(),
+            },
+            2,
+        )
+        .unwrap();
+
+        let projects = cs.projects().unwrap();
+        let wt_rows: Vec<_> = projects.iter().filter(|p| p.path == wt_path).collect();
+        assert_eq!(
+            wt_rows.len(),
+            1,
+            "no duplicate row for a registered worktree"
+        );
+        assert_eq!(
+            wt_rows[0].kind,
+            EntryKind::Repo,
+            "its own registry row wins over the derived child"
         );
     }
 

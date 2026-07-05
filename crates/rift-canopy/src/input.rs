@@ -244,13 +244,14 @@ fn on_key_editing(app: &mut App, key: CanopyKey) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Panel, Project, ProjectStatus};
+    use crate::{EntryKind, Panel, Project, ProjectStatus};
 
     fn project(name: &str) -> Project {
         Project {
             name: name.into(),
             path: format!("/r/{name}"),
             status: ProjectStatus::Idle,
+            kind: EntryKind::Repo,
         }
     }
 

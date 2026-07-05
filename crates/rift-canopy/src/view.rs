@@ -195,9 +195,17 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
         let selected = row == vm.selected;
         let style = if selected { ACCENT } else { Style::DEFAULT };
         let cursor = if selected { '>' } else { ' ' };
+        // Linked worktrees render as indented children of their repository.
+        let indent = match p.kind {
+            EntryKind::Repo => "",
+            EntryKind::Worktree => "  ",
+        };
         // The label is untrusted (a directory name); sanitize before eliding.
-        let label = elide(&sanitize_for_terminal(&p.name), label_w);
-        let line = format!("{cursor} {} {label}", p.status.glyph());
+        let label = elide(
+            &sanitize_for_terminal(&p.name),
+            label_w.saturating_sub(indent.len()),
+        );
+        let line = format!("{cursor} {indent}{} {label}", p.status.glyph());
         clip_line(frame, inner, dy, &line, style);
     }
 }
@@ -429,7 +437,9 @@ mod tests {
     use super::*;
     use crate::render::frame::Size;
     use crate::state::{update, AppState, Event, ProjectData};
-    use crate::{CaptureSummary, DetailView, ModelUsage, Project, ProjectStatus, SettingsSummary};
+    use crate::{
+        CaptureSummary, DetailView, EntryKind, ModelUsage, Project, ProjectStatus, SettingsSummary,
+    };
 
     fn vm() -> ViewModel {
         let mut s = AppState::new(
@@ -441,11 +451,13 @@ mod tests {
                         since_ms: 0,
                         active_sessions: 1,
                     },
+                    kind: EntryKind::Repo,
                 },
                 Project {
                     name: "rift-site".into(),
                     path: "/r/rift-site".into(),
                     status: ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
                 },
             ],
             Size::new(120, 40),
@@ -512,6 +524,7 @@ mod tests {
                 name: "p".into(),
                 path: "/r/p".into(),
                 status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
             }],
             Size::new(120, 40),
         );
@@ -555,11 +568,13 @@ mod tests {
                     name: "alpha".into(),
                     path: "/r/alpha".into(),
                     status: ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
                 },
                 Project {
                     name: "beta".into(),
                     path: "/r/beta".into(),
                     status: ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
                 },
             ],
             Size::new(w, h),
@@ -615,6 +630,7 @@ mod tests {
             name: "a-really-long-project-name-that-cannot-possibly-fit".into(),
             path: "/r/x".into(),
             status: ProjectStatus::Idle,
+            kind: EntryKind::Repo,
         }];
         let text = render_to_text(&s.snapshot());
         assert!(text.contains('…'), "an over-long label is ellipsized");
@@ -627,6 +643,7 @@ mod tests {
                 name: "p".into(),
                 path: "/r/p".into(),
                 status,
+                kind: EntryKind::Repo,
             }],
             Size::new(120, 40),
         );

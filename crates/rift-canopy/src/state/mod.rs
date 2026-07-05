@@ -267,7 +267,7 @@ impl AppState {
                 .rows_cache
                 .iter()
                 .zip(&self.app.projects)
-                .all(|(r, p)| r.status == p.status && r.name == p.name);
+                .all(|(r, p)| r.status == p.status && r.kind == p.kind && r.name == p.name);
         if !rows_match {
             self.rows_cache = Arc::new(
                 self.app
@@ -276,6 +276,7 @@ impl AppState {
                     .map(|p| ProjectRow {
                         name: p.name.clone(),
                         status: p.status,
+                        kind: p.kind,
                     })
                     .collect(),
             );
@@ -474,6 +475,8 @@ pub struct ProjectRow {
     pub name: String,
     /// Live status.
     pub status: ProjectStatus,
+    /// Repository root or linked worktree (drives the child-row indent).
+    pub kind: crate::EntryKind,
 }
 
 /// The immutable per-frame render input. Cheap to clone (Arc-shared vectors).
@@ -514,13 +517,14 @@ pub struct ViewModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Project, ProjectStatus};
+    use crate::{EntryKind, Project, ProjectStatus};
 
     fn project(name: &str) -> Project {
         Project {
             name: name.into(),
             path: format!("/r/{name}"),
             status: ProjectStatus::Idle,
+            kind: EntryKind::Repo,
         }
     }
 

@@ -67,6 +67,9 @@ pub struct Project {
     pub path: String,
     /// Live status.
     pub status: ProjectStatus,
+    /// Repository root or linked worktree (drives the col1 child-row indent
+    /// and the detail header; M4-07).
+    pub kind: EntryKind,
 }
 
 /// The live status of a project, derived read-only from the projection + the
@@ -365,11 +368,13 @@ mod tests {
                     since_ms: 0,
                     active_sessions: 1,
                 },
+                kind: EntryKind::Repo,
             },
             Project {
                 name: "b".into(),
                 path: "/b".into(),
                 status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
             },
         ]);
         app.select_prev(); // already at 0

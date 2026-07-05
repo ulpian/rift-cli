@@ -426,10 +426,16 @@ fn build_detail(root: &Path, path: &str, status: ProjectStatus) -> DetailView {
     let toggles = crate::store::CanopyStore::open(root)
         .and_then(|cs| cs.toggles(path))
         .unwrap_or_default();
+    // A `.git` FILE marks a linked worktree; a directory is a repository root.
+    let kind = if dir.join(".git").is_file() {
+        EntryKind::Worktree
+    } else {
+        EntryKind::Repo
+    };
     DetailView {
         path: path.to_string(),
         label,
-        kind: EntryKind::Repo,
+        kind,
         status,
         models,
         settings: read_settings(&dir),

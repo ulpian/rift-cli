@@ -7,7 +7,7 @@ use rift_canopy::render::Capabilities;
 use rift_canopy::splash::director::Tier;
 use rift_canopy::splash::render2d::draw_tier;
 use rift_canopy::state::AppState;
-use rift_canopy::{AsciiBackend, Project, ProjectStatus};
+use rift_canopy::{AsciiBackend, EntryKind, Project, ProjectStatus};
 
 /// Render a frame to a trailing-trimmed text block (stable across runs).
 fn frame_text(frame: &Frame) -> String {
@@ -36,11 +36,13 @@ fn dashboard_state() -> AppState {
                     since_ms: 0,
                     active_sessions: 1,
                 },
+                kind: EntryKind::Repo,
             },
             Project {
                 name: "rift-site".into(),
                 path: "/r/rift-site".into(),
                 status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
             },
         ],
         Size::new(80, 18),
@@ -95,6 +97,38 @@ fn golden_layout_single_panel() {
 fn golden_layout_too_small() {
     // Below the floor → the centered notice.
     insta::assert_snapshot!("layout_too_small", render_at(22, 5));
+}
+
+#[test]
+fn golden_col1_worktree_children() {
+    // A repository row with an indented linked-worktree child (M4-07).
+    let mut s = AppState::new(
+        vec![
+            Project {
+                name: "rift-cli".into(),
+                path: "/r/rift-cli".into(),
+                status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            },
+            Project {
+                name: "feature-wt".into(),
+                path: "/r/rift-cli-wt".into(),
+                status: ProjectStatus::NotInitialized,
+                kind: EntryKind::Worktree,
+            },
+            Project {
+                name: "rift-site".into(),
+                path: "/r/rift-site".into(),
+                status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            },
+        ],
+        Size::new(80, 18),
+    );
+    s.app.splash.skip();
+    let mut f = Frame::new(s.size);
+    rift_canopy::view::draw(&s.snapshot(), &mut f);
+    insta::assert_snapshot!("col1_worktree_children", frame_text(&f));
 }
 
 // --- graph widgets (M4-09): fixed series, block (floor) tier ----------------

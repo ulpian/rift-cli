@@ -130,6 +130,58 @@ pub fn repo_id_for(dir: &Path) -> Result<rift_core::RepoId> {
     rift_core::RepoId::new(hex.get(..32).unwrap_or(&hex))
 }
 
+/// One linked worktree of a repository, as enumerated from
+/// `<common_dir>/worktrees/*` (M4-07).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkedWorktree {
+    /// The worktree's administrative name (the `worktrees/<name>` dir).
+    pub name: String,
+    /// The working-tree directory the worktree checks out into.
+    pub work_tree: PathBuf,
+}
+
+/// Enumerate a repository's **linked worktrees** by iterating
+/// `<common_dir>/worktrees/*`: each entry's `gitdir` file names the worktree's
+/// `.git` file, whose parent is the working tree. Total and honest — a pruned,
+/// malformed, or unreadable entry is **skipped** (never a panic, never an
+/// invented row), and a repository with no `worktrees/` dir yields an empty
+/// list. The main working tree is not listed (it is the repository row
+/// itself).
+#[must_use]
+pub fn list_worktrees(paths: &RepoPaths) -> Vec<LinkedWorktree> {
+    let admin = paths.common_dir.join("worktrees");
+    let Ok(entries) = std::fs::read_dir(&admin) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(name) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        // `gitdir` holds the absolute path of the worktree's `.git` FILE; the
+        // working tree is its parent. A missing/garbled file = pruned → skip.
+        let Ok(text) = std::fs::read_to_string(dir.join("gitdir")) else {
+            continue;
+        };
+        let dot_git = PathBuf::from(text.trim());
+        let Some(work_tree) = dot_git.parent().map(std::path::Path::to_path_buf) else {
+            continue;
+        };
+        // A worktree whose directory is gone (deleted but not pruned) is
+        // skipped too — a row for a nonexistent path would be an invented lie.
+        if !work_tree.is_dir() {
+            continue;
+        }
+        out.push(LinkedWorktree { name, work_tree });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 fn build_paths(git_dir: PathBuf, common_dir: PathBuf, work_tree: PathBuf) -> RepoPaths {
     let mut h = Sha256::new();
     h.update(work_tree.to_string_lossy().as_bytes());
@@ -1006,6 +1058,87 @@ impl NativeGitWrite for PlumbingGitWrite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a hermetic main-repo + linked-worktree layout by hand (the exact
+    /// file contract `git worktree add` writes), so no git binary is needed.
+    fn worktree_fixture(root: &Path, names: &[&str]) -> RepoPaths {
+        let main = root.join("main");
+        let main_git = main.join(".git");
+        std::fs::create_dir_all(&main_git).unwrap();
+        for name in names {
+            let wt = root.join(name);
+            std::fs::create_dir_all(&wt).unwrap();
+            let admin = main_git.join("worktrees").join(name);
+            std::fs::create_dir_all(&admin).unwrap();
+            let dot_git = wt.join(".git");
+            std::fs::write(&dot_git, format!("gitdir: {}\n", admin.display())).unwrap();
+            std::fs::write(admin.join("gitdir"), format!("{}\n", dot_git.display())).unwrap();
+            std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        }
+        discover(&main).unwrap()
+    }
+
+    #[test]
+    fn lists_linked_worktrees_sorted_and_skips_the_main_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = worktree_fixture(tmp.path(), &["wt-b", "wt-a"]);
+        let listed = list_worktrees(&paths);
+        assert_eq!(
+            listed.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
+            vec!["wt-a", "wt-b"],
+            "sorted by name; the main tree is not a linked worktree"
+        );
+        assert_eq!(listed[0].work_tree, tmp.path().join("wt-a"));
+    }
+
+    #[test]
+    fn no_worktrees_dir_is_an_empty_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("solo");
+        std::fs::create_dir_all(main.join(".git")).unwrap();
+        let paths = discover(&main).unwrap();
+        assert!(list_worktrees(&paths).is_empty());
+    }
+
+    #[test]
+    fn pruned_and_malformed_entries_are_skipped_honestly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = worktree_fixture(tmp.path(), &["good"]);
+        let admin = paths.common_dir.join("worktrees");
+        // Pruned: an admin dir with no gitdir file.
+        std::fs::create_dir_all(admin.join("pruned")).unwrap();
+        // Deleted-but-not-pruned: gitdir points at a directory that is gone.
+        let ghost = admin.join("ghost");
+        std::fs::create_dir_all(&ghost).unwrap();
+        std::fs::write(
+            ghost.join("gitdir"),
+            format!("{}\n", tmp.path().join("nope").join(".git").display()),
+        )
+        .unwrap();
+        let listed = list_worktrees(&paths);
+        assert_eq!(
+            listed.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
+            vec!["good"],
+            "pruned/ghost entries are skipped, never invented rows"
+        );
+    }
+
+    #[test]
+    fn enumeration_agrees_with_discovery_from_inside_the_worktree() {
+        // The listed work_tree round-trips through discover(): the linked
+        // worktree resolves back to the same common dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = worktree_fixture(tmp.path(), &["feature"]);
+        let listed = list_worktrees(&paths);
+        let from_inside = discover(&listed[0].work_tree).unwrap();
+        // discover() keeps the commondir's relative form (`…/worktrees/x/../..`);
+        // equivalence is by canonical path, not lexical bytes.
+        assert_eq!(
+            std::fs::canonicalize(&from_inside.common_dir).unwrap(),
+            std::fs::canonicalize(&paths.common_dir).unwrap()
+        );
+        assert_eq!(from_inside.work_tree, listed[0].work_tree);
+    }
 
     #[test]
     fn discover_main_worktree() {

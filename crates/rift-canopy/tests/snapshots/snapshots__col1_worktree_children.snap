@@ -1,0 +1,22 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: frame_text(&f)
+---
+RIFT — Canopy
+╭─ projects ───╮╭─ detail ─────────────────────╮╭─ graphs ─────────────────────╮
+│> ○ rift-cli  ││rift-cli (repo)               ││recall savings: 0%            │
+│    · feature…││path: /r/rift-cli             ││░░░░░░░░░░░░░░░░░░░░░░░░ 0% Sm│
+│  ○ rift-site ││status: idle                  ││                              │
+│              ││                              ││tokens                        │
+│              ││models                        ││                              │
+│              ││  (none yet)                  ││                              │
+│              ││                              ││                              │
+│              ││settings                      ││                              │
+│              ││  sensitive paths: 0          ││                              │
+│              ││  raw transcripts: off        ││                              │
+│              ││  tool calls: skipped         ││                              │
+│              ││  token usage: skipped        ││                              │
+╰──────────────╯╰──────────────────────────────╯╰──────────────────────────────╯
+╭─ command ────────────────────────────────────────────────────────────────────╮
+│/█                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯
