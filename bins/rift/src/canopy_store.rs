@@ -239,7 +239,7 @@ impl CanopyStore {
             Value::Int(row.created_at),
         ];
         let cols: Vec<&str> = EVENT_COLS.to_vec();
-        rt()?.block_on(self.store.insert("canopy_project_event", &cols, &values))
+        runtime()?.block_on(self.store.insert("canopy_project_event", &cols, &values))
     }
 
     // --- readers ------------------------------------------------------------
@@ -254,7 +254,7 @@ impl CanopyStore {
     fn events(&self) -> Result<Vec<ProjectEvent>> {
         let sql = "SELECT event_id, project_id, op, repo_id, path, label, order_key, created_at \
                    FROM canopy_project_event ORDER BY created_at, event_id";
-        let rows = rt()?.block_on(self.store.query(sql, &[]))?;
+        let rows = runtime()?.block_on(self.store.query(sql, &[]))?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let event_id = r.get_text(0)?;
@@ -313,14 +313,14 @@ impl CanopyStore {
             Value::Int(row.created_at),
         ];
         let cols: Vec<&str> = TOGGLE_COLS.to_vec();
-        rt()?.block_on(self.store.insert("canopy_toggle_event", &cols, &values))
+        runtime()?.block_on(self.store.insert("canopy_toggle_event", &cols, &values))
     }
 
     /// Read a project's toggle events into engine-neutral [`ToggleEvent`]s.
     fn toggle_events(&self, project_id: &str) -> Result<Vec<ToggleEvent>> {
         let sql = "SELECT event_id, feature, desired, created_at \
                    FROM canopy_toggle_event WHERE project_id = ? ORDER BY created_at, event_id";
-        let rows = rt()?.block_on(self.store.query(sql, &[Value::text(project_id)]))?;
+        let rows = runtime()?.block_on(self.store.query(sql, &[Value::text(project_id)]))?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             out.push(ToggleEvent {
@@ -474,8 +474,9 @@ fn opt_text_ref(v: Option<&str>) -> Value {
     v.map_or(Value::Null, Value::text)
 }
 
-/// A short-lived current-thread runtime for the async store seam.
-fn rt() -> Result<tokio::runtime::Runtime> {
+/// A short-lived current-thread runtime for the async store seam — the one
+/// builder every canopy-plane call site uses (the bus's read paths included).
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(RiftError::from)

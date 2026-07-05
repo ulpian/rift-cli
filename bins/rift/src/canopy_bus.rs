@@ -236,7 +236,7 @@ fn status_of(
 /// or `None` if it cannot be opened/read (→ [`ProjectionState::Unavailable`]).
 fn open_and_read(db: &Path) -> Option<(i64, Option<i64>)> {
     let store = SqliteStore::open(db).ok()?;
-    let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
+    let rt = crate::canopy_store::runtime().ok()?;
     let cursor = rt.block_on(store.read_watermark("captured_event")).ok()?;
     // The freshest event's transaction time (0 rows → None, not an error).
     let last_ts = rt
@@ -334,7 +334,7 @@ fn read_projection_detail(root: &Path, dir: &Path) -> Option<(Vec<ModelUsage>, C
         return None;
     }
     let store = SqliteStore::open(&db).ok()?;
-    let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
+    let rt = crate::canopy_store::runtime().ok()?;
 
     // Models: call counts from model_call, unioned with each session's headline
     // model (which may have no calls yet). Sorted most-used first.
@@ -389,7 +389,7 @@ fn read_cursor(root: &Path, path: &str) -> Option<i64> {
         return None;
     }
     let store = SqliteStore::open(&db).ok()?;
-    let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
+    let rt = crate::canopy_store::runtime().ok()?;
     rt.block_on(store.read_watermark("captured_event")).ok()
 }
 
