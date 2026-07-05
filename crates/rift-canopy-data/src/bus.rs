@@ -226,18 +226,32 @@ struct Outbox {
     pending: BTreeMap<(String, FeedKind), Event>,
 }
 
-/// The feed kinds an update can belong to — the coalescing axis. Status/detail
-/// today; the Tokens/Nic/Recall graph feeds join in W3/W4 (ADR-0009).
+/// The feed kinds an update can belong to — the coalescing axis (ADR-0009's
+/// Tokens/Nic/Recall trio alongside the status/detail flow).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum FeedKind {
     /// Per-project status (+ detail for the active project).
     Status,
+    /// Token spend + breakdown.
+    Tokens,
+    /// The nic-gauge reading.
+    Nic,
+    /// Recall savings/calls/threads.
+    Recall,
 }
 
 /// The coalescing key for an update.
 fn feed_key(ev: &Event) -> (String, FeedKind) {
     match ev {
         Event::ProjectData(pd) => (pd.project.clone(), FeedKind::Status),
+        Event::Feed(f) => {
+            let kind = match f.payload {
+                rift_canopy::FeedPayload::Tokens { .. } => FeedKind::Tokens,
+                rift_canopy::FeedPayload::Nic(_) => FeedKind::Nic,
+                rift_canopy::FeedPayload::Recall { .. } => FeedKind::Recall,
+            };
+            (f.project.clone(), kind)
+        }
         // Non-project events have no coalescing axis today; key them globally.
         _ => (String::new(), FeedKind::Status),
     }
@@ -293,11 +307,18 @@ fn stage_read(
     } else {
         None
     };
+    let is_active = active == Some(path.as_str());
     outbox.stage(Event::ProjectData(ProjectData {
-        project: path,
+        project: path.clone(),
         status,
         detail,
     }));
+    // The column-3 feeds follow the active project (SetActive is the
+    // subscribe request, ADR-0009): recompute full section state on every
+    // read of it — a Rebuilt-driven read is thereby the re-bootstrap.
+    if is_active {
+        outbox.stage(Event::Feed(crate::feeds::compute_tokens(root, &path)));
+    }
 }
 
 /// Fold a worker message into the set of projects to (re-)read, updating the
@@ -810,6 +831,20 @@ mod tests {
         proj.to_string_lossy().into_owned()
     }
 
+    /// Receive the next ProjectData update, skipping feed updates (SetActive
+    /// emits both kinds).
+    fn recv_project_data(bus: &Bus, total: Duration) -> Event {
+        let deadline = std::time::Instant::now() + total;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match bus.evt_rx.recv_timeout(left.max(Duration::from_millis(1))) {
+                Ok(Event::Feed(_)) => {} // skip feed updates
+                Ok(ev) => return ev,
+                Err(e) => panic!("no ProjectData update: {e}"),
+            }
+        }
+    }
+
     /// The status half of [`read_project`] — the P8 S1 read surface under test.
     fn status(root: &Path, path: &str) -> ProjectStatus {
         read_project(root, path).0
@@ -879,12 +914,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "seed", 1);
         // Inject the cache root (no process-env mutation → no test races).
-        let bus = spawn_with_root(root.path().to_path_buf(), vec![path_of(&proj)]);
+        let bus = spawn_for_test(root.path().to_path_buf(), vec![path_of(&proj)]);
 
         // The seeded refresh yields one ProjectData update for the project.
+        // Generous deadline: the parallel suite drives real stores hard.
         let ev = bus
             .evt_rx
-            .recv_timeout(Duration::from_secs(15))
+            .recv_timeout(Duration::from_secs(30))
             .expect("a ProjectData update");
         match ev {
             Event::ProjectData(pd) => {
@@ -1092,14 +1128,11 @@ mod tests {
         // The bus attaches rich detail only for the SetActive (foreground) project.
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "seed", 1);
-        let bus = spawn_with_root(root.path().to_path_buf(), vec![]);
+        let bus = spawn_for_test(root.path().to_path_buf(), vec![]);
         bus.req_tx
             .send(DataRequest::SetActive(Some(path_of(&proj))))
             .unwrap();
-        let ev = bus
-            .evt_rx
-            .recv_timeout(Duration::from_secs(15))
-            .expect("a ProjectData update");
+        let ev = recv_project_data(&bus, Duration::from_secs(30));
         match ev {
             Event::ProjectData(pd) => {
                 assert_eq!(pd.project, path_of(&proj));
@@ -1379,6 +1412,22 @@ mod tests {
 
     // --- M4-05: wake-only notify + the bounded latest-per-feed channel ------
 
+    /// A watcher that installs nothing and wakes nothing: unit tests exercise
+    /// the poll path deterministically, with no platform watcher (many
+    /// concurrent FSEvents streams stall on macOS — the real watcher is
+    /// integration-tested in tests/live_sections.rs).
+    struct NoopWatcher;
+    impl WakeWatcher for NoopWatcher {
+        fn watch(&mut self, _root: &Path, _wake: Sender<WorkerMsg>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Test spawn: the bus over a tempdir root with the no-op watcher.
+    fn spawn_for_test(root: PathBuf, initial: Vec<String>) -> Bus {
+        spawn_with_watcher(root, initial, Box::new(NoopWatcher))
+    }
+
     /// A watcher stub that hands the test its wake sender (no filesystem).
     struct StubWatcher {
         grabbed: std::sync::Arc<std::sync::Mutex<Option<Sender<WorkerMsg>>>>,
@@ -1541,7 +1590,7 @@ mod tests {
     fn bus_delivers_live_update_via_poll() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "seed", 1);
-        let bus = spawn_with_root(root.path().to_path_buf(), vec![path_of(&proj)]);
+        let bus = spawn_for_test(root.path().to_path_buf(), vec![path_of(&proj)]);
 
         // Drain the initial request-driven update.
         let first = bus.evt_rx.recv_timeout(Duration::from_secs(15)).unwrap();

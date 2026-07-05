@@ -18,6 +18,7 @@
 )]
 
 pub mod bus;
+pub mod feeds;
 pub mod series;
 pub mod session;
 pub mod store;

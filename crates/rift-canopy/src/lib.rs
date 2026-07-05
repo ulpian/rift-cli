@@ -54,7 +54,8 @@ pub use layout::{solve, PanelRects, Rect};
 pub use render::{select_backend, AsciiBackend, Capabilities, Frame, RenderBackend};
 pub use splash::SplashState;
 pub use state::{
-    update, AppState, DataRequest, Effects, Event, Flow, Focus, PersistOp, ProjectData, ViewModel,
+    update, AppState, DataRequest, Effects, Event, FeedPayload, FeedUpdate, Flow, Focus, PersistOp,
+    ProjectData, ViewModel,
 };
 
 /// Scaffold/status string (kept for the bin entrypoint and smoke tests).

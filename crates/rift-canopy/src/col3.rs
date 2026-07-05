@@ -129,6 +129,7 @@ pub struct SectionSlot {
 ///   render collapsed and the rest are dropped (the only lossy tier, below
 ///   6 rows).
 #[must_use]
+#[allow(clippy::too_many_lines)] // one pass per tier + the exact-tiling spread
 pub fn solve_stack(height: u16) -> Vec<SectionSlot> {
     let n = u16::try_from(SECTIONS.len()).unwrap_or(6);
     if height == 0 {
@@ -458,7 +459,7 @@ fn draw_section(
     match slot.id {
         SectionId::TokenUsage => match &col3.tokens {
             TokensView::NoActivity => {
-                title_line(frame, rect, "token usage", "(no token activity yet)")
+                title_line(frame, rect, "token usage", "(no token activity yet)");
             }
             TokensView::Data(d) => {
                 title_line(

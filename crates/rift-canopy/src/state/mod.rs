@@ -24,7 +24,7 @@ pub type Focus = Panel;
 
 /// An event entering the reducer. Canopy-native (the loop translates terminal
 /// events into these), so the state layer never names an engine type.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// A normalized key press.
     Key(CanopyKey),
@@ -36,6 +36,45 @@ pub enum Event {
     Data(DataUpdate),
     /// A per-project update from the data bus (P8): live status for one project.
     ProjectData(ProjectData),
+    /// A column-3 feed update from the data bus (ADR-0009's Tokens/Nic/Recall
+    /// trio): full section state for one project, applied when it is the
+    /// selected one.
+    Feed(FeedUpdate),
+}
+
+/// One feed's full section state for one project. Each update carries the
+/// **complete** recomputed view (never a delta), so dropped or duplicated
+/// delivery converges on the fresh-read truth by construction (user story 14
+/// and the PRD's delivery-robustness property).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeedUpdate {
+    /// The project (canonical path) this feed update is for.
+    pub project: String,
+    /// Which sections it fills.
+    pub payload: FeedPayload,
+}
+
+/// The three feed kinds (ADR-0009), each patching its column-3 sections.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FeedPayload {
+    /// Token spend + the input|read|output breakdown.
+    Tokens {
+        /// The token-usage section.
+        tokens: crate::col3::TokensView,
+        /// The breakdown section.
+        breakdown: crate::col3::BreakdownView,
+    },
+    /// The nic-gauge section.
+    Nic(crate::col3::NicView),
+    /// The recall sections + the threads count.
+    Recall {
+        /// Recall savings.
+        savings: crate::col3::RecallView<crate::col3::SavingsData>,
+        /// Recall MCP calls.
+        calls: crate::col3::RecallView<crate::col3::CallsData>,
+        /// Distinct active sessions.
+        threads: crate::col3::ThreadsView,
+    },
 }
 
 /// A per-project update from the live data bus (P8). Carries already-scoped,
@@ -363,6 +402,33 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
             }
             Flow::Continue(Effects::default())
         }
+        Event::Feed(update) => {
+            // Feeds fill the selected project's column 3; an update for any
+            // other project is stale routing and is dropped (the bus recomputes
+            // on the next SetActive). set_col3 dirties only on real change.
+            let selected = s.app.selected_project().map(|p| p.path.clone());
+            if selected.as_deref() == Some(update.project.as_str()) {
+                let mut col3 = (*s.col3).clone();
+                match update.payload {
+                    FeedPayload::Tokens { tokens, breakdown } => {
+                        col3.tokens = tokens;
+                        col3.breakdown = breakdown;
+                    }
+                    FeedPayload::Nic(nic) => col3.nic = nic,
+                    FeedPayload::Recall {
+                        savings,
+                        calls,
+                        threads,
+                    } => {
+                        col3.savings = savings;
+                        col3.calls = calls;
+                        col3.threads = threads;
+                    }
+                }
+                s.set_col3(col3);
+            }
+            Flow::Continue(Effects::default())
+        }
         Event::Key(k) => {
             let before = s.app.selected_project().map(|p| p.path.clone());
             let action = on_key(&mut s.app, k);
@@ -388,6 +454,9 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
             let after = s.app.selected_project().map(|p| p.path.clone());
             if before != after {
                 s.app.toggle_cursor = 0;
+                // A different project's sections must never linger: reset to
+                // placeholders until its own feeds arrive.
+                s.set_col3(crate::col3::Col3::default());
                 if let Flow::Continue(eff) = &mut flow {
                     eff.data_requests
                         .push(DataRequest::SetActive(after.clone()));
@@ -936,6 +1005,74 @@ mod tests {
                 | PersistOp::SetToggle { .. } => {}
             }
         }
+    }
+
+    #[test]
+    fn feed_updates_are_full_state_so_delivery_order_converges() {
+        // Delivery robustness (user story 14): every feed update carries FULL
+        // section state, so the display equals whichever update applied last —
+        // drops and duplicates cannot skew it.
+        use crate::col3::{TokensData, TokensView};
+        let feed = |total: f64| {
+            Event::Feed(FeedUpdate {
+                project: "/r/a".into(),
+                payload: FeedPayload::Tokens {
+                    tokens: TokensView::Data(TokensData {
+                        rate: vec![total],
+                        total,
+                    }),
+                    breakdown: crate::col3::BreakdownView::NoActivity,
+                },
+            })
+        };
+        let total_of = |s: &mut AppState| match &s.snapshot().col3.tokens {
+            TokensView::Data(d) => d.total,
+            TokensView::NoActivity => -1.0,
+        };
+
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, feed(100.0));
+        update(&mut s, feed(700.0));
+        assert!((total_of(&mut s) - 700.0).abs() < f64::EPSILON);
+        // A duplicated (replayed) update changes nothing.
+        s.dirty = false;
+        update(&mut s, feed(700.0));
+        assert!(!s.dirty, "an identical feed replay must not redraw");
+        // A dropped intermediate is invisible: last-applied wins regardless.
+        let mut s2 = ready(vec![project("a")]);
+        update(&mut s2, feed(700.0));
+        assert!((total_of(&mut s2) - 700.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn feed_for_a_different_project_is_dropped_and_selection_change_resets() {
+        use crate::col3::{TokensData, TokensView};
+        let feed = |proj: &str| {
+            Event::Feed(FeedUpdate {
+                project: proj.into(),
+                payload: FeedPayload::Tokens {
+                    tokens: TokensView::Data(TokensData {
+                        rate: vec![1.0],
+                        total: 1.0,
+                    }),
+                    breakdown: crate::col3::BreakdownView::NoActivity,
+                },
+            })
+        };
+        let mut s = ready(vec![project("a"), project("b")]);
+        // A feed for the unselected project must not paint a's column 3.
+        update(&mut s, feed("/r/b"));
+        assert_eq!(s.snapshot().col3.tokens, TokensView::NoActivity);
+        // Apply a's feed, then move the selection: sections reset to
+        // placeholders (no stale cross-project data).
+        update(&mut s, feed("/r/a"));
+        assert!(matches!(s.snapshot().col3.tokens, TokensView::Data(_)));
+        update(&mut s, Event::Key(CanopyKey::Down));
+        assert_eq!(
+            s.snapshot().col3.tokens,
+            TokensView::NoActivity,
+            "the previous project's sections must not linger"
+        );
     }
 
     #[test]
