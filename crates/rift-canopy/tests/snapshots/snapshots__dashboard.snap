@@ -4,12 +4,12 @@ expression: frame_text(&f)
 ---
 RIFT — Canopy
 ╭─ projects ───╮╭─ detail ─────────────────────╮╭─ graphs ─────────────────────╮
-│> ● rift-cli  ││rift-cli (repo)               ││recall savings: 18%           │
-│  ○ rift-site ││path: /r/rift-cli             ││████░░░░░░░░░░░░░░░░░░░░ 18% S│
-│              ││status: running               ││                              │
-│              ││                              ││tokens                        │
-│              ││models                        ││▁▄▂█▅▃                        │
-│              ││  (none yet)                  ││                              │
+│> ● rift-cli  ││rift-cli (repo)               ││· token usage  (no token activ│
+│  ○ rift-site ││path: /r/rift-cli             ││· input | read | output  (no t│
+│              ││status: running               ││· nic-gauge  (no model calls y│
+│              ││                              ││· recall savings  (recall off │
+│              ││models                        ││· recall mcp calls  (recall of│
+│              ││  (none yet)                  ││· threads  (no active sessions│
 │              ││                              ││                              │
 │              ││settings                      ││                              │
 │              ││  sensitive paths: 0          ││                              │

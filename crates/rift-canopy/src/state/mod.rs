@@ -190,6 +190,9 @@ pub struct AppState {
     rows_cache: Arc<Vec<ProjectRow>>,
     /// The last snapshot's token series, shared likewise.
     series_cache: Arc<Vec<u64>>,
+    /// The column-3 sections' view-model, filled by the data plane's feeds
+    /// (W3/W4); `Default` is every section's honest placeholder.
+    col3: Arc<crate::col3::Col3>,
 }
 
 impl AppState {
@@ -204,6 +207,15 @@ impl AppState {
             detail: None,
             rows_cache: Arc::new(Vec::new()),
             series_cache: Arc::new(Vec::new()),
+            col3: Arc::new(crate::col3::Col3::default()),
+        }
+    }
+
+    /// Replace the column-3 sections' view-model (the W3/W4 feeds' apply path).
+    pub fn set_col3(&mut self, col3: crate::col3::Col3) {
+        if *self.col3 != col3 {
+            self.col3 = Arc::new(col3);
+            self.dirty = true;
         }
     }
 
@@ -301,6 +313,7 @@ impl AppState {
             context_pct: self.app.context_pct,
             savings_pct: self.app.savings_pct,
             token_series: Arc::clone(&self.series_cache),
+            col3: Arc::clone(&self.col3),
             detail_scroll: self.app.scroll.detail,
             graphs_scroll: self.app.scroll.graphs,
             toggle_cursor: self.app.toggle_cursor,
@@ -500,8 +513,11 @@ pub struct ViewModel {
     pub context_pct: u8,
     /// Recall savings %.
     pub savings_pct: u8,
-    /// Column-3 token series.
+    /// Column-3 token series (legacy Data-event path; the six sections in
+    /// `col3` supersede it and W3/W4 retire it).
     pub token_series: Arc<Vec<u64>>,
+    /// The column-3 sections (M4-10): the six live-graph view-models.
+    pub col3: Arc<crate::col3::Col3>,
     /// Column-2 detail viewport top (scroll offset).
     pub detail_scroll: usize,
     /// Column-3 graphs viewport top (scroll offset).

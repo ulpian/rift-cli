@@ -58,7 +58,8 @@ fn dashboard_state() -> AppState {
 fn golden_dashboard_frame() {
     let mut s = dashboard_state();
     let mut f = Frame::new(s.size);
-    rift_canopy::view::draw(&s.snapshot(), &mut f);
+    let mut b = AsciiBackend::new(Capabilities::empty());
+    rift_canopy::view::draw(&s.snapshot(), &mut b, &mut f);
     insta::assert_snapshot!("dashboard", frame_text(&f));
 }
 
@@ -68,16 +69,18 @@ fn golden_dashboard_frame_wide() {
     let mut s = dashboard_state();
     s.size = Size::new(120, 40);
     let mut f = Frame::new(s.size);
-    rift_canopy::view::draw(&s.snapshot(), &mut f);
+    let mut b = AsciiBackend::new(Capabilities::empty());
+    rift_canopy::view::draw(&s.snapshot(), &mut b, &mut f);
     insta::assert_snapshot!("dashboard_wide", frame_text(&f));
 }
 
 /// Render `dashboard_state()` at `size` and return the golden text (P3 S2 modes).
 fn render_at(w: u16, h: u16) -> String {
-    let mut s = dashboard_state();
-    s.size = Size::new(w, h);
-    let mut f = Frame::new(s.size);
-    rift_canopy::view::draw(&s.snapshot(), &mut f);
+    let mut state = dashboard_state();
+    state.size = Size::new(w, h);
+    let mut f = Frame::new(state.size);
+    let mut backend = AsciiBackend::new(Capabilities::empty());
+    rift_canopy::view::draw(&state.snapshot(), &mut backend, &mut f);
     frame_text(&f)
 }
 
@@ -127,8 +130,92 @@ fn golden_col1_worktree_children() {
     );
     s.app.splash.skip();
     let mut f = Frame::new(s.size);
-    rift_canopy::view::draw(&s.snapshot(), &mut f);
+    let mut b = AsciiBackend::new(Capabilities::empty());
+    rift_canopy::view::draw(&s.snapshot(), &mut b, &mut f);
     insta::assert_snapshot!("col1_worktree_children", frame_text(&f));
+}
+
+// --- column 3 (M4-10): the six-section stack -------------------------------
+
+/// A fully-populated Col3 (every section carrying data).
+fn col3_with_data() -> rift_canopy::Col3 {
+    rift_canopy::Col3 {
+        tokens: rift_canopy::TokensView::Data(rift_canopy::TokensData {
+            rate: vec![120.0, 900.0, 300.0, 1500.0, 700.0, 2500.0, 400.0, 1100.0],
+            total: 7520.0,
+        }),
+        breakdown: rift_canopy::BreakdownView::Data(rift_canopy::BreakdownData {
+            input: 5200.0,
+            read: 48_000.0,
+            output: 9100.0,
+            cache_write: 3300.0,
+            read_fraction: 48_000.0 / 53_200.0,
+        }),
+        nic: rift_canopy::NicView::Reading(rift_canopy::NicReading {
+            pct: 62,
+            band: "Capable",
+            model: "claude-fable-5".into(),
+            threads: 2,
+        }),
+        savings: rift_canopy::RecallView::Data(rift_canopy::SavingsData {
+            rate: vec![0.0, 400.0, 1200.0, 800.0, 2000.0, 1600.0],
+            total: 6000.0,
+        }),
+        calls: rift_canopy::RecallView::Data(rift_canopy::CallsData {
+            rate: vec![1.0, 3.0, 2.0, 5.0, 4.0, 2.0],
+            total: 17.0,
+        }),
+        threads: rift_canopy::ThreadsView::Count(2),
+    }
+}
+
+/// Render just a col3 area of the given height from `col3`.
+fn col3_text(col3: &rift_canopy::Col3, h: u16) -> String {
+    use rift_canopy::render::frame::Style;
+    let mut f = Frame::new(Size::new(34, h));
+    let mut b = AsciiBackend::new(Capabilities::empty());
+    let area = f.rect();
+    let inner = f.border(area, "graphs", Style::DEFAULT);
+    rift_canopy::col3::draw(col3, inner, &mut b, &mut f);
+    frame_text(&f)
+}
+
+#[test]
+fn golden_col3_tall_all_expanded() {
+    insta::assert_snapshot!("col3_tall", col3_text(&col3_with_data(), 30));
+}
+
+#[test]
+fn golden_col3_short_collapses_low_priority() {
+    // The collapse case: low-priority sections fold to one-line summaries
+    // that keep their headline numbers.
+    insta::assert_snapshot!("col3_short", col3_text(&col3_with_data(), 19));
+}
+
+#[test]
+fn golden_col3_placeholders() {
+    // Every placeholder state at once: no token activity, no model calls,
+    // recall disabled, no sessions — placeholders, never fake zero lines.
+    insta::assert_snapshot!(
+        "col3_placeholders",
+        col3_text(&rift_canopy::Col3::default(), 20)
+    );
+}
+
+#[test]
+fn golden_col3_unknown_model_and_quiet_recall() {
+    // The remaining placeholder states: the explicit unknown-model indicator
+    // and enabled-but-quiet recall (visibly distinct from disabled).
+    let col3 = rift_canopy::Col3 {
+        nic: rift_canopy::NicView::UnknownModel {
+            model: "mystery-model-9000".into(),
+            threads: 1,
+        },
+        savings: rift_canopy::RecallView::Quiet,
+        calls: rift_canopy::RecallView::Quiet,
+        ..col3_with_data()
+    };
+    insta::assert_snapshot!("col3_unknown_and_quiet", col3_text(&col3, 20));
 }
 
 // --- graph widgets (M4-09): fixed series, block (floor) tier ----------------

@@ -22,6 +22,7 @@
 pub mod app;
 pub mod col1;
 pub mod col2;
+pub mod col3;
 pub mod command;
 pub mod gauge;
 pub mod input;
@@ -41,6 +42,10 @@ pub use col2::{
     current_toggles, plan_flip, sanitize_for_terminal, toggle_view, CaptureSummary, DetailView,
     Feature, FeatureAction, FeatureActionKind, FeatureManager, ModelUsage, NullFeatureManager,
     SettingsSummary, ToggleChange, ToggleEvent, ToggleRow, ToggleState, ToggleView,
+};
+pub use col3::{
+    fmt_km, BreakdownData, BreakdownView, CallsData, Col3, NicReading, NicView, RecallView,
+    SavingsData, ThreadsView, TokensData, TokensView,
 };
 pub use command::{autocomplete, parse_command, Command, COMMANDS};
 pub use gauge::{render_bar, GaugeState};

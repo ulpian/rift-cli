@@ -1,9 +1,11 @@
-//! The pure dashboard renderer: `view::draw(&ViewModel, &mut Frame)`.
+//! The pure dashboard renderer: `view::draw(&ViewModel, backend, &mut Frame)`.
 //!
 //! The single renderer both backends flush — no `&mut AppState`, no I/O, no
 //! engine types — so it is a deterministic function of the snapshot and every
-//! panel step's headless/snapshot test reuses it. Ports the three-column layout
-//! the live xre path used into pure [`Frame`] drawing.
+//! panel step's headless/snapshot test reuses it. The backend participates
+//! only through the [`RenderBackend::plot`] seam (sub-cell graphs choose
+//! braille or the block floor there); everything else is pure [`Frame`]
+//! drawing.
 
 use crate::col2::sanitize_for_terminal;
 use crate::gauge::{render_bar, GaugeState};
@@ -12,6 +14,7 @@ use crate::layout::{
     MIN_NOTICE_ROWS,
 };
 use crate::render::frame::{Color, Frame, Style};
+use crate::render::RenderBackend;
 use crate::state::ViewModel;
 use crate::{EntryKind, Mode, Panel, ProjectStatus};
 
@@ -19,8 +22,9 @@ use crate::{EntryKind, Mode, Panel, ProjectStatus};
 const ACCENT: Style = Style::fg(Color::Rgb(0x6c, 0xe0, 0x9a));
 
 /// Render the whole dashboard for `vm` into `frame`, choosing the responsive
-/// layout tier for the current size (P3 S2).
-pub fn draw(vm: &ViewModel, frame: &mut Frame) {
+/// layout tier for the current size (P3 S2). `backend` participates only
+/// through the plot seam (column-3 graphs).
+pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) {
     let area = frame.rect();
     if area.w == 0 || area.h == 0 {
         return;
@@ -48,10 +52,10 @@ pub fn draw(vm: &ViewModel, frame: &mut Frame) {
     }
 
     match choose_mode(vm.size) {
-        LayoutMode::TwoCol => draw_two_col(vm, frame, body),
-        LayoutMode::SinglePanel => draw_single(vm, frame, body),
+        LayoutMode::TwoCol => draw_two_col(vm, backend, frame, body),
+        LayoutMode::SinglePanel => draw_single(vm, backend, frame, body),
         // Full3Col (TooSmall handled above).
-        _ => draw_full(vm, frame, body),
+        _ => draw_full(vm, backend, frame, body),
     }
 }
 
@@ -66,32 +70,32 @@ fn draw_title(vm: &ViewModel, frame: &mut Frame, area: Rect) {
 }
 
 /// The full 20/40/40 three-column grid.
-fn draw_full(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+fn draw_full(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, body: Rect) {
     let r = solve(body);
     if r.col1.h >= 2 {
         draw_projects(vm, frame, r.col1);
         draw_detail(vm, frame, r.col2);
-        draw_graphs(vm, frame, r.col3);
+        draw_graphs(vm, backend, frame, r.col3);
     }
     draw_command(vm, frame, r.command);
 }
 
 /// The two-column degraded grid: projects left, detail over graphs right.
-fn draw_two_col(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+fn draw_two_col(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, body: Rect) {
     let r = two_col(body);
     draw_projects(vm, frame, r.col1);
     draw_detail(vm, frame, r.col2);
-    draw_graphs(vm, frame, r.col3);
+    draw_graphs(vm, backend, frame, r.col3);
     draw_command(vm, frame, r.command);
 }
 
 /// The single-panel degraded layout: a tab strip + the focused panel.
-fn draw_single(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+fn draw_single(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, body: Rect) {
     let (tabs, panel, command) = single_panel(body);
     draw_tab_strip(vm, frame, tabs);
     match vm.focus {
         Panel::Detail => draw_detail(vm, frame, panel),
-        Panel::Graphs => draw_graphs(vm, frame, panel),
+        Panel::Graphs => draw_graphs(vm, backend, frame, panel),
         // Projects (and Command focus) show the projects panel.
         Panel::Projects | Panel::Command => draw_projects(vm, frame, panel),
     }
@@ -333,18 +337,11 @@ fn cap_skip(b: bool) -> &'static str {
     }
 }
 
-/// Column 3 — the graphs panel (recall savings + token sparkline), scrollable.
-fn draw_graphs(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
+/// Column 3 — the six live-graph sections (M4-10): solved into a weighted
+/// stack, each honest about absent data, drawn through the plot seam.
+fn draw_graphs(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, rect: Rect) {
     let inner = frame.border(rect, "graphs", border_style(vm.focus == Panel::Graphs));
-    let bar_w = usize::from(inner.w).min(24);
-    let lines = [
-        format!("recall savings: {}%", vm.savings_pct),
-        render_bar(vm.savings_pct, bar_w),
-        String::new(),
-        "tokens".to_string(),
-        sparkline(&vm.token_series),
-    ];
-    render_lines(frame, inner, vm.graphs_scroll, &lines);
+    crate::col3::draw(&vm.col3, inner, backend, frame);
 }
 
 /// Render `lines` into `area` starting at `offset` (the scroll top), clipping to
@@ -416,22 +413,6 @@ pub(crate) fn status_label(status: ProjectStatus) -> &'static str {
     }
 }
 
-/// Render a `u64` series as block-glyph sparkline cells.
-pub(crate) fn sparkline(series: &[u64]) -> String {
-    const RAMP: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let max = series.iter().copied().max().unwrap_or(0);
-    if max == 0 {
-        return "▁".repeat(series.len());
-    }
-    series
-        .iter()
-        .map(|v| {
-            let idx = (u128::from(*v) * (RAMP.len() as u128 - 1) / u128::from(max)) as usize;
-            *RAMP.get(idx).unwrap_or(&'▁')
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,7 +452,8 @@ mod tests {
 
     fn render_to_text(vm: &ViewModel) -> String {
         let mut f = Frame::new(vm.size);
-        draw(vm, &mut f);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+        draw(vm, &mut b, &mut f);
         let mut out = String::new();
         for y in 0..f.height() {
             for x in 0..f.width() {
@@ -490,7 +472,11 @@ mod tests {
         assert!(text.contains("rift-cli"));
         assert!(text.contains("detail"));
         assert!(text.contains("graphs"));
-        assert!(text.contains("recall savings: 18%"));
+        // The six col-3 sections render their honest placeholders (M4-10) —
+        // the old fake-zero savings/tokens lines are gone.
+        assert!(text.contains("token usage"));
+        assert!(text.contains("no token activity yet"));
+        assert!(text.contains("recall savings"));
         assert!(text.contains("context — Thinking"));
     }
 
@@ -531,7 +517,8 @@ mod tests {
         s.app.splash.skip();
         s.app.focus = Panel::Projects;
         let mut f = Frame::new(s.size);
-        draw(&s.snapshot(), &mut f);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+        draw(&s.snapshot(), &mut b, &mut f);
 
         // col1's top-left corner sits at (0, 1), just below the title row.
         let c1 = f.get(0, 1).unwrap();
@@ -556,7 +543,8 @@ mod tests {
             let mut s = AppState::new(vec![], Size::new(w, h));
             s.app.splash.skip();
             let mut f = Frame::new(Size::new(w, h));
-            draw(&s.snapshot(), &mut f); // must not panic
+            let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+            draw(&s.snapshot(), &mut b, &mut f); // must not panic
         }
     }
 
@@ -610,7 +598,7 @@ mod tests {
         s.app.focus = Panel::Graphs;
         let text = render_to_text(&s.snapshot());
         assert!(text.contains("[Graphs]"));
-        assert!(text.contains("tokens"), "the graphs panel is shown");
+        assert!(text.contains("token usage"), "the graphs panel is shown");
     }
 
     #[test]
@@ -677,7 +665,8 @@ mod tests {
         // control character — the ESC is stripped, the inert text remains.
         let mut s = state_with_detail(ProjectStatus::Idle, "evil\x1b[31mmodel");
         let mut f = Frame::new(s.size);
-        draw(&s.snapshot(), &mut f);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+        draw(&s.snapshot(), &mut b, &mut f);
         for y in 0..f.height() {
             for x in 0..f.width() {
                 if let Some(cell) = f.get(x, y) {
@@ -717,7 +706,8 @@ mod tests {
         fn every_size_yields_a_renderable_layout(w in 0u16..400, h in 0u16..400) {
             let mut s = sized(w, h);
             let mut f = Frame::new(Size::new(w, h));
-            draw(&s.snapshot(), &mut f); // must not panic at any size
+            let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+            draw(&s.snapshot(), &mut b, &mut f); // must not panic at any size
         }
 
         /// No arbitrary detail string (model name) ever leaves a control character
@@ -726,7 +716,8 @@ mod tests {
         fn no_control_chars_in_any_cell_for_arbitrary_model(model in ".*") {
             let mut s = state_with_detail(ProjectStatus::Idle, &model);
             let mut f = Frame::new(s.size);
-            draw(&s.snapshot(), &mut f);
+            let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+            draw(&s.snapshot(), &mut b, &mut f);
             for y in 0..f.height() {
                 for x in 0..f.width() {
                     if let Some(cell) = f.get(x, y) {

@@ -12,12 +12,12 @@ RIFT — Canopy
 │                  ││  (none yet)                          │
 │                  │╰──────────────────────────────────────╯
 │                  │╭─ graphs ─────────────────────────────╮
-│                  ││recall savings: 18%                   │
-│                  ││████░░░░░░░░░░░░░░░░░░░░ 18% Smart    │
-│                  ││                                      │
-│                  ││tokens                                │
-│                  ││▁▄▂█▅▃                                │
-│                  ││                                      │
+│                  ││· token usage  (no token activity yet)│
+│                  ││· input | read | output  (no token act│
+│                  ││· nic-gauge  (no model calls yet)     │
+│                  ││· recall savings  (recall off — `rift │
+│                  ││· recall mcp calls  (recall off — `rif│
+│                  ││· threads  (no active sessions)       │
 ╰──────────────────╯╰──────────────────────────────────────╯
 ╭─ command ────────────────────────────────────────────────╮
 │/█                                                        │

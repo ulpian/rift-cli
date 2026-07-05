@@ -418,7 +418,8 @@ fn print_ascii_frame(projects: Vec<Project>) {
     state.app.splash.skip();
     let vm = state.snapshot();
     let mut frame = Frame::new(vm.size);
-    rift_canopy::view::draw(&vm, &mut frame);
+    let mut backend = rift_canopy::AsciiBackend::new(rift_canopy::Capabilities::empty());
+    rift_canopy::view::draw(&vm, &mut backend, &mut frame);
     let mut lines: Vec<String> = (0..frame.height())
         .map(|y| {
             (0..frame.width())

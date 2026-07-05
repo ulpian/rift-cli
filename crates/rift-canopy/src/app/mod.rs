@@ -77,7 +77,7 @@ where
         if state.dirty {
             let vm = state.snapshot();
             let mut frame = backend.begin_frame(state.size);
-            crate::view::draw(&vm, &mut frame);
+            crate::view::draw(&vm, backend, &mut frame);
             backend.present(&frame).map_err(render_err)?;
             state.dirty = false;
         }
