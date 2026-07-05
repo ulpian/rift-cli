@@ -25,6 +25,9 @@ rift-git = { version = "0.0.1", path = "../rift-git" }
 tokio = { workspace = true }
 # fs-notify as a wake-signal only (ADR-0010); failure degrades to PollOnly.
 notify = { workspace = true }
+# The lenient local session-cache parser (M4-06; contract mirrored, no
+# shadow-hooks dependency per ADR-0009).
+serde_json = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

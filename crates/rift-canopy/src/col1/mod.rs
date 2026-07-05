@@ -14,6 +14,5 @@ pub mod status;
 
 pub use registry::{current_registry, EntryKind, ProjectEntry, ProjectEvent, ProjectOp};
 pub use status::{
-    derive as derive_status, PhaseRead, ProjectionState, SessionPhase, StatusInputs,
-    RECENT_WINDOW_MS,
+    derive as derive_status, LiveSessions, ProjectionState, SessionsRead, StatusInputs,
 };

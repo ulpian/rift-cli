@@ -18,7 +18,9 @@
 )]
 
 pub mod bus;
+pub mod session;
 pub mod store;
 
 pub use bus::{spawn, spawn_with_root, Bus};
+pub use session::{active_sessions, ACTIVE_WINDOW_MS};
 pub use store::{runtime, CanopyStore};

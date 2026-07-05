@@ -1,17 +1,19 @@
-//! The pure status truth table (P4 S2).
+//! The pure status truth table (P4 S2, reworked by M4-06).
 //!
 //! A project's live [`ProjectStatus`] is a **deterministic function** of read-only
-//! inputs the bin gathers off-thread ([`StatusInputs`]): whether the repo path
-//! still resolves, the projection's readiness, the session phase file, and the age
-//! of the most recent captured event. Keeping the decision here (pure, total, and
-//! clock-injected via `now_ms`) means every transition is unit-testable without a
-//! store or a terminal — the bin only supplies the facts.
+//! inputs the data plane gathers off-thread ([`StatusInputs`]): whether the repo
+//! path still resolves, the projection's readiness, the live-session cache read,
+//! and whether anything has ever been captured. Keeping the decision here (pure,
+//! total, and clock-free — staleness is judged by the *reader*, which is
+//! clock-injected) means every transition is unit-testable without a store or a
+//! terminal — the data plane only supplies the facts.
+//!
+//! `Running` derives from the **real per-session cache** the capture hooks
+//! maintain (`<git_dir>/rift-sessions/*.json`), not from recent file noise: the
+//! old `.rift/session.phase` reader and its recency proxy are gone (PRD-M4 user
+//! story 10).
 
 use crate::{ProjectStatus, StatusError};
-
-/// Activity within this window (ms) still counts as `Running` even with no live
-/// session — so a just-finished burst doesn't flicker straight to `Idle`.
-pub const RECENT_WINDOW_MS: i64 = 5 * 60 * 1000;
 
 /// The readiness of a project's per-repo projection, as classified by the bin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,23 +28,26 @@ pub enum ProjectionState {
     Unavailable,
 }
 
-/// A live session's phase, as read from a project's session phase file.
+/// The live sessions observed for a project, already staleness-filtered by the
+/// reader (the data plane's session-cache query).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SessionPhase {
-    /// How many agent sessions are currently active.
+pub struct LiveSessions {
+    /// How many distinct sessions are currently active.
     pub active_sessions: u16,
-    /// When the current activity began (epoch-ms).
+    /// When the current activity began (epoch-ms; the earliest live session's
+    /// last update).
     pub since_ms: i64,
 }
 
-/// The outcome of reading a project's session phase file. `Corrupt` is distinct
-/// from `Ok(None)` so [`derive`] can report [`StatusError::CorruptPhaseFile`]
-/// rather than silently treating a garbled file as "no session".
+/// The outcome of reading a project's session cache. `Corrupt` is distinct
+/// from `Ok(None)` so [`derive`] can report
+/// [`StatusError::CorruptSessionCache`] rather than silently treating a
+/// garbled cache as "no session".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PhaseRead {
-    /// The phase file was read (or is absent → `None`).
-    Ok(Option<SessionPhase>),
-    /// The phase file exists but could not be parsed.
+pub enum SessionsRead {
+    /// The cache was read (or is absent → `None`).
+    Ok(Option<LiveSessions>),
+    /// A cache file exists but could not be parsed.
     Corrupt,
 }
 
@@ -53,19 +58,18 @@ pub struct StatusInputs {
     pub repo_present: bool,
     /// The projection's readiness.
     pub projection: ProjectionState,
-    /// The session phase read.
-    pub phase: PhaseRead,
-    /// Age (ms) of the most recent captured event, or `None` if none captured.
-    pub last_event_age_ms: Option<i64>,
-    /// The current time (epoch-ms), injected so the decision is deterministic.
-    pub now_ms: i64,
+    /// The live-session cache read.
+    pub sessions: SessionsRead,
+    /// Whether the projection holds any captured event at all (an empty-but-
+    /// ready projection is still warming up).
+    pub has_captures: bool,
 }
 
 /// Derive a project's [`ProjectStatus`] from its read-only inputs. Total and
 /// deterministic; the precedence is: a missing repo, then an uninitialized or
-/// unreadable projection, then a corrupt phase file, then a still-building
-/// projection, and finally — for a ready projection — a live session or recent
-/// activity (`Running`), older activity (`Idle`), or nothing captured yet
+/// unreadable projection, then a corrupt session cache, then a still-building
+/// projection, and finally — for a ready projection — live sessions
+/// (`Running`), captured history (`Idle`), or nothing captured yet
 /// (`PickingUp`).
 #[must_use]
 pub fn derive(i: &StatusInputs) -> ProjectStatus {
@@ -79,29 +83,28 @@ pub fn derive(i: &StatusInputs) -> ProjectStatus {
         }
         ProjectionState::Building | ProjectionState::Ready => {}
     }
-    if matches!(i.phase, PhaseRead::Corrupt) {
-        return ProjectStatus::Error(StatusError::CorruptPhaseFile);
+    if matches!(i.sessions, SessionsRead::Corrupt) {
+        return ProjectStatus::Error(StatusError::CorruptSessionCache);
     }
     if matches!(i.projection, ProjectionState::Building) {
         return ProjectStatus::PickingUp;
     }
-    // Ready + a readable phase: a live session is unambiguously Running.
-    if let PhaseRead::Ok(Some(p)) = i.phase {
-        if p.active_sessions > 0 {
+    // Ready + a readable cache: a live session is unambiguously Running.
+    if let SessionsRead::Ok(Some(s)) = i.sessions {
+        if s.active_sessions > 0 {
             return ProjectStatus::Running {
-                since_ms: p.since_ms,
-                active_sessions: p.active_sessions,
+                since_ms: s.since_ms,
+                active_sessions: s.active_sessions,
             };
         }
     }
-    // No live session: recent capture activity still reads as Running.
-    match i.last_event_age_ms {
-        Some(age) if age < RECENT_WINDOW_MS => ProjectStatus::Running {
-            since_ms: i.now_ms.saturating_sub(age),
-            active_sessions: 0,
-        },
-        Some(_) => ProjectStatus::Idle,
-        None => ProjectStatus::PickingUp,
+    // No live session: captured history reads Idle; a bare projection is
+    // still picking up. (The old "recent activity is Running" proxy is gone —
+    // Running now means a real live session, PRD-M4 user story 10.)
+    if i.has_captures {
+        ProjectStatus::Idle
+    } else {
+        ProjectStatus::PickingUp
     }
 }
 
@@ -115,9 +118,8 @@ mod tests {
         StatusInputs {
             repo_present: true,
             projection: ProjectionState::Ready,
-            phase: PhaseRead::Ok(None),
-            last_event_age_ms: None,
-            now_ms: 1_000_000,
+            sessions: SessionsRead::Ok(None),
+            has_captures: false,
         }
     }
 
@@ -152,14 +154,14 @@ mod tests {
     }
 
     #[test]
-    fn case4_corrupt_phase() {
+    fn case4_corrupt_session_cache() {
         let i = StatusInputs {
-            phase: PhaseRead::Corrupt,
+            sessions: SessionsRead::Corrupt,
             ..base()
         };
         assert_eq!(
             derive(&i),
-            ProjectStatus::Error(StatusError::CorruptPhaseFile)
+            ProjectStatus::Error(StatusError::CorruptSessionCache)
         );
     }
 
@@ -175,7 +177,7 @@ mod tests {
     #[test]
     fn case6_live_session_is_running() {
         let i = StatusInputs {
-            phase: PhaseRead::Ok(Some(SessionPhase {
+            sessions: SessionsRead::Ok(Some(LiveSessions {
                 active_sessions: 2,
                 since_ms: 500,
             })),
@@ -191,46 +193,47 @@ mod tests {
     }
 
     #[test]
-    fn case7_recent_activity_is_running() {
+    fn case7_history_without_sessions_is_idle_never_running() {
+        // The recency proxy is gone: captured history alone is Idle no matter
+        // how fresh it is (Running requires a live session).
         let i = StatusInputs {
-            last_event_age_ms: Some(RECENT_WINDOW_MS - 1),
-            ..base()
-        };
-        assert_eq!(
-            derive(&i),
-            ProjectStatus::Running {
-                since_ms: i.now_ms - (RECENT_WINDOW_MS - 1),
-                active_sessions: 0
-            }
-        );
-    }
-
-    #[test]
-    fn case8_old_activity_is_idle() {
-        let i = StatusInputs {
-            last_event_age_ms: Some(RECENT_WINDOW_MS),
+            has_captures: true,
             ..base()
         };
         assert_eq!(derive(&i), ProjectStatus::Idle);
     }
 
     #[test]
-    fn case9_ready_but_nothing_captured_is_picking_up() {
+    fn case8_ready_but_nothing_captured_is_picking_up() {
         assert_eq!(derive(&base()), ProjectStatus::PickingUp);
     }
 
     #[test]
-    fn corrupt_phase_outranks_building_and_ready() {
-        // A corrupt phase surfaces as an error whether building or ready.
+    fn zero_active_sessions_reads_as_quiet() {
+        // A readable cache whose sessions all ended: not Running.
+        let i = StatusInputs {
+            sessions: SessionsRead::Ok(Some(LiveSessions {
+                active_sessions: 0,
+                since_ms: 500,
+            })),
+            has_captures: true,
+            ..base()
+        };
+        assert_eq!(derive(&i), ProjectStatus::Idle);
+    }
+
+    #[test]
+    fn corrupt_cache_outranks_building_and_ready() {
+        // A corrupt cache surfaces as an error whether building or ready.
         for projection in [ProjectionState::Building, ProjectionState::Ready] {
             let i = StatusInputs {
                 projection,
-                phase: PhaseRead::Corrupt,
+                sessions: SessionsRead::Corrupt,
                 ..base()
             };
             assert_eq!(
                 derive(&i),
-                ProjectStatus::Error(StatusError::CorruptPhaseFile)
+                ProjectStatus::Error(StatusError::CorruptSessionCache)
             );
         }
     }
@@ -263,16 +266,16 @@ mod tests {
         ]
     }
 
-    fn phase_strategy() -> impl Strategy<Value = PhaseRead> {
+    fn sessions_strategy() -> impl Strategy<Value = SessionsRead> {
         prop_oneof![
-            Just(PhaseRead::Ok(None)),
-            Just(PhaseRead::Corrupt),
-            (0u16..4, 0i64..2_000_000).prop_map(|(active_sessions, since_ms)| PhaseRead::Ok(Some(
-                SessionPhase {
+            Just(SessionsRead::Ok(None)),
+            Just(SessionsRead::Corrupt),
+            (0u16..4, 0i64..2_000_000).prop_map(|(active_sessions, since_ms)| SessionsRead::Ok(
+                Some(LiveSessions {
                     active_sessions,
                     since_ms,
-                }
-            ))),
+                })
+            )),
         ]
     }
 
@@ -283,11 +286,10 @@ mod tests {
         fn derive_is_total(
             repo_present in any::<bool>(),
             projection in projection_strategy(),
-            phase in phase_strategy(),
-            age in proptest::option::of(0i64..10_000_000),
-            now_ms in 0i64..10_000_000,
+            sessions in sessions_strategy(),
+            has_captures in any::<bool>(),
         ) {
-            let i = StatusInputs { repo_present, projection, phase, last_event_age_ms: age, now_ms };
+            let i = StatusInputs { repo_present, projection, sessions, has_captures };
             let s = derive(&i);
             // The glyph mapping is likewise total (never falls through).
             let _ = s.glyph();

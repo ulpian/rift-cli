@@ -34,8 +34,8 @@ pub mod view;
 
 pub use app::CanopyOpts;
 pub use col1::{
-    current_registry, derive_status, EntryKind, PhaseRead, ProjectEntry, ProjectEvent, ProjectOp,
-    ProjectionState, SessionPhase, StatusInputs, RECENT_WINDOW_MS,
+    current_registry, derive_status, EntryKind, LiveSessions, ProjectEntry, ProjectEvent,
+    ProjectOp, ProjectionState, SessionsRead, StatusInputs,
 };
 pub use col2::{
     current_toggles, plan_flip, sanitize_for_terminal, toggle_view, CaptureSummary, DetailView,
@@ -70,12 +70,12 @@ pub struct Project {
 }
 
 /// The live status of a project, derived read-only from the projection + the
-/// session phase file (P4 S2). `Running` carries when activity began (epoch-ms —
-/// not `Instant`, so the value stays `Eq`, snapshot-stable, and clock-injectable)
-/// and how many sessions are active.
+/// live-session cache (P4 S2 / M4-06). `Running` carries when activity began
+/// (epoch-ms — not `Instant`, so the value stays `Eq`, snapshot-stable, and
+/// clock-injectable) and how many sessions are active.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProjectStatus {
-    /// An agent session is active (or there was very recent activity).
+    /// An agent session is active (a live entry in the session cache).
     Running {
         /// When the current activity began (epoch-ms).
         since_ms: i64,
@@ -97,8 +97,8 @@ pub enum ProjectStatus {
 pub enum StatusError {
     /// The projection database is missing, locked, or unreadable.
     ProjectionUnavailable,
-    /// The session phase file could not be parsed.
-    CorruptPhaseFile,
+    /// A live-session cache file could not be parsed.
+    CorruptSessionCache,
     /// The registered repository path is gone.
     RepoMissing,
 }

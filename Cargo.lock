@@ -2729,6 +2729,7 @@ dependencies = [
  "rift-core",
  "rift-git",
  "rift-store",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

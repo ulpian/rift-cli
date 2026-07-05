@@ -40,8 +40,7 @@ use notify::Watcher as _;
 
 use rift_canopy::{
     derive_status, CaptureSummary, DataRequest, DetailView, EntryKind, Event, ModelUsage,
-    PhaseRead, ProjectData, ProjectStatus, ProjectionState, SessionPhase, SettingsSummary,
-    StatusInputs,
+    ProjectData, ProjectStatus, ProjectionState, SessionsRead, SettingsSummary, StatusInputs,
 };
 use rift_git::repo_id_for;
 use rift_store::{projection_db_under, resolve_cache_root, CanonicalStore, SqliteStore};
@@ -326,7 +325,7 @@ fn collect(
 /// Read a project's live status **and** its `{cursor, epoch}` watermark from
 /// its own per-repo projection in a single open — read-only, scoped by the
 /// project's `repo_id`. The gathered facts (repo presence, projection
-/// readiness, the session phase file, the most-recent event's age) are fed to
+/// readiness, the live-session cache, capture presence) are fed to
 /// the pure [`derive_status`] truth table (P4 S2), so the classification is
 /// testable without a store; any failure degrades to an
 /// `Error`/`NotInitialized` status, never a panic.
@@ -344,14 +343,18 @@ fn read_project(root: &Path, path: &str) -> (ProjectStatus, Option<Watermark>) {
             status_of(
                 false,
                 ProjectionState::Uninitialized,
-                PhaseRead::Ok(None),
-                None,
-                now_ms,
+                SessionsRead::Ok(None),
+                false,
             ),
             None,
         );
     };
-    let phase = read_phase(&dir);
+    // The live-session signal reads the per-session cache under the repo's git
+    // dir (linked worktrees resolve through their gitdir file); a non-git
+    // directory simply has no sessions.
+    let sessions = rift_git::discover(&dir).map_or(SessionsRead::Ok(None), |paths| {
+        crate::session::active_sessions(&paths.git_dir, now_ms)
+    });
     let db = projection_db_under(root, &repo);
     if !db.exists() {
         // No projection: initialized (`.rift/` present) → Building, else uninit.
@@ -360,18 +363,17 @@ fn read_project(root: &Path, path: &str) -> (ProjectStatus, Option<Watermark>) {
         } else {
             ProjectionState::Uninitialized
         };
-        return (status_of(true, projection, phase, None, now_ms), None);
+        return (status_of(true, projection, sessions, false), None);
     }
     // The projection exists: open once, read the watermark + freshest event.
     let Some((mark, last_ts)) = open_and_read(&db) else {
         return (
-            status_of(true, ProjectionState::Unavailable, phase, None, now_ms),
+            status_of(true, ProjectionState::Unavailable, sessions, false),
             None,
         );
     };
-    let age = last_ts.map(|ts| now_ms.saturating_sub(ts));
     (
-        status_of(true, ProjectionState::Ready, phase, age, now_ms),
+        status_of(true, ProjectionState::Ready, sessions, last_ts.is_some()),
         Some(mark),
     )
 }
@@ -380,16 +382,14 @@ fn read_project(root: &Path, path: &str) -> (ProjectStatus, Option<Watermark>) {
 fn status_of(
     repo_present: bool,
     projection: ProjectionState,
-    phase: PhaseRead,
-    last_event_age_ms: Option<i64>,
-    now_ms: i64,
+    sessions: SessionsRead,
+    has_captures: bool,
 ) -> ProjectStatus {
     derive_status(&StatusInputs {
         repo_present,
         projection,
-        phase,
-        last_event_age_ms,
-        now_ms,
+        sessions,
+        has_captures,
     })
 }
 
@@ -409,41 +409,6 @@ fn open_and_read(db: &Path) -> Option<(Watermark, Option<i64>)> {
         ))
         .ok()?;
     Some((Watermark { cursor, epoch }, last_ts))
-}
-
-/// Read a project's session phase file (`<dir>/.rift/session.phase`). Absent →
-/// `Ok(None)` (no live session); present but unreadable/garbled → `Corrupt` (so the
-/// status becomes a distinct `CorruptPhaseFile` error rather than silently "quiet").
-/// The format is two whitespace-separated integers: `<active_sessions> <since_ms>`.
-fn read_phase(dir: &Path) -> PhaseRead {
-    let f = dir.join(".rift").join("session.phase");
-    if !f.exists() {
-        return PhaseRead::Ok(None);
-    }
-    match std::fs::read(&f) {
-        Ok(bytes) => match parse_phase(&bytes) {
-            Some(p) => PhaseRead::Ok(Some(p)),
-            None => PhaseRead::Corrupt,
-        },
-        Err(_) => PhaseRead::Corrupt, // exists but unreadable
-    }
-}
-
-/// Parse a phase file's bytes into a [`SessionPhase`], or `None` if malformed —
-/// total over arbitrary bytes (non-UTF8, extra tokens, bad numbers all fail
-/// cleanly), so the reader never panics on a corrupt file.
-fn parse_phase(bytes: &[u8]) -> Option<SessionPhase> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let mut it = text.split_whitespace();
-    let active_sessions: u16 = it.next()?.parse().ok()?;
-    let since_ms: i64 = it.next()?.parse().ok()?;
-    if it.next().is_some() {
-        return None; // trailing junk → corrupt
-    }
-    Some(SessionPhase {
-        active_sessions,
-        since_ms,
-    })
 }
 
 /// Build the rich column-2 [`DetailView`] for the active project: its effective
@@ -924,45 +889,59 @@ mod tests {
         }
     }
 
-    // --- P4 S2: status derivation from the phase file -----------------------
+    // --- P4 S2 / M4-06: status derivation from the live-session cache -------
 
-    /// Write `<proj>/.rift/session.phase` with `contents`.
-    fn write_phase(proj: &Path, contents: &[u8]) {
-        let rift = proj.join(".rift");
-        std::fs::create_dir_all(&rift).unwrap();
-        std::fs::write(rift.join("session.phase"), contents).unwrap();
+    /// Write `<proj>/.git/rift-sessions/<name>.json` with `contents` (the
+    /// hermetic stand-in for the capture hooks' cache writer).
+    fn write_session_cache(proj: &Path, name: &str, contents: &str) {
+        let dir = proj.join(".git").join("rift-sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.json")), contents).unwrap();
+    }
+
+    /// A live cache body updated "now" (the reader's staleness window is
+    /// generous; now_ms comes from the wall clock inside read_project).
+    fn live_cache_json() -> String {
+        format!(
+            r#"{{"schema":1,"session_id":"s1","state":"active","agent":"claude-code",
+                 "current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,
+                 "updated_at_ms":{}}}"#,
+            super::now_ms()
+        )
     }
 
     #[test]
-    fn live_session_phase_makes_status_running() {
+    fn live_session_cache_makes_status_running() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "live", 1);
-        write_phase(&proj, b"2 12345"); // 2 active sessions, since_ms 12345
+        write_session_cache(&proj, "s1", &live_cache_json());
         assert!(matches!(
             status(root.path(), &proj.to_string_lossy()),
             ProjectStatus::Running {
-                active_sessions: 2,
-                since_ms: 12345
+                active_sessions: 1,
+                ..
             }
         ));
     }
 
     #[test]
-    fn corrupt_phase_file_is_a_distinct_error() {
+    fn corrupt_session_cache_is_a_distinct_error() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "bad", 1);
-        write_phase(&proj, b"not a valid phase file");
+        write_session_cache(&proj, "s1", "not a valid cache file");
         assert_eq!(
             status(root.path(), &proj.to_string_lossy()),
-            ProjectStatus::Error(StatusError::CorruptPhaseFile)
+            ProjectStatus::Error(StatusError::CorruptSessionCache)
         );
     }
 
     #[test]
-    fn absent_phase_file_leaves_status_unaffected() {
-        // No phase file → no live session → old capture data reads as Idle.
+    fn absent_session_cache_leaves_status_idle() {
+        // No cache → no live session → old capture data reads as Idle (and
+        // never Running: the recency proxy is gone).
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "quiet", 1);
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
         assert_eq!(
             status(root.path(), &proj.to_string_lossy()),
             ProjectStatus::Idle
@@ -970,42 +949,21 @@ mod tests {
     }
 
     #[test]
-    fn phase_parser_is_total_over_arbitrary_bytes() {
-        // Fuzz-lite: every pattern parses to Some or None, and read_phase never
-        // panics — a garbled phase file degrades to Corrupt, never a crash.
-        let patterns: &[&[u8]] = &[
-            b"",
-            b"   ",
-            b"1",
-            b"1 2",
-            b"1 2 3",
-            b"-1 5",
-            b"99999999999999999999 0",
-            b"1 notanumber",
-            b"\xff\xfe\x00\x01",
-            b"nan nan",
-            b"0 0",
-            b"65535 9223372036854775807",
-        ];
-        for p in patterns {
-            // parse_phase is total: Some(valid) or None, never a panic.
-            let _ = parse_phase(p);
-        }
-        // "1 2" is the one well-formed pattern.
-        assert_eq!(
-            parse_phase(b"1 2"),
-            Some(SessionPhase {
-                active_sessions: 1,
-                since_ms: 2
-            })
+    fn ended_session_cache_reads_idle_not_running() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "done", 1);
+        write_session_cache(
+            &proj,
+            "s1",
+            &format!(
+                r#"{{"schema":1,"session_id":"s1","state":"ended","updated_at_ms":{}}}"#,
+                super::now_ms()
+            ),
         );
-        assert_eq!(parse_phase(b"1 2 3"), None, "trailing junk → corrupt");
-        assert_eq!(parse_phase(b"\xff\xfe"), None, "non-utf8 → corrupt");
-
-        // And read_phase over a real file with garbage yields Corrupt, not a panic.
-        let dir = tempfile::tempdir().unwrap();
-        write_phase(dir.path(), b"\xff\xfe garbage \x00");
-        assert_eq!(read_phase(dir.path()), PhaseRead::Corrupt);
+        assert_eq!(
+            status(root.path(), &proj.to_string_lossy()),
+            ProjectStatus::Idle
+        );
     }
 
     // --- P5 S1: the detail view ---------------------------------------------
