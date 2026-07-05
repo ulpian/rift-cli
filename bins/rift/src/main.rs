@@ -26,7 +26,8 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use rift_canopy::{App, AsciiBackend, PersistOp, Project, Rect, SplashState};
+use rift_canopy::render::Size;
+use rift_canopy::{AppState, Frame, PersistOp, Project};
 use rift_registry::{default_registry_path, ProjectRegistry};
 
 use cli::{exit, Cli, Command, ConfigureArgs, InitArgs, Outcome};
@@ -413,17 +414,27 @@ fn cmd_rebuild() -> rift_core::Result<Outcome> {
 // --- Canopy + registry helpers ----------------------------------------------
 
 /// Render one ASCII dashboard frame to stdout (the headless / fallback path).
+/// The same `view::draw` the live loop uses, over a fixed 100×40 frame — one
+/// renderer, so the headless output can never drift from the TUI.
 fn print_ascii_frame(projects: Vec<Project>) {
-    let mut app = App::new(projects);
-    app.splash = SplashState::new();
-    app.splash.skip();
-    let area = Rect {
-        x: 0,
-        y: 0,
-        w: 100,
-        h: 40,
-    };
-    for line in AsciiBackend.render(&app, area) {
+    let mut state = AppState::new(projects, Size::new(100, 40));
+    state.app.splash.skip();
+    let vm = state.snapshot();
+    let mut frame = Frame::new(vm.size);
+    rift_canopy::view::draw(&vm, &mut frame);
+    let mut lines: Vec<String> = (0..frame.height())
+        .map(|y| {
+            (0..frame.width())
+                .map(|x| frame.get(x, y).map_or(' ', |c| c.ch))
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    for line in lines {
         println!("{line}");
     }
 }
