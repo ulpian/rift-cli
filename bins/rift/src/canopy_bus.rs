@@ -236,7 +236,7 @@ fn status_of(
 /// or `None` if it cannot be opened/read (→ [`ProjectionState::Unavailable`]).
 fn open_and_read(db: &Path) -> Option<(i64, Option<i64>)> {
     let store = SqliteStore::open(db).ok()?;
-    let rt = crate::canopy_store::runtime().ok()?;
+    let rt = rift_canopy_data::runtime().ok()?;
     let cursor = rt.block_on(store.read_watermark("captured_event")).ok()?;
     // The freshest event's transaction time (0 rows → None, not an error).
     let last_ts = rt
@@ -295,7 +295,7 @@ fn build_detail(root: &Path, path: &str, status: ProjectStatus) -> DetailView {
     let (models, capture) = read_projection_detail(root, &dir).unwrap_or_default();
     // Toggles live in the machine-global ui-state store (not the per-repo
     // projection); a read-only open folds them for this project.
-    let toggles = crate::canopy_store::CanopyStore::open(root)
+    let toggles = rift_canopy_data::CanopyStore::open(root)
         .and_then(|cs| cs.toggles(path))
         .unwrap_or_default();
     DetailView {
@@ -334,7 +334,7 @@ fn read_projection_detail(root: &Path, dir: &Path) -> Option<(Vec<ModelUsage>, C
         return None;
     }
     let store = SqliteStore::open(&db).ok()?;
-    let rt = crate::canopy_store::runtime().ok()?;
+    let rt = rift_canopy_data::runtime().ok()?;
 
     // Models: call counts from model_call, unioned with each session's headline
     // model (which may have no calls yet). Sorted most-used first.
@@ -389,7 +389,7 @@ fn read_cursor(root: &Path, path: &str) -> Option<i64> {
         return None;
     }
     let store = SqliteStore::open(&db).ok()?;
-    let rt = crate::canopy_store::runtime().ok()?;
+    let rt = rift_canopy_data::runtime().ok()?;
     rt.block_on(store.read_watermark("captured_event")).ok()
 }
 

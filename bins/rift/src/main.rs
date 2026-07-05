@@ -35,7 +35,6 @@ use cli::{exit, Cli, Command, ConfigureArgs, InitArgs, Outcome};
 mod agents;
 #[cfg(feature = "tui")]
 mod canopy_bus;
-mod canopy_store;
 mod cli;
 mod hooks;
 mod identity;
@@ -237,7 +236,7 @@ fn cmd_init(args: &InitArgs) -> rift_core::Result<Outcome> {
     // source of truth (the TOML registry above is kept only for legacy import).
     // Best-effort: `init` must never fail on a UI-store hiccup.
     let cache_root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
-    if let Ok(cstore) = canopy_store::CanopyStore::open(&cache_root) {
+    if let Ok(cstore) = rift_canopy_data::CanopyStore::open(&cache_root) {
         let _ = cstore.apply(
             &PersistOp::AddProject {
                 path: canon.to_string_lossy().into_owned(),
@@ -453,10 +452,15 @@ fn project_name(path: &std::path::Path) -> String {
 /// TOML registry is imported once (idempotent) so existing users keep their list.
 fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
     let cache_root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
-    let cstore = canopy_store::CanopyStore::open(&cache_root)?;
+    let cstore = rift_canopy_data::CanopyStore::open(&cache_root)?;
     // One-time import of the legacy mutable TOML registry (a no-op afterwards).
     let reg = ProjectRegistry::load(&default_registry_path()).unwrap_or_default();
-    cstore.migrate_from_toml(&reg, hooks::now_ms())?;
+    let legacy: Vec<(String, std::path::PathBuf)> = reg
+        .projects()
+        .iter()
+        .map(|p| (p.name.clone(), p.path.clone()))
+        .collect();
+    cstore.import_legacy(&legacy, hooks::now_ms())?;
     let projects = cstore.projects()?;
 
     #[cfg(feature = "tui")]

@@ -109,6 +109,27 @@ pub fn discover(start: &Path) -> Result<RepoPaths> {
     }
 }
 
+/// A stable [`rift_core::RepoId`] for a working tree — content-addressed over
+/// its canonical path, so each working tree gets its own projection directory.
+///
+/// The derivation is pinned for compatibility with every existing projection:
+/// hex(SHA-256(`0x00` ‖ canonical-path-bytes))[..32] — the `0x00` prefix is the
+/// Merkle *leaf* domain separator this id was historically minted with (in the
+/// `rift` bin, via `rift-hashchain::leaf_hash`); changing it would orphan every
+/// projection on disk.
+///
+/// # Errors
+/// [`RiftError::Io`] if `dir` cannot be canonicalized, or the id is malformed
+/// (structurally unreachable for a 32-hex slug).
+pub fn repo_id_for(dir: &Path) -> Result<rift_core::RepoId> {
+    let canon = std::fs::canonicalize(dir)?;
+    let mut h = Sha256::new();
+    h.update([0u8]); // leaf-hash domain separator (compatibility-pinned)
+    h.update(canon.to_string_lossy().as_bytes());
+    let hex = format!("{:x}", h.finalize());
+    rift_core::RepoId::new(hex.get(..32).unwrap_or(&hex))
+}
+
 fn build_paths(git_dir: PathBuf, common_dir: PathBuf, work_tree: PathBuf) -> RepoPaths {
     let mut h = Sha256::new();
     h.update(work_tree.to_string_lossy().as_bytes());

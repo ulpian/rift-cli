@@ -158,12 +158,11 @@ async fn verify_projection(db_path: &Path, source: &impl ChainSource) -> Result<
     verify_against_source(&store, source).await
 }
 
-/// A stable [`RepoId`] for `dir` — content-addressed over its canonical path so
-/// each working tree gets its own projection directory.
+/// A stable [`RepoId`] for `dir` — delegated to the git plumbing crate, the
+/// single owner of the derivation (the data plane shares it; see
+/// [`rift_git::repo_id_for`] for the compatibility-pinned formula).
 pub(crate) fn repo_id_for(dir: &Path) -> Result<RepoId> {
-    let canon = std::fs::canonicalize(dir)?;
-    let slug = leaf_hash(canon.to_string_lossy().as_bytes()).to_hex();
-    RepoId::new(&slug[..32])
+    rift_git::repo_id_for(dir)
 }
 
 /// Verify under an explicit cache `root` and `repo` (the seam the e2e test drives
@@ -395,6 +394,18 @@ mod tests {
 
     fn repo() -> RepoId {
         RepoId::new("test-repo").unwrap()
+    }
+
+    #[test]
+    fn repo_id_derivation_matches_the_historical_leaf_hash() {
+        // The rift-git derivation must stay byte-identical to the leaf_hash
+        // formula this bin historically minted ids with — a drift would orphan
+        // every projection on disk.
+        let tmp = tempfile::tempdir().unwrap();
+        let canon = std::fs::canonicalize(tmp.path()).unwrap();
+        let expected = leaf_hash(canon.to_string_lossy().as_bytes()).to_hex();
+        let got = repo_id_for(tmp.path()).unwrap();
+        assert_eq!(got.as_str(), &expected[..32]);
     }
 
     #[tokio::test]

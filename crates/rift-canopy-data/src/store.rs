@@ -1,8 +1,8 @@
 //! The machine-global Canopy UI-state store (P4/P5): typed, append-only writers
 //! and a fold reader over `canopy_project_event`.
 //!
-//! Canopy stays pure (`rift-core` only); *this* bin module owns the SQLite side of
-//! the dashboard's registry. Every mutation the reducer emits as a
+//! Canopy stays pure (`rift-core` only); *this* crate owns the SQLite side of
+//! the dashboard's registry (ADR-0009). Every mutation the reducer emits as a
 //! [`PersistOp`] becomes a new event row — add / remove / relabel / reorder are
 //! all **inserts** (never `UPDATE`/`DELETE`), so the log is immutable by
 //! construction and the current registry is the pure fold
@@ -16,10 +16,8 @@ use rift_canopy::{
     ProjectOp, ProjectStatus, ToggleEvent, ToggleView,
 };
 use rift_core::{MonotonicUlidSource, ProjectId, Result, RiftError, UlidSource};
-use rift_registry::ProjectRegistry;
+use rift_git::repo_id_for;
 use rift_store::{canopy_migrations, canopy_ui_db_under, CanonicalStore, SqliteStore, Value};
-
-use crate::verify::repo_id_for;
 
 /// The column order for every `canopy_toggle_event` insert.
 const TOGGLE_COLS: [&str; 6] = [
@@ -46,7 +44,7 @@ const EVENT_COLS: [&str; 9] = [
 
 /// A handle to the append-only Canopy UI-state store, plus the ULID source that
 /// stamps fresh `event_id`/`project_id`s.
-pub(crate) struct CanopyStore {
+pub struct CanopyStore {
     store: SqliteStore,
     ulids: MonotonicUlidSource,
 }
@@ -57,7 +55,7 @@ impl CanopyStore {
     ///
     /// # Errors
     /// [`RiftError`] if the database cannot be created, opened, or migrated.
-    pub(crate) fn open(root: &Path) -> Result<Self> {
+    pub fn open(root: &Path) -> Result<Self> {
         let store = rift_store::open_migrated(canopy_ui_db_under(root), &canopy_migrations())?;
         Ok(Self {
             store,
@@ -70,7 +68,7 @@ impl CanopyStore {
     ///
     /// # Errors
     /// [`RiftError::Storage`] if the log cannot be read.
-    pub(crate) fn projects(&self) -> Result<Vec<Project>> {
+    pub fn projects(&self) -> Result<Vec<Project>> {
         let entries = self.registry()?;
         Ok(entries
             .into_iter()
@@ -89,7 +87,7 @@ impl CanopyStore {
     ///
     /// # Errors
     /// [`RiftError`] if the path is invalid (add) or the store rejects a write.
-    pub(crate) fn apply(&self, op: &PersistOp, now_ms: i64) -> Result<Vec<Project>> {
+    pub fn apply(&self, op: &PersistOp, now_ms: i64) -> Result<Vec<Project>> {
         match op {
             PersistOp::AddProject { path } => self.add(path, now_ms)?,
             PersistOp::RemoveProject { path } => self.remove(path, now_ms)?,
@@ -106,12 +104,11 @@ impl CanopyStore {
 
     /// The current feature-toggle view for a project (empty if the project is
     /// unknown). The read side of [`PersistOp::SetToggle`] — consumed by the live
-    /// dashboard's detail builder (the `tui` path).
+    /// dashboard's detail builder.
     ///
     /// # Errors
     /// [`RiftError::Storage`] if the toggle log cannot be read.
-    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
-    pub(crate) fn toggles(&self, path: &str) -> Result<ToggleView> {
+    pub fn toggles(&self, path: &str) -> Result<ToggleView> {
         let Some(project_id) = self.project_id_for(path)? else {
             return Ok(ToggleView::default());
         };
@@ -120,24 +117,29 @@ impl CanopyStore {
         )))
     }
 
-    /// One-time migration from the legacy mutable TOML registry: if the event log
-    /// is empty and `reg` has projects, fold each in as an `added` event
-    /// (idempotent by canonical path). A no-op once the log is populated.
+    /// One-time import from a legacy registry's `(name, path)` entries: if the
+    /// event log is empty, fold each in as an `added` event. A no-op once the
+    /// log is populated. Registry-format-free so this crate takes no registry
+    /// dependency — the bin flattens its TOML registry into pairs.
     ///
     /// # Errors
     /// [`RiftError`] if the log cannot be read or an event cannot be written.
-    pub(crate) fn migrate_from_toml(&self, reg: &ProjectRegistry, now_ms: i64) -> Result<()> {
+    pub fn import_legacy(
+        &self,
+        entries: &[(String, std::path::PathBuf)],
+        now_ms: i64,
+    ) -> Result<()> {
         if !self.registry()?.is_empty() {
             return Ok(()); // already on the append-only store
         }
-        for p in reg.projects() {
-            let path = p.path.to_string_lossy();
+        for (name, path) in entries {
+            let path_str = path.to_string_lossy();
             // Best-effort: skip an entry whose path no longer resolves.
-            if let Ok(repo) = repo_id_for(&p.path) {
+            if let Ok(repo) = repo_id_for(path) {
                 let project_id = ProjectId::new(self.ulids.next_ulid()).to_string();
                 self.append(
                     &project_id,
-                    &EventRow::added(repo.as_str(), &path, &p.name, now_ms),
+                    &EventRow::added(repo.as_str(), &path_str, name, now_ms),
                 )?;
             }
         }
@@ -476,7 +478,10 @@ fn opt_text_ref(v: Option<&str>) -> Value {
 
 /// A short-lived current-thread runtime for the async store seam — the one
 /// builder every canopy-plane call site uses (the bus's read paths included).
-pub(crate) fn runtime() -> Result<tokio::runtime::Runtime> {
+///
+/// # Errors
+/// [`RiftError`] if the runtime cannot be built.
+pub fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(RiftError::from)
@@ -626,20 +631,21 @@ mod tests {
     }
 
     #[test]
-    fn migrate_from_toml_folds_in_once() {
+    fn import_legacy_folds_in_once() {
         let (dir, cs) = store();
         let a = make_dir(dir.path(), "a");
         let b = make_dir(dir.path(), "b");
-        let mut reg = ProjectRegistry::default();
-        reg.add("a", std::path::PathBuf::from(&a));
-        reg.add("b", std::path::PathBuf::from(&b));
+        let entries = vec![
+            ("a".to_string(), std::path::PathBuf::from(&a)),
+            ("b".to_string(), std::path::PathBuf::from(&b)),
+        ];
 
-        cs.migrate_from_toml(&reg, 1).unwrap();
+        cs.import_legacy(&entries, 1).unwrap();
         assert_eq!(cs.projects().unwrap().len(), 2);
         let events_after_first = cs.events().unwrap().len();
 
-        // A second migration is a no-op (the log is already populated).
-        cs.migrate_from_toml(&reg, 2).unwrap();
+        // A second import is a no-op (the log is already populated).
+        cs.import_legacy(&entries, 2).unwrap();
         assert_eq!(cs.events().unwrap().len(), events_after_first);
     }
 
