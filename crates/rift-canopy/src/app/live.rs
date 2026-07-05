@@ -93,26 +93,46 @@ impl EventSource for MergedEvents {
     }
 }
 
-/// Launch Canopy on the real terminal until the user quits. `on_persist` applies
-/// one append-only registry mutation (add/remove/relabel/reorder/toggle) and
-/// returns the refreshed list. `data_rx` delivers live updates from the data bus
-/// (P8) and `req_tx` carries the reducer's data requests back to it.
+/// Everything the live loop needs from its host — **the** single injection
+/// point (ADR-0011): a new event source or channel becomes a new field here,
+/// wired in [`run`], and the loop body never changes.
+pub struct LoopDeps<'m, F>
+where
+    F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
+{
+    /// Launch options (ascii / skip-splash) from the CLI flags.
+    pub opts: CanopyOpts,
+    /// The registered projects at launch.
+    pub initial: Vec<Project>,
+    /// Applies one append-only registry mutation and returns the refreshed list.
+    pub on_persist: F,
+    /// Live updates from the data bus (P8).
+    pub data_rx: Receiver<Event>,
+    /// The reducer's data requests, back to the bus.
+    pub req_tx: Sender<DataRequest>,
+    /// Performs the feature install/remove actions the reducer plans.
+    pub manager: &'m mut dyn FeatureManager,
+}
+
+/// Launch Canopy on the real terminal until the user quits, over the host
+/// dependencies in [`LoopDeps`].
 ///
 /// The [`Terminal`] guard restores the terminal on return *and* on panic.
 ///
 /// # Errors
 /// [`rift_core::RiftError`] on a terminal enter/read/present failure.
-pub fn run<F>(
-    opts: &CanopyOpts,
-    initial: Vec<Project>,
-    mut on_persist: F,
-    data_rx: Receiver<Event>,
-    req_tx: Sender<DataRequest>,
-    manager: &mut dyn FeatureManager,
-) -> RiftResult<()>
+pub fn run<F>(deps: LoopDeps<'_, F>) -> RiftResult<()>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
 {
+    let LoopDeps {
+        opts,
+        initial,
+        mut on_persist,
+        data_rx,
+        req_tx,
+        manager,
+    } = deps;
     let caps = crate::render::caps::detect(opts.ascii);
     let probe = xre_term::Capabilities::probe();
     let size = Size::new(

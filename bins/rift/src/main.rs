@@ -480,14 +480,14 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
             // Feature installs are Stage 5; until then the null manager accepts
             // toggle actions without installing anything.
             let mut manager = rift_canopy::NullFeatureManager;
-            match rift_canopy::app::live::run(
-                &opts,
-                projects.clone(),
+            match rift_canopy::app::live::run(rift_canopy::app::live::LoopDeps {
+                opts,
+                initial: projects.clone(),
                 on_persist,
-                bus.evt_rx,
-                bus.req_tx,
-                &mut manager,
-            ) {
+                data_rx: bus.evt_rx,
+                req_tx: bus.req_tx,
+                manager: &mut manager,
+            }) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     eprintln!("rift: could not start the interactive dashboard: {e}");
