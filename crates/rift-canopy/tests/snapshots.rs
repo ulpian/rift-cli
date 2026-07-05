@@ -97,6 +97,67 @@ fn golden_layout_too_small() {
     insta::assert_snapshot!("layout_too_small", render_at(22, 5));
 }
 
+// --- graph widgets (M4-09): fixed series, block (floor) tier ----------------
+
+/// Render `points` into a bordered plot box and return the golden text.
+fn widget_text(points: &[rift_canopy::plot::PlotPoint]) -> String {
+    use rift_canopy::render::frame::Style;
+    let mut f = Frame::new(Size::new(26, 8));
+    let inner = f.border(f.rect(), "plot", Style::DEFAULT);
+    rift_canopy::plot::draw_blocks(&mut f, inner, points, Style::DEFAULT);
+    frame_text(&f)
+}
+
+const WIDGET_SERIES: [f64; 12] = [1.0, 3.0, 2.0, 6.0, 4.0, 9.0, 7.0, 5.0, 8.0, 2.0, 4.0, 6.0];
+
+#[test]
+fn golden_widget_sparkline() {
+    let max = rift_canopy::plot::autoscale_max(&WIDGET_SERIES);
+    insta::assert_snapshot!(
+        "widget_sparkline",
+        widget_text(&rift_canopy::plot::sparkline_points(&WIDGET_SERIES, max))
+    );
+}
+
+#[test]
+fn golden_widget_bars() {
+    let max = rift_canopy::plot::autoscale_max(&WIDGET_SERIES);
+    insta::assert_snapshot!(
+        "widget_bars",
+        widget_text(&rift_canopy::plot::bar_points(&WIDGET_SERIES, max, 24))
+    );
+}
+
+#[test]
+fn golden_widget_line() {
+    let max = rift_canopy::plot::autoscale_max(&WIDGET_SERIES);
+    insta::assert_snapshot!(
+        "widget_line",
+        widget_text(&rift_canopy::plot::line_points(&WIDGET_SERIES, max, 48))
+    );
+}
+
+#[test]
+fn golden_widget_gauge() {
+    insta::assert_snapshot!(
+        "widget_gauge",
+        widget_text(&rift_canopy::plot::gauge_points(0.65, 48, 4))
+    );
+}
+
+#[test]
+fn golden_widget_braille_line() {
+    // The sub-cell tier over the same fixed series (cell-aligned with the
+    // block tier by the one-contract property; this pins the dot pattern).
+    use rift_canopy::render::frame::Style;
+    let max = rift_canopy::plot::autoscale_max(&WIDGET_SERIES);
+    let pts = rift_canopy::plot::line_points(&WIDGET_SERIES, max, 48);
+    let mut f = Frame::new(Size::new(26, 8));
+    let inner = f.border(f.rect(), "plot", Style::DEFAULT);
+    rift_canopy::plot::draw_braille(&mut f, inner, &pts, Style::DEFAULT);
+    insta::assert_snapshot!("widget_braille_line", frame_text(&f));
+}
+
 #[test]
 fn golden_static_banner() {
     let mut b = AsciiBackend;

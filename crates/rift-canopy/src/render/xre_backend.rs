@@ -57,6 +57,22 @@ impl RenderBackend for XreBackend {
             .present(&self.scratch)
             .map_err(|e| RenderError::Terminal(e.to_string()))
     }
+
+    fn plot(
+        &mut self,
+        points: &[crate::plot::PlotPoint],
+        area: crate::layout::Rect,
+        style: crate::render::frame::Style,
+        frame: &mut Frame,
+    ) {
+        // Braille where the terminal has sub-cell fidelity; the same-cell block
+        // floor otherwise (the one points→cells contract keeps them aligned).
+        if self.caps.contains(Capabilities::SUBCELL) {
+            crate::plot::draw_braille(frame, area, points, style);
+        } else {
+            crate::plot::draw_blocks(frame, area, points, style);
+        }
+    }
 }
 
 /// Copy a Canopy [`Frame`] into a reused `xre_core::CellBuffer`, resizing it to

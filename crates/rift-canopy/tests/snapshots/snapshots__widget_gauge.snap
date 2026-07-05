@@ -1,0 +1,12 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "widget_text(&rift_canopy::plot::gauge_points(0.65, 48, 4))"
+---
+╭─ plot ─────────────────╮
+│▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄        │
+│                        │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀        │
+│▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄        │
+│                        │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀        │
+╰────────────────────────╯

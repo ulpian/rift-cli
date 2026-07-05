@@ -26,6 +26,7 @@ pub mod command;
 pub mod gauge;
 pub mod input;
 pub mod layout;
+pub mod plot;
 pub mod render;
 pub mod splash;
 pub mod state;

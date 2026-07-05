@@ -112,15 +112,7 @@ pub struct SceneRef<'a> {
     pub fallback: &'a [&'a str],
 }
 
-/// A sub-cell sample for [`RenderBackend::plot`] (braille if available, else a
-/// coarse ASCII bar). `value` is normalized to `[0, 1]`.
-#[derive(Clone, Copy, Debug)]
-pub struct SubCell {
-    /// Column within the plot area.
-    pub x: u16,
-    /// Normalized height `[0, 1]`.
-    pub value: f32,
-}
+pub use crate::plot::PlotPoint;
 
 /// The swappable render backend — the one seam the rest of Stage 4 builds on.
 pub trait RenderBackend {
@@ -148,10 +140,13 @@ pub trait RenderBackend {
         draw_centered(frame, area, scene.fallback);
     }
 
-    /// Sub-cell plot for graphs/gauges. The default draws coarse ASCII bars; the
-    /// xre backend can override with braille when `SUBCELL` is present.
-    fn plot(&mut self, points: &[SubCell], area: Rect, frame: &mut Frame) {
-        draw_ascii_bars(frame, area, points);
+    /// Sub-cell plot for graphs/gauges. The default draws the half-block floor
+    /// tier; the xre backend overrides with braille when `SUBCELL` is present.
+    /// Both tiers place a point in the same cell (the one points→cells
+    /// contract in [`crate::plot`]), so terminals differ only in sub-cell
+    /// resolution, never in shape.
+    fn plot(&mut self, points: &[PlotPoint], area: Rect, style: Style, frame: &mut Frame) {
+        crate::plot::draw_blocks(frame, area, points, style);
     }
 
     /// Dev-only hot-reload tick (no-op unless built with hot-reload).
@@ -188,33 +183,6 @@ pub(crate) fn draw_centered(frame: &mut Frame, area: Rect, lines: &[&str]) {
         let lw = u16::try_from(line.chars().count()).unwrap_or(0);
         let x = area.x + area.w.saturating_sub(lw) / 2;
         frame.put_str(x, y, line, Style::DEFAULT);
-    }
-}
-
-/// Draw `points` as vertical ASCII/Unicode bars filling `area` bottom-up.
-pub(crate) fn draw_ascii_bars(frame: &mut Frame, area: Rect, points: &[SubCell]) {
-    const RAMP: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    for p in points {
-        if p.x >= area.w {
-            continue;
-        }
-        let v = p.value.clamp(0.0, 1.0);
-        let filled = (v * f32::from(area.h)) as u16;
-        for row in 0..area.h {
-            let y = area.y + area.h - 1 - row;
-            let ch = match row.cmp(&filled) {
-                std::cmp::Ordering::Less => '█',
-                std::cmp::Ordering::Equal => {
-                    let frac = (v * f32::from(area.h)) - f32::from(filled);
-                    #[allow(clippy::indexing_slicing)] // clamped to RAMP.len() - 1 by .min(8)
-                    RAMP[((frac * 8.0) as usize).min(8)]
-                }
-                std::cmp::Ordering::Greater => ' ',
-            };
-            if ch != ' ' {
-                frame.set(area.x + p.x, y, ch, Style::DEFAULT);
-            }
-        }
     }
 }
 
