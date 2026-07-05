@@ -2728,6 +2728,7 @@ dependencies = [
  "rift-config",
  "rift-core",
  "rift-git",
+ "rift-nic-gauge",
  "rift-store",
  "serde_json",
  "tempfile",

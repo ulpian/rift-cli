@@ -23,6 +23,9 @@ rift-config = { version = "0.0.1", path = "../rift-config" }
 rift-git = { version = "0.0.1", path = "../rift-git" }
 # The rift-store seam is async; reads run on short-lived current-thread runtimes.
 tokio = { workspace = true }
+# The gauge formula/bands/reference table live in rift-nic-gauge (ADR-0012's
+# single owner); the Nic feed consumes it through the NicGauge trait.
+rift-nic-gauge = { version = "0.0.1", path = "../rift-nic-gauge" }
 # fs-notify as a wake-signal only (ADR-0010); failure degrades to PollOnly.
 notify = { workspace = true }
 # The lenient local session-cache parser (M4-06; contract mirrored, no
