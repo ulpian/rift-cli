@@ -48,9 +48,6 @@ fn dashboard_state() -> AppState {
         Size::new(80, 18),
     );
     s.app.splash.skip();
-    s.app.context_pct = 50;
-    s.app.savings_pct = 18;
-    s.app.token_series = vec![1, 4, 2, 8, 5, 3];
     s
 }
 

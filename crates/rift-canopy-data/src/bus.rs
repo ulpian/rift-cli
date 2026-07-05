@@ -315,9 +315,16 @@ fn stage_read(
     }));
     // The column-3 feeds follow the active project (SetActive is the
     // subscribe request, ADR-0009): recompute full section state on every
-    // read of it — a Rebuilt-driven read is thereby the re-bootstrap.
+    // read of it — a Rebuilt-driven read is thereby the re-bootstrap, and the
+    // reducer's periodic re-stat keeps recall.db-only changes fresh too.
     if is_active {
+        // ONE active-sessions read per recomputation: the gauge badge and the
+        // threads section receive the same value by construction (user
+        // story 6 — the one-query invariant).
+        let live = crate::feeds::read_active_sessions(&path, now_ms());
         outbox.stage(Event::Feed(crate::feeds::compute_tokens(root, &path)));
+        outbox.stage(Event::Feed(crate::feeds::compute_nic(root, &path, live)));
+        outbox.stage(Event::Feed(crate::feeds::compute_recall(root, &path, live)));
     }
 }
 

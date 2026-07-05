@@ -24,7 +24,6 @@ pub mod col1;
 pub mod col2;
 pub mod col3;
 pub mod command;
-pub mod gauge;
 pub mod input;
 pub mod layout;
 pub mod plot;
@@ -48,7 +47,6 @@ pub use col3::{
     SavingsData, ThreadsView, TokensData, TokensView,
 };
 pub use command::{autocomplete, parse_command, Command, COMMANDS};
-pub use gauge::{render_bar, GaugeState};
 pub use input::{on_key, Action, CanopyKey, Mode};
 pub use layout::{solve, PanelRects, Rect};
 pub use render::{select_backend, AsciiBackend, Capabilities, Frame, RenderBackend};
@@ -191,12 +189,6 @@ pub struct App {
     pub toggle_cursor: usize,
     /// The current command-line buffer (after `/`).
     pub command_line: String,
-    /// Context-window % full (drives the nic-gauge).
-    pub context_pct: u8,
-    /// Recent token-usage series (for the column-3 sparkline).
-    pub token_series: Vec<u64>,
-    /// Recall savings % (tokens avoided / total).
-    pub savings_pct: u8,
     /// The splash timeline.
     pub splash: SplashState,
     /// Whether the first-run wizard is shown (registry empty).
@@ -223,9 +215,6 @@ impl App {
             scroll: PanelScroll::default(),
             toggle_cursor: 0,
             command_line: String::new(),
-            context_pct: 0,
-            token_series: Vec::new(),
-            savings_pct: 0,
             splash: SplashState::new(),
             show_wizard,
             mode: Mode::Normal,
@@ -340,12 +329,6 @@ impl App {
         if let Some(i) = self.projects.iter().position(|p| p.path == path) {
             self.selected = i;
         }
-    }
-
-    /// The nic-gauge state from the current context %.
-    #[must_use]
-    pub fn gauge(&self) -> GaugeState {
-        GaugeState::from_pct(self.context_pct)
     }
 }
 

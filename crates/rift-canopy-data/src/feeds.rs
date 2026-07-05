@@ -20,12 +20,16 @@
 
 use std::path::Path;
 
-use rift_canopy::col3::{BreakdownData, BreakdownView, TokensData, TokensView};
-use rift_canopy::{FeedPayload, FeedUpdate};
+use rift_canopy::col3::{
+    BreakdownData, BreakdownView, CallsData, NicReading, NicView, RecallView, SavingsData,
+    ThreadsView, TokensData, TokensView,
+};
+use rift_canopy::{FeedPayload, FeedUpdate, LiveSessions, SessionsRead};
 use rift_git::repo_id_for;
+use rift_nic_gauge::{NicGauge as _, Reading, ReferenceGauge};
 #[cfg(test)]
 use rift_store::Value;
-use rift_store::{projection_db_under, CanonicalStore, SqliteStore};
+use rift_store::{projection_db_under, recall_db_under, CanonicalStore, SqliteStore};
 
 use crate::store::runtime;
 
@@ -202,6 +206,232 @@ fn breakdown_data(rows: &[TokenRow]) -> BreakdownData {
         cache_write,
         read_fraction,
     }
+}
+
+/// The active-sessions read the W4 feeds share: **one** call to the single
+/// query per recomputation — the threads section and the gauge badge both
+/// receive this same value, so they can never disagree (user story 6).
+#[must_use]
+pub fn read_active_sessions(path: &str, now_ms: i64) -> Option<LiveSessions> {
+    let sessions = rift_git::discover(Path::new(path)).map_or(SessionsRead::Ok(None), |paths| {
+        crate::session::active_sessions(&paths.git_dir, now_ms)
+    });
+    match sessions {
+        SessionsRead::Ok(live) => live,
+        // A corrupt cache is surfaced by the STATUS path; the feeds treat it
+        // as no live sessions rather than inventing a count.
+        SessionsRead::Corrupt => None,
+    }
+}
+
+/// Compute the Nic feed: the freshest thread's context reading through the
+/// [`NicGauge`] trait (ADR-0012 — the formula, bands, and reference table live
+/// in rift-nic-gauge), with the thread badge fed by the shared
+/// `active_sessions` value. An unknown model yields the explicit indicator,
+/// never a defaulted percentage (user story 5).
+#[must_use]
+pub fn compute_nic(root: &Path, path: &str, live: Option<LiveSessions>) -> FeedUpdate {
+    let threads = live.map_or(0, |l| l.active_sessions);
+    let nic = match read_last_call(root, path) {
+        None => NicView::NoData,
+        Some(last) => {
+            // Context occupancy after the freshest call: the full prompt
+            // (uncached + cache reads + cache writes) plus its output.
+            let used = last.used_tokens();
+            match ReferenceGauge.reading(&last.model, used) {
+                Reading::Known(k) => NicView::Reading(NicReading {
+                    pct: k.pct,
+                    band: k.band().label(),
+                    model: last.model,
+                    threads,
+                }),
+                Reading::UnknownModel { .. } => NicView::UnknownModel {
+                    model: last.model,
+                    threads,
+                },
+            }
+        }
+    };
+    FeedUpdate {
+        project: path.to_string(),
+        payload: FeedPayload::Nic(nic),
+    }
+}
+
+/// The freshest model call's identity + token classes.
+struct LastCall {
+    model: String,
+    uncached_input: i64,
+    cached_input: i64,
+    cache_creation: i64,
+    output: i64,
+}
+
+impl LastCall {
+    /// Context tokens in use after this call (clamped, saturating).
+    fn used_tokens(&self) -> u64 {
+        let clamp = |v: i64| u64::try_from(v.max(0)).unwrap_or(0);
+        clamp(self.uncached_input)
+            .saturating_add(clamp(self.cached_input))
+            .saturating_add(clamp(self.cache_creation))
+            .saturating_add(clamp(self.output))
+    }
+}
+
+/// Read the freshest usage-bearing model call, scoped to the projection.
+fn read_last_call(root: &Path, path: &str) -> Option<LastCall> {
+    let repo = repo_id_for(Path::new(path)).ok()?;
+    let db = projection_db_under(root, &repo);
+    if !db.exists() {
+        return None;
+    }
+    let store = SqliteStore::open(&db).ok()?;
+    let rt = runtime().ok()?;
+    let rows = rt
+        .block_on(store.query(
+            "SELECT mc.model, tu.uncached_input, tu.cached_input, \
+                    tu.cache_creation, tu.output \
+             FROM token_usage tu JOIN model_call mc ON mc.call_id = tu.call_id \
+             ORDER BY mc.started_at DESC, tu.call_id DESC LIMIT 1",
+            &[],
+        ))
+        .ok()?;
+    let r = rows.first()?;
+    Some(LastCall {
+        model: r.get_text(0).ok()?,
+        uncached_input: r.get_i64(1).ok()?,
+        cached_input: r.get_i64(2).ok()?,
+        cache_creation: r.get_i64(3).ok()?,
+        output: r.get_i64(4).ok()?,
+    })
+}
+
+/// One served `memd.*` audit fact.
+struct AuditRow {
+    t: i64,
+    tokens_avoided: i64,
+}
+
+/// Compute the Recall feed: tokens saved (rate + cumulative) and MCP calls
+/// per bucket from the served `memd.*` audit events in the project's own
+/// recall.db, plus the threads count from the shared `active_sessions` value
+/// (the Recall payload carries it — the M4-15 answer to "which feed kind").
+///
+/// Disabled-vs-quiet (M4-15 decision, recorded): **recall.db absent** means
+/// recall was never enabled here → the enable-prompting placeholder;
+/// recall.db present with no served events is enabled-but-quiet → the
+/// visibly distinct honest-empty state. Neither is ever a zero line.
+#[must_use]
+pub fn compute_recall(root: &Path, path: &str, live: Option<LiveSessions>) -> FeedUpdate {
+    let threads = live.map_or(ThreadsView::NoSessions, |l| {
+        if l.active_sessions > 0 {
+            ThreadsView::Count(l.active_sessions)
+        } else {
+            ThreadsView::NoSessions
+        }
+    });
+    let (savings, calls) = match read_audit_rows(root, path) {
+        RecallDb::Absent => (RecallView::Disabled, RecallView::Disabled),
+        RecallDb::Quiet => (RecallView::Quiet, RecallView::Quiet),
+        RecallDb::Rows(rows) => {
+            let saved: Vec<(i64, f64)> = rows
+                .iter()
+                .map(|r| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let v = r.tokens_avoided.max(0) as f64;
+                    (r.t, v)
+                })
+                .collect();
+            let calls_rows: Vec<(i64, f64)> = rows.iter().map(|r| (r.t, 1.0)).collect();
+            (
+                RecallView::Data(SavingsData {
+                    rate: bucket_values(&saved),
+                    total: crate::series::saturating_sum(saved.iter().map(|(_, v)| *v)),
+                }),
+                RecallView::Data(CallsData {
+                    rate: bucket_values(&calls_rows),
+                    total: crate::series::saturating_sum(calls_rows.iter().map(|(_, v)| *v)),
+                }),
+            )
+        }
+    };
+    FeedUpdate {
+        project: path.to_string(),
+        payload: FeedPayload::Recall {
+            savings,
+            calls,
+            threads,
+        },
+    }
+}
+
+/// The recall.db read outcome.
+enum RecallDb {
+    /// No recall.db: recall was never enabled for this repo.
+    Absent,
+    /// recall.db exists but has no served events yet.
+    Quiet,
+    /// The served audit facts, oldest first.
+    Rows(Vec<AuditRow>),
+}
+
+/// Read the served `memd.*` audit events from the project's own recall.db.
+fn read_audit_rows(root: &Path, path: &str) -> RecallDb {
+    let Ok(repo) = repo_id_for(Path::new(path)) else {
+        return RecallDb::Absent;
+    };
+    let db = recall_db_under(root, &repo);
+    if !db.exists() {
+        return RecallDb::Absent;
+    }
+    let Ok(store) = SqliteStore::open(&db) else {
+        return RecallDb::Quiet; // present but unreadable: enabled, no data now
+    };
+    let Ok(rt) = runtime() else {
+        return RecallDb::Quiet;
+    };
+    let Ok(rows) = rt.block_on(store.query(
+        "SELECT recorded_at, tokens_avoided FROM memd_audit_event \
+         ORDER BY recorded_at, audit_id",
+        &[],
+    )) else {
+        return RecallDb::Quiet; // e.g. a pre-v4 recall.db without the table
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let (Ok(t), Ok(tokens_avoided)) = (r.get_i64(0), r.get_i64(1)) else {
+            continue;
+        };
+        out.push(AuditRow { t, tokens_avoided });
+    }
+    if out.is_empty() {
+        return RecallDb::Quiet;
+    }
+    RecallDb::Rows(out)
+}
+
+/// Bucket arbitrary (t, value) facts with the same adaptive ladder the token
+/// feed uses.
+fn bucket_values(facts: &[(i64, f64)]) -> Vec<f64> {
+    let (Some((first, _)), Some((last, _))) = (facts.first(), facts.last()) else {
+        return Vec::new();
+    };
+    let step = bucket_ms(last.saturating_sub(*first));
+    let end_bucket = last.div_euclid(step);
+    let start_bucket = end_bucket - (TARGET_BUCKETS - 1);
+    let mut series = vec![0.0f64; usize::try_from(TARGET_BUCKETS).unwrap_or(48)];
+    for (t, v) in facts {
+        let b = t.div_euclid(step);
+        if b < start_bucket {
+            continue;
+        }
+        let idx = usize::try_from(b - start_bucket).unwrap_or(0);
+        if let Some(slot) = series.get_mut(idx) {
+            *slot += v.max(0.0);
+        }
+    }
+    let first_active = series.iter().position(|v| *v > 0.0).unwrap_or(0);
+    series.split_off(first_active)
 }
 
 /// Seed one `(model_call, token_usage)` pair — the fixture helper the feed
@@ -387,6 +617,241 @@ mod tests {
             panic!("expected data");
         };
         assert!((b.input - 0.0).abs() < f64::EPSILON);
+    }
+
+    // --- W4: the nic + recall feeds -----------------------------------------
+
+    fn live(n: u16) -> Option<LiveSessions> {
+        Some(LiveSessions {
+            active_sessions: n,
+            since_ms: 1,
+        })
+    }
+
+    fn seed_recall_db(root: &Path, path: &str, events: &[(i64, i64)]) {
+        let repo = repo_id_for(Path::new(path)).unwrap();
+        let db = recall_db_under(root, &repo);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = runtime().unwrap();
+        for (i, (t, avoided)) in events.iter().enumerate() {
+            rt.block_on(store.insert(
+                "memd_audit_event",
+                &[
+                    "audit_id",
+                    "verb",
+                    "handle",
+                    "reason",
+                    "tokens_returned",
+                    "tokens_avoided",
+                    "recorded_at",
+                    "schema_version",
+                ],
+                &[
+                    Value::text(format!("a{i}")),
+                    Value::text("memd.summary_served"),
+                    Value::text("h"),
+                    Value::Null,
+                    Value::Int(10),
+                    Value::Int(*avoided),
+                    Value::Int(*t),
+                    Value::Int(1),
+                ],
+            ))
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn nic_reads_the_freshest_call_through_the_gauge_crate() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        // Older small call, newer big call: the reading is the newest.
+        seed_token_fact(&store, &rt, "c1", 1_000, (1_000, 0, 0, 100));
+        seed_token_fact(&store, &rt, "c2", 9_000, (20_000, 100_000, 0, 4_000));
+
+        let update = compute_nic(root.path(), &proj, live(2));
+        let FeedPayload::Nic(NicView::Reading(r)) = update.payload else {
+            panic!("expected a Reading");
+        };
+        // used = 124_000 over claude's 200k window → 62%.
+        assert_eq!(r.pct, 62);
+        assert_eq!(r.band, "Capable");
+        assert_eq!(r.threads, 2, "the badge carries the shared query value");
+        assert_eq!(r.model, "claude-fable-5");
+    }
+
+    #[test]
+    fn nic_unknown_model_is_the_explicit_indicator_never_a_percentage() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        rt.block_on(store.insert(
+            "model_call",
+            &[
+                "call_id",
+                "turn_id",
+                "model",
+                "started_at",
+                "schema_version",
+            ],
+            &[
+                Value::text("c1"),
+                Value::text("t1"),
+                Value::text("mystery-model-9000"),
+                Value::Int(1_000),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        rt.block_on(store.insert(
+            "token_usage",
+            &[
+                "call_id",
+                "uncached_input",
+                "cached_input",
+                "cache_creation",
+                "output",
+                "counter_method",
+                "schema_version",
+            ],
+            &[
+                Value::text("c1"),
+                Value::Int(100),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(10),
+                Value::text("provider_reported"),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+
+        let update = compute_nic(root.path(), &proj, live(1));
+        match update.payload {
+            FeedPayload::Nic(NicView::UnknownModel { model, threads }) => {
+                assert_eq!(model, "mystery-model-9000");
+                assert_eq!(threads, 1);
+            }
+            other => panic!("an unknown model must never read a percentage: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nic_no_calls_is_nodata() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let update = compute_nic(root.path(), &proj, None);
+        assert!(matches!(update.payload, FeedPayload::Nic(NicView::NoData)));
+    }
+
+    #[test]
+    fn recall_absent_db_is_disabled_present_empty_is_quiet() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        // No recall.db → Disabled (the enable prompt), never a zero line.
+        let update = compute_recall(root.path(), &proj, None);
+        let FeedPayload::Recall {
+            savings,
+            calls,
+            threads,
+        } = update.payload
+        else {
+            panic!("expected Recall");
+        };
+        assert_eq!(savings, RecallView::Disabled);
+        assert_eq!(calls, RecallView::Disabled);
+        assert_eq!(threads, ThreadsView::NoSessions);
+
+        // recall.db exists but has no served events → Quiet (visibly distinct).
+        seed_recall_db(root.path(), &proj, &[]);
+        let update = compute_recall(root.path(), &proj, None);
+        let FeedPayload::Recall { savings, calls, .. } = update.payload else {
+            panic!("expected Recall");
+        };
+        assert_eq!(savings, RecallView::Quiet);
+        assert_eq!(calls, RecallView::Quiet);
+    }
+
+    #[test]
+    fn recall_sums_saved_tokens_and_counts_calls() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        seed_recall_db(
+            root.path(),
+            &proj,
+            &[(1_000, 500), (2_000, 1_500), (3_000, 0)],
+        );
+        let update = compute_recall(root.path(), &proj, live(3));
+        let FeedPayload::Recall {
+            savings,
+            calls,
+            threads,
+        } = update.payload
+        else {
+            panic!("expected Recall");
+        };
+        let RecallView::Data(sd) = savings else {
+            panic!("expected savings data");
+        };
+        assert!((sd.total - 2_000.0).abs() < f64::EPSILON);
+        let RecallView::Data(cd) = calls else {
+            panic!("expected calls data");
+        };
+        assert!(
+            (cd.total - 3.0).abs() < f64::EPSILON,
+            "one call per served event"
+        );
+        assert_eq!(threads, ThreadsView::Count(3));
+    }
+
+    #[test]
+    fn one_query_invariant_badge_equals_threads_by_construction() {
+        // The bus reads active_sessions ONCE and hands the same value to both
+        // feeds: the gauge badge and the threads section cannot disagree.
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_token_fact(&store, &rt, "c1", 1_000, (10, 0, 0, 5));
+        seed_recall_db(root.path(), &proj, &[(1_000, 100)]);
+
+        let shared = live(4);
+        let nic = compute_nic(root.path(), &proj, shared);
+        let recall = compute_recall(root.path(), &proj, shared);
+        let FeedPayload::Nic(NicView::Reading(r)) = nic.payload else {
+            panic!("expected a Reading");
+        };
+        let FeedPayload::Recall { threads, .. } = recall.payload else {
+            panic!("expected Recall");
+        };
+        assert_eq!(ThreadsView::Count(r.threads), threads);
+    }
+
+    #[test]
+    fn recall_is_scope_filtered_across_projects() {
+        let root = tempfile::tempdir().unwrap();
+        let pa = make_project(root.path(), "a");
+        let pb = make_project(root.path(), "b");
+        seed_recall_db(root.path(), &pa, &[(1_000, 700)]);
+        // b has NO recall.db: a's events must not leak into b's sections.
+        let ub = compute_recall(root.path(), &pb, None);
+        let FeedPayload::Recall { savings, .. } = ub.payload else {
+            panic!("expected Recall");
+        };
+        assert_eq!(savings, RecallView::Disabled);
+        let ua = compute_recall(root.path(), &pa, None);
+        let FeedPayload::Recall {
+            savings: RecallView::Data(sd),
+            ..
+        } = ua.payload
+        else {
+            panic!("expected a's data");
+        };
+        assert!((sd.total - 700.0).abs() < f64::EPSILON);
     }
 
     proptest! {

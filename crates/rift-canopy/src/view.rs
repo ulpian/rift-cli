@@ -8,7 +8,6 @@
 //! drawing.
 
 use crate::col2::sanitize_for_terminal;
-use crate::gauge::{render_bar, GaugeState};
 use crate::layout::{
     choose_mode, command_split, single_panel, solve, two_col, LayoutMode, Rect, MIN_NOTICE_COLS,
     MIN_NOTICE_ROWS,
@@ -225,11 +224,6 @@ fn draw_detail(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
         Some(d) => detail_lines(d, &mut lines, vm.toggle_cursor, vm.focus == Panel::Detail),
         None => lines.push("no project selected".into()),
     }
-    lines.push(String::new());
-    let gauge = GaugeState::from_pct(vm.context_pct);
-    lines.push(format!("context — {}", gauge.label()));
-    let bar_w = usize::from(inner.w).min(24);
-    lines.push(render_bar(vm.context_pct, bar_w));
     render_lines(frame, inner, vm.detail_scroll, &lines);
 }
 
@@ -444,9 +438,6 @@ mod tests {
             Size::new(120, 40),
         );
         s.app.splash.skip();
-        s.app.context_pct = 50;
-        s.app.savings_pct = 18;
-        s.app.token_series = vec![1, 4, 2, 8, 5];
         s.snapshot()
     }
 
@@ -477,7 +468,9 @@ mod tests {
         assert!(text.contains("token usage"));
         assert!(text.contains("no token activity yet"));
         assert!(text.contains("recall savings"));
-        assert!(text.contains("context — Thinking"));
+        // The col-2 context bar is retired (ADR-0012): the col-3 nic-gauge
+        // section owns context now.
+        assert!(text.contains("nic-gauge"));
     }
 
     #[test]

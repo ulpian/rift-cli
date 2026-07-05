@@ -32,8 +32,6 @@ pub enum Event {
     Resize(Size),
     /// A fixed-cadence animation/sampling tick.
     Tick,
-    /// A fresh projection snapshot from the data bus (P8): graph-ish series values.
-    Data(DataUpdate),
     /// A per-project update from the data bus (P8): live status for one project.
     ProjectData(ProjectData),
     /// A column-3 feed update from the data bus (ADR-0009's Tokens/Nic/Recall
@@ -90,19 +88,6 @@ pub struct ProjectData {
     /// computes it just for the foreground selection); `None` for status-only
     /// updates of the other projects.
     pub detail: Option<DetailView>,
-}
-
-/// A validated projection update from the live bus. Carries only already-redacted,
-/// scope-checked values; the reducer re-clamps defensively. (P8 fills this in;
-/// today it is fed by tests and the bin's static demo seed.)
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DataUpdate {
-    /// Context-window fullness `0..=100` (drives the nic-gauge).
-    pub context_pct: Option<u8>,
-    /// Recall savings `0..=100`.
-    pub savings_pct: Option<u8>,
-    /// A token-usage sample to append to the column-3 series.
-    pub token_sample: Option<u64>,
 }
 
 /// The outcome of one reduction.
@@ -227,8 +212,6 @@ pub struct AppState {
     /// underlying projects change (checked by cheap comparison in [`Self::snapshot`],
     /// so a stale row can never be served).
     rows_cache: Arc<Vec<ProjectRow>>,
-    /// The last snapshot's token series, shared likewise.
-    series_cache: Arc<Vec<u64>>,
     /// The column-3 sections' view-model, filled by the data plane's feeds
     /// (W3/W4); `Default` is every section's honest placeholder.
     col3: Arc<crate::col3::Col3>,
@@ -245,7 +228,6 @@ impl AppState {
             dirty: true,
             detail: None,
             rows_cache: Arc::new(Vec::new()),
-            series_cache: Arc::new(Vec::new()),
             col3: Arc::new(crate::col3::Col3::default()),
         }
     }
@@ -285,25 +267,6 @@ impl AppState {
         changed
     }
 
-    /// Apply a validated projection update, clamping out-of-range values.
-    fn apply_data(&mut self, u: &DataUpdate) {
-        if let Some(c) = u.context_pct {
-            self.app.context_pct = c.min(100);
-        }
-        if let Some(s) = u.savings_pct {
-            self.app.savings_pct = s.min(100);
-        }
-        if let Some(t) = u.token_sample {
-            self.app.token_series.push(t);
-            // Cap the ring so a flood can't grow memory without bound.
-            const CAP: usize = 256;
-            if self.app.token_series.len() > CAP {
-                let drop = self.app.token_series.len() - CAP;
-                self.app.token_series.drain(0..drop);
-            }
-        }
-    }
-
     /// Derive the immutable render snapshot the renderer consumes.
     ///
     /// The project rows, token series, and rich detail are **shared** (`Arc`)
@@ -332,9 +295,6 @@ impl AppState {
                     .collect(),
             );
         }
-        if *self.series_cache != self.app.token_series {
-            self.series_cache = Arc::new(self.app.token_series.clone());
-        }
         // Prefer the bus-computed rich detail when it is for the selected project;
         // otherwise a thin fallback keeps the panel populated until it arrives.
         let detail = self.app.selected_project().map(|p| match &self.detail {
@@ -349,9 +309,6 @@ impl AppState {
             projects: Arc::clone(&self.rows_cache),
             selected: self.app.selected,
             detail,
-            context_pct: self.app.context_pct,
-            savings_pct: self.app.savings_pct,
-            token_series: Arc::clone(&self.series_cache),
             col3: Arc::clone(&self.col3),
             detail_scroll: self.app.scroll.detail,
             graphs_scroll: self.app.scroll.graphs,
@@ -387,11 +344,6 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
                     });
                 }
             }
-            Flow::Continue(Effects::default())
-        }
-        Event::Data(u) => {
-            s.apply_data(&u);
-            s.dirty = true;
             Flow::Continue(Effects::default())
         }
         Event::ProjectData(pd) => {
@@ -578,14 +530,7 @@ pub struct ViewModel {
     pub selected: usize,
     /// Column-2 selected-project detail (shared with the state's cached copy).
     pub detail: Option<Arc<DetailView>>,
-    /// Context-window % (nic-gauge).
-    pub context_pct: u8,
-    /// Recall savings %.
-    pub savings_pct: u8,
-    /// Column-3 token series (legacy Data-event path; the six sections in
-    /// `col3` supersede it and W3/W4 retire it).
-    pub token_series: Arc<Vec<u64>>,
-    /// The column-3 sections (M4-10): the six live-graph view-models.
+    /// The column-3 sections (M4-10/W3/W4): the six live-graph view-models.
     pub col3: Arc<crate::col3::Col3>,
     /// Column-2 detail viewport top (scroll offset).
     pub detail_scroll: usize,
@@ -756,23 +701,6 @@ mod tests {
             Flow::Continue(e) => assert!(e.data_requests.is_empty()),
             Flow::Quit => panic!("expected Continue"),
         }
-    }
-
-    #[test]
-    fn data_update_clamps_out_of_range() {
-        let mut s = ready(vec![]);
-        update(
-            &mut s,
-            Event::Data(DataUpdate {
-                context_pct: Some(250),
-                savings_pct: Some(180),
-                token_sample: Some(42),
-            }),
-        );
-        assert_eq!(s.app.context_pct, 100, "context clamped to 100");
-        assert_eq!(s.app.savings_pct, 100, "savings clamped to 100");
-        assert_eq!(s.app.token_series, vec![42]);
-        assert!(s.dirty);
     }
 
     #[test]
@@ -1095,9 +1023,9 @@ mod tests {
         assert_eq!(*v1.projects, *v2.projects);
         assert_eq!(v1.size, v2.size);
         assert_eq!(v1.command_line, v2.command_line);
-        // The unchanged rows/series are *shared*, not re-allocated per frame.
+        // The unchanged rows are *shared*, not re-allocated per frame.
         assert!(Arc::ptr_eq(&v1.projects, &v2.projects));
-        assert!(Arc::ptr_eq(&v1.token_series, &v2.token_series));
+        assert!(Arc::ptr_eq(&v1.col3, &v2.col3));
     }
 
     #[test]
@@ -1140,20 +1068,5 @@ mod tests {
         let v = s.snapshot();
         assert_eq!(v.selected, 1);
         assert_eq!(v.detail.unwrap().path, "/r/b");
-    }
-
-    #[test]
-    fn data_series_is_capped() {
-        let mut s = ready(vec![]);
-        for i in 0..300u64 {
-            update(
-                &mut s,
-                Event::Data(DataUpdate {
-                    token_sample: Some(i),
-                    ..Default::default()
-                }),
-            );
-        }
-        assert!(s.app.token_series.len() <= 256);
     }
 }
