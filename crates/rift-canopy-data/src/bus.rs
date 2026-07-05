@@ -34,18 +34,19 @@ use rift_canopy::{
     PhaseRead, ProjectData, ProjectStatus, ProjectionState, SessionPhase, SettingsSummary,
     StatusInputs,
 };
+use rift_git::repo_id_for;
 use rift_store::{projection_db_under, resolve_cache_root, CanonicalStore, SqliteStore};
 
-use crate::verify::repo_id_for;
+use crate::store::runtime;
 
 /// Handles to a running data bus: the request sender (loop → bus) and the update
 /// receiver (bus → loop). Dropping either end disconnects the worker, which then
 /// exits — so the bus is torn down simply by the dashboard returning.
-pub(crate) struct Bus {
+pub struct Bus {
     /// The reducer's data requests are sent here (loop → bus).
-    pub(crate) req_tx: Sender<DataRequest>,
+    pub req_tx: Sender<DataRequest>,
     /// The loop drains bus updates from here (bus → loop).
-    pub(crate) evt_rx: Receiver<Event>,
+    pub evt_rx: Receiver<Event>,
 }
 
 /// Spawn the data-bus worker, seeded to refresh every currently-registered
@@ -53,14 +54,14 @@ pub(crate) struct Bus {
 /// the first main-loop poll drains them. The cache root is resolved from the
 /// process environment ([`resolve_cache_root`]).
 #[must_use]
-pub(crate) fn spawn(initial_paths: Vec<String>) -> Bus {
+pub fn spawn(initial_paths: Vec<String>) -> Bus {
     spawn_with_root(resolve_cache_root(|k| std::env::var(k).ok()), initial_paths)
 }
 
 /// Spawn the bus against an explicit cache `root` — the seam tests drive with a
 /// tempdir, so they never touch the process environment.
 #[must_use]
-pub(crate) fn spawn_with_root(root: PathBuf, initial_paths: Vec<String>) -> Bus {
+pub fn spawn_with_root(root: PathBuf, initial_paths: Vec<String>) -> Bus {
     let (req_tx, req_rx) = channel::<DataRequest>();
     let (evt_tx, evt_rx) = channel::<Event>();
     for p in initial_paths {
@@ -175,7 +176,7 @@ fn collect(req: DataRequest, out: &mut BTreeSet<String>, active: &mut Option<Str
 /// — the same `None` the change observer treats as [`ChangeKind::Unavailable`].
 fn read_project(root: &Path, path: &str) -> (ProjectStatus, Option<i64>) {
     let dir = PathBuf::from(path);
-    let now_ms = crate::hooks::now_ms();
+    let now_ms = now_ms();
 
     // A registered path that no longer resolves → the repo is gone.
     let Ok(repo) = repo_id_for(&dir) else {
@@ -236,7 +237,7 @@ fn status_of(
 /// or `None` if it cannot be opened/read (→ [`ProjectionState::Unavailable`]).
 fn open_and_read(db: &Path) -> Option<(i64, Option<i64>)> {
     let store = SqliteStore::open(db).ok()?;
-    let rt = rift_canopy_data::runtime().ok()?;
+    let rt = runtime().ok()?;
     let cursor = rt.block_on(store.read_watermark("captured_event")).ok()?;
     // The freshest event's transaction time (0 rows → None, not an error).
     let last_ts = rt
@@ -295,7 +296,7 @@ fn build_detail(root: &Path, path: &str, status: ProjectStatus) -> DetailView {
     let (models, capture) = read_projection_detail(root, &dir).unwrap_or_default();
     // Toggles live in the machine-global ui-state store (not the per-repo
     // projection); a read-only open folds them for this project.
-    let toggles = rift_canopy_data::CanopyStore::open(root)
+    let toggles = crate::store::CanopyStore::open(root)
         .and_then(|cs| cs.toggles(path))
         .unwrap_or_default();
     DetailView {
@@ -334,7 +335,7 @@ fn read_projection_detail(root: &Path, dir: &Path) -> Option<(Vec<ModelUsage>, C
         return None;
     }
     let store = SqliteStore::open(&db).ok()?;
-    let rt = rift_canopy_data::runtime().ok()?;
+    let rt = runtime().ok()?;
 
     // Models: call counts from model_call, unioned with each session's headline
     // model (which may have no calls yet). Sorted most-used first.
@@ -389,7 +390,7 @@ fn read_cursor(root: &Path, path: &str) -> Option<i64> {
         return None;
     }
     let store = SqliteStore::open(&db).ok()?;
-    let rt = rift_canopy_data::runtime().ok()?;
+    let rt = runtime().ok()?;
     rt.block_on(store.read_watermark("captured_event")).ok()
 }
 
@@ -496,6 +497,15 @@ impl WatermarkPoller {
         }
         out
     }
+}
+
+/// Wall-clock epoch-ms — the bus's only clock (status ages against it). The
+/// pure truth table stays clock-injected; only this worker samples the wall.
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

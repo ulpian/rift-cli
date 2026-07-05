@@ -33,8 +33,6 @@ use rift_registry::{default_registry_path, ProjectRegistry};
 use cli::{exit, Cli, Command, ConfigureArgs, InitArgs, Outcome};
 
 mod agents;
-#[cfg(feature = "tui")]
-mod canopy_bus;
 mod cli;
 mod hooks;
 mod identity;
@@ -477,7 +475,7 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
             // Spawn the live data bus (P8), seeded to populate every registered
             // project's status; it feeds updates in and takes requests back out.
             let paths: Vec<String> = projects.iter().map(|p| p.path.clone()).collect();
-            let bus = canopy_bus::spawn(paths);
+            let bus = rift_canopy_data::spawn(paths);
             // Every registry mutation (add/remove/relabel/reorder/toggle) is an
             // append-only write to the canopy store, returning the refreshed list.
             let on_persist = |op: &PersistOp| cstore.apply(op, hooks::now_ms());

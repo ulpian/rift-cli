@@ -17,6 +17,8 @@
     )
 )]
 
+pub mod bus;
 pub mod store;
 
+pub use bus::{spawn, spawn_with_root, Bus};
 pub use store::{runtime, CanopyStore};
