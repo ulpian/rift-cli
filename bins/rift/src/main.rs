@@ -412,10 +412,41 @@ fn cmd_rebuild() -> rift_core::Result<Outcome> {
 
 /// Render one ASCII dashboard frame to stdout (the headless / fallback path).
 /// The same `view::draw` the live loop uses, over a fixed 100×40 frame — one
-/// renderer, so the headless output can never drift from the TUI.
+/// renderer, so the headless output can never drift from the TUI. The frame is
+/// **live**: the real data bus runs briefly (bounded by `RIFT_HEADLESS_WAIT_MS`,
+/// default 1200) with the first project active, so statuses and the column-3
+/// sections render from the developer's own projections — placeholders only
+/// where data is honestly absent, exactly like the TUI.
 fn print_ascii_frame(projects: Vec<Project>) {
     let mut state = AppState::new(projects, Size::new(100, 40));
     state.app.splash.skip();
+
+    // Drain the live bus for a bounded window, applying updates through the
+    // same reducer the TUI uses.
+    let wait_ms: u64 = std::env::var("RIFT_HEADLESS_WAIT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1200);
+    if wait_ms > 0 && !state.app.projects.is_empty() {
+        let paths: Vec<String> = state.app.projects.iter().map(|p| p.path.clone()).collect();
+        let active = state.app.selected_project().map(|p| p.path.clone());
+        let bus = rift_canopy_data::spawn(paths);
+        let _ = bus.req_tx.send(rift_canopy::DataRequest::SetActive(active));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        while std::time::Instant::now() < deadline {
+            match bus
+                .evt_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+            {
+                Ok(ev) => {
+                    let _ = rift_canopy::update(&mut state, ev);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+
     let vm = state.snapshot();
     let mut frame = Frame::new(vm.size);
     let mut backend = rift_canopy::AsciiBackend::new(rift_canopy::Capabilities::empty());
