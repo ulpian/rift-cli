@@ -134,7 +134,11 @@ impl CanopyStore {
             let path = p.path.to_string_lossy();
             // Best-effort: skip an entry whose path no longer resolves.
             if let Ok(repo) = repo_id_for(&p.path) {
-                self.append_added(&path, &p.name, repo.as_str(), now_ms)?;
+                let project_id = ProjectId::new(self.ulids.next_ulid()).to_string();
+                self.append(
+                    &project_id,
+                    &EventRow::added(repo.as_str(), &path, &p.name, now_ms),
+                )?;
             }
         }
         Ok(())
@@ -159,7 +163,12 @@ impl CanopyStore {
         let label = canon
             .file_name()
             .map_or_else(|| canon_str.clone(), |n| n.to_string_lossy().into_owned());
-        self.append_added(&canon_str, &label, repo.as_str(), now_ms)
+        // A fresh project id for the first `added` event.
+        let project_id = ProjectId::new(self.ulids.next_ulid()).to_string();
+        self.append(
+            &project_id,
+            &EventRow::added(repo.as_str(), &canon_str, &label, now_ms),
+        )
     }
 
     fn remove(&self, path: &str, now_ms: i64) -> Result<()> {
@@ -171,18 +180,7 @@ impl CanopyStore {
             return Ok(()); // unknown path → nothing to hide
         };
         let supersedes = latest_event_id(&events, &entry.project_id);
-        self.insert(
-            &entry.project_id,
-            "removed",
-            &[
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                opt_text(supersedes),
-                Value::Int(now_ms),
-            ],
-        )
+        self.append(&entry.project_id, &EventRow::removed(supersedes, now_ms))
     }
 
     fn relabel(&self, path: &str, label: &str, now_ms: i64) -> Result<()> {
@@ -194,17 +192,9 @@ impl CanopyStore {
             return Ok(());
         };
         let supersedes = latest_event_id(&events, &entry.project_id);
-        self.insert(
+        self.append(
             &entry.project_id,
-            "relabeled",
-            &[
-                Value::Null,
-                Value::Null,
-                Value::text(label),
-                Value::Null,
-                opt_text(supersedes),
-                Value::Int(now_ms),
-            ],
+            &EventRow::relabeled(label, supersedes, now_ms),
         )
     }
 
@@ -222,71 +212,32 @@ impl CanopyStore {
             return Ok(()); // unreachable: position()/neighbor() are in-bounds
         };
         // Swap their effective order keys: two superseding `reordered` events.
-        self.insert_reorder(
+        self.append(
             &a.project_id,
-            b.order_key,
-            latest_event_id(&events, &a.project_id),
-            now_ms,
+            &EventRow::reordered(b.order_key, latest_event_id(&events, &a.project_id), now_ms),
         )?;
-        self.insert_reorder(
+        self.append(
             &b.project_id,
-            a.order_key,
-            latest_event_id(&events, &b.project_id),
-            now_ms,
+            &EventRow::reordered(a.order_key, latest_event_id(&events, &b.project_id), now_ms),
         )
     }
 
-    /// Append an `added` event for a fresh project id.
-    fn append_added(&self, path: &str, label: &str, repo_id: &str, now_ms: i64) -> Result<()> {
-        let project_id = ProjectId::new(self.ulids.next_ulid()).to_string();
-        self.insert_row(
-            &project_id,
-            "added",
-            &[
-                Value::text(repo_id),
-                Value::text(path),
-                Value::text(label),
-                Value::Null,
-                Value::Null,
-                Value::Int(now_ms),
-            ],
-        )
-    }
-
-    fn insert_reorder(
-        &self,
-        project_id: &str,
-        order_key: i64,
-        supersedes: Option<String>,
-        now_ms: i64,
-    ) -> Result<()> {
-        self.insert(
-            project_id,
-            "reordered",
-            &[
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Int(order_key),
-                opt_text(supersedes),
-                Value::Int(now_ms),
-            ],
-        )
-    }
-
-    /// Insert one event for an *existing* project id (`tail` is the six columns
-    /// after `event_id`, `project_id`, `op`).
-    fn insert(&self, project_id: &str, op: &str, tail: &[Value]) -> Result<()> {
-        self.insert_row(project_id, op, tail)
-    }
-
-    fn insert_row(&self, project_id: &str, op: &str, tail: &[Value]) -> Result<()> {
+    /// Append one typed event row for `project_id` — the **only** writer of
+    /// `canopy_project_event`, so the column order is encoded exactly once,
+    /// against [`EVENT_COLS`].
+    fn append(&self, project_id: &str, row: &EventRow<'_>) -> Result<()> {
         let event_id = self.ulids.next_ulid().to_hex();
-        let mut values = Vec::with_capacity(EVENT_COLS.len());
-        values.push(Value::text(event_id));
-        values.push(Value::text(project_id));
-        values.push(Value::text(op));
-        values.extend_from_slice(tail);
+        let values = [
+            Value::text(event_id),
+            Value::text(project_id),
+            Value::text(row.op),
+            opt_text_ref(row.repo_id),
+            opt_text_ref(row.path),
+            opt_text_ref(row.label),
+            row.order_key.map_or(Value::Null, Value::Int),
+            opt_text(row.supersedes.clone()),
+            Value::Int(row.created_at),
+        ];
         let cols: Vec<&str> = EVENT_COLS.to_vec();
         rt()?.block_on(self.store.insert("canopy_project_event", &cols, &values))
     }
@@ -346,14 +297,20 @@ impl CanopyStore {
             .into_iter()
             .rfind(|e| e.feature == feature)
             .map(|e| e.event_id);
+        let row = ToggleRow {
+            feature,
+            desired,
+            supersedes,
+            created_at: now_ms,
+        };
         let event_id = self.ulids.next_ulid().to_hex();
         let values = [
             Value::text(event_id),
             Value::text(&project_id),
-            Value::text(feature),
-            Value::Int(i64::from(desired)),
-            opt_text(supersedes),
-            Value::Int(now_ms),
+            Value::text(row.feature),
+            Value::Int(i64::from(row.desired)),
+            opt_text(row.supersedes),
+            Value::Int(row.created_at),
         ];
         let cols: Vec<&str> = TOGGLE_COLS.to_vec();
         rt()?.block_on(self.store.insert("canopy_toggle_event", &cols, &values))
@@ -375,6 +332,83 @@ impl CanopyStore {
         }
         Ok(out)
     }
+}
+
+/// A typed `canopy_project_event` row — the compile-checked shape of every
+/// project-event insert. Constructed only through the per-op constructors, so a
+/// column can never be filled positionally with the wrong value; the single
+/// mapping onto [`EVENT_COLS`] lives in [`CanopyStore::append`].
+struct EventRow<'a> {
+    op: &'static str,
+    repo_id: Option<&'a str>,
+    path: Option<&'a str>,
+    label: Option<&'a str>,
+    order_key: Option<i64>,
+    supersedes: Option<String>,
+    created_at: i64,
+}
+
+impl<'a> EventRow<'a> {
+    /// An `added` registration (fresh project).
+    fn added(repo_id: &'a str, path: &'a str, label: &'a str, created_at: i64) -> Self {
+        Self {
+            op: "added",
+            repo_id: Some(repo_id),
+            path: Some(path),
+            label: Some(label),
+            order_key: None,
+            supersedes: None,
+            created_at,
+        }
+    }
+
+    /// A superseding `removed` (hides the project; history kept).
+    fn removed(supersedes: Option<String>, created_at: i64) -> Self {
+        Self {
+            op: "removed",
+            repo_id: None,
+            path: None,
+            label: None,
+            order_key: None,
+            supersedes,
+            created_at,
+        }
+    }
+
+    /// A superseding `relabeled` (new display label).
+    fn relabeled(label: &'a str, supersedes: Option<String>, created_at: i64) -> Self {
+        Self {
+            op: "relabeled",
+            repo_id: None,
+            path: None,
+            label: Some(label),
+            order_key: None,
+            supersedes,
+            created_at,
+        }
+    }
+
+    /// A superseding `reordered` (new explicit order key).
+    fn reordered(order_key: i64, supersedes: Option<String>, created_at: i64) -> Self {
+        Self {
+            op: "reordered",
+            repo_id: None,
+            path: None,
+            label: None,
+            order_key: Some(order_key),
+            supersedes,
+            created_at,
+        }
+    }
+}
+
+/// A typed `canopy_toggle_event` row (the columns after `event_id`/`project_id`),
+/// mapped onto [`TOGGLE_COLS`] in [`CanopyStore::set_toggle`] only.
+struct ToggleRow<'a> {
+    feature: &'a str,
+    desired: bool,
+    supersedes: Option<String>,
+    created_at: i64,
 }
 
 /// The index of `i`'s neighbor in the given `up` direction, or `None` at the end.
@@ -432,6 +466,11 @@ fn latest_event_id(events: &[ProjectEvent], project_id: &str) -> Option<String> 
 
 /// Nullable text value from an `Option<String>`.
 fn opt_text(v: Option<String>) -> Value {
+    v.map_or(Value::Null, Value::text)
+}
+
+/// Nullable text value from an `Option<&str>`.
+fn opt_text_ref(v: Option<&str>) -> Value {
     v.map_or(Value::Null, Value::text)
 }
 
