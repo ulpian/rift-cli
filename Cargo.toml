@@ -36,6 +36,7 @@ members = [
   "crates/rift-recall-policy",
   "crates/rift-recall-mcp",
   "crates/rift-recall-events",
+  "crates/rift-recall-eval",
   "crates/rift-tokens",
   "crates/rift-canopy",
   "crates/rift-registry",
@@ -92,6 +93,9 @@ imara-diff = "0.1"             # (verify)
 # Hashing
 blake3 = "1"
 sha2 = "0.10"
+# Git blob object id (SHA-1 loose-object framing) for the content→blob-oid map
+# (ADR-0005). Already vendored transitively via gix, so this adds no new tree.
+sha1 = "0.10"
 # Symbols (Phase 7 dependency-aware expansion)
 tree-sitter = "0.24"           # (verify)
 # Tokenization (budget enforcement within ~5% of billing tokenizers)

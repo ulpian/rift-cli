@@ -117,6 +117,65 @@ pub fn default_recall_db(repo: &RepoId) -> PathBuf {
     recall_db_from(|k| std::env::var(k).ok(), repo)
 }
 
+/// The canonical **recall** repo id for a worktree path: the first 16 bytes of
+/// `sha256(canonical_path)` as hex. This is the single authority both `rift-memd`
+/// (which reads recall.db) and `rift hooks memd` (which appends the serve-audit
+/// trail) resolve, so they never disagree on which `recall.db` a repo owns.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if [`RepoId::new`] rejects the derived slug (it never
+/// does — the slug is 32 lowercase hex chars).
+pub fn recall_repo_id(repo: &Path) -> rift_core::Result<RepoId> {
+    use sha2::{Digest, Sha256};
+    let abs = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let digest = Sha256::digest(abs.to_string_lossy().as_bytes());
+    let mut hex = String::with_capacity(32);
+    use core::fmt::Write as _;
+    for b in digest.iter().take(16) {
+        let _ = write!(hex, "{b:02x}");
+    }
+    RepoId::new(hex)
+}
+
+/// The recall projection database file for a worktree `repo` path, resolving both
+/// the [`recall_repo_id`] and the cache root from the real environment.
+///
+/// # Errors
+/// Propagates [`recall_repo_id`].
+pub fn recall_db_for_repo(repo: &Path) -> rift_core::Result<PathBuf> {
+    Ok(recall_db_from(
+        |k| std::env::var(k).ok(),
+        &recall_repo_id(repo)?,
+    ))
+}
+
+/// The canonical **capture** repo id for a worktree path — the derivation the
+/// `rift` binary uses for `projection.db` (a domain-separated leaf hash, distinct
+/// from [`recall_repo_id`]'s plain digest). Exposed here so the recall side can
+/// locate the M1 capture projection (e.g. the identity plane's `session_binding`
+/// rows that populate the developer scope axis) without re-deriving ad hoc.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if [`RepoId::new`] rejects the derived slug (it never
+/// does — the slug is 32 lowercase hex chars).
+pub fn capture_repo_id(repo: &Path) -> rift_core::Result<RepoId> {
+    let abs = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let slug = rift_hashchain::leaf_hash(abs.to_string_lossy().as_bytes()).to_hex();
+    RepoId::new(slug.get(..32).unwrap_or(&slug))
+}
+
+/// The M1 capture projection database file for a worktree `repo` path, resolving
+/// both the [`capture_repo_id`] and the cache root from the real environment.
+///
+/// # Errors
+/// Propagates [`capture_repo_id`].
+pub fn capture_projection_db_for_repo(repo: &Path) -> rift_core::Result<PathBuf> {
+    Ok(projection_db_from(
+        |k| std::env::var(k).ok(),
+        &capture_repo_id(repo)?,
+    ))
+}
+
 /// The machine-global canopy UI-state database under an explicit cache `root`:
 /// `<root>/rift/canopy/ui-state.db`. **Repo-independent** (the dashboard spans
 /// repos), so it lives under a fixed `canopy/` prefix rather than a `<repo_id>/`.
@@ -205,6 +264,47 @@ mod tests {
         // default_* read the real process env; exercise them (path is machine-dependent).
         assert!(default_projection_dir(&repo()).ends_with(PathBuf::from("rift").join("abc123")));
         assert!(default_projection_db(&repo()).ends_with("projection.db"));
+    }
+
+    #[test]
+    fn recall_repo_id_is_stable_and_recall_db_for_repo_ends_in_recall_db() {
+        // Deterministic 32-hex slug over the canonical path (shared authority for
+        // rift-memd and `rift hooks memd`, so they agree on the recall.db).
+        let a = recall_repo_id(Path::new(".")).unwrap();
+        let b = recall_repo_id(Path::new(".")).unwrap();
+        assert_eq!(a.as_str(), b.as_str());
+        assert_eq!(a.as_str().len(), 32);
+        assert!(a.as_str().chars().all(|c| c.is_ascii_hexdigit()));
+        // A non-existent path still yields an id (canonicalize falls back).
+        assert_eq!(
+            recall_repo_id(Path::new("/no/such/dir/xyz"))
+                .unwrap()
+                .as_str()
+                .len(),
+            32
+        );
+        // The resolved db path is repo-scoped and named recall.db.
+        let db = recall_db_for_repo(Path::new(".")).unwrap();
+        assert!(db.ends_with("recall.db"));
+        assert!(db.to_string_lossy().contains(a.as_str()));
+    }
+
+    #[test]
+    fn capture_repo_id_is_stable_and_distinct_from_recall_id() {
+        // The capture derivation (leaf hash) and the recall derivation (plain
+        // digest) are deliberately distinct id spaces; both are stable 32-hex.
+        let a = capture_repo_id(Path::new(".")).unwrap();
+        let b = capture_repo_id(Path::new(".")).unwrap();
+        assert_eq!(a.as_str(), b.as_str());
+        assert_eq!(a.as_str().len(), 32);
+        assert_ne!(
+            a.as_str(),
+            recall_repo_id(Path::new(".")).unwrap().as_str(),
+            "capture and recall id spaces are domain-separated"
+        );
+        let db = capture_projection_db_for_repo(Path::new(".")).unwrap();
+        assert!(db.ends_with("projection.db"));
+        assert!(db.to_string_lossy().contains(a.as_str()));
     }
 
     #[test]

@@ -24,6 +24,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Plain SHA-256 of worktree file bytes, to match read-time `content_sha256`.
 sha2 = { workspace = true }
+# Git blob object id (SHA-1 "blob <len>\0" framing) for the content→blob-oid map.
+sha1 = { workspace = true }
 # Pure-Rust, read-side git object/ref access plugs in behind SubstrateReader:
 gix = { workspace = true, optional = true }
 

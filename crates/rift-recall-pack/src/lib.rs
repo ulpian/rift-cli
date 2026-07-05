@@ -221,6 +221,56 @@ pub fn compile(req: &PackRequest) -> Pack {
     }
 }
 
+/// The immutable inputs that identify a pack (ADR-0020). `ranked` is the
+/// **ordered** `(artifact_id, content_sha256)` list the pack was compiled from —
+/// order is part of the identity, because placement is part of the contract.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PackKeyInputs {
+    /// The query (task/error/focus hints) the ranking answered.
+    pub query: String,
+    /// The ranked candidates: `(artifact_id, content_sha256)` in rank order.
+    pub ranked: Vec<(String, String)>,
+    /// The policy version in force when the pack was compiled.
+    pub policy_version: u32,
+    /// The requested token budget (pre-clamp — the caller's contract input).
+    pub token_budget: u32,
+}
+
+/// The input-keyed pack identity (ADR-0020): `PackKey = hash(query,
+/// ranked_ids+hashes, policy_ver, budget)` — over the immutable inputs,
+/// computable **before** rendering, so identical inputs re-serve
+/// byte-identically and any pack cache is content-addressed by inputs. The
+/// rendered output is never the key (an output hash is a post-hoc equality
+/// check, not a cache key). Domain-separated + length-prefixed, so no two
+/// distinct input sets collide via concatenation ambiguity.
+#[must_use]
+pub fn pack_key(inputs: &PackKeyInputs) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"rift.packkey.v1\x00");
+    let mut feed = Vec::new();
+    let push = |buf: &mut Vec<u8>, bytes: &[u8]| {
+        buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        buf.extend_from_slice(bytes);
+    };
+    push(&mut feed, inputs.query.as_bytes());
+    feed.extend_from_slice(&(inputs.ranked.len() as u64).to_le_bytes());
+    for (id, hash) in &inputs.ranked {
+        push(&mut feed, id.as_bytes());
+        push(&mut feed, hash.as_bytes());
+    }
+    feed.extend_from_slice(&inputs.policy_version.to_le_bytes());
+    feed.extend_from_slice(&inputs.token_budget.to_le_bytes());
+    h.update(&feed);
+    let out = h.finalize();
+    let mut s = String::with_capacity(64);
+    use core::fmt::Write as _;
+    for b in out {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +348,110 @@ mod tests {
         let b = compile(&req());
         assert_eq!(a, b);
         assert_eq!(a.render(), b.render());
+    }
+
+    fn key_inputs() -> PackKeyInputs {
+        PackKeyInputs {
+            query: "task: fix retry".into(),
+            ranked: vec![
+                ("id1".into(), "hashA".into()),
+                ("id2".into(), "hashB".into()),
+            ],
+            policy_version: 1,
+            token_budget: 1200,
+        }
+    }
+
+    #[test]
+    fn pack_key_is_input_keyed_and_sensitive_to_every_input() {
+        // ADR-0020: computable before any render, stable for identical inputs.
+        let base = pack_key(&key_inputs());
+        assert_eq!(base.len(), 64);
+        assert_eq!(base, pack_key(&key_inputs()), "identical inputs, same key");
+
+        let mut other_query = key_inputs();
+        other_query.query = "task: other".into();
+        assert_ne!(
+            base,
+            pack_key(&other_query),
+            "query is part of the identity"
+        );
+
+        let mut reordered = key_inputs();
+        reordered.ranked.swap(0, 1);
+        assert_ne!(
+            base,
+            pack_key(&reordered),
+            "rank ORDER is part of the identity"
+        );
+
+        let mut rehashed = key_inputs();
+        rehashed.ranked[0].1 = "hashA2".into();
+        assert_ne!(
+            base,
+            pack_key(&rehashed),
+            "content hash is part of the identity"
+        );
+
+        let mut repoliced = key_inputs();
+        repoliced.policy_version = 2;
+        assert_ne!(
+            base,
+            pack_key(&repoliced),
+            "policy version is part of the identity"
+        );
+
+        let mut rebudgeted = key_inputs();
+        rebudgeted.token_budget = 800;
+        assert_ne!(
+            base,
+            pack_key(&rebudgeted),
+            "budget is part of the identity"
+        );
+    }
+
+    proptest::proptest! {
+        /// Byte-identity across seeds (ADR-0020): equal inputs → equal key AND
+        /// equal rendered pack; the key never depends on the rendered output.
+        #[test]
+        fn same_inputs_reserve_byte_identically(
+            names in proptest::collection::vec("[a-z]{1,8}", 0..6),
+            budget in 1u32..2000,
+        ) {
+            let ranked: Vec<(String, String)> = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (format!("id{i}"), format!("h_{n}")))
+                .collect();
+            let inputs = PackKeyInputs {
+                query: "q".into(),
+                ranked: ranked.clone(),
+                policy_version: 1,
+                token_budget: budget,
+            };
+            proptest::prop_assert_eq!(pack_key(&inputs), pack_key(&inputs));
+            let pr = PackRequest {
+                recommended: ranked.iter().map(|(_, h)| format!("file:x@sha256:{h}")).collect(),
+                token_budget: budget,
+                ..PackRequest::default()
+            };
+            proptest::prop_assert_eq!(compile(&pr).render(), compile(&pr).render());
+        }
+
+        /// Distinct ranked sets produce distinct keys (no concatenation-boundary
+        /// collisions thanks to length prefixing).
+        #[test]
+        fn boundary_shifts_change_the_key(a in "[a-z]{1,6}", b in "[a-z]{1,6}") {
+            let one = PackKeyInputs {
+                ranked: vec![(format!("{a}{b}"), "h".into())],
+                ..key_inputs()
+            };
+            let two = PackKeyInputs {
+                ranked: vec![(a.clone(), format!("{b}h"))],
+                ..key_inputs()
+            };
+            // same concatenated bytes, different field boundaries → different keys
+            proptest::prop_assert_ne!(pack_key(&one), pack_key(&two));
+        }
     }
 }

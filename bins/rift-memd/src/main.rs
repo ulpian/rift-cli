@@ -21,14 +21,14 @@ use std::path::{Path, PathBuf};
 mod mcp_serve;
 
 use clap::{Parser, Subcommand};
-use rift_core::{RepoId, Result, RiftError};
-use rift_recall_ledger::ingest;
+use rift_core::{RepoId, Result, RiftError, Timestamp};
+use rift_recall_ledger::ingest::{self, IngestOptions, IngestReport};
 use rift_recall_ledger::metrics::{compute_metrics, record_metric_snapshot};
+use rift_recall_ledger::{doctor as graph_doctor, outcome};
 use rift_recall_mcp::TOOL_SURFACE;
 use rift_recall_substrate::{worktree, Dialect, GixSubstrate, SubstrateReader};
 use rift_recall_types::Scope;
-use rift_store::{recall_db_from, recall_migrations, CanonicalStore, SqliteStore};
-use sha2::{Digest, Sha256};
+use rift_store::{recall_migrations, CanonicalStore, SqliteStore};
 
 #[derive(Parser)]
 #[command(name = "rift-memd", about = "Rift total-recall plane", version)]
@@ -111,7 +111,7 @@ async fn run() -> Result<()> {
         Cmd::Metrics { repo, json } => metrics(&repo, json).await,
         Cmd::Rebuild { repo } => rebuild(&repo).await,
         Cmd::Status { repo } => status(&repo).await,
-        Cmd::Doctor { repo } => doctor(&repo),
+        Cmd::Doctor { repo } => doctor(&repo).await,
         Cmd::Serve { mcp, repo } => {
             if mcp {
                 mcp_serve::serve_mcp(&repo).await
@@ -131,24 +131,16 @@ async fn run() -> Result<()> {
     }
 }
 
-/// A stable, filesystem-safe repo id derived from the canonical repo path.
+/// A stable, filesystem-safe repo id derived from the canonical repo path. The
+/// single authority (`rift_store::recall_repo_id`) shared with `rift hooks memd`
+/// so both binaries resolve the same `recall.db`.
 pub(crate) fn repo_id_for(repo: &Path) -> Result<RepoId> {
-    let abs = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
-    let digest = Sha256::digest(abs.to_string_lossy().as_bytes());
-    let mut hex = String::with_capacity(32);
-    use core::fmt::Write as _;
-    for b in digest.iter().take(16) {
-        let _ = write!(hex, "{b:02x}");
-    }
-    RepoId::new(hex)
+    rift_store::recall_repo_id(repo)
 }
 
 /// The recall.db path for `repo` (under `RIFT_CACHE_DIR`/`XDG_CACHE_HOME`/`~/.cache`).
 pub(crate) fn recall_db_path(repo: &Path) -> Result<PathBuf> {
-    Ok(recall_db_from(
-        |k| std::env::var(k).ok(),
-        &repo_id_for(repo)?,
-    ))
+    rift_store::recall_db_for_repo(repo)
 }
 
 /// Open (creating + migrating) the recall.db projection for `repo`.
@@ -156,17 +148,78 @@ pub(crate) fn open_recall_db(db: &Path) -> Result<SqliteStore> {
     rift_store::open_migrated(db, &recall_migrations())
 }
 
+/// The production [`IngestOptions`]: the identity plane's `session → developer`
+/// join, read from the M1 capture projection's `session_binding` rows when the
+/// projection exists (hashed ids only — never a raw name/email). Best-effort: a
+/// missing/unreadable capture projection yields default options, and the
+/// developer axis stays null rather than guessed.
+pub(crate) async fn ingest_options(repo: &Path) -> IngestOptions {
+    let mut opts = IngestOptions::default();
+    let Ok(db) = rift_store::capture_projection_db_for_repo(repo) else {
+        return opts;
+    };
+    if !db.exists() {
+        return opts;
+    }
+    let Ok(store) = rift_store::open_capture_projection(&db) else {
+        return opts;
+    };
+    // Append-only bindings: later rows supersede, so last-recorded wins.
+    if let Ok(rows) = store
+        .query(
+            "SELECT session_id, developer_id FROM session_binding ORDER BY recorded_at ASC",
+            &[],
+        )
+        .await
+    {
+        for r in &rows {
+            if let (Ok(session), Ok(dev)) = (r.get_text(0), r.get_text(1)) {
+                opts.developer_by_session.insert(session, dev);
+            }
+        }
+    }
+    opts
+}
+
+/// The full production ingest pass, shared by `metrics`, `rebuild`, and the MCP
+/// server's startup ingest: persist the ADR-0005 blob-oid map **first** (so the
+/// same run's changed-hunk pass can resolve bytes on a real repo), then the
+/// incremental graph ingest with the developer axis, then outcome-label
+/// derivation at the injected `now`.
+pub(crate) async fn ingest_all(
+    store: &SqliteStore,
+    sub: &GixSubstrate,
+    repo: &Path,
+    now: Timestamp,
+) -> Result<(
+    IngestReport,
+    outcome::DeriveReport,
+    Vec<worktree::WorktreeBlob>,
+)> {
+    let (reads, _issues) = ingest::read_facts_all(sub)?;
+    let paths = ingest::read_paths(&reads);
+    let blobs = worktree::hash_blobs(repo, &paths);
+    rift_recall_ledger::blob_map::persist_blob_oid_map(store, &blobs, 0).await?;
+    let opts = ingest_options(repo).await;
+    let report = ingest::ingest_with(store, sub, &opts).await?;
+    let labels = outcome::derive_labels(store, sub, now).await?;
+    Ok((report, labels, blobs))
+}
+
 /// Ingest the repo's checkpoints into recall.db, then compute + report scoped metrics.
 async fn metrics(repo: &Path, json: bool) -> Result<()> {
     let sub = GixSubstrate::open(repo)?;
     let db = recall_db_path(repo)?;
     let store = open_recall_db(&db)?;
-    let report = ingest::ingest(&store, &sub).await?;
+    let (report, _labels, blobs) = ingest_all(&store, &sub, repo, Timestamp::now()).await?;
 
-    // worktree hashes for the avoidable-context component (paths the agent read)
-    let (reads, _issues) = ingest::read_facts_all(&sub)?;
-    let paths = ingest::read_paths(&reads);
-    let worktree = worktree::hash_paths(repo, &paths);
+    // worktree hashes for the avoidable-context component (paths the agent
+    // read): SHA-256 is the validity comparator; the blob-oid side of the same
+    // hashing pass was persisted by `ingest_all` (ADR-0005).
+    let worktree: std::collections::BTreeMap<String, String> = blobs
+        .iter()
+        .map(|b| (b.path.clone(), b.content_sha256.clone()))
+        .collect();
 
     let scope = Scope::default_for(repo_id_for(repo)?.as_str(), u32::MAX);
     let m = compute_metrics(&store, &scope, &worktree).await?;
@@ -196,7 +249,8 @@ async fn metrics(repo: &Path, json: bool) -> Result<()> {
 }
 
 /// Destroy recall.db and rebuild it from git (a cold ingest; idempotent by
-/// content-addressed set-union, so this equals accumulated incremental ingests).
+/// content-addressed set-union, so this equals accumulated incremental ingests
+/// — the printed fingerprint is the byte-identical comparator that proves it).
 async fn rebuild(repo: &Path) -> Result<()> {
     let db = recall_db_path(repo)?;
     // destroy the whole recall projection (it is NOT canonical — git is)
@@ -206,11 +260,13 @@ async fn rebuild(repo: &Path) -> Result<()> {
     }
     let store = open_recall_db(&db)?;
     let sub = GixSubstrate::open(repo)?;
-    let report = ingest::ingest(&store, &sub).await?;
+    let (report, _labels, _blobs) = ingest_all(&store, &sub, repo, Timestamp::now()).await?;
+    let fingerprint = graph_doctor::rebuild_fingerprint(&store).await?;
     println!("rebuilt:        {}", db.display());
     println!("checkpoints:    {}", report.checkpoints);
     println!("nodes:          {}", report.nodes);
     println!("edges:          {}", report.edges);
+    println!("fingerprint:    {fingerprint}");
     if !report.issues.is_empty() {
         println!("parse issues:   {}", report.issues.len());
     }
@@ -239,9 +295,11 @@ async fn status(repo: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Walk the substrate and report a health summary (the graph `doctor`
-/// diagnostics — orphans, lineage leaks, chain mismatch — are a follow-up).
-fn doctor(repo: &Path) -> Result<()> {
+/// Walk the substrate and report a health summary, then diagnose the projected
+/// graph itself (P2 doctor: orphans, lineage gaps, chain mismatches) and print
+/// the rebuild fingerprint — corruption is found and explained, never silently
+/// served.
+async fn doctor(repo: &Path) -> Result<()> {
     let sub = GixSubstrate::open(repo)?;
     let walker = sub.walker();
     let checkpoints = sub.checkpoints()?;
@@ -270,6 +328,32 @@ fn doctor(repo: &Path) -> Result<()> {
             "  - {} / {} @ {:?}: {}",
             issue.checkpoint_id, issue.artifact, issue.locator, issue.detail
         );
+    }
+
+    // The projected graph's own health (skipped when no projection exists yet).
+    let db = recall_db_path(repo)?;
+    if db.exists() {
+        let store = open_recall_db(&db)?;
+        let d = graph_doctor::diagnose(&store).await?;
+        let fingerprint = graph_doctor::rebuild_fingerprint(&store).await?;
+        println!(
+            "graph:          {}",
+            if d.is_healthy() {
+                "healthy"
+            } else {
+                "DEFECTS FOUND"
+            }
+        );
+        println!("  orphan edges:     {}", d.orphan_edges);
+        println!("  orphan payloads:  {}", d.orphan_payloads);
+        println!("  lineage gaps:     {}", d.lineage_gaps);
+        println!("  chain mismatches: {}", d.chain_mismatches);
+        for s in &d.samples {
+            println!("  - {s}");
+        }
+        println!("fingerprint:    {fingerprint}");
+    } else {
+        println!("graph:          (no recall.db yet — run `metrics` or `rebuild`)");
     }
     Ok(())
 }

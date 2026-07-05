@@ -25,7 +25,7 @@ use rift_core::{Result, RiftError};
 use rift_recall_mcp::{
     decode_request, McpServer, RecallContext, ToolName, ToolRequest, TOOL_SURFACE,
 };
-use rift_recall_policy::{PolicyEngine, TurnBudget};
+use rift_recall_policy::{PolicyEngine, ServePolicy, TurnBudget};
 use rift_recall_substrate::{GixSubstrate, MemorySubstrate, SubstrateReader};
 use rift_recall_types::Scope;
 use rmcp::handler::server::ServerHandler;
@@ -37,23 +37,39 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServiceExt};
 
 /// The agent-spawned recall server. Holds only `Send + Sync` state; the recall
-/// store + substrate are opened per call (read-only).
+/// store + substrate are opened per call (read-only). The per-turn budget lives
+/// here (ADR-0004): it persists across the session's calls and is anchored (reset)
+/// by `rift_known_state`, behind a mutex so the `&self` stdio handler can draw it
+/// down.
 pub(crate) struct RiftRecallServer {
     repo: PathBuf,
     config: EffectiveConfig,
+    /// The serve-policy overlay (`.rift/policies/serve.toml`) loaded once at
+    /// start: denied globs, transcript allow-list, fail-closed flag (W1).
+    serve_policy: ServePolicy,
+    budget: tokio::sync::Mutex<TurnBudget>,
 }
 
 impl RiftRecallServer {
     fn new(repo: &Path) -> Result<Self> {
+        let rift_dir = repo.join(".rift");
         // Fail-closed: a missing/malformed config resolves to secure defaults.
-        let config = match EffectiveConfig::load(&repo.join(".rift")) {
+        let config = match EffectiveConfig::load(&rift_dir) {
             Ok(c) => c,
             Err(_) => EffectiveConfig::secure_default()?,
         };
         Ok(Self {
             repo: repo.to_path_buf(),
             config,
+            serve_policy: ServePolicy::load(&rift_dir),
+            budget: tokio::sync::Mutex::new(TurnBudget::default()),
         })
+    }
+
+    /// The policy engine for a call: the effective config plus the serve-policy
+    /// overlay (denied paths, transcript allow-list, fail-closed).
+    fn policy(&self) -> PolicyEngine<'_> {
+        PolicyEngine::new(&self.config).with_serve_policy(self.serve_policy.clone())
     }
 }
 
@@ -87,7 +103,6 @@ fn tool_schema(tool: ToolName) -> Arc<JsonObject> {
             "token_budget": { "type": "integer" },
             "known_hashes": { "type": "array", "items": { "type": "string" } },
             "target": { "type": "string" },
-            "trust": { "type": "string" },
             "reason": { "type": "string" },
             "top_n": { "type": "integer" }
         }
@@ -185,12 +200,25 @@ impl ServerHandler for RiftRecallServer {
         let store = crate::open_recall_db(&db)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        // Build a `Send` substrate reader. Only retrieve_exact needs real bytes;
-        // resolve the one requested blob synchronously (so the non-`Send`
-        // `GixSubstrate` never crosses an await), then dispatch over an in-memory
-        // reader. (Content-hash → git-oid resolution for exact bytes is a
-        // follow-up; the gate + audit are exercised regardless.)
-        let reader = build_reader(&self.repo, tool, &req);
+        // Resolve the target's git blob oid via the ADR-0005 map BEFORE the
+        // non-`Send` `GixSubstrate` is opened synchronously (so it never crosses an
+        // await). Only retrieve_exact needs real bytes.
+        let exact_oid = if tool.is_exact() {
+            match &req.target {
+                Some(target) => {
+                    let sha = rift_recall_mcp::exact_sha(target);
+                    rift_recall_ledger::blob_map::blob_oid_for(&store, sha)
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        // Build a `Send` in-memory reader seeded with the one requested blob.
+        let reader = build_reader(&self.repo, tool, &req, exact_oid.as_deref());
 
         let repo_id = crate::repo_id_for(&self.repo)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
@@ -200,9 +228,11 @@ impl ServerHandler for RiftRecallServer {
             scope: Scope::default_for(repo_id.as_str(), u32::MAX),
             now: Timestamp::now(),
         };
-        let mut server = McpServer::new(TurnBudget::default(), PolicyEngine::new(&self.config));
+        let server = McpServer::new(self.policy());
+        // Draw down the server-held per-turn budget (anchored by known_state).
+        let mut budget = self.budget.lock().await;
         let resp = server
-            .dispatch(tool, &req, &ctx)
+            .dispatch(tool, &req, &ctx, &mut budget)
             .await
             .map_err(|e| ErrorData::internal_error(format!("{e:?}"), None))?;
 
@@ -215,15 +245,30 @@ impl ServerHandler for RiftRecallServer {
 
 /// Build the in-memory substrate reader for a call. For `rift_retrieve_exact`,
 /// pre-fetch the one blob the target encodes from the real repo (synchronously),
-/// so the dispatch future stays `Send`.
-fn build_reader(repo: &Path, tool: ToolName, req: &ToolRequest) -> MemorySubstrate {
+/// so the dispatch future stays `Send`. `blob_oid` is the git object id the
+/// ADR-0005 map resolved for the target's `content_sha256`; the fetched bytes are
+/// **self-validated** (must re-hash to `content_sha256`) before being seeded, so
+/// a stale/wrong map row can never serve mismatched bytes.
+fn build_reader(
+    repo: &Path,
+    tool: ToolName,
+    req: &ToolRequest,
+    blob_oid: Option<&str>,
+) -> MemorySubstrate {
     let mut mem = MemorySubstrate::local();
     if tool.is_exact() {
         if let Some(target) = &req.target {
             let sha = rift_recall_mcp::exact_sha(target);
+            // Fetch by git blob oid (ADR-0005); an unmapped hash falls back to a
+            // direct lookup (in-memory/test substrates seed blobs by content hash).
+            let oid = blob_oid.unwrap_or(sha);
             if let Ok(gix) = GixSubstrate::open(repo) {
-                if let Ok(Some(bytes)) = gix.blob(sha) {
-                    mem = mem.with_blob(sha, &bytes);
+                if let Ok(Some(bytes)) = gix.blob(oid) {
+                    // Self-validate: only seed bytes that hash to the requested
+                    // content id, keyed by that id so the handler finds them.
+                    if rift_recall_substrate::worktree::sha256_hex(&bytes) == sha {
+                        mem = mem.with_blob(sha, &bytes);
+                    }
                 }
             }
         }
@@ -231,11 +276,29 @@ fn build_reader(repo: &Path, tool: ToolName, req: &ToolRequest) -> MemorySubstra
     mem
 }
 
+/// Ingest current substrate state into recall.db before serving, so a freshly
+/// spawned server never serves an **empty world** (P5): the shared production
+/// pass (ADR-0005 blob-oid map → incremental graph ingest with the developer
+/// axis → changed hunks → outcome labels). Best-effort: an ingest failure is
+/// logged and swallowed — the server still serves whatever is already projected
+/// (fail-open on the read side, never fail-closed against the agent).
+async fn startup_ingest(repo: &Path) -> Result<()> {
+    let sub = GixSubstrate::open(repo)?;
+    let db = crate::recall_db_path(repo)?;
+    let store = crate::open_recall_db(&db)?;
+    crate::ingest_all(&store, &sub, repo, rift_core::Timestamp::now()).await?;
+    Ok(())
+}
+
 /// Run the stdio MCP server until the agent closes stdin (EOF → graceful exit).
 ///
 /// # Errors
 /// [`RiftError::Substrate`] if the transport fails to initialize or run.
 pub(crate) async fn serve_mcp(repo: &Path) -> Result<()> {
+    // Populate the projection first; a fresh spawn must not serve an empty world.
+    if let Err(e) = startup_ingest(repo).await {
+        tracing::warn!(error = %e, "startup ingest deferred; serving existing projection");
+    }
     let handler = RiftRecallServer::new(repo)?;
     let running = handler
         .serve(rmcp::transport::stdio())

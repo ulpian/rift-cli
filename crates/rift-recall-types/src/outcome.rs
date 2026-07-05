@@ -52,15 +52,15 @@ impl LabelSubject {
 pub enum OutcomeKind {
     /// Reachable from the integration branch — the work landed.
     Merged,
-    /// A test signal recorded the work passing (deferred derivation; needs CI).
+    /// A captured test run recorded the work passing (`test_results.json`).
     TestsPassed,
     /// A later commit reverted/undid the work (within the revert window).
     Reverted,
     /// Branch deleted or long-idle and never merged.
     Abandoned,
-    /// Agent output survived with little human rewrite (deferred; needs attribution).
+    /// Agent output survived with little human rewrite (per-file attribution).
     LowHumanMod,
-    /// Humans heavily rewrote the agent output (deferred; needs attribution).
+    /// Humans heavily rewrote the agent output (per-file attribution).
     HighHumanMod,
 }
 

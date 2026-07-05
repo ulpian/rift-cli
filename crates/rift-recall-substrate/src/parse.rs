@@ -9,7 +9,7 @@
 
 use rift_recall_types::checkpoint::{
     AttributionFacts, CheckpointMetadata, CostEstimate, FullEventRecord, RedactionReportFacts,
-    TaskRecord, TokenEstimate, ToolCallRecord,
+    TaskRecord, TestResultsFacts, TokenEstimate, ToolCallRecord,
 };
 use serde::de::DeserializeOwned;
 
@@ -212,6 +212,13 @@ pub fn parse_tool_calls(bytes: &[u8], checkpoint_id: &str) -> Outcome<Vec<ToolCa
 #[must_use]
 pub fn parse_token_estimates(bytes: &[u8], checkpoint_id: &str) -> Outcome<Vec<TokenEstimate>> {
     parse_jsonl(bytes, "token_estimates.json", checkpoint_id)
+}
+
+/// Parse `test_results.json` — the captured test runs (the `TestsPassed`
+/// outcome-label signal, P4 S2).
+#[must_use]
+pub fn parse_test_results(bytes: &[u8], checkpoint_id: &str) -> Outcome<TestResultsFacts> {
+    parse_object(bytes, "test_results.json", checkpoint_id)
 }
 
 /// Parse `redaction_report.json` — the counts-only proof redaction ran. The

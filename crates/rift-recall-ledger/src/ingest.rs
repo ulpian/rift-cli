@@ -10,15 +10,15 @@
 //!   call that read a file records the file's `path@hash` *as captured at read
 //!   time*, so a later turn can be told it is `known_unchanged`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rift_core::Result;
 use rift_recall_substrate::parse::{self, ParseIssue};
 use rift_recall_substrate::{CheckpointShard, SubstrateReader};
 use rift_recall_types::checkpoint::CheckpointMetadata;
-use rift_store::CanonicalStore;
+use rift_store::{CanonicalStore, Value};
 
-use crate::graph::{file_read_id, file_revision_id, sha256_id, Built};
+use crate::graph::{file_read_id, file_revision_id, sha256_id, Built, INGEST_TS};
 use crate::FileRead;
 
 /// Extract the file-read facts from a single checkpoint's artifacts, plus any
@@ -105,21 +105,65 @@ pub fn read_paths(reads: &[FileRead]) -> std::collections::BTreeSet<String> {
 /// What an ingest run produced (counts + skip-and-report issues for `doctor`).
 #[derive(Debug, Default, Clone)]
 pub struct IngestReport {
-    /// Checkpoints processed.
+    /// Checkpoints walked (processed + skipped).
     pub checkpoints: usize,
+    /// Checkpoints skipped as already projected (incremental ingest — their
+    /// artifacts were never re-read).
+    pub skipped: usize,
     /// Node rows built.
     pub nodes: usize,
     /// Edge rows built.
     pub edges: usize,
+    /// Changed hunks persisted between consecutive revisions (P2 S3).
+    pub hunks: usize,
     /// Parse issues encountered (never aborts the batch).
     pub issues: Vec<ParseIssue>,
+}
+
+/// Caller-supplied context for a production ingest run (PRD-M2 ingest
+/// completeness). Everything here is optional — a default runs exactly like the
+/// bare [`ingest`] — but a production caller passes the identity plane's
+/// session→developer join so the developer scope axis is populated instead of
+/// always-null.
+#[derive(Debug, Default, Clone)]
+pub struct IngestOptions {
+    /// `session_id → hashed developer id` (from the capture projection's
+    /// `session_binding` rows — never a raw name/email).
+    pub developer_by_session: BTreeMap<String, String>,
+    /// Fallback hashed developer id when no session binding matches (the
+    /// current developer on a single-operator machine).
+    pub default_developer: Option<String>,
+}
+
+impl IngestOptions {
+    /// The hashed developer id for a checkpoint: an explicit id captured in its
+    /// metadata wins, then the primary session's binding, then the fallback.
+    fn developer_for<'a>(
+        &'a self,
+        meta: &'a CheckpointMetadata,
+        sessions: &[String],
+    ) -> Option<&'a str> {
+        meta.developer
+            .as_deref()
+            .or_else(|| {
+                sessions
+                    .iter()
+                    .find_map(|s| self.developer_by_session.get(s))
+                    .map(String::as_str)
+            })
+            .or(self.default_developer.as_deref())
+    }
 }
 
 /// Build the graph rows for one checkpoint — **pure** (reads artifacts, no DB
 /// writes). The cascade: Checkpoint → Sessions → ToolCalls → **FileRead
 /// extraction** → TokenUsage, with the typed edges.
 #[allow(clippy::too_many_lines)] // one cohesive cascade; splitting hurts readability
-fn build_rows(reader: &impl SubstrateReader, shard: &CheckpointShard) -> Result<Built> {
+fn build_rows(
+    reader: &impl SubstrateReader,
+    shard: &CheckpointShard,
+    opts: &IngestOptions,
+) -> Result<Built> {
     let mut b = Built::default();
     let cid = shard.checkpoint_id.as_str();
 
@@ -132,7 +176,16 @@ fn build_rows(reader: &impl SubstrateReader, shard: &CheckpointShard) -> Result<
         None => CheckpointMetadata::default(),
     };
 
-    // --- Checkpoint node + payload ---
+    // --- Sessions (synthesize one keyed to the checkpoint if none) ---
+    let sessions: Vec<String> = if meta.sessions.is_empty() {
+        vec![cid.to_string()]
+    } else {
+        meta.sessions.clone()
+    };
+    let primary = sessions.first().cloned().unwrap_or_else(|| cid.to_string());
+
+    // --- Checkpoint node + payload (developer axis populated — PRD-M2) ---
+    let developer = opts.developer_for(&meta, &sessions);
     b.node(cid, "Checkpoint", cid);
     b.checkpoint(
         cid,
@@ -141,19 +194,18 @@ fn build_rows(reader: &impl SubstrateReader, shard: &CheckpointShard) -> Result<
         shard.prev.as_deref(),
         meta.strategy.as_deref(),
         meta.merkle_root.as_deref(),
-        None, // developer: not surfaced by current capture (scope axis defaults to "current")
+        developer,
     );
 
-    // --- Sessions (synthesize one keyed to the checkpoint if none) ---
-    let sessions: Vec<String> = if meta.sessions.is_empty() {
-        vec![cid.to_string()]
-    } else {
-        meta.sessions.clone()
-    };
-    let primary = sessions.first().cloned().unwrap_or_else(|| cid.to_string());
     for sid in &sessions {
         b.node(sid, "Session", sid);
-        b.session(sid, None);
+        b.session(
+            sid,
+            opts.developer_by_session
+                .get(sid)
+                .map(String::as_str)
+                .or(developer),
+        );
         b.edge(sid, cid, "created"); // Session→created→Checkpoint
     }
 
@@ -264,9 +316,8 @@ pub(crate) async fn apply_rows(store: &impl CanonicalStore, built: &Built) -> Re
     Ok(())
 }
 
-/// Ingest every checkpoint of `reader` into the recall graph `store`. Idempotent:
-/// re-running over the same substrate is a no-op (content-addressed set-union),
-/// so a cold rebuild equals accumulated incremental ingests.
+/// Ingest every checkpoint of `reader` into the recall graph `store` with
+/// default [`IngestOptions`]. See [`ingest_with`].
 ///
 /// # Errors
 /// Propagates substrate read and store write errors.
@@ -274,16 +325,155 @@ pub async fn ingest(
     store: &impl CanonicalStore,
     reader: &impl SubstrateReader,
 ) -> Result<IngestReport> {
+    ingest_with(store, reader, &IngestOptions::default()).await
+}
+
+/// Ingest `reader`'s checkpoints into the recall graph `store` — **incremental
+/// and idempotent**. A checkpoint already projected (content-addressed presence
+/// in `n_checkpoint`) is skipped without re-reading its artifacts, so re-ingest
+/// is cheap, not just a set-union no-op; the run then appends a durable
+/// `ingest_watermark` row per dialect (branch + last checkpoint id) and
+/// persists changed hunks between consecutive revisions of each read path
+/// (P2 S3 — the previously library-only [`crate::hunks::persist_hunks`]).
+///
+/// # Errors
+/// Propagates substrate read and store write errors.
+pub async fn ingest_with(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+    opts: &IngestOptions,
+) -> Result<IngestReport> {
+    // The durable seen-set: checkpoints are content-addressed, so presence in
+    // the projection is proof of prior ingest (robust even if walk ordinals
+    // reshuffle as new shards sort in between old ones).
+    let seen: BTreeSet<String> = store
+        .query("SELECT node_id FROM n_checkpoint", &[])
+        .await?
+        .iter()
+        .filter_map(|r| r.get_text(0).ok())
+        .collect();
+
     let mut report = IngestReport::default();
+    // Last shard per dialect (by walk ordinal) → the durable watermark row.
+    let mut tips: BTreeMap<&'static str, (u64, String)> = BTreeMap::new();
     for shard in reader.checkpoints()? {
-        let built = build_rows(reader, &shard)?;
         report.checkpoints += 1;
+        let branch = shard.dialect.checkpoint_ref();
+        let tip = tips.entry(branch).or_insert((0, String::new()));
+        if shard.ordinal >= tip.0 {
+            *tip = (shard.ordinal, shard.checkpoint_id.clone());
+        }
+        if seen.contains(&shard.checkpoint_id) {
+            report.skipped += 1;
+            continue;
+        }
+        let built = build_rows(reader, &shard, opts)?;
         report.nodes += built.nodes;
         report.edges += built.edges;
         report.issues.extend(built.issues.iter().cloned());
         apply_rows(store, &built).await?;
     }
+
+    // Durable incremental-ingest evidence: one append-only row per dialect,
+    // content-addressed on (branch, tip) so a re-run at the same tip dedupes.
+    for (branch, (_, tip)) in &tips {
+        if tip.is_empty() {
+            continue;
+        }
+        let wid = sha256_id("rift.wm.v1", &[branch.as_bytes(), tip.as_bytes()]);
+        store
+            .insert_or_ignore(
+                "ingest_watermark",
+                &[
+                    "watermark_id",
+                    "branch",
+                    "branch_tip",
+                    "ingested_at",
+                    "schema_version",
+                ],
+                &[
+                    Value::text(wid.as_str()),
+                    Value::text(*branch),
+                    Value::text(tip.as_str()),
+                    Value::Int(INGEST_TS),
+                    Value::Int(1),
+                ],
+            )
+            .await?;
+    }
+
+    // Changed hunks between consecutive revisions of each read path (P2 S3).
+    report.hunks = persist_read_hunks(store, reader).await?;
     Ok(report)
+}
+
+/// Resolve the bytes behind a `content_sha256`: a direct substrate lookup first
+/// (in-memory/test substrates key blobs by content hash), then the ADR-0005
+/// content→blob-oid map for a real git object store. `None` = unresolvable —
+/// the caller skips, never fabricates.
+async fn resolve_content(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+    content_sha256: &str,
+) -> Option<Vec<u8>> {
+    if let Ok(Some(bytes)) = reader.blob(content_sha256) {
+        return Some(bytes);
+    }
+    if let Ok(Some(oid)) = crate::blob_map::blob_oid_for(store, content_sha256).await {
+        if let Ok(Some(bytes)) = reader.blob(&oid) {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+/// Persist changed hunks for every **consecutive distinct** revision pair of
+/// each read path, in read order. Content-addressed and idempotent (a re-run
+/// adds no rows). A pair whose bytes cannot be resolved (blob not in the map
+/// yet) is skipped — recomputed on a later run once the map catches up.
+///
+/// # Errors
+/// Propagates store read/write errors.
+pub async fn persist_read_hunks(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+) -> Result<usize> {
+    let rows = store
+        .query(
+            "SELECT fr.path, fr.content_sha256, r.checkpoint_id \
+             FROM n_file_read r JOIN n_file_revision fr ON fr.node_id = r.file_revision \
+             ORDER BY fr.path ASC, r.read_ordinal ASC, r.node_id ASC",
+            &[],
+        )
+        .await?;
+    let mut total = 0usize;
+    let mut prev: Option<(String, String)> = None;
+    for row in &rows {
+        let path = row.get_text(0)?;
+        let hash = row.get_text(1)?;
+        let checkpoint = row.get_text(2)?;
+        if let Some((prev_path, prev_hash)) = &prev {
+            if *prev_path == path && *prev_hash != hash {
+                let old = resolve_content(store, reader, prev_hash).await;
+                let new = resolve_content(store, reader, &hash).await;
+                if let (Some(old), Some(new)) = (old, new) {
+                    let old_rev = file_revision_id(&path, prev_hash);
+                    let new_rev = file_revision_id(&path, &hash);
+                    total += crate::hunks::persist_hunks(
+                        store,
+                        &checkpoint,
+                        &old_rev,
+                        &new_rev,
+                        &old,
+                        &new,
+                    )
+                    .await?;
+                }
+            }
+        }
+        prev = Some((path, hash));
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -372,6 +562,109 @@ mod tests {
         // one FileRevision (content-addressed), two reads
         assert_eq!(count(&store, "n_file_revision"), 1);
         assert_eq!(count(&store, "n_file_read"), 2);
+    }
+
+    #[test]
+    fn ingest_is_incremental_and_writes_the_durable_watermark() {
+        let tc = b"{\"id\":\"t1\",\"name\":\"Read\",\"file_path\":\"a.rs\",\"sha256\":\"h1\"}\n";
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_artifact("c1", "tool_calls.jsonl", tc);
+        let store = recall_store();
+        let r1 = block(ingest(&store, &sub)).unwrap();
+        assert_eq!(r1.skipped, 0);
+        let r2 = block(ingest(&store, &sub)).unwrap();
+        assert_eq!(
+            r2.skipped, 1,
+            "an already-projected checkpoint is skipped without re-reading artifacts"
+        );
+        assert_eq!(r2.nodes, 0);
+        // The durable watermark: one append-only row, deduped across re-runs.
+        let rows =
+            block(store.query("SELECT branch, branch_tip FROM ingest_watermark", &[])).unwrap();
+        assert_eq!(rows.len(), 1, "same tip re-run dedupes (content-addressed)");
+        assert_eq!(
+            rows[0].get_text(0).unwrap(),
+            "refs/heads/rift/checkpoints/v1"
+        );
+        assert_eq!(rows[0].get_text(1).unwrap(), "c1");
+    }
+
+    #[test]
+    fn ingest_persists_changed_hunks_between_consecutive_revisions() {
+        // The same path read at two hashes across checkpoints; bytes resolvable
+        // via the substrate → hunks land in n_changed_hunk (P2 S3, wired).
+        let tc1 =
+            b"{\"id\":\"t1\",\"name\":\"Read\",\"file_path\":\"f.rs\",\"sha256\":\"h_old\"}\n";
+        let tc2 =
+            b"{\"id\":\"t2\",\"name\":\"Read\",\"file_path\":\"f.rs\",\"sha256\":\"h_new\"}\n";
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_artifact("c1", "tool_calls.jsonl", tc1)
+            .with_shard(shard("c2", 2))
+            .with_artifact("c2", "tool_calls.jsonl", tc2)
+            .with_blob("h_old", b"a\nb\nc\n")
+            .with_blob("h_new", b"a\nB\nc\n");
+        let store = recall_store();
+        let r = block(ingest(&store, &sub)).unwrap();
+        assert!(r.hunks > 0, "consecutive distinct revisions produce hunks");
+        let n = block(store.count("n_changed_hunk")).unwrap();
+        assert!(n > 0);
+        block(ingest(&store, &sub)).unwrap();
+        assert_eq!(
+            n,
+            block(store.count("n_changed_hunk")).unwrap(),
+            "hunk persistence is a content-addressed set-union no-op"
+        );
+    }
+
+    #[test]
+    fn developer_axis_is_populated_from_bindings_metadata_and_fallback() {
+        // c1: session binding wins; c2: metadata-carried id wins over binding;
+        // c3: the default fallback stands in.
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_artifact("c1", "metadata.json", b"{\"session_ids\":[\"s1\"]}")
+            .with_shard(shard("c2", 2))
+            .with_artifact(
+                "c2",
+                "metadata.json",
+                b"{\"session_ids\":[\"s2\"],\"developer\":\"dev_meta\"}",
+            )
+            .with_shard(shard("c3", 3));
+        let store = recall_store();
+        let opts = IngestOptions {
+            developer_by_session: [
+                ("s1".to_string(), "dev_bind_1".to_string()),
+                ("s2".to_string(), "dev_bind_2".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            default_developer: Some("dev_default".to_string()),
+        };
+        block(ingest_with(&store, &sub, &opts)).unwrap();
+        let dev_of = |cid: &str| {
+            let rows = block(store.query(
+                "SELECT developer FROM n_checkpoint WHERE node_id = ?1",
+                &[Value::text(cid)],
+            ))
+            .unwrap();
+            rows[0].get_opt_text(0).unwrap()
+        };
+        assert_eq!(dev_of("c1").as_deref(), Some("dev_bind_1"));
+        assert_eq!(
+            dev_of("c2").as_deref(),
+            Some("dev_meta"),
+            "an explicitly captured id wins over the binding join"
+        );
+        assert_eq!(dev_of("c3").as_deref(), Some("dev_default"));
+        // sessions carry their own binding
+        let s1 = block(store.query("SELECT developer FROM n_session WHERE node_id = 's1'", &[]))
+            .unwrap();
+        assert_eq!(
+            s1[0].get_opt_text(0).unwrap().as_deref(),
+            Some("dev_bind_1")
+        );
     }
 
     proptest::proptest! {

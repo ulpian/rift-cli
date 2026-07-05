@@ -26,6 +26,7 @@ const REQUIRED_JOBS: &[&str] = &[
     "security:",
     "miri:",
     "fuzz-smoke:",
+    "red-team:",
     "ci-meta:",
 ];
 

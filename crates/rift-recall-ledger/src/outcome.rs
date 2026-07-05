@@ -17,13 +17,19 @@
 //! `label_id` is content-addressed (`sha256(subject ‖ kind ‖ valid_from ‖
 //! evidence)`), so re-deriving on `rebuild` is an idempotent set-union.
 //!
-//! Deferred (need signals this plane does not yet have): `TestsPassed` (a CI
-//! result) and `LowHumanMod`/`HighHumanMod` (turn-level attribution). See
-//! `TODO(P4.S2)` below.
+//! Two label kinds derive from **captured artifacts** rather than the git graph
+//! (both landed with M1 and unblocked by PRD-M2):
+//! * `TestsPassed` — a `test_results.json` run that provably passed
+//!   ([`rift_recall_types::checkpoint::TestRunRecord::is_pass`]; absence of
+//!   evidence is never a pass).
+//! * `LowHumanMod`/`HighHumanMod` — the per-file agent/human line attribution
+//!   (`attribution.json`, M1's turn-boundary split), thresholded at
+//!   [`LOW_HUMAN_MOD_MAX`]/[`HIGH_HUMAN_MOD_MIN`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use rift_core::{Result, Timestamp};
+use rift_recall_substrate::parse;
 use rift_recall_substrate::{CommitMeta, SubstrateReader, MAX_REACHABILITY_WALK};
 use rift_recall_types::{LabelSubject, OutcomeKind};
 use rift_store::{CanonicalStore, Value};
@@ -38,6 +44,13 @@ pub const REVERT_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// has not advanced within this span is treated as abandoned (default — 14 days).
 pub const ABANDON_IDLE_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
+/// `LowHumanMod` ceiling: agent output survived with at most this share of the
+/// changed lines rewritten by a human.
+pub const LOW_HUMAN_MOD_MAX: f64 = 0.10;
+
+/// `HighHumanMod` floor: humans rewrote at least this share of the changed lines.
+pub const HIGH_HUMAN_MOD_MIN: f64 = 0.50;
+
 /// What [`derive_labels`] wrote (for reporting; counts are append attempts, the
 /// store dedups by content-addressed `label_id`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +61,10 @@ pub struct DeriveReport {
     pub reverted: usize,
     /// `Abandoned` labels derived.
     pub abandoned: usize,
+    /// `TestsPassed` labels derived.
+    pub tests_passed: usize,
+    /// `LowHumanMod`/`HighHumanMod` labels derived.
+    pub human_mod: usize,
 }
 
 /// The content-addressed id of a label (idempotent re-derivation).
@@ -231,7 +248,6 @@ pub async fn derive_labels(
                     report.reverted += 1;
                 }
             }
-            // TODO(P4.S2): TestsPassed once a CI/test signal is captured.
         } else {
             // Not merged: abandoned if the commit is dangling (no branch reaches
             // it) or its owning branch(es) have all gone idle.
@@ -257,10 +273,84 @@ pub async fn derive_labels(
                 .await?;
                 report.abandoned += 1;
             }
-            // TODO(P4.S2): Low/HighHumanMod once turn-level attribution lands.
         }
+
+        // Artifact-derived labels (independent of merge state) — P4 S2 closure.
+        derive_artifact_labels(
+            store,
+            reader,
+            &shard.checkpoint_id,
+            &subject,
+            valid_from,
+            now,
+            &mut report,
+        )
+        .await?;
     }
     Ok(report)
+}
+
+/// Derive the captured-artifact label kinds for one checkpoint: `TestsPassed`
+/// from `test_results.json` (a run that provably passed) and
+/// `LowHumanMod`/`HighHumanMod` from `attribution.json` (M1's turn-boundary
+/// agent/human line split). Both fail-safe: a missing/ambiguous artifact
+/// derives nothing.
+async fn derive_artifact_labels(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+    checkpoint_id: &str,
+    subject: &LabelSubject,
+    valid_from: Timestamp,
+    now: Timestamp,
+    report: &mut DeriveReport,
+) -> Result<()> {
+    if let Some(bytes) = reader.read_artifact(checkpoint_id, "test_results.json")? {
+        let o = parse::parse_test_results(&bytes, checkpoint_id);
+        if let Some(run) = o.value.runs.iter().find(|r| r.is_pass()) {
+            let evidence = run
+                .command
+                .as_deref()
+                .or(run.framework.as_deref())
+                .unwrap_or("test_results.json");
+            put_label(
+                store,
+                subject,
+                OutcomeKind::TestsPassed,
+                valid_from,
+                now,
+                evidence,
+                None,
+            )
+            .await?;
+            report.tests_passed += 1;
+        }
+    }
+
+    if let Some(bytes) = reader.read_artifact(checkpoint_id, "attribution.json")? {
+        let o = parse::parse_attribution(&bytes, checkpoint_id);
+        let (agent, human) = o.value.attributions.iter().fold((0u64, 0u64), |(a, h), f| {
+            (a + u64::from(f.agent_lines), h + u64::from(f.human_lines))
+        });
+        let total = agent + human;
+        // Only meaningful when the agent actually authored something.
+        if total > 0 && agent > 0 {
+            #[allow(clippy::cast_precision_loss)] // line counts are far below 2^52
+            let ratio = human as f64 / total as f64;
+            let kind = if ratio <= LOW_HUMAN_MOD_MAX {
+                Some(OutcomeKind::LowHumanMod)
+            } else if ratio >= HIGH_HUMAN_MOD_MIN {
+                Some(OutcomeKind::HighHumanMod)
+            } else {
+                None // the middle band is neutral — no label
+            };
+            if let Some(kind) = kind {
+                let evidence = format!("agent_lines={agent} human_lines={human}");
+                put_label(store, subject, kind, valid_from, now, &evidence, None).await?;
+                report.human_mod += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The currently-believed outcome labels for `subject` as of valid-time `as_of`
@@ -476,6 +566,94 @@ mod tests {
         let store = recall_store();
         let report = block(derive_labels(&store, &sub, now)).unwrap();
         assert_eq!(report.abandoned, 1);
+    }
+
+    #[test]
+    fn tests_passed_label_from_captured_test_results() {
+        let sub = MemorySubstrate::local()
+            .with_commit(commit("g0", &[], 0, "genesis"))
+            .with_commit(commit("w1", &["g0"], 1, "work"))
+            .with_integration_tip("w1")
+            .with_shard(shard("cp", 1))
+            .with_checkpoint_commit("cp", "w1")
+            .with_artifact(
+                "cp",
+                "test_results.json",
+                b"{\"runs\":[{\"command\":\"cargo test\",\"exit_code\":0}]}",
+            )
+            // a second checkpoint whose only run FAILED → no label (fail-safe)
+            .with_shard(shard("cp_fail", 2))
+            .with_checkpoint_commit("cp_fail", "w1")
+            .with_artifact(
+                "cp_fail",
+                "test_results.json",
+                b"{\"runs\":[{\"command\":\"cargo test\",\"exit_code\":101}]}",
+            );
+        let store = recall_store();
+        let now = Timestamp::from_millis(2 * DAY);
+        let report = block(derive_labels(&store, &sub, now)).unwrap();
+        assert_eq!(report.tests_passed, 1, "only the proven pass is labeled");
+        let labels = block(effective_labels(
+            &store,
+            &LabelSubject::Checkpoint("cp".into()),
+            now,
+        ))
+        .unwrap();
+        assert!(labels.contains(&OutcomeKind::TestsPassed));
+        let fail_labels = block(effective_labels(
+            &store,
+            &LabelSubject::Checkpoint("cp_fail".into()),
+            now,
+        ))
+        .unwrap();
+        assert!(!fail_labels.contains(&OutcomeKind::TestsPassed));
+    }
+
+    #[test]
+    fn human_mod_labels_from_attribution_thresholds() {
+        // low: 5% human rewrite → LowHumanMod; high: 60% → HighHumanMod;
+        // mid: 30% → neutral (no label); human-only (agent=0) → no label.
+        let attr = |agent: u32, human: u32| {
+            format!(
+                "{{\"attributions\":[{{\"path\":\"a.rs\",\"agent_lines\":{agent},\"human_lines\":{human}}}]}}"
+            )
+        };
+        let sub = MemorySubstrate::local()
+            .with_commit(commit("g0", &[], 0, "genesis"))
+            .with_commit(commit("w1", &["g0"], 1, "work"))
+            .with_integration_tip("w1")
+            .with_shard(shard("cp_low", 1))
+            .with_checkpoint_commit("cp_low", "w1")
+            .with_artifact("cp_low", "attribution.json", attr(95, 5).as_bytes())
+            .with_shard(shard("cp_high", 2))
+            .with_checkpoint_commit("cp_high", "w1")
+            .with_artifact("cp_high", "attribution.json", attr(40, 60).as_bytes())
+            .with_shard(shard("cp_mid", 3))
+            .with_checkpoint_commit("cp_mid", "w1")
+            .with_artifact("cp_mid", "attribution.json", attr(70, 30).as_bytes())
+            .with_shard(shard("cp_human_only", 4))
+            .with_checkpoint_commit("cp_human_only", "w1")
+            .with_artifact("cp_human_only", "attribution.json", attr(0, 10).as_bytes());
+        let store = recall_store();
+        let now = Timestamp::from_millis(2 * DAY);
+        let report = block(derive_labels(&store, &sub, now)).unwrap();
+        assert_eq!(report.human_mod, 2, "only the low and high bands label");
+        let labels_of = |cp: &str| {
+            block(effective_labels(
+                &store,
+                &LabelSubject::Checkpoint(cp.into()),
+                now,
+            ))
+            .unwrap()
+        };
+        assert!(labels_of("cp_low").contains(&OutcomeKind::LowHumanMod));
+        assert!(labels_of("cp_high").contains(&OutcomeKind::HighHumanMod));
+        assert!(!labels_of("cp_mid")
+            .iter()
+            .any(|k| matches!(k, OutcomeKind::LowHumanMod | OutcomeKind::HighHumanMod)));
+        assert!(!labels_of("cp_human_only")
+            .iter()
+            .any(|k| matches!(k, OutcomeKind::LowHumanMod | OutcomeKind::HighHumanMod)));
     }
 
     #[test]

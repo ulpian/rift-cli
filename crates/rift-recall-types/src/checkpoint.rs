@@ -42,6 +42,13 @@ pub struct CheckpointMetadata {
     /// canonicalization and the two epochs coexist.
     #[serde(default)]
     pub canon_version: Option<u32>,
+    /// The **hashed** developer id this checkpoint's sessions belong to, when
+    /// the capture side records it (never a raw name/email — the identity plane
+    /// persists salted hashes only). Populates the developer scope axis at
+    /// ingest (PRD-M2); absent ⇒ the ingest caller's session-binding join (or
+    /// null) stands in.
+    #[serde(default, alias = "developer_id", alias = "developer_hash")]
+    pub developer: Option<String>,
 }
 
 /// One per-file authorship fact from `attribution.json`.
@@ -64,6 +71,44 @@ pub struct AttributionFacts {
     /// Per-file attribution rows.
     #[serde(default, alias = "files")]
     pub attributions: Vec<FileAttribution>,
+}
+
+/// One captured test run from `test_results.json` (the CI/test signal the
+/// `TestsPassed` outcome label derives from — P4 S2). Lenient like every other
+/// artifact view: a run with neither `passed` nor `exit_code` is treated as
+/// unknown (never mistaken for a pass).
+#[derive(Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct TestRunRecord {
+    /// The command that ran, when recorded (e.g. `"cargo test"`).
+    #[serde(default, alias = "cmd")]
+    pub command: Option<String>,
+    /// The test framework, when detected (`"cargo"`, `"pytest"`, `"jest"`, `"go"`).
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// The process exit code, when captured.
+    #[serde(default, alias = "exit", alias = "status")]
+    pub exit_code: Option<i32>,
+    /// An explicit pass/fail verdict, when the capture side records one.
+    #[serde(default)]
+    pub passed: Option<bool>,
+}
+
+impl TestRunRecord {
+    /// Whether this run is a **proven pass**: an explicit `passed: true`, or a
+    /// captured exit code of 0. Absence of evidence is never a pass (fail-safe,
+    /// the same posture as outcome-label reachability).
+    #[must_use]
+    pub fn is_pass(&self) -> bool {
+        self.passed.unwrap_or(false) || self.exit_code == Some(0)
+    }
+}
+
+/// `test_results.json` — the captured test runs for a checkpoint.
+#[derive(Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct TestResultsFacts {
+    /// The captured runs.
+    #[serde(default, alias = "tests")]
+    pub runs: Vec<TestRunRecord>,
 }
 
 /// `cost_estimate.json` — four-class token cost for the checkpoint.

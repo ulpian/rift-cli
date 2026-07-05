@@ -31,6 +31,7 @@ pub(crate) fn run(rest: &[String]) -> Result<()> {
         Some((sub, _)) if sub == "--schema" => cmd_schema(),
         Some((sub, args)) if sub == "install" => cmd_install(args),
         Some((sub, args)) if sub == "git" => run_git_hook(args), // diverges
+        Some((sub, args)) if sub == "memd" => run_memd_hook(args), // diverges
         Some((agent, args)) => run_agent_hook(agent, args),      // diverges
         None => {
             println!(
@@ -554,6 +555,106 @@ fn capture_guarded<F: FnOnce() -> Result<()>>(f: F) -> ! {
     std::process::exit(0);
 }
 
+// --- memd serve-audit hook (never fails the recall server) ------------------
+
+/// `rift hooks memd <verb>`: append one recall serve-decision event to the
+/// per-repo `recall.db` audit relation. Dedicated so `memd.*` events **bypass**
+/// the agent-adapter registry (which returns `unknown agent` and drops them).
+/// Diverges: always exit 0 — an audit-write failure must never disturb the
+/// recall server's response path.
+fn run_memd_hook(_args: &[String]) -> ! {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = record_memd_event();
+    }));
+    let _ = outcome;
+    std::process::exit(0);
+}
+
+/// Read the `memd.*` hook envelope from stdin and append it to the per-repo
+/// `recall.db` serve-audit relation. The recall db is resolved via the shared
+/// [`rift_store::recall_db_for_repo`], so this writes the same file
+/// `rift-memd serve` reads.
+fn record_memd_event() -> Result<()> {
+    let mut body = Vec::new();
+    std::io::stdin().read_to_end(&mut body)?;
+    let cwd = std::env::current_dir()?;
+    let db = rift_store::recall_db_for_repo(&cwd)?;
+    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    rt.block_on(append_memd_audit(&store, &body, now_ms()))
+}
+
+/// Parse a `memd.*` hook envelope and append it to the recall serve-audit
+/// relation, content-addressed on the event's idempotency key (a re-delivered
+/// handoff is a no-op). Neutral fields only: `handle`/`reason` name *what* and
+/// *why*, never the withheld bytes (W10). A malformed envelope defers (no write).
+async fn append_memd_audit(
+    store: &impl rift_store::CanonicalStore,
+    envelope: &[u8],
+    now: i64,
+) -> Result<()> {
+    use rift_store::Value;
+
+    let Ok(env) = serde_json::from_slice::<serde_json::Value>(envelope) else {
+        return Ok(()); // malformed envelope → deferred (no write)
+    };
+    let (Some(audit_id), Some(verb)) = (
+        env.get("idempotency_key")
+            .and_then(serde_json::Value::as_str),
+        env.get("verb").and_then(serde_json::Value::as_str),
+    ) else {
+        return Ok(());
+    };
+    let payload = env
+        .get("payload")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let str_field = |k: &str| {
+        payload
+            .get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    // `handle` on content events; `target` on refusals.
+    let handle = str_field("handle").or_else(|| str_field("target"));
+    let reason = str_field("reason");
+    let i64_field = |k: &str| {
+        payload
+            .get(k)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    };
+
+    store
+        .insert_or_ignore(
+            "memd_audit_event",
+            &[
+                "audit_id",
+                "verb",
+                "handle",
+                "reason",
+                "tokens_returned",
+                "tokens_avoided",
+                "recorded_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(audit_id),
+                Value::text(verb),
+                handle.as_deref().map_or(Value::Null, Value::text),
+                reason.as_deref().map_or(Value::Null, Value::text),
+                Value::Int(i64_field("estimated_tokens_returned")),
+                Value::Int(i64_field("estimated_tokens_avoided")),
+                Value::Int(now),
+                Value::Int(1),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
 // --- agent hooks (never fails the agent) ------------------------------------
 
 /// `rift hooks <agent> <verb>`: ingest one stdin-JSON hook. Diverges: always exit
@@ -851,6 +952,61 @@ mod tests {
         // a non-existent explicit dir falls back to <cwd>/.git
         let fallback = resolve_git_dir(Some(PathBuf::from("/nope/.git")));
         assert!(fallback.ends_with(".git"));
+    }
+
+    #[test]
+    fn memd_audit_events_land_in_recall_db_idempotently() {
+        use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore};
+        let s = SqliteStore::open_in_memory().unwrap();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        // An ExactRetrieved-shaped envelope, exactly as rift-memd emits it.
+        let exact = serde_json::json!({
+            "schema": 1,
+            "verb": "memd.exact_retrieved",
+            "idempotency_key": "k1",
+            "payload": {
+                "kind": "exact_retrieved",
+                "handle": "file:a.rs@sha256:x",
+                "reason": "debugging",
+                "estimated_tokens_returned": 12
+            }
+        })
+        .to_string();
+        rt.block_on(append_memd_audit(&s, exact.as_bytes(), 100))
+            .unwrap();
+        // Re-delivery of the same event is a no-op (content-addressed idempotency).
+        rt.block_on(append_memd_audit(&s, exact.as_bytes(), 200))
+            .unwrap();
+        let rows = rt
+            .block_on(s.query(
+                "SELECT verb, handle, reason, tokens_returned FROM memd_audit_event",
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(rows.len(), 1, "duplicate handoff must not double-count");
+        assert_eq!(rows[0].get_text(0).unwrap(), "memd.exact_retrieved");
+        assert_eq!(rows[0].get_text(1).unwrap(), "file:a.rs@sha256:x");
+        assert_eq!(rows[0].get_i64(3).unwrap(), 12);
+
+        // A refusal envelope carries `target` (not `handle`); still audited.
+        let refused = serde_json::json!({
+            "verb": "memd.refused",
+            "idempotency_key": "k2",
+            "payload": { "kind": "refused", "target": "secrets/.env", "reason": "policy_denied_exact" }
+        })
+        .to_string();
+        rt.block_on(append_memd_audit(&s, refused.as_bytes(), 300))
+            .unwrap();
+        assert_eq!(rt.block_on(s.count("memd_audit_event")).unwrap(), 2);
+
+        // A malformed envelope defers (no write, no panic).
+        rt.block_on(append_memd_audit(&s, b"{ not json", 400))
+            .unwrap();
+        assert_eq!(rt.block_on(s.count("memd_audit_event")).unwrap(), 2);
     }
 
     #[test]

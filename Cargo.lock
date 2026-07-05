@@ -2522,10 +2522,15 @@ dependencies = [
  "rift-core",
  "rift-git",
  "rift-hashchain",
+ "rift-recall-ledger",
+ "rift-recall-mcp",
+ "rift-recall-policy",
  "rift-recall-substrate",
+ "rift-recall-types",
  "rift-registry",
  "rift-shadow",
  "rift-store",
+ "rift-tokens",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2739,6 +2744,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rift-recall-eval"
+version = "0.0.1"
+dependencies = [
+ "proptest",
+ "rift-recall-pack",
+ "rift-tokens",
+]
+
+[[package]]
 name = "rift-recall-events"
 version = "0.0.1"
 dependencies = [
@@ -2787,7 +2801,6 @@ dependencies = [
  "rift-tokens",
  "serde",
  "serde_json",
- "sha2",
  "thiserror",
  "tokio",
 ]
@@ -2800,6 +2813,7 @@ dependencies = [
  "rift-core",
  "rift-recall-types",
  "rift-tokens",
+ "sha2",
 ]
 
 [[package]]
@@ -2810,7 +2824,10 @@ dependencies = [
  "rift-config",
  "rift-core",
  "rift-recall-types",
+ "serde",
+ "tempfile",
  "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -2835,6 +2852,7 @@ dependencies = [
  "rift-recall-types",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tempfile",
 ]

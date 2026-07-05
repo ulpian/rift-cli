@@ -25,7 +25,9 @@
     )
 )]
 
+pub mod blob_map;
 pub mod candidates;
+pub mod doctor;
 pub mod graph;
 pub mod hunks;
 pub mod ingest;

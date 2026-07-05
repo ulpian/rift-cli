@@ -92,6 +92,9 @@ pub(crate) enum Command {
     Session(SessionCmd),
     /// Explain a checkpoint: roots, chain position, attribution, cost.
     Explain(ExplainArgs),
+    /// Ask the recall plane: what changed, is a file stale, where tokens go.
+    #[command(subcommand)]
+    Memory(MemoryCmd),
     /// Prune transient shadow refs / orphaned objects (never the canonical chain).
     Gc(GcArgs),
     /// Configure policy and the checkpoint remote.
@@ -172,6 +175,44 @@ pub(crate) enum SessionCmd {
 pub(crate) struct IdArgs {
     /// The id (or a unique prefix).
     pub(crate) id: String,
+}
+
+/// `rift memory …` — the human-facing recall surface (PRD-M2). Reuses the
+/// recall server's library dispatch: same envelopes, budgets, and policy gates
+/// as the MCP tools (the MCP transport itself stays in `rift-memd`).
+#[derive(Subcommand, Debug)]
+pub(crate) enum MemoryCmd {
+    /// What changed since a checkpoint (id or unique prefix)?
+    DiffSince(PointArgs),
+    /// Does a file differ from what was last captured?
+    FileIfChanged(PathArgs),
+    /// The files consuming the most context tokens.
+    CostHotspots(TopArgs),
+    /// Measured repeated/avoidable context rates over the captured sessions
+    /// (appends an immutable metric snapshot — the M2 gate evidence).
+    RereadReport,
+}
+
+/// `rift memory diff-since <point>`.
+#[derive(Args, Debug)]
+pub(crate) struct PointArgs {
+    /// A checkpoint id (or a unique prefix).
+    pub(crate) point: String,
+}
+
+/// `rift memory file-if-changed <path>`.
+#[derive(Args, Debug)]
+pub(crate) struct PathArgs {
+    /// A repo-relative file path.
+    pub(crate) path: String,
+}
+
+/// `rift memory cost-hotspots`.
+#[derive(Args, Debug)]
+pub(crate) struct TopArgs {
+    /// How many hotspots to report.
+    #[arg(long, default_value_t = 5)]
+    pub(crate) top: u32,
 }
 
 /// The stable exit-code contract (P8 S1). Scripts and CI depend on these.

@@ -23,25 +23,49 @@ use sha2::{Digest, Sha256};
 use crate::graph::{file_revision_id, Built};
 
 /// A [`BlobResolver`] over the read-only substrate: `file:` handles resolve by
-/// fetching the immutable blob whose content id matches the handle's hash;
-/// `log:` (captured tool results) is not yet exposed by the substrate seam, so
-/// it resolves to `None` (a documented follow-up — the handle then degrades to
-/// `Unavailable`, never wrong bytes).
+/// mapping the handle's `content_sha256` to its git blob oid (ADR-0005) and
+/// fetching that immutable object; `log:` (captured tool results) is not yet
+/// exposed by the substrate seam, so it resolves to `None` (a documented
+/// follow-up — the handle then degrades to `Unavailable`, never wrong bytes).
+///
+/// The `content_sha256 → blob_oid` map is loaded from `n_blob_oid_map`
+/// ([`crate::blob_map::load_blob_oid_map`]) and threaded in with
+/// [`with_oid_map`](SubstrateBlobResolver::with_oid_map). An unmapped hash falls
+/// back to a direct lookup — in-memory test substrates seed blobs by content
+/// hash, and a real repo simply misses (honest, per ADR-0005). Resolution stays
+/// self-validating in [`rift_recall_validity::resolve_handle`]: the fetched bytes
+/// must re-hash to the requested `content_sha256`.
 pub struct SubstrateBlobResolver<'a, R: SubstrateReader> {
     reader: &'a R,
+    oid_map: std::collections::BTreeMap<String, String>,
 }
 
 impl<'a, R: SubstrateReader> SubstrateBlobResolver<'a, R> {
-    /// Wrap a substrate reader as a blob resolver.
+    /// Wrap a substrate reader as a blob resolver (no map — direct lookup).
     pub fn new(reader: &'a R) -> Self {
-        Self { reader }
+        Self {
+            reader,
+            oid_map: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Attach the ADR-0005 `content_sha256 → blob_oid` map.
+    #[must_use]
+    pub fn with_oid_map(mut self, oid_map: std::collections::BTreeMap<String, String>) -> Self {
+        self.oid_map = oid_map;
+        self
     }
 }
 
 impl<R: SubstrateReader> BlobResolver for SubstrateBlobResolver<'_, R> {
     fn file_blob(&self, _path: &str, content_sha256: &str) -> Option<Vec<u8>> {
-        // resolve by content id (v1 `blob_oid` == `content_sha256`); never by path
-        self.reader.blob(content_sha256).ok().flatten()
+        // Map the content hash to its git blob oid (ADR-0005), else fall back to a
+        // direct lookup (in-memory substrates seed blobs by content hash).
+        let oid = self
+            .oid_map
+            .get(content_sha256)
+            .map_or(content_sha256, String::as_str);
+        self.reader.blob(oid).ok().flatten()
     }
     fn tool_result(&self, _tool_use_id: &str) -> Option<Vec<u8>> {
         None // log: exact retrieval lands when the substrate exposes tool results
@@ -282,6 +306,44 @@ mod tests {
             Validity::Invalid { .. } => {}
             other => panic!("expected Invalid, got {:?}", validity_tag(&other)),
         }
+    }
+
+    #[test]
+    fn substrate_resolver_maps_content_hash_to_git_blob_oid() {
+        use rift_recall_substrate::MemorySubstrate;
+        use rift_recall_types::Handle;
+        use rift_recall_validity::{resolve_handle, Resolved, Validity};
+
+        // The real-repo case: the git blob oid is DISTINCT from content_sha256.
+        let bytes = b"fn main() {}\n".to_vec();
+        let content_sha = sha256_hex(&bytes);
+        let blob_oid = "1111111111111111111111111111111111111111".to_string();
+        assert_ne!(content_sha, blob_oid);
+
+        // The substrate stores the blob under its git oid; the map bridges.
+        let reader = MemorySubstrate::local().with_blob(&blob_oid, &bytes);
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(content_sha.clone(), blob_oid.clone());
+        let resolver = SubstrateBlobResolver::new(&reader).with_oid_map(map);
+
+        let h = Handle::File {
+            path: "a.rs".into(),
+            sha256: content_sha,
+            range: None,
+        };
+        // resolve_handle self-validates (bytes must re-hash to the handle's sha).
+        match resolve_handle(&h, &resolver, |_| Validity::Degraded { key: String::new() }) {
+            Resolved::Bytes(b) => assert_eq!(b, bytes, "resolved via the blob-oid map"),
+            _ => panic!("expected the mapped bytes"),
+        }
+
+        // Without the map (unmapped hash) the fallback lookup by content hash
+        // misses in a real repo — honest Unavailable, never wrong bytes.
+        let bare = SubstrateBlobResolver::new(&reader);
+        assert!(matches!(
+            resolve_handle(&h, &bare, |_| Validity::Degraded { key: String::new() }),
+            Resolved::Unavailable(_)
+        ));
     }
 
     #[test]

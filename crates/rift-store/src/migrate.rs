@@ -369,10 +369,78 @@ pub fn recall_key_custody_schema_sql() -> String {
     sql
 }
 
+/// The v4 additive recall migration: the append-only `memd_audit_event` serve
+/// trail (the `rift hooks memd` verb writes here). Kept separate so adding it
+/// never perturbs the v1–v3 checksums.
+#[must_use]
+pub fn recall_memd_audit_schema_sql() -> String {
+    use crate::schema::recall_v4_audit_tables;
+    let mut sql = String::new();
+    for table in recall_v4_audit_tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    for table in recall_v4_audit_tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
+/// The v5 additive recall migration: the ADR-0005 `n_blob_oid_map` content→blob
+/// bridge (the worktree hasher populates it; the substrate/exact resolvers
+/// consume it). Kept separate so adding it never perturbs the v1–v4 checksums.
+#[must_use]
+pub fn recall_blob_oid_map_schema_sql() -> String {
+    use crate::schema::recall_v5_blob_map_tables;
+    let mut sql = String::new();
+    for table in recall_v5_blob_map_tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    for table in recall_v5_blob_map_tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
+/// The v6 additive recall migration: the durable `ingest_watermark` relation the
+/// recall ingest path appends to per run (incremental-ingest evidence). Kept
+/// separate so adding it never perturbs the v1–v5 checksums.
+#[must_use]
+pub fn recall_ingest_watermark_schema_sql() -> String {
+    use crate::schema::recall_v6_watermark_tables;
+    let mut sql = String::new();
+    for table in recall_v6_watermark_tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    for table in recall_v6_watermark_tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
 /// The recall projection's migration set (applied to a fresh `recall.db`).
 /// [`apply_migrations`] creates the meta tables itself, so version 1 is the
 /// recall graph schema directly; version 2 adds the outcome-label store;
-/// version 3 adds the key-custody table.
+/// version 3 adds the key-custody table; version 4 adds the memd serve-audit
+/// relation; version 5 adds the content→blob-oid map; version 6 adds the
+/// durable ingest watermark.
 #[must_use]
 pub fn recall_migrations() -> Vec<Migration> {
     vec![
@@ -390,6 +458,21 @@ pub fn recall_migrations() -> Vec<Migration> {
             version: 3,
             name: "recall_key_custody",
             sql: recall_key_custody_schema_sql(),
+        },
+        Migration {
+            version: 4,
+            name: "recall_memd_audit",
+            sql: recall_memd_audit_schema_sql(),
+        },
+        Migration {
+            version: 5,
+            name: "recall_blob_oid_map",
+            sql: recall_blob_oid_map_schema_sql(),
+        },
+        Migration {
+            version: 6,
+            name: "recall_ingest_watermark",
+            sql: recall_ingest_watermark_schema_sql(),
         },
     ]
 }
@@ -698,10 +781,13 @@ mod tests {
     #[test]
     fn recall_core_excludes_v2_outcome_label() {
         let migs = recall_migrations();
-        assert_eq!(migs.len(), 3);
+        assert_eq!(migs.len(), 6);
         assert_eq!(migs[0].name, "recall_core");
         assert_eq!(migs[1].name, "recall_outcome_labels");
         assert_eq!(migs[2].name, "recall_key_custody");
+        assert_eq!(migs[3].name, "recall_memd_audit");
+        assert_eq!(migs[4].name, "recall_blob_oid_map");
+        assert_eq!(migs[5].name, "recall_ingest_watermark");
         // v1 must NOT mention outcome_label (else its checksum would have moved
         // when the table was added to the registry).
         assert!(
@@ -716,11 +802,33 @@ mod tests {
         assert!(migs[1].sql.contains("outcome_label_no_update"));
         assert!(migs[1].sql.contains("idx_outcome_subject"));
         assert!(!migs[1].sql.contains("key_metadata"));
-        // v3 creates exactly the custody table + its guards.
+        // v3 creates exactly the custody table + its guards — and must NOT have
+        // absorbed the v4 audit table (checksum lock for existing v3 recall.dbs).
         assert!(migs[2]
             .sql
             .contains("CREATE TABLE IF NOT EXISTS key_metadata"));
         assert!(migs[2].sql.contains("key_metadata_no_update"));
+        assert!(!migs[2].sql.contains("memd_audit_event"));
+        // v4 creates exactly the memd serve-audit table + its guards — and must
+        // NOT have absorbed the v5 blob-oid map (checksum lock).
+        assert!(migs[3]
+            .sql
+            .contains("CREATE TABLE IF NOT EXISTS memd_audit_event"));
+        assert!(migs[3].sql.contains("memd_audit_event_no_update"));
+        assert!(!migs[3].sql.contains("n_blob_oid_map"));
+        // v5 creates exactly the content→blob-oid map + its guards — and must
+        // NOT have absorbed the v6 watermark table (checksum lock for existing
+        // v5 recall.dbs).
+        assert!(migs[4]
+            .sql
+            .contains("CREATE TABLE IF NOT EXISTS n_blob_oid_map"));
+        assert!(migs[4].sql.contains("n_blob_oid_map_no_update"));
+        assert!(!migs[4].sql.contains("ingest_watermark"));
+        // v6 creates exactly the durable ingest watermark + its guards.
+        assert!(migs[5]
+            .sql
+            .contains("CREATE TABLE IF NOT EXISTS ingest_watermark"));
+        assert!(migs[5].sql.contains("ingest_watermark_no_update"));
     }
 
     /// Applying v1 then v2 to a fresh recall.db is a clean upgrade (no checksum
@@ -729,11 +837,11 @@ mod tests {
     fn recall_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &recall_migrations()).unwrap();
-        assert_eq!(out.applied, 3);
-        assert_eq!(out.high_water, 3);
+        assert_eq!(out.applied, 6);
+        assert_eq!(out.high_water, 6);
         let again = apply_migrations(&s, &recall_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 3);
+        assert_eq!(again.skipped, 6);
     }
 
     /// The canopy UI-state migration creates both append-only tables and re-runs

@@ -38,6 +38,7 @@ mod canopy_store;
 mod cli;
 mod hooks;
 mod identity;
+mod memory;
 mod query;
 mod verify;
 
@@ -136,6 +137,9 @@ fn route(_cli: &Cli, cmd: &Command) -> rift_core::Result<Outcome> {
         Command::Explain(a) => {
             projection_read(|s, rt| rt.block_on(query::explain(s, &a.reference)))
         }
+        // The recall plane's human surface (PRD-M2); reads recall.db (a cache
+        // rebuilt from git), so it needs no `.rift/` init guard.
+        Command::Memory(m) => memory::run(m),
         Command::Gc(a) => projection_read(|s, rt| rt.block_on(query::gc(s, a.dry_run))),
         // Hooks is handled in `main` before routing.
         Command::Hooks(_) => Ok(Outcome::ok(String::new(), serde_json::json!({}))),

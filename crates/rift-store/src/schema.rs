@@ -1111,6 +1111,39 @@ const OUTCOME_LABEL_COLUMNS: &[Column] = &[
     Column::text_null("supersedes"), // → outcome_label(label_id) (comment-FK); NULL = original
 ];
 
+// --- memd serve audit (P5/P7 — the `memd.*` serving-decision trail) ---------
+// Every recall serve decision (manifest/summary/exact/pack/invalidated/refused)
+// lands here through the `rift hooks memd` verb: append-only, content-addressed
+// on the event's idempotency key (a re-delivered handoff is a no-op). Neutral by
+// construction — `handle`/`reason` name *what* and *why*, never the withheld
+// bytes (05-security §5.5, W10). Exact retrieval is audited BEFORE bytes return.
+const MEMD_AUDIT_EVENT_COLUMNS: &[Column] = &[
+    Column::text("audit_id"), // = the event's content-addressed idempotency key
+    Column::text("verb"),     // 'memd.manifest_served' | … | 'memd.refused'
+    Column::text_null("handle"), // the target/handle (neutral; never withheld bytes)
+    Column::text_null("reason"), // neutral reason tag (refusals) / exact-retrieval reason
+    Column::int("tokens_returned"),
+    Column::int("tokens_avoided"),
+    Column::int("recorded_at"),
+    Column::int("schema_version"),
+];
+
+// --- content→blob-oid map (ADR-0005) ---------------------------------------
+// Handles bind content by `content_sha256` (the hash of the file bytes as read),
+// but git addresses blobs by object id (`sha1("blob <len>\0" ‖ bytes)`). This
+// append-only relation carries the bridge, computed by the worktree hasher in the
+// same pass as `content_sha256`, so durable `file:` handle resolution and exact
+// retrieval reach real git objects. PK = `content_sha256` (one blob per content);
+// content-addressed → re-ingest is a set-union no-op. Resolution stays
+// self-validating: after fetching by OID, the resolver re-hashes and checks the
+// requested `content_sha256` before serving.
+const BLOB_OID_MAP_COLUMNS: &[Column] = &[
+    Column::text("content_sha256"), // the validity/handle comparator (PK)
+    Column::text("blob_oid"),       // git blob object id (SHA-1 framing)
+    Column::text("path"),           // first path these bytes were seen at (lineage)
+    Column::int("first_seen"),      // transaction-time (epoch ms)
+];
+
 const RECALL_TABLES: &[CanonicalTable] = &[
     CanonicalTable {
         name: "graph_node",
@@ -1197,13 +1230,38 @@ const RECALL_TABLES: &[CanonicalTable] = &[
         primary_key: &["label_id"],
         unique: NO_UNIQUE,
     },
-    // --- v3 additive (Layer-2 custody): everything past RECALL_V2_TABLE_COUNT.
+    // --- v3 additive (Layer-2 custody): [RECALL_V2_TABLE_COUNT, RECALL_V3_TABLE_COUNT).
     // recall.db carries its own wrapped-DEK custody rows (same shape as the
     // capture projection's table) so each projection is self-contained.
     CanonicalTable {
         name: "key_metadata",
         columns: KEY_METADATA_COLUMNS,
         primary_key: &["key_id"],
+        unique: NO_UNIQUE,
+    },
+    // --- v4 additive (memd serve audit): past RECALL_V3_TABLE_COUNT ------------
+    CanonicalTable {
+        name: "memd_audit_event",
+        columns: MEMD_AUDIT_EVENT_COLUMNS,
+        primary_key: &["audit_id"],
+        unique: NO_UNIQUE,
+    },
+    // --- v5 additive (ADR-0005 blob-oid map): past RECALL_V4_TABLE_COUNT -------
+    CanonicalTable {
+        name: "n_blob_oid_map",
+        columns: BLOB_OID_MAP_COLUMNS,
+        primary_key: &["content_sha256"],
+        unique: NO_UNIQUE,
+    },
+    // --- v6 additive (durable ingest watermark): past RECALL_V5_TABLE_COUNT ----
+    // The recall ingest path appends one row per run (branch + last checkpoint
+    // ingested), so incremental ingest is durable evidence, not just an
+    // in-memory `Watermark` (PRD-M2 audit reconciliation). Same column shape as
+    // the capture projection's table; separate DB, separate rows.
+    CanonicalTable {
+        name: "ingest_watermark",
+        columns: INGEST_WATERMARK_COLUMNS,
+        primary_key: &["watermark_id"],
         unique: NO_UNIQUE,
     },
 ];
@@ -1216,6 +1274,17 @@ pub(crate) const RECALL_V1_TABLE_COUNT: usize = 13;
 
 /// One past the last v2 (`recall_outcome_labels` migration) table.
 pub(crate) const RECALL_V2_TABLE_COUNT: usize = 14;
+
+/// One past the last v3 (`recall_key_custody` migration) table. Frozen once v3
+/// shipped: the custody migration's SQL is generated from exactly the v2..v3
+/// slice, so later tables append past it and ship in their own migration.
+pub(crate) const RECALL_V3_TABLE_COUNT: usize = 15;
+
+/// One past the last v4 (`recall_memd_audit` migration) table.
+pub(crate) const RECALL_V4_TABLE_COUNT: usize = 16;
+
+/// One past the last v5 (`recall_blob_oid_map` migration) table.
+pub(crate) const RECALL_V5_TABLE_COUNT: usize = 17;
 
 /// The v1 recall tables (the `recall_core` migration's source of truth).
 #[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
@@ -1232,7 +1301,30 @@ pub(crate) fn recall_v2_outcome_tables() -> &'static [CanonicalTable] {
 /// The v3-additive recall tables (the `recall_key_custody` migration).
 #[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
 pub(crate) fn recall_v3_custody_tables() -> &'static [CanonicalTable] {
-    &RECALL_TABLES[RECALL_V2_TABLE_COUNT..]
+    &RECALL_TABLES[RECALL_V2_TABLE_COUNT..RECALL_V3_TABLE_COUNT]
+}
+
+/// The v4-additive recall tables (the `recall_memd_audit` migration): the
+/// append-only `memd.*` serve-decision trail.
+#[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
+pub(crate) fn recall_v4_audit_tables() -> &'static [CanonicalTable] {
+    &RECALL_TABLES[RECALL_V3_TABLE_COUNT..RECALL_V4_TABLE_COUNT]
+}
+
+/// The v5-additive recall tables (the `recall_blob_oid_map` migration): the
+/// ADR-0005 content→blob-oid bridge. Frozen once v5 shipped (the next additive
+/// migration starts past [`RECALL_V5_TABLE_COUNT`]).
+#[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
+pub(crate) fn recall_v5_blob_map_tables() -> &'static [CanonicalTable] {
+    &RECALL_TABLES[RECALL_V4_TABLE_COUNT..RECALL_V5_TABLE_COUNT]
+}
+
+/// The v6-additive recall tables (the `recall_ingest_watermark` migration): the
+/// durable incremental-ingest watermark. Open-ended (the current registry end);
+/// the next additive recall migration bounds it and starts past it.
+#[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
+pub(crate) fn recall_v6_watermark_tables() -> &'static [CanonicalTable] {
+    &RECALL_TABLES[RECALL_V5_TABLE_COUNT..]
 }
 
 /// Secondary indexes for the recall graph (appended after the tables in the

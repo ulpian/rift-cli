@@ -15,6 +15,8 @@ rift-core = { version = "0.0.1", path = "../rift-core" }
 rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
 # The one token-counting authority (ADR-0006) backs pack budgeting.
 rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
+# The input-keyed PackKey (ADR-0020) is a SHA-256 over the immutable pack inputs.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

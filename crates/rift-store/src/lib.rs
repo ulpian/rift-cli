@@ -102,9 +102,10 @@ pub use migrate::{
     recall_migrations, Migration, MigrationOutcome,
 };
 pub use paths::{
-    canopy_ui_db_from, canopy_ui_db_under, default_canopy_ui_db, default_projection_db,
-    default_projection_dir, default_recall_db, projection_db_under, projection_dir_under,
-    recall_db_from, recall_db_under, resolve_cache_root,
+    canopy_ui_db_from, canopy_ui_db_under, capture_projection_db_for_repo, capture_repo_id,
+    default_canopy_ui_db, default_projection_db, default_projection_dir, default_recall_db,
+    projection_db_under, projection_dir_under, recall_db_for_repo, recall_db_from, recall_db_under,
+    recall_repo_id, resolve_cache_root,
 };
 pub use rebuild::rebuild;
 pub use schema::{

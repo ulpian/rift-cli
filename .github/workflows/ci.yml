@@ -114,6 +114,19 @@ jobs:
           for t in config_parse run_hook redact diff glob_match checkpoint_artifact mcp_request; do
             cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=25
           done
+  # The Phase-7 prompt-injection red-team gate (pulled into M3): the append-only
+  # corpus (crates/rift-recall-validity/fixtures/injection_corpus.jsonl) runs
+  # through the universal untrusted-content serve chokepoint, and the MCP surface
+  # is checked for verbatim leakage. A forbidden-span leak blocks merge — never
+  # advisory.
+  red-team:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p rift-recall-validity --test red_team
+      - run: cargo test -p rift-recall-mcp red_team
   miri:
     runs-on: ubuntu-latest
     steps:

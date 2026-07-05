@@ -1,5 +1,6 @@
 ---
 source: crates/rift-store/tests/schema_snapshot.rs
+assertion_line: 48
 expression: schema_dump(&recall_migrations())
 ---
 -- index idx_edge_from
@@ -63,6 +64,16 @@ CREATE TABLE graph_node (
   PRIMARY KEY (node_id)
 ) STRICT
 
+-- table ingest_watermark
+CREATE TABLE ingest_watermark (
+  watermark_id TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  branch_tip TEXT NOT NULL,
+  ingested_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (watermark_id)
+) STRICT
+
 -- table key_metadata
 CREATE TABLE key_metadata (
   key_id TEXT NOT NULL,
@@ -77,6 +88,19 @@ CREATE TABLE key_metadata (
   PRIMARY KEY (key_id)
 ) STRICT
 
+-- table memd_audit_event
+CREATE TABLE memd_audit_event (
+  audit_id TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  handle TEXT,
+  reason TEXT,
+  tokens_returned INTEGER NOT NULL,
+  tokens_avoided INTEGER NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (audit_id)
+) STRICT
+
 -- table metric_snapshot
 CREATE TABLE metric_snapshot (
   snapshot_id TEXT NOT NULL,
@@ -86,6 +110,15 @@ CREATE TABLE metric_snapshot (
   avoidable_tokens INTEGER NOT NULL,
   computed_at INTEGER NOT NULL,
   PRIMARY KEY (snapshot_id)
+) STRICT
+
+-- table n_blob_oid_map
+CREATE TABLE n_blob_oid_map (
+  content_sha256 TEXT NOT NULL,
+  blob_oid TEXT NOT NULL,
+  path TEXT NOT NULL,
+  first_seen INTEGER NOT NULL,
+  PRIMARY KEY (content_sha256)
 ) STRICT
 
 -- table n_changed_hunk
@@ -220,17 +253,35 @@ CREATE TRIGGER graph_node_no_delete BEFORE DELETE ON graph_node BEGIN SELECT RAI
 -- trigger graph_node_no_update
 CREATE TRIGGER graph_node_no_update BEFORE UPDATE ON graph_node BEGIN SELECT RAISE(ABORT, 'rift: graph_node is append-only (UPDATE forbidden)'); END
 
+-- trigger ingest_watermark_no_delete
+CREATE TRIGGER ingest_watermark_no_delete BEFORE DELETE ON ingest_watermark BEGIN SELECT RAISE(ABORT, 'rift: ingest_watermark is append-only (DELETE forbidden)'); END
+
+-- trigger ingest_watermark_no_update
+CREATE TRIGGER ingest_watermark_no_update BEFORE UPDATE ON ingest_watermark BEGIN SELECT RAISE(ABORT, 'rift: ingest_watermark is append-only (UPDATE forbidden)'); END
+
 -- trigger key_metadata_no_delete
 CREATE TRIGGER key_metadata_no_delete BEFORE DELETE ON key_metadata BEGIN SELECT RAISE(ABORT, 'rift: key_metadata is append-only (DELETE forbidden)'); END
 
 -- trigger key_metadata_no_update
 CREATE TRIGGER key_metadata_no_update BEFORE UPDATE ON key_metadata BEGIN SELECT RAISE(ABORT, 'rift: key_metadata is append-only (UPDATE forbidden)'); END
 
+-- trigger memd_audit_event_no_delete
+CREATE TRIGGER memd_audit_event_no_delete BEFORE DELETE ON memd_audit_event BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_event is append-only (DELETE forbidden)'); END
+
+-- trigger memd_audit_event_no_update
+CREATE TRIGGER memd_audit_event_no_update BEFORE UPDATE ON memd_audit_event BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_event is append-only (UPDATE forbidden)'); END
+
 -- trigger metric_snapshot_no_delete
 CREATE TRIGGER metric_snapshot_no_delete BEFORE DELETE ON metric_snapshot BEGIN SELECT RAISE(ABORT, 'rift: metric_snapshot is append-only (DELETE forbidden)'); END
 
 -- trigger metric_snapshot_no_update
 CREATE TRIGGER metric_snapshot_no_update BEFORE UPDATE ON metric_snapshot BEGIN SELECT RAISE(ABORT, 'rift: metric_snapshot is append-only (UPDATE forbidden)'); END
+
+-- trigger n_blob_oid_map_no_delete
+CREATE TRIGGER n_blob_oid_map_no_delete BEFORE DELETE ON n_blob_oid_map BEGIN SELECT RAISE(ABORT, 'rift: n_blob_oid_map is append-only (DELETE forbidden)'); END
+
+-- trigger n_blob_oid_map_no_update
+CREATE TRIGGER n_blob_oid_map_no_update BEFORE UPDATE ON n_blob_oid_map BEGIN SELECT RAISE(ABORT, 'rift: n_blob_oid_map is append-only (UPDATE forbidden)'); END
 
 -- trigger n_changed_hunk_no_delete
 CREATE TRIGGER n_changed_hunk_no_delete BEFORE DELETE ON n_changed_hunk BEGIN SELECT RAISE(ABORT, 'rift: n_changed_hunk is append-only (DELETE forbidden)'); END

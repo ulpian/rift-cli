@@ -57,6 +57,14 @@ rift-git = { version = "0.0.1", path = "../../crates/rift-git" }
 # `rift verify` re-derives the chain from the git-authoritative checkpoint branch
 # (`rift/checkpoints/v1`) through the read-only gix substrate reader (P5 S4).
 rift-recall-substrate = { version = "0.0.1", path = "../../crates/rift-recall-substrate" }
+# `rift memory` (PRD-M2) reuses the recall server's library dispatch — the same
+# envelopes, budgets, and policy gates as the MCP tools — over recall.db.
+rift-recall-ledger = { version = "0.0.1", path = "../../crates/rift-recall-ledger" }
+rift-recall-mcp = { version = "0.0.1", path = "../../crates/rift-recall-mcp" }
+rift-recall-policy = { version = "0.0.1", path = "../../crates/rift-recall-policy" }
+rift-recall-types = { version = "0.0.1", path = "../../crates/rift-recall-types" }
+# Tokenizer provenance printed on the reread report (ADR-0006).
+rift-tokens = { version = "0.0.1", path = "../../crates/rift-tokens" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name = "rift-recall-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lost-in-Delta eval harness: deterministic replay, savings/non-degradation metrics, the ADR-0019 go/no-go gate."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The pack under test: the delta-served runs compile real packs.
+rift-recall-pack = { version = "0.0.1", path = "../rift-recall-pack" }
+# The one token-counting authority (ADR-0006): measured savings use the same
+# tokenizer the serving side reports, so reconciliation is apples-to-apples.
+rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
+
+[dev-dependencies]
+proptest = { workspace = true }
