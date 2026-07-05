@@ -23,6 +23,8 @@ rift-config = { version = "0.0.1", path = "../rift-config" }
 rift-git = { version = "0.0.1", path = "../rift-git" }
 # The rift-store seam is async; reads run on short-lived current-thread runtimes.
 tokio = { workspace = true }
+# fs-notify as a wake-signal only (ADR-0010); failure degrades to PollOnly.
+notify = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

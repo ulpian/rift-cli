@@ -70,6 +70,10 @@ authors = ["Ulpian Morina"]
 # paste. Re-review before adding `turso = { workspace = true }` to any crate. See
 # phase-03-turso-storage-foundation/SPIKE-RESULTS.md.
 turso = "0.1"                  # (verify) BETA; deferred — see SPIKE-RESULTS.md
+# Filesystem notification — ADR-0010 decision 2: fs events are a WAKE-SIGNAL
+# only (a fresh {cursor, epoch} poll stays the sole truth), so a missed or
+# spurious event is harmless by construction. Lives only in rift-canopy-data.
+notify = "6.1"
 # Reference store for the testable vertical slice: SQLite-compatible, synchronous,
 # runs the SAME SQL/triggers Turso will. Production target stays `turso` behind the seam.
 rusqlite = { version = "0.32", features = ["bundled"] }   # (verify) needs a C compiler (bundled SQLite)

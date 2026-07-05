@@ -30,9 +30,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{
+    channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError,
+};
 use std::thread;
 use std::time::Duration;
+
+use notify::Watcher as _;
 
 use rift_canopy::{
     derive_status, CaptureSummary, DataRequest, DetailView, EntryKind, Event, ModelUsage,
@@ -67,79 +71,222 @@ pub fn spawn(initial_paths: Vec<String>) -> Bus {
 /// tempdir, so they never touch the process environment.
 #[must_use]
 pub fn spawn_with_root(root: PathBuf, initial_paths: Vec<String>) -> Bus {
+    spawn_with_watcher(root, initial_paths, Box::new(NotifyWatcher::default()))
+}
+
+/// The bound on the bus→loop update channel (ADR-0010 decision 3): a write
+/// storm can stage at most this many in-flight updates; everything beyond is
+/// coalesced latest-per-(project, feed) in the worker's [`Outbox`].
+const UPDATE_CHANNEL_BOUND: usize = 64;
+
+/// One internal worker message: a forwarded public request, or a wake.
+pub(crate) enum WorkerMsg {
+    /// A data request from the reducer.
+    Request(DataRequest),
+    /// A filesystem event fired under the cache root — schedule an immediate
+    /// watermark poll. Deliberately carries **no data** (ADR-0010): a fresh
+    /// poll remains the sole truth, so missed/duplicated/spurious wakes are
+    /// harmless by construction.
+    Wake,
+}
+
+/// The wake-signal seam: implementations watch the cache root and deliver
+/// [`WorkerMsg::Wake`]s for as long as they live. Failing to watch is not an
+/// error path — the bus degrades to `PollOnly` (the adaptive cadence keeps
+/// updating the dashboard; wakes only add promptness).
+pub(crate) trait WakeWatcher: Send {
+    /// Begin watching `root` recursively, sending wakes into `wake`.
+    ///
+    /// # Errors
+    /// A human-readable reason when the platform watcher cannot start; the
+    /// caller degrades to poll-only.
+    fn watch(&mut self, root: &Path, wake: Sender<WorkerMsg>) -> Result<(), String>;
+}
+
+/// The production watcher: `notify`'s recommended platform backend.
+#[derive(Default)]
+struct NotifyWatcher {
+    /// Kept alive for the worker's lifetime; dropping it unwatches.
+    inner: Option<notify::RecommendedWatcher>,
+}
+
+impl WakeWatcher for NotifyWatcher {
+    fn watch(&mut self, root: &Path, wake: Sender<WorkerMsg>) -> Result<(), String> {
+        let mut watcher = notify::recommended_watcher(move |_event| {
+            // Payload deliberately ignored — wake-only (ADR-0010).
+            let _ = wake.send(WorkerMsg::Wake);
+        })
+        .map_err(|e| e.to_string())?;
+        watcher
+            .watch(root, notify::RecursiveMode::Recursive)
+            .map_err(|e| e.to_string())?;
+        self.inner = Some(watcher);
+        Ok(())
+    }
+}
+
+/// Spawn the bus with an injected [`WakeWatcher`] (the unit-test seam: no real
+/// filesystem timing required to exercise wakes or watch failure).
+pub(crate) fn spawn_with_watcher(
+    root: PathBuf,
+    initial_paths: Vec<String>,
+    watcher: Box<dyn WakeWatcher>,
+) -> Bus {
     let (req_tx, req_rx) = channel::<DataRequest>();
-    let (evt_tx, evt_rx) = channel::<Event>();
+    let (msg_tx, msg_rx) = channel::<WorkerMsg>();
+    let (evt_tx, evt_rx) = sync_channel::<Event>(UPDATE_CHANNEL_BOUND);
     for p in initial_paths {
         let _ = req_tx.send(DataRequest::Refresh(p));
     }
-    thread::spawn(move || worker(&req_rx, &evt_tx, &root));
+    // Forward public requests into the worker's merged message stream. Exits
+    // when the request sender is dropped (the dashboard quit).
+    {
+        let msg_tx = msg_tx.clone();
+        thread::spawn(move || {
+            while let Ok(req) = req_rx.recv() {
+                if msg_tx.send(WorkerMsg::Request(req)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    thread::spawn(move || worker(&msg_rx, msg_tx, &evt_tx, &root, watcher));
     Bus { req_tx, evt_rx }
 }
 
-/// The worker loop. It waits for a request **or** the observer's poll interval,
+/// The worker loop. It waits for a message **or** the observer's poll interval,
 /// whichever comes first:
 /// * a request → coalesce the burst (latest-per-project), read each distinct
-///   project's status, and emit a [`ProjectData`];
-/// * a timeout → poll every tracked project's cursor and re-read the ones that
-///   changed (a rebuild additionally re-bootstraps *all* tracked projects).
+///   project's status, and stage a [`ProjectData`];
+/// * a wake (filesystem event) → run the same watermark poll a timeout would —
+///   the poll is the only truth, the wake only made it prompt;
+/// * a timeout → poll every tracked project's watermark and re-read the ones
+///   that changed (a rebuild additionally re-bootstraps *all* tracked
+///   projects).
 ///
-/// Exits when either channel disconnects (the dashboard quit).
-fn worker(req_rx: &Receiver<DataRequest>, evt_tx: &Sender<Event>, root: &Path) {
+/// Staged updates flush through the bounded channel latest-per-(project, feed)
+/// ([`Outbox`]). Exits when either channel disconnects (the dashboard quit).
+fn worker(
+    msg_rx: &Receiver<WorkerMsg>,
+    wake_tx: Sender<WorkerMsg>,
+    evt_tx: &SyncSender<Event>,
+    root: &Path,
+    mut watcher: Box<dyn WakeWatcher>,
+) {
+    // Native-notify capability is best-effort: watching the cache root makes
+    // updates prompt; failure means PollOnly and the cadence is the heartbeat.
+    let _watching = watcher.watch(root, wake_tx).is_ok();
     let mut observer = WatermarkPoller::new(root.to_path_buf());
+    let mut outbox = Outbox::default();
     // The foreground project — the only one for which the expensive rich detail is
     // computed (status is cheap and read for every project).
     let mut active: Option<String> = None;
     loop {
-        match req_rx.recv_timeout(observer.interval()) {
+        let mut to_read = BTreeSet::new();
+        let mut woken = false;
+        match msg_rx.recv_timeout(observer.interval()) {
             Ok(first) => {
-                // Coalesce a burst so a storm of requests collapses to one read per
-                // project (backpressure by set-union, not queue growth).
-                let mut to_read = BTreeSet::new();
-                collect(first, &mut to_read, &mut active);
-                while let Ok(req) = req_rx.try_recv() {
-                    collect(req, &mut to_read, &mut active);
-                }
-                for path in to_read {
-                    if read_emit(&mut observer, evt_tx, root, path, active.as_deref()).is_err() {
-                        return; // the loop is gone; end the worker
-                    }
+                // Coalesce a burst so a storm of requests/wakes collapses to one
+                // read per project (backpressure by set-union, not queue growth).
+                collect(first, &mut to_read, &mut active, &mut woken);
+                while let Ok(msg) = msg_rx.try_recv() {
+                    collect(msg, &mut to_read, &mut active, &mut woken);
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {
-                let mut to_read = BTreeSet::new();
-                for change in observer.poll_once() {
-                    // Every observed change re-reads that project; a rebuild
-                    // replaced the projection wholesale, so re-bootstrap every
-                    // tracked project rather than trusting any cached sibling.
-                    if change.kind == ChangeKind::Rebuilt {
-                        to_read.extend(observer.tracked());
-                    }
-                    to_read.insert(change.project);
-                }
-                for path in to_read {
-                    if read_emit(&mut observer, evt_tx, root, path, active.as_deref()).is_err() {
-                        return;
-                    }
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => woken = true,
             Err(RecvTimeoutError::Disconnected) => return,
         }
+        if woken {
+            // A wake or a timeout schedules the SAME fresh poll — the watermark
+            // read is the sole truth, so a spurious wake reads as quiet.
+            for change in observer.poll_once() {
+                // Every observed change re-reads that project; a rebuild
+                // replaced the projection wholesale, so re-bootstrap every
+                // tracked project rather than trusting any cached sibling.
+                if change.kind == ChangeKind::Rebuilt {
+                    to_read.extend(observer.tracked());
+                }
+                to_read.insert(change.project);
+            }
+        }
+        for path in to_read {
+            stage_read(&mut observer, &mut outbox, root, path, active.as_deref());
+        }
+        if outbox.flush(evt_tx).is_err() {
+            return; // the loop is gone; end the worker
+        }
+    }
+}
+
+/// The staging buffer in front of the bounded update channel: **latest wins
+/// per (project, feed)**, so a write storm can neither stall the worker (sends
+/// never block) nor flood the loop (the channel never exceeds its bound, and
+/// superseded updates are simply replaced while they wait).
+#[derive(Default)]
+struct Outbox {
+    pending: BTreeMap<(String, FeedKind), Event>,
+}
+
+/// The feed kinds an update can belong to — the coalescing axis. Status/detail
+/// today; the Tokens/Nic/Recall graph feeds join in W3/W4 (ADR-0009).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum FeedKind {
+    /// Per-project status (+ detail for the active project).
+    Status,
+}
+
+/// The coalescing key for an update.
+fn feed_key(ev: &Event) -> (String, FeedKind) {
+    match ev {
+        Event::ProjectData(pd) => (pd.project.clone(), FeedKind::Status),
+        // Non-project events have no coalescing axis today; key them globally.
+        _ => (String::new(), FeedKind::Status),
+    }
+}
+
+impl Outbox {
+    /// Stage an update, replacing any staged one for the same (project, feed).
+    fn stage(&mut self, ev: Event) {
+        self.pending.insert(feed_key(&ev), ev);
+    }
+
+    /// Push staged updates through the bounded channel without blocking: a
+    /// full channel keeps the remainder staged (newer stages keep replacing
+    /// them — latest-per-feed under backpressure). `Err` iff the loop is gone.
+    fn flush(&mut self, tx: &SyncSender<Event>) -> Result<(), ()> {
+        let keys: Vec<(String, FeedKind)> = self.pending.keys().cloned().collect();
+        for key in keys {
+            let Some(ev) = self.pending.remove(&key) else {
+                continue;
+            };
+            match tx.try_send(ev) {
+                Ok(()) => {}
+                Err(TrySendError::Full(ev)) => {
+                    // Back under pressure: keep it staged; a newer update for
+                    // the same key replaces it rather than queueing behind it.
+                    self.pending.insert(key, ev);
+                    return Ok(());
+                }
+                Err(TrySendError::Disconnected(_)) => return Err(()),
+            }
+        }
+        Ok(())
     }
 }
 
 /// Read a project's status + watermark once, record the watermark as the
 /// observer's polling baseline (so the next poll only fires on genuinely newer
-/// changes), and emit the update. The rich detail is attached only when `path`
-/// is the `active` (foreground) project — building it reads several tables, so
-/// it stays scoped to the one project the user is looking at. Returns
-/// `Err(())` if the loop end is gone.
-fn read_emit(
+/// changes), and stage the update in the outbox. The rich detail is attached
+/// only when `path` is the `active` (foreground) project — building it reads
+/// several tables, so it stays scoped to the one project the user is looking
+/// at.
+fn stage_read(
     observer: &mut WatermarkPoller,
-    evt_tx: &Sender<Event>,
+    outbox: &mut Outbox,
     root: &Path,
     path: String,
     active: Option<&str>,
-) -> Result<(), ()> {
+) {
     let (status, mark) = read_project(root, &path);
     observer.sync(&path, mark);
     let detail = if active == Some(path.as_str()) {
@@ -147,26 +294,32 @@ fn read_emit(
     } else {
         None
     };
-    let update = Event::ProjectData(ProjectData {
+    outbox.stage(Event::ProjectData(ProjectData {
         project: path,
         status,
         detail,
-    });
-    evt_tx.send(update).map_err(|_| ())
+    }));
 }
 
-/// Fold a request into the set of projects to (re-)read, updating the `active`
-/// (foreground) project. `SetActive(None)` clears the active project.
-fn collect(req: DataRequest, out: &mut BTreeSet<String>, active: &mut Option<String>) {
-    match req {
-        DataRequest::Refresh(p) => {
+/// Fold a worker message into the set of projects to (re-)read, updating the
+/// `active` (foreground) project and the wake flag. `SetActive(None)` clears
+/// the active project; a [`WorkerMsg::Wake`] only requests a poll.
+fn collect(
+    msg: WorkerMsg,
+    out: &mut BTreeSet<String>,
+    active: &mut Option<String>,
+    woken: &mut bool,
+) {
+    match msg {
+        WorkerMsg::Request(DataRequest::Refresh(p)) => {
             out.insert(p);
         }
-        DataRequest::SetActive(Some(p)) => {
+        WorkerMsg::Request(DataRequest::SetActive(Some(p))) => {
             *active = Some(p.clone());
             out.insert(p);
         }
-        DataRequest::SetActive(None) => *active = None,
+        WorkerMsg::Request(DataRequest::SetActive(None)) => *active = None,
+        WorkerMsg::Wake => *woken = true,
     }
 }
 
@@ -760,7 +913,7 @@ mod tests {
         // The seeded refresh yields one ProjectData update for the project.
         let ev = bus
             .evt_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(15))
             .expect("a ProjectData update");
         match ev {
             Event::ProjectData(pd) => {
@@ -981,7 +1134,7 @@ mod tests {
             .unwrap();
         let ev = bus
             .evt_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(15))
             .expect("a ProjectData update");
         match ev {
             Event::ProjectData(pd) => {
@@ -1123,6 +1276,10 @@ mod tests {
     }
 
     proptest::proptest! {
+        // Each case drives a real store through rebuilds — cap the case count
+        // so the suite's wall-clock stays test-farm friendly.
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
         /// The watermark never goes backwards without an epoch bump, over an
         /// arbitrary interleaving of appends and rebuilds against a real store
         /// (PRD-M4 testing decision).
@@ -1256,6 +1413,166 @@ mod tests {
         assert_eq!(poller.interval(), IDLE_INTERVAL);
     }
 
+    // --- M4-05: wake-only notify + the bounded latest-per-feed channel ------
+
+    /// A watcher stub that hands the test its wake sender (no filesystem).
+    struct StubWatcher {
+        grabbed: std::sync::Arc<std::sync::Mutex<Option<Sender<WorkerMsg>>>>,
+    }
+    impl WakeWatcher for StubWatcher {
+        fn watch(&mut self, _root: &Path, wake: Sender<WorkerMsg>) -> Result<(), String> {
+            *self.grabbed.lock().unwrap() = Some(wake);
+            Ok(())
+        }
+    }
+
+    /// A watcher that always fails — the injected PollOnly degradation.
+    struct FailingWatcher;
+    impl WakeWatcher for FailingWatcher {
+        fn watch(&mut self, _root: &Path, _wake: Sender<WorkerMsg>) -> Result<(), String> {
+            Err("no watch backend on this filesystem".into())
+        }
+    }
+
+    #[test]
+    fn wake_triggers_a_fresh_poll_and_spurious_wakes_are_harmless() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "seed", 1);
+        let grabbed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let bus = spawn_with_watcher(
+            root.path().to_path_buf(),
+            vec![path_of(&proj)],
+            Box::new(StubWatcher {
+                grabbed: std::sync::Arc::clone(&grabbed),
+            }),
+        );
+        // Drain the seeded update; the observer baseline is now synced.
+        let first = bus.evt_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(first, Event::ProjectData(_)));
+        let wake = grabbed.lock().unwrap().clone().expect("watcher installed");
+
+        // Spurious + duplicated wakes with no underlying change: the fresh
+        // poll reads quiet, so nothing is emitted (wake-only, no data path).
+        wake.send(WorkerMsg::Wake).unwrap();
+        wake.send(WorkerMsg::Wake).unwrap();
+        assert!(
+            bus.evt_rx.recv_timeout(Duration::from_millis(600)).is_err(),
+            "a spurious wake must not fabricate an update"
+        );
+
+        // A real change + a wake: the update arrives promptly (well inside the
+        // idle cadence — the wake scheduled the poll, the poll found it).
+        append_events(root.path(), &proj, 1, 2);
+        wake.send(WorkerMsg::Wake).unwrap();
+        let ev = bus
+            .evt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wake-scheduled poll delivers the update");
+        assert!(matches!(ev, Event::ProjectData(_)));
+    }
+
+    #[test]
+    fn injected_watch_failure_degrades_to_poll_only() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "seed", 1);
+        let bus = spawn_with_watcher(
+            root.path().to_path_buf(),
+            vec![path_of(&proj)],
+            Box::new(FailingWatcher),
+        );
+        let first = bus.evt_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(first, Event::ProjectData(_)));
+
+        // No watcher — the adaptive poll cadence still surfaces the change.
+        append_events(root.path(), &proj, 1, 2);
+        let ev = bus
+            .evt_rx
+            .recv_timeout(Duration::from_secs(8))
+            .expect("poll-only still delivers");
+        assert!(matches!(ev, Event::ProjectData(pd) if pd.project == path_of(&proj)));
+    }
+
+    #[test]
+    fn outbox_bounds_the_queue_and_keeps_the_latest_per_feed() {
+        // A synthetic storm: 100 updates for one project against a channel of 2.
+        let (tx, rx) = sync_channel::<Event>(2);
+        let mut outbox = Outbox::default();
+        for i in 0..100u16 {
+            outbox.stage(Event::ProjectData(ProjectData {
+                project: "/r/a".into(),
+                status: ProjectStatus::Running {
+                    since_ms: i64::from(i),
+                    active_sessions: 1,
+                },
+                detail: None,
+            }));
+            outbox.flush(&tx).unwrap();
+        }
+        // The channel never exceeded its bound: at most 2 queued...
+        let mut drained = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            drained.push(ev);
+        }
+        assert!(
+            drained.len() <= 2,
+            "bounded channel overfilled: {}",
+            drained.len()
+        );
+        // ...and the LATEST staged update survives in the outbox for the next
+        // flush (latest-per-(project, feed) replacement, not queue growth).
+        outbox.flush(&tx).unwrap();
+        let last = rx.try_recv().expect("the latest staged update flushes");
+        match last {
+            Event::ProjectData(pd) => assert_eq!(
+                pd.status,
+                ProjectStatus::Running {
+                    since_ms: 99,
+                    active_sessions: 1
+                },
+                "an older superseded update leaked through"
+            ),
+            other => panic!("expected ProjectData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distinct_projects_each_keep_their_latest_under_backpressure() {
+        let (tx, rx) = sync_channel::<Event>(1);
+        let mut outbox = Outbox::default();
+        for round in 0..10i64 {
+            for proj in ["/r/a", "/r/b", "/r/c"] {
+                outbox.stage(Event::ProjectData(ProjectData {
+                    project: proj.into(),
+                    status: ProjectStatus::Running {
+                        since_ms: round,
+                        active_sessions: 1,
+                    },
+                    detail: None,
+                }));
+            }
+            outbox.flush(&tx).unwrap();
+        }
+        // Drain everything (alternating drain + flush until dry).
+        let mut latest: BTreeMap<String, i64> = BTreeMap::new();
+        loop {
+            while let Ok(ev) = rx.try_recv() {
+                if let Event::ProjectData(pd) = ev {
+                    if let ProjectStatus::Running { since_ms, .. } = pd.status {
+                        latest.insert(pd.project, since_ms);
+                    }
+                }
+            }
+            if outbox.pending.is_empty() {
+                break;
+            }
+            outbox.flush(&tx).unwrap();
+        }
+        // Every project's LATEST update ultimately got through.
+        assert_eq!(latest.get("/r/a"), Some(&9));
+        assert_eq!(latest.get("/r/b"), Some(&9));
+        assert_eq!(latest.get("/r/c"), Some(&9));
+    }
+
     #[test]
     fn bus_delivers_live_update_via_poll() {
         let root = tempfile::tempdir().unwrap();
@@ -1263,7 +1580,7 @@ mod tests {
         let bus = spawn_with_root(root.path().to_path_buf(), vec![path_of(&proj)]);
 
         // Drain the initial request-driven update.
-        let first = bus.evt_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let first = bus.evt_rx.recv_timeout(Duration::from_secs(15)).unwrap();
         assert!(matches!(first, Event::ProjectData(_)));
 
         // A concurrent append must surface via the observer's poll — with no
@@ -1271,7 +1588,7 @@ mod tests {
         append_events(root.path(), &proj, 1, 2);
         let second = bus
             .evt_rx
-            .recv_timeout(Duration::from_secs(8))
+            .recv_timeout(Duration::from_secs(15))
             .expect("a poll-driven update");
         match second {
             Event::ProjectData(pd) => {

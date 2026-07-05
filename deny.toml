@@ -43,6 +43,11 @@ exceptions = [
   # a linked dependency; it imposes no obligation on our own source. Scoped so any
   # FUTURE MPL dependency is a conscious, reviewed addition rather than a silent pass.
   { name = "uluru", allow = ["MPL-2.0"] },
+  # `notify` (the ADR-0010 wake-signal watcher, rift-canopy-data only) is
+  # CC0-1.0 — a public-domain dedication, MORE permissive than the blanket
+  # allow; it sits in an exception only because the allow list is deliberately
+  # never widened. Scoped to this one crate.
+  { name = "notify", allow = ["CC0-1.0"] },
 ]
 
 [sources]
