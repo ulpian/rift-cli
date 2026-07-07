@@ -216,8 +216,20 @@ pub async fn project_event(
         // content-addressed like the commit-capture writer's.
         EventKind::ToolResult => {
             if let Some(rc) = &facts.read_content {
-                let call_id =
-                    ids::tool_call_row_id(&session_row, ev.turn_ordinal, ev.event_ordinal);
+                // The read's OWN row id is content-addressed over the fact
+                // (session, turn, path, read-time hash) — never the shared
+                // (turn, event_ordinal) slot, whose ordinals restart per hook
+                // and collide across tools within a turn.
+                let call_id = crate::sha256_hex(&[
+                    b"rift.read-call.v1\0",
+                    session_row.as_bytes(),
+                    b"\0",
+                    ev.turn_ordinal.to_string().as_bytes(),
+                    b"\0",
+                    rc.rel_path.as_bytes(),
+                    b"\0",
+                    rc.content_sha256.as_bytes(),
+                ]);
                 rift_store::record_tool_call(
                     store,
                     &ToolCallRow {

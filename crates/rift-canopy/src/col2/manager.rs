@@ -48,7 +48,8 @@ mod tests {
             assert!(m
                 .apply(&FeatureAction {
                     feature: Feature::Fff,
-                    kind
+                    kind,
+                    path: "/r/x".into(),
                 })
                 .is_ok());
         }

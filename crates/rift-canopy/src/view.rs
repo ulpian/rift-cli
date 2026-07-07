@@ -423,7 +423,12 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
 fn draw_detail(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
     let inner = frame.border(rect, "detail", border_style(vm.focus == Panel::Detail));
     let lines = match &vm.detail {
-        Some(d) => detail_line_kinds(d, vm.toggle_cursor, vm.focus == Panel::Detail),
+        Some(d) => detail_line_kinds(
+            d,
+            vm.toggle_cursor,
+            vm.focus == Panel::Detail,
+            &vm.feature_runtime,
+        ),
         None => vec![DetailLine::plain("no project selected")],
     };
     render_lines(frame, inner, vm.detail_scroll, &lines);
@@ -468,6 +473,7 @@ pub(crate) fn detail_line_kinds(
     d: &crate::col2::DetailView,
     toggle_cursor: usize,
     focused: bool,
+    runtime: &std::collections::BTreeMap<String, crate::FeatureRuntime>,
 ) -> Vec<DetailLine> {
     let mut lines: Vec<DetailLine> = Vec::new();
     let kind = match d.kind {
@@ -548,13 +554,30 @@ pub(crate) fn detail_line_kinds(
             ' '
         };
         let indent = if row.indent { "  " } else { "" };
+        // The runtime overlay (M5-12): the last action RESULT wins over the
+        // persisted desired state — Enabling/Disabling while the manager
+        // runs, Failed-with-reason after; cleared on success so the
+        // persisted state (On/Off) shows.
+        let effective = match runtime.get(row.feature.key()) {
+            Some(crate::FeatureRuntime::Enabling) => crate::col2::ToggleState::Enabling,
+            Some(crate::FeatureRuntime::Disabling) => crate::col2::ToggleState::Disabling,
+            Some(crate::FeatureRuntime::Failed(reason)) => {
+                crate::col2::ToggleState::Failed(reason.clone())
+            }
+            None => row.state.clone(),
+        };
         let mut text = format!(
             "{cursor} {indent}{} {}",
-            row.state.glyph(),
+            effective.glyph(),
             row.feature.label()
         );
+        // Staged features are honest (ADR-0013): the flip persists desired
+        // state; the engine itself lands at M7.
+        if staged_feature(row.feature) && matches!(effective, crate::col2::ToggleState::On) {
+            text.push_str(" · engine lands M7");
+        }
         // A failed toggle shows its (sanitized) reason inline.
-        if let crate::col2::ToggleState::Failed(reason) = &row.state {
+        if let crate::col2::ToggleState::Failed(reason) = &effective {
             text.push_str(" — ");
             text.push_str(&sanitize_for_terminal(reason));
         }
@@ -564,6 +587,21 @@ pub(crate) fn detail_line_kinds(
         });
     }
     lines
+}
+
+/// Whether a feature's engine is staged for M7 (fff + codegraph and its
+/// language variants) — their rows state the fact plainly rather than
+/// pretending an install happened (ADR-0013).
+fn staged_feature(f: crate::col2::Feature) -> bool {
+    use crate::col2::Feature;
+    matches!(
+        f,
+        Feature::Fff
+            | Feature::Codegraph
+            | Feature::CodegraphTs
+            | Feature::CodegraphPy
+            | Feature::CodegraphRs
+    )
 }
 
 /// "on"/"off" for a boolean setting.

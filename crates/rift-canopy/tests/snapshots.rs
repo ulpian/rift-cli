@@ -530,3 +530,83 @@ fn golden_suggest_no_match() {
         render_state(&mut suggest_state("zzzzzz"))
     );
 }
+
+// ---- M5 W2: lifecycle rows (Enabling / On+staged / Failed) ------------------
+
+/// The dashboard with a populated toggle block and the feature runtime
+/// overlay set for `total-recall`.
+fn lifecycle_state(runtime: Option<rift_canopy::FeatureRuntime>) -> AppState {
+    use rift_canopy::col2::{DetailView, ToggleRow, ToggleState, ToggleView};
+    use rift_canopy::{Feature, ProjectStatus};
+    let mut s = dashboard_state();
+    s.size = Size::new(100, 32);
+    // A full detail (as the bus would compute it) with every toggle row: the
+    // staged features on, recall off — the states the overlay merges over.
+    let mut detail = DetailView::thin("/r/rift-cli".into(), "rift-cli".into(), ProjectStatus::Idle);
+    detail.toggles = ToggleView {
+        rows: vec![
+            ToggleRow {
+                feature: Feature::Fff,
+                state: ToggleState::On,
+                indent: false,
+            },
+            ToggleRow {
+                feature: Feature::Codegraph,
+                state: ToggleState::On,
+                indent: false,
+            },
+            ToggleRow {
+                feature: Feature::CodegraphTs,
+                state: ToggleState::On,
+                indent: true,
+            },
+            ToggleRow {
+                feature: Feature::TotalRecall,
+                state: ToggleState::Off,
+                indent: false,
+            },
+        ],
+    };
+    let _ = rift_canopy::update(
+        &mut s,
+        rift_canopy::Event::ProjectData(rift_canopy::ProjectData {
+            project: "/r/rift-cli".into(),
+            status: ProjectStatus::Idle,
+            detail: Some(detail),
+        }),
+    );
+    if let Some(r) = runtime {
+        s.app.feature_runtime.insert("rift-total-recall".into(), r);
+    }
+    s
+}
+
+#[test]
+fn golden_lifecycle_enabling_row() {
+    insta::assert_snapshot!(
+        "lifecycle_enabling",
+        render_state(&mut lifecycle_state(Some(
+            rift_canopy::FeatureRuntime::Enabling
+        )))
+    );
+}
+
+#[test]
+fn golden_lifecycle_failed_row() {
+    insta::assert_snapshot!(
+        "lifecycle_failed",
+        render_state(&mut lifecycle_state(Some(
+            rift_canopy::FeatureRuntime::Failed("rift-memd not found — build it".into())
+        )))
+    );
+}
+
+#[test]
+fn golden_lifecycle_settled_rows() {
+    // No runtime overlay: the persisted desired state carries the rows —
+    // including the staged features' honest "engine lands M7" note.
+    insta::assert_snapshot!(
+        "lifecycle_settled",
+        render_state(&mut lifecycle_state(None))
+    );
+}

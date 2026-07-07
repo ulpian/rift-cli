@@ -52,6 +52,7 @@ rift-hashchain = { version = "0.0.1", path = "../../crates/rift-hashchain" }
 tokio = { workspace = true }
 # `rift hooks <agent> <verb>` parses the stdin-JSON capture contract.
 serde_json = { workspace = true }
+toml = { workspace = true }
 # The command-line surface (P8 S1): clap-derive tree, exit codes, --json contract.
 clap = { workspace = true }
 # Structured, redaction-safe diagnostics on stderr (05 section 5.7); RIFT_LOG opt-in.
@@ -75,4 +76,5 @@ rift-recall-types = { version = "0.0.1", path = "../../crates/rift-recall-types"
 rift-tokens = { version = "0.0.1", path = "../../crates/rift-tokens" }
 
 [dev-dependencies]
+proptest = { workspace = true }
 tempfile = { workspace = true }

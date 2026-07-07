@@ -1,2 +1,7 @@
-# Rift project configuration (.rift/config.toml).
-# Secure defaults apply when keys are absent.
+schema_version = 1
+
+[features]
+total_recall = true
+
+[project]
+name = "rift-cli"

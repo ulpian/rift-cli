@@ -96,6 +96,36 @@ pub(crate) fn launch_ingest(repo: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Verify the memory daemon can SERVE this repository (M5-13): a real tool
+/// call through the same bounded MCP dispatch `rift-memd serve --mcp` fronts
+/// — policy gates, budget, the freshly-ingested recall.db. Ok = servable; the
+/// reason string is the lifecycle row's Failed text.
+pub(crate) fn verify_recall_serves(repo: &Path) -> std::result::Result<(), String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|e| format!("runtime: {e}"))?;
+    rt.block_on(async {
+        let db = rift_store::recall_db_for_repo(repo).map_err(|e| format!("recall db: {e}"))?;
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())
+            .map_err(|e| format!("recall db open: {e}"))?;
+        let repo_id = rift_store::recall_repo_id(repo).map_err(|e| format!("repo id: {e}"))?;
+        let scope = Scope::default_for(repo_id.as_str(), u32::MAX);
+        tool_call(
+            &store,
+            repo,
+            &scope,
+            ToolName::CostHotspots,
+            &ToolRequest {
+                top_n: Some(1),
+                ..ToolRequest::default()
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("serve check failed: {e}"))
+    })
+}
+
 /// Dispatch one tool call through the shared bounded surface: the same policy
 /// gates (`.rift/policies/serve.toml` overlay, fail-closed on a malformed
 /// config) and per-turn budget the MCP transport applies.

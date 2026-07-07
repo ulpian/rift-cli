@@ -458,6 +458,7 @@ impl AppState {
             suggestions: crate::current_suggestions(&self.app),
             suggest_highlight: self.app.suggest_highlight,
             suggest_fade: self.suggest_fade,
+            feature_runtime: self.app.feature_runtime.clone(),
         }
     }
 }
@@ -939,10 +940,14 @@ fn dashboard_verb_flow(s: &mut AppState, verb: Verb) -> Flow {
             let Some(feature) = Feature::ALL.iter().find(|f| f.key() == key) else {
                 return unknown_feature_status(s, &key);
             };
+            let Some(path) = s.app.selected_project().map(|p| p.path.clone()) else {
+                return no_match_status(s);
+            };
             Flow::Continue(Effects {
                 feature_actions: vec![FeatureAction {
                     feature: *feature,
                     kind: FeatureActionKind::Reinstall,
+                    path,
                 }],
                 ..Effects::default()
             })
@@ -1019,18 +1024,24 @@ fn toggle_flow(app: &App, detail: Option<&DetailView>, feature: Feature) -> Flow
             feature: change.feature.key().to_string(),
             desired: change.desired,
         });
-        eff.feature_actions.push(FeatureAction::from_change(change));
+        eff.feature_actions
+            .push(FeatureAction::from_change(change, path.clone()));
     }
     Flow::Continue(eff)
 }
 
 /// Retry (reinstall) the cursored feature — no desired-state change, just a fresh
-/// install action for the manager (the one-key retry after a `Failed`).
+/// install action for the manager (the one-key retry after a `Failed`). No
+/// selection ⇒ inert.
 fn retry_flow(app: &App) -> Flow {
+    let Some(path) = app.selected_project().map(|p| p.path.clone()) else {
+        return Flow::Continue(Effects::default());
+    };
     Flow::Continue(Effects {
         feature_actions: vec![FeatureAction {
             feature: cursored_feature(app),
             kind: FeatureActionKind::Reinstall,
+            path,
         }],
         ..Effects::default()
     })
@@ -1088,6 +1099,9 @@ pub struct ViewModel {
     pub suggest_highlight: usize,
     /// The panel's fade-in progress (0..=1; ADR-0022).
     pub suggest_fade: f32,
+    /// Feature-row runtime states (M5-12): action results overlaid on the
+    /// persisted desired state.
+    pub feature_runtime: std::collections::BTreeMap<String, crate::FeatureRuntime>,
 }
 
 #[cfg(test)]
@@ -1341,7 +1355,8 @@ mod tests {
                     e.feature_actions,
                     vec![FeatureAction {
                         feature: Feature::Fff,
-                        kind: FeatureActionKind::Install
+                        kind: FeatureActionKind::Install,
+                        path: "/r/a".into(),
                     }]
                 );
             }
@@ -1390,7 +1405,8 @@ mod tests {
                     e.feature_actions,
                     vec![FeatureAction {
                         feature: Feature::Fff,
-                        kind: FeatureActionKind::Reinstall
+                        kind: FeatureActionKind::Reinstall,
+                        path: "/r/a".into(),
                     }]
                 );
             }

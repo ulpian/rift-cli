@@ -225,6 +225,11 @@ pub struct App {
     /// The palette's in-memory frecency (M5-10): bumped only on successful
     /// dispatch; ranking ties break by it.
     pub frecency: suggest::Frecency,
+    /// Feature-row runtime states (M5-12, ADR-0013): action results drive
+    /// Enabling/Disabling → cleared-on-success / Failed-with-reason. Keyed by
+    /// the feature key; the detail rows merge these over the persisted
+    /// desired state (toasts stop standing in for state).
+    pub feature_runtime: std::collections::BTreeMap<String, FeatureRuntime>,
 }
 
 impl App {
@@ -251,6 +256,7 @@ impl App {
             command_error: None,
             suggest_highlight: 0,
             frecency: suggest::Frecency::new(),
+            feature_runtime: std::collections::BTreeMap::new(),
         }
     }
 
@@ -400,6 +406,18 @@ pub fn launch_selection<'a>(projects: &'a [Project], cwd: &str) -> Option<&'a st
         }
     }
     best
+}
+
+/// A feature row's transient runtime state (M5-12): what the last
+/// feature-action RESULT said, overlaid on the persisted desired state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FeatureRuntime {
+    /// An install/reinstall is in flight (the frame before the manager runs).
+    Enabling,
+    /// A removal is in flight.
+    Disabling,
+    /// The last action failed; the reason renders on the row.
+    Failed(String),
 }
 
 /// The current ranked suggestions for `app`'s buffer — pure over the app

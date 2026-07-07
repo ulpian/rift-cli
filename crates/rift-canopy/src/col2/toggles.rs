@@ -299,18 +299,22 @@ pub enum FeatureActionKind {
 
 /// An install/remove request Canopy hands to the (injected) feature manager —
 /// Canopy itself never touches the filesystem or a package manager.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeatureAction {
     /// The feature to act on.
     pub feature: Feature,
     /// What to do.
     pub kind: FeatureActionKind,
+    /// The target repository (the selected project's path — the manager
+    /// installs/removes THERE, never at process cwd; M5-12).
+    pub path: String,
 }
 
 impl FeatureAction {
-    /// The install/remove action implied by a desired-state change.
+    /// The install/remove action implied by a desired-state change, against
+    /// the given repository.
     #[must_use]
-    pub fn from_change(change: ToggleChange) -> Self {
+    pub fn from_change(change: ToggleChange, path: impl Into<String>) -> Self {
         Self {
             feature: change.feature,
             kind: if change.desired {
@@ -318,6 +322,7 @@ impl FeatureAction {
             } else {
                 FeatureActionKind::Remove
             },
+            path: path.into(),
         }
     }
 }
@@ -449,18 +454,24 @@ mod tests {
     #[test]
     fn action_from_change_maps_install_remove() {
         assert_eq!(
-            FeatureAction::from_change(ToggleChange {
-                feature: Feature::Fff,
-                desired: true
-            })
+            FeatureAction::from_change(
+                ToggleChange {
+                    feature: Feature::Fff,
+                    desired: true
+                },
+                "/r/x"
+            )
             .kind,
             FeatureActionKind::Install
         );
         assert_eq!(
-            FeatureAction::from_change(ToggleChange {
-                feature: Feature::Fff,
-                desired: false
-            })
+            FeatureAction::from_change(
+                ToggleChange {
+                    feature: Feature::Fff,
+                    desired: false
+                },
+                "/r/x"
+            )
             .kind,
             FeatureActionKind::Remove
         );
@@ -526,7 +537,7 @@ mod tests {
             prop_assert!(!plan.is_empty());
             // Every change is a set-desired (an append), never a structural delete.
             for c in plan {
-                let _ = FeatureAction::from_change(c); // total mapping, no panic
+                let _ = FeatureAction::from_change(c, "/r/x"); // total mapping, no panic
             }
         }
     }

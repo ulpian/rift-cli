@@ -1,3 +1,3 @@
 {
-  "mcpServers": {}
+  "mcpServers": { "rift-recall": { "command": "/Users/ulpian/Documents/codebase/rift/rift-cli/target/debug/rift-memd", "args": ["serve", "--mcp"] } }
 }

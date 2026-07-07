@@ -192,7 +192,12 @@ fn project_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
 fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
     let inner = inner_of(rect);
     if let (Some(detail), Some(dy)) = (&vm.detail, local_row(inner, col, row)) {
-        let lines = detail_line_kinds(detail, vm.toggle_cursor, vm.focus == Panel::Detail);
+        let lines = detail_line_kinds(
+            detail,
+            vm.toggle_cursor,
+            vm.focus == Panel::Detail,
+            &vm.feature_runtime,
+        );
         let line_idx = vm.detail_scroll + usize::from(dy);
         if let Some(LineKind::Toggle(i)) = lines.get(line_idx).map(|l| l.kind) {
             return Target::ToggleRow(i);

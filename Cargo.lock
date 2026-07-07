@@ -2748,6 +2748,7 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "getrandom 0.2.17",
+ "proptest",
  "rift-agent",
  "rift-canopy",
  "rift-canopy-data",
@@ -2767,6 +2768,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

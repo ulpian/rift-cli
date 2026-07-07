@@ -34,6 +34,7 @@ use cli::{exit, Cli, Command, ConfigureArgs, InitArgs, Outcome};
 
 mod agents;
 mod cli;
+mod features;
 mod hooks;
 mod identity;
 mod mcpjson;
@@ -514,7 +515,13 @@ fn resolve_memd_binary() -> Option<std::path::PathBuf> {
         "rift-memd"
     };
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+        // Beside the executable (the dist layout), then one level up (a test
+        // harness runs from target/debug/deps/ while memd sits in debug/).
+        for dir in exe
+            .parent()
+            .into_iter()
+            .chain(exe.parent().and_then(std::path::Path::parent))
+        {
             let candidate = dir.join(name);
             if candidate.exists() {
                 return Some(candidate);
@@ -918,9 +925,9 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
             // Every registry mutation (add/remove/relabel/reorder/toggle) is an
             // append-only write to the canopy store, returning the refreshed list.
             let on_persist = |op: &PersistOp| cstore.apply(op, hooks::now_ms());
-            // Feature installs are Stage 5; until then the null manager accepts
-            // toggle actions without installing anything.
-            let mut manager = rift_canopy::NullFeatureManager;
+            // The real feature manager (M5-12/13, ADR-0013): action results
+            // drive the lifecycle rows; the recall install is real.
+            let mut manager = features::RiftFeatureManager;
             // The palette's delegated verbs cross this in-process dispatcher
             // (ADR-0021) — the binary's own subcommand router over an explicit
             // repository root, injected exactly like on_persist.

@@ -140,12 +140,17 @@ where
             match update(state, ev) {
                 Flow::Quit => state.app.quit = true,
                 Flow::Continue(mut effects) => {
-                    // Dispatches run HERE (not in apply_effects): the running
-                    // frame must present before the synchronous dispatch holds
-                    // the loop (ADR-0011 posture; user-initiated).
+                    // Dispatches and feature actions run HERE (not in
+                    // apply_effects): their running/Enabling frames must
+                    // present before the synchronous work holds the loop
+                    // (ADR-0011 posture; user-initiated).
                     let pending = std::mem::take(&mut effects.dispatches);
+                    let actions = std::mem::take(&mut effects.feature_actions);
                     if !effects.is_empty() {
                         apply_effects(effects, state, on_persist, req_sink, manager);
+                    }
+                    for action in actions {
+                        run_feature_action(backend, state, manager, req_sink, action)?;
                     }
                     for (req, repo) in pending {
                         run_dispatch(
@@ -170,6 +175,44 @@ fn render_if_dirty(backend: &mut dyn RenderBackend, state: &mut AppState) -> Rif
         backend.present(&frame).map_err(render_err)?;
         state.dirty = false;
     }
+    Ok(())
+}
+
+/// Run one feature action through the injected manager, with the row states
+/// driven by the RESULT (M5-12, ADR-0013 — toasts stop standing in for
+/// state): the row enters Enabling/Disabling on a presented frame, then the
+/// manager's outcome moves it to On (runtime cleared; the persisted desired
+/// state shows) or Failed-with-reason. A success refreshes the project so
+/// the detail's toggle rows recompute from the store.
+fn run_feature_action(
+    backend: &mut dyn RenderBackend,
+    state: &mut AppState,
+    manager: &mut dyn FeatureManager,
+    req_sink: &mut dyn FnMut(DataRequest),
+    action: crate::FeatureAction,
+) -> RiftResult<()> {
+    let key = action.feature.key().to_string();
+    let transient = match action.kind {
+        crate::FeatureActionKind::Remove => crate::FeatureRuntime::Disabling,
+        _ => crate::FeatureRuntime::Enabling,
+    };
+    state.app.feature_runtime.insert(key.clone(), transient);
+    state.dirty = true;
+    render_if_dirty(backend, state)?; // the Enabling/Disabling row is visible while we block
+    match manager.apply(&action) {
+        Ok(()) => {
+            state.app.feature_runtime.remove(&key);
+            // The persisted desired state now carries the row; recompute it.
+            req_sink(DataRequest::Refresh(action.path.clone()));
+        }
+        Err(reason) => {
+            state
+                .app
+                .feature_runtime
+                .insert(key, crate::FeatureRuntime::Failed(reason));
+        }
+    }
+    state.dirty = true;
     Ok(())
 }
 
@@ -231,7 +274,7 @@ fn apply_effects<F>(
     state: &mut AppState,
     on_persist: &mut F,
     req_sink: &mut dyn FnMut(DataRequest),
-    manager: &mut dyn FeatureManager,
+    _manager: &mut dyn FeatureManager,
 ) where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
 {
@@ -241,14 +284,9 @@ fn apply_effects<F>(
     for op in effects.persist {
         apply_persist(state, on_persist, &op, req_sink);
     }
-    // Canopy never installs anything itself — it hands each planned action to the
-    // injected manager; a failure surfaces as a status toast, never a crash.
-    for action in effects.feature_actions {
-        if let Err(reason) = manager.apply(&action) {
-            state.app.status = Some(format!("{}: {reason}", action.feature.key()));
-            state.dirty = true;
-        }
-    }
+    // Feature actions are handled by `run_feature_action` in the loop (they
+    // need the backend for the Enabling frame); nothing reaches here.
+    debug_assert!(effects.feature_actions.is_empty());
 }
 
 /// Apply one append-only persistence op and reflect the refreshed registry back
@@ -794,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_install_sets_status_not_panic() {
+    fn failed_install_sets_the_row_state_not_a_toast() {
         let mut backend = MockBackend { presents: 0 };
         // Focus the detail panel, then flip a toggle (Space) → a feature action.
         let mut src = ScriptedEvents::new(vec![
@@ -831,7 +869,63 @@ mod tests {
             &mut || Ok(vec![]),
         )
         .unwrap();
-        let status = state.app.status.expect("a failure toast");
-        assert!(status.contains("install refused"), "got {status:?}");
+        // M5-12 (ADR-0013): the RESULT drives the row — Failed-with-reason
+        // lives on the feature's runtime state, not a toast.
+        let runtime = state
+            .app
+            .feature_runtime
+            .get("fff")
+            .expect("a Failed row state");
+        assert_eq!(
+            *runtime,
+            crate::FeatureRuntime::Failed("install refused".into())
+        );
+        assert!(
+            backend.presents >= 2,
+            "the Enabling frame presented before the manager ran"
+        );
+    }
+
+    /// A successful action clears the transient state and refreshes the
+    /// project so the persisted desired state carries the row.
+    #[test]
+    fn successful_install_clears_the_transient_and_refreshes() {
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![
+            vec![Event::Key(CanopyKey::Tab)],
+            vec![Event::Key(CanopyKey::Char(' '))],
+            vec![Event::Key(CanopyKey::Quit)],
+        ]);
+        let mut state = AppState::new(
+            vec![Project {
+                name: "a".into(),
+                path: "/r/a".into(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }],
+            Size::new(80, 24),
+        );
+        state.app.splash.skip();
+        let refreshes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink_log = refreshes.clone();
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut move |req| sink_log.borrow_mut().push(req),
+            &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+        )
+        .unwrap();
+        assert!(state.app.feature_runtime.is_empty(), "transient cleared");
+        assert!(
+            refreshes
+                .borrow()
+                .iter()
+                .any(|r| *r == DataRequest::Refresh("/r/a".into())),
+            "a success refreshes the project's detail"
+        );
     }
 }
