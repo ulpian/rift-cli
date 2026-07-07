@@ -56,6 +56,20 @@ pub(crate) fn render_err(e: RenderError) -> rift_core::RiftError {
     rift_core::RiftError::Other(e.to_string())
 }
 
+/// The shared startup prime (M5-02): one `Refresh` per tracked project, then
+/// the subscribe for the initial selection — the same requests a selection
+/// change or persist-apply would issue, sent once at startup so the first
+/// frame's data is already being computed. `event_loop` calls this before its
+/// first poll; the headless frame calls it in place of a hand-rolled send, so
+/// the interactive and headless runs exercise **one** startup path.
+pub fn prime_startup(state: &AppState, req_sink: &mut dyn FnMut(DataRequest)) {
+    for p in &state.app.projects {
+        req_sink(DataRequest::Refresh(p.path.clone()));
+    }
+    let active = state.app.selected_project().map(|p| p.path.clone());
+    req_sink(DataRequest::SetActive(active));
+}
+
 /// Run the dashboard loop: render-if-dirty, block for events, reduce, apply
 /// effects, repeat — until a quit. `on_persist` performs one append-only registry
 /// mutation (add/remove/relabel/reorder/toggle) and returns the refreshed project
@@ -79,6 +93,11 @@ pub fn event_loop<F>(
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
 {
+    // Launch is live by construction: the prime runs at the loop seam, BEFORE
+    // the first poll, so the bus computes feeds for the initial selection with
+    // zero key events (M5-02 — the M4 blind spot was a subscribe only the
+    // headless vehicle ever sent).
+    prime_startup(state, req_sink);
     let mut last = Instant::now();
     loop {
         if state.dirty {
@@ -294,6 +313,77 @@ mod tests {
         let mut s = AppState::new(vec![], Size::new(80, 24));
         s.app.splash.skip();
         s
+    }
+
+    #[test]
+    fn startup_prime_subscribes_before_the_first_poll_with_zero_key_events() {
+        // The M4 dogfood escape (M5-02): launch must be live BY CONSTRUCTION —
+        // the loop itself issues one Refresh per project + the SetActive for
+        // the initial selection before it ever polls for input. The shared
+        // marker log proves the order; no key event is ever injected.
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum Mark {
+            Req(DataRequest),
+            Poll,
+        }
+        let log: Rc<RefCell<Vec<Mark>>> = Rc::new(RefCell::new(Vec::new()));
+
+        struct MarkingSource {
+            log: Rc<RefCell<Vec<Mark>>>,
+        }
+        impl EventSource for MarkingSource {
+            fn poll(&mut self, _t: Duration) -> RiftResult<Vec<Event>> {
+                self.log.borrow_mut().push(Mark::Poll);
+                // End the loop with ZERO events — the prime must already be done.
+                Err(rift_core::RiftError::Other("scripted stop".into()))
+            }
+        }
+
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = MarkingSource { log: log.clone() };
+        let mut state = AppState::new(
+            vec![
+                Project {
+                    name: "a".into(),
+                    path: "/a".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+                Project {
+                    name: "b".into(),
+                    path: "/b".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+            ],
+            Size::new(80, 24),
+        );
+        state.app.splash.skip();
+
+        let sink_log = log.clone();
+        let mut sink = move |req: DataRequest| sink_log.borrow_mut().push(Mark::Req(req));
+        let _ = event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut sink,
+            &mut NullFeatureManager,
+        );
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                Mark::Req(DataRequest::Refresh("/a".into())),
+                Mark::Req(DataRequest::Refresh("/b".into())),
+                Mark::Req(DataRequest::SetActive(Some("/a".into()))),
+                Mark::Poll,
+            ],
+            "the full prime precedes the first poll"
+        );
     }
 
     #[test]

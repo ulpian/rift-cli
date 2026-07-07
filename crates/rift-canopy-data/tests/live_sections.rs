@@ -138,10 +138,9 @@ fn token_sections_render_live_from_a_seeded_projection() {
     seed_token_fact(root.path(), &path, "c2", 8_000, (300, 4_000, 0, 500));
 
     let bus = spawn_with_root(root.path().to_path_buf(), vec![path.clone()]);
-    // Selecting the project subscribes its feeds (SetActive, ADR-0009).
-    bus.req_tx
-        .send(DataRequest::SetActive(Some(path.clone())))
-        .unwrap();
+    // NO subscribe is sent by this test (M5-02): the loop's own startup prime
+    // must go live on its own — req_sink is wired to the real bus, exactly as
+    // the interactive launch wires it.
 
     let mut state = AppState::new(
         vec![Project {
@@ -167,12 +166,15 @@ fn token_sections_render_live_from_a_seeded_projection() {
         satisfied: false,
     };
     let mut backend = MockBackend;
+    let req_tx = bus.req_tx.clone();
     event_loop(
         &mut backend,
         &mut src,
         &mut state,
         &mut |_op: &PersistOp| Ok(vec![]),
-        &mut |_req| {},
+        &mut move |req: DataRequest| {
+            let _ = req_tx.send(req);
+        },
         &mut NullFeatureManager,
     )
     .unwrap();

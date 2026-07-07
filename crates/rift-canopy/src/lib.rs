@@ -34,7 +34,7 @@ pub mod splash;
 pub mod state;
 pub mod view;
 
-pub use app::CanopyOpts;
+pub use app::{prime_startup, CanopyOpts};
 pub use col1::{
     current_registry, derive_status, EntryKind, LiveSessions, ProjectEntry, ProjectEvent,
     ProjectOp, ProjectionState, SessionsRead, StatusInputs,

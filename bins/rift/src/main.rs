@@ -429,9 +429,13 @@ fn print_ascii_frame(projects: Vec<Project>) {
         .unwrap_or(1200);
     if wait_ms > 0 && !state.app.projects.is_empty() {
         let paths: Vec<String> = state.app.projects.iter().map(|p| p.path.clone()).collect();
-        let active = state.app.selected_project().map(|p| p.path.clone());
         let bus = rift_canopy_data::spawn(paths);
-        let _ = bus.req_tx.send(rift_canopy::DataRequest::SetActive(active));
+        // The SAME prime the interactive loop runs at its seam — one startup
+        // path, so the headless frame can never again mask a dead launch
+        // subscribe (the M4 gate blind spot, M5-02).
+        rift_canopy::prime_startup(&state, &mut |req| {
+            let _ = bus.req_tx.send(req);
+        });
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
         while std::time::Instant::now() < deadline {
             match bus
