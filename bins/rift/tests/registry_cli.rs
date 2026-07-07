@@ -79,3 +79,85 @@ fn setup_registers_cwd_and_dashboard_lists_it() {
         "still one entry after a repeat setup: {text2}"
     );
 }
+
+/// M5-04: `rift projects list|prune` over a hermetic cache root. Victims are
+/// exactly the path-missing rows; `--dry-run` names them and writes nothing;
+/// a present-but-not-a-repo row is never pruned (append-only: remove events
+/// supersede, history stays).
+#[test]
+fn projects_list_and_prune_sweep_only_missing_paths() {
+    let cfg = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+
+    // Three registered rows: a live repo, a soon-dead tempdir, a plain dir.
+    let live = tempfile::tempdir().unwrap();
+    let dead = tempfile::tempdir().unwrap();
+    let plain = tempfile::tempdir().unwrap(); // present, but never a git repo
+
+    for dir in [live.path(), dead.path(), plain.path()] {
+        let out = rift(cfg.path(), cache.path(), dir, &["setup"]);
+        assert!(out.status.success(), "setup failed: {out:?}");
+    }
+    let dead_path = dead.path().to_path_buf();
+    let dead_canon = dead_path.canonicalize().unwrap_or(dead_path.clone());
+    drop(dead); // the registered path no longer exists as a directory
+
+    let list = rift(cfg.path(), cache.path(), live.path(), &["projects", "list", "--json"]);
+    assert!(list.status.success());
+    let doc: serde_json::Value =
+        serde_json::from_slice(&list.stdout).expect("projects list --json parses");
+    let rows = doc["projects"].as_array().unwrap();
+    assert_eq!(rows.len(), 3, "all three rows listed: {doc}");
+    let missing: Vec<&str> = rows
+        .iter()
+        .filter(|r| !r["present"].as_bool().unwrap())
+        .map(|r| r["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(missing.len(), 1, "exactly the dead row is absent: {doc}");
+
+    // Dry-run names exactly the dead row and writes nothing.
+    let dry = rift(
+        cfg.path(),
+        cache.path(),
+        live.path(),
+        &["projects", "prune", "--dry-run", "--json"],
+    );
+    assert!(dry.status.success());
+    let dry_doc: serde_json::Value = serde_json::from_slice(&dry.stdout).unwrap();
+    let victims: Vec<&str> = dry_doc["victims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(victims.len(), 1, "one victim: {dry_doc}");
+    assert!(
+        victims[0] == dead_canon.to_string_lossy()
+            || victims[0].ends_with(dead_canon.file_name().unwrap().to_str().unwrap()),
+        "the victim is the dead row: {victims:?}"
+    );
+    let after_dry = rift(cfg.path(), cache.path(), live.path(), &["projects", "list", "--json"]);
+    let after_dry_doc: serde_json::Value = serde_json::from_slice(&after_dry.stdout).unwrap();
+    assert_eq!(
+        after_dry_doc["projects"].as_array().unwrap().len(),
+        3,
+        "dry-run wrote nothing"
+    );
+
+    // The real prune removes exactly the victim; the plain dir stays.
+    let prune = rift(cfg.path(), cache.path(), live.path(), &["projects", "prune"]);
+    assert!(prune.status.success());
+    let after = rift(cfg.path(), cache.path(), live.path(), &["projects", "list", "--json"]);
+    let after_doc: serde_json::Value = serde_json::from_slice(&after.stdout).unwrap();
+    let left = after_doc["projects"].as_array().unwrap();
+    assert_eq!(left.len(), 2, "the dead row is gone: {after_doc}");
+    assert!(
+        left.iter().all(|r| r["present"].as_bool().unwrap()),
+        "every remaining row is present: {after_doc}"
+    );
+
+    // Prune again: nothing left to sweep (idempotent surface).
+    let again = rift(cfg.path(), cache.path(), live.path(), &["projects", "prune", "--json"]);
+    let again_doc: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(again_doc["victims"].as_array().unwrap().len(), 0);
+}

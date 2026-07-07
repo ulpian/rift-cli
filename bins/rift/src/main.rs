@@ -139,8 +139,86 @@ fn route(_cli: &Cli, cmd: &Command) -> rift_core::Result<Outcome> {
         // rebuilt from git), so it needs no `.rift/` init guard.
         Command::Memory(m) => memory::run(m),
         Command::Gc(a) => projection_read(|s, rt| rt.block_on(query::gc(s, a.dry_run))),
+        Command::Projects(p) => projects_cmd(p),
         // Hooks is handled in `main` before routing.
         Command::Hooks(_) => Ok(Outcome::ok(String::new(), serde_json::json!({}))),
+    }
+}
+
+/// `rift projects list|prune` (M5-04): the registry CLI over the append-only
+/// canopy UI-state store. `list` shows every registered row with its presence
+/// (the same path-missing fact behind the dashboard's `!` glyph); `prune`
+/// appends one superseding removed event per path-missing row. Registered rows
+/// only — derived worktree children are never registry rows.
+fn projects_cmd(cmd: &cli::ProjectsCmd) -> rift_core::Result<Outcome> {
+    let cache_root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
+    let cstore = rift_canopy_data::CanopyStore::open(&cache_root)?;
+    let rows: Vec<Project> = cstore
+        .projects()?
+        .into_iter()
+        .filter(|p| p.kind == rift_canopy::EntryKind::Repo)
+        .collect();
+    let present = |p: &Project| std::path::Path::new(&p.path).is_dir();
+
+    match cmd {
+        cli::ProjectsCmd::List => {
+            let mut human = String::new();
+            let mut json_rows = Vec::new();
+            for p in &rows {
+                let ok = present(p);
+                human.push_str(&format!(
+                    "{} {}  ({})\n",
+                    if ok { " " } else { "!" },
+                    p.path,
+                    p.name
+                ));
+                json_rows.push(serde_json::json!({
+                    "path": p.path, "label": p.name, "present": ok,
+                }));
+            }
+            if rows.is_empty() {
+                human.push_str("no projects registered — run `rift init` in a repository\n");
+            }
+            Ok(Outcome::ok(
+                human.trim_end().to_owned(),
+                serde_json::json!({ "projects": json_rows }),
+            ))
+        }
+        cli::ProjectsCmd::Prune(a) => {
+            let victims: Vec<&Project> = rows.iter().filter(|p| !present(p)).collect();
+            let mut human = String::new();
+            for v in &victims {
+                human.push_str(&format!(
+                    "{} {}  ({})\n",
+                    if a.dry_run { "would remove" } else { "removed" },
+                    v.path,
+                    v.name
+                ));
+            }
+            if !a.dry_run {
+                for v in &victims {
+                    cstore.apply(
+                        &PersistOp::RemoveProject {
+                            path: v.path.clone(),
+                        },
+                        hooks::now_ms(),
+                    )?;
+                }
+            }
+            human.push_str(&format!(
+                "{} {} of {} registered rows{}",
+                if a.dry_run { "would prune" } else { "pruned" },
+                victims.len(),
+                rows.len(),
+                if a.dry_run { " (dry run — nothing written)" } else { "" }
+            ));
+            let json = serde_json::json!({
+                "dry_run": a.dry_run,
+                "victims": victims.iter().map(|v| v.path.clone()).collect::<Vec<_>>(),
+                "registered": rows.len(),
+            });
+            Ok(Outcome::ok(human, json))
+        }
     }
 }
 

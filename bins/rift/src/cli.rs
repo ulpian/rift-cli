@@ -97,6 +97,10 @@ pub(crate) enum Command {
     Memory(MemoryCmd),
     /// Prune transient shadow refs / orphaned objects (never the canonical chain).
     Gc(GcArgs),
+    /// Inspect and maintain the machine-global project registry (the dashboard's
+    /// project list).
+    #[command(subcommand)]
+    Projects(ProjectsCmd),
     /// Configure policy and the checkpoint remote.
     Configure(ConfigureArgs),
     /// Agent + git hook entry (JSON on stdin). Hidden: for agents, not humans.
@@ -175,6 +179,29 @@ pub(crate) enum SessionCmd {
 pub(crate) struct IdArgs {
     /// The id (or a unique prefix).
     pub(crate) id: String,
+}
+
+/// `rift projects …` — the registry's CLI (M5-04): the dashboard's project
+/// list, inspectable and sweepable without a TUI keypress.
+#[derive(Subcommand, Debug)]
+pub(crate) enum ProjectsCmd {
+    /// List every registered project: path, label, presence.
+    List,
+    /// Sweep registered rows whose path no longer exists as a directory,
+    /// appending one superseding removed event per victim (append-only —
+    /// history stays). A present-but-not-a-repo row is never pruned.
+    ///
+    /// Caveat: a temporarily unmounted network/external volume also reads as
+    /// missing — run `--dry-run` first when in doubt.
+    Prune(PruneArgs),
+}
+
+/// `rift projects prune`.
+#[derive(Args, Debug)]
+pub(crate) struct PruneArgs {
+    /// Print the rows that would be removed without writing anything.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }
 
 /// `rift memory …` — the human-facing recall surface (PRD-M2). Reuses the
