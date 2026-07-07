@@ -2,23 +2,23 @@
 source: crates/rift-canopy/tests/snapshots.rs
 expression: "col3_text(&col3, 20)"
 ---
-╭─ graphs ───────────────────────╮
-│· token usage  Σ 7.5K           │
-│                      █         │
-│              ▄       █         │
-│      ▄       █   ▄   █       █ │
-│  ▄   █   ▄   █   █   █   █   █ │
-│· input | read | output  read 90│
-│in 5.2K  rd 48K  out 9.1K       │
-│cache-write 3.3K                │
+╭─ token usage  Σ 7.5K ──────────╮
+│            █                   │
 │    ▄       █       ▄       ▄   │
-│· nic-gauge  [1 thread]         │
-│? unknown context window: myster│
+│in 5.2K                         │
+│rd 48K                          │
+│out 9.1K                        │
+╰────────────────────────────────╯
+╭─ system ───────────────────────╮
 │                                │
-│· recall savings  (no serves yet│
+│~ unknown window: mystery-model-│
+│- capture: —                    │
+│- burn: —                       │
+│- projection: —                 │
+│- recall: —                     │
+╰────────────────────────────────╯
+╭─ recall ───────────────────────╮
+│enabled, no serves yet — see `ri│
 │                                │
 │                                │
-│                                │
-│· recall mcp calls  (no serves y│
-│· threads  2 active             │
 ╰────────────────────────────────╯

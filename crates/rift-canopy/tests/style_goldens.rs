@@ -242,6 +242,87 @@ fn golden_dashboard_four_tiers() {
     insta::assert_snapshot!("dashboard_themed", four_tier_golden(dashboard_frame));
 }
 
+// ---- M55-12: the dumbometer donut (radial on SUBCELL, bar degrade) ----------
+
+/// Render the system panel for a 62% reading, on a backend whose capabilities
+/// `caps` decide radial-vs-bar. Used to pin the donut's two tiers.
+fn system_panel(caps: Capabilities, w: u16, h: u16) -> Frame {
+    use rift_canopy::{Col3, NicReading, NicView};
+    let col3 = Col3 {
+        nic: NicView::Reading(NicReading {
+            pct: 62,
+            band: "Capable",
+            model: "claude-fable-5".into(),
+            threads: 2,
+        }),
+        ..Col3::default()
+    };
+    let mut f = Frame::new(Size::new(w, h));
+    let mut backend = TierBackend { caps };
+    let unicode = caps.contains(Capabilities::UNICODE);
+    rift_canopy::col3::draw(
+        &col3,
+        false,
+        unicode,
+        rift_canopy::layout::Rect { x: 0, y: 0, w, h },
+        &mut backend,
+        &mut f,
+    );
+    f
+}
+
+#[test]
+fn golden_donut_radial_on_subcell_and_bar_degrade() {
+    // SUBCELL-capable → the radial arc; no SUBCELL → the horizontal gauge bar.
+    let sub = Capabilities::TRUECOLOR | Capabilities::UNICODE | Capabilities::SUBCELL;
+    insta::assert_snapshot!(
+        "donut_radial",
+        common::style_snapshot(&system_panel(sub, 30, 34), Tier::Truecolor)
+    );
+    let plain = Capabilities::TRUECOLOR | Capabilities::UNICODE;
+    insta::assert_snapshot!(
+        "donut_bar_degrade",
+        common::style_snapshot(&system_panel(plain, 30, 34), Tier::Truecolor)
+    );
+}
+
+#[test]
+fn donut_unknown_model_shows_no_percentage() {
+    use rift_canopy::{Col3, NicView};
+    let sub = Capabilities::TRUECOLOR | Capabilities::UNICODE | Capabilities::SUBCELL;
+    let col3 = Col3 {
+        nic: NicView::UnknownModel {
+            model: "mystery-9000".into(),
+            threads: 1,
+        },
+        ..Col3::default()
+    };
+    let mut f = Frame::new(Size::new(30, 14));
+    let mut b = TierBackend { caps: sub };
+    rift_canopy::col3::draw(
+        &col3,
+        false,
+        true,
+        rift_canopy::layout::Rect {
+            x: 0,
+            y: 0,
+            w: 30,
+            h: 14,
+        },
+        &mut b,
+        &mut f,
+    );
+    let text: String = (0..f.height())
+        .flat_map(|y| (0..f.width()).map(move |x| (x, y)))
+        .map(|(x, y)| f.get(x, y).map_or(' ', |c| c.ch))
+        .collect();
+    assert!(text.contains("unknown"), "the explicit indicator renders");
+    assert!(
+        !text.contains('%'),
+        "an unknown model never invents a percentage"
+    );
+}
+
 /// The serializer's own contract, asserted directly (not via a golden): the
 /// truecolor tier carries RGB colour; the mono/ASCII floors carry attributes
 /// but **no colour** (every legend entry's fg and bg is the terminal default —

@@ -3,31 +3,31 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: "render_state(&mut suggest_state(\"zzzzzz\"))"
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
-╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ graphs ─────────────────────────────╮
-│># rift-cli      *││rift-cli (repo)                       ││· token usage  (no token activity yet)│
+╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────╮
+│># rift-cli      *││rift-cli (repo)                       ││(no token activity yet)               │
 │ # rift-site     o││path: /r/rift-cli                     ││                                      │
 │                  ││* running                             ││                                      │
 │                  ││[ Open in $EDITOR e ]                 ││                                      │
 │                  │╰──────────────────────────────────────╯│                                      │
 │                  │(none yet)                              │                                      │
-│                  │0 sensitive paths                       │· input | read | output  (no token act│
+│                  │0 sensitive paths                       │                                      │
 │                  │╭─ capture ────────────────────────────╮│                                      │
-│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  ││                                      │
-│                  │││    0     ││    0     ││    0     │  ││                                      │
+│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  │╰──────────────────────────────────────╯
+│                  │││    0     ││    0     ││    0     │  │╭─ system ─────────────────────────────╮
 │                  ││╰──────────╯╰──────────╯╰──────────╯  ││                                      │
 │                  ││                                      ││                                      │
-│                  │╰──────────────────────────────────────╯│· nic-gauge  (no model calls yet)     │
+│                  │╰──────────────────────────────────────╯│(no model calls yet)                  │
 │                  │╭─ features ───────────────────────────╮│                                      │
 │                  ││(no features)                         ││                                      │
-│                  ││                                      ││· recall savings  (recall off — /toggl│
+│                  ││                                      ││- capture: —                          │
+│                  ││                                      ││- burn: —                             │
+│                  │╰──────────────────────────────────────╯│- projection: —                       │
+│                  │╭─ activity · 7d ──────────────────────╮│- recall: —                           │
+│                  ││(no projection yet)                   │╰──────────────────────────────────────╯
+│                  ││                                      │╭─ recall ─────────────────────────────╮
+│                  ││                                      ││recall off — /toggle total-recall     │
 │                  ││                                      ││                                      │
-│                  │╰──────────────────────────────────────╯│                                      │
-│                  │╭─ activity · 7d ──────────────────────╮│                                      │
-│                  ││(no projection yet)                   ││                                      │
-│                  ││                                      ││· recall mcp calls  (recall off — /tog│
 │                  ││                                      ││                                      │
-│                  ││                                      ││                                      │
-│                  ││                                      ││· threads  (no active sessions)       │
 │                  ││                                      ││                                      │
 ╰──────────────────╯╰──────────────────────────────────────╯╰──────────────────────────────────────╯
  ↑/↓ highlight  ·  tab insert  ·  ⏎ run  ·  esc close

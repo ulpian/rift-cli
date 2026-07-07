@@ -331,6 +331,34 @@ pub fn gauge_points(fraction: f32, xsamples: u16, ylevels: u16) -> Vec<PlotPoint
     out
 }
 
+/// Donut arc: the `pct`-filled ring (M55-12), swept clockwise from 12 o'clock,
+/// one point per `samples` step, lit only while the swept fraction is within
+/// `pct`%. Aspect-corrected (a wider x-radius) so it reads round in ~2:1 cells.
+/// Coverage is **monotonic** in `pct` (a fuller gauge lights ⊇ the emptier one)
+/// and every point is in `[0, 1]`, so the arc never leaves its rect.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn donut_points(pct: u8, samples: u16) -> Vec<PlotPoint> {
+    use std::f32::consts::TAU;
+    let frac = f32::from(pct.min(100)) / 100.0;
+    let samples = samples.max(1);
+    let mut out = Vec::new();
+    // Normalized radii: x wider than y to counter the terminal's tall cells.
+    let (rx, ry) = (0.46f32, 0.42f32);
+    for i in 0..samples {
+        let a = f32::from(i) / f32::from(samples); // 0..1 around the circle
+        if a > frac {
+            break; // only the filled arc
+        }
+        let theta = a * TAU;
+        out.push(PlotPoint {
+            x: 0.5 + rx * theta.sin(), // clockwise…
+            y: 0.5 - ry * theta.cos(), // …from the top (12 o'clock)
+        });
+    }
+    out
+}
+
 /// The autoscale ceiling for a series: its max, guarded so a zero-range or
 /// empty series still yields a defined, non-zero scale (no divide-by-zero, no
 /// panic — PRD "autoscale guarded against zero ranges").
@@ -628,9 +656,57 @@ mod tests {
                 .chain(bar_points(&values, max, 8))
                 .chain(line_points(&values, max, 32))
                 .chain(gauge_points(0.7, 16, 2))
+                .chain(donut_points(70, 64))
             {
                 prop_assert!((0.0..=1.0).contains(&p.x));
                 prop_assert!((0.0..=1.0).contains(&p.y));
+            }
+        }
+
+        /// The donut arc's coverage is **monotonic** in pct (a fuller gauge
+        /// lights a superset of the emptier one) and every point is in range.
+        #[test]
+        fn donut_coverage_is_monotonic(a in 0u8..=100, b in 0u8..=100, samples in 8u16..256) {
+            let (lo, hi) = (a.min(b), a.max(b));
+            let lo_pts = donut_points(lo, samples);
+            let hi_pts = donut_points(hi, samples);
+            prop_assert!(hi_pts.len() >= lo_pts.len(), "fuller pct → ⊇ coverage");
+            // The emptier arc is a prefix of the fuller one (same sweep order).
+            prop_assert_eq!(&hi_pts[..lo_pts.len()], &lo_pts[..]);
+            for p in hi_pts {
+                prop_assert!((0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y));
+            }
+        }
+
+        /// Grouped bars: within each group the categories occupy **distinct,
+        /// strictly-increasing x sub-slots** (they never overlap at the contract
+        /// level), and every point is in range. Cell-level collapse at low
+        /// resolution is a rasterization artifact, not a contract violation.
+        #[test]
+        fn grouped_bars_categories_are_disjoint_in_x(
+            groups in proptest::collection::vec(
+                proptest::collection::vec(1.0f64..100.0, 3..=3), 1..8),
+        ) {
+            let max = autoscale_max(&groups.iter().flatten().copied().collect::<Vec<_>>());
+            let per_cat = grouped_bar_points(&groups, 3, max, 8);
+            prop_assert_eq!(per_cat.len(), 3);
+            // For each group, the three categories' x are distinct + ordered.
+            for g in 0..groups.len() {
+                let xs: Vec<f32> = per_cat
+                    .iter()
+                    .filter_map(|cat| cat.iter().find(|p| {
+                        // the g-th group's sub-slot band
+                        let stride = 3 + 1;
+                        let lo = (g * stride) as f32 / (groups.len() * stride) as f32;
+                        let hi = ((g + 1) * stride) as f32 / (groups.len() * stride) as f32;
+                        p.x >= lo && p.x < hi
+                    }).map(|p| p.x))
+                    .collect();
+                prop_assert_eq!(xs.len(), 3, "each category has a bar in group {}", g);
+                prop_assert!(xs[0] < xs[1] && xs[1] < xs[2], "categories are ordered + distinct");
+            }
+            for p in per_cat.iter().flatten() {
+                prop_assert!((0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y));
             }
         }
     }

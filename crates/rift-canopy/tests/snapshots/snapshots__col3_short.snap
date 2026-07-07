@@ -2,22 +2,22 @@
 source: crates/rift-canopy/tests/snapshots.rs
 expression: "col3_text(&col3_with_data(), 19)"
 ---
-╭─ graphs ───────────────────────╮
-│· token usage  Σ 7.5K           │
-│                      █         │
-│      ▄       █       █       ▄ │
-│  ▄   █   ▄   █   █   █   ▄   █ │
-│· input | read | output  read 90│
-│in 5.2K  rd 48K  out 9.1K       │
-│cache-write 3.3K                │
-│    ▄       █       ▄       ▄   │
-│· nic-gauge  62% Capable  [2 thr│
-│████████████████████            │
-│████████████████████            │
-│· recall savings  Σ 6.0K saved  │
-│                      ▄▄▀▀▀▀▀▀▀▄│
-│        ▄▄▄▀▀▀▀▀▄▄▄▄█▀          │
-│▄▄▄▄▄█▀▀▀                       │
-│· recall mcp calls  Σ 17        │
-│· threads  2 active             │
+╭─ token usage  Σ 7.5K ──────────╮
+│            █                   │
+│            █                   │
+│            █                   │
+│    ▄       █       █       ▄   │
+│in 5.2K                         │
+│rd 48K                          │
+│out 9.1K                        │
 ╰────────────────────────────────╯
+╭─ system ───────────────────────╮
+│62% Capable  [2 threads]        │
+│████████████████████            │
+│████████████████████            │
+│- capture: —                    │
+│- burn: —                       │
+│- projection: —                 │
+│- recall: —                     │
+╰────────────────────────────────╯
+saved 42%  (6.0K tokens)

@@ -3,39 +3,39 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: frame_text(&f)
 ---
  RIFT  Canopy  *                                                                              ? Help  / Palette  q Quit
-╭─ projects  2 ────────╮╭─ repository ─────────────────────────────────╮╭─ graphs ─────────────────────────────────────╮
-│># rift-cli          *││rift-cli (repo)                               ││· token usage  (no token activity yet)        │
+╭─ projects  2 ────────╮╭─ repository ─────────────────────────────────╮╭─ token usage ────────────────────────────────╮
+│># rift-cli          *││rift-cli (repo)                               ││(no token activity yet)                       │
 │ # rift-site         o││path: /r/rift-cli                             ││                                              │
 │                      ││* running                                     ││                                              │
 │                      ││[ Open in $EDITOR e ]                         ││                                              │
 │                      │╰──────────────────────────────────────────────╯│                                              │
 │                      │╭─ models ─────────────────────────────────────╮│                                              │
 │                      ││(none yet)                                    ││                                              │
-│                      ││                                              ││· input | read | output  (no token activity ye│
+│                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
 │                      │╰──────────────────────────────────────────────╯│                                              │
 │                      │╭─ settings ───────────────────────────────────╮│                                              │
-│                      ││sensitive paths: 0                            ││                                              │
-│                      ││raw transcripts: off                          ││                                              │
+│                      ││sensitive paths: 0                            │╰──────────────────────────────────────────────╯
+│                      ││raw transcripts: off                          │╭─ system ─────────────────────────────────────╮
 │                      │╰──────────────────────────────────────────────╯│                                              │
-│                      │╭─ capture ────────────────────────────────────╮│· nic-gauge  (no model calls yet)             │
+│                      │╭─ capture ────────────────────────────────────╮│                                              │
 │                      ││╭─ . events ──╮╭─ = sessions ╮╭─ ^ checks ──╮ ││                                              │
 │                      │││      0      ││      0      ││      0      │ ││                                              │
-│                      ││╰─────────────╯╰─────────────╯╰─────────────╯ ││                                              │
-│                      ││                                              ││                                              │
-│                      │╰──────────────────────────────────────────────╯│· recall savings  (recall off — /toggle total-│
-│                      │╭─ features ───────────────────────────────────╮│                                              │
-│                      ││(no features)                                 ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
+│                      ││╰─────────────╯╰─────────────╯╰─────────────╯ ││(no model calls yet)                          │
 │                      ││                                              ││                                              │
 │                      │╰──────────────────────────────────────────────╯│                                              │
-│                      │╭─ activity · 7d ──────────────────────────────╮│· recall mcp calls  (recall off — /toggle tota│
-│                      ││(no projection yet)                           ││                                              │
+│                      │╭─ features ───────────────────────────────────╮│                                              │
+│                      ││(no features)                                 ││- capture: —                                  │
+│                      ││                                              ││- burn: —                                     │
+│                      ││                                              ││- projection: —                               │
+│                      ││                                              ││- recall: —                                   │
+│                      │╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
+│                      │╭─ activity · 7d ──────────────────────────────╮╭─ recall ─────────────────────────────────────╮
+│                      ││(no projection yet)                           ││recall off — /toggle total-recall             │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
-│                      ││                                              ││· threads  (no active sessions)               │
+│                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
 ╰──────────────────────╯╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
  j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  ·  q quit

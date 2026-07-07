@@ -3,14 +3,17 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: render_state(&mut s)
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
-╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ graphs ─────────────────────────────╮
-│>╭─ rift status ────────────────────────────────────────────────────────────────────────────────╮)│
+╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────╮
+│>╭─ rift status ────────────────────────────────────────────────────────────────────────────────╮ │
 │ │line 396                                                                                      │ │
 │ │line 397                                                                                      │ │
 │ │line 398                                                                                      │ │
 │ │line 399                                                                                      │ │
 │ │… truncated (100 more line(s))                                                                │ │
-│ │                                                                                              │t│
+│ │                                                                                              │ │
+│ │                                                                                              │ │
+│ │                                                                                              │─╯
+│ │                                                                                              │─╮
 │ │                                                                                              │ │
 │ │                                                                                              │ │
 │ │                                                                                              │ │
@@ -19,12 +22,9 @@ expression: render_state(&mut s)
 │ │                                                                                              │ │
 │ │                                                                                              │ │
 │ │                                                                                              │ │
-│ │                                                                                              │l│
 │ │                                                                                              │ │
-│ │                                                                                              │ │
-│ │                                                                                              │ │
-│ │                                                                                              │ │
-│ │                                                                                              │g│
+│ │                                                                                              │─╯
+│ │                                                                                              │─╮
 │ │                                                                                              │ │
 │ │                                                                                              │ │
 │ │                                                                                              │ │

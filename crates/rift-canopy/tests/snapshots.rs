@@ -170,14 +170,13 @@ fn col3_with_data() -> rift_canopy::Col3 {
     }
 }
 
-/// Render just a col3 area of the given height from `col3`.
+/// Render just a col3 area of the given height from `col3` (the three panels
+/// fill the area directly — no outer border, like the column-2 cards).
 fn col3_text(col3: &rift_canopy::Col3, h: u16) -> String {
-    use rift_canopy::render::frame::Style;
     let mut f = Frame::new(Size::new(34, h));
     let mut b = AsciiBackend::new(Capabilities::empty());
     let area = f.rect();
-    let inner = f.border(area, "graphs", Style::DEFAULT);
-    rift_canopy::col3::draw(col3, inner, &mut b, &mut f);
+    rift_canopy::col3::draw(col3, false, false, area, &mut b, &mut f);
     frame_text(&f)
 }
 

@@ -530,11 +530,20 @@ fn draw_detail(
     crate::cards::draw(&ctx, THEME, rect, backend, frame);
 }
 
-/// Column 3 — the six live-graph sections (M4-10): solved into a weighted
-/// stack, each honest about absent data, drawn through the plot seam.
+/// Column 3 — the three live panels (M55-11/12/13): token usage, system (the
+/// donut + domain metrics), recall — each an individually-bordered themed
+/// card filling the column, solved by the shared stack. No outer border (like
+/// the column-2 cards); focus accents the panel borders.
 fn draw_graphs(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, rect: Rect) {
-    let inner = frame.border(rect, "graphs", border_style(vm.focus == Panel::Graphs));
-    crate::col3::draw(&vm.col3, inner, backend, frame);
+    let unicode = backend.capabilities().contains(Capabilities::UNICODE);
+    crate::col3::draw(
+        &vm.col3,
+        vm.focus == Panel::Graphs,
+        unicode,
+        rect,
+        backend,
+        frame,
+    );
 }
 
 /// Print `text` on row `dy` of `area`, truncated to the area's width and dropped
@@ -646,17 +655,14 @@ mod tests {
         // Column 2 is the M55-08 card stack, not a single "detail" panel.
         assert!(text.contains("repository"));
         assert!(text.contains("capture"));
-        assert!(text.contains("graphs"));
         // The hint bar teaches the focused (projects) keymap.
         assert!(text.contains("j/k navigate"));
-        // The six col-3 sections render their honest placeholders (M4-10) —
-        // the old fake-zero savings/tokens lines are gone.
+        // Column 3 regroups into the M55-11/12/13 three panels, each honest
+        // about absent data (never a fake zero).
         assert!(text.contains("token usage"));
         assert!(text.contains("no token activity yet"));
-        assert!(text.contains("recall savings"));
-        // The col-2 context bar is retired (ADR-0012): the col-3 nic-gauge
-        // section owns context now.
-        assert!(text.contains("nic-gauge"));
+        assert!(text.contains("system"));
+        assert!(text.contains("recall"));
     }
 
     #[test]
@@ -813,10 +819,10 @@ mod tests {
         assert_eq!(choose_mode(Size::new(60, 20)), LayoutMode::TwoCol);
         let text = render_to_text(&sized(60, 20).snapshot());
         assert!(text.contains("projects"));
-        // Column 2 is short here, so the cards collapse to headlines — the
-        // repository card's `<name> · <status>` sits above the graphs column.
+        // Both columns are short here and collapse to headlines — the card
+        // stack's `<name> · <status>` sits above the col-3 panels' placeholder.
         let detail_row = text.lines().position(|l| l.contains("· idle"));
-        let graphs_row = text.lines().position(|l| l.contains("token usage"));
+        let graphs_row = text.lines().position(|l| l.contains("no token activity"));
         assert!(
             detail_row < graphs_row && detail_row.is_some(),
             "the card stack sits above graphs in two-column mode ({detail_row:?} < {graphs_row:?})"
@@ -838,7 +844,11 @@ mod tests {
         s.app.focus = Panel::Graphs;
         let text = render_to_text(&s.snapshot());
         assert!(text.contains("[Graphs]"));
-        assert!(text.contains("token usage"), "the graphs panel is shown");
+        // The col-3 panels are short here → collapsed to the token headline.
+        assert!(
+            text.contains("no token activity"),
+            "the graphs panel is shown"
+        );
     }
 
     #[test]

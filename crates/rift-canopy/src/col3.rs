@@ -1,19 +1,21 @@
-//! Column 3 — the six live-graph sections: view-model types, the stack
-//! solver, and the section renderer (M4-10).
+//! Column 3 — the three live panels (M55-11/12/13, ADR-0024 §4): the M4 six
+//! sections regroup into **token usage** (the four-class categorical chart + Σ
+//! total + read fraction + five class-coloured stat tiles), **system** (the
+//! dumbometer donut + four domain metrics), and **recall** (savings % + tokens
+//! avoided, MCP calls, threads). None of the M4 data is dropped — the token
+//! time-series moves into the burn-rate metric, the breakdown becomes the
+//! chart+tiles, nic becomes the donut, savings/calls/threads compose recall.
 //!
-//! The **fixed display order** is registration order in [`SECTIONS`] — call
-//! sites cannot reorder it. Two source orderings disagreed (PRD-M4 Solution
-//! prose vs build-plan P6 S1); the PRD is the binding spec, so the order is:
-//! token usage · input|read|output · nic-gauge · recall savings · recall MCP
-//! calls · threads (decision recorded in the M4 map).
-//!
-//! Every section is **honest about absence** (user stories 5/9): a data-less
-//! section still occupies its slot with its placeholder — "no token activity
-//! yet", the recall enable-prompt vs the visibly distinct enabled-but-quiet
-//! state, the unknown-model indicator — never a fake zero line. Under height
-//! pressure the solver collapses low-priority sections to one-line summaries
-//! that keep the headline number (fidelity is lost, information is not —
-//! user story 20).
+//! Each panel is an individually-bordered themed card, sized by the shared
+//! [`crate::stack`] solver and **honest about absence** (user stories 5/9): a
+//! data-less panel still occupies its slot with its placeholder — "no token
+//! activity yet", the recall enable-prompt vs the visibly distinct
+//! enabled-but-quiet state, the unknown-model indicator — never a fake zero.
+//! Under height pressure a panel collapses to its one-line headline (fidelity
+//! is lost, information is not). The donut rasterizes via the hi-res sub-cell
+//! tier on SUBCELL-capable backends and degrades to the shipped horizontal
+//! gauge bar elsewhere; its formula/bands stay owned by `rift-nic-gauge`
+//! (ADR-0012).
 //!
 //! The types here are **filled by the data plane** (`rift-canopy-data`, which
 //! imports this crate — never the reverse, ADR-0009) and rendered pure over
@@ -21,25 +23,21 @@
 
 use crate::layout::Rect;
 use crate::plot::{self, Paint};
-use crate::render::frame::{Frame, Style};
-use crate::render::RenderBackend;
-use crate::theme;
+use crate::render::frame::{Color, Frame, Style};
+use crate::render::{Capabilities, RenderBackend};
+use crate::theme::{self, Icon, Section, Theme};
 
-/// The six sections, in their fixed display order.
+/// The three column-3 panels, in their fixed display order (M55-11/12/13,
+/// ADR-0024 §4 — the M4 six sections regroup here, none of the data dropped).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionId {
-    /// Token spend over time (rate + cumulative).
+    /// Token usage: the four-class categorical chart + Σ total + the read
+    /// fraction + five class-coloured stat tiles.
     TokenUsage,
-    /// The input | read | output class breakdown (+ cache-write band).
-    InputReadOutput,
-    /// The nic-gauge (context fullness, named bands, thread badge).
-    NicGauge,
-    /// Recall savings (rate + cumulative tokens avoided).
-    RecallSavings,
-    /// Recall MCP calls per bucket.
-    RecallCalls,
-    /// Distinct active sessions in the recent window.
-    Threads,
+    /// System: the dumbometer donut + the four domain metrics.
+    System,
+    /// Recall: savings % + tokens avoided, MCP calls, threads.
+    Recall,
 }
 
 /// How reluctantly a section collapses under height pressure.
@@ -81,46 +79,27 @@ impl SectionSpec {
     }
 }
 
-/// The registration table — the **single** place the order, weights, and
-/// collapse priorities are defined (M4-10 decisions, recorded in the map):
-/// the token and nic sections hold out longest; recall-calls and threads
-/// fold first (threads is nearly one line anyway).
-pub const SECTIONS: [SectionSpec; 6] = [
+/// The registration table — the **single** place the panel order, weights, and
+/// collapse priorities are defined (M55-11/12/13): token usage (the chart +
+/// tiles) and system (the donut) hold out longest; recall folds first.
+pub const SECTIONS: [SectionSpec; 3] = [
     SectionSpec {
         id: SectionId::TokenUsage,
         weight: 3,
-        min_rows: 4,
+        min_rows: 7,
         priority: Priority::High,
     },
     SectionSpec {
-        id: SectionId::InputReadOutput,
+        id: SectionId::System,
         weight: 3,
-        min_rows: 4,
+        min_rows: 8,
         priority: Priority::High,
     },
     SectionSpec {
-        id: SectionId::NicGauge,
+        id: SectionId::Recall,
         weight: 2,
-        min_rows: 3,
-        priority: Priority::High,
-    },
-    SectionSpec {
-        id: SectionId::RecallSavings,
-        weight: 3,
-        min_rows: 4,
+        min_rows: 5,
         priority: Priority::Medium,
-    },
-    SectionSpec {
-        id: SectionId::RecallCalls,
-        weight: 2,
-        min_rows: 3,
-        priority: Priority::Low,
-    },
-    SectionSpec {
-        id: SectionId::Threads,
-        weight: 1,
-        min_rows: 2,
-        priority: Priority::Low,
     },
 ];
 
@@ -475,9 +454,20 @@ pub fn fmt_km(v: f64) -> String {
     }
 }
 
-/// Render the six sections into `area` through the plot seam. Pure over the
-/// view-model; safe at any size (zero-height slots simply do not render).
-pub fn draw(col3: &Col3, area: Rect, backend: &mut dyn RenderBackend, frame: &mut Frame) {
+/// Render the three column-3 panels into `area` through the plot seam (M55-11/
+/// 12/13). Each panel is an individually-bordered themed card, sized by the
+/// shared stack solver; `focused` accents the borders when the graphs column
+/// holds focus; `unicode` drives glyph substitution. Pure over the view-model
+/// and safe at any size.
+pub fn draw(
+    col3: &Col3,
+    focused: bool,
+    unicode: bool,
+    area: Rect,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+) {
+    let theme = Theme::rift_dark();
     for slot in solve_stack(area.h) {
         let rect = Rect {
             x: area.x,
@@ -485,45 +475,253 @@ pub fn draw(col3: &Col3, area: Rect, backend: &mut dyn RenderBackend, frame: &mu
             w: area.w,
             h: slot.rows,
         };
-        draw_section(col3, slot, rect, backend, frame);
+        if rect.h == 0 || rect.w == 0 {
+            continue;
+        }
+        match slot.id {
+            SectionId::TokenUsage => {
+                draw_token_panel(col3, theme, focused, slot.collapsed, rect, backend, frame);
+            }
+            SectionId::System => {
+                draw_system_panel(
+                    col3,
+                    theme,
+                    focused,
+                    unicode,
+                    slot.collapsed,
+                    rect,
+                    backend,
+                    frame,
+                );
+            }
+            SectionId::Recall => {
+                draw_recall_panel(col3, theme, focused, slot.collapsed, rect, frame)
+            }
+        }
     }
 }
 
-/// The section title row: `· token usage` etc.
-fn title_line(frame: &mut Frame, rect: Rect, title: &str, headline: &str) {
-    let mut line = String::from("· ");
-    line.push_str(title);
-    if !headline.is_empty() {
-        line.push_str("  ");
-        line.push_str(headline);
-    }
-    let clipped: String = line.chars().take(usize::from(rect.w)).collect();
-    frame.put_str(rect.x, rect.y, &clipped, Style::DEFAULT);
+/// A panel border + title (with the Σ / headline appended), returning the inner
+/// content rect.
+fn panel_frame(
+    theme: Theme,
+    section: Section,
+    focused: bool,
+    title: &str,
+    rect: Rect,
+    frame: &mut Frame,
+) -> Rect {
+    crate::chrome::panel(
+        frame,
+        rect,
+        title,
+        theme.border(section, focused),
+        theme.title(section),
+    )
 }
 
-/// One plain content line under the title.
-fn body_line(frame: &mut Frame, rect: Rect, dy: u16, text: &str) {
-    if dy >= rect.h {
+/// One body line inside a panel's inner rect (dropped when below it).
+fn body(frame: &mut Frame, inner: Rect, dy: u16, text: &str, style: Style) {
+    if dy >= inner.h {
         return;
     }
-    let clipped: String = text.chars().take(usize::from(rect.w)).collect();
-    frame.put_str(rect.x, rect.y + dy, &clipped, Style::DEFAULT);
+    let clipped: String = text.chars().take(usize::from(inner.w)).collect();
+    frame.put_str(inner.x, inner.y + dy, &clipped, style);
 }
 
-/// The plot area under a section's title (rows 1.., full width).
-fn plot_rect(rect: Rect) -> Rect {
-    Rect {
-        x: rect.x,
-        y: rect.y + 1,
-        w: rect.w,
-        h: rect.h.saturating_sub(1),
+// --- token-usage panel (M55-11) ----------------------------------------------
+
+fn draw_token_panel(
+    col3: &Col3,
+    theme: Theme,
+    focused: bool,
+    collapsed: bool,
+    rect: Rect,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+) {
+    // Σ total in the title (from the token totals); the chart + tiles from the
+    // four-class breakdown. They arrive together, so the breakdown gates data.
+    let total = match &col3.tokens {
+        TokensView::Data(d) => Some(d.total),
+        TokensView::NoActivity => None,
+    };
+    let title = total.map_or_else(
+        || "token usage".to_string(),
+        |t| format!("token usage  Σ {}", fmt_km(t)),
+    );
+    let inner = panel_frame(theme, Section::TokenUsage, focused, &title, rect, frame);
+    let BreakdownView::Data(d) = &col3.breakdown else {
+        body(frame, inner, 0, "(no token activity yet)", theme.dim());
+        return;
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let read_pct = (d.read_fraction * 100.0).round() as u8;
+    if collapsed {
+        body(
+            frame,
+            inner,
+            0,
+            &format!(
+                "in {} rd {} out {} · read {read_pct}%",
+                fmt_km(d.input),
+                fmt_km(d.read),
+                fmt_km(d.output)
+            ),
+            theme.body(),
+        );
+        return;
+    }
+    // The categorical class chart in the upper portion.
+    let vals = [d.input, d.read, d.output, d.cache_write];
+    let tiles_rows = 3u16;
+    if inner.h > tiles_rows + 1 {
+        let chart = Rect {
+            x: inner.x,
+            y: inner.y,
+            w: inner.w,
+            h: inner.h - tiles_rows,
+        };
+        let max = plot::autoscale_max(&vals);
+        let pts = plot::bar_points(&vals, max, chart.h.saturating_mul(4).max(4));
+        backend.plot(&pts, chart, &Paint::ByCategory(&theme::BREAKDOWN), frame);
+    }
+    // Five stat tiles on the bottom rows: the four classes + the read fraction,
+    // each bordered in its class colour (the read tile shows the 0/0 = 0 case).
+    let tiles_top = inner.h.saturating_sub(tiles_rows);
+    draw_class_tiles(
+        theme,
+        d,
+        read_pct,
+        Rect {
+            y: inner.y + tiles_top,
+            h: tiles_rows,
+            ..inner
+        },
+        frame,
+    );
+}
+
+/// The five class-coloured stat tiles (headline form): input · read · output ·
+/// read-% · cache. Drawn as one-line labelled values so five fit a narrow
+/// column (the tile primitive's collapsed form).
+fn draw_class_tiles(theme: Theme, d: &BreakdownData, read_pct: u8, rect: Rect, frame: &mut Frame) {
+    let cats = &theme::BREAKDOWN;
+    let cell = |i: usize| cats.get(i).copied().unwrap_or(theme::ACCENT);
+    let tiles: [(&str, String, Color); 5] = [
+        ("in", fmt_km(d.input), cell(0)),
+        ("rd", fmt_km(d.read), cell(1)),
+        ("out", fmt_km(d.output), cell(2)),
+        ("read%", format!("{read_pct}"), cell(1)),
+        ("cache", fmt_km(d.cache_write), cell(3)),
+    ];
+    // Lay the five tiles across the available width, one row each if the column
+    // is narrow, else side by side.
+    let per_row = if rect.w >= 40 { 5 } else { 1 };
+    let tw = rect.w / u16::try_from(per_row).unwrap_or(1).max(1);
+    for (i, (label, value, colour)) in tiles.into_iter().enumerate() {
+        let Ok(iu) = u16::try_from(i) else { break };
+        let (cx, cy) = if per_row == 5 {
+            (rect.x + iu * tw, rect.y)
+        } else {
+            (rect.x, rect.y + iu)
+        };
+        if cy >= rect.y + rect.h {
+            break;
+        }
+        crate::chrome::tile_headline(
+            frame,
+            cx,
+            cy,
+            tw,
+            label,
+            &value,
+            theme.dim(),
+            theme.tile_value(colour),
+        );
     }
 }
 
-#[allow(clippy::too_many_lines)] // one match arm per section — splitting hides the shape
-fn draw_section(
+// --- system panel: the donut + the domain metrics (M55-12) -------------------
+
+fn draw_system_panel(
     col3: &Col3,
-    slot: SectionSlot,
+    theme: Theme,
+    focused: bool,
+    unicode: bool,
+    collapsed: bool,
+    rect: Rect,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+) {
+    let inner = panel_frame(theme, Section::System, focused, "system", rect, frame);
+    if collapsed {
+        let head = match &col3.nic {
+            NicView::Reading(r) => format!("{}% {}  ·  {} threads", r.pct, r.band, r.threads),
+            NicView::UnknownModel { threads, .. } => format!("? unknown  ·  {threads} threads"),
+            NicView::NoData => "(no model calls yet)".to_string(),
+        };
+        body(frame, inner, 0, &head, theme.body());
+        return;
+    }
+    // The donut occupies the top; the four domain metrics the bottom four rows.
+    let metric_rows = 4u16;
+    let gauge_h = inner.h.saturating_sub(metric_rows);
+    let gauge_rect = Rect {
+        x: inner.x,
+        y: inner.y,
+        w: inner.w,
+        h: gauge_h,
+    };
+    draw_dumbometer(&col3.nic, theme, unicode, gauge_rect, backend, frame);
+    // The metric rows below.
+    let m = &col3.metrics;
+    let rows = [
+        ("capture", m.capture_per_min.map(|v| format!("{v:.1}/min"))),
+        (
+            "burn",
+            m.tokens_per_min.map(|v| format!("{}/min", fmt_km(v))),
+        ),
+        ("projection", m.projection_bytes.map(fmt_bytes)),
+        ("recall", m.recall_per_hour.map(|v| format!("{v:.1}/hr"))),
+    ];
+    let base = inner.h.saturating_sub(metric_rows);
+    for (i, (label, value)) in rows.into_iter().enumerate() {
+        let Ok(iu) = u16::try_from(i) else { break };
+        let dy = base + iu;
+        let dot = Icon::Bullet.glyph(unicode);
+        frame.set(inner.x, inner.y + dy, dot, theme.dim());
+        let text = value.map_or_else(|| format!(" {label}: —"), |v| format!(" {label}: {v}"));
+        let style = if value_present(&text) {
+            theme.body()
+        } else {
+            theme.dim()
+        };
+        body(
+            frame,
+            Rect {
+                x: inner.x + 1,
+                ..inner
+            },
+            dy,
+            &text,
+            style,
+        );
+    }
+}
+
+/// Whether a metric row carries a real value (not the `—` placeholder).
+fn value_present(text: &str) -> bool {
+    !text.ends_with('—')
+}
+
+/// Draw the dumbometer: a radial donut on SUBCELL-capable backends, degrading
+/// to the shipped horizontal gauge bar elsewhere; the unknown-model indicator
+/// and the no-data placeholder render explicitly (never a percentage; ADR-0012).
+fn draw_dumbometer(
+    nic: &NicView,
+    theme: Theme,
+    unicode: bool,
     rect: Rect,
     backend: &mut dyn RenderBackend,
     frame: &mut Frame,
@@ -531,218 +729,218 @@ fn draw_section(
     if rect.h == 0 || rect.w == 0 {
         return;
     }
-    match slot.id {
-        SectionId::TokenUsage => match &col3.tokens {
-            TokensView::NoActivity => {
-                title_line(frame, rect, "token usage", "(no token activity yet)");
-            }
-            TokensView::Data(d) => {
-                title_line(
+    match nic {
+        NicView::NoData => body(frame, rect, rect.h / 2, "(no model calls yet)", theme.dim()),
+        NicView::UnknownModel { model, threads } => {
+            let q = Icon::CheckPending.glyph(unicode);
+            body(
+                frame,
+                rect,
+                rect.h / 2,
+                &format!("{q} unknown window: {model}"),
+                theme.dim(),
+            );
+            body(
+                frame,
+                rect,
+                rect.h / 2 + 1,
+                &format!("[{threads} threads]"),
+                theme.body(),
+            );
+        }
+        NicView::Reading(r) => {
+            let colour = theme::band_color(r.band);
+            let subcell = backend.capabilities().contains(Capabilities::SUBCELL);
+            if subcell && rect.h >= 5 {
+                // The radial arc via the plot seam, centered.
+                let samples = rect
+                    .w
+                    .saturating_mul(rect.h)
+                    .saturating_mul(2)
+                    .clamp(16, 720);
+                let pts = plot::donut_points(r.pct, samples);
+                backend.plot(&pts, rect, &Paint::Solid(Style::fg(colour)), frame);
+                // Centered percent + band; the thread badge below.
+                center(
                     frame,
                     rect,
-                    "token usage",
-                    &format!("Σ {}", fmt_km(d.total)),
+                    rect.h / 2,
+                    &format!("{}%", r.pct),
+                    theme.tile_value(colour),
                 );
-                if !slot.collapsed {
-                    let pr = plot_rect(rect);
-                    let max = plot::autoscale_max(&d.rate);
-                    let pts = plot::bar_points(&d.rate, max, pr.h.saturating_mul(4).max(4));
-                    let paint = Paint::VGradient {
-                        lo: theme::TOKEN_LO,
-                        hi: theme::TOKEN_HI,
+                center(frame, rect, rect.h / 2 + 1, r.band, theme.dim());
+                center(
+                    frame,
+                    rect,
+                    rect.h.saturating_sub(1),
+                    &format!("[{} threads]", r.threads),
+                    theme.body(),
+                );
+            } else {
+                // Degrade: the shipped horizontal gauge bar.
+                body(
+                    frame,
+                    rect,
+                    0,
+                    &format!("{}% {}  [{} threads]", r.pct, r.band, r.threads),
+                    theme.body(),
+                );
+                if rect.h > 1 {
+                    let bar = Rect {
+                        x: rect.x,
+                        y: rect.y + 1,
+                        w: rect.w,
+                        h: rect.h - 1,
                     };
-                    backend.plot(&pts, pr, &paint, frame);
-                }
-            }
-        },
-        SectionId::InputReadOutput => match &col3.breakdown {
-            BreakdownView::NoActivity => {
-                title_line(
-                    frame,
-                    rect,
-                    "input | read | output",
-                    "(no token activity yet)",
-                );
-            }
-            BreakdownView::Data(d) => {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let read_pct = (d.read_fraction * 100.0).round() as u8;
-                title_line(
-                    frame,
-                    rect,
-                    "input | read | output",
-                    &format!("read {read_pct}%"),
-                );
-                if !slot.collapsed {
-                    body_line(
-                        frame,
-                        rect,
-                        1,
-                        &format!(
-                            "in {}  rd {}  out {}",
-                            fmt_km(d.input),
-                            fmt_km(d.read),
-                            fmt_km(d.output)
-                        ),
-                    );
-                    // The cache-write band is visibly secondary: one dim line.
-                    body_line(
-                        frame,
-                        rect,
-                        2,
-                        &format!("cache-write {}", fmt_km(d.cache_write)),
-                    );
-                    if rect.h > 3 {
-                        let pr = Rect {
-                            x: rect.x,
-                            y: rect.y + 3,
-                            w: rect.w,
-                            h: rect.h - 3,
-                        };
-                        let vals = [d.input, d.read, d.output, d.cache_write];
-                        let max = plot::autoscale_max(&vals);
-                        let pts = plot::bar_points(&vals, max, pr.h.saturating_mul(4).max(4));
-                        // One hue per class, matching the `in / rd / out` labels
-                        // above (input=blue, read=green, output=violet, cache=amber).
-                        backend.plot(&pts, pr, &Paint::ByCategory(&theme::BREAKDOWN), frame);
-                    }
-                }
-            }
-        },
-        SectionId::NicGauge => match &col3.nic {
-            NicView::NoData => title_line(frame, rect, "nic-gauge", "(no model calls yet)"),
-            NicView::UnknownModel { model, threads } => {
-                title_line(frame, rect, "nic-gauge", &format!("[{threads} thread]"));
-                if !slot.collapsed {
-                    // The explicit indicator — never a defaulted percentage.
-                    body_line(
-                        frame,
-                        rect,
-                        1,
-                        &format!("? unknown context window: {model}"),
-                    );
-                }
-            }
-            NicView::Reading(r) => {
-                title_line(
-                    frame,
-                    rect,
-                    "nic-gauge",
-                    &format!("{}% {}  [{} thread]", r.pct, r.band, r.threads),
-                );
-                if !slot.collapsed {
-                    let pr = plot_rect(rect);
                     let pts = plot::gauge_points(
                         f32::from(r.pct) / 100.0,
-                        pr.w.saturating_mul(2).max(2),
-                        pr.h.saturating_mul(4).clamp(1, 4),
+                        bar.w.saturating_mul(2).max(2),
+                        bar.h.saturating_mul(4).clamp(1, 4),
                     );
-                    // Green (empty) → amber → red (full): the meter reddens as the
-                    // context window fills (fuller = worse).
-                    backend.plot(&pts, pr, &Paint::HRamp(&theme::GAUGE_RAMP), frame);
+                    backend.plot(&pts, bar, &Paint::HRamp(&theme::GAUGE_RAMP), frame);
                 }
             }
-        },
-        SectionId::RecallSavings => match &col3.savings {
-            RecallView::Disabled => {
-                title_line(
-                    frame,
-                    rect,
-                    "recall savings",
-                    "(recall off — /toggle total-recall)",
-                );
-            }
-            RecallView::Quiet => title_line(
-                frame,
-                rect,
-                "recall savings",
-                "(no serves yet — see `rift doctor`)",
-            ),
-            RecallView::Data(d) => {
-                title_line(
-                    frame,
-                    rect,
-                    "recall savings",
-                    &format!("Σ {} saved", fmt_km(d.total)),
-                );
-                if !slot.collapsed {
-                    let pr = plot_rect(rect);
-                    let max = plot::autoscale_max(&d.rate);
-                    let pts = plot::line_points(&d.rate, max, pr.w.saturating_mul(2).max(2));
-                    backend.plot(&pts, pr, &Paint::Solid(Style::fg(theme::ACCENT)), frame);
-                }
-            }
-        },
-        SectionId::RecallCalls => match &col3.calls {
-            RecallView::Disabled => {
-                title_line(
-                    frame,
-                    rect,
-                    "recall mcp calls",
-                    "(recall off — /toggle total-recall)",
-                );
-            }
-            RecallView::Quiet => title_line(
-                frame,
-                rect,
-                "recall mcp calls",
-                "(no serves yet — see `rift doctor`)",
-            ),
-            RecallView::Data(d) => {
-                title_line(
-                    frame,
-                    rect,
-                    "recall mcp calls",
-                    &format!("Σ {}", fmt_km(d.total)),
-                );
-                if !slot.collapsed {
-                    let pr = plot_rect(rect);
-                    let max = plot::autoscale_max(&d.rate);
-                    let pts = plot::bar_points(&d.rate, max, pr.h.saturating_mul(4).max(4));
-                    backend.plot(
-                        &pts,
-                        pr,
-                        &Paint::Solid(Style::fg(theme::RECALL_CALLS)),
-                        frame,
-                    );
-                }
-            }
-        },
-        SectionId::Threads => match &col3.threads {
-            ThreadsView::NoSessions => title_line(frame, rect, "threads", "(no active sessions)"),
-            ThreadsView::Count(n) => {
-                title_line(frame, rect, "threads", &format!("{n} active"));
-            }
-        },
+        }
     }
+}
+
+/// Center `text` on row `dy` of `rect`.
+fn center(frame: &mut Frame, rect: Rect, dy: u16, text: &str, style: Style) {
+    if dy >= rect.h {
+        return;
+    }
+    let w = u16::try_from(text.chars().count()).unwrap_or(0);
+    let x = rect.x + rect.w.saturating_sub(w) / 2;
+    let clipped: String = text.chars().take(usize::from(rect.w)).collect();
+    frame.put_str(x, rect.y + dy, &clipped, style);
+}
+
+/// Human-readable on-disk size (`B` / `KB` / `MB`).
+fn fmt_bytes(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let b = bytes as f64;
+    if b >= 1_048_576.0 {
+        format!("{:.1}MB", b / 1_048_576.0)
+    } else if b >= 1024.0 {
+        format!("{:.0}KB", b / 1024.0)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+// --- recall panel (M55-13) ---------------------------------------------------
+
+fn draw_recall_panel(
+    col3: &Col3,
+    theme: Theme,
+    focused: bool,
+    collapsed: bool,
+    rect: Rect,
+    frame: &mut Frame,
+) {
+    let inner = panel_frame(theme, Section::Recall, focused, "recall", rect, frame);
+    match &col3.savings {
+        RecallView::Disabled => {
+            body(
+                frame,
+                inner,
+                0,
+                "recall off — /toggle total-recall",
+                theme.dim(),
+            );
+            return;
+        }
+        RecallView::Quiet => {
+            body(
+                frame,
+                inner,
+                0,
+                "enabled, no serves yet — see `rift doctor`",
+                theme.dim(),
+            );
+            return;
+        }
+        RecallView::Data(sd) => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let pct = (sd.pct * 100.0).round() as u8;
+            // Savings % beside the absolute tokens avoided.
+            body(
+                frame,
+                inner,
+                0,
+                &format!("saved {pct}%  ({} tokens)", fmt_km(sd.total)),
+                theme.tile_value(theme::ACCENT),
+            );
+        }
+    }
+    if collapsed {
+        return;
+    }
+    // MCP calls + threads as dot-labelled rows.
+    let calls = match &col3.calls {
+        RecallView::Data(c) => format!("{} total", fmt_km(c.total)),
+        _ => "—".to_string(),
+    };
+    body(
+        frame,
+        inner,
+        1,
+        &format!("· mcp calls: {calls}"),
+        theme.body(),
+    );
+    let threads = match &col3.threads {
+        ThreadsView::Count(n) => format!("{n} active"),
+        ThreadsView::NoSessions => "none".to_string(),
+    };
+    body(
+        frame,
+        inner,
+        2,
+        &format!("· threads: {threads}"),
+        theme.body(),
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::render::frame::Size;
+    use crate::render::{AsciiBackend, Capabilities};
+
+    /// Render the three panels into a `w`×`h` area (no outer border).
+    fn draw_to(col3: &Col3, w: u16, h: u16) -> Frame {
+        let mut f = Frame::new(Size::new(w, h));
+        let mut b = AsciiBackend::new(Capabilities::empty());
+        draw(col3, false, false, f.rect(), &mut b, &mut f);
+        f
+    }
+
+    fn text_of(f: &Frame) -> String {
+        (0..f.height())
+            .map(|y| {
+                (0..f.width())
+                    .map(|x| f.get(x, y).map_or(' ', |c| c.ch))
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+
     #[test]
-    fn order_is_the_prd_order_by_registration() {
+    fn order_is_the_three_panels_by_registration() {
         let ids: Vec<SectionId> = SECTIONS.iter().map(|s| s.id).collect();
         assert_eq!(
             ids,
-            vec![
-                SectionId::TokenUsage,
-                SectionId::InputReadOutput,
-                SectionId::NicGauge,
-                SectionId::RecallSavings,
-                SectionId::RecallCalls,
-                SectionId::Threads,
-            ]
+            vec![SectionId::TokenUsage, SectionId::System, SectionId::Recall]
         );
     }
 
     #[test]
-    fn tall_column_expands_everything() {
+    fn tall_column_expands_all_three_panels() {
         let slots = solve_stack(40);
-        assert_eq!(slots.len(), 6);
+        assert_eq!(slots.len(), 3);
         assert!(slots.iter().all(|s| !s.collapsed));
-        // Exact tiling: contiguous, inside the column.
         let mut y = 0;
         for s in &slots {
             assert_eq!(s.y, y);
@@ -752,55 +950,16 @@ mod tests {
     }
 
     #[test]
-    fn short_column_collapses_low_priority_first() {
-        // 16 rows: too tight for all six expanded (min sum = 20), enough for
-        // High+Medium expanded with Low collapsed (min sum = 17? -> next tier).
-        let slots = solve_stack(17);
-        assert_eq!(slots.len(), 6, "every section still occupies a slot");
-        let collapsed: Vec<SectionId> =
-            slots.iter().filter(|s| s.collapsed).map(|s| s.id).collect();
-        assert_eq!(
-            collapsed,
-            vec![SectionId::RecallCalls, SectionId::Threads],
-            "the Low sections fold first"
+    fn short_column_collapses_recall_first_then_none_disappears() {
+        // Recall is Medium (folds before the two High panels).
+        let slots = solve_stack(18);
+        assert_eq!(slots.len(), 3, "every panel keeps a slot");
+        let recall = slots.iter().find(|s| s.id == SectionId::Recall).unwrap();
+        assert!(recall.collapsed, "recall folds first under pressure");
+        assert!(
+            slots.iter().all(|s| s.rows >= 1),
+            "a collapsed panel keeps its headline, never disappears"
         );
-    }
-
-    #[test]
-    fn tighter_column_collapses_medium_too() {
-        // High mins (4+4+3) + three collapsed lines = 14.
-        let slots = solve_stack(14);
-        let expanded: Vec<SectionId> = slots
-            .iter()
-            .filter(|s| !s.collapsed)
-            .map(|s| s.id)
-            .collect();
-        assert_eq!(
-            expanded,
-            vec![
-                SectionId::TokenUsage,
-                SectionId::InputReadOutput,
-                SectionId::NicGauge
-            ],
-            "only High sections stay expanded"
-        );
-        // One row tighter: even the High tier folds.
-        assert!(solve_stack(13).iter().all(|s| s.collapsed));
-    }
-
-    #[test]
-    fn six_rows_renders_all_six_collapsed() {
-        let slots = solve_stack(6);
-        assert_eq!(slots.len(), 6);
-        assert!(slots.iter().all(|s| s.collapsed && s.rows == 1));
-    }
-
-    #[test]
-    fn below_six_rows_drops_from_the_tail() {
-        let slots = solve_stack(3);
-        assert_eq!(slots.len(), 3);
-        assert_eq!(slots[0].id, SectionId::TokenUsage);
-        assert_eq!(slots[2].id, SectionId::NicGauge);
     }
 
     #[test]
@@ -808,73 +967,140 @@ mod tests {
         assert!(solve_stack(0).is_empty());
     }
 
-    proptest::proptest! {
-        /// The solver tiles within the column at every height: slots are
-        /// contiguous from the top, never exceed the height, and keep the
-        /// fixed order.
-        #[test]
-        fn solver_tiles_exactly(h in 0u16..200) {
-            let slots = solve_stack(h);
-            let mut y = 0u16;
-            for (i, s) in slots.iter().enumerate() {
-                proptest::prop_assert_eq!(s.y, y);
-                proptest::prop_assert!(s.rows >= 1);
-                y = y.saturating_add(s.rows);
-                // Order preserved by registration.
-                proptest::prop_assert_eq!(s.id, SECTIONS[i].id);
-            }
-            proptest::prop_assert!(y <= h);
-            // At 6+ rows every section is present (information, not fidelity).
-            if h >= 6 {
-                proptest::prop_assert_eq!(slots.len(), 6);
-            }
-        }
-    }
-
     #[test]
-    fn token_bars_carry_gradient_colour() {
-        // Colour is written into the Frame regardless of backend (the ASCII floor
-        // simply doesn't emit it). A token-usage bar chart must leave at least one
-        // RGB-coloured cell, and none of the lit bar cells stay terminal-default.
-        use crate::render::frame::{Color, Frame, Size};
-        use crate::render::{AsciiBackend, Capabilities};
+    fn token_panel_charts_classes_and_tiles_in_class_colours() {
+        // The four-class categorical chart leaves RGB-coloured bar cells, and
+        // the read tile shows the honest 0/0 = 0 empty case.
         let col3 = Col3 {
             tokens: TokensView::Data(TokensData {
-                rate: vec![1.0, 5.0, 3.0, 9.0, 4.0],
+                rate: vec![1.0, 5.0],
                 total: 22.0,
+            }),
+            breakdown: BreakdownView::Data(BreakdownData {
+                input: 200.0,
+                read: 800.0,
+                output: 300.0,
+                cache_write: 50.0,
+                read_fraction: 0.8,
             }),
             ..Col3::default()
         };
-        let mut frame = Frame::new(Size::new(40, 40));
-        let mut backend = AsciiBackend::new(Capabilities::empty());
-        draw(
-            &col3,
-            Rect {
-                x: 0,
-                y: 0,
-                w: 40,
-                h: 40,
-            },
-            &mut backend,
-            &mut frame,
-        );
+        let f = draw_to(&col3, 40, 24);
+        // The Σ total renders in the panel title.
+        let text = text_of(&f);
+        assert!(text.contains("Σ"), "the Σ total is in the title: \n{text}");
+        // At least one categorical bar cell is RGB-coloured.
         let mut coloured = 0;
-        for y in 0..frame.height() {
-            for x in 0..frame.width() {
-                if let Some(c) = frame.get(x, y) {
-                    // The bar glyphs (braille/half-block) carry the gradient fg.
-                    if matches!(c.ch, '▀' | '▄' | '█') || (0x2800..=0x28FF).contains(&(c.ch as u32))
+        for y in 0..f.height() {
+            for x in 0..f.width() {
+                if let Some(c) = f.get(x, y) {
+                    if matches!(c.ch, '▀' | '▄' | '█') && matches!(c.style.fg, Color::Rgb(_, _, _))
                     {
-                        assert!(
-                            matches!(c.style.fg, Color::Rgb(_, _, _)),
-                            "bar cell ({x},{y}) is not RGB-coloured"
-                        );
                         coloured += 1;
                     }
                 }
             }
         }
-        assert!(coloured > 0, "the token bar chart drew no coloured cells");
+        assert!(coloured > 0, "the class chart drew no coloured bar cells");
+    }
+
+    #[test]
+    fn read_fraction_zero_over_zero_renders_as_zero_not_error() {
+        let col3 = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![1.0],
+                total: 5.0,
+            }),
+            breakdown: BreakdownView::Data(BreakdownData {
+                input: 0.0,
+                read: 0.0,
+                output: 5.0,
+                cache_write: 0.0,
+                read_fraction: 0.0,
+            }),
+            ..Col3::default()
+        };
+        let text = text_of(&draw_to(&col3, 44, 24));
+        assert!(
+            text.contains("read% "),
+            "the read tile shows a defined 0, not a dash"
+        );
+    }
+
+    #[test]
+    fn system_panel_donut_bands_and_unknown_indicator() {
+        // The donut arc coverage is monotonic in pct, and the band colour
+        // changes across the gauge crate's boundaries (49/50, 94/95).
+        assert!(plot::donut_points(50, 200).len() > plot::donut_points(20, 200).len());
+        assert!(plot::donut_points(95, 200).len() >= plot::donut_points(94, 200).len());
+        // The band colour steps at the gauge crate's boundaries (49→Smart /
+        // 50→Capable, 94→Strained / 95→Dumb); the correspondence to
+        // `Band::from_pct` is proven in the data-plane gate leg (nic-gauge dep).
+        assert_ne!(theme::band_color("Smart"), theme::band_color("Capable"));
+        assert_ne!(theme::band_color("Strained"), theme::band_color("Dumb"));
+        // The unknown-model indicator renders explicitly, never a percentage.
+        let col3 = Col3 {
+            nic: NicView::UnknownModel {
+                model: "mystery".into(),
+                threads: 1,
+            },
+            ..Col3::default()
+        };
+        let text = text_of(&draw_to(&col3, 40, 24));
+        assert!(
+            text.contains("unknown"),
+            "the unknown indicator shows: \n{text}"
+        );
+        assert!(
+            !text.contains('%'),
+            "no invented percentage for an unknown model"
+        );
+    }
+
+    #[test]
+    fn system_metrics_render_placeholders_for_absent_sources() {
+        let col3 = Col3 {
+            metrics: PanelMetrics {
+                capture_per_min: Some(2.5),
+                tokens_per_min: None,
+                projection_bytes: Some(4096),
+                recall_per_hour: None,
+            },
+            ..Col3::default()
+        };
+        let text = text_of(&draw_to(&col3, 40, 24));
+        assert!(text.contains("capture: 2.5/min"));
+        assert!(
+            text.contains("burn: —"),
+            "an absent metric is an honest dash"
+        );
+        assert!(text.contains("projection: 4KB"));
+        assert!(text.contains("recall: —"));
+    }
+
+    #[test]
+    fn recall_panel_states_render_honestly() {
+        // Disabled / Quiet / Data (savings % + calls + threads).
+        let disabled = text_of(&draw_to(&Col3::default(), 40, 24));
+        assert!(disabled.contains("recall off"));
+
+        let data = Col3 {
+            savings: RecallView::Data(SavingsData {
+                rate: vec![1.0],
+                total: 6000.0,
+                pct: 0.42,
+            }),
+            calls: RecallView::Data(CallsData {
+                rate: vec![1.0],
+                total: 17.0,
+            }),
+            threads: ThreadsView::Count(3),
+            ..Col3::default()
+        };
+        let text = text_of(&draw_to(&data, 40, 24));
+        assert!(text.contains("saved 42%"), "savings % + tokens: \n{text}");
+        assert!(text.contains("mcp calls: 17"));
+        assert!(text.contains("threads: 3 active"));
     }
 
     #[test]

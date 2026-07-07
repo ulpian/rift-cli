@@ -272,6 +272,22 @@ impl Theme {
     }
 }
 
+/// The dumbometer band colour (M55-12): a per-band step from green (Smart) to
+/// red (Dumb), so the donut arc changes colour at the band boundaries
+/// `rift-nic-gauge` owns (49/50, 94/95). Presentation only — the bands and
+/// their boundaries live in the gauge crate (ADR-0012).
+#[must_use]
+pub fn band_color(band: &str) -> Color {
+    match band {
+        "Smart" => Color::Rgb(0x6c, 0xe0, 0x9a),    // green
+        "Capable" => Color::Rgb(0xa8, 0xe0, 0x6c),  // yellow-green
+        "Thinking" => Color::Rgb(0xf0, 0xc4, 0x5c), // amber
+        "Strained" => Color::Rgb(0xf0, 0x94, 0x5c), // orange
+        "Dumb" => Color::Rgb(0xf0, 0x5c, 0x5c),     // red
+        _ => MUTED,
+    }
+}
+
 /// The status-dot colour for a project status (single-sourced with the rail's
 /// icon choice, [`Icon::for_status`]).
 #[must_use]

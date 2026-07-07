@@ -178,7 +178,7 @@ pub fn draw(
             CardKind::Capture => draw_capture(ctx, theme, slot.rect, slot.collapsed, frame),
             CardKind::Features => draw_features(ctx, theme, slot.rect, slot.collapsed, frame),
             CardKind::Activity => {
-                draw_activity(ctx, theme, slot.rect, slot.collapsed, backend, frame)
+                draw_activity(ctx, theme, slot.rect, slot.collapsed, backend, frame);
             }
         }
     }

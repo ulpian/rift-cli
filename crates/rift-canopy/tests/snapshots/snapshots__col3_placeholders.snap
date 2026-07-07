@@ -2,23 +2,23 @@
 source: crates/rift-canopy/tests/snapshots.rs
 expression: "col3_text(&rift_canopy::Col3::default(), 20)"
 ---
-╭─ graphs ───────────────────────╮
-│· token usage  (no token activit│
+╭─ token usage ──────────────────╮
+│(no token activity yet)         │
 │                                │
 │                                │
 │                                │
 │                                │
-│· input | read | output  (no tok│
+╰────────────────────────────────╯
+╭─ system ───────────────────────╮
+│                                │
+│(no model calls yet)            │
+│- capture: —                    │
+│- burn: —                       │
+│- projection: —                 │
+│- recall: —                     │
+╰────────────────────────────────╯
+╭─ recall ───────────────────────╮
+│recall off — /toggle total-recal│
 │                                │
 │                                │
-│                                │
-│· nic-gauge  (no model calls yet│
-│                                │
-│                                │
-│· recall savings  (recall off — │
-│                                │
-│                                │
-│                                │
-│· recall mcp calls  (recall off │
-│· threads  (no active sessions) │
 ╰────────────────────────────────╯
