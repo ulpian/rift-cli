@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use rift_core::Result as RiftResult;
 
+use crate::dispatch::{CommandDispatcher, DispatchRequest};
 use crate::render::{RenderBackend, RenderError};
 use crate::state::{update, AppState, DataRequest, Effects, Event, Flow, PersistOp};
 use crate::{FeatureManager, Project};
@@ -89,16 +90,20 @@ pub fn prime_startup(state: &AppState, req_sink: &mut dyn FnMut(DataRequest)) {
 ///
 /// # Errors
 /// [`rift_core::RiftError`] on a terminal present/read failure.
-pub fn event_loop<F>(
+#[allow(clippy::too_many_arguments)] // ADR-0011: every host dependency is one explicit seam
+pub fn event_loop<F, R>(
     backend: &mut dyn RenderBackend,
     src: &mut dyn EventSource,
     state: &mut AppState,
     on_persist: &mut F,
     req_sink: &mut dyn FnMut(DataRequest),
     manager: &mut dyn FeatureManager,
+    dispatcher: &mut dyn CommandDispatcher,
+    reload: &mut R,
 ) -> RiftResult<()>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
+    R: FnMut() -> RiftResult<Vec<Project>>,
 {
     // Launch is live by construction: the prime runs at the loop seam, BEFORE
     // the first poll, so the bus computes feeds for the initial selection with
@@ -107,13 +112,7 @@ where
     prime_startup(state, req_sink);
     let mut last = Instant::now();
     loop {
-        if state.dirty {
-            let vm = state.snapshot();
-            let mut frame = backend.begin_frame(state.size);
-            crate::view::draw(&vm, backend, &mut frame);
-            backend.present(&frame).map_err(render_err)?;
-            state.dirty = false;
-        }
+        render_if_dirty(backend, state)?;
         if state.app.quit {
             break;
         }
@@ -140,12 +139,85 @@ where
         for ev in events {
             match update(state, ev) {
                 Flow::Quit => state.app.quit = true,
-                Flow::Continue(effects) => {
+                Flow::Continue(mut effects) => {
+                    // Dispatches run HERE (not in apply_effects): the running
+                    // frame must present before the synchronous dispatch holds
+                    // the loop (ADR-0011 posture; user-initiated).
+                    let pending = std::mem::take(&mut effects.dispatches);
                     if !effects.is_empty() {
                         apply_effects(effects, state, on_persist, req_sink, manager);
                     }
+                    for (req, repo) in pending {
+                        run_dispatch(
+                            backend, state, dispatcher, reload, req_sink, on_persist, manager, req,
+                            &repo,
+                        )?;
+                    }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Present the current frame when dirty (shared by the loop and the
+/// pre-dispatch running frame).
+fn render_if_dirty(backend: &mut dyn RenderBackend, state: &mut AppState) -> RiftResult<()> {
+    if state.dirty {
+        let vm = state.snapshot();
+        let mut frame = backend.begin_frame(state.size);
+        crate::view::draw(&vm, backend, &mut frame);
+        backend.present(&frame).map_err(render_err)?;
+        state.dirty = false;
+    }
+    Ok(())
+}
+
+/// Run one delegated dispatch synchronously: present the running frame, cross
+/// the injected dispatcher seam, feed the outcome back through the reducer,
+/// and — after a successful MUTATING verb — reload the registry through the
+/// injected reload hook, follow the selection, and re-fire the subscribe (the
+/// persist-apply pattern), so a palette-side prune is reflected immediately.
+#[allow(clippy::too_many_arguments)]
+fn run_dispatch<F, R>(
+    backend: &mut dyn RenderBackend,
+    state: &mut AppState,
+    dispatcher: &mut dyn CommandDispatcher,
+    reload: &mut R,
+    req_sink: &mut dyn FnMut(DataRequest),
+    on_persist: &mut F,
+    manager: &mut dyn FeatureManager,
+    req: DispatchRequest,
+    repo: &str,
+) -> RiftResult<()>
+where
+    F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
+    R: FnMut() -> RiftResult<Vec<Project>>,
+{
+    state.dirty = true;
+    render_if_dirty(backend, state)?; // the running line is visible while we block
+    let outcome = dispatcher.dispatch(&req, std::path::Path::new(repo));
+    let reload_needed = req.is_mutating() && outcome.code == 0;
+    if let Flow::Continue(effects) = update(
+        state,
+        Event::DispatchDone {
+            request: req,
+            outcome,
+        },
+    ) {
+        if !effects.is_empty() {
+            apply_effects(effects, state, on_persist, req_sink, manager);
+        }
+    }
+    if reload_needed {
+        if let Ok(projects) = reload() {
+            let keep = state.app.selected_project().map(|p| p.path.clone());
+            state.app.set_projects(projects);
+            if let Some(path) = keep {
+                state.app.select_path(&path);
+            }
+            prime_startup(state, req_sink);
+            state.dirty = true;
         }
     }
     Ok(())
@@ -176,9 +248,6 @@ fn apply_effects<F>(
             state.app.status = Some(format!("{}: {reason}", action.feature.key()));
             state.dirty = true;
         }
-    }
-    for action in effects.commands {
-        dispatch_command(state, &action.command, on_persist, req_sink);
     }
 }
 
@@ -227,34 +296,6 @@ fn persist_status(op: &PersistOp) -> String {
             feature, desired, ..
         } => format!("{feature}: {}", if *desired { "on" } else { "off" }),
     }
-}
-
-/// Handle a slash command from the palette. Only dashboard-relevant verbs act;
-/// the rest report that they are CLI-only for now (mirrors the prior behavior).
-fn dispatch_command<F>(
-    state: &mut AppState,
-    cmd: &crate::Command,
-    on_persist: &mut F,
-    req_sink: &mut dyn FnMut(DataRequest),
-) where
-    F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
-{
-    match cmd.name.as_str() {
-        "setup" => match std::env::current_dir() {
-            Ok(dir) => {
-                let op = PersistOp::AddProject {
-                    path: dir.to_string_lossy().into_owned(),
-                };
-                apply_persist(state, on_persist, &op, req_sink);
-            }
-            Err(e) => state.app.status = Some(format!("setup failed: {e}")),
-        },
-        "quit" => state.app.quit = true,
-        other => {
-            state.app.status = Some(format!("/{other} is only available from the CLI for now"));
-        }
-    }
-    state.dirty = true;
 }
 
 #[cfg(test)]
@@ -379,6 +420,8 @@ mod tests {
             &mut no_persist,
             &mut sink,
             &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
         );
 
         assert_eq!(
@@ -393,6 +436,154 @@ mod tests {
         );
     }
 
+    /// A dispatcher that records requests and answers with a scripted code.
+    struct RecordingDispatcher {
+        calls: Vec<(crate::dispatch::DispatchRequest, String)>,
+        code: i32,
+    }
+    impl crate::dispatch::CommandDispatcher for RecordingDispatcher {
+        fn dispatch(
+            &mut self,
+            req: &crate::dispatch::DispatchRequest,
+            repo: &std::path::Path,
+        ) -> crate::dispatch::DispatchOutcome {
+            self.calls
+                .push((req.clone(), repo.to_string_lossy().into_owned()));
+            crate::dispatch::DispatchOutcome {
+                code: self.code,
+                human: "scripted".into(),
+                json: None,
+            }
+        }
+    }
+
+    fn keys(line: &str) -> Vec<Event> {
+        let mut evs = vec![Event::Key(CanopyKey::Char('/'))];
+        evs.extend(line.chars().map(|c| Event::Key(CanopyKey::Char(c))));
+        evs.push(Event::Key(CanopyKey::Enter));
+        evs
+    }
+
+    fn one_project_state() -> AppState {
+        let mut s = AppState::new(
+            vec![Project {
+                name: "a".into(),
+                path: "/r/a".into(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }],
+            Size::new(100, 32),
+        );
+        s.app.splash.skip();
+        s
+    }
+
+    #[test]
+    fn read_only_verb_crosses_the_dispatcher_and_lands_in_the_overlay() {
+        let mut backend = MockBackend { presents: 0 };
+        let mut script = keys("status");
+        // The Results overlay swallows the first Esc (dismiss); Quit then exits.
+        script.push(Event::Key(CanopyKey::Esc));
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let mut dispatcher = RecordingDispatcher {
+            calls: vec![],
+            code: 0,
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut dispatcher,
+            &mut || Ok(vec![]),
+        )
+        .unwrap();
+        assert_eq!(dispatcher.calls.len(), 1, "one dispatch crossed the seam");
+        assert_eq!(
+            dispatcher
+                .calls
+                .first()
+                .map(|(r, p)| (r.clone(), p.clone())),
+            Some((crate::dispatch::DispatchRequest::Status, "/r/a".into())),
+            "the request carries the SELECTED project's path"
+        );
+        // The outcome landed in the Results overlay (pinned by the reducer
+        // test dispatch_done_renders_the_results_overlay); the script's Esc
+        // then dismissed it — Esc never quits the dashboard from an overlay.
+        assert!(state.app.overlay.is_none(), "Esc dismissed the overlay");
+        assert!(backend.presents >= 2, "a running frame presented mid-turn");
+    }
+
+    #[test]
+    fn mutating_verb_dispatches_only_after_confirm_and_reloads() {
+        let mut backend = MockBackend { presents: 0 };
+        // /rebuild → confirm overlay → Enter confirms → dispatch → reload.
+        let mut script = keys("rebuild");
+        script.push(Event::Key(CanopyKey::Enter)); // the confirm
+        script.push(Event::Key(CanopyKey::Esc)); // dismiss the results overlay
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let mut dispatcher = RecordingDispatcher {
+            calls: vec![],
+            code: 0,
+        };
+        let mut reloads = 0u32;
+        let mut reload = || {
+            reloads += 1;
+            Ok(vec![Project {
+                name: "a".into(),
+                path: "/r/a".into(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }])
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut dispatcher,
+            &mut reload,
+        )
+        .unwrap();
+        assert_eq!(dispatcher.calls.len(), 1);
+        assert_eq!(reloads, 1, "a successful mutation reloads the registry");
+    }
+
+    #[test]
+    fn cancelled_confirm_dispatches_nothing() {
+        let mut backend = MockBackend { presents: 0 };
+        let mut script = keys("gc");
+        script.push(Event::Key(CanopyKey::Esc)); // cancel the confirm
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let mut dispatcher = RecordingDispatcher {
+            calls: vec![],
+            code: 0,
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut dispatcher,
+            &mut || Ok(vec![]),
+        )
+        .unwrap();
+        assert!(dispatcher.calls.is_empty(), "cancel dispatches nothing");
+        assert!(state.app.overlay.is_none());
+    }
+
     #[test]
     fn quit_event_breaks_loop() {
         let mut backend = MockBackend { presents: 0 };
@@ -405,6 +596,8 @@ mod tests {
             &mut no_persist,
             &mut |_| {},
             &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
         );
         assert!(r.is_ok());
         assert!(state.app.quit);
@@ -444,6 +637,8 @@ mod tests {
             &mut no_persist,
             &mut |_| {},
             &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
         )
         .unwrap();
         // initial + one per batch (2 batches) = 3 presents.
@@ -463,6 +658,8 @@ mod tests {
             &mut no_persist,
             &mut |_| {},
             &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
         )
         .unwrap();
         // initial render + render after the quit key = 2; the idle tick added none.
@@ -509,6 +706,8 @@ mod tests {
             &mut no_persist,
             &mut |_| {},
             &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
         )
         .unwrap();
         // Before any tween, the loop polls at the idle cadence…
@@ -537,6 +736,8 @@ mod tests {
             &mut no_persist,
             &mut |_| {},
             &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
         )
         .unwrap();
         assert_eq!(state.size, Size::new(120, 40));
@@ -575,6 +776,8 @@ mod tests {
             &mut on_persist,
             &mut |_| {},
             &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
         )
         .unwrap();
         assert_eq!(seen, vec!["/tmp/x".to_string()]);
@@ -624,6 +827,8 @@ mod tests {
             &mut on_persist,
             &mut |_| {},
             &mut FailingManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
         )
         .unwrap();
         let status = state.app.status.expect("a failure toast");

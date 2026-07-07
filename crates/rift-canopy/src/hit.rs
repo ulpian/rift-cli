@@ -30,6 +30,12 @@ pub enum Target {
     Section(col3::SectionId),
     /// The bottom command bar.
     CommandBar,
+    /// The dispatch overlay's Confirm button (mouse Enter — confirm only).
+    OverlayConfirm,
+    /// The dispatch overlay's Cancel button (mouse Esc).
+    OverlayCancel,
+    /// The dispatch overlay body (wheel scroll / inert click).
+    OverlayBody,
 }
 
 /// The element at cell `(col, row)`, or `None` for empty space / the title row /
@@ -50,6 +56,37 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
         w: size.w,
         h: size.h.saturating_sub(1),
     };
+    // An open overlay owns its region (drawn last, so it is what the user
+    // sees). Confirm buttons resolve exactly where the labels render; every
+    // other overlay cell is the (scrollable) body. Clicks outside fall
+    // through to nothing while the overlay is up — panels beneath are
+    // covered visually, so they must not be clickable.
+    if let Some(overlay) = &vm.overlay {
+        let rect = crate::view::overlay_rect(body);
+        if rect.w >= 8 && rect.h >= 3 && contains(rect, col, row) {
+            if let crate::dispatch::Overlay::Confirm { .. } = overlay {
+                // The buttons row mirrors `view::draw_overlay`: inner dy=3.
+                let inner = inner_of(rect);
+                let button_row = inner.y.saturating_add(3);
+                if row == button_row {
+                    let (confirm, cancel) = crate::view::CONFIRM_BUTTONS;
+                    let confirm_w = u16::try_from(confirm.chars().count()).unwrap_or(0);
+                    let gap = 3u16;
+                    let cancel_w = u16::try_from(cancel.chars().count()).unwrap_or(0);
+                    let cx = inner.x;
+                    if col >= cx && col < cx.saturating_add(confirm_w) {
+                        return Some(Target::OverlayConfirm);
+                    }
+                    let kx = cx.saturating_add(confirm_w).saturating_add(gap);
+                    if col >= kx && col < kx.saturating_add(cancel_w) {
+                        return Some(Target::OverlayCancel);
+                    }
+                }
+            }
+            return Some(Target::OverlayBody);
+        }
+        return None;
+    }
     if vm.show_wizard {
         let (above, command) = command_split(body);
         if contains(command, col, row) {
@@ -282,6 +319,70 @@ mod tests {
                 Some(Target::ToggleRow(_) | Target::PanelFocus(Panel::Detail))
             ),
             "got {hit:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_owns_its_region_and_buttons_resolve() {
+        let mut s = AppState::new(vec![project("a")], Size::new(100, 32));
+        s.app.splash.skip();
+        s.app.overlay = Some(crate::dispatch::Overlay::Confirm {
+            request: crate::dispatch::DispatchRequest::Rebuild,
+            repo: "/r/a".into(),
+        });
+        let v = s.snapshot();
+        let body = Rect {
+            x: 0,
+            y: 1,
+            w: 100,
+            h: 31,
+        };
+        let rect = crate::view::overlay_rect(body);
+        let inner = inner_of(rect);
+        let button_row = inner.y + 3;
+        // The Confirm button's first cell.
+        assert_eq!(
+            hit_test(&v, inner.x, button_row),
+            Some(Target::OverlayConfirm)
+        );
+        // The Cancel button (after the confirm label + the 3-cell gap).
+        let confirm_w = u16::try_from(crate::view::CONFIRM_BUTTONS.0.chars().count()).unwrap();
+        assert_eq!(
+            hit_test(&v, inner.x + confirm_w + 3, button_row),
+            Some(Target::OverlayCancel)
+        );
+        // Any other overlay cell is the body.
+        assert_eq!(
+            hit_test(&v, inner.x + 1, inner.y),
+            Some(Target::OverlayBody)
+        );
+        // Outside the overlay nothing is clickable while it is up.
+        assert_eq!(hit_test(&v, 1, body.y + body.h.saturating_sub(1)), None);
+    }
+
+    #[test]
+    fn results_overlay_has_no_buttons() {
+        let mut s = AppState::new(vec![project("a")], Size::new(100, 32));
+        s.app.splash.skip();
+        s.app.overlay = Some(crate::dispatch::Overlay::Results {
+            title: "rift status".into(),
+            lines: vec!["ok".into()],
+            scroll: 0,
+            footer: None,
+            truncated: false,
+        });
+        let v = s.snapshot();
+        let body = Rect {
+            x: 0,
+            y: 1,
+            w: 100,
+            h: 31,
+        };
+        let inner = inner_of(crate::view::overlay_rect(body));
+        assert_eq!(
+            hit_test(&v, inner.x, inner.y + 3),
+            Some(Target::OverlayBody),
+            "no confirm target on a results overlay"
         );
     }
 

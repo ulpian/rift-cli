@@ -1034,7 +1034,13 @@ fn resolve_git_dir(explicit: Option<PathBuf>) -> PathBuf {
 
 /// The per-repo projection db path for the current working directory.
 pub(crate) fn projection_db() -> Result<PathBuf> {
-    let cwd = std::env::current_dir()?;
+    projection_db_at(&std::env::current_dir()?)
+}
+
+/// The per-repo projection db path for an explicit repository root (the
+/// palette dispatcher passes the selected project's — never process cwd).
+pub(crate) fn projection_db_at(root: &Path) -> Result<PathBuf> {
+    let cwd = root.to_path_buf();
     let repo = crate::verify::repo_id_for(&cwd)?;
     let root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
     Ok(rift_store::projection_db_under(&root, &repo))

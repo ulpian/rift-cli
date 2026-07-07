@@ -286,18 +286,21 @@ fn shard_passes(reader: &impl SubstrateReader) -> Result<(usize, Verdict)> {
 /// [`RiftError::Io`]/[`RiftError::Storage`] if the projection cannot be opened
 /// or migrated (internal problems — exit 70); never for tamper/redaction
 /// findings, which are verdicts.
-pub(crate) fn run() -> Result<VerifySummary> {
+/// Verify against an explicit repository root — the CLI passes its resolved
+/// cwd; the palette dispatcher passes the selected project's path (it must
+/// never consult process cwd).
+pub(crate) fn run_at(root: &std::path::Path) -> Result<VerifySummary> {
     // `main` is synchronous; the store seam is async (Turso-shaped). Drive it on a
     // short-lived current-thread runtime confined to this command — the async
     // readers (Canopy/MCP) get their own runtime when they land.
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
-    rt.block_on(run_async())
+    rt.block_on(run_async(root))
 }
 
-async fn run_async() -> Result<VerifySummary> {
-    let cwd = std::env::current_dir()?;
+async fn run_async(root: &std::path::Path) -> Result<VerifySummary> {
+    let cwd = root.to_path_buf();
     let repo = repo_id_for(&cwd)?;
     let root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
     let db = projection_db_under(&root, &repo);

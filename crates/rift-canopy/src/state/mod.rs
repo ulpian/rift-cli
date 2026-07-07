@@ -15,10 +15,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::col2::{plan_flip, DetailView, Feature, FeatureAction, FeatureActionKind};
+use crate::command::Verb;
+use crate::dispatch::{DispatchOutcome, DispatchRequest, Overlay};
 use crate::hit::{hit_test, Target};
 use crate::input::{on_key, Action, CanopyKey, MouseButton, MouseInput, MouseKind};
 use crate::render::frame::Size;
-use crate::{App, Command, Mode, Panel, ProjectStatus};
+use crate::{App, Mode, Panel, ProjectStatus};
 
 /// Which panel currently holds keyboard focus (the spec's `Focus`; identical to
 /// the existing [`Panel`]).
@@ -42,6 +44,14 @@ pub enum Event {
     /// trio): full section state for one project, applied when it is the
     /// selected one.
     Feed(FeedUpdate),
+    /// A delegated dispatch completed (the loop ran it synchronously); the
+    /// reducer renders the outcome into the results overlay.
+    DispatchDone {
+        /// The request that ran.
+        request: DispatchRequest,
+        /// What it produced.
+        outcome: DispatchOutcome,
+    },
 }
 
 /// One feed's full section state for one project. Each update carries the
@@ -111,8 +121,10 @@ pub struct Effects {
     pub data_requests: Vec<DataRequest>,
     /// Append-only persistence (projects/toggles).
     pub persist: Vec<PersistOp>,
-    /// Parsed slash commands to dispatch.
-    pub commands: Vec<CommandAction>,
+    /// Delegated CLI requests for the injected dispatcher (ADR-0021), each
+    /// with its resolved target repository (the selected project's path at
+    /// emit time — never process cwd).
+    pub dispatches: Vec<(DispatchRequest, String)>,
     /// Feature install/remove actions for the (injected) feature manager (P5 S2).
     /// Canopy plans these but never performs an install itself.
     pub feature_actions: Vec<FeatureAction>,
@@ -124,7 +136,7 @@ impl Effects {
     pub fn is_empty(&self) -> bool {
         self.data_requests.is_empty()
             && self.persist.is_empty()
-            && self.commands.is_empty()
+            && self.dispatches.is_empty()
             && self.feature_actions.is_empty()
     }
 }
@@ -183,13 +195,6 @@ pub enum PersistOp {
         /// The desired on/off intent.
         desired: bool,
     },
-}
-
-/// A parsed slash command to dispatch (wraps the existing [`Command`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommandAction {
-    /// The parsed command.
-    pub command: Command,
 }
 
 /// How many idle ticks between background re-stats of the selected project. At the
@@ -419,6 +424,8 @@ impl AppState {
             toggle_cursor: self.app.toggle_cursor,
             command_line: self.app.command_line.clone(),
             status: self.app.status.clone(),
+            overlay: self.app.overlay.clone(),
+            command_error: self.app.command_error.clone(),
         }
     }
 }
@@ -501,8 +508,12 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
                 }
                 // Flipping/retrying a feature reads the selected project's current
                 // toggle states (from the stored detail) to plan the change.
-                Action::ToggleFeature => toggle_flow(&s.app, s.detail.as_deref()),
+                Action::ToggleFeature => {
+                    toggle_flow(&s.app, s.detail.as_deref(), cursored_feature(&s.app))
+                }
                 Action::RetryFeature => retry_flow(&s.app),
+                Action::RunLine(buf) => run_line(s, &buf),
+                Action::ConfirmDispatch => confirm_dispatch(s),
                 other => fold_action(other),
             };
             // When the selection moves, ask the bus for the new project's data and
@@ -514,6 +525,11 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
             flow
         }
         Event::Mouse(m) => on_mouse(s, m),
+        Event::DispatchDone { request, outcome } => {
+            s.app.overlay = Some(Overlay::results(&request, &outcome));
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
     }
 }
 
@@ -597,13 +613,27 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             s.app.toggle_cursor = i.min(last);
             s.dirty = true;
             // Flip it — identical to Space/Enter/`t` on the keyboard.
-            toggle_flow(&s.app, s.detail.as_deref())
+            toggle_flow(&s.app, s.detail.as_deref(), cursored_feature(&s.app))
         }
         Target::Section(_) => {
             s.app.set_focus(Panel::Graphs);
             s.dirty = true;
             Flow::Continue(Effects::default())
         }
+        // The overlay's mouse surface (M5-09): Confirm is the mouse Enter,
+        // Cancel the mouse Esc; a body click is inert (wheel scrolls).
+        Target::OverlayConfirm => {
+            s.dirty = true;
+            confirm_dispatch(s)
+        }
+        Target::OverlayCancel => {
+            if matches!(s.app.overlay, Some(Overlay::Confirm { .. })) {
+                s.app.overlay = None;
+            }
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
+        Target::OverlayBody => Flow::Continue(Effects::default()),
     }
 }
 
@@ -616,6 +646,18 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
         Some(Target::ToggleRow(_)) => Panel::Detail,
         Some(Target::Section(_)) => Panel::Graphs,
         Some(Target::PanelFocus(p)) => p,
+        // The wheel scrolls an open Results overlay like `j`/`k`.
+        Some(Target::OverlayBody | Target::OverlayConfirm | Target::OverlayCancel) => {
+            if let Some(Overlay::Results { scroll, lines, .. }) = s.app.overlay.as_mut() {
+                *scroll = if down {
+                    scroll.saturating_add(1).min(lines.len().saturating_sub(1))
+                } else {
+                    scroll.saturating_sub(1)
+                };
+                s.dirty = true;
+            }
+            return Flow::Continue(Effects::default());
+        }
         Some(Target::CommandBar) | None => return Flow::Continue(Effects::default()),
     };
     s.dirty = true;
@@ -659,16 +701,181 @@ fn fold_action(action: Action) -> Flow {
         | Action::RemoveProject
         | Action::ReorderProject(_)
         | Action::ToggleFeature
-        | Action::RetryFeature => Flow::Continue(Effects::default()),
+        | Action::RetryFeature
+        | Action::RunLine(_)
+        | Action::ConfirmDispatch => Flow::Continue(Effects::default()),
         Action::AddProject(path) => Flow::Continue(Effects {
             persist: vec![PersistOp::AddProject { path }],
             ..Effects::default()
         }),
-        Action::RunCommand(command) => Flow::Continue(Effects {
-            commands: vec![CommandAction { command }],
-            ..Effects::default()
-        }),
     }
+}
+
+/// Submit one palette buffer (M5-07/09): parse; a span error renders inline
+/// (buffer + mode kept so the underline points at the typed text); a verb
+/// routes by tier — dashboard verbs to typed panel effects, read-only
+/// delegation straight to the dispatcher behind a Running frame, mutating
+/// delegation to the confirm overlay.
+fn run_line(s: &mut AppState, buf: &str) -> Flow {
+    match crate::command::parse(buf) {
+        Err(e) => {
+            s.app.command_error = Some(e);
+            Flow::Continue(Effects::default())
+        }
+        Ok(verb) => {
+            s.app.command_error = None;
+            s.app.command_line.clear();
+            s.app.mode = Mode::Normal;
+            match crate::dispatch::request_for(&verb) {
+                Some(req) => {
+                    let repo = s
+                        .app
+                        .selected_project()
+                        .map(|p| p.path.clone())
+                        .unwrap_or_default();
+                    if req.is_mutating() {
+                        s.app.overlay = Some(Overlay::Confirm { request: req, repo });
+                        Flow::Continue(Effects::default())
+                    } else {
+                        s.app.overlay = Some(Overlay::Running {
+                            title: req.verb_line(),
+                        });
+                        Flow::Continue(Effects {
+                            dispatches: vec![(req, repo)],
+                            ..Effects::default()
+                        })
+                    }
+                }
+                None => dashboard_verb_flow(s, verb),
+            }
+        }
+    }
+}
+
+/// The confirm overlay's Enter/Confirm: swap Confirm → Running and emit the
+/// pending dispatch with the repo resolved at confirm time.
+fn confirm_dispatch(s: &mut AppState) -> Flow {
+    let Some(Overlay::Confirm { request, repo }) = s.app.overlay.take() else {
+        return Flow::Continue(Effects::default());
+    };
+    s.app.overlay = Some(Overlay::Running {
+        title: request.verb_line(),
+    });
+    Flow::Continue(Effects {
+        dispatches: vec![(request, repo)],
+        ..Effects::default()
+    })
+}
+
+/// Resolve a grammar project reference against the current rows.
+fn resolve_project_ref(app: &App, r: &crate::command::ProjectRef) -> Option<String> {
+    use crate::command::ProjectRef;
+    match r {
+        ProjectRef::Selected => app.selected_project().map(|p| p.path.clone()),
+        ProjectRef::Index(n) => app
+            .projects
+            .get(n.saturating_sub(1))
+            .map(|p| p.path.clone()),
+        ProjectRef::Name(name) => app
+            .projects
+            .iter()
+            .find(|p| p.name == *name || p.path == *name)
+            .map(|p| p.path.clone()),
+    }
+}
+
+/// A dashboard-tier verb dispatches to the SAME typed effects the panels
+/// emit — the palette can never exceed a panel's privilege (ADR-0021).
+fn dashboard_verb_flow(s: &mut AppState, verb: Verb) -> Flow {
+    use crate::command::PanelName;
+    match verb {
+        Verb::Quit => Flow::Quit,
+        Verb::Help => {
+            let lines: Vec<String> = crate::command::help_lines();
+            s.app.overlay = Some(Overlay::Results {
+                title: "palette".into(),
+                lines,
+                scroll: 0,
+                footer: None,
+                truncated: false,
+            });
+            Flow::Continue(Effects::default())
+        }
+        Verb::Focus(p) => {
+            s.app.set_focus(match p {
+                PanelName::Projects => Panel::Projects,
+                PanelName::Detail => Panel::Detail,
+                PanelName::Graphs => Panel::Graphs,
+                PanelName::Command => Panel::Command,
+            });
+            Flow::Continue(Effects::default())
+        }
+        Verb::Select(r) => {
+            let before = s.app.selected_project().map(|p| p.path.clone());
+            let Some(path) = resolve_project_ref(&s.app, &r) else {
+                return no_match_status(s);
+            };
+            s.app.select_path(&path);
+            Flow::Continue(Effects {
+                data_requests: selection_change_effects(s, &before),
+                ..Effects::default()
+            })
+        }
+        Verb::Add => {
+            let Some(path) = s.app.launch_cwd.clone() else {
+                s.app.status = Some("launch directory unknown — run `rift init` there".into());
+                return Flow::Continue(Effects::default());
+            };
+            Flow::Continue(Effects {
+                persist: vec![PersistOp::AddProject { path }],
+                ..Effects::default()
+            })
+        }
+        Verb::Remove(r) => {
+            let Some(path) = resolve_project_ref(&s.app, &r) else {
+                return no_match_status(s);
+            };
+            persist_flow(Some(PersistOp::RemoveProject { path }))
+        }
+        Verb::Relabel(r, label) => {
+            let Some(path) = resolve_project_ref(&s.app, &r) else {
+                return no_match_status(s);
+            };
+            persist_flow(Some(PersistOp::RelabelProject { path, label }))
+        }
+        Verb::Toggle(key) => {
+            let Some(feature) = Feature::ALL.iter().find(|f| f.key() == key) else {
+                return unknown_feature_status(s, &key);
+            };
+            toggle_flow(&s.app, s.detail.as_deref(), *feature)
+        }
+        Verb::Reinstall(key) => {
+            let Some(feature) = Feature::ALL.iter().find(|f| f.key() == key) else {
+                return unknown_feature_status(s, &key);
+            };
+            Flow::Continue(Effects {
+                feature_actions: vec![FeatureAction {
+                    feature: *feature,
+                    kind: FeatureActionKind::Reinstall,
+                }],
+                ..Effects::default()
+            })
+        }
+        // Delegable verbs never reach here (request_for handled them).
+        _ => Flow::Continue(Effects::default()),
+    }
+}
+
+/// The "no matching project" toast (shared by the project-ref verbs).
+fn no_match_status(s: &mut AppState) -> Flow {
+    s.app.status = Some("no matching project".into());
+    Flow::Continue(Effects::default())
+}
+
+/// The "unknown feature" toast (shared by toggle/reinstall).
+fn unknown_feature_status(s: &mut AppState, key: &str) -> Flow {
+    s.app.status = Some(format!("unknown feature `{key}` — try /help"));
+    Flow::Continue(Effects::default())
 }
 
 /// Wrap an optional persist op into a `Flow::Continue` (no op ⇒ no effect).
@@ -687,14 +894,14 @@ fn cursored_feature(app: &App) -> Feature {
         .unwrap_or(Feature::Fff)
 }
 
-/// Plan a flip of the cursored feature into append-only `SetToggle` writes plus the
+/// Plan a flip of `feature` into append-only `SetToggle` writes plus the
 /// matching install/remove [`FeatureAction`]s (base-first / cascade order). No
-/// selection ⇒ inert.
-fn toggle_flow(app: &App, detail: Option<&DetailView>) -> Flow {
+/// selection ⇒ inert. The keyboard/mouse paths pass the cursored feature; the
+/// palette's `/toggle <key>` passes the named one.
+fn toggle_flow(app: &App, detail: Option<&DetailView>, feature: Feature) -> Flow {
     let Some(path) = app.selected_project().map(|p| p.path.clone()) else {
         return Flow::Continue(Effects::default());
     };
-    let feature = cursored_feature(app);
     // The current on-states come from the selected project's detail (if present).
     let view = detail
         .filter(|d| d.path == path)
@@ -768,6 +975,10 @@ pub struct ViewModel {
     pub command_line: String,
     /// A transient status/toast line.
     pub status: Option<String>,
+    /// The modal dispatch surface (results / confirm / running), if open.
+    pub overlay: Option<Overlay>,
+    /// The inline parse error under the command bar, if any.
+    pub command_error: Option<crate::command::ParseError>,
 }
 
 #[cfg(test)]
@@ -1112,15 +1323,122 @@ mod tests {
     }
 
     #[test]
-    fn run_command_action_becomes_command_effect() {
-        let mut s = ready(vec![]);
+    fn read_only_verb_dispatches_behind_a_running_frame() {
+        // `/status` (read-only tier) emits one dispatch with the selected
+        // project's repo and opens the Running overlay — no confirm.
+        let mut s = ready(vec![project("a")]);
         update(&mut s, Event::Key(CanopyKey::Char('/')));
         for c in "status".chars() {
             update(&mut s, Event::Key(CanopyKey::Char(c)));
         }
         match update(&mut s, Event::Key(CanopyKey::Enter)) {
-            Flow::Continue(e) => assert_eq!(e.commands.len(), 1),
+            Flow::Continue(e) => {
+                assert_eq!(e.dispatches.len(), 1);
+                let (req, repo) = &e.dispatches[0];
+                assert_eq!(*req, DispatchRequest::Status);
+                assert_eq!(repo, "/r/a");
+            }
             Flow::Quit => panic!("expected Continue"),
+        }
+        assert!(
+            matches!(s.app.overlay, Some(Overlay::Running { .. })),
+            "the running line shows while the dispatch holds the loop"
+        );
+    }
+
+    #[test]
+    fn mutating_verb_confirms_first_and_stray_keys_are_inert() {
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('/')));
+        for c in "rebuild".chars() {
+            update(&mut s, Event::Key(CanopyKey::Char(c)));
+        }
+        match update(&mut s, Event::Key(CanopyKey::Enter)) {
+            Flow::Continue(e) => assert!(e.dispatches.is_empty(), "confirm first"),
+            Flow::Quit => panic!("expected Continue"),
+        }
+        assert!(matches!(s.app.overlay, Some(Overlay::Confirm { .. })));
+        // Stray keys never confirm (a buffered keystroke is harmless).
+        for k in [
+            CanopyKey::Char('y'),
+            CanopyKey::Char(' '),
+            CanopyKey::Tab,
+            CanopyKey::Down,
+        ] {
+            match update(&mut s, Event::Key(k)) {
+                Flow::Continue(e) => assert!(e.dispatches.is_empty(), "{k:?} must be inert"),
+                Flow::Quit => panic!("{k:?} must not quit"),
+            }
+            assert!(matches!(s.app.overlay, Some(Overlay::Confirm { .. })));
+        }
+        // Enter confirms: Confirm → Running + the dispatch effect.
+        match update(&mut s, Event::Key(CanopyKey::Enter)) {
+            Flow::Continue(e) => {
+                assert_eq!(e.dispatches.len(), 1);
+                assert_eq!(e.dispatches[0].0, DispatchRequest::Rebuild);
+            }
+            Flow::Quit => panic!("expected Continue"),
+        }
+        assert!(matches!(s.app.overlay, Some(Overlay::Running { .. })));
+    }
+
+    #[test]
+    fn esc_cancels_a_confirm_dispatching_nothing() {
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('/')));
+        for c in "gc".chars() {
+            update(&mut s, Event::Key(CanopyKey::Char(c)));
+        }
+        let _ = update(&mut s, Event::Key(CanopyKey::Enter));
+        assert!(matches!(s.app.overlay, Some(Overlay::Confirm { .. })));
+        match update(&mut s, Event::Key(CanopyKey::Esc)) {
+            Flow::Continue(e) => assert!(e.dispatches.is_empty()),
+            Flow::Quit => panic!("expected Continue"),
+        }
+        assert!(s.app.overlay.is_none(), "cancel dismisses");
+    }
+
+    #[test]
+    fn parse_error_renders_inline_and_keeps_the_buffer() {
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('/')));
+        for c in "statsu".chars() {
+            update(&mut s, Event::Key(CanopyKey::Char(c)));
+        }
+        let _ = update(&mut s, Event::Key(CanopyKey::Enter));
+        let err = s.app.command_error.as_ref().expect("inline error");
+        assert_eq!(err.hint, Some("status"), "nearest-verb hint");
+        assert_eq!(
+            s.app.command_line, "statsu",
+            "buffer kept for the underline"
+        );
+        assert_eq!(s.app.mode, Mode::Command, "still editing");
+        // The next edit clears the error.
+        update(&mut s, Event::Key(CanopyKey::Backspace));
+        assert!(s.app.command_error.is_none());
+    }
+
+    #[test]
+    fn dispatch_done_renders_the_results_overlay() {
+        let mut s = ready(vec![project("a")]);
+        let outcome = DispatchOutcome {
+            code: 65,
+            human: "chain: BROKEN".into(),
+            json: None,
+        };
+        let _ = update(
+            &mut s,
+            Event::DispatchDone {
+                request: DispatchRequest::Verify,
+                outcome,
+            },
+        );
+        match &s.app.overlay {
+            Some(Overlay::Results { title, footer, .. }) => {
+                assert_eq!(title, "rift verify");
+                assert_eq!(footer.as_deref(), Some("verify: FAILED — integrity (65)"));
+            }
+            other => panic!("expected Results, got {other:?}"),
         }
     }
 

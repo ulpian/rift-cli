@@ -27,12 +27,11 @@ use rift_store::{CanonicalStore, SqliteStore, Value};
 use crate::cli::{exit, MemoryCmd, Outcome};
 
 /// Route one `rift memory` subcommand to its handler.
-pub(crate) fn run(cmd: &MemoryCmd) -> Result<Outcome> {
-    let repo = std::env::current_dir()?;
+pub(crate) fn run(cmd: &MemoryCmd, root: &Path) -> Result<Outcome> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(RiftError::from)?;
-    rt.block_on(dispatch(cmd, &repo))
+    rt.block_on(dispatch(cmd, root))
 }
 
 async fn dispatch(cmd: &MemoryCmd, repo: &Path) -> Result<Outcome> {

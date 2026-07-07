@@ -7,7 +7,7 @@
 //! into [`CanopyKey`] and renders the resulting state — it holds no logic of its
 //! own.
 
-use crate::{parse_command, App, Command};
+use crate::App;
 
 /// Which editing/interaction mode the dashboard is in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,8 +121,10 @@ pub enum Action {
     ToggleFeature,
     /// Retry (reinstall) the feature toggle under the column-2 cursor.
     RetryFeature,
-    /// Run a parsed slash command.
-    RunCommand(Command),
+    /// Submit the command buffer (the reducer parses; errors render inline).
+    RunLine(String),
+    /// The confirm overlay's Enter/Confirm — dispatch the pending request.
+    ConfirmDispatch,
 }
 
 /// Apply one key to the dashboard, returning the effect the event loop must run.
@@ -133,6 +135,12 @@ pub fn on_key(app: &mut App, key: CanopyKey) -> Action {
     if !app.splash.done() {
         app.splash.skip();
         return Action::None;
+    }
+    // An open overlay owns the keys (ADR-0021): Results scrolls/dismisses,
+    // Confirm accepts ONLY Enter/Esc (every other key inert — a buffered
+    // keystroke can never confirm), Running swallows everything.
+    if app.overlay.is_some() {
+        return on_key_overlay(app, key);
     }
     match app.mode {
         Mode::Normal => on_key_normal(app, key),
@@ -243,44 +251,71 @@ fn on_key_editing(app: &mut App, key: CanopyKey) -> Action {
     match key {
         CanopyKey::Char(c) => {
             app.command_line.push(c);
+            app.command_error = None; // an edit clears the inline error
             Action::None
         }
         CanopyKey::Backspace => {
             app.command_line.pop();
+            app.command_error = None;
             Action::None
         }
         CanopyKey::Esc | CanopyKey::Quit => {
             app.mode = Mode::Normal;
             app.command_line.clear();
+            app.command_error = None;
             Action::None
         }
-        CanopyKey::Enter => {
-            let buf = std::mem::take(&mut app.command_line);
-            let mode = app.mode;
-            app.mode = Mode::Normal;
-            match mode {
-                Mode::AddProject => {
-                    let trimmed = buf.trim();
-                    if trimmed.is_empty() {
-                        Action::None
-                    } else {
-                        Action::AddProject(trimmed.to_string())
-                    }
+        CanopyKey::Enter => match app.mode {
+            Mode::AddProject => {
+                let buf = std::mem::take(&mut app.command_line);
+                app.mode = Mode::Normal;
+                let trimmed = buf.trim();
+                if trimmed.is_empty() {
+                    Action::None
+                } else {
+                    Action::AddProject(trimmed.to_string())
                 }
-                Mode::Command => match parse_command(&buf) {
-                    Some(cmd) if cmd.name == "quit" => {
-                        app.quit = true;
-                        Action::Quit
-                    }
-                    Some(cmd) => Action::RunCommand(cmd),
-                    None => Action::None,
-                },
-                // Editing handlers are only reached from Command/AddProject.
-                Mode::Normal => Action::None,
             }
-        }
+            // The reducer parses (span errors render inline and keep the
+            // buffer); on success it clears the buffer + mode itself.
+            Mode::Command => Action::RunLine(app.command_line.clone()),
+            Mode::Normal => Action::None,
+        },
         // Navigation/focus keys are inert while editing the command/path buffer.
         _ => Action::None,
+    }
+}
+
+/// Keys while an overlay is open. Results: Esc dismisses, `j`/`k` (and the
+/// arrows) scroll, everything else inert. Confirm: Enter confirms, Esc
+/// cancels, **every other key is inert**. Running: everything inert.
+fn on_key_overlay(app: &mut App, key: CanopyKey) -> Action {
+    use crate::dispatch::Overlay;
+    match app.overlay.as_mut() {
+        Some(Overlay::Results { scroll, lines, .. }) => match key {
+            CanopyKey::Esc | CanopyKey::Quit => {
+                app.overlay = None;
+                Action::None
+            }
+            CanopyKey::Char('j') | CanopyKey::Down => {
+                *scroll = scroll.saturating_add(1).min(lines.len().saturating_sub(1));
+                Action::None
+            }
+            CanopyKey::Char('k') | CanopyKey::Up => {
+                *scroll = scroll.saturating_sub(1);
+                Action::None
+            }
+            _ => Action::None,
+        },
+        Some(Overlay::Confirm { .. }) => match key {
+            CanopyKey::Enter => Action::ConfirmDispatch,
+            CanopyKey::Esc => {
+                app.overlay = None;
+                Action::None
+            }
+            _ => Action::None,
+        },
+        Some(Overlay::Running { .. }) | None => Action::None,
     }
 }
 
@@ -366,8 +401,13 @@ mod tests {
                 CanopyKey::Char('t'),
             ],
         );
-        assert_eq!(on_key(&mut app, CanopyKey::Enter), Action::Quit);
-        assert!(app.quit);
+        // Parsing moved to the reducer (M5-07): Enter submits the raw line;
+        // the reducer's `/quit` handling produces Flow::Quit (covered in the
+        // state tests).
+        assert_eq!(
+            on_key(&mut app, CanopyKey::Enter),
+            Action::RunLine("quit".into())
+        );
     }
 
     #[test]
@@ -386,8 +426,8 @@ mod tests {
             ],
         );
         match on_key(&mut app, CanopyKey::Enter) {
-            Action::RunCommand(cmd) => assert_eq!(cmd.name, "status"),
-            other => panic!("expected RunCommand, got {other:?}"),
+            Action::RunLine(buf) => assert_eq!(buf, "status"),
+            other => panic!("expected RunLine, got {other:?}"),
         }
     }
 

@@ -330,3 +330,77 @@ fn golden_reduced2d_midframe() {
     );
     insta::assert_snapshot!("splash_reduced2d_mid", frame_text(&f));
 }
+
+// ---- M5 W0: the dispatch overlay + inline parse errors ----------------------
+
+/// Render `state` at 100×32 through the ASCII backend.
+fn render_state(s: &mut AppState) -> String {
+    let vm = s.snapshot();
+    let mut frame = Frame::new(Size::new(100, 32));
+    let mut backend = AsciiBackend::new(Capabilities::empty());
+    rift_canopy::view::draw(&vm, &mut backend, &mut frame);
+    frame_text(&frame)
+}
+
+#[test]
+fn golden_overlay_results_failed_verify() {
+    let mut s = dashboard_state();
+    s.size = Size::new(100, 32);
+    let outcome = rift_canopy::DispatchOutcome {
+        code: 65,
+        human: "re-derived 2 checkpoint(s) from git; 2 shard(s) checked\nchain: BROKEN at #1"
+            .into(),
+        json: None,
+    };
+    s.app.overlay = Some(rift_canopy::Overlay::results(
+        &rift_canopy::DispatchRequest::Verify,
+        &outcome,
+    ));
+    insta::assert_snapshot!("overlay_verify_failed", render_state(&mut s));
+}
+
+#[test]
+fn golden_overlay_results_truncated() {
+    let mut s = dashboard_state();
+    s.size = Size::new(100, 32);
+    let big: String = (0..500).fold(String::new(), |mut acc, i| {
+        use std::fmt::Write as _;
+        let _ = writeln!(acc, "line {i}");
+        acc
+    });
+    let outcome = rift_canopy::DispatchOutcome {
+        code: 0,
+        human: big,
+        json: None,
+    };
+    s.app.overlay = Some(rift_canopy::Overlay::results(
+        &rift_canopy::DispatchRequest::Status,
+        &outcome,
+    ));
+    // Scroll to the truncation notice at the tail.
+    if let Some(rift_canopy::Overlay::Results { scroll, lines, .. }) = s.app.overlay.as_mut() {
+        *scroll = lines.len().saturating_sub(5);
+    }
+    insta::assert_snapshot!("overlay_truncated", render_state(&mut s));
+}
+
+#[test]
+fn golden_overlay_confirm_prompt() {
+    let mut s = dashboard_state();
+    s.size = Size::new(100, 32);
+    s.app.overlay = Some(rift_canopy::Overlay::Confirm {
+        request: rift_canopy::DispatchRequest::ProjectsPrune,
+        repo: "/r/rift-cli".into(),
+    });
+    insta::assert_snapshot!("overlay_confirm", render_state(&mut s));
+}
+
+#[test]
+fn golden_inline_parse_error() {
+    let mut s = dashboard_state();
+    s.size = Size::new(100, 32);
+    s.app.mode = rift_canopy::Mode::Command;
+    s.app.command_line = "statsu".into();
+    s.app.command_error = rift_canopy::parse("statsu").err();
+    insta::assert_snapshot!("inline_parse_error", render_state(&mut s));
+}

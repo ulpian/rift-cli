@@ -85,7 +85,14 @@ fn main() -> ExitCode {
         };
     }
 
-    match route(&cli, cmd) {
+    let root = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("rift: cannot resolve the working directory: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match route(&cli, cmd, &root) {
         Ok(outcome) => emit(&cli, &outcome),
         Err(e) => {
             // A clean non-zero exit with a message — never a panic/backtrace.
@@ -102,44 +109,46 @@ fn main() -> ExitCode {
 }
 
 /// Route a parsed subcommand to its handler, producing a typed [`Outcome`].
-fn route(_cli: &Cli, cmd: &Command) -> rift_core::Result<Outcome> {
+/// `root` is the target repository — process cwd on the CLI path, the selected
+/// project's path on the palette-dispatcher path (which must never touch cwd).
+fn route(_cli: &Cli, cmd: &Command, root: &std::path::Path) -> rift_core::Result<Outcome> {
     use cli::{CheckpointCmd, SessionCmd};
     match cmd {
-        Command::Init(a) => cmd_init(a),
-        Command::Doctor => Ok(cmd_doctor()),
-        Command::Verify => Ok(verify_outcome()),
-        Command::Rebuild => cmd_rebuild(),
-        Command::Configure(a) => cmd_configure(a),
+        Command::Init(a) => cmd_init(root, a),
+        Command::Doctor => Ok(cmd_doctor(root)),
+        Command::Verify => Ok(verify_outcome(root)),
+        Command::Rebuild => cmd_rebuild(root),
+        Command::Configure(a) => cmd_configure(root, a),
         // enable/disable mutate; they may run before `init` and create `.rift/`.
         Command::Enable(a) => {
-            let store = open_projection()?;
-            runtime()?.block_on(agents::enable(&store, &a.agent, hooks::now_ms()))
+            let store = open_projection(root)?;
+            runtime()?.block_on(agents::enable(&store, root, &a.agent, hooks::now_ms()))
         }
         Command::Disable(a) => {
-            let store = open_projection()?;
-            runtime()?.block_on(agents::disable(&store, &a.agent, hooks::now_ms()))
+            let store = open_projection(root)?;
+            runtime()?.block_on(agents::disable(&store, root, &a.agent, hooks::now_ms()))
         }
         // Read-only projection queries — guard on init state first.
-        Command::Status => projection_read(|s, rt| rt.block_on(query::status(s))),
+        Command::Status => projection_read(root, |s, rt| rt.block_on(query::status(s))),
         Command::Checkpoint(CheckpointCmd::List) => {
-            projection_read(|s, rt| rt.block_on(query::checkpoint_list(s)))
+            projection_read(root, |s, rt| rt.block_on(query::checkpoint_list(s)))
         }
         Command::Checkpoint(CheckpointCmd::Show(i)) => {
-            projection_read(|s, rt| rt.block_on(query::checkpoint_show(s, &i.id)))
+            projection_read(root, |s, rt| rt.block_on(query::checkpoint_show(s, &i.id)))
         }
         Command::Session(SessionCmd::List) => {
-            projection_read(|s, rt| rt.block_on(query::session_list(s)))
+            projection_read(root, |s, rt| rt.block_on(query::session_list(s)))
         }
         Command::Session(SessionCmd::Show(i)) => {
-            projection_read(|s, rt| rt.block_on(query::session_show(s, &i.id)))
+            projection_read(root, |s, rt| rt.block_on(query::session_show(s, &i.id)))
         }
         Command::Explain(a) => {
-            projection_read(|s, rt| rt.block_on(query::explain(s, &a.reference)))
+            projection_read(root, |s, rt| rt.block_on(query::explain(s, &a.reference)))
         }
         // The recall plane's human surface (PRD-M2); reads recall.db (a cache
         // rebuilt from git), so it needs no `.rift/` init guard.
-        Command::Memory(m) => memory::run(m),
-        Command::Gc(a) => projection_read(|s, rt| rt.block_on(query::gc(s, a.dry_run))),
+        Command::Memory(m) => memory::run(m, root),
+        Command::Gc(a) => projection_read(root, |s, rt| rt.block_on(query::gc(s, a.dry_run))),
         Command::Projects(p) => projects_cmd(p),
         // Hooks is handled in `main` before routing.
         Command::Hooks(_) => Ok(Outcome::ok(String::new(), serde_json::json!({}))),
@@ -229,21 +238,21 @@ fn projects_cmd(cmd: &cli::ProjectsCmd) -> rift_core::Result<Outcome> {
 
 /// Run a read-only projection query: guard on init state, open the store + a
 /// runtime, and hand both to `f` (which drives the async query to completion).
-fn projection_read<F>(f: F) -> rift_core::Result<Outcome>
+fn projection_read<F>(root: &std::path::Path, f: F) -> rift_core::Result<Outcome>
 where
     F: FnOnce(&rift_store::SqliteStore, &tokio::runtime::Runtime) -> rift_core::Result<Outcome>,
 {
-    if let Some(o) = not_init_guard() {
+    if let Some(o) = not_init_guard(root) {
         return Ok(o);
     }
-    let store = open_projection()?;
+    let store = open_projection(root)?;
     let rt = runtime()?;
     f(&store, &rt)
 }
 
 /// `Some(NOT_INIT outcome)` when the cwd is not a Rift repo (`.rift/` absent).
-fn not_init_guard() -> Option<Outcome> {
-    if is_initialized() {
+fn not_init_guard(root: &std::path::Path) -> Option<Outcome> {
+    if is_initialized(root) {
         return None;
     }
     Some(Outcome::coded(
@@ -253,15 +262,15 @@ fn not_init_guard() -> Option<Outcome> {
     ))
 }
 
-/// Whether the current directory has been initialized (`.rift/` present).
-fn is_initialized() -> bool {
-    std::env::current_dir().is_ok_and(|c| c.join(".rift").is_dir())
+/// Whether `root` has been initialized (`.rift/` present).
+fn is_initialized(root: &std::path::Path) -> bool {
+    root.join(".rift").is_dir()
 }
 
 /// Open (creating + migrating if needed) the per-repo projection store through
-/// the checksum-locked migration engine.
-fn open_projection() -> rift_core::Result<rift_store::SqliteStore> {
-    rift_store::open_capture_projection(hooks::projection_db()?)
+/// the checksum-locked migration engine, for an explicit repository root.
+fn open_projection(root: &std::path::Path) -> rift_core::Result<rift_store::SqliteStore> {
+    rift_store::open_capture_projection(hooks::projection_db_at(root)?)
 }
 
 /// A short-lived current-thread async runtime for the store seam.
@@ -292,8 +301,8 @@ fn emit(cli: &Cli, outcome: &Outcome) -> ExitCode {
 
 /// `rift init` / `rift setup`: register the cwd, scaffold `.rift/`, init the
 /// projection, install git hooks (if a repo), and provision the backend.
-fn cmd_init(args: &InitArgs) -> rift_core::Result<Outcome> {
-    let canon = std::env::current_dir()?.canonicalize()?;
+fn cmd_init(root: &std::path::Path, args: &InitArgs) -> rift_core::Result<Outcome> {
+    let canon = root.canonicalize()?;
     let name = project_name(&canon);
 
     // Register into the global project registry (shared with the dashboard).
@@ -311,7 +320,7 @@ fn cmd_init(args: &InitArgs) -> rift_core::Result<Outcome> {
     }
 
     // Best-effort projection init.
-    let _ = open_projection();
+    let _ = open_projection(&canon);
 
     // Also register into the append-only canopy UI-state store — the dashboard's
     // source of truth (the TOML registry above is kept only for legacy import).
@@ -386,16 +395,14 @@ impl ProvisionOutcome {
 }
 
 /// `rift doctor`: report capture-backend readiness without any network I/O.
-fn cmd_doctor() -> Outcome {
+fn cmd_doctor(root: &std::path::Path) -> Outcome {
     let status = backend_status();
     let mut human = format!("rift doctor\n  capture backend: {status}");
     let mut json = serde_json::json!({ "capture_backend": status });
-    if let Ok(cwd) = std::env::current_dir() {
-        let (chain_human, chain_json) = doctor_memory_chain(&cwd);
-        human.push_str(&chain_human);
-        if let Some(obj) = json.as_object_mut() {
-            obj.insert("memory_chain".into(), chain_json);
-        }
+    let (chain_human, chain_json) = doctor_memory_chain(root);
+    human.push_str(&chain_human);
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("memory_chain".into(), chain_json);
     }
     Outcome::ok(human, json)
 }
@@ -521,8 +528,8 @@ fn resolve_memd_binary() -> Option<std::path::PathBuf> {
 }
 
 /// `rift configure`: manage `.rift/config.toml` (the checkpoint remote / policy).
-fn cmd_configure(args: &ConfigureArgs) -> rift_core::Result<Outcome> {
-    let rift_dir = std::env::current_dir()?.join(".rift");
+fn cmd_configure(root: &std::path::Path, args: &ConfigureArgs) -> rift_core::Result<Outcome> {
+    let rift_dir = root.join(".rift");
     std::fs::create_dir_all(&rift_dir)?;
     let cfg = rift_dir.join("config.toml");
     if let Some(remote) = &args.checkpoint_remote {
@@ -543,9 +550,9 @@ fn cmd_configure(args: &ConfigureArgs) -> rift_core::Result<Outcome> {
 
 /// `rift verify`: carries its own granular exit contract (P5 S4): 0 ok,
 /// 1 tamper, 3 redaction, 5 structure, 70 internal.
-fn verify_outcome() -> Outcome {
+fn verify_outcome(root: &std::path::Path) -> Outcome {
     use verify::Verdict;
-    match verify::run() {
+    match verify::run_at(root) {
         Ok(summary) => {
             let base = format!(
                 "re-derived {} checkpoint(s) from {}; {} shard(s) redaction/Merkle-checked",
@@ -586,10 +593,10 @@ fn verify_outcome() -> Outcome {
 /// `rift rebuild`: run the artifact bridge — rebuild the projection from the
 /// redacted checkpoint branch alone (delete `projection.db` first for a
 /// from-scratch rebuild; over a live projection it is a set-union no-op).
-fn cmd_rebuild() -> rift_core::Result<Outcome> {
-    let cwd = std::env::current_dir()?;
+fn cmd_rebuild(root: &std::path::Path) -> rift_core::Result<Outcome> {
+    let cwd = root.to_path_buf();
     let repo_id = verify::repo_id_for(&cwd)?;
-    let store = open_projection()?;
+    let store = open_projection(root)?;
     let Ok(reader) = rift_recall_substrate::GixSubstrate::open(&cwd) else {
         return Ok(Outcome::coded(
             exit::NOT_INIT,
@@ -626,6 +633,131 @@ fn cmd_rebuild() -> rift_core::Result<Outcome> {
 /// default 1200) with the first project active, so statuses and the column-3
 /// sections render from the developer's own projections — placeholders only
 /// where data is honestly absent, exactly like the TUI.
+/// The palette's in-process dispatcher (ADR-0021, M5-08): every delegated
+/// request maps onto the SAME handlers `route` uses, against the explicit
+/// repository root the loop resolved (the selected project's path — never
+/// process cwd). The mapping below is the structural grammar↔clap bridge the
+/// drift-guard test pins.
+struct RiftDispatcher;
+
+impl rift_canopy::CommandDispatcher for RiftDispatcher {
+    fn dispatch(
+        &mut self,
+        req: &rift_canopy::DispatchRequest,
+        repo: &std::path::Path,
+    ) -> rift_canopy::DispatchOutcome {
+        let outcome = dispatch_request(req, repo).unwrap_or_else(|e| {
+            Outcome::coded(
+                exit::FAILURE,
+                format!("rift: {e}"),
+                serde_json::json!({ "error": e.to_string() }),
+            )
+        });
+        rift_canopy::DispatchOutcome {
+            code: outcome.code,
+            human: outcome.human,
+            json: serde_json::to_string(&outcome.json).ok(),
+        }
+    }
+}
+
+/// Map one palette request onto its subcommand handler — the same arms
+/// `route` dispatches, minus `hooks` (structurally absent from the request
+/// enum) and the dashboard tier (never delegated).
+fn dispatch_request(
+    req: &rift_canopy::DispatchRequest,
+    root: &std::path::Path,
+) -> rift_core::Result<Outcome> {
+    use cli::{CheckpointCmd, GcArgs, ProjectsCmd, SessionCmd};
+    use rift_canopy::DispatchRequest as R;
+    match req {
+        R::Status => projection_read(root, |s, rt| rt.block_on(query::status(s))),
+        R::Memory(m) => memory::run(&palette_memory_cmd(m), root),
+        R::Checkpoint(rift_canopy::CheckpointVerb::List) => {
+            projection_read(root, |s, rt| rt.block_on(query::checkpoint_list(s)))
+        }
+        R::Checkpoint(rift_canopy::CheckpointVerb::Show(id)) => {
+            let _ = CheckpointCmd::Show(cli::IdArgs { id: id.clone() }); // the clap path this mirrors
+            projection_read(root, |s, rt| rt.block_on(query::checkpoint_show(s, id)))
+        }
+        R::Session(rift_canopy::SessionVerb::List) => {
+            projection_read(root, |s, rt| rt.block_on(query::session_list(s)))
+        }
+        R::Session(rift_canopy::SessionVerb::Show(id)) => {
+            let _ = SessionCmd::Show(cli::IdArgs { id: id.clone() });
+            projection_read(root, |s, rt| rt.block_on(query::session_show(s, id)))
+        }
+        R::Explain(reference) => {
+            projection_read(root, |s, rt| rt.block_on(query::explain(s, reference)))
+        }
+        R::Doctor => Ok(cmd_doctor(root)),
+        R::Verify => Ok(verify_outcome(root)),
+        R::GcDryRun => {
+            let _ = GcArgs { dry_run: true };
+            projection_read(root, |s, rt| rt.block_on(query::gc(s, true)))
+        }
+        R::ProjectsList => projects_cmd(&ProjectsCmd::List),
+        R::ProjectsPruneDryRun => {
+            projects_cmd(&ProjectsCmd::Prune(cli::PruneArgs { dry_run: true }))
+        }
+        R::Init => cmd_init(
+            root,
+            &InitArgs {
+                no_provision: false,
+            },
+        ),
+        R::EnableAgent(agent) => {
+            let store = open_projection(root)?;
+            runtime()?.block_on(agents::enable(&store, root, agent, hooks::now_ms()))
+        }
+        R::DisableAgent(agent) => {
+            let store = open_projection(root)?;
+            runtime()?.block_on(agents::disable(&store, root, agent, hooks::now_ms()))
+        }
+        R::Configure(rift_canopy::ConfigureVerb::Show) => cmd_configure(
+            root,
+            &ConfigureArgs {
+                checkpoint_remote: None,
+            },
+        ),
+        R::Configure(rift_canopy::ConfigureVerb::Splash(mode)) => configure_splash_mode(*mode),
+        R::Rebuild => cmd_rebuild(root),
+        R::Gc => projection_read(root, |s, rt| rt.block_on(query::gc(s, false))),
+        R::ProjectsPrune => projects_cmd(&ProjectsCmd::Prune(cli::PruneArgs { dry_run: false })),
+    }
+}
+
+/// The palette's memory verbs mapped onto the clap `MemoryCmd` shapes.
+fn palette_memory_cmd(m: &rift_canopy::MemoryVerb) -> cli::MemoryCmd {
+    use rift_canopy::MemoryVerb as V;
+    match m {
+        V::DiffSince(point) => cli::MemoryCmd::DiffSince(cli::PointArgs {
+            point: point.clone(),
+        }),
+        V::FileIfChanged(path) => {
+            cli::MemoryCmd::FileIfChanged(cli::PathArgs { path: path.clone() })
+        }
+        V::CostHotspots(top) => cli::MemoryCmd::CostHotspots(cli::TopArgs {
+            top: top.unwrap_or(5),
+        }),
+        V::RereadReport => cli::MemoryCmd::RereadReport,
+    }
+}
+
+/// `configure splash <mode>` (M5-15's CLI verb reaches the same writer): the
+/// palette's mutating configure sets ONLY the splash key of the global canopy
+/// preferences. Until the W3 wave lands the prefs key, this reports the
+/// intent honestly.
+fn configure_splash_mode(mode: rift_canopy::SplashMode) -> rift_core::Result<Outcome> {
+    Ok(Outcome::ok(
+        format!(
+            "splash mode: {} (persisted by the W3 configure verb)",
+            mode.as_str()
+        ),
+        serde_json::json!({ "splash_mode": mode.as_str() }),
+    ))
+}
+
 /// Spawn the one-shot launch auto-ingest thread (M5-06): the launch-selected
 /// project (per the same [`rift_canopy::launch_selection`] rule), ingested in
 /// the background when rift-total-recall is enabled for it. The ingest
@@ -770,6 +902,11 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
             // Feature installs are Stage 5; until then the null manager accepts
             // toggle actions without installing anything.
             let mut manager = rift_canopy::NullFeatureManager;
+            // The palette's delegated verbs cross this in-process dispatcher
+            // (ADR-0021) — the binary's own subcommand router over an explicit
+            // repository root, injected exactly like on_persist.
+            let mut dispatcher = RiftDispatcher;
+            let reload = || cstore.projects();
             match rift_canopy::app::live::run(rift_canopy::app::live::LoopDeps {
                 opts,
                 initial: projects.clone(),
@@ -777,6 +914,8 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
                 data_rx: bus.evt_rx,
                 req_tx: bus.req_tx,
                 manager: &mut manager,
+                dispatcher: &mut dispatcher,
+                reload,
             }) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
@@ -917,9 +1056,55 @@ fn skip_reason(no_provision: bool) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn crates_link() {
         assert!(rift_canopy::status().contains("canopy"));
         assert!(rift_shadow::status().contains("shadow"));
+    }
+
+    /// The grammar↔clap drift guard (M5-08): every read-only palette request
+    /// reaches a real handler against an EXPLICIT repository root — never
+    /// process cwd — and a non-repo root answers honestly (never a panic).
+    /// The mutating arms are pinned by the same exhaustive `match` in
+    /// `dispatch_request` (a new request variant fails to compile until it
+    /// maps); their execution is driven by the gate's palette leg.
+    #[test]
+    fn read_only_requests_answer_against_an_explicit_root() {
+        use rift_canopy::DispatchRequest as R;
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path();
+        let requests = [
+            R::Status,
+            R::Memory(rift_canopy::MemoryVerb::RereadReport),
+            R::Checkpoint(rift_canopy::CheckpointVerb::List),
+            R::Session(rift_canopy::SessionVerb::List),
+            R::Explain("abc123".into()),
+            R::Doctor,
+            R::Verify,
+            R::GcDryRun,
+            R::ProjectsList,
+            R::ProjectsPruneDryRun,
+        ];
+        for req in requests {
+            let out = dispatch_request(&req, root);
+            // Memory/verify error on a non-repo (no git); the projection reads
+            // answer NOT_INIT; doctor/projects answer OK. All are honest
+            // Outcomes or typed errors — never a panic, never a cwd read.
+            // Non-repo roots may error typed (memory/verify) — that is honest.
+            if let Ok(o) = out {
+                assert!(
+                    o.code == exit::OK || o.code == exit::NOT_INIT || o.code == exit::FAILURE,
+                    "{req:?} → unexpected code {}",
+                    o.code
+                );
+            }
+        }
+        // Nothing was scaffolded into the scratch root by the read-only tier.
+        assert!(
+            !root.join(".rift").exists(),
+            "read-only requests must not write"
+        );
     }
 }

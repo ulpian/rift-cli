@@ -23,6 +23,7 @@ jobs:
             glob_match,
             checkpoint_artifact,
             mcp_request,
+            palette_parse,
           ]
     steps:
       - uses: actions/checkout@v4

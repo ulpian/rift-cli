@@ -111,7 +111,7 @@ jobs:
       - name: fuzz each target for 60s
         working-directory: fuzz
         run: |
-          for t in config_parse run_hook redact diff glob_match checkpoint_artifact mcp_request; do
+          for t in config_parse run_hook redact diff glob_match checkpoint_artifact mcp_request palette_parse; do
             cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=25
           done
   # The Phase-7 prompt-injection red-team gate (pulled into M3): the append-only

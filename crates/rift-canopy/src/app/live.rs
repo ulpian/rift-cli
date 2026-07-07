@@ -13,6 +13,7 @@ use xre_term::{
 };
 
 use super::{event_loop, CanopyOpts, EventSource};
+use crate::dispatch::CommandDispatcher;
 use crate::render::frame::Size;
 use crate::state::{AppState, DataRequest, Event, PersistOp};
 use crate::{CanopyKey, FeatureManager, MouseButton, MouseInput, MouseKind, Project};
@@ -112,9 +113,10 @@ impl EventSource for MergedEvents {
 /// Everything the live loop needs from its host — **the** single injection
 /// point (ADR-0011): a new event source or channel becomes a new field here,
 /// wired in [`run`], and the loop body never changes.
-pub struct LoopDeps<'m, F>
+pub struct LoopDeps<'m, F, R>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
+    R: FnMut() -> RiftResult<Vec<Project>>,
 {
     /// Launch options (ascii / skip-splash) from the CLI flags.
     pub opts: CanopyOpts,
@@ -128,6 +130,12 @@ where
     pub req_tx: Sender<DataRequest>,
     /// Performs the feature install/remove actions the reducer plans.
     pub manager: &'m mut dyn FeatureManager,
+    /// The palette's delegated-verb door (ADR-0021): the binary's in-process
+    /// dispatcher, injected exactly like `on_persist`.
+    pub dispatcher: &'m mut dyn CommandDispatcher,
+    /// Reloads the registry after a mutating dispatch (the persist-apply
+    /// pattern: selection follows, the subscribe re-fires).
+    pub reload: R,
 }
 
 /// Launch Canopy on the real terminal until the user quits, over the host
@@ -137,9 +145,10 @@ where
 ///
 /// # Errors
 /// [`rift_core::RiftError`] on a terminal enter/read/present failure.
-pub fn run<F>(deps: LoopDeps<'_, F>) -> RiftResult<()>
+pub fn run<F, R>(deps: LoopDeps<'_, F, R>) -> RiftResult<()>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
+    R: FnMut() -> RiftResult<Vec<Project>>,
 {
     let LoopDeps {
         opts,
@@ -148,6 +157,8 @@ where
         data_rx,
         req_tx,
         manager,
+        dispatcher,
+        mut reload,
     } = deps;
     let caps = crate::render::caps::detect(opts.ascii);
     let probe = xre_term::Capabilities::probe();
@@ -164,7 +175,9 @@ where
     state.reduced_motion = prefs.reduced_motion;
 
     // Launch-cwd auto-select (M5-03) BEFORE the loop starts, so the startup
-    // prime subscribes the project the developer launched from.
+    // prime subscribes the project the developer launched from; `/add`
+    // registers exactly this directory (the reducer never reads cwd).
+    state.app.launch_cwd.clone_from(&opts.launch_cwd);
     crate::apply_launch_cwd(
         &mut state.app,
         opts.launch_cwd.as_deref(),
@@ -190,6 +203,8 @@ where
         &mut on_persist,
         &mut req_sink,
         manager,
+        dispatcher,
+        &mut reload,
     )
 }
 

@@ -19,9 +19,9 @@ use rift_store::{record_agent_enablement, AgentEnablementRow, SqliteStore};
 
 use crate::cli::{exit, Outcome};
 
-/// `.rift/agents/<agent>.json` under the current repo.
-fn descriptor_path(agent: &str) -> Result<PathBuf> {
-    Ok(std::env::current_dir()?
+/// `.rift/agents/<agent>.json` under `root`.
+fn descriptor_path(root: &std::path::Path, agent: &str) -> Result<PathBuf> {
+    Ok(root
         .join(".rift")
         .join("agents")
         .join(format!("{agent}.json")))
@@ -33,7 +33,12 @@ fn fingerprint(bytes: &[u8]) -> String {
 }
 
 /// `rift enable --agent <x>`.
-pub(crate) async fn enable(store: &SqliteStore, agent_token: &str, now_ms: i64) -> Result<Outcome> {
+pub(crate) async fn enable(
+    store: &SqliteStore,
+    root: &std::path::Path,
+    agent_token: &str,
+    now_ms: i64,
+) -> Result<Outcome> {
     let agent = AgentId::new(agent_token);
     if !agent.is_well_formed() {
         return Ok(Outcome::coded(
@@ -88,7 +93,7 @@ pub(crate) async fn enable(store: &SqliteStore, agent_token: &str, now_ms: i64) 
     verify_wiring(&reg, &agent, &verbs)?;
 
     // Write the descriptor (idempotent — same content re-writes identically).
-    let path = descriptor_path(agent_token)?;
+    let path = descriptor_path(root, agent_token)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -100,7 +105,8 @@ pub(crate) async fn enable(store: &SqliteStore, agent_token: &str, now_ms: i64) 
     // hooks block to paste into `.claude/settings.local.json` — plain
     // commands, no shim (the wire parser accepts native hook stdin directly).
     let snippet_path = if agent == AgentId::CLAUDE_CODE {
-        let sp = descriptor_path(agent_token)?.with_file_name("claude-code.claude-settings.json");
+        let sp =
+            descriptor_path(root, agent_token)?.with_file_name("claude-code.claude-settings.json");
         let snippet = claude_settings_snippet(&rift_bin);
         std::fs::write(&sp, serde_json::to_vec_pretty(&snippet).unwrap_or_default())?;
         Some(sp)
@@ -173,10 +179,11 @@ fn claude_settings_snippet(rift_bin: &std::path::Path) -> serde_json::Value {
 /// `rift disable --agent <x>`: remove the wiring descriptor (full round-trip).
 pub(crate) async fn disable(
     store: &SqliteStore,
+    root: &std::path::Path,
     agent_token: &str,
     now_ms: i64,
 ) -> Result<Outcome> {
-    let path = descriptor_path(agent_token)?;
+    let path = descriptor_path(root, agent_token)?;
     let existed = path.exists();
     if existed {
         std::fs::remove_file(&path)?;

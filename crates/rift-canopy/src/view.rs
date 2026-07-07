@@ -56,6 +56,109 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
         // Full3Col (TooSmall handled above).
         _ => draw_full(vm, backend, frame, body),
     }
+
+    // The dispatch overlay layers over the body (ADR-0021 "Dispatch posture"):
+    // results scroll, confirms gate, the running line holds during a dispatch.
+    if vm.overlay.is_some() {
+        draw_overlay(vm, frame, body);
+    }
+}
+
+/// Where the dispatch overlay sits: over the body, clear of the command bar,
+/// with a small margin. Shared with `hit_test` so mouse targets and pixels
+/// can never disagree.
+#[must_use]
+pub fn overlay_rect(body: Rect) -> Rect {
+    let margin_x = 2u16.min(body.w / 8);
+    let h_avail = body.h.saturating_sub(crate::layout::COMMAND_ROWS);
+    Rect {
+        x: body.x + margin_x,
+        y: body.y + 1,
+        w: body.w.saturating_sub(margin_x * 2),
+        h: h_avail.saturating_sub(2),
+    }
+}
+
+/// The overlay rect derived from the full frame area (the hit-test entry —
+/// it re-derives the body split `draw` uses).
+#[must_use]
+pub fn overlay_rect_for(size: crate::render::frame::Size) -> Rect {
+    let body = Rect {
+        x: 0,
+        y: 1,
+        w: size.w,
+        h: size.h.saturating_sub(1),
+    };
+    overlay_rect(body)
+}
+
+/// The confirm overlay's two button labels (shared with hit-testing).
+pub const CONFIRM_BUTTONS: (&str, &str) = ("[ Enter: confirm ]", "[ Esc: cancel ]");
+
+/// Draw the dispatch overlay: a bordered, scrollable pane over the body.
+fn draw_overlay(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+    use crate::dispatch::Overlay;
+    let Some(overlay) = &vm.overlay else { return };
+    let rect = overlay_rect(body);
+    if rect.w < 8 || rect.h < 3 {
+        return; // clamped away on tiny terminals; the bar still works
+    }
+    // Blank the region so the panels underneath never bleed through.
+    for dy in 0..rect.h {
+        for dx in 0..rect.w {
+            frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
+        }
+    }
+    match overlay {
+        Overlay::Results {
+            title,
+            lines,
+            scroll,
+            footer,
+            ..
+        } => {
+            let inner = frame.border(rect, &sanitize_for_terminal(title), ACCENT);
+            let footer_rows = usize::from(footer.is_some());
+            let visible = usize::from(inner.h).saturating_sub(footer_rows);
+            for (i, line) in lines.iter().skip(*scroll).take(visible).enumerate() {
+                let Ok(dy) = u16::try_from(i) else { break };
+                clip_line(frame, inner, dy, line, Style::DEFAULT);
+            }
+            if let Some(f) = footer {
+                let dy = inner.h.saturating_sub(1);
+                clip_line(frame, inner, dy, &sanitize_for_terminal(f), ACCENT);
+            }
+        }
+        Overlay::Confirm { request, repo } => {
+            let inner = frame.border(rect, "confirm", ACCENT);
+            clip_line(
+                frame,
+                inner,
+                0,
+                &sanitize_for_terminal(&format!("will run: {}", request.verb_line())),
+                Style::DEFAULT,
+            );
+            clip_line(
+                frame,
+                inner,
+                1,
+                &sanitize_for_terminal(&format!("target repository: {repo}")),
+                Style::DEFAULT,
+            );
+            let buttons = format!("{}   {}", CONFIRM_BUTTONS.0, CONFIRM_BUTTONS.1);
+            clip_line(frame, inner, 3, &buttons, ACCENT);
+        }
+        Overlay::Running { title } => {
+            let inner = frame.border(rect, "running", ACCENT);
+            clip_line(
+                frame,
+                inner,
+                0,
+                &sanitize_for_terminal(&format!("running {title} …")),
+                Style::DEFAULT,
+            );
+        }
+    }
 }
 
 /// The Rift accent header row.
@@ -174,6 +277,25 @@ fn draw_command(vm: &ViewModel, frame: &mut Frame, command: Rect) {
     let inner = frame.border(command, btitle, border_style(vm.focus == Panel::Command));
     let line = format!("{prefix}{}\u{2588}", vm.command_line);
     clip_line(frame, inner, 0, &line, Style::DEFAULT);
+    // A parse error renders inline under the input — the caret run under the
+    // offending span plus the reason (and the nearest-verb hint), drawn over
+    // the bar's bottom border row so no layout shifts.
+    if let Some(err) = &vm.command_error {
+        // The bar draws a virtual `/` before the buffer: spans shift right by
+        // the prefix so the caret run sits under the typed glyphs.
+        let start =
+            (err.span.0 + prefix.chars().count()).min(usize::from(inner.w).saturating_sub(1));
+        let len = err.span.1.saturating_sub(err.span.0).max(1);
+        let mut marker = " ".repeat(start);
+        marker.push_str(&"^".repeat(len.min(usize::from(inner.w).saturating_sub(start))));
+        marker.push(' ');
+        marker.push_str(&sanitize_for_terminal(&err.reason));
+        if let Some(hint) = err.hint {
+            marker.push_str(&format!(" — did you mean `{hint}`?"));
+        }
+        let y = command.y.saturating_add(command.h.saturating_sub(1));
+        clip_at(frame, inner.x, y, inner.w, &marker, ACCENT);
+    }
 }
 
 /// Column 1 — the project list, windowed to keep the selection in view.
