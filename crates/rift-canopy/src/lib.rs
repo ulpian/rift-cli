@@ -50,8 +50,9 @@ pub use col2::{
     SettingsSummary, ToggleChange, ToggleEvent, ToggleRow, ToggleState, ToggleView,
 };
 pub use col3::{
-    fmt_km, BreakdownData, BreakdownView, CallsData, Col3, NicReading, NicView, RecallView,
-    SavingsData, ThreadsView, TokensData, TokensView,
+    fmt_km, ActivityData, ActivityView, BreakdownData, BreakdownView, CallsData, Col3, DayBar,
+    NicReading, NicView, PanelMetrics, RecallView, SavingsData, ThreadsView, TokensData,
+    TokensView,
 };
 pub use command::{
     parse, CheckpointVerb, ConfigureVerb, MemoryVerb, PanelName, ParseError, ProjectRef,

@@ -159,12 +159,14 @@ fn col3_with_data() -> rift_canopy::Col3 {
         savings: rift_canopy::RecallView::Data(rift_canopy::SavingsData {
             rate: vec![0.0, 400.0, 1200.0, 800.0, 2000.0, 1600.0],
             total: 6000.0,
+            pct: 0.42,
         }),
         calls: rift_canopy::RecallView::Data(rift_canopy::CallsData {
             rate: vec![1.0, 3.0, 2.0, 5.0, 4.0, 2.0],
             total: 17.0,
         }),
         threads: rift_canopy::ThreadsView::Count(2),
+        metrics: rift_canopy::PanelMetrics::default(),
     }
 }
 

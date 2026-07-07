@@ -93,7 +93,7 @@ pub struct FeedUpdate {
     pub payload: FeedPayload,
 }
 
-/// The three feed kinds (ADR-0009), each patching its column-3 sections.
+/// The feed kinds (ADR-0009), each patching its dashboard surface.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FeedPayload {
     /// Token spend + the input|read|output breakdown.
@@ -114,6 +114,11 @@ pub enum FeedPayload {
         /// Distinct active sessions.
         threads: crate::col3::ThreadsView,
     },
+    /// The activity card's trailing-week grouped daily bars (M55-06). Patches
+    /// the column-2 activity card, not column 3.
+    Activity(crate::col3::ActivityView),
+    /// The system panel's four domain metrics (M55-07). Patches `Col3.metrics`.
+    Metrics(crate::col3::PanelMetrics),
 }
 
 /// A per-project update from the live data bus (P8). Carries already-scoped,
@@ -298,6 +303,10 @@ pub struct AppState {
     col3: Arc<crate::col3::Col3>,
     /// The in-flight column-3 tween, if any (drives the loop's fast-poll window).
     col3_anim: Option<Col3Anim>,
+    /// The selected project's activity-card data (M55-06), filled by the
+    /// Activity feed; `Default` is the honest placeholder. Column-2, so it sits
+    /// outside the col3 tween machinery (activity snaps; W6 may add polish).
+    activity: Arc<crate::col3::ActivityView>,
     /// The suggest panel's fade-in progress (0..=1, dt-advanced under the
     /// ADR-0022 animator contract; snaps to 1 under reduced motion / ASCII).
     suggest_fade: f32,
@@ -319,6 +328,7 @@ impl AppState {
             rows_cache: Arc::new(Vec::new()),
             col3: Arc::new(crate::col3::Col3::default()),
             col3_anim: None,
+            activity: Arc::new(crate::col3::ActivityView::default()),
             suggest_fade: 1.0,
         }
     }
@@ -484,6 +494,7 @@ impl AppState {
             selected: self.app.selected,
             detail,
             col3: self.displayed_col3(),
+            activity: Arc::clone(&self.activity),
             detail_scroll: self.app.scroll.detail,
             graphs_scroll: self.app.scroll.graphs,
             toggle_cursor: self.app.toggle_cursor,
@@ -535,30 +546,7 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
             Flow::Continue(Effects::default())
         }
         Event::Feed(update) => {
-            // Feeds fill the selected project's column 3; an update for any
-            // other project is stale routing and is dropped (the bus recomputes
-            // on the next SetActive). set_col3 dirties only on real change.
-            let selected = s.app.selected_project().map(|p| p.path.clone());
-            if selected.as_deref() == Some(update.project.as_str()) {
-                let mut col3 = (*s.col3).clone();
-                match update.payload {
-                    FeedPayload::Tokens { tokens, breakdown } => {
-                        col3.tokens = tokens;
-                        col3.breakdown = breakdown;
-                    }
-                    FeedPayload::Nic(nic) => col3.nic = nic,
-                    FeedPayload::Recall {
-                        savings,
-                        calls,
-                        threads,
-                    } => {
-                        col3.savings = savings;
-                        col3.calls = calls;
-                        col3.threads = threads;
-                    }
-                }
-                s.set_col3(col3);
-            }
+            apply_feed(s, update);
             Flow::Continue(Effects::default())
         }
         Event::Key(k) => {
@@ -625,6 +613,53 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
     }
 }
 
+/// Apply one feed update to the selected project's surfaces. A feed for any
+/// other project is stale routing and is dropped (the bus recomputes on the
+/// next `SetActive`). The activity card (column 2) patches directly and dirties
+/// on real change; the column-3 feeds flow through `set_col3` (which dirties
+/// and arms a tween only on a real change).
+fn apply_feed(s: &mut AppState, update: FeedUpdate) {
+    let selected = s.app.selected_project().map(|p| p.path.clone());
+    if selected.as_deref() != Some(update.project.as_str()) {
+        return;
+    }
+    match update.payload {
+        FeedPayload::Activity(activity) => {
+            if *s.activity != activity {
+                s.activity = Arc::new(activity);
+                s.dirty = true;
+            }
+        }
+        FeedPayload::Tokens { tokens, breakdown } => {
+            let mut col3 = (*s.col3).clone();
+            col3.tokens = tokens;
+            col3.breakdown = breakdown;
+            s.set_col3(col3);
+        }
+        FeedPayload::Nic(nic) => {
+            let mut col3 = (*s.col3).clone();
+            col3.nic = nic;
+            s.set_col3(col3);
+        }
+        FeedPayload::Recall {
+            savings,
+            calls,
+            threads,
+        } => {
+            let mut col3 = (*s.col3).clone();
+            col3.savings = savings;
+            col3.calls = calls;
+            col3.threads = threads;
+            s.set_col3(col3);
+        }
+        FeedPayload::Metrics(metrics) => {
+            let mut col3 = (*s.col3).clone();
+            col3.metrics = metrics;
+            s.set_col3(col3);
+        }
+    }
+}
+
 /// After a possible selection move, reset the per-project cursor and column-3
 /// sections and ask the bus for the newly-selected project's data. Returns the
 /// data requests to add (empty when the selection did not change). Shared by the
@@ -639,6 +674,10 @@ fn selection_change_effects(s: &mut AppState, before: &Option<String>) -> Vec<Da
     // A different project's sections must never linger: reset to placeholders
     // (and cancel any in-flight tween) until its own feeds arrive.
     s.set_col3(crate::col3::Col3::default());
+    if !matches!(*s.activity, crate::col3::ActivityView::NoProjection) {
+        s.activity = Arc::new(crate::col3::ActivityView::default());
+        s.dirty = true;
+    }
     let mut reqs = vec![DataRequest::SetActive(after.clone())];
     if let Some(path) = after {
         reqs.push(DataRequest::Refresh(path));
@@ -1148,6 +1187,8 @@ pub struct ViewModel {
     pub detail: Option<Arc<DetailView>>,
     /// The column-3 sections (M4-10/W3/W4): the six live-graph view-models.
     pub col3: Arc<crate::col3::Col3>,
+    /// The selected project's activity-card data (M55-06); `Default` placeholder.
+    pub activity: Arc<crate::col3::ActivityView>,
     /// Column-2 detail viewport top (scroll offset).
     pub detail_scroll: usize,
     /// Column-3 graphs viewport top (scroll offset).
@@ -1339,6 +1380,89 @@ mod tests {
             update(&mut s, Event::Key(CanopyKey::Quit)),
             Flow::Quit
         ));
+    }
+
+    // --- M55-06/07: the activity + metrics feeds ------------------------------
+
+    #[test]
+    fn activity_feed_fills_the_selected_project_and_snaps() {
+        use crate::col3::{ActivityData, ActivityView, DayBar};
+        let mut s = ready(vec![project("a")]);
+        let days = ActivityData {
+            days: vec![DayBar {
+                weekday: "Mon",
+                events: 5,
+                sessions: 1,
+                checkpoints: 2,
+            }],
+        };
+        update(
+            &mut s,
+            Event::Feed(FeedUpdate {
+                project: "/r/a".into(),
+                payload: FeedPayload::Activity(ActivityView::Days(days.clone())),
+            }),
+        );
+        assert_eq!(*s.activity, ActivityView::Days(days));
+        assert!(s.dirty);
+        assert_eq!(s.snapshot().activity.as_ref(), &*s.activity);
+    }
+
+    #[test]
+    fn metrics_feed_patches_col3_metrics_without_a_tween() {
+        use crate::col3::PanelMetrics;
+        let mut s = ready(vec![project("a")]);
+        let metrics = PanelMetrics {
+            capture_per_min: Some(1.5),
+            tokens_per_min: Some(600.0),
+            projection_bytes: Some(4096),
+            recall_per_hour: None,
+        };
+        update(
+            &mut s,
+            Event::Feed(FeedUpdate {
+                project: "/r/a".into(),
+                payload: FeedPayload::Metrics(metrics.clone()),
+            }),
+        );
+        assert_eq!(s.snapshot().col3.metrics, metrics);
+        assert!(
+            s.col3_anim.is_none(),
+            "a metrics-only change never arms a tween"
+        );
+    }
+
+    #[test]
+    fn feed_for_unselected_project_is_dropped() {
+        use crate::col3::ActivityView;
+        let mut s = ready(vec![project("a"), project("b")]); // "a" selected
+        update(
+            &mut s,
+            Event::Feed(FeedUpdate {
+                project: "/r/b".into(),
+                payload: FeedPayload::Activity(ActivityView::Days(
+                    crate::col3::ActivityData::default(),
+                )),
+            }),
+        );
+        assert_eq!(
+            *s.activity,
+            ActivityView::NoProjection,
+            "a non-selected project's activity is stale routing, dropped"
+        );
+    }
+
+    #[test]
+    fn selection_change_resets_activity_to_placeholder() {
+        use crate::col3::{ActivityData, ActivityView};
+        let mut s = ready(vec![project("a"), project("b")]);
+        s.activity = Arc::new(ActivityView::Days(ActivityData::default()));
+        update(&mut s, Event::Key(CanopyKey::Down)); // select b
+        assert_eq!(
+            *s.activity,
+            ActivityView::NoProjection,
+            "b's card must not show a's activity until b's feed arrives"
+        );
     }
 
     // --- M55-04: the data-plane health dot ------------------------------------

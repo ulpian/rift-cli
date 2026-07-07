@@ -283,6 +283,10 @@ enum FeedKind {
     Nic,
     /// Recall savings/calls/threads.
     Recall,
+    /// The activity card's trailing-week bars.
+    Activity,
+    /// The system panel's domain metrics.
+    Metrics,
     /// The data-plane health report (global — one key for the whole plane).
     Health,
 }
@@ -296,6 +300,8 @@ fn feed_key(ev: &Event) -> (String, FeedKind) {
                 rift_canopy::FeedPayload::Tokens { .. } => FeedKind::Tokens,
                 rift_canopy::FeedPayload::Nic(_) => FeedKind::Nic,
                 rift_canopy::FeedPayload::Recall { .. } => FeedKind::Recall,
+                rift_canopy::FeedPayload::Activity(_) => FeedKind::Activity,
+                rift_canopy::FeedPayload::Metrics(_) => FeedKind::Metrics,
             };
             (f.project.clone(), kind)
         }
@@ -371,10 +377,17 @@ fn stage_read(
         // ONE active-sessions read per recomputation: the gauge badge and the
         // threads section receive the same value by construction (user
         // story 6 — the one-query invariant).
-        let live = crate::feeds::read_active_sessions(&path, now_ms());
+        let now = now_ms();
+        let live = crate::feeds::read_active_sessions(&path, now);
         outbox.stage(Event::Feed(crate::feeds::compute_tokens(root, &path)));
         outbox.stage(Event::Feed(crate::feeds::compute_nic(root, &path, live)));
         outbox.stage(Event::Feed(crate::feeds::compute_recall(root, &path, live)));
+        // The M5.5 feeds (activity card + the system panel's domain metrics),
+        // computed against the same clock read (the injected "now").
+        outbox.stage(Event::Feed(crate::feeds::compute_activity(
+            root, &path, now,
+        )));
+        outbox.stage(Event::Feed(crate::feeds::compute_metrics(root, &path, now)));
     }
 }
 

@@ -21,8 +21,8 @@
 use std::path::Path;
 
 use rift_canopy::col3::{
-    BreakdownData, BreakdownView, CallsData, NicReading, NicView, RecallView, SavingsData,
-    ThreadsView, TokensData, TokensView,
+    ActivityData, ActivityView, BreakdownData, BreakdownView, CallsData, DayBar, NicReading,
+    NicView, PanelMetrics, RecallView, SavingsData, ThreadsView, TokensData, TokensView,
 };
 use rift_canopy::{FeedPayload, FeedUpdate, LiveSessions, SessionsRead};
 use rift_git::repo_id_for;
@@ -310,6 +310,7 @@ fn read_last_call(root: &Path, path: &str) -> Option<LastCall> {
 struct AuditRow {
     t: i64,
     tokens_avoided: i64,
+    tokens_returned: i64,
 }
 
 /// Compute the Recall feed: tokens saved (rate + cumulative) and MCP calls
@@ -343,10 +344,22 @@ pub fn compute_recall(root: &Path, path: &str, live: Option<LiveSessions>) -> Fe
                 })
                 .collect();
             let calls_rows: Vec<(i64, f64)> = rows.iter().map(|r| (r.t, 1.0)).collect();
+            // Savings % over the whole served audit trail: avoided / (avoided +
+            // served), through the ledger's guarded ratio so the number can
+            // never drift from `avoidable_context_rate` (M55-07).
+            let sum_u64 = |f: fn(&AuditRow) -> i64| -> u64 {
+                rows.iter()
+                    .map(|r| u64::try_from(f(r).max(0)).unwrap_or(0))
+                    .fold(0u64, u64::saturating_add)
+            };
+            let avoided = sum_u64(|r| r.tokens_avoided);
+            let returned = sum_u64(|r| r.tokens_returned);
+            let pct = rift_recall_ledger::savings_rate(avoided, avoided.saturating_add(returned));
             (
                 RecallView::Data(SavingsData {
                     rate: bucket_values(&saved),
                     total: crate::series::saturating_sum(saved.iter().map(|(_, v)| *v)),
+                    pct,
                 }),
                 RecallView::Data(CallsData {
                     rate: bucket_values(&calls_rows),
@@ -362,6 +375,192 @@ pub fn compute_recall(root: &Path, path: &str, live: Option<LiveSessions>) -> Fe
             calls,
             threads,
         },
+    }
+}
+
+// --- W3: the activity feed + the panel-metrics feed (M55-06/07) --------------
+
+/// One calendar day in milliseconds (UTC day boundaries — the fixture-review
+/// decision, recorded in the map; deterministic and timezone-dependency-free).
+const DAY_MS: i64 = 86_400_000;
+/// The trailing window the activity card shows.
+const ACTIVITY_DAYS: usize = 7;
+/// The recent window (ms) the metric rates are computed over — one hour.
+const RECENT_WINDOW_MS: i64 = 3_600_000;
+
+/// Short weekday label for an epoch-day index (day 0 = 1970-01-01 = Thursday).
+fn weekday_label(epoch_day: i64) -> &'static str {
+    const LABELS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    // Monday-indexed: epoch-day 0 (Thu) → 3.
+    let idx = (epoch_day.rem_euclid(7) + 3).rem_euclid(7);
+    LABELS
+        .get(usize::try_from(idx).unwrap_or(0))
+        .copied()
+        .unwrap_or("?")
+}
+
+/// Compute the Activity feed: per-calendar-day counts of events, sessions, and
+/// checkpoints over the trailing seven days, from the project's own projection.
+/// `now_ms` (the injected clock) defines "today" and the UTC day boundaries.
+/// A **missing/unreadable projection** yields the placeholder; a readable one
+/// with quiet days yields seven zero-count bars (a quiet week is a fact).
+#[must_use]
+pub fn compute_activity(root: &Path, path: &str, now_ms: i64) -> FeedUpdate {
+    let payload = match read_day_counts(root, path, now_ms) {
+        Some(days) => FeedPayload::Activity(ActivityView::Days(ActivityData { days })),
+        None => FeedPayload::Activity(ActivityView::NoProjection),
+    };
+    FeedUpdate {
+        project: path.to_string(),
+        payload,
+    }
+}
+
+/// Read the trailing seven days' capture counts, scoped to the projection.
+/// `None` when the projection is absent/unreadable (the placeholder case).
+fn read_day_counts(root: &Path, path: &str, now_ms: i64) -> Option<Vec<DayBar>> {
+    let repo = repo_id_for(Path::new(path)).ok()?;
+    let db = projection_db_under(root, &repo);
+    if !db.exists() {
+        return None;
+    }
+    let store = SqliteStore::open(&db).ok()?;
+    let rt = runtime().ok()?;
+
+    let today = now_ms.div_euclid(DAY_MS);
+    let days_span = i64::try_from(ACTIVITY_DAYS).unwrap_or(7) - 1;
+    let start_day = today - days_span;
+    let mut bars: Vec<DayBar> = (0..=days_span)
+        .map(|d| {
+            let day = start_day + d;
+            DayBar {
+                weekday: weekday_label(day),
+                events: 0,
+                sessions: 0,
+                checkpoints: 0,
+            }
+        })
+        .collect();
+
+    // One grouped query per category; each returns (day, count) over the window.
+    let window_start = start_day.saturating_mul(DAY_MS);
+    let mut tally = |table: &str, col: &str, pick: &dyn Fn(&mut DayBar) -> &mut u64| {
+        let sql = format!(
+            "SELECT {col} / {DAY_MS} AS day, COUNT(*) FROM {table} \
+             WHERE {col} >= {window_start} GROUP BY day"
+        );
+        if let Ok(rows) = rt.block_on(store.query(&sql, &[])) {
+            for r in rows {
+                if let (Ok(day), Ok(n)) = (r.get_i64(0), r.get_i64(1)) {
+                    if day >= start_day && day <= today {
+                        if let Some(bar) = usize::try_from(day - start_day)
+                            .ok()
+                            .and_then(|i| bars.get_mut(i))
+                        {
+                            *pick(bar) = u64::try_from(n).unwrap_or(0);
+                        }
+                    }
+                }
+            }
+        }
+    };
+    tally("captured_event", "occurred_at_ms", &|b| &mut b.events);
+    tally("session", "started_at", &|b| &mut b.sessions);
+    tally("checkpoint", "created_at", &|b| &mut b.checkpoints);
+    Some(bars)
+}
+
+/// Compute the Panel-metrics feed (M55-07): the system panel's four domain
+/// metrics. Each is honest about absence — a missing projection or disabled
+/// recall yields `None`, never a fake zero. `now_ms` is the injected clock.
+#[must_use]
+pub fn compute_metrics(root: &Path, path: &str, now_ms: i64) -> FeedUpdate {
+    let metrics = read_metrics(root, path, now_ms);
+    FeedUpdate {
+        project: path.to_string(),
+        payload: FeedPayload::Metrics(metrics),
+    }
+}
+
+/// Read the four domain metrics, scoped to the project's own databases.
+fn read_metrics(root: &Path, path: &str, now_ms: i64) -> PanelMetrics {
+    let Ok(repo) = repo_id_for(Path::new(path)) else {
+        return PanelMetrics::default();
+    };
+    let db = projection_db_under(root, &repo);
+    let recall = recall_db_under(root, &repo);
+    let window_start = now_ms.saturating_sub(RECENT_WINDOW_MS);
+    #[allow(clippy::cast_precision_loss)]
+    let win_min = RECENT_WINDOW_MS as f64 / 60_000.0;
+
+    let (capture_per_min, tokens_per_min) = if db.exists() {
+        match (SqliteStore::open(&db).ok(), runtime().ok()) {
+            (Some(store), Some(rt)) => {
+                let recent = |sql: &str| -> f64 {
+                    #[allow(clippy::cast_precision_loss)]
+                    let n = rt
+                        .block_on(store.query_opt_i64(sql, &[]))
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0) as f64;
+                    n
+                };
+                let events = recent(&format!(
+                    "SELECT COUNT(*) FROM captured_event WHERE occurred_at_ms >= {window_start}"
+                ));
+                let tokens = recent(&format!(
+                    "SELECT COALESCE(SUM(tu.uncached_input + tu.cached_input + \
+                            tu.cache_creation + tu.output), 0) \
+                     FROM token_usage tu JOIN model_call mc ON mc.call_id = tu.call_id \
+                     WHERE mc.started_at >= {window_start}"
+                ));
+                (Some(events / win_min), Some(tokens / win_min))
+            }
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    // Projection size: the capture + recall projections' on-disk bytes.
+    let projection_bytes = if db.exists() {
+        let cap = std::fs::metadata(&db).map_or(0, |m| m.len());
+        let rec = std::fs::metadata(&recall).map_or(0, |m| m.len());
+        Some(cap.saturating_add(rec))
+    } else {
+        None
+    };
+
+    // Recall load: served audit events in the last hour = the per-hour rate.
+    let recall_per_hour = if recall.exists() {
+        match (SqliteStore::open(&recall).ok(), runtime().ok()) {
+            (Some(store), Some(rt)) => {
+                #[allow(clippy::cast_precision_loss)]
+                let serves = rt
+                    .block_on(store.query_opt_i64(
+                        &format!(
+                            "SELECT COUNT(*) FROM memd_audit_event \
+                             WHERE recorded_at >= {window_start}"
+                        ),
+                        &[],
+                    ))
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0) as f64;
+                // The window is exactly one hour, so the count is the rate.
+                Some(serves)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    PanelMetrics {
+        capture_per_min,
+        tokens_per_min,
+        projection_bytes,
+        recall_per_hour,
     }
 }
 
@@ -391,7 +590,7 @@ fn read_audit_rows(root: &Path, path: &str) -> RecallDb {
         return RecallDb::Quiet;
     };
     let Ok(rows) = rt.block_on(store.query(
-        "SELECT recorded_at, tokens_avoided FROM memd_audit_event \
+        "SELECT recorded_at, tokens_avoided, tokens_returned FROM memd_audit_event \
          ORDER BY recorded_at, audit_id",
         &[],
     )) else {
@@ -399,10 +598,16 @@ fn read_audit_rows(root: &Path, path: &str) -> RecallDb {
     };
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        let (Ok(t), Ok(tokens_avoided)) = (r.get_i64(0), r.get_i64(1)) else {
+        let (Ok(t), Ok(tokens_avoided), Ok(tokens_returned)) =
+            (r.get_i64(0), r.get_i64(1), r.get_i64(2))
+        else {
             continue;
         };
-        out.push(AuditRow { t, tokens_avoided });
+        out.push(AuditRow {
+            t,
+            tokens_avoided,
+            tokens_returned,
+        });
     }
     if out.is_empty() {
         return RecallDb::Quiet;
@@ -852,6 +1057,297 @@ mod tests {
             panic!("expected a's data");
         };
         assert!((sd.total - 700.0).abs() < f64::EPSILON);
+    }
+
+    // --- M55-06: the activity feed ------------------------------------------
+
+    use rift_canopy::col3::{ActivityView, PanelMetrics};
+
+    /// Seed a `session` row started at `t`.
+    fn seed_session(store: &SqliteStore, rt: &tokio::runtime::Runtime, id: &str, t: i64) {
+        rt.block_on(store.insert(
+            "session",
+            &[
+                "session_id",
+                "agent",
+                "model_primary",
+                "repo_id",
+                "started_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(id),
+                Value::text("claude-code"),
+                Value::text("m"),
+                Value::text("r"),
+                Value::Int(t),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+    }
+
+    /// Seed a `checkpoint` created at `t`.
+    fn seed_checkpoint(store: &SqliteStore, rt: &tokio::runtime::Runtime, id: &str, t: i64) {
+        rt.block_on(store.insert(
+            "checkpoint",
+            &[
+                "checkpoint_id",
+                "strategy",
+                "created_at",
+                "merkle_root",
+                "prev_hash",
+                "schema_version",
+            ],
+            &[
+                Value::text(id),
+                Value::text("manual"),
+                Value::Int(t),
+                Value::text("root"),
+                Value::Null,
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+    }
+
+    /// Seed a `captured_event` occurring at `t`.
+    fn seed_event(store: &SqliteStore, rt: &tokio::runtime::Runtime, key: &str, t: i64) {
+        rt.block_on(store.insert(
+            "captured_event",
+            &[
+                "idempotency_key",
+                "session_id",
+                "turn_ordinal",
+                "event_ordinal",
+                "kind",
+                "trust",
+                "payload_sha256",
+                "occurred_at_ms",
+                "schema_version",
+            ],
+            &[
+                Value::text(key),
+                Value::text("s"),
+                Value::Int(0),
+                Value::Int(0),
+                Value::text("start"),
+                Value::text("trusted"),
+                Value::text("sha"),
+                Value::Int(t),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+    }
+
+    /// `now` fixed at day 20_000 (2024-10-04), the 8th hour, so "today" is stable.
+    const NOW: i64 = 20_000 * DAY_MS + 8 * 3_600_000;
+
+    #[test]
+    fn activity_missing_projection_is_the_placeholder_never_seven_zeros() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = root.path().join("plain");
+        std::fs::create_dir_all(&proj).unwrap();
+        let update = compute_activity(root.path(), &proj.to_string_lossy(), NOW);
+        assert_eq!(
+            update.payload,
+            FeedPayload::Activity(ActivityView::NoProjection),
+            "no projection is the placeholder, not a zero week"
+        );
+    }
+
+    #[test]
+    fn activity_empty_projection_is_seven_zero_days() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "quiet");
+        let FeedPayload::Activity(ActivityView::Days(d)) =
+            compute_activity(root.path(), &proj, NOW).payload
+        else {
+            panic!("a readable projection yields Days, even when quiet");
+        };
+        assert_eq!(d.days.len(), 7);
+        assert!(d
+            .days
+            .iter()
+            .all(|b| b.events == 0 && b.sessions == 0 && b.checkpoints == 0));
+    }
+
+    #[test]
+    fn activity_buckets_by_calendar_day_within_the_window() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        // Today (day 20_000): 2 events, 1 session, 1 checkpoint.
+        seed_event(&store, &rt, "e1", 20_000 * DAY_MS + 1_000);
+        seed_event(&store, &rt, "e2", 20_000 * DAY_MS + 2_000);
+        seed_session(&store, &rt, "s-today", 20_000 * DAY_MS + 500);
+        seed_checkpoint(&store, &rt, "k-today", 20_000 * DAY_MS + 3_000);
+        // Yesterday (day 19_999): 1 event.
+        seed_event(&store, &rt, "e3", 19_999 * DAY_MS + 100);
+        // Eight days ago (day 19_992): OUTSIDE the 7-day window → dropped.
+        seed_event(&store, &rt, "e-old", 19_992 * DAY_MS + 100);
+
+        let FeedPayload::Activity(ActivityView::Days(d)) =
+            compute_activity(root.path(), &proj, NOW).payload
+        else {
+            panic!("expected Days");
+        };
+        assert_eq!(d.days.len(), 7);
+        let today = &d.days[6]; // oldest→newest, today is last
+        assert_eq!((today.events, today.sessions, today.checkpoints), (2, 1, 1));
+        let yesterday = &d.days[5];
+        assert_eq!(yesterday.events, 1);
+        // The eight-day-old event is outside the window → total is exactly 3.
+        let total_events: u64 = d.days.iter().map(|b| b.events).sum();
+        assert_eq!(total_events, 3, "the out-of-window event is dropped");
+        // Weekday labels: day 20_000 is a Friday.
+        assert_eq!(today.weekday, "Fri");
+    }
+
+    #[test]
+    fn activity_bucketing_is_stable_around_the_day_boundary() {
+        // A nudge within the same day never re-buckets (day-bucketing is total
+        // and stable under intra-day clock movement).
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_event(&store, &rt, "e1", 20_000 * DAY_MS + 12 * 3_600_000);
+        let a = compute_activity(root.path(), &proj, 20_000 * DAY_MS + 1);
+        let b = compute_activity(root.path(), &proj, 20_000 * DAY_MS + DAY_MS - 1);
+        assert_eq!(a, b, "any 'now' within the same day yields the same window");
+        // Crossing into the next day shifts the window by one.
+        let c = compute_activity(root.path(), &proj, 20_001 * DAY_MS + 1);
+        assert_ne!(a, c, "a new calendar day shifts the trailing window");
+    }
+
+    #[test]
+    fn weekday_labels_cover_the_week() {
+        // Day 0 (1970-01-01) is a Thursday.
+        assert_eq!(weekday_label(0), "Thu");
+        assert_eq!(weekday_label(3), "Sun"); // 1970-01-04
+        assert_eq!(weekday_label(20_000), "Fri");
+        // Negative epoch-days (pre-1970) never panic.
+        assert!(!weekday_label(-5).is_empty());
+    }
+
+    // --- M55-07: the panel-metrics feed + savings % -------------------------
+
+    #[test]
+    fn metrics_missing_projection_is_all_absent() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = root.path().join("plain");
+        std::fs::create_dir_all(&proj).unwrap();
+        let FeedPayload::Metrics(m) =
+            compute_metrics(root.path(), &proj.to_string_lossy(), NOW).payload
+        else {
+            panic!("expected Metrics");
+        };
+        assert_eq!(
+            m,
+            PanelMetrics::default(),
+            "no projection → every metric absent"
+        );
+        assert!(m.capture_per_min.is_none());
+        assert!(m.projection_bytes.is_none());
+        assert!(m.recall_per_hour.is_none());
+    }
+
+    #[test]
+    fn metrics_rates_use_the_injected_clock_window() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        // Three events inside the last hour, one two hours ago (outside window).
+        seed_event(&store, &rt, "e1", NOW - 10 * 60_000);
+        seed_event(&store, &rt, "e2", NOW - 20 * 60_000);
+        seed_event(&store, &rt, "e3", NOW - 30 * 60_000);
+        seed_event(&store, &rt, "old", NOW - 2 * 3_600_000);
+        seed_token_fact(&store, &rt, "c1", NOW - 5 * 60_000, (100, 200, 0, 300)); // 600 tokens
+        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, NOW).payload else {
+            panic!("expected Metrics");
+        };
+        // 3 events / 60 min = 0.05/min.
+        let cap = m.capture_per_min.expect("readable projection → present");
+        assert!(
+            (cap - 3.0 / 60.0).abs() < 1e-9,
+            "capture rate over the window: {cap}"
+        );
+        let burn = m.tokens_per_min.expect("present");
+        assert!(
+            (burn - 600.0 / 60.0).abs() < 1e-9,
+            "burn rate over the window: {burn}"
+        );
+        // A projection exists → its byte size is present and non-zero.
+        assert!(m.projection_bytes.is_some_and(|b| b > 0));
+        // No recall.db → recall load absent (never a fake zero).
+        assert!(m.recall_per_hour.is_none(), "disabled recall → absent");
+    }
+
+    #[test]
+    fn metrics_recall_load_present_when_recall_db_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        seed_recall_db(
+            root.path(),
+            &proj,
+            &[(NOW - 10 * 60_000, 100), (NOW - 20 * 60_000, 50)],
+        );
+        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, NOW).payload else {
+            panic!("expected Metrics");
+        };
+        // Two serves in the last hour → 2.0 serves/hour.
+        assert_eq!(m.recall_per_hour, Some(2.0));
+        assert!(
+            m.projection_bytes.is_some_and(|b| b > 0),
+            "recall.db adds to size"
+        );
+    }
+
+    #[test]
+    fn savings_pct_is_the_ledger_ratio_no_drift() {
+        // The feed's savings % is provably `savings_rate(Σavoided, Σavoided+Σreturned)`
+        // — the same guarded ratio the ledger uses, so no reimplementation drift.
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        // seed_recall_db fixes tokens_returned = 10 per event.
+        seed_recall_db(root.path(), &proj, &[(1_000, 90), (2_000, 40), (3_000, 20)]);
+        let FeedPayload::Recall {
+            savings: RecallView::Data(sd),
+            ..
+        } = compute_recall(root.path(), &proj, None).payload
+        else {
+            panic!("expected savings data");
+        };
+        let avoided = 90 + 40 + 20; // 150
+        let returned = 10 * 3; // 30
+        let expected = rift_recall_ledger::savings_rate(avoided, avoided + returned);
+        assert!(
+            (sd.pct - expected).abs() < 1e-12,
+            "savings % == the ledger ratio"
+        );
+        assert!((sd.total - 150.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn savings_pct_zero_when_nothing_avoided() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        seed_recall_db(root.path(), &proj, &[(1_000, 0), (2_000, 0)]);
+        let FeedPayload::Recall {
+            savings: RecallView::Data(sd),
+            ..
+        } = compute_recall(root.path(), &proj, None).payload
+        else {
+            panic!("expected savings data");
+        };
+        assert!(
+            (sd.pct - 0.0).abs() < f64::EPSILON,
+            "0 avoided → 0% (never NaN)"
+        );
     }
 
     proptest! {

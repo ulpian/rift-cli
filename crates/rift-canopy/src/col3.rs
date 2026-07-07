@@ -343,6 +343,10 @@ pub struct SavingsData {
     pub rate: Vec<f64>,
     /// Cumulative tokens avoided.
     pub total: f64,
+    /// The savings rate: avoided / (avoided + served), `0/0 ≡ 0` (M55-07). A
+    /// headline (never tweened) — recall's value as a rate, not just a counter
+    /// (user story 26).
+    pub pct: f64,
 }
 
 /// Recall MCP call numbers.
@@ -364,6 +368,60 @@ pub enum ThreadsView {
     Count(u16),
 }
 
+/// The four **domain** metrics of the system panel (M55-07/12, ADR-0024 §4):
+/// each honest about absence — a missing projection or disabled recall renders
+/// its placeholder, never a fake zero. Domain facts about *Rift*, not host
+/// telemetry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PanelMetrics {
+    /// Capture rate — captured events per minute over the recent window
+    /// (`None` = no readable projection).
+    pub capture_per_min: Option<f64>,
+    /// Tokens burn rate — tokens per minute over the recent window (`None` =
+    /// no token facts).
+    pub tokens_per_min: Option<f64>,
+    /// Projection size — on-disk bytes of the capture + recall projections
+    /// (`None` = no projection on disk).
+    pub projection_bytes: Option<u64>,
+    /// Recall load — MCP serves per hour from the audit trail (`None` = recall
+    /// disabled / no recall.db).
+    pub recall_per_hour: Option<f64>,
+}
+
+/// A single trailing-week day of activity: one grouped bar of the three capture
+/// categories, with its weekday label (M55-06/09).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DayBar {
+    /// The short weekday label ("Mon".."Sun"), computed from the injected clock.
+    pub weekday: &'static str,
+    /// Captured events on this calendar day.
+    pub events: u64,
+    /// Sessions started on this calendar day.
+    pub sessions: u64,
+    /// Checkpoints created on this calendar day.
+    pub checkpoints: u64,
+}
+
+/// The activity card's data: the trailing seven calendar days, oldest first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ActivityData {
+    /// Seven days of grouped bars (oldest → today). An absent day is a
+    /// zero-count day (a fact), never dropped.
+    pub days: Vec<DayBar>,
+}
+
+/// The activity card view-model (M55-06). Honest about absence: a **missing
+/// projection** is the placeholder (never seven zeros); a readable projection
+/// with quiet days is `Days` with zero-count bars.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ActivityView {
+    /// No readable projection — the placeholder (distinct from a quiet week).
+    #[default]
+    NoProjection,
+    /// The trailing week's grouped daily bars.
+    Days(ActivityData),
+}
+
 /// The whole column-3 view-model the data plane fills (Arc-shared through the
 /// snapshot; `Default` is every section's honest placeholder).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -380,6 +438,9 @@ pub struct Col3 {
     pub calls: RecallView<CallsData>,
     /// Threads.
     pub threads: ThreadsView,
+    /// The system panel's four domain metrics (M55-07). Headlines — taken from
+    /// the target immediately, never tweened.
+    pub metrics: PanelMetrics,
 }
 
 // --- animation: tween the plot series on a data change -----------------------
@@ -469,12 +530,15 @@ pub(crate) fn interpolate(from: &Col3, to: &Col3, t: f32) -> Col3 {
         savings: interp_recall(&from.savings, &to.savings, |a, b| SavingsData {
             rate: lerp_series(&a.rate, &b.rate, t).unwrap_or_else(|| b.rate.clone()),
             total: b.total,
+            pct: b.pct, // a headline: the savings % is taken from the target
         }),
         calls: interp_recall(&from.calls, &to.calls, |a, b| CallsData {
             rate: lerp_series(&a.rate, &b.rate, t).unwrap_or_else(|| b.rate.clone()),
             total: b.total,
         }),
         threads: to.threads.clone(),
+        // Domain metrics are headlines — taken from the target immediately.
+        metrics: to.metrics.clone(),
     }
 }
 

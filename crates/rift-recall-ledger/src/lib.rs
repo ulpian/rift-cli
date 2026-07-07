@@ -102,10 +102,19 @@ pub fn avoidable_context_rate(
     worktree: &std::collections::BTreeMap<String, String>,
 ) -> f64 {
     let total: u64 = reads.iter().map(|r| u64::from(r.input_tokens)).sum();
+    savings_rate(tokens_avoided(reads, worktree), total)
+}
+
+/// The guarded savings ratio `avoided / total` with `0/0 ≡ 0` — the one
+/// definition [`avoidable_context_rate`] and the dashboard's served-audit
+/// savings % (M55-07) both use, so the two can never drift. `total` is the
+/// would-be full context (served + avoided); `avoided` the part recall spared.
+#[must_use]
+pub fn savings_rate(avoided: u64, total: u64) -> f64 {
     if total == 0 {
         return 0.0;
     }
-    tokens_avoided(reads, worktree) as f64 / total as f64
+    avoided as f64 / total as f64
 }
 
 /// A compact summary of the delta-ledger metrics for one read stream against the
