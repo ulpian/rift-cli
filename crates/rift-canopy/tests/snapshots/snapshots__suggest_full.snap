@@ -1,12 +1,11 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 510
 expression: "render_state(&mut suggest_state(\"\"))"
 ---
-RIFT — Canopy
-╭─ projects ───────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
-│> ● rift-cli      ││rift-cli (repo)                       ││· token usage  (no token activity yet)│
-│  ○ rift-site     ││path: /r/rift-cli                     ││                                      │
+ RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
+╭─ projects  2 ────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
+│># rift-cli      *││rift-cli (repo)                       ││· token usage  (no token activity yet)│
+│ # rift-site     o││path: /r/rift-cli                     ││                                      │
 │                  ││status: running                       ││                                      │
 │                  ││                                      ││                                      │
 │                  ││models                                ││                                      │
@@ -21,7 +20,6 @@ RIFT — Canopy
 │                  ││capture                               ││                                      │
 │                  ││  events: 0                           ││                                      │
 │                  ││  sessions: 0                         ││· recall savings  (recall off — /toggl│
-│                  ││  checkpoints: 0                      ││                                      │
 ╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
 │> help  /help                    show every palette verb                                          │
 │  status  /status                capture / projection health snapshot                             │
@@ -32,6 +30,7 @@ RIFT — Canopy
 │  add  /add                      register the launch directory                                    │
 │  remove  /remove [project]      hide a project (history kept)                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓ highlight  ·  tab insert  ·  ⏎ run  ·  esc close
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

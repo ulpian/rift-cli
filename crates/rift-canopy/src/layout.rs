@@ -21,6 +21,12 @@ pub struct Rect {
 
 /// Rows reserved for the bottom command panel (1 input line + border).
 pub const COMMAND_ROWS: u16 = 3;
+/// Rows for the hint bar above the command panel (ADR-0024 §1).
+pub const HINT_ROWS: u16 = 1;
+/// The smallest body area (rows above the bottom chrome) that still shows the
+/// hint bar. Below it the hint collapses to zero rows — content wins over
+/// teaching chrome, honestly (the bar vanishes; it never squeezes a panel).
+const MIN_ROWS_FOR_HINT: u16 = COMMAND_ROWS + 7;
 /// Minimum width for column 1 (a project name + status fits).
 pub const MIN_COL1: u16 = 16;
 /// Minimum width for column 2 (detail labels + toggles fit).
@@ -66,7 +72,7 @@ pub fn choose_mode(size: crate::render::frame::Size) -> LayoutMode {
     }
 }
 
-/// The four panel rectangles the dashboard renders into.
+/// The five panel rectangles the dashboard renders into.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PanelRects {
     /// Column 1 — projects (≈20%).
@@ -75,77 +81,96 @@ pub struct PanelRects {
     pub col2: Rect,
     /// Column 3 — live graphs (≈40%).
     pub col3: Rect,
+    /// The hint bar above the command row (zero-height when collapsed).
+    pub hint: Rect,
     /// The bottom command row.
     pub command: Rect,
 }
 
-/// Tile `area` into the 20/40/40 columns above a reserved command row. The
-/// columns and command row **exactly** cover `area` (no gaps/overlaps) and each
-/// column meets its minimum width when `area` is wide enough to host all three
-/// (guaranteed by `choose_mode`'s Full3Col threshold, P3 S2).
+/// Tile `area` into the 20/40/40 columns above the bottom chrome (hint bar +
+/// command row). The columns and chrome **exactly** cover `area` (no
+/// gaps/overlaps) and each column meets its minimum width when `area` is wide
+/// enough to host all three (guaranteed by `choose_mode`'s Full3Col threshold).
 #[must_use]
 pub fn solve(area: Rect) -> PanelRects {
-    let cmd_h = area.h.min(COMMAND_ROWS);
-    let body_h = area.h.saturating_sub(cmd_h);
-    let command = Rect {
-        x: area.x,
-        y: area.y.saturating_add(body_h),
-        w: area.w,
-        h: cmd_h,
-    };
+    let (body, hint, command) = chrome_split(area);
     let (w1, w2, w3) = split_3(area.w, [20, 40, 40], [MIN_COL1, MIN_COL2, MIN_COL3]);
     let col1 = Rect {
-        x: area.x,
-        y: area.y,
+        x: body.x,
+        y: body.y,
         w: w1,
-        h: body_h,
+        h: body.h,
     };
     let col2 = Rect {
-        x: area.x.saturating_add(w1),
-        y: area.y,
+        x: body.x.saturating_add(w1),
+        y: body.y,
         w: w2,
-        h: body_h,
+        h: body.h,
     };
     let col3 = Rect {
-        x: area.x.saturating_add(w1).saturating_add(w2),
-        y: area.y,
+        x: body.x.saturating_add(w1).saturating_add(w2),
+        y: body.y,
         w: w3,
-        h: body_h,
+        h: body.h,
     };
     PanelRects {
         col1,
         col2,
         col3,
+        hint,
         command,
     }
 }
 
-/// Carve the bottom command row off `area`, returning `(body, command)`.
+/// Carve the bottom chrome off `area`, returning `(body, hint, command)`. The
+/// command row is reserved first; the hint bar takes one more row only when the
+/// area is tall enough ([`MIN_ROWS_FOR_HINT`]) — below that it collapses to a
+/// zero-height rect (drawn as nothing) so panels never lose rows to chrome.
 #[must_use]
-pub fn command_split(area: Rect) -> (Rect, Rect) {
+pub fn chrome_split(area: Rect) -> (Rect, Rect, Rect) {
     let cmd_h = area.h.min(COMMAND_ROWS);
-    let body_h = area.h.saturating_sub(cmd_h);
+    let hint_h = if area.h >= MIN_ROWS_FOR_HINT {
+        HINT_ROWS
+    } else {
+        0
+    };
+    let body_h = area.h.saturating_sub(cmd_h).saturating_sub(hint_h);
     let body = Rect {
         x: area.x,
         y: area.y,
         w: area.w,
         h: body_h,
     };
-    let command = Rect {
+    let hint = Rect {
         x: area.x,
         y: area.y.saturating_add(body_h),
         w: area.w,
+        h: hint_h,
+    };
+    let command = Rect {
+        x: area.x,
+        y: area.y.saturating_add(body_h).saturating_add(hint_h),
+        w: area.w,
         h: cmd_h,
     };
-    (body, command)
+    (body, hint, command)
+}
+
+/// The rows the bottom chrome (hint + command) occupies for a body area of
+/// height `h` — shared with the overlay/suggest geometry so surfaces anchored
+/// "above the command bar" sit above the hint bar too.
+#[must_use]
+pub fn bottom_chrome_rows(h: u16) -> u16 {
+    let hint_h = if h >= MIN_ROWS_FOR_HINT { HINT_ROWS } else { 0 };
+    h.min(COMMAND_ROWS).saturating_add(hint_h)
 }
 
 /// The two-column degraded layout: projects on the left, detail stacked over
-/// graphs on the right, above the command row. `col1`=projects, `col2`=detail
+/// graphs on the right, above the bottom chrome. `col1`=projects, `col2`=detail
 /// (top-right), `col3`=graphs (bottom-right).
 #[must_use]
 pub fn two_col(area: Rect) -> PanelRects {
-    let (body, command) = command_split(area);
+    let (body, hint, command) = chrome_split(area);
     let left = (body.w / 3).max(MIN_COL1).min(body.w);
     let right_w = body.w.saturating_sub(left);
     let right_x = body.x.saturating_add(left);
@@ -172,15 +197,16 @@ pub fn two_col(area: Rect) -> PanelRects {
         col1,
         col2,
         col3,
+        hint,
         command,
     }
 }
 
 /// The single-panel degraded layout: a 1-row tab strip, one body panel, and the
-/// command row. Returns `(tabs, panel, command)`.
+/// bottom chrome. Returns `(tabs, panel, hint, command)`.
 #[must_use]
-pub fn single_panel(area: Rect) -> (Rect, Rect, Rect) {
-    let (body, command) = command_split(area);
+pub fn single_panel(area: Rect) -> (Rect, Rect, Rect, Rect) {
+    let (body, hint, command) = chrome_split(area);
     let tabs_h = body.h.min(1);
     let tabs = Rect {
         x: body.x,
@@ -194,7 +220,7 @@ pub fn single_panel(area: Rect) -> (Rect, Rect, Rect) {
         w: body.w,
         h: body.h.saturating_sub(tabs_h),
     };
-    (tabs, panel, command)
+    (tabs, panel, hint, command)
 }
 
 /// Split `total` into three widths by `pct` (the remainder lands on the middle
@@ -298,21 +324,39 @@ mod tests {
         assert_eq!(r.col3.x, r.col1.w);
         assert_eq!(r.col2.y + r.col2.h, r.col3.y, "detail sits above graphs");
         assert!(r.col1.w + r.col2.w <= 60);
+        // The hint bar sits between the body and the command row.
+        assert_eq!(r.hint.y, r.col1.h);
+        assert_eq!(r.command.y, r.hint.y + r.hint.h);
 
-        let (tabs, panel, command) = single_panel(area(40, 16));
+        let (tabs, panel, hint, command) = single_panel(area(40, 16));
         assert_eq!(tabs.h, 1);
         assert_eq!(panel.y, tabs.y + 1);
-        assert_eq!(command.y, panel.y + panel.h);
+        assert_eq!(hint.y, panel.y + panel.h);
+        assert_eq!(command.y, hint.y + hint.h);
         assert_eq!(command.h, COMMAND_ROWS);
     }
 
     #[test]
-    fn command_row_height_is_reserved() {
+    fn command_and_hint_rows_are_reserved() {
         let r = solve(area(120, 40));
         assert_eq!(r.command.h, COMMAND_ROWS);
+        assert_eq!(r.hint.h, HINT_ROWS, "tall terminals carry the hint bar");
         assert_eq!(r.command.y, 40 - COMMAND_ROWS);
-        assert_eq!(r.col1.h, 40 - COMMAND_ROWS);
+        assert_eq!(r.hint.y, 40 - COMMAND_ROWS - HINT_ROWS);
+        assert_eq!(r.col1.h, 40 - COMMAND_ROWS - HINT_ROWS);
         assert_eq!(r.command.w, 120);
+    }
+
+    #[test]
+    fn hint_bar_collapses_honestly_when_short() {
+        // Below the threshold the hint bar takes zero rows — the body and the
+        // command row keep everything (the bar vanishes, panels never shrink).
+        let short = solve(area(120, MIN_ROWS_FOR_HINT - 1));
+        assert_eq!(short.hint.h, 0);
+        assert_eq!(short.col1.h + short.command.h, MIN_ROWS_FOR_HINT - 1);
+        // At the threshold it appears.
+        let tall = solve(area(120, MIN_ROWS_FOR_HINT));
+        assert_eq!(tall.hint.h, HINT_ROWS);
     }
 
     #[test]
@@ -371,9 +415,10 @@ mod tests {
             proptest::prop_assert_eq!(r.col2.x, r.col1.x + r.col1.w);
             proptest::prop_assert_eq!(r.col3.x, r.col2.x + r.col2.w);
             proptest::prop_assert_eq!(r.col3.x + r.col3.w, w);
-            // vertical: body + command cover the full height
-            proptest::prop_assert_eq!(r.col1.h + r.command.h, h);
-            proptest::prop_assert_eq!(r.command.y, r.col1.h);
+            // vertical: body + hint + command cover the full height
+            proptest::prop_assert_eq!(r.col1.h + r.hint.h + r.command.h, h);
+            proptest::prop_assert_eq!(r.hint.y, r.col1.h);
+            proptest::prop_assert_eq!(r.command.y, r.col1.h + r.hint.h);
         }
 
         /// No column drops below its minimum width once the grid fits.

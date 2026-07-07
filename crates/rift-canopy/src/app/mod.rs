@@ -44,6 +44,9 @@ pub struct CanopyOpts {
     /// With no registered match this shows the two-ways-in hint — the cwd is
     /// never auto-added.
     pub launch_cwd_is_repo: bool,
+    /// The binary's version, shown in the header (M55-04). Injected like the
+    /// launch cwd so the render crate stays env-free; empty hides the segment.
+    pub version: String,
 }
 
 /// A source of already-translated Canopy [`Event`]s.

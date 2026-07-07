@@ -819,6 +819,7 @@ fn launch_cwd_context() -> (Option<String>, bool) {
 fn print_ascii_frame(projects: Vec<Project>) {
     let mut state = AppState::new(projects, Size::new(100, 40));
     state.app.splash.skip();
+    state.version = env!("CARGO_PKG_VERSION").to_string();
     // The same launch-cwd selection the interactive run applies (M5-03) — the
     // headless frame follows the developer's launch directory too.
     let (launch_cwd, launch_cwd_is_repo) = launch_cwd_context();
@@ -917,6 +918,7 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
                     || std::env::var("RIFT_SPLASH").is_ok_and(|v| v == "never"),
                 launch_cwd,
                 launch_cwd_is_repo,
+                version: env!("CARGO_PKG_VERSION").to_string(),
             };
             // Spawn the live data bus (P8), seeded to populate every registered
             // project's status; it feeds updates in and takes requests back out.

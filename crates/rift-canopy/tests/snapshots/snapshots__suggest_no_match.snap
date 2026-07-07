@@ -1,12 +1,11 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 525
 expression: "render_state(&mut suggest_state(\"zzzzzz\"))"
 ---
-RIFT — Canopy
-╭─ projects ───────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
-│> ● rift-cli      ││rift-cli (repo)                       ││· token usage  (no token activity yet)│
-│  ○ rift-site     ││path: /r/rift-cli                     ││                                      │
+ RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
+╭─ projects  2 ────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
+│># rift-cli      *││rift-cli (repo)                       ││· token usage  (no token activity yet)│
+│ # rift-site     o││path: /r/rift-cli                     ││                                      │
 │                  ││status: running                       ││                                      │
 │                  ││                                      ││                                      │
 │                  ││models                                ││                                      │
@@ -25,13 +24,13 @@ RIFT — Canopy
 │                  ││                                      ││                                      │
 │                  ││features                              ││                                      │
 │                  ││                                      ││                                      │
-│                  ││                                      ││                                      │
 │                  ││                                      ││· recall mcp calls  (recall off — /tog│
 │                  ││                                      ││                                      │
 │                  ││                                      ││                                      │
 │                  ││                                      ││· threads  (no active sessions)       │
 │                  ││                                      ││                                      │
 ╰──────────────────╯╰──────────────────────────────────────╯╰──────────────────────────────────────╯
+ ↑/↓ highlight  ·  tab insert  ·  ⏎ run  ·  esc close
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/zzzzzz█                                                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

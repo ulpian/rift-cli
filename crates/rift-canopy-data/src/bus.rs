@@ -39,8 +39,9 @@ use std::time::Duration;
 use notify::Watcher as _;
 
 use rift_canopy::{
-    derive_status, CaptureSummary, DataRequest, DetailView, EntryKind, Event, ModelUsage,
-    ProjectData, ProjectStatus, ProjectionState, SessionsRead, SettingsSummary, StatusInputs,
+    derive_status, CaptureSummary, DataRequest, DetailView, EntryKind, Event, HealthEvent,
+    ModelUsage, ProjectData, ProjectStatus, ProjectionState, SessionsRead, SettingsSummary,
+    StatusInputs,
 };
 use rift_git::repo_id_for;
 use rift_store::{projection_db_under, resolve_cache_root, CanonicalStore, SqliteStore};
@@ -180,6 +181,10 @@ fn worker(
     // The foreground project — the only one for which the expensive rich detail is
     // computed (status is cheap and read for every project).
     let mut active: Option<String> = None;
+    // The last health report sent (M55-04): the dot rides the reads the worker
+    // already performs — no new polling — and only a *change* stages an event,
+    // so a steady data plane adds zero traffic.
+    let mut last_health: Option<HealthEvent> = None;
     loop {
         let mut to_read = BTreeSet::new();
         let mut woken = false;
@@ -208,11 +213,50 @@ fn worker(
                 to_read.insert(change.project);
             }
         }
+        let did_read = !to_read.is_empty();
+        let mut probe = HealthProbe::default();
         for path in to_read {
-            stage_read(&mut observer, &mut outbox, root, path, active.as_deref());
+            stage_read(
+                &mut observer,
+                &mut outbox,
+                root,
+                path,
+                active.as_deref(),
+                &mut probe,
+            );
+        }
+        if did_read {
+            let health = probe.report();
+            if last_health != Some(health) {
+                last_health = Some(health);
+                outbox.stage(Event::Health(health));
+            }
         }
         if outbox.flush(evt_tx).is_err() {
             return; // the loop is gone; end the worker
+        }
+    }
+}
+
+/// What one read cycle observed about the worker's own infrastructure —
+/// folded into the header dot's [`HealthEvent`] (M55-04, ADR-0024 §1).
+#[derive(Default)]
+struct HealthProbe {
+    /// The machine-global canopy store failed to open this cycle.
+    store_error: bool,
+    /// The worker's async runtime could not be created.
+    runtime_error: bool,
+}
+
+impl HealthProbe {
+    /// Fold the cycle's observations: a dead store outranks a worker error.
+    fn report(&self) -> HealthEvent {
+        if self.store_error {
+            HealthEvent::StoreUnreachable
+        } else if self.runtime_error {
+            HealthEvent::WorkerError
+        } else {
+            HealthEvent::Healthy
         }
     }
 }
@@ -227,7 +271,8 @@ struct Outbox {
 }
 
 /// The feed kinds an update can belong to — the coalescing axis (ADR-0009's
-/// Tokens/Nic/Recall trio alongside the status/detail flow).
+/// Tokens/Nic/Recall trio alongside the status/detail flow and the global
+/// health report).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum FeedKind {
     /// Per-project status (+ detail for the active project).
@@ -238,6 +283,8 @@ enum FeedKind {
     Nic,
     /// Recall savings/calls/threads.
     Recall,
+    /// The data-plane health report (global — one key for the whole plane).
+    Health,
 }
 
 /// The coalescing key for an update.
@@ -252,6 +299,7 @@ fn feed_key(ev: &Event) -> (String, FeedKind) {
             };
             (f.project.clone(), kind)
         }
+        Event::Health(_) => (String::new(), FeedKind::Health),
         // Non-project events have no coalescing axis today; key them globally.
         _ => (String::new(), FeedKind::Status),
     }
@@ -299,11 +347,13 @@ fn stage_read(
     root: &Path,
     path: String,
     active: Option<&str>,
+    probe: &mut HealthProbe,
 ) {
+    probe.runtime_error |= runtime().is_err();
     let (status, mark) = read_project(root, &path);
     observer.sync(&path, mark);
     let detail = if active == Some(path.as_str()) {
-        Some(build_detail(root, &path, status))
+        Some(build_detail(root, &path, status, probe))
     } else {
         None
     };
@@ -443,7 +493,14 @@ fn open_and_read(db: &Path) -> Option<(Watermark, Option<i64>)> {
 /// settings (from `.rift/config.toml`) plus the models and capture counts from its
 /// own projection. Any unreadable part degrades to empty/default — never a panic.
 /// The `status` is the already-derived one, so the detail and the list agree.
-fn build_detail(root: &Path, path: &str, status: ProjectStatus) -> DetailView {
+/// A canopy-store open failure is recorded on `probe` (the header dot's red
+/// signal, M55-04) while the toggles still degrade to their default.
+fn build_detail(
+    root: &Path,
+    path: &str,
+    status: ProjectStatus,
+    probe: &mut HealthProbe,
+) -> DetailView {
     let dir = PathBuf::from(path);
     let label = dir
         .file_name()
@@ -451,9 +508,12 @@ fn build_detail(root: &Path, path: &str, status: ProjectStatus) -> DetailView {
     let (models, capture) = read_projection_detail(root, &dir).unwrap_or_default();
     // Toggles live in the machine-global ui-state store (not the per-repo
     // projection); a read-only open folds them for this project.
-    let toggles = crate::store::CanopyStore::open(root)
-        .and_then(|cs| cs.toggles(path))
-        .unwrap_or_default();
+    let toggles = if let Ok(cs) = crate::store::CanopyStore::open(root) {
+        cs.toggles(path).unwrap_or_default()
+    } else {
+        probe.store_error = true;
+        rift_canopy::ToggleView::default()
+    };
     // A `.git` FILE marks a linked worktree; a directory is a repository root.
     let kind = if dir.join(".git").is_file() {
         EntryKind::Worktree
@@ -838,6 +898,11 @@ mod tests {
         proj.to_string_lossy().into_owned()
     }
 
+    /// Test wrapper: build the detail with a throwaway health probe.
+    fn detail_of(root: &Path, path: &str) -> DetailView {
+        build_detail(root, path, ProjectStatus::Idle, &mut HealthProbe::default())
+    }
+
     /// Receive the next ProjectData update, skipping feed updates (SetActive
     /// emits both kinds).
     fn recv_project_data(bus: &Bus, total: Duration) -> Event {
@@ -845,7 +910,7 @@ mod tests {
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             match bus.evt_rx.recv_timeout(left.max(Duration::from_millis(1))) {
-                Ok(Event::Feed(_)) => {} // skip feed updates
+                Ok(Event::Feed(_) | Event::Health(_)) => {} // skip feed/health updates
                 Ok(ev) => return ev,
                 Err(e) => panic!("no ProjectData update: {e}"),
             }
@@ -925,10 +990,7 @@ mod tests {
 
         // The seeded refresh yields one ProjectData update for the project.
         // Generous deadline: the parallel suite drives real stores hard.
-        let ev = bus
-            .evt_rx
-            .recv_timeout(Duration::from_secs(30))
-            .expect("a ProjectData update");
+        let ev = recv_project_data(&bus, Duration::from_secs(30));
         match ev {
             Event::ProjectData(pd) => {
                 assert_eq!(pd.project, path_of(&proj));
@@ -1029,7 +1091,7 @@ mod tests {
         seed_session(&store, &rt, "s1", "A"); // already seen
         seed_session(&store, &rt, "s2", "C"); // headline-only, 0 calls
 
-        let d = build_detail(root.path(), &path_of(&proj), ProjectStatus::Idle);
+        let d = detail_of(root.path(), &path_of(&proj));
         // Most-used first; the headline-only model appears with 0 calls.
         let models: Vec<(&str, u64)> = d
             .models
@@ -1049,7 +1111,7 @@ mod tests {
         seed_checkpoint(&store, &rt, "k1", 100);
         seed_checkpoint(&store, &rt, "k2", 200);
 
-        let d = build_detail(root.path(), &path_of(&proj), ProjectStatus::Idle);
+        let d = detail_of(root.path(), &path_of(&proj));
         assert_eq!(d.capture.events, 4);
         assert_eq!(d.capture.sessions, 1);
         assert_eq!(d.capture.checkpoints, 2);
@@ -1073,7 +1135,7 @@ mod tests {
             .unwrap()
             .sensitive_paths()
             .len();
-        let d = build_detail(root.path(), &path_of(&proj), ProjectStatus::Idle);
+        let d = detail_of(root.path(), &path_of(&proj));
         assert!(
             d.settings.sensitive_path_count > builtin,
             "the custom glob is counted on top of the built-ins"
@@ -1096,7 +1158,7 @@ mod tests {
         )
         .unwrap();
 
-        let d = build_detail(root.path(), &path_of(&proj), ProjectStatus::Idle);
+        let d = detail_of(root.path(), &path_of(&proj));
         assert!(d.settings.sensitive_path_count >= 1);
         // The pattern text appears nowhere in any string field of the detail.
         let haystack = format!(
@@ -1121,8 +1183,8 @@ mod tests {
         let sa = open_proj(root.path(), &a);
         seed_model_call(&sa, &runtime(), "c1", "OnlyInA");
 
-        let da = build_detail(root.path(), &path_of(&a), ProjectStatus::Idle);
-        let db = build_detail(root.path(), &path_of(&b), ProjectStatus::Idle);
+        let da = detail_of(root.path(), &path_of(&a));
+        let db = detail_of(root.path(), &path_of(&b));
         assert!(da.models.iter().any(|m| m.model == "OnlyInA"));
         assert!(
             db.models.iter().all(|m| m.model != "OnlyInA"),
@@ -1467,7 +1529,7 @@ mod tests {
             }),
         );
         // Drain the seeded update; the observer baseline is now synced.
-        let first = bus.evt_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let first = recv_project_data(&bus, Duration::from_secs(5));
         assert!(matches!(first, Event::ProjectData(_)));
         let wake = grabbed.lock().unwrap().clone().expect("watcher installed");
 
@@ -1484,10 +1546,7 @@ mod tests {
         // idle cadence — the wake scheduled the poll, the poll found it).
         append_events(root.path(), &proj, 1, 2);
         wake.send(WorkerMsg::Wake).unwrap();
-        let ev = bus
-            .evt_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("wake-scheduled poll delivers the update");
+        let ev = recv_project_data(&bus, Duration::from_secs(5));
         assert!(matches!(ev, Event::ProjectData(_)));
     }
 
@@ -1500,7 +1559,7 @@ mod tests {
             vec![path_of(&proj)],
             Box::new(FailingWatcher),
         );
-        let first = bus.evt_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let first = recv_project_data(&bus, Duration::from_secs(5));
         assert!(matches!(first, Event::ProjectData(_)));
 
         // No watcher — the adaptive poll cadence still surfaces the change.
@@ -1593,6 +1652,60 @@ mod tests {
         assert_eq!(latest.get("/r/c"), Some(&9));
     }
 
+    // --- M55-04: the data-plane health report --------------------------------
+
+    #[test]
+    fn health_probe_priorities() {
+        let mut p = HealthProbe::default();
+        assert_eq!(p.report(), HealthEvent::Healthy);
+        p.runtime_error = true;
+        assert_eq!(p.report(), HealthEvent::WorkerError);
+        p.store_error = true;
+        assert_eq!(
+            p.report(),
+            HealthEvent::StoreUnreachable,
+            "a dead store outranks a worker error"
+        );
+    }
+
+    #[test]
+    fn health_emits_once_then_only_on_change() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "seed", 1);
+        let bus = spawn_for_test(root.path().to_path_buf(), vec![path_of(&proj)]);
+
+        // Drain the seeded cycle: exactly one Health(Healthy) rides beside the
+        // ProjectData (emit-on-change: the first report is the change).
+        let mut healths = Vec::new();
+        let mut saw_data = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while (!saw_data || healths.is_empty()) && std::time::Instant::now() < deadline {
+            match bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(Event::Health(h)) => healths.push(h),
+                Ok(Event::ProjectData(_)) => saw_data = true,
+                Ok(_) | Err(_) => {}
+            }
+        }
+        assert_eq!(healths, vec![HealthEvent::Healthy]);
+
+        // A second read of a healthy plane emits data but NO new health report.
+        bus.req_tx
+            .send(DataRequest::Refresh(path_of(&proj)))
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut extra_health = 0;
+        let mut saw_second = false;
+        while !saw_second && std::time::Instant::now() < deadline {
+            match bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(Event::Health(_)) => extra_health += 1,
+                Ok(Event::ProjectData(_)) => saw_second = true,
+                Ok(_) | Err(_) => {}
+            }
+        }
+        assert!(saw_second, "the refresh delivered");
+        assert_eq!(extra_health, 0, "an unchanged health is never re-sent");
+    }
+
     #[test]
     fn bus_delivers_live_update_via_poll() {
         let root = tempfile::tempdir().unwrap();
@@ -1600,16 +1713,13 @@ mod tests {
         let bus = spawn_for_test(root.path().to_path_buf(), vec![path_of(&proj)]);
 
         // Drain the initial request-driven update.
-        let first = bus.evt_rx.recv_timeout(Duration::from_secs(15)).unwrap();
+        let first = recv_project_data(&bus, Duration::from_secs(15));
         assert!(matches!(first, Event::ProjectData(_)));
 
         // A concurrent append must surface via the observer's poll — with no
         // further request sent, any subsequent update is poll-driven.
         append_events(root.path(), &proj, 1, 2);
-        let second = bus
-            .evt_rx
-            .recv_timeout(Duration::from_secs(15))
-            .expect("a poll-driven update");
+        let second = recv_project_data(&bus, Duration::from_secs(15));
         match second {
             Event::ProjectData(pd) => {
                 assert_eq!(pd.project, path_of(&proj));

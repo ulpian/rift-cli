@@ -173,6 +173,7 @@ where
     let mut backend = crate::render::select_backend(caps, opts.ascii);
     let mut state = AppState::new(initial, size);
     state.reduced_motion = prefs.reduced_motion;
+    state.version.clone_from(&opts.version);
 
     // Launch-cwd auto-select (M5-03) BEFORE the loop starts, so the startup
     // prime subscribes the project the developer launched from; `/add`

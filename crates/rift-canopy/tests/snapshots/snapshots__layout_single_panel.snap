@@ -2,12 +2,11 @@
 source: crates/rift-canopy/tests/snapshots.rs
 expression: "render_at(36, 16)"
 ---
-RIFT — Canopy
+ RIFT  Canopy  *
 [Projects] Detail  Graphs
-╭─ projects ───────────────────────╮
-│> ● rift-cli                      │
-│  ○ rift-site                     │
-│                                  │
+╭─ projects  2 ────────────────────╮
+│># rift-cli                      *│
+│ # rift-site                     o│
 │                                  │
 │                                  │
 │                                  │
@@ -15,6 +14,7 @@ RIFT — Canopy
 │                                  │
 │                                  │
 ╰──────────────────────────────────╯
+ j/k navigate  ·  ⏎ open  ·  a add
 ╭─ command ────────────────────────╮
 │/█                                │
 ╰──────────────────────────────────╯

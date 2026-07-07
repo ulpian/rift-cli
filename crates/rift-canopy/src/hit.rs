@@ -10,7 +10,7 @@
 
 use crate::col3;
 use crate::layout::{
-    choose_mode, command_split, single_panel, solve, two_col, LayoutMode, PanelRects, Rect,
+    choose_mode, chrome_split, single_panel, solve, two_col, LayoutMode, PanelRects, Rect,
 };
 use crate::state::ViewModel;
 use crate::view::{detail_line_kinds, visible_window, LineKind};
@@ -39,18 +39,39 @@ pub enum Target {
     /// A suggest-panel row: click INSERTS it (Tab's mouse equivalent — never
     /// execution); the wheel moves the highlight.
     SuggestRow(usize),
+    /// The header's `?` action — open the palette help overlay (M55-04).
+    HeaderHelp,
+    /// The header's `/` action — open the command palette.
+    HeaderPalette,
+    /// The header's `q` action — quit the dashboard.
+    HeaderQuit,
 }
 
-/// The element at cell `(col, row)`, or `None` for empty space / the title row /
-/// a too-small terminal.
+/// The element at cell `(col, row)`, or `None` for empty space / a too-small
+/// terminal. Row 0 is the header: its right-aligned actions resolve to their
+/// targets (geometry shared with [`crate::bars`]); the rest of the bar is
+/// inert.
 #[must_use]
 pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
     let size = vm.size;
-    if col >= size.w || row >= size.h || row == 0 {
-        return None; // off-grid or the title row
+    if col >= size.w || row >= size.h {
+        return None; // off-grid
     }
     if choose_mode(size) == LayoutMode::TooSmall {
         return None;
+    }
+    if row == 0 {
+        // The header actions stay clickable only while no overlay owns the
+        // surface (mirrors the overlay-owns-clicks rule below).
+        if vm.overlay.is_some() {
+            return None;
+        }
+        return match crate::bars::header_action_at(size.w, col) {
+            Some(crate::bars::HeaderAction::Help) => Some(Target::HeaderHelp),
+            Some(crate::bars::HeaderAction::Palette) => Some(Target::HeaderPalette),
+            Some(crate::bars::HeaderAction::Quit) => Some(Target::HeaderQuit),
+            None => None,
+        };
     }
     // The body sits one row below the title (mirrors `view::draw`).
     let body = Rect {
@@ -91,7 +112,7 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
         return None;
     }
     if vm.show_wizard {
-        let (above, command) = command_split(body);
+        let (above, _hint, command) = chrome_split(body);
         if contains(command, col, row) {
             return Some(Target::CommandBar);
         }
@@ -142,7 +163,7 @@ fn hit_grid(vm: &ViewModel, r: PanelRects, col: u16, row: u16) -> Option<Target>
 
 /// Hit-test the single-panel layout: a tab strip over one focused panel.
 fn hit_single(vm: &ViewModel, body: Rect, col: u16, row: u16) -> Option<Target> {
-    let (tabs, panel, command) = single_panel(body);
+    let (tabs, panel, _hint, command) = single_panel(body);
     if contains(command, col, row) {
         return Some(Target::CommandBar);
     }
@@ -279,9 +300,41 @@ mod tests {
     #[test]
     fn title_row_and_offgrid_are_none() {
         let v = vm(120, 40);
-        assert_eq!(hit_test(&v, 5, 0), None, "the title row is inert");
+        assert_eq!(hit_test(&v, 5, 0), None, "the header's left side is inert");
         assert_eq!(hit_test(&v, 999, 5), None, "off-grid is None");
         assert_eq!(hit_test(&v, 5, 999), None);
+    }
+
+    #[test]
+    fn header_actions_resolve_on_row_zero() {
+        let v = vm(120, 40);
+        let spans = crate::bars::header_action_spans(120);
+        assert_eq!(spans.len(), 3);
+        let expect = [
+            Target::HeaderHelp,
+            Target::HeaderPalette,
+            Target::HeaderQuit,
+        ];
+        for (span, want) in spans.iter().zip(expect) {
+            assert_eq!(hit_test(&v, span.start, 0), Some(want.clone()));
+        }
+        // Between the spans (the gap) row 0 stays inert.
+        let gap = spans[0].end;
+        assert_eq!(hit_test(&v, gap, 0), None);
+    }
+
+    #[test]
+    fn header_actions_are_inert_while_an_overlay_is_open() {
+        let mut s = AppState::new(vec![project("a")], Size::new(120, 40));
+        s.app.splash.skip();
+        s.app.overlay = Some(crate::dispatch::Overlay::Running { title: "x".into() });
+        let v = s.snapshot();
+        let spans = crate::bars::header_action_spans(120);
+        assert_eq!(
+            hit_test(&v, spans[0].start, 0),
+            None,
+            "the overlay owns the surface"
+        );
     }
 
     #[test]

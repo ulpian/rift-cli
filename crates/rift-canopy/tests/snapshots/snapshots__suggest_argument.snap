@@ -1,12 +1,11 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 520
 expression: "render_state(&mut suggest_state(\"toggle \"))"
 ---
-RIFT — Canopy
-╭─ projects ───────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
-│> ● rift-cli      ││rift-cli (repo)                       ││· token usage  (no token activity yet)│
-│  ○ rift-site     ││path: /r/rift-cli                     ││                                      │
+ RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
+╭─ projects  2 ────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
+│># rift-cli      *││rift-cli (repo)                       ││· token usage  (no token activity yet)│
+│ # rift-site     o││path: /r/rift-cli                     ││                                      │
 │                  ││status: running                       ││                                      │
 │                  ││                                      ││                                      │
 │                  ││models                                ││                                      │
@@ -23,7 +22,6 @@ RIFT — Canopy
 │                  ││  sessions: 0                         ││· recall savings  (recall off — /toggl│
 │                  ││  checkpoints: 0                      ││                                      │
 │                  ││                                      ││                                      │
-│                  ││features                              ││                                      │
 ╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
 │> toggle fff  /toggle <feature>  flip a feature for the selected project                          │
 │  toggle codegraph  /toggle <feature> flip a feature for the selected project                     │
@@ -32,6 +30,7 @@ RIFT — Canopy
 │  toggle codegraph-rust  /toggle <feature> flip a feature for the selected project                │
 │  toggle rift-total-recall  /toggle <feature> flip a feature for the selected project             │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓ highlight  ·  tab insert  ·  ⏎ run  ·  esc close
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/toggle █                                                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

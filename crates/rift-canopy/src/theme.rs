@@ -247,6 +247,18 @@ impl Theme {
         Style::fg(ACCENT).with_mods(Mods::BOLD)
     }
 
+    /// The header bar's base fill: body text on the raised surface.
+    #[must_use]
+    pub const fn header_bar(self) -> Style {
+        Style::fg(BODY_FG).with_bg(SURFACE_BG)
+    }
+
+    /// A project status dot's style (the rail's trailing dot, M55-05).
+    #[must_use]
+    pub const fn status_dot(self, status: crate::ProjectStatus) -> Style {
+        Style::fg(status_color(status))
+    }
+
     /// The style for a canonical token class (chart + tile share it).
     #[must_use]
     pub fn token_class(self, class: TokenClass) -> Style {
@@ -257,6 +269,19 @@ impl Theme {
     #[must_use]
     pub const fn health(self, health: Health) -> Style {
         Style::fg(health.color()).with_mods(Mods::BOLD)
+    }
+}
+
+/// The status-dot colour for a project status (single-sourced with the rail's
+/// icon choice, [`Icon::for_status`]).
+#[must_use]
+pub const fn status_color(status: crate::ProjectStatus) -> Color {
+    match status {
+        crate::ProjectStatus::Running { .. } => STATUS_RUNNING,
+        crate::ProjectStatus::PickingUp => STATUS_BUSY,
+        crate::ProjectStatus::Idle => STATUS_IDLE,
+        crate::ProjectStatus::NotInitialized => STATUS_UNINIT,
+        crate::ProjectStatus::Error(_) => STATUS_ERROR,
     }
 }
 
@@ -378,6 +403,28 @@ pub enum Icon {
 }
 
 impl Icon {
+    /// The status icon for a project status (colour comes from
+    /// [`status_color`] — one fact, two renderings).
+    #[must_use]
+    pub const fn for_status(status: crate::ProjectStatus) -> Self {
+        match status {
+            crate::ProjectStatus::Running { .. } => Self::StatusRunning,
+            crate::ProjectStatus::PickingUp => Self::StatusBusy,
+            crate::ProjectStatus::Idle => Self::StatusIdle,
+            crate::ProjectStatus::NotInitialized => Self::StatusUninit,
+            crate::ProjectStatus::Error(_) => Self::StatusError,
+        }
+    }
+
+    /// The kind icon for a rail row (repo vs linked worktree).
+    #[must_use]
+    pub const fn for_kind(kind: crate::EntryKind) -> Self {
+        match kind {
+            crate::EntryKind::Repo => Self::Repo,
+            crate::EntryKind::Worktree => Self::Worktree,
+        }
+    }
+
     /// The Unicode glyph for this icon (the capable tier).
     // Conceptually-distinct icons may legitimately share a fallback glyph (a
     // dot, an error bang) — the enum documents intent; the glyph is cosmetic.
@@ -477,10 +524,13 @@ impl Tier {
         }
     }
 
-    /// Whether this tier draws Unicode glyphs. Only the ASCII floor substitutes.
+    /// Whether this tier draws Unicode glyphs. The mono tier arises from cap
+    /// sets without the `UNICODE` probe (e.g. a legacy console), so it
+    /// substitutes like the ASCII floor — matching the renderer, which keys
+    /// glyph choice on `Capabilities::UNICODE` exactly.
     #[must_use]
     pub const fn unicode(self) -> bool {
-        !matches!(self, Self::Ascii)
+        matches!(self, Self::Truecolor | Self::Ansi256)
     }
 
     /// Whether this tier carries any colour at all. Mono and ASCII do not — the
@@ -792,9 +842,11 @@ mod tests {
     }
 
     #[test]
-    fn ascii_tier_substitutes_glyphs_others_do_not() {
+    fn glyph_substitution_follows_the_unicode_probe() {
+        // Mono cap-sets lack the UNICODE probe, so they substitute like the
+        // floor; the colour-capable tiers imply the probe succeeded.
         assert!(!Tier::Ascii.unicode());
-        assert!(Tier::Mono.unicode());
+        assert!(!Tier::Mono.unicode());
         assert!(Tier::Ansi256.unicode());
         assert!(Tier::Truecolor.unicode());
     }

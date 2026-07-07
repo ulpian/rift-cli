@@ -20,6 +20,7 @@
 )]
 
 pub mod app;
+pub mod bars;
 pub mod chrome;
 pub mod col1;
 pub mod col2;
@@ -28,6 +29,7 @@ pub mod command;
 pub mod dispatch;
 pub mod hit;
 pub mod input;
+pub mod keymap;
 pub mod layout;
 pub mod plot;
 pub mod render;
@@ -65,8 +67,8 @@ pub use layout::{solve, PanelRects, Rect};
 pub use render::{select_backend, AsciiBackend, Capabilities, Frame, RenderBackend};
 pub use splash::SplashState;
 pub use state::{
-    update, AppState, DataRequest, Effects, Event, FeedPayload, FeedUpdate, Flow, Focus, PersistOp,
-    ProjectData, ViewModel,
+    update, AppState, DataRequest, Effects, Event, FeedPayload, FeedUpdate, Flow, Focus,
+    HealthEvent, PersistOp, ProjectData, ViewModel,
 };
 pub use suggest::{suggest, ArgKind, CatalogEntry, Frecency, SuggestContext, Suggestion, CATALOG};
 

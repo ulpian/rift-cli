@@ -67,7 +67,7 @@ expression: four_tier_golden(chrome_demo)
 [Mono]
 | 3 projects   [ Open e ]                      |
 |╭─ capture ──────────────────────────────────╮|
-|│╭─ ⊹ events ─╮╭─ ◇ sess ───╮╭─ ⎇ checks ─╮  │|
+|│╭─ . events ─╮╭─ = sess ───╮╭─ ^ checks ─╮  │|
 |││            ││            ││            │  │|
 |││    128     ││     6      ││     12     │  │|
 |│╰────────────╯╰────────────╯╰────────────╯  │|

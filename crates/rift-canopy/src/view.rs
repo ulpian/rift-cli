@@ -9,33 +9,46 @@
 
 use crate::col2::sanitize_for_terminal;
 use crate::layout::{
-    choose_mode, command_split, single_panel, solve, two_col, LayoutMode, Rect, MIN_NOTICE_COLS,
-    MIN_NOTICE_ROWS,
+    bottom_chrome_rows, choose_mode, chrome_split, single_panel, solve, two_col, LayoutMode, Rect,
+    MIN_NOTICE_COLS, MIN_NOTICE_ROWS,
 };
-use crate::render::frame::{Color, Frame, Style};
-use crate::render::RenderBackend;
+use crate::render::frame::{Frame, Style};
+use crate::render::{Capabilities, RenderBackend};
 use crate::state::ViewModel;
+use crate::theme::Theme;
 use crate::{EntryKind, Mode, Panel, ProjectStatus};
 
-/// The Rift accent color (title + selection).
-const ACCENT: Style = Style::fg(Color::Rgb(0x6c, 0xe0, 0x9a));
+/// The Rift accent style (selection + overlay chrome) — the theme's accent.
+const ACCENT: Style = Style::fg(crate::theme::ACCENT);
+
+/// The one surface theme (ADR-0023) — code, not config.
+const THEME: Theme = Theme::rift_dark();
 
 /// Render the whole dashboard for `vm` into `frame`, choosing the responsive
-/// layout tier for the current size (P3 S2). `backend` participates only
-/// through the plot seam (column-3 graphs).
+/// layout tier for the current size (P3 S2). `backend` participates through
+/// the plot seam (column-3 graphs) and, once at the top, the Unicode
+/// capability — the single glyph-substitution switch the theme's icon table
+/// resolves through (draw code never branches on capability elsewhere).
 pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) {
     let area = frame.rect();
     if area.w == 0 || area.h == 0 {
         return;
     }
+    let unicode = backend.capabilities().contains(Capabilities::UNICODE);
 
-    // Below the minimum, show only the centered notice (no title/panels).
+    // Below the minimum, show only the centered notice (no header/panels).
     if choose_mode(vm.size) == LayoutMode::TooSmall {
         draw_too_small(frame, area);
         return;
     }
 
-    draw_title(vm, frame, area);
+    let header = Rect {
+        x: area.x,
+        y: area.y,
+        w: area.w,
+        h: 1,
+    };
+    crate::bars::draw_header(vm, THEME, unicode, frame, header);
     let body = Rect {
         x: area.x,
         y: area.y + 1,
@@ -44,17 +57,18 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
     };
 
     if vm.show_wizard {
-        let (above, command) = command_split(body);
+        let (above, hint, command) = chrome_split(body);
         draw_wizard(vm, frame, above);
+        crate::bars::draw_hint_bar(vm, THEME, frame, hint);
         draw_command(vm, frame, command);
         return;
     }
 
     match choose_mode(vm.size) {
-        LayoutMode::TwoCol => draw_two_col(vm, backend, frame, body),
-        LayoutMode::SinglePanel => draw_single(vm, backend, frame, body),
+        LayoutMode::TwoCol => draw_two_col(vm, backend, frame, body, unicode),
+        LayoutMode::SinglePanel => draw_single(vm, backend, frame, body, unicode),
         // Full3Col (TooSmall handled above).
-        _ => draw_full(vm, backend, frame, body),
+        _ => draw_full(vm, backend, frame, body, unicode),
     }
 
     // The suggest panel expands ABOVE the command bar, borrowing body rows as
@@ -74,10 +88,11 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
 /// The suggest panel's row cap (a bounded list; adapts down to the body).
 pub const SUGGEST_MAX_ROWS: usize = 8;
 
-/// Where the suggest panel sits: directly above the command bar, bounded by
-/// [`SUGGEST_MAX_ROWS`], the suggestion count, and the body's spare rows —
-/// zero-sized when there are none (the panel clamps away; the bar's own line
-/// remains). Shared with `hit_test` so clicks resolve to the drawn rows.
+/// Where the suggest panel sits: directly above the bottom chrome (hint bar +
+/// command bar), bounded by [`SUGGEST_MAX_ROWS`], the suggestion count, and
+/// the body's spare rows — zero-sized when there are none (the panel clamps
+/// away; the bar's own line remains). Shared with `hit_test` so clicks
+/// resolve to the drawn rows.
 #[must_use]
 pub fn suggest_panel_rect(size: crate::render::frame::Size, rows: usize) -> Rect {
     let body = Rect {
@@ -86,7 +101,8 @@ pub fn suggest_panel_rect(size: crate::render::frame::Size, rows: usize) -> Rect
         w: size.w,
         h: size.h.saturating_sub(1),
     };
-    let avail = body.h.saturating_sub(crate::layout::COMMAND_ROWS + 1);
+    let chrome = bottom_chrome_rows(body.h);
+    let avail = body.h.saturating_sub(chrome + 1);
     let want = u16::try_from(rows.min(SUGGEST_MAX_ROWS))
         .unwrap_or(0)
         .saturating_add(2);
@@ -102,7 +118,7 @@ pub fn suggest_panel_rect(size: crate::render::frame::Size, rows: usize) -> Rect
     let y = body
         .y
         .saturating_add(body.h)
-        .saturating_sub(crate::layout::COMMAND_ROWS)
+        .saturating_sub(chrome)
         .saturating_sub(h);
     Rect {
         x: body.x,
@@ -145,13 +161,13 @@ fn draw_suggest_panel(vm: &ViewModel, frame: &mut Frame) {
     }
 }
 
-/// Where the dispatch overlay sits: over the body, clear of the command bar,
-/// with a small margin. Shared with `hit_test` so mouse targets and pixels
-/// can never disagree.
+/// Where the dispatch overlay sits: over the body, clear of the bottom chrome
+/// (hint + command bars), with a small margin. Shared with `hit_test` so mouse
+/// targets and pixels can never disagree.
 #[must_use]
 pub fn overlay_rect(body: Rect) -> Rect {
     let margin_x = 2u16.min(body.w / 8);
-    let h_avail = body.h.saturating_sub(crate::layout::COMMAND_ROWS);
+    let h_avail = body.h.saturating_sub(bottom_chrome_rows(body.h));
     Rect {
         x: body.x + margin_x,
         y: body.y + 1,
@@ -242,46 +258,57 @@ fn draw_overlay(vm: &ViewModel, frame: &mut Frame, body: Rect) {
     }
 }
 
-/// The Rift accent header row.
-fn draw_title(vm: &ViewModel, frame: &mut Frame, area: Rect) {
-    let mut header = String::from("RIFT — Canopy");
-    if let Some(s) = &vm.status {
-        header.push_str("   ");
-        header.push_str(s);
-    }
-    frame.put_str(area.x, area.y, &header, ACCENT);
-}
-
 /// The full 20/40/40 three-column grid.
-fn draw_full(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, body: Rect) {
+fn draw_full(
+    vm: &ViewModel,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+    body: Rect,
+    unicode: bool,
+) {
     let r = solve(body);
     if r.col1.h >= 2 {
-        draw_projects(vm, frame, r.col1);
+        draw_projects(vm, frame, r.col1, unicode);
         draw_detail(vm, frame, r.col2);
         draw_graphs(vm, backend, frame, r.col3);
     }
+    crate::bars::draw_hint_bar(vm, THEME, frame, r.hint);
     draw_command(vm, frame, r.command);
 }
 
 /// The two-column degraded grid: projects left, detail over graphs right.
-fn draw_two_col(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, body: Rect) {
+fn draw_two_col(
+    vm: &ViewModel,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+    body: Rect,
+    unicode: bool,
+) {
     let r = two_col(body);
-    draw_projects(vm, frame, r.col1);
+    draw_projects(vm, frame, r.col1, unicode);
     draw_detail(vm, frame, r.col2);
     draw_graphs(vm, backend, frame, r.col3);
+    crate::bars::draw_hint_bar(vm, THEME, frame, r.hint);
     draw_command(vm, frame, r.command);
 }
 
 /// The single-panel degraded layout: a tab strip + the focused panel.
-fn draw_single(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, body: Rect) {
-    let (tabs, panel, command) = single_panel(body);
+fn draw_single(
+    vm: &ViewModel,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+    body: Rect,
+    unicode: bool,
+) {
+    let (tabs, panel, hint, command) = single_panel(body);
     draw_tab_strip(vm, frame, tabs);
     match vm.focus {
         Panel::Detail => draw_detail(vm, frame, panel),
         Panel::Graphs => draw_graphs(vm, backend, frame, panel),
         // Projects (and Command focus) show the projects panel.
-        Panel::Projects | Panel::Command => draw_projects(vm, frame, panel),
+        Panel::Projects | Panel::Command => draw_projects(vm, frame, panel, unicode),
     }
+    crate::bars::draw_hint_bar(vm, THEME, frame, hint);
     draw_command(vm, frame, command);
 }
 
@@ -337,16 +364,19 @@ fn draw_wizard(vm: &ViewModel, frame: &mut Frame, above: Rect) {
     );
 }
 
-/// The border style for a panel: accented when focused, plain otherwise.
+/// The border style for a panel: accented when focused, the theme's idle
+/// slate otherwise (M55-04 — the borders join the surface theme).
 fn border_style(focused: bool) -> Style {
     if focused {
         ACCENT
     } else {
-        Style::DEFAULT
+        Style::fg(crate::theme::BORDER_IDLE)
     }
 }
 
 /// Draw the bottom command / add-project bar (mode-aware), with a block cursor.
+/// Restyled as chrome (M55-04): themed border + title, the prompt in the
+/// key-hint accent, the input in body text.
 fn draw_command(vm: &ViewModel, frame: &mut Frame, command: Rect) {
     if command.h == 0 {
         return;
@@ -355,9 +385,19 @@ fn draw_command(vm: &ViewModel, frame: &mut Frame, command: Rect) {
         Mode::AddProject => ("add project (path)", ""),
         _ => ("command", "/"),
     };
-    let inner = frame.border(command, btitle, border_style(vm.focus == Panel::Command));
-    let line = format!("{prefix}{}\u{2588}", vm.command_line);
-    clip_line(frame, inner, 0, &line, Style::DEFAULT);
+    let focused = vm.focus == Panel::Command;
+    let inner = crate::chrome::panel(
+        frame,
+        command,
+        btitle,
+        THEME.border(crate::theme::Section::Command, focused),
+        THEME.title(crate::theme::Section::Command),
+    );
+    let px = frame.put_str(inner.x, inner.y, prefix, THEME.key_hint());
+    let line = format!("{}\u{2588}", vm.command_line);
+    let room = (inner.x + inner.w).saturating_sub(px);
+    let clipped: String = line.chars().take(usize::from(room)).collect();
+    frame.put_str(px, inner.y, &clipped, THEME.body());
     // A parse error renders inline under the input — the caret run under the
     // offending span plus the reason (and the nearest-verb hint), drawn over
     // the bar's bottom border row so no layout shifts.
@@ -379,28 +419,62 @@ fn draw_command(vm: &ViewModel, frame: &mut Frame, command: Rect) {
     }
 }
 
-/// Column 1 — the project list, windowed to keep the selection in view.
-fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
-    let inner = frame.border(rect, "projects", border_style(vm.focus == Panel::Projects));
-    if vm.projects.is_empty() {
-        clip_line(
+/// Column 1 — the projects rail (M55-05): count badge in the title, per-row
+/// kind icon + label + trailing status dot, the selection as a filled pill.
+/// Windowed to keep the selection in view; every label passes the sanitizer.
+fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
+    use crate::theme::{Icon, Section};
+    let focused = vm.focus == Panel::Projects;
+    let inner = crate::chrome::panel(
+        frame,
+        rect,
+        "projects",
+        THEME.border(Section::Projects, focused),
+        THEME.title(Section::Projects),
+    );
+    // The registered-project count as a badge on the title row, after the title
+    // (user story 8: the count is a fact you see, not a scroll you take).
+    if rect.w >= 16 && rect.h >= 2 {
+        let bx = rect.x + 12; // just past ` projects ` (title starts at x+3)
+        crate::chrome::badge(
             frame,
-            inner,
-            0,
-            "No projects yet — press 'a'",
-            Style::DEFAULT,
+            bx,
+            rect.y,
+            &vm.projects.len().to_string(),
+            THEME.badge(Section::Projects.accent()),
         );
+    }
+    if vm.projects.is_empty() {
+        clip_line(frame, inner, 0, "No projects yet — press 'a'", THEME.body());
         return;
     }
     let (start, end) = visible_window(vm.selected, vm.projects.len(), usize::from(inner.h));
-    let label_w = usize::from(inner.w).saturating_sub(4); // "> ● "
+    // `> ▣ label … ●` — cursor, kind icon, label, trailing status dot.
+    let label_w = usize::from(inner.w).saturating_sub(6);
     for (row, p) in vm.projects.iter().enumerate().take(end).skip(start) {
         let Ok(dy) = u16::try_from(row.saturating_sub(start)) else {
             break;
         };
+        let y = inner.y + dy;
         let selected = row == vm.selected;
-        let style = if selected { ACCENT } else { Style::DEFAULT };
-        let cursor = if selected { '>' } else { ' ' };
+        // The selection pill: the row filled in the selection wash (BOLD keeps
+        // it visible on the colourless floors, beside the `>` marker).
+        let (row_style, marker) = if selected {
+            let pill = THEME.selection();
+            crate::chrome::fill(
+                frame,
+                Rect {
+                    x: inner.x,
+                    y,
+                    w: inner.w,
+                    h: 1,
+                },
+                pill,
+            );
+            (pill, '>')
+        } else {
+            (THEME.body(), ' ')
+        };
         // Linked worktrees render as indented children of their repository.
         let indent = match p.kind {
             EntryKind::Repo => "",
@@ -411,8 +485,21 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
             &sanitize_for_terminal(&p.name),
             label_w.saturating_sub(indent.len()),
         );
-        let line = format!("{cursor} {indent}{} {label}", p.status.glyph());
-        clip_line(frame, inner, dy, &line, style);
+        frame.set(inner.x, y, marker, row_style);
+        let kind_style = if selected { row_style } else { THEME.dim() };
+        let mut x = frame.put_str(inner.x + 1, y, indent, row_style);
+        frame.set(x, y, Icon::for_kind(p.kind).glyph(unicode), kind_style);
+        x = x.saturating_add(1);
+        frame.put_str(x + 1, y, &label, row_style);
+        // The trailing status dot, pinned to the right edge in status colour.
+        if inner.w >= 2 {
+            let dot_x = inner.x + inner.w - 1;
+            let mut dot = THEME.status_dot(p.status);
+            if selected {
+                dot = dot.with_bg(crate::theme::SELECT_BG);
+            }
+            frame.set(dot_x, y, Icon::for_status(p.status).glyph(unicode), dot);
+        }
     }
 }
 
@@ -751,11 +838,17 @@ mod tests {
     #[test]
     fn draws_three_panels_and_command_bar() {
         let text = render_to_text(&vm());
-        assert!(text.contains("RIFT — Canopy"));
+        // The M55-04 header: mark + product + the right-aligned actions.
+        assert!(text.contains("RIFT"));
+        assert!(text.contains("Canopy"));
+        assert!(text.contains("? Help"));
+        assert!(text.contains("q Quit"));
         assert!(text.contains("projects"));
         assert!(text.contains("rift-cli"));
         assert!(text.contains("detail"));
         assert!(text.contains("graphs"));
+        // The hint bar teaches the focused (projects) keymap.
+        assert!(text.contains("j/k navigate"));
         // The six col-3 sections render their honest placeholders (M4-10) —
         // the old fake-zero savings/tokens lines are gone.
         assert!(text.contains("token usage"));
@@ -820,6 +913,64 @@ mod tests {
         assert_ne!(
             c2.style.fg, accent,
             "an unfocused panel's border is not accented"
+        );
+    }
+
+    #[test]
+    fn rail_shows_count_badge_status_dots_and_selection_pill() {
+        use crate::render::frame::Color;
+        use crate::theme::{status_color, SELECT_BG};
+        let mut s = AppState::new(
+            vec![
+                Project {
+                    name: "alpha".into(),
+                    path: "/r/alpha".into(),
+                    status: ProjectStatus::Running {
+                        since_ms: 0,
+                        active_sessions: 1,
+                    },
+                    kind: EntryKind::Repo,
+                },
+                Project {
+                    name: "beta".into(),
+                    path: "/r/beta".into(),
+                    status: ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+            ],
+            Size::new(120, 40),
+        );
+        s.app.splash.skip();
+        let mut f = Frame::new(s.size);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+        draw(&s.snapshot(), &mut b, &mut f);
+
+        // The count badge shows "2" on the title row (col1 spans x=0..24).
+        let title: String = (0..24).map(|x| f.get(x, 1).unwrap().ch).collect();
+        assert!(title.contains('2'), "the project count badge: {title}");
+
+        // Row 0 of the rail (inner y=2) is the selected `alpha` — its trailing
+        // status dot is running-green, and the pill wash tints the row.
+        let dot_x = 22; // col1 inner right edge (width 24 → inner 1..23)
+        assert_eq!(
+            f.get(dot_x, 2).unwrap().style.fg,
+            status_color(ProjectStatus::Running {
+                since_ms: 0,
+                active_sessions: 1
+            }),
+            "the running dot is green"
+        );
+        assert_eq!(
+            f.get(2, 2).unwrap().style.bg,
+            SELECT_BG,
+            "the selected row carries the pill wash"
+        );
+        // Row 1 (`beta`, unselected) has no pill wash.
+        assert_eq!(f.get(2, 3).unwrap().style.bg, Color::Default);
+        // …and its idle dot is the idle slate.
+        assert_eq!(
+            f.get(dot_x, 3).unwrap().style.fg,
+            status_color(ProjectStatus::Idle)
         );
     }
 

@@ -16,7 +16,37 @@ mod common;
 use common::four_tier_golden;
 use rift_canopy::chrome;
 use rift_canopy::render::frame::{Frame, Size};
+use rift_canopy::render::{Capabilities, RenderBackend, RenderError};
 use rift_canopy::theme::{Icon, Section, Theme, Tier};
+
+/// A capability-bearing backend for the golden renders: it reports the tier's
+/// capability set so `view::draw` chooses Unicode vs ASCII glyphs to match, and
+/// draws the plot floor tier (deterministic). Present is a no-op (headless).
+struct TierBackend {
+    caps: Capabilities,
+}
+
+impl RenderBackend for TierBackend {
+    fn name(&self) -> &'static str {
+        "tier"
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.caps
+    }
+    fn present(&mut self, _frame: &Frame) -> Result<(), RenderError> {
+        Ok(())
+    }
+}
+
+/// The capability set whose `UNICODE` bit matches the tier's glyph choice, so
+/// the frame's glyphs and the serializer's per-tier resolution agree.
+fn caps_for(tier: Tier) -> Capabilities {
+    if tier.unicode() {
+        Capabilities::TRUECOLOR | Capabilities::UNICODE
+    } else {
+        Capabilities::empty()
+    }
+}
 
 /// A compact frame exercising every chrome primitive — a badge and a button in
 /// the header row, then a themed "capture" card with three icon-labelled stat
@@ -95,6 +125,121 @@ fn chrome_demo(tier: Tier) -> Frame {
 #[test]
 fn golden_chrome_primitives_four_tiers() {
     insta::assert_snapshot!("chrome_primitives", four_tier_golden(chrome_demo));
+}
+
+// ---- M55-04: the chrome bars (header · hint · command) ----------------------
+
+/// A live dashboard state with a fixed version and a degraded health dot, so
+/// the header exercises its full vocabulary.
+fn bars_vm(w: u16, h: u16) -> rift_canopy::ViewModel {
+    use rift_canopy::{AppState, EntryKind, Project, ProjectStatus};
+    let mut s = AppState::new(
+        vec![Project {
+            name: "rift-cli".into(),
+            path: "/r/rift-cli".into(),
+            status: ProjectStatus::Idle,
+            kind: EntryKind::Repo,
+        }],
+        Size::new(w, h),
+    );
+    s.app.splash.skip();
+    s.version = "0.1.0".into();
+    s.health = rift_canopy::theme::Health::Warn; // amber: a worker error held
+    s.snapshot()
+}
+
+/// Render just the three chrome bars for `tier` — header on row 0, the hint
+/// bar and command bar in the bottom rows (the full-dashboard draw would drag
+/// every panel into the golden; the bars are what M55-04 pins).
+fn bars_frame(tier: Tier) -> Frame {
+    use rift_canopy::layout::{chrome_split, Rect};
+    let vm = bars_vm(80, 14);
+    let mut f = Frame::new(Size::new(80, 14));
+    let theme = Theme::rift_dark();
+    let header = Rect {
+        x: 0,
+        y: 0,
+        w: 80,
+        h: 1,
+    };
+    rift_canopy::bars::draw_header(&vm, theme, tier.unicode(), &mut f, header);
+    let body = Rect {
+        x: 0,
+        y: 1,
+        w: 80,
+        h: 13,
+    };
+    let (_, hint, command) = chrome_split(body);
+    rift_canopy::bars::draw_hint_bar(&vm, theme, &mut f, hint);
+    // The command bar renders through the full view (it needs the vm); draw it
+    // here via the chrome panel exactly as `view::draw_command` styles it.
+    let inner = rift_canopy::chrome::panel(
+        &mut f,
+        command,
+        "command",
+        theme.border(Section::Command, false),
+        theme.title(Section::Command),
+    );
+    let px = f.put_str(inner.x, inner.y, "/", theme.key_hint());
+    f.put_str(px, inner.y, "\u{2588}", theme.body());
+    f
+}
+
+#[test]
+fn golden_chrome_bars_four_tiers() {
+    insta::assert_snapshot!("chrome_bars", four_tier_golden(bars_frame));
+}
+
+// ---- M55-04/05: the whole themed dashboard, per tier ------------------------
+
+/// The full dashboard (header · projects rail · detail · col3 placeholders ·
+/// hint · command) rendered through the real `view::draw` for `tier`. This is
+/// the load-bearing surface the later waves' cards/panels regenerate; here it
+/// pins the W1 header/hint/command chrome and the W2 rail (count badge, kind
+/// icons, status dots, the selection pill) at every capability tier.
+fn dashboard_frame(tier: Tier) -> Frame {
+    use rift_canopy::{AppState, EntryKind, Project, ProjectStatus};
+    let mut s = AppState::new(
+        vec![
+            Project {
+                name: "rift-cli".into(),
+                path: "/r/rift-cli".into(),
+                status: ProjectStatus::Running {
+                    since_ms: 0,
+                    active_sessions: 1,
+                },
+                kind: EntryKind::Repo,
+            },
+            Project {
+                name: "feature-wt".into(),
+                path: "/r/rift-cli-wt".into(),
+                status: ProjectStatus::NotInitialized,
+                kind: EntryKind::Worktree,
+            },
+            Project {
+                name: "rift-site".into(),
+                path: "/r/rift-site".into(),
+                status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            },
+        ],
+        Size::new(90, 18),
+    );
+    s.app.splash.skip();
+    s.version = "0.1.0".into();
+    s.health = rift_canopy::theme::Health::Ok;
+    let vm = s.snapshot();
+    let mut f = Frame::new(vm.size);
+    let mut backend = TierBackend {
+        caps: caps_for(tier),
+    };
+    rift_canopy::view::draw(&vm, &mut backend, &mut f);
+    f
+}
+
+#[test]
+fn golden_dashboard_four_tiers() {
+    insta::assert_snapshot!("dashboard_themed", four_tier_golden(dashboard_frame));
 }
 
 /// The serializer's own contract, asserted directly (not via a golden): the

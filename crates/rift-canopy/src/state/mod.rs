@@ -52,6 +52,33 @@ pub enum Event {
         /// What it produced.
         outcome: DispatchOutcome,
     },
+    /// A data-plane health report from the bus worker (M55-04, ADR-0024 §1).
+    /// Emitted on change only; the header dot renders the folded state.
+    Health(HealthEvent),
+}
+
+/// What the bus worker observed about its own data plane in one read cycle.
+/// The header dot folds these through [`fold_health`]: a degraded state holds
+/// until a healthy cycle restores it (never a timer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HealthEvent {
+    /// Reads completed with the worker infrastructure and canopy store sound.
+    Healthy,
+    /// The worker hit an internal failure (e.g. its async runtime).
+    WorkerError,
+    /// The machine-global canopy store could not be opened.
+    StoreUnreachable,
+}
+
+/// Fold one health event into the shown [`Health`]: the latest report wins,
+/// and only a healthy cycle restores green (the recover-on-healthy-poll rule).
+#[must_use]
+pub fn fold_health(ev: HealthEvent) -> crate::theme::Health {
+    match ev {
+        HealthEvent::Healthy => crate::theme::Health::Ok,
+        HealthEvent::WorkerError => crate::theme::Health::Warn,
+        HealthEvent::StoreUnreachable => crate::theme::Health::Down,
+    }
 }
 
 /// One feed's full section state for one project. Each update carries the
@@ -250,6 +277,11 @@ pub struct AppState {
     pub dirty: bool,
     /// Honor OS/user reduced-motion: skip col-3 tweens, snap to each new value.
     pub reduced_motion: bool,
+    /// The binary's version string, injected at launch (the render crate stays
+    /// env-free); empty hides the header's version segment.
+    pub version: String,
+    /// The data-plane health the header dot shows (folded from bus reports).
+    pub health: crate::theme::Health,
     /// Idle-tick counter driving the background re-stat cadence (never dirties).
     tick: u32,
     /// The bus-computed rich detail for the active project (keyed by its path);
@@ -281,6 +313,8 @@ impl AppState {
             tick: 0,
             dirty: true,
             reduced_motion: false,
+            version: String::new(),
+            health: crate::theme::Health::Ok,
             detail: None,
             rows_cache: Arc::new(Vec::new()),
             col3: Arc::new(crate::col3::Col3::default()),
@@ -443,6 +477,8 @@ impl AppState {
             size: self.size,
             focus: self.app.focus,
             mode: self.app.mode,
+            version: self.version.clone(),
+            health: self.health,
             show_wizard: self.app.show_wizard,
             projects: Arc::clone(&self.rows_cache),
             selected: self.app.selected,
@@ -565,6 +601,16 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
             flow
         }
         Event::Mouse(m) => on_mouse(s, m),
+        Event::Health(ev) => {
+            // Fold the report; dirty only when the dot actually changes (a
+            // steady Healthy stream never forces a redraw).
+            let next = fold_health(ev);
+            if s.health != next {
+                s.health = next;
+                s.dirty = true;
+            }
+            Flow::Continue(Effects::default())
+        }
         Event::DispatchDone { request, outcome } => {
             if outcome.code == 0 {
                 // Bumped only on successful dispatch (M5-10).
@@ -688,6 +734,22 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             s.dirty = true;
             Flow::Continue(Effects::default())
         }
+        // The header actions (M55-04) map onto the exact same effects their
+        // keys produce — `?` help, `/` palette, `q` quit.
+        Target::HeaderHelp => {
+            s.dirty = true;
+            dashboard_verb_flow(s, Verb::Help)
+        }
+        Target::HeaderPalette => {
+            s.app.set_focus(Panel::Command);
+            s.app.mode = Mode::Command;
+            s.app.command_line.clear();
+            s.arm_suggest_fade();
+            s.app.suggest_highlight = 0;
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
+        Target::HeaderQuit => Flow::Quit,
     }
 }
 
@@ -725,7 +787,10 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             }
             return Flow::Continue(Effects::default());
         }
-        Some(Target::CommandBar) | None => return Flow::Continue(Effects::default()),
+        Some(
+            Target::CommandBar | Target::HeaderHelp | Target::HeaderPalette | Target::HeaderQuit,
+        )
+        | None => return Flow::Continue(Effects::default()),
     };
     s.dirty = true;
     match panel {
@@ -1069,6 +1134,10 @@ pub struct ViewModel {
     pub focus: Focus,
     /// Interaction mode.
     pub mode: Mode,
+    /// The binary's version (header segment; empty hides it).
+    pub version: String,
+    /// The data-plane health the header dot shows.
+    pub health: crate::theme::Health,
     /// Whether to show the first-run wizard.
     pub show_wizard: bool,
     /// Column-1 project rows (shared, rebuilt only when the rows change).
@@ -1270,6 +1339,79 @@ mod tests {
             update(&mut s, Event::Key(CanopyKey::Quit)),
             Flow::Quit
         ));
+    }
+
+    // --- M55-04: the data-plane health dot ------------------------------------
+
+    #[test]
+    fn health_events_fold_and_recover_on_healthy_poll() {
+        use crate::theme::Health;
+        let mut s = ready(vec![]);
+        assert_eq!(s.health, Health::Ok, "optimistic at launch");
+
+        // A worker error downgrades to amber…
+        update(&mut s, Event::Health(HealthEvent::WorkerError));
+        assert_eq!(s.health, Health::Warn);
+        assert!(s.dirty);
+
+        // …a store failure to red…
+        s.dirty = false;
+        update(&mut s, Event::Health(HealthEvent::StoreUnreachable));
+        assert_eq!(s.health, Health::Down);
+        assert!(s.dirty);
+
+        // …and only a healthy poll restores green.
+        s.dirty = false;
+        update(&mut s, Event::Health(HealthEvent::Healthy));
+        assert_eq!(s.health, Health::Ok);
+        assert!(s.dirty);
+    }
+
+    #[test]
+    fn unchanged_health_never_dirties() {
+        let mut s = ready(vec![]);
+        update(&mut s, Event::Health(HealthEvent::Healthy));
+        assert!(
+            !s.dirty,
+            "Ok → Ok is a no-op (a steady stream never redraws)"
+        );
+        update(&mut s, Event::Health(HealthEvent::WorkerError));
+        s.dirty = false;
+        update(&mut s, Event::Health(HealthEvent::WorkerError));
+        assert!(!s.dirty, "Warn → Warn is a no-op");
+    }
+
+    #[test]
+    fn snapshot_carries_health_and_version() {
+        let mut s = ready(vec![]);
+        s.version = "1.2.3".into();
+        update(&mut s, Event::Health(HealthEvent::StoreUnreachable));
+        let vm = s.snapshot();
+        assert_eq!(vm.health, crate::theme::Health::Down);
+        assert_eq!(vm.version, "1.2.3");
+    }
+
+    #[test]
+    fn header_click_targets_map_to_their_key_equivalents() {
+        // HeaderQuit quits; HeaderPalette opens command mode; HeaderHelp opens
+        // the help overlay — each the same effect as its key.
+        let mut s = ready(vec![project("a")]);
+        assert!(matches!(
+            apply_click(&mut s, Target::HeaderQuit),
+            Flow::Quit
+        ));
+
+        let mut s = ready(vec![project("a")]);
+        let _ = apply_click(&mut s, Target::HeaderPalette);
+        assert_eq!(s.app.mode, Mode::Command);
+        assert_eq!(s.app.focus, Panel::Command);
+
+        let mut s = ready(vec![project("a")]);
+        let _ = apply_click(&mut s, Target::HeaderHelp);
+        assert!(
+            matches!(s.app.overlay, Some(Overlay::Results { .. })),
+            "the help overlay opened"
+        );
     }
 
     #[test]

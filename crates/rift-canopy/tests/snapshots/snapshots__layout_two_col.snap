@@ -1,16 +1,14 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 87
 expression: "render_at(60, 20)"
 ---
-RIFT — Canopy
-╭─ projects ───────╮╭─ detail ─────────────────────────────╮
-│> ● rift-cli      ││rift-cli (repo)                       │
-│  ○ rift-site     ││path: /r/rift-cli                     │
+ RIFT  Canopy  *                  ? Help  / Palette  q Quit
+╭─ projects  2 ────╮╭─ detail ─────────────────────────────╮
+│># rift-cli      *││rift-cli (repo)                       │
+│ # rift-site     o││path: /r/rift-cli                     │
 │                  ││status: running                       │
 │                  ││                                      │
 │                  ││models                                │
-│                  ││  (none yet)                          │
 │                  │╰──────────────────────────────────────╯
 │                  │╭─ graphs ─────────────────────────────╮
 │                  ││· token usage  (no token activity yet)│
@@ -20,6 +18,7 @@ RIFT — Canopy
 │                  ││· recall mcp calls  (recall off — /tog│
 │                  ││· threads  (no active sessions)       │
 ╰──────────────────╯╰──────────────────────────────────────╯
+ j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reo
 ╭─ command ────────────────────────────────────────────────╮
 │/█                                                        │
 ╰──────────────────────────────────────────────────────────╯

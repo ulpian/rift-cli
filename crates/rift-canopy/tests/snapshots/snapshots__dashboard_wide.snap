@@ -1,12 +1,11 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 71
 expression: frame_text(&f)
 ---
-RIFT — Canopy
-╭─ projects ───────────╮╭─ detail ─────────────────────────────────────╮╭─ graphs ─────────────────────────────────────╮
-│> ● rift-cli          ││rift-cli (repo)                               ││· token usage  (no token activity yet)        │
-│  ○ rift-site         ││path: /r/rift-cli                             ││                                              │
+ RIFT  Canopy  *                                                                              ? Help  / Palette  q Quit
+╭─ projects  2 ────────╮╭─ detail ─────────────────────────────────────╮╭─ graphs ─────────────────────────────────────╮
+│># rift-cli          *││rift-cli (repo)                               ││· token usage  (no token activity yet)        │
+│ # rift-site         o││path: /r/rift-cli                             ││                                              │
 │                      ││status: running                               ││                                              │
 │                      ││                                              ││                                              │
 │                      ││models                                        ││                                              │
@@ -38,8 +37,8 @@ RIFT — Canopy
 │                      ││                                              ││                                              │
 │                      ││                                              ││· threads  (no active sessions)               │
 │                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
 ╰──────────────────────╯╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
+ j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  ·  q quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

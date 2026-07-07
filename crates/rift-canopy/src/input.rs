@@ -210,6 +210,12 @@ fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
         {
             Action::ReorderProject(false)
         }
+        // Enter on the rail opens the selection: selection already follows the
+        // cursor, so "open" is focusing the detail column (M55-05).
+        CanopyKey::Enter if app.focus == Panel::Projects => {
+            app.set_focus(Panel::Detail);
+            Action::None
+        }
         // Column-2 feature toggles: Space / Enter / `t` flip the cursored toggle,
         // `r` retries a failed one. Only when the detail panel is focused.
         CanopyKey::Char(' ' | 't') | CanopyKey::Enter if app.focus == Panel::Detail => {
@@ -575,6 +581,20 @@ mod tests {
         on_key(&mut app, CanopyKey::Up);
         assert_eq!(app.toggle_cursor, 0);
         assert_eq!(app.scroll.detail, 0, "detail no longer scrolls via arrows");
+    }
+
+    #[test]
+    fn enter_on_the_rail_focuses_detail() {
+        // Selection and inspection are one motion (M55-05): Enter on the rail
+        // focuses the detail column; the selection is untouched.
+        let mut app = ready(vec![project("a"), project("b")]);
+        assert_eq!(app.focus, Panel::Projects);
+        on_key(&mut app, CanopyKey::Down);
+        assert_eq!(on_key(&mut app, CanopyKey::Enter), Action::None);
+        assert_eq!(app.focus, Panel::Detail);
+        assert_eq!(app.selected, 1, "the selection stays put");
+        // Existing behavior unchanged: Enter in the detail column toggles.
+        assert_eq!(on_key(&mut app, CanopyKey::Enter), Action::ToggleFeature);
     }
 
     #[test]
