@@ -42,3 +42,10 @@ serde = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 insta = { workspace = true }
+criterion = { workspace = true }
+
+# ADR-0014: documents the Full3d ≤ 8 ms/frame budget (`director::FRAME_BUDGET`)
+# that the runtime probe enforces by downgrading resolution, then tier.
+[[bench]]
+name = "splash_frame"
+harness = false

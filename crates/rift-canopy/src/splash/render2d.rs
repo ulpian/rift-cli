@@ -2,13 +2,17 @@
 //!
 //! The Reduced2d tier draws the [`ground`] crack as Unicode glyphs and the
 //! [`wordmark`] as a rising, ramp-colored "RIFT" banner; the StaticAscii tier
-//! draws the figlet banner; Full3d defers to the backend's `render_scene` seam
-//! (which, without `xre-3d`, draws the same banner — never an error). Every tier
-//! is a deterministic function of `(t, seed)`, so the keyframe goldens and the
-//! skip → final-frame parity hold.
+//! draws the figlet banner; Full3d compiles the [`mesh3d`] scene (the ground
+//! meshed from the crack field, the extruded wordmark) to its deterministic
+//! point set and density-resolves it — braille, half-blocks where the caps or
+//! the budget ladder's [`Resolution`] demand, and the backend's `render_scene`
+//! banner where Unicode is absent (never an error). Every tier is a
+//! deterministic function of `(t, seed[, resolution])`, so the keyframe
+//! goldens and the skip → final-frame parity hold.
 
 use super::director::Tier;
 use super::ground::CrackField;
+use super::mesh3d::{self, Resolution};
 use super::wordmark::{figlet_lines, reveal};
 use crate::render::frame::{Color, Frame, Style};
 use crate::render::{draw_centered, RenderBackend, SceneRef};
@@ -17,13 +21,16 @@ use crate::render::{draw_centered, RenderBackend, SceneRef};
 const CRACK_RAMP: [char; 4] = ['░', '▒', '▓', '█'];
 
 /// Draw the splash at timeline `t ∈ [0, 1]` for `tier`, seeded by `seed`.
+/// `res` is the Full3d raster density (the budget ladder's first downgrade
+/// axis); the other tiers ignore it.
 pub fn draw_tier(
     tier: Tier,
     t: f32,
     seed: u64,
     backend: &mut dyn RenderBackend,
     frame: &mut Frame,
-    _caps: crate::render::Capabilities,
+    caps: crate::render::Capabilities,
+    res: Resolution,
 ) {
     let area = frame.rect();
     match tier {
@@ -37,13 +44,17 @@ pub fn draw_tier(
             draw_wordmark_2d(frame, t);
         }
         Tier::Full3d => {
-            // The 3D seam: with `xre-3d` the backend rasterizes the voxel/mesh
-            // scene; without it, render_scene draws the banner fallback.
-            let lines = figlet_lines();
-            let scene = SceneRef {
-                fallback: lines.as_slice(),
-            };
-            backend.render_scene(&scene, area, frame);
+            // The mesh raster (ADR-0014): a deterministic point set resolved
+            // by density. Where even Unicode is absent, the render seam's
+            // banner fallback keeps the entrypoint total.
+            let points = mesh3d::scene_points(t, seed, res, (area.w, area.h));
+            if !mesh3d::resolve(frame, area, &points, caps, res) {
+                let lines = figlet_lines();
+                let scene = SceneRef {
+                    fallback: lines.as_slice(),
+                };
+                backend.render_scene(&scene, area, frame);
+            }
         }
     }
 }
@@ -136,6 +147,14 @@ mod tests {
         s
     }
 
+    fn full3d_caps() -> Capabilities {
+        Capabilities::TRUECOLOR
+            | Capabilities::UNICODE
+            | Capabilities::SUBCELL
+            | Capabilities::MESH_3D
+            | Capabilities::RAMP_SHADER
+    }
+
     #[test]
     fn static_tier_draws_banner() {
         let mut f = Frame::new(Size::new(40, 10));
@@ -147,6 +166,7 @@ mod tests {
             &mut b,
             &mut f,
             Capabilities::empty(),
+            Resolution::Full,
         );
         assert!(text_of(&f).contains('_'));
     }
@@ -163,6 +183,7 @@ mod tests {
             &mut b,
             &mut f1,
             Capabilities::empty(),
+            Resolution::Full,
         );
         draw_tier(
             Tier::Reduced2d,
@@ -171,6 +192,7 @@ mod tests {
             &mut b,
             &mut f2,
             Capabilities::empty(),
+            Resolution::Full,
         );
         assert_eq!(text_of(&f1), text_of(&f2));
     }
@@ -186,6 +208,7 @@ mod tests {
             &mut b,
             &mut f,
             Capabilities::empty(),
+            Resolution::Full,
         );
         // At t=1 reveal is full, so every figlet row is present.
         let text = text_of(&f);
@@ -201,16 +224,84 @@ mod tests {
     fn instant_tier_draws_nothing() {
         let mut b = NullBackend;
         let mut f = Frame::new(Size::new(20, 5));
-        draw_tier(Tier::Instant, 0.5, 1, &mut b, &mut f, Capabilities::empty());
+        draw_tier(
+            Tier::Instant,
+            0.5,
+            1,
+            &mut b,
+            &mut f,
+            Capabilities::empty(),
+            Resolution::Full,
+        );
         assert!(text_of(&f).trim().is_empty());
     }
 
     #[test]
-    fn full3d_without_engine_draws_banner_fallback() {
+    fn full3d_without_unicode_draws_banner_fallback() {
+        // Even with the 3D capability bits, no Unicode → the render seam's
+        // static banner (never an error, never a blank).
         let mut b = NullBackend;
         let mut f = Frame::new(Size::new(40, 10));
-        draw_tier(Tier::Full3d, 0.5, 1, &mut b, &mut f, Capabilities::empty());
+        draw_tier(
+            Tier::Full3d,
+            0.5,
+            1,
+            &mut b,
+            &mut f,
+            Capabilities::empty(),
+            Resolution::Full,
+        );
         assert!(text_of(&f).contains('_'));
+    }
+
+    #[test]
+    fn full3d_is_deterministic_and_draws_the_mesh_raster() {
+        let mut b = NullBackend;
+        let mut f1 = Frame::new(Size::new(60, 20));
+        let mut f2 = Frame::new(Size::new(60, 20));
+        for f in [&mut f1, &mut f2] {
+            draw_tier(
+                Tier::Full3d,
+                0.5,
+                99,
+                &mut b,
+                f,
+                full3d_caps(),
+                Resolution::Full,
+            );
+        }
+        assert_eq!(f1, f2, "same (t, seed, res) → identical cells and colours");
+        // The raster resolves as braille density, not the banner.
+        let text = text_of(&f1);
+        assert!(
+            text.chars()
+                .any(|c| (0x2800..=0x28FF).contains(&(c as u32))),
+            "braille glyphs present: {text}"
+        );
+    }
+
+    #[test]
+    fn full3d_half_resolution_coarsens_to_half_blocks() {
+        // The budget ladder's first rung: same tier, half-block density.
+        let mut b = NullBackend;
+        let mut f = Frame::new(Size::new(60, 20));
+        draw_tier(
+            Tier::Full3d,
+            1.0,
+            7,
+            &mut b,
+            &mut f,
+            full3d_caps(),
+            Resolution::Half,
+        );
+        let text = text_of(&f);
+        assert!(text.chars().any(|c| matches!(c, '▀' | '▄' | '█')));
+        assert!(
+            !text
+                .chars()
+                .any(|c| (0x2800..=0x28FF).contains(&(c as u32))),
+            "no braille at half resolution"
+        );
     }
 
     #[test]
@@ -225,6 +316,17 @@ mod tests {
                 &mut b,
                 &mut f,
                 Capabilities::empty(),
+                Resolution::Full,
+            );
+            let mut f3 = Frame::new(Size::new(w, h));
+            draw_tier(
+                Tier::Full3d,
+                0.5,
+                1,
+                &mut b,
+                &mut f3,
+                full3d_caps(),
+                Resolution::Half,
             );
         }
     }

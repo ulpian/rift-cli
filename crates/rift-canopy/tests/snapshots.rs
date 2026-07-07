@@ -1,10 +1,12 @@
 //! Committed golden frames (insta) guarding visual drift in the deterministic
-//! renderers: the ASCII dashboard, the static figlet banner, and the 2D splash
-//! keyframes. Every input is fixed (seed/size/state), so these are stable.
+//! renderers: the ASCII dashboard, the static figlet banner, the 2D splash
+//! keyframes, and the Full3d mesh raster (frames + the ADR-0014 point sets).
+//! Every input is fixed (seed/size/state), so these are stable.
 
 use rift_canopy::render::frame::{Frame, Size};
 use rift_canopy::render::Capabilities;
 use rift_canopy::splash::director::Tier;
+use rift_canopy::splash::mesh3d::{self, Resolution};
 use rift_canopy::splash::render2d::draw_tier;
 use rift_canopy::state::AppState;
 use rift_canopy::{AsciiBackend, EntryKind, Project, ProjectStatus};
@@ -297,6 +299,7 @@ fn golden_static_banner() {
         &mut b,
         &mut f,
         Capabilities::empty(),
+        Resolution::Full,
     );
     insta::assert_snapshot!("splash_static_banner", frame_text(&f));
 }
@@ -312,6 +315,7 @@ fn golden_reduced2d_final_frame() {
         &mut b,
         &mut f,
         Capabilities::empty(),
+        Resolution::Full,
     );
     insta::assert_snapshot!("splash_reduced2d_final", frame_text(&f));
 }
@@ -327,6 +331,7 @@ fn golden_reduced2d_midframe() {
         &mut b,
         &mut f,
         Capabilities::empty(),
+        Resolution::Full,
     );
     insta::assert_snapshot!("splash_reduced2d_mid", frame_text(&f));
 }
@@ -403,4 +408,88 @@ fn golden_inline_parse_error() {
     s.app.command_line = "statsu".into();
     s.app.command_error = rift_canopy::parse("statsu").err();
     insta::assert_snapshot!("inline_parse_error", render_state(&mut s));
+}
+
+// --- Full3d (ADR-0014 / M5-14): the mesh raster --------------------------------
+
+/// The forced Full3d capability set (tests never read a real terminal).
+fn full3d_caps() -> Capabilities {
+    Capabilities::TRUECOLOR
+        | Capabilities::UNICODE
+        | Capabilities::SUBCELL
+        | Capabilities::MESH_3D
+        | Capabilities::RAMP_SHADER
+}
+
+/// The splash seed pinned by the goldens (the director's default).
+const SPLASH_SEED: u64 = 0x5249_4654_5249_4654;
+
+/// Render one Full3d frame at `(t, caps, res)` into a 48×16 golden.
+fn full3d_text(t: f32, caps: Capabilities, res: Resolution) -> String {
+    let mut b = AsciiBackend;
+    let mut f = Frame::new(Size::new(48, 16));
+    draw_tier(Tier::Full3d, t, SPLASH_SEED, &mut b, &mut f, caps, res);
+    frame_text(&f)
+}
+
+#[test]
+fn golden_full3d_final_frame() {
+    // The braille-density resolve of the settled scene (skip parity lands here).
+    insta::assert_snapshot!(
+        "splash_full3d_final",
+        full3d_text(1.0, full3d_caps(), Resolution::Full)
+    );
+}
+
+#[test]
+fn golden_full3d_midframe() {
+    insta::assert_snapshot!(
+        "splash_full3d_mid",
+        full3d_text(0.5, full3d_caps(), Resolution::Full)
+    );
+}
+
+#[test]
+fn golden_full3d_final_halfblock_fallback() {
+    // Forced caps without SUBCELL: the same scene resolved as half-blocks —
+    // the "where cell caps demand" degradation, pinned.
+    let caps = Capabilities::TRUECOLOR
+        | Capabilities::UNICODE
+        | Capabilities::MESH_3D
+        | Capabilities::RAMP_SHADER;
+    insta::assert_snapshot!(
+        "splash_full3d_final_halfblock",
+        full3d_text(1.0, caps, Resolution::Full)
+    );
+}
+
+/// Quantize a Full3d keyframe's point set into a stable text block: one
+/// `x,y,lum` triple per point (positions ×1000, luminance ×100 — integers, so
+/// the golden is float-format-proof), eight points per line.
+fn point_set_text(t: f32) -> String {
+    let points = mesh3d::scene_points(t, SPLASH_SEED, Resolution::Full, (48, 16));
+    let mut triples = Vec::with_capacity(points.len());
+    for p in &points {
+        #[allow(clippy::cast_possible_truncation)]
+        let (qx, qy, ql) = (
+            (p.x * 1000.0).round() as i32,
+            (p.y * 1000.0).round() as i32,
+            (p.lum * 100.0).round() as i32,
+        );
+        triples.push(format!("{qx},{qy},{ql}"));
+    }
+    triples
+        .chunks(8)
+        .map(|c| c.join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn golden_full3d_points_keyframes() {
+    // The ADR-0014 contract: Full3d keyframes are deterministic point sets —
+    // pure functions of (t, seed, resolution, size); injected clock upstream.
+    insta::assert_snapshot!("full3d_points_t25", point_set_text(0.25));
+    insta::assert_snapshot!("full3d_points_t50", point_set_text(0.5));
+    insta::assert_snapshot!("full3d_points_t100", point_set_text(1.0));
 }

@@ -2,23 +2,31 @@
 //!
 //! The production splash is a 3D ground-cracking animation with a ramp-shaded
 //! "Rift" wordmark rising from it. This module ships the **deterministic core**
-//! ([`ground`] crack propagation, [`wordmark`] reveal/shade) and the
-//! [`director`] that times it, picks a fidelity [`director::Tier`], makes it
-//! skippable, and plays it first-run-only — rendering the **2D / ASCII** tiers
-//! into Canopy's [`crate::render::Frame`]. The Full3d voxel/mesh raster is a
-//! capability-gated seam (`render_scene`) filled in later behind `xre-3d`.
+//! ([`ground`] crack propagation, [`wordmark`] reveal/shade), the [`mesh3d`]
+//! Full3d raster (ADR-0014: the ground meshed from the crack field, the
+//! wordmark extruded, density-resolved to cells), and the [`director`] that
+//! times it, picks a fidelity [`director::Tier`], makes it skippable, holds
+//! the Full3d tier to its [`director::FRAME_BUDGET`] (resolution downgrades
+//! first, then the tier), and plays it first-run-only — all rendered into
+//! Canopy's [`crate::render::Frame`]. The math is feature-free; an `xre-3d`
+//! build is what lets live capability detection advertise the 3D tier.
 //!
 //! [`SplashState`] is the small frame-counter the dashboard model still carries
 //! (the in-`App` "is the splash done" flag the key reducer dismisses).
 
 pub mod director;
 pub mod ground;
+pub mod mesh3d;
 pub mod prefs;
 pub mod prng;
 pub mod render2d;
 pub mod wordmark;
 
-pub use director::{choose_tier, play_live, run_splash, SplashConfig, SplashMode, Tier};
+pub use director::{
+    choose_tier, play_live, run_splash, BudgetLadder, Downgrade, SplashConfig, SplashMode, Tier,
+    FRAME_BUDGET,
+};
+pub use mesh3d::{Resolution, ScenePoint};
 
 /// Total animation frames before the legacy splash timeline auto-completes.
 pub const TOTAL_FRAMES: u32 = 48;

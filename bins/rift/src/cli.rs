@@ -146,6 +146,50 @@ pub(crate) struct ConfigureArgs {
     /// Set the checkpoint remote URL.
     #[arg(long)]
     pub(crate) checkpoint_remote: Option<String>,
+
+    /// The configure subcommand (global preference setters).
+    #[command(subcommand)]
+    pub(crate) cmd: Option<ConfigureCmd>,
+}
+
+/// `rift configure <setter>` — global (per-user) preference setters, distinct
+/// from the per-repo `.rift/config.toml` flags above.
+#[derive(Subcommand, Debug)]
+pub(crate) enum ConfigureCmd {
+    /// Set when the Canopy startup splash plays (M5-15 / ADR-0014; supersedes
+    /// the spec's `config` spelling). Writes only the splash key of the
+    /// global canopy preferences.
+    SplashMode(SplashModeArgs),
+}
+
+/// `rift configure splash-mode <always|first-run|never>`.
+#[derive(Args, Debug)]
+pub(crate) struct SplashModeArgs {
+    /// When the splash plays.
+    #[arg(value_enum)]
+    pub(crate) mode: SplashModeArg,
+}
+
+/// The splash-mode choices (the labels are the canopy-prefs contract).
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub(crate) enum SplashModeArg {
+    /// Play on every launch.
+    Always,
+    /// Play only on the first run (the default preference).
+    FirstRun,
+    /// Never play.
+    Never,
+}
+
+impl SplashModeArg {
+    /// The canopy-prefs label this choice persists as.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::FirstRun => "first-run",
+            Self::Never => "never",
+        }
+    }
 }
 
 /// `rift hooks …` — the trailing args are handed verbatim to the hook router.

@@ -527,8 +527,12 @@ fn resolve_memd_binary() -> Option<std::path::PathBuf> {
         .find(|c| c.exists())
 }
 
-/// `rift configure`: manage `.rift/config.toml` (the checkpoint remote / policy).
+/// `rift configure`: manage `.rift/config.toml` (the checkpoint remote / policy)
+/// and, via subcommands, the global canopy preferences.
 fn cmd_configure(root: &std::path::Path, args: &ConfigureArgs) -> rift_core::Result<Outcome> {
+    if let Some(cli::ConfigureCmd::SplashMode(m)) = &args.cmd {
+        return configure_splash_mode(m.mode);
+    }
     let rift_dir = root.join(".rift");
     std::fs::create_dir_all(&rift_dir)?;
     let cfg = rift_dir.join("config.toml");
@@ -546,6 +550,26 @@ fn cmd_configure(root: &std::path::Path, args: &ConfigureArgs) -> rift_core::Res
             serde_json::json!({ "config": cfg.display().to_string() }),
         ))
     }
+}
+
+/// `rift configure splash-mode <always|first-run|never>` (M5-15 / ADR-0014):
+/// a read-modify-write of the **global** canopy preferences that changes only
+/// the splash key — `seen_splash`, `reduced_motion`, and `mouse` ride through
+/// untouched (the prefs read is default-safe, so a missing or garbage file
+/// starts from defaults rather than erroring).
+fn configure_splash_mode(mode: cli::SplashModeArg) -> rift_core::Result<Outcome> {
+    use rift_canopy::splash::prefs;
+    let mut p = prefs::load();
+    p.splash_mode = mode.label().to_string();
+    prefs::save(&p)?;
+    let path = prefs::default_path();
+    Ok(Outcome::ok(
+        format!("configured splash mode: {}", mode.label()),
+        serde_json::json!({
+            "splash_mode": mode.label(),
+            "prefs": path.display().to_string(),
+        }),
+    ))
 }
 
 /// `rift verify`: carries its own granular exit contract (P5 S4): 0 ok,
@@ -718,9 +742,18 @@ fn dispatch_request(
             root,
             &ConfigureArgs {
                 checkpoint_remote: None,
+                cmd: None,
             },
         ),
-        R::Configure(rift_canopy::ConfigureVerb::Splash(mode)) => configure_splash_mode(*mode),
+        // The palette's splash mode reaches the SAME writer as the CLI verb
+        // (one writer, M5-15).
+        R::Configure(rift_canopy::ConfigureVerb::Splash(mode)) => {
+            configure_splash_mode(match mode {
+                rift_canopy::SplashMode::Always => cli::SplashModeArg::Always,
+                rift_canopy::SplashMode::FirstRun => cli::SplashModeArg::FirstRun,
+                rift_canopy::SplashMode::Never => cli::SplashModeArg::Never,
+            })
+        }
         R::Rebuild => cmd_rebuild(root),
         R::Gc => projection_read(root, |s, rt| rt.block_on(query::gc(s, false))),
         R::ProjectsPrune => projects_cmd(&ProjectsCmd::Prune(cli::PruneArgs { dry_run: false })),
@@ -742,20 +775,6 @@ fn palette_memory_cmd(m: &rift_canopy::MemoryVerb) -> cli::MemoryCmd {
         }),
         V::RereadReport => cli::MemoryCmd::RereadReport,
     }
-}
-
-/// `configure splash <mode>` (M5-15's CLI verb reaches the same writer): the
-/// palette's mutating configure sets ONLY the splash key of the global canopy
-/// preferences. Until the W3 wave lands the prefs key, this reports the
-/// intent honestly.
-fn configure_splash_mode(mode: rift_canopy::SplashMode) -> rift_core::Result<Outcome> {
-    Ok(Outcome::ok(
-        format!(
-            "splash mode: {} (persisted by the W3 configure verb)",
-            mode.as_str()
-        ),
-        serde_json::json!({ "splash_mode": mode.as_str() }),
-    ))
 }
 
 /// Spawn the one-shot launch auto-ingest thread (M5-06): the launch-selected
