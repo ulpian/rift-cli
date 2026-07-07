@@ -417,9 +417,28 @@ fn cmd_rebuild() -> rift_core::Result<Outcome> {
 /// default 1200) with the first project active, so statuses and the column-3
 /// sections render from the developer's own projections — placeholders only
 /// where data is honestly absent, exactly like the TUI.
+/// The canonicalized launch directory + whether it sits inside a git repo —
+/// the two facts `apply_launch_cwd` selects/hints from (M5-03). Resolved once
+/// at launch; a threaded TUI must never consult process cwd afterwards.
+fn launch_cwd_context() -> (Option<String>, bool) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return (None, false);
+    };
+    let canonical = cwd.canonicalize().unwrap_or(cwd);
+    let is_repo = rift_git::discover(&canonical).is_ok();
+    (
+        Some(canonical.to_string_lossy().into_owned()),
+        is_repo,
+    )
+}
+
 fn print_ascii_frame(projects: Vec<Project>) {
     let mut state = AppState::new(projects, Size::new(100, 40));
     state.app.splash.skip();
+    // The same launch-cwd selection the interactive run applies (M5-03) — the
+    // headless frame follows the developer's launch directory too.
+    let (launch_cwd, launch_cwd_is_repo) = launch_cwd_context();
+    rift_canopy::apply_launch_cwd(&mut state.app, launch_cwd.as_deref(), launch_cwd_is_repo);
 
     // Drain the live bus for a bounded window, applying updates through the
     // same reducer the TUI uses.
@@ -503,10 +522,13 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
         let interactive =
             std::io::stdout().is_terminal() && std::env::var_os("RIFT_HEADLESS").is_none();
         if interactive {
+            let (launch_cwd, launch_cwd_is_repo) = launch_cwd_context();
             let opts = rift_canopy::CanopyOpts {
                 ascii: cli.ascii,
                 skip_splash: cli.skip_splash
                     || std::env::var("RIFT_SPLASH").is_ok_and(|v| v == "never"),
+                launch_cwd,
+                launch_cwd_is_repo,
             };
             // Spawn the live data bus (P8), seeded to populate every registered
             // project's status; it feeds updates in and takes requests back out.

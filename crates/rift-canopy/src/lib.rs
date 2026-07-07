@@ -333,6 +333,56 @@ impl App {
             self.selected = i;
         }
     }
+
+    /// Select the row the launch cwd names ([`launch_selection`]); `false` when
+    /// no registered row matches (selection stays where it was — index 0 at
+    /// launch).
+    pub fn select_launch_cwd(&mut self, cwd: &str) -> bool {
+        match launch_selection(&self.projects, cwd).map(str::to_owned) {
+            Some(path) => {
+                self.select_path(&path);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// The status-line hint shown when `rift` is launched inside a git repository
+/// that is not registered — registration stays an explicit mutation (M5-03);
+/// the hint names the two ways in and vanishes on the next status change.
+pub const UNREGISTERED_CWD_HINT: &str =
+    "this repository isn't registered — /add it here, or run `rift init`";
+
+/// The launch-cwd auto-select rule (M5-03): the registered row whose path
+/// equals `cwd`, else the **longest** registered ancestor of it (worktree rows
+/// count like any row), else `None` — the caller keeps today's index-0
+/// default. Comparison is textual by path components; the caller passes the
+/// canonicalized launch cwd and the registry stores canonical paths.
+#[must_use]
+pub fn launch_selection<'a>(projects: &'a [Project], cwd: &str) -> Option<&'a str> {
+    let cwd_path = std::path::Path::new(cwd);
+    let mut best: Option<&str> = None;
+    for p in projects {
+        if p.path == cwd {
+            return Some(&p.path);
+        }
+        if cwd_path.starts_with(&p.path) && best.is_none_or(|b: &str| p.path.len() > b.len()) {
+            best = Some(&p.path);
+        }
+    }
+    best
+}
+
+/// Apply the launch-cwd policy to a fresh dashboard (M5-03): auto-select the
+/// registered row the cwd falls under, or — when the cwd is an unregistered
+/// git repository — show [`UNREGISTERED_CWD_HINT`] (never auto-add). Shared by
+/// the interactive launch and the headless frame, like the startup prime.
+pub fn apply_launch_cwd(app: &mut App, cwd: Option<&str>, cwd_is_repo: bool) {
+    let Some(cwd) = cwd else { return };
+    if !app.select_launch_cwd(cwd) && cwd_is_repo {
+        app.status = Some(UNREGISTERED_CWD_HINT.to_owned());
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +392,93 @@ mod tests {
     #[test]
     fn status_mentions_canopy() {
         assert!(status().contains("canopy"));
+    }
+
+    fn proj(path: &str, kind: EntryKind) -> Project {
+        Project {
+            name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+            path: path.to_owned(),
+            status: ProjectStatus::Idle,
+            kind,
+        }
+    }
+
+    #[test]
+    fn launch_selection_exact_match_wins() {
+        let ps = vec![
+            proj("/home/dev/other", EntryKind::Repo),
+            proj("/home/dev/rift", EntryKind::Repo),
+        ];
+        assert_eq!(launch_selection(&ps, "/home/dev/rift"), Some("/home/dev/rift"));
+    }
+
+    #[test]
+    fn launch_selection_prefers_the_longest_ancestor() {
+        let ps = vec![
+            proj("/home/dev", EntryKind::Repo),
+            proj("/home/dev/rift", EntryKind::Repo),
+        ];
+        // A cwd deep inside both rows selects the nearest (longest) root.
+        assert_eq!(
+            launch_selection(&ps, "/home/dev/rift/crates/core"),
+            Some("/home/dev/rift")
+        );
+    }
+
+    #[test]
+    fn launch_selection_counts_worktree_rows() {
+        let ps = vec![
+            proj("/home/dev/rift", EntryKind::Repo),
+            proj("/home/dev/rift-wt/feature", EntryKind::Worktree),
+        ];
+        assert_eq!(
+            launch_selection(&ps, "/home/dev/rift-wt/feature/src"),
+            Some("/home/dev/rift-wt/feature")
+        );
+    }
+
+    #[test]
+    fn launch_selection_is_component_wise_never_prefix_string() {
+        let ps = vec![proj("/home/dev/rift", EntryKind::Repo)];
+        // "/home/dev/rift-extra" is NOT under "/home/dev/rift".
+        assert_eq!(launch_selection(&ps, "/home/dev/rift-extra"), None);
+    }
+
+    #[test]
+    fn unregistered_repo_cwd_hints_and_keeps_index_zero() {
+        let mut app = App::new(vec![
+            proj("/home/dev/a", EntryKind::Repo),
+            proj("/home/dev/b", EntryKind::Repo),
+        ]);
+        apply_launch_cwd(&mut app, Some("/home/dev/unregistered"), true);
+        assert_eq!(app.selected, 0, "selection stays at index 0");
+        assert_eq!(
+            app.status.as_deref(),
+            Some(UNREGISTERED_CWD_HINT),
+            "the two-ways-in hint shows"
+        );
+        // The hint is transient: the next status change replaces it.
+        app.status = Some("registered /x".into());
+        assert_ne!(app.status.as_deref(), Some(UNREGISTERED_CWD_HINT));
+    }
+
+    #[test]
+    fn non_repo_cwd_neither_selects_nor_hints() {
+        let mut app = App::new(vec![proj("/home/dev/a", EntryKind::Repo)]);
+        apply_launch_cwd(&mut app, Some("/tmp/scratch"), false);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.status, None, "no hint outside a git repository");
+    }
+
+    #[test]
+    fn launch_cwd_selects_the_matching_row() {
+        let mut app = App::new(vec![
+            proj("/home/dev/a", EntryKind::Repo),
+            proj("/home/dev/b", EntryKind::Repo),
+        ]);
+        apply_launch_cwd(&mut app, Some("/home/dev/b/src/deep"), true);
+        assert_eq!(app.selected, 1, "selection follows the launch cwd");
+        assert_eq!(app.status, None, "a successful match needs no hint");
     }
 
     #[test]

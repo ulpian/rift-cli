@@ -163,6 +163,14 @@ where
     let mut state = AppState::new(initial, size);
     state.reduced_motion = prefs.reduced_motion;
 
+    // Launch-cwd auto-select (M5-03) BEFORE the loop starts, so the startup
+    // prime subscribes the project the developer launched from.
+    crate::apply_launch_cwd(
+        &mut state.app,
+        opts.launch_cwd.as_deref(),
+        opts.launch_cwd_is_repo,
+    );
+
     // Play the splash on the raw terminal source, so bus updates that arrive
     // meanwhile stay queued (they are drained on the first main-loop poll).
     let mut live = LiveEvents::new();

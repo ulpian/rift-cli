@@ -36,6 +36,13 @@ pub struct CanopyOpts {
     pub ascii: bool,
     /// Skip the startup splash (`--skip-splash` / `RIFT_SPLASH=never`).
     pub skip_splash: bool,
+    /// The canonicalized process launch directory — drives the initial
+    /// selection (M5-03; [`crate::apply_launch_cwd`]). `None` keeps index 0.
+    pub launch_cwd: Option<String>,
+    /// Whether the launch cwd sits inside a git repository (bin-resolved).
+    /// With no registered match this shows the two-ways-in hint — the cwd is
+    /// never auto-added.
+    pub launch_cwd_is_repo: bool,
 }
 
 /// A source of already-translated Canopy [`Event`]s.
