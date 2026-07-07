@@ -33,6 +33,7 @@ pub mod plot;
 pub mod render;
 pub mod splash;
 pub mod state;
+pub mod suggest;
 pub mod view;
 
 pub use app::{prime_startup, CanopyOpts};
@@ -66,6 +67,7 @@ pub use state::{
     update, AppState, DataRequest, Effects, Event, FeedPayload, FeedUpdate, Flow, Focus, PersistOp,
     ProjectData, ViewModel,
 };
+pub use suggest::{suggest, ArgKind, CatalogEntry, Frecency, SuggestContext, Suggestion, CATALOG};
 
 /// Scaffold/status string (kept for the bin entrypoint and smoke tests).
 #[must_use]
@@ -218,6 +220,11 @@ pub struct App {
     /// The last parse error, rendered inline under the command bar until the
     /// next edit.
     pub command_error: Option<crate::command::ParseError>,
+    /// The highlighted suggest-panel row (arrows move it; Tab inserts it).
+    pub suggest_highlight: usize,
+    /// The palette's in-memory frecency (M5-10): bumped only on successful
+    /// dispatch; ranking ties break by it.
+    pub frecency: suggest::Frecency,
 }
 
 impl App {
@@ -242,6 +249,8 @@ impl App {
             overlay: None,
             launch_cwd: None,
             command_error: None,
+            suggest_highlight: 0,
+            frecency: suggest::Frecency::new(),
         }
     }
 
@@ -391,6 +400,21 @@ pub fn launch_selection<'a>(projects: &'a [Project], cwd: &str) -> Option<&'a st
         }
     }
     best
+}
+
+/// The current ranked suggestions for `app`'s buffer — pure over the app
+/// state, shared by the reducer's snapshot, the key handler's Tab-insert, and
+/// the mouse click-insert, so what you see is exactly what inserts (M5-10/11).
+#[must_use]
+pub fn current_suggestions(app: &App) -> Vec<suggest::Suggestion> {
+    if app.mode != Mode::Command || app.overlay.is_some() {
+        return Vec::new();
+    }
+    let ctx = suggest::SuggestContext {
+        projects: app.projects.iter().map(|p| p.name.clone()).collect(),
+        features: Feature::ALL.iter().map(|f| f.key().to_string()).collect(),
+    };
+    suggest::suggest(&app.command_line, &ctx, &app.frecency)
 }
 
 /// Apply the launch-cwd policy to a fresh dashboard (M5-03): auto-select the

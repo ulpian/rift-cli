@@ -493,3 +493,40 @@ fn golden_full3d_points_keyframes() {
     insta::assert_snapshot!("full3d_points_t50", point_set_text(0.5));
     insta::assert_snapshot!("full3d_points_t100", point_set_text(1.0));
 }
+
+// ---- M5 W1: the suggest panel (full / filtered / argument / no-match) -------
+
+/// A dashboard editing the given command buffer (suggest panel open).
+fn suggest_state(buffer: &str) -> AppState {
+    let mut s = dashboard_state();
+    s.size = Size::new(100, 32);
+    s.app.mode = rift_canopy::Mode::Command;
+    s.app.command_line = buffer.to_string();
+    s // suggest_fade rests at 1.0 → the settled (final) frame
+}
+
+#[test]
+fn golden_suggest_full_palette() {
+    insta::assert_snapshot!("suggest_full", render_state(&mut suggest_state("")));
+}
+
+#[test]
+fn golden_suggest_filtered() {
+    insta::assert_snapshot!("suggest_filtered", render_state(&mut suggest_state("se")));
+}
+
+#[test]
+fn golden_suggest_argument() {
+    insta::assert_snapshot!(
+        "suggest_argument",
+        render_state(&mut suggest_state("toggle "))
+    );
+}
+
+#[test]
+fn golden_suggest_no_match() {
+    insta::assert_snapshot!(
+        "suggest_no_match",
+        render_state(&mut suggest_state("zzzzzz"))
+    );
+}

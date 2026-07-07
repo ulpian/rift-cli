@@ -39,6 +39,13 @@ pub const GAUGE_RAMP: [(f32, Color); 3] = [
 /// Recall MCP-calls bars — a cool cyan, distinct from the green savings line.
 pub const RECALL_CALLS: Color = Color::Rgb(0x5c, 0xc4, 0xe0);
 
+/// The muted foreground the suggest panel's text fades in FROM (ADR-0022) and
+/// its descriptions rest at.
+pub const MUTED: Color = Color::Rgb(0x5a, 0x64, 0x5a);
+
+/// The settled body-foreground the suggest rows fade TO.
+pub const BODY_FG: Color = Color::Rgb(0xd8, 0xdd, 0xd8);
+
 /// The gamma used to linearize sRGB channels before interpolation.
 const GAMMA: f32 = 2.2;
 

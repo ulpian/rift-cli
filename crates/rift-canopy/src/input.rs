@@ -252,11 +252,30 @@ fn on_key_editing(app: &mut App, key: CanopyKey) -> Action {
         CanopyKey::Char(c) => {
             app.command_line.push(c);
             app.command_error = None; // an edit clears the inline error
+            app.suggest_highlight = 0; // the list changed under the cursor
             Action::None
         }
         CanopyKey::Backspace => {
             app.command_line.pop();
             app.command_error = None;
+            app.suggest_highlight = 0;
+            Action::None
+        }
+        // The suggest panel's keys (M5-11): arrows highlight; Tab INSERTS the
+        // highlight and never executes — completion is always safe to press.
+        CanopyKey::Down if app.mode == Mode::Command => {
+            let len = crate::current_suggestions(app).len();
+            if len > 0 {
+                app.suggest_highlight = (app.suggest_highlight + 1).min(len - 1);
+            }
+            Action::None
+        }
+        CanopyKey::Up if app.mode == Mode::Command => {
+            app.suggest_highlight = app.suggest_highlight.saturating_sub(1);
+            Action::None
+        }
+        CanopyKey::Tab if app.mode == Mode::Command => {
+            insert_suggestion(app);
             Action::None
         }
         CanopyKey::Esc | CanopyKey::Quit => {
@@ -283,6 +302,20 @@ fn on_key_editing(app: &mut App, key: CanopyKey) -> Action {
         },
         // Navigation/focus keys are inert while editing the command/path buffer.
         _ => Action::None,
+    }
+}
+
+/// Insert the highlighted suggestion into the buffer (Tab and the mouse
+/// click share this — insert-only, never execution).
+pub(crate) fn insert_suggestion(app: &mut App) {
+    let suggestions = crate::current_suggestions(app);
+    if let Some(sug) = suggestions.get(
+        app.suggest_highlight
+            .min(suggestions.len().saturating_sub(1)),
+    ) {
+        app.command_line.clone_from(&sug.insert);
+        app.command_error = None;
+        app.suggest_highlight = 0;
     }
 }
 

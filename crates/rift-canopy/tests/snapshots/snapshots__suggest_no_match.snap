@@ -1,0 +1,37 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 525
+expression: "render_state(&mut suggest_state(\"zzzzzz\"))"
+---
+RIFT — Canopy
+╭─ projects ───────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
+│> ● rift-cli      ││rift-cli (repo)                       ││· token usage  (no token activity yet)│
+│  ○ rift-site     ││path: /r/rift-cli                     ││                                      │
+│                  ││status: running                       ││                                      │
+│                  ││                                      ││                                      │
+│                  ││models                                ││                                      │
+│                  ││  (none yet)                          ││                                      │
+│                  ││                                      ││· input | read | output  (no token act│
+│                  ││settings                              ││                                      │
+│                  ││  sensitive paths: 0                  ││                                      │
+│                  ││  raw transcripts: off                ││                                      │
+│                  ││  tool calls: skipped                 ││                                      │
+│                  ││  token usage: skipped                ││                                      │
+│                  ││                                      ││· nic-gauge  (no model calls yet)     │
+│                  ││capture                               ││                                      │
+│                  ││  events: 0                           ││                                      │
+│                  ││  sessions: 0                         ││· recall savings  (recall off — /toggl│
+│                  ││  checkpoints: 0                      ││                                      │
+│                  ││                                      ││                                      │
+│                  ││features                              ││                                      │
+│                  ││                                      ││                                      │
+│                  ││                                      ││                                      │
+│                  ││                                      ││· recall mcp calls  (recall off — /tog│
+│                  ││                                      ││                                      │
+│                  ││                                      ││                                      │
+│                  ││                                      ││· threads  (no active sessions)       │
+│                  ││                                      ││                                      │
+╰──────────────────╯╰──────────────────────────────────────╯╰──────────────────────────────────────╯
+╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
+│/zzzzzz█                                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

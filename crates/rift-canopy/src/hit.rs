@@ -36,6 +36,9 @@ pub enum Target {
     OverlayCancel,
     /// The dispatch overlay body (wheel scroll / inert click).
     OverlayBody,
+    /// A suggest-panel row: click INSERTS it (Tab's mouse equivalent — never
+    /// execution); the wheel moves the highlight.
+    SuggestRow(usize),
 }
 
 /// The element at cell `(col, row)`, or `None` for empty space / the title row /
@@ -96,6 +99,21 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
             return Some(Target::PanelFocus(Panel::Projects));
         }
         return None;
+    }
+    // The suggest panel (drawn over the body, above the bar) owns its rows
+    // while open — a click inserts, exactly like Tab (M5-11).
+    if !vm.suggestions.is_empty() {
+        let rect = crate::view::suggest_panel_rect(vm.size, vm.suggestions.len());
+        if rect.h > 0 && contains(rect, col, row) {
+            let inner = inner_of(rect);
+            if let Some(dy) = local_row(inner, col, row) {
+                let idx = usize::from(dy);
+                if idx < vm.suggestions.len().min(usize::from(inner.h)) {
+                    return Some(Target::SuggestRow(idx));
+                }
+            }
+            return Some(Target::PanelFocus(Panel::Command));
+        }
     }
     match choose_mode(size) {
         LayoutMode::Full3Col => hit_grid(vm, solve(body), col, row),

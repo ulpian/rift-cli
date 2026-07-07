@@ -203,6 +203,9 @@ pub enum PersistOp {
 /// though no cursor change fires a bus poll. Time-based only; never dirties.
 const REFRESH_EVERY_TICKS: u32 = 15;
 
+/// How long the suggest panel's text fades in (ADR-0022's shared contract).
+const SUGGEST_FADE: Duration = Duration::from_millis(180);
+
 /// How long a column-3 data change eases from its old shape to the new one. Kept
 /// short so the graph "catches up" without feeling laggy; the loop only spins
 /// fast (and only redraws) for this window, then returns to the ~0% CPU idle.
@@ -263,6 +266,9 @@ pub struct AppState {
     col3: Arc<crate::col3::Col3>,
     /// The in-flight column-3 tween, if any (drives the loop's fast-poll window).
     col3_anim: Option<Col3Anim>,
+    /// The suggest panel's fade-in progress (0..=1, dt-advanced under the
+    /// ADR-0022 animator contract; snaps to 1 under reduced motion / ASCII).
+    suggest_fade: f32,
 }
 
 impl AppState {
@@ -279,7 +285,20 @@ impl AppState {
             rows_cache: Arc::new(Vec::new()),
             col3: Arc::new(crate::col3::Col3::default()),
             col3_anim: None,
+            suggest_fade: 1.0,
         }
+    }
+
+    /// (Re)arm the suggest panel's fade-in: entering command mode starts the
+    /// ~180 ms ramp (ADR-0022); reduced motion shows instantly.
+    pub fn arm_suggest_fade(&mut self) {
+        self.suggest_fade = if self.reduced_motion { 1.0 } else { 0.0 };
+    }
+
+    /// The current suggest fade progress (0..=1).
+    #[must_use]
+    pub fn suggest_fade(&self) -> f32 {
+        self.suggest_fade
     }
 
     /// Replace the column-3 sections' view-model (the W3/W4 feeds' apply path).
@@ -320,20 +339,30 @@ impl AppState {
     /// the interpolated frame; returns `false` at rest (no wasted redraw). Takes
     /// an explicit `dt` so it is deterministic in tests.
     pub fn advance_anim(&mut self, dt: Duration) -> bool {
-        let Some(anim) = self.col3_anim.as_mut() else {
-            return false;
-        };
-        anim.elapsed = anim.elapsed.saturating_add(dt);
-        if anim.elapsed >= COL3_SETTLE {
-            self.col3_anim = None; // the final (settled) frame renders the target
+        let mut active = false;
+        if let Some(anim) = self.col3_anim.as_mut() {
+            anim.elapsed = anim.elapsed.saturating_add(dt);
+            if anim.elapsed >= COL3_SETTLE {
+                self.col3_anim = None; // the final (settled) frame renders the target
+            }
+            active = true;
         }
-        true
+        // The suggest panel's fade rides the same dt-advance (ADR-0022): the
+        // loop's settle-window fast poll carries the frames; at 1.0 it is a
+        // no-op and never redraws (the idle property).
+        if self.app.mode == Mode::Command && self.suggest_fade < 1.0 {
+            let step = dt.as_secs_f32() / SUGGEST_FADE.as_secs_f32();
+            self.suggest_fade = (self.suggest_fade + step).min(1.0);
+            active = true;
+        }
+        active
     }
 
-    /// Whether a column-3 tween is in flight (drives the loop's fast-poll window).
+    /// Whether a column-3 tween or the suggest fade is in flight (drives the
+    /// loop's fast-poll window).
     #[must_use]
     pub fn anim_active(&self) -> bool {
-        self.col3_anim.is_some()
+        self.col3_anim.is_some() || (self.app.mode == Mode::Command && self.suggest_fade < 1.0)
     }
 
     /// The displayed column-3 value: the interpolated (eased) frame while a tween
@@ -426,6 +455,9 @@ impl AppState {
             status: self.app.status.clone(),
             overlay: self.app.overlay.clone(),
             command_error: self.app.command_error.clone(),
+            suggestions: crate::current_suggestions(&self.app),
+            suggest_highlight: self.app.suggest_highlight,
+            suggest_fade: self.suggest_fade,
         }
     }
 }
@@ -494,7 +526,14 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
         }
         Event::Key(k) => {
             let before = s.app.selected_project().map(|p| p.path.clone());
+            let mode_before = s.app.mode;
             let action = on_key(&mut s.app, k);
+            if mode_before != Mode::Command && s.app.mode == Mode::Command {
+                // Entering command mode opens the suggest panel: arm its fade
+                // (ADR-0022; reduced motion / ASCII snap to the final frame).
+                s.arm_suggest_fade();
+                s.app.suggest_highlight = 0;
+            }
             s.dirty = true; // any key may change selection/mode/buffer
                             // Remove/reorder target the *selected* project — resolve it here (the
                             // key handler stays free of paths). No selection ⇒ inert.
@@ -526,6 +565,12 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
         }
         Event::Mouse(m) => on_mouse(s, m),
         Event::DispatchDone { request, outcome } => {
+            if outcome.code == 0 {
+                // Bumped only on successful dispatch (M5-10).
+                if let Some(word) = request.verb_line().split_whitespace().nth(1) {
+                    s.app.frecency.bump(word);
+                }
+            }
             s.app.overlay = Some(Overlay::results(&request, &outcome));
             s.dirty = true;
             Flow::Continue(Effects::default())
@@ -634,6 +679,14 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             Flow::Continue(Effects::default())
         }
         Target::OverlayBody => Flow::Continue(Effects::default()),
+        // A suggestion click INSERTS only — Tab's mouse equivalent, never
+        // execution (M5-11; PRD user story 32).
+        Target::SuggestRow(i) => {
+            s.app.suggest_highlight = i;
+            crate::input::insert_suggestion(&mut s.app);
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
     }
 }
 
@@ -646,6 +699,19 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
         Some(Target::ToggleRow(_)) => Panel::Detail,
         Some(Target::Section(_)) => Panel::Graphs,
         Some(Target::PanelFocus(p)) => p,
+        // The wheel moves the suggest highlight (never inserts, never runs).
+        Some(Target::SuggestRow(_)) => {
+            let len = crate::current_suggestions(&s.app).len();
+            if len > 0 {
+                s.app.suggest_highlight = if down {
+                    (s.app.suggest_highlight + 1).min(len - 1)
+                } else {
+                    s.app.suggest_highlight.saturating_sub(1)
+                };
+                s.dirty = true;
+            }
+            return Flow::Continue(Effects::default());
+        }
         // The wheel scrolls an open Results overlay like `j`/`k`.
         Some(Target::OverlayBody | Target::OverlayConfirm | Target::OverlayCancel) => {
             if let Some(Overlay::Results { scroll, lines, .. }) = s.app.overlay.as_mut() {
@@ -719,6 +785,21 @@ fn fold_action(action: Action) -> Flow {
 fn run_line(s: &mut AppState, buf: &str) -> Flow {
     match crate::command::parse(buf) {
         Err(e) => {
+            // An incomplete line accepts the highlighted suggestion first
+            // (PRD user story: Enter runs, accepting the highlight when the
+            // line is incomplete); only if THAT parses does it run.
+            let suggestions = crate::current_suggestions(&s.app);
+            if let Some(sug) = suggestions.get(
+                s.app
+                    .suggest_highlight
+                    .min(suggestions.len().saturating_sub(1)),
+            ) {
+                if crate::command::parse(&sug.insert).is_ok() {
+                    let line = sug.insert.clone();
+                    s.app.command_line.clone_from(&line);
+                    return run_line(s, &line);
+                }
+            }
             s.app.command_error = Some(e);
             Flow::Continue(Effects::default())
         }
@@ -726,6 +807,11 @@ fn run_line(s: &mut AppState, buf: &str) -> Flow {
             s.app.command_error = None;
             s.app.command_line.clear();
             s.app.mode = Mode::Normal;
+            // Frecency: a dashboard verb executes right here (bump now); a
+            // delegated verb bumps only when its dispatch succeeds.
+            if crate::dispatch::request_for(&verb).is_none() {
+                s.app.frecency.bump(verb_word_of(&verb));
+            }
             match crate::dispatch::request_for(&verb) {
                 Some(req) => {
                     let repo = s
@@ -866,6 +952,23 @@ fn dashboard_verb_flow(s: &mut AppState, verb: Verb) -> Flow {
     }
 }
 
+/// The catalog word a dashboard verb bumps in the frecency log.
+fn verb_word_of(verb: &Verb) -> &'static str {
+    match verb {
+        Verb::Select(_) => "select",
+        Verb::Add => "add",
+        Verb::Remove(_) => "remove",
+        Verb::Relabel(..) => "relabel",
+        Verb::Toggle(_) => "toggle",
+        Verb::Reinstall(_) => "reinstall",
+        Verb::Focus(_) => "focus",
+        Verb::Help => "help",
+        Verb::Quit => "quit",
+        // Delegated verbs bump on DispatchDone, not here.
+        _ => "",
+    }
+}
+
 /// The "no matching project" toast (shared by the project-ref verbs).
 fn no_match_status(s: &mut AppState) -> Flow {
     s.app.status = Some("no matching project".into());
@@ -979,6 +1082,12 @@ pub struct ViewModel {
     pub overlay: Option<Overlay>,
     /// The inline parse error under the command bar, if any.
     pub command_error: Option<crate::command::ParseError>,
+    /// The suggest panel's ranked rows (empty unless command mode; M5-10/11).
+    pub suggestions: Vec<crate::suggest::Suggestion>,
+    /// The highlighted suggestion row.
+    pub suggest_highlight: usize,
+    /// The panel's fade-in progress (0..=1; ADR-0022).
+    pub suggest_fade: f32,
 }
 
 #[cfg(test)]
@@ -1416,6 +1525,109 @@ mod tests {
         // The next edit clears the error.
         update(&mut s, Event::Key(CanopyKey::Backspace));
         assert!(s.app.command_error.is_none());
+    }
+
+    #[test]
+    fn suggest_fade_is_deterministic_by_dt_and_idles_after_settle() {
+        // ADR-0022: progress is a pure function of accumulated dt; after the
+        // settle the animator is inert (the fast-poll-only-while-animating
+        // idle property extends to the panel).
+        let mut a = ready(vec![project("a")]);
+        let mut b = ready(vec![project("a")]);
+        for s in [&mut a, &mut b] {
+            update(s, Event::Key(CanopyKey::Char('/')));
+            assert!(s.anim_active(), "entering command mode arms the fade");
+        }
+        // Two identical dt sequences produce identical progress.
+        for s in [&mut a, &mut b] {
+            assert!(s.advance_anim(Duration::from_millis(60)));
+            assert!(s.advance_anim(Duration::from_millis(60)));
+        }
+        assert!((a.suggest_fade() - b.suggest_fade()).abs() < f32::EPSILON);
+        assert!(a.suggest_fade() < 1.0);
+        // Settle: past 180ms the fade is done and the loop idles again.
+        assert!(a.advance_anim(Duration::from_millis(120)));
+        assert!((a.suggest_fade() - 1.0).abs() < f32::EPSILON);
+        assert!(!a.anim_active(), "idle after settle");
+        assert!(
+            !a.advance_anim(Duration::from_millis(16)),
+            "no wasted redraw at rest"
+        );
+    }
+
+    #[test]
+    fn reduced_motion_snaps_the_suggest_fade() {
+        let mut s = ready(vec![project("a")]);
+        s.reduced_motion = true;
+        update(&mut s, Event::Key(CanopyKey::Char('/')));
+        assert!(
+            (s.suggest_fade() - 1.0).abs() < f32::EPSILON,
+            "instant final frame"
+        );
+        assert!(!s.anim_active());
+    }
+
+    #[test]
+    fn suggestion_click_inserts_and_never_executes() {
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('/')));
+        for c in "stat".chars() {
+            update(&mut s, Event::Key(CanopyKey::Char(c)));
+        }
+        // Click the first suggestion row (geometry-independent: drive the
+        // reducer's target arm directly through a real hit on the panel).
+        let vm = s.snapshot();
+        assert!(!vm.suggestions.is_empty());
+        let rect = crate::view::suggest_panel_rect(vm.size, vm.suggestions.len());
+        assert!(rect.h > 0, "panel present at 80x24? size={:?}", vm.size);
+        let flow = update(
+            &mut s,
+            Event::Mouse(MouseInput {
+                kind: MouseKind::Down(MouseButton::Left),
+                col: rect.x + 2,
+                row: rect.y + 1,
+            }),
+        );
+        match flow {
+            Flow::Continue(e) => {
+                assert!(e.dispatches.is_empty(), "insert-only: no dispatch");
+                assert!(e.persist.is_empty());
+            }
+            Flow::Quit => panic!("a suggestion click must never quit"),
+        }
+        assert_eq!(s.app.command_line, "status", "the click inserted the row");
+        assert_eq!(s.app.mode, Mode::Command, "still editing");
+    }
+
+    #[test]
+    fn frecency_bumps_only_on_successful_dispatch() {
+        let mut s = ready(vec![project("a")]);
+        // A failed delegated dispatch never bumps.
+        let _ = update(
+            &mut s,
+            Event::DispatchDone {
+                request: DispatchRequest::Verify,
+                outcome: DispatchOutcome {
+                    code: 65,
+                    human: "broken".into(),
+                    json: None,
+                },
+            },
+        );
+        assert_eq!(s.app.frecency.count("verify"), 0);
+        // A successful one bumps its verb word.
+        let _ = update(
+            &mut s,
+            Event::DispatchDone {
+                request: DispatchRequest::Verify,
+                outcome: DispatchOutcome {
+                    code: 0,
+                    human: "ok".into(),
+                    json: None,
+                },
+            },
+        );
+        assert_eq!(s.app.frecency.count("verify"), 1);
     }
 
     #[test]

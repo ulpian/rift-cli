@@ -57,10 +57,91 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
         _ => draw_full(vm, backend, frame, body),
     }
 
+    // The suggest panel expands ABOVE the command bar, borrowing body rows as
+    // an overlay draw — the fixed command rows and the layout solver are
+    // untouched (M5-11); it clamps away on tiny terminals.
+    if !vm.suggestions.is_empty() {
+        draw_suggest_panel(vm, frame);
+    }
+
     // The dispatch overlay layers over the body (ADR-0021 "Dispatch posture"):
     // results scroll, confirms gate, the running line holds during a dispatch.
     if vm.overlay.is_some() {
         draw_overlay(vm, frame, body);
+    }
+}
+
+/// The suggest panel's row cap (a bounded list; adapts down to the body).
+pub const SUGGEST_MAX_ROWS: usize = 8;
+
+/// Where the suggest panel sits: directly above the command bar, bounded by
+/// [`SUGGEST_MAX_ROWS`], the suggestion count, and the body's spare rows —
+/// zero-sized when there are none (the panel clamps away; the bar's own line
+/// remains). Shared with `hit_test` so clicks resolve to the drawn rows.
+#[must_use]
+pub fn suggest_panel_rect(size: crate::render::frame::Size, rows: usize) -> Rect {
+    let body = Rect {
+        x: 0,
+        y: 1,
+        w: size.w,
+        h: size.h.saturating_sub(1),
+    };
+    let avail = body.h.saturating_sub(crate::layout::COMMAND_ROWS + 1);
+    let want = u16::try_from(rows.min(SUGGEST_MAX_ROWS))
+        .unwrap_or(0)
+        .saturating_add(2);
+    let h = want.min(avail);
+    if h < 3 || body.w < 12 {
+        return Rect {
+            x: body.x,
+            y: body.y,
+            w: 0,
+            h: 0,
+        };
+    }
+    let y = body
+        .y
+        .saturating_add(body.h)
+        .saturating_sub(crate::layout::COMMAND_ROWS)
+        .saturating_sub(h);
+    Rect {
+        x: body.x,
+        y,
+        w: body.w,
+        h,
+    }
+}
+
+/// Draw the suggest panel: `verb  usage` + a muted one-line description per
+/// row, the highlight bar, and the ADR-0022 fade — unselected text ramps from
+/// the muted tone to the settled foreground as `suggest_fade` advances
+/// (reduced motion and ASCII land at 1.0, snapshotting the final frame).
+/// Every string passes the shared sanitizer (labels are user-controlled).
+fn draw_suggest_panel(vm: &ViewModel, frame: &mut Frame) {
+    let rect = suggest_panel_rect(vm.size, vm.suggestions.len());
+    if rect.h == 0 {
+        return;
+    }
+    for dy in 0..rect.h {
+        for dx in 0..rect.w {
+            frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
+        }
+    }
+    let inner = frame.border(rect, "suggest", ACCENT);
+    let t = vm.suggest_fade.clamp(0.0, 1.0);
+    let text_fg = crate::palette::lerp_color(crate::palette::MUTED, crate::palette::BODY_FG, t);
+    let visible = usize::from(inner.h);
+    for (i, sug) in vm.suggestions.iter().take(visible).enumerate() {
+        let Ok(dy) = u16::try_from(i) else { break };
+        let selected = i == vm.suggest_highlight;
+        let marker = if selected { '>' } else { ' ' };
+        let line = format!(
+            "{marker} {:<30} {}",
+            sanitize_for_terminal(&format!("{}  {}", sug.insert, sug.usage)),
+            sanitize_for_terminal(sug.description)
+        );
+        let style = if selected { ACCENT } else { Style::fg(text_fg) };
+        clip_line(frame, inner, dy, &line, style);
     }
 }
 
