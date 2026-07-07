@@ -21,6 +21,7 @@
 
 pub mod app;
 pub mod bars;
+pub mod cards;
 pub mod chrome;
 pub mod col1;
 pub mod col2;
@@ -34,6 +35,7 @@ pub mod layout;
 pub mod plot;
 pub mod render;
 pub mod splash;
+pub mod stack;
 pub mod state;
 pub mod suggest;
 pub mod theme;
@@ -59,8 +61,8 @@ pub use command::{
     SessionVerb, SplashMode, Tier, Verb, MAX_INPUT_LEN, VERB_WORDS,
 };
 pub use dispatch::{
-    request_for, CommandDispatcher, DispatchOutcome, DispatchRequest, NullDispatcher, OutcomeClass,
-    Overlay, OVERLAY_MAX_LINES,
+    request_for, CommandDispatcher, DispatchOutcome, DispatchRequest, EditorLauncher,
+    NullDispatcher, NullEditorLauncher, OutcomeClass, Overlay, OVERLAY_MAX_LINES,
 };
 pub use hit::{hit_test, Target};
 pub use input::{on_key, Action, CanopyKey, Mode, MouseButton, MouseInput, MouseKind};

@@ -8,13 +8,14 @@
 //! It is engine-free (no `xre_*`), so it compiles and tests without the `xre`
 //! feature, exactly like the keyboard reducer it feeds.
 
+use crate::cards::{self, CardKind};
 use crate::col3;
 use crate::layout::{
     choose_mode, chrome_split, single_panel, solve, two_col, LayoutMode, PanelRects, Rect,
 };
 use crate::state::ViewModel;
-use crate::view::{detail_line_kinds, visible_window, LineKind};
-use crate::Panel;
+use crate::view::visible_window;
+use crate::{Panel, ProjectStatus};
 
 /// What a click resolves to — mapped by the reducer onto the same state changes
 /// the keyboard produces.
@@ -39,6 +40,8 @@ pub enum Target {
     /// A suggest-panel row: click INSERTS it (Tab's mouse equivalent — never
     /// execution); the wheel moves the highlight.
     SuggestRow(usize),
+    /// The repository card's *Open in $EDITOR* button (M55-10).
+    EditorButton,
     /// The header's `?` action — open the palette help overlay (M55-04).
     HeaderHelp,
     /// The header's `/` action — open the command palette.
@@ -209,20 +212,47 @@ fn project_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
     Target::PanelFocus(Panel::Projects)
 }
 
-/// A click in column 2 → the feature-toggle row under it, else focus the panel.
+/// A click in column 2 → a feature-toggle row, the editor button, else focus
+/// the panel. Recomputes the card stack from the same solver the renderer uses,
+/// so a click resolves to the exact card/row/button drawn (M55-08/10).
 fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
-    let inner = inner_of(rect);
-    if let (Some(detail), Some(dy)) = (&vm.detail, local_row(inner, col, row)) {
-        let lines = detail_line_kinds(
-            detail,
-            vm.toggle_cursor,
-            vm.focus == Panel::Detail,
-            &vm.feature_runtime,
-        );
-        let line_idx = vm.detail_scroll + usize::from(dy);
-        if let Some(LineKind::Toggle(i)) = lines.get(line_idx).map(|l| l.kind) {
-            return Target::ToggleRow(i);
+    let Some(detail) = vm.detail.as_deref() else {
+        return Target::PanelFocus(Panel::Detail);
+    };
+    // An uninitialized project fills column 2 with just the repository card (no
+    // toggles, no button) — mirrors `cards::draw`'s early-out.
+    if matches!(detail.status, ProjectStatus::NotInitialized) {
+        return Target::PanelFocus(Panel::Detail);
+    }
+    let ctx = cards::CardCtx {
+        detail,
+        activity: &vm.activity,
+        runtime: &vm.feature_runtime,
+        toggle_cursor: vm.toggle_cursor,
+        focused: vm.focus == Panel::Detail,
+        unicode: false, // geometry only; glyph choice never moves a cell
+    };
+    for slot in cards::solve(rect) {
+        if !contains(slot.rect, col, row) {
+            continue;
         }
+        match slot.kind {
+            CardKind::Features => {
+                if let Some(i) = cards::feature_toggle_at(&ctx, slot.rect, slot.collapsed, col, row)
+                {
+                    return Target::ToggleRow(i);
+                }
+            }
+            CardKind::Repository => {
+                if let Some(br) = cards::editor_button_rect(slot.rect, slot.collapsed) {
+                    if contains(br, col, row) {
+                        return Target::EditorButton;
+                    }
+                }
+            }
+            _ => {}
+        }
+        break; // clicked inside this card but not a specific target → focus
     }
     Target::PanelFocus(Panel::Detail)
 }

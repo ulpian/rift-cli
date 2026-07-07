@@ -16,7 +16,7 @@ use crate::render::frame::{Frame, Style};
 use crate::render::{Capabilities, RenderBackend};
 use crate::state::ViewModel;
 use crate::theme::Theme;
-use crate::{EntryKind, Mode, Panel, ProjectStatus};
+use crate::{EntryKind, Mode, Panel};
 
 /// The Rift accent style (selection + overlay chrome) — the theme's accent.
 const ACCENT: Style = Style::fg(crate::theme::ACCENT);
@@ -269,7 +269,7 @@ fn draw_full(
     let r = solve(body);
     if r.col1.h >= 2 {
         draw_projects(vm, frame, r.col1, unicode);
-        draw_detail(vm, frame, r.col2);
+        draw_detail(vm, backend, frame, r.col2, unicode);
         draw_graphs(vm, backend, frame, r.col3);
     }
     crate::bars::draw_hint_bar(vm, THEME, frame, r.hint);
@@ -286,7 +286,7 @@ fn draw_two_col(
 ) {
     let r = two_col(body);
     draw_projects(vm, frame, r.col1, unicode);
-    draw_detail(vm, frame, r.col2);
+    draw_detail(vm, backend, frame, r.col2, unicode);
     draw_graphs(vm, backend, frame, r.col3);
     crate::bars::draw_hint_bar(vm, THEME, frame, r.hint);
     draw_command(vm, frame, r.command);
@@ -303,7 +303,7 @@ fn draw_single(
     let (tabs, panel, hint, command) = single_panel(body);
     draw_tab_strip(vm, frame, tabs);
     match vm.focus {
-        Panel::Detail => draw_detail(vm, frame, panel),
+        Panel::Detail => draw_detail(vm, backend, frame, panel, unicode),
         Panel::Graphs => draw_graphs(vm, backend, frame, panel),
         // Projects (and Command focus) show the projects panel.
         Panel::Projects | Panel::Command => draw_projects(vm, frame, panel, unicode),
@@ -503,210 +503,31 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
     }
 }
 
-/// Column 2 — the detail panel (project sections + nic-gauge), scrollable. Every
-/// projection-derived string (label, path, model name) is escape-sanitized before
-/// it can reach a cell, so untrusted capture data can never inject a terminal
-/// sequence (`05-security`).
-fn draw_detail(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
-    let inner = frame.border(rect, "detail", border_style(vm.focus == Panel::Detail));
-    let lines = match &vm.detail {
-        Some(d) => detail_line_kinds(
-            d,
-            vm.toggle_cursor,
-            vm.focus == Panel::Detail,
-            &vm.feature_runtime,
-        ),
-        None => vec![DetailLine::plain("no project selected")],
+/// Column 2 — the card stack (M55-08): repository · models · settings · capture
+/// · features · activity, each individually bordered and themed, sized by the
+/// shared stack solver. Every projection-derived string is escape-sanitized in
+/// [`crate::cards`] before it can reach a cell (`05-security`). No project
+/// selected → a single placeholder line.
+fn draw_detail(
+    vm: &ViewModel,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+    rect: Rect,
+    unicode: bool,
+) {
+    let Some(detail) = vm.detail.as_deref() else {
+        clip_line(frame, rect, 0, "no project selected", THEME.dim());
+        return;
     };
-    render_lines(frame, inner, vm.detail_scroll, &lines);
-}
-
-/// What a detail-panel row is, for hit-testing. Only feature-toggle rows are
-/// actionable; everything else is inert text.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LineKind {
-    /// Inert text (header, section labels, values).
-    Plain,
-    /// A feature-toggle row, carrying its toggle index (`0..`).
-    Toggle(usize),
-}
-
-/// One rendered detail-panel line: its text plus what it represents. Built once
-/// by [`detail_line_kinds`] and consumed by both the renderer (draws `text`) and
-/// [`crate::hit`] (maps a clicked screen-row to its `kind`), so a click always
-/// resolves to the exact toggle the renderer drew.
-#[derive(Clone)]
-pub(crate) struct DetailLine {
-    /// What this row is.
-    pub kind: LineKind,
-    /// The (already-sanitized) text drawn on this row.
-    pub text: String,
-}
-
-impl DetailLine {
-    /// An inert text line.
-    fn plain(text: impl Into<String>) -> Self {
-        Self {
-            kind: LineKind::Plain,
-            text: text.into(),
-        }
-    }
-}
-
-/// Build the sectioned detail body (header · models · settings · capture ·
-/// features). An uninitialized project shows an init hint instead. `toggle_cursor`
-/// + `focused` drive the feature-toggle cursor highlight.
-pub(crate) fn detail_line_kinds(
-    d: &crate::col2::DetailView,
-    toggle_cursor: usize,
-    focused: bool,
-    runtime: &std::collections::BTreeMap<String, crate::FeatureRuntime>,
-) -> Vec<DetailLine> {
-    let mut lines: Vec<DetailLine> = Vec::new();
-    let kind = match d.kind {
-        EntryKind::Repo => "repo",
-        EntryKind::Worktree => "worktree",
+    let ctx = crate::cards::CardCtx {
+        detail,
+        activity: &vm.activity,
+        runtime: &vm.feature_runtime,
+        toggle_cursor: vm.toggle_cursor,
+        focused: vm.focus == Panel::Detail,
+        unicode,
     };
-    lines.push(DetailLine::plain(format!(
-        "{} ({kind})",
-        sanitize_for_terminal(&d.label)
-    )));
-    lines.push(DetailLine::plain(format!(
-        "path: {}",
-        sanitize_for_terminal(&d.path)
-    )));
-    lines.push(DetailLine::plain(format!(
-        "status: {}",
-        status_label(d.status)
-    )));
-
-    if matches!(d.status, ProjectStatus::NotInitialized) {
-        lines.push(DetailLine::plain(""));
-        lines.push(DetailLine::plain("not initialized — run `rift init`"));
-        return lines;
-    }
-
-    lines.push(DetailLine::plain(""));
-    lines.push(DetailLine::plain("models"));
-    if d.models.is_empty() {
-        lines.push(DetailLine::plain("  (none yet)"));
-    } else {
-        for m in &d.models {
-            lines.push(DetailLine::plain(format!(
-                "  {} ×{}",
-                sanitize_for_terminal(&m.model),
-                m.calls
-            )));
-        }
-    }
-
-    lines.push(DetailLine::plain(""));
-    lines.push(DetailLine::plain("settings"));
-    lines.push(DetailLine::plain(format!(
-        "  sensitive paths: {}",
-        d.settings.sensitive_path_count
-    )));
-    lines.push(DetailLine::plain(format!(
-        "  raw transcripts: {}",
-        on_off(d.settings.raw_transcripts)
-    )));
-    lines.push(DetailLine::plain(format!(
-        "  tool calls: {}",
-        cap_skip(d.settings.captures_tool_calls)
-    )));
-    lines.push(DetailLine::plain(format!(
-        "  token usage: {}",
-        cap_skip(d.settings.captures_token_usage)
-    )));
-
-    lines.push(DetailLine::plain(""));
-    lines.push(DetailLine::plain("capture"));
-    lines.push(DetailLine::plain(format!("  events: {}", d.capture.events)));
-    lines.push(DetailLine::plain(format!(
-        "  sessions: {}",
-        d.capture.sessions
-    )));
-    lines.push(DetailLine::plain(format!(
-        "  checkpoints: {}",
-        d.capture.checkpoints
-    )));
-
-    lines.push(DetailLine::plain(""));
-    lines.push(DetailLine::plain("features"));
-    for (i, row) in d.toggles.rows.iter().enumerate() {
-        // A cursor marker only when the detail panel is focused; variants indent.
-        let cursor = if focused && i == toggle_cursor {
-            '>'
-        } else {
-            ' '
-        };
-        let indent = if row.indent { "  " } else { "" };
-        // The runtime overlay (M5-12): the last action RESULT wins over the
-        // persisted desired state — Enabling/Disabling while the manager
-        // runs, Failed-with-reason after; cleared on success so the
-        // persisted state (On/Off) shows.
-        let effective = match runtime.get(row.feature.key()) {
-            Some(crate::FeatureRuntime::Enabling) => crate::col2::ToggleState::Enabling,
-            Some(crate::FeatureRuntime::Disabling) => crate::col2::ToggleState::Disabling,
-            Some(crate::FeatureRuntime::Failed(reason)) => {
-                crate::col2::ToggleState::Failed(reason.clone())
-            }
-            None => row.state.clone(),
-        };
-        let mut text = format!(
-            "{cursor} {indent}{} {}",
-            effective.glyph(),
-            row.feature.label()
-        );
-        // Staged features are honest (ADR-0013): the flip persists desired
-        // state; the engine itself lands at M7.
-        if staged_feature(row.feature) && matches!(effective, crate::col2::ToggleState::On) {
-            text.push_str(" · engine lands M7");
-        }
-        // A failed toggle shows its (sanitized) reason inline.
-        if let crate::col2::ToggleState::Failed(reason) = &effective {
-            text.push_str(" — ");
-            text.push_str(&sanitize_for_terminal(reason));
-        }
-        lines.push(DetailLine {
-            kind: LineKind::Toggle(i),
-            text,
-        });
-    }
-    lines
-}
-
-/// Whether a feature's engine is staged for M7 (fff + codegraph and its
-/// language variants) — their rows state the fact plainly rather than
-/// pretending an install happened (ADR-0013).
-fn staged_feature(f: crate::col2::Feature) -> bool {
-    use crate::col2::Feature;
-    matches!(
-        f,
-        Feature::Fff
-            | Feature::Codegraph
-            | Feature::CodegraphTs
-            | Feature::CodegraphPy
-            | Feature::CodegraphRs
-    )
-}
-
-/// "on"/"off" for a boolean setting.
-fn on_off(b: bool) -> &'static str {
-    if b {
-        "on"
-    } else {
-        "off"
-    }
-}
-
-/// "captured"/"skipped" for a capture toggle.
-fn cap_skip(b: bool) -> &'static str {
-    if b {
-        "captured"
-    } else {
-        "skipped"
-    }
+    crate::cards::draw(&ctx, THEME, rect, backend, frame);
 }
 
 /// Column 3 — the six live-graph sections (M4-10): solved into a weighted
@@ -714,18 +535,6 @@ fn cap_skip(b: bool) -> &'static str {
 fn draw_graphs(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, rect: Rect) {
     let inner = frame.border(rect, "graphs", border_style(vm.focus == Panel::Graphs));
     crate::col3::draw(&vm.col3, inner, backend, frame);
-}
-
-/// Render `lines` into `area` starting at `offset` (the scroll top), clipping to
-/// the area's width and height.
-fn render_lines(frame: &mut Frame, area: Rect, offset: usize, lines: &[DetailLine]) {
-    for (dy, line) in lines.iter().skip(offset).enumerate() {
-        let Ok(y) = u16::try_from(dy) else { break };
-        if y >= area.h {
-            break;
-        }
-        clip_line(frame, area, y, &line.text, Style::DEFAULT);
-    }
 }
 
 /// Print `text` on row `dy` of `area`, truncated to the area's width and dropped
@@ -774,17 +583,6 @@ pub(crate) fn visible_window(selected: usize, len: usize, height: usize) -> (usi
     // Pin so `selected` stays within the window; clamp the top to the last page.
     let start = selected.saturating_sub(h - 1).min(len - h);
     (start, start + h)
-}
-
-/// A short human label for a project's live status.
-pub(crate) fn status_label(status: ProjectStatus) -> &'static str {
-    match status {
-        ProjectStatus::Running { .. } => "running",
-        ProjectStatus::PickingUp => "picking up",
-        ProjectStatus::Idle => "idle",
-        ProjectStatus::NotInitialized => "not initialized",
-        ProjectStatus::Error(_) => "error",
-    }
 }
 
 #[cfg(test)]
@@ -845,7 +643,9 @@ mod tests {
         assert!(text.contains("q Quit"));
         assert!(text.contains("projects"));
         assert!(text.contains("rift-cli"));
-        assert!(text.contains("detail"));
+        // Column 2 is the M55-08 card stack, not a single "detail" panel.
+        assert!(text.contains("repository"));
+        assert!(text.contains("capture"));
         assert!(text.contains("graphs"));
         // The hint bar teaches the focused (projects) keymap.
         assert!(text.contains("j/k navigate"));
@@ -1013,11 +813,13 @@ mod tests {
         assert_eq!(choose_mode(Size::new(60, 20)), LayoutMode::TwoCol);
         let text = render_to_text(&sized(60, 20).snapshot());
         assert!(text.contains("projects"));
-        let detail_row = text.lines().position(|l| l.contains("detail"));
-        let graphs_row = text.lines().position(|l| l.contains("graphs"));
+        // Column 2 is short here, so the cards collapse to headlines — the
+        // repository card's `<name> · <status>` sits above the graphs column.
+        let detail_row = text.lines().position(|l| l.contains("· idle"));
+        let graphs_row = text.lines().position(|l| l.contains("token usage"));
         assert!(
             detail_row < graphs_row && detail_row.is_some(),
-            "detail sits above graphs in two-column mode ({detail_row:?} < {graphs_row:?})"
+            "the card stack sits above graphs in two-column mode ({detail_row:?} < {graphs_row:?})"
         );
     }
 
@@ -1029,8 +831,9 @@ mod tests {
         s.app.focus = Panel::Detail;
         let text = render_to_text(&s.snapshot());
         assert!(text.contains("[Detail]"), "focused tab is bracketed");
-        // The detail panel leads with the selected project's header (its status).
-        assert!(text.contains("status:"), "the detail panel is shown");
+        // The detail column is the card stack; the (collapsed) repository card
+        // headline shows the project name + status.
+        assert!(text.contains("· idle"), "the card stack is shown");
 
         s.app.focus = Panel::Graphs;
         let text = render_to_text(&s.snapshot());

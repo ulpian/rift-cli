@@ -3,7 +3,7 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: render_state(&mut s)
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
-╭─ projects  2 ────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
+╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ graphs ─────────────────────────────╮
 │>╭─ confirm ────────────────────────────────────────────────────────────────────────────────────╮)│
 │ │will run: rift projects prune                                                                 │ │
 │ │target repository: /r/rift-cli                                                                │ │

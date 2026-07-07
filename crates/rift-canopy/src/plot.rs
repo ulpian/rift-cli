@@ -234,6 +234,47 @@ pub fn bar_points(values: &[f64], max: f64, levels: u16) -> Vec<PlotPoint> {
     out
 }
 
+/// Grouped bars: `groups` day-slots, each carrying `cats` category values, laid
+/// out as adjacent bars within a slot with a one-sub-slot gap between slots
+/// (M55-09). Returns one point vector **per category** so the caller draws each
+/// in its own colour through the plot seam. Categories never overlap within a
+/// slot by construction (each owns a distinct x sub-slot), so the
+/// paint-never-moves-a-cell property extends to grouped bars. All bars share
+/// `max` so heights are comparable across days and categories.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn grouped_bar_points(
+    groups: &[Vec<f64>],
+    cats: usize,
+    max: f64,
+    levels: u16,
+) -> Vec<Vec<PlotPoint>> {
+    let mut out: Vec<Vec<PlotPoint>> = vec![Vec::new(); cats];
+    if groups.is_empty() || cats == 0 {
+        return out;
+    }
+    let levels = levels.max(1);
+    // Each group owns `cats` bar sub-slots plus a trailing gap sub-slot.
+    let stride = cats + 1;
+    let total_sub = groups.len() * stride;
+    for (g, group) in groups.iter().enumerate() {
+        for (c, out_cat) in out.iter_mut().enumerate() {
+            let value = group.get(c).copied().unwrap_or(0.0);
+            let sub = g * stride + c;
+            let x = (sub as f32 + 0.5) / total_sub as f32;
+            let top = norm(value, max);
+            for step in 0..=levels {
+                let y = f32::from(step) / f32::from(levels);
+                if y > top {
+                    break;
+                }
+                out_cat.push(PlotPoint { x, y });
+            }
+        }
+    }
+    out
+}
+
 /// Line: the series as a connected polyline, resampled at `xsamples` columns
 /// with linear interpolation between samples. Empty/degenerate input yields no
 /// points.

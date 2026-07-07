@@ -66,6 +66,21 @@ pub struct SectionSpec {
     pub priority: Priority,
 }
 
+impl SectionSpec {
+    /// This section's sizing as a generic [`crate::stack::Spec`].
+    fn to_stack(self) -> crate::stack::Spec {
+        crate::stack::Spec {
+            weight: self.weight,
+            min_rows: self.min_rows,
+            priority: match self.priority {
+                Priority::Low => crate::stack::Priority::Low,
+                Priority::Medium => crate::stack::Priority::Medium,
+                Priority::High => crate::stack::Priority::High,
+            },
+        }
+    }
+}
+
 /// The registration table — the **single** place the order, weights, and
 /// collapse priorities are defined (M4-10 decisions, recorded in the map):
 /// the token and nic sections hold out longest; recall-calls and threads
@@ -122,127 +137,26 @@ pub struct SectionSlot {
     pub collapsed: bool,
 }
 
-/// Distribute `height` rows across the six sections. Deterministic and total:
-/// * everything expanded when the minimums fit, surplus split by weight;
-/// * under pressure, Low sections collapse to one line first, then Medium,
-///   then High — a collapsed section keeps its headline (never omitted);
-/// * when even six single lines do not fit, the **first** `height` sections
-///   render collapsed and the rest are dropped (the only lossy tier, below
-///   6 rows).
+/// Distribute `height` rows across the six sections via the shared
+/// [`crate::stack`] solver (the same contract the column-2 card stack uses,
+/// M55-08): everything expanded when the minimums fit; under pressure Low then
+/// Medium then High collapse to one-line headlines; below six rows the first
+/// `height` render collapsed and the tail drops. Maps the generic index slots
+/// back onto the fixed [`SectionId`] order.
 #[must_use]
-#[allow(clippy::too_many_lines)] // one pass per tier + the exact-tiling spread
 pub fn solve_stack(height: u16) -> Vec<SectionSlot> {
-    let n = u16::try_from(SECTIONS.len()).unwrap_or(6);
-    if height == 0 {
-        return Vec::new();
-    }
-    // Choose which priorities stay expanded: strongest set that fits.
-    let tiers: [&[Priority]; 4] = [
-        &[Priority::High, Priority::Medium, Priority::Low], // all expanded
-        &[Priority::High, Priority::Medium],
-        &[Priority::High],
-        &[],
-    ];
-    let mut chosen: &[Priority] = &[];
-    for tier in tiers {
-        let need: u16 = SECTIONS
-            .iter()
-            .map(|s| {
-                if tier.contains(&s.priority) {
-                    s.min_rows
-                } else {
-                    1
-                }
+    let specs: Vec<crate::stack::Spec> = SECTIONS.iter().map(|s| s.to_stack()).collect();
+    crate::stack::solve(&specs, height)
+        .into_iter()
+        .filter_map(|slot| {
+            SECTIONS.get(slot.index).map(|spec| SectionSlot {
+                id: spec.id,
+                y: slot.y,
+                rows: slot.rows,
+                collapsed: slot.collapsed,
             })
-            .sum();
-        if need <= height {
-            chosen = tier;
-            break;
-        }
-    }
-    // Below six rows even the all-collapsed tier fails: first `height` only.
-    let all_collapsed_fit = height >= n;
-    if chosen.is_empty() && !all_collapsed_fit {
-        return SECTIONS
-            .iter()
-            .take(usize::from(height))
-            .enumerate()
-            .map(|(i, s)| SectionSlot {
-                id: s.id,
-                y: u16::try_from(i).unwrap_or(0),
-                rows: 1,
-                collapsed: true,
-            })
-            .collect();
-    }
-
-    // Base allocation: minimums for expanded, one line for collapsed.
-    let mut rows: Vec<u16> = SECTIONS
-        .iter()
-        .map(|s| {
-            if chosen.contains(&s.priority) {
-                s.min_rows
-            } else {
-                1
-            }
         })
-        .collect();
-    let used: u16 = rows.iter().sum();
-    let mut surplus = height.saturating_sub(used);
-    // Spread surplus over the expanded sections by weight, round-robin so the
-    // split is exact (no fractional rows, no gap at the bottom).
-    let weights: Vec<u16> = SECTIONS
-        .iter()
-        .map(|s| {
-            if chosen.contains(&s.priority) {
-                s.weight
-            } else {
-                0
-            }
-        })
-        .collect();
-    let total_weight: u16 = weights.iter().sum();
-    if total_weight > 0 {
-        // Whole shares first…
-        for (r, w) in rows.iter_mut().zip(&weights) {
-            let share = u32::from(surplus) * u32::from(*w) / u32::from(total_weight);
-            *r = r.saturating_add(u16::try_from(share).unwrap_or(0));
-        }
-        // …then the remainder, one row at a time, heaviest-first order.
-        let mut leftover = height.saturating_sub(rows.iter().sum::<u16>());
-        let mut order: Vec<usize> = (0..rows.len()).collect();
-        order.sort_by_key(|&i| std::cmp::Reverse(weights.get(i).copied().unwrap_or(0)));
-        for i in order {
-            if leftover == 0 {
-                break;
-            }
-            if weights.get(i).copied().unwrap_or(0) > 0 {
-                if let Some(r) = rows.get_mut(i) {
-                    *r = r.saturating_add(1);
-                    leftover -= 1;
-                }
-            }
-        }
-        surplus = leftover;
-    }
-    let _ = surplus; // fully collapsed columns leave the tail blank
-
-    let mut out = Vec::with_capacity(SECTIONS.len());
-    let mut y = 0u16;
-    for (spec, r) in SECTIONS.iter().zip(rows) {
-        if y >= height {
-            break; // all-collapsed tier taller than the column: drop the tail
-        }
-        let rows = r.min(height - y);
-        out.push(SectionSlot {
-            id: spec.id,
-            y,
-            rows,
-            collapsed: !chosen.contains(&spec.priority),
-        });
-        y = y.saturating_add(rows);
-    }
-    out
+        .collect()
 }
 
 // --- the section view-models (filled by the data plane) ---------------------

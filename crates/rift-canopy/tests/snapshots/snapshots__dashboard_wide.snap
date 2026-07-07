@@ -3,35 +3,35 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: frame_text(&f)
 ---
  RIFT  Canopy  *                                                                              ? Help  / Palette  q Quit
-╭─ projects  2 ────────╮╭─ detail ─────────────────────────────────────╮╭─ graphs ─────────────────────────────────────╮
+╭─ projects  2 ────────╮╭─ repository ─────────────────────────────────╮╭─ graphs ─────────────────────────────────────╮
 │># rift-cli          *││rift-cli (repo)                               ││· token usage  (no token activity yet)        │
 │ # rift-site         o││path: /r/rift-cli                             ││                                              │
-│                      ││status: running                               ││                                              │
+│                      ││* running                                     ││                                              │
+│                      ││[ Open in $EDITOR e ]                         ││                                              │
+│                      │╰──────────────────────────────────────────────╯│                                              │
+│                      │╭─ models ─────────────────────────────────────╮│                                              │
+│                      ││(none yet)                                    ││                                              │
+│                      ││                                              ││· input | read | output  (no token activity ye│
 │                      ││                                              ││                                              │
-│                      ││models                                        ││                                              │
-│                      ││  (none yet)                                  ││                                              │
+│                      │╰──────────────────────────────────────────────╯│                                              │
+│                      │╭─ settings ───────────────────────────────────╮│                                              │
+│                      ││sensitive paths: 0                            ││                                              │
+│                      ││raw transcripts: off                          ││                                              │
+│                      │╰──────────────────────────────────────────────╯│                                              │
+│                      │╭─ capture ────────────────────────────────────╮│· nic-gauge  (no model calls yet)             │
+│                      ││╭─ . events ──╮╭─ = sessions ╮╭─ ^ checks ──╮ ││                                              │
+│                      │││      0      ││      0      ││      0      │ ││                                              │
+│                      ││╰─────────────╯╰─────────────╯╰─────────────╯ ││                                              │
 │                      ││                                              ││                                              │
-│                      ││settings                                      ││· input | read | output  (no token activity ye│
-│                      ││  sensitive paths: 0                          ││                                              │
-│                      ││  raw transcripts: off                        ││                                              │
-│                      ││  tool calls: skipped                         ││                                              │
-│                      ││  token usage: skipped                        ││                                              │
-│                      ││                                              ││                                              │
-│                      ││capture                                       ││                                              │
-│                      ││  events: 0                                   ││· nic-gauge  (no model calls yet)             │
-│                      ││  sessions: 0                                 ││                                              │
-│                      ││  checkpoints: 0                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││features                                      ││                                              │
-│                      ││                                              ││· recall savings  (recall off — /toggle total-│
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
+│                      │╰──────────────────────────────────────────────╯│· recall savings  (recall off — /toggle total-│
+│                      │╭─ features ───────────────────────────────────╮│                                              │
+│                      ││(no features)                                 ││                                              │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
-│                      ││                                              ││· recall mcp calls  (recall off — /toggle tota│
 │                      ││                                              ││                                              │
+│                      │╰──────────────────────────────────────────────╯│                                              │
+│                      │╭─ activity · 7d ──────────────────────────────╮│· recall mcp calls  (recall off — /toggle tota│
+│                      ││(no projection yet)                           ││                                              │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │

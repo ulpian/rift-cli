@@ -177,6 +177,7 @@ fn token_sections_render_live_from_a_seeded_projection() {
         },
         &mut NullFeatureManager,
         &mut rift_canopy::NullDispatcher,
+        &mut rift_canopy::NullEditorLauncher,
         &mut || Ok(vec![]),
     )
     .unwrap();

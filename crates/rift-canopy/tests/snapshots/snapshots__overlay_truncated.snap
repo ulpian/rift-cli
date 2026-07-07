@@ -3,7 +3,7 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: render_state(&mut s)
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
-╭─ projects  2 ────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
+╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ graphs ─────────────────────────────╮
 │>╭─ rift status ────────────────────────────────────────────────────────────────────────────────╮)│
 │ │line 396                                                                                      │ │
 │ │line 397                                                                                      │ │

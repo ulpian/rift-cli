@@ -3,30 +3,30 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: render_state(&mut lifecycle_state(None))
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
-╭─ projects  2 ────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
+╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ graphs ─────────────────────────────╮
 │># rift-cli      o││rift-cli (repo)                       ││· token usage  (no token activity yet)│
 │ # rift-site     o││path: /r/rift-cli                     ││                                      │
-│                  ││status: idle                          ││                                      │
+│                  ││o idle                                ││                                      │
+│                  ││[ Open in $EDITOR e ]                 ││                                      │
+│                  │╰──────────────────────────────────────╯│                                      │
+│                  │(none yet)                              │                                      │
+│                  │0 sensitive paths                       │· input | read | output  (no token act│
+│                  │╭─ capture ────────────────────────────╮│                                      │
+│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  ││                                      │
+│                  │││    0     ││    0     ││    0     │  ││                                      │
+│                  ││╰──────────╯╰──────────╯╰──────────╯  ││                                      │
 │                  ││                                      ││                                      │
-│                  ││models                                ││                                      │
-│                  ││  (none yet)                          ││                                      │
-│                  ││                                      ││· input | read | output  (no token act│
-│                  ││settings                              ││                                      │
-│                  ││  sensitive paths: 0                  ││                                      │
-│                  ││  raw transcripts: off                ││                                      │
-│                  ││  tool calls: skipped                 ││                                      │
-│                  ││  token usage: skipped                ││                                      │
-│                  ││                                      ││· nic-gauge  (no model calls yet)     │
-│                  ││capture                               ││                                      │
-│                  ││  events: 0                           ││                                      │
-│                  ││  sessions: 0                         ││· recall savings  (recall off — /toggl│
-│                  ││  checkpoints: 0                      ││                                      │
+│                  │╰──────────────────────────────────────╯│· nic-gauge  (no model calls yet)     │
+│                  │╭─ features ───────────────────────────╮│                                      │
+│                  ││  [x] fff (fuzzy find) · M7           ││                                      │
+│                  ││  [x] codegraph · M7                  ││· recall savings  (recall off — /toggl│
+│                  ││    [x] typescript · M7               ││                                      │
+│                  │╰──────────────────────────────────────╯│                                      │
+│                  │╭─ activity · 7d ──────────────────────╮│                                      │
+│                  ││(no projection yet)                   ││                                      │
+│                  ││                                      ││· recall mcp calls  (recall off — /tog│
 │                  ││                                      ││                                      │
-│                  ││features                              ││                                      │
-│                  ││  [x] fff (fuzzy find) · engine lands ││                                      │
-│                  ││  [x] codegraph · engine lands M7     ││· recall mcp calls  (recall off — /tog│
-│                  ││    [x] typescript · engine lands M7  ││                                      │
-│                  ││  [ ] total-recall                    ││                                      │
+│                  ││                                      ││                                      │
 │                  ││                                      ││· threads  (no active sessions)       │
 │                  ││                                      ││                                      │
 ╰──────────────────╯╰──────────────────────────────────────╯╰──────────────────────────────────────╯

@@ -692,6 +692,39 @@ impl rift_canopy::CommandDispatcher for RiftDispatcher {
     }
 }
 
+/// The one sanctioned process spawn (ADR-0025, M55-10): `$EDITOR <path>` as
+/// **argv** — no shell, no interpretation, no word-splitting. Unset or empty
+/// `$EDITOR` is an error toast, never a fallback guess. The live driver wraps
+/// this with the terminal-guard suspend/resume; here it is pure argv-exec, so
+/// the argv-shape property is unit-testable without a terminal.
+struct RiftEditorLauncher;
+
+impl rift_canopy::EditorLauncher for RiftEditorLauncher {
+    fn open(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let (program, args) = editor_argv(std::env::var_os("EDITOR").as_deref(), path)?;
+        match std::process::Command::new(&program).args(&args).status() {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("$EDITOR exited with {status}")),
+            Err(e) => Err(format!("could not launch $EDITOR: {e}")),
+        }
+    }
+}
+
+/// Resolve `$EDITOR` into an argv `(program, [path])`. The editor variable is a
+/// single program name (the common convention); the path is passed as a **lone
+/// argument**, so spaces/metacharacters in either the editor or the path are
+/// never split or interpreted (no shell). Unset/blank `$EDITOR` → an error.
+fn editor_argv(
+    editor: Option<&std::ffi::OsStr>,
+    path: &std::path::Path,
+) -> Result<(std::ffi::OsString, Vec<std::ffi::OsString>), String> {
+    let editor = editor.ok_or("$EDITOR is not set — export it to open projects here")?;
+    if editor.is_empty() {
+        return Err("$EDITOR is empty — export it to open projects here".into());
+    }
+    Ok((editor.to_os_string(), vec![path.as_os_str().to_os_string()]))
+}
+
 /// Map one palette request onto its subcommand handler — the same arms
 /// `route` dispatches, minus `hooks` (structurally absent from the request
 /// enum) and the dashboard tier (never delegated).
@@ -934,6 +967,9 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
             // (ADR-0021) — the binary's own subcommand router over an explicit
             // repository root, injected exactly like on_persist.
             let mut dispatcher = RiftDispatcher;
+            // The one sanctioned spawn (ADR-0025): argv-exec of $EDITOR. The
+            // live driver wraps it with the terminal-guard suspend/resume.
+            let mut launcher = RiftEditorLauncher;
             let reload = || cstore.projects();
             match rift_canopy::app::live::run(rift_canopy::app::live::LoopDeps {
                 opts,
@@ -943,6 +979,7 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
                 req_tx: bus.req_tx,
                 manager: &mut manager,
                 dispatcher: &mut dispatcher,
+                launcher: &mut launcher,
                 reload,
             }) {
                 Ok(()) => return Ok(()),
@@ -1090,6 +1127,42 @@ mod tests {
     fn crates_link() {
         assert!(rift_canopy::status().contains("canopy"));
         assert!(rift_shadow::status().contains("shadow"));
+    }
+
+    // --- M55-10: the editor launch is argv-only, never a shell ----------------
+
+    #[test]
+    fn editor_argv_is_program_plus_lone_path() {
+        use std::ffi::OsStr;
+        let (prog, args) =
+            editor_argv(Some(OsStr::new("nvim")), std::path::Path::new("/r/p")).unwrap();
+        assert_eq!(prog, "nvim");
+        assert_eq!(args, vec![std::ffi::OsString::from("/r/p")]);
+    }
+
+    #[test]
+    fn editor_unset_or_empty_is_an_error_never_a_guess() {
+        assert!(editor_argv(None, std::path::Path::new("/r/p")).is_err());
+        assert!(editor_argv(Some(std::ffi::OsStr::new("")), std::path::Path::new("/r/p")).is_err());
+    }
+
+    proptest::proptest! {
+        /// Adversarial `$EDITOR` and path values never split, expand, or shell:
+        /// the path is always **exactly one** argv element (no word-splitting on
+        /// spaces, no metacharacter interpretation), and the program is the
+        /// editor verbatim (ADR-0025).
+        #[test]
+        fn editor_argv_never_splits_or_shells(
+            editor in "[^\u{0}]{1,40}",
+            path in "[^\u{0}]{1,60}",
+        ) {
+            use std::ffi::OsStr;
+            let p = std::path::PathBuf::from(&path);
+            let (prog, args) = editor_argv(Some(OsStr::new(&editor)), &p).unwrap();
+            proptest::prop_assert_eq!(prog, std::ffi::OsString::from(&editor));
+            proptest::prop_assert_eq!(args.len(), 1, "the path is always one lone argv element");
+            proptest::prop_assert_eq!(&args[0], p.as_os_str());
+        }
     }
 
     /// The grammar↔clap drift guard (M5-08): every read-only palette request

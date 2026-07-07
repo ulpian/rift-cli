@@ -160,6 +160,11 @@ pub struct Effects {
     /// Feature install/remove actions for the (injected) feature manager (P5 S2).
     /// Canopy plans these but never performs an install itself.
     pub feature_actions: Vec<FeatureAction>,
+    /// A resolved project path to open in `$EDITOR` (M55-10). The **only**
+    /// sanctioned process spawn from the TUI, performed by the injected
+    /// [`crate::dispatch::EditorLauncher`] — structurally outside the palette
+    /// grammar (ADR-0025).
+    pub editor_launch: Option<String>,
 }
 
 impl Effects {
@@ -170,6 +175,7 @@ impl Effects {
             && self.persist.is_empty()
             && self.dispatches.is_empty()
             && self.feature_actions.is_empty()
+            && self.editor_launch.is_none()
     }
 }
 
@@ -578,6 +584,7 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
                 Action::RetryFeature => retry_flow(&s.app),
                 Action::RunLine(buf) => run_line(s, &buf),
                 Action::ConfirmDispatch => confirm_dispatch(s),
+                Action::OpenEditor => editor_flow(s),
                 other => fold_action(other),
             };
             // When the selection moves, ask the bus for the new project's data and
@@ -789,7 +796,26 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             Flow::Continue(Effects::default())
         }
         Target::HeaderQuit => Flow::Quit,
+        // The repository card's button — the same launch the `e` key produces.
+        Target::EditorButton => {
+            s.app.set_focus(Panel::Detail);
+            s.dirty = true;
+            editor_flow(s)
+        }
     }
+}
+
+/// Open the selected project in `$EDITOR` (M55-10): resolve the selected
+/// project's path and emit the single sanctioned launch effect. No selection ⇒
+/// inert. The path is the project's own — never process cwd (ADR-0025).
+fn editor_flow(s: &AppState) -> Flow {
+    let Some(path) = s.app.selected_project().map(|p| p.path.clone()) else {
+        return Flow::Continue(Effects::default());
+    };
+    Flow::Continue(Effects {
+        editor_launch: Some(path),
+        ..Effects::default()
+    })
 }
 
 /// Apply a scroll-wheel event over the panel under the cursor, using the same
@@ -827,7 +853,11 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             return Flow::Continue(Effects::default());
         }
         Some(
-            Target::CommandBar | Target::HeaderHelp | Target::HeaderPalette | Target::HeaderQuit,
+            Target::CommandBar
+            | Target::HeaderHelp
+            | Target::HeaderPalette
+            | Target::HeaderQuit
+            | Target::EditorButton,
         )
         | None => return Flow::Continue(Effects::default()),
     };
@@ -874,7 +904,8 @@ fn fold_action(action: Action) -> Flow {
         | Action::ToggleFeature
         | Action::RetryFeature
         | Action::RunLine(_)
-        | Action::ConfirmDispatch => Flow::Continue(Effects::default()),
+        | Action::ConfirmDispatch
+        | Action::OpenEditor => Flow::Continue(Effects::default()),
         Action::AddProject(path) => Flow::Continue(Effects {
             persist: vec![PersistOp::AddProject { path }],
             ..Effects::default()
@@ -1513,6 +1544,63 @@ mod tests {
         let vm = s.snapshot();
         assert_eq!(vm.health, crate::theme::Health::Down);
         assert_eq!(vm.version, "1.2.3");
+    }
+
+    // --- M55-10: the editor launch (the one sanctioned spawn) -----------------
+
+    #[test]
+    fn e_key_and_button_emit_the_editor_launch_for_the_selected_project() {
+        // The `e` key (detail focused) and the repository card's button both
+        // resolve to the SELECTED project's path — never process cwd.
+        let mut s = ready(vec![project("a"), project("b")]);
+        update(&mut s, Event::Key(CanopyKey::Down)); // select b
+        s.app.set_focus(Panel::Detail);
+        let flow = update(&mut s, Event::Key(CanopyKey::Char('e')));
+        match flow {
+            Flow::Continue(e) => assert_eq!(e.editor_launch, Some("/r/b".to_string())),
+            Flow::Quit => panic!("expected Continue"),
+        }
+        // The button click (mouse) is the same launch.
+        let flow = apply_click(&mut s, Target::EditorButton);
+        match flow {
+            Flow::Continue(e) => assert_eq!(e.editor_launch, Some("/r/b".to_string())),
+            Flow::Quit => panic!("expected Continue"),
+        }
+    }
+
+    #[test]
+    fn e_key_only_launches_from_the_detail_column() {
+        // Projects-focused `e` is inert; command-mode `e` types into the buffer.
+        let mut s = ready(vec![project("a")]);
+        assert!(matches!(
+            update(&mut s, Event::Key(CanopyKey::Char('e'))),
+            Flow::Continue(e) if e.editor_launch.is_none()
+        ));
+        update(&mut s, Event::Key(CanopyKey::Char('/'))); // command mode
+        update(&mut s, Event::Key(CanopyKey::Char('e')));
+        assert_eq!(
+            s.app.command_line, "e",
+            "e types into the palette, never launches"
+        );
+    }
+
+    #[test]
+    fn no_parseable_command_ever_yields_an_editor_launch() {
+        // The launcher is structurally OUTSIDE the grammar (ADR-0025): no verb
+        // maps to it. Running every catalog verb never emits editor_launch.
+        let mut s = ready(vec![project("a")]);
+        for word in crate::command::VERB_WORDS {
+            if let Ok(_verb) = crate::command::parse(word) {
+                let flow = run_line(&mut s, word);
+                if let Flow::Continue(e) = flow {
+                    assert!(
+                        e.editor_launch.is_none(),
+                        "the `{word}` verb must never reach the editor launcher"
+                    );
+                }
+                s.app.overlay = None; // clear any overlay the verb opened
+            }
+        }
     }
 
     #[test]

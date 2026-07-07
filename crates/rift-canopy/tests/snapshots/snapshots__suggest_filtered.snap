@@ -3,27 +3,27 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: "render_state(&mut suggest_state(\"se\"))"
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
-╭─ projects  2 ────╮╭─ detail ─────────────────────────────╮╭─ graphs ─────────────────────────────╮
+╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ graphs ─────────────────────────────╮
 │># rift-cli      *││rift-cli (repo)                       ││· token usage  (no token activity yet)│
 │ # rift-site     o││path: /r/rift-cli                     ││                                      │
-│                  ││status: running                       ││                                      │
+│                  ││* running                             ││                                      │
+│                  ││[ Open in $EDITOR e ]                 ││                                      │
+│                  │╰──────────────────────────────────────╯│                                      │
+│                  │(none yet)                              │                                      │
+│                  │0 sensitive paths                       │· input | read | output  (no token act│
+│                  │╭─ capture ────────────────────────────╮│                                      │
+│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  ││                                      │
+│                  │││    0     ││    0     ││    0     │  ││                                      │
+│                  ││╰──────────╯╰──────────╯╰──────────╯  ││                                      │
 │                  ││                                      ││                                      │
-│                  ││models                                ││                                      │
-│                  ││  (none yet)                          ││                                      │
-│                  ││                                      ││· input | read | output  (no token act│
-│                  ││settings                              ││                                      │
-│                  ││  sensitive paths: 0                  ││                                      │
-│                  ││  raw transcripts: off                ││                                      │
-│                  ││  tool calls: skipped                 ││                                      │
-│                  ││  token usage: skipped                ││                                      │
-│                  ││                                      ││· nic-gauge  (no model calls yet)     │
-│                  ││capture                               ││                                      │
-│                  ││  events: 0                           ││                                      │
-│                  ││  sessions: 0                         ││· recall savings  (recall off — /toggl│
-│                  ││  checkpoints: 0                      ││                                      │
+│                  │╰──────────────────────────────────────╯│· nic-gauge  (no model calls yet)     │
+│                  │╭─ features ───────────────────────────╮│                                      │
+│                  ││(no features)                         ││                                      │
+│                  ││                                      ││· recall savings  (recall off — /toggl│
 │                  ││                                      ││                                      │
-│                  ││features                              ││                                      │
-│                  ││                                      ││                                      │
+│                  │╰──────────────────────────────────────╯│                                      │
+│                  │╭─ activity · 7d ──────────────────────╮│                                      │
+│                  ││(no projection yet)                   ││                                      │
 ╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
 │> select  /select [project]      select a project row                                             │
 │  session  /session [list|show <id>] inspect sessions                                             │
