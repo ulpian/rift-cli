@@ -12,7 +12,7 @@
 #[cfg(feature = "xre")]
 pub mod live;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rift_core::Result as RiftResult;
 
@@ -20,8 +20,14 @@ use crate::render::{RenderBackend, RenderError};
 use crate::state::{update, AppState, DataRequest, Effects, Event, Flow, PersistOp};
 use crate::{FeatureManager, Project};
 
-/// How long a poll blocks before yielding a `Tick` (input wakes it sooner).
+/// How long a poll blocks before yielding a `Tick` (input wakes it sooner). The
+/// idle cadence — quiescent, no redraw, so CPU stays ~0%.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The fast cadence used **only** while a column-3 tween is in flight (~30fps),
+/// so an easing graph redraws smoothly; the loop drops back to [`POLL_INTERVAL`]
+/// the moment the tween settles.
+const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Options for launching Canopy (from the bare-`rift` CLI flags).
 #[derive(Clone, Debug, Default)]
@@ -73,6 +79,7 @@ pub fn event_loop<F>(
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
 {
+    let mut last = Instant::now();
     loop {
         if state.dirty {
             let vm = state.snapshot();
@@ -84,7 +91,21 @@ where
         if state.app.quit {
             break;
         }
-        let events = src.poll(POLL_INTERVAL)?;
+        // Poll fast only while a graph tween is settling; idle otherwise.
+        let timeout = if state.anim_active() {
+            FRAME_INTERVAL
+        } else {
+            POLL_INTERVAL
+        };
+        let events = src.poll(timeout)?;
+        // Advance any in-flight tween by the real elapsed time; a settling frame
+        // dirties, but at rest `advance_anim` is a no-op and never redraws.
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(last);
+        last = now;
+        if state.advance_anim(dt) {
+            state.dirty = true;
+        }
         if events.is_empty() {
             // Timeout → a tick (idle: no redraw, so CPU stays ~0%).
             let _ = update(state, Event::Tick);
@@ -252,6 +273,19 @@ mod tests {
         }
     }
 
+    /// A scripted source that also records the timeout it was polled with, so a
+    /// test can prove the loop polls fast only while a tween settles.
+    struct TimeoutRecordingEvents {
+        steps: std::collections::VecDeque<Vec<Event>>,
+        seen: Vec<Duration>,
+    }
+    impl EventSource for TimeoutRecordingEvents {
+        fn poll(&mut self, timeout: Duration) -> RiftResult<Vec<Event>> {
+            self.seen.push(timeout);
+            Ok(self.steps.pop_front().unwrap_or_default())
+        }
+    }
+
     fn no_persist(_op: &PersistOp) -> RiftResult<Vec<Project>> {
         Ok(vec![])
     }
@@ -336,6 +370,59 @@ mod tests {
         .unwrap();
         // initial render + render after the quit key = 2; the idle tick added none.
         assert_eq!(backend.presents, 2);
+    }
+
+    #[test]
+    fn tween_polls_fast_then_idle_stays_slow() {
+        use crate::col3::{TokensData, TokensView};
+        use crate::state::{FeedPayload, FeedUpdate};
+        let feed = |rate: Vec<f64>, total: f64| {
+            Event::Feed(FeedUpdate {
+                project: "/r/a".into(),
+                payload: FeedPayload::Tokens {
+                    tokens: TokensView::Data(TokensData { rate, total }),
+                    breakdown: crate::col3::BreakdownView::NoActivity,
+                },
+            })
+        };
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = TimeoutRecordingEvents {
+            steps: std::collections::VecDeque::from(vec![
+                vec![feed(vec![1.0, 2.0], 3.0)], // placeholder→Data: snaps (still idle)
+                vec![feed(vec![5.0, 6.0], 11.0)], // Data→Data: arms the tween
+                vec![],                          // a settling frame → fast poll
+                vec![Event::Key(CanopyKey::Quit)],
+            ]),
+            seen: Vec::new(),
+        };
+        let mut state = AppState::new(
+            vec![Project {
+                name: "a".into(),
+                path: "/r/a".into(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }],
+            Size::new(80, 24),
+        );
+        state.app.splash.skip();
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+        )
+        .unwrap();
+        // Before any tween, the loop polls at the idle cadence…
+        assert_eq!(src.seen[0], POLL_INTERVAL);
+        assert_eq!(src.seen[1], POLL_INTERVAL);
+        // …and once a Data→Data feed lands, it polls fast to animate the settle.
+        assert!(
+            src.seen.contains(&FRAME_INTERVAL),
+            "a tween must trigger fast polling, saw {:?}",
+            src.seen
+        );
     }
 
     #[test]

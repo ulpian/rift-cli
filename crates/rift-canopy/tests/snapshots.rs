@@ -222,7 +222,12 @@ fn widget_text(points: &[rift_canopy::plot::PlotPoint]) -> String {
     use rift_canopy::render::frame::Style;
     let mut f = Frame::new(Size::new(26, 8));
     let inner = f.border(f.rect(), "plot", Style::DEFAULT);
-    rift_canopy::plot::draw_blocks(&mut f, inner, points, Style::DEFAULT);
+    rift_canopy::plot::draw_blocks(
+        &mut f,
+        inner,
+        points,
+        &rift_canopy::plot::Paint::Solid(Style::DEFAULT),
+    );
     frame_text(&f)
 }
 
@@ -272,7 +277,12 @@ fn golden_widget_braille_line() {
     let pts = rift_canopy::plot::line_points(&WIDGET_SERIES, max, 48);
     let mut f = Frame::new(Size::new(26, 8));
     let inner = f.border(f.rect(), "plot", Style::DEFAULT);
-    rift_canopy::plot::draw_braille(&mut f, inner, &pts, Style::DEFAULT);
+    rift_canopy::plot::draw_braille(
+        &mut f,
+        inner,
+        &pts,
+        &rift_canopy::plot::Paint::Solid(Style::DEFAULT),
+    );
     insta::assert_snapshot!("widget_braille_line", frame_text(&f));
 }
 

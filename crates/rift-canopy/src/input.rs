@@ -56,6 +56,49 @@ pub enum CanopyKey {
     Quit,
 }
 
+/// A mouse button — a terminal-agnostic mirror of the backend's, translated in
+/// the live driver so the reducer and hit-testing stay engine-free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    /// The primary (left) button.
+    Left,
+    /// The secondary (right) button.
+    Right,
+    /// The middle button / wheel click.
+    Middle,
+}
+
+/// A mouse action at a cell coordinate. Only presses and the scroll wheel drive
+/// interaction today; moves/drags/releases are modeled so the source can forward
+/// them, but the reducer ignores them (no per-move work).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseKind {
+    /// A button was pressed.
+    Down(MouseButton),
+    /// A button was released.
+    Up(MouseButton),
+    /// The pointer moved with a button held.
+    Drag(MouseButton),
+    /// The pointer moved with no button held.
+    Moved,
+    /// The wheel scrolled up (away from the user).
+    ScrollUp,
+    /// The wheel scrolled down (toward the user).
+    ScrollDown,
+}
+
+/// A mouse event in terminal cells from the top-left — the engine-free form the
+/// reducer consumes (via [`crate::state::Event::Mouse`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseInput {
+    /// What happened.
+    pub kind: MouseKind,
+    /// Column (cell x), 0-based from the left.
+    pub col: u16,
+    /// Row (cell y), 0-based from the top.
+    pub row: u16,
+}
+
 /// What the event loop should do after a key is handled. The state mutation has
 /// already been applied to [`App`]; this is only the externally-visible effect.
 ///

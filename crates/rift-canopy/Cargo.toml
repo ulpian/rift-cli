@@ -17,19 +17,21 @@ default = []
 # always available. We depend on the term/core/tui layers directly rather than
 # the `xre-rs` facade, which would also pull the 3D engine + ECS + scene loader.
 xre = ["dep:xre-core", "dep:xre-term", "dep:xre-tui"]
-# Reserved (off by default): the Full3d splash tier. Re-enables xre-tui's `render`
-# layer (which pulls the xre-render 3D engine). The deterministic crack/wordmark
-# core + the 2D/ASCII tiers ship without it; this is the seam for the real
-# voxel/mesh raster, plugged in later behind `render::xre_backend::render_scene`.
-xre-3d = ["xre", "xre-tui/render"]
+# Off by default: the Full3d splash tier + the hi-res coloured graph tier.
+# Re-enables xre-tui's `render` layer and pulls `xre-render` directly for the
+# `SampleBuffer` + `HalfBlock` density shader used by `render::xre_hires::draw`
+# (the truecolor plot path). The deterministic crack/wordmark core + the
+# 2D/ASCII/braille tiers ship without it.
+xre-3d = ["xre", "xre-tui/render", "dep:xre-render"]
 # Reserved (off by default): parallel rasterization (rayon) for the 3D raster.
-parallel = ["xre", "xre-tui/parallel"]
+parallel = ["xre", "xre-tui/parallel", "xre-render?/parallel"]
 
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 xre-core = { workspace = true, optional = true }
 xre-term = { workspace = true, optional = true }
 xre-tui = { workspace = true, optional = true }
+xre-render = { workspace = true, optional = true }
 # Splash preferences (seen_splash / mode / reduced_motion) persist as a global
 # per-user TOML; the registry crate provides the config-dir resolver we reuse.
 rift-registry = { version = "0.0.1", path = "../rift-registry" }

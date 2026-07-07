@@ -24,8 +24,10 @@ pub mod col1;
 pub mod col2;
 pub mod col3;
 pub mod command;
+pub mod hit;
 pub mod input;
 pub mod layout;
+pub mod palette;
 pub mod plot;
 pub mod render;
 pub mod splash;
@@ -47,7 +49,8 @@ pub use col3::{
     SavingsData, ThreadsView, TokensData, TokensView,
 };
 pub use command::{autocomplete, parse_command, Command, COMMANDS};
-pub use input::{on_key, Action, CanopyKey, Mode};
+pub use hit::{hit_test, Target};
+pub use input::{on_key, Action, CanopyKey, Mode, MouseButton, MouseInput, MouseKind};
 pub use layout::{solve, PanelRects, Rect};
 pub use render::{select_backend, AsciiBackend, Capabilities, Frame, RenderBackend};
 pub use splash::SplashState;

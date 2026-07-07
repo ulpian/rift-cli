@@ -29,6 +29,11 @@ pub struct CanopyPrefs {
     pub splash_mode: String,
     /// Honor OS/user reduced-motion → the static tier, no animation.
     pub reduced_motion: bool,
+    /// Enable mouse capture in the live dashboard (click/scroll). On by default;
+    /// the `RIFT_CANOPY_NO_MOUSE` env kill-switch overrides it at launch. Capturing
+    /// the mouse suppresses the terminal's native drag-to-select — most terminals
+    /// still copy on Shift/Option-drag.
+    pub mouse: bool,
 }
 
 impl Default for CanopyPrefs {
@@ -37,6 +42,7 @@ impl Default for CanopyPrefs {
             seen_splash: false,
             splash_mode: "first-run".to_string(),
             reduced_motion: false,
+            mouse: true,
         }
     }
 }
@@ -113,6 +119,23 @@ mod tests {
         assert_eq!(p, CanopyPrefs::default());
         assert!(!p.seen_splash);
         assert_eq!(p.splash_mode, "first-run");
+        assert!(p.mouse, "mouse capture defaults on");
+    }
+
+    #[test]
+    fn mouse_flag_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = env_for(tmp.path());
+        let p = CanopyPrefs {
+            mouse: false,
+            ..CanopyPrefs::default()
+        };
+        save_from(&env, &p).unwrap();
+        assert_eq!(load_from(&env), p);
+        // A file written before the field existed still loads (serde default).
+        let path = path_from(&env);
+        std::fs::write(&path, "seen_splash = true\n").unwrap();
+        assert!(load_from(&env).mouse, "absent mouse key defaults on");
     }
 
     #[test]

@@ -118,4 +118,14 @@ mod tests {
         assert!(!c.contains(Capabilities::MESH_3D));
         assert!(!c.contains(Capabilities::RAMP_SHADER));
     }
+
+    #[cfg(feature = "xre-3d")]
+    #[test]
+    fn xre_3d_feature_advertises_the_raster_capability() {
+        // The hi-res coloured plot path routes on MESH_3D, which the xre-3d build
+        // sets so `XreBackend::plot` selects `xre_hires::draw`.
+        let c = derive_caps(true, true, false, false);
+        assert!(c.contains(Capabilities::MESH_3D));
+        assert!(c.contains(Capabilities::RAMP_SHADER));
+    }
 }

@@ -14,6 +14,8 @@ pub mod caps;
 pub mod frame;
 #[cfg(feature = "xre")]
 pub mod xre_backend;
+#[cfg(feature = "xre-3d")]
+pub mod xre_hires;
 
 pub use ascii_backend::AsciiBackend;
 pub use frame::{Cell, Color, Frame, Mods, Size, Style};
@@ -112,7 +114,7 @@ pub struct SceneRef<'a> {
     pub fallback: &'a [&'a str],
 }
 
-pub use crate::plot::PlotPoint;
+pub use crate::plot::{Paint, PlotPoint};
 
 /// The swappable render backend — the one seam the rest of Stage 4 builds on.
 pub trait RenderBackend {
@@ -144,9 +146,10 @@ pub trait RenderBackend {
     /// tier; the xre backend overrides with braille when `SUBCELL` is present.
     /// Both tiers place a point in the same cell (the one points→cells
     /// contract in [`crate::plot`]), so terminals differ only in sub-cell
-    /// resolution, never in shape.
-    fn plot(&mut self, points: &[PlotPoint], area: Rect, style: Style, frame: &mut Frame) {
-        crate::plot::draw_blocks(frame, area, points, style);
+    /// resolution, never in shape. `paint` colours the lit cells (cosmetic only —
+    /// it can never change which cells light).
+    fn plot(&mut self, points: &[PlotPoint], area: Rect, paint: &Paint, frame: &mut Frame) {
+        crate::plot::draw_blocks(frame, area, points, paint);
     }
 
     /// Dev-only hot-reload tick (no-op unless built with hot-reload).

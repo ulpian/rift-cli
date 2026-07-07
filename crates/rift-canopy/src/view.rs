@@ -219,78 +219,124 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
 /// sequence (`05-security`).
 fn draw_detail(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
     let inner = frame.border(rect, "detail", border_style(vm.focus == Panel::Detail));
-    let mut lines: Vec<String> = Vec::new();
-    match &vm.detail {
-        Some(d) => detail_lines(d, &mut lines, vm.toggle_cursor, vm.focus == Panel::Detail),
-        None => lines.push("no project selected".into()),
-    }
+    let lines = match &vm.detail {
+        Some(d) => detail_line_kinds(d, vm.toggle_cursor, vm.focus == Panel::Detail),
+        None => vec![DetailLine::plain("no project selected")],
+    };
     render_lines(frame, inner, vm.detail_scroll, &lines);
+}
+
+/// What a detail-panel row is, for hit-testing. Only feature-toggle rows are
+/// actionable; everything else is inert text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineKind {
+    /// Inert text (header, section labels, values).
+    Plain,
+    /// A feature-toggle row, carrying its toggle index (`0..`).
+    Toggle(usize),
+}
+
+/// One rendered detail-panel line: its text plus what it represents. Built once
+/// by [`detail_line_kinds`] and consumed by both the renderer (draws `text`) and
+/// [`crate::hit`] (maps a clicked screen-row to its `kind`), so a click always
+/// resolves to the exact toggle the renderer drew.
+#[derive(Clone)]
+pub(crate) struct DetailLine {
+    /// What this row is.
+    pub kind: LineKind,
+    /// The (already-sanitized) text drawn on this row.
+    pub text: String,
+}
+
+impl DetailLine {
+    /// An inert text line.
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            kind: LineKind::Plain,
+            text: text.into(),
+        }
+    }
 }
 
 /// Build the sectioned detail body (header · models · settings · capture ·
 /// features). An uninitialized project shows an init hint instead. `toggle_cursor`
 /// + `focused` drive the feature-toggle cursor highlight.
-fn detail_lines(
+pub(crate) fn detail_line_kinds(
     d: &crate::col2::DetailView,
-    lines: &mut Vec<String>,
     toggle_cursor: usize,
     focused: bool,
-) {
+) -> Vec<DetailLine> {
+    let mut lines: Vec<DetailLine> = Vec::new();
     let kind = match d.kind {
         EntryKind::Repo => "repo",
         EntryKind::Worktree => "worktree",
     };
-    lines.push(format!("{} ({kind})", sanitize_for_terminal(&d.label)));
-    lines.push(format!("path: {}", sanitize_for_terminal(&d.path)));
-    lines.push(format!("status: {}", status_label(d.status)));
+    lines.push(DetailLine::plain(format!(
+        "{} ({kind})",
+        sanitize_for_terminal(&d.label)
+    )));
+    lines.push(DetailLine::plain(format!(
+        "path: {}",
+        sanitize_for_terminal(&d.path)
+    )));
+    lines.push(DetailLine::plain(format!(
+        "status: {}",
+        status_label(d.status)
+    )));
 
     if matches!(d.status, ProjectStatus::NotInitialized) {
-        lines.push(String::new());
-        lines.push("not initialized — run `rift init`".into());
-        return;
+        lines.push(DetailLine::plain(""));
+        lines.push(DetailLine::plain("not initialized — run `rift init`"));
+        return lines;
     }
 
-    lines.push(String::new());
-    lines.push("models".into());
+    lines.push(DetailLine::plain(""));
+    lines.push(DetailLine::plain("models"));
     if d.models.is_empty() {
-        lines.push("  (none yet)".into());
+        lines.push(DetailLine::plain("  (none yet)"));
     } else {
         for m in &d.models {
-            lines.push(format!(
+            lines.push(DetailLine::plain(format!(
                 "  {} ×{}",
                 sanitize_for_terminal(&m.model),
                 m.calls
-            ));
+            )));
         }
     }
 
-    lines.push(String::new());
-    lines.push("settings".into());
-    lines.push(format!(
+    lines.push(DetailLine::plain(""));
+    lines.push(DetailLine::plain("settings"));
+    lines.push(DetailLine::plain(format!(
         "  sensitive paths: {}",
         d.settings.sensitive_path_count
-    ));
-    lines.push(format!(
+    )));
+    lines.push(DetailLine::plain(format!(
         "  raw transcripts: {}",
         on_off(d.settings.raw_transcripts)
-    ));
-    lines.push(format!(
+    )));
+    lines.push(DetailLine::plain(format!(
         "  tool calls: {}",
         cap_skip(d.settings.captures_tool_calls)
-    ));
-    lines.push(format!(
+    )));
+    lines.push(DetailLine::plain(format!(
         "  token usage: {}",
         cap_skip(d.settings.captures_token_usage)
-    ));
+    )));
 
-    lines.push(String::new());
-    lines.push("capture".into());
-    lines.push(format!("  events: {}", d.capture.events));
-    lines.push(format!("  sessions: {}", d.capture.sessions));
-    lines.push(format!("  checkpoints: {}", d.capture.checkpoints));
+    lines.push(DetailLine::plain(""));
+    lines.push(DetailLine::plain("capture"));
+    lines.push(DetailLine::plain(format!("  events: {}", d.capture.events)));
+    lines.push(DetailLine::plain(format!(
+        "  sessions: {}",
+        d.capture.sessions
+    )));
+    lines.push(DetailLine::plain(format!(
+        "  checkpoints: {}",
+        d.capture.checkpoints
+    )));
 
-    lines.push(String::new());
-    lines.push("features".into());
+    lines.push(DetailLine::plain(""));
+    lines.push(DetailLine::plain("features"));
     for (i, row) in d.toggles.rows.iter().enumerate() {
         // A cursor marker only when the detail panel is focused; variants indent.
         let cursor = if focused && i == toggle_cursor {
@@ -299,18 +345,22 @@ fn detail_lines(
             ' '
         };
         let indent = if row.indent { "  " } else { "" };
-        let mut line = format!(
+        let mut text = format!(
             "{cursor} {indent}{} {}",
             row.state.glyph(),
             row.feature.label()
         );
         // A failed toggle shows its (sanitized) reason inline.
         if let crate::col2::ToggleState::Failed(reason) = &row.state {
-            line.push_str(" — ");
-            line.push_str(&sanitize_for_terminal(reason));
+            text.push_str(" — ");
+            text.push_str(&sanitize_for_terminal(reason));
         }
-        lines.push(line);
+        lines.push(DetailLine {
+            kind: LineKind::Toggle(i),
+            text,
+        });
     }
+    lines
 }
 
 /// "on"/"off" for a boolean setting.
@@ -340,13 +390,13 @@ fn draw_graphs(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Fram
 
 /// Render `lines` into `area` starting at `offset` (the scroll top), clipping to
 /// the area's width and height.
-fn render_lines(frame: &mut Frame, area: Rect, offset: usize, lines: &[String]) {
-    for (dy, text) in lines.iter().skip(offset).enumerate() {
+fn render_lines(frame: &mut Frame, area: Rect, offset: usize, lines: &[DetailLine]) {
+    for (dy, line) in lines.iter().skip(offset).enumerate() {
         let Ok(y) = u16::try_from(dy) else { break };
         if y >= area.h {
             break;
         }
-        clip_line(frame, area, y, text, Style::DEFAULT);
+        clip_line(frame, area, y, &line.text, Style::DEFAULT);
     }
 }
 
@@ -386,7 +436,9 @@ fn elide(s: &str, w: usize) -> String {
 
 /// The visible `[start, end)` slice of a `len`-item list of `height` rows that
 /// keeps `selected` in view (scroll-to-selection). Deterministic in its inputs.
-fn visible_window(selected: usize, len: usize, height: usize) -> (usize, usize) {
+/// Shared with [`crate::hit`] so a click resolves to the same project row the
+/// renderer drew.
+pub(crate) fn visible_window(selected: usize, len: usize, height: usize) -> (usize, usize) {
     if height == 0 || len == 0 {
         return (0, 0);
     }

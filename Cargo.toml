@@ -86,6 +86,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }   # (verify) needs a C c
 xre-core = { version = "0.2", default-features = false }
 xre-term = { version = "0.2", default-features = false }
 xre-tui = { version = "0.2", default-features = false }
+# The software sub-cell rasterizer (SampleBuffer + density shaders). Pulled in
+# ONLY by rift-canopy's `xre-3d` feature (off by default) for the hi-res coloured
+# graph tier; `default-features = false` drops its rayon `parallel` default.
+xre-render = { version = "0.2", default-features = false }
 # MCP server SDK (official)
 rmcp = { version = "0.16", features = ["server", "transport-io", "macros"] } # (verify)
 # Git plumbing (pure-Rust, read-side). Pinned high enough to clear RUSTSEC-2025-0001

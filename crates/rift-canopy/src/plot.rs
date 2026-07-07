@@ -15,7 +15,67 @@
 //! points; the column-3 sections draw with them through the seam.
 
 use crate::layout::Rect;
-use crate::render::frame::{Frame, Style};
+use crate::render::frame::{Color, Frame, Style};
+
+/// How a plot's cells are coloured. **Cosmetic only** — a `Paint` is evaluated
+/// per *already-lit* cell (after the point→cell contract has chosen which cells
+/// light), so no variant can add or remove a lit cell: the one-contract invariant
+/// holds for every `Paint`. `xfrac`/`yfrac` are the cell's normalized position in
+/// the plot rect (`x`: 0 left → 1 right; `y`: 0 bottom → 1 top).
+#[derive(Clone, Copy, Debug)]
+pub enum Paint {
+    /// One style for every cell. `Solid(Style::DEFAULT)` reproduces the
+    /// pre-colour terminal-default look exactly.
+    Solid(Style),
+    /// A vertical gradient from `lo` (bottom) to `hi` (top) — bars that brighten
+    /// as they rise.
+    VGradient {
+        /// The colour at the baseline (`yfrac = 0`).
+        lo: Color,
+        /// The colour at the top (`yfrac = 1`).
+        hi: Color,
+    },
+    /// A horizontal ramp of `(position, colour)` stops sampled by `xfrac` — the
+    /// thermometer look (green → amber → red as a meter extends rightward).
+    HRamp(&'static [(f32, Color)]),
+    /// One colour per x-slot: a cell's colour is `colours[floor(xfrac * n)]` — a
+    /// categorical bar chart (e.g. input | read | output | cache-write).
+    ByCategory(&'static [Color]),
+}
+
+impl Paint {
+    /// The style for a lit cell at normalized position `(xfrac, yfrac)`. **Total**:
+    /// always yields a concrete [`Style`]; it never signals "skip", so it can
+    /// never change which cells are lit.
+    #[must_use]
+    pub fn style_at(&self, xfrac: f32, yfrac: f32) -> Style {
+        match self {
+            Self::Solid(s) => *s,
+            Self::VGradient { lo, hi } => {
+                Style::fg(crate::palette::lerp_color(*lo, *hi, clamp01(yfrac)))
+            }
+            Self::HRamp(stops) => Style::fg(crate::palette::ramp_color(stops, clamp01(xfrac))),
+            Self::ByCategory(colours) => {
+                let n = colours.len();
+                if n == 0 {
+                    return Style::DEFAULT;
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let idx = ((clamp01(xfrac) * n as f32) as usize).min(n - 1);
+                Style::fg(colours.get(idx).copied().unwrap_or(Color::Default))
+            }
+        }
+    }
+}
+
+/// Clamp to `[0, 1]`, mapping non-finite inputs to `0.0`.
+fn clamp01(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
 
 /// A normalized plot point: `x` rightward and `y` upward from the bottom-left,
 /// both in `[0, 1]`. Non-finite or out-of-range points are ignored at the
@@ -67,8 +127,9 @@ fn braille_bit(dot_x: u32, dot_y: u32) -> u32 {
     *col.get(dot_y as usize).unwrap_or(&0)
 }
 
-/// Draw `points` into `area` as braille dot glyphs (the sub-cell tier).
-pub fn draw_braille(frame: &mut Frame, area: Rect, points: &[PlotPoint], style: Style) {
+/// Draw `points` into `area` as braille dot glyphs (the sub-cell tier). `paint`
+/// colours each lit cell by its position; it never affects which cells light.
+pub fn draw_braille(frame: &mut Frame, area: Rect, points: &[PlotPoint], paint: &Paint) {
     let mut masks: std::collections::BTreeMap<(u16, u16), u32> = std::collections::BTreeMap::new();
     for p in points {
         if let Some((cx, cy, dx, dy)) = dot_of(*p, area.w, area.h, BRAILLE_SUB) {
@@ -77,15 +138,20 @@ pub fn draw_braille(frame: &mut Frame, area: Rect, points: &[PlotPoint], style: 
     }
     for ((cx, cy), mask) in masks {
         if let Some(ch) = char::from_u32(0x2800 + mask) {
-            frame.set(area.x + cx, area.y + cy, ch, style);
+            frame.set(
+                area.x + cx,
+                area.y + cy,
+                ch,
+                cell_style(paint, cx, cy, area),
+            );
         }
     }
 }
 
 /// Draw `points` into `area` as half-block glyphs (the fallback floor tier):
 /// top half `▀`, bottom half `▄`, both `█`. Lights exactly the same cells as
-/// [`draw_braille`] for the same points.
-pub fn draw_blocks(frame: &mut Frame, area: Rect, points: &[PlotPoint], style: Style) {
+/// [`draw_braille`] for the same points; `paint` colours them the same way.
+pub fn draw_blocks(frame: &mut Frame, area: Rect, points: &[PlotPoint], paint: &Paint) {
     let mut masks: std::collections::BTreeMap<(u16, u16), u8> = std::collections::BTreeMap::new();
     for p in points {
         if let Some((cx, cy, _dx, dy)) = dot_of(*p, area.w, area.h, BLOCK_SUB) {
@@ -98,8 +164,24 @@ pub fn draw_blocks(frame: &mut Frame, area: Rect, points: &[PlotPoint], style: S
             0b10 => '▄',
             _ => '█',
         };
-        frame.set(area.x + cx, area.y + cy, ch, style);
+        frame.set(
+            area.x + cx,
+            area.y + cy,
+            ch,
+            cell_style(paint, cx, cy, area),
+        );
     }
+}
+
+/// Evaluate `paint` for the cell at local offset `(cx, cy)` within `area`. The
+/// cell's normalized position is `x = (cx+0.5)/w` (left→right) and
+/// `y = 1 - (cy+0.5)/h` (bottom→top, since cell rows count down from the top).
+fn cell_style(paint: &Paint, cx: u16, cy: u16, area: Rect) -> Style {
+    let w = f32::from(area.w.max(1));
+    let h = f32::from(area.h.max(1));
+    let xfrac = (f32::from(cx) + 0.5) / w;
+    let yfrac = 1.0 - (f32::from(cy) + 0.5) / h;
+    paint.style_at(xfrac, yfrac)
 }
 
 /// Normalize `v` against `max` (zero/degenerate max ⇒ 0.0, never a NaN).
@@ -255,9 +337,9 @@ mod tests {
         let a = area(2, 1, 12, 4);
 
         let mut braille = Frame::new(Size::new(20, 8));
-        draw_braille(&mut braille, a, &pts, Style::DEFAULT);
+        draw_braille(&mut braille, a, &pts, &Paint::Solid(Style::DEFAULT));
         let mut blocks = Frame::new(Size::new(20, 8));
-        draw_blocks(&mut blocks, a, &pts, Style::DEFAULT);
+        draw_blocks(&mut blocks, a, &pts, &Paint::Solid(Style::DEFAULT));
 
         assert_eq!(lit_cells(&braille), lit_cells(&blocks));
         assert!(!lit_cells(&braille).is_empty());
@@ -267,7 +349,12 @@ mod tests {
     fn braille_glyphs_are_braille_range() {
         let pts = sparkline_points(&[1.0, 2.0, 3.0], 3.0);
         let mut f = Frame::new(Size::new(10, 4));
-        draw_braille(&mut f, area(0, 0, 10, 4), &pts, Style::DEFAULT);
+        draw_braille(
+            &mut f,
+            area(0, 0, 10, 4),
+            &pts,
+            &Paint::Solid(Style::DEFAULT),
+        );
         for (x, y) in lit_cells(&f) {
             let ch = f.get(x, y).unwrap().ch;
             let cp = ch as u32;
@@ -282,15 +369,20 @@ mod tests {
             &mut f,
             area(0, 0, 0, 0),
             &[PlotPoint { x: 0.5, y: 0.5 }],
-            Style::DEFAULT,
+            &Paint::Solid(Style::DEFAULT),
         );
         draw_blocks(
             &mut f,
             area(0, 0, 10, 0),
             &[PlotPoint { x: 0.5, y: 0.5 }],
-            Style::DEFAULT,
+            &Paint::Solid(Style::DEFAULT),
         );
-        draw_braille(&mut f, area(0, 0, 10, 4), &[], Style::DEFAULT);
+        draw_braille(
+            &mut f,
+            area(0, 0, 10, 4),
+            &[],
+            &Paint::Solid(Style::DEFAULT),
+        );
         assert!(lit_cells(&f).is_empty());
     }
 
@@ -309,8 +401,18 @@ mod tests {
             PlotPoint { x: 0.5, y: 1.7 },
         ];
         let mut f = Frame::new(Size::new(10, 4));
-        draw_braille(&mut f, area(0, 0, 10, 4), &hostile, Style::DEFAULT);
-        draw_blocks(&mut f, area(0, 0, 10, 4), &hostile, Style::DEFAULT);
+        draw_braille(
+            &mut f,
+            area(0, 0, 10, 4),
+            &hostile,
+            &Paint::Solid(Style::DEFAULT),
+        );
+        draw_blocks(
+            &mut f,
+            area(0, 0, 10, 4),
+            &hostile,
+            &Paint::Solid(Style::DEFAULT),
+        );
         assert!(lit_cells(&f).is_empty());
     }
 
@@ -327,7 +429,12 @@ mod tests {
         let pts = line_points(&[5.0], autoscale_max(&[5.0]), 10);
         assert_eq!(pts.len(), 1);
         let mut f = Frame::new(Size::new(10, 4));
-        draw_braille(&mut f, area(0, 0, 10, 4), &pts, Style::DEFAULT);
+        draw_braille(
+            &mut f,
+            area(0, 0, 10, 4),
+            &pts,
+            &Paint::Solid(Style::DEFAULT),
+        );
         assert_eq!(lit_cells(&f).len(), 1);
     }
 
@@ -346,11 +453,89 @@ mod tests {
         let series = [8.0];
         let pts = bar_points(&series, 8.0, 16);
         let mut f = Frame::new(Size::new(4, 4));
-        draw_blocks(&mut f, area(0, 0, 4, 4), &pts, Style::DEFAULT);
+        draw_blocks(
+            &mut f,
+            area(0, 0, 4, 4),
+            &pts,
+            &Paint::Solid(Style::DEFAULT),
+        );
         // A full-height bar lights its whole column.
         let lit = lit_cells(&f);
         let col: Vec<u16> = lit.iter().map(|&(_, y)| y).collect();
         assert_eq!(col, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn solid_paint_is_a_passthrough() {
+        let s = Style::fg(crate::render::frame::Color::Rgb(1, 2, 3));
+        // Solid ignores position and returns exactly its style.
+        assert_eq!(Paint::Solid(s).style_at(0.0, 0.0), s);
+        assert_eq!(Paint::Solid(s).style_at(1.0, 1.0), s);
+    }
+
+    #[test]
+    fn by_category_selects_by_x_slot() {
+        use crate::render::frame::Color;
+        const CATS: [Color; 4] = [
+            Color::Rgb(1, 0, 0),
+            Color::Rgb(2, 0, 0),
+            Color::Rgb(3, 0, 0),
+            Color::Rgb(4, 0, 0),
+        ];
+        let p = Paint::ByCategory(&CATS);
+        // Each quarter of the width maps to its category; 1.0 clamps to the last.
+        assert_eq!(p.style_at(0.10, 0.5).fg, CATS[0]);
+        assert_eq!(p.style_at(0.35, 0.5).fg, CATS[1]);
+        assert_eq!(p.style_at(0.60, 0.5).fg, CATS[2]);
+        assert_eq!(p.style_at(0.90, 0.5).fg, CATS[3]);
+        assert_eq!(p.style_at(1.00, 0.5).fg, CATS[3]);
+    }
+
+    #[test]
+    fn vgradient_moves_from_lo_at_bottom_to_hi_at_top() {
+        use crate::render::frame::Color;
+        let p = Paint::VGradient {
+            lo: Color::Rgb(0, 0, 0),
+            hi: Color::Rgb(0, 0, 255),
+        };
+        assert_eq!(p.style_at(0.5, 0.0).fg, Color::Rgb(0, 0, 0));
+        assert_eq!(p.style_at(0.5, 1.0).fg, Color::Rgb(0, 0, 255));
+    }
+
+    proptest! {
+        /// Colour is cosmetic: for any points/rect, a coloured `Paint` lights the
+        /// exact same cells as `Solid(DEFAULT)` — the one-contract invariant is
+        /// independent of `Paint`.
+        #[test]
+        fn colour_never_moves_a_cell(
+            points in proptest::collection::vec(
+                (0.0f32..1.0, 0.0f32..1.0).prop_map(|(x, y)| PlotPoint { x, y }),
+                0..80,
+            ),
+            w in 1u16..24, h in 1u16..10,
+        ) {
+            use crate::render::frame::Color;
+            let a = area(0, 0, w, h);
+            let paints = [
+                Paint::Solid(Style::DEFAULT),
+                Paint::VGradient { lo: Color::Rgb(0,0,0), hi: Color::Rgb(255,255,255) },
+                Paint::HRamp(&crate::palette::GAUGE_RAMP),
+                Paint::ByCategory(&crate::palette::BREAKDOWN),
+            ];
+            let solid_cells = {
+                let mut f = Frame::new(Size::new(24, 10));
+                draw_braille(&mut f, a, &points, &Paint::Solid(Style::DEFAULT));
+                lit_cells(&f)
+            };
+            for p in &paints {
+                let mut fb = Frame::new(Size::new(24, 10));
+                draw_braille(&mut fb, a, &points, p);
+                let mut fk = Frame::new(Size::new(24, 10));
+                draw_blocks(&mut fk, a, &points, p);
+                prop_assert_eq!(lit_cells(&fb), solid_cells.clone());
+                prop_assert_eq!(lit_cells(&fk), solid_cells.clone());
+            }
+        }
     }
 
     proptest! {
@@ -367,8 +552,8 @@ mod tests {
         ) {
             let a = area(ax, ay, w, h);
             let mut f = Frame::new(Size::new(64, 48));
-            draw_braille(&mut f, a, &points, Style::DEFAULT);
-            draw_blocks(&mut f, a, &points, Style::DEFAULT);
+            draw_braille(&mut f, a, &points, &Paint::Solid(Style::DEFAULT));
+            draw_blocks(&mut f, a, &points, &Paint::Solid(Style::DEFAULT));
             for (x, y) in lit_cells(&f) {
                 prop_assert!(x >= a.x && x < a.x + a.w, "x {x} outside rect {a:?}");
                 prop_assert!(y >= a.y && y < a.y + a.h, "y {y} outside rect {a:?}");
@@ -385,9 +570,9 @@ mod tests {
             let pts = sparkline_points(&values, max);
             let a = area(0, 0, w, h);
             let mut fb = Frame::new(Size::new(24, 10));
-            draw_braille(&mut fb, a, &pts, Style::DEFAULT);
+            draw_braille(&mut fb, a, &pts, &Paint::Solid(Style::DEFAULT));
             let mut fk = Frame::new(Size::new(24, 10));
-            draw_blocks(&mut fk, a, &pts, Style::DEFAULT);
+            draw_blocks(&mut fk, a, &pts, &Paint::Solid(Style::DEFAULT));
             prop_assert_eq!(lit_cells(&fb), lit_cells(&fk));
         }
 

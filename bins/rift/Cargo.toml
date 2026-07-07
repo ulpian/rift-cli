@@ -20,6 +20,11 @@ path = "src/main.rs"
 # still runs the subcommands and the headless one-frame dashboard.
 default = ["tui", "provision-http"]
 tui = ["rift-canopy/xre"]
+# Opt-in (off by default): the hi-res truecolor graph tier (SampleBuffer +
+# HalfBlock density shader). Pulls the xre-render engine, so it is a deliberate
+# `--features tui-hires` build rather than a default; the braille+colour floor is
+# always present without it.
+tui-hires = ["tui", "rift-canopy/xre-3d"]
 # Real capture-backend download + extract for `rift setup` (P1 B2) — ON by default
 # so `rift setup` provisions the backend from the upstream GitHub releases. A
 # `--no-default-features` build (or `rift setup --no-provision` / `RIFT_NO_PROVISION`)

@@ -62,15 +62,25 @@ impl RenderBackend for XreBackend {
         &mut self,
         points: &[crate::plot::PlotPoint],
         area: crate::layout::Rect,
-        style: crate::render::frame::Style,
+        paint: &crate::plot::Paint,
         frame: &mut Frame,
     ) {
+        // Hi-res truecolor tier on `xre-3d` builds whose caps advertise a raster
+        // engine — a strict superset of the braille floor (which stays the
+        // cross-terminal shape reference).
+        #[cfg(feature = "xre-3d")]
+        {
+            if self.caps.contains(Capabilities::MESH_3D) {
+                crate::render::xre_hires::draw(points, area, paint, frame);
+                return;
+            }
+        }
         // Braille where the terminal has sub-cell fidelity; the same-cell block
         // floor otherwise (the one points→cells contract keeps them aligned).
         if self.caps.contains(Capabilities::SUBCELL) {
-            crate::plot::draw_braille(frame, area, points, style);
+            crate::plot::draw_braille(frame, area, points, paint);
         } else {
-            crate::plot::draw_blocks(frame, area, points, style);
+            crate::plot::draw_blocks(frame, area, points, paint);
         }
     }
 }

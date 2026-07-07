@@ -7,37 +7,48 @@ use std::time::Duration;
 
 use rift_core::Result as RiftResult;
 use xre_term::{
-    Event as XEvent, EventQueue, GuardOptions, KeyCode, KeyState, Modifiers, TermError,
+    Event as XEvent, EventQueue, GuardOptions, KeyCode, KeyState, Modifiers,
+    MouseButton as XMouseButton, MouseEvent as XMouseEvent, MouseKind as XMouseKind, TermError,
     TerminalGuard,
 };
 
 use super::{event_loop, CanopyOpts, EventSource};
 use crate::render::frame::Size;
 use crate::state::{AppState, DataRequest, Event, PersistOp};
-use crate::{CanopyKey, FeatureManager, Project};
+use crate::{CanopyKey, FeatureManager, MouseButton, MouseInput, MouseKind, Project};
 
 /// An RAII terminal guard. Wraps `xre_term::TerminalGuard`, which restores the
 /// terminal on drop **and** on panic (its own process-wide hook) — so we never
-/// hand-roll a panic hook. Canopy is keyboard-only, so mouse capture / keyboard
-/// enhancement / pointer-shape are off (preserving native text selection).
+/// hand-roll a panic hook. Mouse capture is opt-in per `mouse` (SGR reporting is
+/// a terminal-wide mode; while on, native drag-to-select is suppressed —
+/// Shift/Option-drag still copies in most terminals). Keyboard-enhancement /
+/// pointer-shape stay off (so key semantics are unchanged).
 pub struct Terminal {
     _guard: TerminalGuard,
 }
 
 impl Terminal {
-    /// Enter raw mode + alternate screen. Restored automatically on drop/panic.
+    /// Enter raw mode + alternate screen, optionally capturing the mouse.
+    /// Restored automatically on drop/panic.
     ///
     /// # Errors
     /// [`rift_core::RiftError`] if entering raw mode fails.
-    pub fn enter() -> RiftResult<Self> {
+    pub fn enter(mouse: bool) -> RiftResult<Self> {
         let guard = TerminalGuard::enter_with(GuardOptions {
-            mouse: false,
+            mouse,
             keyboard_enhancement: false,
             pointer_shape: None,
         })
         .map_err(term_err)?;
         Ok(Self { _guard: guard })
     }
+}
+
+/// Whether to capture the mouse this launch: the persisted `CanopyPrefs.mouse`
+/// flag, overridden off by the `RIFT_CANOPY_NO_MOUSE` env kill-switch (mirrors
+/// the `RIFT_CANOPY_ASCII` pattern).
+fn mouse_enabled(prefs_mouse: bool) -> bool {
+    prefs_mouse && std::env::var_os("RIFT_CANOPY_NO_MOUSE").is_none()
 }
 
 /// The live event source: pump the terminal and translate to Canopy events.
@@ -63,6 +74,11 @@ impl EventSource for LiveEvents {
                     u16::try_from(size.x).unwrap_or(u16::MAX),
                     u16::try_from(size.y).unwrap_or(u16::MAX),
                 ))),
+                XEvent::Mouse(m) => {
+                    if let Some(mouse) = to_canopy_mouse(&m) {
+                        out.push(Event::Mouse(mouse));
+                    }
+                }
                 other => {
                     if let Some(key) = to_canopy(&other) {
                         out.push(Event::Key(key));
@@ -140,9 +156,12 @@ where
         u16::try_from(probe.size.y).unwrap_or(24),
     );
 
-    let _term = Terminal::enter()?; // restores on drop AND on panic (xre guard)
+    let prefs = crate::splash::prefs::load();
+    // restores on drop AND on panic (xre guard); mouse capture is prefs+env-gated.
+    let _term = Terminal::enter(mouse_enabled(prefs.mouse))?;
     let mut backend = crate::render::select_backend(caps, opts.ascii);
     let mut state = AppState::new(initial, size);
+    state.reduced_motion = prefs.reduced_motion;
 
     // Play the splash on the raw terminal source, so bus updates that arrive
     // meanwhile stay queued (they are drained on the first main-loop poll).
@@ -210,6 +229,35 @@ fn to_canopy(ev: &XEvent) -> Option<CanopyKey> {
             CanopyKey::Down
         }),
         _ => None,
+    }
+}
+
+/// Translate an xre mouse event into the terminal-agnostic [`MouseInput`] the
+/// reducer consumes. Cell coordinates are clamped into `u16` (terminals never
+/// approach the ceiling); unknown (`#[non_exhaustive]`) kinds are ignored.
+fn to_canopy_mouse(m: &XMouseEvent) -> Option<MouseInput> {
+    let kind = match m.kind {
+        XMouseKind::Down(b) => MouseKind::Down(mouse_button(b)),
+        XMouseKind::Up(b) => MouseKind::Up(mouse_button(b)),
+        XMouseKind::Drag(b) => MouseKind::Drag(mouse_button(b)),
+        XMouseKind::Moved => MouseKind::Moved,
+        XMouseKind::ScrollUp => MouseKind::ScrollUp,
+        XMouseKind::ScrollDown => MouseKind::ScrollDown,
+        _ => return None,
+    };
+    Some(MouseInput {
+        kind,
+        col: u16::try_from(m.col).unwrap_or(u16::MAX),
+        row: u16::try_from(m.row).unwrap_or(u16::MAX),
+    })
+}
+
+/// Map an xre mouse button onto the Canopy-native one.
+fn mouse_button(b: XMouseButton) -> MouseButton {
+    match b {
+        XMouseButton::Left => MouseButton::Left,
+        XMouseButton::Right => MouseButton::Right,
+        XMouseButton::Middle => MouseButton::Middle,
     }
 }
 

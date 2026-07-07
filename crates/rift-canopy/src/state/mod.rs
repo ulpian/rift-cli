@@ -12,9 +12,11 @@
 //! [`crate::input::on_key`] reducer through [`fold_action`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::col2::{plan_flip, DetailView, Feature, FeatureAction, FeatureActionKind};
-use crate::input::{on_key, Action, CanopyKey};
+use crate::hit::{hit_test, Target};
+use crate::input::{on_key, Action, CanopyKey, MouseButton, MouseInput, MouseKind};
 use crate::render::frame::Size;
 use crate::{App, Command, Mode, Panel, ProjectStatus};
 
@@ -28,6 +30,8 @@ pub type Focus = Panel;
 pub enum Event {
     /// A normalized key press.
     Key(CanopyKey),
+    /// A normalized mouse event (click / scroll) at a cell coordinate.
+    Mouse(MouseInput),
     /// The terminal was resized.
     Resize(Size),
     /// A fixed-cadence animation/sampling tick.
@@ -194,6 +198,39 @@ pub struct CommandAction {
 /// though no cursor change fires a bus poll. Time-based only; never dirties.
 const REFRESH_EVERY_TICKS: u32 = 15;
 
+/// How long a column-3 data change eases from its old shape to the new one. Kept
+/// short so the graph "catches up" without feeling laggy; the loop only spins
+/// fast (and only redraws) for this window, then returns to the ~0% CPU idle.
+const COL3_SETTLE: Duration = Duration::from_millis(350);
+
+/// An in-flight column-3 tween: where the series eased *from*, and how far in.
+/// The *target* is always `AppState::col3` (the truth), so a mid-tween snapshot
+/// still reports the true headline numbers.
+#[derive(Clone, Debug)]
+struct Col3Anim {
+    /// The pre-change series to ease away from.
+    from: Arc<crate::col3::Col3>,
+    /// Elapsed time since the change (drives progress against [`COL3_SETTLE`]).
+    elapsed: Duration,
+}
+
+/// The raw linear progress of a tween in `[0, 1]` for `elapsed` against the
+/// settle window.
+fn elapsed_fraction(elapsed: Duration) -> f32 {
+    let settle = COL3_SETTLE.as_secs_f32();
+    if settle <= 0.0 {
+        return 1.0;
+    }
+    (elapsed.as_secs_f32() / settle).clamp(0.0, 1.0)
+}
+
+/// Ease-out cubic: fast start, gentle finish — the motion reads as "settling"
+/// rather than linear. Endpoints are exact (`0 → 0`, `1 → 1`).
+fn ease_out(t: f32) -> f32 {
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
+}
+
 /// The whole dashboard state: the existing [`App`] model plus loop metadata.
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -203,6 +240,8 @@ pub struct AppState {
     pub size: Size,
     /// Set when something observable changed; gates redraws.
     pub dirty: bool,
+    /// Honor OS/user reduced-motion: skip col-3 tweens, snap to each new value.
+    pub reduced_motion: bool,
     /// Idle-tick counter driving the background re-stat cadence (never dirties).
     tick: u32,
     /// The bus-computed rich detail for the active project (keyed by its path);
@@ -213,8 +252,12 @@ pub struct AppState {
     /// so a stale row can never be served).
     rows_cache: Arc<Vec<ProjectRow>>,
     /// The column-3 sections' view-model, filled by the data plane's feeds
-    /// (W3/W4); `Default` is every section's honest placeholder.
+    /// (W3/W4); `Default` is every section's honest placeholder. This is always the
+    /// **target** value; the displayed value is [`Self::snapshot`]'s interpolation
+    /// when a tween is in flight.
     col3: Arc<crate::col3::Col3>,
+    /// The in-flight column-3 tween, if any (drives the loop's fast-poll window).
+    col3_anim: Option<Col3Anim>,
 }
 
 impl AppState {
@@ -226,17 +269,78 @@ impl AppState {
             size,
             tick: 0,
             dirty: true,
+            reduced_motion: false,
             detail: None,
             rows_cache: Arc::new(Vec::new()),
             col3: Arc::new(crate::col3::Col3::default()),
+            col3_anim: None,
         }
     }
 
     /// Replace the column-3 sections' view-model (the W3/W4 feeds' apply path).
+    ///
+    /// An identical replay is a no-op (delivery robustness). Otherwise the new
+    /// value becomes the target and — unless `reduced_motion` or the change is a
+    /// pure placeholder↔data transition — a tween is armed from the prior value,
+    /// so the graphs ease to the new shape over [`COL3_SETTLE`]. Headlines and
+    /// variants are never tweened (see [`crate::col3::interpolate`]).
     pub fn set_col3(&mut self, col3: crate::col3::Col3) {
-        if *self.col3 != col3 {
+        if *self.col3 == col3 {
+            return;
+        }
+        let animate = !self.reduced_motion && crate::col3::should_animate(&self.col3, &col3);
+        if animate {
+            // Ease from what is on screen *now* — the interpolated frame if a tween
+            // is already running — so a re-tween continues smoothly instead of
+            // snapping back to the previous target.
+            let from = self.displayed_col3();
             self.col3 = Arc::new(col3);
-            self.dirty = true;
+            self.col3_anim = Some(Col3Anim {
+                from,
+                elapsed: Duration::ZERO,
+            });
+        } else {
+            // A non-animating change (a nic snap, or a placeholder↔data variant
+            // flip): adopt the new target but LEAVE any in-flight tween running —
+            // `interpolate` reads non-tweened sections from the target, so the fresh
+            // values show at once while other sections keep easing (no
+            // cross-section cancellation).
+            self.col3 = Arc::new(col3);
+        }
+        self.dirty = true;
+    }
+
+    /// Advance any in-flight column-3 tween by `dt`, clearing it once it settles.
+    /// Returns `true` while a tween is (or was just) active, so the loop redraws
+    /// the interpolated frame; returns `false` at rest (no wasted redraw). Takes
+    /// an explicit `dt` so it is deterministic in tests.
+    pub fn advance_anim(&mut self, dt: Duration) -> bool {
+        let Some(anim) = self.col3_anim.as_mut() else {
+            return false;
+        };
+        anim.elapsed = anim.elapsed.saturating_add(dt);
+        if anim.elapsed >= COL3_SETTLE {
+            self.col3_anim = None; // the final (settled) frame renders the target
+        }
+        true
+    }
+
+    /// Whether a column-3 tween is in flight (drives the loop's fast-poll window).
+    #[must_use]
+    pub fn anim_active(&self) -> bool {
+        self.col3_anim.is_some()
+    }
+
+    /// The displayed column-3 value: the interpolated (eased) frame while a tween
+    /// is in flight, else the shared target `Arc` (unchanged — so a quiescent
+    /// snapshot stays pointer-equal, the ~0% CPU invariant).
+    fn displayed_col3(&self) -> Arc<crate::col3::Col3> {
+        match &self.col3_anim {
+            Some(anim) => {
+                let progress = ease_out(elapsed_fraction(anim.elapsed));
+                Arc::new(crate::col3::interpolate(&anim.from, &self.col3, progress))
+            }
+            None => Arc::clone(&self.col3),
         }
     }
 
@@ -309,7 +413,7 @@ impl AppState {
             projects: Arc::clone(&self.rows_cache),
             selected: self.app.selected,
             detail,
-            col3: Arc::clone(&self.col3),
+            col3: self.displayed_col3(),
             detail_scroll: self.app.scroll.detail,
             graphs_scroll: self.app.scroll.graphs,
             toggle_cursor: self.app.toggle_cursor,
@@ -403,22 +507,144 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
             };
             // When the selection moves, ask the bus for the new project's data and
             // reset the toggle cursor to the top of the new project's toggles.
-            let after = s.app.selected_project().map(|p| p.path.clone());
-            if before != after {
-                s.app.toggle_cursor = 0;
-                // A different project's sections must never linger: reset to
-                // placeholders until its own feeds arrive.
-                s.set_col3(crate::col3::Col3::default());
-                if let Flow::Continue(eff) = &mut flow {
-                    eff.data_requests
-                        .push(DataRequest::SetActive(after.clone()));
-                    if let Some(path) = after {
-                        eff.data_requests.push(DataRequest::Refresh(path));
-                    }
-                }
+            if let Flow::Continue(eff) = &mut flow {
+                eff.data_requests
+                    .extend(selection_change_effects(s, &before));
             }
             flow
         }
+        Event::Mouse(m) => on_mouse(s, m),
+    }
+}
+
+/// After a possible selection move, reset the per-project cursor and column-3
+/// sections and ask the bus for the newly-selected project's data. Returns the
+/// data requests to add (empty when the selection did not change). Shared by the
+/// keyboard and mouse paths so a click and an arrow key are behaviorally
+/// identical.
+fn selection_change_effects(s: &mut AppState, before: &Option<String>) -> Vec<DataRequest> {
+    let after = s.app.selected_project().map(|p| p.path.clone());
+    if *before == after {
+        return Vec::new();
+    }
+    s.app.toggle_cursor = 0;
+    // A different project's sections must never linger: reset to placeholders
+    // (and cancel any in-flight tween) until its own feeds arrive.
+    s.set_col3(crate::col3::Col3::default());
+    let mut reqs = vec![DataRequest::SetActive(after.clone())];
+    if let Some(path) = after {
+        reqs.push(DataRequest::Refresh(path));
+    }
+    reqs
+}
+
+/// Handle a mouse event by hit-testing it against the current view and mapping
+/// the target onto the **same** state changes the keyboard produces. Only left
+/// presses and the scroll wheel act; moves/drags/releases are ignored (no
+/// per-move work, keeping the ~0% CPU idle). While the splash is up, any click
+/// dismisses it and is otherwise swallowed (mirrors the key path).
+fn on_mouse(s: &mut AppState, m: MouseInput) -> Flow {
+    if !s.app.splash.done() {
+        s.app.splash.skip();
+        return Flow::Continue(Effects::default());
+    }
+    let vm = s.snapshot();
+    match m.kind {
+        MouseKind::Down(MouseButton::Left) => match hit_test(&vm, m.col, m.row) {
+            Some(target) => apply_click(s, target),
+            None => Flow::Continue(Effects::default()),
+        },
+        MouseKind::ScrollUp | MouseKind::ScrollDown => {
+            let down = matches!(m.kind, MouseKind::ScrollDown);
+            apply_scroll(s, &vm, m.col, m.row, down)
+        }
+        // Right/middle presses, drags, moves and releases don't drive the UI.
+        _ => Flow::Continue(Effects::default()),
+    }
+}
+
+/// Apply a left-click target: focus panels, select a project, flip a toggle, or
+/// open the command bar — each the same mutation as the equivalent keypress.
+fn apply_click(s: &mut AppState, target: Target) -> Flow {
+    match target {
+        Target::PanelFocus(panel) => {
+            s.app.set_focus(panel);
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
+        Target::CommandBar => {
+            s.app.set_focus(Panel::Command);
+            s.app.mode = Mode::Command;
+            s.app.command_line.clear();
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
+        Target::ProjectRow(i) => {
+            s.app.set_focus(Panel::Projects);
+            let before = s.app.selected_project().map(|p| p.path.clone());
+            if i < s.app.projects.len() {
+                s.app.selected = i;
+            }
+            s.dirty = true;
+            Flow::Continue(Effects {
+                data_requests: selection_change_effects(s, &before),
+                ..Effects::default()
+            })
+        }
+        Target::ToggleRow(i) => {
+            s.app.set_focus(Panel::Detail);
+            let last = Feature::ALL.len().saturating_sub(1);
+            s.app.toggle_cursor = i.min(last);
+            s.dirty = true;
+            // Flip it — identical to Space/Enter/`t` on the keyboard.
+            toggle_flow(&s.app, s.detail.as_deref())
+        }
+        Target::Section(_) => {
+            s.app.set_focus(Panel::Graphs);
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
+    }
+}
+
+/// Apply a scroll-wheel event over the panel under the cursor, using the same
+/// per-panel vertical semantics as the keyboard: projects move the selection,
+/// detail moves the toggle cursor, graphs scroll their viewport.
+fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool) -> Flow {
+    let panel = match hit_test(vm, col, row) {
+        Some(Target::ProjectRow(_)) => Panel::Projects,
+        Some(Target::ToggleRow(_)) => Panel::Detail,
+        Some(Target::Section(_)) => Panel::Graphs,
+        Some(Target::PanelFocus(p)) => p,
+        Some(Target::CommandBar) | None => return Flow::Continue(Effects::default()),
+    };
+    s.dirty = true;
+    match panel {
+        Panel::Projects => {
+            let before = s.app.selected_project().map(|p| p.path.clone());
+            if down {
+                s.app.select_next();
+            } else {
+                s.app.select_prev();
+            }
+            Flow::Continue(Effects {
+                data_requests: selection_change_effects(s, &before),
+                ..Effects::default()
+            })
+        }
+        Panel::Detail => {
+            s.app.move_toggle_cursor(down);
+            Flow::Continue(Effects::default())
+        }
+        Panel::Graphs => {
+            s.app.scroll.graphs = if down {
+                s.app.scroll.graphs.saturating_add(1)
+            } else {
+                s.app.scroll.graphs.saturating_sub(1)
+            };
+            Flow::Continue(Effects::default())
+        }
+        Panel::Command => Flow::Continue(Effects::default()),
     }
 }
 
@@ -1001,6 +1227,211 @@ mod tests {
             TokensView::NoActivity,
             "the previous project's sections must not linger"
         );
+    }
+
+    /// Build a Tokens feed for `/r/a` with the given series/total.
+    fn tokens_feed(rate: Vec<f64>, total: f64) -> Event {
+        use crate::col3::{TokensData, TokensView};
+        Event::Feed(FeedUpdate {
+            project: "/r/a".into(),
+            payload: FeedPayload::Tokens {
+                tokens: TokensView::Data(TokensData { rate, total }),
+                breakdown: crate::col3::BreakdownView::NoActivity,
+            },
+        })
+    }
+
+    fn tokens_of(v: &ViewModel) -> (Vec<f64>, f64) {
+        match &v.col3.tokens {
+            crate::col3::TokensView::Data(d) => (d.rate.clone(), d.total),
+            crate::col3::TokensView::NoActivity => (vec![], -1.0),
+        }
+    }
+
+    #[test]
+    fn data_to_data_feed_arms_a_tween_that_settles() {
+        let mut s = ready(vec![project("a")]);
+        // First feed: placeholder→Data → snaps, no tween armed.
+        update(&mut s, tokens_feed(vec![1.0, 2.0], 3.0));
+        assert!(!s.anim_active(), "the first population snaps");
+        // Second feed: Data→Data with a changed series → a tween is armed.
+        update(&mut s, tokens_feed(vec![5.0, 6.0], 11.0));
+        assert!(s.anim_active(), "a data change arms a tween");
+        // At t=0 the series eases from the OLD shape, but the headline total is
+        // already the target (headlines never tween — gate-m4 / delivery tests).
+        s.advance_anim(Duration::ZERO);
+        let (rate0, total0) = tokens_of(&s.snapshot());
+        assert_eq!(rate0, vec![1.0, 2.0], "series starts at the old shape");
+        assert!(
+            (total0 - 11.0).abs() < f64::EPSILON,
+            "headline is the target"
+        );
+        // Advancing past the settle window ends the tween; the final frame is the
+        // exact target series.
+        assert!(s.advance_anim(Duration::from_millis(400)));
+        assert!(!s.anim_active(), "the tween settles and clears");
+        let (rate_settled, _) = tokens_of(&s.snapshot());
+        assert_eq!(
+            rate_settled,
+            vec![5.0, 6.0],
+            "settled frame equals the target"
+        );
+    }
+
+    #[test]
+    fn reduced_motion_snaps_without_a_tween() {
+        let mut s = ready(vec![project("a")]);
+        s.reduced_motion = true;
+        update(&mut s, tokens_feed(vec![1.0], 1.0));
+        update(&mut s, tokens_feed(vec![9.0], 9.0));
+        assert!(!s.anim_active(), "reduced_motion never tweens");
+        assert_eq!(
+            tokens_of(&s.snapshot()).0,
+            vec![9.0],
+            "shows the target at once"
+        );
+    }
+
+    #[test]
+    fn a_non_animating_feed_keeps_an_in_flight_tween() {
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, tokens_feed(vec![1.0, 2.0], 3.0)); // placeholder→Data: snaps
+        update(&mut s, tokens_feed(vec![5.0, 6.0], 11.0)); // Data→Data: arms a tween
+        assert!(s.anim_active());
+        // A nic feed snaps (nic is never tweened); it must NOT cancel the tokens
+        // tween, and its own value must show immediately.
+        let nic = Event::Feed(FeedUpdate {
+            project: "/r/a".into(),
+            payload: FeedPayload::Nic(crate::col3::NicView::Reading(crate::col3::NicReading {
+                pct: 50,
+                band: "Thinking",
+                model: "m".into(),
+                threads: 1,
+            })),
+        });
+        update(&mut s, nic);
+        assert!(
+            s.anim_active(),
+            "an unrelated (snapping) nic update must not cancel the tokens tween"
+        );
+        match &s.snapshot().col3.nic {
+            crate::col3::NicView::Reading(r) => assert_eq!(r.pct, 50, "nic shows at once"),
+            other => panic!("expected a reading, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_anim_is_a_noop_at_rest() {
+        let mut s = ready(vec![project("a")]);
+        assert!(
+            !s.advance_anim(Duration::from_millis(16)),
+            "with no tween in flight, advancing is a no-op (no redraw)"
+        );
+    }
+
+    #[test]
+    fn identical_feed_replay_neither_dirties_nor_tweens() {
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, tokens_feed(vec![3.0], 3.0)); // placeholder→Data, snaps
+        s.dirty = false;
+        update(&mut s, tokens_feed(vec![3.0], 3.0)); // identical replay
+        assert!(!s.dirty, "an identical feed replay must not redraw");
+        assert!(!s.anim_active(), "and must not arm a tween");
+    }
+
+    fn click(col: u16, row: u16) -> Event {
+        Event::Mouse(MouseInput {
+            kind: MouseKind::Down(MouseButton::Left),
+            col,
+            row,
+        })
+    }
+
+    #[test]
+    fn clicking_a_project_row_matches_the_keyboard_selection() {
+        // A click on the second project row must produce the same selection and
+        // the same bus effects as pressing Down from the top.
+        let mut sk = ready(vec![project("a"), project("b"), project("c")]);
+        let fk = update(&mut sk, Event::Key(CanopyKey::Down));
+        let mut sm = ready(vec![project("a"), project("b"), project("c")]);
+        // col1 inner content starts at (1,2); project rows at y=2,3,4.
+        let fm = update(&mut sm, click(3, 3));
+        assert_eq!(sk.app.selected, 1);
+        assert_eq!(sm.app.selected, 1, "the click selected the clicked row");
+        match (fk, fm) {
+            (Flow::Continue(ek), Flow::Continue(em)) => {
+                assert_eq!(ek.data_requests, em.data_requests, "same bus effects");
+                assert!(em
+                    .data_requests
+                    .contains(&DataRequest::SetActive(Some("/r/b".into()))));
+            }
+            _ => panic!("expected Continue"),
+        }
+    }
+
+    #[test]
+    fn clicking_a_column_focuses_that_panel() {
+        let mut s = ready(vec![project("a")]);
+        assert_eq!(s.app.focus, Panel::Projects);
+        update(&mut s, click(40, 10)); // deep in the detail column
+        assert_eq!(s.app.focus, Panel::Detail);
+        update(&mut s, click(100, 6)); // deep in the graphs column
+        assert_eq!(s.app.focus, Panel::Graphs);
+    }
+
+    #[test]
+    fn clicking_the_command_bar_opens_command_mode() {
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, click(10, 39)); // the bottom command row
+        assert_eq!(s.app.focus, Panel::Command);
+        assert_eq!(s.app.mode, Mode::Command);
+    }
+
+    #[test]
+    fn a_click_during_the_splash_only_dismisses_it() {
+        let mut s = AppState::new(vec![project("a")], Size::new(120, 40)); // fresh splash
+        assert!(!s.app.splash.done());
+        let f = update(&mut s, click(3, 2));
+        assert!(s.app.splash.done(), "the click dismissed the splash");
+        assert_eq!(s.app.focus, Panel::Projects, "and was otherwise swallowed");
+        assert!(matches!(f, Flow::Continue(e) if e.is_empty()));
+    }
+
+    #[test]
+    fn scrolling_over_the_graphs_column_scrolls_its_viewport() {
+        let mut s = ready(vec![project("a")]);
+        let wheel = |kind| {
+            Event::Mouse(MouseInput {
+                kind,
+                col: 100,
+                row: 6,
+            })
+        };
+        update(&mut s, wheel(MouseKind::ScrollDown));
+        assert_eq!(s.app.scroll.graphs, 1);
+        update(&mut s, wheel(MouseKind::ScrollUp));
+        assert_eq!(s.app.scroll.graphs, 0);
+    }
+
+    #[test]
+    fn a_right_click_and_a_move_are_inert() {
+        let mut s = ready(vec![project("a"), project("b")]);
+        for kind in [
+            MouseKind::Down(MouseButton::Right),
+            MouseKind::Moved,
+            MouseKind::Up(MouseButton::Left),
+        ] {
+            let f = update(
+                &mut s,
+                Event::Mouse(MouseInput {
+                    kind,
+                    col: 3,
+                    row: 3,
+                }),
+            );
+            assert!(matches!(f, Flow::Continue(e) if e.is_empty()));
+        }
+        assert_eq!(s.app.selected, 0, "no inert event moved the selection");
     }
 
     #[test]

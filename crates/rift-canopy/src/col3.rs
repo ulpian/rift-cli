@@ -20,7 +20,8 @@
 //! the [`crate::state::ViewModel`].
 
 use crate::layout::Rect;
-use crate::plot;
+use crate::palette;
+use crate::plot::{self, Paint};
 use crate::render::frame::{Frame, Style};
 use crate::render::RenderBackend;
 
@@ -381,6 +382,102 @@ pub struct Col3 {
     pub threads: ThreadsView,
 }
 
+// --- animation: tween the plot series on a data change -----------------------
+//
+// Only the *plottable series* interpolate (bar/line heights); every scalar
+// headline and enum variant is taken from the target immediately, so a mid-tween
+// read still shows the true total/band/count and a fresh headless render (which
+// never animates) is always the settled target. A section whose variant changed
+// (placeholder↔Data) snaps rather than tweens.
+//
+// The **nic-gauge does not tween**: its `pct` is *both* the gauge fill and the
+// title headline (`"{pct}% {band}"`), so easing it would desync the number from
+// its band (e.g. show "80% Smart" mid-transition). The meter snaps to each
+// reading — consistent, and standard for a small horizontal gauge.
+
+/// Linear interpolation of two `f64`s at `t ∈ [0, 1]`.
+fn lerp_f64(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+/// Interpolate two equal-length series element-wise; `None` when the lengths
+/// differ (the caller snaps to the target rather than guess an alignment).
+fn lerp_series(a: &[f64], b: &[f64], t: f64) -> Option<Vec<f64>> {
+    if a.len() != b.len() {
+        return None;
+    }
+    Some(a.iter().zip(b).map(|(x, y)| lerp_f64(*x, *y, t)).collect())
+}
+
+/// Interpolate a `RecallView<T>` only when both sides carry data; otherwise the
+/// target wins (the placeholder↔data transition snaps).
+fn interp_recall<T: Clone>(
+    from: &RecallView<T>,
+    to: &RecallView<T>,
+    blend: impl Fn(&T, &T) -> T,
+) -> RecallView<T> {
+    match (from, to) {
+        (RecallView::Data(a), RecallView::Data(b)) => RecallView::Data(blend(a, b)),
+        _ => to.clone(),
+    }
+}
+
+/// Would tweening `from → to` show any motion? True iff at least one section is a
+/// same-variant `Data` change with an interpolable (equal-length) series or a
+/// changed value — so a pure placeholder↔data update snaps instead.
+#[must_use]
+pub(crate) fn should_animate(from: &Col3, to: &Col3) -> bool {
+    let series_changed = |a: &[f64], b: &[f64]| a.len() == b.len() && a != b;
+    // Nic is deliberately excluded — it snaps (its pct is a headline; see above).
+    matches!((&from.tokens, &to.tokens),
+        (TokensView::Data(a), TokensView::Data(b)) if series_changed(&a.rate, &b.rate))
+        || matches!((&from.breakdown, &to.breakdown),
+            (BreakdownView::Data(a), BreakdownView::Data(b)) if a != b)
+        || matches!((&from.savings, &to.savings),
+            (RecallView::Data(a), RecallView::Data(b)) if series_changed(&a.rate, &b.rate))
+        || matches!((&from.calls, &to.calls),
+            (RecallView::Data(a), RecallView::Data(b)) if series_changed(&a.rate, &b.rate))
+}
+
+/// The displayed `Col3` at tween progress `t ∈ [0, 1]`: `from`'s series eased
+/// toward `to`'s, with all headlines/variants taken from `to`.
+#[must_use]
+pub(crate) fn interpolate(from: &Col3, to: &Col3, t: f32) -> Col3 {
+    let t = f64::from(t.clamp(0.0, 1.0));
+    Col3 {
+        tokens: match (&from.tokens, &to.tokens) {
+            (TokensView::Data(a), TokensView::Data(b)) => TokensView::Data(TokensData {
+                rate: lerp_series(&a.rate, &b.rate, t).unwrap_or_else(|| b.rate.clone()),
+                total: b.total,
+            }),
+            _ => to.tokens.clone(),
+        },
+        breakdown: match (&from.breakdown, &to.breakdown) {
+            (BreakdownView::Data(a), BreakdownView::Data(b)) => {
+                BreakdownView::Data(BreakdownData {
+                    input: lerp_f64(a.input, b.input, t),
+                    read: lerp_f64(a.read, b.read, t),
+                    output: lerp_f64(a.output, b.output, t),
+                    cache_write: lerp_f64(a.cache_write, b.cache_write, t),
+                    read_fraction: b.read_fraction,
+                })
+            }
+            _ => to.breakdown.clone(),
+        },
+        // The nic-gauge snaps: its pct is a headline (title + fill share it).
+        nic: to.nic.clone(),
+        savings: interp_recall(&from.savings, &to.savings, |a, b| SavingsData {
+            rate: lerp_series(&a.rate, &b.rate, t).unwrap_or_else(|| b.rate.clone()),
+            total: b.total,
+        }),
+        calls: interp_recall(&from.calls, &to.calls, |a, b| CallsData {
+            rate: lerp_series(&a.rate, &b.rate, t).unwrap_or_else(|| b.rate.clone()),
+            total: b.total,
+        }),
+        threads: to.threads.clone(),
+    }
+}
+
 // --- rendering ---------------------------------------------------------------
 
 /// Compact K/M formatting for token-scale numbers (PRD "numbers format with
@@ -472,7 +569,11 @@ fn draw_section(
                     let pr = plot_rect(rect);
                     let max = plot::autoscale_max(&d.rate);
                     let pts = plot::bar_points(&d.rate, max, pr.h.saturating_mul(4).max(4));
-                    backend.plot(&pts, pr, Style::DEFAULT, frame);
+                    let paint = Paint::VGradient {
+                        lo: palette::TOKEN_LO,
+                        hi: palette::TOKEN_HI,
+                    };
+                    backend.plot(&pts, pr, &paint, frame);
                 }
             }
         },
@@ -523,7 +624,9 @@ fn draw_section(
                         let vals = [d.input, d.read, d.output, d.cache_write];
                         let max = plot::autoscale_max(&vals);
                         let pts = plot::bar_points(&vals, max, pr.h.saturating_mul(4).max(4));
-                        backend.plot(&pts, pr, Style::DEFAULT, frame);
+                        // One hue per class, matching the `in / rd / out` labels
+                        // above (input=blue, read=green, output=violet, cache=amber).
+                        backend.plot(&pts, pr, &Paint::ByCategory(&palette::BREAKDOWN), frame);
                     }
                 }
             }
@@ -556,7 +659,9 @@ fn draw_section(
                         pr.w.saturating_mul(2).max(2),
                         pr.h.saturating_mul(4).clamp(1, 4),
                     );
-                    backend.plot(&pts, pr, Style::DEFAULT, frame);
+                    // Green (empty) → amber → red (full): the meter reddens as the
+                    // context window fills (fuller = worse).
+                    backend.plot(&pts, pr, &Paint::HRamp(&palette::GAUGE_RAMP), frame);
                 }
             }
         },
@@ -581,7 +686,7 @@ fn draw_section(
                     let pr = plot_rect(rect);
                     let max = plot::autoscale_max(&d.rate);
                     let pts = plot::line_points(&d.rate, max, pr.w.saturating_mul(2).max(2));
-                    backend.plot(&pts, pr, Style::DEFAULT, frame);
+                    backend.plot(&pts, pr, &Paint::Solid(Style::fg(palette::ACCENT)), frame);
                 }
             }
         },
@@ -606,7 +711,12 @@ fn draw_section(
                     let pr = plot_rect(rect);
                     let max = plot::autoscale_max(&d.rate);
                     let pts = plot::bar_points(&d.rate, max, pr.h.saturating_mul(4).max(4));
-                    backend.plot(&pts, pr, Style::DEFAULT, frame);
+                    backend.plot(
+                        &pts,
+                        pr,
+                        &Paint::Solid(Style::fg(palette::RECALL_CALLS)),
+                        frame,
+                    );
                 }
             }
         },
@@ -730,6 +840,182 @@ mod tests {
             if h >= 6 {
                 proptest::prop_assert_eq!(slots.len(), 6);
             }
+        }
+    }
+
+    #[test]
+    fn token_bars_carry_gradient_colour() {
+        // Colour is written into the Frame regardless of backend (the ASCII floor
+        // simply doesn't emit it). A token-usage bar chart must leave at least one
+        // RGB-coloured cell, and none of the lit bar cells stay terminal-default.
+        use crate::render::frame::{Color, Frame, Size};
+        use crate::render::{AsciiBackend, Capabilities};
+        let col3 = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![1.0, 5.0, 3.0, 9.0, 4.0],
+                total: 22.0,
+            }),
+            ..Col3::default()
+        };
+        let mut frame = Frame::new(Size::new(40, 40));
+        let mut backend = AsciiBackend::new(Capabilities::empty());
+        draw(
+            &col3,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 40,
+                h: 40,
+            },
+            &mut backend,
+            &mut frame,
+        );
+        let mut coloured = 0;
+        for y in 0..frame.height() {
+            for x in 0..frame.width() {
+                if let Some(c) = frame.get(x, y) {
+                    // The bar glyphs (braille/half-block) carry the gradient fg.
+                    if matches!(c.ch, '▀' | '▄' | '█') || (0x2800..=0x28FF).contains(&(c.ch as u32))
+                    {
+                        assert!(
+                            matches!(c.style.fg, Color::Rgb(_, _, _)),
+                            "bar cell ({x},{y}) is not RGB-coloured"
+                        );
+                        coloured += 1;
+                    }
+                }
+            }
+        }
+        assert!(coloured > 0, "the token bar chart drew no coloured cells");
+    }
+
+    #[test]
+    fn interpolate_tweens_series_but_takes_headline_from_target() {
+        let from = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![0.0, 0.0],
+                total: 100.0,
+            }),
+            ..Col3::default()
+        };
+        let to = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![10.0, 20.0],
+                total: 700.0,
+            }),
+            ..Col3::default()
+        };
+        let mid = interpolate(&from, &to, 0.5);
+        match mid.tokens {
+            TokensView::Data(d) => {
+                assert_eq!(d.rate, vec![5.0, 10.0], "series is half-way");
+                assert!(
+                    (d.total - 700.0).abs() < f64::EPSILON,
+                    "the headline total is taken from the target immediately"
+                );
+            }
+            TokensView::NoActivity => panic!("expected Data"),
+        }
+    }
+
+    #[test]
+    fn interpolate_endpoints_are_exact() {
+        let from = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![1.0, 2.0],
+                total: 3.0,
+            }),
+            ..Col3::default()
+        };
+        let to = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![9.0, 8.0],
+                total: 17.0,
+            }),
+            ..Col3::default()
+        };
+        // At t=0 the *series* is the old shape but the *headline* is already the
+        // target (totals never tween); at t=1 everything equals the target.
+        match interpolate(&from, &to, 0.0).tokens {
+            TokensView::Data(d) => {
+                assert_eq!(d.rate, vec![1.0, 2.0]);
+                assert!((d.total - 17.0).abs() < f64::EPSILON);
+            }
+            TokensView::NoActivity => panic!("expected Data"),
+        }
+        assert_eq!(interpolate(&from, &to, 1.0).tokens, to.tokens);
+    }
+
+    #[test]
+    fn placeholder_to_data_snaps_not_tweens() {
+        let from = Col3::default(); // NoActivity everywhere
+        let to = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![5.0],
+                total: 5.0,
+            }),
+            ..Col3::default()
+        };
+        assert!(
+            !should_animate(&from, &to),
+            "a placeholder→data update must snap"
+        );
+        // And interpolate at t=0 already shows the target (no blank tween frame).
+        assert_eq!(interpolate(&from, &to, 0.0).tokens, to.tokens);
+    }
+
+    #[test]
+    fn data_to_data_series_change_animates() {
+        let from = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![1.0, 2.0],
+                total: 3.0,
+            }),
+            ..Col3::default()
+        };
+        let to = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![4.0, 5.0],
+                total: 9.0,
+            }),
+            ..Col3::default()
+        };
+        assert!(should_animate(&from, &to));
+        // A length change is not interpolable → snap that section.
+        let to_len = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![4.0, 5.0, 6.0],
+                total: 15.0,
+            }),
+            ..Col3::default()
+        };
+        assert!(!should_animate(&from, &to_len));
+        assert_eq!(interpolate(&from, &to_len, 0.5).tokens, to_len.tokens);
+    }
+
+    #[test]
+    fn nic_reading_change_snaps_and_never_tweens() {
+        // The nic pct is a headline (title + gauge share it), so a reading change
+        // must snap — never show an eased pct beside the target band.
+        let reading = |pct, band| Col3 {
+            nic: NicView::Reading(NicReading {
+                pct,
+                band,
+                model: "m".into(),
+                threads: 1,
+            }),
+            ..Col3::default()
+        };
+        let from = reading(80, "Strained");
+        let to = reading(20, "Smart");
+        assert!(
+            !should_animate(&from, &to),
+            "a nic reading change must not arm a tween"
+        );
+        // interpolate at any progress shows the TARGET reading verbatim — pct and
+        // band always agree, never "80% Smart".
+        for t in [0.0, 0.5, 1.0] {
+            assert_eq!(interpolate(&from, &to, t).nic, to.nic);
         }
     }
 
