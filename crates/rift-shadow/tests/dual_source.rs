@@ -146,6 +146,7 @@ async fn ingest_all(s: &SqliteStore, hooks: &[RawHook], git_dir: &std::path::Pat
             "claude-code",
             "repo-dual",
             raw.occurred_at_ms,
+            None,
         )
         .await
         .unwrap();

@@ -20,23 +20,49 @@ use crate::sha256_hex;
 /// A content-addressed checkpoint id (lowercase hex).
 pub type CheckpointId = String;
 
-/// Derive the content-addressed checkpoint id for a session's redacted capture.
-fn checkpoint_id_for(session: &str, redacted: &[u8]) -> CheckpointId {
+/// Derive the content-addressed checkpoint id for a session's redacted capture
+/// plus its read-fact set. Folding the facts in means a session whose fact set
+/// GREW since its last archive mints a NEW checkpoint id (a new shard, cleanly
+/// appended) instead of colliding with the earlier shard at the same path.
+fn checkpoint_id_for(
+    session: &str,
+    redacted: &[u8],
+    read_facts: &[crate::backend::ArchivedReadFact],
+) -> CheckpointId {
     let content = sha256_hex(&[redacted]);
-    sha256_hex(&[session.as_bytes(), b"\0", content.as_bytes()])
+    let facts_bytes = crate::backend::tool_calls_jsonl_bytes(read_facts).unwrap_or_default();
+    let facts_digest = sha256_hex(&[facts_bytes.as_slice()]);
+    sha256_hex(&[
+        session.as_bytes(),
+        b"\0",
+        content.as_bytes(),
+        b"\0",
+        facts_digest.as_bytes(),
+    ])
 }
 
-/// The checkpoint id `condense` will derive for `(session, raw_capture)` —
-/// computable **before** the archive runs (it depends only on the session and
-/// the redacted capture, never the commit oid), which is what lets
-/// `prepare-commit-msg` inject a `Rift-Checkpoint` trailer that the post-commit
-/// archive then makes true.
+/// The checkpoint id `condense` will derive for `(session, raw_capture,
+/// read_facts)` — computable **before** the archive runs (it depends on the
+/// session, the redacted capture, and the already-captured read facts — never
+/// the commit oid), which is what lets `prepare-commit-msg` inject a
+/// `Rift-Checkpoint` trailer that the post-commit archive then makes true. The
+/// prediction misses only if a read fact lands in the instants between the two
+/// hooks (the archive still lands, under its true id; the trailer is then one
+/// fact stale — recorded limitation, never a lost checkpoint).
 ///
 /// # Errors
 /// [`rift_core::RiftError`] if redaction fails.
-pub fn predicted_checkpoint_id(session: &str, raw_capture: &SecretBytes) -> Result<CheckpointId> {
+pub fn predicted_checkpoint_id(
+    session: &str,
+    raw_capture: &SecretBytes,
+    read_facts: &[crate::backend::ArchivedReadFact],
+) -> Result<CheckpointId> {
     let out = rift_shadow_redact::redact(raw_capture)?;
-    Ok(checkpoint_id_for(session, out.redacted.as_slice()))
+    Ok(checkpoint_id_for(
+        session,
+        out.redacted.as_slice(),
+        read_facts,
+    ))
 }
 
 /// Condense raw shadow capture into a durable, redacted checkpoint and record the
@@ -55,11 +81,12 @@ pub async fn condense(
     reason: ArchiveReason,
     commit_oid: &str,
     now_ms: i64,
+    read_facts: Vec<crate::backend::ArchivedReadFact>,
 ) -> Result<CheckpointId> {
     // ONE-WAY GATE: redact first. Nothing past this line sees the raw bytes; the
     // checkpoint id is content-addressed over the *redacted* form.
     let out = rift_shadow_redact::redact(raw_capture)?;
-    let checkpoint_id = checkpoint_id_for(session, out.redacted.as_slice());
+    let checkpoint_id = checkpoint_id_for(session, out.redacted.as_slice(), &read_facts);
     let report = RedactionReportView::from_redact(&out.report);
 
     // The backend writes the shard. Behind the `ShadowBackend` seam this is the
@@ -77,6 +104,7 @@ pub async fn condense(
         prev_hash: None,
         merkle_root: crate::checkpoint_merkle_root(&[]),
         events: Vec::new(),
+        read_facts,
         content: out.redacted,
         report,
         created_at_ms: now_ms,
@@ -163,6 +191,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
+            Vec::new(),
         )
         .await
         .expect_err("a nonzero backend exit fails condense");
@@ -195,6 +224,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -209,6 +239,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -243,6 +274,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
+            Vec::new(),
         )
         .await;
         assert!(matches!(out, Err(rift_core::RiftError::PolicyDenied(_))));

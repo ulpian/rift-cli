@@ -156,6 +156,7 @@ pub async fn archive_and_capture(
         raw_capture,
         decision,
         now_ms,
+        Vec::new(),
     )
     .await
 }
@@ -177,6 +178,7 @@ pub async fn archive_and_capture_with(
     raw_capture: &SecretBytes,
     decision: ArchiveDecision,
     now_ms: i64,
+    read_facts: Vec<crate::backend::ArchivedReadFact>,
 ) -> Result<Option<CheckpointId>> {
     let archive = run_decision(
         backend,
@@ -187,6 +189,7 @@ pub async fn archive_and_capture_with(
         decision,
         commit_hex,
         now_ms,
+        read_facts,
     )
     .await;
     // Persist the diff facts regardless; anchor attribution to the checkpoint only

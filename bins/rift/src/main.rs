@@ -36,6 +36,7 @@ mod agents;
 mod cli;
 mod hooks;
 mod identity;
+mod mcpjson;
 mod memory;
 mod query;
 mod verify;
@@ -210,7 +211,11 @@ fn projects_cmd(cmd: &cli::ProjectsCmd) -> rift_core::Result<Outcome> {
                 if a.dry_run { "would prune" } else { "pruned" },
                 victims.len(),
                 rows.len(),
-                if a.dry_run { " (dry run — nothing written)" } else { "" }
+                if a.dry_run {
+                    " (dry run — nothing written)"
+                } else {
+                    ""
+                }
             ));
             let json = serde_json::json!({
                 "dry_run": a.dry_run,
@@ -383,10 +388,136 @@ impl ProvisionOutcome {
 /// `rift doctor`: report capture-backend readiness without any network I/O.
 fn cmd_doctor() -> Outcome {
     let status = backend_status();
-    Outcome::ok(
-        format!("rift doctor\n  capture backend: {status}"),
-        serde_json::json!({ "capture_backend": status }),
-    )
+    let mut human = format!("rift doctor\n  capture backend: {status}");
+    let mut json = serde_json::json!({ "capture_backend": status });
+    if let Ok(cwd) = std::env::current_dir() {
+        let (chain_human, chain_json) = doctor_memory_chain(&cwd);
+        human.push_str(&chain_human);
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert("memory_chain".into(), chain_json);
+        }
+    }
+    Outcome::ok(human, json)
+}
+
+/// The memory-chain readout (M5-06, PRD user story 31): checkpoints found →
+/// recall projection ingested → `.mcp.json` provisioned → daemon servable —
+/// each broken leg naming its exact next command, so an empty memory panel is
+/// a diagnosis rather than a shrug.
+fn doctor_memory_chain(repo: &std::path::Path) -> (String, serde_json::Value) {
+    use rift_recall_substrate::{GixSubstrate, SubstrateReader as _};
+    use rift_store::CanonicalStore as _;
+
+    let mut human = String::from("\n  memory chain:");
+
+    // Leg 1: checkpoints on the substrate.
+    let checkpoints = GixSubstrate::open(repo)
+        .and_then(|sub| sub.checkpoints())
+        .map_or(0, |c| c.len());
+    if checkpoints == 0 {
+        human.push_str(
+            "\n    checkpoints:    none — commit while a session is live \
+             (the post-commit hook archives)",
+        );
+    } else {
+        human.push_str(&format!("\n    checkpoints:    {checkpoints} found"));
+    }
+
+    // Leg 2: the recall projection (enabled + ingested).
+    let recall_enabled =
+        rift_config::EffectiveConfig::load(&repo.join(".rift")).is_ok_and(|c| c.recall_enabled());
+    let ingested: Option<i64> = rift_store::recall_db_for_repo(repo)
+        .ok()
+        .filter(|db| db.exists())
+        .and_then(|db| rift_store::open_migrated(&db, &rift_store::recall_migrations()).ok())
+        .and_then(|store| {
+            runtime().ok().and_then(|rt| {
+                rt.block_on(store.query("SELECT COUNT(*) FROM n_file_read", &[]))
+                    .ok()
+                    .and_then(|rows| rows.first().and_then(|r| r.get_i64(0).ok()))
+            })
+        });
+    match (recall_enabled, ingested) {
+        (false, _) => human
+            .push_str("\n    recall ingest:  off — enable rift-total-recall (dashboard `/toggle`)"),
+        (true, None) => human.push_str(
+            "\n    recall ingest:  not ingested — launch `rift` here, or run \
+             `rift memory cost-hotspots`",
+        ),
+        (true, Some(0)) => human.push_str(
+            "\n    recall ingest:  projection empty — checkpoints carry no read \
+             facts yet; commit with a live session",
+        ),
+        (true, Some(n)) => human.push_str(&format!("\n    recall ingest:  {n} read(s) ingested")),
+    }
+
+    // Leg 3: the agent MCP config.
+    let mcp = mcpjson::provision_state(repo);
+    match mcp {
+        mcpjson::McpProvisionState::Provisioned => {
+            human.push_str("\n    .mcp.json:      provisioned");
+        }
+        mcpjson::McpProvisionState::Missing | mcpjson::McpProvisionState::Absent => {
+            if recall_enabled {
+                human.push_str(
+                    "\n    .mcp.json:      NOT provisioned — re-enable rift-total-recall \
+                     (the install writes it)",
+                );
+            } else {
+                human.push_str(
+                    "\n    .mcp.json:      not provisioned (recall is off; enabling writes it)",
+                );
+            }
+        }
+        mcpjson::McpProvisionState::Unparseable => human.push_str(
+            "\n    .mcp.json:      UNPARSEABLE — fix the JSON by hand; rift never \
+             overwrites a broken config",
+        ),
+    }
+
+    // Leg 4: the daemon binary.
+    let memd = resolve_memd_binary();
+    match &memd {
+        Some(p) => human.push_str(&format!(
+            "\n    daemon:         rift-memd at {}",
+            p.display()
+        )),
+        None => human.push_str(
+            "\n    daemon:         rift-memd NOT found — build it \
+             (`cargo build -p rift-memd`) or put it on PATH",
+        ),
+    }
+
+    let json = serde_json::json!({
+        "checkpoints": checkpoints,
+        "recall_enabled": recall_enabled,
+        "ingested_reads": ingested,
+        "mcp_json": mcp.as_str(),
+        "memd": memd.map(|p| p.display().to_string()),
+    });
+    (human, json)
+}
+
+/// Resolve the rift-memd binary: beside the current executable first (the
+/// cargo/dist layout), then `PATH`.
+fn resolve_memd_binary() -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) {
+        "rift-memd.exe"
+    } else {
+        "rift-memd"
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(name))
+        .find(|c| c.exists())
 }
 
 /// `rift configure`: manage `.rift/config.toml` (the checkpoint remote / policy).
@@ -495,6 +626,26 @@ fn cmd_rebuild() -> rift_core::Result<Outcome> {
 /// default 1200) with the first project active, so statuses and the column-3
 /// sections render from the developer's own projections — placeholders only
 /// where data is honestly absent, exactly like the TUI.
+/// Spawn the one-shot launch auto-ingest thread (M5-06): the launch-selected
+/// project (per the same [`rift_canopy::launch_selection`] rule), ingested in
+/// the background when rift-total-recall is enabled for it. The ingest
+/// watermark makes a relaunch a no-op; failures log and never block or crash
+/// the dashboard (the thread is detached — the loop never joins it).
+fn spawn_launch_ingest(projects: &[Project], launch_cwd: Option<&str>) {
+    let selected = launch_cwd
+        .and_then(|cwd| rift_canopy::launch_selection(projects, cwd))
+        .or_else(|| projects.first().map(|p| p.path.as_str()))
+        .map(str::to_owned);
+    let Some(path) = selected else { return };
+    std::thread::spawn(move || {
+        match memory::launch_ingest(std::path::Path::new(&path)) {
+            Ok(true) => tracing::debug!(repo = %path, "launch recall ingest complete"),
+            Ok(false) => {} // recall disabled here — nothing touched
+            Err(e) => tracing::warn!(repo = %path, error = %e, "launch recall ingest failed"),
+        }
+    });
+}
+
 /// The canonicalized launch directory + whether it sits inside a git repo —
 /// the two facts `apply_launch_cwd` selects/hints from (M5-03). Resolved once
 /// at launch; a threaded TUI must never consult process cwd afterwards.
@@ -504,10 +655,7 @@ fn launch_cwd_context() -> (Option<String>, bool) {
     };
     let canonical = cwd.canonicalize().unwrap_or(cwd);
     let is_repo = rift_git::discover(&canonical).is_ok();
-    (
-        Some(canonical.to_string_lossy().into_owned()),
-        is_repo,
-    )
+    (Some(canonical.to_string_lossy().into_owned()), is_repo)
 }
 
 fn print_ascii_frame(projects: Vec<Project>) {
@@ -601,6 +749,10 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
             std::io::stdout().is_terminal() && std::env::var_os("RIFT_HEADLESS").is_none();
         if interactive {
             let (launch_cwd, launch_cwd_is_repo) = launch_cwd_context();
+            // One-shot background ingest for the launch-selected project when
+            // rift-total-recall is enabled there (M5-06). Watermark-idempotent;
+            // a failure logs and never blocks the dashboard.
+            spawn_launch_ingest(&projects, launch_cwd.as_deref());
             let opts = rift_canopy::CanopyOpts {
                 ascii: cli.ascii,
                 skip_splash: cli.skip_splash

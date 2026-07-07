@@ -156,6 +156,139 @@ fn native_route_post_commit_archives_a_checkpoint() {
     }
 }
 
+/// M5-06 read-facts chain: a read-shaped PostToolUse hook captures the
+/// path + content hash durably, and the next post-commit archive freezes them
+/// into the shard's `tool_calls.jsonl` — the artifact the recall plane ingests
+/// as `n_file_read`. Without this, memory is empty by construction.
+#[test]
+#[allow(clippy::too_many_lines)] // one linear e2e scenario: hook -> commit -> shard -> ingest
+fn captured_read_facts_reach_the_checkpoint_shard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    let rift_dir = repo.join(".rift");
+    std::fs::create_dir_all(&rift_dir).unwrap();
+    std::fs::write(
+        rift_dir.join("rewrite.toml"),
+        "[routes]\narchive = \"native\"\n",
+    )
+    .unwrap();
+    let cache = tmp.path().join("cache");
+    let env: Vec<(&str, &str)> = vec![
+        ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
+        ("RIFT_NO_KEYCHAIN", "1"),
+    ];
+
+    // The agent reads a repo file (PostToolUse, absolute payload path — as
+    // Claude Code sends it). The hook must run from the repo cwd.
+    let abs = repo.join("a.txt");
+    let hook_body = format!(
+        r#"{{"schema":1,"session":"e2e-live-1","turn":1,"payload":{{"tool_name":"Read","tool_input":{{"file_path":"{}"}}}}}}"#,
+        abs.display()
+    );
+    let st = Command::new(RIFT)
+        .args(["hooks", "claude-code", "PostToolUse"])
+        .current_dir(&repo)
+        .envs(
+            env.iter()
+                .copied()
+                .map(|(k, v)| (k.to_owned(), v.to_owned())),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|mut c| {
+            c.stdin
+                .take()
+                .unwrap()
+                .write_all(hook_body.as_bytes())
+                .unwrap();
+            c.wait().unwrap()
+        })
+        .unwrap();
+    assert!(st.success(), "agent hook never fails");
+
+    // Commit → the archive freezes the session's read facts into the shard.
+    let (code, stderr) = run_rift_capture(
+        &[
+            "hooks",
+            "git",
+            "post-commit",
+            "--git-dir",
+            repo.join(".git").to_str().unwrap(),
+        ],
+        Some(""),
+        &env,
+    );
+    assert_eq!(code, 0, "post-commit ok; stderr: {stderr}");
+
+    let tree = Command::new("git")
+        .args([
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "refs/heads/rift/checkpoints/v1",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&tree.stdout).into_owned();
+    assert!(
+        names.contains("tool_calls.jsonl"),
+        "the shard carries the read facts: {names}"
+    );
+    let shard_path = names
+        .lines()
+        .find(|l| l.ends_with("tool_calls.jsonl"))
+        .unwrap();
+    let body = Command::new("git")
+        .args([
+            "cat-file",
+            "-p",
+            &format!("refs/heads/rift/checkpoints/v1:{shard_path}"),
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let jsonl = String::from_utf8_lossy(&body.stdout).into_owned();
+    assert!(
+        jsonl.contains(r#""path":"a.txt""#) && jsonl.contains(r#""tool":"Read""#),
+        "the read fact names the repo-relative path: {jsonl}"
+    );
+    // The recorded hash is the read-time content hash (sha256 of "one\n").
+    assert!(
+        jsonl.contains("2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806"),
+        "content_sha256 matches the bytes: {jsonl}"
+    );
+
+    // The recall plane ingests the shard: cost-hotspots shows the REAL read
+    // (memory is no longer empty by construction), and a second run is a
+    // watermark no-op (same answer, no error).
+    for pass in 0..2 {
+        let out = Command::new(RIFT)
+            .args(["memory", "cost-hotspots"])
+            .current_dir(&repo)
+            .envs(
+                env.iter()
+                    .copied()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned())),
+            )
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "cost-hotspots pass {pass}: {out:?}");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            text.contains("a.txt"),
+            "pass {pass}: the captured read is a hotspot: {text}"
+        );
+        assert!(
+            !text.contains("no captured reads"),
+            "pass {pass}: the empty-state is gone: {text}"
+        );
+    }
+}
+
 /// M5-05 loudness: the wrapper route with no provisioned backend names the
 /// skip and the next command on stderr — a silently absent checkpoint is
 /// structurally impossible.

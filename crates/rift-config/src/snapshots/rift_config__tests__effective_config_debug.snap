@@ -1,5 +1,6 @@
 ---
 source: crates/rift-config/src/lib.rs
+assertion_line: 707
 expression: "format!(\"{cfg:#?}\")"
 ---
 EffectiveConfig {
@@ -37,5 +38,8 @@ EffectiveConfig {
     retention_classes: [
         "standard",
     ],
-    policy_hash: Blake3Id(9ea8029e35272fc232260cc8028f35e3fa67c12b49d832c2263ab36479928548),
+    feature_total_recall: false,
+    feature_fff: false,
+    feature_codegraph: false,
+    policy_hash: Blake3Id(a71f5cebc053c40165097d67eacf80a8fc73e9d0f48739ab075f51b66bab62cf),
 }

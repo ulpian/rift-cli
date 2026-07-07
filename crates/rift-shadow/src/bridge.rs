@@ -85,6 +85,12 @@ async fn apply_trigger(
     }
 }
 
+/// The injected worktree read-hasher (M5-06): a read-shaped payload path in,
+/// the resolved repo-relative path + content identity out (`None` when the
+/// path is outside the repo, vanished, or unsafe). Injected so the ingest
+/// layer never touches the filesystem itself.
+pub type ReadHasher<'a> = &'a dyn Fn(&str) -> Option<crate::project::ReadContent>;
+
 /// What one hook ingest produced: the session phase, the effects the caller's
 /// executor should run, and the turn boundaries this hook closed (the caller
 /// runs the working-tree snapshotter for each — it needs the worktree, which
@@ -117,6 +123,7 @@ pub async fn ingest_hook(
     agent_label: &str,
     repo_id: &str,
     now_ms: i64,
+    read_hasher: Option<ReadHasher<'_>>,
 ) -> Result<IngestOutcome> {
     let mut events = dispatch(raw, registry)?;
 
@@ -199,7 +206,15 @@ pub async fn ingest_hook(
 
     // Normalized projection (P2 S3): the same pure mapping the artifact bridge
     // replays over re-derived events, so both sources' rows union to a no-op.
-    let facts = crate::project::payload_facts(&raw.payload);
+    let mut facts = crate::project::payload_facts(&raw.payload);
+    // Resolve the read-time content identity through the caller's worktree
+    // hasher (M5-06): the ingest layer never touches the filesystem itself,
+    // and an unresolvable path (outside the repo, vanished, unsafe) simply
+    // records no read fact.
+    if let (Some(path), Some(hasher)) = (&facts.read_path, read_hasher) {
+        facts.read_content = hasher(path);
+    }
+    let facts = facts;
     let ctx = crate::project::ProjectionCtx {
         agent: agent_label,
         repo_id,
@@ -371,6 +386,7 @@ mod tests {
             "claude-code",
             "repo-1",
             10,
+            None,
         )
         .await
         .unwrap();
@@ -385,6 +401,7 @@ mod tests {
             "claude-code",
             "repo-1",
             11,
+            None,
         )
         .await
         .unwrap();
@@ -401,6 +418,7 @@ mod tests {
             "claude-code",
             "repo-1",
             12,
+            None,
         )
         .await
         .unwrap();
@@ -439,13 +457,13 @@ mod tests {
         let mut edit = raw("PreToolUse", 1);
         edit.payload = serde_json::json!({"tool_name": "Edit"});
 
-        ingest_hook(&edit, &reg, &s, git_dir, "claude-code", "repo-1", 10)
+        ingest_hook(&edit, &reg, &s, git_dir, "claude-code", "repo-1", 10, None)
             .await
             .unwrap();
         assert_eq!(s.count("captured_event").await.unwrap(), 2);
 
         // Re-deliver the identical hook: same idempotency keys → no new rows.
-        ingest_hook(&edit, &reg, &s, git_dir, "claude-code", "repo-1", 99)
+        ingest_hook(&edit, &reg, &s, git_dir, "claude-code", "repo-1", 99, None)
             .await
             .unwrap();
         assert_eq!(
@@ -457,9 +475,18 @@ mod tests {
         // A distinct turn is a distinct logical event → new rows.
         let mut edit2 = edit.clone();
         edit2.turn = Some(2);
-        ingest_hook(&edit2, &reg, &s, git_dir, "claude-code", "repo-1", 100)
-            .await
-            .unwrap();
+        ingest_hook(
+            &edit2,
+            &reg,
+            &s,
+            git_dir,
+            "claude-code",
+            "repo-1",
+            100,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(s.count("captured_event").await.unwrap(), 4);
     }
 
@@ -483,7 +510,7 @@ mod tests {
         let ingest = |raw: RawHook, at: i64| {
             let (s, reg) = (&s, &reg);
             async move {
-                ingest_hook(&raw, reg, s, git_dir, "claude-code", "repo-1", at)
+                ingest_hook(&raw, reg, s, git_dir, "claude-code", "repo-1", at, None)
                     .await
                     .unwrap()
             }

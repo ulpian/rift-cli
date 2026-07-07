@@ -20,7 +20,7 @@ use rift_recall_ledger::ingest::{self, IngestOptions};
 use rift_recall_ledger::metrics::{compute_metrics, record_metric_snapshot, ContextMetrics};
 use rift_recall_mcp::{McpServer, RecallContext, ToolName, ToolRequest, ToolResponse};
 use rift_recall_policy::{PolicyEngine, ServePolicy, TurnBudget};
-use rift_recall_substrate::{worktree, GixSubstrate, MemorySubstrate};
+use rift_recall_substrate::{worktree, GixSubstrate, MemorySubstrate, SubstrateReader as _};
 use rift_recall_types::Scope;
 use rift_store::{CanonicalStore, SqliteStore, Value};
 
@@ -40,13 +40,9 @@ async fn dispatch(cmd: &MemoryCmd, repo: &Path) -> Result<Outcome> {
     let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
     let sub = GixSubstrate::open(repo)?;
 
-    // Answer on fresh state: blob-oid map first (ADR-0005), then the
-    // incremental graph ingest (already-projected checkpoints are skipped).
-    let (reads, _issues) = ingest::read_facts_all(&sub)?;
-    let paths = ingest::read_paths(&reads);
-    let blobs = worktree::hash_blobs(repo, &paths);
-    rift_recall_ledger::blob_map::persist_blob_oid_map(&store, &blobs, 0).await?;
-    ingest::ingest_with(&store, &sub, &IngestOptions::default()).await?;
+    // Answer on fresh state: the same ingest pass the launch auto-ingest and
+    // the memory daemon run (watermark-idempotent).
+    let paths = refresh_recall(&store, &sub, repo).await?;
 
     let repo_id = rift_store::recall_repo_id(repo)?;
     let scope = Scope::default_for(repo_id.as_str(), u32::MAX);
@@ -57,6 +53,48 @@ async fn dispatch(cmd: &MemoryCmd, repo: &Path) -> Result<Outcome> {
         MemoryCmd::CostHotspots(a) => cost_hotspots(&store, repo, &scope, a.top).await,
         MemoryCmd::RereadReport => reread_report(&store, repo, &scope, &paths).await,
     }
+}
+
+/// The one recall ingest pass (M5-06): blob-oid map first (ADR-0005), then the
+/// incremental graph ingest (already-projected checkpoints are skipped — the
+/// watermark that makes launch-twice a no-op). Returns the read paths (the
+/// worktree-hash inputs some callers reuse). Shared by `rift memory *`, the
+/// dashboard's launch auto-ingest, and (via the same library calls) rift-memd.
+pub(crate) async fn refresh_recall(
+    store: &SqliteStore,
+    sub: &GixSubstrate,
+    repo: &Path,
+) -> Result<std::collections::BTreeSet<String>> {
+    let (reads, _issues) = ingest::read_facts_all(sub)?;
+    let paths = ingest::read_paths(&reads);
+    let blobs = worktree::hash_blobs(repo, &paths);
+    rift_recall_ledger::blob_map::persist_blob_oid_map(store, &blobs, 0).await?;
+    ingest::ingest_with(store, sub, &IngestOptions::default()).await?;
+    Ok(paths)
+}
+
+/// The dashboard's launch auto-ingest (M5-06, PRD user story 29): one pass for
+/// the launch-selected repository, **only when rift-total-recall is enabled
+/// there** — an unguarded ingest would create `recall.db` and silently flip
+/// the memory sections' Disabled/Quiet distinction. Returns `Ok(false)` when
+/// recall is off (nothing touched), `Ok(true)` after a completed pass.
+pub(crate) fn launch_ingest(repo: &Path) -> Result<bool> {
+    let cfg = EffectiveConfig::load(&repo.join(".rift"))
+        .or_else(|_| EffectiveConfig::secure_default())?;
+    if !cfg.recall_enabled() {
+        return Ok(false);
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(RiftError::from)?;
+    rt.block_on(async {
+        let db = rift_store::recall_db_for_repo(repo)?;
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+        let sub = GixSubstrate::open(repo)?;
+        refresh_recall(&store, &sub, repo).await?;
+        Ok::<_, RiftError>(())
+    })?;
+    Ok(true)
 }
 
 /// Dispatch one tool call through the shared bounded surface: the same policy
@@ -234,12 +272,40 @@ async fn cost_hotspots(
         ));
     }
     if hotspots.as_array().is_none_or(Vec::is_empty) {
-        human.push_str("  (no captured reads yet)\n");
+        human.push_str(&format!("  {}\n", empty_reads_diagnosis(repo, store).await));
     }
     Ok(Outcome::ok(
         human,
         serde_json::json!({ "hotspots": hotspots }),
     ))
+}
+
+/// Name the broken memory-chain link behind an empty read set (M5-06, PRD user
+/// story 31): no checkpoints → not ingested → genuinely no reads — each with
+/// its next command. An empty panel is a diagnosis, not a shrug.
+pub(crate) async fn empty_reads_diagnosis(repo: &Path, store: &SqliteStore) -> String {
+    let checkpoints = GixSubstrate::open(repo)
+        .and_then(|sub| sub.checkpoints())
+        .map_or(0, |c| c.len());
+    if checkpoints == 0 {
+        return "(no captured reads yet — this repository has no checkpoints; \
+                commit with a live session, or see `rift doctor`)"
+            .to_owned();
+    }
+    let ingested = store
+        .query("SELECT COUNT(*) FROM n_file_read", &[])
+        .await
+        .ok()
+        .and_then(|rows| rows.first().and_then(|r| r.get_i64(0).ok()))
+        .unwrap_or(0);
+    if ingested == 0 {
+        return format!(
+            "(no captured reads yet — {checkpoints} checkpoint(s) exist but carry no \
+             read facts; sessions before the read-fact capture landed have none, \
+             or see `rift doctor`)"
+        );
+    }
+    "(no reads in scope)".to_owned()
 }
 
 /// The data behind one reread report (separated from rendering so the report
@@ -345,6 +411,32 @@ async fn reread_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_ingest_is_inert_when_recall_is_disabled() {
+        // The M5-06 guard: an unguarded ingest would create recall.db and
+        // silently flip the memory sections' Disabled/Quiet distinction. The
+        // guard fires BEFORE any path/store resolution, so a disabled repo is
+        // untouched entirely.
+        let tmp = tempfile::tempdir().unwrap();
+        let ran = launch_ingest(tmp.path()).unwrap();
+        assert!(!ran, "recall disabled -> no ingest ran");
+
+        // With recall enabled in the per-repo policy config the guard opens
+        // (the pass itself then needs a git repo, which this tempdir is not —
+        // an error is fine here; the GUARD decision is what this pins).
+        let rift_dir = tmp.path().join(".rift");
+        std::fs::create_dir_all(&rift_dir).unwrap();
+        std::fs::write(
+            rift_dir.join("config.toml"),
+            "schema_version = 1\n[project]\nname = \"t\"\n[features]\ntotal_recall = true\n",
+        )
+        .unwrap();
+        assert!(
+            launch_ingest(tmp.path()).is_err(),
+            "guard open -> the pass runs (and fails honestly on a non-repo)"
+        );
+    }
 
     /// The reread-report format is a gate artifact: locked by this golden test
     /// (PRD-M2 "its format is locked by a golden fixture and a snapshot test").

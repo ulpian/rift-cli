@@ -200,12 +200,15 @@ fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
         return Ok(());
     };
 
-    let checkpoint_id =
-        rift_shadow::predicted_checkpoint_id(&sess.session_id, &session_raw_capture())?;
     let store = rift_store::open_capture_projection(projection_db_for(&repo.work_tree)?)?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
+    // The prediction folds in the read facts captured so far, exactly as the
+    // post-commit archive will (M5-06) — same query, same digest.
+    let facts = read_facts_for_archive(&rt, &store, &sess.agent, &sess.session_id);
+    let checkpoint_id =
+        rift_shadow::predicted_checkpoint_id(&sess.session_id, &session_raw_capture(), &facts)?;
     let attribution = rt.block_on(rift_shadow::attribution_preview(
         &store,
         &sess.agent,
@@ -288,6 +291,7 @@ fn on_pr_archive(git_dir: Option<&str>) -> Result<()> {
             &repo.work_tree,
             &commit,
             &sess.session_id,
+            &sess.agent,
             decision,
             now,
         )?;
@@ -300,12 +304,14 @@ fn on_pr_archive(git_dir: Option<&str>) -> Result<()> {
 /// `Native`-routed archive needs no wrapper binary; a `Wrapper`/`DualRun` archive
 /// defers when the pinned binary is not provisioned. Dual-run divergences are
 /// persisted append-only as the soak evidence. Capture never blocks the git op.
+#[allow(clippy::too_many_arguments)]
 fn archive_now(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
     work_tree: &Path,
     commit: &str,
     session: &str,
+    agent: &str,
     decision: rift_shadow::hooks::strategy::ArchiveDecision,
     now: i64,
 ) -> Result<()> {
@@ -318,11 +324,12 @@ fn archive_now(
     let routes = RouteTable::load(&repo.work_tree.join(".rift"));
     let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
     let raw = session_raw_capture();
+    let facts = read_facts_for_archive(rt, store, agent, session);
 
     // A fully-native archive writes the shard itself — no wrapper binary required.
     if matches!(routes.route(Capability::Archive), Route::Native) {
         rt.block_on(rift_shadow::run_decision(
-            &native, store, work_tree, session, &raw, decision, commit, now,
+            &native, store, work_tree, session, &raw, decision, commit, now, facts,
         ))?;
         return Ok(());
     }
@@ -336,12 +343,34 @@ fn archive_now(
     let runner = SystemRunner::new(binary);
     let backend = RoutedBackend::new(EntireBackend::new(&runner), native, routes);
     rt.block_on(rift_shadow::run_decision(
-        &backend, store, work_tree, session, &raw, decision, commit, now,
+        &backend, store, work_tree, session, &raw, decision, commit, now, facts,
     ))?;
     if dual {
         persist_dual_run(rt, store, &backend.take_divergences(), session, commit, now);
     }
     Ok(())
+}
+
+/// The session's captured read facts, mapped for the shard's
+/// `tool_calls.jsonl` (M5-06). Best-effort: a query failure archives an empty
+/// set rather than blocking the checkpoint.
+fn read_facts_for_archive(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    agent: &str,
+    session: &str,
+) -> Vec<rift_shadow::backend::ArchivedReadFact> {
+    let row_id = rift_shadow::ids::session_row_id(agent, session);
+    rt.block_on(rift_store::session_read_facts(store, &row_id))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| rift_shadow::backend::ArchivedReadFact {
+            tool_use_id: f.tool_call_id,
+            tool_name: f.tool_name,
+            path: f.path,
+            content_sha256: f.content_sha256,
+        })
+        .collect()
 }
 
 /// Persist a dual-run window's divergences append-only (the soak evidence, P7
@@ -520,6 +549,7 @@ fn run_routed_archive(
     let routes = RouteTable::load(&repo.work_tree.join(".rift"));
     let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
     let raw = session_raw_capture();
+    let facts = read_facts_for_archive(rt, store, &sess.agent, &sess.session_id);
 
     // A fully-native archive writes the shard itself — no wrapper binary.
     if matches!(routes.route(Capability::Archive), Route::Native) {
@@ -533,6 +563,7 @@ fn run_routed_archive(
             &raw,
             decision,
             now,
+            facts,
         ));
         report_archive_outcome(&archived);
         return true;
@@ -552,6 +583,7 @@ fn run_routed_archive(
             &raw,
             decision,
             now,
+            facts,
         ));
         report_archive_outcome(&archived);
         if dual {
@@ -735,6 +767,41 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
+    // The worktree read-hasher (M5-06): resolves a read-shaped tool call's
+    // payload path (absolute or repo-relative) to a repo-relative path plus the
+    // current bytes' identity, using the SAME hashing the recall plane's
+    // blob-oid map uses. A path outside the repo, vanished, or unsafe resolves
+    // to no fact — capture never guesses.
+    let work_tree = std::env::current_dir()
+        .ok()
+        .map(|d| d.canonicalize().unwrap_or(d));
+    let read_hasher = move |raw_path: &str| -> Option<rift_shadow::ReadContent> {
+        let wt = work_tree.as_ref()?;
+        let p = Path::new(raw_path);
+        // Canonicalize an absolute payload path so symlinked prefixes (macOS
+        // `/var` -> `/private/var`) still resolve under the worktree root.
+        let canon;
+        let rel = if p.is_absolute() {
+            canon = p.canonicalize().ok()?;
+            canon.strip_prefix(wt).ok()?
+        } else {
+            p
+        };
+        let rel_str = rel.to_str()?.to_owned();
+        if rel_str.is_empty() {
+            return None;
+        }
+        let mut set = std::collections::BTreeSet::new();
+        set.insert(rel_str);
+        let blob = rift_recall_substrate::worktree::hash_blobs(wt, &set)
+            .into_iter()
+            .next()?;
+        Some(rift_shadow::ReadContent {
+            rel_path: blob.path,
+            blob_oid: blob.blob_oid,
+            content_sha256: blob.content_sha256,
+        })
+    };
     let outcome = rt.block_on(async {
         let out = ingest_hook(
             &raw,
@@ -744,6 +811,7 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
             agent,
             &repo_id,
             now_ms(),
+            Some(&read_hasher),
         )
         .await?;
         // Bind any newly-appeared sessions to the local developer identity
@@ -895,7 +963,16 @@ fn drive_post_ingest(
             reason: ArchiveReason::SessionEnd,
             strategy: base,
         };
-        archive_now(rt, store, &repo.work_tree, &commit, session, decision, now)?;
+        archive_now(
+            rt,
+            store,
+            &repo.work_tree,
+            &commit,
+            session,
+            agent,
+            decision,
+            now,
+        )?;
         let _ = rt.block_on(rift_shadow::bridge::mark_condense_done(
             store,
             &repo.git_dir,
@@ -921,7 +998,16 @@ fn drive_post_ingest(
         },
     );
     if decision.archive {
-        archive_now(rt, store, &repo.work_tree, &commit, session, decision, now)?;
+        archive_now(
+            rt,
+            store,
+            &repo.work_tree,
+            &commit,
+            session,
+            agent,
+            decision,
+            now,
+        )?;
     }
     Ok(())
 }

@@ -36,6 +36,7 @@ pub async fn run_decision(
     decision: ArchiveDecision,
     commit_oid: &str,
     now_ms: i64,
+    read_facts: Vec<crate::backend::ArchivedReadFact>,
 ) -> Result<Option<CheckpointId>> {
     if decision.archive {
         let id = condense(
@@ -48,6 +49,7 @@ pub async fn run_decision(
             decision.reason,
             commit_oid,
             now_ms,
+            read_facts,
         )
         .await?;
         Ok(Some(id))
@@ -134,9 +136,19 @@ mod tests {
             strategy: StrategyKind::ManualCommit,
         };
         let raw = rift_core::SecretBytes::new(Vec::new());
-        let out = run_decision(&backend, &s, Path::new("/r"), "s", &raw, decision, "abc", 1)
-            .await
-            .unwrap();
+        let out = run_decision(
+            &backend,
+            &s,
+            Path::new("/r"),
+            "s",
+            &raw,
+            decision,
+            "abc",
+            1,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
         assert!(out.is_none());
         assert_eq!(s.count("archive_decision").await.unwrap(), 1);
         assert!(
@@ -165,6 +177,7 @@ mod tests {
             decision,
             "abc123",
             1,
+            Vec::new(),
         )
         .await
         .unwrap();

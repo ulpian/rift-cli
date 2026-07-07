@@ -32,6 +32,27 @@ pub struct PayloadFacts {
     pub tool_name: Option<String>,
     /// A child-session id for subagent events, if the payload names one.
     pub child_session: Option<String>,
+    /// The path a **read-shaped** tool touched (`tool_input.file_path`), raw
+    /// from the payload — the capture-side read fact the recall plane's whole
+    /// delta model rests on (M5-06).
+    pub read_path: Option<String>,
+    /// The resolved read-time content identity for `read_path` — repo-relative
+    /// path + hashes, resolved by the caller's injected worktree hasher, never
+    /// by this crate (no filesystem here; tests stay deterministic).
+    pub read_content: Option<ReadContent>,
+}
+
+/// The read-time content identity of one read-shaped tool call: the
+/// repo-relative path plus the current bytes' git blob oid and SHA-256 —
+/// exactly the triple `tool_calls.jsonl` (and so the recall ledger) carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadContent {
+    /// Repo-relative path (the caller relativized any absolute payload path).
+    pub rel_path: String,
+    /// Git blob object id of the bytes at read time.
+    pub blob_oid: String,
+    /// Plain SHA-256 (hex) of the bytes at read time.
+    pub content_sha256: String,
 }
 
 /// Extract [`PayloadFacts`] from a native payload. Total: unknown shapes yield
@@ -43,14 +64,29 @@ pub fn payload_facts(payload: &serde_json::Value) -> PayloadFacts {
             .find_map(|k| payload.get(k).and_then(|v| v.as_str()))
             .map(str::to_owned)
     };
+    let tool_name = str_at(&["tool_name"]);
+    // A read-shaped call names its file in `tool_input.file_path` (a scalar
+    // identity field — the CONTENT of the read never leaves the agent here).
+    let read_path = tool_name
+        .as_deref()
+        .filter(|n| n.eq_ignore_ascii_case("read"))
+        .and_then(|_| {
+            payload
+                .get("tool_input")
+                .and_then(|t| t.get("file_path"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
     PayloadFacts {
         model: str_at(&["model"]),
-        tool_name: str_at(&["tool_name"]),
+        tool_name,
         child_session: str_at(&[
             "subagent_session_id",
             "child_session_id",
             "agent_session_id",
         ]),
+        read_path,
+        read_content: None,
     }
 }
 
@@ -173,13 +209,50 @@ pub async fn project_event(
             )
             .await?;
         }
+        // A completed read-shaped tool call (PostToolUse fan-out) is the one
+        // durable "the agent read path P at content H" fact the recall plane
+        // ingests — without it memory is empty by construction (M5-06). The
+        // read anchors to its own idempotent tool_call row; the revision id is
+        // content-addressed like the commit-capture writer's.
+        EventKind::ToolResult => {
+            if let Some(rc) = &facts.read_content {
+                let call_id =
+                    ids::tool_call_row_id(&session_row, ev.turn_ordinal, ev.event_ordinal);
+                rift_store::record_tool_call(
+                    store,
+                    &ToolCallRow {
+                        tool_call_id: call_id.clone(),
+                        turn_id: ids::turn_row_id(&session_row, ev.turn_ordinal),
+                        tool_name: facts.tool_name.clone().unwrap_or_default(),
+                        started_at: ev.occurred_at_ms,
+                        schema_version: i64::from(ev.schema_version),
+                    },
+                )
+                .await?;
+                let revision_id =
+                    rift_shadow_attribution::file_revision_id(&rc.rel_path, rc.blob_oid.as_bytes())
+                        .sha256()
+                        .to_hex();
+                rift_store::record_file_revision(
+                    store,
+                    &rift_store::FileRevisionRow {
+                        file_revision_id: revision_id.clone(),
+                        path: rc.rel_path.clone(),
+                        blob_oid: rc.blob_oid.clone(),
+                        content_sha256: rc.content_sha256.clone(),
+                        schema_version: i64::from(ev.schema_version),
+                    },
+                )
+                .await?;
+                rift_store::record_tool_reads_file(store, &call_id, &revision_id).await?;
+            }
+        }
         // Turn boundaries drive the state machine and the boundary snapshotter;
-        // prompt-submit / tool-result / file-edit facts are event-grain only at
-        // this layer (file links land with revisions at boundaries/commit).
+        // prompt-submit / file-edit facts are event-grain only at this layer
+        // (file links land with revisions at boundaries/commit).
         EventKind::TurnStart
         | EventKind::TurnEnd
         | EventKind::PromptSubmit
-        | EventKind::ToolResult
         | EventKind::FileEdit
         | EventKind::SubagentEnd => {}
     }

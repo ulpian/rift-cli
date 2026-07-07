@@ -108,12 +108,56 @@ pub struct CheckpointArchive {
     pub merkle_root: Sha256Id,
     /// The archived canonical events (empty ⇒ no `full.jsonl`).
     pub events: Vec<ArchivedEvent>,
+    /// The session's captured read facts (empty ⇒ no `tool_calls.jsonl`) —
+    /// what the recall plane ingests as `n_file_read` (M5-06).
+    pub read_facts: Vec<ArchivedReadFact>,
     /// The redacted raw capture (durable-blob proof of the gate).
     pub content: RedactedBytes,
     /// The redaction report for `redaction_report.json` (must be valid).
     pub report: RedactionReportView,
     /// Creation time (epoch ms) — the commit date is derived from it.
     pub created_at_ms: i64,
+}
+
+/// One read fact frozen into the shard's `tool_calls.jsonl`: identifiers +
+/// hashes only, matching the recall parser's `ToolCallRecord` field aliases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedReadFact {
+    /// The tool-call id (`ToolCallRecord`'s `id` alias).
+    pub tool_use_id: String,
+    /// The tool name (`Read`-shaped).
+    pub tool_name: String,
+    /// Repo-relative path.
+    pub path: String,
+    /// SHA-256 (hex) of the bytes at read time.
+    pub content_sha256: String,
+}
+
+/// Serialize read facts exactly as the shard's `tool_calls.jsonl` freezes them
+/// (`None` when empty — the artifact is omitted, never written empty). Shared
+/// by the shard writer and the checkpoint-id derivation, which folds these
+/// bytes into the id so a session whose fact set GREW mints a NEW checkpoint
+/// instead of colliding with its earlier shard.
+#[must_use]
+pub fn tool_calls_jsonl_bytes(read_facts: &[ArchivedReadFact]) -> Option<Vec<u8>> {
+    if read_facts.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (i, f) in read_facts.iter().enumerate() {
+        if i > 0 {
+            out.push(b'\n');
+        }
+        let line = serde_json::json!({
+            "id": f.tool_use_id,
+            "tool": f.tool_name,
+            "path": f.path,
+            "sha256": f.content_sha256,
+        });
+        out.extend_from_slice(&canonical_json(&line));
+    }
+    out.push(b'\n');
+    Some(out)
 }
 
 /// The counts-only redaction facts the native archive freezes into
@@ -191,6 +235,15 @@ impl CheckpointArchive {
             "input_sha256": r.input_sha256,
         });
         canonical_json(&obj)
+    }
+
+    /// Render `tool_calls.jsonl` — one line per captured read fact, in the
+    /// field spelling the recall parser's `ToolCallRecord` aliases accept.
+    /// `None` when the session produced no read facts (the artifact is omitted,
+    /// never written empty).
+    #[must_use]
+    pub fn tool_calls_jsonl(&self) -> Option<Vec<u8>> {
+        tool_calls_jsonl_bytes(&self.read_facts)
     }
 
     /// The `full.jsonl` bytes (one canonical event per line), or `None` if empty.
@@ -545,6 +598,15 @@ impl<W: NativeGitWrite> NativeBackend<W> {
                 oid: self.writer.write_structural_blob(&full)?,
             });
         }
+        // The read facts the recall plane ingests (M5-06): ids/paths/hashes
+        // only — structural by construction, like metadata.json.
+        if let Some(tool_calls) = archive.tool_calls_jsonl() {
+            entries.push(TreeWriteEntry {
+                mode: GitFileMode::Blob,
+                name: "tool_calls.jsonl".into(),
+                oid: self.writer.write_structural_blob(&tool_calls)?,
+            });
+        }
         // Canonical git tree order (bytewise by name) so the leaf tree is stable.
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let leaf = self.writer.write_tree(&entries)?;
@@ -716,6 +778,7 @@ mod tests {
             prev_hash: None,
             merkle_root: crate::checkpoint_merkle_root(&[]),
             events: Vec::new(),
+            read_facts: Vec::new(),
             content: redacted(),
             report: RedactionReportView {
                 total_spans: 0,

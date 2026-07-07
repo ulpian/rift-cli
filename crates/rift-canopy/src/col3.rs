@@ -671,10 +671,15 @@ fn draw_section(
                     frame,
                     rect,
                     "recall savings",
-                    "(recall off — `rift enable`)",
+                    "(recall off — /toggle total-recall)",
                 );
             }
-            RecallView::Quiet => title_line(frame, rect, "recall savings", "(no serves yet)"),
+            RecallView::Quiet => title_line(
+                frame,
+                rect,
+                "recall savings",
+                "(no serves yet — see `rift doctor`)",
+            ),
             RecallView::Data(d) => {
                 title_line(
                     frame,
@@ -696,10 +701,15 @@ fn draw_section(
                     frame,
                     rect,
                     "recall mcp calls",
-                    "(recall off — `rift enable`)",
+                    "(recall off — /toggle total-recall)",
                 );
             }
-            RecallView::Quiet => title_line(frame, rect, "recall mcp calls", "(no serves yet)"),
+            RecallView::Quiet => title_line(
+                frame,
+                rect,
+                "recall mcp calls",
+                "(no serves yet — see `rift doctor`)",
+            ),
             RecallView::Data(d) => {
                 title_line(
                     frame,

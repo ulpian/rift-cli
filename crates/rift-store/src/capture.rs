@@ -1310,6 +1310,54 @@ pub async fn latest_archive_ms(
         .await
 }
 
+/// One captured read fact for a session: the tool call that read `path` whose
+/// bytes hashed to `content_sha256` at read time (M5-06) — exactly the triple
+/// the checkpoint shard's `tool_calls.jsonl` line carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionReadFact {
+    /// The tool-call row id anchoring the read.
+    pub tool_call_id: String,
+    /// The tool name (`Read`-shaped).
+    pub tool_name: String,
+    /// Repo-relative path.
+    pub path: String,
+    /// SHA-256 (hex) of the bytes at read time.
+    pub content_sha256: String,
+}
+
+/// Every read fact captured for `session_row_id` (the projected session id),
+/// oldest first — the condense-time source of the shard's `tool_calls.jsonl`.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn session_read_facts(
+    store: &impl CanonicalStore,
+    session_row_id: &str,
+) -> Result<Vec<SessionReadFact>> {
+    let rows = store
+        .query(
+            "SELECT tc.tool_call_id, tc.tool_name, fr.path, fr.content_sha256 \
+             FROM tool_reads_file trf \
+             JOIN tool_call tc ON tc.tool_call_id = trf.tool_call_id \
+             JOIN turn t ON t.turn_id = tc.turn_id \
+             JOIN file_revision fr ON fr.file_revision_id = trf.file_revision_id \
+             WHERE t.session_id = ?1 \
+             ORDER BY tc.started_at ASC, tc.tool_call_id ASC",
+            &[Value::text(session_row_id.to_owned())],
+        )
+        .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        out.push(SessionReadFact {
+            tool_call_id: r.get_text(0)?,
+            tool_name: r.get_text(1)?,
+            path: r.get_text(2)?,
+            content_sha256: r.get_text(3)?,
+        });
+    }
+    Ok(out)
+}
+
 /// The most recently recorded branch tip for `branch`, if any — where the
 /// bridge resumes from. Append-only reads: latest `ingested_at` wins (ties
 /// broken by `watermark_id` for determinism).

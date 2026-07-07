@@ -85,6 +85,10 @@ pub struct RiftConfig {
     /// Retention classes.
     #[serde(default)]
     pub retention: RetentionPolicy,
+    /// Optional-feature enablement (ADR-0013): the per-repo desired state the
+    /// feature lifecycle writes and the dashboard/doctor read.
+    #[serde(default)]
+    pub features: FeaturePolicy,
 }
 
 /// Project identity.
@@ -96,6 +100,23 @@ pub struct ProjectMeta {
     /// Optional explicit repo id (otherwise derived elsewhere).
     #[serde(default)]
     pub repo_id: Option<String>,
+}
+
+/// Optional-feature enablement (ADR-0013). `total_recall` gates the recall
+/// plane's auto-ingest and provisioning; `fff`/`codegraph` persist desired
+/// state ahead of their M7 engines (honest staged rows).
+#[derive(Debug, Clone, Default, ::serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeaturePolicy {
+    /// rift-total-recall is installed for this repository.
+    #[serde(default)]
+    pub total_recall: bool,
+    /// fff (fuzzy find) desired state (engine lands at M7).
+    #[serde(default)]
+    pub fff: bool,
+    /// codegraph desired state (engine lands at M7).
+    #[serde(default)]
+    pub codegraph: bool,
 }
 
 /// Redaction tuning knobs.
@@ -233,6 +254,7 @@ impl RiftConfig {
             paths: PathPolicy::default(),
             capture: CapturePolicy::default(),
             retention: RetentionPolicy::default(),
+            features: FeaturePolicy::default(),
         }
     }
 }
@@ -255,6 +277,9 @@ pub struct EffectiveConfig {
     extra_patterns: Vec<String>,
     default_retention_class: String,
     retention_classes: Vec<String>,
+    feature_total_recall: bool,
+    feature_fff: bool,
+    feature_codegraph: bool,
     policy_hash: Blake3Id,
 }
 
@@ -436,6 +461,9 @@ impl EffectiveConfig {
             extra_patterns: extra,
             default_retention_class: cfg.retention.default_class,
             retention_classes: classes,
+            feature_total_recall: cfg.features.total_recall,
+            feature_fff: cfg.features.fff,
+            feature_codegraph: cfg.features.codegraph,
             policy_hash: Blake3Id::from_bytes([0; 32]),
         };
         effective.policy_hash = effective.compute_policy_hash();
@@ -467,6 +495,12 @@ impl EffectiveConfig {
             &format!("{:.4}", f64::from(self.entropy_threshold)),
         );
         field("default_retention_class", &self.default_retention_class);
+        field(
+            "feature_total_recall",
+            &self.feature_total_recall.to_string(),
+        );
+        field("feature_fff", &self.feature_fff.to_string());
+        field("feature_codegraph", &self.feature_codegraph.to_string());
         for v in &self.allow_models {
             field("allow_model", v);
         }
@@ -513,6 +547,26 @@ impl EffectiveConfig {
     #[must_use]
     pub fn is_sensitive_path(&self, path: &str) -> bool {
         self.sensitive_paths.iter().any(|g| glob_match(g, path))
+    }
+
+    /// Whether rift-total-recall is enabled for this repository (ADR-0013):
+    /// gates the dashboard's launch auto-ingest and the `.mcp.json`
+    /// provisioning warner. Default off.
+    #[must_use]
+    pub fn recall_enabled(&self) -> bool {
+        self.feature_total_recall
+    }
+
+    /// fff's persisted desired state (engine lands at M7).
+    #[must_use]
+    pub fn fff_desired(&self) -> bool {
+        self.feature_fff
+    }
+
+    /// codegraph's persisted desired state (engine lands at M7).
+    #[must_use]
+    pub fn codegraph_desired(&self) -> bool {
+        self.feature_codegraph
     }
 
     /// The configured base checkpoint strategy token (one of

@@ -143,6 +143,7 @@ fn a_seeded_secret_never_reaches_any_native_artifact() {
         prev_hash: None,
         merkle_root: rift_shadow::checkpoint_merkle_root(&[]),
         events: Vec::new(),
+        read_facts: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         created_at_ms: 1_700_000_000_000,

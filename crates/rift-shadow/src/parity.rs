@@ -518,6 +518,7 @@ fn empty_archive() -> CheckpointArchive {
     let checkpoint_id = crate::condense::predicted_checkpoint_id(
         &session,
         &rift_core::SecretBytes::new(Vec::new()),
+        &[],
     )
     .unwrap_or_else(|_| "0".repeat(64));
     CheckpointArchive {
@@ -529,6 +530,7 @@ fn empty_archive() -> CheckpointArchive {
         prev_hash: None,
         merkle_root: crate::checkpoint_merkle_root(&[]),
         events: Vec::new(),
+        read_facts: Vec::new(),
         content,
         report,
         created_at_ms: 1_700_000_000_000,
@@ -586,6 +588,7 @@ fn two_turn_archive() -> CheckpointArchive {
         prev_hash: None,
         merkle_root,
         events,
+        read_facts: Vec::new(),
         content,
         report: RedactionReportView {
             total_spans: 0,
@@ -778,6 +781,7 @@ mod tests {
             prev_hash: None,
             merkle_root: crate::checkpoint_merkle_root(&fixture_canonical_events(&events)),
             events,
+            read_facts: Vec::new(),
             content: empty_content(),
             report: empty_report(),
             created_at_ms: 1_700_000_000_000,

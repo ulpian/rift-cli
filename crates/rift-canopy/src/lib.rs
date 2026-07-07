@@ -409,7 +409,10 @@ mod tests {
             proj("/home/dev/other", EntryKind::Repo),
             proj("/home/dev/rift", EntryKind::Repo),
         ];
-        assert_eq!(launch_selection(&ps, "/home/dev/rift"), Some("/home/dev/rift"));
+        assert_eq!(
+            launch_selection(&ps, "/home/dev/rift"),
+            Some("/home/dev/rift")
+        );
     }
 
     #[test]

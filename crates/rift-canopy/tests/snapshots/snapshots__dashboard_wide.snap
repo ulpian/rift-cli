@@ -1,5 +1,6 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 71
 expression: frame_text(&f)
 ---
 RIFT — Canopy
@@ -23,14 +24,14 @@ RIFT — Canopy
 │                      ││  checkpoints: 0                              ││                                              │
 │                      ││                                              ││                                              │
 │                      ││features                                      ││                                              │
-│                      ││                                              ││· recall savings  (recall off — `rift enable`)│
+│                      ││                                              ││· recall savings  (recall off — /toggle total-│
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
-│                      ││                                              ││· recall mcp calls  (recall off — `rift enable│
+│                      ││                                              ││· recall mcp calls  (recall off — /toggle tota│
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
 │                      ││                                              ││                                              │
