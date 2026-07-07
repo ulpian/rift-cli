@@ -20,10 +20,10 @@
 //! the [`crate::state::ViewModel`].
 
 use crate::layout::Rect;
-use crate::palette;
 use crate::plot::{self, Paint};
 use crate::render::frame::{Frame, Style};
 use crate::render::RenderBackend;
+use crate::theme;
 
 /// The six sections, in their fixed display order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -570,8 +570,8 @@ fn draw_section(
                     let max = plot::autoscale_max(&d.rate);
                     let pts = plot::bar_points(&d.rate, max, pr.h.saturating_mul(4).max(4));
                     let paint = Paint::VGradient {
-                        lo: palette::TOKEN_LO,
-                        hi: palette::TOKEN_HI,
+                        lo: theme::TOKEN_LO,
+                        hi: theme::TOKEN_HI,
                     };
                     backend.plot(&pts, pr, &paint, frame);
                 }
@@ -626,7 +626,7 @@ fn draw_section(
                         let pts = plot::bar_points(&vals, max, pr.h.saturating_mul(4).max(4));
                         // One hue per class, matching the `in / rd / out` labels
                         // above (input=blue, read=green, output=violet, cache=amber).
-                        backend.plot(&pts, pr, &Paint::ByCategory(&palette::BREAKDOWN), frame);
+                        backend.plot(&pts, pr, &Paint::ByCategory(&theme::BREAKDOWN), frame);
                     }
                 }
             }
@@ -661,7 +661,7 @@ fn draw_section(
                     );
                     // Green (empty) → amber → red (full): the meter reddens as the
                     // context window fills (fuller = worse).
-                    backend.plot(&pts, pr, &Paint::HRamp(&palette::GAUGE_RAMP), frame);
+                    backend.plot(&pts, pr, &Paint::HRamp(&theme::GAUGE_RAMP), frame);
                 }
             }
         },
@@ -691,7 +691,7 @@ fn draw_section(
                     let pr = plot_rect(rect);
                     let max = plot::autoscale_max(&d.rate);
                     let pts = plot::line_points(&d.rate, max, pr.w.saturating_mul(2).max(2));
-                    backend.plot(&pts, pr, &Paint::Solid(Style::fg(palette::ACCENT)), frame);
+                    backend.plot(&pts, pr, &Paint::Solid(Style::fg(theme::ACCENT)), frame);
                 }
             }
         },
@@ -724,7 +724,7 @@ fn draw_section(
                     backend.plot(
                         &pts,
                         pr,
-                        &Paint::Solid(Style::fg(palette::RECALL_CALLS)),
+                        &Paint::Solid(Style::fg(theme::RECALL_CALLS)),
                         frame,
                     );
                 }

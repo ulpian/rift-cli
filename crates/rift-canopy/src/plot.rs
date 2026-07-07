@@ -52,9 +52,9 @@ impl Paint {
         match self {
             Self::Solid(s) => *s,
             Self::VGradient { lo, hi } => {
-                Style::fg(crate::palette::lerp_color(*lo, *hi, clamp01(yfrac)))
+                Style::fg(crate::theme::lerp_color(*lo, *hi, clamp01(yfrac)))
             }
-            Self::HRamp(stops) => Style::fg(crate::palette::ramp_color(stops, clamp01(xfrac))),
+            Self::HRamp(stops) => Style::fg(crate::theme::ramp_color(stops, clamp01(xfrac))),
             Self::ByCategory(colours) => {
                 let n = colours.len();
                 if n == 0 {
@@ -519,8 +519,8 @@ mod tests {
             let paints = [
                 Paint::Solid(Style::DEFAULT),
                 Paint::VGradient { lo: Color::Rgb(0,0,0), hi: Color::Rgb(255,255,255) },
-                Paint::HRamp(&crate::palette::GAUGE_RAMP),
-                Paint::ByCategory(&crate::palette::BREAKDOWN),
+                Paint::HRamp(&crate::theme::GAUGE_RAMP),
+                Paint::ByCategory(&crate::theme::BREAKDOWN),
             ];
             let solid_cells = {
                 let mut f = Frame::new(Size::new(24, 10));

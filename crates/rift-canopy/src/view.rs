@@ -129,7 +129,7 @@ fn draw_suggest_panel(vm: &ViewModel, frame: &mut Frame) {
     }
     let inner = frame.border(rect, "suggest", ACCENT);
     let t = vm.suggest_fade.clamp(0.0, 1.0);
-    let text_fg = crate::palette::lerp_color(crate::palette::MUTED, crate::palette::BODY_FG, t);
+    let text_fg = crate::theme::lerp_color(crate::theme::MUTED, crate::theme::BODY_FG, t);
     let visible = usize::from(inner.h);
     for (i, sug) in vm.suggestions.iter().take(visible).enumerate() {
         let Ok(dy) = u16::try_from(i) else { break };

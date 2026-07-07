@@ -123,12 +123,7 @@ mod tests {
             w: 8,
             h: 2,
         };
-        draw(
-            &pts,
-            area,
-            &Paint::HRamp(&crate::palette::GAUGE_RAMP),
-            &mut f,
-        );
+        draw(&pts, area, &Paint::HRamp(&crate::theme::GAUGE_RAMP), &mut f);
         let mut lit = 0;
         for y in 0..f.height() {
             for x in 0..f.width() {

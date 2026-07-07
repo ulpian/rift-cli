@@ -20,6 +20,7 @@
 )]
 
 pub mod app;
+pub mod chrome;
 pub mod col1;
 pub mod col2;
 pub mod col3;
@@ -28,12 +29,12 @@ pub mod dispatch;
 pub mod hit;
 pub mod input;
 pub mod layout;
-pub mod palette;
 pub mod plot;
 pub mod render;
 pub mod splash;
 pub mod state;
 pub mod suggest;
+pub mod theme;
 pub mod view;
 
 pub use app::{prime_startup, CanopyOpts};
