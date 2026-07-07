@@ -30,6 +30,7 @@ pub mod ci_meta;
 pub mod coverage;
 pub mod gate_m1;
 pub mod gate_m4;
+pub mod gate_m5;
 pub mod pin_cut;
 
 /// A fallible meta-check: `Ok(violations)` (empty ⇒ healthy) or a hard `Err`
