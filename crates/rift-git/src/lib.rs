@@ -484,10 +484,25 @@ impl NativeGitWrite for MemoryGitWrite {
 
     fn commit_on_orphan(&self, spec: &OrphanCommit<'_>) -> Result<String> {
         // Content-aware idempotency (mirrors the plumbing impl): an identical
-        // re-graft is a no-op; a different tree at the same shard path is a conflict.
+        // re-graft is a no-op; so is anchor-only drift (the checkpoint id is
+        // content-addressed over the capture and deliberately EXCLUDES the
+        // anchoring commit — the trailer-prediction contract — so a re-archive
+        // of unchanged capture at a later commit differs only in metadata.json
+        // + the content_hash.txt digest over it, and keeps the FIRST anchor).
+        // Divergent capture content at the same shard path must surface.
         let existing = self.shards.borrow().get(spec.shard_path).cloned();
         if let Some(existing) = existing {
-            if existing == spec.tree_oid {
+            let same = existing == spec.tree_oid || {
+                let trees = self.trees.borrow();
+                let entries_of = |oid: &str| {
+                    trees
+                        .iter()
+                        .find(|(t, _)| t == oid)
+                        .map(|(_, e)| non_anchor_entries(e))
+                };
+                entries_of(&existing).is_some_and(|a| entries_of(spec.tree_oid) == Some(a))
+            };
+            if same {
                 return self
                     .tip
                     .borrow()
@@ -836,6 +851,53 @@ pub fn path_object_oid(repo: &RepoPaths, commit: &str, path: &str) -> Result<Opt
     Ok(ok.then(|| trim_oid(&out)).filter(|s| !s.is_empty()))
 }
 
+/// The shard entries that drift with the anchoring commit / archive time and
+/// are therefore EXEMPT from idempotence comparison: `metadata.json` embeds
+/// them directly, and `content_hash.txt` is a digest computed OVER
+/// metadata.json (the LAYOUT contract), so it inherits the drift. The capture
+/// identity is carried by the remaining entries (`content.redacted`,
+/// `redaction_report.json`, `full.jsonl`), which are always compared.
+const ANCHOR_DEPENDENT_SHARD_ENTRIES: &[&str] = &["metadata.json", "content_hash.txt"];
+
+/// Whether two shard leaf trees are equal once the anchor-dependent entries are
+/// set aside (see [`ANCHOR_DEPENDENT_SHARD_ENTRIES`]) — the checkpoint id is
+/// content-addressed over the capture and deliberately excludes the anchoring
+/// commit (the trailer-prediction contract), so those entries legitimately
+/// differ across re-archives of identical capture.
+///
+/// # Errors
+/// [`RiftError::Validity`]/[`RiftError::Storage`] if a tree cannot be listed.
+fn trees_equal_ignoring_anchor(repo: &RepoPaths, a: &str, b: &str) -> Result<bool> {
+    validate_oid(a)?;
+    validate_oid(b)?;
+    let list = |oid: &str| -> Result<Vec<String>> {
+        let out = run_git_capture(repo, &["ls-tree".into(), oid.to_owned()], &[])?;
+        let mut lines: Vec<String> = String::from_utf8_lossy(&out)
+            .lines()
+            .filter(|l| {
+                !ANCHOR_DEPENDENT_SHARD_ENTRIES
+                    .iter()
+                    .any(|n| l.ends_with(&format!("\t{n}")))
+            })
+            .map(str::to_owned)
+            .collect();
+        lines.sort_unstable();
+        Ok(lines)
+    };
+    Ok(list(a)? == list(b)?)
+}
+
+/// The shard-tree entries that participate in idempotence comparison —
+/// everything except the anchor-dependent pair (see
+/// [`trees_equal_ignoring_anchor`]). Shared by the in-memory writer double.
+fn non_anchor_entries(entries: &[TreeWriteEntry]) -> Vec<TreeWriteEntry> {
+    entries
+        .iter()
+        .filter(|e| !ANCHOR_DEPENDENT_SHARD_ENTRIES.contains(&e.name.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Commit `tree` (optionally onto `parent`) with a deterministic identity + date,
 /// returning the commit oid. Author == committer, date fixed by the caller, so the
 /// commit is byte-reproducible for identical inputs.
@@ -988,13 +1050,20 @@ impl NativeGitWrite for PlumbingGitWrite {
         }
         let tip = resolve_commit(&self.repo, spec.branch)?;
         // Idempotent by CONTENT, not merely by path: a re-fired archive of the
-        // identical shard (same leaf tree) is a true no-op, but a *different* tree
-        // at the same shard path is a genuine conflict — the immutable branch keeps
-        // the first, so we must surface it (a divergence under DualRun) instead of
-        // silently dropping the new content.
+        // identical shard (same leaf tree) is a true no-op, and so is
+        // anchor-only drift — the checkpoint id is content-addressed over the
+        // capture, deliberately excluding the anchoring commit (the
+        // trailer-prediction contract), so unchanged capture re-archived at a
+        // later commit differs only in metadata.json + content_hash.txt and
+        // keeps the FIRST anchor. A shard whose *capture* entries differ is a
+        // genuine conflict — the immutable branch keeps the first, so we must
+        // surface it (a divergence under DualRun) instead of silently dropping
+        // content.
         if let Some(t) = &tip {
             if let Some(existing) = path_object_oid(&self.repo, t, spec.shard_path)? {
-                if existing == spec.tree_oid {
+                if existing == spec.tree_oid
+                    || trees_equal_ignoring_anchor(&self.repo, &existing, spec.tree_oid)?
+                {
                     return Ok(t.clone());
                 }
                 return Err(RiftError::integrity(
@@ -1441,14 +1510,26 @@ mod tests {
         let id = "ab".to_string() + &"cd".repeat(31);
         let shard_path = format!("{}/{}", &id[..2], &id[2..]);
 
-        let leaf_for = |body: &[u8]| {
-            let oid = w.write_structural_blob(body).unwrap();
-            w.write_tree(&[TreeWriteEntry {
-                mode: GitFileMode::Blob,
-                name: "metadata.json".into(),
-                oid,
-            }])
-            .unwrap()
+        // A shard = one capture entry (participates in identity) + metadata.json
+        // (exempt: it embeds the anchoring commit + time, which the checkpoint id
+        // deliberately excludes).
+        let leaf_for = |capture: &[u8], meta: &[u8]| {
+            let capture_oid = w.write_structural_blob(capture).unwrap();
+            let meta_oid = w.write_structural_blob(meta).unwrap();
+            let mut entries = vec![
+                TreeWriteEntry {
+                    mode: GitFileMode::Blob,
+                    name: "content.redacted".into(),
+                    oid: capture_oid,
+                },
+                TreeWriteEntry {
+                    mode: GitFileMode::Blob,
+                    name: "metadata.json".into(),
+                    oid: meta_oid,
+                },
+            ];
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            w.write_tree(&entries).unwrap()
         };
         let commit_for = |leaf: &str| {
             w.commit_on_orphan(&OrphanCommit {
@@ -1461,13 +1542,17 @@ mod tests {
             })
         };
 
-        let leaf_a = leaf_for(br#"{"commit":"A"}"#);
+        let leaf_a = leaf_for(b"hash-A", br#"{"commit":"A"}"#);
         let c1 = commit_for(&leaf_a).unwrap();
         // Re-archiving the byte-identical shard is a true no-op (same tip).
         assert_eq!(commit_for(&leaf_a).unwrap(), c1);
-        // A different shard body at the SAME checkpoint path is a hard conflict —
+        // Metadata-only drift (same capture, later anchoring commit) is ALSO a
+        // no-op — the branch keeps the first anchor (the same-session re-archive).
+        let leaf_drift = leaf_for(b"hash-A", br#"{"commit":"B"}"#);
+        assert_eq!(commit_for(&leaf_drift).unwrap(), c1);
+        // A different CAPTURE body at the SAME checkpoint path is a hard conflict —
         // the branch keeps the first; the second is surfaced, never dropped silently.
-        let leaf_b = leaf_for(br#"{"commit":"B"}"#);
+        let leaf_b = leaf_for(b"hash-B", br#"{"commit":"B"}"#);
         let conflict = commit_for(&leaf_b);
         assert!(
             matches!(conflict, Err(RiftError::Integrity(_))),

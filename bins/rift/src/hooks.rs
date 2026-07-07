@@ -418,8 +418,6 @@ fn state_from_token(token: &str) -> rift_shadow::hooks::SessionState {
 /// evaluated from the configured globs over the commit's changed paths, and
 /// composes over any base strategy.
 fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
-    use rift_shadow::backend::{EntireBackend, NativeBackend, RouteTable, RoutedBackend};
-    use rift_shadow::entire::SystemRunner;
     use rift_shadow::hooks::session_cache::live_sessions;
     use rift_shadow::hooks::strategy::{decide, GitEvent, TriggerCtx};
 
@@ -484,64 +482,10 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
                 schedule_interval_ms: cfg.schedule_interval_ms(),
             },
         );
-        if decision.archive {
-            use rift_shadow::backend::{Capability, Route};
-            let routes = RouteTable::load(&repo.work_tree.join(".rift"));
-            let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
-            let raw = session_raw_capture();
-
-            // A fully-native archive writes the shard itself — no wrapper binary.
-            if matches!(routes.route(Capability::Archive), Route::Native) {
-                let archived = rt.block_on(rift_shadow::archive_and_capture_with(
-                    &capture,
-                    &native,
-                    &store,
-                    &repo.work_tree,
-                    &commit,
-                    &sess.session_id,
-                    &raw,
-                    decision,
-                    now,
-                ));
-                report_archive_outcome(&archived);
-                return Ok(());
-            }
-            // Wrapper / DualRun: archive through the pinned binary when provisioned.
-            if let Some(binary) = provisioned_binary() {
-                let dual = matches!(routes.route(Capability::Archive), Route::DualRun);
-                let runner = SystemRunner::new(binary);
-                let backend = RoutedBackend::new(EntireBackend::new(&runner), native, routes);
-                let archived = rt.block_on(rift_shadow::archive_and_capture_with(
-                    &capture,
-                    &backend,
-                    &store,
-                    &repo.work_tree,
-                    &commit,
-                    &sess.session_id,
-                    &raw,
-                    decision,
-                    now,
-                ));
-                report_archive_outcome(&archived);
-                if dual {
-                    persist_dual_run(
-                        &rt,
-                        &store,
-                        &backend.take_divergences(),
-                        &sess.session_id,
-                        &commit,
-                        now,
-                    );
-                }
-                return Ok(());
-            }
-            // Wrapper/DualRun route but no provisioned binary: record the durable
-            // C-diff facts below, and say WHY no checkpoint landed — a silently
-            // skipped condense must be impossible (M5-01).
-            eprintln!(
-                "rift: checkpoint skipped — capture backend not provisioned \
-                 (run `rift setup`, or set `archive = \"native\"` in .rift/rewrite.toml)"
-            );
+        if decision.archive
+            && run_routed_archive(&rt, &store, &repo, &capture, &commit, &sess, decision, now)
+        {
+            return Ok(());
         }
     }
 
@@ -549,6 +493,87 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
     // facts (file_revision + changed_hunk); attribution waits for a checkpoint.
     rt.block_on(rift_shadow::persist_commit_capture(&store, &capture, None))?;
     Ok(())
+}
+
+/// Archive the session's checkpoint through the route the repo's
+/// `.rift/rewrite.toml` selects (native / wrapper / dual-run). Returns `true`
+/// when the archive leg ran (success or a loudly-reported failure — the C-diff
+/// facts are already durable either way); `false` means the wrapper route had
+/// no provisioned binary, the skip was named on stderr, and the caller still
+/// owes the plain capture persist.
+#[allow(clippy::too_many_arguments)]
+fn run_routed_archive(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    repo: &rift_git::RepoPaths,
+    capture: &rift_shadow::attribution::CommitCapture,
+    commit: &str,
+    sess: &rift_shadow::hooks::session_cache::SessionCache,
+    decision: rift_shadow::hooks::strategy::ArchiveDecision,
+    now: i64,
+) -> bool {
+    use rift_shadow::backend::{
+        Capability, EntireBackend, NativeBackend, Route, RouteTable, RoutedBackend,
+    };
+    use rift_shadow::entire::SystemRunner;
+
+    let routes = RouteTable::load(&repo.work_tree.join(".rift"));
+    let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
+    let raw = session_raw_capture();
+
+    // A fully-native archive writes the shard itself — no wrapper binary.
+    if matches!(routes.route(Capability::Archive), Route::Native) {
+        let archived = rt.block_on(rift_shadow::archive_and_capture_with(
+            capture,
+            &native,
+            store,
+            &repo.work_tree,
+            commit,
+            &sess.session_id,
+            &raw,
+            decision,
+            now,
+        ));
+        report_archive_outcome(&archived);
+        return true;
+    }
+    // Wrapper / DualRun: archive through the pinned binary when provisioned.
+    if let Some(binary) = provisioned_binary() {
+        let dual = matches!(routes.route(Capability::Archive), Route::DualRun);
+        let runner = SystemRunner::new(binary);
+        let backend = RoutedBackend::new(EntireBackend::new(&runner), native, routes);
+        let archived = rt.block_on(rift_shadow::archive_and_capture_with(
+            capture,
+            &backend,
+            store,
+            &repo.work_tree,
+            commit,
+            &sess.session_id,
+            &raw,
+            decision,
+            now,
+        ));
+        report_archive_outcome(&archived);
+        if dual {
+            persist_dual_run(
+                rt,
+                store,
+                &backend.take_divergences(),
+                &sess.session_id,
+                commit,
+                now,
+            );
+        }
+        return true;
+    }
+    // Wrapper/DualRun route but no provisioned binary: the caller records the
+    // durable C-diff facts; say WHY no checkpoint landed — a silently skipped
+    // condense must be impossible (M5-01).
+    eprintln!(
+        "rift: checkpoint skipped — capture backend not provisioned \
+         (run `rift setup`, or set `archive = \"native\"` in .rift/rewrite.toml)"
+    );
+    false
 }
 
 /// Name the archive outcome on stderr. A failed condense must be LOUD at the

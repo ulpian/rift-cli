@@ -97,7 +97,11 @@ fn native_route_post_commit_archives_a_checkpoint() {
     let repo = seed_live_session_repo(tmp.path());
     let rift_dir = repo.join(".rift");
     std::fs::create_dir_all(&rift_dir).unwrap();
-    std::fs::write(rift_dir.join("rewrite.toml"), "[routes]\narchive = \"native\"\n").unwrap();
+    std::fs::write(
+        rift_dir.join("rewrite.toml"),
+        "[routes]\narchive = \"native\"\n",
+    )
+    .unwrap();
     let cache = tmp.path().join("cache");
 
     let (code, stderr) = run_rift_capture(
@@ -132,7 +136,12 @@ fn native_route_post_commit_archives_a_checkpoint() {
     );
     // The shard carries the four structural artifacts of a native archive.
     let tree = Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "refs/heads/rift/checkpoints/v1"])
+        .args([
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "refs/heads/rift/checkpoints/v1",
+        ])
         .current_dir(&repo)
         .output()
         .unwrap();

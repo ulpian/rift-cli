@@ -166,7 +166,10 @@ mod tests {
         )
         .await
         .expect_err("a nonzero backend exit fails condense");
-        assert!(err.to_string().contains("bad usage"), "reason surfaced: {err}");
+        assert!(
+            err.to_string().contains("bad usage"),
+            "reason surfaced: {err}"
+        );
         assert_eq!(
             s.count("archive_decision").await.unwrap(),
             0,

@@ -816,6 +816,43 @@ mod tests {
     }
 
     #[test]
+    fn native_archive_metadata_drift_is_a_noop_keeping_the_first_anchor() {
+        // The checkpoint id excludes the anchoring commit (trailer prediction),
+        // so a later commit in the same session re-archives the SAME shard path
+        // with only metadata.json differing. That must be an idempotent no-op —
+        // the dogfood regression: the second commit of a session once failed
+        // with 'shard path already holds different content'.
+        let n = NativeBackend::in_memory();
+        n.archive_checkpoint(&archive()).unwrap();
+        let tip1 = n.writer().branch_tip();
+        let mut later = archive();
+        later.commit = "def456".to_owned();
+        later.created_at_ms += 60_000;
+        n.archive_checkpoint(&later).unwrap();
+        assert_eq!(n.writer().branch_tip(), tip1, "first anchor kept");
+        assert_eq!(n.writer().shard_paths().len(), 1);
+    }
+
+    #[test]
+    fn native_archive_divergent_capture_content_still_refuses() {
+        // Same shard path with DIFFERENT capture entries stays an integrity
+        // refusal — only metadata.json may drift.
+        let n = NativeBackend::in_memory();
+        n.archive_checkpoint(&archive()).unwrap();
+        let mut diverged = archive();
+        diverged.content = rift_shadow_redact::redact(&SecretBytes::new(b"other".to_vec()))
+            .unwrap()
+            .redacted;
+        let err = n
+            .archive_checkpoint(&diverged)
+            .expect_err("divergent capture content at the same shard path");
+        assert!(
+            err.to_string().contains("different content"),
+            "refusal names the conflict: {err}"
+        );
+    }
+
+    #[test]
     fn metadata_and_report_are_canonical_and_valid() {
         use rift_recall_types::checkpoint::{CheckpointMetadata, RedactionReportFacts};
         let a = archive();
