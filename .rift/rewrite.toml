@@ -1,0 +1,9 @@
+# Per-capability backend routes (ADR-0018 promotion dial).
+#
+# Archive is promoted to the native git-plumbing writer on this repository:
+# M5-01 (2026-07-07) proved the pinned wrapper binary has no archive verb and
+# cannot see rift-native-hook sessions, so the wrapper route can never condense
+# here. Owner decision on the fired contingency; PRD-P7's parity soak still
+# owes its evidence, and `kill_switch = true` reverts everything to the wrapper.
+[routes]
+archive = "native"

@@ -300,10 +300,31 @@ pub trait EntireRunner {
 }
 
 /// A deterministic test double.
-#[derive(Default)]
 pub struct MockRunner {
     /// Calls observed, for assertions.
     pub calls: std::cell::RefCell<Vec<CaptureIntent>>,
+    /// The exit class every run reports (default `Ok`) — scriptable so callers
+    /// can assert that a nonzero backend exit is never read as success.
+    pub exit: std::cell::Cell<ExitClass>,
+}
+
+impl Default for MockRunner {
+    fn default() -> Self {
+        Self {
+            calls: std::cell::RefCell::new(Vec::new()),
+            exit: std::cell::Cell::new(ExitClass::Ok),
+        }
+    }
+}
+
+impl MockRunner {
+    /// A runner whose every invocation reports `exit`.
+    #[must_use]
+    pub fn with_exit(exit: ExitClass) -> Self {
+        let r = Self::default();
+        r.exit.set(exit);
+        r
+    }
 }
 
 impl EntireRunner for MockRunner {
@@ -312,7 +333,7 @@ impl EntireRunner for MockRunner {
         screen(&argv)?;
         self.calls.borrow_mut().push(intent.clone());
         Ok(RunOutcome {
-            exit: ExitClass::Ok,
+            exit: self.exit.get(),
             stdout: String::new(),
         })
     }

@@ -26,7 +26,7 @@ use rift_core::{CanonicalEvent, RedactedBytes, Result, RiftError, Sha256Id};
 use rift_git::{
     GitFileMode, GitIdent, MemoryGitWrite, NativeGitWrite, OrphanCommit, TreeWriteEntry,
 };
-use rift_shadow_entire::{CaptureIntent, EntireRunner, SubstrateError};
+use rift_shadow_entire::{CaptureIntent, EntireRunner, ExitClass, SubstrateError};
 use rift_store::{
     record_verification_divergence, record_verification_run, CanonicalStore,
     VerificationDivergenceRow, VerificationRunRow,
@@ -435,8 +435,33 @@ impl<R: EntireRunner> ShadowBackend for EntireBackend<'_, R> {
             repo: archive.repo.clone(),
             commit: archive.commit.clone(),
         };
-        self.runner.run(&intent).map_err(map_archive_err)?;
-        Ok(())
+        let out = self.runner.run(&intent).map_err(map_archive_err)?;
+        archive_exit_to_result(out.exit)
+    }
+}
+
+/// A non-`Ok` backend exit is an archive **failure** and must surface,
+/// class-preserved — success here is what lets `condense` record `archived=1`,
+/// so reading a usage error as success would write false audit facts with no
+/// checkpoint on the substrate (the M5-01 silent-zero-checkpoint defect).
+fn archive_exit_to_result(class: ExitClass) -> Result<()> {
+    match class {
+        ExitClass::Ok => Ok(()),
+        ExitClass::IntegrityRefused => Err(RiftError::Integrity(
+            "capture backend refused the archive on an integrity check".into(),
+        )),
+        ExitClass::RetryableTransient => Err(RiftError::Substrate(
+            "capture backend archive failed (transient)".into(),
+        )),
+        ExitClass::BadUsage => Err(RiftError::Substrate(
+            "capture backend rejected the archive invocation (bad usage)".into(),
+        )),
+        ExitClass::NothingToDo => Err(RiftError::Substrate(
+            "capture backend archived nothing (nothing-to-do)".into(),
+        )),
+        ExitClass::BackendInternal => Err(RiftError::Substrate(
+            "capture backend archive failed (backend internal)".into(),
+        )),
     }
 }
 
@@ -724,6 +749,36 @@ mod tests {
             1,
             "wrapper archived via the runner"
         );
+    }
+
+    #[test]
+    fn wrapper_nonzero_exit_is_an_archive_failure_never_success() {
+        // The M5-01 defect: a usage-error exit read as success let `condense`
+        // record archived=1 with no checkpoint on the substrate. Every non-Ok
+        // class must surface as Err, class-preserved where the vocabulary has one.
+        for (class, want_integrity) in [
+            (ExitClass::BadUsage, false),
+            (ExitClass::NothingToDo, false),
+            (ExitClass::RetryableTransient, false),
+            (ExitClass::BackendInternal, false),
+            (ExitClass::IntegrityRefused, true),
+        ] {
+            let runner = MockRunner::with_exit(class);
+            let backend = EntireBackend::new(&runner);
+            let err = backend
+                .archive_checkpoint(&archive())
+                .expect_err("non-Ok exit must fail the archive");
+            assert_eq!(
+                matches!(err, RiftError::Integrity(_)),
+                want_integrity,
+                "class preservation for {class:?}"
+            );
+        }
+        // And Ok stays Ok.
+        let runner = MockRunner::with_exit(ExitClass::Ok);
+        EntireBackend::new(&runner)
+            .archive_checkpoint(&archive())
+            .unwrap();
     }
 
     #[test]

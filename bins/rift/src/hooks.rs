@@ -492,7 +492,7 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
 
             // A fully-native archive writes the shard itself — no wrapper binary.
             if matches!(routes.route(Capability::Archive), Route::Native) {
-                rt.block_on(rift_shadow::archive_and_capture_with(
+                let archived = rt.block_on(rift_shadow::archive_and_capture_with(
                     &capture,
                     &native,
                     &store,
@@ -502,7 +502,8 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
                     &raw,
                     decision,
                     now,
-                ))?;
+                ));
+                report_archive_outcome(&archived);
                 return Ok(());
             }
             // Wrapper / DualRun: archive through the pinned binary when provisioned.
@@ -510,7 +511,7 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
                 let dual = matches!(routes.route(Capability::Archive), Route::DualRun);
                 let runner = SystemRunner::new(binary);
                 let backend = RoutedBackend::new(EntireBackend::new(&runner), native, routes);
-                rt.block_on(rift_shadow::archive_and_capture_with(
+                let archived = rt.block_on(rift_shadow::archive_and_capture_with(
                     &capture,
                     &backend,
                     &store,
@@ -520,7 +521,8 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
                     &raw,
                     decision,
                     now,
-                ))?;
+                ));
+                report_archive_outcome(&archived);
                 if dual {
                     persist_dual_run(
                         &rt,
@@ -533,8 +535,13 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
                 }
                 return Ok(());
             }
-            // Wrapper/DualRun route but no provisioned binary: fall through and
-            // still record the durable C-diff facts (no checkpoint to anchor).
+            // Wrapper/DualRun route but no provisioned binary: record the durable
+            // C-diff facts below, and say WHY no checkpoint landed — a silently
+            // skipped condense must be impossible (M5-01).
+            eprintln!(
+                "rift: checkpoint skipped — capture backend not provisioned \
+                 (run `rift setup`, or set `archive = \"native\"` in .rift/rewrite.toml)"
+            );
         }
     }
 
@@ -542,6 +549,17 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
     // facts (file_revision + changed_hunk); attribution waits for a checkpoint.
     rt.block_on(rift_shadow::persist_commit_capture(&store, &capture, None))?;
     Ok(())
+}
+
+/// Name the archive outcome on stderr. A failed condense must be LOUD at the
+/// commit that lost it (the M5-01 defect was weeks of silence); success stays
+/// quiet apart from git's own output. The `C`-diff capture inside
+/// `archive_and_capture_with` is already durable either way.
+fn report_archive_outcome(archived: &Result<Option<String>>) {
+    if let Err(e) = archived {
+        tracing::warn!(error = %e, "checkpoint archive failed");
+        eprintln!("rift: checkpoint archive FAILED — {e} (see `rift doctor`)");
+    }
 }
 
 /// Run capture work but isolate failure: log + swallow any error or panic, then

@@ -145,6 +145,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_backend_archive_records_no_archived_row() {
+        // Audit honesty (M5-01): `archived=1` may exist only when the substrate
+        // write landed. A backend that exits nonzero must error out of condense
+        // BEFORE the decision row is written — no false facts.
+        let s = store();
+        let runner = MockRunner::with_exit(rift_shadow_entire::ExitClass::BadUsage);
+        let backend = EntireBackend::new(&runner);
+        let raw = SecretBytes::new(Vec::new());
+        let err = condense(
+            &backend,
+            &s,
+            std::path::Path::new("/tmp/repo"),
+            "01JSESSION",
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1,
+        )
+        .await
+        .expect_err("a nonzero backend exit fails condense");
+        assert!(err.to_string().contains("bad usage"), "reason surfaced: {err}");
+        assert_eq!(
+            s.count("archive_decision").await.unwrap(),
+            0,
+            "no archived=1 row for an archive that never landed"
+        );
+    }
+
+    #[tokio::test]
     async fn condense_is_idempotent_and_redacts() {
         let s = store();
         let runner = MockRunner::default();
