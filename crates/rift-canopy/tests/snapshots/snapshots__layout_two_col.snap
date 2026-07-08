@@ -16,7 +16,7 @@ expression: "render_at(60, 20)"
 │                  │
 │                  │
 │                  │
-│                  │
+│[+][^][v][x]      │
 ╰──────────────────╯
  j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reo
 ╭─ command ────────────────────────────────────────────────╮

@@ -25,6 +25,14 @@ pub enum Target {
     PanelFocus(Panel),
     /// Select the project list row at this index (column 1).
     ProjectRow(usize),
+    /// The rail's `+` button — begin registering a project (like the `a` key).
+    RailAdd,
+    /// The rail's `↑` button — move the selected project up (ReorderProject).
+    RailReorderUp,
+    /// The rail's `↓` button — move the selected project down.
+    RailReorderDown,
+    /// The rail's `✕` button — remove the selected project (RemoveProject).
+    RailRemove,
     /// The feature-toggle at this index (column 2).
     ToggleRow(usize),
     /// A column-3 graph section.
@@ -69,6 +77,10 @@ impl Target {
                 | Target::OverlayConfirm
                 | Target::OverlayCancel
                 | Target::OverlayClose
+                | Target::RailAdd
+                | Target::RailReorderUp
+                | Target::RailReorderDown
+                | Target::RailRemove
         )
     }
 }
@@ -235,9 +247,17 @@ fn tab_at(col: u16, tabs: Rect) -> Panel {
 /// A click in column 1 → the project row under it, else focus the panel.
 fn project_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
     let inner = inner_of(rect);
-    if let Some(dy) = local_row(inner, col, row) {
+    let (list, buttons) = crate::view::rail_action_layout(inner, !vm.projects.is_empty());
+    // The bottom action bar (M56-05) — add / reorder / remove — takes priority
+    // over row selection; its chips are the same cells the renderer drew.
+    for (r, target) in &buttons {
+        if contains(*r, col, row) {
+            return target.clone();
+        }
+    }
+    if let Some(dy) = local_row(list, col, row) {
         if !vm.projects.is_empty() {
-            let (start, end) = visible_window(vm.selected, vm.projects.len(), usize::from(inner.h));
+            let (start, end) = visible_window(vm.selected, vm.projects.len(), usize::from(list.h));
             let idx = start + usize::from(dy);
             if idx < end {
                 return Target::ProjectRow(idx);
@@ -551,6 +571,29 @@ mod tests {
         let cr = crate::view::modal_close_rect(rect).unwrap();
         // Running carries no Close control, so that cell is inert body, not close.
         assert_eq!(hit_test(&v, cr.x, cr.y), Some(Target::OverlayBody));
+    }
+
+    #[test]
+    fn rail_action_bar_buttons_are_clickable() {
+        let mut s = AppState::new(vec![project("a"), project("b")], Size::new(120, 40));
+        s.app.splash.skip();
+        let v = s.snapshot();
+        // Recompute the rail inner exactly as hit_test does (Full3Col).
+        let body = Rect {
+            x: 0,
+            y: 1,
+            w: 120,
+            h: 39,
+        };
+        let col1 = solve(body).col1;
+        let inner = inner_of(col1);
+        let (_list, buttons) = crate::view::rail_action_layout(inner, true);
+        assert!(!buttons.is_empty(), "the rail has an action bar");
+        // Every chip cell resolves to its target (pixels == targets).
+        for (r, target) in &buttons {
+            assert_eq!(hit_test(&v, r.x, r.y), Some(target.clone()));
+        }
+        assert_eq!(buttons[0].1, Target::RailAdd, "the first chip is Add");
     }
 
     proptest::proptest! {

@@ -28,7 +28,7 @@ expression: render_state(&mut lifecycle_state(None))
 │                  ││                                      ││recall off — /toggle total-recall     │
 │                  ││                                      ││                                      │
 │                  ││                                      ││                                      │
-│                  ││                                      ││                                      │
+│[+][^][v][x]      ││                                      ││                                      │
 ╰──────────────────╯╰──────────────────────────────────────╯╰──────────────────────────────────────╯
  j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  ·  q quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮

@@ -556,6 +556,102 @@ fn draw_command(vm: &ViewModel, frame: &mut Frame, command: Rect) {
 /// Column 1 — the projects rail (M55-05): count badge in the title, per-row
 /// kind icon + label + trailing status dot, the selection as a filled pill.
 /// Windowed to keep the selection in view; every label passes the sanitizer.
+/// The rail's bottom action bar (M56-05): the list area (rows above the bar) and
+/// the clickable `[glyph]` buttons — `+` add always, and `↑`/`↓`/`✕` (reorder
+/// up/down, remove selected) when a project is selected. One shared source for
+/// `draw_projects` and the hit-test, so the chips and their click targets are
+/// the same cells. Returns `(list_area, buttons)`; no buttons when the rail is
+/// too short to spare a row.
+pub(crate) fn rail_action_layout(
+    inner: Rect,
+    has_selection: bool,
+) -> (Rect, Vec<(Rect, crate::hit::Target)>) {
+    if inner.h < 2 {
+        return (inner, Vec::new());
+    }
+    let bar_y = inner.y + inner.h - 1;
+    let list = Rect {
+        h: inner.h - 1,
+        ..inner
+    };
+    let mut targets = vec![crate::hit::Target::RailAdd];
+    if has_selection {
+        targets.push(crate::hit::Target::RailReorderUp);
+        targets.push(crate::hit::Target::RailReorderDown);
+        targets.push(crate::hit::Target::RailRemove);
+    }
+    // Chips abut (`[+][↑][↓][✕]`) so all four fit even in a ~14-cell rail; a
+    // gap would clip the rightmost (remove) at narrow widths.
+    let chip = 3u16;
+    let right = inner.x + inner.w;
+    let mut x = inner.x;
+    let mut buttons = Vec::with_capacity(targets.len());
+    for t in targets {
+        if x + chip > right {
+            break;
+        }
+        buttons.push((
+            Rect {
+                x,
+                y: bar_y,
+                w: chip,
+                h: 1,
+            },
+            t,
+        ));
+        x += chip;
+    }
+    (list, buttons)
+}
+
+/// The glyph inside a rail action chip (M56-05); the ASCII floor substitutes.
+fn rail_action_glyph(target: &crate::hit::Target, unicode: bool) -> char {
+    use crate::hit::Target;
+    match target {
+        Target::RailAdd => '+',
+        Target::RailReorderUp => {
+            if unicode {
+                '↑'
+            } else {
+                '^'
+            }
+        }
+        Target::RailReorderDown => {
+            if unicode {
+                '↓'
+            } else {
+                'v'
+            }
+        }
+        Target::RailRemove => {
+            if unicode {
+                '✕'
+            } else {
+                'x'
+            }
+        }
+        _ => '?',
+    }
+}
+
+/// Draw the rail action chips, each `[glyph]` — muted at rest, flashing toward
+/// the accent when pressed (ADR-0028).
+fn draw_rail_actions(
+    vm: &ViewModel,
+    frame: &mut Frame,
+    buttons: &[(Rect, crate::hit::Target)],
+    unicode: bool,
+) {
+    for (r, target) in buttons {
+        let g = rail_action_glyph(target, unicode);
+        let style = match crate::chrome::press_flash_bg(vm.button_flash(target)) {
+            Some(bg) => THEME.dim().with_bg(bg),
+            None => THEME.dim(),
+        };
+        frame.put_str(r.x, r.y, &format!("[{g}]"), style);
+    }
+}
+
 fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
     use crate::theme::{Icon, Section};
     let focused = vm.focus == Panel::Projects;
@@ -578,11 +674,19 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
             THEME.badge(Section::Projects.accent()),
         );
     }
+    let (list, buttons) = rail_action_layout(inner, !vm.projects.is_empty());
     if vm.projects.is_empty() {
-        clip_line(frame, inner, 0, "No projects yet — press 'a'", THEME.body());
+        clip_line(
+            frame,
+            list,
+            0,
+            "No projects yet — press 'a' or [+]",
+            THEME.body(),
+        );
+        draw_rail_actions(vm, frame, &buttons, unicode);
         return;
     }
-    let (start, end) = visible_window(vm.selected, vm.projects.len(), usize::from(inner.h));
+    let (start, end) = visible_window(vm.selected, vm.projects.len(), usize::from(list.h));
     // `> ▣ label … ●` — cursor, kind icon, label, trailing status dot.
     let label_w = usize::from(inner.w).saturating_sub(6);
     for (row, p) in vm.projects.iter().enumerate().take(end).skip(start) {
@@ -646,6 +750,7 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
             frame.set(dot_x, y, Icon::for_status(p.status).glyph(unicode), dot);
         }
     }
+    draw_rail_actions(vm, frame, &buttons, unicode);
 }
 
 /// Column 2 — the card stack (M55-08): repository · models · settings · capture

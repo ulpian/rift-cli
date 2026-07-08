@@ -839,6 +839,12 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
                 ..Effects::default()
             })
         }
+        // The rail action bar (M56-05): the same typed effects the `a` / `d` /
+        // ⇧-arrow keys raise — no new capability, only a new trigger. The press
+        // flash is armed above (is_button).
+        Target::RailAdd | Target::RailRemove | Target::RailReorderUp | Target::RailReorderDown => {
+            apply_rail_action(s, &target)
+        }
         Target::ToggleRow(i) => {
             s.app.set_focus(Panel::Detail);
             let last = Feature::ALL.len().saturating_sub(1);
@@ -963,7 +969,11 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             | Target::HeaderHelp
             | Target::HeaderPalette
             | Target::HeaderQuit
-            | Target::EditorButton,
+            | Target::EditorButton
+            | Target::RailAdd
+            | Target::RailReorderUp
+            | Target::RailReorderDown
+            | Target::RailRemove,
         )
         | None => return Flow::Continue(Effects::default()),
     };
@@ -1225,6 +1235,33 @@ fn no_match_status(s: &mut AppState) -> Flow {
 fn unknown_feature_status(s: &mut AppState, key: &str) -> Flow {
     s.app.status = Some(format!("unknown feature `{key}` — try /help"));
     Flow::Continue(Effects::default())
+}
+
+/// The rail action bar's clicks (M56-05) — the add/remove/reorder buttons raise
+/// the same typed effects the `a` / `d` / ⇧-arrow keys do. Add enters
+/// AddProject mode; remove/reorder act on the selected project (no selection ⇒
+/// inert). Split out of `apply_click` to keep that reducer under the line limit.
+fn apply_rail_action(s: &mut AppState, target: &Target) -> Flow {
+    s.app.set_focus(Panel::Projects);
+    s.dirty = true;
+    match target {
+        Target::RailAdd => {
+            s.app.mode = Mode::AddProject;
+            s.app.command_line.clear();
+            s.app.status = None;
+            Flow::Continue(Effects::default())
+        }
+        Target::RailRemove => {
+            let sel = s.app.selected_project().map(|p| p.path.clone());
+            persist_flow(sel.map(|path| PersistOp::RemoveProject { path }))
+        }
+        Target::RailReorderUp | Target::RailReorderDown => {
+            let up = matches!(target, Target::RailReorderUp);
+            let sel = s.app.selected_project().map(|p| p.path.clone());
+            persist_flow(sel.map(|path| PersistOp::ReorderProject { path, up }))
+        }
+        _ => Flow::Continue(Effects::default()),
+    }
 }
 
 /// Wrap an optional persist op into a `Flow::Continue` (no op ⇒ no effect).
@@ -2191,6 +2228,33 @@ mod tests {
             "the close X press-flashes like any button"
         );
         assert_eq!(s.pressed, Some(Target::OverlayClose));
+    }
+
+    #[test]
+    fn rail_buttons_raise_the_same_effects_as_keys_and_flash() {
+        // Add → enters AddProject mode (like the `a` key) and press-flashes.
+        let mut s = ready(vec![project("a"), project("b")]);
+        let _ = apply_click(&mut s, Target::RailAdd);
+        assert_eq!(s.app.mode, Mode::AddProject);
+        assert_eq!(s.pressed, Some(Target::RailAdd));
+        // Remove selected → the same PersistOp the `d` key raises.
+        let mut s = ready(vec![project("a"), project("b")]);
+        match apply_click(&mut s, Target::RailRemove) {
+            Flow::Continue(e) => assert!(matches!(
+                e.persist.as_slice(),
+                [PersistOp::RemoveProject { .. }]
+            )),
+            Flow::Quit => panic!("remove is not quit"),
+        }
+        // Reorder up → ReorderProject { up: true } on the selected path.
+        let mut s = ready(vec![project("a"), project("b")]);
+        match apply_click(&mut s, Target::RailReorderUp) {
+            Flow::Continue(e) => assert!(matches!(
+                e.persist.as_slice(),
+                [PersistOp::ReorderProject { up: true, .. }]
+            )),
+            Flow::Quit => panic!("reorder is not quit"),
+        }
     }
 
     #[test]
