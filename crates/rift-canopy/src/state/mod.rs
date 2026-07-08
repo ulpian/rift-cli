@@ -589,6 +589,7 @@ impl AppState {
             command_line: self.app.command_line.clone(),
             status: self.app.status.clone(),
             overlay: self.app.overlay.clone(),
+            overlay_focus: self.app.overlay_focus,
             command_error: self.app.command_error.clone(),
             suggestions: crate::current_suggestions(&self.app),
             suggest_highlight: self.app.suggest_highlight,
@@ -699,7 +700,7 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
                     s.app.frecency.bump(word);
                 }
             }
-            s.app.overlay = Some(Overlay::results(&request, &outcome));
+            s.app.open_overlay(Overlay::results(&request, &outcome));
             s.dirty = true;
             Flow::Continue(Effects::default())
         }
@@ -1049,10 +1050,10 @@ fn run_line(s: &mut AppState, buf: &str) -> Flow {
                         .map(|p| p.path.clone())
                         .unwrap_or_default();
                     if req.is_mutating() {
-                        s.app.overlay = Some(Overlay::Confirm { request: req, repo });
+                        s.app.open_overlay(Overlay::Confirm { request: req, repo });
                         Flow::Continue(Effects::default())
                     } else {
-                        s.app.overlay = Some(Overlay::Running {
+                        s.app.open_overlay(Overlay::Running {
                             title: req.verb_line(),
                         });
                         Flow::Continue(Effects {
@@ -1073,7 +1074,7 @@ fn confirm_dispatch(s: &mut AppState) -> Flow {
     let Some(Overlay::Confirm { request, repo }) = s.app.overlay.take() else {
         return Flow::Continue(Effects::default());
     };
-    s.app.overlay = Some(Overlay::Running {
+    s.app.open_overlay(Overlay::Running {
         title: request.verb_line(),
     });
     Flow::Continue(Effects {
@@ -1107,7 +1108,7 @@ fn dashboard_verb_flow(s: &mut AppState, verb: Verb) -> Flow {
         Verb::Quit => Flow::Quit,
         Verb::Help => {
             let lines: Vec<String> = crate::command::help_lines();
-            s.app.overlay = Some(Overlay::Results {
+            s.app.open_overlay(Overlay::Results {
                 title: "palette".into(),
                 lines,
                 scroll: 0,
@@ -1325,6 +1326,9 @@ pub struct ViewModel {
     pub status: Option<String>,
     /// The modal dispatch surface (results / confirm / running), if open.
     pub overlay: Option<Overlay>,
+    /// The modal focus ring's cursor — an index into `overlay.controls()`
+    /// (ADR-0027); the renderer highlights the focused control.
+    pub overlay_focus: usize,
     /// The inline parse error under the command bar, if any.
     pub command_error: Option<crate::command::ParseError>,
     /// The suggest panel's ranked rows (empty unless command mode; M5-10/11).
@@ -1358,6 +1362,16 @@ impl ViewModel {
         } else {
             0.0
         }
+    }
+
+    /// The modal control the focus ring rests on (ADR-0027) — the render side's
+    /// view of the focused control, so the focused button draws highlighted.
+    #[must_use]
+    pub fn focused_overlay_control(&self) -> Option<crate::dispatch::OverlayControl> {
+        let controls = self.overlay.as_ref()?.controls();
+        controls
+            .get(self.overlay_focus.min(controls.len().checked_sub(1)?))
+            .copied()
     }
 }
 
@@ -2076,20 +2090,18 @@ mod tests {
             Flow::Quit => panic!("expected Continue"),
         }
         assert!(matches!(s.app.overlay, Some(Overlay::Confirm { .. })));
-        // Stray keys never confirm (a buffered keystroke is harmless).
-        for k in [
-            CanopyKey::Char('y'),
-            CanopyKey::Char(' '),
-            CanopyKey::Tab,
-            CanopyKey::Down,
-        ] {
+        // Stray keys never confirm a mutating modal — a buffered keystroke is
+        // harmless, and Space (unlike Enter) never activates the Confirm control
+        // (ADR-0027). These keep focus on the default Confirm control.
+        for k in [CanopyKey::Char('y'), CanopyKey::Char(' '), CanopyKey::Down] {
             match update(&mut s, Event::Key(k)) {
                 Flow::Continue(e) => assert!(e.dispatches.is_empty(), "{k:?} must be inert"),
                 Flow::Quit => panic!("{k:?} must not quit"),
             }
             assert!(matches!(s.app.overlay, Some(Overlay::Confirm { .. })));
         }
-        // Enter confirms: Confirm → Running + the dispatch effect.
+        // Enter confirms the default-focused Confirm control: Confirm → Running
+        // + the dispatch effect.
         match update(&mut s, Event::Key(CanopyKey::Enter)) {
             Flow::Continue(e) => {
                 assert_eq!(e.dispatches.len(), 1);
@@ -2098,6 +2110,56 @@ mod tests {
             Flow::Quit => panic!("expected Continue"),
         }
         assert!(matches!(s.app.overlay, Some(Overlay::Running { .. })));
+    }
+
+    #[test]
+    fn tab_cycles_the_modal_focus_ring_and_enter_activates_the_focused_control() {
+        // Open a mutating confirm (default focus = Confirm).
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('/')));
+        for c in "rebuild".chars() {
+            update(&mut s, Event::Key(CanopyKey::Char(c)));
+        }
+        let _ = update(&mut s, Event::Key(CanopyKey::Enter));
+        assert!(matches!(s.app.overlay, Some(Overlay::Confirm { .. })));
+        assert_eq!(
+            s.app.focused_overlay_control(),
+            Some(crate::dispatch::OverlayControl::Confirm),
+            "a confirm modal defaults focus to Confirm"
+        );
+        // Tab → Cancel; Enter now cancels (dismiss, no dispatch).
+        update(&mut s, Event::Key(CanopyKey::Tab));
+        assert_eq!(
+            s.app.focused_overlay_control(),
+            Some(crate::dispatch::OverlayControl::Cancel)
+        );
+        match update(&mut s, Event::Key(CanopyKey::Enter)) {
+            Flow::Continue(e) => assert!(e.dispatches.is_empty(), "Cancel dispatches nothing"),
+            Flow::Quit => panic!("expected Continue"),
+        }
+        assert!(
+            s.app.overlay.is_none(),
+            "activating Cancel dismisses the modal"
+        );
+    }
+
+    #[test]
+    fn shift_tab_wraps_the_ring_to_the_close_control() {
+        let mut s = ready(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('/')));
+        for c in "rebuild".chars() {
+            update(&mut s, Event::Key(CanopyKey::Char(c)));
+        }
+        let _ = update(&mut s, Event::Key(CanopyKey::Enter));
+        // Shift-Tab from the default (Confirm) wraps to the last control (Close).
+        update(&mut s, Event::Key(CanopyKey::BackTab));
+        assert_eq!(
+            s.app.focused_overlay_control(),
+            Some(crate::dispatch::OverlayControl::Close)
+        );
+        // Enter on Close dismisses.
+        let _ = update(&mut s, Event::Key(CanopyKey::Enter));
+        assert!(s.app.overlay.is_none());
     }
 
     #[test]

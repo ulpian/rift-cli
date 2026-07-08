@@ -331,37 +331,64 @@ pub(crate) fn insert_suggestion(app: &mut App) {
     }
 }
 
-/// Keys while an overlay is open. Results: Esc dismisses, `j`/`k` (and the
-/// arrows) scroll, everything else inert. Confirm: Enter confirms, Esc
-/// cancels, **every other key is inert**. Running: everything inert.
+/// Keys while an overlay is open — the modal owns them and its focus ring
+/// (ADR-0027). Tab / Shift-Tab move focus across the modal's controls;
+/// Enter / Space activate the focused control (a mutating Confirm needs Enter —
+/// Space never confirms it, so a buffered keystroke can't); Esc always
+/// dismisses a Results/Confirm; `j`/`k`/arrows and the wheel scroll a Results
+/// body regardless of focus. Running swallows everything.
 fn on_key_overlay(app: &mut App, key: CanopyKey) -> Action {
-    use crate::dispatch::Overlay;
-    match app.overlay.as_mut() {
-        Some(Overlay::Results { scroll, lines, .. }) => match key {
-            CanopyKey::Esc | CanopyKey::Quit => {
-                app.overlay = None;
-                Action::None
-            }
+    use crate::dispatch::{Overlay, OverlayControl};
+    // Focus-ring traversal is available in every modal that has controls.
+    match key {
+        CanopyKey::Tab => {
+            app.cycle_overlay_focus(true);
+            return Action::None;
+        }
+        CanopyKey::BackTab => {
+            app.cycle_overlay_focus(false);
+            return Action::None;
+        }
+        _ => {}
+    }
+    // Results keeps its j/k (and arrow) scroll whichever control is focused.
+    if let Some(Overlay::Results { scroll, lines, .. }) = app.overlay.as_mut() {
+        match key {
             CanopyKey::Char('j') | CanopyKey::Down => {
                 *scroll = scroll.saturating_add(1).min(lines.len().saturating_sub(1));
-                Action::None
+                return Action::None;
             }
             CanopyKey::Char('k') | CanopyKey::Up => {
                 *scroll = scroll.saturating_sub(1);
-                Action::None
+                return Action::None;
             }
-            _ => Action::None,
-        },
-        Some(Overlay::Confirm { .. }) => match key {
-            CanopyKey::Enter => Action::ConfirmDispatch,
-            CanopyKey::Esc => {
+            _ => {}
+        }
+    }
+    // Esc always closes/cancels a dismissable modal (Running swallows it).
+    if matches!(key, CanopyKey::Esc | CanopyKey::Quit) {
+        if matches!(
+            app.overlay,
+            Some(Overlay::Results { .. } | Overlay::Confirm { .. })
+        ) {
+            app.overlay = None;
+        }
+        return Action::None;
+    }
+    // Enter / Space activate the focused control. Space never activates the
+    // mutating Confirm — only Enter does — so a stray Space can't run it.
+    if matches!(key, CanopyKey::Enter | CanopyKey::Char(' ')) {
+        let is_space = matches!(key, CanopyKey::Char(' '));
+        return match app.focused_overlay_control() {
+            Some(OverlayControl::Confirm) if !is_space => Action::ConfirmDispatch,
+            Some(OverlayControl::Cancel | OverlayControl::Close) => {
                 app.overlay = None;
                 Action::None
             }
             _ => Action::None,
-        },
-        Some(Overlay::Running { .. }) | None => Action::None,
+        };
     }
+    Action::None
 }
 
 #[cfg(test)]

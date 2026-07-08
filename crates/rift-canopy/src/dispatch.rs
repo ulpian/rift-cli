@@ -257,6 +257,37 @@ pub enum Overlay {
     },
 }
 
+/// A focusable control within an open modal — where the focus ring can land
+/// (ADR-0027). Enter/Space activate the button controls; `Body` is the
+/// scrollable results region (Enter is inert; j/k and the wheel scroll it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayControl {
+    /// The scrollable results body.
+    Body,
+    /// The confirm button (runs the pending mutating dispatch).
+    Confirm,
+    /// The cancel button (dismisses a confirm).
+    Cancel,
+    /// The close X (dismisses the modal).
+    Close,
+}
+
+impl Overlay {
+    /// The focus ring's ordered controls for this modal (ADR-0027). Index 0 is
+    /// the default focus — the control "open, press Enter" acts on — so a
+    /// confirm defaults to Confirm and a results listing to its (scrollable)
+    /// Body. Running has no focusable controls.
+    #[must_use]
+    pub fn controls(&self) -> &'static [OverlayControl] {
+        use OverlayControl::{Body, Cancel, Close, Confirm};
+        match self {
+            Overlay::Results { .. } => &[Body, Close],
+            Overlay::Confirm { .. } => &[Confirm, Cancel, Close],
+            Overlay::Running { .. } => &[],
+        }
+    }
+}
+
 impl Overlay {
     /// Build the Results overlay from a completed outcome: body sanitized
     /// line-by-line, bounded with an honest truncation notice, nonzero exits

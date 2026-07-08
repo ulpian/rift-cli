@@ -220,6 +220,10 @@ pub struct App {
     pub status: Option<String>,
     /// The modal dispatch surface (results / confirm / running), if open.
     pub overlay: Option<crate::dispatch::Overlay>,
+    /// The focus ring's cursor within the open modal — an index into
+    /// `overlay.controls()` (ADR-0027). 0 is the default focus; reset when a
+    /// modal opens via [`Self::open_overlay`].
+    pub overlay_focus: usize,
     /// The canonicalized launch directory (`/add` registers it; set from
     /// `CanopyOpts` at startup — the reducer never reads process cwd).
     pub launch_cwd: Option<String>,
@@ -258,6 +262,7 @@ impl App {
             quit: false,
             status: None,
             overlay: None,
+            overlay_focus: 0,
             launch_cwd: None,
             command_error: None,
             suggest_highlight: 0,
@@ -305,6 +310,43 @@ impl App {
         if let Some(&next) = FOCUS_ORDER.get(j) {
             self.set_focus(next);
         }
+    }
+
+    /// Open a modal and focus its default control (index 0; ADR-0027), so a
+    /// freshly-opened confirm has its confirm button focused ("open, Enter").
+    pub fn open_overlay(&mut self, overlay: crate::dispatch::Overlay) {
+        self.overlay = Some(overlay);
+        self.overlay_focus = 0;
+    }
+
+    /// Move the modal focus ring to the next (`fwd`) / previous control,
+    /// wrapping (Tab / Shift-Tab; ADR-0027). A no-op with no open modal or a
+    /// modal that has no focusable controls (Running).
+    pub fn cycle_overlay_focus(&mut self, fwd: bool) {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return;
+        };
+        let n = overlay.controls().len();
+        if n == 0 {
+            return;
+        }
+        let cur = self.overlay_focus.min(n - 1);
+        self.overlay_focus = if fwd {
+            (cur + 1) % n
+        } else {
+            (cur + n - 1) % n
+        };
+    }
+
+    /// The modal control the focus ring currently rests on (ADR-0027), or `None`
+    /// with no open modal / no focusable controls.
+    #[must_use]
+    pub fn focused_overlay_control(&self) -> Option<crate::dispatch::OverlayControl> {
+        let overlay = self.overlay.as_ref()?;
+        let controls = overlay.controls();
+        controls
+            .get(self.overlay_focus.min(controls.len().checked_sub(1)?))
+            .copied()
     }
 
     /// Move focus one column left/right (Projects↔Detail↔Graphs), clamped. A no-op

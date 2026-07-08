@@ -252,6 +252,24 @@ fn draw_scrim(frame: &mut Frame, modal: Rect) {
     }
 }
 
+/// The style for a modal button (ADR-0027/0028): the accent, washed with the
+/// focus background when the focus ring rests on it, and the press-flash
+/// background (which wins) while it is pressed. Colour-only, so the mono/ASCII
+/// tiers keep the label glyphs and drop the wash.
+fn overlay_button_style(
+    vm: &ViewModel,
+    target: &crate::hit::Target,
+    control: crate::dispatch::OverlayControl,
+) -> Style {
+    if let Some(bg) = crate::chrome::press_flash_bg(vm.button_flash(target)) {
+        ACCENT.with_bg(bg)
+    } else if vm.focused_overlay_control() == Some(control) {
+        ACCENT.with_bg(crate::theme::SELECT_BG)
+    } else {
+        ACCENT
+    }
+}
+
 /// Draw the dispatch overlay as a centered modal (ADR-0026): a themed scrim over
 /// the dashboard, then a bordered, scrollable pane. Geometry comes from the one
 /// shared [`modal_rect`], so pixels and hit-test targets can never disagree.
@@ -305,8 +323,32 @@ fn draw_overlay(vm: &ViewModel, frame: &mut Frame) {
                 &sanitize_for_terminal(&format!("target repository: {repo}")),
                 Style::DEFAULT,
             );
-            let buttons = format!("{}   {}", CONFIRM_BUTTONS.0, CONFIRM_BUTTONS.1);
-            clip_line(frame, inner, 3, &buttons, ACCENT);
+            // Confirm / Cancel as two focus-ring buttons (ADR-0027): the focused
+            // one carries the focus wash, a pressed one the flash (ADR-0028).
+            // The gap (3) and columns mirror the hit-test exactly.
+            let brow = inner.y + 3;
+            let confirm_w = u16::try_from(CONFIRM_BUTTONS.0.chars().count()).unwrap_or(0);
+            frame.put_str(
+                inner.x,
+                brow,
+                CONFIRM_BUTTONS.0,
+                overlay_button_style(
+                    vm,
+                    &crate::hit::Target::OverlayConfirm,
+                    crate::dispatch::OverlayControl::Confirm,
+                ),
+            );
+            let cancel_x = inner.x.saturating_add(confirm_w).saturating_add(3);
+            frame.put_str(
+                cancel_x,
+                brow,
+                CONFIRM_BUTTONS.1,
+                overlay_button_style(
+                    vm,
+                    &crate::hit::Target::OverlayCancel,
+                    crate::dispatch::OverlayControl::Cancel,
+                ),
+            );
         }
         Overlay::Running { title } => {
             let inner = frame.border(rect, "running", ACCENT);
