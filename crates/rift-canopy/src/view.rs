@@ -252,6 +252,19 @@ fn draw_scrim(frame: &mut Frame, modal: Rect) {
     }
 }
 
+/// The clickable close `[x]` on a modal's top-right border (ADR-0027) — one
+/// shared source for the draw and the hit-test, so the glyph and its click
+/// target are the same cells. `None` when the modal is too narrow to host it.
+#[must_use]
+pub fn modal_close_rect(modal: Rect) -> Option<Rect> {
+    (modal.w >= 8).then(|| Rect {
+        x: modal.x + modal.w - 4,
+        y: modal.y,
+        w: 3,
+        h: 1,
+    })
+}
+
 /// The style for a modal button (ADR-0027/0028): the accent, washed with the
 /// focus background when the focus ring rests on it, and the press-flash
 /// background (which wins) while it is pressed. Colour-only, so the mono/ASCII
@@ -359,6 +372,22 @@ fn draw_overlay(vm: &ViewModel, frame: &mut Frame) {
                 &sanitize_for_terminal(&format!("running {title} …")),
                 Style::DEFAULT,
             );
+        }
+    }
+    // The universal close X on the top-right border (ADR-0027), for modals that
+    // carry a Close control (Results / Confirm; Running has none). The focus
+    // wash marks it when the ring rests on Close; the flash when it is pressed.
+    if overlay
+        .controls()
+        .contains(&crate::dispatch::OverlayControl::Close)
+    {
+        if let Some(cr) = modal_close_rect(rect) {
+            let style = overlay_button_style(
+                vm,
+                &crate::hit::Target::OverlayClose,
+                crate::dispatch::OverlayControl::Close,
+            );
+            frame.put_str(cr.x, cr.y, "[x]", style);
         }
     }
 }

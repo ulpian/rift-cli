@@ -4,7 +4,7 @@ expression: render_state(&mut s)
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
 ╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────╮
-│># rift-c╭─ rift verify ────────────────────────────────────────────────────────────────╮         │
+│># rift-c╭─ rift verify ─────────────────────────────────────────────────────────────[x]╮         │
 │ # rift-s│re-derived 2 checkpoint(s) from git; 2 shard(s) checked                       │         │
 │         │chain: BROKEN at #1                                                           │         │
 │         │                                                                              │         │

@@ -4,7 +4,7 @@ expression: render_state(&mut s)
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
 ╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────╮
-│># rift-c╭─ rift status ────────────────────────────────────────────────────────────────╮         │
+│># rift-c╭─ rift status ─────────────────────────────────────────────────────────────[x]╮         │
 │ # rift-s│line 396                                                                      │         │
 │         │line 397                                                                      │         │
 │         │line 398                                                                      │         │

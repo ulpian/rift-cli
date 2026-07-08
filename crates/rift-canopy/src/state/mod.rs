@@ -865,6 +865,13 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             s.dirty = true;
             Flow::Continue(Effects::default())
         }
+        // The close X (ADR-0027) — the click/Tab equivalent of Esc; dismisses
+        // any modal that carries a Close control.
+        Target::OverlayClose => {
+            s.app.overlay = None;
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
         Target::OverlayBody => Flow::Continue(Effects::default()),
         // A suggestion click INSERTS only — Tab's mouse equivalent, never
         // execution (M5-11; PRD user story 32).
@@ -935,7 +942,12 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             return Flow::Continue(Effects::default());
         }
         // The wheel scrolls an open Results overlay like `j`/`k`.
-        Some(Target::OverlayBody | Target::OverlayConfirm | Target::OverlayCancel) => {
+        Some(
+            Target::OverlayBody
+            | Target::OverlayConfirm
+            | Target::OverlayCancel
+            | Target::OverlayClose,
+        ) => {
             if let Some(Overlay::Results { scroll, lines, .. }) = s.app.overlay.as_mut() {
                 *scroll = if down {
                     scroll.saturating_add(1).min(lines.len().saturating_sub(1))
@@ -2160,6 +2172,25 @@ mod tests {
         // Enter on Close dismisses.
         let _ = update(&mut s, Event::Key(CanopyKey::Enter));
         assert!(s.app.overlay.is_none());
+    }
+
+    #[test]
+    fn clicking_the_close_x_dismisses_the_modal_and_flashes() {
+        let mut s = ready(vec![project("a")]);
+        s.app.open_overlay(Overlay::Results {
+            title: "t".into(),
+            lines: vec!["ok".into()],
+            scroll: 0,
+            footer: None,
+            truncated: false,
+        });
+        let _ = apply_click(&mut s, Target::OverlayClose);
+        assert!(s.app.overlay.is_none(), "the X dismisses the modal");
+        assert_eq!(
+            s.press_pulse, 1.0,
+            "the close X press-flashes like any button"
+        );
+        assert_eq!(s.pressed, Some(Target::OverlayClose));
     }
 
     #[test]

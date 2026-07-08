@@ -35,6 +35,8 @@ pub enum Target {
     OverlayConfirm,
     /// The dispatch overlay's Cancel button (mouse Esc).
     OverlayCancel,
+    /// The modal's close X — dismiss (mouse/Tab equivalent of Esc; ADR-0027).
+    OverlayClose,
     /// The dispatch overlay body (wheel scroll / inert click).
     OverlayBody,
     /// A suggest-panel row: click INSERTS it (Tab's mouse equivalent — never
@@ -66,6 +68,7 @@ impl Target {
                 | Target::EditorButton
                 | Target::OverlayConfirm
                 | Target::OverlayCancel
+                | Target::OverlayClose
         )
     }
 }
@@ -111,6 +114,18 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
     if let Some(overlay) = &vm.overlay {
         let rect = crate::view::modal_rect(size);
         if rect.w >= 8 && rect.h >= 3 && contains(rect, col, row) {
+            // The close X (ADR-0027), top-right, for modals that carry a Close
+            // control — the same cells `draw_overlay` paints it into.
+            if overlay
+                .controls()
+                .contains(&crate::dispatch::OverlayControl::Close)
+            {
+                if let Some(cr) = crate::view::modal_close_rect(rect) {
+                    if contains(cr, col, row) {
+                        return Some(Target::OverlayClose);
+                    }
+                }
+            }
             if let crate::dispatch::Overlay::Confirm { .. } = overlay {
                 // The buttons row mirrors `view::draw_overlay`: inner dy=3.
                 let inner = inner_of(rect);
@@ -502,6 +517,40 @@ mod tests {
             Some(Target::OverlayBody),
             "no confirm target on a results overlay"
         );
+    }
+
+    #[test]
+    fn the_close_x_is_clickable_and_pixels_equal_targets() {
+        let mut s = AppState::new(vec![project("a")], Size::new(100, 32));
+        s.app.splash.skip();
+        s.app.open_overlay(crate::dispatch::Overlay::Confirm {
+            request: crate::dispatch::DispatchRequest::Rebuild,
+            repo: "/r/a".into(),
+        });
+        let v = s.snapshot();
+        let rect = crate::view::modal_rect(Size::new(100, 32));
+        let cr = crate::view::modal_close_rect(rect).expect("wide modal has a close X");
+        // Every cell the X is drawn into resolves to OverlayClose.
+        assert_eq!(hit_test(&v, cr.x, cr.y), Some(Target::OverlayClose));
+        assert_eq!(
+            hit_test(&v, cr.x + cr.w - 1, cr.y),
+            Some(Target::OverlayClose)
+        );
+        // Just left of the X is the modal body, not the close.
+        assert_eq!(hit_test(&v, cr.x - 1, cr.y), Some(Target::OverlayBody));
+    }
+
+    #[test]
+    fn a_running_modal_has_no_close_x() {
+        let mut s = AppState::new(vec![project("a")], Size::new(100, 32));
+        s.app.splash.skip();
+        s.app
+            .open_overlay(crate::dispatch::Overlay::Running { title: "x".into() });
+        let v = s.snapshot();
+        let rect = crate::view::modal_rect(Size::new(100, 32));
+        let cr = crate::view::modal_close_rect(rect).unwrap();
+        // Running carries no Close control, so that cell is inert body, not close.
+        assert_eq!(hit_test(&v, cr.x, cr.y), Some(Target::OverlayBody));
     }
 
     proptest::proptest! {
