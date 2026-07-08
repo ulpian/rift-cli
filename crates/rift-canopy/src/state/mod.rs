@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::col2::{plan_flip, DetailView, Feature, FeatureAction, FeatureActionKind};
 use crate::command::Verb;
 use crate::dispatch::{DispatchOutcome, DispatchRequest, Overlay};
-use crate::hit::{hit_test, Target};
+use crate::hit::{hit_test, ScrollRegion, Target};
 use crate::input::{on_key, Action, CanopyKey, MouseButton, MouseInput, MouseKind};
 use crate::render::frame::Size;
 use crate::{App, Mode, Panel, ProjectStatus};
@@ -966,7 +966,10 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             s.dirty = true;
             Flow::Continue(Effects::default())
         }
-        Target::OverlayBody => Flow::Continue(Effects::default()),
+        // An inert click surface: the overlay body, and a scrollbar (an overflow
+        // indicator only — ADR-0031; the wheel scrolls the region in apply_scroll,
+        // and drag/click-to-page is a later rung on the same track/thumb geometry).
+        Target::OverlayBody | Target::Scrollbar(_) => Flow::Continue(Effects::default()),
         // A suggestion click INSERTS only — Tab's mouse equivalent, never
         // execution (M5-11; PRD user story 32).
         Target::SuggestRow(i) => {
@@ -1018,9 +1021,13 @@ fn editor_flow(s: &AppState) -> Flow {
 /// detail moves the toggle cursor, graphs scroll their viewport.
 fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool) -> Flow {
     let panel = match hit_test(vm, col, row) {
-        Some(Target::ProjectRow(_)) => Panel::Projects,
-        Some(Target::ToggleRow(_) | Target::RetryRow(_)) => Panel::Detail,
-        Some(Target::Section(_)) => Panel::Graphs,
+        Some(Target::ProjectRow(_) | Target::Scrollbar(ScrollRegion::Rail)) => Panel::Projects,
+        Some(
+            Target::ToggleRow(_)
+            | Target::RetryRow(_)
+            | Target::Scrollbar(ScrollRegion::Detail),
+        ) => Panel::Detail,
+        Some(Target::Section(_) | Target::Scrollbar(ScrollRegion::Graphs)) => Panel::Graphs,
         Some(Target::PanelFocus(p)) => p,
         // The wheel moves the suggest highlight (never inserts, never runs).
         Some(Target::SuggestRow(_)) => {
@@ -1040,7 +1047,8 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             Target::OverlayBody
             | Target::OverlayConfirm
             | Target::OverlayCancel
-            | Target::OverlayClose,
+            | Target::OverlayClose
+            | Target::Scrollbar(ScrollRegion::Modal),
         ) => {
             if let Some(Overlay::Results { scroll, lines, .. }) = s.app.overlay.as_mut() {
                 *scroll = if down {

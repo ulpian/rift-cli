@@ -191,6 +191,70 @@ pub fn press_flash_bg(flash: f32) -> Option<crate::render::frame::Color> {
     (f > 0.0).then(|| crate::theme::lerp_color(crate::theme::SURFACE_BG, crate::theme::ACCENT, f))
 }
 
+/// A scrollbar's geometry (ADR-0031): the **track** on a region's right edge and
+/// the **thumb** within it, derived purely from `(offset, viewport, content_len)`
+/// — shared between the renderer and the hit-test so the drawn cells and the
+/// click region are identical, exactly like every other clickable geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scrollbar {
+    /// The full-height track on the region's right edge (1 cell wide).
+    pub track: Rect,
+    /// The thumb — its size and position derive from the offset/viewport/content.
+    pub thumb: Rect,
+}
+
+/// The scrollbar for a scrollable `area` whose content is `content_len` rows, of
+/// which `area.h` are visible starting at `offset` (ADR-0031). `None` when the
+/// content fits the viewport — the bar's presence honestly means "there is more".
+/// The thumb height is proportional (≥1 cell) and its position maps the offset
+/// across the track's travel, so the drawn indicator reflects where the viewport
+/// sits in the content.
+#[must_use]
+pub fn scrollbar(area: Rect, offset: usize, content_len: usize) -> Option<Scrollbar> {
+    let viewport = usize::from(area.h);
+    if area.w == 0 || viewport == 0 || content_len <= viewport {
+        return None;
+    }
+    let track = Rect {
+        x: area.x + area.w - 1,
+        y: area.y,
+        w: 1,
+        h: area.h,
+    };
+    // Proportional thumb: (visible / total) of the track, at least one cell.
+    let thumb_h = ((viewport * viewport) / content_len).clamp(1, viewport);
+    // `content_len > viewport` here (we returned above otherwise), so the max
+    // in-range offset is ≥ 1 — the division is always safe.
+    let max_off = content_len - viewport;
+    let travel = viewport - thumb_h; // rows the thumb can move
+    let off = offset.min(max_off);
+    let thumb_top = (off * travel) / max_off;
+    let thumb = Rect {
+        x: track.x,
+        y: area.y + u16::try_from(thumb_top).unwrap_or(0),
+        w: 1,
+        h: u16::try_from(thumb_h).unwrap_or(1),
+    };
+    Some(Scrollbar { track, thumb })
+}
+
+/// Draw a [`Scrollbar`] (ADR-0031): the track glyph down the right edge in the
+/// dim border tone, the thumb cells over it in the accent. Both glyph and colour
+/// degrade on ASCII (`│`/`█` → `|`/`#`) so a mono terminal still shows an honest
+/// indicator. Chrome — the bar sits on the region's own last column, never over a
+/// data cell (callers reserve that column).
+pub fn draw_scrollbar(frame: &mut Frame, bar: &Scrollbar, unicode: bool) {
+    let (track_g, thumb_g) = if unicode { ('│', '█') } else { ('|', '#') };
+    let track_style = Style::fg(crate::theme::BORDER_IDLE);
+    let thumb_style = Style::fg(crate::theme::ACCENT);
+    for dy in 0..bar.track.h {
+        frame.set(bar.track.x, bar.track.y + dy, track_g, track_style);
+    }
+    for dy in 0..bar.thumb.h {
+        frame.set(bar.thumb.x, bar.thumb.y + dy, thumb_g, thumb_style);
+    }
+}
+
 /// Truncate `s` to at most `w` display cells (char-counted).
 fn clip(s: &str, w: u16) -> String {
     s.chars().take(usize::from(w)).collect()
@@ -377,5 +441,81 @@ mod tests {
         }
         badge(&mut f, 20, 20, "off-screen", Style::DEFAULT);
         button(&mut f, 20, 0, "x", "y", Style::DEFAULT, Style::DEFAULT);
+    }
+
+    // ---- M57-04: the scrollbar primitive (ADR-0031) ------------------------
+
+    #[test]
+    fn no_scrollbar_when_content_fits() {
+        // Content ≤ viewport ⇒ no bar (its presence honestly means "there's more").
+        let area = rect(0, 0, 10, 8);
+        assert!(scrollbar(area, 0, 8).is_none(), "exactly fits ⇒ no bar");
+        assert!(scrollbar(area, 0, 3).is_none(), "under-fills ⇒ no bar");
+        assert!(scrollbar(area, 0, 9).is_some(), "one row over ⇒ a bar");
+    }
+
+    #[test]
+    fn thumb_tracks_top_middle_bottom() {
+        // 20 rows of content in an 8-row viewport: the thumb sits at the top at
+        // offset 0, and at the bottom of the track at the max offset (12).
+        let area = rect(0, 0, 10, 8);
+        let top = scrollbar(area, 0, 20).unwrap();
+        assert_eq!(top.thumb.y, area.y, "offset 0 ⇒ thumb at the top");
+        let bottom = scrollbar(area, 12, 20).unwrap();
+        assert_eq!(
+            bottom.thumb.y + bottom.thumb.h,
+            area.y + area.h,
+            "max offset ⇒ thumb flush to the track bottom"
+        );
+        // The thumb never leaves the track, at any offset.
+        for off in 0..=12 {
+            let bar = scrollbar(area, off, 20).unwrap();
+            assert!(bar.thumb.y >= bar.track.y);
+            assert!(bar.thumb.y + bar.thumb.h <= bar.track.y + bar.track.h);
+            assert!(bar.thumb.h >= 1, "the thumb is always at least one cell");
+        }
+    }
+
+    #[test]
+    fn drawn_cells_equal_the_geometry() {
+        // The rendered track/thumb cells are exactly the geometry's cells
+        // (pixels == targets — the same discipline as every clickable geometry).
+        let area = rect(0, 0, 12, 8);
+        let bar = scrollbar(area, 4, 24).unwrap();
+        let mut f = Frame::new(Size::new(12, 8));
+        draw_scrollbar(&mut f, &bar, true);
+        let track_x = area.x + area.w - 1;
+        for y in 0..8 {
+            let lit = f.get(track_x, y).is_some_and(|c| c.ch != ' ');
+            let in_track = y >= bar.track.y && y < bar.track.y + bar.track.h;
+            assert_eq!(lit, in_track, "track cell mismatch at row {y}");
+            let is_thumb = y >= bar.thumb.y && y < bar.thumb.y + bar.thumb.h;
+            let glyph = f.get(track_x, y).map(|c| c.ch);
+            if is_thumb {
+                assert_eq!(glyph, Some('█'), "thumb glyph at row {y}");
+            }
+        }
+        // No cell OUTSIDE the track column is touched.
+        for y in 0..8 {
+            for x in 0..track_x {
+                assert!(
+                    f.get(x, y).is_some_and(|c| c.ch == ' '),
+                    "the bar wrote outside its column at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scrollbar_degrades_on_ascii() {
+        let area = rect(0, 0, 6, 6);
+        let bar = scrollbar(area, 0, 12).unwrap();
+        let mut f = Frame::new(Size::new(6, 6));
+        draw_scrollbar(&mut f, &bar, false);
+        let x = area.x + area.w - 1;
+        // The ASCII floor keeps an honest indicator: `|` track, `#` thumb.
+        let glyphs: Vec<char> = (0..6).filter_map(|y| f.get(x, y).map(|c| c.ch)).collect();
+        assert!(glyphs.contains(&'#'), "ascii thumb: {glyphs:?}");
+        assert!(glyphs.contains(&'|'), "ascii track: {glyphs:?}");
     }
 }

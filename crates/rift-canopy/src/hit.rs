@@ -15,6 +15,21 @@ use crate::state::ViewModel;
 use crate::view::visible_window;
 use crate::{Panel, ProjectStatus};
 
+/// A scrollable region that can carry a scrollbar (ADR-0031). Identifies which
+/// region a [`Target::Scrollbar`] belongs to so a future thumb-drag knows what to
+/// move; the indicator ships first (drag is a later rung on the same geometry).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollRegion {
+    /// The projects rail (column 1).
+    Rail,
+    /// The column-2 detail card stack.
+    Detail,
+    /// The column-3 graph panel stack.
+    Graphs,
+    /// An open modal's scrollable body.
+    Modal,
+}
+
 /// What a click resolves to — mapped by the reducer onto the same state changes
 /// the keyboard produces.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +66,10 @@ pub enum Target {
     WizardAdd,
     /// The dispatch overlay body (wheel scroll / inert click).
     OverlayBody,
+    /// A region's scrollbar (ADR-0031): an overflow indicator today (a click is
+    /// inert; the wheel scrolls the region under it). Drag/click-to-page is a
+    /// later rung on this same track/thumb geometry.
+    Scrollbar(ScrollRegion),
     /// A suggest-panel row: click INSERTS it (Tab's mouse equivalent — never
     /// execution); the wheel moves the highlight.
     SuggestRow(usize),
