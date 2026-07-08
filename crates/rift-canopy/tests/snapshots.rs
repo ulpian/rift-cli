@@ -438,6 +438,67 @@ fn golden_axis_frame() {
 }
 
 #[test]
+fn golden_activity_axis() {
+    // The activity card with a dense week: the axis frame (Y-count gutter,
+    // weekday X row, events/sessions/checkpoints legend) around the grouped bars.
+    use rift_canopy::cards::{self, CardCtx, CardKind};
+    use rift_canopy::{ActivityData, ActivityView, DayBar, DetailView};
+    let detail = DetailView::thin(
+        "/r/rift-cli".into(),
+        "rift-cli".into(),
+        ProjectStatus::Idle,
+    );
+    let days = ActivityView::Days(ActivityData {
+        days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            .iter()
+            .enumerate()
+            .map(|(i, wd)| {
+                let n = u64::try_from(i).unwrap_or(0);
+                DayBar {
+                    weekday: wd,
+                    events: n * 4,
+                    sessions: n,
+                    checkpoints: n / 2,
+                }
+            })
+            .collect(),
+    });
+    let runtime = std::collections::BTreeMap::new();
+    let ctx = CardCtx {
+        detail: &detail,
+        activity: &days,
+        runtime: &runtime,
+        toggle_cursor: 0,
+        focused: false,
+        unicode: false,
+        pressed: None,
+        press_pulse: 0.0,
+    };
+    // Render the full card stack and snapshot the activity card (its own slot).
+    let area = rift_canopy::Rect {
+        x: 0,
+        y: 0,
+        w: 44,
+        h: 44,
+    };
+    let slots = cards::solve(area);
+    let activity = slots.iter().find(|s| s.kind == CardKind::Activity);
+    let (y0, y1) = activity.map_or((0u16, 44), |s| (s.rect.y, s.rect.y + s.rect.h));
+    let mut f = Frame::new(Size::new(44, 44));
+    let mut b = AsciiBackend::new(Capabilities::empty());
+    cards::draw(&ctx, rift_canopy::theme::Theme::rift_dark(), area, &mut b, &mut f);
+    // Snapshot just the activity slot's rows.
+    let mut out = String::new();
+    for y in y0..y1 {
+        for x in 0..f.width() {
+            out.push(f.get(x, y).map_or(' ', |c| c.ch));
+        }
+        out.push('\n');
+    }
+    insta::assert_snapshot!("activity_axis", out.trim_end());
+}
+
+#[test]
 fn golden_overlay_wizard_modal() {
     // The first-run wizard as a modal (ADR-0029): message + the add-project chip.
     let mut s = AppState::new(vec![], Size::new(100, 32));

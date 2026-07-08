@@ -1,0 +1,14 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: out.trim_end()
+---
+╭─ activity · 7d ──────────────────────────╮
+│# events  # sess  # checks                │
+│24                             ▄     █    │
+│                         ▄     █     █    │
+│                    ▄    █     █     █    │
+│12            ▄     █    █     █     █    │
+│         ▄    █     █    █ ▄   █▄    ██   │
+│ 0 ▄ ▄▄  █▄ ▄ █ █▄  ██ ▄ █ ██  ██ █  ███  │
+│   M    T    W    T    F    S    S        │
+╰──────────────────────────────────────────╯

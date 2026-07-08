@@ -480,7 +480,7 @@ pub fn draw(
         }
         match slot.id {
             SectionId::TokenUsage => {
-                draw_token_panel(col3, theme, focused, slot.collapsed, rect, backend, frame);
+                draw_token_panel(col3, theme, focused, unicode, slot.collapsed, rect, backend, frame);
             }
             SectionId::System => {
                 draw_system_panel(
@@ -535,6 +535,7 @@ fn draw_token_panel(
     col3: &Col3,
     theme: Theme,
     focused: bool,
+    unicode: bool,
     collapsed: bool,
     rect: Rect,
     backend: &mut dyn RenderBackend,
@@ -583,8 +584,33 @@ fn draw_token_panel(
             h: inner.h - tiles_rows,
         };
         let max = plot::autoscale_max(&vals);
-        let pts = plot::bar_points(&vals, max, chart.h.saturating_mul(4).max(4));
-        backend.plot(&pts, chart, &Paint::ByCategory(&theme::BREAKDOWN), frame);
+        // The axis frame (ADR-0030): a humanized Y-token gutter, the four class
+        // labels on X, and the class-colour legend — single-sourced with the
+        // tiles via `theme::BREAKDOWN`. The legend drops first under vertical
+        // pressure (the tiles below already name the classes), then the axis.
+        let x_labels = ["in".to_string(), "rd".into(), "out".into(), "ca".into()];
+        let legend_full = [
+            (theme::BREAKDOWN[0], "input"),
+            (theme::BREAKDOWN[1], "read"),
+            (theme::BREAKDOWN[2], "output"),
+            (theme::BREAKDOWN[3], "cache"),
+        ];
+        let legend: &[(Color, &str)] = if chart.h >= 4 { &legend_full } else { &[] };
+        let plot_rect = if chart.h >= 3 {
+            let spec = crate::axis::AxisSpec {
+                max,
+                humanize: fmt_km,
+                x_labels: &x_labels,
+                legend,
+            };
+            crate::axis::draw(frame, theme, chart, &spec, unicode)
+        } else {
+            chart
+        };
+        if plot_rect.h > 0 && plot_rect.w > 0 {
+            let pts = plot::bar_points(&vals, max, plot_rect.h.saturating_mul(4).max(4));
+            backend.plot(&pts, plot_rect, &Paint::ByCategory(&theme::BREAKDOWN), frame);
+        }
     }
     // Five stat tiles on the bottom rows: the four classes + the read fraction,
     // each bordered in its class colour (the read tile shows the 0/0 = 0 case).

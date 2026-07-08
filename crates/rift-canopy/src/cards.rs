@@ -677,25 +677,9 @@ fn draw_activity(
         );
         return;
     }
-    // The legend on the first inner row.
-    let mut lx = inner.x;
-    for (ic, label, colour) in activity_cats() {
-        frame.set(lx, inner.y, ic.glyph(ctx.unicode), Style::fg(colour));
-        lx = frame.put_str(lx + 1, inner.y, &format!(" {label}  "), theme.dim());
-        if lx >= inner.x + inner.w {
-            break;
-        }
-    }
-    // The grouped bars fill the middle; the day labels the last row.
     if inner.h < 3 {
         return;
     }
-    let plot_rect = Rect {
-        x: inner.x,
-        y: inner.y + 1,
-        w: inner.w,
-        h: inner.h - 2,
-    };
     let groups: Vec<Vec<f64>> = days
         .iter()
         .map(|b| vec![as_f64(b.events), as_f64(b.sessions), as_f64(b.checkpoints)])
@@ -705,27 +689,38 @@ fn draw_activity(
         .flat_map(|g| g.iter().copied())
         .fold(0.0f64, f64::max)
         .max(1.0);
+    let cats = activity_cats();
+    // The axis frame (ADR-0030): a Y-count gutter, a weekday X row, and the
+    // three-series legend, shrinking the plot. Under height pressure the axis
+    // drops before the bars (collapse-to-summary drops the headline last).
+    let plot_rect = if inner.h >= 4 {
+        let x_labels: Vec<String> = days
+            .iter()
+            .map(|b| b.weekday.chars().next().map(String::from).unwrap_or_default())
+            .collect();
+        let legend = [
+            (cats[0].2, cats[0].1),
+            (cats[1].2, cats[1].1),
+            (cats[2].2, cats[2].1),
+        ];
+        let spec = crate::axis::AxisSpec {
+            max,
+            humanize: crate::col3::fmt_km,
+            x_labels: &x_labels,
+            legend: &legend,
+        };
+        crate::axis::draw(frame, theme, inner, &spec, ctx.unicode)
+    } else {
+        inner
+    };
+    if plot_rect.h == 0 || plot_rect.w == 0 {
+        return;
+    }
     let levels = plot_rect.h.saturating_mul(4).max(4);
     let per_cat = plot::grouped_bar_points(&groups, 3, max, levels);
-    let cats = activity_cats();
     for (c, pts) in per_cat.iter().enumerate() {
         let colour = cats.get(c).map_or(Color::Default, |(_, _, col)| *col);
         backend.plot(pts, plot_rect, &Paint::Solid(Style::fg(colour)), frame);
-    }
-    // Day labels (first letter of each weekday) on the last inner row.
-    let label_row = inner.y + inner.h - 1;
-    let stride = inner.w / u16::try_from(days.len().max(1)).unwrap_or(1);
-    for (i, b) in days.iter().enumerate() {
-        let Ok(i16) = u16::try_from(i) else { break };
-        let x = inner.x + i16 * stride;
-        if x < inner.x + inner.w {
-            frame.set(
-                x,
-                label_row,
-                b.weekday.chars().next().unwrap_or('?'),
-                theme.dim(),
-            );
-        }
     }
 }
 
@@ -1207,6 +1202,50 @@ mod tests {
             }
         }
         assert!(bar_cells > 0, "the grouped daily bars draw");
+        // The axis frame (ADR-0030): the Y-count gutter (max=18), the three-series
+        // legend, and the weekday X row all render around the bars.
+        let text2: String = (0..f2.height())
+            .flat_map(|y| (0..f2.width()).map(move |x| (x, y)))
+            .map(|(x, y)| f2.get(x, y).map_or(' ', |c| c.ch))
+            .collect();
+        assert!(text2.contains("18"), "the Y-count gutter shows the max: {text2}");
+        assert!(text2.contains('0'), "the zero baseline renders");
+        assert!(text2.contains("events"), "the legend names the series");
+        assert!(text2.contains('M'), "the weekday X row renders");
+    }
+
+    #[test]
+    fn a_quiet_week_still_draws_the_axis_and_a_zero_baseline() {
+        // Seven zero-count days: not a blank — the axis + `0` baseline still frame
+        // the (empty) plot (placeholder-not-fake-zero; ADR-0030).
+        let d = detail(ProjectStatus::Idle);
+        let rt = BTreeMap::new();
+        let quiet = ActivityView::Days(ActivityData {
+            days: (0..7u64)
+                .map(|_| DayBar {
+                    weekday: "Tue",
+                    events: 0,
+                    sessions: 0,
+                    checkpoints: 0,
+                })
+                .collect(),
+        });
+        let mut f = Frame::new(Size::new(44, 12));
+        let mut b = AsciiBackend::new(Capabilities::empty());
+        draw_activity(
+            &ctx(&d, &quiet, &rt),
+            Theme::rift_dark(),
+            rect(0, 0, 44, 12),
+            false,
+            &mut b,
+            &mut f,
+        );
+        let text: String = (0..f.height())
+            .flat_map(|y| (0..f.width()).map(move |x| (x, y)))
+            .map(|(x, y)| f.get(x, y).map_or(' ', |c| c.ch))
+            .collect();
+        assert!(text.contains('0'), "the zero baseline shows on a quiet week");
+        assert!(text.contains("events"), "the legend still frames the quiet week");
     }
 
     #[test]
