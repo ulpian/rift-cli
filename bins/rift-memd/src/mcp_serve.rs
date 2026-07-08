@@ -127,26 +127,64 @@ fn tool_descriptors() -> Vec<Tool> {
         .collect()
 }
 
-/// Best-effort: hand a serving event to `rift hooks memd <verb>` (the Go capture
-/// CLI redacts + chains it). Never blocks the response; all errors are ignored.
+/// Resolve the `rift` audit-sink binary for the running process.
+///
+/// `rift` ships **beside** `rift-memd` in every layout — dev `target/<profile>/`,
+/// `cargo install` `~/.cargo/bin/`, a distro/Homebrew `bin/` — so resolve it
+/// relative to our own `current_exe` rather than trusting `$PATH`. The daemon is
+/// spawned by **absolute path** from the agent's `.mcp.json` and inherits no
+/// guaranteed `PATH`, so a bare `rift` lookup silently fails on most machines —
+/// and a dropped audit handoff is exactly what strands the dashboard on
+/// "no serves yet". Fall back to a bare, PATH-resolved name only when no sibling
+/// is present, so an unusual install still gets a chance.
+fn rift_bin() -> PathBuf {
+    rift_bin_beside(std::env::current_exe().ok(), Path::exists)
+}
+
+/// Pure core of [`rift_bin`], split out so the layout logic is unit-testable
+/// without touching the real filesystem or process image.
+fn rift_bin_beside(exe: Option<PathBuf>, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    // `rift` on unix, `rift.exe` on Windows — the daemon is `rift-memd[.exe]`.
+    let name = format!("rift{}", std::env::consts::EXE_SUFFIX);
+    exe.as_deref()
+        .and_then(Path::parent)
+        .map(|dir| dir.join(&name))
+        .filter(|sibling| exists(sibling))
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// Best-effort: hand a serving event to `rift hooks memd <verb>` (the capture
+/// CLI redacts + hash-chains it). Never blocks the response. A spawn failure is
+/// non-fatal — the serve already succeeded — but it is logged loudly (stderr,
+/// gated by `RIFT_LOG`): a *silent* failure here is exactly what makes the
+/// dashboard read "no serves yet" forever.
 fn emit_event(event: &rift_recall_events::MemdEvent) {
     use std::process::{Command, Stdio};
     let verb = event.verb();
     let json = event.to_hook_json();
-    if let Ok(mut child) = Command::new("rift")
+    let bin = rift_bin();
+    match Command::new(&bin)
         .args(["hooks", "memd", verb])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
     {
-        if let Some(stdin) = child.stdin.take() {
-            use std::io::Write as _;
-            let mut stdin = stdin;
-            let _ = stdin.write_all(json.as_bytes());
+        Ok(mut child) => {
+            if let Some(stdin) = child.stdin.take() {
+                use std::io::Write as _;
+                let mut stdin = stdin;
+                let _ = stdin.write_all(json.as_bytes());
+            }
+            // Detach: do not wait (non-blocking audit handoff).
+            drop(child);
         }
-        // Detach: do not wait (non-blocking audit handoff).
-        drop(child);
+        Err(error) => tracing::warn!(
+            bin = %bin.display(),
+            %error,
+            "recall serve-audit handoff could not spawn `rift hooks memd`; \
+             this serve's savings will not be recorded"
+        ),
     }
 }
 
@@ -351,5 +389,31 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["mcpServers"]["rift-recall"]["command"], "rift-memd");
         assert_eq!(v["mcpServers"]["rift-recall"]["args"][1], "--mcp");
+    }
+
+    fn rift_name() -> String {
+        format!("rift{}", std::env::consts::EXE_SUFFIX)
+    }
+
+    #[test]
+    fn audit_sink_resolves_beside_the_daemon() {
+        // Whatever bin dir rift-memd runs from, `rift` is its sibling — the
+        // invariant that holds across dev, cargo-install, and package layouts.
+        let got = rift_bin_beside(Some(PathBuf::from("/opt/rift/bin/rift-memd")), |_| true);
+        assert_eq!(got, PathBuf::from(format!("/opt/rift/bin/{}", rift_name())));
+    }
+
+    #[test]
+    fn audit_sink_falls_back_to_path_when_no_sibling() {
+        // No co-located binary (unusual layout) → bare name, resolved via $PATH.
+        let got = rift_bin_beside(Some(PathBuf::from("/opt/rift/bin/rift-memd")), |_| false);
+        assert_eq!(got, PathBuf::from(rift_name()));
+    }
+
+    #[test]
+    fn audit_sink_falls_back_when_exe_unknown() {
+        // current_exe() unavailable → still a usable bare name, never a panic.
+        let got = rift_bin_beside(None, |_| true);
+        assert_eq!(got, PathBuf::from(rift_name()));
     }
 }
