@@ -578,7 +578,10 @@ pub fn feature_retry_at(
         return None;
     }
     let rowdata = ctx.detail.toggles.rows.get(i)?;
-    if !matches!(effective_state(rowdata, ctx.runtime), ToggleState::Failed(_)) {
+    if !matches!(
+        effective_state(rowdata, ctx.runtime),
+        ToggleState::Failed(_)
+    ) {
         return None;
     }
     let chip = feature_retry_rect(inner, dy)?;
@@ -718,7 +721,13 @@ fn draw_activity(
     let plot_rect = if inner.h >= 4 {
         let x_labels: Vec<String> = days
             .iter()
-            .map(|b| b.weekday.chars().next().map(String::from).unwrap_or_default())
+            .map(|b| {
+                b.weekday
+                    .chars()
+                    .next()
+                    .map(String::from)
+                    .unwrap_or_default()
+            })
             .collect();
         let legend = [
             (cats[0].2, cats[0].1),
@@ -1129,7 +1138,10 @@ mod tests {
         draw_features(&c, Theme::rift_dark(), feat.rect, false, &mut f);
         // The `[r]` chip renders where the shared geometry says (pixels==targets).
         assert_eq!(f.get(chip.x, chip.y).unwrap().ch, '[');
-        assert_eq!(feature_retry_at(&c, feat.rect, false, chip.x, chip.y), Some(0));
+        assert_eq!(
+            feature_retry_at(&c, feat.rect, false, chip.x, chip.y),
+            Some(0)
+        );
         assert_eq!(
             feature_retry_at(&c, feat.rect, false, chip.x + 1, chip.y),
             Some(0),
@@ -1153,10 +1165,7 @@ mod tests {
             FeatureRuntime::Failed("boom".into()),
         );
         let slots = solve(rect(0, 0, 40, 60));
-        let feat = slots
-            .iter()
-            .find(|s| s.kind == CardKind::Features)
-            .unwrap();
+        let feat = slots.iter().find(|s| s.kind == CardKind::Features).unwrap();
         let chip = feature_retry_rect(inner_of(feat.rect), 0).unwrap();
         let mut c = ctx(&d, &act, &rt);
         c.pressed = Some(crate::hit::Target::RetryRow(0));
@@ -1230,7 +1239,10 @@ mod tests {
             .flat_map(|y| (0..f2.width()).map(move |x| (x, y)))
             .map(|(x, y)| f2.get(x, y).map_or(' ', |c| c.ch))
             .collect();
-        assert!(text2.contains("18"), "the Y-count gutter shows the max: {text2}");
+        assert!(
+            text2.contains("18"),
+            "the Y-count gutter shows the max: {text2}"
+        );
         assert!(text2.contains('0'), "the zero baseline renders");
         assert!(text2.contains("events"), "the legend names the series");
         assert!(text2.contains('M'), "the weekday X row renders");
@@ -1266,8 +1278,14 @@ mod tests {
             .flat_map(|y| (0..f.width()).map(move |x| (x, y)))
             .map(|(x, y)| f.get(x, y).map_or(' ', |c| c.ch))
             .collect();
-        assert!(text.contains('0'), "the zero baseline shows on a quiet week");
-        assert!(text.contains("events"), "the legend still frames the quiet week");
+        assert!(
+            text.contains('0'),
+            "the zero baseline shows on a quiet week"
+        );
+        assert!(
+            text.contains("events"),
+            "the legend still frames the quiet week"
+        );
     }
 
     #[test]

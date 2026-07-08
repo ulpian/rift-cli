@@ -444,11 +444,7 @@ fn golden_activity_axis() {
     // weekday X row, events/sessions/checkpoints legend) around the grouped bars.
     use rift_canopy::cards::{self, CardCtx, CardKind};
     use rift_canopy::{ActivityData, ActivityView, DayBar, DetailView};
-    let detail = DetailView::thin(
-        "/r/rift-cli".into(),
-        "rift-cli".into(),
-        ProjectStatus::Idle,
-    );
+    let detail = DetailView::thin("/r/rift-cli".into(), "rift-cli".into(), ProjectStatus::Idle);
     let days = ActivityView::Days(ActivityData {
         days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             .iter()
@@ -487,7 +483,14 @@ fn golden_activity_axis() {
     let (y0, y1) = activity.map_or((0u16, 44), |s| (s.rect.y, s.rect.y + s.rect.h));
     let mut f = Frame::new(Size::new(44, 44));
     let mut b = AsciiBackend::new(Capabilities::empty());
-    cards::draw(&ctx, rift_canopy::theme::Theme::rift_dark(), area, 0, &mut b, &mut f);
+    cards::draw(
+        &ctx,
+        rift_canopy::theme::Theme::rift_dark(),
+        area,
+        0,
+        &mut b,
+        &mut f,
+    );
     // Snapshot just the activity slot's rows.
     let mut out = String::new();
     for y in y0..y1 {

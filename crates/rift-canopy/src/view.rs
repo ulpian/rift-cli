@@ -404,7 +404,15 @@ fn draw_overlay(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
             scroll,
             footer,
             ..
-        } => draw_results(frame, unicode, rect, title, lines, *scroll, footer.as_deref()),
+        } => draw_results(
+            frame,
+            unicode,
+            rect,
+            title,
+            lines,
+            *scroll,
+            footer.as_deref(),
+        ),
         Overlay::Confirm { request, repo } => {
             let inner = frame.border(rect, "confirm", ACCENT);
             clip_line(
@@ -1043,7 +1051,10 @@ mod tests {
         s.app.splash.skip();
         let text = render_to_text(&s.snapshot());
         let has_bar = |t: &str| t.contains('█') || t.contains('│') || t.contains('#');
-        assert!(has_bar(&text), "the overflowing rail shows a scrollbar:\n{text}");
+        assert!(
+            has_bar(&text),
+            "the overflowing rail shows a scrollbar:\n{text}"
+        );
 
         let mut few = AppState::new(
             vec![Project {

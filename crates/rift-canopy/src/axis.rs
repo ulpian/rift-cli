@@ -59,7 +59,10 @@ impl AxisSpec<'_> {
             .map(|t| t.chars().count())
             .max()
             .unwrap_or(1);
-        (u16::try_from(widest).unwrap_or(MIN_GUTTER).saturating_add(1)).clamp(MIN_GUTTER, MAX_GUTTER)
+        (u16::try_from(widest)
+            .unwrap_or(MIN_GUTTER)
+            .saturating_add(1))
+        .clamp(MIN_GUTTER, MAX_GUTTER)
     }
 
     /// Whether a legend row is reserved (a non-empty legend).
@@ -112,7 +115,12 @@ pub fn draw(frame: &mut Frame, theme: Theme, r: Rect, spec: &AxisSpec<'_>, unico
                 break;
             }
             frame.set(lx, r.y, sw, Style::fg(*colour));
-            lx = frame.put_str(lx.saturating_add(1), r.y, &format!(" {name}  "), theme.dim());
+            lx = frame.put_str(
+                lx.saturating_add(1),
+                r.y,
+                &format!(" {name}  "),
+                theme.dim(),
+            );
         }
     }
     // The Y-tick gutter: max at the top plot row, mid at the middle, 0 at the
@@ -125,7 +133,9 @@ pub fn draw(frame: &mut Frame, theme: Theme, r: Rect, spec: &AxisSpec<'_>, unico
         (plot.y + plot.h.saturating_sub(1), &ticks[2]),
     ];
     for (ty, label) in rows {
-        let w = u16::try_from(label.chars().count()).unwrap_or(0).min(gutter);
+        let w = u16::try_from(label.chars().count())
+            .unwrap_or(0)
+            .min(gutter);
         let tx = r.x + gutter.saturating_sub(w).saturating_sub(1);
         frame.put_str(tx, ty, label, theme.dim());
     }
@@ -241,10 +251,8 @@ mod tests {
         for y in 0..f.height() {
             for x in 0..f.width() {
                 if f.get(x, y).is_some_and(|c| c.ch != ' ') {
-                    let inside = x >= plot.x
-                        && x < plot.x + plot.w
-                        && y >= plot.y
-                        && y < plot.y + plot.h;
+                    let inside =
+                        x >= plot.x && x < plot.x + plot.w && y >= plot.y && y < plot.y + plot.h;
                     assert!(!inside, "an axis glyph landed in the plot at ({x},{y})");
                 }
             }

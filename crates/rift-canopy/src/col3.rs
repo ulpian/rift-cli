@@ -499,7 +499,14 @@ pub fn draw(
     // then blit the [offset, offset+viewport) window — so "j/k scroll" moves the
     // panels instead of collapsing them, with the scrollbar (M57-06) as its sign.
     let mut scratch = Frame::new(crate::render::frame::Size::new(area.w, content_h));
-    draw_stack(col3, focused, unicode, scratch.rect(), backend, &mut scratch);
+    draw_stack(
+        col3,
+        focused,
+        unicode,
+        scratch.rect(),
+        backend,
+        &mut scratch,
+    );
     let off = offset.min(usize::from(content_h.saturating_sub(area.h)));
     frame.blit_window(&scratch, area, off);
 }
@@ -528,7 +535,16 @@ fn draw_stack(
         }
         match slot.id {
             SectionId::TokenUsage => {
-                draw_token_panel(col3, theme, focused, unicode, slot.collapsed, rect, backend, frame);
+                draw_token_panel(
+                    col3,
+                    theme,
+                    focused,
+                    unicode,
+                    slot.collapsed,
+                    rect,
+                    backend,
+                    frame,
+                );
             }
             SectionId::System => {
                 draw_system_panel(
@@ -657,7 +673,12 @@ fn draw_token_panel(
         };
         if plot_rect.h > 0 && plot_rect.w > 0 {
             let pts = plot::bar_points(&vals, max, plot_rect.h.saturating_mul(4).max(4));
-            backend.plot(&pts, plot_rect, &Paint::ByCategory(&theme::BREAKDOWN), frame);
+            backend.plot(
+                &pts,
+                plot_rect,
+                &Paint::ByCategory(&theme::BREAKDOWN),
+                frame,
+            );
         }
     }
     // Five stat tiles on the bottom rows: the four classes + the read fraction,
@@ -1027,7 +1048,10 @@ mod tests {
             }),
             ..Col3::default()
         };
-        assert!(content_rows() > 12, "the fixture stack overflows a 12-row column");
+        assert!(
+            content_rows() > 12,
+            "the fixture stack overflows a 12-row column"
+        );
         let top = text_of(&draw_at(&col3, 34, 12, 0));
         let scrolled = text_of(&draw_at(&col3, 34, 12, 5));
         assert_ne!(top, scrolled, "the offset scrolls the panels");

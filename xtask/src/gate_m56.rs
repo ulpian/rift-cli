@@ -70,7 +70,12 @@ fn passed_count(out: &str) -> usize {
 fn require_lib(root: &Path, v: &mut Vec<String>, filters: &[&str], label: &str) {
     let mut full = vec!["test", "-p", "rift-canopy", "--lib", "--"];
     full.extend_from_slice(filters);
-    let (code, out) = run_cmd("cargo", &full, root, &[("INSTA_UPDATE".into(), "no".into())]);
+    let (code, out) = run_cmd(
+        "cargo",
+        &full,
+        root,
+        &[("INSTA_UPDATE".into(), "no".into())],
+    );
     violation(
         v,
         code == 0,
@@ -84,12 +89,23 @@ fn require_lib(root: &Path, v: &mut Vec<String>, filters: &[&str], label: &str) 
 }
 
 /// Run a named integration-test binary (optionally with a name filter).
-fn require_test_bin(root: &Path, v: &mut Vec<String>, bin: &str, filter: Option<&str>, label: &str) {
+fn require_test_bin(
+    root: &Path,
+    v: &mut Vec<String>,
+    bin: &str,
+    filter: Option<&str>,
+    label: &str,
+) {
     let mut full = vec!["test", "-p", "rift-canopy", "--test", bin];
     if let Some(f) = filter {
         full.push(f);
     }
-    let (code, out) = run_cmd("cargo", &full, root, &[("INSTA_UPDATE".into(), "no".into())]);
+    let (code, out) = run_cmd(
+        "cargo",
+        &full,
+        root,
+        &[("INSTA_UPDATE".into(), "no".into())],
+    );
     violation(
         v,
         code == 0,
@@ -229,7 +245,10 @@ fn leg_coverage(root: &Path, v: &mut Vec<String>) -> String {
         violation(
             v,
             false,
-            &format!("coverage: llvm-cov run failed (exit {code}): …{}", tail(&out)),
+            &format!(
+                "coverage: llvm-cov run failed (exit {code}): …{}",
+                tail(&out)
+            ),
         );
         return String::new();
     }

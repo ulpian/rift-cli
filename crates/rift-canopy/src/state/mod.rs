@@ -703,8 +703,8 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
             }
             s.dirty = true; // any key may change selection/mode/buffer
             s.app.clamp_scrolls(s.size); // a scroll key can never pass the end
-                            // Remove/reorder target the *selected* project — resolve it here (the
-                            // key handler stays free of paths). No selection ⇒ inert.
+                                         // Remove/reorder target the *selected* project — resolve it here (the
+                                         // key handler stays free of paths). No selection ⇒ inert.
             let sel = s.app.selected_project().map(|p| p.path.clone());
             let mut flow = match action {
                 Action::RemoveProject => {
@@ -1024,9 +1024,7 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
     let panel = match hit_test(vm, col, row) {
         Some(Target::ProjectRow(_) | Target::Scrollbar(ScrollRegion::Rail)) => Panel::Projects,
         Some(
-            Target::ToggleRow(_)
-            | Target::RetryRow(_)
-            | Target::Scrollbar(ScrollRegion::Detail),
+            Target::ToggleRow(_) | Target::RetryRow(_) | Target::Scrollbar(ScrollRegion::Detail),
         ) => Panel::Detail,
         Some(Target::Section(_) | Target::Scrollbar(ScrollRegion::Graphs)) => Panel::Graphs,
         Some(Target::PanelFocus(p)) => p,
@@ -2882,7 +2880,10 @@ mod tests {
             })
         };
         update(&mut s, wheel(MouseKind::ScrollDown));
-        assert_eq!(s.app.scroll.graphs, 1, "the wheel scrolls the graphs viewport");
+        assert_eq!(
+            s.app.scroll.graphs, 1,
+            "the wheel scrolls the graphs viewport"
+        );
         update(&mut s, wheel(MouseKind::ScrollUp));
         assert_eq!(s.app.scroll.graphs, 0);
         // The offset can never scroll past the fully-expanded content: it settles
@@ -2893,7 +2894,10 @@ mod tests {
         let ceiling = s.app.scroll.graphs;
         assert!(ceiling > 0, "there is real overflow to scroll");
         update(&mut s, wheel(MouseKind::ScrollDown));
-        assert_eq!(s.app.scroll.graphs, ceiling, "already at the end — no further");
+        assert_eq!(
+            s.app.scroll.graphs, ceiling,
+            "already at the end — no further"
+        );
     }
 
     #[test]

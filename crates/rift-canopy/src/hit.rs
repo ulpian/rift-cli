@@ -356,7 +356,8 @@ fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
             CardKind::Features => {
                 // The retry chip is a sub-region of a Failed row, so it wins
                 // over the row toggle (checked first).
-                if let Some(i) = cards::feature_retry_at(&ctx, slot.rect, slot.collapsed, col, row) {
+                if let Some(i) = cards::feature_retry_at(&ctx, slot.rect, slot.collapsed, col, row)
+                {
                     return Target::RetryRow(i);
                 }
                 if let Some(i) = cards::feature_toggle_at(&ctx, slot.rect, slot.collapsed, col, row)
@@ -402,7 +403,10 @@ fn section_or_focus(rect: Rect, offset: usize, col: u16, row: u16) -> Target {
             (inner.h, dy)
         } else {
             let off = offset.min(usize::from(content_h.saturating_sub(inner.h)));
-            (content_h, dy.saturating_add(u16::try_from(off).unwrap_or(0)))
+            (
+                content_h,
+                dy.saturating_add(u16::try_from(off).unwrap_or(0)),
+            )
         };
         for slot in col3::solve_stack(solve_h) {
             if content_row >= slot.y && content_row < slot.y.saturating_add(slot.rows) {
@@ -718,8 +722,9 @@ mod tests {
             h: 15,
         };
         let col3 = solve(body).col3;
-        let bar = crate::chrome::scrollbar(col3, v.graphs_scroll, usize::from(col3::content_rows()))
-            .expect("the short column overflows, so a bar exists");
+        let bar =
+            crate::chrome::scrollbar(col3, v.graphs_scroll, usize::from(col3::content_rows()))
+                .expect("the short column overflows, so a bar exists");
         // Every track cell resolves to the graphs scrollbar (pixels == targets).
         for dy in 0..bar.track.h {
             assert_eq!(

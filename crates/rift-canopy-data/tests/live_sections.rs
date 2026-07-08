@@ -18,8 +18,8 @@ use rift_canopy::app::{event_loop, EventSource};
 use rift_canopy::render::frame::{Frame, Size};
 use rift_canopy::render::{AsciiBackend, Capabilities, RenderBackend};
 use rift_canopy::{
-    AppState, CanopyKey, DataRequest, EntryKind, Event, NullFeatureManager, PersistOp, Project,
-    ProjectStatus, TokensView,
+    AppState, BreakdownView, CanopyKey, DataRequest, EntryKind, Event, NullFeatureManager,
+    PersistOp, Project, ProjectStatus, TokensView,
 };
 use rift_canopy_data::{runtime, spawn_with_root};
 use rift_core::Result as RiftResult;
@@ -201,9 +201,20 @@ fn token_sections_render_live_from_a_seeded_projection() {
         })
         .collect();
     assert!(text.contains("token usage  Σ 8.1K"), "live total:\n{text}");
-    // read/(input+read) = 6000/6800 ≈ 88.2% → rounded 88.
-    assert!(text.contains("read 88%"), "read fraction:\n{text}");
     assert!(!text.contains("no token activity yet"));
+    // The read fraction (read/(input+read) = 6000/6800 ≈ 88%) flows through the
+    // live feed. It surfaces in the token panel's read tile, which the narrow
+    // col3 column lays out vertically and can push below the fold (ADR-0030 axis /
+    // ADR-0031 scroll), so verify the *data* the render draws from — the source of
+    // truth — not a layout-fragile substring.
+    match &vm.col3.breakdown {
+        BreakdownView::Data(d) => assert!(
+            (d.read_fraction - 0.882).abs() < 0.01,
+            "live read fraction: {}",
+            d.read_fraction
+        ),
+        BreakdownView::NoActivity => panic!("the breakdown feed never arrived"),
+    }
 }
 
 #[test]
