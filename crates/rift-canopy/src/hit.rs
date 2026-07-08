@@ -89,7 +89,7 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
     // through to nothing while the overlay is up — panels beneath are
     // covered visually, so they must not be clickable.
     if let Some(overlay) = &vm.overlay {
-        let rect = crate::view::overlay_rect(body);
+        let rect = crate::view::modal_rect(size);
         if rect.w >= 8 && rect.h >= 3 && contains(rect, col, row) {
             if let crate::dispatch::Overlay::Confirm { .. } = overlay {
                 // The buttons row mirrors `view::draw_overlay`: inner dy=3.
@@ -437,13 +437,10 @@ mod tests {
             repo: "/r/a".into(),
         });
         let v = s.snapshot();
-        let body = Rect {
-            x: 0,
-            y: 1,
-            w: 100,
-            h: 31,
-        };
-        let rect = crate::view::overlay_rect(body);
+        // The modal is a centered box (ADR-0026); its geometry comes from the
+        // one shared `modal_rect(size)` the renderer also uses.
+        let size = Size::new(100, 32);
+        let rect = crate::view::modal_rect(size);
         let inner = inner_of(rect);
         let button_row = inner.y + 3;
         // The Confirm button's first cell.
@@ -462,8 +459,9 @@ mod tests {
             hit_test(&v, inner.x + 1, inner.y),
             Some(Target::OverlayBody)
         );
-        // Outside the overlay nothing is clickable while it is up.
-        assert_eq!(hit_test(&v, 1, body.y + body.h.saturating_sub(1)), None);
+        // Outside the modal nothing is clickable while it is up (the scrim
+        // click is inert): a corner well outside the centered box.
+        assert_eq!(hit_test(&v, 1, size.h - 1), None);
     }
 
     #[test]
@@ -478,13 +476,7 @@ mod tests {
             truncated: false,
         });
         let v = s.snapshot();
-        let body = Rect {
-            x: 0,
-            y: 1,
-            w: 100,
-            h: 31,
-        };
-        let inner = inner_of(crate::view::overlay_rect(body));
+        let inner = inner_of(crate::view::modal_rect(Size::new(100, 32)));
         assert_eq!(
             hit_test(&v, inner.x, inner.y + 3),
             Some(Target::OverlayBody),

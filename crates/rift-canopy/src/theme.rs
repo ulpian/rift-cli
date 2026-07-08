@@ -80,6 +80,11 @@ pub const SELECT_BG: Color = Color::Rgb(0x24, 0x40, 0x33);
 /// The hover-target background — a fainter wash than [`SELECT_BG`].
 pub const HOVER_BG: Color = Color::Rgb(0x22, 0x2c, 0x2a);
 
+/// The modal scrim background (ADR-0026) — a dark wash laid over the dashboard
+/// behind an open modal so the modal reads as floating focus. Colour-only, so
+/// the capability tiers drop it to no-dim on mono / ASCII / `NO_COLOR`.
+pub const SCRIM_BG: Color = Color::Rgb(0x0e, 0x12, 0x11);
+
 /// Health dot — the data plane is connected and polling cleanly.
 pub const HEALTH_OK: Color = Color::Rgb(0x6c, 0xe0, 0x9a);
 /// Health dot — the bus worker reported an error (degraded, recoverable).

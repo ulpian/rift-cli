@@ -80,8 +80,9 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
 
     // The dispatch overlay layers over the body (ADR-0021 "Dispatch posture"):
     // results scroll, confirms gate, the running line holds during a dispatch.
+    // It sizes itself as a centered modal (ADR-0026) from `vm.size`.
     if vm.overlay.is_some() {
-        draw_overlay(vm, frame, body);
+        draw_overlay(vm, frame);
     }
 
     // The one-shot startup sweep (M55-14): a top-to-bottom reveal as the panels
@@ -183,45 +184,85 @@ fn draw_suggest_panel(vm: &ViewModel, frame: &mut Frame) {
     }
 }
 
-/// Where the dispatch overlay sits: over the body, clear of the bottom chrome
-/// (hint + command bars), with a small margin. Shared with `hit_test` so mouse
-/// targets and pixels can never disagree.
-#[must_use]
-pub fn overlay_rect(body: Rect) -> Rect {
-    let margin_x = 2u16.min(body.w / 8);
-    let h_avail = body.h.saturating_sub(bottom_chrome_rows(body.h));
-    Rect {
-        x: body.x + margin_x,
-        y: body.y + 1,
-        w: body.w.saturating_sub(margin_x * 2),
-        h: h_avail.saturating_sub(2),
-    }
-}
+/// The smallest readable modal box (ADR-0026): a modal clamps *up* to this even
+/// when 80% of a small terminal would be fewer cells.
+pub const MIN_MODAL_COLS: u16 = 40;
+/// The smallest readable modal box height — see [`MIN_MODAL_COLS`].
+pub const MIN_MODAL_ROWS: u16 = 12;
 
-/// The overlay rect derived from the full frame area (the hit-test entry —
-/// it re-derives the body split `draw` uses).
+/// Where a modal sits (ADR-0026): a box at 80% × 80% of the terminal, clamped
+/// *up* to the readable minimum and *down* to the region between the 1-row
+/// header and the bottom chrome (hint + command bars) — so those bars always
+/// stay visible while modals come and go — then centered in that region. On the
+/// narrow `SinglePanel`/`TooSmall` tiers it degrades to near-full-screen so its
+/// content stays usable. This is the single source of truth for both
+/// [`draw_overlay`] and the pure hit-test, so a resize can never desync a
+/// modal's pixels from its click targets.
 #[must_use]
-pub fn overlay_rect_for(size: crate::render::frame::Size) -> Rect {
-    let body = Rect {
-        x: 0,
-        y: 1,
-        w: size.w,
-        h: size.h.saturating_sub(1),
+pub fn modal_rect(size: crate::render::frame::Size) -> Rect {
+    // The region a modal may occupy: below the header, above the bottom chrome.
+    let body_h = size.h.saturating_sub(1);
+    let avail_y = 1u16.min(size.h);
+    let avail_h = body_h.saturating_sub(bottom_chrome_rows(body_h));
+    let avail_w = size.w;
+
+    // Target = 80% of the terminal (95% near-full on the narrow tiers), clamped
+    // up to the readable minimum and down to the region so chrome stays put.
+    let pct: u32 = if matches!(
+        choose_mode(size),
+        LayoutMode::SinglePanel | LayoutMode::TooSmall
+    ) {
+        95
+    } else {
+        80
     };
-    overlay_rect(body)
+    let want_w = u16::try_from(u32::from(size.w) * pct / 100).unwrap_or(size.w);
+    let want_h = u16::try_from(u32::from(size.h) * pct / 100).unwrap_or(size.h);
+    let w = want_w.max(MIN_MODAL_COLS).min(avail_w);
+    let h = want_h.max(MIN_MODAL_ROWS).min(avail_h);
+
+    // Center within the available region.
+    let x = avail_w.saturating_sub(w) / 2;
+    let y = avail_y.saturating_add(avail_h.saturating_sub(h) / 2);
+    Rect { x, y, w, h }
 }
 
 /// The confirm overlay's two button labels (shared with hit-testing).
 pub const CONFIRM_BUTTONS: (&str, &str) = ("[ Enter: confirm ]", "[ Esc: cancel ]");
 
-/// Draw the dispatch overlay: a bordered, scrollable pane over the body.
-fn draw_overlay(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+/// Dim the dashboard behind an open modal (ADR-0026): a themed background wash
+/// over every cell outside `modal`, glyphs kept so the body reads as *behind*
+/// the modal rather than gone. Colour-only, so the capability tiers drop it to
+/// no-dim on mono / ASCII / `NO_COLOR` — there the modal's border alone
+/// separates it. The modal owns input while open, so the dimmed body is inert.
+fn draw_scrim(frame: &mut Frame, modal: Rect) {
+    let area = frame.rect();
+    let modal_bottom = modal.y.saturating_add(modal.h);
+    let modal_right = modal.x.saturating_add(modal.w);
+    for y in area.y..area.y.saturating_add(area.h) {
+        let in_modal_rows = y >= modal.y && y < modal_bottom;
+        for x in area.x..area.x.saturating_add(area.w) {
+            if in_modal_rows && x >= modal.x && x < modal_right {
+                continue; // the modal paints its own rect below
+            }
+            if let Some(cell) = frame.get(x, y) {
+                frame.set(x, y, cell.ch, cell.style.with_bg(crate::theme::SCRIM_BG));
+            }
+        }
+    }
+}
+
+/// Draw the dispatch overlay as a centered modal (ADR-0026): a themed scrim over
+/// the dashboard, then a bordered, scrollable pane. Geometry comes from the one
+/// shared [`modal_rect`], so pixels and hit-test targets can never disagree.
+fn draw_overlay(vm: &ViewModel, frame: &mut Frame) {
     use crate::dispatch::Overlay;
     let Some(overlay) = &vm.overlay else { return };
-    let rect = overlay_rect(body);
+    let rect = modal_rect(vm.size);
     if rect.w < 8 || rect.h < 3 {
         return; // clamped away on tiny terminals; the bar still works
     }
+    draw_scrim(frame, rect);
     // Blank the region so the panels underneath never bleed through.
     for dy in 0..rect.h {
         for dx in 0..rect.w {
@@ -983,7 +1024,46 @@ mod tests {
         assert!(text.contains("capture"));
     }
 
+    #[test]
+    fn modal_is_centered_and_insets_the_dashboard() {
+        // At a full-grid size the modal is 80% × 80%, centered, and clear of the
+        // 1-row header and the bottom chrome (ADR-0026) — an inset box, not the
+        // whole screen.
+        let r = modal_rect(Size::new(120, 40));
+        assert_eq!((r.x, r.y, r.w, r.h), (12, 2, 96, 32));
+    }
+
+    #[test]
+    fn modal_degrades_to_near_full_on_narrow_tiers() {
+        // On the narrow SinglePanel tier the modal widens past the 80% grid
+        // fraction toward near-full-screen so its content stays usable.
+        let size = Size::new(44, 30); // SinglePanel: MIN_COL1 <= w < MIN_COL1+MIN_COL2
+        assert_eq!(
+            crate::layout::choose_mode(size),
+            crate::layout::LayoutMode::SinglePanel
+        );
+        let r = modal_rect(size);
+        assert!(r.w > size.w * 80 / 100, "wider than the 80% grid modal");
+    }
+
     proptest::proptest! {
+        /// The modal rect (ADR-0026) is always within the frame, never covers the
+        /// header row, and clears the bottom chrome — at every size above the
+        /// too-small floor — so the header and command bars always stay put and
+        /// the draw/hit-test share one rect that can never leave the screen.
+        #[test]
+        fn modal_rect_fits_and_clears_chrome(w in 24u16..400, h in 6u16..400) {
+            let size = Size::new(w, h);
+            proptest::prop_assume!(
+                crate::layout::choose_mode(size) != crate::layout::LayoutMode::TooSmall
+            );
+            let r = modal_rect(size);
+            proptest::prop_assert!(r.x + r.w <= size.w, "within the frame width");
+            proptest::prop_assert!(r.y >= 1, "never covers the header row");
+            let chrome = crate::layout::bottom_chrome_rows(size.h - 1);
+            proptest::prop_assert!(r.y + r.h <= size.h - chrome, "clears the bottom chrome");
+        }
+
         /// Every terminal size yields a renderable layout — no panic, at any size.
         #[test]
         fn every_size_yields_a_renderable_layout(w in 0u16..400, h in 0u16..400) {
