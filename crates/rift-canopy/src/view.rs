@@ -776,6 +776,8 @@ fn draw_detail(
         toggle_cursor: vm.toggle_cursor,
         focused: vm.focus == Panel::Detail,
         unicode,
+        pressed: vm.pressed.clone(),
+        press_pulse: vm.press_pulse,
     };
     crate::cards::draw(&ctx, THEME, rect, backend, frame);
 }

@@ -146,6 +146,23 @@ pub struct CardCtx<'a> {
     pub focused: bool,
     /// Whether Unicode glyphs are available (icon substitution).
     pub unicode: bool,
+    /// The button whose press-flash is in flight (ADR-0028), if any.
+    pub pressed: Option<crate::hit::Target>,
+    /// The press-flash progress (1.0 → 0.0) keyed by [`Self::pressed`].
+    pub press_pulse: f32,
+}
+
+impl CardCtx<'_> {
+    /// The press-flash fraction (0.0 at rest) for a card button drawn as
+    /// `target` (ADR-0028) — the shared "am I flashing?" for editor/toggle/retry.
+    #[must_use]
+    fn flash(&self, target: &crate::hit::Target) -> f32 {
+        if self.pressed.as_ref() == Some(target) {
+            self.press_pulse
+        } else {
+            0.0
+        }
+    }
 }
 
 /// The key hint for the repository card's *Open in $EDITOR* button.
@@ -297,13 +314,20 @@ fn draw_repository(
     }
     // The Open in $EDITOR button on the last inner row (action lands M55-10).
     if let Some(br) = editor_button_rect(rect, collapsed) {
+        // The button flashes toward the accent on click/activation (ADR-0028).
+        let base = theme.button(ctx.focused);
+        let style =
+            match crate::chrome::press_flash_bg(ctx.flash(&crate::hit::Target::EditorButton)) {
+                Some(bg) => base.with_bg(bg),
+                None => base,
+            };
         crate::chrome::button(
             frame,
             br.x,
             br.y,
             EDITOR_LABEL,
             EDITOR_KEY,
-            theme.button(ctx.focused),
+            style,
             theme.key_hint(),
         );
     }
@@ -529,12 +553,17 @@ fn draw_features(ctx: &CardCtx<'_>, theme: Theme, rect: Rect, collapsed: bool, f
             text.push_str(" — ");
             text.push_str(&sanitize_for_terminal(reason));
         }
-        let style = if cursored {
-            theme.selection()
+        // The row flashes toward the accent when its toggle is clicked
+        // (ADR-0028); otherwise the cursored row keeps the selection wash.
+        let flash = ctx.flash(&crate::hit::Target::ToggleRow(i));
+        let (style, fill_row) = if let Some(bg) = crate::chrome::press_flash_bg(flash) {
+            (theme.selection().with_bg(bg), true)
+        } else if cursored {
+            (theme.selection(), true)
         } else {
-            theme.body()
+            (theme.body(), false)
         };
-        if cursored {
+        if fill_row {
             crate::chrome::fill(
                 frame,
                 Rect {
@@ -792,6 +821,8 @@ mod tests {
             toggle_cursor: 0,
             focused: true,
             unicode: false,
+            pressed: None,
+            press_pulse: 0.0,
         }
     }
 
@@ -932,6 +963,76 @@ mod tests {
         assert_eq!(f.get(br.x, br.y).unwrap().ch, '[');
         // Collapsed cards have no button.
         assert_eq!(editor_button_rect(repo.rect, true), None);
+    }
+
+    #[test]
+    fn a_pressed_editor_button_flashes_toward_the_accent() {
+        let d = detail(ProjectStatus::Idle);
+        let act = ActivityView::NoProjection;
+        let rt = BTreeMap::new();
+        let slots = solve(rect(0, 0, 40, 60));
+        let repo = slots
+            .iter()
+            .find(|s| s.kind == CardKind::Repository)
+            .unwrap();
+        let br = editor_button_rect(repo.rect, false).unwrap();
+        let ctx = CardCtx {
+            detail: &d,
+            activity: &act,
+            runtime: &rt,
+            toggle_cursor: 0,
+            focused: true,
+            unicode: false,
+            pressed: Some(crate::hit::Target::EditorButton),
+            press_pulse: 1.0,
+        };
+        let mut f = Frame::new(Size::new(40, 60));
+        draw_repository(&ctx, Theme::rift_dark(), repo.rect, false, &mut f);
+        let flash_bg = crate::chrome::press_flash_bg(1.0).unwrap();
+        assert_eq!(
+            f.get(br.x, br.y).unwrap().style.bg,
+            flash_bg,
+            "the pressed editor button flashes"
+        );
+    }
+
+    #[test]
+    fn a_pressed_toggle_row_flashes() {
+        let d = detail(ProjectStatus::Idle);
+        let act = ActivityView::NoProjection;
+        let rt = BTreeMap::new();
+        let slots = solve(rect(0, 0, 40, 60));
+        let feat = slots
+            .iter()
+            .find(|s| s.kind == CardKind::Features)
+            .expect("features card present");
+        let flash_bg = crate::chrome::press_flash_bg(1.0).unwrap();
+        let has_flash = |pressed: Option<crate::hit::Target>| {
+            let ctx = CardCtx {
+                detail: &d,
+                activity: &act,
+                runtime: &rt,
+                toggle_cursor: 0,
+                focused: true,
+                unicode: false,
+                pressed,
+                press_pulse: 1.0,
+            };
+            let mut f = Frame::new(Size::new(40, 60));
+            draw_features(&ctx, Theme::rift_dark(), feat.rect, false, &mut f);
+            (feat.rect.y..feat.rect.y + feat.rect.h).any(|y| {
+                (feat.rect.x..feat.rect.x + feat.rect.w)
+                    .any(|x| f.get(x, y).is_some_and(|c| c.style.bg == flash_bg))
+            })
+        };
+        assert!(
+            has_flash(Some(crate::hit::Target::ToggleRow(0))),
+            "a pressed toggle row flashes"
+        );
+        assert!(
+            !has_flash(None),
+            "no flash bg at rest (only the cursored selection wash)"
+        );
     }
 
     #[test]

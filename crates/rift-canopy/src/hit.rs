@@ -81,6 +81,7 @@ impl Target {
                 | Target::RailReorderUp
                 | Target::RailReorderDown
                 | Target::RailRemove
+                | Target::ToggleRow(_)
         )
     }
 }
@@ -286,6 +287,8 @@ fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
         toggle_cursor: vm.toggle_cursor,
         focused: vm.focus == Panel::Detail,
         unicode: false, // geometry only; glyph choice never moves a cell
+        pressed: None,  // geometry only; the flash never moves a cell
+        press_pulse: 0.0,
     };
     for slot in cards::solve(rect) {
         if !contains(slot.rect, col, row) {
