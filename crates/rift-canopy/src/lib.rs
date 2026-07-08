@@ -20,6 +20,7 @@
 )]
 
 pub mod app;
+pub mod axis;
 pub mod bars;
 pub mod cards;
 pub mod chrome;

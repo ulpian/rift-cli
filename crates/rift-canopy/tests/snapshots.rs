@@ -401,6 +401,42 @@ fn golden_overlay_confirm_prompt() {
     insta::assert_snapshot!("overlay_confirm", render_state(&mut s));
 }
 
+// ---- M5.7 W0: the cartesian axis frame (ADR-0030) ---------------------------
+
+#[test]
+fn golden_axis_frame() {
+    // The shared axis helper over a token-usage fixture: a Y-tick gutter
+    // (0 / mid / max humanized), an X-class row, and a class-colour legend.
+    use rift_canopy::axis::{draw, AxisSpec};
+    use rift_canopy::fmt_km;
+    use rift_canopy::theme::{Theme, BREAKDOWN};
+    let x: Vec<String> = ["input", "read", "output", "cache"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let legend = [
+        (BREAKDOWN[0], "input"),
+        (BREAKDOWN[1], "read"),
+        (BREAKDOWN[2], "output"),
+        (BREAKDOWN[3], "cache"),
+    ];
+    let spec = AxisSpec {
+        max: 1_600_000.0,
+        humanize: fmt_km,
+        x_labels: &x,
+        legend: &legend,
+    };
+    let mut f = Frame::new(Size::new(40, 10));
+    let r = rift_canopy::Rect {
+        x: 0,
+        y: 0,
+        w: 40,
+        h: 10,
+    };
+    let _plot = draw(&mut f, Theme::rift_dark(), r, &spec, true);
+    insta::assert_snapshot!("axis_frame", frame_text(&f));
+}
+
 #[test]
 fn golden_overlay_wizard_modal() {
     // The first-run wizard as a modal (ADR-0029): message + the add-project chip.

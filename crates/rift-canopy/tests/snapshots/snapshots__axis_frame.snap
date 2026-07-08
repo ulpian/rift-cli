@@ -1,0 +1,14 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: frame_text(&f)
+---
+■ input  ■ read  ■ output  ■ cache
+1.6M
+
+
+
+800K
+
+
+   0
+     input   read    output  cache
