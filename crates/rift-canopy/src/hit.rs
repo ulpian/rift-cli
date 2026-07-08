@@ -33,6 +33,9 @@ pub enum Target {
     RailRemove,
     /// The feature-toggle at this index (column 2).
     ToggleRow(usize),
+    /// The `[r]` retry chip on the Failed feature row at this index (column 2):
+    /// reinstalls it, the click equivalent of the `r` key.
+    RetryRow(usize),
     /// A column-3 graph section.
     Section(col3::SectionId),
     /// The bottom command bar.
@@ -84,6 +87,7 @@ impl Target {
                 | Target::RailReorderDown
                 | Target::RailRemove
                 | Target::ToggleRow(_)
+                | Target::RetryRow(_)
         )
     }
 }
@@ -297,6 +301,11 @@ fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
         }
         match slot.kind {
             CardKind::Features => {
+                // The retry chip is a sub-region of a Failed row, so it wins
+                // over the row toggle (checked first).
+                if let Some(i) = cards::feature_retry_at(&ctx, slot.rect, slot.collapsed, col, row) {
+                    return Target::RetryRow(i);
+                }
                 if let Some(i) = cards::feature_toggle_at(&ctx, slot.rect, slot.collapsed, col, row)
                 {
                     return Target::ToggleRow(i);

@@ -519,6 +519,50 @@ pub fn feature_toggle_at(
     }
 }
 
+/// The clickable `[r]` retry chip on a Failed feature row (ADR-0028), pinned to
+/// the row's right edge — one source for the draw and the hit-test so the glyph
+/// and its target are the same cells. `None` when the card is too narrow.
+#[must_use]
+pub fn feature_retry_rect(inner: Rect, dy: u16) -> Option<Rect> {
+    (inner.w >= 5).then(|| Rect {
+        x: inner.x + inner.w - 3,
+        y: inner.y + dy,
+        w: 3,
+        h: 1,
+    })
+}
+
+/// The Failed feature row whose `[r]` retry chip is at `(col, row)`, or `None`.
+/// Only a row in the `Failed` state carries a chip (the placeholder-not-fake
+/// discipline: no retry affordance where there is nothing to retry).
+#[must_use]
+pub fn feature_retry_at(
+    ctx: &CardCtx<'_>,
+    card_rect: Rect,
+    collapsed: bool,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    if collapsed {
+        return None;
+    }
+    let inner = inner_of(card_rect);
+    if row < inner.y {
+        return None;
+    }
+    let dy = row - inner.y;
+    let i = usize::from(dy);
+    if i >= feature_row_count(ctx) || dy >= inner.h {
+        return None;
+    }
+    let rowdata = ctx.detail.toggles.rows.get(i)?;
+    if !matches!(effective_state(rowdata, ctx.runtime), ToggleState::Failed(_)) {
+        return None;
+    }
+    let chip = feature_retry_rect(inner, dy)?;
+    (col >= chip.x && col < chip.x + chip.w).then_some(i)
+}
+
 fn draw_features(ctx: &CardCtx<'_>, theme: Theme, rect: Rect, collapsed: bool, frame: &mut Frame) {
     let d = ctx.detail;
     let inner = card_frame(theme, Section::Features, "features", rect, frame);
@@ -576,6 +620,18 @@ fn draw_features(ctx: &CardCtx<'_>, theme: Theme, rect: Rect, collapsed: bool, f
             );
         }
         line(frame, inner, dy, &text, style);
+        // A Failed row carries a clickable `[r]` retry chip at its right edge
+        // (ADR-0028) — the pointer twin of the `r` key. It flashes on press.
+        if matches!(effective, ToggleState::Failed(_)) {
+            if let Some(chip) = feature_retry_rect(inner, dy) {
+                let rflash = ctx.flash(&crate::hit::Target::RetryRow(i));
+                let cstyle = match crate::chrome::press_flash_bg(rflash) {
+                    Some(bg) => theme.key_hint().with_bg(bg),
+                    None => theme.key_hint(),
+                };
+                frame.put_str(chip.x, chip.y, "[r]", cstyle);
+            }
+        }
     }
 }
 
@@ -1032,6 +1088,68 @@ mod tests {
         assert!(
             !has_flash(None),
             "no flash bg at rest (only the cursored selection wash)"
+        );
+    }
+
+    #[test]
+    fn a_failed_row_shows_a_clickable_retry_chip() {
+        let d = detail(ProjectStatus::Idle);
+        let act = ActivityView::NoProjection;
+        let mut rt = BTreeMap::new();
+        rt.insert(
+            Feature::ALL[0].key().to_string(),
+            FeatureRuntime::Failed("boom".into()),
+        );
+        let slots = solve(rect(0, 0, 40, 60));
+        let feat = slots
+            .iter()
+            .find(|s| s.kind == CardKind::Features)
+            .expect("features card present");
+        let c = ctx(&d, &act, &rt);
+        let inner = inner_of(feat.rect);
+        let chip = feature_retry_rect(inner, 0).expect("wide enough for a chip");
+        let mut f = Frame::new(Size::new(40, 60));
+        draw_features(&c, Theme::rift_dark(), feat.rect, false, &mut f);
+        // The `[r]` chip renders where the shared geometry says (pixels==targets).
+        assert_eq!(f.get(chip.x, chip.y).unwrap().ch, '[');
+        assert_eq!(feature_retry_at(&c, feat.rect, false, chip.x, chip.y), Some(0));
+        assert_eq!(
+            feature_retry_at(&c, feat.rect, false, chip.x + 1, chip.y),
+            Some(0),
+            "every chip cell resolves to the row"
+        );
+        // A non-failed row (row 1 is Off) carries no chip.
+        assert_eq!(
+            feature_retry_at(&c, feat.rect, false, chip.x, inner.y + 1),
+            None,
+            "no retry affordance where there's nothing to retry"
+        );
+    }
+
+    #[test]
+    fn a_pressed_retry_chip_flashes() {
+        let d = detail(ProjectStatus::Idle);
+        let act = ActivityView::NoProjection;
+        let mut rt = BTreeMap::new();
+        rt.insert(
+            Feature::ALL[0].key().to_string(),
+            FeatureRuntime::Failed("boom".into()),
+        );
+        let slots = solve(rect(0, 0, 40, 60));
+        let feat = slots
+            .iter()
+            .find(|s| s.kind == CardKind::Features)
+            .unwrap();
+        let chip = feature_retry_rect(inner_of(feat.rect), 0).unwrap();
+        let mut c = ctx(&d, &act, &rt);
+        c.pressed = Some(crate::hit::Target::RetryRow(0));
+        c.press_pulse = 1.0;
+        let mut f = Frame::new(Size::new(40, 60));
+        draw_features(&c, Theme::rift_dark(), feat.rect, false, &mut f);
+        assert_eq!(
+            f.get(chip.x, chip.y).unwrap().style.bg,
+            crate::chrome::press_flash_bg(1.0).unwrap(),
+            "the pressed retry chip flashes toward the accent"
         );
     }
 

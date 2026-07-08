@@ -922,6 +922,15 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             // Flip it — identical to Space/Enter/`t` on the keyboard.
             toggle_flow(&s.app, s.detail.as_deref(), cursored_feature(&s.app))
         }
+        // The `[r]` retry chip on a Failed row (ADR-0028) — cursor to the row and
+        // reinstall, identical to `r` on the keyboard. Flash armed above.
+        Target::RetryRow(i) => {
+            s.app.set_focus(Panel::Detail);
+            let last = Feature::ALL.len().saturating_sub(1);
+            s.app.toggle_cursor = i.min(last);
+            s.dirty = true;
+            retry_flow(&s.app)
+        }
         Target::Section(_) => {
             s.app.set_focus(Panel::Graphs);
             s.dirty = true;
@@ -1010,7 +1019,7 @@ fn editor_flow(s: &AppState) -> Flow {
 fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool) -> Flow {
     let panel = match hit_test(vm, col, row) {
         Some(Target::ProjectRow(_)) => Panel::Projects,
-        Some(Target::ToggleRow(_)) => Panel::Detail,
+        Some(Target::ToggleRow(_) | Target::RetryRow(_)) => Panel::Detail,
         Some(Target::Section(_)) => Panel::Graphs,
         Some(Target::PanelFocus(p)) => p,
         // The wheel moves the suggest highlight (never inserts, never runs).
@@ -2360,6 +2369,8 @@ mod tests {
             Target::RailReorderDown,
             Target::RailRemove,
             Target::ToggleRow(0),
+            Target::RetryRow(0),
+            Target::WizardAdd,
         ] {
             assert!(target.is_button(), "{target:?} must be a button");
             let mut s = ready(vec![project("a")]);
@@ -3040,6 +3051,26 @@ mod tests {
         assert!(s.app.overlay.is_none(), "the wizard dismissed");
         assert_eq!(s.press_pulse, 1.0, "the primary button flashed on click");
         assert_eq!(s.pressed, Some(Target::WizardAdd));
+    }
+
+    #[test]
+    fn retry_chip_click_cursors_the_row_and_reinstalls() {
+        // Clicking `[r]` on the Failed row at index 2 cursors it and raises the
+        // same Reinstall the `r` key does — a new trigger, not a new capability.
+        let mut s = ready(vec![project("a")]);
+        let flow = apply_click(&mut s, Target::RetryRow(2));
+        assert_eq!(s.app.toggle_cursor, 2, "the chip cursors its row");
+        assert_eq!(s.app.focus, Panel::Detail);
+        let Flow::Continue(eff) = flow else {
+            panic!("retry continues")
+        };
+        assert_eq!(eff.feature_actions.len(), 1);
+        assert_eq!(
+            eff.feature_actions[0].kind,
+            FeatureActionKind::Reinstall,
+            "the chip reinstalls the cursored feature"
+        );
+        assert_eq!(eff.feature_actions[0].feature, Feature::ALL[2]);
     }
 
     #[test]
