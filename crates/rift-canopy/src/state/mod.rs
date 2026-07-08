@@ -645,7 +645,14 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
         Event::Key(k) => {
             let before = s.app.selected_project().map(|p| p.path.clone());
             let mode_before = s.app.mode;
+            // Keyboard-activation parity (ADR-0028): Enter/Space on a focused
+            // modal button flashes it exactly like a click. Captured *before*
+            // `on_key`, which may dismiss the modal.
+            let modal_flash = modal_activation_flash(&s.app, k);
             let action = on_key(&mut s.app, k);
+            if let Some(t) = modal_flash {
+                s.arm_press_pulse(t);
+            }
             if mode_before != Mode::Command && s.app.mode == Mode::Command {
                 // Entering command mode opens the suggest panel: arm its fade
                 // (ADR-0022; reduced motion / ASCII snap to the final frame).
@@ -807,6 +814,25 @@ fn on_mouse(s: &mut AppState, m: MouseInput) -> Flow {
 
 /// Apply a left-click target: focus panels, select a project, flip a toggle, or
 /// open the command bar — each the same mutation as the equivalent keypress.
+/// The modal button a keyboard activation (Enter/Space) would flash (ADR-0028),
+/// mirroring `on_key_overlay`'s activation rule — Space never fires the mutating
+/// Confirm, and a focused Body/none flashes nothing.
+fn modal_activation_flash(app: &App, key: crate::input::CanopyKey) -> Option<Target> {
+    use crate::dispatch::OverlayControl;
+    use crate::input::CanopyKey;
+    let is_enter = matches!(key, CanopyKey::Enter);
+    let is_space = matches!(key, CanopyKey::Char(' '));
+    if !(is_enter || is_space) {
+        return None;
+    }
+    match app.focused_overlay_control()? {
+        OverlayControl::Confirm if is_enter => Some(Target::OverlayConfirm),
+        OverlayControl::Cancel => Some(Target::OverlayCancel),
+        OverlayControl::Close => Some(Target::OverlayClose),
+        _ => None,
+    }
+}
+
 fn apply_click(s: &mut AppState, target: Target) -> Flow {
     // Acknowledge a button press with the flash (ADR-0028) — keyed by target so
     // the right button lights; a repeat press re-arms. Selection/focus/body
@@ -2255,6 +2281,62 @@ mod tests {
             )),
             Flow::Quit => panic!("reorder is not quit"),
         }
+    }
+
+    #[test]
+    fn every_button_target_flashes_on_click() {
+        for target in [
+            Target::HeaderHelp,
+            Target::HeaderPalette,
+            Target::HeaderQuit,
+            Target::EditorButton,
+            Target::OverlayConfirm,
+            Target::OverlayCancel,
+            Target::OverlayClose,
+            Target::RailAdd,
+            Target::RailReorderUp,
+            Target::RailReorderDown,
+            Target::RailRemove,
+            Target::ToggleRow(0),
+        ] {
+            assert!(target.is_button(), "{target:?} must be a button");
+            let mut s = ready(vec![project("a")]);
+            let _ = apply_click(&mut s, target.clone());
+            assert_eq!(
+                s.pressed.as_ref(),
+                Some(&target),
+                "clicking {target:?} arms the press-pulse"
+            );
+        }
+        // A selection/focus target is not a button and does not flash.
+        assert!(!Target::ProjectRow(0).is_button());
+        let mut s = ready(vec![project("a")]);
+        let _ = apply_click(&mut s, Target::ProjectRow(0));
+        assert!(s.pressed.is_none());
+    }
+
+    #[test]
+    fn keyboard_activation_of_a_modal_button_flashes_it() {
+        // Enter on the default-focused Confirm flashes it, exactly like a click.
+        let mut s = ready(vec![project("a")]);
+        s.app.open_overlay(Overlay::Confirm {
+            request: DispatchRequest::Rebuild,
+            repo: "/r".into(),
+        });
+        let _ = update(&mut s, Event::Key(CanopyKey::Enter));
+        assert_eq!(s.pressed, Some(Target::OverlayConfirm));
+        // Tab to the close X on a results modal, then Enter flashes OverlayClose.
+        let mut s = ready(vec![project("a")]);
+        s.app.open_overlay(Overlay::Results {
+            title: "t".into(),
+            lines: vec!["x".into()],
+            scroll: 0,
+            footer: None,
+            truncated: false,
+        });
+        update(&mut s, Event::Key(CanopyKey::Tab)); // Body → Close
+        let _ = update(&mut s, Event::Key(CanopyKey::Enter));
+        assert_eq!(s.pressed, Some(Target::OverlayClose));
     }
 
     #[test]
