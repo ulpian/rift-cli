@@ -241,6 +241,12 @@ pub enum PersistOp {
 /// though no cursor change fires a bus poll. Time-based only; never dirties.
 const REFRESH_EVERY_TICKS: u32 = 15;
 
+/// How long the one-shot startup sweep runs as the panels first fill after the
+/// splash (M55-14, ADR-0022) — a single settle window, then it never re-fires.
+const STARTUP_SWEEP: Duration = Duration::from_millis(450);
+/// How long a selection/hover pulse takes to decay back to rest (M55-14).
+const PULSE_DECAY: Duration = Duration::from_millis(300);
+
 /// How long the suggest panel's text fades in (ADR-0022's shared contract).
 const SUGGEST_FADE: Duration = Duration::from_millis(180);
 
@@ -316,6 +322,13 @@ pub struct AppState {
     /// The suggest panel's fade-in progress (0..=1, dt-advanced under the
     /// ADR-0022 animator contract; snaps to 1 under reduced motion / ASCII).
     suggest_fade: f32,
+    /// The one-shot startup sweep progress (0..=1; M55-14). Rests at 1.0 (done);
+    /// armed to 0.0 once per launch by [`Self::arm_startup_sweep`], then advances
+    /// to 1.0 and **never re-fires**. Reduced motion / headless stays at 1.0.
+    startup_sweep: f32,
+    /// A transient selection/hover pulse (1.0 → 0.0 decay; M55-14). Armed on a
+    /// selection change; a brief colour lerp acknowledges the cursor.
+    select_pulse: f32,
 }
 
 impl AppState {
@@ -336,7 +349,22 @@ impl AppState {
             col3_anim: None,
             activity: Arc::new(crate::col3::ActivityView::default()),
             suggest_fade: 1.0,
+            startup_sweep: 1.0,
+            select_pulse: 0.0,
         }
+    }
+
+    /// Arm the one-shot startup sweep (M55-14): the panels reveal as the
+    /// dashboard first fills after the splash. Reduced motion shows the final
+    /// frame instantly. Called once at launch; the sweep never re-fires.
+    pub fn arm_startup_sweep(&mut self) {
+        self.startup_sweep = if self.reduced_motion { 1.0 } else { 0.0 };
+    }
+
+    /// The startup-sweep reveal progress (0..=1) for the renderer.
+    #[must_use]
+    pub fn startup_sweep(&self) -> f32 {
+        self.startup_sweep
     }
 
     /// (Re)arm the suggest panel's fade-in: entering command mode starts the
@@ -405,14 +433,38 @@ impl AppState {
             self.suggest_fade = (self.suggest_fade + step).min(1.0);
             active = true;
         }
+        // The one-shot startup sweep (M55-14): advances to 1.0 then rests
+        // forever (it never re-arms, so it can't re-fire).
+        if self.startup_sweep < 1.0 {
+            let step = dt.as_secs_f32() / STARTUP_SWEEP.as_secs_f32();
+            self.startup_sweep = (self.startup_sweep + step).min(1.0);
+            active = true;
+        }
+        // The selection pulse decays to rest (M55-14).
+        if self.select_pulse > 0.0 {
+            let step = dt.as_secs_f32() / PULSE_DECAY.as_secs_f32();
+            self.select_pulse = (self.select_pulse - step).max(0.0);
+            active = true;
+        }
         active
     }
 
-    /// Whether a column-3 tween or the suggest fade is in flight (drives the
-    /// loop's fast-poll window).
+    /// Whether any dt-tween is in flight (drives the loop's fast-poll window):
+    /// a col-3 tween, the suggest fade, the startup sweep, or a selection pulse.
     #[must_use]
     pub fn anim_active(&self) -> bool {
-        self.col3_anim.is_some() || (self.app.mode == Mode::Command && self.suggest_fade < 1.0)
+        self.col3_anim.is_some()
+            || (self.app.mode == Mode::Command && self.suggest_fade < 1.0)
+            || self.startup_sweep < 1.0
+            || self.select_pulse > 0.0
+    }
+
+    /// Arm a selection/hover pulse (M55-14): a brief colour lerp acknowledges
+    /// the cursor. Reduced motion skips it (rests at 0).
+    fn arm_select_pulse(&mut self) {
+        if !self.reduced_motion {
+            self.select_pulse = 1.0;
+        }
     }
 
     /// The displayed column-3 value: the interpolated (eased) frame while a tween
@@ -511,6 +563,8 @@ impl AppState {
             suggestions: crate::current_suggestions(&self.app),
             suggest_highlight: self.app.suggest_highlight,
             suggest_fade: self.suggest_fade,
+            sweep: self.startup_sweep,
+            select_pulse: self.select_pulse,
             feature_runtime: self.app.feature_runtime.clone(),
         }
     }
@@ -678,8 +732,9 @@ fn selection_change_effects(s: &mut AppState, before: &Option<String>) -> Vec<Da
         return Vec::new();
     }
     s.app.toggle_cursor = 0;
-    // A different project's sections must never linger: reset to placeholders
-    // (and cancel any in-flight tween) until its own feeds arrive.
+    s.arm_select_pulse(); // acknowledge the cursor move (M55-14)
+                          // A different project's sections must never linger: reset to placeholders
+                          // (and cancel any in-flight tween) until its own feeds arrive.
     s.set_col3(crate::col3::Col3::default());
     if !matches!(*s.activity, crate::col3::ActivityView::NoProjection) {
         s.activity = Arc::new(crate::col3::ActivityView::default());
@@ -1240,6 +1295,11 @@ pub struct ViewModel {
     pub suggest_highlight: usize,
     /// The panel's fade-in progress (0..=1; ADR-0022).
     pub suggest_fade: f32,
+    /// The one-shot startup-sweep reveal progress (0..=1; M55-14). 1.0 = fully
+    /// revealed (reduced motion / headless rest here).
+    pub sweep: f32,
+    /// The transient selection pulse (1.0 → 0.0; M55-14).
+    pub select_pulse: f32,
     /// Feature-row runtime states (M5-12): action results overlaid on the
     /// persisted desired state.
     pub feature_runtime: std::collections::BTreeMap<String, crate::FeatureRuntime>,
@@ -1411,6 +1471,89 @@ mod tests {
             update(&mut s, Event::Key(CanopyKey::Quit)),
             Flow::Quit
         ));
+    }
+
+    // --- M55-14: the startup sweep + the selection pulse ----------------------
+
+    #[test]
+    fn startup_sweep_fires_once_then_settles_and_never_re_fires() {
+        let mut s = ready(vec![project("a")]);
+        assert!(
+            (s.startup_sweep - 1.0).abs() < f32::EPSILON,
+            "rests done by default"
+        );
+        s.arm_startup_sweep();
+        assert_eq!(s.startup_sweep, 0.0, "armed to the start");
+        assert!(s.anim_active(), "a sweeping frame fast-polls");
+
+        // A chosen dt advances the reveal deterministically.
+        assert!(s.advance_anim(STARTUP_SWEEP / 2));
+        assert!(
+            (s.startup_sweep - 0.5).abs() < 0.02,
+            "half-way after half the window"
+        );
+        assert!(s.advance_anim(STARTUP_SWEEP)); // overshoots → clamps to 1.0
+        assert_eq!(s.startup_sweep, 1.0, "settles at the final frame");
+
+        // At rest it is idle and a further advance never re-arms it.
+        assert!(!s.anim_active());
+        assert!(!s.advance_anim(STARTUP_SWEEP));
+        assert_eq!(s.startup_sweep, 1.0, "the one-shot sweep never re-fires");
+    }
+
+    #[test]
+    fn reduced_motion_shows_the_final_frame_instantly() {
+        let mut s = ready(vec![project("a")]);
+        s.reduced_motion = true;
+        s.arm_startup_sweep();
+        assert_eq!(
+            s.startup_sweep, 1.0,
+            "reduced motion snaps to the settled frame"
+        );
+        assert!(!s.anim_active());
+        // The pulse is likewise skipped.
+        s.arm_select_pulse();
+        assert_eq!(s.select_pulse, 0.0);
+    }
+
+    #[test]
+    fn selection_change_arms_a_decaying_pulse() {
+        let mut s = ready(vec![project("a"), project("b")]);
+        update(&mut s, Event::Key(CanopyKey::Down)); // select b
+        assert_eq!(s.select_pulse, 1.0, "a cursor move arms the pulse");
+        assert!(s.anim_active());
+        assert!(s.advance_anim(PULSE_DECAY / 2));
+        assert!(s.select_pulse < 1.0 && s.select_pulse > 0.0, "it decays");
+        assert!(s.advance_anim(PULSE_DECAY)); // overshoots → clamps to 0
+        assert_eq!(s.select_pulse, 0.0, "decays to rest");
+        assert!(!s.anim_active());
+    }
+
+    #[test]
+    fn sweep_reveal_snapshots_the_full_frame_at_rest() {
+        // The settled snapshot (sweep = 1.0) is the full dashboard — every
+        // headless/golden render sees the final frame, never a mid-wipe one.
+        use crate::render::frame::Frame;
+        let mut s = ready(vec![project("a")]);
+        let vm = s.snapshot();
+        assert!((vm.sweep - 1.0).abs() < f32::EPSILON);
+        // Mid-sweep, the lower rows blank (a wipe reveal).
+        s.arm_startup_sweep();
+        s.advance_anim(STARTUP_SWEEP / 4); // ~25% revealed
+        let vm = s.snapshot();
+        let mut f = Frame::new(vm.size);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+        crate::view::draw(&vm, &mut b, &mut f);
+        // A row near the bottom of the body is blank during the wipe.
+        let bottom = vm.size.h.saturating_sub(2);
+        let row: String = (0..vm.size.w)
+            .map(|x| f.get(x, bottom).map_or(' ', |c| c.ch))
+            .collect();
+        assert_eq!(
+            row.trim(),
+            "",
+            "rows below the reveal line are blank mid-sweep"
+        );
     }
 
     // --- M55-06/07: the activity + metrics feeds ------------------------------

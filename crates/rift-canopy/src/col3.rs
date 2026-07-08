@@ -495,7 +495,7 @@ pub fn draw(
                 );
             }
             SectionId::Recall => {
-                draw_recall_panel(col3, theme, focused, slot.collapsed, rect, frame)
+                draw_recall_panel(col3, theme, focused, slot.collapsed, rect, frame);
             }
         }
     }

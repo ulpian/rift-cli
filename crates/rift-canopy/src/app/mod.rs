@@ -879,6 +879,41 @@ mod tests {
     }
 
     #[test]
+    fn startup_sweep_fast_polls_then_settles_and_never_re_fires() {
+        // M55-14: once the sweep is armed, the loop fast-polls (FRAME_INTERVAL)
+        // until it settles, then drops back to the idle cadence; the one-shot
+        // sweep never re-fires on a headless (never-armed) frame.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = TimeoutRecordingEvents {
+            steps: std::collections::VecDeque::from(vec![
+                vec![], // a sweeping frame → fast poll
+                vec![], // still sweeping → fast poll
+                vec![Event::Key(CanopyKey::Quit)],
+            ]),
+            seen: Vec::new(),
+        };
+        let mut state = one_project_state();
+        state.arm_startup_sweep();
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut crate::dispatch::NullEditorLauncher,
+            &mut || Ok(vec![]),
+        )
+        .unwrap();
+        assert!(
+            src.seen.first() == Some(&FRAME_INTERVAL),
+            "the armed sweep fast-polls its reveal, saw {:?}",
+            src.seen
+        );
+    }
+
+    #[test]
     fn resize_updates_size() {
         let mut backend = MockBackend { presents: 0 };
         let mut src = ScriptedEvents::new(vec![

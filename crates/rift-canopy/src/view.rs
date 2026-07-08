@@ -83,6 +83,28 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
     if vm.overlay.is_some() {
         draw_overlay(vm, frame, body);
     }
+
+    // The one-shot startup sweep (M55-14): a top-to-bottom reveal as the panels
+    // first fill after the splash. At 1.0 (reduced motion / headless / settled)
+    // it is a no-op; while sweeping, rows below the reveal line are blanked so
+    // the dashboard wipes in rather than popping. Pure dt-tween — the settled
+    // frame (which every headless/snapshot render sees) is always the full one.
+    apply_startup_sweep(vm, frame, body);
+}
+
+/// Blank the body rows below the sweep's reveal line (a no-op at rest).
+fn apply_startup_sweep(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+    let sweep = vm.sweep.clamp(0.0, 1.0);
+    if sweep >= 1.0 || body.h == 0 {
+        return;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let revealed = (f32::from(body.h) * sweep) as u16;
+    for dy in revealed..body.h {
+        for dx in 0..body.w {
+            frame.set(body.x + dx, body.y + dy, ' ', Style::DEFAULT);
+        }
+    }
 }
 
 /// The suggest panel's row cap (a bounded list; adapts down to the body).
@@ -460,7 +482,18 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
         // The selection pill: the row filled in the selection wash (BOLD keeps
         // it visible on the colourless floors, beside the `>` marker).
         let (row_style, marker) = if selected {
-            let pill = THEME.selection();
+            // The selection pulse (M55-14): the pill flashes toward the accent
+            // on a cursor move, then decays to the resting selection wash.
+            let pill = if vm.select_pulse > 0.0 {
+                let bg = crate::theme::lerp_color(
+                    crate::theme::ACCENT,
+                    crate::theme::SELECT_BG,
+                    1.0 - vm.select_pulse.clamp(0.0, 1.0),
+                );
+                THEME.selection().with_bg(bg)
+            } else {
+                THEME.selection()
+            };
             crate::chrome::fill(
                 frame,
                 Rect {

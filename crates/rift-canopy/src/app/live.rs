@@ -204,6 +204,11 @@ where
     let mut state = AppState::new(initial, size);
     state.reduced_motion = prefs.reduced_motion;
     state.version.clone_from(&opts.version);
+    // The one-shot startup sweep as the panels first fill after the splash
+    // (M55-14); reduced motion / ASCII show the final frame instantly.
+    if !opts.ascii {
+        state.arm_startup_sweep();
+    }
 
     // Launch-cwd auto-select (M5-03) BEFORE the loop starts, so the startup
     // prime subscribes the project the developer launched from; `/add`
