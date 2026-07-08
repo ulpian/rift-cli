@@ -402,6 +402,41 @@ fn golden_overlay_confirm_prompt() {
 }
 
 #[test]
+fn golden_overlay_wizard_modal() {
+    // The first-run wizard as a modal (ADR-0029): message + the add-project chip.
+    let mut s = AppState::new(vec![], Size::new(100, 32));
+    s.app.splash.skip();
+    s.size = Size::new(100, 32);
+    insta::assert_snapshot!("overlay_wizard", render_state(&mut s));
+}
+
+#[test]
+fn golden_overlay_alert_error() {
+    let mut s = dashboard_state();
+    s.size = Size::new(100, 32);
+    s.app.overlay = Some(rift_canopy::Overlay::alert(
+        "verify failed",
+        vec![
+            "chain: BROKEN at #1".into(),
+            "run `rift verify` for detail".into(),
+        ],
+        rift_canopy::Severity::Error,
+    ));
+    insta::assert_snapshot!("overlay_alert_error", render_state(&mut s));
+}
+
+#[test]
+fn golden_overlay_notice_success() {
+    let mut s = dashboard_state();
+    s.size = Size::new(100, 32);
+    s.app.overlay = Some(rift_canopy::Overlay::notice(
+        "registry",
+        vec!["registered /r/rift-cli".into()],
+    ));
+    insta::assert_snapshot!("overlay_notice", render_state(&mut s));
+}
+
+#[test]
 fn golden_inline_parse_error() {
     let mut s = dashboard_state();
     s.size = Size::new(100, 32);

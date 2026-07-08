@@ -61,8 +61,9 @@ pub use command::{
     SessionVerb, SplashMode, Tier, Verb, MAX_INPUT_LEN, VERB_WORDS,
 };
 pub use dispatch::{
-    request_for, CommandDispatcher, DispatchOutcome, DispatchRequest, EditorLauncher,
-    NullDispatcher, NullEditorLauncher, OutcomeClass, Overlay, OVERLAY_MAX_LINES,
+    request_for, CommandDispatcher, DispatchOutcome, DispatchRequest, EditorLauncher, Message,
+    MessageAction, NullDispatcher, NullEditorLauncher, OutcomeClass, Overlay, OverlayControl,
+    Severity, OVERLAY_MAX_LINES,
 };
 pub use hit::{hit_test, Target};
 pub use input::{on_key, Action, CanopyKey, Mode, MouseButton, MouseInput, MouseKind};
@@ -210,15 +211,13 @@ pub struct App {
     pub command_line: String,
     /// The splash timeline.
     pub splash: SplashState,
-    /// Whether the first-run wizard is shown (registry empty).
-    pub show_wizard: bool,
     /// The current interaction mode (drives key handling + the command bar).
     pub mode: Mode,
     /// Set once the user has asked to quit; the event loop exits next iteration.
     pub quit: bool,
-    /// A transient status/toast line (e.g. "registered X" or an error reason).
-    pub status: Option<String>,
-    /// The modal dispatch surface (results / confirm / running), if open.
+    /// The modal surface (results / confirm / running / alert / notice / the
+    /// first-run wizard), if open — the one home for every transient message
+    /// (ADR-0029). `None` when the dashboard owns the surface.
     pub overlay: Option<crate::dispatch::Overlay>,
     /// The focus ring's cursor within the open modal — an index into
     /// `overlay.controls()` (ADR-0027). 0 is the default focus; reset when a
@@ -247,7 +246,9 @@ impl App {
     /// the project registry is empty.
     #[must_use]
     pub fn new(projects: Vec<Project>) -> Self {
-        let show_wizard = projects.is_empty();
+        // An empty registry raises the first-run wizard as a modal (ADR-0029),
+        // not a bespoke column-1 panel.
+        let overlay = projects.is_empty().then(crate::dispatch::Overlay::wizard);
         Self {
             projects,
             selected: 0,
@@ -257,11 +258,9 @@ impl App {
             toggle_cursor: 0,
             command_line: String::new(),
             splash: SplashState::new(),
-            show_wizard,
             mode: Mode::Normal,
             quit: false,
-            status: None,
-            overlay: None,
+            overlay,
             overlay_focus: 0,
             launch_cwd: None,
             command_error: None,
@@ -272,11 +271,46 @@ impl App {
     }
 
     /// Replace the watched projects (e.g. after a project is registered),
-    /// recomputing the first-run wizard flag and clamping the selection.
+    /// clamping the selection and raising the first-run wizard when the
+    /// registry becomes empty (ADR-0029).
     pub fn set_projects(&mut self, projects: Vec<Project>) {
-        self.show_wizard = projects.is_empty();
         self.selected = self.selected.min(projects.len().saturating_sub(1));
         self.projects = projects;
+        self.maybe_raise_wizard();
+    }
+
+    /// Raise the first-run wizard modal when the registry is empty and no other
+    /// modal owns the surface (ADR-0029) — empty-registry startup and the
+    /// "removed the last project" transition both land here. Idempotent: a
+    /// wizard already open, or a non-empty registry, is a no-op.
+    pub fn maybe_raise_wizard(&mut self) {
+        if self.projects.is_empty() && self.overlay.is_none() {
+            self.open_overlay(crate::dispatch::Overlay::wizard());
+        }
+    }
+
+    /// Begin registering a project from the wizard's primary action (ADR-0029):
+    /// dismiss the modal and enter add-project mode so the command bar takes the
+    /// path — the click/key equivalent of the `a` key, from the wizard.
+    pub fn start_add_project(&mut self) {
+        self.overlay = None;
+        self.overlay_focus = 0;
+        self.mode = Mode::AddProject;
+        self.command_line.clear();
+    }
+
+    /// Whether the first-run wizard modal is the open overlay (the empty-registry
+    /// surface) — used by the render/hit paths that treated `show_wizard` as a
+    /// layout flag.
+    #[must_use]
+    pub fn showing_wizard(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(crate::dispatch::Overlay::Alert(crate::dispatch::Message {
+                action: crate::dispatch::MessageAction::AddProject,
+                ..
+            }))
+        )
     }
 
     /// Move the project selection down (saturating).
@@ -489,8 +523,14 @@ pub fn current_suggestions(app: &App) -> Vec<suggest::Suggestion> {
 /// the interactive launch and the headless frame, like the startup prime.
 pub fn apply_launch_cwd(app: &mut App, cwd: Option<&str>, cwd_is_repo: bool) {
     let Some(cwd) = cwd else { return };
-    if !app.select_launch_cwd(cwd) && cwd_is_repo {
-        app.status = Some(UNREGISTERED_CWD_HINT.to_owned());
+    // The hint is an info Alert (ADR-0029), raised only when no modal already
+    // owns the surface — an empty registry keeps its first-run wizard instead.
+    if !app.select_launch_cwd(cwd) && cwd_is_repo && app.overlay.is_none() {
+        app.open_overlay(crate::dispatch::Overlay::alert(
+            "unregistered repository",
+            vec![UNREGISTERED_CWD_HINT.to_owned()],
+            crate::dispatch::Severity::Info,
+        ));
     }
 }
 
@@ -556,6 +596,14 @@ mod tests {
         assert_eq!(launch_selection(&ps, "/home/dev/rift-extra"), None);
     }
 
+    /// The body lines of an open Alert overlay (test helper for the routed hints).
+    fn alert_body(app: &App) -> Option<Vec<String>> {
+        match &app.overlay {
+            Some(crate::dispatch::Overlay::Alert(m)) => Some(m.body.clone()),
+            _ => None,
+        }
+    }
+
     #[test]
     fn unregistered_repo_cwd_hints_and_keeps_index_zero() {
         let mut app = App::new(vec![
@@ -564,14 +612,12 @@ mod tests {
         ]);
         apply_launch_cwd(&mut app, Some("/home/dev/unregistered"), true);
         assert_eq!(app.selected, 0, "selection stays at index 0");
+        // The two-ways-in hint shows as an info Alert (ADR-0029), not a toast.
         assert_eq!(
-            app.status.as_deref(),
-            Some(UNREGISTERED_CWD_HINT),
-            "the two-ways-in hint shows"
+            alert_body(&app).as_deref(),
+            Some([UNREGISTERED_CWD_HINT.to_owned()].as_slice()),
+            "the two-ways-in hint shows as a modal"
         );
-        // The hint is transient: the next status change replaces it.
-        app.status = Some("registered /x".into());
-        assert_ne!(app.status.as_deref(), Some(UNREGISTERED_CWD_HINT));
     }
 
     #[test]
@@ -579,7 +625,7 @@ mod tests {
         let mut app = App::new(vec![proj("/home/dev/a", EntryKind::Repo)]);
         apply_launch_cwd(&mut app, Some("/tmp/scratch"), false);
         assert_eq!(app.selected, 0);
-        assert_eq!(app.status, None, "no hint outside a git repository");
+        assert!(app.overlay.is_none(), "no hint outside a git repository");
     }
 
     #[test]
@@ -590,13 +636,16 @@ mod tests {
         ]);
         apply_launch_cwd(&mut app, Some("/home/dev/b/src/deep"), true);
         assert_eq!(app.selected, 1, "selection follows the launch cwd");
-        assert_eq!(app.status, None, "a successful match needs no hint");
+        assert!(app.overlay.is_none(), "a successful match needs no hint");
     }
 
     #[test]
     fn empty_registry_shows_wizard() {
         let app = App::new(vec![]);
-        assert!(app.show_wizard);
+        assert!(
+            app.showing_wizard(),
+            "an empty registry raises the wizard modal"
+        );
     }
 
     #[test]

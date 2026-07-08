@@ -9,7 +9,7 @@
 
 use crate::col2::sanitize_for_terminal;
 use crate::layout::{
-    bottom_chrome_rows, choose_mode, chrome_split, single_panel, solve, two_col, LayoutMode, Rect,
+    bottom_chrome_rows, choose_mode, single_panel, solve, two_col, LayoutMode, Rect,
     MIN_NOTICE_COLS, MIN_NOTICE_ROWS,
 };
 use crate::render::frame::{Frame, Style};
@@ -55,14 +55,6 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
         w: area.w,
         h: area.h.saturating_sub(1),
     };
-
-    if vm.show_wizard {
-        let (above, hint, command) = chrome_split(body);
-        draw_wizard(vm, frame, above);
-        crate::bars::draw_hint_bar(vm, THEME, frame, hint);
-        draw_command(vm, frame, command);
-        return;
-    }
 
     match choose_mode(vm.size) {
         LayoutMode::TwoCol => draw_two_col(vm, backend, frame, body, unicode),
@@ -265,6 +257,46 @@ pub fn modal_close_rect(modal: Rect) -> Option<Rect> {
     })
 }
 
+/// The primary-action chip string for a message modal (`[ Add a project ]`), or
+/// `None` for a dismiss-only message. One source for draw + measurement, so the
+/// drawn cells and the hit-test width agree.
+fn primary_chip(action: crate::dispatch::MessageAction) -> Option<String> {
+    action.primary_label().map(|label| format!("[ {label} ]"))
+}
+
+/// The primary-action button rect on a message modal (ADR-0029) — bottom-left of
+/// the modal's inner content, shared by [`draw_overlay`] and the hit-test so the
+/// chip cells and the click target are the same cells. `None` for a dismiss-only
+/// message or a modal too small to host it.
+#[must_use]
+pub fn modal_primary_rect(inner: Rect, action: crate::dispatch::MessageAction) -> Option<Rect> {
+    let chip = primary_chip(action)?;
+    if inner.w == 0 || inner.h == 0 {
+        return None;
+    }
+    let w = u16::try_from(chip.chars().count())
+        .unwrap_or(0)
+        .min(inner.w);
+    Some(Rect {
+        x: inner.x,
+        y: inner.y + inner.h - 1,
+        w,
+        h: 1,
+    })
+}
+
+/// A message severity's frame colour (ADR-0029): red error, amber warning, green
+/// success, accent info. Colour-only, so the mono/ASCII tiers drop it and the
+/// border glyphs stand — the one styling axis decided at draw, not per call site.
+fn severity_style(severity: crate::dispatch::Severity) -> Style {
+    use crate::dispatch::Severity;
+    Style::fg(match severity {
+        Severity::Error => crate::theme::STATUS_ERROR,
+        Severity::Warning => crate::theme::HEALTH_WARN,
+        Severity::Success | Severity::Info => crate::theme::ACCENT,
+    })
+}
+
 /// The style for a modal button (ADR-0027/0028): the accent, washed with the
 /// focus background when the focus ring rests on it, and the press-flash
 /// background (which wins) while it is pressed. Colour-only, so the mono/ASCII
@@ -280,6 +312,39 @@ fn overlay_button_style(
         ACCENT.with_bg(crate::theme::SELECT_BG)
     } else {
         ACCENT
+    }
+}
+
+/// Draw a message modal (ADR-0029) into `rect`: the severity-coloured frame, the
+/// sanitized body lines, and — for a message with a primary action — the
+/// bottom-left action chip (the wizard's *add project*). The universal close X
+/// is drawn by the shared tail of [`draw_overlay`].
+fn draw_message(vm: &ViewModel, frame: &mut Frame, rect: Rect, msg: &crate::dispatch::Message) {
+    let style = severity_style(msg.severity);
+    let inner = frame.border(rect, &sanitize_for_terminal(&msg.title), style);
+    for (i, line) in msg.body.iter().enumerate() {
+        let Ok(dy) = u16::try_from(i) else { break };
+        if dy >= inner.h {
+            break;
+        }
+        clip_line(
+            frame,
+            inner,
+            dy,
+            &sanitize_for_terminal(line),
+            Style::DEFAULT,
+        );
+    }
+    if let (Some(chip), Some(pr)) = (
+        primary_chip(msg.action),
+        modal_primary_rect(inner, msg.action),
+    ) {
+        let bstyle = overlay_button_style(
+            vm,
+            &crate::hit::Target::WizardAdd,
+            crate::dispatch::OverlayControl::Primary,
+        );
+        frame.put_str(pr.x, pr.y, &chip, bstyle);
     }
 }
 
@@ -373,6 +438,9 @@ fn draw_overlay(vm: &ViewModel, frame: &mut Frame) {
                 Style::DEFAULT,
             );
         }
+        // A message (ADR-0029): an Alert (blocking) or a Notice (auto-dismissing)
+        // renders from `{ title, body, severity, action }` through one path.
+        Overlay::Alert(msg) | Overlay::Notice(msg) => draw_message(vm, frame, rect, msg),
     }
     // The universal close X on the top-right border (ADR-0027), for modals that
     // carry a Close control (Results / Confirm; Running has none). The focus
@@ -477,35 +545,6 @@ fn draw_too_small(frame: &mut Frame, area: Rect) {
     let x = area.x + area.w.saturating_sub(len) / 2;
     let y = area.y + area.h / 2;
     clip_at(frame, x, y, area.w, &msg, Style::DEFAULT);
-}
-
-/// The first-run hint, spanning the full column area so it stays readable.
-fn draw_wizard(vm: &ViewModel, frame: &mut Frame, above: Rect) {
-    let inner = frame.border(above, "projects", border_style(vm.focus == Panel::Projects));
-    clip_line(
-        frame,
-        inner,
-        0,
-        "No projects registered yet.",
-        Style::DEFAULT,
-    );
-    clip_line(
-        frame,
-        inner,
-        1,
-        "Press 'a' to add a project, or run `rift setup`.",
-        Style::DEFAULT,
-    );
-}
-
-/// The border style for a panel: accented when focused, the theme's idle
-/// slate otherwise (M55-04 — the borders join the surface theme).
-fn border_style(focused: bool) -> Style {
-    if focused {
-        ACCENT
-    } else {
-        Style::fg(crate::theme::BORDER_IDLE)
-    }
 }
 
 /// Draw the bottom command / add-project bar (mode-aware), with a block cursor.
@@ -919,10 +958,79 @@ mod tests {
 
     #[test]
     fn wizard_when_empty() {
+        // The first-run wizard renders as a modal (ADR-0029), with the message,
+        // the clickable *add project* chip, and the universal close X.
         let mut s = AppState::new(vec![], Size::new(100, 30));
         s.app.splash.skip();
         let text = render_to_text(&s.snapshot());
-        assert!(text.contains("No projects registered"));
+        assert!(text.contains("No projects registered"), "the message shows");
+        assert!(
+            text.contains("Add a project"),
+            "the primary action chip shows"
+        );
+        assert!(text.contains("[x]"), "the universal close X shows");
+    }
+
+    #[test]
+    fn severity_frames_each_message_class() {
+        use crate::dispatch::Severity;
+        assert_eq!(
+            severity_style(Severity::Error).fg,
+            crate::theme::STATUS_ERROR
+        );
+        assert_eq!(
+            severity_style(Severity::Warning).fg,
+            crate::theme::HEALTH_WARN
+        );
+        assert_eq!(severity_style(Severity::Success).fg, crate::theme::ACCENT);
+        assert_eq!(severity_style(Severity::Info).fg, crate::theme::ACCENT);
+    }
+
+    #[test]
+    fn primary_rect_is_bottom_left_only_for_an_action() {
+        use crate::dispatch::MessageAction;
+        let inner = Rect {
+            x: 4,
+            y: 2,
+            w: 30,
+            h: 8,
+        };
+        let pr = modal_primary_rect(inner, MessageAction::AddProject).expect("has a primary");
+        assert_eq!(
+            pr.y,
+            inner.y + inner.h - 1,
+            "the chip sits on the bottom row"
+        );
+        assert_eq!(pr.x, inner.x, "left-aligned");
+        assert!(modal_primary_rect(inner, MessageAction::Dismiss).is_none());
+    }
+
+    #[test]
+    fn an_error_alert_frames_the_message_in_red() {
+        let mut s = AppState::new(vec![], Size::new(100, 30));
+        s.app.splash.skip();
+        s.open_alert(crate::dispatch::Message::error(
+            "disk full",
+            vec!["no space left on device".into()],
+        ));
+        let vm = s.snapshot();
+        let mut f = Frame::new(vm.size);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+        draw(&vm, &mut b, &mut f);
+        let rect = modal_rect(vm.size);
+        // The top-left border cell carries the error severity colour.
+        assert_eq!(
+            f.get(rect.x, rect.y).map(|c| c.style.fg),
+            Some(crate::theme::STATUS_ERROR),
+            "an error Alert frames red"
+        );
+        // A dismiss-only alert has no primary chip.
+        let text = render_to_text(&vm);
+        assert!(text.contains("no space left on device"));
+        assert!(
+            !text.contains("Add a project"),
+            "no primary on a plain alert"
+        );
     }
 
     #[test]

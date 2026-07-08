@@ -157,7 +157,6 @@ fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
         CanopyKey::Char('a') => {
             app.mode = Mode::AddProject;
             app.command_line.clear();
-            app.status = None;
             Action::None
         }
         CanopyKey::Char('/') => {
@@ -365,13 +364,18 @@ fn on_key_overlay(app: &mut App, key: CanopyKey) -> Action {
             _ => {}
         }
     }
-    // Esc always closes/cancels a dismissable modal (Running swallows it).
-    if matches!(key, CanopyKey::Esc | CanopyKey::Quit) {
-        if matches!(
-            app.overlay,
-            Some(Overlay::Results { .. } | Overlay::Confirm { .. })
-        ) {
+    // A normalized hard quit (Ctrl-C) exits the app even from a modal — an
+    // open message must never trap the escape hatch.
+    if matches!(key, CanopyKey::Quit) {
+        app.quit = true;
+        return Action::Quit;
+    }
+    // Esc closes/cancels a dismissable modal (ADR-0027) — results, confirm,
+    // alert, notice, the wizard; only Running swallows it.
+    if matches!(key, CanopyKey::Esc) {
+        if !matches!(app.overlay, Some(Overlay::Running { .. })) {
             app.overlay = None;
+            app.overlay_focus = 0;
         }
         return Action::None;
     }
@@ -383,6 +387,13 @@ fn on_key_overlay(app: &mut App, key: CanopyKey) -> Action {
             Some(OverlayControl::Confirm) if !is_space => Action::ConfirmDispatch,
             Some(OverlayControl::Cancel | OverlayControl::Close) => {
                 app.overlay = None;
+                app.overlay_focus = 0;
+                Action::None
+            }
+            // The wizard's *add a project* action (ADR-0029): dismiss the modal
+            // and enter add-project mode (the `a` key's effect, from the wizard).
+            Some(OverlayControl::Primary) => {
+                app.start_add_project();
                 Action::None
             }
             _ => Action::None,
@@ -405,10 +416,13 @@ mod tests {
         }
     }
 
-    /// An app past the splash, ready for Normal-mode interaction.
+    /// An app past the splash, ready for Normal-mode interaction (the first-run
+    /// wizard, which an empty registry raises, is dismissed so keys reach the
+    /// dashboard — overlay-key tests open their own overlay).
     fn ready(projects: Vec<Project>) -> App {
         let mut app = App::new(projects);
         app.splash.skip();
+        app.overlay = None;
         app
     }
 
@@ -657,6 +671,43 @@ mod tests {
         assert_eq!(app.focus, Panel::Command);
         assert_eq!(app.mode, Mode::Command);
         assert_eq!(app.focus_prev, Panel::Graphs);
+    }
+
+    // ---- M56-08: message-modal keys (ADR-0029) -----------------------------
+
+    #[test]
+    fn wizard_primary_enter_begins_add_project() {
+        let mut app = ready(vec![project("a")]);
+        app.overlay = Some(crate::dispatch::Overlay::wizard()); // focus = Primary
+        assert_eq!(on_key(&mut app, CanopyKey::Enter), Action::None);
+        assert_eq!(app.mode, Mode::AddProject, "Enter fired the wizard action");
+        assert!(app.overlay.is_none(), "the wizard dismissed");
+    }
+
+    #[test]
+    fn esc_dismisses_an_alert_and_a_notice() {
+        for ov in [
+            crate::dispatch::Overlay::alert(
+                "e",
+                vec!["x".into()],
+                crate::dispatch::Severity::Error,
+            ),
+            crate::dispatch::Overlay::notice("ok", vec!["done".into()]),
+        ] {
+            let mut app = ready(vec![project("a")]);
+            app.overlay = Some(ov);
+            assert_eq!(on_key(&mut app, CanopyKey::Esc), Action::None);
+            assert!(app.overlay.is_none(), "Esc closes every message modal");
+        }
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_from_a_modal() {
+        // A hard quit must never be trapped by an open message (the escape hatch).
+        let mut app = ready(vec![project("a")]);
+        app.overlay = Some(crate::dispatch::Overlay::wizard());
+        assert_eq!(on_key(&mut app, CanopyKey::Quit), Action::Quit);
+        assert!(app.quit, "Ctrl-C sets quit even with a modal open");
     }
 
     proptest::proptest! {

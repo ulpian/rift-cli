@@ -223,6 +223,95 @@ impl DispatchOutcome {
 /// honest notice, never rendered unbounded.
 pub const OVERLAY_MAX_LINES: usize = 400;
 
+/// The severity of a modal message (ADR-0029): the one axis the view resolves
+/// into a border/title colour, so styling is decided once at draw — not per call
+/// site. Colour-only, so the mono/ASCII tiers drop it and the glyphs stand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// A failure — a red frame (an error the developer must read).
+    Error,
+    /// An actionable warning — an amber frame (a soft miss, e.g. "no match").
+    Warning,
+    /// A success — a green frame (auto-dismissing under `Notice`).
+    Success,
+    /// Neutral information — the accent frame (the first-run wizard).
+    Info,
+}
+
+/// The action a message offers beyond dismissal (ADR-0029). A **closed** enum —
+/// the modal grammar stays closed (no arbitrary callbacks leak in), so a message
+/// is data, not a capability. `Dismiss` is Close/Esc only; `AddProject` adds the
+/// first-run wizard's single *add a project* button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageAction {
+    /// Dismiss-only: the universal Close X and Esc (an error alert, a notice).
+    Dismiss,
+    /// A single primary *add a project* button — the first-run wizard modal.
+    AddProject,
+}
+
+impl MessageAction {
+    /// The primary button's label, or `None` for a dismiss-only message.
+    #[must_use]
+    pub fn primary_label(self) -> Option<&'static str> {
+        match self {
+            MessageAction::AddProject => Some("Add a project"),
+            MessageAction::Dismiss => None,
+        }
+    }
+}
+
+/// A modal message — the data every `Alert`/`Notice` renders from (ADR-0029):
+/// `{ title, body, severity, action }`. Opening and closing route through the
+/// one overlay path, so severity styling, focus defaults (ADR-0027), and
+/// geometry (ADR-0026) are decided once, not re-implemented per error site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    /// The modal title (severity-styled, sanitized at draw).
+    pub title: String,
+    /// The body lines (sanitized at draw, like the results body).
+    pub body: Vec<String>,
+    /// The severity — the view's single styling axis.
+    pub severity: Severity,
+    /// The action beyond dismissal (`Dismiss` for a plain message).
+    pub action: MessageAction,
+}
+
+impl Message {
+    /// A dismiss-only error message (a red frame) — a failure to read.
+    #[must_use]
+    pub fn error(title: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            title: title.into(),
+            body,
+            severity: Severity::Error,
+            action: MessageAction::Dismiss,
+        }
+    }
+
+    /// A dismiss-only warning message (an amber frame) — a soft miss.
+    #[must_use]
+    pub fn warning(title: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            title: title.into(),
+            body,
+            severity: Severity::Warning,
+            action: MessageAction::Dismiss,
+        }
+    }
+
+    /// A dismiss-only success message (a green frame) — opened as a `Notice`.
+    #[must_use]
+    pub fn success(title: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            title: title.into(),
+            body,
+            severity: Severity::Success,
+            action: MessageAction::Dismiss,
+        }
+    }
+}
+
 /// The modal surface over the body (ADR-0021 "Dispatch posture"): read-only
 /// outcomes render in the Results variant; mutating requests confirm first;
 /// Running is the frame shown while a synchronous dispatch holds the loop.
@@ -255,6 +344,66 @@ pub enum Overlay {
         /// The verb line being run.
         title: String,
     },
+    /// A blocking message (ADR-0029): an error, or a message with a primary
+    /// action such as the first-run wizard. Dismiss-only unless its action
+    /// offers more; it holds the surface until the developer dismisses it.
+    Alert(Message),
+    /// A brief success/info message (ADR-0029) that auto-dismisses by `dt` under
+    /// the ADR-0022 animator contract — a bounded settle, never a timer/thread.
+    Notice(Message),
+}
+
+impl Overlay {
+    /// A blocking [`Overlay::Alert`] from a title, body lines, and severity —
+    /// dismiss-only (Close/Esc). The single door error sites open, so severity
+    /// styling and focus/geometry are decided once (ADR-0029).
+    #[must_use]
+    pub fn alert(title: impl Into<String>, body: Vec<String>, severity: Severity) -> Self {
+        Overlay::Alert(Message {
+            title: title.into(),
+            body,
+            severity,
+            action: MessageAction::Dismiss,
+        })
+    }
+
+    /// A brief [`Overlay::Notice`] (a success/info toast) that auto-dismisses by
+    /// `dt`. Opened via `AppState::open_notice` so its settle is armed.
+    #[must_use]
+    pub fn notice(title: impl Into<String>, body: Vec<String>) -> Self {
+        Overlay::Notice(Message {
+            title: title.into(),
+            body,
+            severity: Severity::Success,
+            action: MessageAction::Dismiss,
+        })
+    }
+
+    /// The first-run wizard as a modal (ADR-0029): a welcome message plus the one
+    /// *add a project* primary action. Raised when the registry is empty.
+    #[must_use]
+    pub fn wizard() -> Self {
+        Overlay::Alert(Message {
+            title: "welcome to Rift".into(),
+            body: vec![
+                "No projects registered yet.".into(),
+                "Add a project to start capturing agent sessions,".into(),
+                "or run `rift init` in a repository.".into(),
+            ],
+            severity: Severity::Info,
+            action: MessageAction::AddProject,
+        })
+    }
+
+    /// The severity of a message overlay (`Alert`/`Notice`), or `None` for the
+    /// results/confirm/running frames (which carry their own accent).
+    #[must_use]
+    pub fn severity(&self) -> Option<Severity> {
+        match self {
+            Overlay::Alert(m) | Overlay::Notice(m) => Some(m.severity),
+            _ => None,
+        }
+    }
 }
 
 /// A focusable control within an open modal — where the focus ring can land
@@ -270,6 +419,8 @@ pub enum OverlayControl {
     Cancel,
     /// The close X (dismisses the modal).
     Close,
+    /// A message's primary action button (e.g. the wizard's *add a project*).
+    Primary,
 }
 
 impl Overlay {
@@ -279,11 +430,18 @@ impl Overlay {
     /// Body. Running has no focusable controls.
     #[must_use]
     pub fn controls(&self) -> &'static [OverlayControl] {
-        use OverlayControl::{Body, Cancel, Close, Confirm};
+        use OverlayControl::{Body, Cancel, Close, Confirm, Primary};
         match self {
             Overlay::Results { .. } => &[Body, Close],
             Overlay::Confirm { .. } => &[Confirm, Cancel, Close],
             Overlay::Running { .. } => &[],
+            // A message defaults its focus to the primary action when it has
+            // one (the wizard opens with *add project* focused), else to Close.
+            Overlay::Alert(m) => match m.action {
+                MessageAction::AddProject => &[Primary, Close],
+                MessageAction::Dismiss => &[Close],
+            },
+            Overlay::Notice(_) => &[Close],
         }
     }
 }
@@ -479,5 +637,60 @@ mod tests {
         assert_eq!(OutcomeClass::from_code(65), OutcomeClass::Integrity);
         assert_eq!(OutcomeClass::from_code(1), OutcomeClass::Failure);
         assert_eq!(OutcomeClass::from_code(75).as_str(), "transient");
+    }
+
+    // ---- M56-08: message routing (ADR-0029) --------------------------------
+
+    #[test]
+    fn a_dismiss_message_carries_only_the_close_control() {
+        // An error/notice is dismiss-only: Close is its one control, the default
+        // focus (index 0), so "open, press Enter" closes it.
+        let alert = Overlay::alert("e", vec!["x".into()], Severity::Error);
+        assert_eq!(alert.controls(), &[OverlayControl::Close]);
+        let notice = Overlay::notice("ok", vec!["done".into()]);
+        assert_eq!(notice.controls(), &[OverlayControl::Close]);
+    }
+
+    #[test]
+    fn the_wizard_defaults_focus_to_its_primary_action() {
+        // The wizard opens with the *add project* button focused, Close second.
+        let wizard = Overlay::wizard();
+        assert_eq!(
+            wizard.controls(),
+            &[OverlayControl::Primary, OverlayControl::Close],
+            "the wizard focuses its primary action first"
+        );
+        let Overlay::Alert(m) = &wizard else {
+            panic!("the wizard is an Alert")
+        };
+        assert_eq!(m.action, MessageAction::AddProject);
+        assert_eq!(m.action.primary_label(), Some("Add a project"));
+    }
+
+    #[test]
+    fn severity_reports_only_for_message_overlays() {
+        assert_eq!(
+            Overlay::alert("e", vec![], Severity::Error).severity(),
+            Some(Severity::Error)
+        );
+        assert_eq!(
+            Overlay::notice("ok", vec![]).severity(),
+            Some(Severity::Success)
+        );
+        assert_eq!(
+            Overlay::Running { title: "x".into() }.severity(),
+            None,
+            "a running frame carries its own accent, not a severity"
+        );
+    }
+
+    #[test]
+    fn message_constructors_set_the_severity_axis() {
+        assert_eq!(Message::error("t", vec![]).severity, Severity::Error);
+        assert_eq!(Message::warning("t", vec![]).severity, Severity::Warning);
+        assert_eq!(Message::success("t", vec![]).severity, Severity::Success);
+        // A plain message is dismiss-only (no primary action leaks in).
+        assert_eq!(Message::error("t", vec![]).action, MessageAction::Dismiss);
+        assert_eq!(MessageAction::Dismiss.primary_label(), None);
     }
 }

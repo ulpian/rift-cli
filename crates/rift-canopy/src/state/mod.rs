@@ -255,6 +255,11 @@ const SUGGEST_FADE: Duration = Duration::from_millis(180);
 /// fast (and only redraws) for this window, then returns to the ~0% CPU idle.
 const COL3_SETTLE: Duration = Duration::from_millis(350);
 
+/// How long a success/info [`Overlay::Notice`] lingers before its `dt`-timed
+/// auto-dismiss (ADR-0022/0029) — a bounded settle, not a timer/thread, so the
+/// idle property holds (the loop spins fast only for this window, then rests).
+const NOTICE_SETTLE: Duration = Duration::from_millis(2200);
+
 /// An in-flight column-3 tween: where the series eased *from*, and how far in.
 /// The *target* is always `AppState::col3` (the truth), so a mid-tween snapshot
 /// still reports the true headline numbers.
@@ -336,6 +341,10 @@ pub struct AppState {
     press_pulse: f32,
     /// The button whose press-flash is in flight (keys `press_pulse`).
     pressed: Option<Target>,
+    /// The open [`Overlay::Notice`]'s remaining settle (1.0 → 0.0; ADR-0029).
+    /// Armed to 1.0 when a Notice opens, decayed by `dt` in [`Self::advance_anim`],
+    /// which dismisses the Notice when it reaches 0 — a bounded auto-dismiss.
+    notice_settle: f32,
 }
 
 impl AppState {
@@ -360,7 +369,25 @@ impl AppState {
             select_pulse: 0.0,
             press_pulse: 0.0,
             pressed: None,
+            notice_settle: 0.0,
         }
+    }
+
+    /// Open a blocking [`Overlay::Alert`] (an error / warning message; ADR-0029)
+    /// — the one door error sites route through. Dirties so the modal presents.
+    pub fn open_alert(&mut self, message: crate::dispatch::Message) {
+        self.app.open_overlay(Overlay::Alert(message));
+        self.notice_settle = 0.0;
+        self.dirty = true;
+    }
+
+    /// Open a brief [`Overlay::Notice`] (a success/info message; ADR-0029) and arm
+    /// its `dt`-timed auto-dismiss settle. Dirties so the toast presents; the
+    /// loop's fast-poll window carries the settle to its bounded close.
+    pub fn open_notice(&mut self, message: crate::dispatch::Message) {
+        self.app.open_overlay(Overlay::Notice(message));
+        self.notice_settle = 1.0;
+        self.dirty = true;
     }
 
     /// Arm the one-shot startup sweep (M55-14): the panels reveal as the
@@ -465,6 +492,22 @@ impl AppState {
             }
             active = true;
         }
+        // A Notice auto-dismisses by `dt` (ADR-0029): its settle decays and, at 0,
+        // the Notice closes itself — a bounded settle, never a timer/thread. A
+        // Notice dismissed early (X/Esc) drops out here (the overlay is no longer
+        // a Notice), so the settle can't keep the loop awake past its close.
+        if matches!(self.app.overlay, Some(Overlay::Notice(_))) {
+            let step = dt.as_secs_f32() / NOTICE_SETTLE.as_secs_f32();
+            self.notice_settle = (self.notice_settle - step).max(0.0);
+            if self.notice_settle <= 0.0 {
+                self.app.overlay = None;
+                self.app.overlay_focus = 0;
+                self.app.maybe_raise_wizard(); // an empty registry keeps its wizard
+            }
+            active = true;
+        } else {
+            self.notice_settle = 0.0;
+        }
         active
     }
 
@@ -477,6 +520,7 @@ impl AppState {
             || self.startup_sweep < 1.0
             || self.select_pulse > 0.0
             || self.press_pulse > 0.0
+            || (matches!(self.app.overlay, Some(Overlay::Notice(_))) && self.notice_settle > 0.0)
     }
 
     /// Arm a selection/hover pulse (M55-14): a brief colour lerp acknowledges
@@ -577,7 +621,6 @@ impl AppState {
             mode: self.app.mode,
             version: self.version.clone(),
             health: self.health,
-            show_wizard: self.app.show_wizard,
             projects: Arc::clone(&self.rows_cache),
             selected: self.app.selected,
             detail,
@@ -587,7 +630,6 @@ impl AppState {
             graphs_scroll: self.app.scroll.graphs,
             toggle_cursor: self.app.toggle_cursor,
             command_line: self.app.command_line.clone(),
-            status: self.app.status.clone(),
             overlay: self.app.overlay.clone(),
             overlay_focus: self.app.overlay_focus,
             command_error: self.app.command_error.clone(),
@@ -829,6 +871,7 @@ fn modal_activation_flash(app: &App, key: crate::input::CanopyKey) -> Option<Tar
         OverlayControl::Confirm if is_enter => Some(Target::OverlayConfirm),
         OverlayControl::Cancel => Some(Target::OverlayCancel),
         OverlayControl::Close => Some(Target::OverlayClose),
+        OverlayControl::Primary => Some(Target::WizardAdd),
         _ => None,
     }
 }
@@ -898,9 +941,19 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             Flow::Continue(Effects::default())
         }
         // The close X (ADR-0027) — the click/Tab equivalent of Esc; dismisses
-        // any modal that carries a Close control.
+        // any modal that carries a Close control. An empty registry keeps its
+        // wizard (dismissing it just reveals the empty rail; it re-raises only if
+        // the surface is otherwise free).
         Target::OverlayClose => {
             s.app.overlay = None;
+            s.app.overlay_focus = 0;
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
+        // The wizard's primary action (ADR-0029) — begin registering a project,
+        // the click equivalent of the `a` key from the first-run modal.
+        Target::WizardAdd => {
+            s.app.start_add_project();
             s.dirty = true;
             Flow::Continue(Effects::default())
         }
@@ -996,6 +1049,7 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             | Target::HeaderPalette
             | Target::HeaderQuit
             | Target::EditorButton
+            | Target::WizardAdd
             | Target::RailAdd
             | Target::RailReorderUp
             | Target::RailReorderDown
@@ -1187,7 +1241,10 @@ fn dashboard_verb_flow(s: &mut AppState, verb: Verb) -> Flow {
         }
         Verb::Add => {
             let Some(path) = s.app.launch_cwd.clone() else {
-                s.app.status = Some("launch directory unknown — run `rift init` there".into());
+                s.open_alert(crate::dispatch::Message::error(
+                    "cannot add project",
+                    vec!["launch directory unknown — run `rift init` there".into()],
+                ));
                 return Flow::Continue(Effects::default());
             };
             Flow::Continue(Effects {
@@ -1251,15 +1308,22 @@ fn verb_word_of(verb: &Verb) -> &'static str {
     }
 }
 
-/// The "no matching project" toast (shared by the project-ref verbs).
+/// The "no matching project" alert (shared by the project-ref verbs) — a soft
+/// miss, so a warning Alert (ADR-0029).
 fn no_match_status(s: &mut AppState) -> Flow {
-    s.app.status = Some("no matching project".into());
+    s.open_alert(crate::dispatch::Message::warning(
+        "no match",
+        vec!["no matching project".into()],
+    ));
     Flow::Continue(Effects::default())
 }
 
-/// The "unknown feature" toast (shared by toggle/reinstall).
+/// The "unknown feature" alert (shared by toggle/reinstall).
 fn unknown_feature_status(s: &mut AppState, key: &str) -> Flow {
-    s.app.status = Some(format!("unknown feature `{key}` — try /help"));
+    s.open_alert(crate::dispatch::Message::warning(
+        "unknown feature",
+        vec![format!("unknown feature `{key}` — try /help")],
+    ));
     Flow::Continue(Effects::default())
 }
 
@@ -1274,7 +1338,6 @@ fn apply_rail_action(s: &mut AppState, target: &Target) -> Flow {
         Target::RailAdd => {
             s.app.mode = Mode::AddProject;
             s.app.command_line.clear();
-            s.app.status = None;
             Flow::Continue(Effects::default())
         }
         Target::RailRemove => {
@@ -1377,8 +1440,6 @@ pub struct ViewModel {
     pub version: String,
     /// The data-plane health the header dot shows.
     pub health: crate::theme::Health,
-    /// Whether to show the first-run wizard.
-    pub show_wizard: bool,
     /// Column-1 project rows (shared, rebuilt only when the rows change).
     pub projects: Arc<Vec<ProjectRow>>,
     /// The selected project's index (selection highlight + scroll-to-selection).
@@ -1397,9 +1458,8 @@ pub struct ViewModel {
     pub toggle_cursor: usize,
     /// The command/add-project edit buffer.
     pub command_line: String,
-    /// A transient status/toast line.
-    pub status: Option<String>,
-    /// The modal dispatch surface (results / confirm / running), if open.
+    /// The modal surface (results / confirm / running / alert / notice / wizard),
+    /// if open — the one home for every message (ADR-0029).
     pub overlay: Option<Overlay>,
     /// The modal focus ring's cursor — an index into `overlay.controls()`
     /// (ADR-0027); the renderer highlights the focused control.
@@ -1467,6 +1527,8 @@ mod tests {
     fn ready(projects: Vec<Project>) -> AppState {
         let mut s = AppState::new(projects, Size::new(120, 40));
         s.app.splash.skip(); // past the splash
+        s.app.overlay = None; // dismiss the first-run wizard; drive the dashboard
+        s.app.overlay_focus = 0;
         s.dirty = false;
         s
     }
@@ -2877,5 +2939,120 @@ mod tests {
         let v = s.snapshot();
         assert_eq!(v.selected, 1);
         assert_eq!(v.detail.unwrap().path, "/r/b");
+    }
+
+    // ---- M56-08: message routing (ADR-0029) --------------------------------
+
+    use crate::dispatch::{Message, Overlay, Severity};
+
+    #[test]
+    fn an_empty_registry_raises_the_wizard_modal() {
+        // Construction raises it; `ready` dismisses it, so build directly.
+        let s = AppState::new(vec![], Size::new(120, 40));
+        assert!(s.app.showing_wizard(), "empty startup raises the wizard");
+    }
+
+    #[test]
+    fn removing_the_last_project_re_raises_the_wizard() {
+        let mut app = App::new(vec![project("a")]);
+        app.overlay = None;
+        app.set_projects(vec![]); // the registry emptied
+        assert!(
+            app.showing_wizard(),
+            "emptying the registry re-raises the wizard"
+        );
+    }
+
+    #[test]
+    fn a_soft_miss_opens_a_warning_alert() {
+        // `/select nope` with no matching project opens a warning Alert, not a
+        // silent toast.
+        let mut s = ready(vec![project("a")]);
+        let flow = no_match_status(&mut s);
+        assert!(matches!(flow, Flow::Continue(_)));
+        assert!(
+            matches!(&s.app.overlay, Some(Overlay::Alert(m)) if m.severity == Severity::Warning),
+            "a no-match opens a warning Alert: {:?}",
+            s.app.overlay
+        );
+    }
+
+    #[test]
+    fn add_without_a_launch_cwd_opens_an_error_alert() {
+        let mut s = ready(vec![project("a")]);
+        s.app.launch_cwd = None;
+        let _ = dashboard_verb_flow(&mut s, Verb::Add);
+        assert!(
+            matches!(&s.app.overlay, Some(Overlay::Alert(m)) if m.severity == Severity::Error),
+            "add with no cwd opens an error Alert: {:?}",
+            s.app.overlay
+        );
+    }
+
+    #[test]
+    fn open_notice_arms_a_bounded_auto_dismiss() {
+        let mut s = ready(vec![project("a")]);
+        s.reduced_motion = false;
+        s.open_notice(Message::success("ok", vec!["done".into()]));
+        assert!(matches!(s.app.overlay, Some(Overlay::Notice(_))));
+        assert!(s.anim_active(), "a pending Notice keeps the loop awake");
+        // A partial dt keeps it open; a dt past the settle window closes it.
+        assert!(s.advance_anim(Duration::from_millis(200)));
+        assert!(
+            matches!(s.app.overlay, Some(Overlay::Notice(_))),
+            "still up"
+        );
+        let _ = s.advance_anim(Duration::from_secs(3));
+        assert!(s.app.overlay.is_none(), "the Notice auto-dismissed by dt");
+        assert!(!s.anim_active(), "and the loop returns to idle");
+    }
+
+    #[test]
+    fn a_notice_dismissed_early_does_not_keep_the_loop_awake() {
+        let mut s = ready(vec![project("a")]);
+        s.open_notice(Message::success("ok", vec!["done".into()]));
+        s.app.overlay = None; // the user pressed Esc / X before the settle
+        assert!(!s.anim_active(), "an early dismiss ends the settle");
+        assert!(!s.advance_anim(Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn open_alert_does_not_arm_the_settle() {
+        let mut s = ready(vec![project("a")]);
+        s.open_alert(Message::error("e", vec!["boom".into()]));
+        assert!(matches!(s.app.overlay, Some(Overlay::Alert(_))));
+        assert!(!s.anim_active(), "an Alert blocks; it never auto-dismisses");
+    }
+
+    #[test]
+    fn the_wizard_primary_click_enters_add_project_mode_and_flashes() {
+        let mut s = AppState::new(vec![], Size::new(120, 40));
+        s.app.splash.skip();
+        s.reduced_motion = false;
+        assert!(s.app.showing_wizard());
+        let flow = apply_click(&mut s, Target::WizardAdd);
+        assert!(matches!(flow, Flow::Continue(_)));
+        assert_eq!(
+            s.app.mode,
+            Mode::AddProject,
+            "the wizard begins add-project"
+        );
+        assert!(s.app.overlay.is_none(), "the wizard dismissed");
+        assert_eq!(s.press_pulse, 1.0, "the primary button flashed on click");
+        assert_eq!(s.pressed, Some(Target::WizardAdd));
+    }
+
+    #[test]
+    fn a_success_notice_over_an_emptying_registry_re_raises_the_wizard() {
+        // The removal-to-empty case: a Notice shows, then its settle-close hands
+        // the surface back to the wizard (the empty registry keeps its prompt).
+        let mut s = AppState::new(vec![], Size::new(120, 40));
+        s.open_notice(Message::success("registry", vec!["removed /a".into()]));
+        assert!(matches!(s.app.overlay, Some(Overlay::Notice(_))));
+        let _ = s.advance_anim(Duration::from_secs(3));
+        assert!(
+            s.app.showing_wizard(),
+            "the wizard returns after the notice"
+        );
     }
 }

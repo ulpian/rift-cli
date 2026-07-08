@@ -236,10 +236,12 @@ fn run_editor(
     path: &str,
 ) -> RiftResult<()> {
     match launcher.open(std::path::Path::new(path)) {
-        Ok(()) => state.app.status = Some(format!("opened {path} in $EDITOR")),
-        Err(reason) => state.app.status = Some(reason),
+        Ok(()) => state.open_notice(crate::dispatch::Message::success(
+            "editor",
+            vec![format!("opened {path} in $EDITOR")],
+        )),
+        Err(reason) => state.open_alert(crate::dispatch::Message::error("editor", vec![reason])),
     }
-    state.dirty = true;
     render_if_dirty(backend, state)?;
     Ok(())
 }
@@ -335,7 +337,13 @@ fn apply_persist<F>(
             if let Some(path) = keep {
                 state.app.select_path(&path); // selection follows the same project
             }
-            state.app.status = Some(persist_status(op));
+            // A success is a Notice (ADR-0029); it auto-dismisses. When the
+            // removal emptied the registry, `set_projects` already raised the
+            // wizard, which the Notice's settle-close re-raises after it fades.
+            state.open_notice(crate::dispatch::Message::success(
+                "registry",
+                vec![persist_status(op)],
+            ));
             // Track every current project on the bus (new adds included), and
             // prioritize the selection so its live status/detail refreshes.
             for p in &state.app.projects {
@@ -344,7 +352,10 @@ fn apply_persist<F>(
             let active = state.app.selected_project().map(|p| p.path.clone());
             req_sink(DataRequest::SetActive(active));
         }
-        Err(e) => state.app.status = Some(e.to_string()),
+        Err(e) => state.open_alert(crate::dispatch::Message::error(
+            "registry",
+            vec![e.to_string()],
+        )),
     }
     state.dirty = true;
 }
@@ -426,6 +437,7 @@ mod tests {
     fn ready_state() -> AppState {
         let mut s = AppState::new(vec![], Size::new(80, 24));
         s.app.splash.skip();
+        s.app.overlay = None; // dismiss the first-run wizard; drive the dashboard
         s
     }
 
@@ -702,11 +714,17 @@ mod tests {
             vec!["/r/a".to_string()],
             "the launcher opened the SELECTED project's path"
         );
-        assert!(state.app.status.unwrap().contains("$EDITOR"));
+        // A success is a Notice (ADR-0029), not a header toast.
+        assert!(
+            matches!(&state.app.overlay, Some(crate::dispatch::Overlay::Notice(m))
+                if m.body.iter().any(|l| l.contains("$EDITOR"))),
+            "the launch success opened a Notice: {:?}",
+            state.app.overlay
+        );
     }
 
     #[test]
-    fn unset_editor_becomes_a_status_toast_never_a_guess() {
+    fn unset_editor_becomes_an_alert_never_a_guess() {
         let mut backend = MockBackend { presents: 0 };
         let mut src = ScriptedEvents::new(vec![
             vec![Event::Key(CanopyKey::Tab)],
@@ -732,9 +750,15 @@ mod tests {
         )
         .unwrap();
         // It still crossed the seam (the launcher decides), and its Err becomes
-        // the status toast verbatim.
+        // an error Alert (ADR-0029) verbatim.
         assert_eq!(opened.borrow().len(), 1);
-        assert_eq!(state.app.status.as_deref(), Some("$EDITOR is not set"));
+        assert!(
+            matches!(&state.app.overlay, Some(crate::dispatch::Overlay::Alert(m))
+                if m.body == ["$EDITOR is not set"]
+                    && m.severity == crate::dispatch::Severity::Error),
+            "the launch error opened an error Alert: {:?}",
+            state.app.overlay
+        );
     }
 
     #[test]
@@ -975,7 +999,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(seen, vec!["/tmp/x".to_string()]);
-        assert!(state.app.status.unwrap().contains("registered /tmp/x"));
+        assert!(
+            matches!(&state.app.overlay, Some(crate::dispatch::Overlay::Notice(m))
+                if m.body.iter().any(|l| l.contains("registered /tmp/x"))),
+            "the add success opened a Notice: {:?}",
+            state.app.overlay
+        );
     }
 
     /// A manager that always fails — proves a failed install surfaces as a status

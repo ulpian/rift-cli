@@ -49,6 +49,8 @@ pub enum HintContext {
     OverlayResults,
     /// A confirm overlay is open.
     OverlayConfirm,
+    /// A message overlay (alert / notice / the first-run wizard) is open.
+    OverlayMessage,
     /// A dispatch is running (keys are inert).
     OverlayRunning,
 }
@@ -60,6 +62,7 @@ pub fn context(mode: Mode, focus: Panel, overlay: Option<&Overlay>) -> HintConte
     match overlay {
         Some(Overlay::Results { .. }) => HintContext::OverlayResults,
         Some(Overlay::Confirm { .. }) => HintContext::OverlayConfirm,
+        Some(Overlay::Alert(_) | Overlay::Notice(_)) => HintContext::OverlayMessage,
         Some(Overlay::Running { .. }) => HintContext::OverlayRunning,
         None => match mode {
             Mode::Command => HintContext::CommandEditing,
@@ -120,6 +123,10 @@ const OVERLAY_CONFIRM: &[Hint] = &[
     hint("⏎", "confirm", CanopyKey::Enter),
     hint("esc", "cancel", CanopyKey::Esc),
 ];
+const OVERLAY_MESSAGE: &[Hint] = &[
+    hint("⏎", "action", CanopyKey::Enter),
+    hint("esc", "dismiss", CanopyKey::Esc),
+];
 
 /// The hint table for a context — the focused panel's real bindings, in the
 /// order they should read left to right.
@@ -134,6 +141,7 @@ pub fn hints(ctx: HintContext) -> &'static [Hint] {
         HintContext::AddProject => ADD_PROJECT,
         HintContext::OverlayResults => OVERLAY_RESULTS,
         HintContext::OverlayConfirm => OVERLAY_CONFIRM,
+        HintContext::OverlayMessage => OVERLAY_MESSAGE,
         // Everything is deliberately inert while a dispatch runs.
         HintContext::OverlayRunning => &[],
     }
@@ -196,6 +204,11 @@ mod tests {
                     repo: "/r/b".into(),
                 });
             }
+            HintContext::OverlayMessage => {
+                // The wizard message: a Primary + Close ring, so Enter has an
+                // observable action (enter add-project mode) to prove.
+                app.overlay = Some(Overlay::wizard());
+            }
             HintContext::OverlayRunning => {
                 app.overlay = Some(Overlay::Running { title: "x".into() });
             }
@@ -207,7 +220,7 @@ mod tests {
     /// a non-`None` action).
     fn fingerprint(app: &App) -> String {
         format!(
-            "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{:?}|{}",
+            "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{:?}",
             app.focus,
             app.mode,
             app.selected,
@@ -220,8 +233,9 @@ mod tests {
                 Overlay::Results { scroll, .. } => format!("results@{scroll}"),
                 Overlay::Confirm { .. } => "confirm".into(),
                 Overlay::Running { .. } => "running".into(),
+                Overlay::Alert(_) => "alert".into(),
+                Overlay::Notice(_) => "notice".into(),
             }),
-            app.status.is_some(),
         )
     }
 
@@ -230,7 +244,7 @@ mod tests {
     /// an action is returned. A hint can never advertise a dead key.
     #[test]
     fn every_hint_key_is_handled_by_the_reducer() {
-        const ALL: [HintContext; 9] = [
+        const ALL: [HintContext; 10] = [
             HintContext::Rail,
             HintContext::Detail,
             HintContext::Graphs,
@@ -239,6 +253,7 @@ mod tests {
             HintContext::AddProject,
             HintContext::OverlayResults,
             HintContext::OverlayConfirm,
+            HintContext::OverlayMessage,
             HintContext::OverlayRunning,
         ];
         for ctx in ALL {

@@ -122,13 +122,9 @@ pub fn draw_header(vm: &ViewModel, theme: Theme, unicode: bool, frame: &mut Fram
         Icon::HealthDot.glyph(unicode),
         theme.health(vm.health).with_bg(SURFACE_BG),
     );
-    x = x.saturating_add(1);
 
-    // Right cluster: the actions (drawn first so the toast clips against it).
+    // Right cluster: the header actions.
     let spans = header_action_spans(area.w);
-    let toast_end = spans.first().map_or(area.x + area.w, |s| {
-        area.x + s.start.saturating_sub(ITEM_GAP)
-    });
     for span in &spans {
         let Some((key, label, _)) = HEADER_ITEMS.iter().find(|(_, _, a)| *a == span.action) else {
             continue;
@@ -143,16 +139,6 @@ pub fn draw_header(vm: &ViewModel, theme: Theme, unicode: bool, frame: &mut Fram
         let bg = crate::chrome::press_flash_bg(vm.button_flash(&target)).unwrap_or(SURFACE_BG);
         let kx = frame.put_str(area.x + span.start, y, key, theme.key_hint().with_bg(bg));
         frame.put_str(kx, y, &format!(" {label}"), theme.dim().with_bg(bg));
-    }
-
-    // The transient status toast rides the middle, clipped to the free span.
-    if let Some(status) = &vm.status {
-        let sx = x.saturating_add(2);
-        if toast_end > sx {
-            let room = usize::from(toast_end - sx);
-            let text: String = sanitize_for_terminal(status).chars().take(room).collect();
-            frame.put_str(sx, y, &text, theme.dim().with_bg(SURFACE_BG));
-        }
     }
 }
 
@@ -309,20 +295,6 @@ mod tests {
             Health::Down.color(),
             "a dead data plane looks dead"
         );
-    }
-
-    #[test]
-    fn header_status_toast_is_sanitized_and_clipped() {
-        let mut v = vm(80, 24);
-        v.status = Some("evil\x1b[31mtoast".into());
-        let mut f = Frame::new(Size::new(80, 24));
-        let area = f.rect();
-        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
-        let row = row_text(&f, 0);
-        assert!(row.contains("evil[31mtoast"), "escape stripped: {row}");
-        for x in 0..80u16 {
-            assert!(!f.get(x, 0).unwrap().ch.is_control());
-        }
     }
 
     #[test]

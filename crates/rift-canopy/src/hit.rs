@@ -10,9 +10,7 @@
 
 use crate::cards::{self, CardKind};
 use crate::col3;
-use crate::layout::{
-    choose_mode, chrome_split, single_panel, solve, two_col, LayoutMode, PanelRects, Rect,
-};
+use crate::layout::{choose_mode, single_panel, solve, two_col, LayoutMode, PanelRects, Rect};
 use crate::state::ViewModel;
 use crate::view::visible_window;
 use crate::{Panel, ProjectStatus};
@@ -45,6 +43,9 @@ pub enum Target {
     OverlayCancel,
     /// The modal's close X — dismiss (mouse/Tab equivalent of Esc; ADR-0027).
     OverlayClose,
+    /// A message modal's primary action — the first-run wizard's *add a project*
+    /// button (ADR-0029): begins registering a project, like the `a` key.
+    WizardAdd,
     /// The dispatch overlay body (wheel scroll / inert click).
     OverlayBody,
     /// A suggest-panel row: click INSERTS it (Tab's mouse equivalent — never
@@ -77,6 +78,7 @@ impl Target {
                 | Target::OverlayConfirm
                 | Target::OverlayCancel
                 | Target::OverlayClose
+                | Target::WizardAdd
                 | Target::RailAdd
                 | Target::RailReorderUp
                 | Target::RailReorderDown
@@ -158,17 +160,16 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
                     }
                 }
             }
+            // A message modal's primary action (the wizard's *add project*),
+            // bottom-left of the inner rect — same cells `draw_overlay` paints.
+            if let crate::dispatch::Overlay::Alert(m) = overlay {
+                if let Some(pr) = crate::view::modal_primary_rect(inner_of(rect), m.action) {
+                    if contains(pr, col, row) {
+                        return Some(Target::WizardAdd);
+                    }
+                }
+            }
             return Some(Target::OverlayBody);
-        }
-        return None;
-    }
-    if vm.show_wizard {
-        let (above, _hint, command) = chrome_split(body);
-        if contains(command, col, row) {
-            return Some(Target::CommandBar);
-        }
-        if contains(above, col, row) {
-            return Some(Target::PanelFocus(Panel::Projects));
         }
         return None;
     }
@@ -561,6 +562,26 @@ mod tests {
         );
         // Just left of the X is the modal body, not the close.
         assert_eq!(hit_test(&v, cr.x - 1, cr.y), Some(Target::OverlayBody));
+    }
+
+    #[test]
+    fn the_wizard_primary_button_resolves_where_it_is_drawn() {
+        // The empty registry raises the wizard modal; its *add project* chip is
+        // clickable and its drawn cells equal the hit region (ADR-0029).
+        let mut s = AppState::new(vec![], Size::new(100, 32));
+        s.app.splash.skip();
+        assert!(s.app.showing_wizard());
+        let v = s.snapshot();
+        let inner = inner_of(crate::view::modal_rect(Size::new(100, 32)));
+        let pr = crate::view::modal_primary_rect(inner, crate::dispatch::MessageAction::AddProject)
+            .expect("the wizard has a primary button");
+        // Both ends of the chip resolve to WizardAdd.
+        assert_eq!(hit_test(&v, pr.x, pr.y), Some(Target::WizardAdd));
+        assert_eq!(hit_test(&v, pr.x + pr.w - 1, pr.y), Some(Target::WizardAdd));
+        // The close X is still reachable on the wizard (dismiss-only fallback).
+        let cr =
+            crate::view::modal_close_rect(crate::view::modal_rect(Size::new(100, 32))).unwrap();
+        assert_eq!(hit_test(&v, cr.x, cr.y), Some(Target::OverlayClose));
     }
 
     #[test]
