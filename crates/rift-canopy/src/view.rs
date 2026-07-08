@@ -74,7 +74,7 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
     // results scroll, confirms gate, the running line holds during a dispatch.
     // It sizes itself as a centered modal (ADR-0026) from `vm.size`.
     if vm.overlay.is_some() {
-        draw_overlay(vm, frame);
+        draw_overlay(vm, unicode, frame);
     }
 
     // The one-shot startup sweep (M55-14): a top-to-bottom reveal as the panels
@@ -348,10 +348,42 @@ fn draw_message(vm: &ViewModel, frame: &mut Frame, rect: Rect, msg: &crate::disp
     }
 }
 
+/// Draw a Results modal (ADR-0021): the bordered title, the scrolled body lines,
+/// the nonzero-class footer, and the modal-body overflow scrollbar (ADR-0031)
+/// when the listing exceeds the box.
+fn draw_results(
+    frame: &mut Frame,
+    unicode: bool,
+    rect: Rect,
+    title: &str,
+    lines: &[String],
+    scroll: usize,
+    footer: Option<&str>,
+) {
+    let inner = frame.border(rect, &sanitize_for_terminal(title), ACCENT);
+    let footer_rows = usize::from(footer.is_some());
+    let visible = usize::from(inner.h).saturating_sub(footer_rows);
+    for (i, line) in lines.iter().skip(scroll).take(visible).enumerate() {
+        let Ok(dy) = u16::try_from(i) else { break };
+        clip_line(frame, inner, dy, line, Style::DEFAULT);
+    }
+    if let Some(f) = footer {
+        let dy = inner.h.saturating_sub(1);
+        clip_line(frame, inner, dy, &sanitize_for_terminal(f), ACCENT);
+    }
+    // The modal-body scrollbar over the body's rows (a long listing overflows the
+    // 80/80 box — ADR-0026); its presence means "there is more".
+    let body = Rect {
+        h: u16::try_from(visible).unwrap_or(inner.h),
+        ..inner
+    };
+    draw_overflow_bar(frame, body, scroll, lines.len(), unicode);
+}
+
 /// Draw the dispatch overlay as a centered modal (ADR-0026): a themed scrim over
 /// the dashboard, then a bordered, scrollable pane. Geometry comes from the one
 /// shared [`modal_rect`], so pixels and hit-test targets can never disagree.
-fn draw_overlay(vm: &ViewModel, frame: &mut Frame) {
+fn draw_overlay(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
     use crate::dispatch::Overlay;
     let Some(overlay) = &vm.overlay else { return };
     let rect = modal_rect(vm.size);
@@ -372,19 +404,7 @@ fn draw_overlay(vm: &ViewModel, frame: &mut Frame) {
             scroll,
             footer,
             ..
-        } => {
-            let inner = frame.border(rect, &sanitize_for_terminal(title), ACCENT);
-            let footer_rows = usize::from(footer.is_some());
-            let visible = usize::from(inner.h).saturating_sub(footer_rows);
-            for (i, line) in lines.iter().skip(*scroll).take(visible).enumerate() {
-                let Ok(dy) = u16::try_from(i) else { break };
-                clip_line(frame, inner, dy, line, Style::DEFAULT);
-            }
-            if let Some(f) = footer {
-                let dy = inner.h.saturating_sub(1);
-                clip_line(frame, inner, dy, &sanitize_for_terminal(f), ACCENT);
-            }
-        }
+        } => draw_results(frame, unicode, rect, title, lines, *scroll, footer.as_deref()),
         Overlay::Confirm { request, repo } => {
             let inner = frame.border(rect, "confirm", ACCENT);
             clip_line(
@@ -790,6 +810,16 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
         }
     }
     draw_rail_actions(vm, frame, &buttons, unicode);
+    // The rail overflow scrollbar (ADR-0031): tracks the selection window when
+    // more projects exist than the list has rows — the visual half of the
+    // silent paging `visible_window` already does.
+    let bar_area = Rect {
+        x: rect.x,
+        y: list.y,
+        w: rect.w,
+        h: list.h,
+    };
+    draw_overflow_bar(frame, bar_area, start, vm.projects.len(), unicode);
 }
 
 /// Column 2 — the card stack (M55-08): repository · models · settings · capture
@@ -819,6 +849,16 @@ fn draw_detail(
         press_pulse: vm.press_pulse,
     };
     crate::cards::draw(&ctx, THEME, rect, vm.detail_scroll, backend, frame);
+    // The card-stack overflow scrollbar (ADR-0031): shown only when the column is
+    // too short to host every card (the collapse-solve's lossy tier — cards are
+    // one row each there, so the row/card counts line up).
+    draw_overflow_bar(
+        frame,
+        rect,
+        vm.detail_scroll,
+        crate::cards::content_len(),
+        unicode,
+    );
 }
 
 /// Column 3 — the three live panels (M55-11/12/13): token usage, system (the
@@ -836,6 +876,35 @@ fn draw_graphs(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Fram
         backend,
         frame,
     );
+    // The overflow scrollbar (ADR-0031): drawn on the column's right edge only
+    // when the fully-expanded panels exceed the column — the visible sign of the
+    // "j/k scroll" M57-05 wired.
+    draw_overflow_bar(
+        frame,
+        rect,
+        vm.graphs_scroll,
+        usize::from(crate::col3::content_rows()),
+        unicode,
+    );
+}
+
+/// Draw an overflow scrollbar on `area`'s right edge (ADR-0031) when its content
+/// exceeds the viewport, tracking `(offset, content_len)`. Chrome — the bar's
+/// presence honestly means "there is more"; a fitting region draws nothing.
+/// Returns whether a bar was drawn (so the caller can reserve for it / hit-test).
+fn draw_overflow_bar(
+    frame: &mut Frame,
+    area: Rect,
+    offset: usize,
+    content_len: usize,
+    unicode: bool,
+) -> bool {
+    if let Some(bar) = crate::chrome::scrollbar(area, offset, content_len) {
+        crate::chrome::draw_scrollbar(frame, &bar, unicode);
+        true
+    } else {
+        false
+    }
 }
 
 /// Print `text` on row `dy` of `area`, truncated to the area's width and dropped
@@ -955,6 +1024,58 @@ mod tests {
         assert!(text.contains("no token activity yet"));
         assert!(text.contains("system"));
         assert!(text.contains("recall"));
+    }
+
+    #[test]
+    fn a_long_rail_shows_a_scrollbar_a_short_one_does_not() {
+        use crate::render::frame::Size;
+        // More projects than rows → the rail carries an overflow scrollbar (its
+        // track/thumb glyph on the right edge); a fitting rail carries none.
+        let many: Vec<Project> = (0..30)
+            .map(|i| Project {
+                name: format!("proj-{i}"),
+                path: format!("/r/{i}"),
+                status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            })
+            .collect();
+        let mut s = AppState::new(many, Size::new(90, 20));
+        s.app.splash.skip();
+        let text = render_to_text(&s.snapshot());
+        let has_bar = |t: &str| t.contains('█') || t.contains('│') || t.contains('#');
+        assert!(has_bar(&text), "the overflowing rail shows a scrollbar:\n{text}");
+
+        let mut few = AppState::new(
+            vec![Project {
+                name: "solo".into(),
+                path: "/r/solo".into(),
+                status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }],
+            Size::new(90, 20),
+        );
+        few.app.splash.skip();
+        // The projects rail itself carries no thumb glyph when a single row fits
+        // (the rail is column 1; a `█` there would be the bar). Scan column-1 rows.
+        let vm = few.snapshot();
+        let mut f = Frame::new(vm.size);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+        draw(&vm, &mut b, &mut f);
+        let col1 = crate::layout::solve(Rect {
+            x: 0,
+            y: 1,
+            w: 90,
+            h: 19,
+        })
+        .col1;
+        let edge = col1.x + col1.w - 1;
+        for y in col1.y..(col1.y + col1.h) {
+            assert_ne!(
+                f.get(edge, y).map(|c| c.ch),
+                Some('#'),
+                "a fitting rail draws no scrollbar thumb"
+            );
+        }
     }
 
     #[test]

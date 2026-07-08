@@ -144,57 +144,11 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
         w: size.w,
         h: size.h.saturating_sub(1),
     };
-    // An open overlay owns its region (drawn last, so it is what the user
-    // sees). Confirm buttons resolve exactly where the labels render; every
-    // other overlay cell is the (scrollable) body. Clicks outside fall
-    // through to nothing while the overlay is up — panels beneath are
-    // covered visually, so they must not be clickable.
+    // An open overlay owns its region (drawn last, so it is what the user sees).
+    // Clicks outside fall through to nothing while the overlay is up — the panels
+    // beneath are covered visually, so they must not be clickable.
     if let Some(overlay) = &vm.overlay {
-        let rect = crate::view::modal_rect(size);
-        if rect.w >= 8 && rect.h >= 3 && contains(rect, col, row) {
-            // The close X (ADR-0027), top-right, for modals that carry a Close
-            // control — the same cells `draw_overlay` paints it into.
-            if overlay
-                .controls()
-                .contains(&crate::dispatch::OverlayControl::Close)
-            {
-                if let Some(cr) = crate::view::modal_close_rect(rect) {
-                    if contains(cr, col, row) {
-                        return Some(Target::OverlayClose);
-                    }
-                }
-            }
-            if let crate::dispatch::Overlay::Confirm { .. } = overlay {
-                // The buttons row mirrors `view::draw_overlay`: inner dy=3.
-                let inner = inner_of(rect);
-                let button_row = inner.y.saturating_add(3);
-                if row == button_row {
-                    let (confirm, cancel) = crate::view::CONFIRM_BUTTONS;
-                    let confirm_w = u16::try_from(confirm.chars().count()).unwrap_or(0);
-                    let gap = 3u16;
-                    let cancel_w = u16::try_from(cancel.chars().count()).unwrap_or(0);
-                    let cx = inner.x;
-                    if col >= cx && col < cx.saturating_add(confirm_w) {
-                        return Some(Target::OverlayConfirm);
-                    }
-                    let kx = cx.saturating_add(confirm_w).saturating_add(gap);
-                    if col >= kx && col < kx.saturating_add(cancel_w) {
-                        return Some(Target::OverlayCancel);
-                    }
-                }
-            }
-            // A message modal's primary action (the wizard's *add project*),
-            // bottom-left of the inner rect — same cells `draw_overlay` paints.
-            if let crate::dispatch::Overlay::Alert(m) = overlay {
-                if let Some(pr) = crate::view::modal_primary_rect(inner_of(rect), m.action) {
-                    if contains(pr, col, row) {
-                        return Some(Target::WizardAdd);
-                    }
-                }
-            }
-            return Some(Target::OverlayBody);
-        }
-        return None;
+        return hit_overlay(overlay, size, col, row);
     }
     // The suggest panel (drawn over the body, above the bar) owns its rows
     // while open — a click inserts, exactly like Tab (M5-11).
@@ -217,6 +171,72 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
         LayoutMode::SinglePanel => hit_single(vm, body, col, row),
         LayoutMode::TooSmall => None,
     }
+}
+
+/// Resolve a click while an overlay owns the surface (ADR-0026/0027/0029/0031):
+/// the close X, the confirm/cancel buttons, a message's primary action, the
+/// modal-body scrollbar, else the (scrollable) body — the same cells
+/// `view::draw_overlay` paints. A click outside the modal is inert (`None`).
+fn hit_overlay(
+    overlay: &crate::dispatch::Overlay,
+    size: crate::render::frame::Size,
+    col: u16,
+    row: u16,
+) -> Option<Target> {
+    use crate::dispatch::{Overlay, OverlayControl};
+    let rect = crate::view::modal_rect(size);
+    if rect.w < 8 || rect.h < 3 || !contains(rect, col, row) {
+        return None;
+    }
+    // The close X, top-right, for modals that carry a Close control.
+    if overlay.controls().contains(&OverlayControl::Close) {
+        if let Some(cr) = crate::view::modal_close_rect(rect) {
+            if contains(cr, col, row) {
+                return Some(Target::OverlayClose);
+            }
+        }
+    }
+    let inner = inner_of(rect);
+    if let Overlay::Confirm { .. } = overlay {
+        // The buttons row mirrors `view::draw_overlay`: inner dy=3.
+        if row == inner.y.saturating_add(3) {
+            let (confirm, cancel) = crate::view::CONFIRM_BUTTONS;
+            let confirm_w = u16::try_from(confirm.chars().count()).unwrap_or(0);
+            let cancel_w = u16::try_from(cancel.chars().count()).unwrap_or(0);
+            if col >= inner.x && col < inner.x.saturating_add(confirm_w) {
+                return Some(Target::OverlayConfirm);
+            }
+            let kx = inner.x.saturating_add(confirm_w).saturating_add(3);
+            if col >= kx && col < kx.saturating_add(cancel_w) {
+                return Some(Target::OverlayCancel);
+            }
+        }
+    }
+    // A message modal's primary action (the wizard's *add project*).
+    if let Overlay::Alert(m) = overlay {
+        if let Some(pr) = crate::view::modal_primary_rect(inner, m.action) {
+            if contains(pr, col, row) {
+                return Some(Target::WizardAdd);
+            }
+        }
+    }
+    // The modal-body scrollbar (a long Results listing overflows the box).
+    if let Overlay::Results {
+        lines,
+        scroll,
+        footer,
+        ..
+    } = overlay
+    {
+        let body = Rect {
+            h: inner.h.saturating_sub(u16::from(footer.is_some())),
+            ..inner
+        };
+        if on_scrollbar(body, *scroll, lines.len(), col, row) {
+            return Some(Target::Scrollbar(ScrollRegion::Modal));
+        }
+    }
+    Some(Target::OverlayBody)
 }
 
 /// Hit-test one of the multi-column grids (full or two-column).
@@ -280,9 +300,19 @@ fn project_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
             return target.clone();
         }
     }
-    if let Some(dy) = local_row(list, col, row) {
-        if !vm.projects.is_empty() {
-            let (start, end) = visible_window(vm.selected, vm.projects.len(), usize::from(list.h));
+    if !vm.projects.is_empty() {
+        let (start, end) = visible_window(vm.selected, vm.projects.len(), usize::from(list.h));
+        // The rail overflow scrollbar on the panel's right border (ADR-0031).
+        let bar_area = Rect {
+            x: rect.x,
+            y: list.y,
+            w: rect.w,
+            h: list.h,
+        };
+        if on_scrollbar(bar_area, start, vm.projects.len(), col, row) {
+            return Target::Scrollbar(ScrollRegion::Rail);
+        }
+        if let Some(dy) = local_row(list, col, row) {
             let idx = start + usize::from(dy);
             if idx < end {
                 return Target::ProjectRow(idx);
@@ -296,6 +326,10 @@ fn project_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
 /// the panel. Recomputes the card stack from the same solver the renderer uses,
 /// so a click resolves to the exact card/row/button drawn (M55-08/10).
 fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
+    // The card-stack overflow scrollbar (ADR-0031) on the column's right edge.
+    if on_scrollbar(rect, vm.detail_scroll, cards::content_len(), col, row) {
+        return Target::Scrollbar(ScrollRegion::Detail);
+    }
     let Some(detail) = vm.detail.as_deref() else {
         return Target::PanelFocus(Panel::Detail);
     };
@@ -344,11 +378,23 @@ fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
     Target::PanelFocus(Panel::Detail)
 }
 
+/// Whether `(col, row)` lands on the overflow scrollbar for a region of `area`
+/// with `(offset, content_len)` — the same `chrome::scrollbar` geometry the
+/// renderer draws, so the bar's cells and its hit-region are identical (ADR-0031).
+fn on_scrollbar(area: Rect, offset: usize, content_len: usize, col: u16, row: u16) -> bool {
+    crate::chrome::scrollbar(area, offset, content_len)
+        .is_some_and(|bar| contains(bar.track, col, row))
+}
+
 /// A click in column 3 → the graph section under it, else focus the panel. When
 /// the panels overflow (ADR-0031), the viewport row maps through the scroll
 /// `offset` into the fully-expanded stack — the same window the renderer blits —
 /// so a click resolves to the panel actually on screen.
 fn section_or_focus(rect: Rect, offset: usize, col: u16, row: u16) -> Target {
+    // The overflow scrollbar on the column's right edge wins over the panel body.
+    if on_scrollbar(rect, offset, usize::from(col3::content_rows()), col, row) {
+        return Target::Scrollbar(ScrollRegion::Graphs);
+    }
     let inner = inner_of(rect);
     if let Some(dy) = local_row(inner, col, row) {
         let content_h = col3::content_rows();
@@ -654,6 +700,61 @@ mod tests {
             assert_eq!(hit_test(&v, r.x, r.y), Some(target.clone()));
         }
         assert_eq!(buttons[0].1, Target::RailAdd, "the first chip is Add");
+    }
+
+    #[test]
+    fn the_graphs_scrollbar_resolves_where_it_is_drawn() {
+        // A short Full3Col column overflows its expanded panels, so a scrollbar
+        // renders — every track cell resolves to the graphs region (ADR-0031).
+        let size = Size::new(100, 16);
+        let mut s = AppState::new(vec![project("a")], size);
+        s.app.splash.skip();
+        s.size = size;
+        let v = s.snapshot();
+        let body = Rect {
+            x: 0,
+            y: 1,
+            w: 100,
+            h: 15,
+        };
+        let col3 = solve(body).col3;
+        let bar = crate::chrome::scrollbar(col3, v.graphs_scroll, usize::from(col3::content_rows()))
+            .expect("the short column overflows, so a bar exists");
+        // Every track cell resolves to the graphs scrollbar (pixels == targets).
+        for dy in 0..bar.track.h {
+            assert_eq!(
+                hit_test(&v, bar.track.x, bar.track.y + dy),
+                Some(Target::Scrollbar(ScrollRegion::Graphs)),
+            );
+        }
+    }
+
+    #[test]
+    fn a_fitting_column_shows_no_scrollbar() {
+        // A tall column fits the expanded panels — no bar; the right edge is the
+        // panel, not a scrollbar target.
+        let size = Size::new(100, 40);
+        let mut s = AppState::new(vec![project("a")], size);
+        s.app.splash.skip();
+        s.size = size;
+        let v = s.snapshot();
+        let body = Rect {
+            x: 0,
+            y: 1,
+            w: 100,
+            h: 39,
+        };
+        let col3 = solve(body).col3;
+        assert!(
+            crate::chrome::scrollbar(col3, 0, usize::from(col3::content_rows())).is_none(),
+            "the tall column fits — no overflow bar"
+        );
+        let edge = col3.x + col3.w - 1;
+        assert_ne!(
+            hit_test(&v, edge, col3.y + 2),
+            Some(Target::Scrollbar(ScrollRegion::Graphs)),
+            "no scrollbar target where there is no overflow"
+        );
     }
 
     proptest::proptest! {

@@ -116,6 +116,14 @@ pub fn solve(area: Rect) -> Vec<CardSlot> {
     solve_scrolled(area, 0).0
 }
 
+/// The number of cards in the stack — the content length the card-stack
+/// scrollbar (ADR-0031) tracks (each is one row in the collapse-solve's lossy
+/// tier, where the stack overflows and the bar appears).
+#[must_use]
+pub fn content_len() -> usize {
+    CARDS.len()
+}
+
 /// Solve the card stack over `area` with a scroll `offset` (ADR-0031), returning
 /// each visible card's slot and the largest in-range offset (`max_scroll`). When
 /// the stack fits, `offset` is clamped to 0 and the layout is unchanged; when it
