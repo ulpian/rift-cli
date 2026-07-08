@@ -180,6 +180,17 @@ pub fn button(
     frame.put_str(cx, y, "]", style)
 }
 
+/// The press-flash background for a button at `flash` (ADR-0028): the accent at
+/// `flash == 1.0` lerping to the raised surface as it decays, or `None` at rest
+/// so the button keeps its normal fill. Colour-only, so the mono/ASCII tiers
+/// resolve it away — a keyboard/pointer press acknowledges identically at every
+/// tier that can carry colour.
+#[must_use]
+pub fn press_flash_bg(flash: f32) -> Option<crate::render::frame::Color> {
+    let f = flash.clamp(0.0, 1.0);
+    (f > 0.0).then(|| crate::theme::lerp_color(crate::theme::SURFACE_BG, crate::theme::ACCENT, f))
+}
+
 /// Truncate `s` to at most `w` display cells (char-counted).
 fn clip(s: &str, w: u16) -> String {
     s.chars().take(usize::from(w)).collect()

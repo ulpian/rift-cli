@@ -329,6 +329,13 @@ pub struct AppState {
     /// A transient selection/hover pulse (1.0 → 0.0 decay; M55-14). Armed on a
     /// selection change; a brief colour lerp acknowledges the cursor.
     select_pulse: f32,
+    /// A transient button press-flash (1.0 → 0.0 decay; ADR-0028), keyed by
+    /// [`Self::pressed`] so the right button lights. Distinct from
+    /// `select_pulse`: this is bound to the activation event, not a selection
+    /// change, so re-pressing the same button re-arms it.
+    press_pulse: f32,
+    /// The button whose press-flash is in flight (keys `press_pulse`).
+    pressed: Option<Target>,
 }
 
 impl AppState {
@@ -351,6 +358,8 @@ impl AppState {
             suggest_fade: 1.0,
             startup_sweep: 1.0,
             select_pulse: 0.0,
+            press_pulse: 0.0,
+            pressed: None,
         }
     }
 
@@ -446,6 +455,16 @@ impl AppState {
             self.select_pulse = (self.select_pulse - step).max(0.0);
             active = true;
         }
+        // The button press-flash decays to rest (ADR-0028) — same shape as the
+        // selection pulse, keyed by `pressed`.
+        if self.press_pulse > 0.0 {
+            let step = dt.as_secs_f32() / PULSE_DECAY.as_secs_f32();
+            self.press_pulse = (self.press_pulse - step).max(0.0);
+            if self.press_pulse <= 0.0 {
+                self.pressed = None;
+            }
+            active = true;
+        }
         active
     }
 
@@ -457,6 +476,7 @@ impl AppState {
             || (self.app.mode == Mode::Command && self.suggest_fade < 1.0)
             || self.startup_sweep < 1.0
             || self.select_pulse > 0.0
+            || self.press_pulse > 0.0
     }
 
     /// Arm a selection/hover pulse (M55-14): a brief colour lerp acknowledges
@@ -464,6 +484,16 @@ impl AppState {
     fn arm_select_pulse(&mut self) {
         if !self.reduced_motion {
             self.select_pulse = 1.0;
+        }
+    }
+
+    /// Arm a button press-flash (ADR-0028), keyed by `target`: a brief colour
+    /// lerp acknowledges the press. Bound to the activation event, so a repeat
+    /// press re-arms; reduced motion skips it (rests at 0).
+    fn arm_press_pulse(&mut self, target: Target) {
+        if !self.reduced_motion {
+            self.press_pulse = 1.0;
+            self.pressed = Some(target);
         }
     }
 
@@ -565,6 +595,8 @@ impl AppState {
             suggest_fade: self.suggest_fade,
             sweep: self.startup_sweep,
             select_pulse: self.select_pulse,
+            press_pulse: self.press_pulse,
+            pressed: self.pressed.clone(),
             feature_runtime: self.app.feature_runtime.clone(),
         }
     }
@@ -775,6 +807,12 @@ fn on_mouse(s: &mut AppState, m: MouseInput) -> Flow {
 /// Apply a left-click target: focus panels, select a project, flip a toggle, or
 /// open the command bar — each the same mutation as the equivalent keypress.
 fn apply_click(s: &mut AppState, target: Target) -> Flow {
+    // Acknowledge a button press with the flash (ADR-0028) — keyed by target so
+    // the right button lights; a repeat press re-arms. Selection/focus/body
+    // targets don't flash (the rail row has its own selection pulse).
+    if target.is_button() {
+        s.arm_press_pulse(target.clone());
+    }
     match target {
         Target::PanelFocus(panel) => {
             s.app.set_focus(panel);
@@ -1300,9 +1338,27 @@ pub struct ViewModel {
     pub sweep: f32,
     /// The transient selection pulse (1.0 → 0.0; M55-14).
     pub select_pulse: f32,
+    /// The transient button press-flash (1.0 → 0.0; ADR-0028), keyed by
+    /// [`Self::pressed`].
+    pub press_pulse: f32,
+    /// The button whose press-flash is in flight (keys `press_pulse`).
+    pub pressed: Option<crate::hit::Target>,
     /// Feature-row runtime states (M5-12): action results overlaid on the
     /// persisted desired state.
     pub feature_runtime: std::collections::BTreeMap<String, crate::FeatureRuntime>,
+}
+
+impl ViewModel {
+    /// The press-flash fraction (0.0 at rest) for the button drawn as `target`
+    /// (ADR-0028) — the shared way every button draw site asks "am I flashing?".
+    #[must_use]
+    pub fn button_flash(&self, target: &crate::hit::Target) -> f32 {
+        if self.pressed.as_ref() == Some(target) {
+            self.press_pulse
+        } else {
+            0.0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1527,6 +1583,46 @@ mod tests {
         assert!(s.advance_anim(PULSE_DECAY)); // overshoots → clamps to 0
         assert_eq!(s.select_pulse, 0.0, "decays to rest");
         assert!(!s.anim_active());
+    }
+
+    #[test]
+    fn a_button_press_flashes_and_re_presses_re_arm() {
+        let mut s = ready(vec![project("a")]);
+        // A button press arms the flash keyed by its target (ADR-0028).
+        let _ = apply_click(&mut s, Target::HeaderHelp);
+        assert_eq!(s.press_pulse, 1.0, "a button press arms the flash");
+        assert_eq!(s.pressed, Some(Target::HeaderHelp));
+        assert!(s.anim_active());
+        assert_eq!(s.select_pulse, 0.0, "the selection pulse is untouched");
+        // It decays…
+        assert!(s.advance_anim(PULSE_DECAY / 2));
+        assert!(s.press_pulse < 1.0 && s.press_pulse > 0.0, "it decays");
+        // …and a fresh press re-arms it to full (bound to the event, not a change).
+        let _ = apply_click(&mut s, Target::HeaderHelp);
+        assert_eq!(s.press_pulse, 1.0, "re-pressing the same button re-flashes");
+        // Overshoot → rest, and `pressed` clears.
+        assert!(s.advance_anim(PULSE_DECAY));
+        assert_eq!(s.press_pulse, 0.0, "decays to rest");
+        assert_eq!(s.pressed, None);
+        assert!(!s.anim_active());
+    }
+
+    #[test]
+    fn reduced_motion_snaps_the_press_flash() {
+        let mut s = ready(vec![project("a")]);
+        s.reduced_motion = true;
+        let _ = apply_click(&mut s, Target::HeaderHelp);
+        assert_eq!(s.press_pulse, 0.0, "reduced motion never flashes");
+        assert_eq!(s.pressed, None);
+    }
+
+    #[test]
+    fn a_row_select_uses_the_selection_pulse_not_the_press_flash() {
+        let mut s = ready(vec![project("a"), project("b")]);
+        let _ = apply_click(&mut s, Target::ProjectRow(1));
+        assert_eq!(s.press_pulse, 0.0, "a row select is not a button press");
+        assert!(s.pressed.is_none());
+        assert_eq!(s.select_pulse, 1.0, "it arms the selection pulse instead");
     }
 
     #[test]

@@ -133,13 +133,16 @@ pub fn draw_header(vm: &ViewModel, theme: Theme, unicode: bool, frame: &mut Fram
         let Some((key, label, _)) = HEADER_ITEMS.iter().find(|(_, _, a)| *a == span.action) else {
             continue;
         };
-        let kx = frame.put_str(
-            area.x + span.start,
-            y,
-            key,
-            theme.key_hint().with_bg(SURFACE_BG),
-        );
-        frame.put_str(kx, y, &format!(" {label}"), theme.dim().with_bg(SURFACE_BG));
+        // A press flashes the action's chip toward the accent (ADR-0028); at
+        // rest it keeps the header's raised-surface fill.
+        let target = match span.action {
+            HeaderAction::Help => crate::hit::Target::HeaderHelp,
+            HeaderAction::Palette => crate::hit::Target::HeaderPalette,
+            HeaderAction::Quit => crate::hit::Target::HeaderQuit,
+        };
+        let bg = crate::chrome::press_flash_bg(vm.button_flash(&target)).unwrap_or(SURFACE_BG);
+        let kx = frame.put_str(area.x + span.start, y, key, theme.key_hint().with_bg(bg));
+        frame.put_str(kx, y, &format!(" {label}"), theme.dim().with_bg(bg));
     }
 
     // The transient status toast rides the middle, clipped to the free span.
@@ -240,6 +243,36 @@ mod tests {
                 span.action
             );
         }
+    }
+
+    #[test]
+    fn a_pressed_header_action_flashes_toward_the_accent() {
+        let mut v = vm(80, 24);
+        v.pressed = Some(crate::hit::Target::HeaderPalette);
+        v.press_pulse = 1.0;
+        let mut f = Frame::new(Size::new(80, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        let spans = header_action_spans(80);
+        let palette = spans
+            .iter()
+            .find(|s| s.action == HeaderAction::Palette)
+            .unwrap();
+        let help = spans
+            .iter()
+            .find(|s| s.action == HeaderAction::Help)
+            .unwrap();
+        let flash_bg = crate::chrome::press_flash_bg(1.0).unwrap();
+        assert_eq!(
+            f.get(palette.start, 0).unwrap().style.bg,
+            flash_bg,
+            "the pressed chip flashes toward the accent"
+        );
+        assert_eq!(
+            f.get(help.start, 0).unwrap().style.bg,
+            SURFACE_BG,
+            "an unpressed chip keeps the header's surface fill"
+        );
     }
 
     #[test]

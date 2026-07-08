@@ -50,6 +50,26 @@ pub enum Target {
     HeaderQuit,
 }
 
+impl Target {
+    /// Whether this target is a clickable *button* that acknowledges a press
+    /// with the flash (ADR-0028). Header actions, the editor button, and the
+    /// overlay confirm/cancel today; the rail/detail action buttons and the
+    /// modal close join as they land. Selection/focus/body targets do not
+    /// flash (the rail row already has its own selection pulse).
+    #[must_use]
+    pub fn is_button(&self) -> bool {
+        matches!(
+            self,
+            Target::HeaderHelp
+                | Target::HeaderPalette
+                | Target::HeaderQuit
+                | Target::EditorButton
+                | Target::OverlayConfirm
+                | Target::OverlayCancel
+        )
+    }
+}
+
 /// The element at cell `(col, row)`, or `None` for empty space / a too-small
 /// terminal. Row 0 is the header: its right-aligned actions resolve to their
 /// targets (geometry shared with [`crate::bars`]); the rest of the bar is
