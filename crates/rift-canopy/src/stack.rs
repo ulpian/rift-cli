@@ -162,6 +162,49 @@ pub fn solve(specs: &[Spec], height: u16) -> Vec<Slot> {
     out
 }
 
+/// The largest in-range scroll offset for a stack of `n` items in `height` rows
+/// (ADR-0031): 0 when everything fits (the collapse-solve shows all items), else
+/// the count that overflows the viewport (`n - height`). Content-aware clamping
+/// reads this so an offset can never scroll past the end into empty space.
+#[must_use]
+pub fn max_scroll(n: usize, height: u16) -> usize {
+    n.saturating_sub(usize::from(height))
+}
+
+/// Solve with a scroll `offset` (ADR-0031). When the stack overflows its height
+/// (more items than rows — the lossy tier drops the tail), the visible window
+/// starts `offset` items down instead of the top, so the **tracked offset moves
+/// content**: the advertised "j/k scroll" is no longer inert. When everything
+/// fits (the normal collapse-solve), the offset is clamped to 0 — the layout is
+/// unchanged, so no fitting dashboard reflows. Returns `(slots, max_scroll)`.
+#[must_use]
+pub fn solve_windowed(specs: &[Spec], height: u16, offset: usize) -> (Vec<Slot>, usize) {
+    let n = specs.len();
+    let ceiling = max_scroll(n, height);
+    if ceiling == 0 || height == 0 {
+        // Everything fits (or a zero viewport): the ordinary collapse-solve, no
+        // window — a fitting stack scrolls nothing.
+        return (solve(specs, height), 0);
+    }
+    // Lossy tier: `height` one-line items, windowed from the clamped offset.
+    let viewport = usize::from(height);
+    let off = offset.min(ceiling);
+    let slots = specs
+        .iter()
+        .enumerate()
+        .skip(off)
+        .take(viewport)
+        .enumerate()
+        .map(|(row, (index, _))| Slot {
+            index,
+            y: u16::try_from(row).unwrap_or(0),
+            rows: 1,
+            collapsed: true,
+        })
+        .collect();
+    (slots, ceiling)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

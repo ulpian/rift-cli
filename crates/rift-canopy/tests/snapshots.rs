@@ -176,7 +176,7 @@ fn col3_text(col3: &rift_canopy::Col3, h: u16) -> String {
     let mut f = Frame::new(Size::new(34, h));
     let mut b = AsciiBackend::new(Capabilities::empty());
     let area = f.rect();
-    rift_canopy::col3::draw(col3, false, false, area, &mut b, &mut f);
+    rift_canopy::col3::draw(col3, false, false, area, 0, &mut b, &mut f);
     frame_text(&f)
 }
 
@@ -186,9 +186,10 @@ fn golden_col3_tall_all_expanded() {
 }
 
 #[test]
-fn golden_col3_short_collapses_low_priority() {
-    // The collapse case: low-priority sections fold to one-line summaries
-    // that keep their headline numbers.
+fn golden_col3_short_scrolls_the_expanded_stack() {
+    // Height pressure (ADR-0031): the fully-expanded panels overflow 19 rows, so
+    // the column scrolls the window (offset 0 = the top of the expanded stack)
+    // rather than collapsing — the scrollbar (M57-06) signals the panels below.
     insta::assert_snapshot!("col3_short", col3_text(&col3_with_data(), 19));
 }
 
@@ -486,7 +487,7 @@ fn golden_activity_axis() {
     let (y0, y1) = activity.map_or((0u16, 44), |s| (s.rect.y, s.rect.y + s.rect.h));
     let mut f = Frame::new(Size::new(44, 44));
     let mut b = AsciiBackend::new(Capabilities::empty());
-    cards::draw(&ctx, rift_canopy::theme::Theme::rift_dark(), area, &mut b, &mut f);
+    cards::draw(&ctx, rift_canopy::theme::Theme::rift_dark(), area, 0, &mut b, &mut f);
     // Snapshot just the activity slot's rows.
     let mut out = String::new();
     for y in y0..y1 {

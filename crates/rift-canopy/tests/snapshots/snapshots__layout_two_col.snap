@@ -10,14 +10,14 @@ expression: "render_at(60, 20)"
 │                  │(no features)
 │                  │(no projection yet)
 │                  │
-│                  │(no token activity yet)
-│                  │(no model calls yet)
-│                  │recall off — /toggle total-recall
-│                  │
-│                  │
-│                  │
-│[+][^][v][x]      │
-╰──────────────────╯
+│                  │╭─ token usage ────────────────────────╮
+│                  ││(no token activity yet)               │
+│                  ││                                      │
+│                  ││                                      │
+│                  ││                                      │
+│                  ││                                      │
+│[+][^][v][x]      │╰──────────────────────────────────────╯
+╰──────────────────╯╭─ system ─────────────────────────────╮
  j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reo
 ╭─ command ────────────────────────────────────────────────╮
 │/█                                                        │

@@ -3,19 +3,19 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: frame_text(&f)
 ---
  RIFT  Canopy  *                                      ? Help  / Palette  q Quit
-╭─ projects  3 ╮rift-cli · idle                 (no token activity yet)
-│># rift-cli  o│(none yet)                      (no model calls yet)
-│   > featu…  -│0 sensitive paths               recall off — /toggle total-recal
-│ # rift-si…  o│0 ev · 0 se · 0 ck
-│              │(no features)
-│              │(no projection yet)
-│              │
-│              │
-│              │
-│              │
-│              │
-│[+][^][v][x]  │
-╰──────────────╯
+╭─ projects  3 ╮rift-cli · idle                 ╭─ token usage ────────────────╮
+│># rift-cli  o│(none yet)                      │(no token activity yet)       │
+│   > featu…  -│0 sensitive paths               │                              │
+│ # rift-si…  o│0 ev · 0 se · 0 ck              │                              │
+│              │(no features)                   │                              │
+│              │(no projection yet)             │                              │
+│              │                                ╰──────────────────────────────╯
+│              │                                ╭─ system ─────────────────────╮
+│              │                                │                              │
+│              │                                │(no model calls yet)          │
+│              │                                │- capture: —                  │
+│[+][^][v][x]  │                                │- burn: —                     │
+╰──────────────╯                                │- projection: —               │
  j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette
 ╭─ command ────────────────────────────────────────────────────────────────────╮
 │/█                                                                            │

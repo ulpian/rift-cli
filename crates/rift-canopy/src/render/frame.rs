@@ -232,6 +232,24 @@ impl Frame {
         self.cells.fill(Cell { ch, style });
     }
 
+    /// Copy a horizontal band of `src` — rows `[src_row, src_row + area.h)` ×
+    /// columns `[0, area.w)` — into `self` at `area` (ADR-0031's scroll window).
+    /// The band is the visible slice of a taller off-screen render; source rows
+    /// past the end leave the destination as the caller left it. Cells carry
+    /// their style, so a scrolled panel keeps its colours.
+    pub fn blit_window(&mut self, src: &Frame, area: Rect, src_row: usize) {
+        for dy in 0..area.h {
+            let Ok(sy) = u16::try_from(src_row.saturating_add(usize::from(dy))) else {
+                break;
+            };
+            for dx in 0..area.w {
+                if let Some(cell) = src.get(dx, sy) {
+                    self.set(area.x + dx, area.y + dy, cell.ch, cell.style);
+                }
+            }
+        }
+    }
+
     /// Print `s` left-to-right starting at `(x, y)`, clipped at the right edge
     /// and dropped entirely when `y` is out of range. Returns the next free `x`.
     /// Counts in `char`s (one column each) — good enough for the ASCII/box-draw

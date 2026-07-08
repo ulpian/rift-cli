@@ -3,10 +3,8 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: "col3_text(&col3_with_data(), 19)"
 ---
 ╭─ token usage  Σ 7.5K ──────────╮
-│# input  # read  # output  # cach
-│48K           █                 │
-│240    ▄      █      ▄      ▄   │
-│    in     rd     out    ca     │
+│            █                   │
+│    ▄       █       ▄       ▄   │
 │in 5.2K                         │
 │rd 48K                          │
 │out 9.1K                        │
@@ -14,10 +12,12 @@ expression: "col3_text(&col3_with_data(), 19)"
 ╭─ system ───────────────────────╮
 │62% Capable  [2 threads]        │
 │████████████████████            │
-│████████████████████            │
 │- capture: —                    │
 │- burn: —                       │
 │- projection: —                 │
 │- recall: —                     │
 ╰────────────────────────────────╯
-saved 42%  (6.0K tokens)
+╭─ recall ───────────────────────╮
+│saved 42%  (6.0K tokens)        │
+│· mcp calls: 17 total           │
+│· threads: 2 active             │

@@ -138,6 +138,26 @@ pub fn solve_stack(height: u16) -> Vec<SectionSlot> {
         .collect()
 }
 
+/// The panel stack's **fully-expanded** height (every panel at its `min_rows`,
+/// none collapsed) — the content length the graphs viewport scrolls over
+/// (ADR-0031). When the column is shorter than this, `scroll.graphs` moves the
+/// window through the expanded panels instead of collapsing them.
+#[must_use]
+pub fn content_rows() -> u16 {
+    SECTIONS
+        .iter()
+        .map(|s| s.min_rows)
+        .fold(0, u16::saturating_add)
+}
+
+/// The largest in-range graphs scroll offset for a column of `height` rows: 0
+/// when the expanded panels fit, else the overflow. Content-aware clamping reads
+/// this so the offset can never scroll past the end.
+#[must_use]
+pub fn max_scroll(height: u16) -> usize {
+    usize::from(content_rows().saturating_sub(height))
+}
+
 // --- the section view-models (filled by the data plane) ---------------------
 
 /// Token spend over time.
@@ -460,6 +480,34 @@ pub fn fmt_km(v: f64) -> String {
 /// holds focus; `unicode` drives glyph substitution. Pure over the view-model
 /// and safe at any size.
 pub fn draw(
+    col3: &Col3,
+    focused: bool,
+    unicode: bool,
+    area: Rect,
+    offset: usize,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+) {
+    let content_h = content_rows();
+    if content_h <= area.h || area.w == 0 || area.h == 0 {
+        // The expanded panels fit: solve at the column height (surplus spreads),
+        // draw straight in. `scroll.graphs` clamps to 0 — nothing to scroll.
+        draw_stack(col3, focused, unicode, area, backend, frame);
+        return;
+    }
+    // Overflow (ADR-0031): render the fully-expanded stack into a scratch frame,
+    // then blit the [offset, offset+viewport) window — so "j/k scroll" moves the
+    // panels instead of collapsing them, with the scrollbar (M57-06) as its sign.
+    let mut scratch = Frame::new(crate::render::frame::Size::new(area.w, content_h));
+    draw_stack(col3, focused, unicode, scratch.rect(), backend, &mut scratch);
+    let off = offset.min(usize::from(content_h.saturating_sub(area.h)));
+    frame.blit_window(&scratch, area, off);
+}
+
+/// Draw the three panels straight into `area` at the solver's sizing (the
+/// non-scrolled path; also the scratch-frame body for the scrolled path). Solving
+/// at `area.h` = [`content_rows`] expands every panel to its `min_rows`.
+fn draw_stack(
     col3: &Col3,
     focused: bool,
     unicode: bool,
@@ -938,7 +986,14 @@ mod tests {
     fn draw_to(col3: &Col3, w: u16, h: u16) -> Frame {
         let mut f = Frame::new(Size::new(w, h));
         let mut b = AsciiBackend::new(Capabilities::empty());
-        draw(col3, false, false, f.rect(), &mut b, &mut f);
+        draw(col3, false, false, f.rect(), 0, &mut b, &mut f);
+        f
+    }
+
+    fn draw_at(col3: &Col3, w: u16, h: u16, offset: usize) -> Frame {
+        let mut f = Frame::new(Size::new(w, h));
+        let mut b = AsciiBackend::new(Capabilities::empty());
+        draw(col3, false, false, f.rect(), offset, &mut b, &mut f);
         f
     }
 
@@ -951,6 +1006,37 @@ mod tests {
                     + "\n"
             })
             .collect()
+    }
+
+    #[test]
+    fn a_short_column_scrolls_the_expanded_panels() {
+        // The scroll offset moves content (ADR-0031): below the expanded content
+        // height (20), a different offset windows a different slice; a tall column
+        // fits, so the offset is inert (the old code's no-op, now the fit path).
+        let col3 = Col3 {
+            tokens: TokensView::Data(TokensData {
+                rate: vec![1.0, 5.0],
+                total: 22.0,
+            }),
+            breakdown: BreakdownView::Data(BreakdownData {
+                input: 200.0,
+                read: 800.0,
+                output: 300.0,
+                cache_write: 50.0,
+                read_fraction: 0.8,
+            }),
+            ..Col3::default()
+        };
+        assert!(content_rows() > 12, "the fixture stack overflows a 12-row column");
+        let top = text_of(&draw_at(&col3, 34, 12, 0));
+        let scrolled = text_of(&draw_at(&col3, 34, 12, 5));
+        assert_ne!(top, scrolled, "the offset scrolls the panels");
+        // A column taller than the expanded content ignores the offset.
+        let fit_a = text_of(&draw_at(&col3, 34, 24, 0));
+        let fit_b = text_of(&draw_at(&col3, 34, 24, 5));
+        assert_eq!(fit_a, fit_b, "a fitting column has nothing to scroll");
+        assert_eq!(max_scroll(24), 0);
+        assert!(max_scroll(12) > 0);
     }
 
     #[test]

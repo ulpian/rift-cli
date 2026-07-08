@@ -818,7 +818,7 @@ fn draw_detail(
         pressed: vm.pressed.clone(),
         press_pulse: vm.press_pulse,
     };
-    crate::cards::draw(&ctx, THEME, rect, backend, frame);
+    crate::cards::draw(&ctx, THEME, rect, vm.detail_scroll, backend, frame);
 }
 
 /// Column 3 — the three live panels (M55-11/12/13): token usage, system (the
@@ -832,6 +832,7 @@ fn draw_graphs(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Fram
         vm.focus == Panel::Graphs,
         unicode,
         rect,
+        vm.graphs_scroll,
         backend,
         frame,
     );

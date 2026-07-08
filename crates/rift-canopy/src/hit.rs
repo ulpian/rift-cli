@@ -231,7 +231,7 @@ fn hit_grid(vm: &ViewModel, r: PanelRects, col: u16, row: u16) -> Option<Target>
         return Some(toggle_or_focus(vm, r.col2, col, row));
     }
     if contains(r.col3, col, row) {
-        return Some(section_or_focus(r.col3, col, row));
+        return Some(section_or_focus(r.col3, vm.graphs_scroll, col, row));
     }
     None
 }
@@ -248,7 +248,7 @@ fn hit_single(vm: &ViewModel, body: Rect, col: u16, row: u16) -> Option<Target> 
     if contains(panel, col, row) {
         return Some(match vm.focus {
             Panel::Detail => toggle_or_focus(vm, panel, col, row),
-            Panel::Graphs => section_or_focus(panel, col, row),
+            Panel::Graphs => section_or_focus(panel, vm.graphs_scroll, col, row),
             Panel::Projects | Panel::Command => project_or_focus(vm, panel, col, row),
         });
     }
@@ -314,7 +314,7 @@ fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
         pressed: None,  // geometry only; the flash never moves a cell
         press_pulse: 0.0,
     };
-    for slot in cards::solve(rect) {
+    for slot in cards::solve_scrolled(rect, vm.detail_scroll).0 {
         if !contains(slot.rect, col, row) {
             continue;
         }
@@ -344,14 +344,22 @@ fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
     Target::PanelFocus(Panel::Detail)
 }
 
-/// A click in column 3 → the graph section under it, else focus the panel.
-/// (The section stack is a pure function of the column's inner height, so it
-/// needs no col3 data.)
-fn section_or_focus(rect: Rect, col: u16, row: u16) -> Target {
+/// A click in column 3 → the graph section under it, else focus the panel. When
+/// the panels overflow (ADR-0031), the viewport row maps through the scroll
+/// `offset` into the fully-expanded stack — the same window the renderer blits —
+/// so a click resolves to the panel actually on screen.
+fn section_or_focus(rect: Rect, offset: usize, col: u16, row: u16) -> Target {
     let inner = inner_of(rect);
     if let Some(dy) = local_row(inner, col, row) {
-        for slot in col3::solve_stack(inner.h) {
-            if dy >= slot.y && dy < slot.y.saturating_add(slot.rows) {
+        let content_h = col3::content_rows();
+        let (solve_h, content_row) = if content_h <= inner.h {
+            (inner.h, dy)
+        } else {
+            let off = offset.min(usize::from(content_h.saturating_sub(inner.h)));
+            (content_h, dy.saturating_add(u16::try_from(off).unwrap_or(0)))
+        };
+        for slot in col3::solve_stack(solve_h) {
+            if content_row >= slot.y && content_row < slot.y.saturating_add(slot.rows) {
                 return Target::Section(slot.id);
             }
         }

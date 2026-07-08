@@ -265,6 +265,7 @@ fn system_panel(caps: Capabilities, w: u16, h: u16) -> Frame {
         false,
         unicode,
         rift_canopy::layout::Rect { x: 0, y: 0, w, h },
+        0,
         &mut backend,
         &mut f,
     );
@@ -309,6 +310,7 @@ fn donut_unknown_model_shows_no_percentage() {
             w: 30,
             h: 14,
         },
+        0,
         &mut b,
         &mut f,
     );

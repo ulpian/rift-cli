@@ -417,13 +417,44 @@ impl App {
         };
     }
 
-    /// Clamp scroll offsets so they stay in range after a resize. A coarse cap by
-    /// terminal height for now; content-aware clamping lands with the reflow work
-    /// (P3 S2) and the column steps.
+    /// Clamp scroll offsets to their stacks' true overflow (ADR-0031), so an
+    /// offset can never scroll past the end into empty space. The column areas
+    /// are recomputed from the same layout the renderer dispatches to, and each
+    /// offset is capped at its stack's `max_scroll` — 0 when the stack fits
+    /// (a fitting column scrolls nothing).
     pub fn clamp_scrolls(&mut self, size: crate::render::frame::Size) {
-        let cap = usize::from(size.h);
-        self.scroll.detail = self.scroll.detail.min(cap);
-        self.scroll.graphs = self.scroll.graphs.min(cap);
+        use crate::layout::{choose_mode, single_panel, solve, two_col, LayoutMode};
+        let body = crate::layout::Rect {
+            x: 0,
+            y: 1,
+            w: size.w,
+            h: size.h.saturating_sub(1),
+        };
+        let (col2, col3) = match choose_mode(size) {
+            LayoutMode::Full3Col => {
+                let r = solve(body);
+                (r.col2, r.col3)
+            }
+            LayoutMode::TwoCol => {
+                let r = two_col(body);
+                (r.col2, r.col3)
+            }
+            LayoutMode::SinglePanel => {
+                let (_tabs, panel, _hint, _cmd) = single_panel(body);
+                (panel, panel)
+            }
+            LayoutMode::TooSmall => {
+                self.scroll = PanelScroll::default();
+                return;
+            }
+        };
+        self.scroll.detail = self
+            .scroll
+            .detail
+            .min(crate::cards::solve_scrolled(col2, 0).1);
+        // Graphs scroll over the fully-expanded panels (ADR-0031): the overflow
+        // of the expanded content past the column height.
+        self.scroll.graphs = self.scroll.graphs.min(crate::col3::max_scroll(col3.h));
     }
 
     /// Move the column-2 feature-toggle cursor down/up, clamped to the six toggles.

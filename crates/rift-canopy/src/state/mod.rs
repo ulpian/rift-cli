@@ -702,6 +702,7 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
                 s.app.suggest_highlight = 0;
             }
             s.dirty = true; // any key may change selection/mode/buffer
+            s.app.clamp_scrolls(s.size); // a scroll key can never pass the end
                             // Remove/reorder target the *selected* project — resolve it here (the
                             // key handler stays free of paths). No selection ⇒ inert.
             let sel = s.app.selected_project().map(|p| p.path.clone());
@@ -1098,6 +1099,7 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             } else {
                 s.app.scroll.graphs.saturating_sub(1)
             };
+            s.app.clamp_scrolls(s.size); // never past the end (ADR-0031)
             Flow::Continue(Effects::default())
         }
         Panel::Command => Flow::Continue(Effects::default()),
@@ -1560,8 +1562,9 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// After a resize, scroll offsets are clamped in range (never grow without
-        /// bound when the terminal shrinks).
+        /// After a resize, scroll offsets are content-clamped in range (ADR-0031):
+        /// never past the end (a huge pre-value collapses to the overflow), and the
+        /// clamp is idempotent — re-clamping the same size never moves them.
         #[test]
         fn scroll_offset_always_in_range_after_resize(
             pre in 0usize..10_000, w in 1u16..400, h in 1u16..400,
@@ -1570,8 +1573,15 @@ mod tests {
             s.app.scroll.detail = pre;
             s.app.scroll.graphs = pre;
             update(&mut s, Event::Resize(Size::new(w, h)));
-            proptest::prop_assert!(s.app.scroll.detail <= usize::from(h));
-            proptest::prop_assert!(s.app.scroll.graphs <= usize::from(h));
+            // Bounded by the fully-expanded content (never the raw pre-value).
+            proptest::prop_assert!(
+                s.app.scroll.graphs <= usize::from(crate::col3::content_rows())
+            );
+            // Idempotent: already in range, so a second clamp is a no-op.
+            let (g, d) = (s.app.scroll.graphs, s.app.scroll.detail);
+            s.app.clamp_scrolls(Size::new(w, h));
+            proptest::prop_assert_eq!(s.app.scroll.graphs, g);
+            proptest::prop_assert_eq!(s.app.scroll.detail, d);
         }
     }
 
@@ -2858,18 +2868,32 @@ mod tests {
 
     #[test]
     fn scrolling_over_the_graphs_column_scrolls_its_viewport() {
+        // A short Full3Col terminal: the fully-expanded panels overflow the
+        // column, so the graphs offset moves content (ADR-0031) — the old inert
+        // code clamped it away, so this is the regression the old code fails.
         let mut s = ready(vec![project("a")]);
+        s.size = Size::new(100, 16);
+        s.app.clamp_scrolls(s.size);
         let wheel = |kind| {
             Event::Mouse(MouseInput {
                 kind,
-                col: 100,
+                col: 90,
                 row: 6,
             })
         };
         update(&mut s, wheel(MouseKind::ScrollDown));
-        assert_eq!(s.app.scroll.graphs, 1);
+        assert_eq!(s.app.scroll.graphs, 1, "the wheel scrolls the graphs viewport");
         update(&mut s, wheel(MouseKind::ScrollUp));
         assert_eq!(s.app.scroll.graphs, 0);
+        // The offset can never scroll past the fully-expanded content: it settles
+        // at a positive ceiling and further scrolling is a no-op.
+        for _ in 0..40 {
+            update(&mut s, wheel(MouseKind::ScrollDown));
+        }
+        let ceiling = s.app.scroll.graphs;
+        assert!(ceiling > 0, "there is real overflow to scroll");
+        update(&mut s, wheel(MouseKind::ScrollDown));
+        assert_eq!(s.app.scroll.graphs, ceiling, "already at the end — no further");
     }
 
     #[test]

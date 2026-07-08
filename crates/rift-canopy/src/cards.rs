@@ -113,8 +113,20 @@ pub struct CardSlot {
 /// always resolves to the card that was drawn.
 #[must_use]
 pub fn solve(area: Rect) -> Vec<CardSlot> {
+    solve_scrolled(area, 0).0
+}
+
+/// Solve the card stack over `area` with a scroll `offset` (ADR-0031), returning
+/// each visible card's slot and the largest in-range offset (`max_scroll`). When
+/// the stack fits, `offset` is clamped to 0 and the layout is unchanged; when it
+/// overflows (a column too short for every card), the window starts `offset`
+/// cards down — the shared solve the renderer and hit-test both use, so a click
+/// always resolves to the card that was drawn.
+#[must_use]
+pub fn solve_scrolled(area: Rect, offset: usize) -> (Vec<CardSlot>, usize) {
     let specs: Vec<Spec> = CARDS.iter().map(|(_, s)| *s).collect();
-    stack::solve(&specs, area.h)
+    let (slots, max_scroll) = stack::solve_windowed(&specs, area.h, offset);
+    let cards = slots
         .into_iter()
         .filter_map(|slot| {
             CARDS.get(slot.index).map(|(kind, _)| CardSlot {
@@ -128,7 +140,8 @@ pub fn solve(area: Rect) -> Vec<CardSlot> {
                 collapsed: slot.collapsed,
             })
         })
-        .collect()
+        .collect();
+    (cards, max_scroll)
 }
 
 /// Everything a card render (and the hit-test) reads — bundled so the pure
@@ -177,6 +190,7 @@ pub fn draw(
     ctx: &CardCtx<'_>,
     theme: Theme,
     area: Rect,
+    offset: usize,
     backend: &mut dyn RenderBackend,
     frame: &mut Frame,
 ) {
@@ -184,7 +198,7 @@ pub fn draw(
         draw_repository(ctx, theme, area, false, frame);
         return;
     }
-    for slot in solve(area) {
+    for slot in solve_scrolled(area, offset).0 {
         if slot.rect.h == 0 || slot.rect.w == 0 {
             continue;
         }
@@ -848,7 +862,7 @@ mod tests {
     fn render(ctx: &CardCtx<'_>, area: Rect) -> (Frame, String) {
         let mut f = Frame::new(Size::new(area.x + area.w, area.y + area.h));
         let mut b = AsciiBackend::new(Capabilities::empty());
-        draw(ctx, Theme::rift_dark(), area, &mut b, &mut f);
+        draw(ctx, Theme::rift_dark(), area, 0, &mut b, &mut f);
         let text: String = (0..f.height())
             .map(|y| {
                 (0..f.width())
@@ -1278,6 +1292,7 @@ mod tests {
                 &ctx(&d, &act, &rt),
                 Theme::rift_dark(),
                 rect(0, 0, w, h),
+                0,
                 &mut b,
                 &mut f,
             );
