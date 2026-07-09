@@ -7,7 +7,7 @@ expression: frame_text(&f)
 │># rift-cli          *││rift-cli (repo)                               ││(no token activity yet)                       │
 │ # rift-site         o││path: /r/rift-cli                             ││                                              │
 │                      ││* running                                     ││                                              │
-│                      ││[ Open in $EDITOR e ]                         ││                                              │
+│                      ││                                              ││                                              │
 │                      │╰──────────────────────────────────────────────╯│                                              │
 │                      │╭─ models ─────────────────────────────────────╮│                                              │
 │                      ││(none yet)                                    ││                                              │

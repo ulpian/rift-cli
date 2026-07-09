@@ -10,7 +10,7 @@
 
 use crate::cards::{self, CardKind};
 use crate::col3;
-use crate::layout::{choose_mode, single_panel, solve, two_col, LayoutMode, PanelRects, Rect};
+use crate::layout::{choose_mode, single_panel, two_col, LayoutMode, PanelRects, Rect};
 use crate::state::ViewModel;
 use crate::view::visible_window;
 use crate::{Panel, ProjectStatus};
@@ -73,8 +73,6 @@ pub enum Target {
     /// A suggest-panel row: click INSERTS it (Tab's mouse equivalent — never
     /// execution); the wheel moves the highlight.
     SuggestRow(usize),
-    /// The repository card's *Open in $EDITOR* button (M55-10).
-    EditorButton,
     /// The header's `?` action — open the palette help overlay (M55-04).
     HeaderHelp,
     /// The header's `/` action — open the command palette.
@@ -85,8 +83,8 @@ pub enum Target {
 
 impl Target {
     /// Whether this target is a clickable *button* that acknowledges a press
-    /// with the flash (ADR-0028). Header actions, the editor button, and the
-    /// overlay confirm/cancel today; the rail/detail action buttons and the
+    /// with the flash (ADR-0028). Header actions and the overlay
+    /// confirm/cancel today; the rail/detail action buttons and the
     /// modal close join as they land. Selection/focus/body targets do not
     /// flash (the rail row already has its own selection pulse).
     #[must_use]
@@ -96,7 +94,6 @@ impl Target {
             Target::HeaderHelp
                 | Target::HeaderPalette
                 | Target::HeaderQuit
-                | Target::EditorButton
                 | Target::OverlayConfirm
                 | Target::OverlayCancel
                 | Target::OverlayClose
@@ -166,11 +163,51 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
         }
     }
     match choose_mode(size) {
-        LayoutMode::Full3Col => hit_grid(vm, solve(body), col, row),
+        // The full grid is data-driven (ADR-0033): hit-test the *same*
+        // `solve_model` output the renderer draws, so pixels equal targets for
+        // any arrangement. The degraded tiers keep the default role layout.
+        LayoutMode::Full3Col => hit_model(
+            vm,
+            &crate::layout_model::solve_model(&vm.layout, body),
+            col,
+            row,
+        ),
         LayoutMode::TwoCol => hit_grid(vm, two_col(body), col, row),
         LayoutMode::SinglePanel => hit_single(vm, body, col, row),
         LayoutMode::TooSmall => None,
     }
+}
+
+/// Hit-test the data-driven full grid: the command row, then each physical
+/// column by its role — the same `solve_model`/role dispatch `view::draw_full`
+/// uses, so a click resolves to exactly the element drawn (ADR-0024 §6/0033).
+fn hit_model(
+    vm: &ViewModel,
+    sl: &crate::layout_model::SolvedLayout,
+    col: u16,
+    row: u16,
+) -> Option<Target> {
+    if contains(sl.command, col, row) {
+        return Some(Target::CommandBar);
+    }
+    for scol in &sl.columns {
+        if !contains(scol.rect, col, row) {
+            continue;
+        }
+        return match scol.role() {
+            crate::layout_model::ColumnRole::Rail => {
+                Some(project_or_focus(vm, scol.rect, col, row))
+            }
+            crate::layout_model::ColumnRole::Cards => {
+                Some(toggle_or_focus(vm, scol.rect, col, row))
+            }
+            crate::layout_model::ColumnRole::Sections => {
+                Some(section_or_focus(scol.rect, vm.graphs_scroll, col, row))
+            }
+            crate::layout_model::ColumnRole::Empty => None,
+        };
+    }
+    None
 }
 
 /// Resolve a click while an overlay owns the surface (ADR-0026/0027/0029/0031):
@@ -352,27 +389,17 @@ fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
         if !contains(slot.rect, col, row) {
             continue;
         }
-        match slot.kind {
-            CardKind::Features => {
-                // The retry chip is a sub-region of a Failed row, so it wins
-                // over the row toggle (checked first).
-                if let Some(i) = cards::feature_retry_at(&ctx, slot.rect, slot.collapsed, col, row)
-                {
-                    return Target::RetryRow(i);
-                }
-                if let Some(i) = cards::feature_toggle_at(&ctx, slot.rect, slot.collapsed, col, row)
-                {
-                    return Target::ToggleRow(i);
-                }
+        // Only the Features card has clickable sub-regions (retry chip + toggle
+        // rows); every other card focuses the detail panel on a plain click.
+        if slot.kind == CardKind::Features {
+            // The retry chip is a sub-region of a Failed row, so it wins
+            // over the row toggle (checked first).
+            if let Some(i) = cards::feature_retry_at(&ctx, slot.rect, slot.collapsed, col, row) {
+                return Target::RetryRow(i);
             }
-            CardKind::Repository => {
-                if let Some(br) = cards::editor_button_rect(slot.rect, slot.collapsed) {
-                    if contains(br, col, row) {
-                        return Target::EditorButton;
-                    }
-                }
+            if let Some(i) = cards::feature_toggle_at(&ctx, slot.rect, slot.collapsed, col, row) {
+                return Target::ToggleRow(i);
             }
-            _ => {}
         }
         break; // clicked inside this card but not a specific target → focus
     }
@@ -449,6 +476,7 @@ fn contains(r: Rect, x: u16, y: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::solve;
     use crate::render::frame::Size;
     use crate::state::AppState;
     use crate::{EntryKind, Project, ProjectStatus};

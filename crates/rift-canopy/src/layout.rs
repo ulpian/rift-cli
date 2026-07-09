@@ -277,6 +277,94 @@ fn enforce_minimums(
     (a, b, c)
 }
 
+/// Split `total` into `weights.len()` widths by weight (the whole remainder lands
+/// on the **first maximal-weight column** so the widths sum to `total` exactly),
+/// then raise any column below its minimum ([`enforce_minimums_n`]). The
+/// N-column generalization of [`split_3`] behind the data-driven layout model
+/// (ADR-0033); `split_n(t, [20,40,40], [MIN_COL1,MIN_COL2,MIN_COL3])` equals
+/// `split_3(t, …)` at every width (the fidelity pin, proptested). `weights` and
+/// `min` must be the same length; a zero total-weight yields all-zero widths.
+#[must_use]
+pub(crate) fn split_n(total: u16, weights: &[u16], min: &[u16]) -> Vec<u16> {
+    let n = weights.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let total_weight: u32 = weights.iter().map(|&w| u32::from(w)).sum();
+    let mut widths: Vec<u16> = if total_weight == 0 {
+        vec![0; n]
+    } else {
+        weights
+            .iter()
+            .map(|&w| {
+                u16::try_from(u32::from(total).saturating_mul(u32::from(w)) / total_weight)
+                    .unwrap_or(0)
+            })
+            .collect()
+    };
+    // The whole remainder → the first maximal-weight column, so the widths sum to
+    // `total` exactly (mirrors `split_3`'s remainder-to-the-middle for [20,40,40]).
+    let assigned: u16 = widths.iter().copied().fold(0, u16::saturating_add);
+    let remainder = total.saturating_sub(assigned);
+    if remainder > 0 {
+        if let Some(idx) = max_weight_index(weights) {
+            if let Some(w) = widths.get_mut(idx) {
+                *w = w.saturating_add(remainder);
+            }
+        }
+    }
+    enforce_minimums_n(&mut widths, min, total);
+    widths
+}
+
+/// The index of the first maximal-weight column, or `None` for an empty slice.
+fn max_weight_index(weights: &[u16]) -> Option<usize> {
+    weights
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, &w)| (w, std::cmp::Reverse(*i)))
+        .map(|(i, _)| i)
+}
+
+/// The slice generalization of [`enforce_minimums`]: raise any column below its
+/// minimum, reclaiming the deficit from the widest surplus column (one cell at a
+/// time) so the total is preserved. A no-op when `total` cannot host every
+/// minimum (the degraded tiers handle that) or the lengths disagree.
+fn enforce_minimums_n(widths: &mut [u16], min: &[u16], total: u16) {
+    if widths.len() != min.len() {
+        return;
+    }
+    let min_sum: u32 = min.iter().map(|&m| u32::from(m)).sum();
+    if u32::from(total) < min_sum {
+        return;
+    }
+    let need: u16 = widths
+        .iter()
+        .zip(min)
+        .map(|(&w, &m)| m.saturating_sub(w))
+        .fold(0, u16::saturating_add);
+    if need == 0 {
+        return;
+    }
+    for (w, &m) in widths.iter_mut().zip(min) {
+        *w = (*w).max(m);
+    }
+    for _ in 0..need {
+        // The widest surplus column gives up one cell (first on a tie).
+        let victim = widths
+            .iter()
+            .zip(min)
+            .enumerate()
+            .filter(|(_, (&w, &m))| w > m)
+            .max_by_key(|(i, (&w, &m))| (w - m, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i);
+        match victim.and_then(|i| widths.get_mut(i)) {
+            Some(w) => *w = w.saturating_sub(1),
+            None => break,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +519,36 @@ mod tests {
             proptest::prop_assert!(b >= MIN_COL2);
             proptest::prop_assert!(c >= MIN_COL3);
             proptest::prop_assert_eq!(a + b + c, w);
+        }
+
+        /// The fidelity pin (ADR-0033): `split_n` at the default weights equals
+        /// the shipped `split_3` at **every** width, so the data-driven layout's
+        /// default renders the grid byte-for-byte identically.
+        #[test]
+        fn split_n_matches_split_3_for_the_default(w in 0..8000u16) {
+            let (a, b, c) = split_3(w, [20, 40, 40], [MIN_COL1, MIN_COL2, MIN_COL3]);
+            let n = split_n(w, &[20, 40, 40], &[MIN_COL1, MIN_COL2, MIN_COL3]);
+            proptest::prop_assert_eq!(n, vec![a, b, c]);
+        }
+
+        /// `split_n` tiles exactly for an arbitrary column set once the width
+        /// admits every minimum: the widths sum to the total and no column drops
+        /// below its minimum.
+        #[test]
+        fn split_n_tiles_exactly_for_arbitrary_columns(
+            weights in proptest::collection::vec(1u16..100, 1..6),
+            extra in 0u32..4000,
+        ) {
+            let mins: Vec<u16> = weights.iter().map(|_| 8u16).collect();
+            let min_sum: u16 = mins.iter().copied().fold(0, u16::saturating_add);
+            let total = min_sum.saturating_add(u16::try_from(extra).unwrap_or(0));
+            let widths = split_n(total, &weights, &mins);
+            proptest::prop_assert_eq!(widths.len(), weights.len());
+            let sum: u16 = widths.iter().copied().fold(0, u16::saturating_add);
+            proptest::prop_assert_eq!(sum, total, "widths tile the total exactly");
+            for (w, m) in widths.iter().zip(&mins) {
+                proptest::prop_assert!(w >= m, "no column below its minimum");
+            }
         }
     }
 }

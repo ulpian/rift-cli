@@ -7,7 +7,7 @@ expression: "render_state(&mut\nlifecycle_state(Some(rift_canopy::FeatureRuntime
 │># rift-cli      o││rift-cli (repo)                       ││(no token activity yet)               │
 │ # rift-site     o││path: /r/rift-cli                     ││                                      │
 │                  ││o idle                                ││                                      │
-│                  ││[ Open in $EDITOR e ]                 ││                                      │
+│                  ││                                      ││                                      │
 │                  │╰──────────────────────────────────────╯│                                      │
 │                  │(none yet)                              │                                      │
 │                  │0 sensitive paths                       │                                      │

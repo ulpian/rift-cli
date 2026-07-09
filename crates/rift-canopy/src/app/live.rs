@@ -13,7 +13,7 @@ use xre_term::{
 };
 
 use super::{event_loop, CanopyOpts, EventSource};
-use crate::dispatch::{CommandDispatcher, EditorLauncher};
+use crate::dispatch::CommandDispatcher;
 use crate::render::frame::Size;
 use crate::state::{AppState, DataRequest, Event, PersistOp};
 use crate::{CanopyKey, FeatureManager, MouseButton, MouseInput, MouseKind, Project};
@@ -133,37 +133,9 @@ where
     /// The palette's delegated-verb door (ADR-0021): the binary's in-process
     /// dispatcher, injected exactly like `on_persist`.
     pub dispatcher: &'m mut dyn CommandDispatcher,
-    /// The one sanctioned spawn (ADR-0025): opens a project in `$EDITOR`. The
-    /// binary provides the argv-exec; the live driver wraps it with the
-    /// terminal-guard suspend/resume ([`GuardedLauncher`]).
-    pub launcher: &'m mut dyn EditorLauncher,
     /// Reloads the registry after a mutating dispatch (the persist-apply
     /// pattern: selection follows, the subscribe re-fires).
     pub reload: R,
-}
-
-/// Wraps the binary's argv-exec [`EditorLauncher`] with the terminal-guard
-/// round-trip (ADR-0025): dropping the live [`Terminal`] guard restores raw
-/// mode + the alternate screen (suspend); re-entering a fresh guard restores
-/// them after the editor exits. Restore-on-panic holds across the round-trip —
-/// during the launch the guard is already dropped (terminal cooked), and xre's
-/// process-wide panic hook is the backstop otherwise.
-struct GuardedLauncher<'a> {
-    /// The binary's argv-only launcher.
-    inner: &'a mut dyn EditorLauncher,
-    /// The live guard, taken (dropped) for the duration of a launch.
-    term: Option<Terminal>,
-    /// Whether the re-entered guard captures the mouse (matches the initial one).
-    mouse: bool,
-}
-
-impl EditorLauncher for GuardedLauncher<'_> {
-    fn open(&mut self, path: &std::path::Path) -> Result<(), String> {
-        self.term = None; // suspend: drop the guard → terminal restored
-        let outcome = self.inner.open(path);
-        self.term = Terminal::enter(self.mouse).ok(); // resume: re-enter raw + alt
-        outcome
-    }
 }
 
 /// Launch Canopy on the real terminal until the user quits, over the host
@@ -186,7 +158,6 @@ where
         req_tx,
         manager,
         dispatcher,
-        launcher,
         mut reload,
     } = deps;
     let caps = crate::render::caps::detect(opts.ascii);
@@ -199,7 +170,8 @@ where
     let prefs = crate::splash::prefs::load();
     let mouse = mouse_enabled(prefs.mouse);
     // restores on drop AND on panic (xre guard); mouse capture is prefs+env-gated.
-    let term = Terminal::enter(mouse)?;
+    // Held for the whole loop; dropped on return (restoring the terminal).
+    let _term = Terminal::enter(mouse)?;
     let mut backend = crate::render::select_backend(caps, opts.ascii);
     let mut state = AppState::new(initial, size);
     state.reduced_motion = prefs.reduced_motion;
@@ -232,13 +204,6 @@ where
     let mut req_sink = move |req: DataRequest| {
         let _ = req_tx.send(req); // a closed bus is non-fatal; the UI just goes static
     };
-    // The live guard moves into the guarded launcher so a $EDITOR launch can
-    // suspend (drop) and resume (re-enter) it around the argv-exec (ADR-0025).
-    let mut guarded = GuardedLauncher {
-        inner: launcher,
-        term: Some(term),
-        mouse,
-    };
     event_loop(
         backend.as_mut(),
         &mut src,
@@ -247,7 +212,6 @@ where
         &mut req_sink,
         manager,
         dispatcher,
-        &mut guarded,
         &mut reload,
     )
 }

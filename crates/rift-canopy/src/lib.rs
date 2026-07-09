@@ -33,6 +33,7 @@ pub mod hit;
 pub mod input;
 pub mod keymap;
 pub mod layout;
+pub mod layout_model;
 pub mod plot;
 pub mod render;
 pub mod splash;
@@ -62,13 +63,13 @@ pub use command::{
     SessionVerb, SplashMode, Tier, Verb, MAX_INPUT_LEN, VERB_WORDS,
 };
 pub use dispatch::{
-    request_for, CommandDispatcher, DispatchOutcome, DispatchRequest, EditorLauncher, Message,
-    MessageAction, NullDispatcher, NullEditorLauncher, OutcomeClass, Overlay, OverlayControl,
-    Severity, OVERLAY_MAX_LINES,
+    request_for, CommandDispatcher, DispatchOutcome, DispatchRequest, Message, MessageAction,
+    NullDispatcher, OutcomeClass, Overlay, OverlayControl, Severity, OVERLAY_MAX_LINES,
 };
 pub use hit::{hit_test, Target};
 pub use input::{on_key, Action, CanopyKey, Mode, MouseButton, MouseInput, MouseKind};
 pub use layout::{solve, PanelRects, Rect};
+pub use layout_model::{Column, ColumnRole, LayoutModel, SolvedColumn, SolvedLayout, Unit};
 pub use render::{select_backend, AsciiBackend, Capabilities, Frame, RenderBackend};
 pub use splash::SplashState;
 pub use state::{
@@ -240,6 +241,11 @@ pub struct App {
     /// the feature key; the detail rows merge these over the persisted
     /// desired state (toasts stop standing in for state).
     pub feature_runtime: std::collections::BTreeMap<String, FeatureRuntime>,
+    /// The active dashboard arrangement (ADR-0033): the data-driven grid the
+    /// renderer and hit-test both read. Defaults to the canonical 20/40/40
+    /// grid, so an untouched dashboard renders exactly as before; the panel
+    /// editor (M5.9) mutates it and per-project persistence restores it.
+    pub layout: crate::layout_model::LayoutModel,
 }
 
 impl App {
@@ -268,6 +274,7 @@ impl App {
             suggest_highlight: 0,
             frecency: suggest::Frecency::new(),
             feature_runtime: std::collections::BTreeMap::new(),
+            layout: crate::layout_model::LayoutModel::default(),
         }
     }
 

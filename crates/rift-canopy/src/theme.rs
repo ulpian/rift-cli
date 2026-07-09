@@ -236,7 +236,7 @@ impl Theme {
         Style::fg(accent).with_mods(Mods::BOLD)
     }
 
-    /// A button (e.g. *Open in $EDITOR*): its label style, focused or not.
+    /// A button chip's label style, focused or not.
     #[must_use]
     pub const fn button(self, focused: bool) -> Style {
         if focused {

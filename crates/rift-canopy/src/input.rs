@@ -125,9 +125,6 @@ pub enum Action {
     RunLine(String),
     /// The confirm overlay's Enter/Confirm — dispatch the pending request.
     ConfirmDispatch,
-    /// Open the selected project in `$EDITOR` (the `e` key / the repository
-    /// card's button; M55-10). The reducer resolves the project path.
-    OpenEditor,
 }
 
 /// Apply one key to the dashboard, returning the effect the event loop must run.
@@ -224,9 +221,6 @@ fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
             Action::ToggleFeature
         }
         CanopyKey::Char('r') if app.focus == Panel::Detail => Action::RetryFeature,
-        // `e` opens the selected project in $EDITOR (the repository card lives
-        // in the detail column; M55-10). Reachable only when detail is focused.
-        CanopyKey::Char('e') if app.focus == Panel::Detail => Action::OpenEditor,
         CanopyKey::Char('q') | CanopyKey::Quit => {
             app.quit = true;
             Action::Quit

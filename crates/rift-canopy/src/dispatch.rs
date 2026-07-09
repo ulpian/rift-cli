@@ -515,35 +515,6 @@ impl CommandDispatcher for NullDispatcher {
     }
 }
 
-/// The **one sanctioned process spawn** from the TUI (ADR-0025): open a project
-/// in `$EDITOR`. Injected at launch exactly like [`CommandDispatcher`] — the
-/// render crate never constructs a process; loop tests use a recording mock.
-/// Structurally **outside** the palette grammar, so the closed-grammar
-/// no-spawn proof (ADR-0015/0021) is preserved: no spawn is reachable from
-/// parse or dispatch; exactly one spawn is reachable from this seam.
-pub trait EditorLauncher {
-    /// Open `path` in `$EDITOR`, synchronously (the binary suspends the
-    /// terminal guard, argv-execs `$EDITOR <path>`, and re-enters the guard).
-    /// Returns a short human outcome for the status line — `Ok` on success,
-    /// `Err(reason)` when `$EDITOR` is unset/empty or the launch failed. Never
-    /// a fallback guess at an editor.
-    ///
-    /// # Errors
-    /// A human reason (unset `$EDITOR`, spawn failure) — never key/transcript
-    /// bytes.
-    fn open(&mut self, path: &std::path::Path) -> Result<(), String>;
-}
-
-/// A launcher for contexts with no terminal behind them (headless snapshots,
-/// tests): every open is a no-op success. The real spawn lives in the binary.
-pub struct NullEditorLauncher;
-
-impl EditorLauncher for NullEditorLauncher {
-    fn open(&mut self, _path: &std::path::Path) -> Result<(), String> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use rift_core::Result as RiftResult;
 
-use crate::dispatch::{CommandDispatcher, DispatchRequest, EditorLauncher};
+use crate::dispatch::{CommandDispatcher, DispatchRequest};
 use crate::render::{RenderBackend, RenderError};
 use crate::state::{update, AppState, DataRequest, Effects, Event, Flow, PersistOp};
 use crate::{FeatureManager, Project};
@@ -102,7 +102,6 @@ pub fn event_loop<F, R>(
     req_sink: &mut dyn FnMut(DataRequest),
     manager: &mut dyn FeatureManager,
     dispatcher: &mut dyn CommandDispatcher,
-    launcher: &mut dyn EditorLauncher,
     reload: &mut R,
 ) -> RiftResult<()>
 where
@@ -144,13 +143,12 @@ where
             match update(state, ev) {
                 Flow::Quit => state.app.quit = true,
                 Flow::Continue(mut effects) => {
-                    // Dispatches, feature actions, and the editor launch run
-                    // HERE (not in apply_effects): their running/Enabling
-                    // frames must present before the synchronous work holds the
-                    // loop (ADR-0011 posture; user-initiated).
+                    // Dispatches and feature actions run HERE (not in
+                    // apply_effects): their running/Enabling frames must present
+                    // before the synchronous work holds the loop (ADR-0011
+                    // posture; user-initiated).
                     let pending = std::mem::take(&mut effects.dispatches);
                     let actions = std::mem::take(&mut effects.feature_actions);
-                    let editor = effects.editor_launch.take();
                     if !effects.is_empty() {
                         apply_effects(effects, state, on_persist, req_sink, manager);
                     }
@@ -162,9 +160,6 @@ where
                             backend, state, dispatcher, reload, req_sink, on_persist, manager, req,
                             &repo,
                         )?;
-                    }
-                    if let Some(path) = editor {
-                        run_editor(backend, state, launcher, &path)?;
                     }
                 }
             }
@@ -221,28 +216,6 @@ fn run_feature_action(
         }
     }
     state.dirty = true;
-    Ok(())
-}
-
-/// Open the selected project in `$EDITOR` through the injected launcher
-/// (M55-10, ADR-0025): the one sanctioned spawn. The launcher suspends the
-/// terminal guard, argv-execs `$EDITOR <path>`, and re-enters; the outcome is a
-/// status toast (unset/empty `$EDITOR` never guesses). A full redraw follows so
-/// the dashboard repaints over whatever the editor left.
-fn run_editor(
-    backend: &mut dyn RenderBackend,
-    state: &mut AppState,
-    launcher: &mut dyn EditorLauncher,
-    path: &str,
-) -> RiftResult<()> {
-    match launcher.open(std::path::Path::new(path)) {
-        Ok(()) => state.open_notice(crate::dispatch::Message::success(
-            "editor",
-            vec![format!("opened {path} in $EDITOR")],
-        )),
-        Err(reason) => state.open_alert(crate::dispatch::Message::error("editor", vec![reason])),
-    }
-    render_if_dirty(backend, state)?;
     Ok(())
 }
 
@@ -499,7 +472,6 @@ mod tests {
             &mut sink,
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         );
 
@@ -578,7 +550,6 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut dispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();
@@ -630,7 +601,6 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut dispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut reload,
         )
         .unwrap();
@@ -658,107 +628,11 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut dispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();
         assert!(dispatcher.calls.is_empty(), "cancel dispatches nothing");
         assert!(state.app.overlay.is_none());
-    }
-
-    /// A recording editor launcher: captures every opened path, answers with a
-    /// scripted outcome (the loop test's mock — no real process, ADR-0025).
-    struct RecordingLauncher {
-        opened: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
-        outcome: Result<(), String>,
-    }
-    impl crate::dispatch::EditorLauncher for RecordingLauncher {
-        fn open(&mut self, path: &std::path::Path) -> Result<(), String> {
-            self.opened
-                .borrow_mut()
-                .push(path.to_string_lossy().into_owned());
-            self.outcome.clone()
-        }
-    }
-
-    #[test]
-    fn e_key_launches_the_selected_project_through_the_seam() {
-        // M55-10: `e` (detail focused) crosses the injected launcher with the
-        // selected project's path; the mock records it, no process is born.
-        let mut backend = MockBackend { presents: 0 };
-        let mut src = ScriptedEvents::new(vec![
-            vec![Event::Key(CanopyKey::Tab)], // Projects → Detail
-            vec![Event::Key(CanopyKey::Char('e'))],
-            vec![Event::Key(CanopyKey::Quit)],
-        ]);
-        let mut state = one_project_state();
-        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut launcher = RecordingLauncher {
-            opened: opened.clone(),
-            outcome: Ok(()),
-        };
-        event_loop(
-            &mut backend,
-            &mut src,
-            &mut state,
-            &mut no_persist,
-            &mut |_| {},
-            &mut NullFeatureManager,
-            &mut crate::dispatch::NullDispatcher,
-            &mut launcher,
-            &mut || Ok(vec![]),
-        )
-        .unwrap();
-        assert_eq!(
-            *opened.borrow(),
-            vec!["/r/a".to_string()],
-            "the launcher opened the SELECTED project's path"
-        );
-        // A success is a Notice (ADR-0029), not a header toast.
-        assert!(
-            matches!(&state.app.overlay, Some(crate::dispatch::Overlay::Notice(m))
-                if m.body.iter().any(|l| l.contains("$EDITOR"))),
-            "the launch success opened a Notice: {:?}",
-            state.app.overlay
-        );
-    }
-
-    #[test]
-    fn unset_editor_becomes_an_alert_never_a_guess() {
-        let mut backend = MockBackend { presents: 0 };
-        let mut src = ScriptedEvents::new(vec![
-            vec![Event::Key(CanopyKey::Tab)],
-            vec![Event::Key(CanopyKey::Char('e'))],
-            vec![Event::Key(CanopyKey::Quit)],
-        ]);
-        let mut state = one_project_state();
-        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut launcher = RecordingLauncher {
-            opened: opened.clone(),
-            outcome: Err("$EDITOR is not set".into()),
-        };
-        event_loop(
-            &mut backend,
-            &mut src,
-            &mut state,
-            &mut no_persist,
-            &mut |_| {},
-            &mut NullFeatureManager,
-            &mut crate::dispatch::NullDispatcher,
-            &mut launcher,
-            &mut || Ok(vec![]),
-        )
-        .unwrap();
-        // It still crossed the seam (the launcher decides), and its Err becomes
-        // an error Alert (ADR-0029) verbatim.
-        assert_eq!(opened.borrow().len(), 1);
-        assert!(
-            matches!(&state.app.overlay, Some(crate::dispatch::Overlay::Alert(m))
-                if m.body == ["$EDITOR is not set"]
-                    && m.severity == crate::dispatch::Severity::Error),
-            "the launch error opened an error Alert: {:?}",
-            state.app.overlay
-        );
     }
 
     #[test]
@@ -774,7 +648,6 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         );
         assert!(r.is_ok());
@@ -816,7 +689,6 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();
@@ -838,7 +710,6 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();
@@ -887,7 +758,6 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();
@@ -926,7 +796,6 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();
@@ -953,7 +822,6 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();
@@ -994,7 +862,6 @@ mod tests {
             &mut |_| {},
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();
@@ -1051,7 +918,6 @@ mod tests {
             &mut |_| {},
             &mut FailingManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();
@@ -1102,7 +968,6 @@ mod tests {
             &mut move |req| sink_log.borrow_mut().push(req),
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
-            &mut crate::dispatch::NullEditorLauncher,
             &mut || Ok(vec![]),
         )
         .unwrap();

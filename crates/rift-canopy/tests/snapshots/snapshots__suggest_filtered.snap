@@ -7,7 +7,7 @@ expression: "render_state(&mut suggest_state(\"se\"))"
 │># rift-cli      *││rift-cli (repo)                       ││(no token activity yet)               │
 │ # rift-site     o││path: /r/rift-cli                     ││                                      │
 │                  ││* running                             ││                                      │
-│                  ││[ Open in $EDITOR e ]                 ││                                      │
+│                  ││                                      ││                                      │
 │                  │╰──────────────────────────────────────╯│                                      │
 │                  │(none yet)                              │                                      │
 │                  │0 sensitive paths                       │                                      │

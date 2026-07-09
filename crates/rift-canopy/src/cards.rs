@@ -28,7 +28,7 @@ use crate::{EntryKind, FeatureRuntime, ProjectStatus};
 /// One card in the column-2 stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardKind {
-    /// Name, kind, path, status, and the *Open in $EDITOR* button.
+    /// Name, kind, path, and status.
     Repository,
     /// Calls-ranked models with count pills + an honest `+N more`.
     Models,
@@ -40,6 +40,19 @@ pub enum CardKind {
     Features,
     /// Grouped daily bars of events/sessions/checkpoints (trailing week).
     Activity,
+}
+
+impl CardKind {
+    /// The cards in their fixed default display order (mirrors [`CARDS`]) — the
+    /// default [`crate::layout_model::LayoutModel`]'s column-2 units.
+    pub const ALL: [CardKind; 6] = [
+        CardKind::Repository,
+        CardKind::Models,
+        CardKind::Settings,
+        CardKind::Capture,
+        CardKind::Features,
+        CardKind::Activity,
+    ];
 }
 
 /// The card registration table — the fixed display order and each card's stack
@@ -175,7 +188,7 @@ pub struct CardCtx<'a> {
 
 impl CardCtx<'_> {
     /// The press-flash fraction (0.0 at rest) for a card button drawn as
-    /// `target` (ADR-0028) — the shared "am I flashing?" for editor/toggle/retry.
+    /// `target` (ADR-0028) — the shared "am I flashing?" for toggle/retry.
     #[must_use]
     fn flash(&self, target: &crate::hit::Target) -> f32 {
         if self.pressed.as_ref() == Some(target) {
@@ -185,11 +198,6 @@ impl CardCtx<'_> {
         }
     }
 }
-
-/// The key hint for the repository card's *Open in $EDITOR* button.
-pub const EDITOR_KEY: &str = "e";
-/// The button label.
-pub const EDITOR_LABEL: &str = "Open in $EDITOR";
 
 /// Draw the card stack into `area`. An uninitialized project shows only the
 /// repository card (with the init hint) filling the column — mirroring the M4
@@ -244,31 +252,6 @@ fn line(frame: &mut Frame, inner: Rect, dy: u16, text: &str, style: Style) {
 }
 
 // --- the repository card -----------------------------------------------------
-
-/// The repository card's *Open in $EDITOR* button rect within its inner area,
-/// or `None` when the card is collapsed / too short to host it. Shared with the
-/// hit-test (M55-10) so the click resolves exactly where the button draws.
-#[must_use]
-pub fn editor_button_rect(card_rect: Rect, collapsed: bool) -> Option<Rect> {
-    if collapsed {
-        return None;
-    }
-    let inner = inner_of(card_rect);
-    if inner.h < 4 || inner.w < 6 {
-        return None;
-    }
-    // The button sits on the last inner row.
-    let label = format!("[ {EDITOR_LABEL} {EDITOR_KEY} ]");
-    let bw = u16::try_from(label.chars().count())
-        .unwrap_or(0)
-        .min(inner.w);
-    Some(Rect {
-        x: inner.x,
-        y: inner.y + inner.h - 1,
-        w: bw,
-        h: 1,
-    })
-}
 
 fn draw_repository(
     ctx: &CardCtx<'_>,
@@ -331,26 +314,6 @@ fn draw_repository(
             3,
             "not initialized — run `rift init`",
             theme.dim(),
-        );
-        return;
-    }
-    // The Open in $EDITOR button on the last inner row (action lands M55-10).
-    if let Some(br) = editor_button_rect(rect, collapsed) {
-        // The button flashes toward the accent on click/activation (ADR-0028).
-        let base = theme.button(ctx.focused);
-        let style =
-            match crate::chrome::press_flash_bg(ctx.flash(&crate::hit::Target::EditorButton)) {
-                Some(bg) => base.with_bg(bg),
-                None => base,
-            };
-        crate::chrome::button(
-            frame,
-            br.x,
-            br.y,
-            EDITOR_LABEL,
-            EDITOR_KEY,
-            style,
-            theme.key_hint(),
         );
     }
 }
@@ -951,8 +914,6 @@ mod tests {
         assert!(text.contains("claude-opus"));
         assert!(text.contains("×12"));
         assert!(text.contains("128"), "the capture events count tiles");
-        // The repository card carries the Open in $EDITOR button.
-        assert!(text.contains("Open in $EDITOR"));
     }
 
     #[test]
@@ -1019,62 +980,6 @@ mod tests {
         assert_eq!(
             feature_toggle_at(&c, feat.rect, true, feat.rect.x + 2, inner_y),
             None
-        );
-    }
-
-    #[test]
-    fn editor_button_rect_matches_the_drawn_button() {
-        let d = detail(ProjectStatus::Idle);
-        let act = ActivityView::NoProjection;
-        let rt = BTreeMap::new();
-        let slots = solve(rect(0, 0, 40, 60));
-        let repo = slots
-            .iter()
-            .find(|s| s.kind == CardKind::Repository)
-            .unwrap();
-        let br = editor_button_rect(repo.rect, false).expect("expanded repo card has a button");
-        // Render and confirm the button glyph '[' sits at the button rect origin.
-        let mut f = Frame::new(Size::new(40, 60));
-        draw_repository(
-            &ctx(&d, &act, &rt),
-            Theme::rift_dark(),
-            repo.rect,
-            false,
-            &mut f,
-        );
-        assert_eq!(f.get(br.x, br.y).unwrap().ch, '[');
-        // Collapsed cards have no button.
-        assert_eq!(editor_button_rect(repo.rect, true), None);
-    }
-
-    #[test]
-    fn a_pressed_editor_button_flashes_toward_the_accent() {
-        let d = detail(ProjectStatus::Idle);
-        let act = ActivityView::NoProjection;
-        let rt = BTreeMap::new();
-        let slots = solve(rect(0, 0, 40, 60));
-        let repo = slots
-            .iter()
-            .find(|s| s.kind == CardKind::Repository)
-            .unwrap();
-        let br = editor_button_rect(repo.rect, false).unwrap();
-        let ctx = CardCtx {
-            detail: &d,
-            activity: &act,
-            runtime: &rt,
-            toggle_cursor: 0,
-            focused: true,
-            unicode: false,
-            pressed: Some(crate::hit::Target::EditorButton),
-            press_pulse: 1.0,
-        };
-        let mut f = Frame::new(Size::new(40, 60));
-        draw_repository(&ctx, Theme::rift_dark(), repo.rect, false, &mut f);
-        let flash_bg = crate::chrome::press_flash_bg(1.0).unwrap();
-        assert_eq!(
-            f.get(br.x, br.y).unwrap().style.bg,
-            flash_bg,
-            "the pressed editor button flashes"
         );
     }
 

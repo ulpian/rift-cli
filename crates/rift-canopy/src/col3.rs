@@ -40,6 +40,12 @@ pub enum SectionId {
     Recall,
 }
 
+impl SectionId {
+    /// The panels in their fixed default display order (mirrors [`SECTIONS`]) —
+    /// the default [`crate::layout_model::LayoutModel`]'s column-3 units.
+    pub const ALL: [SectionId; 3] = [SectionId::TokenUsage, SectionId::System, SectionId::Recall];
+}
+
 /// How reluctantly a section collapses under height pressure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Priority {

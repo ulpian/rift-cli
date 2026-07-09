@@ -9,9 +9,10 @@
 
 use crate::col2::sanitize_for_terminal;
 use crate::layout::{
-    bottom_chrome_rows, choose_mode, single_panel, solve, two_col, LayoutMode, Rect,
-    MIN_NOTICE_COLS, MIN_NOTICE_ROWS,
+    bottom_chrome_rows, choose_mode, single_panel, two_col, LayoutMode, Rect, MIN_NOTICE_COLS,
+    MIN_NOTICE_ROWS,
 };
+use crate::layout_model::ColumnRole;
 use crate::render::frame::{Frame, Style};
 use crate::render::{Capabilities, RenderBackend};
 use crate::state::ViewModel;
@@ -488,7 +489,11 @@ fn draw_overlay(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
     }
 }
 
-/// The full 20/40/40 three-column grid.
+/// The full three-column grid, tiled from the data-driven layout model
+/// (ADR-0033). Each physical column renders by its role — the default model
+/// places the rail, cards, and panels in columns 1/2/3 at 20/40/40, so this is
+/// byte-identical to the shipped grid; a rearranged model (M5.9) moves and
+/// resizes the columns and this same loop draws them where the model says.
 fn draw_full(
     vm: &ViewModel,
     backend: &mut dyn RenderBackend,
@@ -496,14 +501,20 @@ fn draw_full(
     body: Rect,
     unicode: bool,
 ) {
-    let r = solve(body);
-    if r.col1.h >= 2 {
-        draw_projects(vm, frame, r.col1, unicode);
-        draw_detail(vm, backend, frame, r.col2, unicode);
-        draw_graphs(vm, backend, frame, r.col3);
+    let sl = crate::layout_model::solve_model(&vm.layout, body);
+    for col in &sl.columns {
+        if col.rect.h < 2 || col.rect.w == 0 {
+            continue;
+        }
+        match col.role() {
+            ColumnRole::Rail => draw_projects(vm, frame, col.rect, unicode),
+            ColumnRole::Cards => draw_detail(vm, backend, frame, col.rect, unicode),
+            ColumnRole::Sections => draw_graphs(vm, backend, frame, col.rect),
+            ColumnRole::Empty => {}
+        }
     }
-    crate::bars::draw_hint_bar(vm, THEME, frame, r.hint);
-    draw_command(vm, frame, r.command);
+    crate::bars::draw_hint_bar(vm, THEME, frame, sl.hint);
+    draw_command(vm, frame, sl.command);
 }
 
 /// The two-column degraded grid: projects left, detail over graphs right.

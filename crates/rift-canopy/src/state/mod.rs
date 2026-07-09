@@ -160,11 +160,6 @@ pub struct Effects {
     /// Feature install/remove actions for the (injected) feature manager (P5 S2).
     /// Canopy plans these but never performs an install itself.
     pub feature_actions: Vec<FeatureAction>,
-    /// A resolved project path to open in `$EDITOR` (M55-10). The **only**
-    /// sanctioned process spawn from the TUI, performed by the injected
-    /// [`crate::dispatch::EditorLauncher`] — structurally outside the palette
-    /// grammar (ADR-0025).
-    pub editor_launch: Option<String>,
 }
 
 impl Effects {
@@ -175,7 +170,6 @@ impl Effects {
             && self.persist.is_empty()
             && self.dispatches.is_empty()
             && self.feature_actions.is_empty()
-            && self.editor_launch.is_none()
     }
 }
 
@@ -313,6 +307,10 @@ pub struct AppState {
     /// underlying projects change (checked by cheap comparison in [`Self::snapshot`],
     /// so a stale row can never be served).
     rows_cache: Arc<Vec<ProjectRow>>,
+    /// The last snapshot's layout model (ADR-0033), shared with every
+    /// [`ViewModel`] until `app.layout` changes — pointer-equal on quiescent
+    /// frames, like `rows_cache`.
+    layout_cache: Arc<crate::layout_model::LayoutModel>,
     /// The column-3 sections' view-model, filled by the data plane's feeds
     /// (W3/W4); `Default` is every section's honest placeholder. This is always the
     /// **target** value; the displayed value is [`Self::snapshot`]'s interpolation
@@ -361,6 +359,7 @@ impl AppState {
             health: crate::theme::Health::Ok,
             detail: None,
             rows_cache: Arc::new(Vec::new()),
+            layout_cache: Arc::new(crate::layout_model::LayoutModel::default()),
             col3: Arc::new(crate::col3::Col3::default()),
             col3_anim: None,
             activity: Arc::new(crate::col3::ActivityView::default()),
@@ -615,6 +614,10 @@ impl AppState {
             Some(d) if d.path == p.path => Arc::clone(d),
             _ => Arc::new(DetailView::thin(p.path.clone(), p.name.clone(), p.status)),
         });
+        // Rebuild the shared layout only when it actually changed (like rows).
+        if *self.layout_cache != self.app.layout {
+            self.layout_cache = Arc::new(self.app.layout.clone());
+        }
         ViewModel {
             size: self.size,
             focus: self.app.focus,
@@ -641,6 +644,7 @@ impl AppState {
             press_pulse: self.press_pulse,
             pressed: self.pressed.clone(),
             feature_runtime: self.app.feature_runtime.clone(),
+            layout: Arc::clone(&self.layout_cache),
         }
     }
 }
@@ -721,7 +725,6 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
                 Action::RetryFeature => retry_flow(&s.app),
                 Action::RunLine(buf) => run_line(s, &buf),
                 Action::ConfirmDispatch => confirm_dispatch(s),
-                Action::OpenEditor => editor_flow(s),
                 other => fold_action(other),
             };
             // When the selection moves, ask the bus for the new project's data and
@@ -995,26 +998,7 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             Flow::Continue(Effects::default())
         }
         Target::HeaderQuit => Flow::Quit,
-        // The repository card's button — the same launch the `e` key produces.
-        Target::EditorButton => {
-            s.app.set_focus(Panel::Detail);
-            s.dirty = true;
-            editor_flow(s)
-        }
     }
-}
-
-/// Open the selected project in `$EDITOR` (M55-10): resolve the selected
-/// project's path and emit the single sanctioned launch effect. No selection ⇒
-/// inert. The path is the project's own — never process cwd (ADR-0025).
-fn editor_flow(s: &AppState) -> Flow {
-    let Some(path) = s.app.selected_project().map(|p| p.path.clone()) else {
-        return Flow::Continue(Effects::default());
-    };
-    Flow::Continue(Effects {
-        editor_launch: Some(path),
-        ..Effects::default()
-    })
 }
 
 /// Apply a scroll-wheel event over the panel under the cursor, using the same
@@ -1064,7 +1048,6 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             | Target::HeaderHelp
             | Target::HeaderPalette
             | Target::HeaderQuit
-            | Target::EditorButton
             | Target::WizardAdd
             | Target::RailAdd
             | Target::RailReorderUp
@@ -1117,8 +1100,7 @@ fn fold_action(action: Action) -> Flow {
         | Action::ToggleFeature
         | Action::RetryFeature
         | Action::RunLine(_)
-        | Action::ConfirmDispatch
-        | Action::OpenEditor => Flow::Continue(Effects::default()),
+        | Action::ConfirmDispatch => Flow::Continue(Effects::default()),
         Action::AddProject(path) => Flow::Continue(Effects {
             persist: vec![PersistOp::AddProject { path }],
             ..Effects::default()
@@ -1502,6 +1484,10 @@ pub struct ViewModel {
     /// Feature-row runtime states (M5-12): action results overlaid on the
     /// persisted desired state.
     pub feature_runtime: std::collections::BTreeMap<String, crate::FeatureRuntime>,
+    /// The active dashboard arrangement (ADR-0033), shared from `App.layout` so
+    /// the renderer and the pure hit-test read one model. Pointer-equal when
+    /// unchanged — a quiescent snapshot stays cheap (the ~0% idle invariant).
+    pub layout: Arc<crate::layout_model::LayoutModel>,
 }
 
 impl ViewModel {
@@ -1961,63 +1947,6 @@ mod tests {
         assert_eq!(vm.version, "1.2.3");
     }
 
-    // --- M55-10: the editor launch (the one sanctioned spawn) -----------------
-
-    #[test]
-    fn e_key_and_button_emit_the_editor_launch_for_the_selected_project() {
-        // The `e` key (detail focused) and the repository card's button both
-        // resolve to the SELECTED project's path — never process cwd.
-        let mut s = ready(vec![project("a"), project("b")]);
-        update(&mut s, Event::Key(CanopyKey::Down)); // select b
-        s.app.set_focus(Panel::Detail);
-        let flow = update(&mut s, Event::Key(CanopyKey::Char('e')));
-        match flow {
-            Flow::Continue(e) => assert_eq!(e.editor_launch, Some("/r/b".to_string())),
-            Flow::Quit => panic!("expected Continue"),
-        }
-        // The button click (mouse) is the same launch.
-        let flow = apply_click(&mut s, Target::EditorButton);
-        match flow {
-            Flow::Continue(e) => assert_eq!(e.editor_launch, Some("/r/b".to_string())),
-            Flow::Quit => panic!("expected Continue"),
-        }
-    }
-
-    #[test]
-    fn e_key_only_launches_from_the_detail_column() {
-        // Projects-focused `e` is inert; command-mode `e` types into the buffer.
-        let mut s = ready(vec![project("a")]);
-        assert!(matches!(
-            update(&mut s, Event::Key(CanopyKey::Char('e'))),
-            Flow::Continue(e) if e.editor_launch.is_none()
-        ));
-        update(&mut s, Event::Key(CanopyKey::Char('/'))); // command mode
-        update(&mut s, Event::Key(CanopyKey::Char('e')));
-        assert_eq!(
-            s.app.command_line, "e",
-            "e types into the palette, never launches"
-        );
-    }
-
-    #[test]
-    fn no_parseable_command_ever_yields_an_editor_launch() {
-        // The launcher is structurally OUTSIDE the grammar (ADR-0025): no verb
-        // maps to it. Running every catalog verb never emits editor_launch.
-        let mut s = ready(vec![project("a")]);
-        for word in crate::command::VERB_WORDS {
-            if let Ok(_verb) = crate::command::parse(word) {
-                let flow = run_line(&mut s, word);
-                if let Flow::Continue(e) = flow {
-                    assert!(
-                        e.editor_launch.is_none(),
-                        "the `{word}` verb must never reach the editor launcher"
-                    );
-                }
-                s.app.overlay = None; // clear any overlay the verb opened
-            }
-        }
-    }
-
     #[test]
     fn header_click_targets_map_to_their_key_equivalents() {
         // HeaderQuit quits; HeaderPalette opens command mode; HeaderHelp opens
@@ -2376,7 +2305,6 @@ mod tests {
             Target::HeaderHelp,
             Target::HeaderPalette,
             Target::HeaderQuit,
-            Target::EditorButton,
             Target::OverlayConfirm,
             Target::OverlayCancel,
             Target::OverlayClose,
