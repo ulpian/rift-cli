@@ -23,14 +23,18 @@ pub enum HeaderAction {
     Help,
     /// `/` — open the command palette.
     Palette,
+    /// `e` — toggle the panel editor (ADR-0034).
+    Editor,
     /// `q` — quit the dashboard.
     Quit,
 }
 
-/// The header's right-aligned actions: key glyph + label, in display order.
-const HEADER_ITEMS: [(&str, &str, HeaderAction); 3] = [
+/// The header's right-aligned actions: key glyph + label, in display order. The
+/// panel-editor toggle sits between the palette and quit (ADR-0034).
+const HEADER_ITEMS: [(&str, &str, HeaderAction); 4] = [
     ("?", "Help", HeaderAction::Help),
     ("/", "Palette", HeaderAction::Palette),
+    ("e", "Panel Editor", HeaderAction::Editor),
     ("q", "Quit", HeaderAction::Quit),
 ];
 
@@ -67,9 +71,10 @@ pub fn header_action_spans(w: u16) -> Vec<HeaderSpan> {
         .map(|(k, l, _)| item_width(k, l))
         .sum::<u16>()
         + ITEM_GAP * (u16::try_from(HEADER_ITEMS.len()).unwrap_or(1) - 1);
-    // The left cluster needs breathing room; below ~2× the cluster width the
-    // hints clip away whole.
-    if w < total.saturating_mul(2) {
+    // The left cluster (mark · product · version · health dot ≈ half the action
+    // cluster) needs breathing room; below ~1.5× the cluster width the hints clip
+    // away whole rather than overlapping the mark.
+    if w < total.saturating_add(total / 2) {
         return Vec::new();
     }
     let mut x = w.saturating_sub(1).saturating_sub(total);
@@ -134,9 +139,16 @@ pub fn draw_header(vm: &ViewModel, theme: Theme, unicode: bool, frame: &mut Fram
         let target = match span.action {
             HeaderAction::Help => crate::hit::Target::HeaderHelp,
             HeaderAction::Palette => crate::hit::Target::HeaderPalette,
+            HeaderAction::Editor => crate::hit::Target::HeaderEditor,
             HeaderAction::Quit => crate::hit::Target::HeaderQuit,
         };
-        let bg = crate::chrome::press_flash_bg(vm.button_flash(&target)).unwrap_or(SURFACE_BG);
+        // The panel-editor toggle reads active while the mode is on — a steady
+        // accent wash, distinct from the transient press flash.
+        let active =
+            span.action == HeaderAction::Editor && vm.mode == crate::input::Mode::PanelEditor;
+        let bg = crate::chrome::press_flash_bg(vm.button_flash(&target))
+            .or_else(|| active.then_some(crate::theme::SELECT_BG))
+            .unwrap_or(SURFACE_BG);
         let kx = frame.put_str(area.x + span.start, y, key, theme.key_hint().with_bg(bg));
         frame.put_str(kx, y, &format!(" {label}"), theme.dim().with_bg(bg));
     }
@@ -264,7 +276,7 @@ mod tests {
     #[test]
     fn header_action_at_resolves_and_misses() {
         let spans = header_action_spans(80);
-        assert_eq!(spans.len(), 3);
+        assert_eq!(spans.len(), 4);
         for span in &spans {
             assert_eq!(header_action_at(80, span.start), Some(span.action));
             assert_eq!(header_action_at(80, span.end - 1), Some(span.action));

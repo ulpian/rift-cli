@@ -45,6 +45,8 @@ pub enum HintContext {
     CommandEditing,
     /// Typing an add-project path.
     AddProject,
+    /// Rearranging the layout in panel-editor mode.
+    PanelEditor,
     /// A results overlay is open.
     OverlayResults,
     /// A confirm overlay is open.
@@ -67,6 +69,7 @@ pub fn context(mode: Mode, focus: Panel, overlay: Option<&Overlay>) -> HintConte
         None => match mode {
             Mode::Command => HintContext::CommandEditing,
             Mode::AddProject => HintContext::AddProject,
+            Mode::PanelEditor => HintContext::PanelEditor,
             Mode::Normal => match focus {
                 Panel::Projects => HintContext::Rail,
                 Panel::Detail => HintContext::Detail,
@@ -115,6 +118,14 @@ const ADD_PROJECT: &[Hint] = &[
     hint("⏎", "register", CanopyKey::Enter),
     hint("esc", "cancel", CanopyKey::Esc),
 ];
+const PANEL_EDITOR: &[Hint] = &[
+    hint("hjkl", "move", CanopyKey::Char('l')),
+    hint("⏎", "pick/drop", CanopyKey::Enter),
+    hint("<>", "resize", CanopyKey::Char('>')),
+    hint("[]", "column", CanopyKey::Char(']')),
+    hint("r", "reset", CanopyKey::Char('r')),
+    hint("esc", "done", CanopyKey::Esc),
+];
 const OVERLAY_RESULTS: &[Hint] = &[
     hint("j/k", "scroll", CanopyKey::Down),
     hint("esc", "dismiss", CanopyKey::Esc),
@@ -139,6 +150,7 @@ pub fn hints(ctx: HintContext) -> &'static [Hint] {
         HintContext::CommandIdle => COMMAND_IDLE,
         HintContext::CommandEditing => COMMAND_EDITING,
         HintContext::AddProject => ADD_PROJECT,
+        HintContext::PanelEditor => PANEL_EDITOR,
         HintContext::OverlayResults => OVERLAY_RESULTS,
         HintContext::OverlayConfirm => OVERLAY_CONFIRM,
         HintContext::OverlayMessage => OVERLAY_MESSAGE,
@@ -189,6 +201,13 @@ mod tests {
                 app.mode = Mode::AddProject;
                 app.command_line = "/tmp/x".into();
             }
+            HintContext::PanelEditor => {
+                app.mode = Mode::PanelEditor;
+                // A NON-default layout so `r` (reset) observably changes it, with
+                // the cursor mid-grid (a right neighbor for resize / column move).
+                app.layout.columns.swap(0, 1);
+                app.editor.cursor = crate::editor::Cursor { col: 1, unit: 0 };
+            }
             HintContext::OverlayResults => {
                 app.overlay = Some(Overlay::Results {
                     title: "t".into(),
@@ -220,7 +239,7 @@ mod tests {
     /// a non-`None` action).
     fn fingerprint(app: &App) -> String {
         format!(
-            "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{:?}",
+            "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}",
             app.focus,
             app.mode,
             app.selected,
@@ -236,6 +255,10 @@ mod tests {
                 Overlay::Alert(_) => "alert".into(),
                 Overlay::Notice(_) => "notice".into(),
             }),
+            // The panel-editor cursor/pickup and the layout arrangement — so an
+            // editor key (move/reorder/resize/reset) registers as handled.
+            app.editor,
+            app.layout,
         )
     }
 
@@ -244,13 +267,14 @@ mod tests {
     /// an action is returned. A hint can never advertise a dead key.
     #[test]
     fn every_hint_key_is_handled_by_the_reducer() {
-        const ALL: [HintContext; 10] = [
+        const ALL: [HintContext; 11] = [
             HintContext::Rail,
             HintContext::Detail,
             HintContext::Graphs,
             HintContext::CommandIdle,
             HintContext::CommandEditing,
             HintContext::AddProject,
+            HintContext::PanelEditor,
             HintContext::OverlayResults,
             HintContext::OverlayConfirm,
             HintContext::OverlayMessage,

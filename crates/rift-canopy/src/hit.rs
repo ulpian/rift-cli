@@ -77,6 +77,8 @@ pub enum Target {
     HeaderHelp,
     /// The header's `/` action — open the command palette.
     HeaderPalette,
+    /// The header's `e` action — toggle the panel editor (ADR-0034).
+    HeaderEditor,
     /// The header's `q` action — quit the dashboard.
     HeaderQuit,
 }
@@ -93,6 +95,7 @@ impl Target {
             self,
             Target::HeaderHelp
                 | Target::HeaderPalette
+                | Target::HeaderEditor
                 | Target::HeaderQuit
                 | Target::OverlayConfirm
                 | Target::OverlayCancel
@@ -130,6 +133,7 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
         return match crate::bars::header_action_at(size.w, col) {
             Some(crate::bars::HeaderAction::Help) => Some(Target::HeaderHelp),
             Some(crate::bars::HeaderAction::Palette) => Some(Target::HeaderPalette),
+            Some(crate::bars::HeaderAction::Editor) => Some(Target::HeaderEditor),
             Some(crate::bars::HeaderAction::Quit) => Some(Target::HeaderQuit),
             None => None,
         };
@@ -512,10 +516,11 @@ mod tests {
     fn header_actions_resolve_on_row_zero() {
         let v = vm(120, 40);
         let spans = crate::bars::header_action_spans(120);
-        assert_eq!(spans.len(), 3);
+        assert_eq!(spans.len(), 4);
         let expect = [
             Target::HeaderHelp,
             Target::HeaderPalette,
+            Target::HeaderEditor,
             Target::HeaderQuit,
         ];
         for (span, want) in spans.iter().zip(expect) {

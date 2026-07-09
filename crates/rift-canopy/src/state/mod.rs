@@ -645,6 +645,7 @@ impl AppState {
             pressed: self.pressed.clone(),
             feature_runtime: self.app.feature_runtime.clone(),
             layout: Arc::clone(&self.layout_cache),
+            editor: self.app.editor,
         }
     }
 }
@@ -880,6 +881,7 @@ fn modal_activation_flash(app: &App, key: crate::input::CanopyKey) -> Option<Tar
     }
 }
 
+#[allow(clippy::too_many_lines)] // one arm per click target — a dispatch table
 fn apply_click(s: &mut AppState, target: Target) -> Flow {
     // Acknowledge a button press with the flash (ADR-0028) — keyed by target so
     // the right button lights; a repeat press re-arms. Selection/focus/body
@@ -997,6 +999,18 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             s.dirty = true;
             Flow::Continue(Effects::default())
         }
+        // The header's panel-editor toggle (ADR-0034): enter the mode, or exit
+        // it if already editing — the click equivalent of `e` / `Esc`.
+        Target::HeaderEditor => {
+            if s.app.mode == Mode::PanelEditor {
+                s.app.mode = Mode::Normal;
+                s.app.editor.reset();
+            } else {
+                crate::input::enter_panel_editor(&mut s.app);
+            }
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
         Target::HeaderQuit => Flow::Quit,
     }
 }
@@ -1047,6 +1061,7 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             Target::CommandBar
             | Target::HeaderHelp
             | Target::HeaderPalette
+            | Target::HeaderEditor
             | Target::HeaderQuit
             | Target::WizardAdd
             | Target::RailAdd
@@ -1488,6 +1503,9 @@ pub struct ViewModel {
     /// the renderer and the pure hit-test read one model. Pointer-equal when
     /// unchanged — a quiescent snapshot stays cheap (the ~0% idle invariant).
     pub layout: Arc<crate::layout_model::LayoutModel>,
+    /// The panel-editor state (ADR-0034), copied from `App.editor` — the grip
+    /// renderer and the editor hit-test read it while `mode == PanelEditor`.
+    pub editor: crate::editor::EditorState,
 }
 
 impl ViewModel {

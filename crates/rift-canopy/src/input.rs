@@ -18,6 +18,9 @@ pub enum Mode {
     Command,
     /// Typing a path to register a new project.
     AddProject,
+    /// Rearranging the dashboard layout (ADR-0034): grips on every panel, the
+    /// cursor moves/reorders/resizes, `Esc` or the toggle exits.
+    PanelEditor,
 }
 
 /// A terminal-agnostic key, translated from the backend's event stream so the
@@ -145,6 +148,7 @@ pub fn on_key(app: &mut App, key: CanopyKey) -> Action {
     match app.mode {
         Mode::Normal => on_key_normal(app, key),
         Mode::Command | Mode::AddProject => on_key_editing(app, key),
+        Mode::PanelEditor => on_key_editor(app, key),
     }
 }
 
@@ -221,6 +225,12 @@ fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
             Action::ToggleFeature
         }
         CanopyKey::Char('r') if app.focus == Panel::Detail => Action::RetryFeature,
+        // `e` enters the panel editor (ADR-0034) — the freed mnemonic (it opened
+        // an editor; now it opens the *layout* editor), from any focus.
+        CanopyKey::Char('e') => {
+            enter_panel_editor(app);
+            Action::None
+        }
         CanopyKey::Char('q') | CanopyKey::Quit => {
             app.quit = true;
             Action::Quit
@@ -228,6 +238,90 @@ fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
         // Other keys (incl. reorder/remove without a focused selection) are inert.
         _ => Action::None,
     }
+}
+
+/// Enter panel-editor mode (ADR-0034): reset the cursor to the origin, clamped
+/// into the current layout. Shared by the `e` key and the header toggle.
+pub fn enter_panel_editor(app: &mut App) {
+    app.mode = Mode::PanelEditor;
+    app.editor.reset();
+    app.editor.clamp(&app.layout);
+}
+
+/// The panel-editor reducer (ADR-0034): the cursor moves over the layout's units
+/// and, when a unit is picked up, reorders it within its column or moves it
+/// across columns; `<`/`>` resize, `[`/`]` move whole columns, `r` resets, `Esc`
+/// cancels a pickup then exits. All pure over `App.layout` / `App.editor`; the
+/// persist write is emitted by the state layer on exit when the layout changed.
+fn on_key_editor(app: &mut App, key: CanopyKey) -> Action {
+    use crate::editor;
+    app.editor.clamp(&app.layout);
+    let picked = app.editor.picked;
+    match key {
+        // Ctrl-C still quits the whole app, even mid-edit.
+        CanopyKey::Quit => {
+            app.quit = true;
+            return Action::Quit;
+        }
+        // Esc cancels a live pickup first, then (a second press) exits the mode.
+        CanopyKey::Esc => {
+            if picked {
+                app.editor.picked = false;
+            } else {
+                app.mode = Mode::Normal;
+                app.editor.reset();
+            }
+        }
+        // Enter / Space / `p` pick up the cursor's unit, or drop a picked one.
+        CanopyKey::Enter | CanopyKey::Char(' ' | 'p') => {
+            app.editor.picked = !picked;
+        }
+        CanopyKey::Char('h') | CanopyKey::Left => {
+            if picked {
+                editor::move_unit(&mut app.editor, &mut app.layout, false);
+            } else {
+                editor::move_cursor_col(&mut app.editor, &app.layout, false);
+            }
+        }
+        CanopyKey::Char('l') | CanopyKey::Right => {
+            if picked {
+                editor::move_unit(&mut app.editor, &mut app.layout, true);
+            } else {
+                editor::move_cursor_col(&mut app.editor, &app.layout, true);
+            }
+        }
+        CanopyKey::Char('j') | CanopyKey::Down => {
+            if picked {
+                editor::reorder_within(&mut app.editor, &mut app.layout, true);
+            } else {
+                editor::move_cursor_unit(&mut app.editor, &app.layout, true);
+            }
+        }
+        CanopyKey::Char('k') | CanopyKey::Up => {
+            if picked {
+                editor::reorder_within(&mut app.editor, &mut app.layout, false);
+            } else {
+                editor::move_cursor_unit(&mut app.editor, &app.layout, false);
+            }
+        }
+        // Resize the divider right of the cursor's column (only when not picked).
+        CanopyKey::Char('>') if !picked => editor::resize(&app.editor, &mut app.layout, true),
+        CanopyKey::Char('<') if !picked => editor::resize(&app.editor, &mut app.layout, false),
+        // Move the whole column left/right (only when not picked).
+        CanopyKey::Char(']') if !picked => {
+            editor::move_column(&mut app.editor, &mut app.layout, true);
+        }
+        CanopyKey::Char('[') if !picked => {
+            editor::move_column(&mut app.editor, &mut app.layout, false);
+        }
+        // Reset to the canonical layout.
+        CanopyKey::Char('r') => {
+            app.layout = crate::layout_model::LayoutModel::default();
+            app.editor.reset();
+        }
+        _ => {}
+    }
+    Action::None
 }
 
 /// Route a vertical nav key to the focused panel: the projects list moves its
@@ -303,7 +397,9 @@ fn on_key_editing(app: &mut App, key: CanopyKey) -> Action {
             // The reducer parses (span errors render inline and keep the
             // buffer); on success it clears the buffer + mode itself.
             Mode::Command => Action::RunLine(app.command_line.clone()),
-            Mode::Normal => Action::None,
+            // on_key_editing is only reached in Command/AddProject; the others
+            // are inert here (PanelEditor routes to on_key_editor).
+            Mode::Normal | Mode::PanelEditor => Action::None,
         },
         // Navigation/focus keys are inert while editing the command/path buffer.
         _ => Action::None,

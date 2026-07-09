@@ -29,6 +29,7 @@ pub mod col2;
 pub mod col3;
 pub mod command;
 pub mod dispatch;
+pub mod editor;
 pub mod hit;
 pub mod input;
 pub mod keymap;
@@ -66,6 +67,7 @@ pub use dispatch::{
     request_for, CommandDispatcher, DispatchOutcome, DispatchRequest, Message, MessageAction,
     NullDispatcher, OutcomeClass, Overlay, OverlayControl, Severity, OVERLAY_MAX_LINES,
 };
+pub use editor::EditorState;
 pub use hit::{hit_test, Target};
 pub use input::{on_key, Action, CanopyKey, Mode, MouseButton, MouseInput, MouseKind};
 pub use layout::{solve, PanelRects, Rect};
@@ -246,6 +248,10 @@ pub struct App {
     /// grid, so an untouched dashboard renders exactly as before; the panel
     /// editor (M5.9) mutates it and per-project persistence restores it.
     pub layout: crate::layout_model::LayoutModel,
+    /// The panel-editor's transient interaction state (ADR-0034) — the cursor,
+    /// the pickup flag, and any live mouse drag. Only meaningful while
+    /// `mode == Mode::PanelEditor`; resting otherwise.
+    pub editor: crate::editor::EditorState,
 }
 
 impl App {
@@ -275,6 +281,7 @@ impl App {
             frecency: suggest::Frecency::new(),
             feature_runtime: std::collections::BTreeMap::new(),
             layout: crate::layout_model::LayoutModel::default(),
+            editor: crate::editor::EditorState::default(),
         }
     }
 

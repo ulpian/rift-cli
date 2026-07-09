@@ -2,7 +2,7 @@
 source: crates/rift-canopy/tests/snapshots.rs
 expression: frame_text(&f)
 ---
- RIFT  Canopy  *                                      ? Help  / Palette  q Quit
+ RIFT  Canopy  *                      ? Help  / Palette  e Panel Editor  q Quit
 ╭─ projects  3 ╮rift-cli · idle                 ╭─ token usage ────────────────#
 │># rift-cli  o│(none yet)                      │(no token activity yet)       #
 │   > featu…  -│0 sensitive paths               │                              #
