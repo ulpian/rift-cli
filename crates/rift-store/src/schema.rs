@@ -1415,6 +1415,17 @@ const CANOPY_TOGGLE_EVENT_COLUMNS: &[Column] = &[
     Column::int("created_at"), // transaction-time (epoch ms)
 ];
 
+// Per-project dashboard arrangement (ADR-0035): the panel editor's layout, saved
+// per project_id as a superseding event. `layout` is the encoded LayoutModel;
+// NULL is a reset to the default (a superseding event, never a delete).
+const CANOPY_LAYOUT_EVENT_COLUMNS: &[Column] = &[
+    Column::text("event_id"),        // ULID
+    Column::text("project_id"),      // FK: a canopy_project_event.project_id (comment-FK)
+    Column::text_null("layout"),     // encoded LayoutModel; NULL = reset-to-default
+    Column::text_null("supersedes"), // prior layout event_id for this project
+    Column::int("created_at"),       // transaction-time (epoch ms)
+];
+
 const CANOPY_TABLES: &[CanonicalTable] = &[
     CanonicalTable {
         name: "canopy_project_event",
@@ -1425,6 +1436,12 @@ const CANOPY_TABLES: &[CanonicalTable] = &[
     CanonicalTable {
         name: "canopy_toggle_event",
         columns: CANOPY_TOGGLE_EVENT_COLUMNS,
+        primary_key: &["event_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "canopy_layout_event",
+        columns: CANOPY_LAYOUT_EVENT_COLUMNS,
         primary_key: &["event_id"],
         unique: NO_UNIQUE,
     },

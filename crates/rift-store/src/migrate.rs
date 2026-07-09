@@ -491,20 +491,26 @@ pub fn recall_migrations() -> Vec<Migration> {
     ]
 }
 
-/// Build the canopy UI-state schema migration SQL from the canopy table registry
-/// (the machine-global `ui-state.db`). Same shape as [`canonical_schema_sql`],
-/// over [`crate::schema::canopy_canonical_tables`].
-#[must_use]
-pub fn canopy_canonical_schema_sql() -> String {
+/// Build the canopy schema SQL for the registry tables named in `names` (in
+/// registry order): create + append-only guard per table, then a
+/// `_schema_version` row per table. Splitting by name lets each migration
+/// **version** own a frozen, checksum-stable subset (a new table is a new
+/// version, never an edit to an applied one — the frozen-prefix rule).
+fn canopy_schema_sql_for(names: &[&str]) -> String {
     use crate::schema::canopy_canonical_tables;
+    let selected = || {
+        canopy_canonical_tables()
+            .iter()
+            .filter(|t| names.contains(&t.name))
+    };
     let mut sql = String::new();
-    for table in canopy_canonical_tables() {
+    for table in selected() {
         sql.push_str(&table.create_table_sql());
         sql.push('\n');
         sql.push_str(&table.guard_trigger_sql());
         sql.push('\n');
     }
-    for table in canopy_canonical_tables() {
+    for table in selected() {
         sql.push_str(&format!(
             "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
             table.name
@@ -513,16 +519,34 @@ pub fn canopy_canonical_schema_sql() -> String {
     sql
 }
 
-/// The canopy UI-state projection's migration set (applied to a fresh
-/// `ui-state.db`). [`apply_migrations`] creates the meta tables itself, so
-/// version 1 is the canopy schema directly.
+/// The full canopy UI-state schema SQL (every table, all versions) — for the
+/// additive-migration check and the DDL snapshot. Not a single migration (the
+/// layout table arrived in v2); see [`canopy_migrations`].
+#[must_use]
+pub fn canopy_canonical_schema_sql() -> String {
+    use crate::schema::canopy_canonical_tables;
+    let all: Vec<&str> = canopy_canonical_tables().iter().map(|t| t.name).collect();
+    canopy_schema_sql_for(&all)
+}
+
+/// The canopy UI-state projection's migration set (applied to a fresh or an
+/// existing `ui-state.db`). v1 is the frozen project + toggle core (M4/M5); v2
+/// adds the per-project layout table (ADR-0035) — a new version so an existing
+/// v1 store upgrades additively and the v1 checksum stays locked.
 #[must_use]
 pub fn canopy_migrations() -> Vec<Migration> {
-    vec![Migration {
-        version: 1,
-        name: "canopy_core",
-        sql: canopy_canonical_schema_sql(),
-    }]
+    vec![
+        Migration {
+            version: 1,
+            name: "canopy_core",
+            sql: canopy_schema_sql_for(&["canopy_project_event", "canopy_toggle_event"]),
+        },
+        Migration {
+            version: 2,
+            name: "canopy_layout",
+            sql: canopy_schema_sql_for(&["canopy_layout_event"]),
+        },
+    ]
 }
 
 /// Open (creating if needed) a projection DB at `path` and bring it to the
@@ -858,22 +882,29 @@ mod tests {
         assert_eq!(again.skipped, 6);
     }
 
-    /// The canopy UI-state migration creates both append-only tables and re-runs
-    /// idempotently (a fresh `ui-state.db` upgrade).
+    /// The canopy UI-state migrations create the append-only tables (v1 core +
+    /// v2 layout) and re-run idempotently (a fresh `ui-state.db` upgrade).
     #[test]
     fn canopy_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &canopy_migrations()).unwrap();
-        assert_eq!(out.applied, 1);
-        assert_eq!(out.high_water, 1);
-        let sql = &canopy_migrations()[0].sql;
-        assert!(sql.contains("CREATE TABLE IF NOT EXISTS canopy_project_event"));
-        assert!(sql.contains("CREATE TABLE IF NOT EXISTS canopy_toggle_event"));
-        assert!(sql.contains("canopy_project_event_no_update"));
-        assert!(sql.contains("canopy_toggle_event_no_delete"));
+        assert_eq!(out.applied, 2, "v1 core + v2 layout");
+        assert_eq!(out.high_water, 2);
+        let v1 = &canopy_migrations()[0].sql;
+        assert!(v1.contains("CREATE TABLE IF NOT EXISTS canopy_project_event"));
+        assert!(v1.contains("CREATE TABLE IF NOT EXISTS canopy_toggle_event"));
+        assert!(v1.contains("canopy_project_event_no_update"));
+        assert!(v1.contains("canopy_toggle_event_no_delete"));
+        // v1 stays frozen (no layout table — the checksum lock holds for existing
+        // stores); v2 adds the layout table with its append-only guards.
+        assert!(!v1.contains("canopy_layout_event"), "v1 is the frozen core");
+        let v2 = &canopy_migrations()[1].sql;
+        assert!(v2.contains("CREATE TABLE IF NOT EXISTS canopy_layout_event"));
+        assert!(v2.contains("canopy_layout_event_no_update"));
+        assert!(v2.contains("canopy_layout_event_no_delete"));
         let again = apply_migrations(&s, &canopy_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 1);
+        assert_eq!(again.skipped, 2);
     }
 
     /// Every canopy migration is additive (the destructive-DDL CI gate).

@@ -178,6 +178,7 @@ fn token_sections_render_live_from_a_seeded_projection() {
         &mut NullFeatureManager,
         &mut rift_canopy::NullDispatcher,
         &mut || Ok(vec![]),
+        &mut |_: &str| Ok(None),
     )
     .unwrap();
 

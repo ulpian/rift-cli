@@ -160,6 +160,10 @@ pub struct Effects {
     /// Feature install/remove actions for the (injected) feature manager (P5 S2).
     /// Canopy plans these but never performs an install itself.
     pub feature_actions: Vec<FeatureAction>,
+    /// A project path whose saved layout the loop should load and apply (ADR-0035):
+    /// set on a selection change and at startup. The reducer emits the request;
+    /// the loop performs the read through the injected layout loader.
+    pub load_layout: Option<String>,
 }
 
 impl Effects {
@@ -170,6 +174,7 @@ impl Effects {
             && self.persist.is_empty()
             && self.dispatches.is_empty()
             && self.feature_actions.is_empty()
+            && self.load_layout.is_none()
     }
 }
 
@@ -226,6 +231,15 @@ pub enum PersistOp {
         feature: String,
         /// The desired on/off intent.
         desired: bool,
+    },
+    /// Record the project's dashboard arrangement (a superseding `layout` event;
+    /// ADR-0035). `Some` is an encoded [`crate::layout_model::LayoutModel`];
+    /// `None` is a reset to the default — a superseding event, never a delete.
+    SetLayout {
+        /// The path of the project the layout belongs to.
+        path: String,
+        /// The encoded arrangement, or `None` to reset to the default.
+        layout: Option<String>,
     },
 }
 
@@ -412,6 +426,16 @@ impl AppState {
     #[must_use]
     pub fn suggest_fade(&self) -> f32 {
         self.suggest_fade
+    }
+
+    /// Apply a project's saved dashboard arrangement (ADR-0035) — the loop's path
+    /// after loading the layout for the newly-active project. Dirties (so the new
+    /// grid presents) only on a real change.
+    pub fn set_layout(&mut self, layout: crate::layout_model::LayoutModel) {
+        if self.app.layout != layout {
+            self.app.layout = layout;
+            self.dirty = true;
+        }
     }
 
     /// Replace the column-3 sections' view-model (the W3/W4 feeds' apply path).
@@ -731,8 +755,13 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
             // When the selection moves, ask the bus for the new project's data and
             // reset the toggle cursor to the top of the new project's toggles.
             if let Flow::Continue(eff) = &mut flow {
-                eff.data_requests
-                    .extend(selection_change_effects(s, &before));
+                selection_change_effects(s, &before, eff);
+                // Leaving the panel editor persists the arrangement (ADR-0035).
+                if mode_before == Mode::PanelEditor && s.app.mode != Mode::PanelEditor {
+                    if let Some(op) = layout_persist_op(&s.app) {
+                        eff.persist.push(op);
+                    }
+                }
             }
             flow
         }
@@ -809,14 +838,14 @@ fn apply_feed(s: &mut AppState, update: FeedUpdate) {
 }
 
 /// After a possible selection move, reset the per-project cursor and column-3
-/// sections and ask the bus for the newly-selected project's data. Returns the
-/// data requests to add (empty when the selection did not change). Shared by the
-/// keyboard and mouse paths so a click and an arrow key are behaviorally
-/// identical.
-fn selection_change_effects(s: &mut AppState, before: &Option<String>) -> Vec<DataRequest> {
+/// sections and ask the bus for the newly-selected project's data, and set
+/// `eff.load_layout` so the loop restores the new project's saved arrangement
+/// (ADR-0035). A no-op when the selection did not change. Shared by the keyboard
+/// and mouse paths so a click and an arrow key are behaviorally identical.
+fn selection_change_effects(s: &mut AppState, before: &Option<String>, eff: &mut Effects) {
     let after = s.app.selected_project().map(|p| p.path.clone());
     if *before == after {
-        return Vec::new();
+        return;
     }
     s.app.toggle_cursor = 0;
     s.arm_select_pulse(); // acknowledge the cursor move (M55-14)
@@ -827,11 +856,25 @@ fn selection_change_effects(s: &mut AppState, before: &Option<String>) -> Vec<Da
         s.activity = Arc::new(crate::col3::ActivityView::default());
         s.dirty = true;
     }
-    let mut reqs = vec![DataRequest::SetActive(after.clone())];
+    eff.data_requests
+        .push(DataRequest::SetActive(after.clone()));
     if let Some(path) = after {
-        reqs.push(DataRequest::Refresh(path));
+        eff.data_requests.push(DataRequest::Refresh(path.clone()));
+        eff.load_layout = Some(path);
     }
-    reqs
+}
+
+/// The `SetLayout` persist op for the selected project's current arrangement
+/// (ADR-0035) — `None` layout when it equals the default (a reset). `None` when
+/// no project is selected.
+fn layout_persist_op(app: &App) -> Option<PersistOp> {
+    let path = app.selected_project().map(|p| p.path.clone())?;
+    let layout = if app.layout == crate::layout_model::LayoutModel::default() {
+        None
+    } else {
+        Some(app.layout.encode())
+    };
+    Some(PersistOp::SetLayout { path, layout })
 }
 
 /// Handle a mouse event by hit-testing it against the current view and mapping
@@ -973,10 +1016,9 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
                 s.app.selected = i;
             }
             s.dirty = true;
-            Flow::Continue(Effects {
-                data_requests: selection_change_effects(s, &before),
-                ..Effects::default()
-            })
+            let mut eff = Effects::default();
+            selection_change_effects(s, &before, &mut eff);
+            Flow::Continue(eff)
         }
         // The rail action bar (M56-05): the same typed effects the `a` / `d` /
         // ⇧-arrow keys raise — no new capability, only a new trigger. The press
@@ -1064,16 +1106,22 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             Flow::Continue(Effects::default())
         }
         // The header's panel-editor toggle (ADR-0034): enter the mode, or exit
-        // it if already editing — the click equivalent of `e` / `Esc`.
+        // it if already editing — the click equivalent of `e` / `Esc`. Exiting
+        // persists the arrangement (ADR-0035).
         Target::HeaderEditor => {
+            s.dirty = true;
             if s.app.mode == Mode::PanelEditor {
                 s.app.mode = Mode::Normal;
                 s.app.editor.reset();
+                let mut eff = Effects::default();
+                if let Some(op) = layout_persist_op(&s.app) {
+                    eff.persist.push(op);
+                }
+                Flow::Continue(eff)
             } else {
                 crate::input::enter_panel_editor(&mut s.app);
+                Flow::Continue(Effects::default())
             }
-            s.dirty = true;
-            Flow::Continue(Effects::default())
         }
         Target::HeaderQuit => Flow::Quit,
         // A grip press (ADR-0034) begins a unit drag: pick the unit up and arm the
@@ -1165,10 +1213,9 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             } else {
                 s.app.select_prev();
             }
-            Flow::Continue(Effects {
-                data_requests: selection_change_effects(s, &before),
-                ..Effects::default()
-            })
+            let mut eff = Effects::default();
+            selection_change_effects(s, &before, &mut eff);
+            Flow::Continue(eff)
         }
         Panel::Detail => {
             s.app.move_toggle_cursor(down);
@@ -1333,10 +1380,9 @@ fn dashboard_verb_flow(s: &mut AppState, verb: Verb) -> Flow {
                 return no_match_status(s);
             };
             s.app.select_path(&path);
-            Flow::Continue(Effects {
-                data_requests: selection_change_effects(s, &before),
-                ..Effects::default()
-            })
+            let mut eff = Effects::default();
+            selection_change_effects(s, &before, &mut eff);
+            Flow::Continue(eff)
         }
         Verb::Add => {
             let Some(path) = s.app.launch_cwd.clone() else {
@@ -2703,6 +2749,10 @@ mod tests {
                 feature: String::new(),
                 desired: false,
             },
+            PersistOp::SetLayout {
+                path: String::new(),
+                layout: None,
+            },
         ];
         for op in ops {
             match op {
@@ -2710,7 +2760,8 @@ mod tests {
                 | PersistOp::RemoveProject { .. }
                 | PersistOp::RelabelProject { .. }
                 | PersistOp::ReorderProject { .. }
-                | PersistOp::SetToggle { .. } => {}
+                | PersistOp::SetToggle { .. }
+                | PersistOp::SetLayout { .. } => {}
             }
         }
     }

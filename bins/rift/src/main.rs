@@ -935,6 +935,9 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
             // repository root, injected exactly like on_persist.
             let mut dispatcher = RiftDispatcher;
             let reload = || cstore.projects();
+            // Loads a project's saved dashboard layout (ADR-0035) — the seam the
+            // retired editor launcher vacated; folds the append-only layout log.
+            let layout_loader = |path: &str| cstore.layout(path);
             match rift_canopy::app::live::run(rift_canopy::app::live::LoopDeps {
                 opts,
                 initial: projects.clone(),
@@ -944,6 +947,7 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
                 manager: &mut manager,
                 dispatcher: &mut dispatcher,
                 reload,
+                layout_loader,
             }) {
                 Ok(()) => return Ok(()),
                 Err(e) => {

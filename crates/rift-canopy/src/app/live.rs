@@ -113,10 +113,11 @@ impl EventSource for MergedEvents {
 /// Everything the live loop needs from its host — **the** single injection
 /// point (ADR-0011): a new event source or channel becomes a new field here,
 /// wired in [`run`], and the loop body never changes.
-pub struct LoopDeps<'m, F, R>
+pub struct LoopDeps<'m, F, R, L>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
     R: FnMut() -> RiftResult<Vec<Project>>,
+    L: FnMut(&str) -> RiftResult<Option<crate::layout_model::LayoutModel>>,
 {
     /// Launch options (ascii / skip-splash) from the CLI flags.
     pub opts: CanopyOpts,
@@ -136,6 +137,10 @@ where
     /// Reloads the registry after a mutating dispatch (the persist-apply
     /// pattern: selection follows, the subscribe re-fires).
     pub reload: R,
+    /// Loads a project's saved dashboard layout by path (ADR-0035) — the seam
+    /// the retired editor launcher vacated; the binary wires it to the canopy
+    /// store's `layout` reader.
+    pub layout_loader: L,
 }
 
 /// Launch Canopy on the real terminal until the user quits, over the host
@@ -145,10 +150,11 @@ where
 ///
 /// # Errors
 /// [`rift_core::RiftError`] on a terminal enter/read/present failure.
-pub fn run<F, R>(deps: LoopDeps<'_, F, R>) -> RiftResult<()>
+pub fn run<F, R, L>(deps: LoopDeps<'_, F, R, L>) -> RiftResult<()>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
     R: FnMut() -> RiftResult<Vec<Project>>,
+    L: FnMut(&str) -> RiftResult<Option<crate::layout_model::LayoutModel>>,
 {
     let LoopDeps {
         opts,
@@ -159,6 +165,7 @@ where
         manager,
         dispatcher,
         mut reload,
+        mut layout_loader,
     } = deps;
     let caps = crate::render::caps::detect(opts.ascii);
     let probe = xre_term::Capabilities::probe();
@@ -213,6 +220,7 @@ where
         manager,
         dispatcher,
         &mut reload,
+        &mut layout_loader,
     )
 }
 

@@ -213,6 +213,113 @@ impl Default for LayoutModel {
     }
 }
 
+// --- the persistence codec (ADR-0035) ----------------------------------------
+
+impl LayoutModel {
+    /// Encode to a versioned string for the append-only layout store (ADR-0035):
+    /// `v1;<weight>=<unit>,<unit>;…` where a unit is `rail` / `card.<kind>` /
+    /// `sec.<id>`. No serde in the pure crate — a stable, human-legible line.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        let mut out = String::from("v1");
+        for col in &self.columns {
+            out.push(';');
+            out.push_str(&col.weight.to_string());
+            out.push('=');
+            let joined: Vec<String> = col.units.iter().map(|u| unit_string(*u)).collect();
+            out.push_str(&joined.join(","));
+        }
+        out
+    }
+
+    /// Decode a [`Self::encode`] string, or `None` on any malformed or
+    /// forward-version blob (the caller falls back to the default — ADR-0035). A
+    /// store written by a newer binary degrades to the canonical layout rather
+    /// than crashing.
+    #[must_use]
+    pub fn decode(s: &str) -> Option<LayoutModel> {
+        let mut parts = s.split(';');
+        if parts.next()? != "v1" {
+            return None;
+        }
+        let mut columns = Vec::new();
+        for part in parts {
+            let (w, units_str) = part.split_once('=')?;
+            let weight: u16 = w.parse().ok()?;
+            let mut units = Vec::new();
+            if !units_str.is_empty() {
+                for tok in units_str.split(',') {
+                    units.push(parse_unit(tok)?);
+                }
+            }
+            columns.push(Column { weight, units });
+        }
+        if columns.is_empty() {
+            return None;
+        }
+        Some(LayoutModel { columns })
+    }
+}
+
+/// A unit's full persisted string (`rail` / `card.<kind>` / `sec.<id>`).
+fn unit_string(u: Unit) -> String {
+    match u {
+        Unit::Rail => "rail".to_string(),
+        Unit::Card(k) => format!("card.{}", card_token(k)),
+        Unit::Section(s) => format!("sec.{}", section_token(s)),
+    }
+}
+
+/// Parse a persisted unit token, or `None` on an unknown one.
+fn parse_unit(tok: &str) -> Option<Unit> {
+    if tok == "rail" {
+        return Some(Unit::Rail);
+    }
+    let (kind, name) = tok.split_once('.')?;
+    match kind {
+        "card" => card_from_token(name).map(Unit::Card),
+        "sec" => section_from_token(name).map(Unit::Section),
+        _ => None,
+    }
+}
+
+/// A card's stable persisted name.
+fn card_token(k: CardKind) -> &'static str {
+    match k {
+        CardKind::Repository => "repository",
+        CardKind::Models => "models",
+        CardKind::Settings => "settings",
+        CardKind::Capture => "capture",
+        CardKind::Features => "features",
+        CardKind::Activity => "activity",
+    }
+}
+
+/// A card from its persisted name.
+fn card_from_token(name: &str) -> Option<CardKind> {
+    CardKind::ALL
+        .iter()
+        .copied()
+        .find(|k| card_token(*k) == name)
+}
+
+/// A panel's stable persisted name.
+fn section_token(s: SectionId) -> &'static str {
+    match s {
+        SectionId::TokenUsage => "tokens",
+        SectionId::System => "system",
+        SectionId::Recall => "recall",
+    }
+}
+
+/// A panel from its persisted name.
+fn section_from_token(name: &str) -> Option<SectionId> {
+    SectionId::ALL
+        .iter()
+        .copied()
+        .find(|s| section_token(*s) == name)
+}
+
 /// The cards in their default display order, as units.
 #[must_use]
 pub fn default_card_units() -> Vec<Unit> {
@@ -338,6 +445,22 @@ mod tests {
         assert_eq!(m.columns[0].min_width(), MIN_COL1);
         assert_eq!(m.columns[1].min_width(), MIN_COL2);
         assert_eq!(m.columns[2].min_width(), MIN_COL3);
+    }
+
+    #[test]
+    fn codec_round_trips_the_default_and_rejects_garbage() {
+        let m = LayoutModel::default();
+        assert_eq!(LayoutModel::decode(&m.encode()), Some(m));
+        // Malformed / forward-version blobs decode to None (→ caller's default).
+        assert_eq!(LayoutModel::decode("v2;20=rail"), None, "forward version");
+        assert_eq!(LayoutModel::decode("garbage"), None);
+        assert_eq!(LayoutModel::decode("v1;x=rail"), None, "bad weight");
+        assert_eq!(
+            LayoutModel::decode("v1;20=card.bogus"),
+            None,
+            "unknown card"
+        );
+        assert_eq!(LayoutModel::decode("v1"), None, "no columns");
     }
 
     #[test]

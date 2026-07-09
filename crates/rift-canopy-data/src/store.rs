@@ -29,6 +29,15 @@ const TOGGLE_COLS: [&str; 6] = [
     "created_at",
 ];
 
+/// The column order for every `canopy_layout_event` insert (ADR-0035).
+const LAYOUT_COLS: [&str; 5] = [
+    "event_id",
+    "project_id",
+    "layout",
+    "supersedes",
+    "created_at",
+];
+
 /// The column order for every `canopy_project_event` insert (one source of truth).
 const EVENT_COLS: [&str; 9] = [
     "event_id",
@@ -127,6 +136,9 @@ impl CanopyStore {
                 feature,
                 desired,
             } => self.set_toggle(path, feature, *desired, now_ms)?,
+            PersistOp::SetLayout { path, layout } => {
+                self.set_layout(path, layout.as_deref(), now_ms)?;
+            }
         }
         self.projects()
     }
@@ -362,6 +374,60 @@ impl CanopyStore {
             });
         }
         Ok(out)
+    }
+
+    /// Append a per-project layout event (ADR-0035): `layout` is the encoded
+    /// arrangement, `None` a reset — a superseding event either way. A no-op for
+    /// an unknown path (like [`Self::set_toggle`]).
+    fn set_layout(&self, path: &str, layout: Option<&str>, now_ms: i64) -> Result<()> {
+        let Some(project_id) = self.project_id_for(path)? else {
+            return Ok(());
+        };
+        let supersedes = self.latest_layout_event_id(&project_id)?;
+        let event_id = self.ulids.next_ulid().to_hex();
+        let values = [
+            Value::text(event_id),
+            Value::text(&project_id),
+            opt_text_ref(layout),
+            opt_text(supersedes),
+            Value::Int(now_ms),
+        ];
+        let cols: Vec<&str> = LAYOUT_COLS.to_vec();
+        runtime()?.block_on(self.store.insert("canopy_layout_event", &cols, &values))
+    }
+
+    /// The event_id of the latest layout event for a project (for `supersedes`).
+    fn latest_layout_event_id(&self, project_id: &str) -> Result<Option<String>> {
+        let sql = "SELECT event_id FROM canopy_layout_event WHERE project_id = ? \
+                   ORDER BY created_at DESC, event_id DESC LIMIT 1";
+        let rows = runtime()?.block_on(self.store.query(sql, &[Value::text(project_id)]))?;
+        match rows.first() {
+            Some(r) => Ok(Some(r.get_text(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The current saved layout for a project (ADR-0035): the latest event's
+    /// arrangement, or `None` when the project is unknown, has no layout event, or
+    /// its latest event is a reset — the caller then uses `LayoutModel::default`.
+    /// A malformed/forward-version blob decodes to `None` (degrade to default).
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] if the layout log cannot be read.
+    pub fn layout(&self, path: &str) -> Result<Option<rift_canopy::LayoutModel>> {
+        let Some(project_id) = self.project_id_for(path)? else {
+            return Ok(None);
+        };
+        let sql = "SELECT layout FROM canopy_layout_event WHERE project_id = ? \
+                   ORDER BY created_at DESC, event_id DESC LIMIT 1";
+        let rows = runtime()?.block_on(self.store.query(sql, &[Value::text(&project_id)]))?;
+        let Some(r) = rows.first() else {
+            return Ok(None);
+        };
+        match r.get_opt_text(0)? {
+            Some(encoded) => Ok(rift_canopy::LayoutModel::decode(&encoded)),
+            None => Ok(None), // a reset event → the default
+        }
     }
 }
 
@@ -797,6 +863,64 @@ mod tests {
             2,
             "both toggle events are kept (append-only)"
         );
+    }
+
+    #[test]
+    fn set_layout_appends_and_reads_back_the_latest_with_reset() {
+        use rift_canopy::LayoutModel;
+        let (dir, cs) = store();
+        let path = make_dir(dir.path(), "lay");
+        cs.apply(&PersistOp::AddProject { path: path.clone() }, 1)
+            .unwrap();
+        // No layout event yet → the default (loader returns None).
+        assert_eq!(cs.layout(&path).unwrap(), None);
+
+        // Save a rearranged layout (swap the first two columns).
+        let mut m = LayoutModel::default();
+        m.columns.swap(0, 1);
+        cs.apply(
+            &PersistOp::SetLayout {
+                path: path.clone(),
+                layout: Some(m.encode()),
+            },
+            2,
+        )
+        .unwrap();
+        assert_eq!(cs.layout(&path).unwrap(), Some(m));
+
+        // A reset is a NEW superseding event → the reader returns None (default).
+        cs.apply(
+            &PersistOp::SetLayout {
+                path: path.clone(),
+                layout: None,
+            },
+            3,
+        )
+        .unwrap();
+        assert_eq!(
+            cs.layout(&path).unwrap(),
+            None,
+            "reset supersedes to default"
+        );
+
+        // Both events are kept (append-only).
+        let pid = cs.project_id_for(&path).unwrap().unwrap();
+        assert!(cs.latest_layout_event_id(&pid).unwrap().is_some());
+    }
+
+    #[test]
+    fn layout_for_unknown_path_is_a_noop() {
+        let (dir, cs) = store();
+        let ghost = dir.path().join("ghost").to_string_lossy().into_owned();
+        cs.apply(
+            &PersistOp::SetLayout {
+                path: ghost.clone(),
+                layout: Some("v1;20=rail".into()),
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(cs.layout(&ghost).unwrap(), None);
     }
 
     #[test]

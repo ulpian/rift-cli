@@ -94,7 +94,7 @@ pub fn prime_startup(state: &AppState, req_sink: &mut dyn FnMut(DataRequest)) {
 /// # Errors
 /// [`rift_core::RiftError`] on a terminal present/read failure.
 #[allow(clippy::too_many_arguments)] // ADR-0011: every host dependency is one explicit seam
-pub fn event_loop<F, R>(
+pub fn event_loop<F, R, L>(
     backend: &mut dyn RenderBackend,
     src: &mut dyn EventSource,
     state: &mut AppState,
@@ -103,16 +103,21 @@ pub fn event_loop<F, R>(
     manager: &mut dyn FeatureManager,
     dispatcher: &mut dyn CommandDispatcher,
     reload: &mut R,
+    layout_loader: &mut L,
 ) -> RiftResult<()>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
     R: FnMut() -> RiftResult<Vec<Project>>,
+    L: FnMut(&str) -> RiftResult<Option<crate::layout_model::LayoutModel>>,
 {
     // Launch is live by construction: the prime runs at the loop seam, BEFORE
     // the first poll, so the bus computes feeds for the initial selection with
     // zero key events (M5-02 — the M4 blind spot was a subscribe only the
     // headless vehicle ever sent).
     prime_startup(state, req_sink);
+    // Load the initially-selected project's saved layout (ADR-0035), so a
+    // rearranged dashboard is restored on launch, before the first frame.
+    load_project_layout(state, layout_loader)?;
     let mut last = Instant::now();
     loop {
         render_if_dirty(backend, state)?;
@@ -149,8 +154,15 @@ where
                     // posture; user-initiated).
                     let pending = std::mem::take(&mut effects.dispatches);
                     let actions = std::mem::take(&mut effects.feature_actions);
+                    let load = effects.load_layout.take();
                     if !effects.is_empty() {
                         apply_effects(effects, state, on_persist, req_sink, manager);
+                    }
+                    // A selection change loads the new project's saved layout
+                    // (ADR-0035) — through the injected loader, applied to state.
+                    if let Some(path) = load {
+                        let m = layout_loader(&path)?.unwrap_or_default();
+                        state.set_layout(m);
                     }
                     for action in actions {
                         run_feature_action(backend, state, manager, req_sink, action)?;
@@ -216,6 +228,20 @@ fn run_feature_action(
         }
     }
     state.dirty = true;
+    Ok(())
+}
+
+/// Load and apply the currently-selected project's saved layout (ADR-0035)
+/// through the injected loader. No selection ⇒ nothing to load. A missing/reset
+/// layout applies the default (the loader returns `None`).
+fn load_project_layout<L>(state: &mut AppState, layout_loader: &mut L) -> RiftResult<()>
+where
+    L: FnMut(&str) -> RiftResult<Option<crate::layout_model::LayoutModel>>,
+{
+    if let Some(path) = state.app.selected_project().map(|p| p.path.clone()) {
+        let m = layout_loader(&path)?.unwrap_or_default();
+        state.set_layout(m);
+    }
     Ok(())
 }
 
@@ -345,6 +371,13 @@ fn persist_status(op: &PersistOp) -> String {
         PersistOp::SetToggle {
             feature, desired, ..
         } => format!("{feature}: {}", if *desired { "on" } else { "off" }),
+        PersistOp::SetLayout { layout, .. } => {
+            if layout.is_some() {
+                "saved layout".to_string()
+            } else {
+                "reset layout".to_string()
+            }
+        }
     }
 }
 
@@ -473,6 +506,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         );
 
         assert_eq!(
@@ -551,6 +585,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut dispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         assert_eq!(dispatcher.calls.len(), 1, "one dispatch crossed the seam");
@@ -602,6 +637,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut dispatcher,
             &mut reload,
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         assert_eq!(dispatcher.calls.len(), 1);
@@ -629,6 +665,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut dispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         assert!(dispatcher.calls.is_empty(), "cancel dispatches nothing");
@@ -649,6 +686,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         );
         assert!(r.is_ok());
         assert!(state.app.quit);
@@ -690,6 +728,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         // initial + one per batch (2 batches) = 3 presents.
@@ -711,6 +750,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         // initial render + render after the quit key = 2; the idle tick added none.
@@ -759,6 +799,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         // Before any tween, the loop polls at the idle cadence…
@@ -797,6 +838,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         assert!(
@@ -823,6 +865,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         assert_eq!(state.size, Size::new(120, 40));
@@ -863,6 +906,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         assert_eq!(seen, vec!["/tmp/x".to_string()]);
@@ -919,6 +963,7 @@ mod tests {
             &mut FailingManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         // M5-12 (ADR-0013): the RESULT drives the row — Failed-with-reason
@@ -969,6 +1014,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
+            &mut |_: &str| Ok(None),
         )
         .unwrap();
         assert!(state.app.feature_runtime.is_empty(), "transient cleared");
