@@ -39,6 +39,22 @@ impl Unit {
             Unit::Section(_) => MIN_COL3,
         }
     }
+
+    /// This unit's stack sizing (weight, min-rows, priority) — so a mixed column
+    /// stacks the rail, cards, and panels through the one shared solver. The rail
+    /// holds out longest and fills a column it shares.
+    #[must_use]
+    pub fn stack_spec(self) -> crate::stack::Spec {
+        match self {
+            Unit::Rail => crate::stack::Spec {
+                weight: 3,
+                min_rows: 3,
+                priority: crate::stack::Priority::High,
+            },
+            Unit::Card(k) => crate::cards::card_spec(k),
+            Unit::Section(s) => crate::col3::section_spec(s),
+        }
+    }
 }
 
 /// The role a (homogeneous) column plays, derived from its units — the M5.8
@@ -46,12 +62,15 @@ impl Unit {
 /// columns (a card dragged among panels) arrive with the M5.9 per-unit path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnRole {
-    /// Hosts the projects rail.
+    /// Exactly the projects rail.
     Rail,
-    /// Hosts column-2 cards.
+    /// All column-2 cards (renders via the card stack).
     Cards,
-    /// Hosts column-3 panels.
+    /// All column-3 panels (renders via the panel stack).
     Sections,
+    /// A heterogeneous mix (a card among panels, the rail among others) — the
+    /// per-unit path after a cross-column move (ADR-0034).
+    Mixed,
     /// No units (renders zero-wide).
     Empty,
 }
@@ -77,16 +96,87 @@ impl Column {
     /// The column's dispatch role, derived from its units.
     #[must_use]
     pub fn role(&self) -> ColumnRole {
-        if self.units.is_empty() {
-            ColumnRole::Empty
-        } else if self.units.iter().any(|u| matches!(u, Unit::Rail)) {
-            ColumnRole::Rail
-        } else if self.units.iter().all(|u| matches!(u, Unit::Section(_))) {
-            ColumnRole::Sections
-        } else {
-            ColumnRole::Cards
-        }
+        role_of(&self.units)
     }
+
+    /// This column's cards in order (empty unless it is an all-cards column).
+    #[must_use]
+    pub fn card_kinds(&self) -> Vec<CardKind> {
+        self.units
+            .iter()
+            .filter_map(|u| match u {
+                Unit::Card(k) => Some(*k),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// This column's panels in order (empty unless it is an all-panels column).
+    #[must_use]
+    pub fn section_ids(&self) -> Vec<SectionId> {
+        self.units
+            .iter()
+            .filter_map(|u| match u {
+                Unit::Section(s) => Some(*s),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The dispatch role of an ordered unit slice.
+#[must_use]
+pub fn role_of(units: &[Unit]) -> ColumnRole {
+    if units.is_empty() {
+        ColumnRole::Empty
+    } else if units == [Unit::Rail] {
+        ColumnRole::Rail
+    } else if units.iter().all(|u| matches!(u, Unit::Card(_))) {
+        ColumnRole::Cards
+    } else if units.iter().all(|u| matches!(u, Unit::Section(_))) {
+        ColumnRole::Sections
+    } else {
+        ColumnRole::Mixed
+    }
+}
+
+/// One solved unit slot within a (mixed) column: which unit, its rect, and
+/// whether it collapsed — the per-unit analogue of a card/section slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnitSlot {
+    /// The unit.
+    pub unit: Unit,
+    /// Its rect within the column.
+    pub rect: Rect,
+    /// Collapsed to a one-line headline.
+    pub collapsed: bool,
+}
+
+/// Solve a heterogeneous column of `units` over `area` with a scroll `offset`,
+/// stacking them through the shared [`crate::stack`] solver (each unit sized by
+/// its [`Unit::stack_spec`]). Returns the visible slots and the largest in-range
+/// offset. Used for a mixed column (a card among panels) after a cross-column
+/// move (ADR-0034); the homogeneous card/panel stacks keep their own solvers.
+#[must_use]
+pub fn solve_column(units: &[Unit], area: Rect, offset: usize) -> (Vec<UnitSlot>, usize) {
+    let specs: Vec<crate::stack::Spec> = units.iter().map(|u| u.stack_spec()).collect();
+    let (slots, max_scroll) = crate::stack::solve_windowed(&specs, area.h, offset);
+    let out = slots
+        .into_iter()
+        .filter_map(|slot| {
+            units.get(slot.index).map(|unit| UnitSlot {
+                unit: *unit,
+                rect: Rect {
+                    x: area.x,
+                    y: area.y + slot.y,
+                    w: area.w,
+                    h: slot.rows,
+                },
+                collapsed: slot.collapsed,
+            })
+        })
+        .collect();
+    (out, max_scroll)
 }
 
 /// The whole arrangement: ordered columns (left to right). "Reorder whole
@@ -149,11 +239,31 @@ impl SolvedColumn {
     /// The column's dispatch role.
     #[must_use]
     pub fn role(&self) -> ColumnRole {
-        Column {
-            weight: 1,
-            units: self.units.clone(),
-        }
-        .role()
+        role_of(&self.units)
+    }
+
+    /// This column's cards in order (for the [`ColumnRole::Cards`] path).
+    #[must_use]
+    pub fn card_kinds(&self) -> Vec<CardKind> {
+        self.units
+            .iter()
+            .filter_map(|u| match u {
+                Unit::Card(k) => Some(*k),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// This column's panels in order (for the [`ColumnRole::Sections`] path).
+    #[must_use]
+    pub fn section_ids(&self) -> Vec<SectionId> {
+        self.units
+            .iter()
+            .filter_map(|u| match u {
+                Unit::Section(s) => Some(*s),
+                _ => None,
+            })
+            .collect()
     }
 }
 

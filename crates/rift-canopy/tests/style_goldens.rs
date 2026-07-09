@@ -262,6 +262,7 @@ fn system_panel(caps: Capabilities, w: u16, h: u16) -> Frame {
     let unicode = caps.contains(Capabilities::UNICODE);
     rift_canopy::col3::draw(
         &col3,
+        &rift_canopy::col3::SectionId::ALL,
         false,
         unicode,
         rift_canopy::layout::Rect { x: 0, y: 0, w, h },
@@ -302,6 +303,7 @@ fn donut_unknown_model_shows_no_percentage() {
     let mut b = TierBackend { caps: sub };
     rift_canopy::col3::draw(
         &col3,
+        &rift_canopy::col3::SectionId::ALL,
         false,
         true,
         rift_canopy::layout::Rect {

@@ -109,6 +109,21 @@ pub const SECTIONS: [SectionSpec; 3] = [
     },
 ];
 
+/// A section's stack sizing as a generic [`crate::stack::Spec`] — the single
+/// source, so a data-driven column (ADR-0033) sizes each panel exactly as the
+/// fixed stack did.
+#[must_use]
+pub fn section_spec(id: SectionId) -> crate::stack::Spec {
+    SECTIONS.iter().find(|s| s.id == id).map_or(
+        crate::stack::Spec {
+            weight: 1,
+            min_rows: 3,
+            priority: crate::stack::Priority::Medium,
+        },
+        |s| s.to_stack(),
+    )
+}
+
 /// One solved slot: where a section renders and whether it collapsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SectionSlot {
@@ -129,13 +144,13 @@ pub struct SectionSlot {
 /// `height` render collapsed and the tail drops. Maps the generic index slots
 /// back onto the fixed [`SectionId`] order.
 #[must_use]
-pub fn solve_stack(height: u16) -> Vec<SectionSlot> {
-    let specs: Vec<crate::stack::Spec> = SECTIONS.iter().map(|s| s.to_stack()).collect();
+pub fn solve_stack(ids: &[SectionId], height: u16) -> Vec<SectionSlot> {
+    let specs: Vec<crate::stack::Spec> = ids.iter().map(|id| section_spec(*id)).collect();
     crate::stack::solve(&specs, height)
         .into_iter()
         .filter_map(|slot| {
-            SECTIONS.get(slot.index).map(|spec| SectionSlot {
-                id: spec.id,
+            ids.get(slot.index).map(|id| SectionSlot {
+                id: *id,
                 y: slot.y,
                 rows: slot.rows,
                 collapsed: slot.collapsed,
@@ -144,15 +159,13 @@ pub fn solve_stack(height: u16) -> Vec<SectionSlot> {
         .collect()
 }
 
-/// The panel stack's **fully-expanded** height (every panel at its `min_rows`,
-/// none collapsed) — the content length the graphs viewport scrolls over
-/// (ADR-0031). When the column is shorter than this, `scroll.graphs` moves the
-/// window through the expanded panels instead of collapsing them.
+/// The panel stack's **fully-expanded** height for `ids` (every panel at its
+/// `min_rows`, none collapsed) — the content length the graphs viewport scrolls
+/// over (ADR-0031).
 #[must_use]
-pub fn content_rows() -> u16 {
-    SECTIONS
-        .iter()
-        .map(|s| s.min_rows)
+pub fn content_rows(ids: &[SectionId]) -> u16 {
+    ids.iter()
+        .map(|id| section_spec(*id).min_rows)
         .fold(0, u16::saturating_add)
 }
 
@@ -160,8 +173,8 @@ pub fn content_rows() -> u16 {
 /// when the expanded panels fit, else the overflow. Content-aware clamping reads
 /// this so the offset can never scroll past the end.
 #[must_use]
-pub fn max_scroll(height: u16) -> usize {
-    usize::from(content_rows().saturating_sub(height))
+pub fn max_scroll(ids: &[SectionId], height: u16) -> usize {
+    usize::from(content_rows(ids).saturating_sub(height))
 }
 
 // --- the section view-models (filled by the data plane) ---------------------
@@ -487,6 +500,7 @@ pub fn fmt_km(v: f64) -> String {
 /// and safe at any size.
 pub fn draw(
     col3: &Col3,
+    ids: &[SectionId],
     focused: bool,
     unicode: bool,
     area: Rect,
@@ -494,11 +508,11 @@ pub fn draw(
     backend: &mut dyn RenderBackend,
     frame: &mut Frame,
 ) {
-    let content_h = content_rows();
+    let content_h = content_rows(ids);
     if content_h <= area.h || area.w == 0 || area.h == 0 {
         // The expanded panels fit: solve at the column height (surplus spreads),
         // draw straight in. `scroll.graphs` clamps to 0 — nothing to scroll.
-        draw_stack(col3, focused, unicode, area, backend, frame);
+        draw_stack(col3, ids, focused, unicode, area, backend, frame);
         return;
     }
     // Overflow (ADR-0031): render the fully-expanded stack into a scratch frame,
@@ -507,6 +521,7 @@ pub fn draw(
     let mut scratch = Frame::new(crate::render::frame::Size::new(area.w, content_h));
     draw_stack(
         col3,
+        ids,
         focused,
         unicode,
         scratch.rect(),
@@ -517,57 +532,65 @@ pub fn draw(
     frame.blit_window(&scratch, area, off);
 }
 
-/// Draw the three panels straight into `area` at the solver's sizing (the
-/// non-scrolled path; also the scratch-frame body for the scrolled path). Solving
-/// at `area.h` = [`content_rows`] expands every panel to its `min_rows`.
+/// Draw the `ids` panels straight into `area` at the solver's sizing (the
+/// non-scrolled path; also the scratch-frame body for the scrolled path).
 fn draw_stack(
     col3: &Col3,
+    ids: &[SectionId],
     focused: bool,
     unicode: bool,
     area: Rect,
     backend: &mut dyn RenderBackend,
     frame: &mut Frame,
 ) {
-    let theme = Theme::rift_dark();
-    for slot in solve_stack(area.h) {
+    for slot in solve_stack(ids, area.h) {
         let rect = Rect {
             x: area.x,
             y: area.y + slot.y,
             w: area.w,
             h: slot.rows,
         };
-        if rect.h == 0 || rect.w == 0 {
-            continue;
+        draw_one(
+            col3,
+            slot.id,
+            focused,
+            unicode,
+            slot.collapsed,
+            rect,
+            backend,
+            frame,
+        );
+    }
+}
+
+/// Draw one panel into `rect` — the per-unit dispatch a mixed column (a panel
+/// among cards, ADR-0034) shares with the homogeneous panel stack.
+pub fn draw_one(
+    col3: &Col3,
+    id: SectionId,
+    focused: bool,
+    unicode: bool,
+    collapsed: bool,
+    rect: Rect,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+) {
+    if rect.h == 0 || rect.w == 0 {
+        return;
+    }
+    let theme = Theme::rift_dark();
+    match id {
+        SectionId::TokenUsage => {
+            draw_token_panel(
+                col3, theme, focused, unicode, collapsed, rect, backend, frame,
+            );
         }
-        match slot.id {
-            SectionId::TokenUsage => {
-                draw_token_panel(
-                    col3,
-                    theme,
-                    focused,
-                    unicode,
-                    slot.collapsed,
-                    rect,
-                    backend,
-                    frame,
-                );
-            }
-            SectionId::System => {
-                draw_system_panel(
-                    col3,
-                    theme,
-                    focused,
-                    unicode,
-                    slot.collapsed,
-                    rect,
-                    backend,
-                    frame,
-                );
-            }
-            SectionId::Recall => {
-                draw_recall_panel(col3, theme, focused, slot.collapsed, rect, frame);
-            }
+        SectionId::System => {
+            draw_system_panel(
+                col3, theme, focused, unicode, collapsed, rect, backend, frame,
+            );
         }
+        SectionId::Recall => draw_recall_panel(col3, theme, focused, collapsed, rect, frame),
     }
 }
 
@@ -1013,14 +1036,32 @@ mod tests {
     fn draw_to(col3: &Col3, w: u16, h: u16) -> Frame {
         let mut f = Frame::new(Size::new(w, h));
         let mut b = AsciiBackend::new(Capabilities::empty());
-        draw(col3, false, false, f.rect(), 0, &mut b, &mut f);
+        draw(
+            col3,
+            &SectionId::ALL,
+            false,
+            false,
+            f.rect(),
+            0,
+            &mut b,
+            &mut f,
+        );
         f
     }
 
     fn draw_at(col3: &Col3, w: u16, h: u16, offset: usize) -> Frame {
         let mut f = Frame::new(Size::new(w, h));
         let mut b = AsciiBackend::new(Capabilities::empty());
-        draw(col3, false, false, f.rect(), offset, &mut b, &mut f);
+        draw(
+            col3,
+            &SectionId::ALL,
+            false,
+            false,
+            f.rect(),
+            offset,
+            &mut b,
+            &mut f,
+        );
         f
     }
 
@@ -1055,7 +1096,7 @@ mod tests {
             ..Col3::default()
         };
         assert!(
-            content_rows() > 12,
+            content_rows(&SectionId::ALL) > 12,
             "the fixture stack overflows a 12-row column"
         );
         let top = text_of(&draw_at(&col3, 34, 12, 0));
@@ -1065,8 +1106,8 @@ mod tests {
         let fit_a = text_of(&draw_at(&col3, 34, 24, 0));
         let fit_b = text_of(&draw_at(&col3, 34, 24, 5));
         assert_eq!(fit_a, fit_b, "a fitting column has nothing to scroll");
-        assert_eq!(max_scroll(24), 0);
-        assert!(max_scroll(12) > 0);
+        assert_eq!(max_scroll(&SectionId::ALL, 24), 0);
+        assert!(max_scroll(&SectionId::ALL, 12) > 0);
     }
 
     #[test]
@@ -1080,7 +1121,7 @@ mod tests {
 
     #[test]
     fn tall_column_expands_all_three_panels() {
-        let slots = solve_stack(40);
+        let slots = solve_stack(&SectionId::ALL, 40);
         assert_eq!(slots.len(), 3);
         assert!(slots.iter().all(|s| !s.collapsed));
         let mut y = 0;
@@ -1094,7 +1135,7 @@ mod tests {
     #[test]
     fn short_column_collapses_recall_first_then_none_disappears() {
         // Recall is Medium (folds before the two High panels).
-        let slots = solve_stack(18);
+        let slots = solve_stack(&SectionId::ALL, 18);
         assert_eq!(slots.len(), 3, "every panel keeps a slot");
         let recall = slots.iter().find(|s| s.id == SectionId::Recall).unwrap();
         assert!(recall.collapsed, "recall folds first under pressure");
@@ -1106,7 +1147,7 @@ mod tests {
 
     #[test]
     fn zero_height_is_empty() {
-        assert!(solve_stack(0).is_empty());
+        assert!(solve_stack(&SectionId::ALL, 0).is_empty());
     }
 
     #[test]

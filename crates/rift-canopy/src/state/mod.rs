@@ -836,27 +836,91 @@ fn selection_change_effects(s: &mut AppState, before: &Option<String>) -> Vec<Da
 
 /// Handle a mouse event by hit-testing it against the current view and mapping
 /// the target onto the **same** state changes the keyboard produces. Only left
-/// presses and the scroll wheel act; moves/drags/releases are ignored (no
-/// per-move work, keeping the ~0% CPU idle). While the splash is up, any click
-/// dismisses it and is otherwise swallowed (mirrors the key path).
+/// presses and the scroll wheel act in normal use; moves/drags/releases are
+/// ignored (no per-move work, keeping the ~0% CPU idle). The **one** exception
+/// (ADR-0034): while panel-editor mode holds a live drag, `Drag`/`Up` move and
+/// drop the grabbed unit — scoped so normal-mode idle is byte-identical. While
+/// the splash is up, any click dismisses it and is otherwise swallowed.
 fn on_mouse(s: &mut AppState, m: MouseInput) -> Flow {
     if !s.app.splash.done() {
         s.app.splash.skip();
         return Flow::Continue(Effects::default());
     }
+    let editing_drag = s.app.mode == Mode::PanelEditor && s.app.editor.drag.is_some();
     let vm = s.snapshot();
     match m.kind {
         MouseKind::Down(MouseButton::Left) => match hit_test(&vm, m.col, m.row) {
             Some(target) => apply_click(s, target),
             None => Flow::Continue(Effects::default()),
         },
+        // The scoped drag exception: only while a pickup/divider drag is live.
+        MouseKind::Drag(MouseButton::Left) if editing_drag => drag_update(s, &vm, m),
+        MouseKind::Up(MouseButton::Left) if editing_drag => drop_drag(s),
         MouseKind::ScrollUp | MouseKind::ScrollDown => {
             let down = matches!(m.kind, MouseKind::ScrollDown);
             apply_scroll(s, &vm, m.col, m.row, down)
         }
-        // Right/middle presses, drags, moves and releases don't drive the UI.
+        // Right/middle presses, moves, and drags/releases outside an edit-mode
+        // drag don't drive the UI (the idle invariant holds in normal mode).
         _ => Flow::Continue(Effects::default()),
     }
+}
+
+/// Advance a live editor drag toward the pointer (ADR-0034): a unit drag moves
+/// its hover cursor to the grip under the pointer; a divider drag resizes one
+/// step toward the pointer. Dirties only on a real change.
+fn drag_update(s: &mut AppState, vm: &ViewModel, m: MouseInput) -> Flow {
+    match s.app.editor.drag {
+        Some(crate::editor::Drag::Unit(_)) => {
+            if let Some(Target::GripBar(h)) = hit_test(vm, m.col, m.row) {
+                if s.app.editor.cursor != h {
+                    s.app.editor.cursor = h;
+                    s.dirty = true;
+                }
+            }
+        }
+        Some(crate::editor::Drag::Divider(i)) => {
+            // Resize toward the pointer: compare it to the divider's current x.
+            let body = crate::layout::Rect {
+                x: 0,
+                y: 1,
+                w: s.size.w,
+                h: s.size.h.saturating_sub(1),
+            };
+            let sl = crate::layout_model::solve_model(&s.app.layout, body);
+            if let Some(colr) = sl.columns.get(i) {
+                let divider_x = colr.rect.x + colr.rect.w.saturating_sub(1);
+                let cur = crate::editor::Cursor { col: i, unit: 0 };
+                let saved = s.app.editor.cursor;
+                s.app.editor.cursor = cur;
+                if m.col > divider_x {
+                    crate::editor::resize(&s.app.editor, &mut s.app.layout, true);
+                    s.dirty = true;
+                } else if m.col < divider_x {
+                    crate::editor::resize(&s.app.editor, &mut s.app.layout, false);
+                    s.dirty = true;
+                }
+                s.app.editor.cursor = saved;
+                s.app.editor.cursor.col = i;
+            }
+        }
+        None => {}
+    }
+    Flow::Continue(Effects::default())
+}
+
+/// Release a live editor drag (ADR-0034): a unit drag drops the grabbed unit at
+/// its hover cursor (conserving the multiset); a divider drag just ends. Clears
+/// the drag and the pickup. Persistence of the new layout lands in W4/W5.
+fn drop_drag(s: &mut AppState) -> Flow {
+    if let Some(crate::editor::Drag::Unit(src)) = s.app.editor.drag {
+        let dst = s.app.editor.cursor;
+        s.app.editor.cursor = crate::editor::drop_unit(&mut s.app.layout, src, dst.col, dst.unit);
+    }
+    s.app.editor.picked = false;
+    s.app.editor.drag = None;
+    s.dirty = true;
+    Flow::Continue(Effects::default())
 }
 
 /// Apply a left-click target: focus panels, select a project, flip a toggle, or
@@ -1012,6 +1076,25 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             Flow::Continue(Effects::default())
         }
         Target::HeaderQuit => Flow::Quit,
+        // A grip press (ADR-0034) begins a unit drag: pick the unit up and arm the
+        // drag, which `drag_update`/`drop_drag` carry to the release. The keyboard
+        // (pick/move/drop) is the equivalent path.
+        Target::GripBar(c) => {
+            s.app.editor.cursor = c;
+            s.app.editor.clamp(&s.app.layout);
+            s.app.editor.picked = true;
+            s.app.editor.drag = Some(crate::editor::Drag::Unit(c));
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
+        // A divider press begins a resize drag toward the pointer.
+        Target::ColumnDivider(i) => {
+            s.app.editor.cursor.col = i;
+            s.app.editor.clamp(&s.app.layout);
+            s.app.editor.drag = Some(crate::editor::Drag::Divider(i));
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
     }
 }
 
@@ -1067,7 +1150,9 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             | Target::RailAdd
             | Target::RailReorderUp
             | Target::RailReorderDown
-            | Target::RailRemove,
+            | Target::RailRemove
+            | Target::GripBar(_)
+            | Target::ColumnDivider(_),
         )
         | None => return Flow::Continue(Effects::default()),
     };
@@ -1554,6 +1639,62 @@ mod tests {
         s
     }
 
+    /// A left mouse event of `kind` at `(col,row)`.
+    fn mouse(kind: MouseKind, col: u16, row: u16) -> Event {
+        Event::Mouse(MouseInput { kind, col, row })
+    }
+
+    #[test]
+    fn normal_mode_drag_and_up_are_inert_and_do_not_dirty() {
+        // The ~0% idle invariant (ADR-0034): outside panel-editor mode, Drag and
+        // Up produce the empty effect and never dirty — byte-identical to before.
+        let mut s = ready(vec![project("a")]);
+        for kind in [
+            MouseKind::Drag(MouseButton::Left),
+            MouseKind::Up(MouseButton::Left),
+            MouseKind::Moved,
+        ] {
+            s.dirty = false;
+            let flow = update(&mut s, mouse(kind, 30, 10));
+            assert!(matches!(flow, Flow::Continue(e) if e.is_empty()));
+            assert!(!s.dirty, "{kind:?} in normal mode must not dirty");
+        }
+    }
+
+    #[test]
+    fn edit_mode_drag_without_a_live_pickup_is_inert() {
+        // In panel-editor mode but with no drag armed, Drag/Up are still inert.
+        let mut s = ready(vec![project("a")]);
+        crate::input::enter_panel_editor(&mut s.app);
+        s.dirty = false;
+        let flow = update(&mut s, mouse(MouseKind::Drag(MouseButton::Left), 30, 10));
+        assert!(matches!(flow, Flow::Continue(e) if e.is_empty()));
+        assert!(!s.dirty, "an edit-mode drag with no pickup must not dirty");
+    }
+
+    #[test]
+    fn a_grip_press_drag_release_moves_a_unit_and_conserves_the_multiset() {
+        let mut s = ready(vec![project("a")]);
+        crate::input::enter_panel_editor(&mut s.app);
+        // Press a grip → a live unit drag is armed and the unit is picked up.
+        let _ = apply_click(
+            &mut s,
+            Target::GripBar(crate::editor::Cursor { col: 1, unit: 0 }),
+        );
+        assert!(s.app.editor.picked);
+        assert!(matches!(
+            s.app.editor.drag,
+            Some(crate::editor::Drag::Unit(_))
+        ));
+        // Drag onto a different grip in the same column, then release → the unit
+        // moved and the set is conserved.
+        s.app.editor.cursor = crate::editor::Cursor { col: 1, unit: 2 };
+        let _ = update(&mut s, mouse(MouseKind::Up(MouseButton::Left), 40, 10));
+        assert!(s.app.editor.drag.is_none());
+        assert!(!s.app.editor.picked);
+        assert!(crate::editor::is_conserved(&s.app.layout));
+    }
+
     #[test]
     fn resize_sets_size_and_dirty() {
         let mut s = ready(vec![]);
@@ -1577,7 +1718,7 @@ mod tests {
             update(&mut s, Event::Resize(Size::new(w, h)));
             // Bounded by the fully-expanded content (never the raw pre-value).
             proptest::prop_assert!(
-                s.app.scroll.graphs <= usize::from(crate::col3::content_rows())
+                s.app.scroll.graphs <= usize::from(crate::col3::content_rows(&crate::col3::SectionId::ALL))
             );
             // Idempotent: already in range, so a second clamp is a no-op.
             let (g, d) = (s.app.scroll.graphs, s.app.scroll.detail);

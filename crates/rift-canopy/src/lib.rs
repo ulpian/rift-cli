@@ -462,13 +462,20 @@ impl App {
                 return;
             }
         };
+        // Clamp against the default card/panel lists — the scroll bounds are the
+        // count/rows, invariant under reordering (a cross-column move can only
+        // shrink a column, so the default over-estimate stays a safe ceiling; the
+        // solver re-clamps the offset when it draws).
         self.scroll.detail = self
             .scroll
             .detail
-            .min(crate::cards::solve_scrolled(col2, 0).1);
+            .min(crate::cards::solve_scrolled(&crate::cards::CardKind::ALL, col2, 0).1);
         // Graphs scroll over the fully-expanded panels (ADR-0031): the overflow
         // of the expanded content past the column height.
-        self.scroll.graphs = self.scroll.graphs.min(crate::col3::max_scroll(col3.h));
+        self.scroll.graphs = self.scroll.graphs.min(crate::col3::max_scroll(
+            &crate::col3::SectionId::ALL,
+            col3.h,
+        ));
     }
 
     /// Move the column-2 feature-toggle cursor down/up, clamped to the six toggles.

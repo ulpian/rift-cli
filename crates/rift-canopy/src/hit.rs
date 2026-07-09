@@ -81,6 +81,12 @@ pub enum Target {
     HeaderEditor,
     /// The header's `q` action — quit the dashboard.
     HeaderQuit,
+    /// A unit's grip in panel-editor mode (ADR-0034): a press picks it up / drops
+    /// it. Carries the unit's `(column, unit)` cursor so the drop knows the source.
+    GripBar(crate::editor::Cursor),
+    /// A column divider in panel-editor mode: a drag resizes it. Carries the index
+    /// of the column to its left.
+    ColumnDivider(usize),
 }
 
 impl Target {
@@ -166,6 +172,11 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
             return Some(Target::PanelFocus(Panel::Command));
         }
     }
+    // Panel-editor mode owns the full grid's clicks: grips pick up units, dividers
+    // resize (ADR-0034). Editing is Full3Col-only; the narrow tiers stay normal.
+    if vm.mode == crate::input::Mode::PanelEditor && choose_mode(size) == LayoutMode::Full3Col {
+        return hit_editor(vm, body, col, row);
+    }
     match choose_mode(size) {
         // The full grid is data-driven (ADR-0033): hit-test the *same*
         // `solve_model` output the renderer draws, so pixels equal targets for
@@ -180,6 +191,61 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
         LayoutMode::SinglePanel => hit_single(vm, body, col, row),
         LayoutMode::TooSmall => None,
     }
+}
+
+/// Hit-test a mixed column (post cross-column move, ADR-0034): resolve the click
+/// to the panel of the unit under it — the same `solve_column` geometry the
+/// renderer uses. Coarse focus; per-toggle precision in a mixed column is not a
+/// first-cut requirement.
+fn hit_mixed(units: &[crate::layout_model::Unit], rect: Rect, col: u16, row: u16) -> Target {
+    use crate::layout_model::Unit;
+    let (slots, _) = crate::layout_model::solve_column(units, rect, 0);
+    for slot in &slots {
+        if contains(slot.rect, col, row) {
+            return match slot.unit {
+                Unit::Rail => Target::PanelFocus(Panel::Projects),
+                Unit::Card(_) => Target::PanelFocus(Panel::Detail),
+                Unit::Section(id) => Target::Section(id),
+            };
+        }
+    }
+    Target::PanelFocus(Panel::Detail)
+}
+
+/// Hit-test the panel editor (ADR-0034): a column divider (right border), then a
+/// unit grip (its top border row), computed from the same `solve_model` /
+/// `solve_column` the grip renderer uses — so a grip's drawn cells and its click
+/// region are the same (pixels == targets). A click elsewhere is inert.
+fn hit_editor(vm: &ViewModel, body: Rect, col: u16, row: u16) -> Option<Target> {
+    let sl = crate::layout_model::solve_model(&vm.layout, body);
+    if contains(sl.command, col, row) {
+        return Some(Target::CommandBar);
+    }
+    for (ci, scol) in sl.columns.iter().enumerate() {
+        // The right divider (shared border) resizes; checked before the body so a
+        // click on the seam grabs the divider, not the column.
+        if ci + 1 < sl.columns.len() && scol.rect.w > 0 {
+            let x = scol.rect.x + scol.rect.w - 1;
+            if col == x && row >= scol.rect.y && row < scol.rect.y.saturating_add(scol.rect.h) {
+                return Some(Target::ColumnDivider(ci));
+            }
+        }
+        if !contains(scol.rect, col, row) {
+            continue;
+        }
+        let (slots, _) = crate::layout_model::solve_column(&scol.units, scol.rect, 0);
+        for (ui, slot) in slots.iter().enumerate() {
+            // The grip is the unit's whole top border row (generous + usable).
+            if row == slot.rect.y
+                && col >= slot.rect.x
+                && col < slot.rect.x.saturating_add(slot.rect.w)
+            {
+                return Some(Target::GripBar(crate::editor::Cursor { col: ci, unit: ui }));
+            }
+        }
+        return Some(Target::PanelFocus(Panel::Detail));
+    }
+    None
 }
 
 /// Hit-test the data-driven full grid: the command row, then each physical
@@ -198,17 +264,22 @@ fn hit_model(
         if !contains(scol.rect, col, row) {
             continue;
         }
+        use crate::layout_model::ColumnRole;
         return match scol.role() {
-            crate::layout_model::ColumnRole::Rail => {
-                Some(project_or_focus(vm, scol.rect, col, row))
-            }
-            crate::layout_model::ColumnRole::Cards => {
-                Some(toggle_or_focus(vm, scol.rect, col, row))
-            }
-            crate::layout_model::ColumnRole::Sections => {
-                Some(section_or_focus(scol.rect, vm.graphs_scroll, col, row))
-            }
-            crate::layout_model::ColumnRole::Empty => None,
+            ColumnRole::Rail => Some(project_or_focus(vm, scol.rect, col, row)),
+            ColumnRole::Cards => Some(toggle_or_focus(vm, &scol.card_kinds(), scol.rect, col, row)),
+            ColumnRole::Sections => Some(section_or_focus(
+                &scol.section_ids(),
+                scol.rect,
+                vm.graphs_scroll,
+                col,
+                row,
+            )),
+            // A mixed column (post cross-column move): resolve to the panel the
+            // unit under the click belongs to (coarse focus; per-toggle precision
+            // in a mixed column is not needed for the first cut).
+            ColumnRole::Mixed => Some(hit_mixed(&scol.units, scol.rect, col, row)),
+            ColumnRole::Empty => None,
         };
     }
     None
@@ -289,10 +360,16 @@ fn hit_grid(vm: &ViewModel, r: PanelRects, col: u16, row: u16) -> Option<Target>
         return Some(project_or_focus(vm, r.col1, col, row));
     }
     if contains(r.col2, col, row) {
-        return Some(toggle_or_focus(vm, r.col2, col, row));
+        return Some(toggle_or_focus(vm, &CardKind::ALL, r.col2, col, row));
     }
     if contains(r.col3, col, row) {
-        return Some(section_or_focus(r.col3, vm.graphs_scroll, col, row));
+        return Some(section_or_focus(
+            &col3::SectionId::ALL,
+            r.col3,
+            vm.graphs_scroll,
+            col,
+            row,
+        ));
     }
     None
 }
@@ -308,8 +385,10 @@ fn hit_single(vm: &ViewModel, body: Rect, col: u16, row: u16) -> Option<Target> 
     }
     if contains(panel, col, row) {
         return Some(match vm.focus {
-            Panel::Detail => toggle_or_focus(vm, panel, col, row),
-            Panel::Graphs => section_or_focus(panel, vm.graphs_scroll, col, row),
+            Panel::Detail => toggle_or_focus(vm, &CardKind::ALL, panel, col, row),
+            Panel::Graphs => {
+                section_or_focus(&col3::SectionId::ALL, panel, vm.graphs_scroll, col, row)
+            }
             Panel::Projects | Panel::Command => project_or_focus(vm, panel, col, row),
         });
     }
@@ -366,9 +445,9 @@ fn project_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
 /// A click in column 2 → a feature-toggle row, the editor button, else focus
 /// the panel. Recomputes the card stack from the same solver the renderer uses,
 /// so a click resolves to the exact card/row/button drawn (M55-08/10).
-fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
+fn toggle_or_focus(vm: &ViewModel, units: &[CardKind], rect: Rect, col: u16, row: u16) -> Target {
     // The card-stack overflow scrollbar (ADR-0031) on the column's right edge.
-    if on_scrollbar(rect, vm.detail_scroll, cards::content_len(), col, row) {
+    if on_scrollbar(rect, vm.detail_scroll, cards::content_len(units), col, row) {
         return Target::Scrollbar(ScrollRegion::Detail);
     }
     let Some(detail) = vm.detail.as_deref() else {
@@ -389,7 +468,7 @@ fn toggle_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
         pressed: None,  // geometry only; the flash never moves a cell
         press_pulse: 0.0,
     };
-    for slot in cards::solve_scrolled(rect, vm.detail_scroll).0 {
+    for slot in cards::solve_scrolled(units, rect, vm.detail_scroll).0 {
         if !contains(slot.rect, col, row) {
             continue;
         }
@@ -422,14 +501,20 @@ fn on_scrollbar(area: Rect, offset: usize, content_len: usize, col: u16, row: u1
 /// the panels overflow (ADR-0031), the viewport row maps through the scroll
 /// `offset` into the fully-expanded stack — the same window the renderer blits —
 /// so a click resolves to the panel actually on screen.
-fn section_or_focus(rect: Rect, offset: usize, col: u16, row: u16) -> Target {
+fn section_or_focus(
+    ids: &[col3::SectionId],
+    rect: Rect,
+    offset: usize,
+    col: u16,
+    row: u16,
+) -> Target {
     // The overflow scrollbar on the column's right edge wins over the panel body.
-    if on_scrollbar(rect, offset, usize::from(col3::content_rows()), col, row) {
+    if on_scrollbar(rect, offset, usize::from(col3::content_rows(ids)), col, row) {
         return Target::Scrollbar(ScrollRegion::Graphs);
     }
     let inner = inner_of(rect);
     if let Some(dy) = local_row(inner, col, row) {
-        let content_h = col3::content_rows();
+        let content_h = col3::content_rows(ids);
         let (solve_h, content_row) = if content_h <= inner.h {
             (inner.h, dy)
         } else {
@@ -439,7 +524,7 @@ fn section_or_focus(rect: Rect, offset: usize, col: u16, row: u16) -> Target {
                 dy.saturating_add(u16::try_from(off).unwrap_or(0)),
             )
         };
-        for slot in col3::solve_stack(solve_h) {
+        for slot in col3::solve_stack(ids, solve_h) {
             if content_row >= slot.y && content_row < slot.y.saturating_add(slot.rows) {
                 return Target::Section(slot.id);
             }
@@ -502,6 +587,46 @@ mod tests {
         );
         s.app.splash.skip();
         s.snapshot()
+    }
+
+    /// A ready view-model in panel-editor mode at a full-grid size.
+    fn editor_vm(w: u16, h: u16) -> ViewModel {
+        let mut s = AppState::new(
+            vec![project("a"), project("b"), project("c")],
+            Size::new(w, h),
+        );
+        s.app.splash.skip();
+        crate::input::enter_panel_editor(&mut s.app);
+        s.snapshot()
+    }
+
+    #[test]
+    fn panel_editor_grips_and_dividers_resolve_where_drawn() {
+        // In edit mode, every unit's top border row grips and the shared column
+        // borders resolve to dividers — computed from the same solve_model the
+        // grip renderer uses (pixels == targets, ADR-0034).
+        let v = editor_vm(120, 40);
+        let body = Rect {
+            x: 0,
+            y: 1,
+            w: 120,
+            h: 39,
+        };
+        let sl = crate::layout_model::solve_model(&v.layout, body);
+        // The first column's first unit (the rail): its top border row grips.
+        let c0 = &sl.columns[0];
+        let (slots, _) = crate::layout_model::solve_column(&c0.units, c0.rect, 0);
+        let top = slots[0].rect;
+        assert_eq!(
+            hit_test(&v, top.x, top.y),
+            Some(Target::GripBar(crate::editor::Cursor { col: 0, unit: 0 })),
+        );
+        // The divider on column 0's right border resolves to ColumnDivider(0).
+        let dx = c0.rect.x + c0.rect.w - 1;
+        assert_eq!(
+            hit_test(&v, dx, c0.rect.y + 3),
+            Some(Target::ColumnDivider(0)),
+        );
     }
 
     #[test]
@@ -755,9 +880,12 @@ mod tests {
             h: 15,
         };
         let col3 = solve(body).col3;
-        let bar =
-            crate::chrome::scrollbar(col3, v.graphs_scroll, usize::from(col3::content_rows()))
-                .expect("the short column overflows, so a bar exists");
+        let bar = crate::chrome::scrollbar(
+            col3,
+            v.graphs_scroll,
+            usize::from(col3::content_rows(&col3::SectionId::ALL)),
+        )
+        .expect("the short column overflows, so a bar exists");
         // Every track cell resolves to the graphs scrollbar (pixels == targets).
         for dy in 0..bar.track.h {
             assert_eq!(
@@ -784,7 +912,12 @@ mod tests {
         };
         let col3 = solve(body).col3;
         assert!(
-            crate::chrome::scrollbar(col3, 0, usize::from(col3::content_rows())).is_none(),
+            crate::chrome::scrollbar(
+                col3,
+                0,
+                usize::from(col3::content_rows(&col3::SectionId::ALL))
+            )
+            .is_none(),
             "the tall column fits — no overflow bar"
         );
         let edge = col3.x + col3.w - 1;

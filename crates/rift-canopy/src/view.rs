@@ -502,19 +502,148 @@ fn draw_full(
     unicode: bool,
 ) {
     let sl = crate::layout_model::solve_model(&vm.layout, body);
+    let editing = vm.mode == crate::input::Mode::PanelEditor;
     for col in &sl.columns {
         if col.rect.h < 2 || col.rect.w == 0 {
             continue;
         }
-        match col.role() {
-            ColumnRole::Rail => draw_projects(vm, frame, col.rect, unicode),
-            ColumnRole::Cards => draw_detail(vm, backend, frame, col.rect, unicode),
-            ColumnRole::Sections => draw_graphs(vm, backend, frame, col.rect),
-            ColumnRole::Empty => {}
+        // In edit mode every column renders through the one per-unit path, so the
+        // grips (computed from the same `solve_column`) sit exactly on the drawn
+        // units. In normal mode the homogeneous columns keep their richer stacks
+        // (scroll, scrollbars) — byte-identical to before.
+        if editing || col.role() == ColumnRole::Mixed {
+            draw_column_units(vm, backend, frame, col.rect, &col.units, unicode);
+        } else {
+            match col.role() {
+                ColumnRole::Rail => draw_projects(vm, frame, col.rect, unicode),
+                ColumnRole::Cards => {
+                    draw_detail(vm, backend, frame, col.rect, unicode, &col.card_kinds());
+                }
+                ColumnRole::Sections => {
+                    draw_graphs(vm, backend, frame, col.rect, &col.section_ids());
+                }
+                ColumnRole::Mixed | ColumnRole::Empty => {}
+            }
         }
+    }
+    // In panel-editor mode, overlay grips + column dividers over the columns.
+    if editing {
+        draw_editor_grips(vm, frame, &sl, unicode);
     }
     crate::bars::draw_hint_bar(vm, THEME, frame, sl.hint);
     draw_command(vm, frame, sl.command);
+}
+
+/// Draw a column's `units` in order through the one shared per-unit path — the
+/// grid's edit-mode render and the mixed-column render (ADR-0033/0034). Each unit
+/// draws via its own `draw_one`; the geometry is the shared `solve_column`, so
+/// the grips (same solver) sit exactly on the drawn units.
+fn draw_column_units(
+    vm: &ViewModel,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+    rect: Rect,
+    units: &[crate::layout_model::Unit],
+    unicode: bool,
+) {
+    let (slots, _) = crate::layout_model::solve_column(units, rect, 0);
+    for slot in &slots {
+        draw_unit(
+            vm,
+            backend,
+            frame,
+            slot.unit,
+            slot.rect,
+            slot.collapsed,
+            unicode,
+        );
+    }
+}
+
+/// Draw one unit into `rect` — the rail, a card, or a panel (ADR-0034).
+fn draw_unit(
+    vm: &ViewModel,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+    unit: crate::layout_model::Unit,
+    rect: Rect,
+    collapsed: bool,
+    unicode: bool,
+) {
+    use crate::layout_model::Unit;
+    match unit {
+        Unit::Rail => draw_projects(vm, frame, rect, unicode),
+        Unit::Card(k) => {
+            if let Some(detail) = vm.detail.as_deref() {
+                let ctx = crate::cards::CardCtx {
+                    detail,
+                    activity: &vm.activity,
+                    runtime: &vm.feature_runtime,
+                    toggle_cursor: vm.toggle_cursor,
+                    focused: vm.focus == Panel::Detail,
+                    unicode,
+                    pressed: vm.pressed.clone(),
+                    press_pulse: vm.press_pulse,
+                };
+                crate::cards::draw_one(&ctx, THEME, k, rect, collapsed, backend, frame);
+            }
+        }
+        Unit::Section(s) => crate::col3::draw_one(
+            &vm.col3,
+            s,
+            vm.focus == Panel::Graphs,
+            unicode,
+            collapsed,
+            rect,
+            backend,
+            frame,
+        ),
+    }
+}
+
+/// Draw the panel-editor grips (ADR-0034): a grip glyph on each unit's top border
+/// row (accent-washed; the cursor's unit and a picked unit stand out) and a
+/// highlighted divider on each shared column border. Grips are computed from the
+/// same `solve_column` the edit-mode render uses, so they sit on the drawn units.
+/// Colour + one glyph only, so the paint-never-moves-a-lit-cell property holds.
+fn draw_editor_grips(
+    vm: &ViewModel,
+    frame: &mut Frame,
+    sl: &crate::layout_model::SolvedLayout,
+    unicode: bool,
+) {
+    let grip = if unicode { '⣿' } else { ':' };
+    for (ci, col) in sl.columns.iter().enumerate() {
+        // The right divider (between this column and the next) — a highlighted bar.
+        if ci + 1 < sl.columns.len() && col.rect.w > 0 {
+            let x = col.rect.x + col.rect.w.saturating_sub(1);
+            for dy in 0..col.rect.h {
+                frame.set(x, col.rect.y + dy, if unicode { '┃' } else { '|' }, ACCENT);
+            }
+        }
+        let (slots, _) = crate::layout_model::solve_column(&col.units, col.rect, 0);
+        for (ui, slot) in slots.iter().enumerate() {
+            if slot.rect.w == 0 || slot.rect.h == 0 {
+                continue;
+            }
+            let is_cursor = ci == vm.editor.cursor.col && ui == vm.editor.cursor.unit;
+            let style = if is_cursor && vm.editor.picked {
+                THEME.selection()
+            } else if is_cursor {
+                ACCENT
+            } else {
+                THEME.dim()
+            };
+            // The grip sits at the unit's top-left border corner (chrome, never a
+            // data cell — the border glyph is already there).
+            frame.set(slot.rect.x, slot.rect.y, grip, style);
+            // A short handle run to read as a bar, clipped to the border width.
+            let run = slot.rect.w.min(4);
+            for dx in 1..run {
+                frame.set(slot.rect.x + dx, slot.rect.y, grip, style);
+            }
+        }
+    }
 }
 
 /// The two-column degraded grid: projects left, detail over graphs right.
@@ -527,8 +656,15 @@ fn draw_two_col(
 ) {
     let r = two_col(body);
     draw_projects(vm, frame, r.col1, unicode);
-    draw_detail(vm, backend, frame, r.col2, unicode);
-    draw_graphs(vm, backend, frame, r.col3);
+    draw_detail(
+        vm,
+        backend,
+        frame,
+        r.col2,
+        unicode,
+        &crate::cards::CardKind::ALL,
+    );
+    draw_graphs(vm, backend, frame, r.col3, &crate::col3::SectionId::ALL);
     crate::bars::draw_hint_bar(vm, THEME, frame, r.hint);
     draw_command(vm, frame, r.command);
 }
@@ -544,8 +680,15 @@ fn draw_single(
     let (tabs, panel, hint, command) = single_panel(body);
     draw_tab_strip(vm, frame, tabs);
     match vm.focus {
-        Panel::Detail => draw_detail(vm, backend, frame, panel, unicode),
-        Panel::Graphs => draw_graphs(vm, backend, frame, panel),
+        Panel::Detail => draw_detail(
+            vm,
+            backend,
+            frame,
+            panel,
+            unicode,
+            &crate::cards::CardKind::ALL,
+        ),
+        Panel::Graphs => draw_graphs(vm, backend, frame, panel, &crate::col3::SectionId::ALL),
         // Projects (and Command focus) show the projects panel.
         Panel::Projects | Panel::Command => draw_projects(vm, frame, panel, unicode),
     }
@@ -852,6 +995,7 @@ fn draw_detail(
     frame: &mut Frame,
     rect: Rect,
     unicode: bool,
+    units: &[crate::cards::CardKind],
 ) {
     let Some(detail) = vm.detail.as_deref() else {
         clip_line(frame, rect, 0, "no project selected", THEME.dim());
@@ -867,7 +1011,7 @@ fn draw_detail(
         pressed: vm.pressed.clone(),
         press_pulse: vm.press_pulse,
     };
-    crate::cards::draw(&ctx, THEME, rect, vm.detail_scroll, backend, frame);
+    crate::cards::draw(&ctx, THEME, units, rect, vm.detail_scroll, backend, frame);
     // The card-stack overflow scrollbar (ADR-0031): shown only when the column is
     // too short to host every card (the collapse-solve's lossy tier — cards are
     // one row each there, so the row/card counts line up).
@@ -875,7 +1019,7 @@ fn draw_detail(
         frame,
         rect,
         vm.detail_scroll,
-        crate::cards::content_len(),
+        crate::cards::content_len(units),
         unicode,
     );
 }
@@ -884,10 +1028,17 @@ fn draw_detail(
 /// donut + domain metrics), recall — each an individually-bordered themed
 /// card filling the column, solved by the shared stack. No outer border (like
 /// the column-2 cards); focus accents the panel borders.
-fn draw_graphs(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame, rect: Rect) {
+fn draw_graphs(
+    vm: &ViewModel,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+    rect: Rect,
+    ids: &[crate::col3::SectionId],
+) {
     let unicode = backend.capabilities().contains(Capabilities::UNICODE);
     crate::col3::draw(
         &vm.col3,
+        ids,
         vm.focus == Panel::Graphs,
         unicode,
         rect,
@@ -902,7 +1053,7 @@ fn draw_graphs(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Fram
         frame,
         rect,
         vm.graphs_scroll,
-        usize::from(crate::col3::content_rows()),
+        usize::from(crate::col3::content_rows(ids)),
         unicode,
     );
 }

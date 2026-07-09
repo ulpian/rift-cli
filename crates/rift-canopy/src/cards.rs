@@ -121,36 +121,50 @@ pub struct CardSlot {
     pub collapsed: bool,
 }
 
-/// Solve the card stack over `area`, returning each card's rect. Pure over the
-/// area height — the same solve the renderer and the hit-test share, so a click
-/// always resolves to the card that was drawn.
+/// A card's stack sizing (weight, min-rows, priority) from the registration
+/// table — the single source, so a data-driven column (ADR-0033) sizes each of
+/// its cards exactly as the fixed stack did.
 #[must_use]
-pub fn solve(area: Rect) -> Vec<CardSlot> {
-    solve_scrolled(area, 0).0
+pub fn card_spec(kind: CardKind) -> Spec {
+    CARDS.iter().find(|(k, _)| *k == kind).map_or(
+        Spec {
+            weight: 1,
+            min_rows: 3,
+            priority: Priority::Medium,
+        },
+        |(_, s)| *s,
+    )
 }
 
-/// The number of cards in the stack — the content length the card-stack
-/// scrollbar (ADR-0031) tracks (each is one row in the collapse-solve's lossy
-/// tier, where the stack overflows and the bar appears).
+/// Solve a card stack of `units` (in order) over `area`. Pure over the area
+/// height — the same solve the renderer and the hit-test share, so a click
+/// always resolves to the card that was drawn. `units` is the column's ordered
+/// card list (`CardKind::ALL` for the default column).
 #[must_use]
-pub fn content_len() -> usize {
-    CARDS.len()
+pub fn solve(units: &[CardKind], area: Rect) -> Vec<CardSlot> {
+    solve_scrolled(units, area, 0).0
 }
 
-/// Solve the card stack over `area` with a scroll `offset` (ADR-0031), returning
-/// each visible card's slot and the largest in-range offset (`max_scroll`). When
-/// the stack fits, `offset` is clamped to 0 and the layout is unchanged; when it
-/// overflows (a column too short for every card), the window starts `offset`
-/// cards down — the shared solve the renderer and hit-test both use, so a click
-/// always resolves to the card that was drawn.
+/// The number of cards in `units` — the content length the card-stack scrollbar
+/// (ADR-0031) tracks (each is one row in the collapse-solve's lossy tier).
 #[must_use]
-pub fn solve_scrolled(area: Rect, offset: usize) -> (Vec<CardSlot>, usize) {
-    let specs: Vec<Spec> = CARDS.iter().map(|(_, s)| *s).collect();
+pub fn content_len(units: &[CardKind]) -> usize {
+    units.len()
+}
+
+/// Solve a card stack of `units` over `area` with a scroll `offset` (ADR-0031),
+/// returning each visible card's slot and the largest in-range offset
+/// (`max_scroll`). When the stack fits, `offset` is clamped to 0 and the layout
+/// is unchanged; when it overflows, the window starts `offset` cards down — the
+/// shared solve the renderer and hit-test both use.
+#[must_use]
+pub fn solve_scrolled(units: &[CardKind], area: Rect, offset: usize) -> (Vec<CardSlot>, usize) {
+    let specs: Vec<Spec> = units.iter().map(|k| card_spec(*k)).collect();
     let (slots, max_scroll) = stack::solve_windowed(&specs, area.h, offset);
     let cards = slots
         .into_iter()
         .filter_map(|slot| {
-            CARDS.get(slot.index).map(|(kind, _)| CardSlot {
+            units.get(slot.index).map(|kind| CardSlot {
                 kind: *kind,
                 rect: Rect {
                     x: area.x,
@@ -205,6 +219,7 @@ impl CardCtx<'_> {
 pub fn draw(
     ctx: &CardCtx<'_>,
     theme: Theme,
+    units: &[CardKind],
     area: Rect,
     offset: usize,
     backend: &mut dyn RenderBackend,
@@ -214,20 +229,43 @@ pub fn draw(
         draw_repository(ctx, theme, area, false, frame);
         return;
     }
-    for slot in solve_scrolled(area, offset).0 {
+    for slot in solve_scrolled(units, area, offset).0 {
         if slot.rect.h == 0 || slot.rect.w == 0 {
             continue;
         }
-        match slot.kind {
-            CardKind::Repository => draw_repository(ctx, theme, slot.rect, slot.collapsed, frame),
-            CardKind::Models => draw_models(ctx, theme, slot.rect, slot.collapsed, frame),
-            CardKind::Settings => draw_settings(ctx, theme, slot.rect, slot.collapsed, frame),
-            CardKind::Capture => draw_capture(ctx, theme, slot.rect, slot.collapsed, frame),
-            CardKind::Features => draw_features(ctx, theme, slot.rect, slot.collapsed, frame),
-            CardKind::Activity => {
-                draw_activity(ctx, theme, slot.rect, slot.collapsed, backend, frame);
-            }
-        }
+        draw_one(
+            ctx,
+            theme,
+            slot.kind,
+            slot.rect,
+            slot.collapsed,
+            backend,
+            frame,
+        );
+    }
+}
+
+/// Draw one card into `rect` — the per-unit dispatch a mixed column (a card
+/// among panels, ADR-0034) shares with the homogeneous stack.
+pub fn draw_one(
+    ctx: &CardCtx<'_>,
+    theme: Theme,
+    kind: CardKind,
+    rect: Rect,
+    collapsed: bool,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+) {
+    if rect.h == 0 || rect.w == 0 {
+        return;
+    }
+    match kind {
+        CardKind::Repository => draw_repository(ctx, theme, rect, collapsed, frame),
+        CardKind::Models => draw_models(ctx, theme, rect, collapsed, frame),
+        CardKind::Settings => draw_settings(ctx, theme, rect, collapsed, frame),
+        CardKind::Capture => draw_capture(ctx, theme, rect, collapsed, frame),
+        CardKind::Features => draw_features(ctx, theme, rect, collapsed, frame),
+        CardKind::Activity => draw_activity(ctx, theme, rect, collapsed, backend, frame),
     }
 }
 
@@ -842,7 +880,15 @@ mod tests {
     fn render(ctx: &CardCtx<'_>, area: Rect) -> (Frame, String) {
         let mut f = Frame::new(Size::new(area.x + area.w, area.y + area.h));
         let mut b = AsciiBackend::new(Capabilities::empty());
-        draw(ctx, Theme::rift_dark(), area, 0, &mut b, &mut f);
+        draw(
+            ctx,
+            Theme::rift_dark(),
+            &CardKind::ALL,
+            area,
+            0,
+            &mut b,
+            &mut f,
+        );
         let text: String = (0..f.height())
             .map(|y| {
                 (0..f.width())
@@ -876,7 +922,7 @@ mod tests {
         // Under pressure every card still occupies a slot (collapse, not drop),
         // for a tall and a short column.
         for h in [40u16, 12] {
-            let slots = solve(rect(0, 0, 40, h));
+            let slots = solve(&CardKind::ALL, rect(0, 0, 40, h));
             assert_eq!(slots.len(), 6, "all six cards present at h={h}");
             let kinds: Vec<CardKind> = slots.iter().map(|s| s.kind).collect();
             assert_eq!(kinds[0], CardKind::Repository);
@@ -941,7 +987,7 @@ mod tests {
         let act = ActivityView::NoProjection;
         let rt = BTreeMap::new();
         // A short models card can't show all ten → an honest `+N more`.
-        let slots = solve(rect(0, 0, 40, 40));
+        let slots = solve(&CardKind::ALL, rect(0, 0, 40, 40));
         let models_slot = slots.iter().find(|s| s.kind == CardKind::Models).unwrap();
         let mut f = Frame::new(Size::new(40, 40));
         draw_models(
@@ -964,7 +1010,7 @@ mod tests {
         let act = ActivityView::NoProjection;
         let rt = BTreeMap::new();
         let c = ctx(&d, &act, &rt);
-        let slots = solve(rect(0, 0, 40, 60));
+        let slots = solve(&CardKind::ALL, rect(0, 0, 40, 60));
         let feat = slots.iter().find(|s| s.kind == CardKind::Features).unwrap();
         // The features card inner starts at rect.y+1 (border); row i = toggle i.
         let inner_y = feat.rect.y + 1;
@@ -988,7 +1034,7 @@ mod tests {
         let d = detail(ProjectStatus::Idle);
         let act = ActivityView::NoProjection;
         let rt = BTreeMap::new();
-        let slots = solve(rect(0, 0, 40, 60));
+        let slots = solve(&CardKind::ALL, rect(0, 0, 40, 60));
         let feat = slots
             .iter()
             .find(|s| s.kind == CardKind::Features)
@@ -1031,7 +1077,7 @@ mod tests {
             Feature::ALL[0].key().to_string(),
             FeatureRuntime::Failed("boom".into()),
         );
-        let slots = solve(rect(0, 0, 40, 60));
+        let slots = solve(&CardKind::ALL, rect(0, 0, 40, 60));
         let feat = slots
             .iter()
             .find(|s| s.kind == CardKind::Features)
@@ -1069,7 +1115,7 @@ mod tests {
             Feature::ALL[0].key().to_string(),
             FeatureRuntime::Failed("boom".into()),
         );
-        let slots = solve(rect(0, 0, 40, 60));
+        let slots = solve(&CardKind::ALL, rect(0, 0, 40, 60));
         let feat = slots.iter().find(|s| s.kind == CardKind::Features).unwrap();
         let chip = feature_retry_rect(inner_of(feat.rect), 0).unwrap();
         let mut c = ctx(&d, &act, &rt);
@@ -1222,6 +1268,7 @@ mod tests {
             draw(
                 &ctx(&d, &act, &rt),
                 Theme::rift_dark(),
+                &CardKind::ALL,
                 rect(0, 0, w, h),
                 0,
                 &mut b,

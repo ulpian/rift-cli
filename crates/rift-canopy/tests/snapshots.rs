@@ -176,7 +176,16 @@ fn col3_text(col3: &rift_canopy::Col3, h: u16) -> String {
     let mut f = Frame::new(Size::new(34, h));
     let mut b = AsciiBackend::new(Capabilities::empty());
     let area = f.rect();
-    rift_canopy::col3::draw(col3, false, false, area, 0, &mut b, &mut f);
+    rift_canopy::col3::draw(
+        col3,
+        &rift_canopy::col3::SectionId::ALL,
+        false,
+        false,
+        area,
+        0,
+        &mut b,
+        &mut f,
+    );
     frame_text(&f)
 }
 
@@ -478,7 +487,7 @@ fn golden_activity_axis() {
         w: 44,
         h: 44,
     };
-    let slots = cards::solve(area);
+    let slots = cards::solve(&CardKind::ALL, area);
     let activity = slots.iter().find(|s| s.kind == CardKind::Activity);
     let (y0, y1) = activity.map_or((0u16, 44), |s| (s.rect.y, s.rect.y + s.rect.h));
     let mut f = Frame::new(Size::new(44, 44));
@@ -486,6 +495,7 @@ fn golden_activity_axis() {
     cards::draw(
         &ctx,
         rift_canopy::theme::Theme::rift_dark(),
+        &CardKind::ALL,
         area,
         0,
         &mut b,
