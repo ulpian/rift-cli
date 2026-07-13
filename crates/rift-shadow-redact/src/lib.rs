@@ -12,7 +12,9 @@
 //!   plus conservative PII (email, IPv4).
 //!
 //! Spans coalesce, then mask with a fixed placeholder per class (so masked
-//! length never reveals secret length). The report holds **only** counts, ids,
+//! length never reveals secret length); detect→mask repeats to a fixpoint so
+//! the unmasked remainder of an overlap-dropped span cannot survive the gate
+//! (redaction is idempotent on its own output). The report holds **only** counts, ids,
 //! hashes, and pack versions — it is structurally incapable of carrying a
 //! secret. All regexes are linear-time (`regex` crate, no backreferences), so a
 //! hostile input cannot wedge the pipeline (`05-security` §5.5).
@@ -412,36 +414,26 @@ fn coalesce(mut spans: Vec<Span>) -> Vec<Span> {
     chosen
 }
 
-fn mask(
-    text: &str,
-    spans: &[Span],
-    input_sha256: Sha256Id,
-    versions: Vec<String>,
-) -> (String, RedactionReport) {
-    let mut by_detector: BTreeMap<String, u32> = BTreeMap::new();
-    let mut by_class: BTreeMap<DetectorClass, u32> = BTreeMap::new();
-    let mut bytes_masked: u64 = 0;
+fn mask(text: &str, spans: &[Span], report: &mut RedactionReport) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for s in spans {
         out.push_str(&text[last..s.start]);
-        out.push_str(s.class.placeholder());
-        bytes_masked += (s.end - s.start) as u64;
-        *by_detector.entry(s.id.clone()).or_insert(0) += 1;
-        *by_class.entry(s.class).or_insert(0) += 1;
+        let placeholder = s.class.placeholder();
+        // Re-masking an already-placed placeholder (e.g. `password=[REDACTED:jdbc]`
+        // matches the DSN detector again on a later pass) is a no-op, not a new
+        // redaction — keep it out of the counts.
+        if &text[s.start..s.end] != placeholder {
+            report.total_spans = report.total_spans.saturating_add(1);
+            report.bytes_masked += (s.end - s.start) as u64;
+            *report.by_detector.entry(s.id.clone()).or_insert(0) += 1;
+            *report.by_class.entry(s.class).or_insert(0) += 1;
+        }
+        out.push_str(placeholder);
         last = s.end;
     }
     out.push_str(&text[last..]);
-    let report = RedactionReport {
-        total_spans: u32::try_from(spans.len()).unwrap_or(u32::MAX),
-        by_detector,
-        by_class,
-        bytes_masked,
-        allowlisted: 0,
-        rule_pack_versions: versions,
-        input_sha256,
-    };
-    (out, report)
+    out
 }
 
 /// Redact with the built-in pack.
@@ -452,39 +444,75 @@ pub fn redact(raw: &SecretBytes) -> Result<RedactionOutput> {
     redact_with(raw, &RulePackSet::builtin())
 }
 
+/// Upper bound on detect→mask passes before declaring non-convergence. Each
+/// pass substitutes fixed placeholders only, so real inputs stabilize within a
+/// pass or two; the cap is a fail-safe against adversarial oscillation.
+const MAX_PASSES: usize = 8;
+
 /// Redact with a specific rule-pack set.
 ///
+/// Detection and masking iterate to a fixpoint: masking one span can leave the
+/// unmasked remainder of an overlapping lower-precedence span behind (coalesce
+/// drops the loser whole), so each pass re-detects until the text is stable.
+/// Anything a detector can still see in the output would also be seen by a
+/// re-redaction — stability is exactly the idempotence the gate promises.
+///
 /// # Errors
-/// [`RiftError`] only on internal failure.
+/// [`RiftError`] on internal failure, including an input whose masking does
+/// not stabilize within [`MAX_PASSES`] (fail-safe: no partially-redacted bytes
+/// are ever returned).
 pub fn redact_with(raw: &SecretBytes, packs: &RulePackSet) -> Result<RedactionOutput> {
     let input_sha256 = sha256(raw.as_slice());
-    let text = normalize(raw.as_slice());
+    let mut text = normalize(raw.as_slice());
+    let mut report = RedactionReport {
+        total_spans: 0,
+        by_detector: BTreeMap::new(),
+        by_class: BTreeMap::new(),
+        bytes_masked: 0,
+        allowlisted: 0,
+        rule_pack_versions: packs.version_set(),
+        input_sha256,
+    };
+    let mut converged = false;
+    for _ in 0..MAX_PASSES {
+        let mut spans = shape_spans(&text, pass1_detectors());
+        spans.extend(shape_spans(&text, &packs.extra));
+        spans.extend(entropy_spans(&text));
+        spans.extend(shape_spans(&text, pii_detectors()));
 
-    let mut spans = shape_spans(&text, pass1_detectors());
-    spans.extend(shape_spans(&text, &packs.extra));
-    spans.extend(entropy_spans(&text));
-    spans.extend(shape_spans(&text, pii_detectors()));
-
-    let merged = coalesce(spans);
-    // Allowlist is subtract-only: drop spans whose exact value is allowlisted
-    // (kept, not masked) and count them, so the report proves the value was seen
-    // and deliberately kept rather than missed.
-    let mut allowlisted = 0u32;
-    let chosen: Vec<Span> = merged
-        .into_iter()
-        .filter(|s| {
-            let keep_unmasked = text
-                .as_bytes()
-                .get(s.start..s.end)
-                .is_some_and(|span| packs.allow.contains(&sha256(span)));
-            if keep_unmasked {
-                allowlisted += 1;
-            }
-            !keep_unmasked
-        })
-        .collect();
-    let (masked, mut report) = mask(&text, &chosen, input_sha256, packs.version_set());
-    report.allowlisted = allowlisted;
+        let merged = coalesce(spans);
+        // Allowlist is subtract-only: drop spans whose exact value is allowlisted
+        // (kept, not masked) and count them, so the report proves the value was
+        // seen and deliberately kept rather than missed. Kept values are
+        // re-detected on every pass, so the count is the last pass's, not a sum.
+        let mut allowlisted = 0u32;
+        let chosen: Vec<Span> = merged
+            .into_iter()
+            .filter(|s| {
+                let keep_unmasked = text
+                    .as_bytes()
+                    .get(s.start..s.end)
+                    .is_some_and(|span| packs.allow.contains(&sha256(span)));
+                if keep_unmasked {
+                    allowlisted += 1;
+                }
+                !keep_unmasked
+            })
+            .collect();
+        report.allowlisted = allowlisted;
+        let masked = mask(&text, &chosen, &mut report);
+        if masked == text {
+            converged = true;
+            break;
+        }
+        text = masked;
+    }
+    if !converged {
+        return Err(RiftError::Other(format!(
+            "redaction did not stabilize within {MAX_PASSES} passes"
+        )));
+    }
+    let masked = text;
     let redacted_sha256 = sha256(masked.as_bytes());
     let provenance = RedactionProvenance {
         rule_pack_versions: packs.version_set(),
@@ -709,6 +737,36 @@ mod tests {
         // without the pack, the custom token is NOT redacted
         let plain = masked("secret ACME-AB12CD34 here");
         assert!(plain.contains("ACME-AB12CD34"));
+    }
+
+    /// Regression: fuzz crash-265daa39b7149f97854ec8fa27d4753c0e7d3e6e.
+    ///
+    /// The input holds a high-entropy token that *ends inside* a PII email
+    /// (`…abcdef0p_011=vendor.githu@b.pat`). The email wins coalescing, and the
+    /// overlapping entropy span used to be dropped whole — leaving the
+    /// unmasked high-entropy prefix `KOSFODNN7E…0p_011=` in the output, which
+    /// a second redaction then masked (non-idempotent, and a first-pass leak).
+    #[test]
+    fn overlap_dropped_span_remainder_is_still_masked() {
+        let raw: &[u8] = &[
+            134, 0, 73, 91, 65, 0, 0, 255, 255, 48, 49, 50, 51, 0, 0, 0, 118, 101, 110, 100, 111,
+            114, 46, 103, 105, 116, 104, 117, 0, 75, 79, 83, 70, 79, 68, 78, 78, 55, 69, 50, 51,
+            52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102, 48, 112, 95, 48, 49, 49, 61, 118,
+            101, 110, 100, 111, 114, 46, 103, 105, 116, 104, 117, 64, 98, 46, 112, 97, 116, 10,
+        ];
+        let first = redact(&SecretBytes::new(raw.to_vec())).unwrap();
+        let cleared = first.redacted.as_slice().to_vec();
+        let text = String::from_utf8_lossy(&cleared);
+        assert!(
+            !text.contains("KOSFODNN7E23456789abcdef0p_011="),
+            "high-entropy fragment survived the first pass: {text}"
+        );
+        let second = redact(&SecretBytes::new(cleared.clone())).unwrap();
+        assert_eq!(
+            second.redacted.as_slice(),
+            cleared.as_slice(),
+            "redaction must be idempotent on its own output"
+        );
     }
 
     proptest::proptest! {
