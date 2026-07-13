@@ -2,8 +2,7 @@
 
 Security is a **per-line property** in Rift, not a release-time phase. This
 document summarizes the threat model, the controls baked into the code, and how
-to report a vulnerability. The full model is
-[`plan_v1/build-plan/00-overview/05-security-model-and-threat-model.md`](plan_v1/build-plan/00-overview/05-security-model-and-threat-model.md).
+to report a vulnerability.
 
 ## Reporting a vulnerability
 

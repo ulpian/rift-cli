@@ -10,17 +10,16 @@ captures every agent session into an immutable, tamper-evident, git-native ledge
 and projects a memory-delta graph that lets agents retrieve *deltas* instead of
 re-reading the world.
 
-This repo implements the local toolchain described in
-[`plan_v1/build-plan/`](plan_v1/build-plan/) (the binding spec). Rift Cloud
+This repo implements the local Rift toolchain. Rift Cloud
 (sync, web dashboard, forecasting) is Stage 7 outlook only — out of scope here,
 but every local decision is made *sync-ready*.
 
-Where implementation deliberately deviates from or refines the spec, the
-decision is recorded in [`docs/adr/`](docs/adr/) — ADRs supersede the spec
-text they name. Domain vocabulary is defined in
-[`docs/GLOSSARY.md`](docs/GLOSSARY.md) (use those terms with those meanings),
-and the executable plans for the current milestones live in
-[`docs/prd/`](docs/prd/).
+Architecture decisions (ADRs), domain vocabulary (a glossary), and milestone
+plans (PRDs) live as **local-only** design notes under `docs/` — that directory
+is git-ignored and not part of the repository, so consult those files when they
+are present in your working tree, but don't rely on them existing in a fresh
+clone. Where an ADR refines an earlier decision, the ADR wins; use the
+glossary's terms with the glossary's meanings.
 
 The three core packages, three optional ones, and one storage substrate:
 
@@ -39,13 +38,11 @@ The three core packages, three optional ones, and one storage substrate:
    chains + Merkle roots. Enforced in three layers: the type layer (no mutating
    API), the SQL layer (`BEFORE UPDATE/DELETE … RAISE(ABORT)` triggers on every
    canonical table), and a registry-driven property test in `rift-store`. **Add a
-   canonical table without its guard and CI goes red.** See
-   [`plan_v1/build-plan/00-overview/04-database-design-4nf-5nf-immutability.md`](plan_v1/build-plan/00-overview/04-database-design-4nf-5nf-immutability.md).
+   canonical table without its guard and CI goes red.**
 2. **Security is a per-line property.** Secrets never reach durable storage
    un-redacted (the `RedactedBytes` type makes that a compile error); untrusted
    tool output is never served raw; exact retrieval is policy-gated + audited.
-   See [SECURITY.md](SECURITY.md) and
-   [`…/05-security-model-and-threat-model.md`](plan_v1/build-plan/00-overview/05-security-model-and-threat-model.md).
+   See [SECURITY.md](SECURITY.md).
 
 ## Prerequisites
 
@@ -79,7 +76,7 @@ miri, and `xtask ci-meta` (required jobs, read-only permissions, the
 allows, no schema fast-path in bins). A scheduled `fuzz-nightly.yml` runs
 10-minute budgets daily.
 
-## Workspace layout (maps 1:1 to `plan_v1/scaffold/`)
+## Workspace layout
 
 ```
 crates/

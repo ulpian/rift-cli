@@ -52,9 +52,9 @@ pub mod store;
 // NOTE — Turso engine DEFERRED (P3 review): a native-async `TursoStore` implements
 // the `store::Store` seam, but the `turso` dependency is intentionally not wired
 // (it pulls advisory-bearing git2/paste, and turso 0.1.5 lacks CREATE TRIGGER /
-// STRICT / encryption). The reference impl + rationale live at
-// `plan_v1/build-plan/stage-01-foundations/phase-03-turso-storage-foundation/`
-// (`turso_store.reference.rs` + `SPIKE-RESULTS.md`). Re-home it here and re-add
+// STRICT / encryption). The reference impl + rationale live in the project's
+// local design notes (`turso_store.reference.rs` + `SPIKE-RESULTS.md`). Re-home
+// it here and re-add
 // the dep/feature only after re-review. The rusqlite `SqliteStore` is the shipping
 // engine; any new engine plugs in behind `store::Store` without touching callers.
 mod value;

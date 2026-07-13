@@ -30,8 +30,7 @@
 //! handle can never masquerade as a chain hash (proven by the `compile_fail`
 //! doctest on `rift_core::id`).
 //!
-//! **The construction is Rift-native** (decision record:
-//! `plan_v1/build-plan/stage-01-foundations/ERRATA.md`): checkpoint hashing has
+//! **The construction is Rift-native**: checkpoint hashing has
 //! no Entire equivalent to be byte-compatible with — the P7 parity harness
 //! compares native against native. The prefixes, odd-leaf rule, empty root, and
 //! all four layers are therefore **pinned by hard-coded hex vectors** in this
@@ -328,8 +327,8 @@ mod tests {
         assert_ne!(l, n);
     }
 
-    /// The Rift-native construction, pinned byte-exact (see the module doc and
-    /// `plan_v1/…/stage-01-foundations/ERRATA.md`): the domain prefixes
+    /// The Rift-native construction, pinned byte-exact (see the module doc):
+    /// the domain prefixes
     /// (0x00 leaf / 0x01 node / 0x02 empty / 0x03 checkpoint / 0x04 commit),
     /// the empty-root constant, the odd-leaf duplicate-last rule, and the layer
     /// compositions. Every other test in this crate is self-referential — this

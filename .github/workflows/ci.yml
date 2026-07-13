@@ -143,8 +143,7 @@ jobs:
         continue-on-error: true
   # NOTE: ASAN/TSAN advisory jobs are deferred until the first unsafe/FFI seam
   # lands — the workspace is #![forbid(unsafe_code)] end-to-end today, so there
-  # is no undefined-behavior surface for the sanitizers to exercise (see
-  # plan_v1/build-plan/stage-01-foundations/ERRATA.md).
+  # is no undefined-behavior surface for the sanitizers to exercise.
   # NOTE: a Turso advisory job was removed with the turso dependency (P3 review —
   # see phase-03 SPIKE-RESULTS.md). Restore it (clippy + test `-p rift-store
   # --features turso`, continue-on-error) if/when the turso dep is wired back.

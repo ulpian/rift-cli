@@ -23,8 +23,7 @@ Rift makes AI-assisted engineering **legible, recoverable, and cheaper**:
 
 > **Scope.** This repo is the **local toolchain**. Rift Cloud (encrypted sync,
 > web dashboard, forecasting) is acknowledged as Stage 7 outlook only — every
-> local decision is made *sync-ready* so Cloud is additive, never a rewrite. The
-> binding spec is in [`plan_v1/build-plan/`](plan_v1/build-plan/).
+> local decision is made *sync-ready* so Cloud is additive, never a rewrite.
 
 ## Two non-negotiables
 
