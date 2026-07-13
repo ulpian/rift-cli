@@ -162,41 +162,253 @@ impl Section {
 
 // ── the theme table ─────────────────────────────────────────────────────────
 
-/// The one built-in surface theme — "Rift dark". A zero-sized handle: the theme
-/// is code, not config (ADR-0023), so it carries no state; its methods are the
-/// single source of every chrome style. A future config surface swaps this type
-/// for a loaded table without touching a call site.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Theme;
+/// One of the five operator-overridable colour roles (ADR-0038 §2). Slots are
+/// **roles**, not constants: background → surface fills, border → idle panel
+/// and tile frames, button → button and key-hint chrome, graph → the graph
+/// accent family, text → the body foreground. The meaning-bearing colours —
+/// health, severity, gauge bands, token classes, status dots, the
+/// selection/hover washes — are never slots, so a theme can restyle the
+/// dashboard but can never repaint meaning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeSlot {
+    /// Surface fills (the header bar, badges, tiles).
+    Background,
+    /// Idle panel and tile borders.
+    Border,
+    /// Button and key-hint chrome.
+    Button,
+    /// The graph accent family (token bars, savings/calls lines, strokes).
+    Graph,
+    /// The body foreground.
+    Text,
+}
 
-impl Theme {
-    /// The built-in "Rift dark" theme.
+impl ThemeSlot {
+    /// The five slots in display order (the picker's stage-one rows).
+    pub const ALL: [Self; 5] = [
+        Self::Background,
+        Self::Border,
+        Self::Button,
+        Self::Graph,
+        Self::Text,
+    ];
+
+    /// The storage spelling (the `canopy_profile_theme_event.slot` column).
     #[must_use]
-    pub const fn rift_dark() -> Self {
-        Self
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Border => "border",
+            Self::Button => "button",
+            Self::Graph => "graph",
+            Self::Text => "text",
+        }
     }
 
-    /// A section's title style — its accent, bold.
+    /// Decode a stored slot key (the writer validates; the fold is strict).
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.key() == key)
+    }
+}
+
+/// The ten named colour presets (ADR-0039 §2) — a name → RGB table, hexes
+/// chosen for legibility on the dark surface. A picker vocabulary, not a
+/// storage format: the persisted event stores the resolved hex, so custom
+/// colours later are a picker change, not a schema change.
+pub const PRESETS: [(&str, Color); 10] = [
+    ("red", Color::Rgb(0xe0, 0x5c, 0x5c)),
+    ("blue", Color::Rgb(0x5c, 0xa8, 0xff)),
+    ("green", Color::Rgb(0x6c, 0xe0, 0x9a)),
+    ("white", Color::Rgb(0xe8, 0xec, 0xe8)),
+    ("black", Color::Rgb(0x14, 0x18, 0x16)),
+    ("yellow", Color::Rgb(0xf0, 0xc4, 0x5c)),
+    ("pink", Color::Rgb(0xf0, 0x8c, 0xc4)),
+    ("orange", Color::Rgb(0xf0, 0x94, 0x5c)),
+    ("cyan", Color::Rgb(0x5c, 0xc4, 0xe0)),
+    ("purple", Color::Rgb(0xb4, 0x8c, 0xff)),
+];
+
+/// Parse a `#RRGGBB` hex colour (the theme event's storage format).
+#[must_use]
+pub fn parse_hex_colour(s: &str) -> Option<Color> {
+    let hex = s.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(hex.get(0..2)?, 16).ok()?;
+    let g = u8::from_str_radix(hex.get(2..4)?, 16).ok()?;
+    let b = u8::from_str_radix(hex.get(4..6)?, 16).ok()?;
+    Some(Color::Rgb(r, g, b))
+}
+
+/// Format an RGB colour as `#RRGGBB` (the storage format); `None` for the
+/// non-RGB variants, which are never persisted.
+#[must_use]
+pub fn colour_to_hex(c: Color) -> Option<String> {
+    match c {
+        Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        _ => None,
+    }
+}
+
+/// The five optional RGB slot overrides (ADR-0038 §1) over the unchanged
+/// Rift-dark constants as fallbacks. `NONE` (every slot unset) is the provable
+/// byte-identity with today's dashboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ThemeOverrides {
+    /// Surface fills, or `None` for [`SURFACE_BG`].
+    pub background: Option<Color>,
+    /// Idle borders, or `None` for [`BORDER_IDLE`].
+    pub border: Option<Color>,
+    /// Button/key-hint chrome, or `None` for [`ACCENT`].
+    pub button: Option<Color>,
+    /// The graph accent family, or `None` for the built-in family.
+    pub graph: Option<Color>,
+    /// The body foreground, or `None` for [`BODY_FG`].
+    pub text: Option<Color>,
+}
+
+impl ThemeOverrides {
+    /// No overrides — Rift dark, byte-identical to today.
+    pub const NONE: Self = Self {
+        background: None,
+        border: None,
+        button: None,
+        graph: None,
+        text: None,
+    };
+
+    /// This slot's override, if set.
+    #[must_use]
+    pub const fn get(self, slot: ThemeSlot) -> Option<Color> {
+        match slot {
+            ThemeSlot::Background => self.background,
+            ThemeSlot::Border => self.border,
+            ThemeSlot::Button => self.button,
+            ThemeSlot::Graph => self.graph,
+            ThemeSlot::Text => self.text,
+        }
+    }
+
+    /// Set (or reset, with `None`) one slot's override.
+    pub fn set(&mut self, slot: ThemeSlot, colour: Option<Color>) {
+        match slot {
+            ThemeSlot::Background => self.background = colour,
+            ThemeSlot::Border => self.border = colour,
+            ThemeSlot::Button => self.button = colour,
+            ThemeSlot::Graph => self.graph = colour,
+            ThemeSlot::Text => self.text = colour,
+        }
+    }
+}
+
+/// The surface theme (ADR-0023, runtime per ADR-0038): a small `Copy` value —
+/// five optional slot overrides over the Rift-dark constants as fallbacks.
+/// Accessors keep their names and consult the overrides first, so with no
+/// overrides every tier renders byte-identical to today. The active profile's
+/// theme rides the view snapshot; draw code receives it as a parameter and
+/// never names a themable constant directly (the gate grep enforces the seam).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Theme {
+    overrides: ThemeOverrides,
+}
+
+impl Theme {
+    /// The built-in "Rift dark" theme (no overrides).
+    #[must_use]
+    pub const fn rift_dark() -> Self {
+        Self {
+            overrides: ThemeOverrides::NONE,
+        }
+    }
+
+    /// Rift dark with a profile's slot overrides applied over it (ADR-0038).
+    #[must_use]
+    pub const fn with_overrides(overrides: ThemeOverrides) -> Self {
+        Self { overrides }
+    }
+
+    /// The active slot overrides (the picker shows each slot's current value).
+    #[must_use]
+    pub const fn overrides(self) -> ThemeOverrides {
+        self.overrides
+    }
+
+    /// The surface fill (the background slot, else [`SURFACE_BG`]).
+    #[must_use]
+    pub fn surface_bg(self) -> Color {
+        self.overrides.background.unwrap_or(SURFACE_BG)
+    }
+
+    /// The idle border tone (the border slot, else [`BORDER_IDLE`]).
+    #[must_use]
+    pub fn border_idle(self) -> Color {
+        self.overrides.border.unwrap_or(BORDER_IDLE)
+    }
+
+    /// The button/key-hint accent (the button slot, else [`ACCENT`]).
+    #[must_use]
+    pub fn button_accent(self) -> Color {
+        self.overrides.button.unwrap_or(ACCENT)
+    }
+
+    /// The graph accent (the graph slot, else [`ACCENT`]) — the savings line
+    /// and every plot stroke that carried the accent green.
+    #[must_use]
+    pub fn graph_accent(self) -> Color {
+        self.overrides.graph.unwrap_or(ACCENT)
+    }
+
+    /// The token-bar gradient's bright top (the graph slot, else [`TOKEN_HI`]).
+    #[must_use]
+    pub fn graph_hi(self) -> Color {
+        self.overrides.graph.unwrap_or(TOKEN_HI)
+    }
+
+    /// The token-bar gradient's deep baseline: a darkened graph override, else
+    /// [`TOKEN_LO`] — so an overridden gradient still rises toward its colour.
+    #[must_use]
+    pub fn graph_lo(self) -> Color {
+        self.overrides.graph.map_or(TOKEN_LO, |c| {
+            lerp_color(Color::Rgb(0x10, 0x14, 0x12), c, 0.45)
+        })
+    }
+
+    /// The recall MCP-calls stroke (the graph slot, else [`RECALL_CALLS`]).
+    #[must_use]
+    pub fn graph_calls(self) -> Color {
+        self.overrides.graph.unwrap_or(RECALL_CALLS)
+    }
+
+    /// The body foreground (the text slot, else [`BODY_FG`]).
+    #[must_use]
+    pub fn body_fg(self) -> Color {
+        self.overrides.text.unwrap_or(BODY_FG)
+    }
+
+    /// A section's title style — its accent, bold. Section identities are not
+    /// slots (ADR-0038: per-section accent theming re-opens the ADR).
     #[must_use]
     pub const fn title(self, section: Section) -> Style {
         Style::fg(section.accent()).with_mods(Mods::BOLD)
     }
 
-    /// A section's border style: the accent when focused, the idle slate
-    /// otherwise (mirrors the M4 focused-border convention, now themed).
+    /// A section's border style: the accent when focused, the (themable) idle
+    /// tone otherwise (mirrors the M4 focused-border convention, now themed).
     #[must_use]
-    pub const fn border(self, section: Section, focused: bool) -> Style {
+    pub fn border(self, section: Section, focused: bool) -> Style {
         if focused {
             Style::fg(section.accent())
         } else {
-            Style::fg(BORDER_IDLE)
+            Style::fg(self.border_idle())
         }
     }
 
     /// Ordinary body text on a card.
     #[must_use]
-    pub const fn body(self) -> Style {
-        Style::fg(BODY_FG)
+    pub fn body(self) -> Style {
+        Style::fg(self.body_fg())
     }
 
     /// De-emphasized text (secondary values, `+N more`, placeholders).
@@ -208,23 +420,28 @@ impl Theme {
     /// A count/status pill badge (e.g. the rail's project count) — the accent on
     /// the surface fill.
     #[must_use]
-    pub const fn badge(self, accent: Color) -> Style {
-        Style::fg(accent).with_bg(SURFACE_BG).with_mods(Mods::BOLD)
+    pub fn badge(self, accent: Color) -> Style {
+        Style::fg(accent)
+            .with_bg(self.surface_bg())
+            .with_mods(Mods::BOLD)
     }
 
-    /// The selection pill: body text reversed onto the selection wash.
+    /// The selection pill: the accent reversed onto the selection wash (the
+    /// washes are code-fixed — ADR-0038 §2).
     #[must_use]
     pub const fn selection(self) -> Style {
         Style::fg(ACCENT).with_bg(SELECT_BG).with_mods(Mods::BOLD)
     }
 
-    /// A hover target's wash (pointer acknowledgement).
+    /// A hover target's wash (pointer acknowledgement; the wash is fixed, the
+    /// text follows the text slot).
     #[must_use]
-    pub const fn hover(self) -> Style {
-        Style::fg(BODY_FG).with_bg(HOVER_BG)
+    pub fn hover(self) -> Style {
+        Style::fg(self.body_fg()).with_bg(HOVER_BG)
     }
 
-    /// A stat tile's border, coloured by the class/section it reports.
+    /// A stat tile's border, coloured by the class/section it reports
+    /// (semantic — never a slot).
     #[must_use]
     pub const fn tile_border(self, accent: Color) -> Style {
         Style::fg(accent)
@@ -238,24 +455,26 @@ impl Theme {
 
     /// A button chip's label style, focused or not.
     #[must_use]
-    pub const fn button(self, focused: bool) -> Style {
+    pub fn button(self, focused: bool) -> Style {
         if focused {
-            Style::fg(ACCENT).with_bg(SELECT_BG).with_mods(Mods::BOLD)
+            Style::fg(self.button_accent())
+                .with_bg(SELECT_BG)
+                .with_mods(Mods::BOLD)
         } else {
-            Style::fg(BODY_FG).with_bg(SURFACE_BG)
+            Style::fg(self.body_fg()).with_bg(self.surface_bg())
         }
     }
 
     /// A key-hint glyph (the letter in `? Help`) — accented and bold.
     #[must_use]
-    pub const fn key_hint(self) -> Style {
-        Style::fg(ACCENT).with_mods(Mods::BOLD)
+    pub fn key_hint(self) -> Style {
+        Style::fg(self.button_accent()).with_mods(Mods::BOLD)
     }
 
     /// The header bar's base fill: body text on the raised surface.
     #[must_use]
-    pub const fn header_bar(self) -> Style {
-        Style::fg(BODY_FG).with_bg(SURFACE_BG)
+    pub fn header_bar(self) -> Style {
+        Style::fg(self.body_fg()).with_bg(self.surface_bg())
     }
 
     /// A project status dot's style (the rail's trailing dot, M55-05).
@@ -421,6 +640,8 @@ pub enum Icon {
     Bullet,
     /// The data-plane health dot.
     HealthDot,
+    /// The header identity button's profile glyph (ADR-0037).
+    Profile,
 }
 
 impl Icon {
@@ -470,6 +691,7 @@ impl Icon {
             Self::CheckFailed => '☒',
             Self::Bullet => '·',
             Self::HealthDot => '●',
+            Self::Profile => '⦿',
         }
     }
 
@@ -496,6 +718,7 @@ impl Icon {
             Self::CheckFailed => '!',
             Self::Bullet => '-',
             Self::HealthDot => '*',
+            Self::Profile => '@',
         }
     }
 
@@ -739,6 +962,105 @@ mod tests {
         }
     }
 
+    // ── the runtime theme (ADR-0038) ─────────────────────────────────────────
+
+    #[test]
+    fn no_overrides_resolve_to_the_rift_dark_constants() {
+        // The provable identity behind the golden proof: every slot accessor
+        // falls back to its constant when unset.
+        let t = Theme::rift_dark();
+        assert_eq!(t.surface_bg(), SURFACE_BG);
+        assert_eq!(t.border_idle(), BORDER_IDLE);
+        assert_eq!(t.button_accent(), ACCENT);
+        assert_eq!(t.graph_accent(), ACCENT);
+        assert_eq!(t.graph_hi(), TOKEN_HI);
+        assert_eq!(t.graph_lo(), TOKEN_LO);
+        assert_eq!(t.graph_calls(), RECALL_CALLS);
+        assert_eq!(t.body_fg(), BODY_FG);
+        assert_eq!(t, Theme::with_overrides(ThemeOverrides::NONE));
+    }
+
+    #[test]
+    fn every_slot_override_is_consulted_first() {
+        let c = Color::Rgb(1, 2, 3);
+        for slot in ThemeSlot::ALL {
+            let mut o = ThemeOverrides::NONE;
+            o.set(slot, Some(c));
+            let t = Theme::with_overrides(o);
+            let got = match slot {
+                ThemeSlot::Background => t.surface_bg(),
+                ThemeSlot::Border => t.border_idle(),
+                ThemeSlot::Button => t.button_accent(),
+                ThemeSlot::Graph => t.graph_accent(),
+                ThemeSlot::Text => t.body_fg(),
+            };
+            assert_eq!(got, c, "{slot:?} override wins");
+            assert_eq!(t.overrides().get(slot), Some(c));
+            // …and only that slot moved.
+            for other in ThemeSlot::ALL {
+                if other != slot {
+                    assert_eq!(t.overrides().get(other), None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_colours_never_move_under_a_full_override() {
+        // ADR-0038 §2: health, status dots, token classes, gauge bands, and
+        // the selection wash are code-fixed — a theme cannot repaint meaning.
+        let mut o = ThemeOverrides::NONE;
+        for slot in ThemeSlot::ALL {
+            o.set(slot, Some(Color::Rgb(9, 9, 9)));
+        }
+        let themed = Theme::with_overrides(o);
+        let dark = Theme::rift_dark();
+        for h in [Health::Ok, Health::Warn, Health::Down] {
+            assert_eq!(themed.health(h), dark.health(h));
+        }
+        for class in TokenClass::ALL {
+            assert_eq!(themed.token_class(class), dark.token_class(class));
+        }
+        assert_eq!(
+            themed.status_dot(crate::ProjectStatus::Idle),
+            dark.status_dot(crate::ProjectStatus::Idle)
+        );
+        assert_eq!(themed.selection(), dark.selection());
+        assert_eq!(band_color("Smart"), Color::Rgb(0x6c, 0xe0, 0x9a));
+    }
+
+    #[test]
+    fn hex_colours_round_trip_and_reject_garbage() {
+        for (_, c) in PRESETS {
+            let hex = colour_to_hex(c).unwrap();
+            assert_eq!(parse_hex_colour(&hex), Some(c));
+        }
+        for bad in ["", "red", "#12345", "#1234567", "112233", "#12g4ff"] {
+            assert_eq!(parse_hex_colour(bad), None, "{bad:?} must not parse");
+        }
+        assert_eq!(colour_to_hex(Color::Default), None);
+    }
+
+    #[test]
+    fn the_ten_presets_are_named_rgb_and_slot_keys_round_trip() {
+        assert_eq!(PRESETS.len(), 10);
+        let names: Vec<&str> = PRESETS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            [
+                "red", "blue", "green", "white", "black", "yellow", "pink", "orange", "cyan",
+                "purple"
+            ]
+        );
+        for (_, c) in PRESETS {
+            assert!(matches!(c, Color::Rgb(..)), "presets are resolved RGB");
+        }
+        for slot in ThemeSlot::ALL {
+            assert_eq!(ThemeSlot::from_key(slot.key()), Some(slot));
+        }
+        assert_eq!(ThemeSlot::from_key("sparkle"), None);
+    }
+
     // ── colour foundation (carried from the old palette module) ──────────────
 
     #[test]
@@ -799,7 +1121,7 @@ mod tests {
     fn token_class_map_matches_breakdown() {
         for class in TokenClass::ALL {
             assert_eq!(class.color(), BREAKDOWN[class.index()]);
-            assert_eq!(Theme.token_class(class).fg, class.color());
+            assert_eq!(Theme::rift_dark().token_class(class).fg, class.color());
         }
         // Order is the canonical input, read, output, cache-write.
         let colours: Vec<Color> = TokenClass::ALL.iter().map(|c| c.color()).collect();
@@ -943,12 +1265,12 @@ mod tests {
             let tier = Tier::from_caps(Capabilities::empty()); // forced ASCII
             let section = SECTIONS[seed % SECTIONS.len()];
             for style in [
-                Theme.title(section),
-                Theme.border(section, true),
-                Theme.border(section, false),
-                Theme.selection(),
-                Theme.hover(),
-                Theme.badge(section.accent()),
+                Theme::rift_dark().title(section),
+                Theme::rift_dark().border(section, true),
+                Theme::rift_dark().border(section, false),
+                Theme::rift_dark().selection(),
+                Theme::rift_dark().hover(),
+                Theme::rift_dark().badge(section.accent()),
             ] {
                 let r = resolve_style(style, tier);
                 prop_assert_eq!(r.fg, Color::Default);

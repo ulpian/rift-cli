@@ -876,6 +876,36 @@ fn print_ascii_frame(projects: Vec<Project>) {
     }
 }
 
+/// The canopy store behind the profile loader seam (ADR-0036 §6): the binary
+/// stays wiring — every read the loop performs crosses this one adapter.
+#[cfg(feature = "tui")]
+struct StoreProfileLoader<'a> {
+    cstore: &'a rift_canopy_data::CanopyStore,
+}
+
+#[cfg(feature = "tui")]
+impl rift_canopy::ProfileLoader for StoreProfileLoader<'_> {
+    fn profiles(&mut self) -> rift_core::Result<(Option<String>, Vec<rift_canopy::ProfileEntry>)> {
+        self.cstore.profiles_view()
+    }
+
+    fn projects(&mut self, profile: &str) -> rift_core::Result<Vec<rift_canopy::Project>> {
+        self.cstore.profile_projects(profile)
+    }
+
+    fn layout(
+        &mut self,
+        profile: &str,
+        path: &str,
+    ) -> rift_core::Result<Option<rift_canopy::LayoutModel>> {
+        self.cstore.profile_layout(profile, path)
+    }
+
+    fn theme(&mut self, profile: &str) -> rift_core::Result<rift_canopy::ThemeOverrides> {
+        self.cstore.profile_theme(profile)
+    }
+}
+
 /// Derive a project's display name from its path (directory basename).
 fn project_name(path: &std::path::Path) -> String {
     path.file_name().map_or_else(
@@ -899,7 +929,11 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
         .map(|p| (p.name.clone(), p.path.clone()))
         .collect();
     cstore.import_legacy(&legacy, hooks::now_ms())?;
-    let projects = cstore.projects()?;
+    // Seed the default profile on first launch (ADR-0036; idempotent like the
+    // import): one `created` + one `selected` event when the log is empty.
+    cstore.seed_default_profile(hooks::now_ms())?;
+    // The dashboard shows the ACTIVE profile's view (restored across launches).
+    let projects = cstore.active_projects()?;
 
     #[cfg(feature = "tui")]
     {
@@ -934,10 +968,11 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
             // (ADR-0021) — the binary's own subcommand router over an explicit
             // repository root, injected exactly like on_persist.
             let mut dispatcher = RiftDispatcher;
-            let reload = || cstore.projects();
-            // Loads a project's saved dashboard layout (ADR-0035) — the seam the
-            // retired editor launcher vacated; folds the append-only layout log.
-            let layout_loader = |path: &str| cstore.layout(path);
+            let reload = || cstore.active_projects();
+            // The profile loader seam (ADR-0036 §6, generalising the ADR-0035
+            // layout loader): the active profile, live names, membership, and
+            // (profile, project) arrangements all read through the store.
+            let mut profile_loader = StoreProfileLoader { cstore: &cstore };
             match rift_canopy::app::live::run(rift_canopy::app::live::LoopDeps {
                 opts,
                 initial: projects.clone(),
@@ -947,7 +982,7 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
                 manager: &mut manager,
                 dispatcher: &mut dispatcher,
                 reload,
-                layout_loader,
+                profile_loader: &mut profile_loader,
             }) {
                 Ok(()) => return Ok(()),
                 Err(e) => {

@@ -81,6 +81,14 @@ pub enum Target {
     HeaderEditor,
     /// The header's `q` action — quit the dashboard.
     HeaderQuit,
+    /// The header's identity button (ADR-0037) — open/close the profile menu.
+    HeaderProfile,
+    /// A profile row in the open profile menu: click-to-activate (a click
+    /// moves the cursor there and switches, exactly like `Enter`).
+    ProfileRow(usize),
+    /// A row in the open colour picker (ADR-0039): a click selects it through
+    /// the shared modal hit-test, exactly like `Enter` on that row.
+    PickerRow(usize),
     /// A unit's grip in panel-editor mode (ADR-0034): a press picks it up / drops
     /// it. Carries the unit's `(column, unit)` cursor so the drop knows the source.
     GripBar(crate::editor::Cursor),
@@ -103,6 +111,7 @@ impl Target {
                 | Target::HeaderPalette
                 | Target::HeaderEditor
                 | Target::HeaderQuit
+                | Target::HeaderProfile
                 | Target::OverlayConfirm
                 | Target::OverlayCancel
                 | Target::OverlayClose
@@ -141,7 +150,10 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
             Some(crate::bars::HeaderAction::Palette) => Some(Target::HeaderPalette),
             Some(crate::bars::HeaderAction::Editor) => Some(Target::HeaderEditor),
             Some(crate::bars::HeaderAction::Quit) => Some(Target::HeaderQuit),
-            None => None,
+            // The identity button (ADR-0037): the SAME span function the
+            // renderer draws with, so pixels equal targets.
+            None => crate::bars::profile_hit(&vm.version, vm.profile_name.as_deref(), size.w, col)
+                .then_some(Target::HeaderProfile),
         };
     }
     // The body sits one row below the title (mirrors `view::draw`).
@@ -171,6 +183,17 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
             }
             return Some(Target::PanelFocus(Panel::Command));
         }
+    }
+    // The profile menu owns the surface while open (ADR-0037): its rows are
+    // click-to-activate; everything else inside the frame is inert, and the
+    // covered panels beneath are not clickable.
+    if vm.mode == crate::input::Mode::ProfileMenu {
+        return hit_profile_menu(vm, size, col, row);
+    }
+    // The colour picker owns the surface while open (ADR-0039): a row click
+    // selects through the same modal geometry the renderer draws.
+    if vm.mode == crate::input::Mode::ColourPicker {
+        return hit_colour_picker(vm, size, col, row);
     }
     // Panel-editor mode owns the full grid's clicks: grips pick up units, dividers
     // resize (ADR-0034). Editing is Full3Col-only; the narrow tiers stay normal.
@@ -246,6 +269,57 @@ fn hit_editor(vm: &ViewModel, body: Rect, col: u16, row: u16) -> Option<Target> 
         return Some(Target::PanelFocus(Panel::Detail));
     }
     None
+}
+
+/// Hit-test the open profile menu (ADR-0037): a browse-stage click on a listed
+/// row activates it (the mouse equivalent of moving the cursor and pressing
+/// `Enter`); the rest of the frame is inert; outside the frame nothing is
+/// clickable. The row geometry is [`crate::view::profile_menu_row_rect`] — the
+/// same cells the renderer paints.
+fn hit_profile_menu(
+    vm: &ViewModel,
+    size: crate::render::frame::Size,
+    col: u16,
+    row: u16,
+) -> Option<Target> {
+    let rect = crate::view::modal_rect(size);
+    if rect.w < 8 || rect.h < 3 || !contains(rect, col, row) {
+        return None;
+    }
+    if matches!(
+        vm.profile_menu.stage,
+        crate::profile_menu::MenuStage::Browse
+    ) {
+        for i in 0..vm.profiles.len() {
+            let rr = crate::view::profile_menu_row_rect(rect, i);
+            if rr.h > 0 && contains(rr, col, row) {
+                return Some(Target::ProfileRow(i));
+            }
+        }
+    }
+    Some(Target::OverlayBody)
+}
+
+/// Hit-test the open colour picker (ADR-0039): a click on a listed row (a slot,
+/// a preset, or the reset row) selects it — the mouse twin of moving the cursor
+/// and pressing `Enter`. The rest of the frame is inert; outside it, nothing.
+fn hit_colour_picker(
+    vm: &ViewModel,
+    size: crate::render::frame::Size,
+    col: u16,
+    row: u16,
+) -> Option<Target> {
+    let rect = crate::view::modal_rect(size);
+    if rect.w < 8 || rect.h < 3 || !contains(rect, col, row) {
+        return None;
+    }
+    for i in 0..crate::view::colour_picker_rows(vm.colour_picker.stage) {
+        let rr = crate::view::colour_picker_row_rect(rect, i);
+        if rr.h > 0 && contains(rr, col, row) {
+            return Some(Target::PickerRow(i));
+        }
+    }
+    Some(Target::OverlayBody)
 }
 
 /// Hit-test the data-driven full grid: the command row, then each physical
@@ -674,6 +748,114 @@ mod tests {
     fn too_small_yields_no_targets() {
         let v = vm(10, 4);
         assert_eq!(hit_test(&v, 2, 2), None);
+    }
+
+    /// A ready state with the profile plane wired (active = `pf0`).
+    fn profiled_state(w: u16, h: u16) -> AppState {
+        let mut s = AppState::new(vec![project("a")], Size::new(w, h));
+        s.app.splash.skip();
+        s.version = "0.1.0".into();
+        s.app.set_profiles(
+            ["default", "work"]
+                .iter()
+                .enumerate()
+                .map(|(i, name)| crate::profile::ProfileEntry {
+                    profile_id: format!("pf{i}"),
+                    name: (*name).to_string(),
+                    created_at: i64::try_from(i).unwrap(),
+                })
+                .collect(),
+            "pf0".into(),
+        );
+        s
+    }
+
+    #[test]
+    fn identity_button_resolves_on_row_zero_and_goes_inert_under_an_overlay() {
+        let mut s = profiled_state(120, 40);
+        let v = s.snapshot();
+        let (start, end) =
+            crate::bars::profile_span(&v.version, v.profile_name.as_deref(), 120).unwrap();
+        assert_eq!(hit_test(&v, start, 0), Some(Target::HeaderProfile));
+        assert_eq!(hit_test(&v, end - 1, 0), Some(Target::HeaderProfile));
+        assert_eq!(hit_test(&v, end, 0), None, "one past the span misses");
+        // Inert while an overlay owns the surface (ADR-0037 §1).
+        s.app.overlay = Some(crate::dispatch::Overlay::Running { title: "x".into() });
+        let v = s.snapshot();
+        assert_eq!(hit_test(&v, start, 0), None);
+    }
+
+    #[test]
+    fn profile_menu_rows_hit_their_drawn_cells_and_the_body_is_inert() {
+        let mut s = profiled_state(120, 40);
+        crate::input::enter_profile_menu(&mut s.app);
+        let v = s.snapshot();
+        let modal = crate::view::modal_rect(v.size);
+        for i in 0..2usize {
+            let rr = crate::view::profile_menu_row_rect(modal, i);
+            assert!(rr.h > 0);
+            assert_eq!(hit_test(&v, rr.x, rr.y), Some(Target::ProfileRow(i)));
+            assert_eq!(
+                hit_test(&v, rr.x + rr.w - 1, rr.y),
+                Some(Target::ProfileRow(i))
+            );
+        }
+        // Inside the frame but off the rows: inert body. Outside: nothing.
+        assert_eq!(
+            hit_test(&v, modal.x + 1, modal.y + modal.h - 2),
+            Some(Target::OverlayBody)
+        );
+        assert_eq!(hit_test(&v, modal.x.saturating_sub(2), modal.y + 2), None);
+    }
+
+    #[test]
+    fn colour_picker_rows_hit_their_drawn_cells() {
+        let mut s = profiled_state(120, 40);
+        crate::input::enter_profile_menu(&mut s.app);
+        s.app.mode = crate::input::Mode::ColourPicker;
+        s.app.colour_picker.reset();
+        let v = s.snapshot();
+        let modal = crate::view::modal_rect(v.size);
+        // Slots stage: five rows.
+        for i in 0..crate::theme::ThemeSlot::ALL.len() {
+            let rr = crate::view::colour_picker_row_rect(modal, i);
+            assert!(rr.h > 0);
+            assert_eq!(hit_test(&v, rr.x, rr.y), Some(Target::PickerRow(i)));
+        }
+        // Presets stage: eleven rows (ten presets + reset).
+        s.app.colour_picker.stage = crate::colour_picker::PickerStage::Presets;
+        let v = s.snapshot();
+        for i in 0..=crate::colour_picker::RESET_ROW {
+            let rr = crate::view::colour_picker_row_rect(modal, i);
+            if rr.h == 0 {
+                continue; // a short frame clips trailing rows whole
+            }
+            assert_eq!(
+                hit_test(&v, rr.x + rr.w - 1, rr.y),
+                Some(Target::PickerRow(i))
+            );
+        }
+        // Off the rows: an inert body. Outside the frame: nothing.
+        assert_eq!(
+            hit_test(&v, modal.x + 1, modal.y + modal.h - 2),
+            Some(Target::OverlayBody)
+        );
+        assert_eq!(hit_test(&v, modal.x.saturating_sub(2), modal.y + 2), None);
+    }
+
+    #[test]
+    fn profile_menu_rows_go_inert_outside_browse() {
+        let mut s = profiled_state(120, 40);
+        crate::input::enter_profile_menu(&mut s.app);
+        s.app.profile_menu.stage = crate::profile_menu::MenuStage::NamingCreate;
+        let v = s.snapshot();
+        let modal = crate::view::modal_rect(v.size);
+        let rr = crate::view::profile_menu_row_rect(modal, 0);
+        assert_eq!(
+            hit_test(&v, rr.x, rr.y),
+            Some(Target::OverlayBody),
+            "naming owns the input; rows are not switch targets"
+        );
     }
 
     #[test]

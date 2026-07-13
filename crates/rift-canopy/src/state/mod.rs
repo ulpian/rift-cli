@@ -164,6 +164,10 @@ pub struct Effects {
     /// set on a selection change and at startup. The reducer emits the request;
     /// the loop performs the read through the injected layout loader.
     pub load_layout: Option<String>,
+    /// Reload the profile plane after a profile persist op (ADR-0036 §6):
+    /// names, active id, membership, selection, and arrangement all reload
+    /// through the injected profile loader. The reducer only raises the flag.
+    pub reload_profiles: bool,
 }
 
 impl Effects {
@@ -175,6 +179,7 @@ impl Effects {
             && self.dispatches.is_empty()
             && self.feature_actions.is_empty()
             && self.load_layout.is_none()
+            && !self.reload_profiles
     }
 }
 
@@ -195,7 +200,9 @@ pub enum DataRequest {
 /// is deliberately no `Update`/`Delete` variant: a removal, relabel, reorder, or
 /// toggle-off is a new, superseding insert into the append-only log, which upholds
 /// the immutable model (04 §4.3). The bin resolves `path` → the stored
-/// `project_id` when it writes the event, so ids never leak into Canopy.
+/// `project_id` when it writes the event, so ids never leak into Canopy. Profiles
+/// (ADR-0036) are keyed by their stable `profile` id, which Canopy *does* hold —
+/// names are mutable display data served through the profile loader seam.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PersistOp {
     /// Register a project at the given path.
@@ -233,13 +240,83 @@ pub enum PersistOp {
         desired: bool,
     },
     /// Record the project's dashboard arrangement (a superseding `layout` event;
-    /// ADR-0035). `Some` is an encoded [`crate::layout_model::LayoutModel`];
-    /// `None` is a reset to the default — a superseding event, never a delete.
+    /// ADR-0035, profile-scoped per ADR-0036). `Some` is an encoded
+    /// [`crate::layout_model::LayoutModel`]; `None` is a reset to the default —
+    /// a superseding event, never a delete.
     SetLayout {
+        /// The profile the arrangement belongs to (all new writes are
+        /// profile-scoped; the legacy per-project table is frozen for writes).
+        profile: String,
         /// The path of the project the layout belongs to.
         path: String,
         /// The encoded arrangement, or `None` to reset to the default.
         layout: Option<String>,
+    },
+    /// Mint a new profile (ADR-0036): a `created` event, plus explicit
+    /// membership `added` events copying the creating (active) profile's
+    /// effective project list at creation time.
+    CreateProfile {
+        /// The validated display name (trimmed, non-empty, ≤ 24, unique).
+        name: String,
+    },
+    /// Rename a profile (a superseding `renamed` event).
+    RenameProfile {
+        /// The stable id of the profile to rename.
+        profile: String,
+        /// The validated new display name.
+        name: String,
+    },
+    /// Remove a profile (a superseding `removed` event, never a row deletion).
+    /// Removing the active or the last live profile is refused in the reducer
+    /// and again in the store (ADR-0036 §5).
+    RemoveProfile {
+        /// The stable id of the profile to remove.
+        profile: String,
+    },
+    /// Make a profile the one the dashboard shows (a superseding `selected`
+    /// event; the latest fold names the active profile).
+    SelectProfile {
+        /// The stable id of the profile to activate.
+        profile: String,
+    },
+    /// Include a catalogue project in a profile's membership view (this
+    /// profile only; `canopy_project_event` stays the registration source of
+    /// truth).
+    AddProfileProject {
+        /// The stable id of the profile whose view gains the project.
+        profile: String,
+        /// The catalogue project's canonical path.
+        path: String,
+    },
+    /// Hide a project from a profile's membership view (this profile only —
+    /// other profiles and the global catalogue are untouched).
+    RemoveProfileProject {
+        /// The stable id of the profile whose view loses the project.
+        profile: String,
+        /// The catalogue project's canonical path.
+        path: String,
+    },
+    /// Move a project up (`true`) or down (`false`) within a profile's view (a
+    /// superseding `reordered` event; the bin computes the new order keys).
+    ReorderProfileProject {
+        /// The stable id of the profile whose view is reordered.
+        profile: String,
+        /// The catalogue project's canonical path.
+        path: String,
+        /// Move up when `true`, down when `false`.
+        up: bool,
+    },
+    /// Record one theme-slot override for a profile (a superseding event per
+    /// (profile, slot) — ADR-0038). `colour` is resolved `#RRGGBB` hex; `None`
+    /// is a reset to the Rift-dark default — a superseding event, never a
+    /// delete. The slot carries [`crate::theme::ThemeSlot`]'s storage spelling.
+    SetProfileTheme {
+        /// The stable id of the profile the override belongs to.
+        profile: String,
+        /// The slot key (`background`/`border`/`button`/`graph`/`text`).
+        slot: String,
+        /// The resolved hex colour, or `None` to reset the slot.
+        colour: Option<String>,
     },
 }
 
@@ -312,6 +389,10 @@ pub struct AppState {
     pub version: String,
     /// The data-plane health the header dot shows (folded from bus reports).
     pub health: crate::theme::Health,
+    /// The active profile's surface theme (ADR-0038): Rift dark plus the
+    /// profile's slot overrides. Swapped (dirtying) on profile change and on a
+    /// live picker apply; rides the snapshot so the renderer stays pure.
+    theme: crate::theme::Theme,
     /// Idle-tick counter driving the background re-stat cadence (never dirties).
     tick: u32,
     /// The bus-computed rich detail for the active project (keyed by its path);
@@ -371,6 +452,7 @@ impl AppState {
             reduced_motion: false,
             version: String::new(),
             health: crate::theme::Health::Ok,
+            theme: crate::theme::Theme::rift_dark(),
             detail: None,
             rows_cache: Arc::new(Vec::new()),
             layout_cache: Arc::new(crate::layout_model::LayoutModel::default()),
@@ -401,6 +483,23 @@ impl AppState {
         self.app.open_overlay(Overlay::Notice(message));
         self.notice_settle = 1.0;
         self.dirty = true;
+    }
+
+    /// Swap the active surface theme (ADR-0038): Rift dark plus a profile's
+    /// slot overrides, dirtying only on a real change — the set-theme path the
+    /// picker's live apply and the profile switch both ride.
+    pub fn set_theme(&mut self, overrides: crate::theme::ThemeOverrides) {
+        let next = crate::theme::Theme::with_overrides(overrides);
+        if next != self.theme {
+            self.theme = next;
+            self.dirty = true;
+        }
+    }
+
+    /// The active surface theme (the snapshot copies it each frame).
+    #[must_use]
+    pub fn theme(&self) -> crate::theme::Theme {
+        self.theme
     }
 
     /// Arm the one-shot startup sweep (M55-14): the panels reveal as the
@@ -670,6 +769,12 @@ impl AppState {
             feature_runtime: self.app.feature_runtime.clone(),
             layout: Arc::clone(&self.layout_cache),
             editor: self.app.editor,
+            profile_name: self.app.active_profile_name().map(String::from),
+            profiles: self.app.profiles.clone(),
+            active_profile: self.app.active_profile.clone(),
+            profile_menu: self.app.profile_menu.clone(),
+            theme: self.theme,
+            colour_picker: self.app.colour_picker,
         }
     }
 }
@@ -737,10 +842,12 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
             let sel = s.app.selected_project().map(|p| p.path.clone());
             let mut flow = match action {
                 Action::RemoveProject => {
-                    persist_flow(sel.map(|path| PersistOp::RemoveProject { path }))
+                    let op = sel.map(|path| remove_project_op(&s.app, path));
+                    persist_flow(op)
                 }
                 Action::ReorderProject(up) => {
-                    persist_flow(sel.map(|path| PersistOp::ReorderProject { path, up }))
+                    let op = sel.map(|path| reorder_project_op(&s.app, path, up));
+                    persist_flow(op)
                 }
                 // Flipping/retrying a feature reads the selected project's current
                 // toggle states (from the stored detail) to plan the change.
@@ -750,7 +857,7 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
                 Action::RetryFeature => retry_flow(&s.app),
                 Action::RunLine(buf) => run_line(s, &buf),
                 Action::ConfirmDispatch => confirm_dispatch(s),
-                other => fold_action(other),
+                other => profile_or_fold_action(s, other),
             };
             // When the selection moves, ask the bus for the new project's data and
             // reset the toggle cursor to the top of the new project's toggles.
@@ -865,8 +972,8 @@ fn selection_change_effects(s: &mut AppState, before: &Option<String>, eff: &mut
 }
 
 /// The `SetLayout` persist op for the selected project's current arrangement
-/// (ADR-0035) — `None` layout when it equals the default (a reset). `None` when
-/// no project is selected.
+/// (ADR-0035, scoped to the active profile per ADR-0036) — `None` layout when
+/// it equals the default (a reset). `None` when no project is selected.
 fn layout_persist_op(app: &App) -> Option<PersistOp> {
     let path = app.selected_project().map(|p| p.path.clone())?;
     let layout = if app.layout == crate::layout_model::LayoutModel::default() {
@@ -874,7 +981,11 @@ fn layout_persist_op(app: &App) -> Option<PersistOp> {
     } else {
         Some(app.layout.encode())
     };
-    Some(PersistOp::SetLayout { path, layout })
+    Some(PersistOp::SetLayout {
+        profile: app.active_profile.clone(),
+        path,
+        layout,
+    })
 }
 
 /// Handle a mouse event by hit-testing it against the current view and mapping
@@ -1124,6 +1235,50 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             }
         }
         Target::HeaderQuit => Flow::Quit,
+        // The header's identity button (ADR-0037): open the profile menu, or
+        // close it if already open — the click equivalent of `p` / `Esc`.
+        Target::HeaderProfile => {
+            s.dirty = true;
+            if s.app.mode == Mode::ProfileMenu {
+                s.app.mode = Mode::Normal;
+                s.app.profile_menu.reset();
+                s.app.command_line.clear();
+            } else {
+                crate::input::enter_profile_menu(&mut s.app);
+            }
+            Flow::Continue(Effects::default())
+        }
+        // A profile row in the open menu: click-to-activate (ADR-0037) — move
+        // the cursor there and switch, exactly like `Enter`.
+        Target::ProfileRow(i) => {
+            s.dirty = true;
+            if i < s.app.profiles.len() {
+                s.app.profile_menu.cursor = i;
+                switch_profile_flow(s)
+            } else {
+                Flow::Continue(Effects::default())
+            }
+        }
+        // A picker row (ADR-0039): the mouse twin of cursoring + `Enter` — a
+        // slot click opens its presets; a preset/reset click applies live.
+        Target::PickerRow(i) => {
+            use crate::colour_picker::PickerStage;
+            s.dirty = true;
+            match s.app.colour_picker.stage {
+                PickerStage::Slots => {
+                    s.app.colour_picker.slot_cursor = i.min(crate::theme::ThemeSlot::ALL.len() - 1);
+                    s.app.colour_picker.stage = PickerStage::Presets;
+                    s.app.colour_picker.preset_cursor = 0;
+                    Flow::Continue(Effects::default())
+                }
+                PickerStage::Presets => {
+                    s.app.colour_picker.preset_cursor = i.min(crate::colour_picker::RESET_ROW);
+                    let slot = s.app.colour_picker.slot();
+                    let colour = crate::theme::PRESETS.get(i).map(|(_, c)| *c);
+                    apply_theme_slot(s, slot, colour)
+                }
+            }
+        }
         // A grip press (ADR-0034) begins a unit drag: pick the unit up and arm the
         // drag, which `drag_update`/`drop_drag` carry to the release. The keyboard
         // (pick/move/drop) is the equivalent path.
@@ -1194,6 +1349,9 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             | Target::HeaderPalette
             | Target::HeaderEditor
             | Target::HeaderQuit
+            | Target::HeaderProfile
+            | Target::ProfileRow(_)
+            | Target::PickerRow(_)
             | Target::WizardAdd
             | Target::RailAdd
             | Target::RailReorderUp
@@ -1247,7 +1405,12 @@ fn fold_action(action: Action) -> Flow {
         | Action::ToggleFeature
         | Action::RetryFeature
         | Action::RunLine(_)
-        | Action::ConfirmDispatch => Flow::Continue(Effects::default()),
+        | Action::ConfirmDispatch
+        | Action::SwitchProfile
+        | Action::CreateProfile(_)
+        | Action::RenameProfile { .. }
+        | Action::DeleteProfile(_)
+        | Action::SetThemeSlot { .. } => Flow::Continue(Effects::default()),
         Action::AddProject(path) => Flow::Continue(Effects {
             persist: vec![PersistOp::AddProject { path }],
             ..Effects::default()
@@ -1401,7 +1564,8 @@ fn dashboard_verb_flow(s: &mut AppState, verb: Verb) -> Flow {
             let Some(path) = resolve_project_ref(&s.app, &r) else {
                 return no_match_status(s);
             };
-            persist_flow(Some(PersistOp::RemoveProject { path }))
+            let op = remove_project_op(&s.app, path);
+            persist_flow(Some(op))
         }
         Verb::Relabel(r, label) => {
             let Some(path) = resolve_project_ref(&s.app, &r) else {
@@ -1431,8 +1595,76 @@ fn dashboard_verb_flow(s: &mut AppState, verb: Verb) -> Flow {
                 ..Effects::default()
             })
         }
+        // The /profile family (ADR-0037 §6): the same typed effects the menu
+        // emits — two surfaces, one grammar.
+        Verb::Profile(pv) => profile_verb_flow(s, pv),
         // Delegable verbs never reach here (request_for handled them).
         _ => Flow::Continue(Effects::default()),
+    }
+}
+
+/// Apply one `/profile` palette verb (ADR-0037 §6). Names resolve against the
+/// live profiles; a miss or a refused name/guard is a soft warning Alert
+/// (ADR-0029). Every accepted act is the same op + reload the menu emits.
+fn profile_verb_flow(s: &mut AppState, pv: crate::command::ProfileVerb) -> Flow {
+    use crate::command::ProfileVerb;
+    let warn = |s: &mut AppState, body: &str| {
+        s.open_alert(crate::dispatch::Message::warning(
+            "profiles",
+            vec![body.to_string()],
+        ));
+        Flow::Continue(Effects::default())
+    };
+    if s.app.profiles.is_empty() {
+        return warn(s, "the profile plane is not wired in this run");
+    }
+    match pv {
+        ProfileVerb::New(raw) => {
+            match crate::profile::normalize_profile_name(&raw, &s.app.profiles, None) {
+                Some(name) => profile_persist_flow(PersistOp::CreateProfile { name }),
+                None => warn(s, "name must be 1–24 chars and unique"),
+            }
+        }
+        ProfileVerb::Rename(raw) => {
+            let active = s.app.active_profile.clone();
+            match crate::profile::normalize_profile_name(&raw, &s.app.profiles, Some(&active)) {
+                Some(name) => profile_persist_flow(PersistOp::RenameProfile {
+                    profile: active,
+                    name,
+                }),
+                None => warn(s, "name must be 1–24 chars and unique"),
+            }
+        }
+        ProfileVerb::Switch(name) => {
+            let target = s
+                .app
+                .profiles
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.profile_id.clone());
+            match target {
+                Some(id) if id == s.app.active_profile => Flow::Continue(Effects::default()),
+                Some(id) => profile_persist_flow(PersistOp::SelectProfile { profile: id }),
+                None => warn(s, "no profile by that name"),
+            }
+        }
+        ProfileVerb::Delete(name) => {
+            let target = s
+                .app
+                .profiles
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.profile_id.clone());
+            match target {
+                // The removal guards refuse here first — and again in the store.
+                Some(id) if id == s.app.active_profile => {
+                    warn(s, "cannot delete the active profile")
+                }
+                Some(_) if s.app.profiles.len() <= 1 => warn(s, "cannot delete the last profile"),
+                Some(id) => profile_persist_flow(PersistOp::RemoveProfile { profile: id }),
+                None => warn(s, "no profile by that name"),
+            }
+        }
     }
 }
 
@@ -1446,6 +1678,7 @@ fn verb_word_of(verb: &Verb) -> &'static str {
         Verb::Toggle(_) => "toggle",
         Verb::Reinstall(_) => "reinstall",
         Verb::Focus(_) => "focus",
+        Verb::Profile(_) => "profile",
         Verb::Help => "help",
         Verb::Quit => "quit",
         // Delegated verbs bump on DispatchDone, not here.
@@ -1487,12 +1720,14 @@ fn apply_rail_action(s: &mut AppState, target: &Target) -> Flow {
         }
         Target::RailRemove => {
             let sel = s.app.selected_project().map(|p| p.path.clone());
-            persist_flow(sel.map(|path| PersistOp::RemoveProject { path }))
+            let op = sel.map(|path| remove_project_op(&s.app, path));
+            persist_flow(op)
         }
         Target::RailReorderUp | Target::RailReorderDown => {
             let up = matches!(target, Target::RailReorderUp);
             let sel = s.app.selected_project().map(|p| p.path.clone());
-            persist_flow(sel.map(|path| PersistOp::ReorderProject { path, up }))
+            let op = sel.map(|path| reorder_project_op(&s.app, path, up));
+            persist_flow(op)
         }
         _ => Flow::Continue(Effects::default()),
     }
@@ -1504,6 +1739,111 @@ fn persist_flow(op: Option<PersistOp>) -> Flow {
         persist: op.into_iter().collect(),
         ..Effects::default()
     })
+}
+
+/// Fold the profile-plane actions (ADR-0036/0037/0039) — each one superseding
+/// persist op plus its reload (or, for a picker selection, the same-frame
+/// re-theme) — deferring every other action to [`fold_action`].
+fn profile_or_fold_action(s: &mut AppState, action: Action) -> Flow {
+    match action {
+        Action::SwitchProfile => switch_profile_flow(s),
+        Action::CreateProfile(name) => profile_persist_flow(PersistOp::CreateProfile { name }),
+        Action::RenameProfile { profile, name } => {
+            profile_persist_flow(PersistOp::RenameProfile { profile, name })
+        }
+        Action::DeleteProfile(profile) => {
+            profile_persist_flow(PersistOp::RemoveProfile { profile })
+        }
+        // A picker selection applies LIVE in the same frame (ADR-0039): the
+        // snapshot re-themes here; the superseding event persists.
+        Action::SetThemeSlot { slot, colour } => apply_theme_slot(s, slot, colour),
+        other => fold_action(other),
+    }
+}
+
+/// A profile persist op plus the whole-view reload it implies (ADR-0036 §6):
+/// the loop re-reads names, active id, membership, selection, and arrangement
+/// through the loader seam after the op lands.
+fn profile_persist_flow(op: PersistOp) -> Flow {
+    Flow::Continue(Effects {
+        persist: vec![op],
+        reload_profiles: true,
+        ..Effects::default()
+    })
+}
+
+/// The menu's switch (`Enter` on a row, ADR-0037 §5): select the cursored
+/// profile and close the menu — the whole view follows through the reload.
+/// Switching to the already-active profile just closes the menu.
+fn switch_profile_flow(s: &mut AppState) -> Flow {
+    let Some(target) = s
+        .app
+        .profiles
+        .get(s.app.profile_menu.cursor)
+        .map(|p| p.profile_id.clone())
+    else {
+        return Flow::Continue(Effects::default());
+    };
+    s.app.mode = Mode::Normal;
+    s.app.profile_menu.reset();
+    if target == s.app.active_profile {
+        return Flow::Continue(Effects::default());
+    }
+    profile_persist_flow(PersistOp::SelectProfile { profile: target })
+}
+
+/// Apply one theme-slot selection (ADR-0039 §3): re-theme the running
+/// dashboard NOW — the same frame; the dashboard is the preview — and append
+/// the superseding per-(profile, slot) event through the persist seam. No
+/// profile wired ⇒ the preview alone (nothing durable to scope it to).
+fn apply_theme_slot(
+    s: &mut AppState,
+    slot: crate::theme::ThemeSlot,
+    colour: Option<crate::render::frame::Color>,
+) -> Flow {
+    let mut overrides = s.theme().overrides();
+    overrides.set(slot, colour);
+    s.set_theme(overrides);
+    s.dirty = true;
+    if s.app.active_profile.is_empty() {
+        return Flow::Continue(Effects::default());
+    }
+    Flow::Continue(Effects {
+        persist: vec![PersistOp::SetProfileTheme {
+            profile: s.app.active_profile.clone(),
+            slot: slot.key().to_string(),
+            colour: colour.and_then(crate::theme::colour_to_hex),
+        }],
+        ..Effects::default()
+    })
+}
+
+/// The remove op for a column-1 project: profile-scoped (this view only —
+/// ADR-0036, user story 8) when a profile is wired; the catalogue removal
+/// otherwise (headless/tests keep pre-profile behavior).
+fn remove_project_op(app: &App, path: String) -> PersistOp {
+    if app.active_profile.is_empty() {
+        PersistOp::RemoveProject { path }
+    } else {
+        PersistOp::RemoveProfileProject {
+            profile: app.active_profile.clone(),
+            path,
+        }
+    }
+}
+
+/// The reorder op for a column-1 project: profile-scoped when a profile is
+/// wired (the view reorders; the catalogue keeps its order), global otherwise.
+fn reorder_project_op(app: &App, path: String, up: bool) -> PersistOp {
+    if app.active_profile.is_empty() {
+        PersistOp::ReorderProject { path, up }
+    } else {
+        PersistOp::ReorderProfileProject {
+            profile: app.active_profile.clone(),
+            path,
+            up,
+        }
+    }
 }
 
 /// The feature under the toggle cursor (clamped into range).
@@ -1637,6 +1977,24 @@ pub struct ViewModel {
     /// The panel-editor state (ADR-0034), copied from `App.editor` — the grip
     /// renderer and the editor hit-test read it while `mode == PanelEditor`.
     pub editor: crate::editor::EditorState,
+    /// The active profile's display name (ADR-0037's header identity), or
+    /// `None` until the profile plane is wired — the button hides.
+    pub profile_name: Option<String>,
+    /// The live profiles (ADR-0036) — the menu's rows.
+    pub profiles: Vec<crate::profile::ProfileEntry>,
+    /// The active profile's stable id (marks the active row in the menu).
+    pub active_profile: String,
+    /// The profile menu's state (ADR-0037), copied from `App.profile_menu` —
+    /// the menu renderer and its hit-test read it while `mode == ProfileMenu`.
+    pub profile_menu: crate::profile_menu::ProfileMenuState,
+    /// The active profile's surface theme (ADR-0038) — the palette rides the
+    /// snapshot exactly like the version and the layout, so the renderer stays
+    /// pure and a no-override frame is byte-identical to Rift dark.
+    pub theme: crate::theme::Theme,
+    /// The colour picker's state (ADR-0039), copied from `App.colour_picker` —
+    /// the picker renderer and its hit-test read it while
+    /// `mode == ColourPicker`.
+    pub colour_picker: crate::colour_picker::ColourPickerState,
 }
 
 impl ViewModel {
@@ -2239,6 +2597,309 @@ mod tests {
         }
     }
 
+    // ---- ADR-0036/0037: the profile plane's state flows ----------------------
+
+    /// A ready state with three live profiles wired (active = `pf0`).
+    fn ready_with_profiles(projects: Vec<crate::Project>) -> AppState {
+        let mut s = ready(projects);
+        s.app.set_profiles(
+            ["default", "work", "lab"]
+                .iter()
+                .enumerate()
+                .map(|(i, name)| crate::profile::ProfileEntry {
+                    profile_id: format!("pf{i}"),
+                    name: (*name).to_string(),
+                    created_at: i64::try_from(i).unwrap(),
+                })
+                .collect(),
+            "pf0".into(),
+        );
+        s
+    }
+
+    /// Unwrap a `Flow::Continue`'s effects.
+    fn effects_of(flow: Flow) -> Effects {
+        match flow {
+            Flow::Continue(e) => e,
+            Flow::Quit => panic!("expected Continue"),
+        }
+    }
+
+    #[test]
+    fn wired_remove_and_reorder_are_profile_scoped() {
+        // Story 8: a column-1 remove/reorder touches only the active profile's
+        // view — the catalogue op is the unwired fallback, not the default.
+        let mut s = ready_with_profiles(vec![project("a"), project("b")]);
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Char('d'))));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::RemoveProfileProject {
+                profile: "pf0".into(),
+                path: "/r/a".into()
+            }]
+        );
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::ShiftDown)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::ReorderProfileProject {
+                profile: "pf0".into(),
+                path: "/r/a".into(),
+                up: false
+            }]
+        );
+    }
+
+    #[test]
+    fn menu_switch_emits_select_plus_reload_and_closes() {
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j')));
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SelectProfile {
+                profile: "pf1".into()
+            }]
+        );
+        assert!(e.reload_profiles, "the whole view reloads on a switch");
+        assert_eq!(s.app.mode, Mode::Normal, "the menu closed");
+    }
+
+    #[test]
+    fn switching_to_the_active_profile_just_closes_the_menu() {
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert!(e.persist.is_empty());
+        assert!(!e.reload_profiles);
+        assert_eq!(s.app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn menu_create_rename_delete_emit_their_ops_with_reload() {
+        // Create.
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('n')));
+        for c in "client".chars() {
+            update(&mut s, Event::Key(CanopyKey::Char(c)));
+        }
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::CreateProfile {
+                name: "client".into()
+            }]
+        );
+        assert!(e.reload_profiles);
+
+        // Rename (prefilled; append a char).
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j')));
+        update(&mut s, Event::Key(CanopyKey::Char('r')));
+        update(&mut s, Event::Key(CanopyKey::Char('2')));
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::RenameProfile {
+                profile: "pf1".into(),
+                name: "work2".into()
+            }]
+        );
+        assert!(e.reload_profiles);
+
+        // Delete, through the inline confirm.
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j')));
+        update(&mut s, Event::Key(CanopyKey::Char('d')));
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::RemoveProfile {
+                profile: "pf1".into()
+            }]
+        );
+        assert!(e.reload_profiles);
+    }
+
+    /// Type a slash line in command mode and press Enter.
+    fn run_palette(s: &mut AppState, line: &str) -> Effects {
+        update(s, Event::Key(CanopyKey::Char('/')));
+        for c in line.chars() {
+            update(s, Event::Key(CanopyKey::Char(c)));
+        }
+        effects_of(update(s, Event::Key(CanopyKey::Enter)))
+    }
+
+    #[test]
+    fn profile_palette_verbs_map_onto_the_menu_ops() {
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile switch lab");
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SelectProfile {
+                profile: "pf2".into()
+            }]
+        );
+        assert!(e.reload_profiles);
+
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile new client");
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::CreateProfile {
+                name: "client".into()
+            }]
+        );
+
+        // Rename targets the ACTIVE profile.
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile rename main");
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::RenameProfile {
+                profile: "pf0".into(),
+                name: "main".into()
+            }]
+        );
+
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile delete lab");
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::RemoveProfile {
+                profile: "pf2".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn profile_palette_guards_and_misses_alert_softly() {
+        // Deleting the active profile is refused with a warning Alert.
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile delete default");
+        assert!(e.persist.is_empty());
+        assert!(matches!(s.app.overlay, Some(Overlay::Alert(_))));
+
+        // An unknown name is a soft miss.
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile switch ghost");
+        assert!(e.persist.is_empty());
+        assert!(matches!(s.app.overlay, Some(Overlay::Alert(_))));
+
+        // A duplicate new-name is refused.
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile new work");
+        assert!(e.persist.is_empty());
+        assert!(matches!(s.app.overlay, Some(Overlay::Alert(_))));
+    }
+
+    #[test]
+    fn identity_click_toggles_the_menu_and_row_click_switches() {
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let _ = apply_click(&mut s, Target::HeaderProfile);
+        assert_eq!(s.app.mode, Mode::ProfileMenu);
+        let _ = apply_click(&mut s, Target::HeaderProfile);
+        assert_eq!(s.app.mode, Mode::Normal, "a second click closes");
+
+        let _ = apply_click(&mut s, Target::HeaderProfile);
+        let e = effects_of(apply_click(&mut s, Target::ProfileRow(2)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SelectProfile {
+                profile: "pf2".into()
+            }]
+        );
+        assert!(e.reload_profiles);
+        assert_eq!(s.app.mode, Mode::Normal, "click-to-activate closes");
+    }
+
+    #[test]
+    fn snapshot_carries_the_profile_plane() {
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let vm = s.snapshot();
+        assert_eq!(vm.profile_name.as_deref(), Some("default"));
+        assert_eq!(vm.profiles.len(), 3);
+        assert_eq!(vm.active_profile, "pf0");
+    }
+
+    #[test]
+    fn a_picker_selection_rethemes_the_same_frame_and_persists_one_event() {
+        use crate::theme::{ThemeSlot, PRESETS};
+        let mut s = ready_with_profiles(vec![project("a")]);
+        // p → menu, c → picker, Enter → background's presets, Enter → red.
+        for k in ['p', 'c'] {
+            update(&mut s, Event::Key(CanopyKey::Char(k)));
+        }
+        update(&mut s, Event::Key(CanopyKey::Enter));
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        // Applied live: the snapshot already wears the override.
+        assert_eq!(
+            s.snapshot().theme.overrides().get(ThemeSlot::Background),
+            Some(PRESETS[0].1),
+            "the dashboard is the preview — re-themed in the same frame"
+        );
+        // Exactly one superseding event persists, with the resolved hex.
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SetProfileTheme {
+                profile: "pf0".into(),
+                slot: "background".into(),
+                colour: crate::theme::colour_to_hex(PRESETS[0].1),
+            }]
+        );
+        assert!(!e.reload_profiles, "live apply needs no view reload");
+
+        // The reset row supersedes back to default (a NULL colour).
+        for _ in 0..20 {
+            update(&mut s, Event::Key(CanopyKey::Down));
+        }
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            s.snapshot().theme.overrides().get(ThemeSlot::Background),
+            None,
+            "reset returns the slot to Rift dark"
+        );
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SetProfileTheme {
+                profile: "pf0".into(),
+                slot: "background".into(),
+                colour: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn picker_clicks_mirror_the_keyboard() {
+        use crate::colour_picker::PickerStage;
+        use crate::theme::{ThemeSlot, PRESETS};
+        let mut s = ready_with_profiles(vec![project("a")]);
+        for k in ['p', 'c'] {
+            update(&mut s, Event::Key(CanopyKey::Char(k)));
+        }
+        // A slot click opens its presets…
+        let _ = apply_click(&mut s, Target::PickerRow(4)); // text
+        assert_eq!(s.app.colour_picker.stage, PickerStage::Presets);
+        assert_eq!(s.app.colour_picker.slot_cursor, 4);
+        // …and a preset click applies live, exactly like Enter.
+        let e = effects_of(apply_click(&mut s, Target::PickerRow(2))); // green
+        assert_eq!(
+            s.snapshot().theme.overrides().get(ThemeSlot::Text),
+            Some(PRESETS[2].1)
+        );
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SetProfileTheme {
+                profile: "pf0".into(),
+                slot: "text".into(),
+                colour: crate::theme::colour_to_hex(PRESETS[2].1),
+            }]
+        );
+    }
+
     #[test]
     fn flip_feature_emits_settoggle_and_install_action() {
         let mut s = ready(vec![project("a")]);
@@ -2727,8 +3388,9 @@ mod tests {
     #[test]
     fn persist_ops_are_insert_only() {
         // Exhaustive match: every PersistOp is an insert (add/remove/relabel/
-        // reorder/toggle are all superseding appends). If anyone adds an
-        // Update/Delete variant, this stops compiling — the immutability guard.
+        // reorder/toggle/layout and the ADR-0036 profile ops are all superseding
+        // appends). If anyone adds an Update/Delete variant, this stops
+        // compiling — the immutability guard.
         let ops = [
             PersistOp::AddProject {
                 path: String::new(),
@@ -2750,8 +3412,40 @@ mod tests {
                 desired: false,
             },
             PersistOp::SetLayout {
+                profile: String::new(),
                 path: String::new(),
                 layout: None,
+            },
+            PersistOp::CreateProfile {
+                name: String::new(),
+            },
+            PersistOp::RenameProfile {
+                profile: String::new(),
+                name: String::new(),
+            },
+            PersistOp::RemoveProfile {
+                profile: String::new(),
+            },
+            PersistOp::SelectProfile {
+                profile: String::new(),
+            },
+            PersistOp::AddProfileProject {
+                profile: String::new(),
+                path: String::new(),
+            },
+            PersistOp::RemoveProfileProject {
+                profile: String::new(),
+                path: String::new(),
+            },
+            PersistOp::ReorderProfileProject {
+                profile: String::new(),
+                path: String::new(),
+                up: true,
+            },
+            PersistOp::SetProfileTheme {
+                profile: String::new(),
+                slot: String::new(),
+                colour: None,
             },
         ];
         for op in ops {
@@ -2761,7 +3455,15 @@ mod tests {
                 | PersistOp::RelabelProject { .. }
                 | PersistOp::ReorderProject { .. }
                 | PersistOp::SetToggle { .. }
-                | PersistOp::SetLayout { .. } => {}
+                | PersistOp::SetLayout { .. }
+                | PersistOp::CreateProfile { .. }
+                | PersistOp::RenameProfile { .. }
+                | PersistOp::RemoveProfile { .. }
+                | PersistOp::SelectProfile { .. }
+                | PersistOp::AddProfileProject { .. }
+                | PersistOp::RemoveProfileProject { .. }
+                | PersistOp::ReorderProfileProject { .. }
+                | PersistOp::SetProfileTheme { .. } => {}
             }
         }
     }

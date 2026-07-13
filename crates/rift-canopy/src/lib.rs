@@ -27,6 +27,7 @@ pub mod chrome;
 pub mod col1;
 pub mod col2;
 pub mod col3;
+pub mod colour_picker;
 pub mod command;
 pub mod dispatch;
 pub mod editor;
@@ -36,6 +37,8 @@ pub mod keymap;
 pub mod layout;
 pub mod layout_model;
 pub mod plot;
+pub mod profile;
+pub mod profile_menu;
 pub mod render;
 pub mod splash;
 pub mod stack;
@@ -59,9 +62,10 @@ pub use col3::{
     NicReading, NicView, PanelMetrics, RecallView, SavingsData, ThreadsView, TokensData,
     TokensView,
 };
+pub use colour_picker::{ColourPickerState, PickerStage, RESET_ROW};
 pub use command::{
-    parse, CheckpointVerb, ConfigureVerb, MemoryVerb, PanelName, ParseError, ProjectRef,
-    SessionVerb, SplashMode, Tier, Verb, MAX_INPUT_LEN, VERB_WORDS,
+    parse, CheckpointVerb, ConfigureVerb, MemoryVerb, PanelName, ParseError, ProfileVerb,
+    ProjectRef, SessionVerb, SplashMode, Tier, Verb, MAX_INPUT_LEN, VERB_WORDS,
 };
 pub use dispatch::{
     request_for, CommandDispatcher, DispatchOutcome, DispatchRequest, Message, MessageAction,
@@ -72,6 +76,13 @@ pub use hit::{hit_test, Target};
 pub use input::{on_key, Action, CanopyKey, Mode, MouseButton, MouseInput, MouseKind};
 pub use layout::{solve, PanelRects, Rect};
 pub use layout_model::{Column, ColumnRole, LayoutModel, SolvedColumn, SolvedLayout, Unit};
+pub use profile::{
+    active_profile_id, current_membership, current_profiles, default_profile_id,
+    normalize_profile_name, MembershipEntry, NullProfileLoader, ProfileEntry, ProfileEvent,
+    ProfileLoader, ProfileOp, ProfileProjectEvent, ProfileProjectOp, DEFAULT_PROFILE_NAME,
+    MAX_PROFILE_NAME,
+};
+pub use profile_menu::{MenuStage, ProfileMenuState};
 pub use render::{select_backend, AsciiBackend, Capabilities, Frame, RenderBackend};
 pub use splash::SplashState;
 pub use state::{
@@ -79,6 +90,7 @@ pub use state::{
     HealthEvent, PersistOp, ProjectData, ViewModel,
 };
 pub use suggest::{suggest, ArgKind, CatalogEntry, Frecency, SuggestContext, Suggestion, CATALOG};
+pub use theme::{colour_to_hex, parse_hex_colour, Theme, ThemeOverrides, ThemeSlot, PRESETS};
 
 /// Scaffold/status string (kept for the bin entrypoint and smoke tests).
 #[must_use]
@@ -252,6 +264,20 @@ pub struct App {
     /// the pickup flag, and any live mouse drag. Only meaningful while
     /// `mode == Mode::PanelEditor`; resting otherwise.
     pub editor: crate::editor::EditorState,
+    /// The live profiles (ADR-0036), served through the profile loader seam at
+    /// launch and after every profile persist op. Empty until wired.
+    pub profiles: Vec<crate::profile::ProfileEntry>,
+    /// The active profile's stable id (ADR-0036) — the view the dashboard
+    /// shows; scopes every arrangement write. Empty until wired.
+    pub active_profile: String,
+    /// The profile menu's transient interaction state (ADR-0037) — the cursor
+    /// and the naming/confirm stage. Only meaningful while
+    /// `mode == Mode::ProfileMenu`; resting otherwise.
+    pub profile_menu: crate::profile_menu::ProfileMenuState,
+    /// The colour picker's transient interaction state (ADR-0039) — the stage
+    /// and its two cursors. Only meaningful while `mode == Mode::ColourPicker`;
+    /// resting otherwise.
+    pub colour_picker: crate::colour_picker::ColourPickerState,
 }
 
 impl App {
@@ -282,7 +308,32 @@ impl App {
             feature_runtime: std::collections::BTreeMap::new(),
             layout: crate::layout_model::LayoutModel::default(),
             editor: crate::editor::EditorState::default(),
+            profiles: Vec::new(),
+            active_profile: String::new(),
+            profile_menu: crate::profile_menu::ProfileMenuState::default(),
+            colour_picker: crate::colour_picker::ColourPickerState::default(),
         }
+    }
+
+    /// The active profile's display name (ADR-0037's header identity), or
+    /// `None` until the profile plane is wired.
+    #[must_use]
+    pub fn active_profile_name(&self) -> Option<&str> {
+        self.profiles
+            .iter()
+            .find(|p| p.profile_id == self.active_profile)
+            .map(|p| p.name.as_str())
+    }
+
+    /// Replace the live profiles + active id (from the loader seam or after a
+    /// profile persist op), clamping the menu cursor onto the new list.
+    pub fn set_profiles(&mut self, profiles: Vec<crate::profile::ProfileEntry>, active: String) {
+        self.profile_menu.cursor = self
+            .profile_menu
+            .cursor
+            .min(profiles.len().saturating_sub(1));
+        self.profiles = profiles;
+        self.active_profile = active;
     }
 
     /// Replace the watched projects (e.g. after a project is registered),

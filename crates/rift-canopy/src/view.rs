@@ -16,15 +16,12 @@ use crate::layout_model::ColumnRole;
 use crate::render::frame::{Frame, Style};
 use crate::render::{Capabilities, RenderBackend};
 use crate::state::ViewModel;
-use crate::theme::Theme;
 use crate::{EntryKind, Mode, Panel};
 
 /// The Rift accent style (selection + overlay chrome) — the theme's accent.
 const ACCENT: Style = Style::fg(crate::theme::ACCENT);
 
 /// The one surface theme (ADR-0023) — code, not config.
-const THEME: Theme = Theme::rift_dark();
-
 /// Render the whole dashboard for `vm` into `frame`, choosing the responsive
 /// layout tier for the current size (P3 S2). `backend` participates through
 /// the plot seam (column-3 graphs) and, once at the top, the Unicode
@@ -49,7 +46,7 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
         w: area.w,
         h: 1,
     };
-    crate::bars::draw_header(vm, THEME, unicode, frame, header);
+    crate::bars::draw_header(vm, vm.theme, unicode, frame, header);
     let body = Rect {
         x: area.x,
         y: area.y + 1,
@@ -69,6 +66,18 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
     // untouched (M5-11); it clamps away on tiny terminals.
     if !vm.suggestions.is_empty() {
         draw_suggest_panel(vm, frame);
+    }
+
+    // The profile menu (ADR-0037): a mode, not an overlay — a centered frame
+    // over the shared modal geometry and scrim, its state on the snapshot.
+    if vm.mode == crate::input::Mode::ProfileMenu {
+        draw_profile_menu(vm, unicode, frame);
+    }
+
+    // The colour picker (ADR-0039): two stages over the same modal geometry;
+    // the dashboard beneath is the live preview.
+    if vm.mode == crate::input::Mode::ColourPicker {
+        draw_colour_picker(vm, unicode, frame);
     }
 
     // The dispatch overlay layers over the body (ADR-0021 "Dispatch posture"):
@@ -161,7 +170,7 @@ fn draw_suggest_panel(vm: &ViewModel, frame: &mut Frame) {
     }
     let inner = frame.border(rect, "suggest", ACCENT);
     let t = vm.suggest_fade.clamp(0.0, 1.0);
-    let text_fg = crate::theme::lerp_color(crate::theme::MUTED, crate::theme::BODY_FG, t);
+    let text_fg = crate::theme::lerp_color(crate::theme::MUTED, vm.theme.body_fg(), t);
     let visible = usize::from(inner.h);
     for (i, sug) in vm.suggestions.iter().take(visible).enumerate() {
         let Ok(dy) = u16::try_from(i) else { break };
@@ -286,6 +295,265 @@ pub fn modal_primary_rect(inner: Rect, action: crate::dispatch::MessageAction) -
     })
 }
 
+/// The profile menu's row rect for profile index `i` (ADR-0037): one full-width
+/// row per live profile, starting one row below the modal's inner top. One
+/// source for the renderer and the hit-test, so a click lands exactly on the
+/// drawn row; zero-sized when the row would overrun the frame's usable body
+/// (the bottom rows are reserved for the input/confirm line).
+#[must_use]
+pub fn profile_menu_row_rect(modal: Rect, i: usize) -> Rect {
+    let empty = Rect {
+        x: modal.x,
+        y: modal.y,
+        w: 0,
+        h: 0,
+    };
+    if modal.w < 4 || modal.h < 5 {
+        return empty;
+    }
+    let inner = Rect {
+        x: modal.x + 1,
+        y: modal.y + 1,
+        w: modal.w - 2,
+        h: modal.h - 2,
+    };
+    let Ok(dy) = u16::try_from(i + 1) else {
+        return empty;
+    };
+    // The last two inner rows host the naming/confirm/hint line and a gap.
+    if dy >= inner.h.saturating_sub(2) {
+        return empty;
+    }
+    Rect {
+        x: inner.x,
+        y: inner.y + dy,
+        w: inner.w,
+        h: 1,
+    }
+}
+
+/// Draw the profile menu (ADR-0037): the shared centered modal frame + scrim,
+/// the live profiles (active marked with the profile glyph, the cursor row
+/// washed), and — per stage — the naming input line (create/rename, with the
+/// inline name-rule error) or the inline delete confirm. Pure drawing over the
+/// snapshot; every name passes the shared sanitizer.
+fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
+    use crate::profile_menu::MenuStage;
+    let rect = modal_rect(vm.size);
+    if rect.w < 8 || rect.h < 5 {
+        return;
+    }
+    draw_scrim(frame, rect);
+    for dy in 0..rect.h {
+        for dx in 0..rect.w {
+            frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
+        }
+    }
+    let inner = frame.border(rect, "profiles", ACCENT);
+
+    for (i, p) in vm.profiles.iter().enumerate() {
+        let rr = profile_menu_row_rect(rect, i);
+        if rr.h == 0 {
+            break; // the frame is full; the rest clip away whole
+        }
+        let is_active = p.profile_id == vm.active_profile;
+        let on_cursor =
+            i == vm.profile_menu.cursor && matches!(vm.profile_menu.stage, MenuStage::Browse);
+        let marker = if is_active {
+            crate::theme::Icon::Profile.glyph(unicode)
+        } else {
+            ' '
+        };
+        let line = format!(" {marker} {}", sanitize_for_terminal(&p.name));
+        let style = if on_cursor {
+            Style::fg(vm.theme.body_fg()).with_bg(crate::theme::SELECT_BG)
+        } else if is_active {
+            ACCENT
+        } else {
+            Style::fg(vm.theme.body_fg())
+        };
+        if on_cursor {
+            for dx in 0..rr.w {
+                frame.set(rr.x + dx, rr.y, ' ', style);
+            }
+        }
+        clip_line(frame, inner, rr.y - inner.y, &line, style);
+    }
+
+    // The stage line, on the inner bottom row: browse hints, the naming input,
+    // or the inline delete confirm (an explicit second act — ADR-0037 §3).
+    if inner.h == 0 {
+        return;
+    }
+    let stage_dy = inner.h - 1;
+    let muted = Style::fg(crate::theme::MUTED);
+    match &vm.profile_menu.stage {
+        MenuStage::Browse => {
+            clip_line(
+                frame,
+                inner,
+                stage_dy,
+                " ⏎ switch · n new · r rename · d delete · c colours · esc close",
+                muted,
+            );
+        }
+        MenuStage::NamingCreate | MenuStage::NamingRename { .. } => {
+            let verb = if matches!(vm.profile_menu.stage, MenuStage::NamingCreate) {
+                "new profile"
+            } else {
+                "rename to"
+            };
+            let line = format!(" {verb}: {}▏", sanitize_for_terminal(&vm.command_line));
+            clip_line(frame, inner, stage_dy, &line, ACCENT);
+            if vm.profile_menu.name_error && stage_dy > 0 {
+                clip_line(
+                    frame,
+                    inner,
+                    stage_dy - 1,
+                    " name must be 1–24 chars and unique",
+                    severity_style(crate::dispatch::Severity::Warning),
+                );
+            }
+        }
+        MenuStage::ConfirmDelete { profile } => {
+            let name = vm
+                .profiles
+                .iter()
+                .find(|p| &p.profile_id == profile)
+                .map(|p| sanitize_for_terminal(&p.name))
+                .unwrap_or_default();
+            let line = format!(" delete {name}? ⏎ confirm · esc cancel");
+            clip_line(
+                frame,
+                inner,
+                stage_dy,
+                &line,
+                severity_style(crate::dispatch::Severity::Warning),
+            );
+        }
+    }
+}
+
+/// The colour picker's row rect for row index `i` (ADR-0039) — the same shape
+/// as [`profile_menu_row_rect`] (one source for draw + hit), reused so the two
+/// modal surfaces cannot drift apart.
+#[must_use]
+pub fn colour_picker_row_rect(modal: Rect, i: usize) -> Rect {
+    profile_menu_row_rect(modal, i)
+}
+
+/// The number of rows the picker's current stage lists (slots, or presets +
+/// the reset row) — shared by the renderer and the hit-test.
+#[must_use]
+pub fn colour_picker_rows(stage: crate::colour_picker::PickerStage) -> usize {
+    match stage {
+        crate::colour_picker::PickerStage::Slots => crate::theme::ThemeSlot::ALL.len(),
+        crate::colour_picker::PickerStage::Presets => crate::theme::PRESETS.len() + 1,
+    }
+}
+
+/// Draw the colour picker (ADR-0039): stage one lists the five slots with each
+/// slot's current swatch (or `default`); stage two lists the ten presets —
+/// name beside a solid swatch box — plus the reset row. The swatch is
+/// colour-only, so on mono/ASCII the name alone carries the choice. Pure
+/// drawing over the snapshot; the dashboard behind the scrim is the preview.
+fn draw_colour_picker(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
+    use crate::colour_picker::{PickerStage, RESET_ROW};
+    let rect = modal_rect(vm.size);
+    if rect.w < 8 || rect.h < 5 {
+        return;
+    }
+    draw_scrim(frame, rect);
+    for dy in 0..rect.h {
+        for dx in 0..rect.w {
+            frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
+        }
+    }
+    let title = match vm.colour_picker.stage {
+        PickerStage::Slots => "colours".to_string(),
+        PickerStage::Presets => format!("colours · {}", vm.colour_picker.slot().key()),
+    };
+    let inner = frame.border(rect, &title, ACCENT);
+    let swatch = if unicode { "██" } else { "##" };
+
+    match vm.colour_picker.stage {
+        PickerStage::Slots => {
+            for (i, slot) in crate::theme::ThemeSlot::ALL.iter().enumerate() {
+                let rr = colour_picker_row_rect(rect, i);
+                if rr.h == 0 {
+                    break;
+                }
+                let on_cursor = i == vm.colour_picker.slot_cursor;
+                let style = if on_cursor {
+                    Style::fg(vm.theme.body_fg()).with_bg(crate::theme::SELECT_BG)
+                } else {
+                    Style::fg(vm.theme.body_fg())
+                };
+                if on_cursor {
+                    for dx in 0..rr.w {
+                        frame.set(rr.x + dx, rr.y, ' ', style);
+                    }
+                }
+                let x = frame.put_str(rr.x, rr.y, &format!(" {:<12}", slot.key()), style);
+                // The slot's current value: a swatch in its override, or the
+                // word `default` — honest about what the slot holds today.
+                match vm.theme.overrides().get(*slot) {
+                    Some(c) => {
+                        frame.put_str(x, rr.y, swatch, Style::fg(c).with_bg(style.bg));
+                    }
+                    None => {
+                        frame.put_str(x, rr.y, "default", vm.theme.dim().with_bg(style.bg));
+                    }
+                }
+            }
+        }
+        PickerStage::Presets => {
+            for i in 0..=RESET_ROW {
+                let rr = colour_picker_row_rect(rect, i);
+                if rr.h == 0 {
+                    break;
+                }
+                let on_cursor = i == vm.colour_picker.preset_cursor;
+                let style = if on_cursor {
+                    Style::fg(vm.theme.body_fg()).with_bg(crate::theme::SELECT_BG)
+                } else {
+                    Style::fg(vm.theme.body_fg())
+                };
+                if on_cursor {
+                    for dx in 0..rr.w {
+                        frame.set(rr.x + dx, rr.y, ' ', style);
+                    }
+                }
+                match crate::theme::PRESETS.get(i) {
+                    // A preset row: the name beside a box of the colour itself.
+                    Some((name, colour)) => {
+                        let x = frame.put_str(rr.x, rr.y, &format!(" {name:<8}"), style);
+                        frame.put_str(x, rr.y, swatch, Style::fg(*colour).with_bg(style.bg));
+                    }
+                    // The reset row sits beside the presets (ADR-0039 §2).
+                    None => {
+                        frame.put_str(rr.x, rr.y, " reset to default", style);
+                    }
+                }
+            }
+        }
+    }
+
+    if inner.h > 0 {
+        let hint = match vm.colour_picker.stage {
+            PickerStage::Slots => " ⏎ choose · esc menu",
+            PickerStage::Presets => " ⏎ apply (live) · esc slots",
+        };
+        clip_line(
+            frame,
+            inner,
+            inner.h - 1,
+            hint,
+            Style::fg(crate::theme::MUTED),
+        );
+    }
+}
+
 /// A message severity's frame colour (ADR-0029): red error, amber warning, green
 /// success, accent info. Colour-only, so the mono/ASCII tiers drop it and the
 /// border glyphs stand — the one styling axis decided at draw, not per call site.
@@ -307,7 +575,7 @@ fn overlay_button_style(
     target: &crate::hit::Target,
     control: crate::dispatch::OverlayControl,
 ) -> Style {
-    if let Some(bg) = crate::chrome::press_flash_bg(vm.button_flash(target)) {
+    if let Some(bg) = crate::chrome::press_flash_bg(vm.theme, vm.button_flash(target)) {
         ACCENT.with_bg(bg)
     } else if vm.focused_overlay_control() == Some(control) {
         ACCENT.with_bg(crate::theme::SELECT_BG)
@@ -354,6 +622,7 @@ fn draw_message(vm: &ViewModel, frame: &mut Frame, rect: Rect, msg: &crate::disp
 /// when the listing exceeds the box.
 fn draw_results(
     frame: &mut Frame,
+    theme: crate::theme::Theme,
     unicode: bool,
     rect: Rect,
     title: &str,
@@ -378,7 +647,7 @@ fn draw_results(
         h: u16::try_from(visible).unwrap_or(inner.h),
         ..inner
     };
-    draw_overflow_bar(frame, body, scroll, lines.len(), unicode);
+    draw_overflow_bar(frame, body, scroll, lines.len(), theme, unicode);
 }
 
 /// Draw the dispatch overlay as a centered modal (ADR-0026): a themed scrim over
@@ -407,6 +676,7 @@ fn draw_overlay(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
             ..
         } => draw_results(
             frame,
+            vm.theme,
             unicode,
             rect,
             title,
@@ -530,7 +800,7 @@ fn draw_full(
     if editing {
         draw_editor_grips(vm, frame, &sl, unicode);
     }
-    crate::bars::draw_hint_bar(vm, THEME, frame, sl.hint);
+    crate::bars::draw_hint_bar(vm, vm.theme, frame, sl.hint);
     draw_command(vm, frame, sl.command);
 }
 
@@ -585,7 +855,7 @@ fn draw_unit(
                     pressed: vm.pressed.clone(),
                     press_pulse: vm.press_pulse,
                 };
-                crate::cards::draw_one(&ctx, THEME, k, rect, collapsed, backend, frame);
+                crate::cards::draw_one(&ctx, vm.theme, k, rect, collapsed, backend, frame);
             }
         }
         Unit::Section(s) => crate::col3::draw_one(
@@ -628,11 +898,11 @@ fn draw_editor_grips(
             }
             let is_cursor = ci == vm.editor.cursor.col && ui == vm.editor.cursor.unit;
             let style = if is_cursor && vm.editor.picked {
-                THEME.selection()
+                vm.theme.selection()
             } else if is_cursor {
                 ACCENT
             } else {
-                THEME.dim()
+                vm.theme.dim()
             };
             // The grip sits at the unit's top-left border corner (chrome, never a
             // data cell — the border glyph is already there).
@@ -665,7 +935,7 @@ fn draw_two_col(
         &crate::cards::CardKind::ALL,
     );
     draw_graphs(vm, backend, frame, r.col3, &crate::col3::SectionId::ALL);
-    crate::bars::draw_hint_bar(vm, THEME, frame, r.hint);
+    crate::bars::draw_hint_bar(vm, vm.theme, frame, r.hint);
     draw_command(vm, frame, r.command);
 }
 
@@ -692,7 +962,7 @@ fn draw_single(
         // Projects (and Command focus) show the projects panel.
         Panel::Projects | Panel::Command => draw_projects(vm, frame, panel, unicode),
     }
-    crate::bars::draw_hint_bar(vm, THEME, frame, hint);
+    crate::bars::draw_hint_bar(vm, vm.theme, frame, hint);
     draw_command(vm, frame, command);
 }
 
@@ -745,14 +1015,14 @@ fn draw_command(vm: &ViewModel, frame: &mut Frame, command: Rect) {
         frame,
         command,
         btitle,
-        THEME.border(crate::theme::Section::Command, focused),
-        THEME.title(crate::theme::Section::Command),
+        vm.theme.border(crate::theme::Section::Command, focused),
+        vm.theme.title(crate::theme::Section::Command),
     );
-    let px = frame.put_str(inner.x, inner.y, prefix, THEME.key_hint());
+    let px = frame.put_str(inner.x, inner.y, prefix, vm.theme.key_hint());
     let line = format!("{}\u{2588}", vm.command_line);
     let room = (inner.x + inner.w).saturating_sub(px);
     let clipped: String = line.chars().take(usize::from(room)).collect();
-    frame.put_str(px, inner.y, &clipped, THEME.body());
+    frame.put_str(px, inner.y, &clipped, vm.theme.body());
     // A parse error renders inline under the input — the caret run under the
     // offending span plus the reason (and the nearest-verb hint), drawn over
     // the bar's bottom border row so no layout shifts.
@@ -865,9 +1135,9 @@ fn draw_rail_actions(
 ) {
     for (r, target) in buttons {
         let g = rail_action_glyph(target, unicode);
-        let style = match crate::chrome::press_flash_bg(vm.button_flash(target)) {
-            Some(bg) => THEME.dim().with_bg(bg),
-            None => THEME.dim(),
+        let style = match crate::chrome::press_flash_bg(vm.theme, vm.button_flash(target)) {
+            Some(bg) => vm.theme.dim().with_bg(bg),
+            None => vm.theme.dim(),
         };
         frame.put_str(r.x, r.y, &format!("[{g}]"), style);
     }
@@ -880,8 +1150,8 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
         frame,
         rect,
         "projects",
-        THEME.border(Section::Projects, focused),
-        THEME.title(Section::Projects),
+        vm.theme.border(Section::Projects, focused),
+        vm.theme.title(Section::Projects),
     );
     // The registered-project count as a badge on the title row, after the title
     // (user story 8: the count is a fact you see, not a scroll you take).
@@ -892,7 +1162,7 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
             bx,
             rect.y,
             &vm.projects.len().to_string(),
-            THEME.badge(Section::Projects.accent()),
+            vm.theme.badge(Section::Projects.accent()),
         );
     }
     let (list, buttons) = rail_action_layout(inner, !vm.projects.is_empty());
@@ -902,7 +1172,7 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
             list,
             0,
             "No projects yet — press 'a' or [+]",
-            THEME.body(),
+            vm.theme.body(),
         );
         draw_rail_actions(vm, frame, &buttons, unicode);
         return;
@@ -927,9 +1197,9 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
                     crate::theme::SELECT_BG,
                     1.0 - vm.select_pulse.clamp(0.0, 1.0),
                 );
-                THEME.selection().with_bg(bg)
+                vm.theme.selection().with_bg(bg)
             } else {
-                THEME.selection()
+                vm.theme.selection()
             };
             crate::chrome::fill(
                 frame,
@@ -943,7 +1213,7 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
             );
             (pill, '>')
         } else {
-            (THEME.body(), ' ')
+            (vm.theme.body(), ' ')
         };
         // Linked worktrees render as indented children of their repository.
         let indent = match p.kind {
@@ -956,7 +1226,7 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
             label_w.saturating_sub(indent.len()),
         );
         frame.set(inner.x, y, marker, row_style);
-        let kind_style = if selected { row_style } else { THEME.dim() };
+        let kind_style = if selected { row_style } else { vm.theme.dim() };
         let mut x = frame.put_str(inner.x + 1, y, indent, row_style);
         frame.set(x, y, Icon::for_kind(p.kind).glyph(unicode), kind_style);
         x = x.saturating_add(1);
@@ -964,7 +1234,7 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
         // The trailing status dot, pinned to the right edge in status colour.
         if inner.w >= 2 {
             let dot_x = inner.x + inner.w - 1;
-            let mut dot = THEME.status_dot(p.status);
+            let mut dot = vm.theme.status_dot(p.status);
             if selected {
                 dot = dot.with_bg(crate::theme::SELECT_BG);
             }
@@ -981,7 +1251,7 @@ fn draw_projects(vm: &ViewModel, frame: &mut Frame, rect: Rect, unicode: bool) {
         w: rect.w,
         h: list.h,
     };
-    draw_overflow_bar(frame, bar_area, start, vm.projects.len(), unicode);
+    draw_overflow_bar(frame, bar_area, start, vm.projects.len(), vm.theme, unicode);
 }
 
 /// Column 2 — the card stack (M55-08): repository · models · settings · capture
@@ -998,7 +1268,7 @@ fn draw_detail(
     units: &[crate::cards::CardKind],
 ) {
     let Some(detail) = vm.detail.as_deref() else {
-        clip_line(frame, rect, 0, "no project selected", THEME.dim());
+        clip_line(frame, rect, 0, "no project selected", vm.theme.dim());
         return;
     };
     let ctx = crate::cards::CardCtx {
@@ -1011,7 +1281,15 @@ fn draw_detail(
         pressed: vm.pressed.clone(),
         press_pulse: vm.press_pulse,
     };
-    crate::cards::draw(&ctx, THEME, units, rect, vm.detail_scroll, backend, frame);
+    crate::cards::draw(
+        &ctx,
+        vm.theme,
+        units,
+        rect,
+        vm.detail_scroll,
+        backend,
+        frame,
+    );
     // The card-stack overflow scrollbar (ADR-0031): shown only when the column is
     // too short to host every card (the collapse-solve's lossy tier — cards are
     // one row each there, so the row/card counts line up).
@@ -1020,6 +1298,7 @@ fn draw_detail(
         rect,
         vm.detail_scroll,
         crate::cards::content_len(units),
+        vm.theme,
         unicode,
     );
 }
@@ -1054,6 +1333,7 @@ fn draw_graphs(
         rect,
         vm.graphs_scroll,
         usize::from(crate::col3::content_rows(ids)),
+        vm.theme,
         unicode,
     );
 }
@@ -1067,10 +1347,11 @@ fn draw_overflow_bar(
     area: Rect,
     offset: usize,
     content_len: usize,
+    theme: crate::theme::Theme,
     unicode: bool,
 ) -> bool {
     if let Some(bar) = crate::chrome::scrollbar(area, offset, content_len) {
-        crate::chrome::draw_scrollbar(frame, &bar, unicode);
+        crate::chrome::draw_scrollbar(frame, &bar, theme, unicode);
         true
     } else {
         false
@@ -1171,6 +1452,104 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// A view-model in a picker/menu-capable state (one live profile).
+    fn profiled_state() -> AppState {
+        let mut s = AppState::new(
+            vec![Project {
+                name: "rift-cli".into(),
+                path: "/r/rift-cli".into(),
+                status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }],
+            Size::new(120, 40),
+        );
+        s.app.splash.skip();
+        s.app.set_profiles(
+            vec![crate::profile::ProfileEntry {
+                profile_id: "pf0".into(),
+                name: "default".into(),
+                created_at: 0,
+            }],
+            "pf0".into(),
+        );
+        s
+    }
+
+    #[test]
+    fn profile_menu_lists_profiles_with_the_stage_line() {
+        let mut s = profiled_state();
+        crate::input::enter_profile_menu(&mut s.app);
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("profiles"), "the menu frame titles: {text}");
+        assert!(text.contains("default"), "the live profile lists");
+        assert!(text.contains("n new"), "the browse stage line teaches keys");
+    }
+
+    #[test]
+    fn picker_lists_presets_as_name_beside_a_swatch() {
+        // ADR-0039 §1: stage two is one row per preset — the NAME beside a
+        // solid swatch box — plus the reset row. On the colour tiers the
+        // swatch carries the preset's own RGB; on mono the name alone carries
+        // (the glyphs still render; colour resolves away by construction).
+        let mut s = profiled_state();
+        crate::input::enter_profile_menu(&mut s.app);
+        s.app.mode = crate::input::Mode::ColourPicker;
+        s.app.colour_picker.stage = crate::colour_picker::PickerStage::Presets;
+        let v = s.snapshot();
+        let mut f = Frame::new(v.size);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::UNICODE);
+        draw(&v, &mut b, &mut f);
+        let modal = modal_rect(v.size);
+        for (i, (name, colour)) in crate::theme::PRESETS.iter().enumerate() {
+            let rr = colour_picker_row_rect(modal, i);
+            assert!(rr.h > 0, "every preset row fits the frame");
+            let row: String = (rr.x..rr.x + rr.w)
+                .map(|x| f.get(x, rr.y).map_or(' ', |c| c.ch))
+                .collect();
+            assert!(row.contains(name), "row {i} names its preset: {row}");
+            // The swatch box sits right after the padded name, in the colour.
+            let sx = rr.x + 1 + 8;
+            let cell = f.get(sx, rr.y).unwrap();
+            assert_eq!(cell.ch, '#', "a solid swatch box (ASCII backend)");
+            assert_eq!(cell.style.fg, *colour, "the swatch IS the colour");
+        }
+        // The reset row sits beside the presets.
+        let rr = colour_picker_row_rect(modal, crate::colour_picker::RESET_ROW);
+        let row: String = (rr.x..rr.x + rr.w)
+            .map(|x| f.get(x, rr.y).map_or(' ', |c| c.ch))
+            .collect();
+        assert!(row.contains("reset to default"), "{row}");
+    }
+
+    #[test]
+    fn picker_slot_stage_shows_current_values() {
+        let mut state = profiled_state();
+        let mut overrides = crate::theme::ThemeOverrides::NONE;
+        overrides.set(
+            crate::theme::ThemeSlot::Border,
+            Some(crate::theme::PRESETS[1].1),
+        );
+        state.set_theme(overrides);
+        state.app.mode = crate::input::Mode::ColourPicker;
+        let view_model = state.snapshot();
+        let mut frame = Frame::new(view_model.size);
+        let mut backend = crate::render::AsciiBackend::new(crate::render::Capabilities::UNICODE);
+        draw(&view_model, &mut backend, &mut frame);
+        let modal = modal_rect(view_model.size);
+        let text: String = (0..frame.height())
+            .flat_map(|y| (0..frame.width()).map(move |x| (x, y)))
+            .map(|(x, y)| frame.get(x, y).map_or(' ', |c| c.ch))
+            .collect();
+        assert!(text.contains("background"), "the slots list");
+        assert!(text.contains("default"), "an unset slot reads default");
+        // The overridden border slot shows a swatch in its colour.
+        let rr = colour_picker_row_rect(modal, 1);
+        let sx = rr.x + 1 + 12;
+        let cell = frame.get(sx, rr.y).unwrap();
+        assert_eq!(cell.ch, '#');
+        assert_eq!(cell.style.fg, crate::theme::PRESETS[1].1);
     }
 
     #[test]

@@ -180,15 +180,19 @@ pub fn button(
     frame.put_str(cx, y, "]", style)
 }
 
-/// The press-flash background for a button at `flash` (ADR-0028): the accent at
-/// `flash == 1.0` lerping to the raised surface as it decays, or `None` at rest
-/// so the button keeps its normal fill. Colour-only, so the mono/ASCII tiers
-/// resolve it away — a keyboard/pointer press acknowledges identically at every
-/// tier that can carry colour.
+/// The press-flash background for a button at `flash` (ADR-0028): the button
+/// accent at `flash == 1.0` lerping to the raised surface as it decays, or
+/// `None` at rest so the button keeps its normal fill. Colour-only, so the
+/// mono/ASCII tiers resolve it away — a keyboard/pointer press acknowledges
+/// identically at every tier that can carry colour. Takes the runtime theme
+/// (ADR-0038): both endpoints follow the profile's background/button slots.
 #[must_use]
-pub fn press_flash_bg(flash: f32) -> Option<crate::render::frame::Color> {
+pub fn press_flash_bg(
+    theme: crate::theme::Theme,
+    flash: f32,
+) -> Option<crate::render::frame::Color> {
     let f = flash.clamp(0.0, 1.0);
-    (f > 0.0).then(|| crate::theme::lerp_color(crate::theme::SURFACE_BG, crate::theme::ACCENT, f))
+    (f > 0.0).then(|| crate::theme::lerp_color(theme.surface_bg(), theme.button_accent(), f))
 }
 
 /// A scrollbar's geometry (ADR-0031): the **track** on a region's right edge and
@@ -239,13 +243,18 @@ pub fn scrollbar(area: Rect, offset: usize, content_len: usize) -> Option<Scroll
 }
 
 /// Draw a [`Scrollbar`] (ADR-0031): the track glyph down the right edge in the
-/// dim border tone, the thumb cells over it in the accent. Both glyph and colour
-/// degrade on ASCII (`│`/`█` → `|`/`#`) so a mono terminal still shows an honest
-/// indicator. Chrome — the bar sits on the region's own last column, never over a
-/// data cell (callers reserve that column).
-pub fn draw_scrollbar(frame: &mut Frame, bar: &Scrollbar, unicode: bool) {
+/// (themable) border tone, the thumb cells over it in the accent. Both glyph and
+/// colour degrade on ASCII (`│`/`█` → `|`/`#`) so a mono terminal still shows an
+/// honest indicator. Chrome — the bar sits on the region's own last column, never
+/// over a data cell (callers reserve that column).
+pub fn draw_scrollbar(
+    frame: &mut Frame,
+    bar: &Scrollbar,
+    theme: crate::theme::Theme,
+    unicode: bool,
+) {
     let (track_g, thumb_g) = if unicode { ('│', '█') } else { ('|', '#') };
-    let track_style = Style::fg(crate::theme::BORDER_IDLE);
+    let track_style = Style::fg(theme.border_idle());
     let thumb_style = Style::fg(crate::theme::ACCENT);
     for dy in 0..bar.track.h {
         frame.set(bar.track.x, bar.track.y + dy, track_g, track_style);
@@ -483,7 +492,7 @@ mod tests {
         let area = rect(0, 0, 12, 8);
         let bar = scrollbar(area, 4, 24).unwrap();
         let mut f = Frame::new(Size::new(12, 8));
-        draw_scrollbar(&mut f, &bar, true);
+        draw_scrollbar(&mut f, &bar, crate::theme::Theme::rift_dark(), true);
         let track_x = area.x + area.w - 1;
         for y in 0..8 {
             let lit = f.get(track_x, y).is_some_and(|c| c.ch != ' ');
@@ -511,7 +520,7 @@ mod tests {
         let area = rect(0, 0, 6, 6);
         let bar = scrollbar(area, 0, 12).unwrap();
         let mut f = Frame::new(Size::new(6, 6));
-        draw_scrollbar(&mut f, &bar, false);
+        draw_scrollbar(&mut f, &bar, crate::theme::Theme::rift_dark(), false);
         let x = area.x + area.w - 1;
         // The ASCII floor keeps an honest indicator: `|` track, `#` thumb.
         let glyphs: Vec<char> = (0..6).filter_map(|y| f.get(x, y).map(|c| c.ch)).collect();

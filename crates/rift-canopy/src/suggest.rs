@@ -24,6 +24,8 @@ pub enum ArgKind {
     SessionSub,
     /// A projects subcommand.
     ProjectsSub,
+    /// A profile subcommand (new / rename / switch / delete).
+    ProfileSub,
     /// A splash mode (configure splash).
     ConfigureSub,
     /// `--dry-run` (gc).
@@ -115,6 +117,12 @@ pub const CATALOG: &[CatalogEntry] = &[
         usage: "/focus <panel>",
         description: "move focus to a panel",
         arg: ArgKind::Panel,
+    },
+    CatalogEntry {
+        verb: "profile",
+        usage: "/profile <new|rename|switch|delete> <name>",
+        description: "manage profiles (the menu's grammar)",
+        arg: ArgKind::ProfileSub,
     },
     CatalogEntry {
         verb: "quit",
@@ -353,6 +361,10 @@ fn suggest_args(verb_word: &str, partial: &str, ctx: &SuggestContext) -> Vec<Sug
                 ["list", "prune"].iter().map(|s| (*s).to_owned()).collect()
             }
         }
+        ArgKind::ProfileSub => ["new", "rename", "switch", "delete"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
         ArgKind::ConfigureSub => {
             if let Some(mode_part) = partial.strip_prefix("splash") {
                 let mode_needle = mode_part.trim_start().to_ascii_lowercase();

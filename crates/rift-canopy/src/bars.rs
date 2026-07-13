@@ -14,7 +14,7 @@ use crate::keymap;
 use crate::layout::Rect;
 use crate::render::frame::Frame;
 use crate::state::ViewModel;
-use crate::theme::{Icon, Section, Theme, SURFACE_BG};
+use crate::theme::{Icon, Section, Theme};
 
 /// A clickable header action (the right-aligned key hints).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +100,73 @@ pub fn header_action_at(w: u16, col: u16) -> Option<HeaderAction> {
         .map(|s| s.action)
 }
 
+/// The identity button's name budget in cells (ADR-0037 §1): beyond it the
+/// name truncates with an ellipsis.
+const PROFILE_NAME_BUDGET: usize = 16;
+
+/// The gap between the health dot and the identity button, in cells.
+const PROFILE_GAP: u16 = 2;
+
+/// The active profile's name, terminal-sanitised and truncated at the fixed
+/// budget (ADR-0037 §§1/4) — the one text both the renderer and the span
+/// math use, so the drawn cells always equal the hit target.
+fn profile_label(name: &str) -> String {
+    let clean = sanitize_for_terminal(name);
+    if clean.chars().count() <= PROFILE_NAME_BUDGET {
+        return clean;
+    }
+    let mut out: String = clean.chars().take(PROFILE_NAME_BUDGET - 1).collect();
+    out.push('…');
+    out
+}
+
+/// One past the left cluster's last cell (the health dot) — the identity
+/// button's anchor, deterministic from the version string alone. Kept in
+/// lockstep with the strings [`draw_header`] puts.
+fn left_cluster_end(version: &str) -> u16 {
+    // ` RIFT ` (6) + ` Canopy` (7)
+    let mut x = 6u16.saturating_add(7);
+    if !version.is_empty() {
+        let v = sanitize_for_terminal(version);
+        let count = u16::try_from(v.chars().count()).unwrap_or(u16::MAX);
+        x = x.saturating_add(2).saturating_add(count); // ` v` + version
+    }
+    x.saturating_add(2).saturating_add(1) // `  ` + the health dot
+}
+
+/// The header identity button's cell span `[start, end)` on row 0 (ADR-0037):
+/// `⦿ name` right after the version and the health dot. **One** function feeds
+/// both the renderer and the row-0 hit-test, so a resize can never desync what
+/// is drawn from what is clickable. `None` hides the button — no profile wired
+/// (empty name), or a row too narrow to hold it clear of the right cluster: it
+/// clips away whole rather than garbling (the right cluster's rule).
+#[must_use]
+pub fn profile_span(version: &str, profile_name: Option<&str>, w: u16) -> Option<(u16, u16)> {
+    let name = profile_name?;
+    if name.is_empty() {
+        return None;
+    }
+    let label = profile_label(name);
+    let start = left_cluster_end(version).saturating_add(PROFILE_GAP);
+    let label_cells = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+    let end = start.saturating_add(2).saturating_add(label_cells); // `⦿ ` + name
+                                                                   // The button must clear the action cluster (when present) by a gap, and
+                                                                   // the row's right margin regardless — else it clips away whole.
+    let limit = header_action_spans(w)
+        .first()
+        .map_or_else(|| w.saturating_sub(1), |s| s.start.saturating_sub(ITEM_GAP));
+    if end > limit {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Whether row-0 column `col` is on the identity button.
+#[must_use]
+pub fn profile_hit(version: &str, profile_name: Option<&str>, w: u16, col: u16) -> bool {
+    profile_span(version, profile_name, w).is_some_and(|(start, end)| col >= start && col < end)
+}
+
 /// Draw the header bar into `area`'s first row: mark, version, health dot,
 /// the status toast, and the right-aligned actions. Colour rides the theme's
 /// surface fill (the mono/ASCII tiers resolve it away; the glyphs stand).
@@ -118,15 +185,45 @@ pub fn draw_header(vm: &ViewModel, theme: Theme, unicode: bool, frame: &mut Fram
     x = frame.put_str(x, y, " Canopy", bar);
     if !vm.version.is_empty() {
         let v = sanitize_for_terminal(&vm.version);
-        x = frame.put_str(x, y, &format!(" v{v}"), theme.dim().with_bg(SURFACE_BG));
+        x = frame.put_str(
+            x,
+            y,
+            &format!(" v{v}"),
+            theme.dim().with_bg(theme.surface_bg()),
+        );
     }
     x = frame.put_str(x, y, "  ", bar);
     frame.set(
         x,
         y,
         Icon::HealthDot.glyph(unicode),
-        theme.health(vm.health).with_bg(SURFACE_BG),
+        theme.health(vm.health).with_bg(theme.surface_bg()),
     );
+
+    // The identity button (ADR-0037): `⦿ name` after the health dot, drawn on
+    // the SAME span the hit-test resolves. Press-flash on click; a steady
+    // active wash while the profile menu is open (the panel-editor pattern).
+    if let Some((start, end)) = profile_span(&vm.version, vm.profile_name.as_deref(), area.w) {
+        let target = crate::hit::Target::HeaderProfile;
+        let active = vm.mode == crate::input::Mode::ProfileMenu;
+        let bg = crate::chrome::press_flash_bg(theme, vm.button_flash(&target))
+            .or_else(|| active.then_some(crate::theme::SELECT_BG))
+            .unwrap_or(theme.surface_bg());
+        let label = vm
+            .profile_name
+            .as_deref()
+            .map(profile_label)
+            .unwrap_or_default();
+        let gx = area.x + start;
+        frame.set(
+            gx,
+            y,
+            Icon::Profile.glyph(unicode),
+            theme.key_hint().with_bg(bg),
+        );
+        frame.put_str(gx + 1, y, &format!(" {label}"), theme.dim().with_bg(bg));
+        let _ = end;
+    }
 
     // Right cluster: the header actions.
     let spans = header_action_spans(area.w);
@@ -146,9 +243,9 @@ pub fn draw_header(vm: &ViewModel, theme: Theme, unicode: bool, frame: &mut Fram
         // accent wash, distinct from the transient press flash.
         let active =
             span.action == HeaderAction::Editor && vm.mode == crate::input::Mode::PanelEditor;
-        let bg = crate::chrome::press_flash_bg(vm.button_flash(&target))
+        let bg = crate::chrome::press_flash_bg(theme, vm.button_flash(&target))
             .or_else(|| active.then_some(crate::theme::SELECT_BG))
-            .unwrap_or(SURFACE_BG);
+            .unwrap_or(theme.surface_bg());
         let kx = frame.put_str(area.x + span.start, y, key, theme.key_hint().with_bg(bg));
         frame.put_str(kx, y, &format!(" {label}"), theme.dim().with_bg(bg));
     }
@@ -260,7 +357,7 @@ mod tests {
             .iter()
             .find(|s| s.action == HeaderAction::Help)
             .unwrap();
-        let flash_bg = crate::chrome::press_flash_bg(1.0).unwrap();
+        let flash_bg = crate::chrome::press_flash_bg(Theme::rift_dark(), 1.0).unwrap();
         assert_eq!(
             f.get(palette.start, 0).unwrap().style.bg,
             flash_bg,
@@ -268,7 +365,7 @@ mod tests {
         );
         assert_eq!(
             f.get(help.start, 0).unwrap().style.bg,
-            SURFACE_BG,
+            crate::theme::SURFACE_BG,
             "an unpressed chip keeps the header's surface fill"
         );
     }
@@ -287,6 +384,146 @@ mod tests {
         // Too narrow: the cluster clips away whole; nothing is clickable.
         assert!(header_action_spans(30).is_empty());
         assert_eq!(header_action_at(30, 15), None);
+    }
+
+    /// A snapshot with the profile plane wired: one active profile named `name`.
+    fn vm_with_profile(name: &str, w: u16, h: u16) -> ViewModel {
+        let mut s = AppState::new(
+            vec![Project {
+                name: "p".into(),
+                path: "/r/p".into(),
+                status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }],
+            Size::new(w, h),
+        );
+        s.app.splash.skip();
+        s.version = "0.1.0".into();
+        s.app.set_profiles(
+            vec![crate::profile::ProfileEntry {
+                profile_id: "pf1".into(),
+                name: name.into(),
+                created_at: 1,
+            }],
+            "pf1".into(),
+        );
+        s.snapshot()
+    }
+
+    #[test]
+    fn identity_button_draws_exactly_on_its_span() {
+        // ADR-0037 §1: one span function feeds the renderer and the hit-test —
+        // the glyph sits on the span's first cell, the name follows, and every
+        // cell in [start, end) hits while start-1 / end miss.
+        let v = vm_with_profile("work", 80, 24);
+        let mut f = Frame::new(Size::new(80, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 80)
+            .expect("the identity button shows on a wide header");
+        assert_eq!(f.get(start, 0).unwrap().ch, Icon::Profile.unicode());
+        let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
+        assert!(
+            text.contains("work"),
+            "the name renders on the span: {text}"
+        );
+        for col in start..end {
+            assert!(profile_hit(&v.version, v.profile_name.as_deref(), 80, col));
+        }
+        assert!(!profile_hit(
+            &v.version,
+            v.profile_name.as_deref(),
+            80,
+            start - 1
+        ));
+        assert!(!profile_hit(&v.version, v.profile_name.as_deref(), 80, end));
+    }
+
+    #[test]
+    fn identity_name_truncates_with_an_ellipsis_at_the_budget() {
+        let long = "a-very-long-profile-name-indeed";
+        let v = vm_with_profile(long, 120, 24);
+        let (start, end) =
+            profile_span(&v.version, v.profile_name.as_deref(), 120).expect("shows when wide");
+        // `⦿ ` + 15 chars + `…` = 18 cells.
+        assert_eq!(end - start, 18, "the span holds the budgeted label");
+        let mut f = Frame::new(Size::new(120, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
+        assert!(text.ends_with('…'), "truncation is an ellipsis: {text}");
+    }
+
+    #[test]
+    fn identity_clips_away_whole_on_a_narrow_header() {
+        // Mirrors the right cluster's rule: below the threshold the whole span
+        // vanishes rather than garbling — and nothing on the row hits.
+        let v = vm_with_profile("work", 30, 24);
+        assert_eq!(
+            profile_span(&v.version, v.profile_name.as_deref(), 30),
+            None
+        );
+        let mut f = Frame::new(Size::new(30, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        let row: String = (0..30u16)
+            .map(|x| f.get(x, 0).map_or(' ', |c| c.ch))
+            .collect();
+        assert!(
+            !row.contains(Icon::Profile.unicode()),
+            "no partial button: {row}"
+        );
+        for col in 0..30u16 {
+            assert!(!profile_hit(&v.version, v.profile_name.as_deref(), 30, col));
+        }
+    }
+
+    #[test]
+    fn identity_hides_until_the_profile_plane_is_wired() {
+        let v = vm(80, 24); // no profiles set
+        assert_eq!(v.profile_name, None);
+        assert_eq!(
+            profile_span(&v.version, v.profile_name.as_deref(), 80),
+            None
+        );
+    }
+
+    #[test]
+    fn identity_reads_active_while_the_menu_is_open_and_flashes_on_press() {
+        use crate::input::Mode;
+        let mut v = vm_with_profile("work", 80, 24);
+        v.mode = Mode::ProfileMenu;
+        let (start, _) = profile_span(&v.version, v.profile_name.as_deref(), 80).unwrap();
+        let mut f = Frame::new(Size::new(80, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        assert_eq!(
+            f.get(start, 0).unwrap().style.bg,
+            crate::theme::SELECT_BG,
+            "a steady active wash while the menu is open"
+        );
+        // A press flashes toward the accent (and wins over the wash).
+        v.pressed = Some(crate::hit::Target::HeaderProfile);
+        v.press_pulse = 1.0;
+        let mut f = Frame::new(Size::new(80, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        assert_eq!(
+            f.get(start, 0).unwrap().style.bg,
+            crate::chrome::press_flash_bg(Theme::rift_dark(), 1.0).unwrap()
+        );
+    }
+
+    #[test]
+    fn hostile_profile_names_are_sanitised_before_render() {
+        // A control-byte name cannot smuggle bytes into the header (story 22).
+        let v = vm_with_profile("wo\x1b[31mrk\x07", 120, 24);
+        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 120).unwrap();
+        let mut f = Frame::new(Size::new(120, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
+        assert!(!text.contains('\x1b') && !text.contains('\x07'), "{text:?}");
     }
 
     #[test]

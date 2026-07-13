@@ -731,7 +731,7 @@ fn draw_token_panel(
 /// column (the tile primitive's collapsed form).
 fn draw_class_tiles(theme: Theme, d: &BreakdownData, read_pct: u8, rect: Rect, frame: &mut Frame) {
     let cats = &theme::BREAKDOWN;
-    let cell = |i: usize| cats.get(i).copied().unwrap_or(theme::ACCENT);
+    let cell = |i: usize| cats.get(i).copied().unwrap_or(theme.graph_accent());
     let tiles: [(&str, String, Color); 5] = [
         ("in", fmt_km(d.input), cell(0)),
         ("rd", fmt_km(d.read), cell(1)),
@@ -993,7 +993,7 @@ fn draw_recall_panel(
                 inner,
                 0,
                 &format!("saved {pct}%  ({} tokens)", fmt_km(sd.total)),
-                theme.tile_value(theme::ACCENT),
+                theme.tile_value(theme.graph_accent()),
             );
         }
     }

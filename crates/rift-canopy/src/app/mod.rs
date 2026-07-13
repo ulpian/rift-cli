@@ -94,7 +94,7 @@ pub fn prime_startup(state: &AppState, req_sink: &mut dyn FnMut(DataRequest)) {
 /// # Errors
 /// [`rift_core::RiftError`] on a terminal present/read failure.
 #[allow(clippy::too_many_arguments)] // ADR-0011: every host dependency is one explicit seam
-pub fn event_loop<F, R, L>(
+pub fn event_loop<F, R>(
     backend: &mut dyn RenderBackend,
     src: &mut dyn EventSource,
     state: &mut AppState,
@@ -103,21 +103,33 @@ pub fn event_loop<F, R, L>(
     manager: &mut dyn FeatureManager,
     dispatcher: &mut dyn CommandDispatcher,
     reload: &mut R,
-    layout_loader: &mut L,
+    loader: &mut dyn crate::profile::ProfileLoader,
 ) -> RiftResult<()>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
     R: FnMut() -> RiftResult<Vec<Project>>,
-    L: FnMut(&str) -> RiftResult<Option<crate::layout_model::LayoutModel>>,
 {
+    // The profile plane loads BEFORE the first frame (ADR-0036): the header
+    // shows the restored active profile's name — and the dashboard wears its
+    // theme (ADR-0038) — from frame one. The project list itself was injected
+    // by the host (already profile-scoped), so this only fills the identity —
+    // it never clobbers the injected rows.
+    let (active, profiles) = loader.profiles()?;
+    let active = active.unwrap_or_default();
+    if !active.is_empty() {
+        let overrides = loader.theme(&active)?;
+        state.set_theme(overrides);
+    }
+    state.app.set_profiles(profiles, active);
     // Launch is live by construction: the prime runs at the loop seam, BEFORE
     // the first poll, so the bus computes feeds for the initial selection with
     // zero key events (M5-02 — the M4 blind spot was a subscribe only the
     // headless vehicle ever sent).
     prime_startup(state, req_sink);
-    // Load the initially-selected project's saved layout (ADR-0035), so a
-    // rearranged dashboard is restored on launch, before the first frame.
-    load_project_layout(state, layout_loader)?;
+    // Load the initially-selected project's saved layout (ADR-0035, scoped to
+    // the active profile per ADR-0036), so a rearranged dashboard is restored
+    // on launch, before the first frame.
+    load_project_layout(state, loader)?;
     let mut last = Instant::now();
     loop {
         render_if_dirty(backend, state)?;
@@ -155,13 +167,22 @@ where
                     let pending = std::mem::take(&mut effects.dispatches);
                     let actions = std::mem::take(&mut effects.feature_actions);
                     let load = effects.load_layout.take();
+                    let reload_profiles = effects.reload_profiles;
                     if !effects.is_empty() {
                         apply_effects(effects, state, on_persist, req_sink, manager);
+                    }
+                    // A profile change reloads the whole view — names, active
+                    // id, membership, selection, arrangement — through the one
+                    // loader seam (ADR-0036 §6), after the persist landed.
+                    if reload_profiles {
+                        reload_profile_plane(state, loader, req_sink)?;
                     }
                     // A selection change loads the new project's saved layout
                     // (ADR-0035) — through the injected loader, applied to state.
                     if let Some(path) = load {
-                        let m = layout_loader(&path)?.unwrap_or_default();
+                        let m = loader
+                            .layout(&state.app.active_profile, &path)?
+                            .unwrap_or_default();
                         state.set_layout(m);
                     }
                     for action in actions {
@@ -231,17 +252,52 @@ fn run_feature_action(
     Ok(())
 }
 
-/// Load and apply the currently-selected project's saved layout (ADR-0035)
-/// through the injected loader. No selection ⇒ nothing to load. A missing/reset
-/// layout applies the default (the loader returns `None`).
-fn load_project_layout<L>(state: &mut AppState, layout_loader: &mut L) -> RiftResult<()>
-where
-    L: FnMut(&str) -> RiftResult<Option<crate::layout_model::LayoutModel>>,
-{
+/// Load and apply the currently-selected project's saved layout (ADR-0035,
+/// scoped to the active profile per ADR-0036) through the injected loader. No
+/// selection ⇒ nothing to load. A missing/reset layout applies the default
+/// (the loader returns `None`).
+fn load_project_layout(
+    state: &mut AppState,
+    loader: &mut dyn crate::profile::ProfileLoader,
+) -> RiftResult<()> {
     if let Some(path) = state.app.selected_project().map(|p| p.path.clone()) {
-        let m = layout_loader(&path)?.unwrap_or_default();
+        let m = loader
+            .layout(&state.app.active_profile, &path)?
+            .unwrap_or_default();
         state.set_layout(m);
     }
+    Ok(())
+}
+
+/// Reload the whole profile plane after a profile persist op (ADR-0036 §6):
+/// the live names + active id, the active profile's membership view, the
+/// selection (kept by path where the project survives the switch), the bus
+/// subscription, and the (profile, project) arrangement — all through the one
+/// injected loader. Runtime project status stays runtime-only: the bus re-feeds
+/// it through the re-issued requests, exactly like a persist-apply.
+fn reload_profile_plane(
+    state: &mut AppState,
+    loader: &mut dyn crate::profile::ProfileLoader,
+    req_sink: &mut dyn FnMut(DataRequest),
+) -> RiftResult<()> {
+    let (active, profiles) = loader.profiles()?;
+    let active = active.unwrap_or_default();
+    state.app.set_profiles(profiles, active.clone());
+    if !active.is_empty() {
+        let keep = state.app.selected_project().map(|p| p.path.clone());
+        let projects = loader.projects(&active)?;
+        state.app.set_projects(projects);
+        if let Some(path) = keep {
+            state.app.select_path(&path);
+        }
+        prime_startup(state, req_sink);
+        load_project_layout(state, loader)?;
+        // The switch re-themes through the same reload path (ADR-0038 §6):
+        // projects, arrangements, and colours swap as one view.
+        let overrides = loader.theme(&active)?;
+        state.set_theme(overrides);
+    }
+    state.dirty = true;
     Ok(())
 }
 
@@ -339,10 +395,14 @@ fn apply_persist<F>(
             // A success is a Notice (ADR-0029); it auto-dismisses. When the
             // removal emptied the registry, `set_projects` already raised the
             // wizard, which the Notice's settle-close re-raises after it fades.
-            state.open_notice(crate::dispatch::Message::success(
-                "registry",
-                vec![persist_status(op)],
-            ));
+            // A theme apply is the one silent op (ADR-0039): the live repaint
+            // IS the acknowledgement — a toast would cover the preview.
+            if !matches!(op, PersistOp::SetProfileTheme { .. }) {
+                state.open_notice(crate::dispatch::Message::success(
+                    "registry",
+                    vec![persist_status(op)],
+                ));
+            }
             // Track every current project on the bus (new adds included), and
             // prioritize the selection so its live status/detail refreshes.
             for p in &state.app.projects {
@@ -365,7 +425,7 @@ fn persist_status(op: &PersistOp) -> String {
         PersistOp::AddProject { path } => format!("registered {path}"),
         PersistOp::RemoveProject { path } => format!("removed {path}"),
         PersistOp::RelabelProject { label, .. } => format!("relabeled to {label}"),
-        PersistOp::ReorderProject { up, .. } => {
+        PersistOp::ReorderProject { up, .. } | PersistOp::ReorderProfileProject { up, .. } => {
             format!("moved {}", if *up { "up" } else { "down" })
         }
         PersistOp::SetToggle {
@@ -376,6 +436,21 @@ fn persist_status(op: &PersistOp) -> String {
                 "saved layout".to_string()
             } else {
                 "reset layout".to_string()
+            }
+        }
+        PersistOp::CreateProfile { name } => format!("created profile {name}"),
+        PersistOp::RenameProfile { name, .. } => format!("renamed profile to {name}"),
+        PersistOp::RemoveProfile { .. } => "deleted profile".to_string(),
+        PersistOp::SelectProfile { .. } => "switched profile".to_string(),
+        PersistOp::AddProfileProject { path, .. } => format!("added {path} to profile"),
+        PersistOp::RemoveProfileProject { path, .. } => {
+            format!("removed {path} from profile")
+        }
+        PersistOp::SetProfileTheme { slot, colour, .. } => {
+            if colour.is_some() {
+                format!("set {slot} colour")
+            } else {
+                format!("reset {slot} colour")
             }
         }
     }
@@ -506,7 +581,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         );
 
         assert_eq!(
@@ -585,7 +660,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut dispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         assert_eq!(dispatcher.calls.len(), 1, "one dispatch crossed the seam");
@@ -602,6 +677,143 @@ mod tests {
         // then dismissed it — Esc never quits the dashboard from an overlay.
         assert!(state.app.overlay.is_none(), "Esc dismissed the overlay");
         assert!(backend.presents >= 2, "a running frame presented mid-turn");
+    }
+
+    /// A profile loader double that records every read and serves a two-profile
+    /// plane whose active id lives in a shared cell (the persist seam moves it,
+    /// exactly like the real store's `selected` fold).
+    struct RecordingLoader {
+        active: std::rc::Rc<std::cell::RefCell<String>>,
+        calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+    impl crate::profile::ProfileLoader for RecordingLoader {
+        fn profiles(&mut self) -> RiftResult<(Option<String>, Vec<crate::profile::ProfileEntry>)> {
+            self.calls.borrow_mut().push("profiles".into());
+            let entries = [("pf0", "default"), ("pf1", "lab")]
+                .iter()
+                .enumerate()
+                .map(|(i, (id, name))| crate::profile::ProfileEntry {
+                    profile_id: (*id).to_string(),
+                    name: (*name).to_string(),
+                    created_at: i64::try_from(i).unwrap_or(0),
+                })
+                .collect();
+            Ok((Some(self.active.borrow().clone()), entries))
+        }
+        fn projects(&mut self, profile: &str) -> RiftResult<Vec<Project>> {
+            self.calls.borrow_mut().push(format!("projects:{profile}"));
+            let path = if profile == "pf1" { "/x" } else { "/a" };
+            Ok(vec![Project {
+                name: path.trim_start_matches('/').into(),
+                path: path.into(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }])
+        }
+        fn layout(
+            &mut self,
+            profile: &str,
+            path: &str,
+        ) -> RiftResult<Option<crate::layout_model::LayoutModel>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("layout:{profile}:{path}"));
+            if profile == "pf1" && path == "/x" {
+                let mut m = crate::layout_model::LayoutModel::default();
+                m.columns.swap(0, 1);
+                return Ok(Some(m));
+            }
+            Ok(None)
+        }
+        fn theme(&mut self, profile: &str) -> RiftResult<crate::theme::ThemeOverrides> {
+            self.calls.borrow_mut().push(format!("theme:{profile}"));
+            let mut o = crate::theme::ThemeOverrides::NONE;
+            if profile == "pf1" {
+                o.set(
+                    crate::theme::ThemeSlot::Background,
+                    Some(crate::render::frame::Color::Rgb(1, 2, 3)),
+                );
+            }
+            Ok(o)
+        }
+    }
+
+    #[test]
+    fn a_profile_switch_reloads_the_whole_view_through_the_loader_seam() {
+        // ADR-0036 §6 / ADR-0037 §5: `Enter` in the menu emits SelectProfile;
+        // the loop then reloads names, membership, selection, and the
+        // (profile, project) arrangement through the ONE injected loader.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![vec![
+            Event::Key(CanopyKey::Char('p')),
+            Event::Key(CanopyKey::Char('j')),
+            Event::Key(CanopyKey::Enter),
+            Event::Key(CanopyKey::Quit),
+        ]]);
+        let mut state = one_project_state();
+        let active = std::rc::Rc::new(std::cell::RefCell::new("pf0".to_string()));
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut loader = RecordingLoader {
+            active: std::rc::Rc::clone(&active),
+            calls: std::rc::Rc::clone(&calls),
+        };
+        let persisted = std::cell::RefCell::new(Vec::new());
+        let persist_active = std::rc::Rc::clone(&active);
+        let mut on_persist = |op: &PersistOp| {
+            if let PersistOp::SelectProfile { profile } = op {
+                *persist_active.borrow_mut() = profile.clone();
+            }
+            persisted.borrow_mut().push(op.clone());
+            Ok(vec![])
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut on_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut loader,
+        )
+        .unwrap();
+
+        assert_eq!(
+            *persisted.borrow(),
+            vec![PersistOp::SelectProfile {
+                profile: "pf1".into()
+            }],
+            "the switch is one superseding persist op"
+        );
+        assert_eq!(state.app.active_profile, "pf1", "the identity followed");
+        assert_eq!(
+            state
+                .app
+                .projects
+                .iter()
+                .map(|p| p.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/x"],
+            "membership swapped to the new profile's view"
+        );
+        let mut swapped = crate::layout_model::LayoutModel::default();
+        swapped.columns.swap(0, 1);
+        assert_eq!(
+            state.app.layout, swapped,
+            "the (profile, project) arrangement restored through the seam"
+        );
+        assert!(
+            calls.borrow().iter().any(|c| c == "layout:pf1:/x"),
+            "the layout read was profile-scoped: {:?}",
+            calls.borrow()
+        );
+        // The switch re-themed as part of the same reload (ADR-0038 §6).
+        assert_eq!(
+            state.theme().overrides().background,
+            Some(crate::render::frame::Color::Rgb(1, 2, 3)),
+            "colours swap with the view"
+        );
     }
 
     #[test]
@@ -637,7 +849,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut dispatcher,
             &mut reload,
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         assert_eq!(dispatcher.calls.len(), 1);
@@ -665,7 +877,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut dispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         assert!(dispatcher.calls.is_empty(), "cancel dispatches nothing");
@@ -686,7 +898,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         );
         assert!(r.is_ok());
         assert!(state.app.quit);
@@ -728,7 +940,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         // initial + one per batch (2 batches) = 3 presents.
@@ -750,7 +962,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         // initial render + render after the quit key = 2; the idle tick added none.
@@ -799,7 +1011,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         // Before any tween, the loop polls at the idle cadence…
@@ -838,7 +1050,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         assert!(
@@ -865,7 +1077,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         assert_eq!(state.size, Size::new(120, 40));
@@ -906,7 +1118,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         assert_eq!(seen, vec!["/tmp/x".to_string()]);
@@ -963,7 +1175,7 @@ mod tests {
             &mut FailingManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         // M5-12 (ADR-0013): the RESULT drives the row — Failed-with-reason
@@ -1014,7 +1226,7 @@ mod tests {
             &mut NullFeatureManager,
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
-            &mut |_: &str| Ok(None),
+            &mut crate::profile::NullProfileLoader,
         )
         .unwrap();
         assert!(state.app.feature_runtime.is_empty(), "transient cleared");

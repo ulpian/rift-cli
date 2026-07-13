@@ -47,6 +47,10 @@ pub enum HintContext {
     AddProject,
     /// Rearranging the layout in panel-editor mode.
     PanelEditor,
+    /// Managing profiles in the profile menu (ADR-0037).
+    ProfileMenu,
+    /// Picking a profile's theme colours (ADR-0039).
+    ColourPicker,
     /// A results overlay is open.
     OverlayResults,
     /// A confirm overlay is open.
@@ -70,6 +74,8 @@ pub fn context(mode: Mode, focus: Panel, overlay: Option<&Overlay>) -> HintConte
             Mode::Command => HintContext::CommandEditing,
             Mode::AddProject => HintContext::AddProject,
             Mode::PanelEditor => HintContext::PanelEditor,
+            Mode::ProfileMenu => HintContext::ProfileMenu,
+            Mode::ColourPicker => HintContext::ColourPicker,
             Mode::Normal => match focus {
                 Panel::Projects => HintContext::Rail,
                 Panel::Detail => HintContext::Detail,
@@ -126,6 +132,20 @@ const PANEL_EDITOR: &[Hint] = &[
     hint("r", "reset", CanopyKey::Char('r')),
     hint("esc", "done", CanopyKey::Esc),
 ];
+const PROFILE_MENU: &[Hint] = &[
+    hint("j/k", "move", CanopyKey::Down),
+    hint("⏎", "switch", CanopyKey::Enter),
+    hint("n", "new", CanopyKey::Char('n')),
+    hint("r", "rename", CanopyKey::Char('r')),
+    hint("d", "delete", CanopyKey::Char('d')),
+    hint("c", "colours", CanopyKey::Char('c')),
+    hint("esc", "close", CanopyKey::Esc),
+];
+const COLOUR_PICKER: &[Hint] = &[
+    hint("j/k", "move", CanopyKey::Down),
+    hint("⏎", "select", CanopyKey::Enter),
+    hint("esc", "back", CanopyKey::Esc),
+];
 const OVERLAY_RESULTS: &[Hint] = &[
     hint("j/k", "scroll", CanopyKey::Down),
     hint("esc", "dismiss", CanopyKey::Esc),
@@ -151,6 +171,8 @@ pub fn hints(ctx: HintContext) -> &'static [Hint] {
         HintContext::CommandEditing => COMMAND_EDITING,
         HintContext::AddProject => ADD_PROJECT,
         HintContext::PanelEditor => PANEL_EDITOR,
+        HintContext::ProfileMenu => PROFILE_MENU,
+        HintContext::ColourPicker => COLOUR_PICKER,
         HintContext::OverlayResults => OVERLAY_RESULTS,
         HintContext::OverlayConfirm => OVERLAY_CONFIRM,
         HintContext::OverlayMessage => OVERLAY_MESSAGE,
@@ -208,6 +230,37 @@ mod tests {
                 app.layout.columns.swap(0, 1);
                 app.editor.cursor = crate::editor::Cursor { col: 1, unit: 0 };
             }
+            HintContext::ProfileMenu => {
+                // Three live profiles, active first, cursor mid-list on a
+                // NON-active row — so `d` can open the confirm, `Enter` can
+                // switch, and both `j` and `k` have room to move.
+                app.profiles = ["default", "work", "lab"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| crate::profile::ProfileEntry {
+                        profile_id: format!("pf{i}"),
+                        name: (*name).to_string(),
+                        created_at: i64::try_from(i).unwrap_or(0),
+                    })
+                    .collect();
+                app.active_profile = "pf0".into();
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.cursor = 1;
+            }
+            HintContext::ColourPicker => {
+                // The preset stage mid-list: `j`/`k` have room, `Enter`
+                // applies (a typed action), `Esc` steps back to the slots.
+                app.profiles = vec![crate::profile::ProfileEntry {
+                    profile_id: "pf0".into(),
+                    name: "default".into(),
+                    created_at: 0,
+                }];
+                app.active_profile = "pf0".into();
+                app.mode = Mode::ColourPicker;
+                app.colour_picker.stage = crate::colour_picker::PickerStage::Presets;
+                app.colour_picker.slot_cursor = 1;
+                app.colour_picker.preset_cursor = 2;
+            }
             HintContext::OverlayResults => {
                 app.overlay = Some(Overlay::Results {
                     title: "t".into(),
@@ -259,7 +312,7 @@ mod tests {
             // editor key (move/reorder/resize/reset) registers as handled.
             app.editor,
             app.layout,
-        )
+        ) + &format!("|{:?}|{:?}", app.profile_menu, app.colour_picker)
     }
 
     /// The M55-04 derivation proof: every hinted key, fed to the reducer in
@@ -267,7 +320,7 @@ mod tests {
     /// an action is returned. A hint can never advertise a dead key.
     #[test]
     fn every_hint_key_is_handled_by_the_reducer() {
-        const ALL: [HintContext; 11] = [
+        const ALL: [HintContext; 13] = [
             HintContext::Rail,
             HintContext::Detail,
             HintContext::Graphs,
@@ -275,6 +328,8 @@ mod tests {
             HintContext::CommandEditing,
             HintContext::AddProject,
             HintContext::PanelEditor,
+            HintContext::ProfileMenu,
+            HintContext::ColourPicker,
             HintContext::OverlayResults,
             HintContext::OverlayConfirm,
             HintContext::OverlayMessage,

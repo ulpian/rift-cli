@@ -70,6 +70,21 @@ pub enum SessionVerb {
     Show(String),
 }
 
+/// `profile` subcommands (ADR-0037 §6: palette parity with the profile menu —
+/// two surfaces, one grammar). Names are resolved against the live profiles in
+/// the state layer; every act is the same typed effect the menu emits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileVerb {
+    /// Create a profile (copying the active profile's project list).
+    New(String),
+    /// Rename the active profile.
+    Rename(String),
+    /// Switch to the named profile (the whole view follows).
+    Switch(String),
+    /// Delete the named profile (guards refuse the active and the last).
+    Delete(String),
+}
+
 /// The splash-mode values `configure splash` accepts (ADR-0014).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplashMode {
@@ -123,6 +138,8 @@ pub enum Verb {
     Reinstall(String),
     /// Move focus to a panel.
     Focus(PanelName),
+    /// Manage profiles (ADR-0036/0037) — the menu's grammar as slash verbs.
+    Profile(ProfileVerb),
     /// Show the palette help (the full catalog).
     Help,
     /// Quit the dashboard.
@@ -188,6 +205,7 @@ impl Verb {
             | Self::Toggle(_)
             | Self::Reinstall(_)
             | Self::Focus(_)
+            | Self::Profile(_)
             | Self::Help
             | Self::Quit => Tier::Dashboard,
             Self::Status
@@ -222,6 +240,7 @@ pub const VERB_WORDS: &[&str] = &[
     "toggle",
     "reinstall",
     "focus",
+    "profile",
     "help",
     "quit",
     "status",
@@ -255,6 +274,7 @@ pub fn help_lines() -> Vec<String> {
                 "toggle" => "/toggle <feature>",
                 "reinstall" => "/reinstall <feature>",
                 "focus" => "/focus <projects|detail|graphs|command>",
+                "profile" => "/profile <new|rename|switch|delete> <name>",
                 "help" => "/help",
                 "quit" => "/quit (or /q)",
                 "status" => "/status",
@@ -529,6 +549,33 @@ pub fn parse(input: &str) -> Result<Verb, ParseError> {
                     verb_tok,
                     "a panel",
                     "/focus <projects|detail|graphs|command>",
+                ))
+            }
+        },
+        "profile" => match arg(0).map(|t| t.text.to_ascii_lowercase()) {
+            Some(sub) => {
+                let name = |usage: &str| match arg(1) {
+                    Some(t) => Ok(t.text.clone()),
+                    None => Err(missing(arg(0).unwrap_or(verb_tok), "a profile name", usage)),
+                };
+                match sub.as_str() {
+                    "new" => Verb::Profile(ProfileVerb::New(name("/profile new <name>")?)),
+                    "rename" => Verb::Profile(ProfileVerb::Rename(name("/profile rename <name>")?)),
+                    "switch" => Verb::Profile(ProfileVerb::Switch(name("/profile switch <name>")?)),
+                    "delete" => Verb::Profile(ProfileVerb::Delete(name("/profile delete <name>")?)),
+                    _ => {
+                        return Err(ParseError::at(
+                            arg(0).map_or((0, 0), Token::span),
+                            "unknown profile verb — new | rename | switch | delete",
+                        ))
+                    }
+                }
+            }
+            None => {
+                return Err(missing(
+                    verb_tok,
+                    "a profile verb",
+                    "/profile <new|rename|switch|delete> <name>",
                 ))
             }
         },
@@ -855,6 +902,7 @@ mod tests {
                 "focus" => format!("/{word} projects"),
                 "relabel" => format!("/{word} newname"),
                 "memory" => format!("/{word} reread-report"),
+                "profile" => format!("/{word} switch work"),
                 _ => format!("/{word}"),
             };
             prop_assert!(parse(&line).is_ok(), "verb `{word}` must parse: {line}");

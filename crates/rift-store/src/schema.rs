@@ -1426,6 +1426,55 @@ const CANOPY_LAYOUT_EVENT_COLUMNS: &[Column] = &[
     Column::int("created_at"),       // transaction-time (epoch ms)
 ];
 
+// The profile plane (ADR-0036): named, machine-global operator views. A profile
+// scopes what the dashboard shows — its own membership over the global catalogue
+// (`canopy_project_event` stays the registration source of truth), its own
+// per-(profile, project) arrangements, and (ADR-0038) its own theme slots. All
+// per-key, time-varying, superseding-event state like its siblings above.
+const CANOPY_PROFILE_EVENT_COLUMNS: &[Column] = &[
+    Column::text("event_id"),        // ULID
+    Column::text("profile_id"),      // stable per profile (ULID)
+    Column::text("op"),              // 'created' | 'renamed' | 'removed' | 'selected'
+    Column::text_null("name"),       // set on 'created'/'renamed'
+    Column::text_null("supersedes"), // prior event_id this corrects (04 §4.3)
+    Column::int("created_at"),       // transaction-time (epoch ms)
+];
+
+const CANOPY_PROFILE_PROJECT_EVENT_COLUMNS: &[Column] = &[
+    Column::text("event_id"),        // ULID
+    Column::text("profile_id"),      // FK: a canopy_profile_event.profile_id (comment-FK)
+    Column::text("project_id"),      // FK: a canopy_project_event.project_id (comment-FK)
+    Column::text("op"),              // 'added' | 'removed' | 'reordered'
+    Column::int_null("order_key"),   // set on 'added'/'reordered'
+    Column::text_null("supersedes"), // prior event_id for this (profile,project)
+    Column::int("created_at"),       // transaction-time (epoch ms)
+];
+
+// Per-(profile, project) arrangement (ADR-0036, superseding ADR-0035's
+// per-project table for writes): the `LayoutModel` codec is reused unchanged;
+// NULL is a reset to the default. `canopy_layout_event` is frozen for writes and
+// stays readable as the default profile's fallback.
+const CANOPY_PROFILE_LAYOUT_EVENT_COLUMNS: &[Column] = &[
+    Column::text("event_id"),        // ULID
+    Column::text("profile_id"),      // FK: a canopy_profile_event.profile_id (comment-FK)
+    Column::text("project_id"),      // FK: a canopy_project_event.project_id (comment-FK)
+    Column::text_null("layout"),     // encoded LayoutModel; NULL = reset-to-default
+    Column::text_null("supersedes"), // prior layout event_id for this (profile,project)
+    Column::int("created_at"),       // transaction-time (epoch ms)
+];
+
+// Per-(profile, slot) surface-theme overrides (ADR-0038): `colour` is `#RRGGBB`
+// hex with NULL = reset-to-default; latest-wins per (profile, slot). Slots are
+// the five roles (background/border/button/graph/text) validated at the writer.
+const CANOPY_PROFILE_THEME_EVENT_COLUMNS: &[Column] = &[
+    Column::text("event_id"),        // ULID
+    Column::text("profile_id"),      // FK: a canopy_profile_event.profile_id (comment-FK)
+    Column::text("slot"),            // 'background' | 'border' | 'button' | 'graph' | 'text'
+    Column::text_null("colour"),     // '#RRGGBB'; NULL = reset-to-default
+    Column::text_null("supersedes"), // prior event_id for this (profile,slot)
+    Column::int("created_at"),       // transaction-time (epoch ms)
+];
+
 const CANOPY_TABLES: &[CanonicalTable] = &[
     CanonicalTable {
         name: "canopy_project_event",
@@ -1442,6 +1491,30 @@ const CANOPY_TABLES: &[CanonicalTable] = &[
     CanonicalTable {
         name: "canopy_layout_event",
         columns: CANOPY_LAYOUT_EVENT_COLUMNS,
+        primary_key: &["event_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "canopy_profile_event",
+        columns: CANOPY_PROFILE_EVENT_COLUMNS,
+        primary_key: &["event_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "canopy_profile_project_event",
+        columns: CANOPY_PROFILE_PROJECT_EVENT_COLUMNS,
+        primary_key: &["event_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "canopy_profile_layout_event",
+        columns: CANOPY_PROFILE_LAYOUT_EVENT_COLUMNS,
+        primary_key: &["event_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "canopy_profile_theme_event",
+        columns: CANOPY_PROFILE_THEME_EVENT_COLUMNS,
         primary_key: &["event_id"],
         unique: NO_UNIQUE,
     },

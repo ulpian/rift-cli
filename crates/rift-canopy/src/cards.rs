@@ -626,7 +626,7 @@ fn draw_features(ctx: &CardCtx<'_>, theme: Theme, rect: Rect, collapsed: bool, f
         // The row flashes toward the accent when its toggle is clicked
         // (ADR-0028); otherwise the cursored row keeps the selection wash.
         let flash = ctx.flash(&crate::hit::Target::ToggleRow(i));
-        let (style, fill_row) = if let Some(bg) = crate::chrome::press_flash_bg(flash) {
+        let (style, fill_row) = if let Some(bg) = crate::chrome::press_flash_bg(theme, flash) {
             (theme.selection().with_bg(bg), true)
         } else if cursored {
             (theme.selection(), true)
@@ -651,7 +651,7 @@ fn draw_features(ctx: &CardCtx<'_>, theme: Theme, rect: Rect, collapsed: bool, f
         if matches!(effective, ToggleState::Failed(_)) {
             if let Some(chip) = feature_retry_rect(inner, dy) {
                 let rflash = ctx.flash(&crate::hit::Target::RetryRow(i));
-                let cstyle = match crate::chrome::press_flash_bg(rflash) {
+                let cstyle = match crate::chrome::press_flash_bg(theme, rflash) {
                     Some(bg) => theme.key_hint().with_bg(bg),
                     None => theme.key_hint(),
                 };
@@ -1039,7 +1039,7 @@ mod tests {
             .iter()
             .find(|s| s.kind == CardKind::Features)
             .expect("features card present");
-        let flash_bg = crate::chrome::press_flash_bg(1.0).unwrap();
+        let flash_bg = crate::chrome::press_flash_bg(Theme::rift_dark(), 1.0).unwrap();
         let has_flash = |pressed: Option<crate::hit::Target>| {
             let ctx = CardCtx {
                 detail: &d,
@@ -1125,7 +1125,7 @@ mod tests {
         draw_features(&c, Theme::rift_dark(), feat.rect, false, &mut f);
         assert_eq!(
             f.get(chip.x, chip.y).unwrap().style.bg,
-            crate::chrome::press_flash_bg(1.0).unwrap(),
+            crate::chrome::press_flash_bg(Theme::rift_dark(), 1.0).unwrap(),
             "the pressed retry chip flashes toward the accent"
         );
     }

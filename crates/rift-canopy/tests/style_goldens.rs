@@ -242,6 +242,118 @@ fn golden_dashboard_four_tiers() {
     insta::assert_snapshot!("dashboard_themed", four_tier_golden(dashboard_frame));
 }
 
+// ---- ADR-0038: the runtime surface theme (M5.11) -----------------------------
+
+/// Every slot overridden — the fully-themed fixture the ADR-0038 golden pins.
+fn full_overrides() -> rift_canopy::ThemeOverrides {
+    use rift_canopy::render::frame::Color;
+    use rift_canopy::{ThemeOverrides, ThemeSlot};
+    let mut o = ThemeOverrides::NONE;
+    o.set(ThemeSlot::Background, Some(Color::Rgb(0x20, 0x14, 0x2c)));
+    o.set(ThemeSlot::Border, Some(Color::Rgb(0xb4, 0x8c, 0xff)));
+    o.set(ThemeSlot::Button, Some(Color::Rgb(0xf0, 0x8c, 0xc4)));
+    o.set(ThemeSlot::Graph, Some(Color::Rgb(0x5c, 0xa8, 0xff)));
+    o.set(ThemeSlot::Text, Some(Color::Rgb(0xe8, 0xec, 0xe8)));
+    o
+}
+
+/// The full dashboard with EVERY theme slot overridden, per tier — the second
+/// identity ADR-0038 §5 pins (the first is the untouched goldens above, which
+/// must pass unchanged: no overrides ⇒ byte-identity with Rift dark).
+fn themed_dashboard_frame(tier: Tier) -> Frame {
+    use rift_canopy::{AppState, EntryKind, Project, ProjectStatus};
+    let mut s = AppState::new(
+        vec![Project {
+            name: "rift-cli".into(),
+            path: "/r/rift-cli".into(),
+            status: ProjectStatus::Idle,
+            kind: EntryKind::Repo,
+        }],
+        Size::new(90, 18),
+    );
+    s.app.splash.skip();
+    s.version = "0.1.0".into();
+    s.app.set_profiles(
+        vec![rift_canopy::profile::ProfileEntry {
+            profile_id: "pf0".into(),
+            name: "lab".into(),
+            created_at: 0,
+        }],
+        "pf0".into(),
+    );
+    s.set_theme(full_overrides());
+    let vm = s.snapshot();
+    let mut f = Frame::new(vm.size);
+    let mut backend = TierBackend {
+        caps: caps_for(tier),
+    };
+    rift_canopy::view::draw(&vm, &mut backend, &mut f);
+    f
+}
+
+#[test]
+fn golden_fully_overridden_dashboard_four_tiers() {
+    insta::assert_snapshot!(
+        "dashboard_overridden",
+        four_tier_golden(themed_dashboard_frame)
+    );
+}
+
+/// ADR-0038 §3's floor proof: on the mono and ASCII tiers a profile palette
+/// changes NOTHING — the lattice drops colour by construction, so the themed
+/// and untouched serializations are identical. (`NO_COLOR` forces the ASCII
+/// tier, so this is also the `NO_COLOR` guarantee.) The only glyph difference
+/// between the fixtures is the identity button the themed one carries, so both
+/// frames here use the same profiled state and differ ONLY in overrides.
+#[test]
+fn a_palette_changes_nothing_on_the_floor_tiers() {
+    use rift_canopy::{AppState, EntryKind, Project, ProjectStatus};
+    let frame_for = |overrides: Option<rift_canopy::ThemeOverrides>, tier: Tier| {
+        let mut s = AppState::new(
+            vec![Project {
+                name: "rift-cli".into(),
+                path: "/r/rift-cli".into(),
+                status: ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }],
+            Size::new(90, 18),
+        );
+        s.app.splash.skip();
+        s.version = "0.1.0".into();
+        s.app.set_profiles(
+            vec![rift_canopy::profile::ProfileEntry {
+                profile_id: "pf0".into(),
+                name: "lab".into(),
+                created_at: 0,
+            }],
+            "pf0".into(),
+        );
+        if let Some(o) = overrides {
+            s.set_theme(o);
+        }
+        let vm = s.snapshot();
+        let mut f = Frame::new(vm.size);
+        let mut backend = TierBackend {
+            caps: caps_for(tier),
+        };
+        rift_canopy::view::draw(&vm, &mut backend, &mut f);
+        common::style_snapshot(&f, tier)
+    };
+    for tier in [Tier::Mono, Tier::Ascii] {
+        assert_eq!(
+            frame_for(None, tier),
+            frame_for(Some(full_overrides()), tier),
+            "{tier:?}: a palette must not manifest on a colourless tier"
+        );
+    }
+    // And the sanity inverse: on truecolor the override IS visible.
+    assert_ne!(
+        frame_for(None, Tier::Truecolor),
+        frame_for(Some(full_overrides()), Tier::Truecolor),
+        "truecolor renders the palette"
+    );
+}
+
 // ---- M55-12: the dumbometer donut (radial on SUBCELL, bar degrade) ----------
 
 /// Render the system panel for a 62% reading, on a backend whose capabilities

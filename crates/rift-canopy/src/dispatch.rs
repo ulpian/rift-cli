@@ -138,6 +138,7 @@ pub fn request_for(verb: &Verb) -> Option<DispatchRequest> {
         | Verb::Toggle(_)
         | Verb::Reinstall(_)
         | Verb::Focus(_)
+        | Verb::Profile(_)
         | Verb::Help
         | Verb::Quit => return None,
     };
