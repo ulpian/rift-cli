@@ -21,6 +21,9 @@
 .claude/settings.local.json
 .mcp.local.json
 
+# Local-only design docs (ADRs / PRDs / glossary) — kept on disk, never tracked
+/docs/
+
 # Local read-side caches (regenerable from the checkpoint branch / Turso projection)
 **/*.duckdb
 **/*.sqlite
