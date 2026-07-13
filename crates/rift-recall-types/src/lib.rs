@@ -114,10 +114,17 @@ pub enum Handle {
     },
 }
 
-fn path_is_safe(p: &str) -> bool {
+/// Whether `p` is a safe repo-relative path: non-empty, not absolute, no `..`
+/// segment, and **no ASCII control character** (a control char — notably `\n`
+/// / `\r` — would let a path forge extra lines or role-shaped directives when
+/// rendered into a manifest or pack, M6-05). Public so serve paths can drop an
+/// anomalous candidate path before it is ever rendered, not only when a handle
+/// is parsed.
+#[must_use]
+pub fn path_is_safe(p: &str) -> bool {
     !p.is_empty()
         && !p.starts_with('/')
-        && !p.contains('\0')
+        && !p.bytes().any(|b| b.is_ascii_control())
         && !p.split('/').any(|seg| seg == "..")
 }
 

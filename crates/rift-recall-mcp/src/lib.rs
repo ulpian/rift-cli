@@ -805,6 +805,14 @@ impl<'a> McpServer<'a> {
             if self.policy.is_denied_path(&c.path) {
                 continue;
             }
+            // An anomalous candidate path (absolute, `..`, or control chars) is
+            // never a legitimate repo artifact and is dropped BEFORE it can be
+            // rendered anywhere — as a handle, a critical fact, or the echoed
+            // reference of a neutral digest (M6-05: a newline-bearing path
+            // could otherwise forge a directive line at any placement).
+            if !rift_recall_types::path_is_safe(&c.path) {
+                continue;
+            }
             let sensitivity = if self.policy.exact_source_required(&c.path) {
                 Sensitivity::Sensitive
             } else {

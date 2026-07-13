@@ -3042,6 +3042,7 @@ dependencies = [
 name = "rift-recall-mcp"
 version = "0.0.1"
 dependencies = [
+ "insta",
  "proptest",
  "rift-config",
  "rift-core",
@@ -3071,6 +3072,7 @@ dependencies = [
  "rift-recall-types",
  "rift-recall-validity",
  "rift-tokens",
+ "serde_json",
  "sha2",
 ]
 

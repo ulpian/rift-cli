@@ -95,6 +95,19 @@ pub struct SectionEntry {
     spill_text: Option<String>,
 }
 
+/// Replace every control character (notably `\n`/`\r`) with a space so an
+/// attacker-influenceable identifier field — a repo path or a retrieval handle —
+/// can never introduce a line break, and thus can never forge a standalone
+/// role-shaped directive line at any placement (including the duplicated
+/// critical edges) when the pack is rendered (M6-05). Applied ONLY to
+/// identifier fields; legitimately multi-line **trusted** content (exact hunk
+/// text, which passed the trust chokepoint) is never routed through it.
+fn sanitize_field(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 impl SectionEntry {
     fn new(text: String, class: EntryClass) -> Self {
         Self::with_spill(text, class, None)
@@ -128,15 +141,15 @@ impl SectionEntry {
     /// exact-or-handle, never a lossy summary (PRD story 6).
     #[must_use]
     pub fn from_envelope(e: &Envelope, sensitivity: Sensitivity) -> Self {
+        // The path and handle are identifier fields — neutralize them so a
+        // control-char-bearing path cannot forge structure. The exact `content`
+        // is trusted (it passed the chokepoint's `TrustedPayload`) and stays
+        // verbatim, so legitimately multi-line code renders intact.
+        let path = sanitize_field(&e.path);
         match &e.state {
-            ArtifactState::KnownUnchanged {
-                handle: _,
-                basis_sha256,
-                ..
-            } => Self::new(
+            ArtifactState::KnownUnchanged { basis_sha256, .. } => Self::new(
                 format!(
-                    "{} unchanged @sha256:{} (known_unchanged; not re-inlined)",
-                    e.path, basis_sha256
+                    "{path} unchanged @sha256:{basis_sha256} (known_unchanged; not re-inlined)"
                 ),
                 EntryClass::KnownUnchanged,
             ),
@@ -145,32 +158,39 @@ impl SectionEntry {
                 basis_sha256,
                 summary,
                 ..
-            } => match sensitivity {
-                Sensitivity::Sensitive => Self::new(
-                    format!(
-                        "{} available: {handle} (sensitive; summary withheld)",
-                        e.path
+            } => {
+                let handle = sanitize_field(handle);
+                match sensitivity {
+                    Sensitivity::Sensitive => Self::new(
+                        format!("{path} available: {handle} (sensitive; summary withheld)"),
+                        EntryClass::Handle,
                     ),
-                    EntryClass::Handle,
-                ),
-                Sensitivity::Normal => Self::with_spill(
-                    format!("{} summary@sha256:{basis_sha256}: {summary}", e.path),
-                    EntryClass::SummaryBound,
-                    Some(format!("{} available: {handle} (budget_exhausted)", e.path)),
-                ),
-            },
+                    Sensitivity::Normal => Self::with_spill(
+                        format!("{path} summary@sha256:{basis_sha256}: {summary}"),
+                        EntryClass::SummaryBound,
+                        Some(format!("{path} available: {handle} (budget_exhausted)")),
+                    ),
+                }
+            }
             ArtifactState::ExactIncluded {
                 handle,
                 basis_sha256,
                 content,
                 ..
-            } => Self::with_spill(
-                format!("{} changed @sha256:{basis_sha256}:\n{content}", e.path),
-                EntryClass::ExactContent,
-                Some(format!("{} available: {handle} (budget_exhausted)", e.path)),
-            ),
+            } => {
+                let handle = sanitize_field(handle);
+                Self::with_spill(
+                    format!("{path} changed @sha256:{basis_sha256}:\n{content}"),
+                    EntryClass::ExactContent,
+                    Some(format!("{path} available: {handle} (budget_exhausted)")),
+                )
+            }
             ArtifactState::AvailableByHandle { handle, reason, .. } => Self::new(
-                format!("{} available: {handle} ({})", e.path, omit_tag(*reason)),
+                format!(
+                    "{path} available: {} ({})",
+                    sanitize_field(handle),
+                    omit_tag(*reason)
+                ),
                 EntryClass::Handle,
             ),
         }
@@ -191,13 +211,16 @@ impl SectionEntry {
             .as_deref()
             .map(|n| format!(" [{n}]"))
             .unwrap_or_default();
+        // The whole line is identifiers + counts (the digest carries no payload
+        // text); neutralize it so the caller-supplied handle can never break the
+        // line even if it slipped a control char past its own validation.
         Self::new(
-            format!(
+            sanitize_field(&format!(
                 "untrusted {}: {} - retrieve {}{note}",
                 d.kind,
                 facts.join(", "),
                 d.handle
-            ),
+            )),
             EntryClass::NeutralDigest,
         )
     }
@@ -206,16 +229,22 @@ impl SectionEntry {
     /// free-text "handles" cannot ride (they would not have parsed).
     #[must_use]
     pub fn from_handle(h: &Handle) -> Self {
-        Self::new(format!("retrieve: {h}"), EntryClass::Handle)
+        Self::new(
+            sanitize_field(&format!("retrieve: {h}")),
+            EntryClass::Handle,
+        )
     }
 
-    /// Build an edge-placed critical fact from the closed vocabulary.
+    /// Build an edge-placed critical fact from the closed vocabulary. The path
+    /// is neutralized: a control-char-bearing repo filename cannot forge a
+    /// second (role-shaped) line at the duplicated critical edges (M6-05).
     #[must_use]
     pub fn critical(fact: &CriticalFact) -> Self {
         let text = match fact {
-            CriticalFact::RevertedProvenance { path } => {
-                format!("CRITICAL: {path}'s last provenance was reverted - verify before reuse")
-            }
+            CriticalFact::RevertedProvenance { path } => format!(
+                "CRITICAL: {}'s last provenance was reverted - verify before reuse",
+                sanitize_field(path)
+            ),
         };
         Self::new(text, EntryClass::CriticalFact)
     }

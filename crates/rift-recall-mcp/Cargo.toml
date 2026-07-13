@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
 
 [dev-dependencies]
+insta = { workspace = true }
 rift-config = { version = "0.0.1", path = "../rift-config" }
 proptest = { workspace = true }
 tokio = { workspace = true }

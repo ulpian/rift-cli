@@ -24,3 +24,5 @@ sha2 = { workspace = true }
 [dev-dependencies]
 insta = { workspace = true }
 proptest = { workspace = true }
+# The append-only red-team corpus is JSONL; the pack-path leak test parses it.
+serde_json = { workspace = true }

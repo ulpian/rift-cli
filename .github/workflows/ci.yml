@@ -127,6 +127,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rift-recall-validity --test red_team
       - run: cargo test -p rift-recall-mcp red_team
+      # The pack-path leg (M6-05): the append-only corpus rendered through the
+      # typed, budgeted pack — zero forbidden spans in ANY section, both ends.
+      - run: cargo test -p rift-recall-pack red_team
   miri:
     runs-on: ubuntu-latest
     steps:
