@@ -133,6 +133,13 @@ pub struct IngestOptions {
     /// Fallback hashed developer id when no session binding matches (the
     /// current developer on a single-operator machine).
     pub default_developer: Option<String>,
+    /// Fallback token estimates keyed by `content_sha256` (M6-12), consulted
+    /// only when a read fact carries no inline or `token_estimates.json`
+    /// figure — the caller resolves them from bytes it can still reach and
+    /// verify (worktree match, blob-oid map, capture projection). A hash with
+    /// no entry ingests as 0 tokens plus a counted
+    /// [`IssueKind::TokenUnresolved`] — measured or absent, never a guess.
+    pub token_estimate_by_hash: BTreeMap<String, u32>,
 }
 
 impl IngestOptions {
@@ -231,6 +238,7 @@ fn build_rows(
         .map(|t| (t.tool_use_id.as_str(), t.input_tokens))
         .collect();
 
+    let mut unresolved_tokens = 0usize;
     for (i, tc) in tool_calls.iter().enumerate() {
         if tc.tool_use_id.is_empty() {
             continue; // a tool call needs an identity to be a node
@@ -251,11 +259,19 @@ fn build_rows(
         b.node(&fr, "FileRevision", &fr);
         b.file_revision(&fr, path, hash, hash, 0);
         // FileRead: the irreducible (tool_call, revision, range) triple.
-        let input_tokens = i64::from(
-            tc.input_tokens
-                .or_else(|| tok_by_id.get(tc_id).copied())
-                .unwrap_or(0),
-        );
+        // Token precedence: the fact's inline figure, then the shard's
+        // `token_estimates.json`, then the caller's resolved-bytes fallback
+        // (M6-12). Still nothing ⇒ 0, counted into ONE summarized issue per
+        // checkpoint below — never a guess, and never an issue flood that
+        // drowns real corruption on a healthy pre-M6 substrate.
+        let resolved = tc
+            .input_tokens
+            .or_else(|| tok_by_id.get(tc_id).copied())
+            .or_else(|| opts.token_estimate_by_hash.get(hash.as_str()).copied());
+        if resolved.is_none() {
+            unresolved_tokens += 1;
+        }
+        let input_tokens = i64::from(resolved.unwrap_or(0));
         let read_ordinal = i64::try_from(
             shard
                 .ordinal
@@ -277,6 +293,16 @@ fn build_rows(
         );
         b.edge(tc_id, &fr, "read"); // ToolCall→read→FileRevision
         b.lineage(&fr, "tool_calls.jsonl", "mechanical", None);
+    }
+
+    if unresolved_tokens > 0 {
+        b.issues.push(ParseIssue {
+            checkpoint_id: cid.to_owned(),
+            artifact: "tool_calls.jsonl",
+            locator: parse::Locator::WholeFile,
+            kind: parse::IssueKind::TokenUnresolved,
+            detail: format!("{unresolved_tokens} read(s) with no resolvable token estimate"),
+        });
     }
 
     // --- TokenUsage from the per-checkpoint cost estimate ---
@@ -546,6 +572,45 @@ mod tests {
         assert_eq!(read_edges[0].get_i64(0).unwrap(), 1);
     }
 
+    /// M6-12 precedence: an inline figure wins over the caller's fallback map;
+    /// a factless hash takes the fallback; a hash resolved nowhere ingests as
+    /// 0 with a counted `TokenUnresolved` issue — never a guess.
+    #[test]
+    fn fallback_token_estimates_fill_only_factless_reads() {
+        let tc = b"{\"id\":\"t1\",\"name\":\"Read\",\"file_path\":\"a.rs\",\"sha256\":\"h1\",\"input_tokens\":7}\n\
+                   {\"id\":\"t2\",\"name\":\"Read\",\"file_path\":\"b.rs\",\"sha256\":\"h2\"}\n\
+                   {\"id\":\"t3\",\"name\":\"Read\",\"file_path\":\"c.rs\",\"sha256\":\"h3\"}\n";
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_artifact("c1", "tool_calls.jsonl", tc);
+        let store = recall_store();
+        let opts = IngestOptions {
+            token_estimate_by_hash: [("h1".to_string(), 999u32), ("h2".to_string(), 55u32)]
+                .into_iter()
+                .collect(),
+            ..IngestOptions::default()
+        };
+        let report = block(ingest_with(&store, &sub, &opts)).unwrap();
+        let rows = block(store.query(
+            "SELECT f.input_tokens FROM n_file_read f ORDER BY f.read_ordinal ASC",
+            &[],
+        ))
+        .unwrap();
+        let tokens: Vec<i64> = rows.iter().map(|r| r.get_i64(0).unwrap()).collect();
+        assert_eq!(
+            tokens,
+            vec![7, 55, 0],
+            "inline wins; fallback fills; absent is 0"
+        );
+        let unresolved: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.kind == parse::IssueKind::TokenUnresolved)
+            .collect();
+        assert_eq!(unresolved.len(), 1, "one summarized issue per checkpoint");
+        assert!(unresolved[0].detail.contains("1 read(s)"));
+    }
+
     #[test]
     fn dedupes_same_file_across_checkpoints() {
         let tc1 =
@@ -641,6 +706,7 @@ mod tests {
             .into_iter()
             .collect(),
             default_developer: Some("dev_default".to_string()),
+            token_estimate_by_hash: BTreeMap::new(),
         };
         block(ingest_with(&store, &sub, &opts)).unwrap();
         let dev_of = |cid: &str| {

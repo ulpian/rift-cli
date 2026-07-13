@@ -131,6 +131,10 @@ pub struct ArchivedReadFact {
     pub path: String,
     /// SHA-256 (hex) of the bytes at read time.
     pub content_sha256: String,
+    /// Token estimate over the read-time bytes (M6-12), when one was captured
+    /// (`ToolCallRecord`'s inline `input_tokens`). `None` omits the field, so
+    /// pre-estimate facts freeze byte-identically to their old lines.
+    pub input_tokens: Option<u32>,
 }
 
 /// Serialize read facts exactly as the shard's `tool_calls.jsonl` freezes them
@@ -148,12 +152,17 @@ pub fn tool_calls_jsonl_bytes(read_facts: &[ArchivedReadFact]) -> Option<Vec<u8>
         if i > 0 {
             out.push(b'\n');
         }
-        let line = serde_json::json!({
+        let mut line = serde_json::json!({
             "id": f.tool_use_id,
             "tool": f.tool_name,
             "path": f.path,
             "sha256": f.content_sha256,
         });
+        // Present only when captured (M6-12): omission keeps pre-estimate
+        // fact sets byte-identical to the lines they froze before.
+        if let (Some(tokens), Some(obj)) = (f.input_tokens, line.as_object_mut()) {
+            obj.insert("input_tokens".to_owned(), serde_json::json!(tokens));
+        }
         out.extend_from_slice(&canonical_json(&line));
     }
     out.push(b'\n');
@@ -748,6 +757,33 @@ mod tests {
     use super::*;
     use rift_core::SecretBytes;
     use rift_shadow_entire::MockRunner;
+
+    /// M6-12: a fact with a token estimate freezes it inline; one without
+    /// freezes byte-identically to the pre-estimate line shape (no field).
+    #[test]
+    fn tool_calls_lines_carry_tokens_only_when_captured() {
+        let plain = ArchivedReadFact {
+            tool_use_id: "t1".into(),
+            tool_name: "Read".into(),
+            path: "a.rs".into(),
+            content_sha256: "aa".into(),
+            input_tokens: None,
+        };
+        let with_tokens = ArchivedReadFact {
+            input_tokens: Some(42),
+            ..plain.clone()
+        };
+        let old = String::from_utf8(tool_calls_jsonl_bytes(&[plain]).unwrap()).unwrap();
+        assert_eq!(
+            old, "{\"id\":\"t1\",\"path\":\"a.rs\",\"sha256\":\"aa\",\"tool\":\"Read\"}\n",
+            "a fact without an estimate must freeze exactly the old line"
+        );
+        let new = String::from_utf8(tool_calls_jsonl_bytes(&[with_tokens]).unwrap()).unwrap();
+        assert!(
+            new.contains("\"input_tokens\":42"),
+            "the captured estimate must ride the line: {new}"
+        );
+    }
 
     /// A backend whose checkpoint_root deliberately diverges (for dual-run tests).
     struct DivergentNative;

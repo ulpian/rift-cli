@@ -148,20 +148,24 @@ pub(crate) fn open_recall_db(db: &Path) -> Result<SqliteStore> {
     rift_store::open_migrated(db, &recall_migrations())
 }
 
+/// Open the M1 capture projection for `repo`, if it exists — shared context
+/// for the developer axis and the token fallback (one open per ingest pass).
+/// Best-effort: a missing/unreadable projection is `None`, never an error.
+pub(crate) fn open_capture_for(repo: &Path) -> Option<SqliteStore> {
+    rift_store::capture_projection_db_for_repo(repo)
+        .ok()
+        .filter(|db| db.exists())
+        .and_then(|db| rift_store::open_capture_projection(&db).ok())
+}
+
 /// The production [`IngestOptions`]: the identity plane's `session → developer`
 /// join, read from the M1 capture projection's `session_binding` rows when the
 /// projection exists (hashed ids only — never a raw name/email). Best-effort: a
-/// missing/unreadable capture projection yields default options, and the
-/// developer axis stays null rather than guessed.
-pub(crate) async fn ingest_options(repo: &Path) -> IngestOptions {
+/// missing capture projection yields default options, and the developer axis
+/// stays null rather than guessed.
+pub(crate) async fn ingest_options(capture: Option<&SqliteStore>) -> IngestOptions {
     let mut opts = IngestOptions::default();
-    let Ok(db) = rift_store::capture_projection_db_for_repo(repo) else {
-        return opts;
-    };
-    if !db.exists() {
-        return opts;
-    }
-    let Ok(store) = rift_store::open_capture_projection(&db) else {
+    let Some(store) = capture else {
         return opts;
     };
     // Append-only bindings: later rows supersede, so last-recorded wins.
@@ -200,7 +204,16 @@ pub(crate) async fn ingest_all(
     let paths = ingest::read_paths(&reads);
     let blobs = worktree::hash_blobs(repo, &paths);
     rift_recall_ledger::blob_map::persist_blob_oid_map(store, &blobs, 0).await?;
-    let opts = ingest_options(repo).await;
+    let capture = open_capture_for(repo);
+    let mut opts = ingest_options(capture.as_ref()).await;
+    opts.token_estimate_by_hash = rift_recall_ledger::tokens::fallback_token_estimates(
+        &reads,
+        store,
+        capture.as_ref(),
+        sub,
+        repo,
+    )
+    .await;
     let report = ingest::ingest_with(store, sub, &opts).await?;
     let labels = outcome::derive_labels(store, sub, now).await?;
     Ok((report, labels, blobs))

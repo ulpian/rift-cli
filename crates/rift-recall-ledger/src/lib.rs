@@ -34,6 +34,7 @@ pub mod ingest;
 pub mod metrics;
 pub mod outcome;
 pub mod scope_query;
+pub mod tokens;
 pub mod validity_store;
 
 use std::collections::BTreeSet;

@@ -68,28 +68,35 @@ pub struct WorktreeBlob {
 pub fn hash_blobs(repo_root: &Path, paths: &BTreeSet<String>) -> Vec<WorktreeBlob> {
     let mut out = Vec::new();
     for path in paths {
-        if !path_is_safe(path) {
-            continue;
-        }
-        let full = repo_root.join(path);
-        let Ok(meta) = std::fs::symlink_metadata(&full) else {
-            continue;
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        if meta.len() > crate::parse::MAX_ARTIFACT_BYTES as u64 {
-            continue;
-        }
-        if let Ok(bytes) = std::fs::read(&full) {
-            out.push(WorktreeBlob {
-                path: path.clone(),
-                content_sha256: sha256_hex(&bytes),
-                blob_oid: git_blob_oid(&bytes),
-            });
+        if let Some((blob, _)) = hash_blob_bytes(repo_root, path) {
+            out.push(blob);
         }
     }
     out
+}
+
+/// Hash ONE worktree file and hand back the bytes alongside its identities —
+/// the single-read form for callers that need the content too (M6-12's token
+/// estimate), so hashing and consuming can never race the filesystem. Same
+/// skip rules as [`hash_paths`]: an unsafe/missing/non-file/oversize path is
+/// `None`, never a panic.
+#[must_use]
+pub fn hash_blob_bytes(repo_root: &Path, path: &str) -> Option<(WorktreeBlob, Vec<u8>)> {
+    if !path_is_safe(path) {
+        return None;
+    }
+    let full = repo_root.join(path);
+    let meta = std::fs::symlink_metadata(&full).ok()?;
+    if !meta.is_file() || meta.len() > crate::parse::MAX_ARTIFACT_BYTES as u64 {
+        return None;
+    }
+    let bytes = std::fs::read(&full).ok()?;
+    let blob = WorktreeBlob {
+        path: path.to_owned(),
+        content_sha256: sha256_hex(&bytes),
+        blob_oid: git_blob_oid(&bytes),
+    };
+    Some((blob, bytes))
 }
 
 /// A repo-relative path is safe to join under the repo root: non-empty, not

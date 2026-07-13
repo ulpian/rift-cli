@@ -56,7 +56,7 @@ pub use parity::{
     fixture_names, parity_report, render_report, run_behavior, AnchorSource, Fidelity,
     GoldenAnchors, ParityBehavior, ParityResult,
 };
-pub use project::ReadContent;
+pub use project::{ReadContent, TokenEstimate};
 pub use promotion::{
     can_promote_to_dual_run, can_promote_to_native, SoakEvidence, SOAK_MIN_CONSECUTIVE_CLEAN,
 };

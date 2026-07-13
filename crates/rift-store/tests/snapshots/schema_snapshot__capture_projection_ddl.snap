@@ -146,6 +146,15 @@ CREATE TABLE developer_identity_snapshot (
   PRIMARY KEY (snapshot_id)
 ) STRICT
 
+-- table file_read_tokens
+CREATE TABLE file_read_tokens (
+  tool_call_id TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  tokenizer TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (tool_call_id)
+) STRICT
+
 -- table file_revision
 CREATE TABLE file_revision (
   file_revision_id TEXT NOT NULL,
@@ -490,6 +499,12 @@ CREATE TRIGGER developer_identity_snapshot_no_delete BEFORE DELETE ON developer_
 
 -- trigger developer_identity_snapshot_no_update
 CREATE TRIGGER developer_identity_snapshot_no_update BEFORE UPDATE ON developer_identity_snapshot BEGIN SELECT RAISE(ABORT, 'rift: developer_identity_snapshot is append-only (UPDATE forbidden)'); END
+
+-- trigger file_read_tokens_no_delete
+CREATE TRIGGER file_read_tokens_no_delete BEFORE DELETE ON file_read_tokens BEGIN SELECT RAISE(ABORT, 'rift: file_read_tokens is append-only (DELETE forbidden)'); END
+
+-- trigger file_read_tokens_no_update
+CREATE TRIGGER file_read_tokens_no_update BEFORE UPDATE ON file_read_tokens BEGIN SELECT RAISE(ABORT, 'rift: file_read_tokens is append-only (UPDATE forbidden)'); END
 
 -- trigger file_revision_no_delete
 CREATE TRIGGER file_revision_no_delete BEFORE DELETE ON file_revision BEGIN SELECT RAISE(ABORT, 'rift: file_revision is append-only (DELETE forbidden)'); END

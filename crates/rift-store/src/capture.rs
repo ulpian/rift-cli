@@ -1090,6 +1090,64 @@ pub async fn record_tool_reads_file(
         .await
 }
 
+/// Record a `file_read_tokens` measurement (M6-12): the token count of one
+/// read's bytes, measured at read time — the only moment a modified working
+/// file's content is certainly in hand. Keyed by the read's own tool call, so
+/// it lands atomically with the fact it describes and is idempotent on replay.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_file_read_tokens(
+    store: &impl CanonicalStore,
+    tool_call_id: &str,
+    input_tokens: u32,
+    tokenizer: &str,
+    schema_version: i64,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "file_read_tokens",
+            &[
+                "tool_call_id",
+                "input_tokens",
+                "tokenizer",
+                "schema_version",
+            ],
+            &[
+                Value::text(tool_call_id.to_owned()),
+                Value::Int(i64::from(input_tokens)),
+                Value::text(tokenizer.to_owned()),
+                Value::Int(schema_version),
+            ],
+        )
+        .await
+}
+
+/// The capture projection's whole `content_sha256 → blob_oid` mapping (M6-12's
+/// historical token resolution: hash → oid → object-store bytes). One query —
+/// resolvers consult it per read, and `content_sha256` is unindexed, so
+/// per-hash lookups would table-scan per read. First row wins per hash; the
+/// mapping is content-addressed, so every row for a hash names the same oid.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn content_blob_oid_map(
+    store: &impl CanonicalStore,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let rows = store
+        .query(
+            "SELECT content_sha256, blob_oid FROM file_revision \
+             ORDER BY file_revision_id ASC",
+            &[],
+        )
+        .await?;
+    let mut out = std::collections::BTreeMap::new();
+    for r in &rows {
+        out.entry(r.get_text(0)?).or_insert(r.get_text(1)?);
+    }
+    Ok(out)
+}
+
 /// Record a `tool_edits_file` link (distinct from reads — they vary independently).
 ///
 /// # Errors
@@ -1323,6 +1381,9 @@ pub struct SessionReadFact {
     pub path: String,
     /// SHA-256 (hex) of the bytes at read time.
     pub content_sha256: String,
+    /// Token estimate over the read-time bytes (M6-12), when one was captured
+    /// (facts recorded before the v6 migration have none).
+    pub input_tokens: Option<u32>,
 }
 
 /// Every read fact captured for `session_row_id` (the projected session id),
@@ -1336,11 +1397,12 @@ pub async fn session_read_facts(
 ) -> Result<Vec<SessionReadFact>> {
     let rows = store
         .query(
-            "SELECT tc.tool_call_id, tc.tool_name, fr.path, fr.content_sha256 \
+            "SELECT tc.tool_call_id, tc.tool_name, fr.path, fr.content_sha256, frt.input_tokens \
              FROM tool_reads_file trf \
              JOIN tool_call tc ON tc.tool_call_id = trf.tool_call_id \
              JOIN turn t ON t.turn_id = tc.turn_id \
              JOIN file_revision fr ON fr.file_revision_id = trf.file_revision_id \
+             LEFT JOIN file_read_tokens frt ON frt.tool_call_id = trf.tool_call_id \
              WHERE t.session_id = ?1 \
              ORDER BY tc.started_at ASC, tc.tool_call_id ASC",
             &[Value::text(session_row_id.to_owned())],
@@ -1353,6 +1415,7 @@ pub async fn session_read_facts(
             tool_name: r.get_text(1)?,
             path: r.get_text(2)?,
             content_sha256: r.get_text(3)?,
+            input_tokens: r.get_opt_i64(4)?.and_then(|t| u32::try_from(t).ok()),
         });
     }
     Ok(out)

@@ -369,6 +369,7 @@ fn read_facts_for_archive(
             tool_name: f.tool_name,
             path: f.path,
             content_sha256: f.content_sha256,
+            input_tokens: f.input_tokens,
         })
         .collect()
 }
@@ -793,13 +794,26 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
         }
         let mut set = std::collections::BTreeSet::new();
         set.insert(rel_str);
-        let blob = rift_recall_substrate::worktree::hash_blobs(wt, &set)
-            .into_iter()
-            .next()?;
+        let rel_norm = set.iter().next()?.clone();
+        let (blob, bytes) = rift_recall_substrate::worktree::hash_blob_bytes(wt, &rel_norm)?;
+        // Token measurement while the very bytes we hashed are in hand
+        // (M6-12). Hook-budget guard: BPE-encode only modest files here — a
+        // large file would stall the agent's Read hook, so it stays
+        // unmeasured and the recall ingest resolves it offline instead. Only
+        // real BPE figures persist ("measured or absent"): the chars/4
+        // fallback never lands a durable number.
+        const HOOK_TOKENIZE_MAX_BYTES: usize = 1 << 20; // 1 MiB
+        let tokens = (bytes.len() <= HOOK_TOKENIZE_MAX_BYTES
+            && rift_tokens::provenance() == rift_tokens::TOKENIZER)
+            .then(|| rift_shadow::TokenEstimate {
+                input_tokens: rift_tokens::count(&String::from_utf8_lossy(&bytes)),
+                tokenizer: rift_tokens::TOKENIZER.to_owned(),
+            });
         Some(rift_shadow::ReadContent {
             rel_path: blob.path,
             blob_oid: blob.blob_oid,
             content_sha256: blob.content_sha256,
+            tokens,
         })
     };
     let outcome = rt.block_on(async {

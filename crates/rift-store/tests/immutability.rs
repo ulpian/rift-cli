@@ -152,7 +152,7 @@ fn forgotten_registration_is_caught() {
     apply_migrations(&store, &default_migrations()).expect("apply base migrations");
     // A developer adds a data table via a migration but forgets canonical_tables().
     let rogue = vec![Migration {
-        version: 6, // one past the shipped set (v5 = capture_projection_meta)
+        version: 7, // one past the shipped set (v6 = capture_read_tokens)
         name: "rogue_unregistered",
         sql: "CREATE TABLE IF NOT EXISTS audit_log \
               (id INTEGER PRIMARY KEY, note TEXT) STRICT;"

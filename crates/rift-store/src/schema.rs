@@ -830,12 +830,35 @@ const TABLES: &[CanonicalTable] = &[
         primary_key: &["key"],
         unique: NO_UNIQUE,
     },
+    // --- capture v6 additive (read tokens, M6-12): past the v5 set -------------
+    // The token estimate for one READ's bytes, measured at read time — the only
+    // moment the bytes are certainly in hand (a modified working file's
+    // read-time content may exist nowhere else). Keyed by the tool call, not
+    // the revision: fact and estimate are written by the same hook, so a
+    // session's archived lines can never be mutated retroactively by another
+    // session measuring the same revision later. `tokenizer` records
+    // provenance ("skeptical buyer": every count names its measurer); only
+    // real BPE measurements are persisted — the chars/4 fallback never lands.
+    CanonicalTable {
+        name: "file_read_tokens",
+        columns: FILE_READ_TOKENS_COLUMNS,
+        primary_key: &["tool_call_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// Columns for the v5 `projection_meta` key/value table (ADR-0010).
 const PROJECTION_META_COLUMNS: &[Column] = &[
     Column::text("key"),  // e.g. 'rebuild_epoch'
     Column::int("value"), // the integer fact
+    Column::int("schema_version"),
+];
+
+/// Columns for the v6 `file_read_tokens` table (M6-12). FK: tool_call.
+const FILE_READ_TOKENS_COLUMNS: &[Column] = &[
+    Column::text("tool_call_id"), // FK: tool_call (1:1, sparse)
+    Column::int("input_tokens"),  // measured over the read-time bytes
+    Column::text("tokenizer"),    // e.g. 'cl100k_base' (provenance)
     Column::int("schema_version"),
 ];
 
@@ -867,9 +890,13 @@ pub(crate) const CAPTURE_IDENTITY_TABLE_COUNT: usize = 32;
 /// shipped; later tables append past it and ship in their own migration.
 pub(crate) const CAPTURE_TURN_BOUNDARY_TABLE_COUNT: usize = 35;
 
-/// Boundary after the v5 (`capture_projection_meta`) table — the current end
-/// of the capture registry. The next additive capture migration starts here.
+/// Boundary after the v5 (`capture_projection_meta`) table. Frozen once v5
+/// shipped; later tables append past it and ship in their own migration.
 pub(crate) const CAPTURE_PROJECTION_META_TABLE_COUNT: usize = 36;
+
+/// Boundary after the v6 (`capture_read_tokens`) table — the current end of
+/// the capture registry. The next additive capture migration starts here.
+pub(crate) const CAPTURE_READ_TOKENS_TABLE_COUNT: usize = 37;
 
 /// The v3 `capture_identity` tables (frozen once shipped — see
 /// [`CAPTURE_IDENTITY_TABLE_COUNT`]).
@@ -891,6 +918,13 @@ pub(crate) fn capture_turn_boundary_tables() -> &'static [CanonicalTable] {
 #[allow(clippy::indexing_slicing)] // same compile-time bound as above
 pub(crate) fn capture_projection_meta_tables() -> &'static [CanonicalTable] {
     &TABLES[CAPTURE_TURN_BOUNDARY_TABLE_COUNT..CAPTURE_PROJECTION_META_TABLE_COUNT]
+}
+
+/// The v6 `file_revision_tokens` table (M6-12's read-time token estimates).
+#[must_use]
+#[allow(clippy::indexing_slicing)] // same compile-time bound as above
+pub(crate) fn capture_read_tokens_tables() -> &'static [CanonicalTable] {
+    &TABLES[CAPTURE_PROJECTION_META_TABLE_COUNT..CAPTURE_READ_TOKENS_TABLE_COUNT]
 }
 
 /// The registry of canonical (append-only) tables. The immutability property

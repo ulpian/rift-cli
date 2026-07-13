@@ -281,9 +281,19 @@ pub fn capture_projection_meta_schema_sql() -> String {
     capture_slice_sql(crate::schema::capture_projection_meta_tables())
 }
 
+/// The v6 additive capture migration (M6-12): the `file_read_tokens` table
+/// holding read-time token measurements (keyed by the read's tool call, so a
+/// fact and its figure land together). Kept separate so adding it never
+/// perturbs the v1–v5 checksums; a read without a row simply has no estimate
+/// (the recall ingest falls back or records 0).
+#[must_use]
+pub fn capture_read_tokens_schema_sql() -> String {
+    capture_slice_sql(crate::schema::capture_read_tokens_tables())
+}
+
 /// The default migration set: meta tables, the canonical schema, the identity
-/// relations, the turn-boundary relations (+ price seed), then the
-/// projection-meta table (the ADR-0010 rebuild epoch).
+/// relations, the turn-boundary relations (+ price seed), the projection-meta
+/// table (the ADR-0010 rebuild epoch), then the read-token estimates (M6-12).
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
     vec![
@@ -311,6 +321,11 @@ pub fn default_migrations() -> Vec<Migration> {
             version: 5,
             name: "capture_projection_meta",
             sql: capture_projection_meta_schema_sql(),
+        },
+        Migration {
+            version: 6,
+            name: "capture_read_tokens",
+            sql: capture_read_tokens_schema_sql(),
         },
     ]
 }
@@ -733,8 +748,8 @@ mod tests {
     async fn applies_pending_migrations_in_order() {
         let s = store();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
-        assert_eq!(out.applied, 5);
-        assert_eq!(out.high_water, 5);
+        assert_eq!(out.applied, 6);
+        assert_eq!(out.high_water, 6);
         // canonical tables exist (insert succeeds)
         s.insert(
             "session",
@@ -768,12 +783,12 @@ mod tests {
         let out = apply_migrations_on(&s, &default_migrations())
             .await
             .unwrap();
-        assert_eq!(out.applied, 5);
-        assert_eq!(out.high_water, 5);
+        assert_eq!(out.applied, 6);
+        assert_eq!(out.high_water, 6);
         // The sync runner sees everything applied (same _migrations ledger).
         let again = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 5);
+        assert_eq!(again.skipped, 6);
         // And the tamper lock holds through the seam.
         let mut edited = default_migrations();
         edited[1].sql.push_str("\n-- tampered");
@@ -803,7 +818,7 @@ mod tests {
         /// schema as one full apply, with prefix members skipped (checksums
         /// verified), never re-applied.
         #[test]
-        fn apply_then_apply_is_noop(split in 0usize..=4) {
+        fn apply_then_apply_is_noop(split in 0usize..=5) {
             let migs = default_migrations();
             let s = store();
             let first = apply_migrations(&s, &migs[..split]).unwrap();
@@ -811,7 +826,7 @@ mod tests {
             let rest = apply_migrations(&s, &migs).unwrap();
             proptest::prop_assert_eq!(rest.skipped, split);
             proptest::prop_assert_eq!(rest.applied, migs.len() - split);
-            proptest::prop_assert_eq!(rest.high_water, 5);
+            proptest::prop_assert_eq!(rest.high_water, 6);
 
             let fresh = store();
             apply_migrations(&fresh, &migs).unwrap();
@@ -826,7 +841,7 @@ mod tests {
         apply_migrations(&s, &default_migrations()).unwrap();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(out.applied, 0);
-        assert_eq!(out.skipped, 5);
+        assert_eq!(out.skipped, 6);
     }
 
     /// The additive contract for the recall projection: `recall_core` (v1) must
@@ -1084,13 +1099,14 @@ mod tests {
     fn capture_registry_growth_lands_past_frozen_boundaries() {
         use crate::schema::{
             canonical_tables, capture_identity_tables, capture_projection_meta_tables,
-            capture_turn_boundary_tables,
+            capture_read_tokens_tables, capture_turn_boundary_tables,
         };
         assert_eq!(
             capture_v1_tables().len()
                 + capture_identity_tables().len()
                 + capture_turn_boundary_tables().len()
-                + capture_projection_meta_tables().len(),
+                + capture_projection_meta_tables().len()
+                + capture_read_tokens_tables().len(),
             canonical_tables().len(),
             "a new capture table must extend a NEW slice (and migration), not fall between"
         );
@@ -1141,7 +1157,7 @@ mod tests {
         let migs: i64 = again
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0)))
             .unwrap();
-        assert_eq!(migs, 5);
+        assert_eq!(migs, 6);
     }
 
     /// The step-05 filesystem control: a projection opened through the standard

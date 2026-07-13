@@ -53,6 +53,20 @@ pub struct ReadContent {
     pub blob_oid: String,
     /// Plain SHA-256 (hex) of the bytes at read time.
     pub content_sha256: String,
+    /// Token estimate over the read-time bytes (M6-12), measured by the caller
+    /// while the bytes were in hand — a modified working file's read-time
+    /// content may exist nowhere else, so this is the only reliable moment.
+    pub tokens: Option<TokenEstimate>,
+}
+
+/// A token count paired with the tokenizer that produced it (ADR-0006's
+/// "skeptical buyer" provenance: a figure is never more exact than its basis).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenEstimate {
+    /// The estimated input tokens.
+    pub input_tokens: u32,
+    /// The measuring tokenizer (e.g. `cl100k_base`).
+    pub tokenizer: String,
 }
 
 /// Extract [`PayloadFacts`] from a native payload. Total: unknown shapes yield
@@ -257,6 +271,20 @@ pub async fn project_event(
                 )
                 .await?;
                 rift_store::record_tool_reads_file(store, &call_id, &revision_id).await?;
+                // The read-time token measurement (M6-12), keyed by this
+                // read's own call so fact and figure land together — a later
+                // session measuring the same revision can never mutate this
+                // session's archived lines.
+                if let Some(te) = &rc.tokens {
+                    rift_store::record_file_read_tokens(
+                        store,
+                        &call_id,
+                        te.input_tokens,
+                        &te.tokenizer,
+                        i64::from(ev.schema_version),
+                    )
+                    .await?;
+                }
             }
         }
         // Turn boundaries drive the state machine and the boundary snapshotter;
@@ -489,5 +517,50 @@ mod tests {
             0,
             "no price on file → no fabricated cost"
         );
+    }
+
+    /// M6-12 round trip: a read fact carrying a token estimate persists it
+    /// (idempotently) and `session_read_facts` hands it back for the archive;
+    /// a read without one joins back as `None`, never a guess.
+    #[tokio::test]
+    async fn read_token_estimate_persists_and_joins_back() {
+        let s = store();
+        let mut facts = payload_facts(&serde_json::json!({ "tool_name": "Read" }));
+        facts.read_content = Some(ReadContent {
+            rel_path: "src/lib.rs".into(),
+            blob_oid: "oid-1".into(),
+            content_sha256: "aa11".into(),
+            tokens: Some(TokenEstimate {
+                input_tokens: 123,
+                tokenizer: "cl100k_base".into(),
+            }),
+        });
+        for _ in 0..2 {
+            project_event(&s, &ev(EventKind::ToolResult, 1, 0), &facts, CTX)
+                .await
+                .unwrap();
+        }
+        facts.read_content = Some(ReadContent {
+            rel_path: "src/other.rs".into(),
+            blob_oid: "oid-2".into(),
+            content_sha256: "bb22".into(),
+            tokens: None,
+        });
+        project_event(&s, &ev(EventKind::ToolResult, 2, 0), &facts, CTX)
+            .await
+            .unwrap();
+
+        assert_eq!(s.count("file_read_tokens").await.unwrap(), 1);
+        let session_row = ids::session_row_id("claude-code", "native-1");
+        let reads = rift_store::session_read_facts(&s, &session_row)
+            .await
+            .unwrap();
+        assert_eq!(reads.len(), 2);
+        let by_path: std::collections::BTreeMap<_, _> = reads
+            .iter()
+            .map(|r| (r.path.as_str(), r.input_tokens))
+            .collect();
+        assert_eq!(by_path.get("src/lib.rs"), Some(&Some(123)));
+        assert_eq!(by_path.get("src/other.rs"), Some(&None));
     }
 }

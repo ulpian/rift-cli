@@ -137,6 +137,10 @@ pub async fn diagnose(store: &impl CanonicalStore) -> Result<GraphDiagnostics> {
 /// The relations (and their deterministic row renderings) the rebuild
 /// fingerprint covers. Surrogate `created_at` columns are excluded on tables
 /// where they are non-semantic; the graph content itself is fully covered.
+/// `n_file_read.input_tokens` is also excluded (M6-12): its fallback figures
+/// are resolved from ingest-time reachable bytes, so two honest ingests can
+/// differ in *coverage* (never in value) — the fingerprint proves the
+/// substrate-pure structure, not the enrichment.
 const FINGERPRINT_QUERIES: &[&str] = &[
     "SELECT node_id || '|' || kind || '|' || ref_id FROM graph_node ORDER BY node_id",
     "SELECT edge_id || '|' || from_node || '|' || to_node || '|' || kind FROM graph_edge ORDER BY edge_id",
@@ -149,7 +153,7 @@ const FINGERPRINT_QUERIES: &[&str] = &[
     "SELECT node_id || '|' || path || '|' || blob_oid || '|' || content_sha256 || '|' || size \
      FROM n_file_revision ORDER BY node_id",
     "SELECT node_id || '|' || checkpoint_id || '|' || tool_call_id || '|' || file_revision || '|' \
-     || input_tokens || '|' || read_ordinal FROM n_file_read ORDER BY node_id",
+     || read_ordinal FROM n_file_read ORDER BY node_id",
     "SELECT node_id || '|' || checkpoint_id || '|' || call_id || '|' || uncached_in || '|' \
      || cached_in || '|' || cache_write || '|' || output FROM n_token_usage ORDER BY node_id",
     "SELECT node_id || '|' || commit_id || '|' || file_revision || '|' || coalesce(old_start,-1) || '|' \

@@ -34,6 +34,9 @@ pub enum IssueKind {
     Corrupt,
     /// An artifact (or line) exceeded its size cap and was skipped unparsed.
     OversizeSkipped,
+    /// A read fact carried no token estimate and its read-time bytes could not
+    /// be resolved (M6-12) — the read counts 0 tokens rather than a guess.
+    TokenUnresolved,
 }
 
 /// A single problem worth reporting to `doctor`. Carries **no** raw payload bytes.

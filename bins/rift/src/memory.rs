@@ -68,7 +68,25 @@ pub(crate) async fn refresh_recall(
     let paths = ingest::read_paths(&reads);
     let blobs = worktree::hash_blobs(repo, &paths);
     rift_recall_ledger::blob_map::persist_blob_oid_map(store, &blobs, 0).await?;
-    ingest::ingest_with(store, sub, &IngestOptions::default()).await?;
+    // The token fallback rides EVERY ingest front door (M6-12): first writer
+    // wins on content-addressed rows, so an unresolved launch-time ingest
+    // would freeze 0-token reads that rift-memd could have resolved.
+    let capture = rift_store::capture_projection_db_for_repo(repo)
+        .ok()
+        .filter(|db| db.exists())
+        .and_then(|db| rift_store::open_capture_projection(&db).ok());
+    let opts = IngestOptions {
+        token_estimate_by_hash: rift_recall_ledger::tokens::fallback_token_estimates(
+            &reads,
+            store,
+            capture.as_ref(),
+            sub,
+            repo,
+        )
+        .await,
+        ..IngestOptions::default()
+    };
+    ingest::ingest_with(store, sub, &opts).await?;
     Ok(paths)
 }
 
