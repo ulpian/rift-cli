@@ -1,0 +1,24 @@
+---
+source: crates/rift-recall-pack/src/tests.rs
+expression: comfortable.render()
+---
+CRITICAL: src/retry.rs's last provenance was reverted - verify before reuse
+src/changed0.rs changed @sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+src/changed1.rs changed @sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+src/changed2.rs changed @sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+src/stable.rs summary@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: signatures unchanged
+retrieve: file:src/retry.rs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Informational only: these areas account for the most repeated read tokens.
+CRITICAL: src/retry.rs's last provenance was reverted - verify before reuse

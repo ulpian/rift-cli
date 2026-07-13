@@ -3065,6 +3065,7 @@ dependencies = [
 name = "rift-recall-pack"
 version = "0.0.1"
 dependencies = [
+ "insta",
  "proptest",
  "rift-core",
  "rift-recall-types",

@@ -22,4 +22,5 @@ rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+insta = { workspace = true }
 proptest = { workspace = true }

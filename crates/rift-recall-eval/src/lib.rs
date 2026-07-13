@@ -362,7 +362,12 @@ fn replay_delta(scenario: &Scenario) -> RunMetrics {
     {
         let _ = preq.push_recommended(SectionEntry::from_handle(&handle(f)));
     }
-    let pack = compile(&preq);
+    // Replay has no per-turn ceiling; the scenario budget alone governs. A
+    // budget too small for any pack falls back to the full-read shape (the
+    // caller's documented fallback), so tiny-budget scenarios stay runnable.
+    let Ok(pack) = compile(&preq, u32::MAX) else {
+        return replay(scenario, ReplayMode::FullRead);
+    };
     let rendered = pack.render();
     let mut tokens = count_tokens(&rendered);
     let mut steps = 1u32; // reading the pack is a step

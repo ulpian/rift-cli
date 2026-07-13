@@ -88,16 +88,36 @@ pub struct SectionEntry {
     text: String,
     est_tokens: u32,
     class: EntryClass,
+    /// The handle line this entry degrades to under budget pressure (P6 S2's
+    /// spill: inline content becomes `available_by_handle`, NEVER a truncated
+    /// slice of itself). Prepared at construction from the same sealed
+    /// inputs; `None` for entries already minimal (handles, facts, notes).
+    spill_text: Option<String>,
 }
 
 impl SectionEntry {
     fn new(text: String, class: EntryClass) -> Self {
+        Self::with_spill(text, class, None)
+    }
+
+    fn with_spill(text: String, class: EntryClass, spill_text: Option<String>) -> Self {
         let est_tokens = crate::est_tokens(&text);
         Self {
             text,
             est_tokens,
             class,
+            spill_text,
         }
+    }
+
+    /// The budget-pressure degrade for this entry: its handle form, when it
+    /// has one that is actually cheaper. A whole-entry swap — content is
+    /// never truncated (sensitive-safe by construction, PRD story 6).
+    #[must_use]
+    pub(crate) fn spill(&self) -> Option<Self> {
+        let text = self.spill_text.clone()?;
+        let spilled = Self::new(text, EntryClass::Handle);
+        (spilled.est_tokens < self.est_tokens).then_some(spilled)
     }
 
     /// Build an entry from a four-state envelope — the output of the sealed
@@ -133,18 +153,21 @@ impl SectionEntry {
                     ),
                     EntryClass::Handle,
                 ),
-                Sensitivity::Normal => Self::new(
+                Sensitivity::Normal => Self::with_spill(
                     format!("{} summary@sha256:{basis_sha256}: {summary}", e.path),
                     EntryClass::SummaryBound,
+                    Some(format!("{} available: {handle} (budget_exhausted)", e.path)),
                 ),
             },
             ArtifactState::ExactIncluded {
+                handle,
                 basis_sha256,
                 content,
                 ..
-            } => Self::new(
+            } => Self::with_spill(
                 format!("{} changed @sha256:{basis_sha256}:\n{content}", e.path),
                 EntryClass::ExactContent,
+                Some(format!("{} available: {handle} (budget_exhausted)", e.path)),
             ),
             ArtifactState::AvailableByHandle { handle, reason, .. } => Self::new(
                 format!("{} available: {handle} ({})", e.path, omit_tag(*reason)),

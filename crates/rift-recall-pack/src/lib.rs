@@ -35,8 +35,46 @@ use rift_core::{Result, RiftError};
 pub const DEFAULT_PACK_TOKENS: u32 = 1200;
 /// Hard ceiling a pack may never exceed (tokens).
 pub const MAX_PACK_TOKENS: u32 = 4000;
-/// Tokens reserved for the duplicated critical-facts tail.
+/// Ceiling for the duplicated critical-facts tail (P6 S2 anchor band).
 const CRITICAL_TAIL_CAP: u32 = 250;
+/// Ceiling reserved for the critical-facts top anchor.
+const ANCHOR_TOP_CAP: u32 = 250;
+/// The tail's graceful-degradation floor: a tail CUT below this is dropped
+/// whole rather than served as a rump (PRD story 2: 100–250 tokens).
+pub const TAIL_FLOOR_TOKENS: u32 = 100;
+
+/// Why a pack could not be compiled (fail-loud, PRD story 7: truncation is
+/// visible, never silent).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackError {
+    /// The effective cap (`min(budget, hard ceiling, turn remaining)`) cannot
+    /// hold even a minimal coherent pack.
+    BudgetTooSmall {
+        /// The cheapest coherent content the request carries.
+        needed: u32,
+        /// The effective cap that could not hold it.
+        cap: u32,
+    },
+}
+
+impl core::fmt::Display for PackError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::BudgetTooSmall { needed, cap } => write!(
+                f,
+                "pack budget too small: cap {cap} tokens cannot hold minimal content ({needed})"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for PackError {}
+
+impl From<PackError> for RiftError {
+    fn from(e: PackError) -> Self {
+        Self::validity(e.to_string())
+    }
+}
 
 pub(crate) fn est_tokens(s: &str) -> u32 {
     // The one workspace counting authority (ADR-0006); floor of 1 so no pack
@@ -196,8 +234,12 @@ impl PackRequest {
 pub struct Pack {
     /// Sections in placement order.
     pub sections: Vec<Section>,
-    /// Total estimated tokens (≤ effective budget).
+    /// Total tokens, **measured post-render over the serialized text** (never
+    /// a sum of per-item estimates); ≤ the effective cap.
     pub total_tokens: u32,
+    /// The tokenizer that measured `total_tokens` ("skeptical buyer"
+    /// provenance, ADR-0006).
+    pub tokenizer: &'static str,
 }
 
 impl Pack {
@@ -215,97 +257,216 @@ impl Pack {
     }
 }
 
-/// Compile a deterministic, edge-placed, budget-bounded pack.
+/// Compile a deterministic, edge-placed, budget-bounded pack (P6 S2).
 ///
-/// The critical-facts top and tail are always included (truncated only if they
-/// alone exceed budget). Changed → unchanged → recommended are filled greedily
-/// within the remaining budget; anything that does not fit is dropped (its
-/// content remains available by handle elsewhere). The result never exceeds
-/// `min(request.token_budget, MAX_PACK_TOKENS)`.
-#[must_use]
-pub fn compile(req: &PackRequest) -> Pack {
-    let budget = req.token_budget.clamp(1, MAX_PACK_TOKENS);
-    let mut used: u32 = 0;
-    let mut sections: Vec<Section> = Vec::new();
+/// The effective cap is `min(token_budget, MAX_PACK_TOKENS, turn_remaining)` —
+/// a pack can never blow the per-turn ceiling (PRD story 9). Anchors are
+/// reserved first (top ≤ 250 tokens; tail 100–250 with graceful degradation:
+/// a tail CUT below [`TAIL_FLOOR_TOKENS`] is dropped whole). Sections fill in
+/// rank order; an inline entry that does not fit **spills to its handle**
+/// (never a truncated slice — sensitive-safe, PRD story 6). The total is then
+/// **re-measured over the rendered text** and, while it exceeds the cap,
+/// content degrades in reverse-rank order (lowest-priority section first,
+/// last entry first: spill, then drop), then the tail shrinks, then the top
+/// truncates — a strictly-shrinking, terminating loop (PRD story 8).
+///
+/// # Errors
+/// [`PackError::BudgetTooSmall`] when the cap cannot hold even the request's
+/// cheapest coherent content — fail-loud, never a silently empty pack
+/// (PRD story 7; the documented caller fallback is `changed_hunks` directly).
+pub fn compile(req: &PackRequest, turn_remaining: u32) -> core::result::Result<Pack, PackError> {
+    let cap = req
+        .token_budget
+        .clamp(1, MAX_PACK_TOKENS)
+        .min(turn_remaining);
 
-    // Reserve the tail up front so recency facts are never crowded out.
-    let tail_cost = req
+    // Fail-loud floor: the cheapest thing this request wants to say must fit.
+    // (An entirely empty request compiles to an empty pack — nothing to hold.)
+    let cheapest = req
         .critical
-        .iter()
+        .first()
         .map(SectionEntry::est_tokens)
-        .sum::<u32>()
-        .min(CRITICAL_TAIL_CAP);
-    let reserve_tail = tail_cost.min(budget);
+        .into_iter()
+        .chain(
+            [&req.changed, &req.unchanged, &req.recommended]
+                .into_iter()
+                .flat_map(|v| v.iter().map(SectionEntry::est_tokens)),
+        )
+        .chain(req.cost_note.iter().map(SectionEntry::est_tokens))
+        .min();
+    match cheapest {
+        None => {
+            return Ok(Pack {
+                sections: Vec::new(),
+                total_tokens: 0,
+                tokenizer: rift_tokens::provenance(),
+            })
+        }
+        Some(needed) if needed > cap => {
+            return Err(PackError::BudgetTooSmall { needed, cap });
+        }
+        Some(_) => {}
+    }
 
-    // 1. critical facts top
-    let mut top = Section {
-        kind: SectionKind::CriticalTop,
-        lines: Vec::new(),
-    };
+    // 1) Top anchor: critical facts in order, within the anchor band and cap.
+    let anchor_band = ANCHOR_TOP_CAP.min(cap);
+    let mut top: Vec<SectionEntry> = Vec::new();
+    let mut top_cost = 0u32;
     for fact in &req.critical {
-        if used + fact.est_tokens() + reserve_tail <= budget {
-            used += fact.est_tokens();
-            top.lines.push(fact.text().to_string());
+        if top_cost + fact.est_tokens() <= anchor_band {
+            top_cost += fact.est_tokens();
+            top.push(fact.clone());
         }
     }
-    sections.push(top);
 
-    // helper to fill a section greedily within remaining budget (minus tail reserve)
-    let fill =
-        |kind: SectionKind, items: &[SectionEntry], used: &mut u32, sections: &mut Vec<Section>| {
-            let mut sec = Section {
-                kind,
-                lines: Vec::new(),
-            };
-            for item in items {
-                if *used + item.est_tokens() + reserve_tail <= budget {
-                    *used += item.est_tokens();
-                    sec.lines.push(item.text().to_string());
+    // 2) Tail reserve: the top anchors repeat within the 100–250 band.
+    let tail_full: u32 = top.iter().map(SectionEntry::est_tokens).sum();
+    let reserve_tail = tail_full
+        .min(CRITICAL_TAIL_CAP)
+        .min(cap.saturating_sub(top_cost));
+
+    // 3) Fill by rank within the estimate budget, spilling to handles.
+    let est_room = cap.saturating_sub(top_cost + reserve_tail);
+    let mut est_used = 0u32;
+    let mut fill = |items: &[SectionEntry]| -> Vec<SectionEntry> {
+        let mut out = Vec::new();
+        for item in items {
+            if est_used + item.est_tokens() <= est_room {
+                est_used += item.est_tokens();
+                out.push(item.clone());
+            } else if let Some(spilled) = item.spill() {
+                if est_used + spilled.est_tokens() <= est_room {
+                    est_used += spilled.est_tokens();
+                    out.push(spilled);
                 }
             }
-            if !sec.lines.is_empty() {
-                sections.push(sec);
-            }
-        };
+        }
+        out
+    };
+    let mut changed = fill(&req.changed);
+    let mut unchanged = fill(&req.unchanged);
+    let mut recommended = fill(&req.recommended);
+    let mut cost_note = req.cost_note.clone().filter(|w| {
+        let fits = est_used + w.est_tokens() <= est_room;
+        if fits {
+            est_used += w.est_tokens();
+        }
+        fits
+    });
 
-    // 2. changed, 3. unchanged, 4. recommended
-    fill(SectionKind::Changed, &req.changed, &mut used, &mut sections);
-    fill(
-        SectionKind::Unchanged,
-        &req.unchanged,
-        &mut used,
-        &mut sections,
-    );
-    fill(
-        SectionKind::Recommended,
-        &req.recommended,
-        &mut used,
-        &mut sections,
-    );
+    // 4) Tail: the longest top-prefix within the reserve; a CUT tail below
+    //    the floor is dropped whole (deterministic graceful degradation).
+    let mut tail = materialize_tail(&top, reserve_tail);
 
-    // 5. cost warning
-    if let Some(w) = &req.cost_note {
-        if used + w.est_tokens() + reserve_tail <= budget {
-            used += w.est_tokens();
-            sections.push(Section {
-                kind: SectionKind::CostWarning,
-                lines: vec![w.text().to_string()],
+    // 5) Post-render re-measure (over the serialized text, never estimate
+    //    sums) + reverse-rank degrade until the measurement fits the cap.
+    let mut measured;
+    loop {
+        let pack = assemble(&top, &changed, &unchanged, &recommended, &cost_note, &tail);
+        measured = rift_tokens::count(&pack.render());
+        if measured <= cap {
+            return Ok(Pack {
+                total_tokens: measured,
+                ..pack
+            });
+        }
+        // Reverse-rank: lowest-priority section first, last entry first;
+        // spill an inline entry if that shrinks it, else drop it outright.
+        let degraded = degrade_last(&mut recommended)
+            || cost_note.take().is_some()
+            || degrade_last(&mut unchanged)
+            || degrade_last(&mut changed)
+            || shrink_tail(&mut tail)
+            || (top.len() > 1 && top.pop().is_some());
+        if !degraded {
+            // Nothing left but the minimal anchor and it still measures over
+            // the cap (estimate/measure divergence corner): fail loud.
+            return Err(PackError::BudgetTooSmall {
+                needed: measured,
+                cap,
             });
         }
     }
+}
 
-    // 6. critical facts tail (duplicated for recency)
-    if !req.critical.is_empty() {
-        used += reserve_tail;
-        sections.push(Section {
-            kind: SectionKind::CriticalTail,
-            lines: req.critical.iter().map(|f| f.text().to_string()).collect(),
-        });
+/// The longest prefix of the top anchors fitting `reserve`; a CUT prefix
+/// below [`TAIL_FLOOR_TOKENS`] degrades to no tail at all (never a rump).
+fn materialize_tail(top: &[SectionEntry], reserve: u32) -> Vec<SectionEntry> {
+    let mut tail: Vec<SectionEntry> = Vec::new();
+    let mut cost = 0u32;
+    for fact in top {
+        if cost + fact.est_tokens() > reserve {
+            break;
+        }
+        cost += fact.est_tokens();
+        tail.push(fact.clone());
     }
+    if tail.len() < top.len() && cost < TAIL_FLOOR_TOKENS {
+        tail.clear();
+    }
+    tail
+}
 
+/// Degrade a section's LAST entry: swap it for its cheaper handle spill when
+/// it has one, else remove it. `true` if anything changed.
+fn degrade_last(entries: &mut Vec<SectionEntry>) -> bool {
+    let Some(last) = entries.last() else {
+        return false;
+    };
+    match last.spill() {
+        Some(spilled) if spilled.est_tokens() < last.est_tokens() => {
+            if let Some(slot) = entries.last_mut() {
+                *slot = spilled;
+            }
+            true
+        }
+        _ => entries.pop().is_some(),
+    }
+}
+
+/// Shrink the tail by one fact from the end; dropping below the floor (when
+/// the tail no longer mirrors the full top) clears it whole.
+fn shrink_tail(tail: &mut Vec<SectionEntry>) -> bool {
+    if tail.is_empty() {
+        return false;
+    }
+    tail.pop();
+    let cost: u32 = tail.iter().map(SectionEntry::est_tokens).sum();
+    if !tail.is_empty() && cost < TAIL_FLOOR_TOKENS {
+        tail.clear();
+    }
+    true
+}
+
+/// Assemble the ordered sections from the surviving entries (placement is the
+/// compiler's, not the caller's).
+fn assemble(
+    top: &[SectionEntry],
+    changed: &[SectionEntry],
+    unchanged: &[SectionEntry],
+    recommended: &[SectionEntry],
+    cost_note: &Option<SectionEntry>,
+    tail: &[SectionEntry],
+) -> Pack {
+    let mut sections: Vec<Section> = Vec::new();
+    let mut push = |kind: SectionKind, entries: &[SectionEntry]| {
+        let lines: Vec<String> = entries.iter().map(|e| e.text().to_string()).collect();
+        if kind == SectionKind::CriticalTop || !lines.is_empty() {
+            sections.push(Section { kind, lines });
+        }
+    };
+    push(SectionKind::CriticalTop, top);
+    push(SectionKind::Changed, changed);
+    push(SectionKind::Unchanged, unchanged);
+    push(SectionKind::Recommended, recommended);
+    if let Some(w) = cost_note {
+        push(SectionKind::CostWarning, core::slice::from_ref(w));
+    }
+    push(SectionKind::CriticalTail, tail);
     Pack {
         sections,
-        total_tokens: used.min(budget),
+        total_tokens: 0, // measured by the caller over render()
+        tokenizer: rift_tokens::provenance(),
     }
 }
 

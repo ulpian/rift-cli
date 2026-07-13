@@ -213,6 +213,15 @@ pub enum ToolError {
     QueryParamsRequired,
     /// Policy denied (carries the reason to surface).
     Denied(OmitReason),
+    /// The effective pack cap (`min(budget, hard ceiling, turn remaining)`)
+    /// cannot hold a coherent pack (PRD story 7 — fail-loud; the documented
+    /// fallback is calling `rift_changed_hunks` directly).
+    PackBudgetTooSmall {
+        /// The cheapest coherent content the request carried.
+        needed: u32,
+        /// The effective cap that could not hold it.
+        cap: u32,
+    },
     /// An internal read/build error (identifier/reason only — never content).
     Internal(String),
 }
@@ -930,7 +939,13 @@ impl<'a> McpServer<'a> {
             }
         }
 
-        let pack = rift_recall_pack::compile(&preq);
+        // The pack budget composes with the remaining TURN budget (PRD story
+        // 9): the effective cap is min(pack target, hard ceiling, remaining).
+        let pack = rift_recall_pack::compile(&preq, budget.tokens_remaining()).map_err(
+            |rift_recall_pack::PackError::BudgetTooSmall { needed, cap }| {
+                ToolError::PackBudgetTooSmall { needed, cap }
+            },
+        )?;
         let rendered = pack.render();
         let returned = charge(budget, rift_tokens::count(&rendered));
         let avoided = ranked

@@ -1,0 +1,17 @@
+---
+source: crates/rift-recall-pack/src/tests.rs
+expression: tight.render()
+---
+CRITICAL: src/retry.rs's last provenance was reverted - verify before reuse
+src/changed0.rs changed @sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+src/changed1.rs changed @sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+src/changed2.rs available: file:src/changed2.rs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (budget_exhausted)
+CRITICAL: src/retry.rs's last provenance was reverted - verify before reuse
