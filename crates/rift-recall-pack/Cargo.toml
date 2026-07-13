@@ -13,6 +13,9 @@ workspace = true
 [dependencies]
 rift-core = { version = "0.0.1", path = "../rift-core" }
 rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+# Sealed-constructor outputs (Envelope / NeutralDigest) are the only material
+# a SectionEntry can be built from (ADR-0016).
+rift-recall-validity = { version = "0.0.1", path = "../rift-recall-validity" }
 # The one token-counting authority (ADR-0006) backs pack budgeting.
 rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
 # The input-keyed PackKey (ADR-0020) is a SHA-256 over the immutable pack inputs.

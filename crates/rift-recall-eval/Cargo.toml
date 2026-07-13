@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 # The pack under test: the delta-served runs compile real packs.
 rift-recall-pack = { version = "0.0.1", path = "../rift-recall-pack" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
 # The one token-counting authority (ADR-0006): measured savings use the same
 # tokenizer the serving side reports, so reconciliation is apples-to-apples.
 rift-tokens = { version = "0.0.1", path = "../rift-tokens" }

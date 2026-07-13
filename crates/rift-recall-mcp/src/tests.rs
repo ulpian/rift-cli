@@ -516,7 +516,6 @@ fn context_pack_carries_projection_content_not_empty_sections() {
     // reverted provenance → the pack's sections carry real projection content.
     let cfg = cfg();
     let store = seeded_store();
-    let reader = MemorySubstrate::local();
 
     // find the top candidate's revision id + hash from the seeded projection
     let row = block(store.query(
@@ -526,6 +525,9 @@ fn context_pack_carries_projection_content_not_empty_sections() {
     .unwrap();
     let rev_id = row[0].get_text(0).unwrap();
     let rev_hash = row[0].get_text(2).unwrap();
+    // the substrate serves the revision's bytes, so the pack can inline the
+    // CHANGED HUNK TEXT (M6-03: text, not just line ranges) via the chokepoint
+    let reader = MemorySubstrate::local().with_blob(&rev_hash, b"a\nb\n");
     let ckpt = {
         let r = block(store.query(
             "SELECT checkpoint_id FROM n_file_read WHERE file_revision = ?1 LIMIT 1",
@@ -578,9 +580,11 @@ fn context_pack_carries_projection_content_not_empty_sections() {
     ))
     .unwrap();
     let rendered = resp.payload["sections"].to_string();
+    // the changed section inlines the hunk's exact text (trust-shaped through
+    // TrustedPayload + envelope_for), placed early — not a bare range descriptor
     assert!(
-        rendered.contains("hunk(s) at lines"),
-        "changed section carries persisted hunks: {rendered}"
+        rendered.contains("changed @sha256:") && rendered.contains("L2-L2:"),
+        "changed section carries the persisted hunk TEXT: {rendered}"
     );
     assert!(
         rendered.contains("CRITICAL:"),
@@ -712,4 +716,28 @@ fn token_accounting_is_non_negative_and_honest() {
     // avoided is the captured re-read cost (400 + 50) and dominates the manifest.
     assert!(resp.estimated_tokens_avoided >= resp.estimated_tokens_returned);
     assert!(resp.estimated_tokens_avoided > 0);
+}
+
+/// ADR-0016 §2: no serve path constructs a four-state envelope or a pack
+/// section outside the sealed constructors. Structural, source-level: the
+/// forgeable forms are struct-literal `Envelope {`/`Section {` construction
+/// and field-init `state: ArtifactState::…` — matching on `&e.state` (the
+/// read side) uses neither. `SectionEntry`/`ValidSummary` need no scan: their
+/// fields are private, so a bypass there is already a compile error.
+#[test]
+fn no_bypass_serve_paths_use_sealed_constructors_only() {
+    let src = include_str!("lib.rs");
+    for forged in [
+        "Envelope {",
+        "state: ArtifactState::",
+        "Section {",
+        "PackItem",
+    ] {
+        assert!(
+            !src.contains(forged),
+            "serve path contains a sealed-constructor bypass: `{forged}` \
+             (build envelopes via envelope_for/manifest_envelope and pack \
+             sections via SectionEntry/PackRequest instead)"
+        );
+    }
 }

@@ -33,7 +33,7 @@
     )
 )]
 
-use rift_recall_pack::{compile, PackItem, PackRequest};
+use rift_recall_pack::{compile, PackRequest, SectionEntry, Sensitivity};
 
 /// The versioned go/no-go thresholds (ADR-0019 #1). Any change to the bar is
 /// an explicit, reviewable edit to a versioned value — never a silent tune.
@@ -309,18 +309,43 @@ pub fn replay(scenario: &Scenario, mode: ReplayMode) -> RunMetrics {
 /// early, unchanged as summaries-by-handle, retrievals recommended in rank
 /// order), then follow handles until the decisive fact turns up.
 fn replay_delta(scenario: &Scenario) -> RunMetrics {
-    let changed: Vec<PackItem> = scenario
-        .files
-        .iter()
-        .filter(|f| f.changed)
-        .map(|f| PackItem::new(format!("{} changed - retrieve file:{}", f.path, f.path)))
-        .collect();
-    let unchanged: Vec<PackItem> = scenario
-        .files
-        .iter()
-        .filter(|f| !f.changed)
-        .map(|f| PackItem::new(format!("{} unchanged (known_unchanged)", f.path)))
-        .collect();
+    use rift_recall_types::{ArtifactState, Envelope, Handle, Trust};
+    // Fixture envelopes stand in for `envelope_for` outputs (the harness IS
+    // the replay of a serve, not a serve path); the entries still go through
+    // the sealed pack constructors, so the compiled shape matches production.
+    let sha = |f: &ScenarioFile| format!("{:0>64}", f.path.len());
+    let handle = |f: &ScenarioFile| Handle::File {
+        path: f.path.clone(),
+        sha256: sha(f),
+        range: None,
+    };
+    let mut preq = PackRequest::new(scenario.token_budget);
+    for f in scenario.files.iter().filter(|f| f.changed) {
+        let env = Envelope {
+            path: f.path.clone(),
+            trust: Trust::CodeFact,
+            state: ArtifactState::AvailableByHandle {
+                handle: handle(f).to_string(),
+                basis_sha256: Some(sha(f)),
+                reason: rift_recall_types::OmitReason::NotRequested,
+            },
+            estimated_tokens_returned: 0,
+        };
+        let _ = preq.push_changed(SectionEntry::from_envelope(&env, Sensitivity::Normal));
+    }
+    for f in scenario.files.iter().filter(|f| !f.changed) {
+        let env = Envelope {
+            path: f.path.clone(),
+            trust: Trust::CodeFact,
+            state: ArtifactState::KnownUnchanged {
+                handle: handle(f).to_string(),
+                basis_sha256: sha(f),
+                last_seen_turn: None,
+            },
+            estimated_tokens_returned: 0,
+        };
+        let _ = preq.push_unchanged(SectionEntry::from_envelope(&env, Sensitivity::Normal));
+    }
     let recommended: Vec<String> = scenario
         .files
         .iter()
@@ -329,14 +354,15 @@ fn replay_delta(scenario: &Scenario) -> RunMetrics {
         .chain(scenario.files.iter().filter(|f| !f.changed))
         .map(|f| format!("file:{}", f.path))
         .collect();
-    let pack = compile(&PackRequest {
-        critical_facts: Vec::new(),
-        changed,
-        unchanged,
-        recommended: recommended.clone(),
-        cost_warning: None,
-        token_budget: scenario.token_budget,
-    });
+    for f in scenario
+        .files
+        .iter()
+        .filter(|f| f.changed)
+        .chain(scenario.files.iter().filter(|f| !f.changed))
+    {
+        let _ = preq.push_recommended(SectionEntry::from_handle(&handle(f)));
+    }
+    let pack = compile(&preq);
     let rendered = pack.render();
     let mut tokens = count_tokens(&rendered);
     let mut steps = 1u32; // reading the pack is a step

@@ -8,6 +8,13 @@
 //! (primacy + recency). It enforces a hard token ceiling (a pack can never
 //! exceed [`MAX_PACK_TOKENS`]) and is deterministic for identical inputs, so an
 //! unchanged pack re-serves byte-identically (cache-friendly stable prefix).
+//!
+//! Sections are **trust-shaped by construction** (ADR-0016): they hold sealed
+//! [`SectionEntry`] values buildable only from the serve constructors' outputs
+//! (see [`entry`]), and [`PackRequest`]'s per-section admission checks make a
+//! placement-violating pack unrepresentable — `UnchangedButRelevant` can never
+//! hold exact content, recommendations are parse-validated handles only, and
+//! the cost warning comes from a closed descriptive vocabulary.
 #![forbid(unsafe_code)]
 #![cfg_attr(
     test,
@@ -19,6 +26,11 @@
     )
 )]
 
+mod entry;
+
+pub use entry::{CostNote, CriticalFact, EntryClass, SectionEntry, Sensitivity, COST_NOTE};
+use rift_core::{Result, RiftError};
+
 /// Default target pack size (tokens).
 pub const DEFAULT_PACK_TOKENS: u32 = 1200;
 /// Hard ceiling a pack may never exceed (tokens).
@@ -26,29 +38,10 @@ pub const MAX_PACK_TOKENS: u32 = 4000;
 /// Tokens reserved for the duplicated critical-facts tail.
 const CRITICAL_TAIL_CAP: u32 = 250;
 
-fn est_tokens(s: &str) -> u32 {
+pub(crate) fn est_tokens(s: &str) -> u32 {
     // The one workspace counting authority (ADR-0006); floor of 1 so no pack
     // item is ever budget-free.
     rift_tokens::count(s).max(1)
-}
-
-/// A unit of pack content with its estimated token cost.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PackItem {
-    /// The rendered text.
-    pub text: String,
-    /// Estimated tokens.
-    pub est_tokens: u32,
-}
-
-impl PackItem {
-    /// Build an item, estimating its token cost from its text.
-    #[must_use]
-    pub fn new(text: impl Into<String>) -> Self {
-        let text = text.into();
-        let est_tokens = est_tokens(&text);
-        Self { text, est_tokens }
-    }
 }
 
 /// The ordered section kinds (placement is part of the API contract).
@@ -68,30 +61,134 @@ pub enum SectionKind {
     CriticalTail,
 }
 
-/// A compiled pack section.
+/// A compiled pack section (the render view; content came from sealed entries).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Section {
     /// The section kind.
     pub kind: SectionKind,
-    /// The lines of the section.
+    /// The rendered lines of the section.
     pub lines: Vec<String>,
 }
 
-/// The inputs to compile a pack.
+/// Which entry classes a section admits — the placement invariants (PRD-M6
+/// stories 4/5/6) as data. `Unchanged` NEVER admits exact content (honest-cache:
+/// unchanged content is summaries + handles + hashes only); recommendations are
+/// handles only; the cost slot takes only the closed [`CostNote`] vocabulary.
+const fn admits(kind: SectionKind, class: EntryClass) -> bool {
+    match kind {
+        SectionKind::CriticalTop | SectionKind::CriticalTail => {
+            matches!(class, EntryClass::CriticalFact)
+        }
+        SectionKind::Changed => matches!(
+            class,
+            EntryClass::ExactContent
+                | EntryClass::SummaryBound
+                | EntryClass::Handle
+                | EntryClass::NeutralDigest
+                | EntryClass::KnownUnchanged
+        ),
+        SectionKind::Unchanged => matches!(
+            class,
+            EntryClass::KnownUnchanged
+                | EntryClass::SummaryBound
+                | EntryClass::Handle
+                | EntryClass::NeutralDigest
+        ),
+        SectionKind::Recommended => matches!(class, EntryClass::Handle),
+        SectionKind::CostWarning => matches!(class, EntryClass::CostNote),
+    }
+}
+
+/// The inputs to compile a pack. Fields are private and entries are admitted
+/// through the per-section methods below, each of which enforces its section's
+/// placement invariant — so an invariant-violating request never exists.
 #[derive(Clone, Debug, Default)]
 pub struct PackRequest {
-    /// Critical facts (duplicated top and tail).
-    pub critical_facts: Vec<String>,
-    /// Changed-file items.
-    pub changed: Vec<PackItem>,
-    /// Unchanged-but-relevant items (summaries + handles).
-    pub unchanged: Vec<PackItem>,
-    /// Recommended retrieval handles.
-    pub recommended: Vec<String>,
-    /// Optional cost warning line.
-    pub cost_warning: Option<String>,
-    /// The token budget (clamped to [`MAX_PACK_TOKENS`]).
-    pub token_budget: u32,
+    critical: Vec<SectionEntry>,
+    changed: Vec<SectionEntry>,
+    unchanged: Vec<SectionEntry>,
+    recommended: Vec<SectionEntry>,
+    cost_note: Option<SectionEntry>,
+    token_budget: u32,
+}
+
+fn refuse(kind: SectionKind, class: EntryClass) -> RiftError {
+    RiftError::validity(format!(
+        "placement invariant: {kind:?} does not admit {class:?} entries"
+    ))
+}
+
+impl PackRequest {
+    /// A request targeting `token_budget` tokens (clamped at compile time).
+    #[must_use]
+    pub fn new(token_budget: u32) -> Self {
+        Self {
+            token_budget,
+            ..Self::default()
+        }
+    }
+
+    /// Admit an edge-placed critical fact (duplicated top and tail).
+    ///
+    /// # Errors
+    /// [`RiftError::Validity`] unless the entry is a [`EntryClass::CriticalFact`].
+    pub fn push_critical(&mut self, e: SectionEntry) -> Result<()> {
+        if !admits(SectionKind::CriticalTop, e.class()) {
+            return Err(refuse(SectionKind::CriticalTop, e.class()));
+        }
+        self.critical.push(e);
+        Ok(())
+    }
+
+    /// Admit a changed-file entry (exact hunk content, summary, handle, or a
+    /// neutral digest of untrusted provenance).
+    ///
+    /// # Errors
+    /// [`RiftError::Validity`] if the class is not admissible in `Changed`.
+    pub fn push_changed(&mut self, e: SectionEntry) -> Result<()> {
+        if !admits(SectionKind::Changed, e.class()) {
+            return Err(refuse(SectionKind::Changed, e.class()));
+        }
+        self.changed.push(e);
+        Ok(())
+    }
+
+    /// Admit an unchanged-but-relevant entry. **Exact content is refused** —
+    /// unchanged context is summaries + handles + hashes only (PRD story 5).
+    ///
+    /// # Errors
+    /// [`RiftError::Validity`] if the class is not admissible in `Unchanged`.
+    pub fn push_unchanged(&mut self, e: SectionEntry) -> Result<()> {
+        if !admits(SectionKind::Unchanged, e.class()) {
+            return Err(refuse(SectionKind::Unchanged, e.class()));
+        }
+        self.unchanged.push(e);
+        Ok(())
+    }
+
+    /// Admit a recommended retrieval (parse-validated handles only).
+    ///
+    /// # Errors
+    /// [`RiftError::Validity`] unless the entry is a [`EntryClass::Handle`].
+    pub fn push_recommended(&mut self, e: SectionEntry) -> Result<()> {
+        if !admits(SectionKind::Recommended, e.class()) {
+            return Err(refuse(SectionKind::Recommended, e.class()));
+        }
+        self.recommended.push(e);
+        Ok(())
+    }
+
+    /// Set the descriptive cost note (closed vocabulary; directive-free).
+    ///
+    /// # Errors
+    /// [`RiftError::Validity`] unless the entry is a [`EntryClass::CostNote`].
+    pub fn set_cost_note(&mut self, e: SectionEntry) -> Result<()> {
+        if !admits(SectionKind::CostWarning, e.class()) {
+            return Err(refuse(SectionKind::CostWarning, e.class()));
+        }
+        self.cost_note = Some(e);
+        Ok(())
+    }
 }
 
 /// A compiled, ordered, budgeted pack.
@@ -132,10 +229,10 @@ pub fn compile(req: &PackRequest) -> Pack {
     let mut sections: Vec<Section> = Vec::new();
 
     // Reserve the tail up front so recency facts are never crowded out.
-    let tail_lines: Vec<String> = req.critical_facts.clone();
-    let tail_cost = tail_lines
+    let tail_cost = req
+        .critical
         .iter()
-        .map(|l| est_tokens(l))
+        .map(SectionEntry::est_tokens)
         .sum::<u32>()
         .min(CRITICAL_TAIL_CAP);
     let reserve_tail = tail_cost.min(budget);
@@ -145,26 +242,25 @@ pub fn compile(req: &PackRequest) -> Pack {
         kind: SectionKind::CriticalTop,
         lines: Vec::new(),
     };
-    for fact in &req.critical_facts {
-        let cost = est_tokens(fact);
-        if used + cost + reserve_tail <= budget {
-            used += cost;
-            top.lines.push(fact.clone());
+    for fact in &req.critical {
+        if used + fact.est_tokens() + reserve_tail <= budget {
+            used += fact.est_tokens();
+            top.lines.push(fact.text().to_string());
         }
     }
     sections.push(top);
 
     // helper to fill a section greedily within remaining budget (minus tail reserve)
     let fill =
-        |kind: SectionKind, items: &[PackItem], used: &mut u32, sections: &mut Vec<Section>| {
+        |kind: SectionKind, items: &[SectionEntry], used: &mut u32, sections: &mut Vec<Section>| {
             let mut sec = Section {
                 kind,
                 lines: Vec::new(),
             };
             for item in items {
-                if *used + item.est_tokens + reserve_tail <= budget {
-                    *used += item.est_tokens;
-                    sec.lines.push(item.text.clone());
+                if *used + item.est_tokens() + reserve_tail <= budget {
+                    *used += item.est_tokens();
+                    sec.lines.push(item.text().to_string());
                 }
             }
             if !sec.lines.is_empty() {
@@ -172,7 +268,7 @@ pub fn compile(req: &PackRequest) -> Pack {
             }
         };
 
-    // 2. changed, 3. unchanged
+    // 2. changed, 3. unchanged, 4. recommended
     fill(SectionKind::Changed, &req.changed, &mut used, &mut sections);
     fill(
         SectionKind::Unchanged,
@@ -180,38 +276,30 @@ pub fn compile(req: &PackRequest) -> Pack {
         &mut used,
         &mut sections,
     );
-
-    // 4. recommended retrievals (handles are cheap; one est per handle)
-    let rec_items: Vec<PackItem> = req
-        .recommended
-        .iter()
-        .map(|h| PackItem::new(format!("retrieve: {h}")))
-        .collect();
     fill(
         SectionKind::Recommended,
-        &rec_items,
+        &req.recommended,
         &mut used,
         &mut sections,
     );
 
     // 5. cost warning
-    if let Some(w) = &req.cost_warning {
-        let cost = est_tokens(w);
-        if used + cost + reserve_tail <= budget {
-            used += cost;
+    if let Some(w) = &req.cost_note {
+        if used + w.est_tokens() + reserve_tail <= budget {
+            used += w.est_tokens();
             sections.push(Section {
                 kind: SectionKind::CostWarning,
-                lines: vec![w.clone()],
+                lines: vec![w.text().to_string()],
             });
         }
     }
 
     // 6. critical facts tail (duplicated for recency)
-    if !tail_lines.is_empty() {
+    if !req.critical.is_empty() {
         used += reserve_tail;
         sections.push(Section {
             kind: SectionKind::CriticalTail,
-            lines: tail_lines,
+            lines: req.critical.iter().map(|f| f.text().to_string()).collect(),
         });
     }
 
@@ -272,186 +360,4 @@ pub fn pack_key(inputs: &PackKeyInputs) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn req() -> PackRequest {
-        PackRequest {
-            critical_facts: vec!["CRITICAL: retry policy changed".into()],
-            changed: vec![PackItem::new("src/retry.rs: 3 hunks +12/-4")],
-            unchanged: vec![PackItem::new("BillingClient.charge() signature unchanged")],
-            recommended: vec!["file:src/retry.rs@sha256:abc".into()],
-            cost_warning: Some("this repo re-reads 22% of input tokens".into()),
-            token_budget: 1200,
-        }
-    }
-
-    #[test]
-    fn sections_are_in_placement_order() {
-        let pack = compile(&req());
-        let kinds: Vec<_> = pack.sections.iter().map(|s| s.kind).collect();
-        assert_eq!(
-            kinds,
-            vec![
-                SectionKind::CriticalTop,
-                SectionKind::Changed,
-                SectionKind::Unchanged,
-                SectionKind::Recommended,
-                SectionKind::CostWarning,
-                SectionKind::CriticalTail,
-            ]
-        );
-    }
-
-    #[test]
-    fn critical_facts_appear_top_and_tail() {
-        let pack = compile(&req());
-        let first = &pack.sections.first().unwrap();
-        let last = &pack.sections.last().unwrap();
-        assert_eq!(first.kind, SectionKind::CriticalTop);
-        assert_eq!(last.kind, SectionKind::CriticalTail);
-        assert_eq!(
-            first.lines, last.lines,
-            "critical facts duplicated at the edges"
-        );
-    }
-
-    #[test]
-    fn never_exceeds_budget() {
-        let mut r = req();
-        r.token_budget = 10; // tiny
-        r.changed = (0..100)
-            .map(|i| PackItem::new(format!("changed file {i} with lots of content here")))
-            .collect();
-        let pack = compile(&r);
-        assert!(
-            pack.total_tokens <= 10,
-            "pack must not exceed budget: {}",
-            pack.total_tokens
-        );
-    }
-
-    #[test]
-    fn never_exceeds_hard_ceiling() {
-        let mut r = req();
-        r.token_budget = 1_000_000; // absurd request
-        r.changed = (0..5000)
-            .map(|i| PackItem::new(format!("big changed item number {i} blah blah blah")))
-            .collect();
-        let pack = compile(&r);
-        assert!(pack.total_tokens <= MAX_PACK_TOKENS);
-    }
-
-    #[test]
-    fn deterministic_for_identical_inputs() {
-        let a = compile(&req());
-        let b = compile(&req());
-        assert_eq!(a, b);
-        assert_eq!(a.render(), b.render());
-    }
-
-    fn key_inputs() -> PackKeyInputs {
-        PackKeyInputs {
-            query: "task: fix retry".into(),
-            ranked: vec![
-                ("id1".into(), "hashA".into()),
-                ("id2".into(), "hashB".into()),
-            ],
-            policy_version: 1,
-            token_budget: 1200,
-        }
-    }
-
-    #[test]
-    fn pack_key_is_input_keyed_and_sensitive_to_every_input() {
-        // ADR-0020: computable before any render, stable for identical inputs.
-        let base = pack_key(&key_inputs());
-        assert_eq!(base.len(), 64);
-        assert_eq!(base, pack_key(&key_inputs()), "identical inputs, same key");
-
-        let mut other_query = key_inputs();
-        other_query.query = "task: other".into();
-        assert_ne!(
-            base,
-            pack_key(&other_query),
-            "query is part of the identity"
-        );
-
-        let mut reordered = key_inputs();
-        reordered.ranked.swap(0, 1);
-        assert_ne!(
-            base,
-            pack_key(&reordered),
-            "rank ORDER is part of the identity"
-        );
-
-        let mut rehashed = key_inputs();
-        rehashed.ranked[0].1 = "hashA2".into();
-        assert_ne!(
-            base,
-            pack_key(&rehashed),
-            "content hash is part of the identity"
-        );
-
-        let mut repoliced = key_inputs();
-        repoliced.policy_version = 2;
-        assert_ne!(
-            base,
-            pack_key(&repoliced),
-            "policy version is part of the identity"
-        );
-
-        let mut rebudgeted = key_inputs();
-        rebudgeted.token_budget = 800;
-        assert_ne!(
-            base,
-            pack_key(&rebudgeted),
-            "budget is part of the identity"
-        );
-    }
-
-    proptest::proptest! {
-        /// Byte-identity across seeds (ADR-0020): equal inputs → equal key AND
-        /// equal rendered pack; the key never depends on the rendered output.
-        #[test]
-        fn same_inputs_reserve_byte_identically(
-            names in proptest::collection::vec("[a-z]{1,8}", 0..6),
-            budget in 1u32..2000,
-        ) {
-            let ranked: Vec<(String, String)> = names
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (format!("id{i}"), format!("h_{n}")))
-                .collect();
-            let inputs = PackKeyInputs {
-                query: "q".into(),
-                ranked: ranked.clone(),
-                policy_version: 1,
-                token_budget: budget,
-            };
-            proptest::prop_assert_eq!(pack_key(&inputs), pack_key(&inputs));
-            let pr = PackRequest {
-                recommended: ranked.iter().map(|(_, h)| format!("file:x@sha256:{h}")).collect(),
-                token_budget: budget,
-                ..PackRequest::default()
-            };
-            proptest::prop_assert_eq!(compile(&pr).render(), compile(&pr).render());
-        }
-
-        /// Distinct ranked sets produce distinct keys (no concatenation-boundary
-        /// collisions thanks to length prefixing).
-        #[test]
-        fn boundary_shifts_change_the_key(a in "[a-z]{1,6}", b in "[a-z]{1,6}") {
-            let one = PackKeyInputs {
-                ranked: vec![(format!("{a}{b}"), "h".into())],
-                ..key_inputs()
-            };
-            let two = PackKeyInputs {
-                ranked: vec![(a.clone(), format!("{b}h"))],
-                ..key_inputs()
-            };
-            // same concatenated bytes, different field boundaries → different keys
-            proptest::prop_assert_ne!(pack_key(&one), pack_key(&two));
-        }
-    }
-}
+mod tests;

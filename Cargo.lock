@@ -3004,6 +3004,7 @@ version = "0.0.1"
 dependencies = [
  "proptest",
  "rift-recall-pack",
+ "rift-recall-types",
  "rift-tokens",
 ]
 
@@ -3067,6 +3068,7 @@ dependencies = [
  "proptest",
  "rift-core",
  "rift-recall-types",
+ "rift-recall-validity",
  "rift-tokens",
  "sha2",
 ]

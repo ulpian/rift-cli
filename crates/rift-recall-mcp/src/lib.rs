@@ -72,8 +72,9 @@ pub const TOOL_SURFACE: &[ToolName] = &[
 ];
 
 /// The fixed, neutral cost-awareness note (W7: descriptive, never a directive).
-pub const COST_NOTE: &str =
-    "Informational only: these areas account for the most repeated read tokens.";
+/// Re-exported from the pack crate's closed [`rift_recall_pack::CostNote`]
+/// vocabulary so the two surfaces can never drift.
+pub const COST_NOTE: &str = rift_recall_pack::COST_NOTE;
 
 impl ToolName {
     /// The wire name (`rift_<tool>`), as advertised over MCP.
@@ -740,7 +741,8 @@ impl<'a> McpServer<'a> {
         ctx: &RecallContext<'_, S, R>,
         budget: &mut TurnBudget,
     ) -> Result<ToolResponse, ToolError> {
-        use rift_recall_pack::PackItem;
+        use rift_recall_pack::{CostNote, CriticalFact, PackRequest, SectionEntry, Sensitivity};
+        use rift_recall_validity::{envelope_for, resolve, MemoryDigestStore, SummaryStore};
 
         let ranked = Self::ranked_candidates(req, ctx).await?;
         let pack_tokens = if req.token_budget == 0 {
@@ -767,26 +769,67 @@ impl<'a> McpServer<'a> {
             token_budget: pack_tokens,
         });
 
-        // Section content from the projection (P6): persisted changed hunks,
-        // known-unchanged summaries-by-handle, and reverted-provenance warnings
-        // as edge-placed critical facts. Handles only + neutral descriptors —
-        // the pack never inlines raw bytes.
+        // Every section entry is built from a sealed-constructor output
+        // (ADR-0016): `envelope_for` (with `resolve` supplying the validity
+        // verdict) for trusted artifacts, the trust chokepoint for untrusted
+        // provenance, parse-validated handles for recommendations, and the
+        // closed critical/cost vocabularies. No inline strings enter a pack.
+        //
+        // The summary store is empty until ingest persists digest bindings (a
+        // deliberate deferral): `resolve` then verdicts `Degraded`, so the
+        // envelope honestly serves known-unchanged / exact-hunks / handles and
+        // never fabricates a summary.
+        let summaries = SummaryStore::new();
+        let digests = MemoryDigestStore::default();
+        let snapshot = rift_recall_validity::WorktreeSnapshot::new();
+        let mut env_budget = rift_recall_validity::Budget::new(pack_tokens);
+
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
-        let mut critical_facts: Vec<String> = Vec::new();
-        let mut changed: Vec<PackItem> = Vec::new();
-        let mut unchanged: Vec<PackItem> = Vec::new();
-        let mut recommended: Vec<String> = Vec::new();
+        let mut preq = PackRequest::new(pack_tokens);
+        preq.set_cost_note(SectionEntry::cost_note(CostNote::RepeatedReadAreas))
+            .map_err(|e| ToolError::Internal(e.to_string()))?;
+
         for lc in ranked.iter().take(8) {
             let c = &lc.candidate;
-            let handle = format!("file:{}@sha256:{}", c.path, lc.content_sha256);
-            recommended.push(handle.clone());
-            if known.contains(lc.content_sha256.as_str()) {
-                unchanged.push(PackItem::new(format!(
-                    "{} unchanged @sha256:{} (known_unchanged; not re-inlined)",
-                    c.path, lc.content_sha256
-                )));
+            // Policy shapes exposure BEFORE any content is touched: a denied
+            // path is never served — not even as a handle.
+            if self.policy.is_denied_path(&c.path) {
                 continue;
             }
+            let sensitivity = if self.policy.exact_source_required(&c.path) {
+                Sensitivity::Sensitive
+            } else {
+                Sensitivity::Normal
+            };
+            let handle_str = format!("file:{}@sha256:{}", c.path, lc.content_sha256);
+            // Trust derives from provenance, never the caller (ADR-0003).
+            let trust = provenance_trust(&handle_str);
+            if let Ok(h) = handle_str.parse::<Handle>() {
+                let _ = preq.push_recommended(SectionEntry::from_handle(&h));
+            }
+            if trust.is_untrusted() {
+                // Chokepoint: untrusted provenance enters as a neutral digest
+                // only — counts + handle, never payload text (W9).
+                let digest = serialize_untrusted("tool_output", b"", &handle_str);
+                preq.push_changed(SectionEntry::from_neutral(&digest))
+                    .map_err(|e| ToolError::Internal(e.to_string()))?;
+                continue;
+            }
+            let seen = if known.contains(lc.content_sha256.as_str()) {
+                SeenStatus::SeenSameHash
+            } else {
+                SeenStatus::NotSeenOrChanged
+            };
+            let validity = resolve(
+                &summaries,
+                &digests,
+                &snapshot,
+                &format!("summary:{}", c.path),
+            );
+
+            // Changed-hunk TEXT (P6 story 3): the persisted line ranges slice
+            // the revision's bytes; the ONLY raw inline goes through the
+            // chokepoint's `TrustedPayload` — untrusted bytes cannot ride.
             let hunk_rows = ctx
                 .store
                 .query(
@@ -796,24 +839,79 @@ impl<'a> McpServer<'a> {
                 )
                 .await
                 .map_err(|e| ToolError::Internal(e.to_string()))?;
-            if !hunk_rows.is_empty() {
-                let ranges: Vec<String> = hunk_rows
-                    .iter()
-                    .take(4)
-                    .map(|r| {
-                        let lo = r.get_i64(0).unwrap_or(0).max(0) + 1; // 1-based
-                        let len = r.get_i64(1).unwrap_or(0).max(0);
-                        format!("{lo}..{}", lo + len.max(1) - 1)
-                    })
-                    .collect();
-                changed.push(PackItem::new(format!(
-                    "{} changed: {} hunk(s) at lines {} — retrieve {handle}",
-                    c.path,
-                    hunk_rows.len(),
-                    ranges.join(",")
-                )));
+            let is_changed = !hunk_rows.is_empty();
+            let mut exact_text: Option<String> = None;
+            if is_changed && seen == SeenStatus::NotSeenOrChanged {
+                let bytes = ctx
+                    .reader
+                    .blob(&lc.content_sha256)
+                    .map_err(|e| ToolError::Internal(e.to_string()))?
+                    .unwrap_or_default();
+                if !bytes.is_empty() {
+                    if let Ok(t) = TrustedPayload::new(trust, bytes) {
+                        let body = t.into_raw_body();
+                        let hunks: Vec<rift_recall_ledger::hunks::Hunk> = hunk_rows
+                            .iter()
+                            .map(|r| {
+                                let start =
+                                    u32::try_from(r.get_i64(0).unwrap_or(0).max(0)).unwrap_or(0);
+                                let len =
+                                    u32::try_from(r.get_i64(1).unwrap_or(0).max(0)).unwrap_or(0);
+                                rift_recall_ledger::hunks::Hunk {
+                                    old_start: 0,
+                                    old_len: 0,
+                                    new_start: start,
+                                    new_len: len,
+                                    binary: false,
+                                }
+                            })
+                            .collect();
+                        let page = rift_recall_ledger::hunks::serve_hunks(
+                            body.as_bytes(),
+                            &hunks,
+                            &c.path,
+                            &lc.content_sha256,
+                            env_budget.remaining(),
+                        );
+                        if !page.hunks.is_empty() {
+                            let blocks: Vec<String> = page
+                                .hunks
+                                .iter()
+                                .map(|h| format!("L{}-L{}:\n{}", h.range.lo, h.range.hi, h.text))
+                                .collect();
+                            exact_text = Some(blocks.join(""));
+                        }
+                    }
+                }
             }
-            // Reverted provenance is decisive context — edge-placed (P6 S1).
+
+            // The four-state envelope: the SOLE per-artifact constructor
+            // (ADR-0016). Exact inlining is allowed only for non-sensitive
+            // paths — a sensitive path is exact-gated (the audited
+            // retrieve_exact) or a handle here, never pack-inlined or a
+            // lossy summary.
+            let exact_allowed = matches!(sensitivity, Sensitivity::Normal);
+            let env = envelope_for(
+                &c.path,
+                trust,
+                &handle_str,
+                &lc.content_sha256,
+                seen,
+                &validity,
+                exact_text.as_deref(),
+                exact_allowed,
+                &mut env_budget,
+            );
+            let entry = SectionEntry::from_envelope(&env, sensitivity);
+            if is_changed && seen == SeenStatus::NotSeenOrChanged {
+                preq.push_changed(entry)
+            } else {
+                preq.push_unchanged(entry)
+            }
+            .map_err(|e| ToolError::Internal(e.to_string()))?;
+
+            // Reverted provenance is decisive context — edge-placed (P6 S1),
+            // from the closed critical-fact vocabulary.
             let reverted = ctx
                 .store
                 .query(
@@ -825,22 +923,14 @@ impl<'a> McpServer<'a> {
                 .await
                 .map_err(|e| ToolError::Internal(e.to_string()))?;
             if !reverted.is_empty() {
-                critical_facts.push(format!(
-                    "CRITICAL: {}'s last provenance was reverted - verify before reuse",
-                    c.path
-                ));
+                preq.push_critical(SectionEntry::critical(&CriticalFact::RevertedProvenance {
+                    path: c.path.clone(),
+                }))
+                .map_err(|e| ToolError::Internal(e.to_string()))?;
             }
         }
 
-        let pack_req = rift_recall_pack::PackRequest {
-            critical_facts,
-            changed,
-            unchanged,
-            recommended,
-            cost_warning: Some(COST_NOTE.to_string()),
-            token_budget: pack_tokens,
-        };
-        let pack = rift_recall_pack::compile(&pack_req);
+        let pack = rift_recall_pack::compile(&preq);
         let rendered = pack.render();
         let returned = charge(budget, rift_tokens::count(&rendered));
         let avoided = ranked
