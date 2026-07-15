@@ -19,11 +19,13 @@
 
 pub mod bus;
 pub mod feeds;
+pub mod loader;
 pub mod series;
 pub mod session;
 pub mod store;
 
 pub use bus::{spawn, spawn_with_root, Bus};
+pub use loader::StoreProfileLoader;
 pub use series::{saturating_sum, Sample, Series, Unit};
 pub use session::{active_sessions, ACTIVE_WINDOW_MS};
 pub use store::{runtime, CanopyStore};

@@ -47,7 +47,7 @@ pub mod suggest;
 pub mod theme;
 pub mod view;
 
-pub use app::{prime_startup, CanopyOpts};
+pub use app::{load_profile_plane, prime_startup, CanopyOpts};
 pub use col1::{
     current_registry, derive_status, EntryKind, LiveSessions, ProjectEntry, ProjectEvent,
     ProjectOp, ProjectionState, SessionsRead, StatusInputs,

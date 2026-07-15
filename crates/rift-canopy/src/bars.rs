@@ -104,18 +104,23 @@ pub fn header_action_at(w: u16, col: u16) -> Option<HeaderAction> {
 /// name truncates with an ellipsis.
 const PROFILE_NAME_BUDGET: usize = 16;
 
+/// The narrowest name the identity button renders (one cell + an ellipsis)
+/// before it clips away whole — the W0 shrink-before-hide floor.
+const PROFILE_MIN_NAME_CELLS: usize = 2;
+
 /// The gap between the health dot and the identity button, in cells.
 const PROFILE_GAP: u16 = 2;
 
-/// The active profile's name, terminal-sanitised and truncated at the fixed
-/// budget (ADR-0037 §§1/4) — the one text both the renderer and the span
-/// math use, so the drawn cells always equal the hit target.
-fn profile_label(name: &str) -> String {
+/// The active profile's name, terminal-sanitised and truncated with an
+/// ellipsis at `budget` cells (ADR-0037 §§1/4) — the one text both the
+/// renderer and the span math use, so the drawn cells always equal the hit
+/// target.
+fn profile_label(name: &str, budget: usize) -> String {
     let clean = sanitize_for_terminal(name);
-    if clean.chars().count() <= PROFILE_NAME_BUDGET {
+    if clean.chars().count() <= budget {
         return clean;
     }
-    let mut out: String = clean.chars().take(PROFILE_NAME_BUDGET - 1).collect();
+    let mut out: String = clean.chars().take(budget.saturating_sub(1)).collect();
     out.push('…');
     out
 }
@@ -134,31 +139,44 @@ fn left_cluster_end(version: &str) -> u16 {
     x.saturating_add(2).saturating_add(1) // `  ` + the health dot
 }
 
-/// The header identity button's cell span `[start, end)` on row 0 (ADR-0037):
-/// `⦿ name` right after the version and the health dot. **One** function feeds
-/// both the renderer and the row-0 hit-test, so a resize can never desync what
-/// is drawn from what is clickable. `None` hides the button — no profile wired
-/// (empty name), or a row too narrow to hold it clear of the right cluster: it
-/// clips away whole rather than garbling (the right cluster's rule).
-#[must_use]
-pub fn profile_span(version: &str, profile_name: Option<&str>, w: u16) -> Option<(u16, u16)> {
+/// The identity button's span **and** its budgeted label — the one solver the
+/// renderer and the hit-test both consume, so what is drawn always equals what
+/// is clickable, including the width-dependent shrink.
+fn profile_button(version: &str, profile_name: Option<&str>, w: u16) -> Option<(u16, u16, String)> {
     let name = profile_name?;
     if name.is_empty() {
         return None;
     }
-    let label = profile_label(name);
     let start = left_cluster_end(version).saturating_add(PROFILE_GAP);
-    let label_cells = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-    let end = start.saturating_add(2).saturating_add(label_cells); // `⦿ ` + name
-                                                                   // The button must clear the action cluster (when present) by a gap, and
-                                                                   // the row's right margin regardless — else it clips away whole.
+    // The button must clear the action cluster (when present) by a gap, and
+    // the row's right margin regardless.
     let limit = header_action_spans(w)
         .first()
         .map_or_else(|| w.saturating_sub(1), |s| s.start.saturating_sub(ITEM_GAP));
-    if end > limit {
+    // W0 interim rule (dogfood 2026-07-15, replaced by the M512-04 cluster
+    // ladder): the name shrinks to the cells available before the button hides
+    // whole — a narrow pane costs characters, not identity. Below the floor it
+    // still clips away whole rather than garbling (the right cluster's rule).
+    let avail = usize::from(limit.saturating_sub(start.saturating_add(2)));
+    let budget = avail.min(PROFILE_NAME_BUDGET);
+    if budget < PROFILE_MIN_NAME_CELLS {
         return None;
     }
-    Some((start, end))
+    let label = profile_label(name, budget);
+    let label_cells = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+    let end = start.saturating_add(2).saturating_add(label_cells); // `⦿ ` + name
+    Some((start, end, label))
+}
+
+/// The header identity button's cell span `[start, end)` on row 0 (ADR-0037):
+/// `⦿ name` right after the version and the health dot. **One** function feeds
+/// both the renderer and the row-0 hit-test, so a resize can never desync what
+/// is drawn from what is clickable. `None` hides the button — no profile wired
+/// (empty name), or a row too narrow to hold even the shrunk name clear of the
+/// right cluster: it clips away whole rather than garbling.
+#[must_use]
+pub fn profile_span(version: &str, profile_name: Option<&str>, w: u16) -> Option<(u16, u16)> {
+    profile_button(version, profile_name, w).map(|(start, end, _)| (start, end))
 }
 
 /// Whether row-0 column `col` is on the identity button.
@@ -201,19 +219,17 @@ pub fn draw_header(vm: &ViewModel, theme: Theme, unicode: bool, frame: &mut Fram
     );
 
     // The identity button (ADR-0037): `⦿ name` after the health dot, drawn on
-    // the SAME span the hit-test resolves. Press-flash on click; a steady
-    // active wash while the profile menu is open (the panel-editor pattern).
-    if let Some((start, end)) = profile_span(&vm.version, vm.profile_name.as_deref(), area.w) {
+    // the SAME span — and the same width-budgeted label — the hit-test
+    // resolves. Press-flash on click; a steady active wash while the profile
+    // menu is open (the panel-editor pattern).
+    if let Some((start, end, label)) =
+        profile_button(&vm.version, vm.profile_name.as_deref(), area.w)
+    {
         let target = crate::hit::Target::HeaderProfile;
         let active = vm.mode == crate::input::Mode::ProfileMenu;
         let bg = crate::chrome::press_flash_bg(theme, vm.button_flash(&target))
             .or_else(|| active.then_some(crate::theme::SELECT_BG))
             .unwrap_or(theme.surface_bg());
-        let label = vm
-            .profile_name
-            .as_deref()
-            .map(profile_label)
-            .unwrap_or_default();
         let gx = area.x + start;
         frame.set(
             gx,
@@ -456,26 +472,65 @@ mod tests {
 
     #[test]
     fn identity_clips_away_whole_on_a_narrow_header() {
-        // Mirrors the right cluster's rule: below the threshold the whole span
-        // vanishes rather than garbling — and nothing on the row hits.
+        // The W0 shrink rule spends the name first: on a narrow header the
+        // label shrinks to its ellipsis floor instead of hiding…
         let v = vm_with_profile("work", 30, 24);
-        assert_eq!(
-            profile_span(&v.version, v.profile_name.as_deref(), 30),
-            None
-        );
+        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 30)
+            .expect("above the floor the button shrinks instead of hiding");
         let mut f = Frame::new(Size::new(30, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
-        let row: String = (0..30u16)
+        let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
+        assert!(text.ends_with('…'), "the floor label is an ellipsis: {text}");
+        // …and below the floor the whole span vanishes rather than garbling —
+        // nothing on the row hits (the right cluster's rule).
+        let v = vm_with_profile("work", 27, 24);
+        assert_eq!(
+            profile_span(&v.version, v.profile_name.as_deref(), 27),
+            None
+        );
+        let mut f = Frame::new(Size::new(27, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        let row: String = (0..27u16)
             .map(|x| f.get(x, 0).map_or(' ', |c| c.ch))
             .collect();
         assert!(
             !row.contains(Icon::Profile.unicode()),
             "no partial button: {row}"
         );
-        for col in 0..30u16 {
-            assert!(!profile_hit(&v.version, v.profile_name.as_deref(), 30, col));
+        for col in 0..27u16 {
+            assert!(!profile_hit(&v.version, v.profile_name.as_deref(), 27, col));
         }
+    }
+
+    #[test]
+    fn identity_name_shrinks_before_the_button_hides() {
+        // W0 (dogfood 2026-07-15): at widths where the full name would collide
+        // with the action cluster, the label shrinks — the pre-fix rule hid
+        // the whole button here (the silent 62–77 hidden band).
+        let v = vm_with_profile("collaboration", 80, 24);
+        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 80)
+            .expect("the shrunk button shows beside the action cluster");
+        let mut f = Frame::new(Size::new(80, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
+        assert!(text.ends_with('…'), "shrunk with an ellipsis: {text}");
+        // The shrunk label and the hit target come from one solver: every
+        // span cell hits, one past it misses.
+        for col in start..end {
+            assert!(profile_hit(&v.version, v.profile_name.as_deref(), 80, col));
+        }
+        assert!(!profile_hit(&v.version, v.profile_name.as_deref(), 80, end));
+        // Wider, the same name renders whole again.
+        let v = vm_with_profile("collaboration", 90, 24);
+        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 90).unwrap();
+        let mut f = Frame::new(Size::new(90, 24));
+        let area = f.rect();
+        draw_header(&v, Theme::rift_dark(), true, &mut f, area);
+        let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
+        assert!(text.contains("collaboration"), "{text}");
     }
 
     #[test]

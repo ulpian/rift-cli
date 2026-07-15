@@ -67,6 +67,30 @@ pub(crate) fn render_err(e: RenderError) -> rift_core::RiftError {
     rift_core::RiftError::Other(e.to_string())
 }
 
+/// The shared profile-plane load (ADR-0036 §6, W0): the live profiles, the
+/// restored active id, and — when one is active — its theme (ADR-0038), all
+/// through the injected loader, onto the state **before the first frame**.
+/// `event_loop` calls this at its launch seam; the headless one-frame render
+/// calls the same function, so the interactive and headless runs exercise
+/// **one** startup path (the M5-02 principle — the pre-W0 headless frame
+/// skipped this load entirely and was structurally blind to the class).
+///
+/// # Errors
+/// Propagates a loader read failure.
+pub fn load_profile_plane(
+    state: &mut AppState,
+    loader: &mut dyn crate::profile::ProfileLoader,
+) -> RiftResult<()> {
+    let (active, profiles) = loader.profiles()?;
+    let active = active.unwrap_or_default();
+    if !active.is_empty() {
+        let overrides = loader.theme(&active)?;
+        state.set_theme(overrides);
+    }
+    state.app.set_profiles(profiles, active);
+    Ok(())
+}
+
 /// The shared startup prime (M5-02): one `Refresh` per tracked project, then
 /// the subscribe for the initial selection — the same requests a selection
 /// change or persist-apply would issue, sent once at startup so the first
@@ -114,13 +138,7 @@ where
     // theme (ADR-0038) — from frame one. The project list itself was injected
     // by the host (already profile-scoped), so this only fills the identity —
     // it never clobbers the injected rows.
-    let (active, profiles) = loader.profiles()?;
-    let active = active.unwrap_or_default();
-    if !active.is_empty() {
-        let overrides = loader.theme(&active)?;
-        state.set_theme(overrides);
-    }
-    state.app.set_profiles(profiles, active);
+    load_profile_plane(state, loader)?;
     // Launch is live by construction: the prime runs at the loop seam, BEFORE
     // the first poll, so the bus computes feeds for the initial selection with
     // zero key events (M5-02 — the M4 blind spot was a subscribe only the

@@ -816,7 +816,10 @@ fn launch_cwd_context() -> (Option<String>, bool) {
     (Some(canonical.to_string_lossy().into_owned()), is_repo)
 }
 
-fn print_ascii_frame(projects: Vec<Project>) {
+fn print_ascii_frame(
+    projects: Vec<Project>,
+    loader: &mut dyn rift_canopy::ProfileLoader,
+) -> rift_core::Result<()> {
     let mut state = AppState::new(projects, Size::new(100, 40));
     state.app.splash.skip();
     state.version = env!("CARGO_PKG_VERSION").to_string();
@@ -824,6 +827,10 @@ fn print_ascii_frame(projects: Vec<Project>) {
     // headless frame follows the developer's launch directory too.
     let (launch_cwd, launch_cwd_is_repo) = launch_cwd_context();
     rift_canopy::apply_launch_cwd(&mut state.app, launch_cwd.as_deref(), launch_cwd_is_repo);
+    // The SAME profile-plane load the interactive loop runs at its launch seam
+    // (ADR-0036 §6; the W0 fix): identity + theme render on the headless frame
+    // too, so a one-frame check can no longer be blind to a launch-wiring gap.
+    rift_canopy::load_profile_plane(&mut state, loader)?;
 
     // Drain the live bus for a bounded window, applying updates through the
     // same reducer the TUI uses.
@@ -874,36 +881,7 @@ fn print_ascii_frame(projects: Vec<Project>) {
     for line in lines {
         println!("{line}");
     }
-}
-
-/// The canopy store behind the profile loader seam (ADR-0036 §6): the binary
-/// stays wiring — every read the loop performs crosses this one adapter.
-#[cfg(feature = "tui")]
-struct StoreProfileLoader<'a> {
-    cstore: &'a rift_canopy_data::CanopyStore,
-}
-
-#[cfg(feature = "tui")]
-impl rift_canopy::ProfileLoader for StoreProfileLoader<'_> {
-    fn profiles(&mut self) -> rift_core::Result<(Option<String>, Vec<rift_canopy::ProfileEntry>)> {
-        self.cstore.profiles_view()
-    }
-
-    fn projects(&mut self, profile: &str) -> rift_core::Result<Vec<rift_canopy::Project>> {
-        self.cstore.profile_projects(profile)
-    }
-
-    fn layout(
-        &mut self,
-        profile: &str,
-        path: &str,
-    ) -> rift_core::Result<Option<rift_canopy::LayoutModel>> {
-        self.cstore.profile_layout(profile, path)
-    }
-
-    fn theme(&mut self, profile: &str) -> rift_core::Result<rift_canopy::ThemeOverrides> {
-        self.cstore.profile_theme(profile)
-    }
+    Ok(())
 }
 
 /// Derive a project's display name from its path (directory basename).
@@ -971,8 +949,10 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
             let reload = || cstore.active_projects();
             // The profile loader seam (ADR-0036 §6, generalising the ADR-0035
             // layout loader): the active profile, live names, membership, and
-            // (profile, project) arrangements all read through the store.
-            let mut profile_loader = StoreProfileLoader { cstore: &cstore };
+            // (profile, project) arrangements all read through the store — the
+            // same public adapter the headless frame and the store-backed
+            // launch regression test wire (W0).
+            let mut profile_loader = rift_canopy_data::StoreProfileLoader::new(&cstore);
             match rift_canopy::app::live::run(rift_canopy::app::live::LoopDeps {
                 opts,
                 initial: projects.clone(),
@@ -993,7 +973,8 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
     }
 
     let _ = cli; // only consulted on the interactive path
-    print_ascii_frame(projects);
+    let mut profile_loader = rift_canopy_data::StoreProfileLoader::new(&cstore);
+    print_ascii_frame(projects, &mut profile_loader)?;
     Ok(())
 }
 
