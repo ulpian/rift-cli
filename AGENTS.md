@@ -43,6 +43,10 @@ CI runs the same gate across three OSes plus a release build, `cargo deny`, and
   defaults). Built-in sensitive paths are non-droppable.
 - **`#![forbid(unsafe_code)]`** workspace-wide; keep clippy `-D warnings` clean;
   inject the clock/RNG/identity in tests (no wall-clock, no network).
+- **Modal-surface parity (Canopy).** Any surface drawn as a centered modal —
+  overlay or mode stage — carries the shared top-right close X, and every act
+  its hints teach is also clickable on that surface (and every clickable has a
+  key). Hints are stage-honest. See CLAUDE.md / ADR-0046.
 
 See [CLAUDE.md](CLAUDE.md) for the full crate map and gotchas, and
 [SECURITY.md](SECURITY.md) for the threat model.

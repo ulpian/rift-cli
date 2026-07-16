@@ -138,6 +138,13 @@ xtask__tests__crate_graph_adjacency.snap` is the reviewable adjacency list.
 - **Determinism in tests:** inject the clock/RNG/identity (`UlidSource`,
   `CryptoRng` via explicit nonces, `IdentitySource`). No test reads the wall clock
   or network.
+- **Modal-surface parity (Canopy, ADR-0046).** Anything drawn as a centered
+  modal frame — an `Overlay` *or* a mode stage over the shared modal geometry —
+  carries the shared close X (`modal_close_rect`, top-right; a mode's X closes
+  the mode, never reuse `Target::OverlayClose`), and every act its hints teach
+  is also reachable by click on that surface (and every clickable by key).
+  Hints derive per stage so they never advertise a dead key. One solver feeds
+  draw + hit-test; a new modal surface joins the parity fixtures or CI goes red.
 
 ## Lints & tests
 
