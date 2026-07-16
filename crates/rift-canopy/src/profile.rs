@@ -196,6 +196,48 @@ pub fn normalize_profile_name(
     Some(name.to_string())
 }
 
+// --- the startup pin (ADR-0045) ----------------------------------------------
+
+/// One event in the startup-pin log (ADR-0045 §2): latest-wins, machine-global
+/// like its siblings. `profile_id` `None` is an unpin — launch follows the
+/// last-selected chain, today's behaviour.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileStartupEvent {
+    /// The minted event id (ULID hex) — the replay tiebreaker.
+    pub event_id: String,
+    /// The pinned profile, or `None` for an unpin.
+    pub profile_id: Option<String>,
+    /// Transaction-time (epoch ms).
+    pub created_at: i64,
+}
+
+/// The pinned startup profile: the latest event's `profile_id` (`None` on an
+/// empty log or when the latest row is an unpin). Liveness is deliberately the
+/// resolver's concern ([`resolve_launch_profile`]), not the fold's — a dead pin
+/// stays in the fold and simply loses at resolution.
+#[must_use]
+pub fn startup_profile_id(events: &[ProfileStartupEvent]) -> Option<String> {
+    events
+        .iter()
+        .max_by(|a, b| {
+            (a.created_at, a.event_id.as_str()).cmp(&(b.created_at, b.event_id.as_str()))
+        })
+        .and_then(|e| e.profile_id.clone())
+}
+
+/// The profile a launch opens on (ADR-0045 §3): the pinned profile **when it
+/// is live**, else the last-selected chain ([`active_profile_id`]). A pure
+/// function of the two logs — launch never writes.
+#[must_use]
+pub fn resolve_launch_profile(pinned: Option<&str>, events: &[ProfileEvent]) -> Option<String> {
+    if let Some(p) = pinned {
+        if current_profiles(events).iter().any(|e| e.profile_id == p) {
+            return Some(p.to_string());
+        }
+    }
+    active_profile_id(events)
+}
+
 // --- membership -------------------------------------------------------------
 
 /// A single mutation to one profile's membership view over the global
@@ -343,6 +385,20 @@ pub trait ProfileLoader {
     /// # Errors
     /// [`rift_core::RiftError`] if the theme log cannot be read.
     fn theme(&mut self, profile: &str) -> rift_core::Result<crate::theme::ThemeOverrides>;
+
+    /// The pinned startup profile (ADR-0045), or `None` when unpinned. The
+    /// caller resolves liveness ([`resolve_launch_profile`]).
+    ///
+    /// # Errors
+    /// [`rift_core::RiftError`] if the startup log cannot be read.
+    fn startup(&mut self) -> rift_core::Result<Option<String>>;
+
+    /// The global catalogue (every registered project, profile-independent) —
+    /// the members editor's add-stage candidate source (ADR-0044).
+    ///
+    /// # Errors
+    /// [`rift_core::RiftError`] if the registry log cannot be read.
+    fn catalogue(&mut self) -> rift_core::Result<Vec<crate::Project>>;
 }
 
 /// A loader that serves nothing: no profiles, empty views, default layouts —
@@ -370,6 +426,14 @@ impl ProfileLoader for NullProfileLoader {
 
     fn theme(&mut self, _profile: &str) -> rift_core::Result<crate::theme::ThemeOverrides> {
         Ok(crate::theme::ThemeOverrides::NONE)
+    }
+
+    fn startup(&mut self) -> rift_core::Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn catalogue(&mut self) -> rift_core::Result<Vec<crate::Project>> {
+        Ok(Vec::new())
     }
 }
 
@@ -555,6 +619,57 @@ mod tests {
         assert!(current_membership(&log).is_empty());
     }
 
+    // --- the startup pin ------------------------------------------------------
+
+    fn sev(id: Option<&str>, at: i64) -> ProfileStartupEvent {
+        ProfileStartupEvent {
+            event_id: format!("s{at:04}"),
+            profile_id: id.map(String::from),
+            created_at: at,
+        }
+    }
+
+    #[test]
+    fn startup_fold_is_latest_wins_and_null_unpins() {
+        assert_eq!(startup_profile_id(&[]), None, "an empty log is unpinned");
+        let log = [sev(Some("p1"), 1), sev(Some("p2"), 2)];
+        assert_eq!(startup_profile_id(&log), Some("p2".into()));
+        // The latest NULL row unpins — earlier pins stay history, not state.
+        let log = [sev(Some("p1"), 1), sev(None, 2)];
+        assert_eq!(startup_profile_id(&log), None);
+        // Same-timestamp rows tie-break on event id (replay order).
+        let log = [sev(Some("p1"), 5), sev(Some("p2"), 5)];
+        assert_eq!(
+            startup_profile_id(&log),
+            Some("p2".into()),
+            "the later event id wins a timestamp tie"
+        );
+    }
+
+    #[test]
+    fn launch_resolution_prefers_a_live_pin_and_falls_back() {
+        let log = [
+            ev("p1", ProfileOp::Created { name: "one".into() }, 1),
+            ev("p2", ProfileOp::Created { name: "two".into() }, 2),
+            ev("p2", ProfileOp::Selected, 3),
+        ];
+        // A live pin overrides last-selected…
+        assert_eq!(resolve_launch_profile(Some("p1"), &log), Some("p1".into()));
+        // …an unpinned launch follows the chain…
+        assert_eq!(resolve_launch_profile(None, &log), Some("p2".into()));
+        // …and a dead pin loses to the chain instead of dangling.
+        let log = [
+            ev("p1", ProfileOp::Created { name: "one".into() }, 1),
+            ev("p2", ProfileOp::Created { name: "two".into() }, 2),
+            ev("p1", ProfileOp::Removed, 3),
+        ];
+        assert_eq!(
+            resolve_launch_profile(Some("p1"), &log),
+            resolve_launch_profile(None, &log),
+            "a removed pin falls back through the selected chain"
+        );
+    }
+
     // --- property tests -----------------------------------------------------
 
     fn profile_op_strategy() -> impl Strategy<Value = ProfileOp> {
@@ -596,6 +711,35 @@ mod tests {
                     "the active profile is live"
                 ),
                 None => prop_assert!(live.is_empty(), "no active only when none live"),
+            }
+        }
+
+        /// Launch resolution never dangles: whatever the pin (live, dead,
+        /// unknown, absent), the resolved profile is live — `None` only when
+        /// no profile is (ADR-0045 §3).
+        #[test]
+        fn resolved_launch_profile_is_always_live(
+            raw in proptest::collection::vec((0usize..3, profile_op_strategy(), 1i64..50), 0..40),
+            pin in proptest::option::of(0usize..4)
+        ) {
+            let events: Vec<ProfileEvent> = raw
+                .into_iter()
+                .enumerate()
+                .map(|(i, (pid, op, at))| ProfileEvent {
+                    event_id: format!("e{i:04}"),
+                    profile_id: format!("p{pid}"),
+                    op,
+                    created_at: at,
+                })
+                .collect();
+            let live = current_profiles(&events);
+            let pin = pin.map(|p| format!("p{p}"));
+            match resolve_launch_profile(pin.as_deref(), &events) {
+                Some(id) => prop_assert!(
+                    live.iter().any(|p| p.profile_id == id),
+                    "the launch profile is live"
+                ),
+                None => prop_assert!(live.is_empty(), "no launch profile only when none live"),
             }
         }
 

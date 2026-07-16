@@ -78,9 +78,9 @@ pub use layout::{solve, PanelRects, Rect};
 pub use layout_model::{Column, ColumnRole, LayoutModel, SolvedColumn, SolvedLayout, Unit};
 pub use profile::{
     active_profile_id, current_membership, current_profiles, default_profile_id,
-    normalize_profile_name, MembershipEntry, NullProfileLoader, ProfileEntry, ProfileEvent,
-    ProfileLoader, ProfileOp, ProfileProjectEvent, ProfileProjectOp, DEFAULT_PROFILE_NAME,
-    MAX_PROFILE_NAME,
+    normalize_profile_name, resolve_launch_profile, startup_profile_id, MembershipEntry,
+    NullProfileLoader, ProfileEntry, ProfileEvent, ProfileLoader, ProfileOp, ProfileProjectEvent,
+    ProfileProjectOp, ProfileStartupEvent, DEFAULT_PROFILE_NAME, MAX_PROFILE_NAME,
 };
 pub use profile_menu::{MenuStage, ProfileMenuState};
 pub use render::{select_backend, AsciiBackend, Capabilities, Frame, RenderBackend};
@@ -270,6 +270,10 @@ pub struct App {
     /// The active profile's stable id (ADR-0036) — the view the dashboard
     /// shows; scopes every arrangement write. Empty until wired.
     pub active_profile: String,
+    /// The pinned startup profile (ADR-0045), served through the loader at
+    /// launch and refreshed on every profile-plane reload; `None` = launch
+    /// follows last-selected.
+    pub startup_profile: Option<String>,
     /// The profile menu's transient interaction state (ADR-0037) — the cursor
     /// and the naming/confirm stage. Only meaningful while
     /// `mode == Mode::ProfileMenu`; resting otherwise.
@@ -310,6 +314,7 @@ impl App {
             editor: crate::editor::EditorState::default(),
             profiles: Vec::new(),
             active_profile: String::new(),
+            startup_profile: None,
             profile_menu: crate::profile_menu::ProfileMenuState::default(),
             colour_picker: crate::colour_picker::ColourPickerState::default(),
         }

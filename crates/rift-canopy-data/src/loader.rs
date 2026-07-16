@@ -42,6 +42,14 @@ impl ProfileLoader for StoreProfileLoader<'_> {
     fn theme(&mut self, profile: &str) -> Result<ThemeOverrides> {
         self.store.profile_theme(profile)
     }
+
+    fn startup(&mut self) -> Result<Option<String>> {
+        self.store.startup_profile()
+    }
+
+    fn catalogue(&mut self) -> Result<Vec<Project>> {
+        self.store.projects()
+    }
 }
 
 #[cfg(test)]

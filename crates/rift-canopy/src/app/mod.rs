@@ -82,12 +82,25 @@ pub fn load_profile_plane(
     loader: &mut dyn crate::profile::ProfileLoader,
 ) -> RiftResult<()> {
     let (active, profiles) = loader.profiles()?;
-    let active = active.unwrap_or_default();
-    if !active.is_empty() {
-        let overrides = loader.theme(&active)?;
+    // The startup pin (ADR-0045 §3): a LIVE pin overrides the last-selected
+    // fold at launch; a dead pin loses to the chain. A pure read — launch
+    // writes nothing, so relaunching is idempotent by construction.
+    let pinned = loader.startup()?;
+    let fold_active = active.clone().unwrap_or_default();
+    let resolved = pinned
+        .clone()
+        .filter(|p| profiles.iter().any(|e| e.profile_id == *p))
+        .or(active)
+        .unwrap_or_default();
+    if !resolved.is_empty() {
+        let overrides = loader.theme(&resolved)?;
         state.set_theme(overrides);
     }
-    state.app.set_profiles(profiles, active);
+    // When the pin diverged from the fold, the session's first WRITE will
+    // prepend the synchronizing `SelectProfile` (ADR-0045 §4).
+    state.select_sync_pending = !resolved.is_empty() && resolved != fold_active;
+    state.app.set_profiles(profiles, resolved);
+    state.app.startup_profile = pinned;
     Ok(())
 }
 
@@ -186,6 +199,32 @@ where
                     let actions = std::mem::take(&mut effects.feature_actions);
                     let load = effects.load_layout.take();
                     let reload_profiles = effects.reload_profiles;
+                    // A pinned launch defers its `selected` write to the
+                    // session's FIRST persist batch (ADR-0045 §4): prepending
+                    // the synchronizing SelectProfile here aligns the store's
+                    // fold-active with the shown profile before any op that
+                    // implicitly targets "the active profile" lands.
+                    if state.select_sync_pending && !effects.persist.is_empty() {
+                        state.select_sync_pending = false;
+                        let switching = effects
+                            .persist
+                            .iter()
+                            .any(|op| matches!(op, PersistOp::SelectProfile { .. }));
+                        if !switching && !state.app.active_profile.is_empty() {
+                            effects.persist.insert(
+                                0,
+                                PersistOp::SelectProfile {
+                                    profile: state.app.active_profile.clone(),
+                                },
+                            );
+                        }
+                    }
+                    // Whether an actual switch is in this batch — the sticky-
+                    // session discriminator (ADR-0045 §4).
+                    let select_landed = effects
+                        .persist
+                        .iter()
+                        .any(|op| matches!(op, PersistOp::SelectProfile { .. }));
                     if !effects.is_empty() {
                         apply_effects(effects, state, on_persist, req_sink, manager);
                     }
@@ -193,7 +232,7 @@ where
                     // id, membership, selection, arrangement — through the one
                     // loader seam (ADR-0036 §6), after the persist landed.
                     if reload_profiles {
-                        reload_profile_plane(state, loader, req_sink)?;
+                        reload_profile_plane(state, loader, req_sink, select_landed)?;
                     }
                     // A selection change loads the new project's saved layout
                     // (ADR-0035) — through the injected loader, applied to state.
@@ -297,10 +336,23 @@ fn reload_profile_plane(
     state: &mut AppState,
     loader: &mut dyn crate::profile::ProfileLoader,
     req_sink: &mut dyn FnMut(DataRequest),
+    select_landed: bool,
 ) -> RiftResult<()> {
-    let (active, profiles) = loader.profiles()?;
-    let active = active.unwrap_or_default();
+    let (fold_active, profiles) = loader.profiles()?;
+    // Sticky sessions (ADR-0045 §4): a pinned launch never writes `selected`,
+    // so the fold's active and the session's shown profile may differ. Adopt
+    // the fold only when a switch landed in this batch or the shown profile
+    // died; otherwise keep showing what we show — its name list, membership,
+    // arrangement, and theme still reload below.
+    let shown = state.app.active_profile.clone();
+    let shown_live = !shown.is_empty() && profiles.iter().any(|p| p.profile_id == shown);
+    let active = if select_landed || !shown_live {
+        fold_active.unwrap_or_default()
+    } else {
+        shown
+    };
     state.app.set_profiles(profiles, active.clone());
+    state.app.startup_profile = loader.startup()?;
     if !active.is_empty() {
         let keep = state.app.selected_project().map(|p| p.path.clone());
         let projects = loader.projects(&active)?;
@@ -356,6 +408,15 @@ where
         }
     }
     if reload_needed {
+        // A mutating dispatch in a pinned, not-yet-synchronized session first
+        // aligns the fold with the shown profile (ADR-0045 §4) — else the
+        // reload hook would hand back the wrong profile's rows.
+        if state.select_sync_pending && !state.app.active_profile.is_empty() {
+            state.select_sync_pending = false;
+            let _ = on_persist(&PersistOp::SelectProfile {
+                profile: state.app.active_profile.clone(),
+            });
+        }
         if let Ok(projects) = reload() {
             let keep = state.app.selected_project().map(|p| p.path.clone());
             state.app.set_projects(projects);
@@ -470,6 +531,13 @@ fn persist_status(op: &PersistOp) -> String {
                 format!("set {slot} colour")
             } else {
                 format!("reset {slot} colour")
+            }
+        }
+        PersistOp::SetStartupProfile { profile } => {
+            if profile.is_some() {
+                "pinned startup profile".to_string()
+            } else {
+                "startup follows last selected".to_string()
             }
         }
     }
@@ -700,10 +768,12 @@ mod tests {
 
     /// A profile loader double that records every read and serves a two-profile
     /// plane whose active id lives in a shared cell (the persist seam moves it,
-    /// exactly like the real store's `selected` fold).
+    /// exactly like the real store's `selected` fold). `pinned` plays the
+    /// ADR-0045 startup fold.
     struct RecordingLoader {
         active: std::rc::Rc<std::cell::RefCell<String>>,
         calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        pinned: Option<String>,
     }
     impl crate::profile::ProfileLoader for RecordingLoader {
         fn profiles(&mut self) -> RiftResult<(Option<String>, Vec<crate::profile::ProfileEntry>)> {
@@ -755,6 +825,27 @@ mod tests {
             }
             Ok(o)
         }
+        fn startup(&mut self) -> RiftResult<Option<String>> {
+            self.calls.borrow_mut().push("startup".into());
+            Ok(self.pinned.clone())
+        }
+        fn catalogue(&mut self) -> RiftResult<Vec<Project>> {
+            self.calls.borrow_mut().push("catalogue".into());
+            Ok(vec![
+                Project {
+                    name: "a".into(),
+                    path: "/a".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+                Project {
+                    name: "x".into(),
+                    path: "/x".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+            ])
+        }
     }
 
     #[test]
@@ -775,6 +866,7 @@ mod tests {
         let mut loader = RecordingLoader {
             active: std::rc::Rc::clone(&active),
             calls: std::rc::Rc::clone(&calls),
+            pinned: None,
         };
         let persisted = std::cell::RefCell::new(Vec::new());
         let persist_active = std::rc::Rc::clone(&active);
@@ -832,6 +924,126 @@ mod tests {
             state.theme().overrides().background,
             Some(crate::render::frame::Color::Rgb(1, 2, 3)),
             "colours swap with the view"
+        );
+    }
+
+    #[test]
+    fn a_pinned_launch_shows_the_pinned_profile_and_writes_nothing() {
+        // ADR-0045 §3: the pin overrides the last-selected fold at launch —
+        // identity AND theme — and launch stays a pure read: zero persists.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![vec![Event::Key(CanopyKey::Quit)]]);
+        let mut state = one_project_state();
+        let active = std::rc::Rc::new(std::cell::RefCell::new("pf0".to_string()));
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut loader = RecordingLoader {
+            active: std::rc::Rc::clone(&active),
+            calls: std::rc::Rc::clone(&calls),
+            pinned: Some("pf1".to_string()),
+        };
+        let persisted = std::cell::RefCell::new(Vec::new());
+        let mut on_persist = |op: &PersistOp| {
+            persisted.borrow_mut().push(op.clone());
+            Ok(vec![])
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut on_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut loader,
+        )
+        .unwrap();
+        assert_eq!(
+            state.app.active_profile, "pf1",
+            "the live pin wins the launch resolution"
+        );
+        assert_eq!(
+            state.theme().overrides().background,
+            Some(crate::render::frame::Color::Rgb(1, 2, 3)),
+            "the dashboard wears the pinned profile's theme from frame one"
+        );
+        assert!(
+            calls.borrow().iter().any(|c| c == "startup"),
+            "the pin loaded through the seam: {:?}",
+            calls.borrow()
+        );
+        assert!(
+            persisted.borrow().is_empty(),
+            "launch writes nothing: {:?}",
+            persisted.borrow()
+        );
+        assert!(
+            state.select_sync_pending,
+            "the deferred selected-sync stays armed until the first write"
+        );
+    }
+
+    #[test]
+    fn a_pinned_sessions_first_write_syncs_then_the_view_stays() {
+        // ADR-0045 §4: a pinned session's first persist batch prepends the
+        // synchronizing SelectProfile, so the fold's active aligns with the
+        // shown profile and a non-select op can never snap the view back.
+        let mut backend = MockBackend { presents: 0 };
+        let mut script = vec![Event::Key(CanopyKey::Char('p'))];
+        script.push(Event::Key(CanopyKey::Char('n')));
+        for ch in "qa".chars() {
+            script.push(Event::Key(CanopyKey::Char(ch)));
+        }
+        script.push(Event::Key(CanopyKey::Enter));
+        script.push(Event::Key(CanopyKey::Esc));
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let active = std::rc::Rc::new(std::cell::RefCell::new("pf0".to_string()));
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut loader = RecordingLoader {
+            active: std::rc::Rc::clone(&active),
+            calls: std::rc::Rc::clone(&calls),
+            pinned: Some("pf1".to_string()),
+        };
+        let persisted = std::cell::RefCell::new(Vec::new());
+        let persist_active = std::rc::Rc::clone(&active);
+        let mut on_persist = |op: &PersistOp| {
+            if let PersistOp::SelectProfile { profile } = op {
+                *persist_active.borrow_mut() = profile.clone();
+            }
+            persisted.borrow_mut().push(op.clone());
+            Ok(vec![])
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut on_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut loader,
+        )
+        .unwrap();
+        assert_eq!(
+            *persisted.borrow(),
+            vec![
+                PersistOp::SelectProfile {
+                    profile: "pf1".into()
+                },
+                PersistOp::CreateProfile { name: "qa".into() },
+            ],
+            "the first write carries the deferred selected-sync FIRST"
+        );
+        assert_eq!(
+            state.app.active_profile, "pf1",
+            "the shown profile never snapped back to the pre-pin fold"
+        );
+        assert!(
+            !state.select_sync_pending,
+            "the sync is one-shot — later batches carry no prepend"
         );
     }
 

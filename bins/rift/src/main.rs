@@ -910,8 +910,10 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
     // Seed the default profile on first launch (ADR-0036; idempotent like the
     // import): one `created` + one `selected` event when the log is empty.
     cstore.seed_default_profile(hooks::now_ms())?;
-    // The dashboard shows the ACTIVE profile's view (restored across launches).
-    let projects = cstore.active_projects()?;
+    // The dashboard shows the resolved LAUNCH profile's view (ADR-0045 §3:
+    // the pin when live, else the restored last-selected chain) — the same
+    // helper the loop's launch load resolves through, and a pure read.
+    let projects = cstore.launch_projects()?;
 
     #[cfg(feature = "tui")]
     {

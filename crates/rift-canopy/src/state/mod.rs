@@ -328,6 +328,13 @@ pub enum PersistOp {
         /// The resolved hex colour, or `None` to reset the slot.
         colour: Option<String>,
     },
+    /// Pin — or with `None` unpin — the startup profile (ADR-0045 §2): one
+    /// superseding latest-wins event. Launch itself only reads the fold.
+    SetStartupProfile {
+        /// The profile launch should open on, or `None` to follow
+        /// last-selected (today's behaviour).
+        profile: Option<String>,
+    },
 }
 
 /// How many idle ticks between background re-stats of the selected project. At the
@@ -448,6 +455,12 @@ pub struct AppState {
     /// Armed to 1.0 when a Notice opens, decayed by `dt` in [`Self::advance_anim`],
     /// which dismisses the Notice when it reaches 0 — a bounded auto-dismiss.
     notice_settle: f32,
+    /// Set at a pinned launch whose resolved profile differs from the store's
+    /// last-selected fold (ADR-0045 §4): launch writes nothing, so the loop
+    /// prepends the synchronizing `SelectProfile` to the session's **first**
+    /// persist batch — observation never mutates; the first mutation aligns
+    /// the fold with what the session shows.
+    pub select_sync_pending: bool,
 }
 
 impl AppState {
@@ -475,6 +488,7 @@ impl AppState {
             press_pulse: 0.0,
             pressed: None,
             notice_settle: 0.0,
+            select_sync_pending: false,
         }
     }
 
@@ -782,6 +796,7 @@ impl AppState {
             profile_name: self.app.active_profile_name().map(String::from),
             profiles: self.app.profiles.clone(),
             active_profile: self.app.active_profile.clone(),
+            startup_profile: self.app.startup_profile.clone(),
             profile_menu: self.app.profile_menu.clone(),
             theme: self.theme,
             colour_picker: self.app.colour_picker,
@@ -1994,6 +2009,9 @@ pub struct ViewModel {
     pub profiles: Vec<crate::profile::ProfileEntry>,
     /// The active profile's stable id (marks the active row in the menu).
     pub active_profile: String,
+    /// The pinned startup profile (ADR-0045), or `None` when launch follows
+    /// last-selected — the settings surface's pin-toggle row reads it.
+    pub startup_profile: Option<String>,
     /// The profile menu's state (ADR-0037), copied from `App.profile_menu` —
     /// the menu renderer and its hit-test read it while `mode == ProfileMenu`.
     pub profile_menu: crate::profile_menu::ProfileMenuState,
@@ -3461,6 +3479,7 @@ mod tests {
                 slot: String::new(),
                 colour: None,
             },
+            PersistOp::SetStartupProfile { profile: None },
         ];
         for op in ops {
             match op {
@@ -3478,7 +3497,8 @@ mod tests {
                 | PersistOp::AddProfileProject { .. }
                 | PersistOp::RemoveProfileProject { .. }
                 | PersistOp::ReorderProfileProject { .. }
-                | PersistOp::SetProfileTheme { .. } => {}
+                | PersistOp::SetProfileTheme { .. }
+                | PersistOp::SetStartupProfile { .. } => {}
             }
         }
     }
