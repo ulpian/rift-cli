@@ -151,6 +151,17 @@ pub enum Action {
     /// The menu's confirmed delete for a profile (by stable id) — only reached
     /// through the inline confirm (an explicit second act).
     DeleteProfile(String),
+    /// Duplicate a profile under the validated new name — the full clone of
+    /// its effective state (ADR-0045 §1).
+    DuplicateProfile {
+        /// The stable id of the profile being cloned.
+        source: String,
+        /// The validated new display name.
+        name: String,
+    },
+    /// Flip the startup pin for a profile (ADR-0045 §2): pin it when it is
+    /// not the pin, unpin when it is (the state layer resolves which).
+    ToggleStartupPin(String),
     /// Apply one theme-slot selection for the active profile (ADR-0039):
     /// `None` colour is the reset row. The state layer re-themes the running
     /// dashboard in the same frame and appends the superseding event.
@@ -381,14 +392,76 @@ pub fn enter_profile_menu(app: &mut App) {
     app.command_line.clear();
 }
 
-/// The profile-menu reducer (ADR-0037): `j`/`k` move over the live profiles,
-/// `Enter` switches, `n` creates, `r` renames, `d` deletes behind an inline
-/// confirm, `Esc` steps back (naming/confirm → browse → closed). Naming reuses
-/// the editing-mode buffer (`App::command_line`, the AddProject precedent) and
-/// validates against the ADR-0037 §4 name rules before any op is emitted; the
-/// delete guards (active, last) refuse right here — and again in the store.
+/// Open the settings page for a profile (ADR-0044 §3) — the one entry both
+/// the `s` key and the row chip use.
+pub(crate) fn enter_profile_settings(app: &mut App, profile: String) {
+    app.profile_menu.stage = crate::profile_menu::MenuStage::Settings { profile };
+    app.profile_menu.settings_cursor = 0;
+    app.profile_menu.name_error = false;
+    app.command_line.clear();
+}
+
+/// Activate one settings row for `profile` (ADR-0044 §3) — the one dispatch
+/// both `Enter` and a row click use.
+pub(crate) fn activate_settings_row(
+    app: &mut App,
+    profile: &str,
+    row: crate::profile_menu::SettingsRow,
+) -> Action {
+    use crate::profile_menu::{MenuStage, SettingsRow};
+    match row {
+        SettingsRow::Name => {
+            if let Some(p) = app.profiles.iter().find(|p| p.profile_id == profile) {
+                app.profile_menu.stage = MenuStage::NamingRename {
+                    profile: p.profile_id.clone(),
+                };
+                app.profile_menu.name_error = false;
+                // Prefill with the current name — a rename edits, not retypes.
+                app.command_line.clone_from(&p.name);
+            }
+            Action::None
+        }
+        SettingsRow::Colours => {
+            // The picker returns to this settings page on Esc — the menu
+            // stage stays intact underneath (ADR-0039, targeted by M512-07).
+            app.mode = Mode::ColourPicker;
+            app.colour_picker.reset();
+            Action::None
+        }
+        SettingsRow::Duplicate => {
+            app.profile_menu.stage = MenuStage::NamingDuplicate {
+                source: profile.to_string(),
+            };
+            app.profile_menu.name_error = false;
+            app.command_line.clear();
+            Action::None
+        }
+        SettingsRow::StartupPin => Action::ToggleStartupPin(profile.to_string()),
+        SettingsRow::Delete => {
+            // The removal guards refuse here first (ADR-0036 §5): never the
+            // active profile, never the last one — the confirm can't open.
+            if profile != app.active_profile && app.profiles.len() > 1 {
+                app.profile_menu.stage = MenuStage::ConfirmDelete {
+                    profile: profile.to_string(),
+                    back_to_settings: true,
+                };
+            }
+            Action::None
+        }
+    }
+}
+
+/// The profile-menu reducer (ADR-0037, hub-and-spoke per ADR-0044): Browse
+/// moves over the live profiles (`Enter` switches, `s` opens the cursor row's
+/// settings, `n` creates, `d` deletes behind the inline confirm); the settings
+/// page moves over [`crate::profile_menu::SettingsRow::ALL`] and `Enter`
+/// activates; naming reuses the editing-mode buffer (`App::command_line`, the
+/// AddProject precedent) and validates against the ADR-0037 §4 name rules
+/// before any op is emitted. `Esc` steps one stage back toward Browse, then
+/// closes. Rename and colours live in settings — Browse no longer carries
+/// `r`/`c`.
 fn on_key_profile_menu(app: &mut App, key: CanopyKey) -> Action {
-    use crate::profile_menu::MenuStage;
+    use crate::profile_menu::{MenuStage, SettingsRow};
     // Ctrl-C still quits the whole app, even mid-menu.
     if matches!(key, CanopyKey::Quit) {
         app.quit = true;
@@ -412,34 +485,23 @@ fn on_key_profile_menu(app: &mut App, key: CanopyKey) -> Action {
                 app.command_line.clear();
                 Action::None
             }
-            CanopyKey::Char('r') => {
+            CanopyKey::Char('s') => {
                 if let Some(p) = app.profiles.get(app.profile_menu.cursor) {
-                    app.profile_menu.stage = MenuStage::NamingRename {
-                        profile: p.profile_id.clone(),
-                    };
-                    app.profile_menu.name_error = false;
-                    // Prefill with the current name — a rename edits, not retypes.
-                    app.command_line.clone_from(&p.name);
+                    enter_profile_settings(app, p.profile_id.clone());
                 }
                 Action::None
             }
             CanopyKey::Char('d') => {
-                // The removal guards refuse here first (ADR-0036 §5): never the
-                // active profile, never the last one — the confirm can't open.
+                // The in-hub shortcut keeps the M5.10 grammar; the guards
+                // refuse here first (ADR-0036 §5).
                 if let Some(p) = app.profiles.get(app.profile_menu.cursor) {
                     if p.profile_id != app.active_profile && app.profiles.len() > 1 {
                         app.profile_menu.stage = MenuStage::ConfirmDelete {
                             profile: p.profile_id.clone(),
+                            back_to_settings: false,
                         };
                     }
                 }
-                Action::None
-            }
-            // `c` opens the colour picker for the ACTIVE profile (ADR-0039) —
-            // the M5.11 entry ADR-0037 reserved.
-            CanopyKey::Char('c') => {
-                app.mode = Mode::ColourPicker;
-                app.colour_picker.reset();
                 Action::None
             }
             CanopyKey::Esc => {
@@ -450,7 +512,33 @@ fn on_key_profile_menu(app: &mut App, key: CanopyKey) -> Action {
             }
             _ => Action::None,
         },
-        MenuStage::NamingCreate | MenuStage::NamingRename { .. } => match key {
+        MenuStage::Settings { profile } => {
+            let rows_last = SettingsRow::ALL.len() - 1;
+            match key {
+                CanopyKey::Char('j') | CanopyKey::Down => {
+                    app.profile_menu.settings_cursor =
+                        (app.profile_menu.settings_cursor + 1).min(rows_last);
+                    Action::None
+                }
+                CanopyKey::Char('k') | CanopyKey::Up => {
+                    app.profile_menu.settings_cursor =
+                        app.profile_menu.settings_cursor.saturating_sub(1);
+                    Action::None
+                }
+                CanopyKey::Enter => {
+                    let row = SettingsRow::ALL[app.profile_menu.settings_cursor.min(rows_last)];
+                    activate_settings_row(app, &profile, row)
+                }
+                CanopyKey::Esc => {
+                    app.profile_menu.stage = MenuStage::Browse;
+                    Action::None
+                }
+                _ => Action::None,
+            }
+        }
+        MenuStage::NamingCreate
+        | MenuStage::NamingRename { .. }
+        | MenuStage::NamingDuplicate { .. } => match key {
             CanopyKey::Char(c) => {
                 app.command_line.push(c);
                 app.profile_menu.name_error = false;
@@ -462,7 +550,15 @@ fn on_key_profile_menu(app: &mut App, key: CanopyKey) -> Action {
                 Action::None
             }
             CanopyKey::Esc => {
-                app.profile_menu.stage = MenuStage::Browse;
+                // Naming steps back to where it was opened from: create to
+                // Browse, rename/duplicate to their settings page.
+                app.profile_menu.stage = match app.profile_menu.stage.clone() {
+                    MenuStage::NamingRename { profile } => MenuStage::Settings { profile },
+                    MenuStage::NamingDuplicate { source } => {
+                        MenuStage::Settings { profile: source }
+                    }
+                    _ => MenuStage::Browse,
+                };
                 app.profile_menu.name_error = false;
                 app.command_line.clear();
                 Action::None
@@ -470,14 +566,22 @@ fn on_key_profile_menu(app: &mut App, key: CanopyKey) -> Action {
             CanopyKey::Enter => submit_profile_name(app),
             _ => Action::None,
         },
-        MenuStage::ConfirmDelete { profile } => match key {
-            // Only Enter lands the delete — the explicit second act.
+        MenuStage::ConfirmDelete {
+            profile,
+            back_to_settings,
+        } => match key {
+            // Only Enter lands the delete — the explicit second act. A landed
+            // delete always returns to Browse: the page's profile is gone.
             CanopyKey::Enter => {
                 app.profile_menu.stage = MenuStage::Browse;
                 Action::DeleteProfile(profile)
             }
             CanopyKey::Esc | CanopyKey::Char('n') => {
-                app.profile_menu.stage = MenuStage::Browse;
+                app.profile_menu.stage = if back_to_settings {
+                    MenuStage::Settings { profile }
+                } else {
+                    MenuStage::Browse
+                };
                 Action::None
             }
             _ => Action::None,
@@ -548,10 +652,12 @@ fn on_key_colour_picker(app: &mut App, key: CanopyKey) -> Action {
     }
 }
 
-/// Validate and submit the naming buffer (create or rename). A refused name —
-/// empty, over the 24-char budget, or a duplicate among live profiles — marks
-/// the inline error and keeps the input open; a valid one returns to browse
-/// and emits the typed action.
+/// Validate and submit the naming buffer (create, rename, or duplicate). A
+/// refused name — empty, over the 24-char budget, or a duplicate among live
+/// profiles — marks the inline error and keeps the input open; a valid one
+/// emits the typed action and returns to its origin: create and duplicate to
+/// Browse (the reducer never learns the minted id — ADR-0044), rename to its
+/// settings page.
 fn submit_profile_name(app: &mut App) -> Action {
     use crate::profile_menu::MenuStage;
     let except = match &app.profile_menu.stage {
@@ -569,7 +675,13 @@ fn submit_profile_name(app: &mut App) -> Action {
     app.profile_menu.name_error = false;
     match stage {
         MenuStage::NamingCreate => Action::CreateProfile(name),
-        MenuStage::NamingRename { profile } => Action::RenameProfile { profile, name },
+        MenuStage::NamingRename { profile } => {
+            app.profile_menu.stage = MenuStage::Settings {
+                profile: profile.clone(),
+            };
+            Action::RenameProfile { profile, name }
+        }
+        MenuStage::NamingDuplicate { source } => Action::DuplicateProfile { source, name },
         // Unreachable: only the naming stages call this.
         other => {
             app.profile_menu.stage = other;
@@ -1148,10 +1260,12 @@ mod tests {
 
     #[test]
     fn naming_rename_prefills_and_emits() {
+        use crate::profile_menu::MenuStage;
         let mut app = with_profiles();
         on_key(&mut app, CanopyKey::Char('p'));
         on_key(&mut app, CanopyKey::Char('j')); // cursor → "work"
-        on_key(&mut app, CanopyKey::Char('r'));
+        on_key(&mut app, CanopyKey::Char('s')); // its settings page
+        on_key(&mut app, CanopyKey::Enter); // the Name row
         assert_eq!(app.command_line, "work", "rename edits, not retypes");
         for c in "shop".chars() {
             on_key(&mut app, CanopyKey::Char(c));
@@ -1161,6 +1275,13 @@ mod tests {
             Action::RenameProfile {
                 profile: "pf1".into(),
                 name: "workshop".into()
+            }
+        );
+        // A landed rename returns to the settings page it came from.
+        assert_eq!(
+            app.profile_menu.stage,
+            MenuStage::Settings {
+                profile: "pf1".into()
             }
         );
     }
@@ -1192,7 +1313,8 @@ mod tests {
         assert_eq!(
             app.profile_menu.stage,
             MenuStage::ConfirmDelete {
-                profile: "pf1".into()
+                profile: "pf1".into(),
+                back_to_settings: false
             }
         );
         on_key(&mut app, CanopyKey::Esc);
@@ -1229,22 +1351,39 @@ mod tests {
 
     // ---- ADR-0039: the colour picker's two stages ----------------------------
 
+    /// Open the picker the ADR-0044 way: the settings page's Colours row
+    /// (Browse no longer carries `c`).
+    fn open_picker(app: &mut App) {
+        on_key(app, CanopyKey::Char('p'));
+        on_key(app, CanopyKey::Char('s'));
+        on_key(app, CanopyKey::Char('j')); // settings cursor → colours
+        on_key(app, CanopyKey::Enter);
+    }
+
     #[test]
     fn c_in_the_menu_opens_the_picker_and_esc_steps_all_the_way_back() {
         use crate::colour_picker::PickerStage;
+        use crate::profile_menu::MenuStage;
         let mut app = with_profiles();
-        on_key(&mut app, CanopyKey::Char('p'));
-        on_key(&mut app, CanopyKey::Char('c'));
+        open_picker(&mut app);
         assert_eq!(app.mode, Mode::ColourPicker);
         assert_eq!(app.colour_picker.stage, PickerStage::Slots);
         // Enter a slot's presets, then Esc steps back one stage at a time:
-        // presets → slots → the profile menu (browsing never dead-ends).
+        // presets → slots → the settings page it opened from (browsing never
+        // dead-ends — the menu stage stays intact underneath).
         on_key(&mut app, CanopyKey::Enter);
         assert_eq!(app.colour_picker.stage, PickerStage::Presets);
         on_key(&mut app, CanopyKey::Esc);
         assert_eq!(app.colour_picker.stage, PickerStage::Slots);
         on_key(&mut app, CanopyKey::Esc);
         assert_eq!(app.mode, Mode::ProfileMenu);
+        assert_eq!(
+            app.profile_menu.stage,
+            MenuStage::Settings {
+                profile: "pf0".into()
+            },
+            "the picker returns to the settings page it came from"
+        );
     }
 
     #[test]
@@ -1252,8 +1391,7 @@ mod tests {
         use crate::colour_picker::{PickerStage, RESET_ROW};
         use crate::theme::ThemeSlot;
         let mut app = with_profiles();
-        on_key(&mut app, CanopyKey::Char('p'));
-        on_key(&mut app, CanopyKey::Char('c'));
+        open_picker(&mut app);
         // Slots: clamp at both ends.
         on_key(&mut app, CanopyKey::Char('k'));
         assert_eq!(app.colour_picker.slot_cursor, 0);
@@ -1274,8 +1412,7 @@ mod tests {
     fn enter_on_a_preset_applies_and_the_reset_row_maps_to_none() {
         use crate::theme::{ThemeSlot, PRESETS};
         let mut app = with_profiles();
-        on_key(&mut app, CanopyKey::Char('p'));
-        on_key(&mut app, CanopyKey::Char('c'));
+        open_picker(&mut app);
         on_key(&mut app, CanopyKey::Char('j')); // slot → border
         on_key(&mut app, CanopyKey::Enter);
         on_key(&mut app, CanopyKey::Char('j')); // preset → blue

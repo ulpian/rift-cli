@@ -296,7 +296,12 @@ pub fn draw_hint_bar(vm: &ViewModel, theme: Theme, frame: &mut Frame, rect: Rect
     if rect.h == 0 || rect.w == 0 {
         return;
     }
-    let ctx = keymap::context(vm.mode, vm.focus, vm.overlay.as_ref());
+    let ctx = keymap::context(
+        vm.mode,
+        vm.focus,
+        vm.overlay.as_ref(),
+        &vm.profile_menu.stage,
+    );
     let table = keymap::hints(ctx);
     let mut x = rect.x.saturating_add(1);
     let end = rect.x + rect.w;

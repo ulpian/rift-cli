@@ -86,6 +86,19 @@ pub enum Target {
     /// A profile row in the open profile menu: click-to-activate (a click
     /// moves the cursor there and switches, exactly like `Enter`).
     ProfileRow(usize),
+    /// A hub row's `[settings]` chip (ADR-0044 §4) — opens that profile's
+    /// settings page, the click twin of `s`.
+    ProfileSettings(usize),
+    /// The hub's `[ + new profile ]` row — opens the naming input, the click
+    /// twin of `n`.
+    ProfileNew,
+    /// The profile menu's close `[x]` (ADR-0046): closes the MODE — the
+    /// pointer twin of Esc-from-Browse. Never `OverlayClose` (that clears an
+    /// overlay, not a mode).
+    ProfileMenuClose,
+    /// A settings-page row (ADR-0044 §3): a click activates it, exactly like
+    /// `Enter` on that row.
+    SettingsRow(usize),
     /// A row in the open colour picker (ADR-0039): a click selects it through
     /// the shared modal hit-test, exactly like `Enter` on that row.
     PickerRow(usize),
@@ -122,6 +135,9 @@ impl Target {
                 | Target::RailRemove
                 | Target::ToggleRow(_)
                 | Target::RetryRow(_)
+                | Target::ProfileSettings(_)
+                | Target::ProfileNew
+                | Target::ProfileMenuClose
         )
     }
 }
@@ -286,16 +302,39 @@ fn hit_profile_menu(
     if rect.w < 8 || rect.h < 3 || !contains(rect, col, row) {
         return None;
     }
-    if matches!(
-        vm.profile_menu.stage,
-        crate::profile_menu::MenuStage::Browse
-    ) {
-        for i in 0..vm.profiles.len() {
-            let rr = crate::view::profile_menu_row_rect(rect, i);
-            if rr.h > 0 && contains(rr, col, row) {
-                return Some(Target::ProfileRow(i));
+    // The close `[x]`, on every stage (ADR-0046 §2) — the mode's own close.
+    if let Some(cr) = crate::view::modal_close_rect(rect) {
+        if contains(cr, col, row) {
+            return Some(Target::ProfileMenuClose);
+        }
+    }
+    match &vm.profile_menu.stage {
+        crate::profile_menu::MenuStage::Browse => {
+            for i in 0..vm.profiles.len() {
+                // The chip outranks the row it sits on (it is inside it).
+                let chip = crate::view::profile_menu_settings_rect(rect, i);
+                if chip.w > 0 && contains(chip, col, row) {
+                    return Some(Target::ProfileSettings(i));
+                }
+                let rr = crate::view::profile_menu_row_rect(rect, i);
+                if rr.h > 0 && contains(rr, col, row) {
+                    return Some(Target::ProfileRow(i));
+                }
+            }
+            let new_rr = crate::view::profile_menu_row_rect(rect, vm.profiles.len());
+            if new_rr.h > 0 && contains(new_rr, col, row) {
+                return Some(Target::ProfileNew);
             }
         }
+        crate::profile_menu::MenuStage::Settings { .. } => {
+            for i in 0..crate::profile_menu::SettingsRow::ALL.len() {
+                let rr = crate::view::profile_menu_row_rect(rect, i);
+                if rr.h > 0 && contains(rr, col, row) {
+                    return Some(Target::SettingsRow(i));
+                }
+            }
+        }
+        _ => {}
     }
     Some(Target::OverlayBody)
 }
@@ -786,6 +825,41 @@ mod tests {
         s.app.overlay = Some(crate::dispatch::Overlay::Running { title: "x".into() });
         let v = s.snapshot();
         assert_eq!(hit_test(&v, span.start, 0), None);
+    }
+
+    #[test]
+    fn settings_chips_and_new_button_hit_their_drawn_cells() {
+        // ADR-0046: every hub act has a click twin — the chips, the
+        // `[ + new profile ]` row, and the close X on EVERY stage.
+        let mut s = profiled_state(120, 40);
+        crate::input::enter_profile_menu(&mut s.app);
+        let v = s.snapshot();
+        let modal = crate::view::modal_rect(v.size);
+        for i in 0..2usize {
+            let chip = crate::view::profile_menu_settings_rect(modal, i);
+            assert!(chip.w > 0, "the chip renders at this width");
+            assert_eq!(
+                hit_test(&v, chip.x, chip.y),
+                Some(Target::ProfileSettings(i))
+            );
+            // The rest of the row still switches.
+            let rr = crate::view::profile_menu_row_rect(modal, i);
+            assert_eq!(hit_test(&v, rr.x, rr.y), Some(Target::ProfileRow(i)));
+        }
+        let new_rr = crate::view::profile_menu_row_rect(modal, 2);
+        assert_eq!(hit_test(&v, new_rr.x, new_rr.y), Some(Target::ProfileNew));
+        let cr = crate::view::modal_close_rect(modal).unwrap();
+        assert_eq!(hit_test(&v, cr.x, cr.y), Some(Target::ProfileMenuClose));
+        // The settings stage: rows resolve, and the X still closes.
+        s.app.profile_menu.stage = crate::profile_menu::MenuStage::Settings {
+            profile: "pf0".into(),
+        };
+        let v = s.snapshot();
+        for i in 0..crate::profile_menu::SettingsRow::ALL.len() {
+            let rr = crate::view::profile_menu_row_rect(modal, i);
+            assert_eq!(hit_test(&v, rr.x, rr.y), Some(Target::SettingsRow(i)));
+        }
+        assert_eq!(hit_test(&v, cr.x, cr.y), Some(Target::ProfileMenuClose));
     }
 
     #[test]

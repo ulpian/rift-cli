@@ -47,8 +47,14 @@ pub enum HintContext {
     AddProject,
     /// Rearranging the layout in panel-editor mode.
     PanelEditor,
-    /// Managing profiles in the profile menu (ADR-0037).
+    /// Browsing profiles in the profile menu's hub (ADR-0037/ADR-0044).
     ProfileMenu,
+    /// A profile's settings page (ADR-0044 §3).
+    ProfileSettings,
+    /// Typing a profile name (create / rename / duplicate).
+    ProfileNaming,
+    /// The menu's inline delete confirm.
+    ProfileConfirm,
     /// Picking a profile's theme colours (ADR-0039).
     ColourPicker,
     /// A results overlay is open.
@@ -62,9 +68,17 @@ pub enum HintContext {
 }
 
 /// Derive the context from the reducer's own dispatch order: overlay kind
-/// first (an open overlay owns the keys), then mode, then focus.
+/// first (an open overlay owns the keys), then mode — the profile menu
+/// per stage (ADR-0044 §5, so hints never advertise a dead key mid-stage) —
+/// then focus.
 #[must_use]
-pub fn context(mode: Mode, focus: Panel, overlay: Option<&Overlay>) -> HintContext {
+pub fn context(
+    mode: Mode,
+    focus: Panel,
+    overlay: Option<&Overlay>,
+    menu: &crate::profile_menu::MenuStage,
+) -> HintContext {
+    use crate::profile_menu::MenuStage;
     match overlay {
         Some(Overlay::Results { .. }) => HintContext::OverlayResults,
         Some(Overlay::Confirm { .. }) => HintContext::OverlayConfirm,
@@ -74,7 +88,14 @@ pub fn context(mode: Mode, focus: Panel, overlay: Option<&Overlay>) -> HintConte
             Mode::Command => HintContext::CommandEditing,
             Mode::AddProject => HintContext::AddProject,
             Mode::PanelEditor => HintContext::PanelEditor,
-            Mode::ProfileMenu => HintContext::ProfileMenu,
+            Mode::ProfileMenu => match menu {
+                MenuStage::Browse => HintContext::ProfileMenu,
+                MenuStage::Settings { .. } => HintContext::ProfileSettings,
+                MenuStage::NamingCreate
+                | MenuStage::NamingRename { .. }
+                | MenuStage::NamingDuplicate { .. } => HintContext::ProfileNaming,
+                MenuStage::ConfirmDelete { .. } => HintContext::ProfileConfirm,
+            },
             Mode::ColourPicker => HintContext::ColourPicker,
             Mode::Normal => match focus {
                 Panel::Projects => HintContext::Rail,
@@ -135,11 +156,23 @@ const PANEL_EDITOR: &[Hint] = &[
 const PROFILE_MENU: &[Hint] = &[
     hint("j/k", "move", CanopyKey::Down),
     hint("⏎", "switch", CanopyKey::Enter),
+    hint("s", "settings", CanopyKey::Char('s')),
     hint("n", "new", CanopyKey::Char('n')),
-    hint("r", "rename", CanopyKey::Char('r')),
     hint("d", "delete", CanopyKey::Char('d')),
-    hint("c", "colours", CanopyKey::Char('c')),
     hint("esc", "close", CanopyKey::Esc),
+];
+const PROFILE_SETTINGS: &[Hint] = &[
+    hint("j/k", "move", CanopyKey::Down),
+    hint("⏎", "open", CanopyKey::Enter),
+    hint("esc", "back", CanopyKey::Esc),
+];
+const PROFILE_NAMING: &[Hint] = &[
+    hint("⏎", "save", CanopyKey::Enter),
+    hint("esc", "back", CanopyKey::Esc),
+];
+const PROFILE_CONFIRM: &[Hint] = &[
+    hint("⏎", "confirm", CanopyKey::Enter),
+    hint("esc", "cancel", CanopyKey::Esc),
 ];
 const COLOUR_PICKER: &[Hint] = &[
     hint("j/k", "move", CanopyKey::Down),
@@ -172,6 +205,9 @@ pub fn hints(ctx: HintContext) -> &'static [Hint] {
         HintContext::AddProject => ADD_PROJECT,
         HintContext::PanelEditor => PANEL_EDITOR,
         HintContext::ProfileMenu => PROFILE_MENU,
+        HintContext::ProfileSettings => PROFILE_SETTINGS,
+        HintContext::ProfileNaming => PROFILE_NAMING,
+        HintContext::ProfileConfirm => PROFILE_CONFIRM,
         HintContext::ColourPicker => COLOUR_PICKER,
         HintContext::OverlayResults => OVERLAY_RESULTS,
         HintContext::OverlayConfirm => OVERLAY_CONFIRM,
@@ -194,6 +230,20 @@ mod tests {
             status: ProjectStatus::Idle,
             kind: EntryKind::Repo,
         }
+    }
+
+    /// Three live profiles (active first) — the shared profile-plane fixture.
+    fn profiles_fixture(app: &mut App) {
+        app.profiles = ["default", "work", "lab"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| crate::profile::ProfileEntry {
+                profile_id: format!("pf{i}"),
+                name: (*name).to_string(),
+                created_at: i64::try_from(i).unwrap_or(0),
+            })
+            .collect();
+        app.active_profile = "pf0".into();
     }
 
     /// A mid-state app for `ctx`: three projects with the middle one selected,
@@ -232,20 +282,40 @@ mod tests {
             }
             HintContext::ProfileMenu => {
                 // Three live profiles, active first, cursor mid-list on a
-                // NON-active row — so `d` can open the confirm, `Enter` can
-                // switch, and both `j` and `k` have room to move.
-                app.profiles = ["default", "work", "lab"]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| crate::profile::ProfileEntry {
-                        profile_id: format!("pf{i}"),
-                        name: (*name).to_string(),
-                        created_at: i64::try_from(i).unwrap_or(0),
-                    })
-                    .collect();
-                app.active_profile = "pf0".into();
+                // NON-active row — so `d` can open the confirm, `s` its
+                // settings, `Enter` can switch, and `j`/`k` have room.
+                profiles_fixture(&mut app);
                 app.mode = Mode::ProfileMenu;
                 app.profile_menu.cursor = 1;
+            }
+            HintContext::ProfileSettings => {
+                // The settings page for a NON-active profile, cursor mid-list
+                // — `j`/`k` have room, `Enter` opens the cursor row, `Esc`
+                // steps back to Browse.
+                profiles_fixture(&mut app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::Settings {
+                    profile: "pf1".into(),
+                };
+                app.profile_menu.settings_cursor = 1;
+            }
+            HintContext::ProfileNaming => {
+                // A naming input holding a VALID name, so `Enter` emits the
+                // typed action and `Esc` observably steps back.
+                profiles_fixture(&mut app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::NamingCreate;
+                app.command_line = "qa".into();
+            }
+            HintContext::ProfileConfirm => {
+                // The inline confirm on a NON-active profile — `Enter` lands
+                // the delete (a typed action), `Esc` cancels (a stage move).
+                profiles_fixture(&mut app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::ConfirmDelete {
+                    profile: "pf1".into(),
+                    back_to_settings: false,
+                };
             }
             HintContext::ColourPicker => {
                 // The preset stage mid-list: `j`/`k` have room, `Enter`
@@ -320,7 +390,7 @@ mod tests {
     /// an action is returned. A hint can never advertise a dead key.
     #[test]
     fn every_hint_key_is_handled_by_the_reducer() {
-        const ALL: [HintContext; 13] = [
+        const ALL: [HintContext; 16] = [
             HintContext::Rail,
             HintContext::Detail,
             HintContext::Graphs,
@@ -329,6 +399,9 @@ mod tests {
             HintContext::AddProject,
             HintContext::PanelEditor,
             HintContext::ProfileMenu,
+            HintContext::ProfileSettings,
+            HintContext::ProfileNaming,
+            HintContext::ProfileConfirm,
             HintContext::ColourPicker,
             HintContext::OverlayResults,
             HintContext::OverlayConfirm,
@@ -361,33 +434,68 @@ mod tests {
             truncated: false,
         };
         assert_eq!(
-            context(Mode::Command, Panel::Projects, Some(&results)),
+            context(
+                Mode::Command,
+                Panel::Projects,
+                Some(&results),
+                &crate::profile_menu::MenuStage::Browse
+            ),
             HintContext::OverlayResults
         );
         // Mode outranks focus.
         assert_eq!(
-            context(Mode::Command, Panel::Projects, None),
+            context(
+                Mode::Command,
+                Panel::Projects,
+                None,
+                &crate::profile_menu::MenuStage::Browse
+            ),
             HintContext::CommandEditing
         );
         assert_eq!(
-            context(Mode::AddProject, Panel::Graphs, None),
+            context(
+                Mode::AddProject,
+                Panel::Graphs,
+                None,
+                &crate::profile_menu::MenuStage::Browse
+            ),
             HintContext::AddProject
         );
         // Focus routes Normal mode.
         assert_eq!(
-            context(Mode::Normal, Panel::Projects, None),
+            context(
+                Mode::Normal,
+                Panel::Projects,
+                None,
+                &crate::profile_menu::MenuStage::Browse
+            ),
             HintContext::Rail
         );
         assert_eq!(
-            context(Mode::Normal, Panel::Detail, None),
+            context(
+                Mode::Normal,
+                Panel::Detail,
+                None,
+                &crate::profile_menu::MenuStage::Browse
+            ),
             HintContext::Detail
         );
         assert_eq!(
-            context(Mode::Normal, Panel::Graphs, None),
+            context(
+                Mode::Normal,
+                Panel::Graphs,
+                None,
+                &crate::profile_menu::MenuStage::Browse
+            ),
             HintContext::Graphs
         );
         assert_eq!(
-            context(Mode::Normal, Panel::Command, None),
+            context(
+                Mode::Normal,
+                Panel::Command,
+                None,
+                &crate::profile_menu::MenuStage::Browse
+            ),
             HintContext::CommandIdle
         );
     }

@@ -331,12 +331,28 @@ impl App {
     }
 
     /// Replace the live profiles + active id (from the loader seam or after a
-    /// profile persist op), clamping the menu cursor onto the new list.
+    /// profile persist op), clamping the menu cursor onto the new list and
+    /// resetting any menu stage whose profile is no longer live (ADR-0044 §6
+    /// — a palette-side delete cannot strand a settings page).
     pub fn set_profiles(&mut self, profiles: Vec<crate::profile::ProfileEntry>, active: String) {
+        use crate::profile_menu::MenuStage;
         self.profile_menu.cursor = self
             .profile_menu
             .cursor
             .min(profiles.len().saturating_sub(1));
+        let stage_profile = match &self.profile_menu.stage {
+            MenuStage::Settings { profile }
+            | MenuStage::NamingRename { profile }
+            | MenuStage::ConfirmDelete { profile, .. }
+            | MenuStage::NamingDuplicate { source: profile } => Some(profile.clone()),
+            MenuStage::Browse | MenuStage::NamingCreate => None,
+        };
+        if let Some(p) = stage_profile {
+            if !profiles.iter().any(|e| e.profile_id == p) {
+                self.profile_menu.stage = MenuStage::Browse;
+                self.command_line.clear();
+            }
+        }
         self.profiles = profiles;
         self.active_profile = active;
     }

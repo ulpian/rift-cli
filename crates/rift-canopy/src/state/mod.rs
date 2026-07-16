@@ -1284,6 +1284,48 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
                 Flow::Continue(Effects::default())
             }
         }
+        // A hub row's `[settings]` chip (ADR-0044 §4): open that profile's
+        // settings page — the click twin of `s` on its row.
+        Target::ProfileSettings(i) => {
+            s.dirty = true;
+            if let Some(p) = s.app.profiles.get(i) {
+                let id = p.profile_id.clone();
+                s.app.profile_menu.cursor = i;
+                crate::input::enter_profile_settings(&mut s.app, id);
+            }
+            Flow::Continue(Effects::default())
+        }
+        // The hub's `[ + new profile ]` row — the click twin of `n`.
+        Target::ProfileNew => {
+            s.dirty = true;
+            s.app.profile_menu.stage = crate::profile_menu::MenuStage::NamingCreate;
+            s.app.profile_menu.name_error = false;
+            s.app.command_line.clear();
+            Flow::Continue(Effects::default())
+        }
+        // The menu's close `[x]` (ADR-0046): closes the MODE — the pointer
+        // twin of Esc-from-Browse, never the overlay close path.
+        Target::ProfileMenuClose => {
+            s.dirty = true;
+            s.app.mode = Mode::Normal;
+            s.app.profile_menu.reset();
+            s.app.command_line.clear();
+            Flow::Continue(Effects::default())
+        }
+        // A settings row (ADR-0044 §3): activate it, exactly like `Enter`.
+        Target::SettingsRow(i) => {
+            use crate::profile_menu::{MenuStage, SettingsRow};
+            s.dirty = true;
+            let rows_last = SettingsRow::ALL.len() - 1;
+            if let MenuStage::Settings { profile } = s.app.profile_menu.stage.clone() {
+                s.app.profile_menu.settings_cursor = i.min(rows_last);
+                let row = SettingsRow::ALL[i.min(rows_last)];
+                let action = crate::input::activate_settings_row(&mut s.app, &profile, row);
+                profile_or_fold_action(s, action)
+            } else {
+                Flow::Continue(Effects::default())
+            }
+        }
         // A picker row (ADR-0039): the mouse twin of cursoring + `Enter` — a
         // slot click opens its presets; a preset/reset click applies live.
         Target::PickerRow(i) => {
@@ -1376,6 +1418,10 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             | Target::HeaderQuit
             | Target::HeaderProfile
             | Target::ProfileRow(_)
+            | Target::ProfileSettings(_)
+            | Target::ProfileNew
+            | Target::ProfileMenuClose
+            | Target::SettingsRow(_)
             | Target::PickerRow(_)
             | Target::WizardAdd
             | Target::RailAdd
@@ -1435,6 +1481,8 @@ fn fold_action(action: Action) -> Flow {
         | Action::CreateProfile(_)
         | Action::RenameProfile { .. }
         | Action::DeleteProfile(_)
+        | Action::DuplicateProfile { .. }
+        | Action::ToggleStartupPin(_)
         | Action::SetThemeSlot { .. } => Flow::Continue(Effects::default()),
         Action::AddProject(path) => Flow::Continue(Effects {
             persist: vec![PersistOp::AddProject { path }],
@@ -1778,6 +1826,19 @@ fn profile_or_fold_action(s: &mut AppState, action: Action) -> Flow {
         }
         Action::DeleteProfile(profile) => {
             profile_persist_flow(PersistOp::RemoveProfile { profile })
+        }
+        Action::DuplicateProfile { source, name } => {
+            profile_persist_flow(PersistOp::DuplicateProfile { source, name })
+        }
+        // The settings toggle resolves pin-vs-unpin against the CURRENT pin
+        // (ADR-0045 §2); the reload keeps the rendered state honest.
+        Action::ToggleStartupPin(profile) => {
+            let profile = if s.app.startup_profile.as_deref() == Some(profile.as_str()) {
+                None
+            } else {
+                Some(profile)
+            };
+            profile_persist_flow(PersistOp::SetStartupProfile { profile })
         }
         // A picker selection applies LIVE in the same frame (ADR-0039): the
         // snapshot re-themes here; the superseding event persists.
@@ -2721,11 +2782,13 @@ mod tests {
         );
         assert!(e.reload_profiles);
 
-        // Rename (prefilled; append a char).
+        // Rename — through the settings page now (ADR-0044 §3): the Name row
+        // opens the prefilled input; append a char.
         let mut s = ready_with_profiles(vec![project("a")]);
         update(&mut s, Event::Key(CanopyKey::Char('p')));
         update(&mut s, Event::Key(CanopyKey::Char('j')));
-        update(&mut s, Event::Key(CanopyKey::Char('r')));
+        update(&mut s, Event::Key(CanopyKey::Char('s')));
+        let _ = update(&mut s, Event::Key(CanopyKey::Enter)); // Name row opens
         update(&mut s, Event::Key(CanopyKey::Char('2')));
         let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
         assert_eq!(
@@ -2854,13 +2917,200 @@ mod tests {
     }
 
     #[test]
+    fn settings_opens_from_key_chip_and_enter_dispatches_rows() {
+        use crate::profile_menu::MenuStage;
+        // `s` opens the cursor row's settings page…
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j')));
+        update(&mut s, Event::Key(CanopyKey::Char('s')));
+        assert_eq!(
+            s.app.profile_menu.stage,
+            MenuStage::Settings {
+                profile: "pf1".into()
+            }
+        );
+        // …Esc steps back to the hub…
+        update(&mut s, Event::Key(CanopyKey::Esc));
+        assert_eq!(s.app.profile_menu.stage, MenuStage::Browse);
+        assert_eq!(s.app.mode, Mode::ProfileMenu);
+        // …and the row chip is the click twin (ADR-0046).
+        let click = click_on(Target::ProfileSettings(2), &mut s);
+        let e = effects_of(update(&mut s, Event::Mouse(click)));
+        assert!(e.persist.is_empty());
+        assert_eq!(
+            s.app.profile_menu.stage,
+            MenuStage::Settings {
+                profile: "pf2".into()
+            },
+            "the chip opens ITS row's settings page"
+        );
+    }
+
+    #[test]
+    fn duplicate_from_settings_names_then_emits_full_clone_op() {
+        use crate::profile_menu::{MenuStage, SettingsRow};
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j'))); // a NON-active row
+        update(&mut s, Event::Key(CanopyKey::Char('s')));
+        // Cursor to the Duplicate row, activate, type the clone's name.
+        let dup = SettingsRow::ALL
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Duplicate))
+            .unwrap();
+        for _ in 0..dup {
+            update(&mut s, Event::Key(CanopyKey::Char('j')));
+        }
+        update(&mut s, Event::Key(CanopyKey::Enter));
+        assert_eq!(
+            s.app.profile_menu.stage,
+            MenuStage::NamingDuplicate {
+                source: "pf1".into()
+            }
+        );
+        for c in "work-copy".chars() {
+            update(&mut s, Event::Key(CanopyKey::Char(c)));
+        }
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::DuplicateProfile {
+                source: "pf1".into(),
+                name: "work-copy".into()
+            }],
+            "the clone op carries the SETTINGS page's profile as its source"
+        );
+        assert!(e.reload_profiles);
+        assert_eq!(
+            s.app.profile_menu.stage,
+            MenuStage::Browse,
+            "a landed duplicate returns to the hub (the reducer never learns the minted id)"
+        );
+    }
+
+    #[test]
+    fn startup_toggle_pins_and_unpins() {
+        use crate::profile_menu::SettingsRow;
+        let pin_row = SettingsRow::ALL
+            .iter()
+            .position(|r| matches!(r, SettingsRow::StartupPin))
+            .unwrap();
+        // Unpinned → the toggle pins the page's profile.
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j')));
+        update(&mut s, Event::Key(CanopyKey::Char('s')));
+        for _ in 0..pin_row {
+            update(&mut s, Event::Key(CanopyKey::Char('j')));
+        }
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SetStartupProfile {
+                profile: Some("pf1".into())
+            }]
+        );
+        assert!(e.reload_profiles);
+        // Already the pin → the same act unpins (NULL).
+        s.app.startup_profile = Some("pf1".into());
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SetStartupProfile { profile: None }]
+        );
+    }
+
+    #[test]
+    fn delete_from_settings_confirms_then_returns_to_browse() {
+        use crate::profile_menu::{MenuStage, SettingsRow};
+        let del_row = SettingsRow::ALL
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Delete))
+            .unwrap();
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j')));
+        update(&mut s, Event::Key(CanopyKey::Char('s')));
+        for _ in 0..del_row {
+            update(&mut s, Event::Key(CanopyKey::Char('j')));
+        }
+        update(&mut s, Event::Key(CanopyKey::Enter));
+        assert_eq!(
+            s.app.profile_menu.stage,
+            MenuStage::ConfirmDelete {
+                profile: "pf1".into(),
+                back_to_settings: true
+            }
+        );
+        // Esc cancels BACK to the settings page it came from…
+        update(&mut s, Event::Key(CanopyKey::Esc));
+        assert_eq!(
+            s.app.profile_menu.stage,
+            MenuStage::Settings {
+                profile: "pf1".into()
+            }
+        );
+        // …while a landed delete returns to the hub (the page's profile is gone).
+        update(&mut s, Event::Key(CanopyKey::Enter));
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::RemoveProfile {
+                profile: "pf1".into()
+            }]
+        );
+        assert_eq!(s.app.profile_menu.stage, MenuStage::Browse);
+    }
+
+    #[test]
+    fn menu_close_x_closes_the_mode_not_an_overlay() {
+        use crate::profile_menu::MenuStage;
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('s')));
+        assert!(matches!(
+            s.app.profile_menu.stage,
+            MenuStage::Settings { .. }
+        ));
+        // The `[x]` closes the MODE from any stage (ADR-0046 §2) and never
+        // touches the overlay plane.
+        let e = effects_of(apply_click(&mut s, Target::ProfileMenuClose));
+        assert!(e.is_empty());
+        assert_eq!(s.app.mode, Mode::Normal);
+        assert_eq!(s.app.profile_menu.stage, MenuStage::Browse);
+        assert!(s.app.overlay.is_none());
+    }
+
+    /// A left click on the drawn cell of `target` (resolved via the pure
+    /// hit-test so the test exercises pixels == targets).
+    fn click_on(target: Target, s: &mut AppState) -> crate::input::MouseInput {
+        let vm = s.snapshot();
+        let (w, h) = (vm.size.w, vm.size.h);
+        for row in 0..h {
+            for col in 0..w {
+                if crate::hit::hit_test(&vm, col, row).as_ref() == Some(&target) {
+                    return crate::input::MouseInput {
+                        kind: crate::input::MouseKind::Down(crate::input::MouseButton::Left),
+                        col,
+                        row,
+                    };
+                }
+            }
+        }
+        panic!("target {target:?} has no drawn cell");
+    }
+
+    #[test]
     fn a_picker_selection_rethemes_the_same_frame_and_persists_one_event() {
         use crate::theme::{ThemeSlot, PRESETS};
         let mut s = ready_with_profiles(vec![project("a")]);
-        // p → menu, c → picker, Enter → background's presets, Enter → red.
-        for k in ['p', 'c'] {
+        // p → menu, s → settings, j+Enter → the Colours row opens the picker
+        // (ADR-0044 §3), Enter → background's presets, Enter → red.
+        for k in ['p', 's', 'j'] {
             update(&mut s, Event::Key(CanopyKey::Char(k)));
         }
+        update(&mut s, Event::Key(CanopyKey::Enter));
         update(&mut s, Event::Key(CanopyKey::Enter));
         let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
         // Applied live: the snapshot already wears the override.

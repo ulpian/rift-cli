@@ -332,13 +332,53 @@ pub fn profile_menu_row_rect(modal: Rect, i: usize) -> Rect {
     }
 }
 
-/// Draw the profile menu (ADR-0037): the shared centered modal frame + scrim,
-/// the live profiles (active marked with the profile glyph, the cursor row
-/// washed), and — per stage — the naming input line (create/rename, with the
-/// inline name-rule error) or the inline delete confirm. Pure drawing over the
-/// snapshot; every name passes the shared sanitizer.
+/// The `[settings]` chip's rect on a hub row (ADR-0044 §4) — right-aligned
+/// inside the row, one source for the draw and the hit-test. Zero-sized when
+/// the row is (or is too narrow to host a chip beside a name).
+#[must_use]
+pub fn profile_menu_settings_rect(modal: Rect, i: usize) -> Rect {
+    let rr = profile_menu_row_rect(modal, i);
+    let chip_w = u16::try_from(PROFILE_SETTINGS_CHIP.chars().count()).unwrap_or(0);
+    if rr.h == 0 || rr.w < chip_w.saturating_add(20) {
+        return Rect {
+            x: rr.x,
+            y: rr.y,
+            w: 0,
+            h: 0,
+        };
+    }
+    Rect {
+        x: rr.x + rr.w - chip_w - 1,
+        y: rr.y,
+        w: chip_w,
+        h: 1,
+    }
+}
+
+/// The hub's `[settings]` chip text (one source for draw + measurement).
+pub const PROFILE_SETTINGS_CHIP: &str = "[settings]";
+
+/// The hub's trailing `[ + new profile ]` row text.
+pub const PROFILE_NEW_ROW: &str = " [ + new profile ]";
+
+/// A mode-modal's close `[x]` style: press-flash aware, muted at rest — the
+/// pointer twin of `Esc` (ADR-0046; the target closes the MODE, never an
+/// overlay).
+fn menu_close_style(vm: &ViewModel, target: &crate::hit::Target) -> Style {
+    let bg = crate::chrome::press_flash_bg(vm.theme, vm.button_flash(target))
+        .unwrap_or(vm.theme.surface_bg());
+    Style::fg(crate::theme::MUTED).with_bg(bg)
+}
+
+/// Draw the profile menu (ADR-0037, hub-and-spoke per ADR-0044): the shared
+/// centered modal frame + scrim and, per stage — the hub (live profiles with
+/// `[settings]` chips and the `[ + new profile ]` row), the per-profile
+/// settings page, a naming input (create / rename / duplicate, with the
+/// inline name-rule error), or the inline delete confirm. Every stage carries
+/// the close `[x]` (ADR-0046). Pure drawing over the snapshot; every name
+/// passes the shared sanitizer.
 fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
-    use crate::profile_menu::MenuStage;
+    use crate::profile_menu::{MenuStage, SettingsRow};
     let rect = modal_rect(vm.size);
     if rect.w < 8 || rect.h < 5 {
         return;
@@ -349,38 +389,123 @@ fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
             frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
         }
     }
-    let inner = frame.border(rect, "profiles", ACCENT);
-
-    for (i, p) in vm.profiles.iter().enumerate() {
-        let rr = profile_menu_row_rect(rect, i);
-        if rr.h == 0 {
-            break; // the frame is full; the rest clip away whole
-        }
-        let is_active = p.profile_id == vm.active_profile;
-        let on_cursor =
-            i == vm.profile_menu.cursor && matches!(vm.profile_menu.stage, MenuStage::Browse);
-        let marker = if is_active {
-            crate::theme::Icon::Profile.glyph(unicode)
-        } else {
-            ' '
-        };
-        let line = format!(" {marker} {}", sanitize_for_terminal(&p.name));
-        let style = if on_cursor {
-            Style::fg(vm.theme.body_fg()).with_bg(crate::theme::SELECT_BG)
-        } else if is_active {
-            ACCENT
-        } else {
-            Style::fg(vm.theme.body_fg())
-        };
-        if on_cursor {
-            for dx in 0..rr.w {
-                frame.set(rr.x + dx, rr.y, ' ', style);
-            }
-        }
-        clip_line(frame, inner, rr.y - inner.y, &line, style);
+    let settings_profile = match &vm.profile_menu.stage {
+        MenuStage::Settings { profile } => Some(profile.clone()),
+        _ => None,
+    };
+    let title = settings_profile
+        .as_deref()
+        .and_then(|id| vm.profiles.iter().find(|p| p.profile_id == id))
+        .map_or_else(
+            || "profiles".to_string(),
+            |p| format!("profile · {}", sanitize_for_terminal(&p.name)),
+        );
+    let inner = frame.border(rect, &title, ACCENT);
+    // The close affordance, on every stage (ADR-0046 §2): the pointer twin of
+    // Esc, resolving to the MODE's own close target.
+    if let Some(cr) = modal_close_rect(rect) {
+        let style = menu_close_style(vm, &crate::hit::Target::ProfileMenuClose);
+        frame.put_str(cr.x, cr.y, "[x]", style);
     }
 
-    // The stage line, on the inner bottom row: browse hints, the naming input,
+    match &vm.profile_menu.stage {
+        MenuStage::Settings { profile } => {
+            // The settings page: one activatable row per SettingsRow::ALL.
+            for (i, row) in SettingsRow::ALL.iter().enumerate() {
+                let rr = profile_menu_row_rect(rect, i);
+                if rr.h == 0 {
+                    break;
+                }
+                let on_cursor = i == vm.profile_menu.settings_cursor;
+                let suffix = match row {
+                    SettingsRow::StartupPin => {
+                        if vm.startup_profile.as_deref() == Some(profile.as_str()) {
+                            "  [on]"
+                        } else {
+                            "  [off]"
+                        }
+                    }
+                    _ => "",
+                };
+                let line = format!(" {}{suffix}", row.label());
+                let style = if on_cursor {
+                    Style::fg(vm.theme.body_fg()).with_bg(crate::theme::SELECT_BG)
+                } else if matches!(row, SettingsRow::Delete) {
+                    severity_style(crate::dispatch::Severity::Warning)
+                } else {
+                    Style::fg(vm.theme.body_fg())
+                };
+                if on_cursor {
+                    for dx in 0..rr.w {
+                        frame.set(rr.x + dx, rr.y, ' ', style);
+                    }
+                }
+                clip_line(frame, inner, rr.y - inner.y, &line, style);
+            }
+        }
+        _ => {
+            // The hub: the live profiles, each with its `[settings]` chip,
+            // then the `[ + new profile ]` row.
+            for (i, p) in vm.profiles.iter().enumerate() {
+                let rr = profile_menu_row_rect(rect, i);
+                if rr.h == 0 {
+                    break; // the frame is full; the rest clip away whole
+                }
+                let is_active = p.profile_id == vm.active_profile;
+                let on_cursor = i == vm.profile_menu.cursor
+                    && matches!(vm.profile_menu.stage, MenuStage::Browse);
+                let marker = if is_active {
+                    crate::theme::Icon::Profile.glyph(unicode)
+                } else {
+                    ' '
+                };
+                let line = format!(" {marker} {}", sanitize_for_terminal(&p.name));
+                let style = if on_cursor {
+                    Style::fg(vm.theme.body_fg()).with_bg(crate::theme::SELECT_BG)
+                } else if is_active {
+                    ACCENT
+                } else {
+                    Style::fg(vm.theme.body_fg())
+                };
+                if on_cursor {
+                    for dx in 0..rr.w {
+                        frame.set(rr.x + dx, rr.y, ' ', style);
+                    }
+                }
+                clip_line(frame, inner, rr.y - inner.y, &line, style);
+                // The row's settings chip — a click twin for `s` (ADR-0046).
+                let cr = profile_menu_settings_rect(rect, i);
+                if cr.w > 0 {
+                    let target = crate::hit::Target::ProfileSettings(i);
+                    let bg = crate::chrome::press_flash_bg(vm.theme, vm.button_flash(&target))
+                        .or_else(|| on_cursor.then_some(crate::theme::SELECT_BG))
+                        .unwrap_or(vm.theme.surface_bg());
+                    frame.put_str(
+                        cr.x,
+                        cr.y,
+                        PROFILE_SETTINGS_CHIP,
+                        Style::fg(crate::theme::MUTED).with_bg(bg),
+                    );
+                }
+            }
+            // The `[ + new profile ]` row — the click twin for `n`.
+            let new_rr = profile_menu_row_rect(rect, vm.profiles.len());
+            if new_rr.h > 0 {
+                let target = crate::hit::Target::ProfileNew;
+                let bg = crate::chrome::press_flash_bg(vm.theme, vm.button_flash(&target))
+                    .unwrap_or(vm.theme.surface_bg());
+                clip_line(
+                    frame,
+                    inner,
+                    new_rr.y - inner.y,
+                    PROFILE_NEW_ROW,
+                    Style::fg(crate::theme::MUTED).with_bg(bg),
+                );
+            }
+        }
+    }
+
+    // The stage line, on the inner bottom row: stage hints, the naming input,
     // or the inline delete confirm (an explicit second act — ADR-0037 §3).
     if inner.h == 0 {
         return;
@@ -393,15 +518,20 @@ fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
                 frame,
                 inner,
                 stage_dy,
-                " ⏎ switch · n new · r rename · d delete · c colours · esc close",
+                " ⏎ switch · s settings · n new · d delete · esc close",
                 muted,
             );
         }
-        MenuStage::NamingCreate | MenuStage::NamingRename { .. } => {
-            let verb = if matches!(vm.profile_menu.stage, MenuStage::NamingCreate) {
-                "new profile"
-            } else {
-                "rename to"
+        MenuStage::Settings { .. } => {
+            clip_line(frame, inner, stage_dy, " ⏎ open · esc back", muted);
+        }
+        MenuStage::NamingCreate
+        | MenuStage::NamingRename { .. }
+        | MenuStage::NamingDuplicate { .. } => {
+            let verb = match &vm.profile_menu.stage {
+                MenuStage::NamingCreate => "new profile",
+                MenuStage::NamingDuplicate { .. } => "duplicate as",
+                _ => "rename to",
             };
             let line = format!(" {verb}: {}▏", sanitize_for_terminal(&vm.command_line));
             clip_line(frame, inner, stage_dy, &line, ACCENT);
@@ -415,7 +545,7 @@ fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
                 );
             }
         }
-        MenuStage::ConfirmDelete { profile } => {
+        MenuStage::ConfirmDelete { profile, .. } => {
             let name = vm
                 .profiles
                 .iter()
@@ -1485,6 +1615,39 @@ mod tests {
         assert!(text.contains("profiles"), "the menu frame titles: {text}");
         assert!(text.contains("default"), "the live profile lists");
         assert!(text.contains("n new"), "the browse stage line teaches keys");
+        // The hub's mouse affordances (ADR-0044 §4 / ADR-0046): a settings
+        // chip per row, the new-profile row, and the close X.
+        assert!(text.contains(PROFILE_SETTINGS_CHIP), "chips render: {text}");
+        assert!(text.contains("[ + new profile ]"), "{text}");
+        assert!(text.contains("[x]"), "the close X renders: {text}");
+    }
+
+    #[test]
+    fn settings_page_lists_rows_with_the_pin_state() {
+        use crate::profile_menu::{MenuStage, SettingsRow};
+        let mut s = profiled_state();
+        crate::input::enter_profile_menu(&mut s.app);
+        s.app.profile_menu.stage = MenuStage::Settings {
+            profile: "pf0".into(),
+        };
+        s.app.startup_profile = Some("pf0".into());
+        let text = render_to_text(&s.snapshot());
+        assert!(
+            text.contains("profile · default"),
+            "the frame titles the page's profile: {text}"
+        );
+        for row in SettingsRow::ALL {
+            assert!(text.contains(row.label()), "row {row:?} renders: {text}");
+        }
+        assert!(
+            text.contains("startup pin  [on]"),
+            "the pin row shows its state: {text}"
+        );
+        assert!(text.contains("⏎ open · esc back"), "{text}");
+        // Unpinned, the same row reads [off].
+        s.app.startup_profile = None;
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("startup pin  [off]"), "{text}");
     }
 
     #[test]
