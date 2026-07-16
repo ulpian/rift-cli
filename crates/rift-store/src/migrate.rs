@@ -547,9 +547,9 @@ pub fn canopy_canonical_schema_sql() -> String {
 /// The canopy UI-state projection's migration set (applied to a fresh or an
 /// existing `ui-state.db`). v1 is the frozen project + toggle core (M4/M5); v2
 /// adds the per-project layout table (ADR-0035); v3 adds the profile plane
-/// (ADR-0036); v4 adds the per-(profile, slot) theme table (ADR-0038) — each a
-/// new version so an existing store upgrades additively and the applied
-/// checksums stay locked.
+/// (ADR-0036); v4 adds the per-(profile, slot) theme table (ADR-0038); v5 adds
+/// the startup-pin table (ADR-0045) — each a new version so an existing store
+/// upgrades additively and the applied checksums stay locked.
 #[must_use]
 pub fn canopy_migrations() -> Vec<Migration> {
     vec![
@@ -576,6 +576,11 @@ pub fn canopy_migrations() -> Vec<Migration> {
             version: 4,
             name: "canopy_profile_theme",
             sql: canopy_schema_sql_for(&["canopy_profile_theme_event"]),
+        },
+        Migration {
+            version: 5,
+            name: "canopy_profile_startup",
+            sql: canopy_schema_sql_for(&["canopy_profile_startup_event"]),
         },
     ]
 }
@@ -921,10 +926,10 @@ mod tests {
         let s = store();
         let out = apply_migrations(&s, &canopy_migrations()).unwrap();
         assert_eq!(
-            out.applied, 4,
-            "v1 core + v2 layout + v3 profiles + v4 theme"
+            out.applied, 5,
+            "v1 core + v2 layout + v3 profiles + v4 theme + v5 startup"
         );
-        assert_eq!(out.high_water, 4);
+        assert_eq!(out.high_water, 5);
         let v1 = &canopy_migrations()[0].sql;
         assert!(v1.contains("CREATE TABLE IF NOT EXISTS canopy_project_event"));
         assert!(v1.contains("CREATE TABLE IF NOT EXISTS canopy_toggle_event"));
@@ -956,9 +961,15 @@ mod tests {
         assert!(v4.contains("CREATE TABLE IF NOT EXISTS canopy_profile_theme_event"));
         assert!(v4.contains("canopy_profile_theme_event_no_update"));
         assert!(v4.contains("canopy_profile_theme_event_no_delete"));
+        // v4 stays frozen (no startup table); v5 adds it (ADR-0045) with guards.
+        assert!(!v4.contains("canopy_profile_startup_event"), "v4 is frozen");
+        let v5 = &canopy_migrations()[4].sql;
+        assert!(v5.contains("CREATE TABLE IF NOT EXISTS canopy_profile_startup_event"));
+        assert!(v5.contains("canopy_profile_startup_event_no_update"));
+        assert!(v5.contains("canopy_profile_startup_event_no_delete"));
         let again = apply_migrations(&s, &canopy_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 4);
+        assert_eq!(again.skipped, 5);
     }
 
     /// Every canopy migration is additive (the destructive-DDL CI gate).

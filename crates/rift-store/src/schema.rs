@@ -1509,6 +1509,16 @@ const CANOPY_PROFILE_THEME_EVENT_COLUMNS: &[Column] = &[
     Column::int("created_at"),       // transaction-time (epoch ms)
 ];
 
+// The startup pin (ADR-0045): a single latest-wins fold — the profile launch
+// opens on, NULL = follow last-selected (today's behaviour). Launch only ever
+// READS this table; pinning/unpinning are ordinary superseding events.
+const CANOPY_PROFILE_STARTUP_EVENT_COLUMNS: &[Column] = &[
+    Column::text("event_id"),        // ULID
+    Column::text_null("profile_id"), // FK comment-FK; NULL = follow last-selected
+    Column::text_null("supersedes"), // prior startup event_id
+    Column::int("created_at"),       // transaction-time (epoch ms)
+];
+
 const CANOPY_TABLES: &[CanonicalTable] = &[
     CanonicalTable {
         name: "canopy_project_event",
@@ -1549,6 +1559,12 @@ const CANOPY_TABLES: &[CanonicalTable] = &[
     CanonicalTable {
         name: "canopy_profile_theme_event",
         columns: CANOPY_PROFILE_THEME_EVENT_COLUMNS,
+        primary_key: &["event_id"],
+        unique: NO_UNIQUE,
+    },
+    CanonicalTable {
+        name: "canopy_profile_startup_event",
+        columns: CANOPY_PROFILE_STARTUP_EVENT_COLUMNS,
         primary_key: &["event_id"],
         unique: NO_UNIQUE,
     },

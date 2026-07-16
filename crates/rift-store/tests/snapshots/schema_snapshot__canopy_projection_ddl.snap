@@ -1,5 +1,6 @@
 ---
 source: crates/rift-store/tests/schema_snapshot.rs
+assertion_line: 53
 expression: schema_dump(&canopy_migrations())
 ---
 -- table _migrations
@@ -55,6 +56,15 @@ CREATE TABLE canopy_profile_project_event (
   project_id TEXT NOT NULL,
   op TEXT NOT NULL,
   order_key INTEGER,
+  supersedes TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (event_id)
+) STRICT
+
+-- table canopy_profile_startup_event
+CREATE TABLE canopy_profile_startup_event (
+  event_id TEXT NOT NULL,
+  profile_id TEXT,
   supersedes TEXT,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (event_id)
@@ -119,6 +129,12 @@ CREATE TRIGGER canopy_profile_project_event_no_delete BEFORE DELETE ON canopy_pr
 
 -- trigger canopy_profile_project_event_no_update
 CREATE TRIGGER canopy_profile_project_event_no_update BEFORE UPDATE ON canopy_profile_project_event BEGIN SELECT RAISE(ABORT, 'rift: canopy_profile_project_event is append-only (UPDATE forbidden)'); END
+
+-- trigger canopy_profile_startup_event_no_delete
+CREATE TRIGGER canopy_profile_startup_event_no_delete BEFORE DELETE ON canopy_profile_startup_event BEGIN SELECT RAISE(ABORT, 'rift: canopy_profile_startup_event is append-only (DELETE forbidden)'); END
+
+-- trigger canopy_profile_startup_event_no_update
+CREATE TRIGGER canopy_profile_startup_event_no_update BEFORE UPDATE ON canopy_profile_startup_event BEGIN SELECT RAISE(ABORT, 'rift: canopy_profile_startup_event is append-only (UPDATE forbidden)'); END
 
 -- trigger canopy_profile_theme_event_no_delete
 CREATE TRIGGER canopy_profile_theme_event_no_delete BEFORE DELETE ON canopy_profile_theme_event BEGIN SELECT RAISE(ABORT, 'rift: canopy_profile_theme_event is append-only (DELETE forbidden)'); END
