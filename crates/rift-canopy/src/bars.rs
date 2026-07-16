@@ -21,6 +21,9 @@ use crate::theme::{Icon, Section, Theme};
 pub enum HeaderAction {
     /// `?` — open the palette help overlay.
     Help,
+    /// `p` — the identity button (ADR-0044 §1): the active profile's name,
+    /// and the door to the profile menu.
+    Profile,
     /// `/` — open the command palette.
     Palette,
     /// `e` — toggle the panel editor (ADR-0034).
@@ -29,8 +32,10 @@ pub enum HeaderAction {
     Quit,
 }
 
-/// The header's right-aligned actions: key glyph + label, in display order. The
-/// panel-editor toggle sits between the palette and quit (ADR-0034).
+/// The header's **static** right-aligned actions: key glyph + label, in
+/// display order. The identity item is dynamic (it carries the active
+/// profile's name) and is inserted immediately before Palette by
+/// [`header_cluster`] (ADR-0044 §1).
 const HEADER_ITEMS: [(&str, &str, HeaderAction); 4] = [
     ("?", "Help", HeaderAction::Help),
     ("/", "Palette", HeaderAction::Palette),
@@ -54,67 +59,52 @@ pub struct HeaderSpan {
     pub action: HeaderAction,
 }
 
-/// Width of one `key label` group in cells.
-fn item_width(key: &str, label: &str) -> u16 {
-    let k = u16::try_from(key.chars().count()).unwrap_or(0);
-    let l = u16::try_from(label.chars().count()).unwrap_or(0);
-    k + 1 + l
-}
-
-/// The header actions' spans for a row of width `w`, right-aligned with a
-/// one-cell margin. Empty when the row is too narrow to carry them all —
-/// the cluster clips away whole rather than overlapping the left side.
-#[must_use]
-pub fn header_action_spans(w: u16) -> Vec<HeaderSpan> {
-    let total: u16 = HEADER_ITEMS
-        .iter()
-        .map(|(k, l, _)| item_width(k, l))
-        .sum::<u16>()
-        + ITEM_GAP * (u16::try_from(HEADER_ITEMS.len()).unwrap_or(1) - 1);
-    // The left cluster (mark · product · version · health dot ≈ half the action
-    // cluster) needs breathing room; below ~1.5× the cluster width the hints clip
-    // away whole rather than overlapping the mark.
-    if w < total.saturating_add(total / 2) {
-        return Vec::new();
-    }
-    let mut x = w.saturating_sub(1).saturating_sub(total);
-    let mut out = Vec::with_capacity(HEADER_ITEMS.len());
-    for (key, label, action) in HEADER_ITEMS {
-        let width = item_width(key, label);
-        out.push(HeaderSpan {
-            start: x,
-            end: x + width,
-            action,
-        });
-        x += width + ITEM_GAP;
-    }
-    out
-}
-
-/// The header action under column `col`, if any.
-#[must_use]
-pub fn header_action_at(w: u16, col: u16) -> Option<HeaderAction> {
-    header_action_spans(w)
-        .into_iter()
-        .find(|s| col >= s.start && col < s.end)
-        .map(|s| s.action)
-}
-
-/// The identity button's name budget in cells (ADR-0037 §1): beyond it the
-/// name truncates with an ellipsis.
+/// The identity item's name budget in cells (ADR-0037 §1, carried into the
+/// cluster by ADR-0044 §1): beyond it the name truncates with an ellipsis.
 const PROFILE_NAME_BUDGET: usize = 16;
 
-/// The narrowest name the identity button renders (one cell + an ellipsis)
-/// before it clips away whole — the W0 shrink-before-hide floor.
+/// The narrowest name the identity item renders (one cell + an ellipsis)
+/// before the ladder drops the item whole (ADR-0044 §2).
 const PROFILE_MIN_NAME_CELLS: usize = 2;
 
-/// The gap between the health dot and the identity button, in cells.
-const PROFILE_GAP: u16 = 2;
+/// A header item's label: static chrome text, or the identity item's budgeted
+/// profile name (drawn behind the profile glyph, which substitutes on the
+/// ASCII tier — both glyph forms are one cell, so geometry is tier-free).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeaderLabel {
+    /// A fixed action label (`Help`, `Palette`, …).
+    Static(&'static str),
+    /// The identity item: the budgeted profile name behind `⦿ `.
+    Profile(String),
+}
+
+impl HeaderLabel {
+    /// The label's width in cells (the glyph + its gap cost 2 for the identity).
+    fn cells(&self) -> u16 {
+        match self {
+            Self::Static(s) => u16::try_from(s.chars().count()).unwrap_or(u16::MAX),
+            Self::Profile(name) => {
+                2u16.saturating_add(u16::try_from(name.chars().count()).unwrap_or(u16::MAX))
+            }
+        }
+    }
+}
+
+/// One resolved header-cluster item: its span plus exactly what the renderer
+/// puts there — **one** solver feeds the draw and the row-0 hit-test, so a
+/// resize can never desync pixels from targets (ADR-0024 §6, ADR-0044 §2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeaderItem {
+    /// Where the item sits on row 0.
+    pub span: HeaderSpan,
+    /// The key glyph (key-hint styled) the chrome teaches.
+    pub key: &'static str,
+    /// The label beside it.
+    pub label: HeaderLabel,
+}
 
 /// The active profile's name, terminal-sanitised and truncated with an
-/// ellipsis at `budget` cells (ADR-0037 §§1/4) — the one text both the
-/// renderer and the span math use, so the drawn cells always equal the hit
-/// target.
+/// ellipsis at `budget` cells — the one truncation rule every ladder step uses.
 fn profile_label(name: &str, budget: usize) -> String {
     let clean = sanitize_for_terminal(name);
     if clean.chars().count() <= budget {
@@ -125,64 +115,99 @@ fn profile_label(name: &str, budget: usize) -> String {
     out
 }
 
-/// One past the left cluster's last cell (the health dot) — the identity
-/// button's anchor, deterministic from the version string alone. Kept in
-/// lockstep with the strings [`draw_header`] puts.
-fn left_cluster_end(version: &str) -> u16 {
-    // ` RIFT ` (6) + ` Canopy` (7)
-    let mut x = 6u16.saturating_add(7);
-    if !version.is_empty() {
-        let v = sanitize_for_terminal(version);
-        let count = u16::try_from(v.chars().count()).unwrap_or(u16::MAX);
-        x = x.saturating_add(2).saturating_add(count); // ` v` + version
+/// The cluster's candidate items: the four static actions plus, when a
+/// profile is wired, the identity item immediately before Palette with its
+/// name at `budget` cells (ADR-0044 §1).
+fn cluster_candidates(
+    profile: Option<(&str, usize)>,
+) -> Vec<(&'static str, HeaderLabel, HeaderAction)> {
+    let mut items: Vec<(&'static str, HeaderLabel, HeaderAction)> = HEADER_ITEMS
+        .iter()
+        .map(|(k, l, a)| (*k, HeaderLabel::Static(l), *a))
+        .collect();
+    if let Some((name, budget)) = profile {
+        items.insert(
+            1,
+            (
+                "p",
+                HeaderLabel::Profile(profile_label(name, budget)),
+                HeaderAction::Profile,
+            ),
+        );
     }
-    x.saturating_add(2).saturating_add(1) // `  ` + the health dot
+    items
 }
 
-/// The identity button's span **and** its budgeted label — the one solver the
-/// renderer and the hit-test both consume, so what is drawn always equals what
-/// is clickable, including the width-dependent shrink.
-fn profile_button(version: &str, profile_name: Option<&str>, w: u16) -> Option<(u16, u16, String)> {
-    let name = profile_name?;
-    if name.is_empty() {
+/// Right-align `items` on a row of width `w`, or `None` when they miss the
+/// cluster's fit threshold (the left cluster — mark · product · version ·
+/// health dot ≈ half the action cluster — needs breathing room; below ~1.5×
+/// the cluster width the row would garble).
+fn lay_out(
+    items: Vec<(&'static str, HeaderLabel, HeaderAction)>,
+    w: u16,
+) -> Option<Vec<HeaderItem>> {
+    let gaps = ITEM_GAP * (u16::try_from(items.len()).unwrap_or(1).saturating_sub(1));
+    let total: u16 = items
+        .iter()
+        .map(|(k, l, _)| u16::try_from(k.chars().count()).unwrap_or(0) + 1 + l.cells())
+        .sum::<u16>()
+        + gaps;
+    if w < total.saturating_add(total / 2) {
         return None;
     }
-    let start = left_cluster_end(version).saturating_add(PROFILE_GAP);
-    // The button must clear the action cluster (when present) by a gap, and
-    // the row's right margin regardless.
-    let limit = header_action_spans(w)
-        .first()
-        .map_or_else(|| w.saturating_sub(1), |s| s.start.saturating_sub(ITEM_GAP));
-    // W0 interim rule (dogfood 2026-07-15, replaced by the M512-04 cluster
-    // ladder): the name shrinks to the cells available before the button hides
-    // whole — a narrow pane costs characters, not identity. Below the floor it
-    // still clips away whole rather than garbling (the right cluster's rule).
-    let avail = usize::from(limit.saturating_sub(start.saturating_add(2)));
-    let budget = avail.min(PROFILE_NAME_BUDGET);
-    if budget < PROFILE_MIN_NAME_CELLS {
-        return None;
+    let mut x = w.saturating_sub(1).saturating_sub(total);
+    let mut out = Vec::with_capacity(items.len());
+    for (key, label, action) in items {
+        let width = u16::try_from(key.chars().count()).unwrap_or(0) + 1 + label.cells();
+        out.push(HeaderItem {
+            span: HeaderSpan {
+                start: x,
+                end: x + width,
+                action,
+            },
+            key,
+            label,
+        });
+        x += width + ITEM_GAP;
     }
-    let label = profile_label(name, budget);
-    let label_cells = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-    let end = start.saturating_add(2).saturating_add(label_cells); // `⦿ ` + name
-    Some((start, end, label))
+    Some(out)
 }
 
-/// The header identity button's cell span `[start, end)` on row 0 (ADR-0037):
-/// `⦿ name` right after the version and the health dot. **One** function feeds
-/// both the renderer and the row-0 hit-test, so a resize can never desync what
-/// is drawn from what is clickable. `None` hides the button — no profile wired
-/// (empty name), or a row too narrow to hold even the shrunk name clear of the
-/// right cluster: it clips away whole rather than garbling.
+/// The header cluster at width `w` (ADR-0044 §2) — the degradation ladder:
+/// the identity item's name renders at the full budget, shrinks stepwise with
+/// an ellipsis to its two-cell floor, then the item drops whole (the four
+/// actions stay exactly as today), and finally the whole cluster clips. Once
+/// the identity is visible at a width it is visible at every greater width —
+/// the monotonicity the pre-W4 hidden band lacked.
 #[must_use]
-pub fn profile_span(version: &str, profile_name: Option<&str>, w: u16) -> Option<(u16, u16)> {
-    profile_button(version, profile_name, w).map(|(start, end, _)| (start, end))
+pub fn header_cluster(w: u16, profile_name: Option<&str>) -> Vec<HeaderItem> {
+    if let Some(name) = profile_name.filter(|n| !n.is_empty()) {
+        for budget in (PROFILE_MIN_NAME_CELLS..=PROFILE_NAME_BUDGET).rev() {
+            if let Some(items) = lay_out(cluster_candidates(Some((name, budget))), w) {
+                return items;
+            }
+        }
+    }
+    lay_out(cluster_candidates(None), w).unwrap_or_default()
 }
 
-/// Whether row-0 column `col` is on the identity button.
+/// The header actions' spans for a row of width `w` — the cluster solver's
+/// spans view (the hit-test and the span tests consume this).
 #[must_use]
-pub fn profile_hit(version: &str, profile_name: Option<&str>, w: u16, col: u16) -> bool {
-    profile_span(version, profile_name, w).is_some_and(|(start, end)| col >= start && col < end)
+pub fn header_action_spans(w: u16, profile_name: Option<&str>) -> Vec<HeaderSpan> {
+    header_cluster(w, profile_name)
+        .into_iter()
+        .map(|i| i.span)
+        .collect()
+}
+
+/// The header action under column `col`, if any.
+#[must_use]
+pub fn header_action_at(w: u16, profile_name: Option<&str>, col: u16) -> Option<HeaderAction> {
+    header_cluster(w, profile_name)
+        .into_iter()
+        .find(|i| col >= i.span.start && col < i.span.end)
+        .map(|i| i.span.action)
 }
 
 /// Draw the header bar into `area`'s first row: mark, version, health dot,
@@ -218,52 +243,49 @@ pub fn draw_header(vm: &ViewModel, theme: Theme, unicode: bool, frame: &mut Fram
         theme.health(vm.health).with_bg(theme.surface_bg()),
     );
 
-    // The identity button (ADR-0037): `⦿ name` after the health dot, drawn on
-    // the SAME span — and the same width-budgeted label — the hit-test
-    // resolves. Press-flash on click; a steady active wash while the profile
-    // menu is open (the panel-editor pattern).
-    if let Some((start, end, label)) =
-        profile_button(&vm.version, vm.profile_name.as_deref(), area.w)
-    {
-        let target = crate::hit::Target::HeaderProfile;
-        let active = vm.mode == crate::input::Mode::ProfileMenu;
-        let bg = crate::chrome::press_flash_bg(theme, vm.button_flash(&target))
-            .or_else(|| active.then_some(crate::theme::SELECT_BG))
-            .unwrap_or(theme.surface_bg());
-        let gx = area.x + start;
-        frame.set(
-            gx,
-            y,
-            Icon::Profile.glyph(unicode),
-            theme.key_hint().with_bg(bg),
-        );
-        frame.put_str(gx + 1, y, &format!(" {label}"), theme.dim().with_bg(bg));
-        let _ = end;
-    }
-
-    // Right cluster: the header actions.
-    let spans = header_action_spans(area.w);
-    for span in &spans {
-        let Some((key, label, _)) = HEADER_ITEMS.iter().find(|(_, _, a)| *a == span.action) else {
-            continue;
-        };
-        // A press flashes the action's chip toward the accent (ADR-0028); at
+    // Right cluster (ADR-0044): the actions plus the identity item, drawn on
+    // the exact spans the row-0 hit-test resolves — one solver for pixels and
+    // targets, including the identity name's width-dependent shrink.
+    for item in header_cluster(area.w, vm.profile_name.as_deref()) {
+        // A press flashes the item's chip toward the accent (ADR-0028); at
         // rest it keeps the header's raised-surface fill.
-        let target = match span.action {
+        let target = match item.span.action {
             HeaderAction::Help => crate::hit::Target::HeaderHelp,
+            HeaderAction::Profile => crate::hit::Target::HeaderProfile,
             HeaderAction::Palette => crate::hit::Target::HeaderPalette,
             HeaderAction::Editor => crate::hit::Target::HeaderEditor,
             HeaderAction::Quit => crate::hit::Target::HeaderQuit,
         };
-        // The panel-editor toggle reads active while the mode is on — a steady
-        // accent wash, distinct from the transient press flash.
-        let active =
-            span.action == HeaderAction::Editor && vm.mode == crate::input::Mode::PanelEditor;
+        // The mode-owning toggles read active while their mode is on — a
+        // steady accent wash, distinct from the transient press flash.
+        let active = (item.span.action == HeaderAction::Editor
+            && vm.mode == crate::input::Mode::PanelEditor)
+            || (item.span.action == HeaderAction::Profile
+                && vm.mode == crate::input::Mode::ProfileMenu);
         let bg = crate::chrome::press_flash_bg(theme, vm.button_flash(&target))
             .or_else(|| active.then_some(crate::theme::SELECT_BG))
             .unwrap_or(theme.surface_bg());
-        let kx = frame.put_str(area.x + span.start, y, key, theme.key_hint().with_bg(bg));
-        frame.put_str(kx, y, &format!(" {label}"), theme.dim().with_bg(bg));
+        let kx = frame.put_str(
+            area.x + item.span.start,
+            y,
+            item.key,
+            theme.key_hint().with_bg(bg),
+        );
+        match &item.label {
+            HeaderLabel::Static(label) => {
+                frame.put_str(kx, y, &format!(" {label}"), theme.dim().with_bg(bg));
+            }
+            HeaderLabel::Profile(name) => {
+                let gx = frame.put_str(kx, y, " ", theme.dim().with_bg(bg));
+                frame.set(
+                    gx,
+                    y,
+                    Icon::Profile.glyph(unicode),
+                    theme.key_hint().with_bg(bg),
+                );
+                frame.put_str(gx + 1, y, &format!(" {name}"), theme.dim().with_bg(bg));
+            }
+        }
     }
 }
 
@@ -341,7 +363,7 @@ mod tests {
         let mut f = Frame::new(Size::new(80, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
-        for span in header_action_spans(80) {
+        for span in header_action_spans(80, None) {
             let (key, _, _) = HEADER_ITEMS
                 .iter()
                 .find(|(_, _, a)| *a == span.action)
@@ -364,7 +386,7 @@ mod tests {
         let mut f = Frame::new(Size::new(80, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
-        let spans = header_action_spans(80);
+        let spans = header_action_spans(80, None);
         let palette = spans
             .iter()
             .find(|s| s.action == HeaderAction::Palette)
@@ -388,18 +410,48 @@ mod tests {
 
     #[test]
     fn header_action_at_resolves_and_misses() {
-        let spans = header_action_spans(80);
-        assert_eq!(spans.len(), 4);
+        let spans = header_action_spans(80, None);
+        assert_eq!(spans.len(), 4, "unwired: the four static actions");
         for span in &spans {
-            assert_eq!(header_action_at(80, span.start), Some(span.action));
-            assert_eq!(header_action_at(80, span.end - 1), Some(span.action));
+            assert_eq!(header_action_at(80, None, span.start), Some(span.action));
+            assert_eq!(header_action_at(80, None, span.end - 1), Some(span.action));
             // One past a span is a gap (or the margin) — never a target.
-            assert_eq!(header_action_at(80, span.end), None);
+            assert_eq!(header_action_at(80, None, span.end), None);
         }
-        assert_eq!(header_action_at(80, 0), None, "the mark is not a target");
+        assert_eq!(
+            header_action_at(80, None, 0),
+            None,
+            "the mark is not a target"
+        );
         // Too narrow: the cluster clips away whole; nothing is clickable.
-        assert!(header_action_spans(30).is_empty());
-        assert_eq!(header_action_at(30, 15), None);
+        assert!(header_action_spans(30, None).is_empty());
+        assert_eq!(header_action_at(30, None, 15), None);
+        // Wired: five items, the identity immediately before Palette
+        // (ADR-0044 §1).
+        let spans = header_action_spans(90, Some("work"));
+        assert_eq!(spans.len(), 5);
+        assert_eq!(
+            spans.iter().map(|s| s.action).collect::<Vec<_>>(),
+            vec![
+                HeaderAction::Help,
+                HeaderAction::Profile,
+                HeaderAction::Palette,
+                HeaderAction::Editor,
+                HeaderAction::Quit
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unwired_cluster_keeps_the_four_item_geometry() {
+        // With no profile the cluster is byte-identical to its pre-ADR-0044
+        // four-item form: same positions, same clip threshold — so the
+        // unprofiled goldens never re-cut.
+        let spans = header_action_spans(80, None);
+        assert_eq!(spans.first().map(|s| s.start), Some(38), "right-aligned");
+        assert_eq!(spans.last().map(|s| s.end), Some(79), "one-cell margin");
+        assert!(header_action_spans(60, None).is_empty());
+        assert_eq!(header_action_spans(61, None).len(), 4);
     }
 
     /// A snapshot with the profile plane wired: one active profile named `name`.
@@ -426,43 +478,48 @@ mod tests {
         s.snapshot()
     }
 
+    /// The identity item's span at width `w`, if the ladder kept it.
+    fn identity_span(w: u16, name: &str) -> Option<(u16, u16)> {
+        header_cluster(w, Some(name))
+            .into_iter()
+            .find(|i| i.span.action == HeaderAction::Profile)
+            .map(|i| (i.span.start, i.span.end))
+    }
+
     #[test]
     fn identity_button_draws_exactly_on_its_span() {
-        // ADR-0037 §1: one span function feeds the renderer and the hit-test —
-        // the glyph sits on the span's first cell, the name follows, and every
-        // cell in [start, end) hits while start-1 / end miss.
+        // ADR-0044 §2: one cluster solver feeds the renderer and the hit-test —
+        // the key glyph opens the span, the profile glyph and name follow, and
+        // every cell in [start, end) resolves Profile while the gaps miss.
         let v = vm_with_profile("work", 80, 24);
         let mut f = Frame::new(Size::new(80, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
-        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 80)
-            .expect("the identity button shows on a wide header");
-        assert_eq!(f.get(start, 0).unwrap().ch, Icon::Profile.unicode());
+        let (start, end) = identity_span(80, "work").expect("shows on a wide header");
+        assert_eq!(f.get(start, 0).unwrap().ch, 'p', "the chrome teaches `p`");
+        assert_eq!(f.get(start + 2, 0).unwrap().ch, Icon::Profile.unicode());
         let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
         assert!(
             text.contains("work"),
             "the name renders on the span: {text}"
         );
         for col in start..end {
-            assert!(profile_hit(&v.version, v.profile_name.as_deref(), 80, col));
+            assert_eq!(
+                header_action_at(80, Some("work"), col),
+                Some(HeaderAction::Profile)
+            );
         }
-        assert!(!profile_hit(
-            &v.version,
-            v.profile_name.as_deref(),
-            80,
-            start - 1
-        ));
-        assert!(!profile_hit(&v.version, v.profile_name.as_deref(), 80, end));
+        assert_eq!(header_action_at(80, Some("work"), start - 1), None);
+        assert_eq!(header_action_at(80, Some("work"), end), None);
     }
 
     #[test]
     fn identity_name_truncates_with_an_ellipsis_at_the_budget() {
         let long = "a-very-long-profile-name-indeed";
         let v = vm_with_profile(long, 120, 24);
-        let (start, end) =
-            profile_span(&v.version, v.profile_name.as_deref(), 120).expect("shows when wide");
-        // `⦿ ` + 15 chars + `…` = 18 cells.
-        assert_eq!(end - start, 18, "the span holds the budgeted label");
+        let (start, end) = identity_span(120, long).expect("shows when wide");
+        // `p` + ` ` + `⦿ ` + 15 chars + `…` = 20 cells.
+        assert_eq!(end - start, 20, "the span holds the budgeted label");
         let mut f = Frame::new(Size::new(120, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
@@ -472,12 +529,12 @@ mod tests {
 
     #[test]
     fn identity_clips_away_whole_on_a_narrow_header() {
-        // The W0 shrink rule spends the name first: on a narrow header the
-        // label shrinks to its ellipsis floor instead of hiding…
-        let v = vm_with_profile("work", 30, 24);
-        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 30)
-            .expect("above the floor the button shrinks instead of hiding");
-        let mut f = Frame::new(Size::new(30, 24));
+        // The ladder (ADR-0044 §2) spends the name first: at moderate
+        // narrowness the label shrinks to its ellipsis floor…
+        let v = vm_with_profile("work", 75, 24);
+        let (start, end) =
+            identity_span(75, "work").expect("above the floor the item shrinks instead of hiding");
+        let mut f = Frame::new(Size::new(75, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
         let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
@@ -485,51 +542,54 @@ mod tests {
             text.ends_with('…'),
             "the floor label is an ellipsis: {text}"
         );
-        // …and below the floor the whole span vanishes rather than garbling —
-        // nothing on the row hits (the right cluster's rule).
-        let v = vm_with_profile("work", 27, 24);
-        assert_eq!(
-            profile_span(&v.version, v.profile_name.as_deref(), 27),
-            None
-        );
-        let mut f = Frame::new(Size::new(27, 24));
+        // …narrower, the item drops WHOLE while the four actions stand…
+        let v = vm_with_profile("work", 70, 24);
+        assert_eq!(identity_span(70, "work"), None);
+        let spans = header_action_spans(70, Some("work"));
+        assert_eq!(spans.len(), 4, "the actions survive the identity drop");
+        let mut f = Frame::new(Size::new(70, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
-        let row: String = (0..27u16)
+        let row: String = (0..70u16)
             .map(|x| f.get(x, 0).map_or(' ', |c| c.ch))
             .collect();
         assert!(
             !row.contains(Icon::Profile.unicode()),
             "no partial button: {row}"
         );
-        for col in 0..27u16 {
-            assert!(!profile_hit(&v.version, v.profile_name.as_deref(), 27, col));
+        for col in 0..70u16 {
+            assert_ne!(
+                header_action_at(70, Some("work"), col),
+                Some(HeaderAction::Profile)
+            );
         }
+        // …and at the narrowest the whole cluster clips; nothing hits.
+        assert!(header_action_spans(50, Some("work")).is_empty());
     }
 
     #[test]
     fn identity_name_shrinks_before_the_button_hides() {
-        // W0 (dogfood 2026-07-15): at widths where the full name would collide
-        // with the action cluster, the label shrinks — the pre-fix rule hid
-        // the whole button here (the silent 62–77 hidden band).
+        // The hidden-band class (W0 dogfood): at widths where the full name
+        // misses the fit, the label shrinks instead of vanishing.
         let v = vm_with_profile("collaboration", 80, 24);
-        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 80)
-            .expect("the shrunk button shows beside the action cluster");
+        let (start, end) =
+            identity_span(80, "collaboration").expect("the shrunk item shows in the cluster");
         let mut f = Frame::new(Size::new(80, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
         let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
         assert!(text.ends_with('…'), "shrunk with an ellipsis: {text}");
-        // The shrunk label and the hit target come from one solver: every
-        // span cell hits, one past it misses.
+        // The shrunk label and the hit target come from one solver.
         for col in start..end {
-            assert!(profile_hit(&v.version, v.profile_name.as_deref(), 80, col));
+            assert_eq!(
+                header_action_at(80, Some("collaboration"), col),
+                Some(HeaderAction::Profile)
+            );
         }
-        assert!(!profile_hit(&v.version, v.profile_name.as_deref(), 80, end));
         // Wider, the same name renders whole again.
-        let v = vm_with_profile("collaboration", 90, 24);
-        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 90).unwrap();
-        let mut f = Frame::new(Size::new(90, 24));
+        let v = vm_with_profile("collaboration", 95, 24);
+        let (start, end) = identity_span(95, "collaboration").unwrap();
+        let mut f = Frame::new(Size::new(95, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
         let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
@@ -537,13 +597,31 @@ mod tests {
     }
 
     #[test]
+    fn identity_visibility_is_monotonic_across_widths() {
+        // ADR-0044 §2's keystone: once the identity is visible at a width it
+        // is visible at every greater width — the property whose absence was
+        // the silent hidden band (62–77 cells pre-W4).
+        for name in ["work", "collaboration", "a-very-long-profile-name-indeed"] {
+            let mut seen = false;
+            for w in 10..=200u16 {
+                let visible = identity_span(w, name).is_some();
+                assert!(
+                    visible || !seen,
+                    "{name}: visible at a narrower width but hidden at {w}"
+                );
+                seen = seen || visible;
+            }
+            assert!(seen, "{name}: the item shows somewhere in the sweep");
+        }
+    }
+
+    #[test]
     fn identity_hides_until_the_profile_plane_is_wired() {
         let v = vm(80, 24); // no profiles set
         assert_eq!(v.profile_name, None);
-        assert_eq!(
-            profile_span(&v.version, v.profile_name.as_deref(), 80),
-            None
-        );
+        assert!(header_cluster(80, None)
+            .iter()
+            .all(|i| i.span.action != HeaderAction::Profile));
     }
 
     #[test]
@@ -551,7 +629,7 @@ mod tests {
         use crate::input::Mode;
         let mut v = vm_with_profile("work", 80, 24);
         v.mode = Mode::ProfileMenu;
-        let (start, _) = profile_span(&v.version, v.profile_name.as_deref(), 80).unwrap();
+        let (start, _) = identity_span(80, "work").unwrap();
         let mut f = Frame::new(Size::new(80, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
@@ -575,8 +653,9 @@ mod tests {
     #[test]
     fn hostile_profile_names_are_sanitised_before_render() {
         // A control-byte name cannot smuggle bytes into the header (story 22).
-        let v = vm_with_profile("wo\x1b[31mrk\x07", 120, 24);
-        let (start, end) = profile_span(&v.version, v.profile_name.as_deref(), 120).unwrap();
+        let hostile = "wo\x1b[31mrk\x07";
+        let v = vm_with_profile(hostile, 120, 24);
+        let (start, end) = identity_span(120, hostile).unwrap();
         let mut f = Frame::new(Size::new(120, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);

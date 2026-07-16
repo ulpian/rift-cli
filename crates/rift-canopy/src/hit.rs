@@ -145,15 +145,15 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
         if vm.overlay.is_some() {
             return None;
         }
-        return match crate::bars::header_action_at(size.w, col) {
+        // The cluster solver (ADR-0044) resolves every row-0 target — the
+        // identity item included — from the SAME spans the renderer draws.
+        return match crate::bars::header_action_at(size.w, vm.profile_name.as_deref(), col) {
             Some(crate::bars::HeaderAction::Help) => Some(Target::HeaderHelp),
+            Some(crate::bars::HeaderAction::Profile) => Some(Target::HeaderProfile),
             Some(crate::bars::HeaderAction::Palette) => Some(Target::HeaderPalette),
             Some(crate::bars::HeaderAction::Editor) => Some(Target::HeaderEditor),
             Some(crate::bars::HeaderAction::Quit) => Some(Target::HeaderQuit),
-            // The identity button (ADR-0037): the SAME span function the
-            // renderer draws with, so pixels equal targets.
-            None => crate::bars::profile_hit(&vm.version, vm.profile_name.as_deref(), size.w, col)
-                .then_some(Target::HeaderProfile),
+            None => None,
         };
     }
     // The body sits one row below the title (mirrors `view::draw`).
@@ -714,7 +714,7 @@ mod tests {
     #[test]
     fn header_actions_resolve_on_row_zero() {
         let v = vm(120, 40);
-        let spans = crate::bars::header_action_spans(120);
+        let spans = crate::bars::header_action_spans(120, None);
         assert_eq!(spans.len(), 4);
         let expect = [
             Target::HeaderHelp,
@@ -736,7 +736,7 @@ mod tests {
         s.app.splash.skip();
         s.app.overlay = Some(crate::dispatch::Overlay::Running { title: "x".into() });
         let v = s.snapshot();
-        let spans = crate::bars::header_action_spans(120);
+        let spans = crate::bars::header_action_spans(120, None);
         assert_eq!(
             hit_test(&v, spans[0].start, 0),
             None,
@@ -774,15 +774,18 @@ mod tests {
     fn identity_button_resolves_on_row_zero_and_goes_inert_under_an_overlay() {
         let mut s = profiled_state(120, 40);
         let v = s.snapshot();
-        let (start, end) =
-            crate::bars::profile_span(&v.version, v.profile_name.as_deref(), 120).unwrap();
-        assert_eq!(hit_test(&v, start, 0), Some(Target::HeaderProfile));
-        assert_eq!(hit_test(&v, end - 1, 0), Some(Target::HeaderProfile));
-        assert_eq!(hit_test(&v, end, 0), None, "one past the span misses");
+        let span = crate::bars::header_cluster(120, v.profile_name.as_deref())
+            .into_iter()
+            .find(|i| i.span.action == crate::bars::HeaderAction::Profile)
+            .map(|i| i.span)
+            .unwrap();
+        assert_eq!(hit_test(&v, span.start, 0), Some(Target::HeaderProfile));
+        assert_eq!(hit_test(&v, span.end - 1, 0), Some(Target::HeaderProfile));
+        assert_eq!(hit_test(&v, span.end, 0), None, "one past the span misses");
         // Inert while an overlay owns the surface (ADR-0037 §1).
         s.app.overlay = Some(crate::dispatch::Overlay::Running { title: "x".into() });
         let v = s.snapshot();
-        assert_eq!(hit_test(&v, start, 0), None);
+        assert_eq!(hit_test(&v, span.start, 0), None);
     }
 
     #[test]
