@@ -481,7 +481,10 @@ mod tests {
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
         let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
-        assert!(text.ends_with('…'), "the floor label is an ellipsis: {text}");
+        assert!(
+            text.ends_with('…'),
+            "the floor label is an ellipsis: {text}"
+        );
         // …and below the floor the whole span vanishes rather than garbling —
         // nothing on the row hits (the right cluster's rule).
         let v = vm_with_profile("work", 27, 24);

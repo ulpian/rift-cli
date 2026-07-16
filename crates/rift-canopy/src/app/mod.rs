@@ -457,6 +457,7 @@ fn persist_status(op: &PersistOp) -> String {
             }
         }
         PersistOp::CreateProfile { name } => format!("created profile {name}"),
+        PersistOp::DuplicateProfile { name, .. } => format!("duplicated to {name}"),
         PersistOp::RenameProfile { name, .. } => format!("renamed profile to {name}"),
         PersistOp::RemoveProfile { .. } => "deleted profile".to_string(),
         PersistOp::SelectProfile { .. } => "switched profile".to_string(),

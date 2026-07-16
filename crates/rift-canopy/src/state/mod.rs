@@ -259,6 +259,16 @@ pub enum PersistOp {
         /// The validated display name (trimmed, non-empty, ≤ 24, unique).
         name: String,
     },
+    /// Duplicate a profile (ADR-0045 §1): a full clone of the source's
+    /// effective state at clone time — membership, per-project arrangements,
+    /// and the `Some` theme slots — as explicit events under a new name.
+    /// Never writes `selected` (cloning is not switching).
+    DuplicateProfile {
+        /// The stable id of the profile to clone.
+        source: String,
+        /// The validated new display name (trimmed, non-empty, ≤ 24, unique).
+        name: String,
+    },
     /// Rename a profile (a superseding `renamed` event).
     RenameProfile {
         /// The stable id of the profile to rename.
@@ -3419,6 +3429,10 @@ mod tests {
             PersistOp::CreateProfile {
                 name: String::new(),
             },
+            PersistOp::DuplicateProfile {
+                source: String::new(),
+                name: String::new(),
+            },
             PersistOp::RenameProfile {
                 profile: String::new(),
                 name: String::new(),
@@ -3457,6 +3471,7 @@ mod tests {
                 | PersistOp::SetToggle { .. }
                 | PersistOp::SetLayout { .. }
                 | PersistOp::CreateProfile { .. }
+                | PersistOp::DuplicateProfile { .. }
                 | PersistOp::RenameProfile { .. }
                 | PersistOp::RemoveProfile { .. }
                 | PersistOp::SelectProfile { .. }

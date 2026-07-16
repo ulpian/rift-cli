@@ -149,6 +149,9 @@ impl CanopyStore {
             PersistOp::CreateProfile { name } => {
                 self.create_profile(name, now_ms)?;
             }
+            PersistOp::DuplicateProfile { source, name } => {
+                self.duplicate_profile(source, name, now_ms)?;
+            }
             PersistOp::RenameProfile { profile, name } => {
                 self.rename_profile(profile, name, now_ms)?;
             }
@@ -570,6 +573,50 @@ impl CanopyStore {
         if let Some(source) = source {
             for e in self.effective_entries(&source, &pevents)? {
                 self.include_in_profile(&profile_id, &e.project_id, Some(e.order_key), now_ms)?;
+            }
+        }
+        Ok(profile_id)
+    }
+
+    /// Duplicate a live profile under a new name — a **full clone of its
+    /// effective state at clone time** (ADR-0045 §1): the source's effective
+    /// project list as explicit membership `added` events in source order,
+    /// each member's effective arrangement (read through
+    /// [`Self::profile_layout`], so a clone of the default profile captures
+    /// its legacy-fold fallback), and each theme slot the source's fold
+    /// resolves to `Some` — absence already means default, so no NULL resets
+    /// are written. **Never writes `selected`**: cloning is not switching.
+    /// Returns the new profile's id.
+    ///
+    /// # Errors
+    /// [`RiftError::Validity`] for an unknown/removed source or a name that
+    /// breaks the rules (trimmed, non-empty, ≤ 24 chars, unique among live).
+    pub fn duplicate_profile(&self, source: &str, name: &str, now_ms: i64) -> Result<String> {
+        let pevents = self.profile_events()?;
+        let live = current_profiles(&pevents);
+        if !live.iter().any(|p| p.profile_id == source) {
+            return Err(RiftError::validity(format!("unknown profile {source:?}")));
+        }
+        let Some(name) = normalize_profile_name(name, &live, None) else {
+            return Err(RiftError::validity(format!(
+                "invalid or duplicate profile name {name:?}"
+            )));
+        };
+        let entries = self.effective_entries(source, &pevents)?;
+        let profile_id = self.ulids.next_ulid().to_hex();
+        self.append_profile(&profile_id, &ProfileRow::created(&name, now_ms))?;
+        for e in &entries {
+            self.include_in_profile(&profile_id, &e.project_id, Some(e.order_key), now_ms)?;
+        }
+        for e in &entries {
+            if let Some(m) = self.profile_layout(source, &e.path)? {
+                self.set_profile_layout(&profile_id, &e.path, Some(&m.encode()), now_ms)?;
+            }
+        }
+        let overrides = self.profile_theme(source)?;
+        for slot in rift_canopy::ThemeSlot::ALL {
+            if let Some(hex) = overrides.get(slot).and_then(rift_canopy::colour_to_hex) {
+                self.set_profile_theme(&profile_id, slot.key(), Some(&hex), now_ms)?;
             }
         }
         Ok(profile_id)
@@ -1792,6 +1839,191 @@ mod tests {
             !view.iter().any(|p| p.path == c),
             "membership diverges after creation"
         );
+    }
+
+    #[test]
+    fn duplicate_clones_membership_layouts_and_theme_in_full() {
+        use rift_canopy::LayoutModel;
+        let (dir, cs) = store();
+        seed(&cs, 0);
+        let a = make_dir(dir.path(), "a");
+        let b = make_dir(dir.path(), "b");
+        cs.apply(&PersistOp::AddProject { path: a.clone() }, 1)
+            .unwrap();
+        cs.apply(&PersistOp::AddProject { path: b.clone() }, 2)
+            .unwrap();
+        let lab = cs.create_profile("lab", 3).unwrap();
+        cs.apply(
+            &PersistOp::SelectProfile {
+                profile: lab.clone(),
+            },
+            4,
+        )
+        .unwrap();
+        // The source gets an arrangement on `a` and two theme slots.
+        let mut m = LayoutModel::default();
+        m.columns.swap(0, 1);
+        cs.apply(
+            &PersistOp::SetLayout {
+                profile: lab.clone(),
+                path: a.clone(),
+                layout: Some(m.encode()),
+            },
+            5,
+        )
+        .unwrap();
+        cs.set_profile_theme(&lab, "background", Some("#112233"), 6)
+            .unwrap();
+        cs.set_profile_theme(&lab, "text", Some("#aabbcc"), 7)
+            .unwrap();
+
+        let copy = cs.duplicate_profile(&lab, "lab-copy", 8).unwrap();
+        // Membership: the source's effective list, in order.
+        let view = cs.profile_projects(&copy).unwrap();
+        assert_eq!(
+            view.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+            vec![a.as_str(), b.as_str()],
+            "the clone carries the source's membership in order"
+        );
+        // Arrangements: effective equality per member (ADR-0045 §1).
+        assert_eq!(
+            cs.profile_layout(&copy, &a).unwrap(),
+            Some(m),
+            "the clone carries the source's arrangement"
+        );
+        assert_eq!(cs.profile_layout(&copy, &b).unwrap(), None);
+        // Theme: fold-equal to the source; unset slots stay unset.
+        assert_eq!(
+            cs.profile_theme(&copy).unwrap(),
+            cs.profile_theme(&lab).unwrap()
+        );
+        assert_eq!(cs.profile_theme(&copy).unwrap().border, None);
+        // A duplicate never writes `selected`: the active profile is unmoved.
+        let (active, _) = cs.profiles_view().unwrap();
+        assert_eq!(
+            active.as_deref(),
+            Some(lab.as_str()),
+            "cloning is not switching"
+        );
+    }
+
+    #[test]
+    fn duplicate_of_the_default_freezes_the_catalogue_and_legacy_layout_fallback() {
+        use rift_canopy::LayoutModel;
+        let (dir, cs) = store();
+        let active = seed(&cs, 0);
+        let a = make_dir(dir.path(), "a");
+        cs.apply(&PersistOp::AddProject { path: a.clone() }, 1)
+            .unwrap();
+        let pid = cs.project_id_for(&a).unwrap().unwrap();
+        // A pre-upgrade (M5.9) arrangement sits in the frozen legacy table —
+        // the default profile's effective layout comes from the fallback fold.
+        let mut m = LayoutModel::default();
+        m.columns.swap(0, 1);
+        let cols = vec![
+            "event_id",
+            "project_id",
+            "layout",
+            "supersedes",
+            "created_at",
+        ];
+        let values = [
+            Value::text("legacy-1"),
+            Value::text(&pid),
+            Value::text(m.encode()),
+            Value::Null,
+            Value::Int(0),
+        ];
+        runtime()
+            .unwrap()
+            .block_on(cs.store.insert("canopy_layout_event", &cols, &values))
+            .unwrap();
+
+        let copy = cs.duplicate_profile(&active, "frozen", 2).unwrap();
+        // The clone materialised the default's implicit catalogue view…
+        let view = cs.profile_projects(&copy).unwrap();
+        assert_eq!(
+            view.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+            vec![a.as_str()]
+        );
+        // …captured the legacy fold as an explicit profile-scoped row…
+        assert_eq!(
+            cs.profile_layout(&copy, &a).unwrap(),
+            Some(m),
+            "the clone owns the default's effective (legacy-fold) arrangement"
+        );
+        // …and is frozen at clone time: a later registration joins the default
+        // (catalogue view) but never the clone.
+        let b = make_dir(dir.path(), "b");
+        cs.apply(&PersistOp::AddProject { path: b.clone() }, 3)
+            .unwrap();
+        assert!(cs
+            .profile_projects(&active)
+            .unwrap()
+            .iter()
+            .any(|p| p.path == b));
+        assert!(!cs
+            .profile_projects(&copy)
+            .unwrap()
+            .iter()
+            .any(|p| p.path == b));
+    }
+
+    #[test]
+    fn duplicate_refuses_invalid_duplicate_names_and_dead_sources() {
+        let (_dir, cs) = store();
+        let active = seed(&cs, 0);
+        // Name rules hold: empty, over-long, and colliding names refuse.
+        assert!(cs.duplicate_profile(&active, "   ", 1).is_err());
+        assert!(cs.duplicate_profile(&active, &"x".repeat(25), 2).is_err());
+        assert!(cs
+            .duplicate_profile(&active, DEFAULT_PROFILE_NAME, 3)
+            .is_err());
+        // Unknown and removed sources refuse.
+        assert!(cs.duplicate_profile("ghost", "copy", 4).is_err());
+        let lab = cs.create_profile("lab", 5).unwrap();
+        cs.apply(
+            &PersistOp::RemoveProfile {
+                profile: lab.clone(),
+            },
+            6,
+        )
+        .unwrap();
+        assert!(cs.duplicate_profile(&lab, "copy", 7).is_err());
+    }
+
+    #[test]
+    fn duplicate_and_source_diverge_freely_after_the_clone() {
+        let (dir, cs) = store();
+        seed(&cs, 0);
+        let a = make_dir(dir.path(), "a");
+        cs.apply(&PersistOp::AddProject { path: a.clone() }, 1)
+            .unwrap();
+        let lab = cs.create_profile("lab", 2).unwrap();
+        let copy = cs.duplicate_profile(&lab, "lab-copy", 3).unwrap();
+        // Source edits after the clone touch the source alone — and vice versa.
+        cs.apply(
+            &PersistOp::RemoveProfileProject {
+                profile: lab.clone(),
+                path: a.clone(),
+            },
+            4,
+        )
+        .unwrap();
+        assert!(!cs
+            .profile_projects(&lab)
+            .unwrap()
+            .iter()
+            .any(|p| p.path == a));
+        assert!(cs
+            .profile_projects(&copy)
+            .unwrap()
+            .iter()
+            .any(|p| p.path == a));
+        cs.set_profile_theme(&copy, "graph", Some("#00ff00"), 5)
+            .unwrap();
+        assert_eq!(cs.profile_theme(&lab).unwrap().graph, None);
+        assert!(cs.profile_theme(&copy).unwrap().graph.is_some());
     }
 
     #[test]
