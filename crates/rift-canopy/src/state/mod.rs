@@ -173,6 +173,10 @@ pub struct Effects {
     /// on entry and after every membership op, so the editor's rows always
     /// re-read the store.
     pub load_membership: Option<String>,
+    /// A NON-active profile whose theme overrides the loop should load for
+    /// the colour picker's swatches (ADR-0045 §5): set when the picker opens
+    /// for a profile whose overrides the state can't derive purely.
+    pub load_picker_theme: Option<String>,
 }
 
 impl Effects {
@@ -186,6 +190,7 @@ impl Effects {
             && self.load_layout.is_none()
             && !self.reload_profiles
             && self.load_membership.is_none()
+            && self.load_picker_theme.is_none()
     }
 }
 
@@ -805,7 +810,7 @@ impl AppState {
             startup_profile: self.app.startup_profile.clone(),
             profile_menu: self.app.profile_menu.clone(),
             theme: self.theme,
-            colour_picker: self.app.colour_picker,
+            colour_picker: self.app.colour_picker.clone(),
         }
     }
 }
@@ -1381,6 +1386,14 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
                 }
             }
         }
+        // The picker's close `[x]` (ADR-0046): back to the profile menu it
+        // opened from — the menu stage underneath is intact.
+        Target::PickerClose => {
+            s.dirty = true;
+            s.app.mode = Mode::ProfileMenu;
+            s.app.colour_picker.reset();
+            Flow::Continue(Effects::default())
+        }
         // A grip press (ADR-0034) begins a unit drag: pick the unit up and arm the
         // drag, which `drag_update`/`drop_drag` carry to the release. The keyboard
         // (pick/move/drop) is the equivalent path.
@@ -1464,6 +1477,7 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             | Target::MemberRemove
             | Target::MemberAddOpen
             | Target::PickerRow(_)
+            | Target::PickerClose
             | Target::WizardAdd
             | Target::RailAdd
             | Target::RailReorderUp
@@ -1528,6 +1542,7 @@ fn fold_action(action: Action) -> Flow {
         | Action::MemberRemove
         | Action::MemberReorder(_)
         | Action::MemberAdd
+        | Action::OpenColours(_)
         | Action::SetThemeSlot { .. } => Flow::Continue(Effects::default()),
         Action::AddProject(path) => Flow::Continue(Effects {
             persist: vec![PersistOp::AddProject { path }],
@@ -1888,6 +1903,20 @@ fn profile_or_fold_action(s: &mut AppState, action: Action) -> Flow {
         // A picker selection applies LIVE in the same frame (ADR-0039): the
         // snapshot re-themes here; the superseding event persists.
         Action::SetThemeSlot { slot, colour } => apply_theme_slot(s, slot, colour),
+        // The picker opened for a profile (ADR-0045 §5): seed its swatches —
+        // purely when the target is active; through the seam otherwise.
+        Action::OpenColours(profile) => {
+            s.dirty = true;
+            if profile == s.app.active_profile {
+                s.app.colour_picker.target_overrides = s.theme().overrides();
+                Flow::Continue(Effects::default())
+            } else {
+                Flow::Continue(Effects {
+                    load_picker_theme: Some(profile),
+                    ..Effects::default()
+                })
+            }
+        }
         // The members editor (M512-06): entry loads the lists; every op is a
         // superseding membership insert plus a re-read of the editor's rows.
         Action::LoadMembers(profile) => Flow::Continue(Effects {
@@ -1986,25 +2015,36 @@ fn switch_profile_flow(s: &mut AppState) -> Flow {
     profile_persist_flow(PersistOp::SelectProfile { profile: target })
 }
 
-/// Apply one theme-slot selection (ADR-0039 §3): re-theme the running
-/// dashboard NOW — the same frame; the dashboard is the preview — and append
-/// the superseding per-(profile, slot) event through the persist seam. No
-/// profile wired ⇒ the preview alone (nothing durable to scope it to).
+/// Apply one theme-slot selection (ADR-0039 §3, targeted per ADR-0045 §5):
+/// the event persists to the picker's TARGET profile always; the running
+/// dashboard re-themes in the same frame **only when the target is the active
+/// profile** — editing a non-active profile's colours never disturbs the
+/// shown view. The picker's own swatches update purely either way, so its
+/// slot stage tells the truth without a reload. No profile wired ⇒ the
+/// preview alone (nothing durable to scope it to).
 fn apply_theme_slot(
     s: &mut AppState,
     slot: crate::theme::ThemeSlot,
     colour: Option<crate::render::frame::Color>,
 ) -> Flow {
-    let mut overrides = s.theme().overrides();
-    overrides.set(slot, colour);
-    s.set_theme(overrides);
+    let target = if s.app.colour_picker.target_profile.is_empty() {
+        s.app.active_profile.clone()
+    } else {
+        s.app.colour_picker.target_profile.clone()
+    };
+    s.app.colour_picker.target_overrides.set(slot, colour);
+    if target == s.app.active_profile {
+        let mut overrides = s.theme().overrides();
+        overrides.set(slot, colour);
+        s.set_theme(overrides);
+    }
     s.dirty = true;
-    if s.app.active_profile.is_empty() {
+    if target.is_empty() {
         return Flow::Continue(Effects::default());
     }
     Flow::Continue(Effects {
         persist: vec![PersistOp::SetProfileTheme {
-            profile: s.app.active_profile.clone(),
+            profile: target,
             slot: slot.key().to_string(),
             colour: colour.and_then(crate::theme::colour_to_hex),
         }],
@@ -3310,6 +3350,76 @@ mod tests {
                 path: "/r/free".into()
             }]
         );
+    }
+
+    #[test]
+    fn picker_for_a_non_active_profile_persists_without_retheming() {
+        use crate::profile_menu::SettingsRow;
+        use crate::theme::{ThemeSlot, PRESETS};
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let before = s.theme();
+        // Open the NON-active pf1's settings → Colours (ADR-0045 §5).
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j')));
+        update(&mut s, Event::Key(CanopyKey::Char('s')));
+        let colours_row = SettingsRow::ALL
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Colours))
+            .unwrap();
+        for _ in 0..colours_row {
+            update(&mut s, Event::Key(CanopyKey::Char('j')));
+        }
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.load_picker_theme.as_deref(),
+            Some("pf1"),
+            "a non-active target's swatches load through the seam"
+        );
+        assert_eq!(s.app.colour_picker.target_profile, "pf1");
+        // Apply a preset: the event carries pf1; the LIVE theme is untouched;
+        // the picker's own swatches update purely.
+        update(&mut s, Event::Key(CanopyKey::Enter)); // background's presets
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter))); // red
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SetProfileTheme {
+                profile: "pf1".into(),
+                slot: "background".into(),
+                colour: crate::theme::colour_to_hex(PRESETS[0].1),
+            }]
+        );
+        assert_eq!(
+            s.theme(),
+            before,
+            "editing a non-active profile never re-themes the shown view"
+        );
+        assert_eq!(
+            s.app
+                .colour_picker
+                .target_overrides
+                .get(ThemeSlot::Background),
+            Some(PRESETS[0].1),
+            "the picker's swatches stay honest without a reload"
+        );
+    }
+
+    #[test]
+    fn picker_close_x_returns_to_the_menu() {
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('s')));
+        update(&mut s, Event::Key(CanopyKey::Char('j'))); // → Colours
+        let _ = update(&mut s, Event::Key(CanopyKey::Enter));
+        assert_eq!(s.app.mode, Mode::ColourPicker);
+        // The `[x]` closes the PICKER — back to the menu it opened from,
+        // its settings stage intact (ADR-0046 §2).
+        let e = effects_of(apply_click(&mut s, Target::PickerClose));
+        assert!(e.is_empty());
+        assert_eq!(s.app.mode, Mode::ProfileMenu);
+        assert!(matches!(
+            s.app.profile_menu.stage,
+            crate::profile_menu::MenuStage::Settings { .. }
+        ));
     }
 
     #[test]

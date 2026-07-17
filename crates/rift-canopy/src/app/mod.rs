@@ -199,6 +199,7 @@ where
                     let actions = std::mem::take(&mut effects.feature_actions);
                     let load = effects.load_layout.take();
                     let load_members = effects.load_membership.take();
+                    let load_picker = effects.load_picker_theme.take();
                     let reload_profiles = effects.reload_profiles;
                     // A pinned launch defers its `selected` write to the
                     // session's FIRST persist batch (ADR-0045 §4): prepending
@@ -250,6 +251,13 @@ where
                         let members = loader.projects(&profile)?;
                         let catalogue = loader.catalogue()?;
                         state.app.set_membership_lists(members, catalogue);
+                        state.dirty = true;
+                    }
+                    // A non-active profile's picker swatches load through the
+                    // seam (ADR-0045 §5) — the active profile seeds purely.
+                    if let Some(profile) = load_picker {
+                        let overrides = loader.theme(&profile)?;
+                        state.app.colour_picker.target_overrides = overrides;
                         state.dirty = true;
                     }
                     for action in actions {

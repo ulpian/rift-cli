@@ -748,11 +748,28 @@ fn draw_colour_picker(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
             frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
         }
     }
-    let title = match vm.colour_picker.stage {
-        PickerStage::Slots => "colours".to_string(),
-        PickerStage::Presets => format!("colours · {}", vm.colour_picker.slot().key()),
+    // The title carries the TARGET profile (ADR-0045 §5) — the page edits
+    // that profile, active or not.
+    let target_name = vm
+        .profiles
+        .iter()
+        .find(|p| p.profile_id == vm.colour_picker.target_profile)
+        .map(|p| sanitize_for_terminal(&p.name));
+    let title = match (vm.colour_picker.stage, target_name) {
+        (PickerStage::Slots, Some(n)) => format!("colours · {n}"),
+        (PickerStage::Slots, None) => "colours".to_string(),
+        (PickerStage::Presets, Some(n)) => {
+            format!("colours · {n} · {}", vm.colour_picker.slot().key())
+        }
+        (PickerStage::Presets, None) => format!("colours · {}", vm.colour_picker.slot().key()),
     };
     let inner = frame.border(rect, &title, ACCENT);
+    // The close affordance (ADR-0046 §2): the picker's own close — back to
+    // the profile menu whence it came, the pointer twin of Esc-to-the-end.
+    if let Some(cr) = modal_close_rect(rect) {
+        let style = menu_close_style(vm, &crate::hit::Target::PickerClose);
+        frame.put_str(cr.x, cr.y, "[x]", style);
+    }
     let swatch = if unicode { "██" } else { "##" };
 
     match vm.colour_picker.stage {
@@ -774,9 +791,10 @@ fn draw_colour_picker(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
                     }
                 }
                 let x = frame.put_str(rr.x, rr.y, &format!(" {:<12}", slot.key()), style);
-                // The slot's current value: a swatch in its override, or the
-                // word `default` — honest about what the slot holds today.
-                match vm.theme.overrides().get(*slot) {
+                // The slot's current value — the TARGET's overrides, not the
+                // live theme (ADR-0045 §5): a non-active profile's page tells
+                // the truth. A swatch in its override, or the word `default`.
+                match vm.colour_picker.target_overrides.get(*slot) {
                     Some(c) => {
                         frame.put_str(x, rr.y, swatch, Style::fg(c).with_bg(style.bg));
                     }
@@ -1837,14 +1855,18 @@ mod tests {
 
     #[test]
     fn picker_slot_stage_shows_current_values() {
+        // Target-aware (ADR-0045 §5): the slot stage reads the TARGET's
+        // overrides — here a profile whose border is overridden — not the
+        // live theme, so a non-active page tells the truth.
         let mut state = profiled_state();
         let mut overrides = crate::theme::ThemeOverrides::NONE;
         overrides.set(
             crate::theme::ThemeSlot::Border,
             Some(crate::theme::PRESETS[1].1),
         );
-        state.set_theme(overrides);
         state.app.mode = crate::input::Mode::ColourPicker;
+        state.app.colour_picker.target_profile = "pf0".into();
+        state.app.colour_picker.target_overrides = overrides;
         let view_model = state.snapshot();
         let mut frame = Frame::new(view_model.size);
         let mut backend = crate::render::AsciiBackend::new(crate::render::Capabilities::UNICODE);

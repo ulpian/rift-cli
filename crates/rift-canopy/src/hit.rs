@@ -115,6 +115,9 @@ pub enum Target {
     /// A row in the open colour picker (ADR-0039): a click selects it through
     /// the shared modal hit-test, exactly like `Enter` on that row.
     PickerRow(usize),
+    /// The colour picker's close `[x]` (ADR-0046): closes the picker back to
+    /// the profile menu — the pointer twin of Esc-to-the-end.
+    PickerClose,
     /// A unit's grip in panel-editor mode (ADR-0034): a press picks it up / drops
     /// it. Carries the unit's `(column, unit)` cursor so the drop knows the source.
     GripBar(crate::editor::Cursor),
@@ -155,6 +158,7 @@ impl Target {
                 | Target::MemberDown
                 | Target::MemberRemove
                 | Target::MemberAddOpen
+                | Target::PickerClose
         )
     }
 }
@@ -392,6 +396,12 @@ fn hit_colour_picker(
     let rect = crate::view::modal_rect(size);
     if rect.w < 8 || rect.h < 3 || !contains(rect, col, row) {
         return None;
+    }
+    // The close `[x]` (ADR-0046 §2) — the picker's own close.
+    if let Some(cr) = crate::view::modal_close_rect(rect) {
+        if contains(cr, col, row) {
+            return Some(Target::PickerClose);
+        }
     }
     for i in 0..crate::view::colour_picker_rows(vm.colour_picker.stage) {
         let rr = crate::view::colour_picker_row_rect(rect, i);

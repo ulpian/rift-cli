@@ -172,6 +172,10 @@ pub enum Action {
     MemberReorder(bool),
     /// Include the add-stage candidate under the cursor in the edited profile.
     MemberAdd,
+    /// The picker opened for a profile (ADR-0045 §5): the state layer seeds
+    /// the target's overrides — purely from the live theme when the target is
+    /// active, else through the loader seam.
+    OpenColours(String),
     /// Apply one theme-slot selection for the active profile (ADR-0039):
     /// `None` colour is the reset row. The state layer re-themes the running
     /// dashboard in the same frame and appends the superseding event.
@@ -432,11 +436,12 @@ pub(crate) fn activate_settings_row(
             Action::None
         }
         SettingsRow::Colours => {
-            // The picker returns to this settings page on Esc — the menu
-            // stage stays intact underneath (ADR-0039, targeted by M512-07).
+            // The picker binds to THIS page's profile (ADR-0045 §5) and
+            // returns here on Esc — the menu stage stays intact underneath.
             app.mode = Mode::ColourPicker;
             app.colour_picker.reset();
-            Action::None
+            app.colour_picker.target_profile = profile.to_string();
+            Action::OpenColours(profile.to_string())
         }
         SettingsRow::Projects => {
             // The members editor (M512-06): the stage opens now; the lists

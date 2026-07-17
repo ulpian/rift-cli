@@ -23,7 +23,7 @@ pub const RESET_ROW: usize = PRESETS.len();
 
 /// The colour picker's transient state — only meaningful while
 /// `mode == Mode::ColourPicker`; resting (`Default`) otherwise.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ColourPickerState {
     /// The current stage.
     pub stage: PickerStage,
@@ -31,6 +31,13 @@ pub struct ColourPickerState {
     pub slot_cursor: usize,
     /// The highlighted preset row (`0..PRESETS.len()`, or [`RESET_ROW`]).
     pub preset_cursor: usize,
+    /// The profile the picker edits (ADR-0045 §5) — set on entry from its
+    /// settings page. Empty only in the resting state.
+    pub target_profile: String,
+    /// The TARGET's current overrides — the slot stage's swatches read these,
+    /// not the live theme, so a non-active profile's page tells the truth
+    /// (loaded through the seam on entry; updated purely on every apply).
+    pub target_overrides: crate::theme::ThemeOverrides,
 }
 
 impl ColourPickerState {
