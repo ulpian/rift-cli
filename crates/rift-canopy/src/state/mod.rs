@@ -168,6 +168,11 @@ pub struct Effects {
     /// names, active id, membership, selection, and arrangement all reload
     /// through the injected profile loader. The reducer only raises the flag.
     pub reload_profiles: bool,
+    /// A profile whose member view + the catalogue the loop should load
+    /// through the loader seam (the members editor — ADR-0044/M512-06): set
+    /// on entry and after every membership op, so the editor's rows always
+    /// re-read the store.
+    pub load_membership: Option<String>,
 }
 
 impl Effects {
@@ -180,6 +185,7 @@ impl Effects {
             && self.feature_actions.is_empty()
             && self.load_layout.is_none()
             && !self.reload_profiles
+            && self.load_membership.is_none()
     }
 }
 
@@ -1312,6 +1318,35 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             s.app.command_line.clear();
             Flow::Continue(Effects::default())
         }
+        // A members-editor row: click-to-select (the chips act on the cursor).
+        Target::MemberRow(i) => {
+            s.dirty = true;
+            let last = s.app.profile_menu.members.len().saturating_sub(1);
+            s.app.profile_menu.member_cursor = i.min(last);
+            Flow::Continue(Effects::default())
+        }
+        // An add-stage candidate row: include it, exactly like `Enter`.
+        Target::MemberAddRow(i) => {
+            s.dirty = true;
+            let last = s.app.profile_menu.candidates().len().saturating_sub(1);
+            s.app.profile_menu.add_cursor = i.min(last);
+            profile_or_fold_action(s, Action::MemberAdd)
+        }
+        // The editor's action chips (the rail pattern): the click twins of
+        // ⇧k / ⇧j / d / a on the cursor row (ADR-0046).
+        Target::MemberUp => profile_or_fold_action(s, Action::MemberReorder(true)),
+        Target::MemberDown => profile_or_fold_action(s, Action::MemberReorder(false)),
+        Target::MemberRemove => profile_or_fold_action(s, Action::MemberRemove),
+        Target::MemberAddOpen => {
+            s.dirty = true;
+            if let crate::profile_menu::MenuStage::Members { profile } =
+                s.app.profile_menu.stage.clone()
+            {
+                s.app.profile_menu.stage = crate::profile_menu::MenuStage::MembersAdd { profile };
+                s.app.profile_menu.add_cursor = 0;
+            }
+            Flow::Continue(Effects::default())
+        }
         // A settings row (ADR-0044 §3): activate it, exactly like `Enter`.
         Target::SettingsRow(i) => {
             use crate::profile_menu::{MenuStage, SettingsRow};
@@ -1422,6 +1457,12 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             | Target::ProfileNew
             | Target::ProfileMenuClose
             | Target::SettingsRow(_)
+            | Target::MemberRow(_)
+            | Target::MemberAddRow(_)
+            | Target::MemberUp
+            | Target::MemberDown
+            | Target::MemberRemove
+            | Target::MemberAddOpen
             | Target::PickerRow(_)
             | Target::WizardAdd
             | Target::RailAdd
@@ -1483,6 +1524,10 @@ fn fold_action(action: Action) -> Flow {
         | Action::DeleteProfile(_)
         | Action::DuplicateProfile { .. }
         | Action::ToggleStartupPin(_)
+        | Action::LoadMembers(_)
+        | Action::MemberRemove
+        | Action::MemberReorder(_)
+        | Action::MemberAdd
         | Action::SetThemeSlot { .. } => Flow::Continue(Effects::default()),
         Action::AddProject(path) => Flow::Continue(Effects {
             persist: vec![PersistOp::AddProject { path }],
@@ -1843,8 +1888,71 @@ fn profile_or_fold_action(s: &mut AppState, action: Action) -> Flow {
         // A picker selection applies LIVE in the same frame (ADR-0039): the
         // snapshot re-themes here; the superseding event persists.
         Action::SetThemeSlot { slot, colour } => apply_theme_slot(s, slot, colour),
+        // The members editor (M512-06): entry loads the lists; every op is a
+        // superseding membership insert plus a re-read of the editor's rows.
+        Action::LoadMembers(profile) => Flow::Continue(Effects {
+            load_membership: Some(profile),
+            ..Effects::default()
+        }),
+        Action::MemberRemove => member_op(s, |profile, path| PersistOp::RemoveProfileProject {
+            profile,
+            path,
+        }),
+        Action::MemberReorder(up) => member_op(s, move |profile, path| {
+            PersistOp::ReorderProfileProject { profile, path, up }
+        }),
+        Action::MemberAdd => {
+            let crate::profile_menu::MenuStage::MembersAdd { profile } =
+                s.app.profile_menu.stage.clone()
+            else {
+                return Flow::Continue(Effects::default());
+            };
+            let Some(path) = s
+                .app
+                .profile_menu
+                .candidates()
+                .get(s.app.profile_menu.add_cursor)
+                .map(|p| p.path.clone())
+            else {
+                return Flow::Continue(Effects::default());
+            };
+            s.dirty = true;
+            Flow::Continue(Effects {
+                persist: vec![PersistOp::AddProfileProject {
+                    profile: profile.clone(),
+                    path,
+                }],
+                load_membership: Some(profile),
+                ..Effects::default()
+            })
+        }
         other => fold_action(other),
     }
+}
+
+/// One members-editor op on the row under the cursor: resolve (profile, path)
+/// from the stage + the loaded member list, persist the superseding event, and
+/// re-read the editor's rows through the seam.
+fn member_op(s: &mut AppState, op: impl FnOnce(String, String) -> PersistOp) -> Flow {
+    let crate::profile_menu::MenuStage::Members { profile } = s.app.profile_menu.stage.clone()
+    else {
+        return Flow::Continue(Effects::default());
+    };
+    let Some(path) = s
+        .app
+        .profile_menu
+        .members
+        .get(s.app.profile_menu.member_cursor)
+        .map(|p| p.path.clone())
+    else {
+        return Flow::Continue(Effects::default());
+    };
+    s.dirty = true;
+    Flow::Continue(Effects {
+        persist: vec![op(profile.clone(), path)],
+        load_membership: Some(profile),
+        ..Effects::default()
+    })
 }
 
 /// A profile persist op plus the whole-view reload it implies (ADR-0036 §6):
@@ -3061,6 +3169,147 @@ mod tests {
             }]
         );
         assert_eq!(s.app.profile_menu.stage, MenuStage::Browse);
+    }
+
+    #[test]
+    fn members_editor_removes_reorders_and_adds_for_a_non_active_profile() {
+        use crate::profile_menu::{MenuStage, SettingsRow};
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j'))); // a NON-active row
+        update(&mut s, Event::Key(CanopyKey::Char('s')));
+        let projects_row = SettingsRow::ALL
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Projects))
+            .unwrap();
+        for _ in 0..projects_row {
+            update(&mut s, Event::Key(CanopyKey::Char('j')));
+        }
+        // Entering requests the lists through the seam (the reducer never
+        // reads a store).
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(e.load_membership.as_deref(), Some("pf1"));
+        assert!(e.persist.is_empty());
+        assert_eq!(
+            s.app.profile_menu.stage,
+            MenuStage::Members {
+                profile: "pf1".into()
+            }
+        );
+        // The loop lands the lists (simulated here); every op then carries
+        // the EDITED profile's id and re-requests the read.
+        s.app.set_membership_lists(
+            vec![project("m1"), project("m2")],
+            vec![project("m1"), project("m2"), project("free")],
+        );
+        update(&mut s, Event::Key(CanopyKey::Char('j'))); // cursor → m2
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Char('d'))));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::RemoveProfileProject {
+                profile: "pf1".into(),
+                path: "/r/m2".into()
+            }]
+        );
+        assert_eq!(e.load_membership.as_deref(), Some("pf1"));
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::ShiftUp)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::ReorderProfileProject {
+                profile: "pf1".into(),
+                path: "/r/m2".into(),
+                up: true
+            }]
+        );
+        // The add stage lists only NON-members; Enter includes the candidate.
+        update(&mut s, Event::Key(CanopyKey::Char('a')));
+        assert_eq!(
+            s.app.profile_menu.stage,
+            MenuStage::MembersAdd {
+                profile: "pf1".into()
+            }
+        );
+        assert_eq!(
+            s.app
+                .profile_menu
+                .candidates()
+                .iter()
+                .map(|p| p.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/r/free"],
+            "candidates are the catalogue minus the members"
+        );
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Enter)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::AddProfileProject {
+                profile: "pf1".into(),
+                path: "/r/free".into()
+            }]
+        );
+        assert_eq!(e.load_membership.as_deref(), Some("pf1"));
+        // Esc steps back: add → members → settings.
+        update(&mut s, Event::Key(CanopyKey::Esc));
+        assert!(matches!(
+            s.app.profile_menu.stage,
+            MenuStage::Members { .. }
+        ));
+        update(&mut s, Event::Key(CanopyKey::Esc));
+        assert!(matches!(
+            s.app.profile_menu.stage,
+            MenuStage::Settings { .. }
+        ));
+    }
+
+    #[test]
+    fn members_chips_mirror_the_keyboard() {
+        use crate::profile_menu::MenuStage;
+        let mut s = ready_with_profiles(vec![project("a")]);
+        update(&mut s, Event::Key(CanopyKey::Char('p')));
+        update(&mut s, Event::Key(CanopyKey::Char('j')));
+        s.app.profile_menu.stage = MenuStage::Members {
+            profile: "pf1".into(),
+        };
+        s.app.set_membership_lists(
+            vec![project("m1"), project("m2")],
+            vec![project("m1"), project("m2"), project("free")],
+        );
+        // [remove] acts on the cursor row, exactly like `d` (ADR-0046).
+        let e = effects_of(apply_click(&mut s, Target::MemberRemove));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::RemoveProfileProject {
+                profile: "pf1".into(),
+                path: "/r/m1".into()
+            }]
+        );
+        // A row click selects; [↓] then reorders THAT row.
+        let e = effects_of(apply_click(&mut s, Target::MemberRow(1)));
+        assert!(e.is_empty());
+        let e = effects_of(apply_click(&mut s, Target::MemberDown));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::ReorderProfileProject {
+                profile: "pf1".into(),
+                path: "/r/m2".into(),
+                up: false
+            }]
+        );
+        // [ add ] opens the add stage; a candidate click includes it.
+        let e = effects_of(apply_click(&mut s, Target::MemberAddOpen));
+        assert!(e.is_empty());
+        assert!(matches!(
+            s.app.profile_menu.stage,
+            MenuStage::MembersAdd { .. }
+        ));
+        let e = effects_of(apply_click(&mut s, Target::MemberAddRow(0)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::AddProfileProject {
+                profile: "pf1".into(),
+                path: "/r/free".into()
+            }]
+        );
     }
 
     #[test]

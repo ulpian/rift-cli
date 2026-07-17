@@ -2118,6 +2118,48 @@ mod tests {
     }
 
     #[test]
+    fn default_membership_edit_from_the_editor_materializes_first() {
+        // M512-06 end-to-end: the editor's first membership op on the DEFAULT
+        // profile materialises its implicit catalogue view as explicit rows
+        // (copy-on-first-divergence, ADR-0036 §4), THEN applies the edit.
+        let (dir, cs) = store();
+        let active = seed(&cs, 0);
+        let a = make_dir(dir.path(), "a");
+        let b = make_dir(dir.path(), "b");
+        cs.apply(&PersistOp::AddProject { path: a.clone() }, 1)
+            .unwrap();
+        cs.apply(&PersistOp::AddProject { path: b.clone() }, 2)
+            .unwrap();
+        cs.apply(
+            &PersistOp::RemoveProfileProject {
+                profile: active.clone(),
+                path: a.clone(),
+            },
+            3,
+        )
+        .unwrap();
+        // The default's view lost `a` but kept `b` (the copy materialised)…
+        let view = cs.profile_projects(&active).unwrap();
+        assert_eq!(
+            view.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+            vec![b.as_str()]
+        );
+        // …and once diverged, a registration under ANOTHER active profile no
+        // longer reaches the default implicitly (its catalogue fallback ended).
+        let lab = cs.create_profile("lab", 4).unwrap();
+        cs.apply(&PersistOp::SelectProfile { profile: lab }, 5)
+            .unwrap();
+        let c = make_dir(dir.path(), "c");
+        cs.apply(&PersistOp::AddProject { path: c.clone() }, 6)
+            .unwrap();
+        let view = cs.profile_projects(&active).unwrap();
+        assert!(
+            !view.iter().any(|p| p.path == c),
+            "the first edit froze the default's implicit catalogue view"
+        );
+    }
+
+    #[test]
     fn startup_pin_supersedes_unpins_and_refuses_dead_profiles() {
         let (_dir, cs) = store();
         let active = seed(&cs, 0);

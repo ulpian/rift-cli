@@ -162,6 +162,16 @@ pub enum Action {
     /// Flip the startup pin for a profile (ADR-0045 §2): pin it when it is
     /// not the pin, unpin when it is (the state layer resolves which).
     ToggleStartupPin(String),
+    /// Load a profile's members + the catalogue through the loader seam
+    /// (entering the members editor, and after every membership op — the
+    /// reducer only *requests* loads).
+    LoadMembers(String),
+    /// Remove the member under the editor cursor from the edited profile.
+    MemberRemove,
+    /// Move the member under the editor cursor up (`true`) or down.
+    MemberReorder(bool),
+    /// Include the add-stage candidate under the cursor in the edited profile.
+    MemberAdd,
     /// Apply one theme-slot selection for the active profile (ADR-0039):
     /// `None` colour is the reset row. The state layer re-themes the running
     /// dashboard in the same frame and appends the superseding event.
@@ -428,6 +438,16 @@ pub(crate) fn activate_settings_row(
             app.colour_picker.reset();
             Action::None
         }
+        SettingsRow::Projects => {
+            // The members editor (M512-06): the stage opens now; the lists
+            // land through the loader seam (the reducer only requests).
+            app.profile_menu.stage = MenuStage::Members {
+                profile: profile.to_string(),
+            };
+            app.profile_menu.member_cursor = 0;
+            app.profile_menu.add_cursor = 0;
+            Action::LoadMembers(profile.to_string())
+        }
         SettingsRow::Duplicate => {
             app.profile_menu.stage = MenuStage::NamingDuplicate {
                 source: profile.to_string(),
@@ -536,6 +556,47 @@ fn on_key_profile_menu(app: &mut App, key: CanopyKey) -> Action {
                 _ => Action::None,
             }
         }
+        MenuStage::Members { profile } => match key {
+            CanopyKey::Char('j') | CanopyKey::Down => {
+                let last = app.profile_menu.members.len().saturating_sub(1);
+                app.profile_menu.member_cursor = (app.profile_menu.member_cursor + 1).min(last);
+                Action::None
+            }
+            CanopyKey::Char('k') | CanopyKey::Up => {
+                app.profile_menu.member_cursor = app.profile_menu.member_cursor.saturating_sub(1);
+                Action::None
+            }
+            CanopyKey::Char('d') => Action::MemberRemove,
+            CanopyKey::ShiftUp => Action::MemberReorder(true),
+            CanopyKey::ShiftDown => Action::MemberReorder(false),
+            CanopyKey::Char('a') => {
+                app.profile_menu.stage = MenuStage::MembersAdd { profile };
+                app.profile_menu.add_cursor = 0;
+                Action::None
+            }
+            CanopyKey::Esc => {
+                app.profile_menu.stage = MenuStage::Settings { profile };
+                Action::None
+            }
+            _ => Action::None,
+        },
+        MenuStage::MembersAdd { profile } => match key {
+            CanopyKey::Char('j') | CanopyKey::Down => {
+                let last = app.profile_menu.candidates().len().saturating_sub(1);
+                app.profile_menu.add_cursor = (app.profile_menu.add_cursor + 1).min(last);
+                Action::None
+            }
+            CanopyKey::Char('k') | CanopyKey::Up => {
+                app.profile_menu.add_cursor = app.profile_menu.add_cursor.saturating_sub(1);
+                Action::None
+            }
+            CanopyKey::Enter => Action::MemberAdd,
+            CanopyKey::Esc => {
+                app.profile_menu.stage = MenuStage::Members { profile };
+                Action::None
+            }
+            _ => Action::None,
+        },
         MenuStage::NamingCreate
         | MenuStage::NamingRename { .. }
         | MenuStage::NamingDuplicate { .. } => match key {

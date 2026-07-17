@@ -51,6 +51,10 @@ pub enum HintContext {
     ProfileMenu,
     /// A profile's settings page (ADR-0044 §3).
     ProfileSettings,
+    /// The members editor — a profile's ordered project view (M512-06).
+    ProfileMembers,
+    /// The members editor's add stage (catalogue candidates).
+    ProfileMembersAdd,
     /// Typing a profile name (create / rename / duplicate).
     ProfileNaming,
     /// The menu's inline delete confirm.
@@ -91,6 +95,8 @@ pub fn context(
             Mode::ProfileMenu => match menu {
                 MenuStage::Browse => HintContext::ProfileMenu,
                 MenuStage::Settings { .. } => HintContext::ProfileSettings,
+                MenuStage::Members { .. } => HintContext::ProfileMembers,
+                MenuStage::MembersAdd { .. } => HintContext::ProfileMembersAdd,
                 MenuStage::NamingCreate
                 | MenuStage::NamingRename { .. }
                 | MenuStage::NamingDuplicate { .. } => HintContext::ProfileNaming,
@@ -166,6 +172,18 @@ const PROFILE_SETTINGS: &[Hint] = &[
     hint("⏎", "open", CanopyKey::Enter),
     hint("esc", "back", CanopyKey::Esc),
 ];
+const PROFILE_MEMBERS: &[Hint] = &[
+    hint("j/k", "move", CanopyKey::Down),
+    hint("d", "remove", CanopyKey::Char('d')),
+    hint("⇧j/k", "reorder", CanopyKey::ShiftDown),
+    hint("a", "add", CanopyKey::Char('a')),
+    hint("esc", "back", CanopyKey::Esc),
+];
+const PROFILE_MEMBERS_ADD: &[Hint] = &[
+    hint("j/k", "move", CanopyKey::Down),
+    hint("⏎", "add", CanopyKey::Enter),
+    hint("esc", "back", CanopyKey::Esc),
+];
 const PROFILE_NAMING: &[Hint] = &[
     hint("⏎", "save", CanopyKey::Enter),
     hint("esc", "back", CanopyKey::Esc),
@@ -206,6 +224,8 @@ pub fn hints(ctx: HintContext) -> &'static [Hint] {
         HintContext::PanelEditor => PANEL_EDITOR,
         HintContext::ProfileMenu => PROFILE_MENU,
         HintContext::ProfileSettings => PROFILE_SETTINGS,
+        HintContext::ProfileMembers => PROFILE_MEMBERS,
+        HintContext::ProfileMembersAdd => PROFILE_MEMBERS_ADD,
         HintContext::ProfileNaming => PROFILE_NAMING,
         HintContext::ProfileConfirm => PROFILE_CONFIRM,
         HintContext::ColourPicker => COLOUR_PICKER,
@@ -299,6 +319,30 @@ mod tests {
                 };
                 app.profile_menu.settings_cursor = 1;
             }
+            HintContext::ProfileMembers => {
+                // A two-member view mid-cursor: every hinted act has a target
+                // (remove/reorder act on the cursor row; `a` has candidates).
+                profiles_fixture(&mut app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::Members {
+                    profile: "pf1".into(),
+                };
+                app.profile_menu.members = vec![project("a"), project("b"), project("c")];
+                app.profile_menu.catalogue =
+                    vec![project("a"), project("b"), project("c"), project("x")];
+                app.profile_menu.member_cursor = 1;
+            }
+            HintContext::ProfileMembersAdd => {
+                profiles_fixture(&mut app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::MembersAdd {
+                    profile: "pf1".into(),
+                };
+                app.profile_menu.members = vec![project("a")];
+                app.profile_menu.catalogue =
+                    vec![project("a"), project("b"), project("c"), project("x")];
+                app.profile_menu.add_cursor = 1;
+            }
             HintContext::ProfileNaming => {
                 // A naming input holding a VALID name, so `Enter` emits the
                 // typed action and `Esc` observably steps back.
@@ -390,7 +434,7 @@ mod tests {
     /// an action is returned. A hint can never advertise a dead key.
     #[test]
     fn every_hint_key_is_handled_by_the_reducer() {
-        const ALL: [HintContext; 16] = [
+        const ALL: [HintContext; 18] = [
             HintContext::Rail,
             HintContext::Detail,
             HintContext::Graphs,
@@ -400,6 +444,8 @@ mod tests {
             HintContext::PanelEditor,
             HintContext::ProfileMenu,
             HintContext::ProfileSettings,
+            HintContext::ProfileMembers,
+            HintContext::ProfileMembersAdd,
             HintContext::ProfileNaming,
             HintContext::ProfileConfirm,
             HintContext::ColourPicker,

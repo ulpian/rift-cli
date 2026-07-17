@@ -358,6 +358,54 @@ pub fn profile_menu_settings_rect(modal: Rect, i: usize) -> Rect {
 /// The hub's `[settings]` chip text (one source for draw + measurement).
 pub const PROFILE_SETTINGS_CHIP: &str = "[settings]";
 
+/// The members editor's action chips, in display order (the rail pattern:
+/// chips act on the cursor row) — one source for draw, hit, and the target
+/// mapping.
+pub const MEMBERS_CHIPS: [&str; 4] = ["[↑]", "[↓]", "[remove]", "[ add ]"];
+
+/// The members editor's action-chip rects on its trailing row (index
+/// `members_len`) — one solver for the draw and the hit-test (ADR-0046).
+/// Empty when the frame cannot host the row.
+#[must_use]
+pub fn members_action_chips(modal: Rect, members_len: usize) -> Vec<(Rect, usize, &'static str)> {
+    let rr = profile_menu_row_rect(modal, members_len);
+    if rr.h == 0 {
+        return Vec::new();
+    }
+    let mut x = rr.x + 1;
+    let mut out = Vec::with_capacity(MEMBERS_CHIPS.len());
+    for (i, text) in MEMBERS_CHIPS.iter().enumerate() {
+        let w = u16::try_from(text.chars().count()).unwrap_or(0);
+        if x + w > rr.x + rr.w {
+            break; // too narrow: trailing chips clip away whole
+        }
+        out.push((
+            Rect {
+                x,
+                y: rr.y,
+                w,
+                h: 1,
+            },
+            i,
+            *text,
+        ));
+        x += w + 1;
+    }
+    out
+}
+
+/// The hit target one members chip resolves to (keyed by its text, the same
+/// constant the draw uses — the mapping cannot drift).
+#[must_use]
+pub fn members_chip_target(text: &str) -> crate::hit::Target {
+    match text {
+        "[↑]" => crate::hit::Target::MemberUp,
+        "[↓]" => crate::hit::Target::MemberDown,
+        "[remove]" => crate::hit::Target::MemberRemove,
+        _ => crate::hit::Target::MemberAddOpen,
+    }
+}
+
 /// The hub's trailing `[ + new profile ]` row text.
 pub const PROFILE_NEW_ROW: &str = " [ + new profile ]";
 
@@ -389,17 +437,20 @@ fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
             frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
         }
     }
-    let settings_profile = match &vm.profile_menu.stage {
-        MenuStage::Settings { profile } => Some(profile.clone()),
-        _ => None,
+    let name_of = |id: &str| {
+        vm.profiles
+            .iter()
+            .find(|p| p.profile_id == id)
+            .map(|p| sanitize_for_terminal(&p.name))
     };
-    let title = settings_profile
-        .as_deref()
-        .and_then(|id| vm.profiles.iter().find(|p| p.profile_id == id))
-        .map_or_else(
-            || "profiles".to_string(),
-            |p| format!("profile · {}", sanitize_for_terminal(&p.name)),
-        );
+    let title = match &vm.profile_menu.stage {
+        MenuStage::Settings { profile } => name_of(profile).map(|n| format!("profile · {n}")),
+        MenuStage::Members { profile } | MenuStage::MembersAdd { profile } => {
+            name_of(profile).map(|n| format!("projects · {n}"))
+        }
+        _ => None,
+    }
+    .unwrap_or_else(|| "profiles".to_string());
     let inner = frame.border(rect, &title, ACCENT);
     // The close affordance, on every stage (ADR-0046 §2): the pointer twin of
     // Esc, resolving to the MODE's own close target.
@@ -441,6 +492,92 @@ fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
                     }
                 }
                 clip_line(frame, inner, rr.y - inner.y, &line, style);
+            }
+        }
+        MenuStage::Members { .. } => {
+            // The members editor: the profile's ordered view, then the
+            // action-chip row (the rail pattern — chips act on the cursor
+            // row, the click twins of d / ⇧j/k / a — ADR-0046).
+            if vm.profile_menu.members.is_empty() {
+                clip_line(
+                    frame,
+                    inner,
+                    1,
+                    " (no projects in this profile)",
+                    Style::fg(crate::theme::MUTED),
+                );
+            }
+            for (i, p) in vm.profile_menu.members.iter().enumerate() {
+                let rr = profile_menu_row_rect(rect, i);
+                if rr.h == 0 {
+                    break;
+                }
+                let on_cursor = i == vm.profile_menu.member_cursor;
+                let style = if on_cursor {
+                    Style::fg(vm.theme.body_fg()).with_bg(crate::theme::SELECT_BG)
+                } else {
+                    Style::fg(vm.theme.body_fg())
+                };
+                if on_cursor {
+                    for dx in 0..rr.w {
+                        frame.set(rr.x + dx, rr.y, ' ', style);
+                    }
+                }
+                clip_line(
+                    frame,
+                    inner,
+                    rr.y - inner.y,
+                    &format!(" {}", sanitize_for_terminal(&p.name)),
+                    style,
+                );
+            }
+            for (chip_rect, _, text) in members_action_chips(rect, vm.profile_menu.members.len()) {
+                let target = members_chip_target(text);
+                let bg = crate::chrome::press_flash_bg(vm.theme, vm.button_flash(&target))
+                    .unwrap_or(vm.theme.surface_bg());
+                frame.put_str(
+                    chip_rect.x,
+                    chip_rect.y,
+                    text,
+                    Style::fg(crate::theme::MUTED).with_bg(bg),
+                );
+            }
+        }
+        MenuStage::MembersAdd { .. } => {
+            // The add stage: catalogue projects not yet in this view.
+            let candidates = vm.profile_menu.candidates();
+            if candidates.is_empty() {
+                clip_line(
+                    frame,
+                    inner,
+                    1,
+                    " (every catalogue project is already here)",
+                    Style::fg(crate::theme::MUTED),
+                );
+            }
+            for (i, p) in candidates.iter().enumerate() {
+                let rr = profile_menu_row_rect(rect, i);
+                if rr.h == 0 {
+                    break;
+                }
+                let on_cursor = i == vm.profile_menu.add_cursor;
+                let style = if on_cursor {
+                    Style::fg(vm.theme.body_fg()).with_bg(crate::theme::SELECT_BG)
+                } else {
+                    Style::fg(vm.theme.body_fg())
+                };
+                if on_cursor {
+                    for dx in 0..rr.w {
+                        frame.set(rr.x + dx, rr.y, ' ', style);
+                    }
+                }
+                clip_line(
+                    frame,
+                    inner,
+                    rr.y - inner.y,
+                    &format!(" {}", sanitize_for_terminal(&p.name)),
+                    style,
+                );
             }
         }
         _ => {
@@ -524,6 +661,18 @@ fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
         }
         MenuStage::Settings { .. } => {
             clip_line(frame, inner, stage_dy, " ⏎ open · esc back", muted);
+        }
+        MenuStage::Members { .. } => {
+            clip_line(
+                frame,
+                inner,
+                stage_dy,
+                " d remove · ⇧j/k reorder · a add · esc back",
+                muted,
+            );
+        }
+        MenuStage::MembersAdd { .. } => {
+            clip_line(frame, inner, stage_dy, " ⏎ add · esc back", muted);
         }
         MenuStage::NamingCreate
         | MenuStage::NamingRename { .. }

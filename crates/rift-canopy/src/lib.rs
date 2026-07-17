@@ -342,6 +342,8 @@ impl App {
             .min(profiles.len().saturating_sub(1));
         let stage_profile = match &self.profile_menu.stage {
             MenuStage::Settings { profile }
+            | MenuStage::Members { profile }
+            | MenuStage::MembersAdd { profile }
             | MenuStage::NamingRename { profile }
             | MenuStage::ConfirmDelete { profile, .. }
             | MenuStage::NamingDuplicate { source: profile } => Some(profile.clone()),
@@ -364,6 +366,22 @@ impl App {
         self.selected = self.selected.min(projects.len().saturating_sub(1));
         self.projects = projects;
         self.maybe_raise_wizard();
+    }
+
+    /// Land the members editor's lists (the loader seam's read — ADR-0044,
+    /// M512-06): the edited profile's ordered view plus the global catalogue,
+    /// with both cursors clamped onto the new rows.
+    pub fn set_membership_lists(&mut self, members: Vec<Project>, catalogue: Vec<Project>) {
+        self.profile_menu.member_cursor = self
+            .profile_menu
+            .member_cursor
+            .min(members.len().saturating_sub(1));
+        self.profile_menu.members = members;
+        self.profile_menu.catalogue = catalogue;
+        self.profile_menu.add_cursor = self
+            .profile_menu
+            .add_cursor
+            .min(self.profile_menu.candidates().len().saturating_sub(1));
     }
 
     /// Raise the first-run wizard modal when the registry is empty and no other

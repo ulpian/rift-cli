@@ -99,6 +99,19 @@ pub enum Target {
     /// A settings-page row (ADR-0044 §3): a click activates it, exactly like
     /// `Enter` on that row.
     SettingsRow(usize),
+    /// A members-editor row: a click moves the cursor there (selection; the
+    /// action chips act on the cursor row).
+    MemberRow(usize),
+    /// An add-stage candidate row: a click includes it, exactly like `Enter`.
+    MemberAddRow(usize),
+    /// The members editor's `[↑]` chip — reorder the cursor row up (⇧k).
+    MemberUp,
+    /// The members editor's `[↓]` chip — reorder the cursor row down (⇧j).
+    MemberDown,
+    /// The members editor's `[remove]` chip — remove the cursor row (`d`).
+    MemberRemove,
+    /// The members editor's `[ add ]` chip — open the add stage (`a`).
+    MemberAddOpen,
     /// A row in the open colour picker (ADR-0039): a click selects it through
     /// the shared modal hit-test, exactly like `Enter` on that row.
     PickerRow(usize),
@@ -138,6 +151,10 @@ impl Target {
                 | Target::ProfileSettings(_)
                 | Target::ProfileNew
                 | Target::ProfileMenuClose
+                | Target::MemberUp
+                | Target::MemberDown
+                | Target::MemberRemove
+                | Target::MemberAddOpen
         )
     }
 }
@@ -331,6 +348,30 @@ fn hit_profile_menu(
                 let rr = crate::view::profile_menu_row_rect(rect, i);
                 if rr.h > 0 && contains(rr, col, row) {
                     return Some(Target::SettingsRow(i));
+                }
+            }
+        }
+        crate::profile_menu::MenuStage::Members { .. } => {
+            // The action chips first (they sit on their own trailing row).
+            for (chip, _, text) in
+                crate::view::members_action_chips(rect, vm.profile_menu.members.len())
+            {
+                if contains(chip, col, row) {
+                    return Some(crate::view::members_chip_target(text));
+                }
+            }
+            for i in 0..vm.profile_menu.members.len() {
+                let rr = crate::view::profile_menu_row_rect(rect, i);
+                if rr.h > 0 && contains(rr, col, row) {
+                    return Some(Target::MemberRow(i));
+                }
+            }
+        }
+        crate::profile_menu::MenuStage::MembersAdd { .. } => {
+            for i in 0..vm.profile_menu.candidates().len() {
+                let rr = crate::view::profile_menu_row_rect(rect, i);
+                if rr.h > 0 && contains(rr, col, row) {
+                    return Some(Target::MemberAddRow(i));
                 }
             }
         }

@@ -19,6 +19,8 @@ pub enum SettingsRow {
     Name,
     /// The profile's five theme slots (opens the colour picker).
     Colours,
+    /// The profile's project membership (opens the members editor).
+    Projects,
     /// Clone the profile whole — membership, arrangements, `Some` theme
     /// slots (ADR-0045 §1; opens the duplicate naming input).
     Duplicate,
@@ -29,11 +31,11 @@ pub enum SettingsRow {
 }
 
 impl SettingsRow {
-    /// Every row, in display order. The members editor (`Projects`) joins in
-    /// M512-06.
-    pub const ALL: [Self; 5] = [
+    /// Every row, in display order.
+    pub const ALL: [Self; 6] = [
         Self::Name,
         Self::Colours,
+        Self::Projects,
         Self::Duplicate,
         Self::StartupPin,
         Self::Delete,
@@ -45,6 +47,7 @@ impl SettingsRow {
         match self {
             Self::Name => "name",
             Self::Colours => "colours",
+            Self::Projects => "projects",
             Self::Duplicate => "duplicate",
             Self::StartupPin => "startup pin",
             Self::Delete => "delete profile",
@@ -76,6 +79,18 @@ pub enum MenuStage {
         /// The stable id of the profile being cloned.
         source: String,
     },
+    /// The members editor (ADR-0044 §3, M512-06): a cursor over the profile's
+    /// ordered project view, loaded through the loader seam.
+    Members {
+        /// The profile whose membership is being edited.
+        profile: String,
+    },
+    /// The add stage: a cursor over the catalogue projects NOT yet in this
+    /// profile's view; `Enter` includes one.
+    MembersAdd {
+        /// The profile gaining a member.
+        profile: String,
+    },
     /// The inline delete confirm — an explicit second act inside the menu,
     /// never a `MessageAction` (ADR-0037 §3).
     ConfirmDelete {
@@ -101,11 +116,32 @@ pub struct ProfileMenuState {
     /// The last refused name, rendered inline until the next edit (the name
     /// rules are trimmed, non-empty, ≤ 24 chars, unique — ADR-0037 §4).
     pub name_error: bool,
+    /// The edited profile's ordered project view (the members editor's rows),
+    /// loaded through the loader seam on entry and after every membership op.
+    pub members: Vec<crate::Project>,
+    /// The global catalogue — the add stage's candidate source. Candidates
+    /// are computed pure ([`ProfileMenuState::candidates`]), never stored.
+    pub catalogue: Vec<crate::Project>,
+    /// The highlighted member row.
+    pub member_cursor: usize,
+    /// The highlighted add-stage candidate row.
+    pub add_cursor: usize,
 }
 
 impl ProfileMenuState {
     /// Reset to the resting state (leaving the menu or entering it fresh).
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// The add stage's rows: catalogue projects NOT in the member view —
+    /// computed from the two loaded lists, so the rows can never drift from
+    /// what a membership op would actually do.
+    #[must_use]
+    pub fn candidates(&self) -> Vec<&crate::Project> {
+        self.catalogue
+            .iter()
+            .filter(|c| !self.members.iter().any(|m| m.path == c.path))
+            .collect()
     }
 }

@@ -198,6 +198,7 @@ where
                     let pending = std::mem::take(&mut effects.dispatches);
                     let actions = std::mem::take(&mut effects.feature_actions);
                     let load = effects.load_layout.take();
+                    let load_members = effects.load_membership.take();
                     let reload_profiles = effects.reload_profiles;
                     // A pinned launch defers its `selected` write to the
                     // session's FIRST persist batch (ADR-0045 §4): prepending
@@ -241,6 +242,15 @@ where
                             .layout(&state.app.active_profile, &path)?
                             .unwrap_or_default();
                         state.set_layout(m);
+                    }
+                    // The members editor re-reads its rows through the seam
+                    // (ADR-0044/M512-06) — on entry and after every membership
+                    // op, AFTER the persist landed (the load_layout pattern).
+                    if let Some(profile) = load_members {
+                        let members = loader.projects(&profile)?;
+                        let catalogue = loader.catalogue()?;
+                        state.app.set_membership_lists(members, catalogue);
+                        state.dirty = true;
                     }
                     for action in actions {
                         run_feature_action(backend, state, manager, req_sink, action)?;
@@ -925,6 +935,71 @@ mod tests {
             Some(crate::render::frame::Color::Rgb(1, 2, 3)),
             "colours swap with the view"
         );
+    }
+
+    #[test]
+    fn entering_members_loads_through_the_loader_and_lands_the_lists() {
+        // M512-06: the reducer only REQUESTS the lists; the loop reads the
+        // edited profile's view + the catalogue through the one seam.
+        let mut backend = MockBackend { presents: 0 };
+        let mut script = vec![
+            Event::Key(CanopyKey::Char('p')),
+            Event::Key(CanopyKey::Char('j')), // cursor → pf1
+            Event::Key(CanopyKey::Char('s')),
+        ];
+        // Settings cursor → the Projects row, then Enter opens the editor.
+        let projects_row = crate::profile_menu::SettingsRow::ALL
+            .iter()
+            .position(|r| matches!(r, crate::profile_menu::SettingsRow::Projects))
+            .unwrap();
+        for _ in 0..projects_row {
+            script.push(Event::Key(CanopyKey::Char('j')));
+        }
+        script.push(Event::Key(CanopyKey::Enter));
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let active = std::rc::Rc::new(std::cell::RefCell::new("pf0".to_string()));
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut loader = RecordingLoader {
+            active: std::rc::Rc::clone(&active),
+            calls: std::rc::Rc::clone(&calls),
+            pinned: None,
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut |_| Ok(vec![]),
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut loader,
+        )
+        .unwrap();
+        assert!(
+            calls.borrow().iter().any(|c| c == "projects:pf1"),
+            "the member view read was profile-scoped: {:?}",
+            calls.borrow()
+        );
+        assert!(
+            calls.borrow().iter().any(|c| c == "catalogue"),
+            "the add stage's candidate source loaded: {:?}",
+            calls.borrow()
+        );
+        assert_eq!(
+            state
+                .app
+                .profile_menu
+                .members
+                .iter()
+                .map(|p| p.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/x"],
+            "the edited profile's view landed on the editor"
+        );
+        assert_eq!(state.app.profile_menu.catalogue.len(), 2);
     }
 
     #[test]
