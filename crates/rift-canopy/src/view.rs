@@ -34,6 +34,13 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
     }
     let unicode = backend.capabilities().contains(Capabilities::UNICODE);
 
+    // The surface paints ITS OWN background first (ADR-0038: the background
+    // slot is every element's backdrop, not just the header's) — every
+    // foreground-only write beneath inherits it through the frame's
+    // transparent-Default compose rule, so a profile's background repaints
+    // panels, gaps, and bars alike. Floor tiers resolve the colour away.
+    crate::chrome::fill(frame, area, Style::DEFAULT.with_bg(vm.theme.surface_bg()));
+
     // Below the minimum, show only the centered notice (no header/panels).
     if choose_mode(vm.size) == LayoutMode::TooSmall {
         draw_too_small(frame, area);
@@ -105,7 +112,12 @@ fn apply_startup_sweep(vm: &ViewModel, frame: &mut Frame, body: Rect) {
     let revealed = (f32::from(body.h) * sweep) as u16;
     for dy in revealed..body.h {
         for dx in 0..body.w {
-            frame.set(body.x + dx, body.y + dy, ' ', Style::DEFAULT);
+            frame.set(
+                body.x + dx,
+                body.y + dy,
+                ' ',
+                Style::DEFAULT.with_bg(vm.theme.surface_bg()),
+            );
         }
     }
 }
@@ -165,7 +177,12 @@ fn draw_suggest_panel(vm: &ViewModel, frame: &mut Frame) {
     }
     for dy in 0..rect.h {
         for dx in 0..rect.w {
-            frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
+            frame.set(
+                rect.x + dx,
+                rect.y + dy,
+                ' ',
+                Style::DEFAULT.with_bg(vm.theme.surface_bg()),
+            );
         }
     }
     let inner = frame.border(rect, "suggest", ACCENT);
@@ -434,7 +451,12 @@ fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
     draw_scrim(frame, rect);
     for dy in 0..rect.h {
         for dx in 0..rect.w {
-            frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
+            frame.set(
+                rect.x + dx,
+                rect.y + dy,
+                ' ',
+                Style::DEFAULT.with_bg(vm.theme.surface_bg()),
+            );
         }
     }
     let name_of = |id: &str| {
@@ -745,7 +767,12 @@ fn draw_colour_picker(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
     draw_scrim(frame, rect);
     for dy in 0..rect.h {
         for dx in 0..rect.w {
-            frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
+            frame.set(
+                rect.x + dx,
+                rect.y + dy,
+                ' ',
+                Style::DEFAULT.with_bg(vm.theme.surface_bg()),
+            );
         }
     }
     // The title carries the TARGET profile (ADR-0045 §5) — the page edits
@@ -961,7 +988,12 @@ fn draw_overlay(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
     // Blank the region so the panels underneath never bleed through.
     for dy in 0..rect.h {
         for dx in 0..rect.w {
-            frame.set(rect.x + dx, rect.y + dy, ' ', Style::DEFAULT);
+            frame.set(
+                rect.x + dx,
+                rect.y + dy,
+                ' ',
+                Style::DEFAULT.with_bg(vm.theme.surface_bg()),
+            );
         }
     }
     match overlay {
@@ -1790,6 +1822,51 @@ mod tests {
     }
 
     #[test]
+    fn the_background_slot_repaints_panels_and_modals() {
+        // The dogfood finding (2026-07-17): a background override repainted
+        // the header but not the panel or modal backdrops. The surface now
+        // paints its own background and every foreground-only write inherits
+        // it (the frame's transparent-Default compose rule) — so the slot
+        // applies to EVERY element's backdrop, per ADR-0038 §2.
+        let bg = crate::render::frame::Color::Rgb(0x11, 0x22, 0x33);
+        let mut s = profiled_state();
+        let mut overrides = crate::theme::ThemeOverrides::NONE;
+        overrides.set(crate::theme::ThemeSlot::Background, Some(bg));
+        s.set_theme(overrides);
+        let vm = s.snapshot();
+        let mut f = Frame::new(vm.size);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::UNICODE);
+        draw(&vm, &mut b, &mut f);
+        // A panel-interior cell (mid-body) wears the override…
+        let mid = f
+            .get(vm.size.w / 2, vm.size.h / 2)
+            .expect("mid-body cell exists");
+        assert_eq!(mid.style.bg, bg, "panel backdrops wear the background slot");
+        // …and so does a modal's interior once the menu opens.
+        crate::input::enter_profile_menu(&mut s.app);
+        let vm = s.snapshot();
+        let mut f = Frame::new(vm.size);
+        draw(&vm, &mut b, &mut f);
+        let modal = modal_rect(vm.size);
+        let inside = f
+            .get(modal.x + modal.w / 2, modal.y + modal.h - 2)
+            .expect("modal interior cell exists");
+        assert_eq!(
+            inside.style.bg, bg,
+            "modal backdrops wear the background slot"
+        );
+        // Unthemed, the surface paints Rift dark for itself — never the
+        // terminal's own background.
+        let mut s = profiled_state();
+        s.set_theme(crate::theme::ThemeOverrides::NONE);
+        let vm = s.snapshot();
+        let mut f = Frame::new(vm.size);
+        draw(&vm, &mut b, &mut f);
+        let mid = f.get(vm.size.w / 2, vm.size.h / 2).unwrap();
+        assert_eq!(mid.style.bg, crate::theme::SURFACE_BG);
+    }
+
+    #[test]
     fn settings_page_lists_rows_with_the_pin_state() {
         use crate::profile_menu::{MenuStage, SettingsRow};
         let mut s = profiled_state();
@@ -2139,8 +2216,9 @@ mod tests {
             SELECT_BG,
             "the selected row carries the pill wash"
         );
-        // Row 1 (`beta`, unselected) has no pill wash.
-        assert_eq!(f.get(2, 3).unwrap().style.bg, Color::Default);
+        // Row 1 (`beta`, unselected) has no pill wash — just the surface the
+        // dashboard paints for itself (the background slot's canvas).
+        assert_eq!(f.get(2, 3).unwrap().style.bg, crate::theme::SURFACE_BG);
         // …and its idle dot is the idle slate.
         assert_eq!(
             f.get(dot_x, 3).unwrap().style.fg,

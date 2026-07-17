@@ -220,9 +220,21 @@ impl Frame {
     }
 
     /// Write a styled glyph at `(x, y)`. Out-of-bounds writes are ignored.
+    ///
+    /// A [`Color::Default`] **background** is transparent at compose time: the
+    /// cell keeps the background already beneath it. The root draw fills the
+    /// surface with the theme's background first (ADR-0038: the background
+    /// slot applies to every element's backdrop), so foreground-only styles
+    /// ride the themed surface instead of punching terminal-default holes in
+    /// it. A surface that must be opaque (a modal blanking the dashboard
+    /// behind it) sets its background explicitly.
     #[allow(clippy::indexing_slicing)] // index(x, y) yields an in-bounds cell index
     pub fn set(&mut self, x: u16, y: u16, ch: char, style: Style) {
         if let Some(i) = self.index(x, y) {
+            let mut style = style;
+            if matches!(style.bg, Color::Default) {
+                style.bg = self.cells[i].style.bg;
+            }
             self.cells[i] = Cell { ch, style };
         }
     }
