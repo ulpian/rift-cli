@@ -120,7 +120,7 @@ pub const CATALOG: &[CatalogEntry] = &[
     },
     CatalogEntry {
         verb: "profile",
-        usage: "/profile <new|rename|switch|delete> <name>",
+        usage: "/profile <new|rename|switch|delete|duplicate|startup> [name]",
         description: "manage profiles (the menu's grammar)",
         arg: ArgKind::ProfileSub,
     },
@@ -361,7 +361,7 @@ fn suggest_args(verb_word: &str, partial: &str, ctx: &SuggestContext) -> Vec<Sug
                 ["list", "prune"].iter().map(|s| (*s).to_owned()).collect()
             }
         }
-        ArgKind::ProfileSub => ["new", "rename", "switch", "delete"]
+        ArgKind::ProfileSub => ["new", "rename", "switch", "delete", "duplicate", "startup"]
             .iter()
             .map(|s| (*s).to_owned())
             .collect(),

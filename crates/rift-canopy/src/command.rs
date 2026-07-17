@@ -83,6 +83,12 @@ pub enum ProfileVerb {
     Switch(String),
     /// Delete the named profile (guards refuse the active and the last).
     Delete(String),
+    /// Duplicate the ACTIVE profile under a new name — the full clone of its
+    /// effective state (ADR-0045 §1; parallel to `New`).
+    Duplicate(String),
+    /// Pin the named profile as the launch view, or with `None` (the bare
+    /// verb) unpin — launch follows last-selected again (ADR-0045 §2).
+    Startup(Option<String>),
 }
 
 /// The splash-mode values `configure splash` accepts (ADR-0014).
@@ -274,7 +280,7 @@ pub fn help_lines() -> Vec<String> {
                 "toggle" => "/toggle <feature>",
                 "reinstall" => "/reinstall <feature>",
                 "focus" => "/focus <projects|detail|graphs|command>",
-                "profile" => "/profile <new|rename|switch|delete> <name>",
+                "profile" => "/profile <new|rename|switch|delete|duplicate|startup> [name]",
                 "help" => "/help",
                 "quit" => "/quit (or /q)",
                 "status" => "/status",
@@ -563,10 +569,18 @@ pub fn parse(input: &str) -> Result<Verb, ParseError> {
                     "rename" => Verb::Profile(ProfileVerb::Rename(name("/profile rename <name>")?)),
                     "switch" => Verb::Profile(ProfileVerb::Switch(name("/profile switch <name>")?)),
                     "delete" => Verb::Profile(ProfileVerb::Delete(name("/profile delete <name>")?)),
+                    "duplicate" => Verb::Profile(ProfileVerb::Duplicate(name(
+                        "/profile duplicate <new-name>",
+                    )?)),
+                    // Bare `/profile startup` is the unpin — the one
+                    // no-argument profile verb (ADR-0045 §6).
+                    "startup" => Verb::Profile(ProfileVerb::Startup(
+                        arg(1).map(|t| t.text.clone()),
+                    )),
                     _ => {
                         return Err(ParseError::at(
                             arg(0).map_or((0, 0), Token::span),
-                            "unknown profile verb — new | rename | switch | delete",
+                            "unknown profile verb — new | rename | switch | delete | duplicate | startup",
                         ))
                     }
                 }
@@ -575,7 +589,7 @@ pub fn parse(input: &str) -> Result<Verb, ParseError> {
                 return Err(missing(
                     verb_tok,
                     "a profile verb",
-                    "/profile <new|rename|switch|delete> <name>",
+                    "/profile <new|rename|switch|delete|duplicate|startup> [name]",
                 ))
             }
         },
@@ -780,6 +794,26 @@ pub fn parse(input: &str) -> Result<Verb, ParseError> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn profile_duplicate_and_startup_parse_including_bare_startup() {
+        assert_eq!(
+            parse("/profile duplicate lab-copy"),
+            Ok(Verb::Profile(ProfileVerb::Duplicate("lab-copy".into())))
+        );
+        assert_eq!(
+            parse("/profile startup lab"),
+            Ok(Verb::Profile(ProfileVerb::Startup(Some("lab".into()))))
+        );
+        // The bare verb is the unpin (ADR-0045 §6) — the one no-argument
+        // profile verb, never a parse error.
+        assert_eq!(
+            parse("/profile startup"),
+            Ok(Verb::Profile(ProfileVerb::Startup(None)))
+        );
+        // Duplicate still requires its new name.
+        assert!(parse("/profile duplicate").is_err());
+    }
 
     #[test]
     fn dashboard_verbs_parse_with_project_refs() {

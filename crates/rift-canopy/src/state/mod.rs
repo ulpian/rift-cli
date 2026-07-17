@@ -1798,6 +1798,36 @@ fn profile_verb_flow(s: &mut AppState, pv: crate::command::ProfileVerb) -> Flow 
                 None => warn(s, "no profile by that name"),
             }
         }
+        // `/profile duplicate <new-name>` clones the ACTIVE profile whole —
+        // parallel to `/profile new` (ADR-0045 §6).
+        ProfileVerb::Duplicate(raw) => {
+            match crate::profile::normalize_profile_name(&raw, &s.app.profiles, None) {
+                Some(name) => profile_persist_flow(PersistOp::DuplicateProfile {
+                    source: s.app.active_profile.clone(),
+                    name,
+                }),
+                None => warn(s, "name must be 1–24 chars and unique"),
+            }
+        }
+        // `/profile startup <name>` pins; the bare verb unpins (launch
+        // follows last-selected again) — never a warn (ADR-0045 §6).
+        ProfileVerb::Startup(None) => {
+            profile_persist_flow(PersistOp::SetStartupProfile { profile: None })
+        }
+        ProfileVerb::Startup(Some(name)) => {
+            let target = s
+                .app
+                .profiles
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.profile_id.clone());
+            match target {
+                Some(id) => {
+                    profile_persist_flow(PersistOp::SetStartupProfile { profile: Some(id) })
+                }
+                None => warn(s, "no profile by that name"),
+            }
+        }
     }
 }
 
@@ -3012,6 +3042,33 @@ mod tests {
                 profile: "pf2".into()
             }]
         );
+
+        // Duplicate clones the ACTIVE profile whole (ADR-0045 §6).
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile duplicate spare");
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::DuplicateProfile {
+                source: "pf0".into(),
+                name: "spare".into()
+            }]
+        );
+        assert!(e.reload_profiles);
+
+        // Startup pins by name; the bare verb unpins.
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile startup lab");
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SetStartupProfile {
+                profile: Some("pf2".into())
+            }]
+        );
+        let e = run_palette(&mut s, "profile startup");
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::SetStartupProfile { profile: None }]
+        );
     }
 
     #[test]
@@ -3031,6 +3088,18 @@ mod tests {
         // A duplicate new-name is refused.
         let mut s = ready_with_profiles(vec![project("a")]);
         let e = run_palette(&mut s, "profile new work");
+        assert!(e.persist.is_empty());
+        assert!(matches!(s.app.overlay, Some(Overlay::Alert(_))));
+
+        // A duplicate's colliding clone-name is refused the same way…
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile duplicate work");
+        assert!(e.persist.is_empty());
+        assert!(matches!(s.app.overlay, Some(Overlay::Alert(_))));
+
+        // …and pinning an unknown name is a soft miss.
+        let mut s = ready_with_profiles(vec![project("a")]);
+        let e = run_palette(&mut s, "profile startup ghost");
         assert!(e.persist.is_empty());
         assert!(matches!(s.app.overlay, Some(Overlay::Alert(_))));
     }
