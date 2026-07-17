@@ -33,6 +33,7 @@ pub mod gate_m4;
 pub mod gate_m5;
 pub mod gate_m510;
 pub mod gate_m511;
+pub mod gate_m512;
 pub mod gate_m55;
 pub mod gate_m56;
 pub mod gate_m57;

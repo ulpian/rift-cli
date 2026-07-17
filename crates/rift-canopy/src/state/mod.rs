@@ -3492,6 +3492,71 @@ mod tests {
     }
 
     #[test]
+    fn every_modal_surface_carries_the_close_affordance() {
+        use crate::profile_menu::MenuStage;
+        // ADR-0046 §5: every mode drawn as a modal carries the close `[x]` —
+        // the pointer twin of Esc — resolved through the pure hit-test and
+        // closing through the MODE's own path. (The Overlay shell's X is
+        // proven by the ADR-0027 suite; this sweep covers the mode-modals, so
+        // a future stage that forgets its X turns CI red.)
+        let stages = vec![
+            MenuStage::Browse,
+            MenuStage::Settings {
+                profile: "pf0".into(),
+            },
+            MenuStage::Members {
+                profile: "pf0".into(),
+            },
+            MenuStage::MembersAdd {
+                profile: "pf0".into(),
+            },
+            MenuStage::NamingCreate,
+            MenuStage::ConfirmDelete {
+                profile: "pf1".into(),
+                back_to_settings: false,
+            },
+        ];
+        for stage in stages {
+            let mut s = ready_with_profiles(vec![project("a")]);
+            update(&mut s, Event::Key(CanopyKey::Char('p')));
+            s.app.profile_menu.stage = stage.clone();
+            let vm = s.snapshot();
+            let cr = crate::view::modal_close_rect(crate::view::modal_rect(vm.size)).unwrap();
+            assert_eq!(
+                crate::hit::hit_test(&vm, cr.x, cr.y),
+                Some(Target::ProfileMenuClose),
+                "menu stage {stage:?} lost its close X"
+            );
+            let _ = apply_click(&mut s, Target::ProfileMenuClose);
+            assert_eq!(s.app.mode, Mode::Normal, "the X closes from {stage:?}");
+        }
+        for picker_stage in [
+            crate::colour_picker::PickerStage::Slots,
+            crate::colour_picker::PickerStage::Presets,
+        ] {
+            let mut s = ready_with_profiles(vec![project("a")]);
+            update(&mut s, Event::Key(CanopyKey::Char('p')));
+            update(&mut s, Event::Key(CanopyKey::Char('s')));
+            update(&mut s, Event::Key(CanopyKey::Char('j'))); // → Colours
+            let _ = update(&mut s, Event::Key(CanopyKey::Enter));
+            s.app.colour_picker.stage = picker_stage;
+            let vm = s.snapshot();
+            let cr = crate::view::modal_close_rect(crate::view::modal_rect(vm.size)).unwrap();
+            assert_eq!(
+                crate::hit::hit_test(&vm, cr.x, cr.y),
+                Some(Target::PickerClose),
+                "picker stage {picker_stage:?} lost its close X"
+            );
+            let _ = apply_click(&mut s, Target::PickerClose);
+            assert_eq!(
+                s.app.mode,
+                Mode::ProfileMenu,
+                "the picker's X returns to the menu"
+            );
+        }
+    }
+
+    #[test]
     fn menu_close_x_closes_the_mode_not_an_overlay() {
         use crate::profile_menu::MenuStage;
         let mut s = ready_with_profiles(vec![project("a")]);

@@ -111,6 +111,12 @@ fn main() -> Result<(), String> {
             println!("gate-m511: all checks pass");
             Ok(())
         }
+        Some("gate-m512") => {
+            let violations = xtask::gate_m512::run(&workspace_root())?;
+            fail_with(&violations, "gate-m512")?;
+            println!("gate-m512: all checks pass");
+            Ok(())
+        }
         Some("gate-m5") => {
             let violations = xtask::gate_m5::run(&workspace_root())?;
             fail_with(&violations, "gate-m5")?;
@@ -125,7 +131,7 @@ fn main() -> Result<(), String> {
             Ok(())
         }
         _ => Err(
-            "usage: xtask <check-coverage <cov.json> | ci-meta | pin-cut <version> | gate-m1 | gate-m4 | gate-m5 | gate-m55 | gate-m56 | gate-m57 | gate-m58 | gate-m59 | gate-m510 | gate-m511>"
+            "usage: xtask <check-coverage <cov.json> | ci-meta | pin-cut <version> | gate-m1 | gate-m4 | gate-m5 | gate-m55 | gate-m56 | gate-m57 | gate-m58 | gate-m59 | gate-m510 | gate-m511 | gate-m512>"
                 .to_string(),
         ),
     }
