@@ -1,5 +1,6 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 194
 expression: "col3_text(&col3_with_data(), 30)"
 ---
 ╭─ token usage  Σ 7.5K ──────────╮
@@ -15,11 +16,11 @@ expression: "col3_text(&col3_with_data(), 30)"
 ╰────────────────────────────────╯
 ╭─ system ───────────────────────╮
 │62% Capable  [2 threads]        │
-│▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄            │
-│▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄            │
-│                                │
 │▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀            │
 │▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀            │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀            │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀            │
+│ session - idle                 │
 │- capture: —                    │
 │- burn: —                       │
 │- projection: —                 │

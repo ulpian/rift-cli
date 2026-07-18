@@ -269,6 +269,7 @@ mod tests {
     /// A mid-state app for `ctx`: three projects with the middle one selected,
     /// cursors off their rails' edges — so every direction key has room to
     /// move and every action key has a live target.
+    #[allow(clippy::too_many_lines)] // one arm per hint context — fixture assembly
     fn app_in(ctx: HintContext) -> App {
         let mut app = App::new(vec![project("a"), project("b"), project("c")]);
         app.splash.skip();

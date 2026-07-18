@@ -1,5 +1,6 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 733
 expression: "render_state(&mut\nlifecycle_state(Some(rift_canopy::FeatureRuntime::Enabling)))"
 ---
  RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
@@ -18,7 +19,7 @@ expression: "render_state(&mut\nlifecycle_state(Some(rift_canopy::FeatureRuntime
 │                  ││                                      ││                                      │
 │                  │╰──────────────────────────────────────╯│(no model calls yet)                  │
 │                  │╭─ features ───────────────────────────╮│                                      │
-│                  ││  [x] fff (fuzzy find) · M7           ││                                      │
+│                  ││  [x] fff (fuzzy find) · M7           ││ session - idle                       │
 │                  ││  [x] codegraph · M7                  ││- capture: —                          │
 │                  ││    [x] typescript · M7               ││- burn: —                             │
 │                  │╰──────────────────────────────────────╯│- projection: —                       │

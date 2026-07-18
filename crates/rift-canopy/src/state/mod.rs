@@ -348,11 +348,14 @@ pub enum PersistOp {
     },
 }
 
-/// How many idle ticks between background re-stats of the selected project. At the
-/// 100ms poll cadence this re-reads the foreground project roughly every 1.5s, so a
-/// `Running` → `Idle` transition (activity aging past the window) surfaces even
-/// though no cursor change fires a bus poll. Time-based only; never dirties.
-const REFRESH_EVERY_TICKS: u32 = 15;
+/// How many idle ticks between background re-stats of the selected project —
+/// the **status/aging cadence only**, never the metric driver (ADR-0047: the
+/// panel metrics are event-anchored, so time alone cannot move them, and fs
+/// wakes drive their recompute). At the 100ms poll cadence this re-reads the
+/// foreground project roughly every 60s — ample for the 30-minute `Running` →
+/// `Idle` aging (activity falling out of the window surfaces even though no
+/// cursor change fires a bus poll). Time-based only; never dirties.
+const REFRESH_EVERY_TICKS: u32 = 600;
 
 /// How long the one-shot startup sweep runs as the panels first fill after the
 /// splash (M55-14, ADR-0022) — a single settle window, then it never re-fires.
@@ -1357,9 +1360,11 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             use crate::profile_menu::{MenuStage, SettingsRow};
             s.dirty = true;
             let rows_last = SettingsRow::ALL.len() - 1;
-            if let MenuStage::Settings { profile } = s.app.profile_menu.stage.clone() {
+            if let (MenuStage::Settings { profile }, Some(row)) = (
+                s.app.profile_menu.stage.clone(),
+                SettingsRow::ALL.get(i.min(rows_last)).copied(),
+            ) {
                 s.app.profile_menu.settings_cursor = i.min(rows_last);
-                let row = SettingsRow::ALL[i.min(rows_last)];
                 let action = crate::input::activate_settings_row(&mut s.app, &profile, row);
                 profile_or_fold_action(s, action)
             } else {
@@ -2679,6 +2684,7 @@ mod tests {
             tokens_per_min: Some(600.0),
             projection_bytes: Some(4096),
             recall_per_hour: None,
+            session_live: true,
         };
         update(
             &mut s,

@@ -30,6 +30,7 @@ fn fail_with(violations: &[String], what: &str) -> Result<(), String> {
     Err(format!("{} {what} violation(s)", violations.len()))
 }
 
+#[allow(clippy::too_many_lines)] // one arm per subcommand — a dispatch table
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {

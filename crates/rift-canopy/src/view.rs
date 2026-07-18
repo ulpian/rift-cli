@@ -442,6 +442,7 @@ fn menu_close_style(vm: &ViewModel, target: &crate::hit::Target) -> Style {
 /// inline name-rule error), or the inline delete confirm. Every stage carries
 /// the close `[x]` (ADR-0046). Pure drawing over the snapshot; every name
 /// passes the shared sanitizer.
+#[allow(clippy::too_many_lines)] // one linear pass per menu stage; splitting would obscure the layout
 fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
     use crate::profile_menu::{MenuStage, SettingsRow};
     let rect = modal_rect(vm.size);
@@ -758,6 +759,7 @@ pub fn colour_picker_rows(stage: crate::colour_picker::PickerStage) -> usize {
 /// name beside a solid swatch box — plus the reset row. The swatch is
 /// colour-only, so on mono/ASCII the name alone carries the choice. Pure
 /// drawing over the snapshot; the dashboard behind the scrim is the preview.
+#[allow(clippy::too_many_lines)] // one linear pass per picker stage; slots then presets
 fn draw_colour_picker(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
     use crate::colour_picker::{PickerStage, RESET_ROW};
     let rect = modal_rect(vm.size);
@@ -2169,7 +2171,6 @@ mod tests {
 
     #[test]
     fn rail_shows_count_badge_status_dots_and_selection_pill() {
-        use crate::render::frame::Color;
         use crate::theme::{status_color, SELECT_BG};
         let mut s = AppState::new(
             vec![

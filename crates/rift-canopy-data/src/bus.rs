@@ -101,6 +101,17 @@ pub(crate) trait WakeWatcher: Send {
     /// A human-readable reason when the platform watcher cannot start; the
     /// caller degrades to poll-only.
     fn watch(&mut self, root: &Path, wake: Sender<WorkerMsg>) -> Result<(), String>;
+
+    /// Point the second, **narrow** watch at the ACTIVE project's
+    /// session-cache dir (`<git_dir>/rift-sessions`, ADR-0010 amendment) —
+    /// the one class of change the cache-root watch cannot see. `None`
+    /// unwatches. Best-effort by the same contract as [`Self::watch`]: a
+    /// failure (commonly the dir not existing before the first hook event)
+    /// leaves session promptness to the poll cadence, and the worker
+    /// re-calls every cycle so attach retries for free. One extra stream at
+    /// most — never one per tracked project (the macOS FSEvents caution).
+    /// Default: poll-only watchers ignore it.
+    fn set_active_session_dir(&mut self, _dir: Option<&Path>) {}
 }
 
 /// The production watcher: `notify`'s recommended platform backend.
@@ -108,6 +119,9 @@ pub(crate) trait WakeWatcher: Send {
 struct NotifyWatcher {
     /// Kept alive for the worker's lifetime; dropping it unwatches.
     inner: Option<notify::RecommendedWatcher>,
+    /// The active project's session dir currently attached (`Some` iff the
+    /// narrow second watch is installed).
+    session_dir: Option<PathBuf>,
 }
 
 impl WakeWatcher for NotifyWatcher {
@@ -122,6 +136,26 @@ impl WakeWatcher for NotifyWatcher {
             .map_err(|e| e.to_string())?;
         self.inner = Some(watcher);
         Ok(())
+    }
+
+    fn set_active_session_dir(&mut self, dir: Option<&Path>) {
+        if self.session_dir.as_deref() == dir {
+            return; // already attached exactly there (or both absent)
+        }
+        let Some(w) = self.inner.as_mut() else {
+            return; // no platform watcher at all → PollOnly for sessions too
+        };
+        if let Some(old) = self.session_dir.take() {
+            let _ = w.unwatch(&old);
+        }
+        if let Some(d) = dir {
+            // Non-recursive: rift-sessions is a flat dir of small JSON
+            // caches. Failure (dir not created yet) leaves `session_dir`
+            // `None`, so the worker's next call retries the attach.
+            if w.watch(d, notify::RecursiveMode::NonRecursive).is_ok() {
+                self.session_dir = Some(d.to_path_buf());
+            }
+        }
     }
 }
 
@@ -159,10 +193,16 @@ pub(crate) fn spawn_with_watcher(
 /// * a request → coalesce the burst (latest-per-project), read each distinct
 ///   project's status, and stage a [`ProjectData`];
 /// * a wake (filesystem event) → run the same watermark poll a timeout would —
-///   the poll is the only truth, the wake only made it prompt;
+///   the poll is the only truth, the wake only made it prompt — **and**
+///   re-read the ACTIVE project even when no watermark moved (the ADR-0010
+///   amendment): recall.db and the session caches change without the
+///   projection cursor, and the event-anchored recompute is idempotent, so
+///   an unfounded wake converges on identical output the reducer's dirty
+///   gate then drops;
 /// * a timeout → poll every tracked project's watermark and re-read the ones
 ///   that changed (a rebuild additionally re-bootstraps *all* tracked
-///   projects).
+///   projects). Idle timeouts never force a recompute — the idle cost stays
+///   one cheap watermark read.
 ///
 /// Staged updates flush through the bounded channel latest-per-(project, feed)
 /// ([`Outbox`]). Exits when either channel disconnects (the dashboard quit).
@@ -181,26 +221,37 @@ fn worker(
     // The foreground project — the only one for which the expensive rich detail is
     // computed (status is cheap and read for every project).
     let mut active: Option<String> = None;
+    // The active project's session-cache dir — the narrow second watch
+    // target (ADR-0010 amendment). Re-derived only when `active` changes;
+    // re-asserted every cycle (a cheap no-op once attached) so a dir created
+    // after SetActive still gets its watch.
+    let mut session_dir: Option<PathBuf> = None;
     // The last health report sent (M55-04): the dot rides the reads the worker
     // already performs — no new polling — and only a *change* stages an event,
     // so a steady data plane adds zero traffic.
     let mut last_health: Option<HealthEvent> = None;
     loop {
         let mut to_read = BTreeSet::new();
-        let mut woken = false;
+        let mut woke_by_fs = false;
+        let mut timed_out = false;
+        let active_before = active.clone();
         match msg_rx.recv_timeout(observer.interval()) {
             Ok(first) => {
                 // Coalesce a burst so a storm of requests/wakes collapses to one
                 // read per project (backpressure by set-union, not queue growth).
-                collect(first, &mut to_read, &mut active, &mut woken);
+                collect(first, &mut to_read, &mut active, &mut woke_by_fs);
                 while let Ok(msg) = msg_rx.try_recv() {
-                    collect(msg, &mut to_read, &mut active, &mut woken);
+                    collect(msg, &mut to_read, &mut active, &mut woke_by_fs);
                 }
             }
-            Err(RecvTimeoutError::Timeout) => woken = true,
+            Err(RecvTimeoutError::Timeout) => timed_out = true,
             Err(RecvTimeoutError::Disconnected) => return,
         }
-        if woken {
+        if active != active_before {
+            session_dir = active.as_deref().and_then(session_dir_for);
+        }
+        watcher.set_active_session_dir(session_dir.as_deref());
+        if woke_by_fs || timed_out {
             // A wake or a timeout schedules the SAME fresh poll — the watermark
             // read is the sole truth, so a spurious wake reads as quiet.
             for change in observer.poll_once() {
@@ -211,6 +262,15 @@ fn worker(
                     to_read.extend(observer.tracked());
                 }
                 to_read.insert(change.project);
+            }
+        }
+        if woke_by_fs {
+            // Filesystem activity → recompute the active project's feeds even
+            // without a cursor move: this is how recall.db serves and
+            // session-cache writes reach the panel (the poll stays the only
+            // truth about the *projection*; the recompute is a fresh read).
+            if let Some(a) = active.clone() {
+                to_read.insert(a);
             }
         }
         let did_read = !to_read.is_empty();
@@ -374,31 +434,47 @@ fn stage_read(
     // read of it — a Rebuilt-driven read is thereby the re-bootstrap, and the
     // reducer's periodic re-stat keeps recall.db-only changes fresh too.
     if is_active {
-        // ONE active-sessions read per recomputation: the gauge badge and the
-        // threads section receive the same value by construction (user
-        // story 6 — the one-query invariant).
+        // ONE active-sessions read per recomputation: the gauge badge, the
+        // threads section, and the metrics' session anchor all derive from
+        // the same pass by construction (user story 6 — the one-query
+        // invariant, widened by ADR-0047 to carry the newest live id).
         let now = now_ms();
-        let live = crate::feeds::read_active_sessions(&path, now);
+        let sessions = crate::feeds::read_active_sessions(&path, now);
         outbox.stage(Event::Feed(crate::feeds::compute_tokens(root, &path)));
-        outbox.stage(Event::Feed(crate::feeds::compute_nic(root, &path, live)));
-        outbox.stage(Event::Feed(crate::feeds::compute_recall(root, &path, live)));
-        // The M5.5 feeds (activity card + the system panel's domain metrics),
-        // computed against the same clock read (the injected "now").
+        outbox.stage(Event::Feed(crate::feeds::compute_nic(
+            root,
+            &path,
+            sessions.live,
+        )));
+        outbox.stage(Event::Feed(crate::feeds::compute_recall(
+            root,
+            &path,
+            sessions.live,
+        )));
+        // The activity card stays on the injected clock (calendar-day
+        // bucketing); the panel metrics are event-anchored (ADR-0047) — the
+        // live session's id is their only session input, never `now`.
         outbox.stage(Event::Feed(crate::feeds::compute_activity(
             root, &path, now,
         )));
-        outbox.stage(Event::Feed(crate::feeds::compute_metrics(root, &path, now)));
+        outbox.stage(Event::Feed(crate::feeds::compute_metrics(
+            root,
+            &path,
+            sessions.newest_live.as_deref(),
+        )));
     }
 }
 
 /// Fold a worker message into the set of projects to (re-)read, updating the
-/// `active` (foreground) project and the wake flag. `SetActive(None)` clears
-/// the active project; a [`WorkerMsg::Wake`] only requests a poll.
+/// `active` (foreground) project and the fs-wake flag. `SetActive(None)`
+/// clears the active project; a [`WorkerMsg::Wake`] requests a poll **and**
+/// (in the worker) the active project's recompute — never any data of its
+/// own.
 fn collect(
     msg: WorkerMsg,
     out: &mut BTreeSet<String>,
     active: &mut Option<String>,
-    woken: &mut bool,
+    woke_by_fs: &mut bool,
 ) {
     match msg {
         WorkerMsg::Request(DataRequest::Refresh(p)) => {
@@ -409,8 +485,17 @@ fn collect(
             out.insert(p);
         }
         WorkerMsg::Request(DataRequest::SetActive(None)) => *active = None,
-        WorkerMsg::Wake => *woken = true,
+        WorkerMsg::Wake => *woke_by_fs = true,
     }
+}
+
+/// The active project's session-cache dir (`<git_dir>/rift-sessions`) — the
+/// narrow second watch target. `None` for a non-git project (nothing to
+/// watch; the status path reads the same absence).
+fn session_dir_for(path: &str) -> Option<PathBuf> {
+    rift_git::discover(Path::new(path))
+        .ok()
+        .map(|p| p.git_dir.join("rift-sessions"))
 }
 
 /// Read a project's live status **and** its `{cursor, epoch}` watermark from
@@ -1582,6 +1667,168 @@ mod tests {
             .recv_timeout(Duration::from_secs(8))
             .expect("poll-only still delivers");
         assert!(matches!(ev, Event::ProjectData(pd) if pd.project == path_of(&proj)));
+    }
+
+    // --- ADR-0010 amendment: the session-dir watch + wake-recompute-active --
+
+    /// A watcher recording every `set_active_session_dir` call (the wiring
+    /// seam test — no filesystem).
+    struct RecordingWatcher {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<Option<PathBuf>>>>,
+    }
+    impl WakeWatcher for RecordingWatcher {
+        fn watch(&mut self, _root: &Path, _wake: Sender<WorkerMsg>) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_active_session_dir(&mut self, dir: Option<&Path>) {
+            self.calls.lock().unwrap().push(dir.map(Path::to_path_buf));
+        }
+    }
+
+    #[test]
+    fn set_active_swaps_the_session_dir_watch() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "seed", 1);
+        // A git-ish project: discover() resolves `<proj>/.git`, so the worker
+        // derives `<proj>/.git/rift-sessions` as the narrow watch target.
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        let expected = proj.join(".git").join("rift-sessions");
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bus = spawn_with_watcher(
+            root.path().to_path_buf(),
+            vec![],
+            Box::new(RecordingWatcher {
+                calls: std::sync::Arc::clone(&calls),
+            }),
+        );
+
+        bus.req_tx
+            .send(DataRequest::SetActive(Some(path_of(&proj))))
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut attached_at = None;
+        while attached_at.is_none() && std::time::Instant::now() < deadline {
+            attached_at = calls
+                .lock()
+                .unwrap()
+                .iter()
+                .position(|c| c.as_deref() == Some(expected.as_path()));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let attached_at = attached_at.expect("SetActive points the watch at the session dir");
+
+        // Clearing the active project unwatches.
+        bus.req_tx.send(DataRequest::SetActive(None)).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut cleared = false;
+        while !cleared && std::time::Instant::now() < deadline {
+            cleared = calls
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(attached_at + 1)
+                .any(Option::is_none);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(cleared, "SetActive(None) clears the session-dir watch");
+    }
+
+    /// Seed the project's recall.db with served audit events — a write that
+    /// moves **no** projection watermark (the recall-only change class).
+    fn seed_recall_serves(root: &Path, proj: &Path, events: &[(i64, i64)]) {
+        let repo = rift_store::recall_repo_id(proj).unwrap();
+        let db = rift_store::recall_db_under(root, &repo);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = runtime();
+        for (i, (t, avoided)) in events.iter().enumerate() {
+            rt.block_on(store.insert(
+                "memd_audit_event",
+                &[
+                    "audit_id",
+                    "verb",
+                    "handle",
+                    "reason",
+                    "tokens_returned",
+                    "tokens_avoided",
+                    "recorded_at",
+                    "schema_version",
+                ],
+                &[
+                    Value::text(format!("a{i}")),
+                    Value::text("memd.summary_served"),
+                    Value::text("h"),
+                    Value::Null,
+                    Value::Int(10),
+                    Value::Int(*avoided),
+                    Value::Int(*t),
+                    Value::Int(1),
+                ],
+            ))
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn fs_wake_recomputes_the_active_project_without_a_cursor_move() {
+        // The ADR-0010 amendment's gap-closure: recall.db (and the session
+        // caches) change without moving the projection {cursor, epoch}, so a
+        // poll alone never re-reads. An fs wake must recompute the ACTIVE
+        // project's feeds regardless — that is how a recall serve reaches
+        // the panel promptly.
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "seed", 1);
+        let grabbed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let bus = spawn_with_watcher(
+            root.path().to_path_buf(),
+            vec![],
+            Box::new(StubWatcher {
+                grabbed: std::sync::Arc::clone(&grabbed),
+            }),
+        );
+        bus.req_tx
+            .send(DataRequest::SetActive(Some(path_of(&proj))))
+            .unwrap();
+
+        // The SetActive recompute lands (any Feed) — baseline fully synced.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut primed = false;
+        while !primed && std::time::Instant::now() < deadline {
+            if let Ok(Event::Feed(_)) = bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
+                primed = true;
+            }
+        }
+        assert!(primed, "the SetActive recompute never arrived");
+        // Drain the burst dry.
+        while bus.evt_rx.recv_timeout(Duration::from_millis(700)).is_ok() {}
+
+        // Recall-only change: serves land, no projection write of any kind.
+        seed_recall_serves(root.path(), &proj, &[(1_000, 500)]);
+        let wake = grabbed.lock().unwrap().clone().expect("watcher installed");
+        wake.send(WorkerMsg::Wake).unwrap();
+
+        // The wake alone (no cursor move) surfaces the served data.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut saw_serves = false;
+        while !saw_serves && std::time::Instant::now() < deadline {
+            if let Ok(Event::Feed(f)) = bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
+                if matches!(
+                    f.payload,
+                    rift_canopy::FeedPayload::Recall {
+                        savings: rift_canopy::RecallView::Data(_),
+                        ..
+                    }
+                ) {
+                    saw_serves = true;
+                }
+            }
+        }
+        assert!(
+            saw_serves,
+            "an fs wake must recompute the active project's feeds even when \
+             no projection watermark moved"
+        );
     }
 
     #[test]

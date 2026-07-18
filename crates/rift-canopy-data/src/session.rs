@@ -15,7 +15,9 @@
 //! [`active_sessions`] is **the** single active-sessions query (PRD-M4 user
 //! story 6): both of its consumers — the column-3 *threads section* and the
 //! nic-gauge *thread badge* (W4, M4-14/M4-15) — call it and nothing else, so
-//! the two can never disagree.
+//! the two can never disagree. [`sessions_detail`] is the same single pass,
+//! additionally surfacing the **newest live** session's id — the anchor the
+//! session-scoped panel metrics hang their event-anchored span on (ADR-0047).
 
 use std::path::Path;
 
@@ -42,6 +44,22 @@ pub const ACTIVE_WINDOW_MS: i64 = 30 * 60 * 1000;
 /// `live_sessions` filter.
 const LIVE_STATES: &[&str] = &["active", "compacting", "ending"];
 
+/// The one-pass detail read over the session caches: the badge signal
+/// ([`SessionsRead`], unchanged contract) plus the id of the **newest live**
+/// session — greatest `updated_at_ms`, ties broken toward the greater id so
+/// the pick is deterministic. The id anchors the session-scoped panel
+/// metrics (ADR-0047); the badge feeds the status truth table and the
+/// gauge/threads pair exactly as before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionsDetail {
+    /// The active-sessions badge signal.
+    pub read: SessionsRead,
+    /// The newest live session's id. `None` when nothing is live, on a
+    /// corrupt read, or when the winning cache carries no id (leniency: an
+    /// id-less cache still counts toward the badge but cannot anchor).
+    pub newest_live: Option<String>,
+}
+
 /// **The** single active-sessions query: distinct live sessions for the repo
 /// whose git dir is `git_dir`, judged at `now_ms` (injected — no wall clock).
 ///
@@ -54,24 +72,44 @@ const LIVE_STATES: &[&str] = &["active", "compacting", "ending"];
 /// oldest current activity.
 #[must_use]
 pub fn active_sessions(git_dir: &Path, now_ms: i64) -> SessionsRead {
+    sessions_detail(git_dir, now_ms).read
+}
+
+/// The same single pass as [`active_sessions`], also surfacing the newest
+/// live session's id (see [`SessionsDetail`]). One `read_dir` walk serves
+/// both consumers, so the badge and the metrics anchor can never disagree
+/// about which sessions are live.
+#[must_use]
+pub fn sessions_detail(git_dir: &Path, now_ms: i64) -> SessionsDetail {
+    let corrupt = SessionsDetail {
+        read: SessionsRead::Corrupt,
+        newest_live: None,
+    };
     let dir = git_dir.join(SESSIONS_DIR);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SessionsRead::Ok(None),
-        Err(_) => return SessionsRead::Corrupt, // exists but unlistable
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return SessionsDetail {
+                read: SessionsRead::Ok(None),
+                newest_live: None,
+            }
+        }
+        Err(_) => return corrupt, // exists but unlistable
     };
     let mut live: u16 = 0;
     let mut since_ms = i64::MAX;
+    // The newest live entry seen so far: (updated_at_ms, session_id).
+    let mut newest: Option<(i64, String)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue; // tmp files / strays are not cache entries
         }
         if entry.metadata().is_ok_and(|m| m.len() > MAX_CACHE_BYTES) {
-            return SessionsRead::Corrupt; // size cap: not plausibly ours
+            return corrupt; // size cap: not plausibly ours
         }
         let Ok(bytes) = std::fs::read(&path) else {
-            return SessionsRead::Corrupt; // exists but unreadable
+            return corrupt; // exists but unreadable
         };
         match parse_cache(&bytes) {
             Some(cache) => {
@@ -80,24 +118,39 @@ pub fn active_sessions(git_dir: &Path, now_ms: i64) -> SessionsRead {
                 if cache.live && fresh {
                     live = live.saturating_add(1);
                     since_ms = since_ms.min(cache.updated_at_ms);
+                    if let Some(id) = cache.session_id {
+                        let candidate = (cache.updated_at_ms, id);
+                        if newest.as_ref().is_none_or(|best| candidate > *best) {
+                            newest = Some(candidate);
+                        }
+                    }
                 }
             }
-            None => return SessionsRead::Corrupt,
+            None => return corrupt,
         }
     }
     if live == 0 {
-        return SessionsRead::Ok(None);
+        return SessionsDetail {
+            read: SessionsRead::Ok(None),
+            newest_live: None,
+        };
     }
-    SessionsRead::Ok(Some(LiveSessions {
-        active_sessions: live,
-        since_ms,
-    }))
+    SessionsDetail {
+        read: SessionsRead::Ok(Some(LiveSessions {
+            active_sessions: live,
+            since_ms,
+        })),
+        newest_live: newest.map(|(_, id)| id),
+    }
 }
 
-/// The two facts the signal needs from one cache file.
+/// The facts the signal needs from one cache file.
 struct CacheFacts {
     live: bool,
     updated_at_ms: i64,
+    /// The cache's `session_id`, when present — the metrics anchor. Optional
+    /// by leniency: only `state` + `updated_at_ms` are *required*.
+    session_id: Option<String>,
 }
 
 /// Parse one cache file's bytes, leniently and totally: unknown fields are
@@ -108,9 +161,14 @@ fn parse_cache(bytes: &[u8]) -> Option<CacheFacts> {
     let obj = value.as_object()?;
     let state = obj.get("state")?.as_str()?;
     let updated_at_ms = obj.get("updated_at_ms")?.as_i64()?;
+    let session_id = obj
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     Some(CacheFacts {
         live: LIVE_STATES.contains(&state),
         updated_at_ms,
+        session_id,
     })
 }
 
@@ -171,6 +229,68 @@ mod tests {
                 since_ms: now - 5,
             }))
         );
+    }
+
+    #[test]
+    fn sessions_detail_picks_the_newest_live_id() {
+        // The metrics anchor is the live session touched most recently — the
+        // one being typed in — not the earliest (`since_ms` keeps that role).
+        let tmp = tempfile::tempdir().unwrap();
+        write_cache(tmp.path(), "a", &cache_json_id("a-id", "active", 900));
+        write_cache(tmp.path(), "b", &cache_json_id("b-id", "compacting", 800));
+        write_cache(tmp.path(), "c", &cache_json_id("c-id", "ended", 950)); // not live
+        let detail = sessions_detail(tmp.path(), 1_000);
+        assert_eq!(
+            detail.read,
+            SessionsRead::Ok(Some(LiveSessions {
+                active_sessions: 2,
+                since_ms: 800,
+            }))
+        );
+        assert_eq!(detail.newest_live.as_deref(), Some("a-id"));
+    }
+
+    #[test]
+    fn an_id_less_cache_counts_toward_the_badge_but_never_anchors() {
+        // Leniency: only `state` + `updated_at_ms` are required — a cache
+        // without a `session_id` still counts as live, it just cannot be the
+        // metrics anchor.
+        let tmp = tempfile::tempdir().unwrap();
+        write_cache(
+            tmp.path(),
+            "bare",
+            r#"{"state":"active","updated_at_ms":990}"#,
+        );
+        let detail = sessions_detail(tmp.path(), 1_000);
+        assert_eq!(
+            detail.read,
+            SessionsRead::Ok(Some(LiveSessions {
+                active_sessions: 1,
+                since_ms: 990,
+            }))
+        );
+        assert_eq!(detail.newest_live, None);
+    }
+
+    #[test]
+    fn newest_live_ties_break_deterministically() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_cache(tmp.path(), "x", &cache_json_id("aa", "active", 900));
+        write_cache(tmp.path(), "y", &cache_json_id("zz", "active", 900));
+        let detail = sessions_detail(tmp.path(), 1_000);
+        assert_eq!(
+            detail.newest_live.as_deref(),
+            Some("zz"),
+            "equal freshness breaks to the greater id, deterministically"
+        );
+    }
+
+    fn cache_json_id(id: &str, state: &str, updated_at_ms: i64) -> String {
+        format!(
+            r#"{{"schema":1,"session_id":"{id}","state":"{state}","agent":"claude-code",
+                 "current_turn_ordinal":3,"turn_open":true,"compaction_boundary":null,
+                 "updated_at_ms":{updated_at_ms},"native_id_map":{{}}}}"#
+        )
     }
 
     #[test]

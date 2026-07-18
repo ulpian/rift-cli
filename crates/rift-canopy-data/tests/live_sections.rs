@@ -83,6 +83,66 @@ fn seed_token_fact(root: &Path, path: &str, call_id: &str, t: i64, classes: (i64
     .unwrap();
 }
 
+/// Seed a `session` row (the ADR-0047 anchor).
+fn seed_session_row(root: &Path, path: &str, id: &str, started_at: i64) {
+    let repo = repo_id_for(Path::new(path)).unwrap();
+    let store = SqliteStore::open(projection_db_under(root, &repo)).unwrap();
+    let rt = runtime().unwrap();
+    rt.block_on(store.insert(
+        "session",
+        &[
+            "session_id",
+            "agent",
+            "model_primary",
+            "repo_id",
+            "started_at",
+            "schema_version",
+        ],
+        &[
+            Value::text(id),
+            Value::text("claude-code"),
+            Value::text("m"),
+            Value::text("r"),
+            Value::Int(started_at),
+            Value::Int(1),
+        ],
+    ))
+    .unwrap();
+}
+
+/// Seed one captured event for a session (advances the event anchor).
+fn seed_session_event(root: &Path, path: &str, key: &str, session: &str, t: i64) {
+    let repo = repo_id_for(Path::new(path)).unwrap();
+    let store = SqliteStore::open(projection_db_under(root, &repo)).unwrap();
+    let rt = runtime().unwrap();
+    rt.block_on(store.insert(
+        "captured_event",
+        &[
+            "idempotency_key",
+            "session_id",
+            "turn_ordinal",
+            "event_ordinal",
+            "kind",
+            "trust",
+            "payload_sha256",
+            "occurred_at_ms",
+            "schema_version",
+        ],
+        &[
+            Value::text(key),
+            Value::text(session),
+            Value::Int(0),
+            Value::Int(0),
+            Value::text("start"),
+            Value::text("trusted"),
+            Value::text("sha"),
+            Value::Int(t),
+            Value::Int(1),
+        ],
+    ))
+    .unwrap();
+}
+
 /// An event source bridging the bus into the loop: drains bus updates each
 /// poll, and quits once the given predicate over the drained history holds
 /// (or after `max_polls`, whichever comes first).
@@ -275,4 +335,68 @@ fn a_mid_run_rebuild_drives_a_full_re_read() {
         saw_rebuilt,
         "the post-rebuild feed never reflected the fresh scoped read"
     );
+}
+
+#[test]
+fn metrics_hold_while_idle_and_move_on_capture() {
+    // ADR-0047 end-to-end: the panel metrics are session-scoped and
+    // event-anchored — they move when the transcript moves, and HOLD (no
+    // drifting value) while nothing is captured.
+    let root = tempfile::tempdir().unwrap();
+    let path = make_project(root.path(), "sess");
+    const S0: i64 = 1_000_000;
+    seed_session_row(root.path(), &path, "s1", S0);
+    seed_session_event(root.path(), &path, "e1", "s1", S0 + 60_000);
+
+    let bus = spawn_with_root(root.path().to_path_buf(), vec![path.clone()]);
+    bus.req_tx
+        .send(DataRequest::SetActive(Some(path.clone())))
+        .unwrap();
+
+    // The first Metrics: 1 event over a 60s span → floored to 1min → 1.0/min.
+    let held = wait_for_capture_rate(&bus.evt_rx, 1.0, Duration::from_secs(15))
+        .expect("the first Metrics feed never arrived");
+
+    // IDLE: nothing captured. Wall-clock advances across several poll
+    // cycles — any Metrics that arrives (idempotent recomputes are allowed)
+    // must carry the IDENTICAL held value; a drifted value is the old
+    // trailing-window bug.
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while std::time::Instant::now() < deadline {
+        if let Ok(Event::Feed(f)) = bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
+            if let rift_canopy::FeedPayload::Metrics(m) = &f.payload {
+                assert_eq!(m, &held, "an idle recompute must hold the value exactly");
+            }
+        }
+    }
+
+    // A new captured event re-anchors: 2 events over 10min → 0.2/min.
+    seed_session_event(root.path(), &path, "e2", "s1", S0 + 10 * 60_000);
+    let moved = wait_for_capture_rate(&bus.evt_rx, 0.2, Duration::from_secs(15))
+        .expect("the re-anchored Metrics feed never arrived");
+    // No live-session cache exists in this fixture, so the held anchor is the
+    // newest projection session — rendered as the dimmed hold (ADR-0047).
+    assert!(
+        !moved.session_live,
+        "no cache → the anchor is a held fallback"
+    );
+}
+
+/// Drain the bus until a Metrics feed with the given capture rate arrives.
+fn wait_for_capture_rate(
+    rx: &Receiver<Event>,
+    rate: f64,
+    total: Duration,
+) -> Option<rift_canopy::PanelMetrics> {
+    let deadline = std::time::Instant::now() + total;
+    while std::time::Instant::now() < deadline {
+        if let Ok(Event::Feed(f)) = rx.recv_timeout(Duration::from_millis(250)) {
+            if let rift_canopy::FeedPayload::Metrics(m) = f.payload {
+                if m.capture_per_min.is_some_and(|v| (v - rate).abs() < 1e-9) {
+                    return Some(m);
+                }
+            }
+        }
+    }
+    None
 }

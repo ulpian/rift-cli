@@ -27,9 +27,9 @@ use rift_canopy::col3::{
 use rift_canopy::{FeedPayload, FeedUpdate, LiveSessions, SessionsRead};
 use rift_git::repo_id_for;
 use rift_nic_gauge::{NicGauge as _, Reading, ReferenceGauge};
-#[cfg(test)]
-use rift_store::Value;
-use rift_store::{projection_db_under, recall_db_under, CanonicalStore, SqliteStore};
+use rift_store::{
+    projection_db_under, recall_db_under, recall_repo_id, CanonicalStore, SqliteStore, Value,
+};
 
 use crate::store::runtime;
 
@@ -208,19 +208,36 @@ fn breakdown_data(rows: &[TokenRow]) -> BreakdownData {
     }
 }
 
+/// What the shared per-recompute session read yields: the badge value (the
+/// one-query invariant — the threads section and the gauge badge receive
+/// this same value, so they can never disagree, user story 6) plus the
+/// newest live session's id — the anchor the session-scoped panel metrics
+/// hang their event-anchored span on (ADR-0047).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActiveRead {
+    /// The live-session badge value (thread count + running-since).
+    pub live: Option<LiveSessions>,
+    /// The newest live session's id (`None` = nothing live / no anchor).
+    pub newest_live: Option<String>,
+}
+
 /// The active-sessions read the W4 feeds share: **one** call to the single
-/// query per recomputation — the threads section and the gauge badge both
-/// receive this same value, so they can never disagree (user story 6).
+/// query per recomputation — every consumer (threads, badge, metrics anchor)
+/// reads this same pass, so they can never disagree (user story 6).
 #[must_use]
-pub fn read_active_sessions(path: &str, now_ms: i64) -> Option<LiveSessions> {
-    let sessions = rift_git::discover(Path::new(path)).map_or(SessionsRead::Ok(None), |paths| {
-        crate::session::active_sessions(&paths.git_dir, now_ms)
-    });
-    match sessions {
-        SessionsRead::Ok(live) => live,
+pub fn read_active_sessions(path: &str, now_ms: i64) -> ActiveRead {
+    let Ok(paths) = rift_git::discover(Path::new(path)) else {
+        return ActiveRead::default();
+    };
+    let detail = crate::session::sessions_detail(&paths.git_dir, now_ms);
+    match detail.read {
+        SessionsRead::Ok(live) => ActiveRead {
+            live,
+            newest_live: detail.newest_live,
+        },
         // A corrupt cache is surfaced by the STATUS path; the feeds treat it
-        // as no live sessions rather than inventing a count.
-        SessionsRead::Corrupt => None,
+        // as no live sessions rather than inventing a count or an anchor.
+        SessionsRead::Corrupt => ActiveRead::default(),
     }
 }
 
@@ -385,8 +402,6 @@ pub fn compute_recall(root: &Path, path: &str, live: Option<LiveSessions>) -> Fe
 const DAY_MS: i64 = 86_400_000;
 /// The trailing window the activity card shows.
 const ACTIVITY_DAYS: usize = 7;
-/// The recent window (ms) the metric rates are computed over — one hour.
-const RECENT_WINDOW_MS: i64 = 3_600_000;
 
 /// Short weekday label for an epoch-day index (day 0 = 1970-01-01 = Thursday).
 fn weekday_label(epoch_day: i64) -> &'static str {
@@ -470,59 +485,192 @@ fn read_day_counts(root: &Path, path: &str, now_ms: i64) -> Option<Vec<DayBar>> 
     Some(bars)
 }
 
-/// Compute the Panel-metrics feed (M55-07): the system panel's four domain
-/// metrics. Each is honest about absence — a missing projection or disabled
-/// recall yields `None`, never a fake zero. `now_ms` is the injected clock.
+/// Compute the Panel-metrics feed (M55-07, reshaped by ADR-0047): the system
+/// panel's four domain metrics, rated over the **current session's** own
+/// event-anchored span. Each is honest about absence — a missing projection
+/// or disabled recall yields `None`, never a fake zero. `active_session` is
+/// the newest live session's id from the shared session read (the anchor).
+/// No wall clock enters the computation: with no new captured data the
+/// output is byte-identical, so the values hold exactly while idle and the
+/// reducer's dirty gate suppresses any redraw.
 #[must_use]
-pub fn compute_metrics(root: &Path, path: &str, now_ms: i64) -> FeedUpdate {
-    let metrics = read_metrics(root, path, now_ms);
+pub fn compute_metrics(root: &Path, path: &str, active_session: Option<&str>) -> FeedUpdate {
+    let metrics = read_metrics(root, path, active_session);
     FeedUpdate {
         project: path.to_string(),
         payload: FeedPayload::Metrics(metrics),
     }
 }
 
-/// Read the four domain metrics, scoped to the project's own databases.
-fn read_metrics(root: &Path, path: &str, now_ms: i64) -> PanelMetrics {
+/// The span the metric rates are computed over (ADR-0047): which session
+/// scopes the counts, and the event-anchored `[start, end]` window the
+/// denominators derive from. Both ends are **captured** times — never `now` —
+/// so a rate moves only when the transcript moves.
+struct SessionAnchor {
+    /// s0 — the anchoring session's `started_at` (or, in the sessionless
+    /// fallback, the earliest captured event).
+    start: i64,
+    /// e0 — the newest captured event in scope (clamped to ≥ `start`).
+    end: i64,
+    /// The anchoring session's id (`None` = the whole-projection fallback).
+    session: Option<String>,
+    /// Whether the anchor is the LIVE session (`false` = held from the most
+    /// recent finished session — rendered dimmed).
+    live: bool,
+}
+
+/// The anchor's span in `unit_ms` units, floored to one whole unit
+/// (ADR-0047): a sub-unit span reports the count *as* the rate rather than
+/// extrapolating a wild figure from a tiny sample — and the denominator can
+/// never be zero.
+#[allow(clippy::cast_precision_loss)]
+fn span_units(a: &SessionAnchor, unit_ms: f64) -> f64 {
+    ((a.end.saturating_sub(a.start)).max(0) as f64 / unit_ms).max(1.0)
+}
+
+/// Resolve the session anchor down the fallback ladder: the live session
+/// once its `session` row has landed → the newest projection session (its
+/// final rates HOLD when nothing is live, rendered dimmed) → the events
+/// themselves (a projection captured before sessions existed) → `None` (a
+/// readable but empty projection — the rate rows render their placeholder).
+fn resolve_anchor(
+    store: &SqliteStore,
+    rt: &tokio::runtime::Runtime,
+    active_session: Option<&str>,
+) -> Option<SessionAnchor> {
+    if let Some(sid) = active_session {
+        if let Some(start) = rt
+            .block_on(store.query_opt_i64(
+                "SELECT started_at FROM session WHERE session_id = ?",
+                &[Value::text(sid)],
+            ))
+            .ok()
+            .flatten()
+        {
+            return Some(anchor_for(store, rt, sid, start, true));
+        }
+    }
+    let newest = rt
+        .block_on(store.query(
+            "SELECT session_id, started_at FROM session \
+             ORDER BY started_at DESC, session_id DESC LIMIT 1",
+            &[],
+        ))
+        .ok()
+        .and_then(|rows| {
+            let r = rows.first()?;
+            Some((r.get_text(0).ok()?, r.get_i64(1).ok()?))
+        });
+    if let Some((sid, start)) = newest {
+        return Some(anchor_for(store, rt, &sid, start, false));
+    }
+    // No session rows at all: anchor on the events themselves. MIN/MAX over
+    // an empty table read as SQL NULL → `None` → no anchor (honest absence).
+    let bound = |agg: &str| -> Option<i64> {
+        rt.block_on(store.query_opt_i64(
+            &format!("SELECT {agg}(occurred_at_ms) FROM captured_event"),
+            &[],
+        ))
+        .ok()
+        .flatten()
+    };
+    let start = bound("MIN")?;
+    let end = bound("MAX")?.max(start);
+    Some(SessionAnchor {
+        start,
+        end,
+        session: None,
+        live: false,
+    })
+}
+
+/// Build a session's anchor: `[started_at, newest captured event]`. A
+/// session with no events yet — or events somehow timed before its start —
+/// spans zero (the per-unit floor keeps the rates finite).
+fn anchor_for(
+    store: &SqliteStore,
+    rt: &tokio::runtime::Runtime,
+    sid: &str,
+    start: i64,
+    live: bool,
+) -> SessionAnchor {
+    let end = rt
+        .block_on(store.query_opt_i64(
+            "SELECT MAX(occurred_at_ms) FROM captured_event WHERE session_id = ?",
+            &[Value::text(sid)],
+        ))
+        .ok()
+        .flatten()
+        .unwrap_or(start)
+        .max(start);
+    SessionAnchor {
+        start,
+        end,
+        session: Some(sid.to_string()),
+        live,
+    }
+}
+
+/// The two projection-side rates over the anchor's span: captured events
+/// (session-exact where a session anchors) and the four-class token sum over
+/// `[start, end]` per minute of span. Tokens are time-window scoped —
+/// `model_call` reaches a session only via `turn`, so the uniform
+/// `[s0, e0]` window is the robust reading (ADR-0047).
+fn session_rates(
+    store: &SqliteStore,
+    rt: &tokio::runtime::Runtime,
+    a: &SessionAnchor,
+) -> (Option<f64>, Option<f64>) {
+    let count = |sql: &str, params: &[Value]| -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let n = rt
+            .block_on(store.query_opt_i64(sql, params))
+            .ok()
+            .flatten()
+            .unwrap_or(0) as f64;
+        n
+    };
+    let events = match &a.session {
+        Some(sid) => count(
+            "SELECT COUNT(*) FROM captured_event WHERE session_id = ?",
+            &[Value::text(sid)],
+        ),
+        None => count("SELECT COUNT(*) FROM captured_event", &[]),
+    };
+    let tokens = count(
+        &format!(
+            "SELECT COALESCE(SUM(tu.uncached_input + tu.cached_input + \
+                    tu.cache_creation + tu.output), 0) \
+             FROM token_usage tu JOIN model_call mc ON mc.call_id = tu.call_id \
+             WHERE mc.started_at >= {s0} AND mc.started_at <= {e0}",
+            s0 = a.start,
+            e0 = a.end,
+        ),
+        &[],
+    );
+    let span_min = span_units(a, 60_000.0);
+    (Some(events / span_min), Some(tokens / span_min))
+}
+
+/// Read the four domain metrics, scoped to the project's own databases and
+/// anchored to the active session's event-anchored span (ADR-0047).
+fn read_metrics(root: &Path, path: &str, active_session: Option<&str>) -> PanelMetrics {
     let Ok(repo) = repo_id_for(Path::new(path)) else {
         return PanelMetrics::default();
     };
     let db = projection_db_under(root, &repo);
-    let recall = recall_db_under(root, &repo);
-    let window_start = now_ms.saturating_sub(RECENT_WINDOW_MS);
-    #[allow(clippy::cast_precision_loss)]
-    let win_min = RECENT_WINDOW_MS as f64 / 60_000.0;
-
-    let (capture_per_min, tokens_per_min) = if db.exists() {
-        match (SqliteStore::open(&db).ok(), runtime().ok()) {
-            (Some(store), Some(rt)) => {
-                let recent = |sql: &str| -> f64 {
-                    #[allow(clippy::cast_precision_loss)]
-                    let n = rt
-                        .block_on(store.query_opt_i64(sql, &[]))
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0) as f64;
-                    n
-                };
-                let events = recent(&format!(
-                    "SELECT COUNT(*) FROM captured_event WHERE occurred_at_ms >= {window_start}"
-                ));
-                let tokens = recent(&format!(
-                    "SELECT COALESCE(SUM(tu.uncached_input + tu.cached_input + \
-                            tu.cache_creation + tu.output), 0) \
-                     FROM token_usage tu JOIN model_call mc ON mc.call_id = tu.call_id \
-                     WHERE mc.started_at >= {window_start}"
-                ));
-                (Some(events / win_min), Some(tokens / win_min))
-            }
-            _ => (None, None),
-        }
-    } else {
-        (None, None)
+    // recall.db is keyed by `recall_repo_id` (the serve/audit writer's
+    // authority — `rift hooks memd` / `rift-memd`), a DIFFERENT digest from the
+    // capture `repo_id_for` that keys projection.db above. Resolving recall.db
+    // with the capture id opened the wrong, empty file and stranded the panel
+    // on "no serves yet" (paths.rs:120 — recall_repo_id is the single authority).
+    let recall = match recall_repo_id(Path::new(path)) {
+        Ok(rid) => recall_db_under(root, &rid),
+        Err(_) => return PanelMetrics::default(),
     };
 
-    // Projection size: the capture + recall projections' on-disk bytes.
+    // Projection size: the capture + recall projections' on-disk bytes
+    // (instantaneous — the one row that never had a window).
     let projection_bytes = if db.exists() {
         let cap = std::fs::metadata(&db).map_or(0, |m| m.len());
         let rec = std::fs::metadata(&recall).map_or(0, |m| m.len());
@@ -531,29 +679,46 @@ fn read_metrics(root: &Path, path: &str, now_ms: i64) -> PanelMetrics {
         None
     };
 
-    // Recall load: served audit events in the last hour = the per-hour rate.
-    let recall_per_hour = if recall.exists() {
-        match (SqliteStore::open(&recall).ok(), runtime().ok()) {
+    // The anchor + the two projection-side rates.
+    let (anchor, capture_per_min, tokens_per_min) = if db.exists() {
+        match (SqliteStore::open(&db).ok(), runtime().ok()) {
+            (Some(store), Some(rt)) => match resolve_anchor(&store, &rt, active_session) {
+                Some(a) => {
+                    let (cap, tok) = session_rates(&store, &rt, &a);
+                    (Some(a), cap, tok)
+                }
+                None => (None, None, None),
+            },
+            _ => (None, None, None),
+        }
+    } else {
+        (None, None, None)
+    };
+
+    // Recall load: serves inside the anchored span, per hour of span. With
+    // no span at all there is nothing to rate against — honest absence.
+    let recall_per_hour = match (&anchor, recall.exists()) {
+        (Some(a), true) => match (SqliteStore::open(&recall).ok(), runtime().ok()) {
             (Some(store), Some(rt)) => {
                 #[allow(clippy::cast_precision_loss)]
                 let serves = rt
                     .block_on(store.query_opt_i64(
                         &format!(
                             "SELECT COUNT(*) FROM memd_audit_event \
-                             WHERE recorded_at >= {window_start}"
+                             WHERE recorded_at >= {s0} AND recorded_at <= {e0}",
+                            s0 = a.start,
+                            e0 = a.end,
                         ),
                         &[],
                     ))
                     .ok()
                     .flatten()
                     .unwrap_or(0) as f64;
-                // The window is exactly one hour, so the count is the rate.
-                Some(serves)
+                Some(serves / span_units(a, 3_600_000.0))
             }
             _ => None,
-        }
-    } else {
-        None
+        },
+        _ => None,
     };
 
     PanelMetrics {
@@ -561,6 +726,7 @@ fn read_metrics(root: &Path, path: &str, now_ms: i64) -> PanelMetrics {
         tokens_per_min,
         projection_bytes,
         recall_per_hour,
+        session_live: anchor.is_some_and(|a| a.live),
     }
 }
 
@@ -576,7 +742,10 @@ enum RecallDb {
 
 /// Read the served `memd.*` audit events from the project's own recall.db.
 fn read_audit_rows(root: &Path, path: &str) -> RecallDb {
-    let Ok(repo) = repo_id_for(Path::new(path)) else {
+    // recall.db is keyed by `recall_repo_id`, NOT the capture `repo_id_for`
+    // (which keys projection.db). The serve/audit writer appends under
+    // recall_repo_id; the reader must match or it opens a different, empty file.
+    let Ok(repo) = recall_repo_id(Path::new(path)) else {
         return RecallDb::Absent;
     };
     let db = recall_db_under(root, &repo);
@@ -834,7 +1003,9 @@ mod tests {
     }
 
     fn seed_recall_db(root: &Path, path: &str, events: &[(i64, i64)]) {
-        let repo = repo_id_for(Path::new(path)).unwrap();
+        // Seed under `recall_repo_id` — the writer's authority the reader now
+        // matches (recall.db is NOT keyed by the capture `repo_id_for`).
+        let repo = recall_repo_id(Path::new(path)).unwrap();
         let db = recall_db_under(root, &repo);
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
@@ -1014,6 +1185,47 @@ mod tests {
     }
 
     #[test]
+    fn recall_reads_the_writers_recall_repo_id_not_the_capture_id() {
+        // Regression: the serve/audit writer (`rift hooks memd` / `rift-memd`)
+        // keys recall.db by `recall_repo_id`; the panel used the capture
+        // `repo_id_for` and opened a different, empty recall.db — stranding it
+        // on "no serves yet" even after real serves landed.
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+
+        // The two id spaces genuinely differ for the same path.
+        let cap_id = repo_id_for(Path::new(&proj)).unwrap();
+        let recall_id = recall_repo_id(Path::new(&proj)).unwrap();
+        assert_ne!(
+            cap_id.as_str(),
+            recall_id.as_str(),
+            "capture and recall repo-ids must differ, else the test proves nothing"
+        );
+
+        // A decoy EMPTY recall.db under the CAPTURE id: reading it would yield
+        // Quiet. The reader must ignore it.
+        let decoy = recall_db_under(root.path(), &cap_id);
+        std::fs::create_dir_all(decoy.parent().unwrap()).unwrap();
+        rift_store::open_migrated(&decoy, &rift_store::recall_migrations()).unwrap();
+
+        // Real serves land under the recall id.
+        seed_recall_db(root.path(), &proj, &[(1_000, 500), (2_000, 700)]);
+
+        let FeedPayload::Recall { savings, calls, .. } =
+            compute_recall(root.path(), &proj, None).payload
+        else {
+            panic!("expected Recall");
+        };
+        // If the reader used the capture id it would find the empty decoy and
+        // report Quiet; matching the writer's id, it reports the served data.
+        let RecallView::Data(sd) = savings else {
+            panic!("must read the writer's recall.db, not the capture-id decoy");
+        };
+        assert!((sd.total - 1_200.0).abs() < f64::EPSILON);
+        assert!(matches!(calls, RecallView::Data(_)));
+    }
+
+    #[test]
     fn one_query_invariant_badge_equals_threads_by_construction() {
         // The bus reads active_sessions ONCE and hands the same value to both
         // feeds: the gauge badge and the threads section cannot disagree.
@@ -1113,6 +1325,18 @@ mod tests {
 
     /// Seed a `captured_event` occurring at `t`.
     fn seed_event(store: &SqliteStore, rt: &tokio::runtime::Runtime, key: &str, t: i64) {
+        seed_event_for(store, rt, key, "s", t);
+    }
+
+    /// Seed one captured event for an explicit session — the session-scoped
+    /// metrics tests (ADR-0047) need events in more than one session.
+    fn seed_event_for(
+        store: &SqliteStore,
+        rt: &tokio::runtime::Runtime,
+        key: &str,
+        session: &str,
+        t: i64,
+    ) {
         rt.block_on(store.insert(
             "captured_event",
             &[
@@ -1128,7 +1352,7 @@ mod tests {
             ],
             &[
                 Value::text(key),
-                Value::text("s"),
+                Value::text(session),
                 Value::Int(0),
                 Value::Int(0),
                 Value::text("start"),
@@ -1233,7 +1457,7 @@ mod tests {
         assert!(!weekday_label(-5).is_empty());
     }
 
-    // --- M55-07: the panel-metrics feed + savings % -------------------------
+    // --- M55-07 / ADR-0047: the session-scoped panel-metrics feed -----------
 
     #[test]
     fn metrics_missing_projection_is_all_absent() {
@@ -1241,7 +1465,7 @@ mod tests {
         let proj = root.path().join("plain");
         std::fs::create_dir_all(&proj).unwrap();
         let FeedPayload::Metrics(m) =
-            compute_metrics(root.path(), &proj.to_string_lossy(), NOW).payload
+            compute_metrics(root.path(), &proj.to_string_lossy(), None).payload
         else {
             panic!("expected Metrics");
         };
@@ -1253,34 +1477,46 @@ mod tests {
         assert!(m.capture_per_min.is_none());
         assert!(m.projection_bytes.is_none());
         assert!(m.recall_per_hour.is_none());
+        assert!(!m.session_live);
     }
 
     #[test]
-    fn metrics_rates_use_the_injected_clock_window() {
+    fn metrics_rates_are_scoped_to_the_active_sessions_span() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p");
         let store = open_proj(root.path(), &proj);
         let rt = runtime().unwrap();
-        // Three events inside the last hour, one two hours ago (outside window).
-        seed_event(&store, &rt, "e1", NOW - 10 * 60_000);
-        seed_event(&store, &rt, "e2", NOW - 20 * 60_000);
-        seed_event(&store, &rt, "e3", NOW - 30 * 60_000);
-        seed_event(&store, &rt, "old", NOW - 2 * 3_600_000);
-        seed_token_fact(&store, &rt, "c1", NOW - 5 * 60_000, (100, 200, 0, 300)); // 600 tokens
-        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, NOW).payload else {
+        // The active session "s": started at S0, events through S0+30min.
+        const S0: i64 = 1_000_000;
+        seed_session(&store, &rt, "s", S0);
+        seed_event_for(&store, &rt, "e1", "s", S0 + 10 * 60_000);
+        seed_event_for(&store, &rt, "e2", "s", S0 + 20 * 60_000);
+        seed_event_for(&store, &rt, "e3", "s", S0 + 30 * 60_000);
+        // Another session's event inside the same wall-time span: capture is
+        // session-EXACT, so it must not count.
+        seed_session(&store, &rt, "other", S0 - 3_600_000);
+        seed_event_for(&store, &rt, "ex", "other", S0 + 5 * 60_000);
+        // 600 tokens inside [S0, S0+30min] (tokens are span-scoped).
+        seed_token_fact(&store, &rt, "c1", S0 + 5 * 60_000, (100, 200, 0, 300));
+        // A model call BEFORE the session: outside the span, never counted.
+        seed_token_fact(&store, &rt, "c0", S0 - 10 * 60_000, (999, 0, 0, 0));
+
+        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, Some("s")).payload else {
             panic!("expected Metrics");
         };
-        // 3 events / 60 min = 0.05/min.
+        // Span = [S0, S0+30min] → 3 session events / 30 min = 0.1/min.
         let cap = m.capture_per_min.expect("readable projection → present");
         assert!(
-            (cap - 3.0 / 60.0).abs() < 1e-9,
-            "capture rate over the window: {cap}"
+            (cap - 3.0 / 30.0).abs() < 1e-9,
+            "capture rate over the session span: {cap}"
         );
+        // 600 span-scoped tokens / 30 min = 20/min (the pre-session 999 excluded).
         let burn = m.tokens_per_min.expect("present");
         assert!(
-            (burn - 600.0 / 60.0).abs() < 1e-9,
-            "burn rate over the window: {burn}"
+            (burn - 600.0 / 30.0).abs() < 1e-9,
+            "burn rate over the session span: {burn}"
         );
+        assert!(m.session_live, "anchored to the LIVE session");
         // A projection exists → its byte size is present and non-zero.
         assert!(m.projection_bytes.is_some_and(|b| b > 0));
         // No recall.db → recall load absent (never a fake zero).
@@ -1288,19 +1524,126 @@ mod tests {
     }
 
     #[test]
-    fn metrics_recall_load_present_when_recall_db_exists() {
+    fn metrics_hold_when_only_the_clock_advances() {
+        // The ADR-0047 key property: no wall clock enters the computation —
+        // the same captured data yields byte-identical metrics no matter when
+        // they are recomputed, so idle recomputes are no-ops by construction
+        // (the reducer's dirty gate then suppresses any redraw).
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p");
-        seed_recall_db(
-            root.path(),
-            &proj,
-            &[(NOW - 10 * 60_000, 100), (NOW - 20 * 60_000, 50)],
-        );
-        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, NOW).payload else {
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_session(&store, &rt, "s", 1_000_000);
+        seed_event_for(&store, &rt, "e1", "s", 1_000_000 + 60_000);
+        seed_token_fact(&store, &rt, "c1", 1_000_000 + 30_000, (10, 20, 0, 5));
+
+        let a = compute_metrics(root.path(), &proj, Some("s"));
+        let b = compute_metrics(root.path(), &proj, Some("s"));
+        assert_eq!(a, b, "recomputing over unchanged data is identical");
+        // And the value only moves when the transcript moves: a new event
+        // advances the span, so the rate changes.
+        seed_event_for(&store, &rt, "e2", "s", 1_000_000 + 10 * 60_000);
+        let c = compute_metrics(root.path(), &proj, Some("s"));
+        assert_ne!(a, c, "a new captured event re-anchors the span");
+    }
+
+    #[test]
+    fn metrics_zero_span_floors_to_the_unit() {
+        // A single event (span 0) reports the count AS the rate — the
+        // per-unit floor — never NaN/inf and never a wild extrapolation.
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        const S0: i64 = 5_000_000;
+        seed_session(&store, &rt, "s", S0);
+        seed_event_for(&store, &rt, "e1", "s", S0);
+        seed_token_fact(&store, &rt, "c1", S0, (100, 0, 0, 0));
+        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, Some("s")).payload else {
             panic!("expected Metrics");
         };
-        // Two serves in the last hour → 2.0 serves/hour.
-        assert_eq!(m.recall_per_hour, Some(2.0));
+        let cap = m.capture_per_min.expect("present");
+        assert!(cap.is_finite());
+        assert!((cap - 1.0).abs() < 1e-9, "1 event in a zero span → 1.0/min");
+        let burn = m.tokens_per_min.expect("present");
+        assert!((burn - 100.0).abs() < 1e-9, "100 tokens, floored to /1min");
+    }
+
+    #[test]
+    fn metrics_fall_back_to_the_newest_session_when_none_live() {
+        // No live session: the most recent projection session anchors — its
+        // final rates HOLD (rendered dimmed via `session_live = false`).
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_session(&store, &rt, "old", 1_000_000);
+        seed_event_for(&store, &rt, "eo", "old", 1_000_000 + 60_000);
+        seed_session(&store, &rt, "new", 9_000_000);
+        seed_event_for(&store, &rt, "en1", "new", 9_000_000 + 5 * 60_000);
+        seed_event_for(&store, &rt, "en2", "new", 9_000_000 + 10 * 60_000);
+        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, None).payload else {
+            panic!("expected Metrics");
+        };
+        // Anchored to "new": 2 events / 10 min.
+        let cap = m.capture_per_min.expect("present");
+        assert!((cap - 0.2).abs() < 1e-9, "newest session anchors: {cap}");
+        assert!(!m.session_live, "a held fallback is not live");
+    }
+
+    #[test]
+    fn metrics_active_session_wins_over_newer_rows() {
+        // The LIVE session anchors even when another session started later —
+        // liveness (the cache) beats recency (the table).
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_session(&store, &rt, "mine", 1_000_000);
+        seed_event_for(&store, &rt, "e1", "mine", 1_000_000 + 60_000);
+        seed_session(&store, &rt, "newer", 9_000_000);
+        seed_event_for(&store, &rt, "e2", "newer", 9_000_000 + 60_000);
+        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, Some("mine")).payload
+        else {
+            panic!("expected Metrics");
+        };
+        assert!((m.capture_per_min.unwrap() - 1.0).abs() < 1e-9);
+        assert!(m.session_live);
+    }
+
+    #[test]
+    fn metrics_empty_projection_rates_absent_bytes_present() {
+        // Readable projection, zero sessions AND zero events: nothing to
+        // anchor on → the rates are honestly absent; the size is a fact.
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "quiet");
+        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, None).payload else {
+            panic!("expected Metrics");
+        };
+        assert!(m.capture_per_min.is_none());
+        assert!(m.tokens_per_min.is_none());
+        assert!(m.recall_per_hour.is_none());
+        assert!(m.projection_bytes.is_some_and(|b| b > 0));
+        assert!(!m.session_live);
+    }
+
+    #[test]
+    fn metrics_recall_load_is_span_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        // Session span = [S0, S0 + 2h].
+        const S0: i64 = 10_000_000;
+        seed_session(&store, &rt, "s", S0);
+        seed_event_for(&store, &rt, "e1", "s", S0 + 2 * 3_600_000);
+        // One serve inside the span, one before it (excluded).
+        seed_recall_db(root.path(), &proj, &[(S0 - 5_000, 50), (S0 + 1_000, 100)]);
+        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, Some("s")).payload else {
+            panic!("expected Metrics");
+        };
+        // 1 in-span serve / 2h of span = 0.5/hr.
+        assert_eq!(m.recall_per_hour, Some(0.5));
         assert!(
             m.projection_bytes.is_some_and(|b| b > 0),
             "recall.db adds to size"

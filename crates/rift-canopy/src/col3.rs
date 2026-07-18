@@ -300,24 +300,29 @@ pub enum ThreadsView {
     Count(u16),
 }
 
-/// The four **domain** metrics of the system panel (M55-07/12, ADR-0024 §4):
-/// each honest about absence — a missing projection or disabled recall renders
-/// its placeholder, never a fake zero. Domain facts about *Rift*, not host
-/// telemetry.
+/// The four **domain** metrics of the system panel (M55-07/12, ADR-0024 §4;
+/// rates reshaped by ADR-0047): each honest about absence — a missing
+/// projection or disabled recall renders its placeholder, never a fake zero.
+/// Domain facts about *Rift*, not host telemetry. The rates are computed over
+/// the **current session's** event-anchored span, so they move only when the
+/// transcript moves and hold exactly while idle.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PanelMetrics {
-    /// Capture rate — captured events per minute over the recent window
+    /// Capture rate — the session's captured events per minute of its span
     /// (`None` = no readable projection).
     pub capture_per_min: Option<f64>,
-    /// Tokens burn rate — tokens per minute over the recent window (`None` =
-    /// no token facts).
+    /// Tokens burn rate — the session's tokens per minute of its span
+    /// (`None` = no token facts).
     pub tokens_per_min: Option<f64>,
     /// Projection size — on-disk bytes of the capture + recall projections
     /// (`None` = no projection on disk).
     pub projection_bytes: Option<u64>,
-    /// Recall load — MCP serves per hour from the audit trail (`None` = recall
-    /// disabled / no recall.db).
+    /// Recall load — MCP serves inside the session span, per hour of span
+    /// (`None` = recall disabled / no recall.db).
     pub recall_per_hour: Option<f64>,
+    /// Whether the rates anchor to the LIVE session. `false` = held from the
+    /// most recent finished session — the rows render dimmed (ADR-0047).
+    pub session_live: bool,
 }
 
 /// A single trailing-week day of activity: one grouped bar of the three capture
@@ -788,8 +793,13 @@ fn draw_system_panel(
         body(frame, inner, 0, &head, theme.body());
         return;
     }
-    // The donut occupies the top; the four domain metrics the bottom four rows.
-    let metric_rows = 4u16;
+    // The donut occupies the top; the domain metrics the bottom rows — plus,
+    // where the panel is tall enough, one hint row naming the rates' scope
+    // (ADR-0047): `session · live` while the live session anchors them,
+    // `session · idle` (dim) while a finished session's rates are held.
+    let m = &col3.metrics;
+    let hint = inner.h >= 8;
+    let metric_rows = 4u16 + u16::from(hint);
     let gauge_h = inner.h.saturating_sub(metric_rows);
     let gauge_rect = Rect {
         x: inner.x,
@@ -798,25 +808,54 @@ fn draw_system_panel(
         h: gauge_h,
     };
     draw_dumbometer(&col3.nic, theme, unicode, gauge_rect, backend, frame);
-    // The metric rows below.
-    let m = &col3.metrics;
+    let base = inner.h.saturating_sub(metric_rows);
+    if hint {
+        let sep = if unicode { "·" } else { "-" };
+        let (word, style) = if m.session_live {
+            ("live", theme.body())
+        } else {
+            ("idle", theme.dim())
+        };
+        body(
+            frame,
+            Rect {
+                x: inner.x + 1,
+                ..inner
+            },
+            base,
+            &format!("session {sep} {word}"),
+            style,
+        );
+    }
+    // The metric rows below the hint. The three session rates render dimmed
+    // when no session is live (held from the last one — a stale-marker, not
+    // an absence); the projection size is instantaneous and always body.
     let rows = [
-        ("capture", m.capture_per_min.map(|v| format!("{v:.1}/min"))),
+        (
+            "capture",
+            m.capture_per_min.map(|v| format!("{v:.1}/min")),
+            !m.session_live,
+        ),
         (
             "burn",
             m.tokens_per_min.map(|v| format!("{}/min", fmt_km(v))),
+            !m.session_live,
         ),
-        ("projection", m.projection_bytes.map(fmt_bytes)),
-        ("recall", m.recall_per_hour.map(|v| format!("{v:.1}/hr"))),
+        ("projection", m.projection_bytes.map(fmt_bytes), false),
+        (
+            "recall",
+            m.recall_per_hour.map(|v| format!("{v:.1}/hr")),
+            !m.session_live,
+        ),
     ];
-    let base = inner.h.saturating_sub(metric_rows);
-    for (i, (label, value)) in rows.into_iter().enumerate() {
+    let rows_base = base + u16::from(hint);
+    for (i, (label, value, dimmed)) in rows.into_iter().enumerate() {
         let Ok(iu) = u16::try_from(i) else { break };
-        let dy = base + iu;
+        let dy = rows_base + iu;
         let dot = Icon::Bullet.glyph(unicode);
         frame.set(inner.x, inner.y + dy, dot, theme.dim());
         let text = value.map_or_else(|| format!(" {label}: —"), |v| format!(" {label}: {v}"));
-        let style = if value_present(&text) {
+        let style = if value_present(&text) && !dimmed {
             theme.body()
         } else {
             theme.dim()
@@ -1248,6 +1287,7 @@ mod tests {
                 tokens_per_min: None,
                 projection_bytes: Some(4096),
                 recall_per_hour: None,
+                session_live: true,
             },
             ..Col3::default()
         };
@@ -1259,6 +1299,58 @@ mod tests {
         );
         assert!(text.contains("projection: 4KB"));
         assert!(text.contains("recall: —"));
+    }
+
+    #[test]
+    fn system_panel_hints_the_rates_session_scope() {
+        // ADR-0047: the hint row names the rates' scope — `live` while the
+        // live session anchors them, `idle` while a finished session's rates
+        // are held (and the rate rows render dimmed). ASCII backend → the
+        // `-` separator.
+        let live = Col3 {
+            metrics: PanelMetrics {
+                capture_per_min: Some(2.5),
+                session_live: true,
+                ..PanelMetrics::default()
+            },
+            ..Col3::default()
+        };
+        let text = text_of(&draw_to(&live, 40, 30));
+        assert!(
+            text.contains("session - live"),
+            "the live hint shows:\n{text}"
+        );
+
+        let held = Col3 {
+            metrics: PanelMetrics {
+                capture_per_min: Some(2.5),
+                session_live: false,
+                ..PanelMetrics::default()
+            },
+            ..Col3::default()
+        };
+        let text = text_of(&draw_to(&held, 40, 30));
+        assert!(
+            text.contains("session - idle"),
+            "the held hint shows:\n{text}"
+        );
+        // The held rates themselves still show (a stale marker, not absence).
+        assert!(text.contains("capture: 2.5/min"));
+    }
+
+    #[test]
+    fn system_panel_too_short_for_the_hint_degrades_to_rows_only() {
+        // A short panel drops the hint row, never a metric row.
+        let col3 = Col3 {
+            metrics: PanelMetrics {
+                capture_per_min: Some(2.5),
+                session_live: true,
+                ..PanelMetrics::default()
+            },
+            ..Col3::default()
+        };
+        let text = text_of(&draw_to(&col3, 40, 12));
+        assert!(text.contains("capture: 2.5/min"), "rows survive:\n{text}");
     }
 
     #[test]

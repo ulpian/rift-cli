@@ -485,6 +485,7 @@ pub(crate) fn activate_settings_row(
 /// before any op is emitted. `Esc` steps one stage back toward Browse, then
 /// closes. Rename and colours live in settings — Browse no longer carries
 /// `r`/`c`.
+#[allow(clippy::too_many_lines)] // one arm per menu stage — a dispatch table
 fn on_key_profile_menu(app: &mut App, key: CanopyKey) -> Action {
     use crate::profile_menu::{MenuStage, SettingsRow};
     // Ctrl-C still quits the whole app, even mid-menu.
@@ -550,10 +551,12 @@ fn on_key_profile_menu(app: &mut App, key: CanopyKey) -> Action {
                         app.profile_menu.settings_cursor.saturating_sub(1);
                     Action::None
                 }
-                CanopyKey::Enter => {
-                    let row = SettingsRow::ALL[app.profile_menu.settings_cursor.min(rows_last)];
-                    activate_settings_row(app, &profile, row)
-                }
+                CanopyKey::Enter => SettingsRow::ALL
+                    .get(app.profile_menu.settings_cursor.min(rows_last))
+                    .copied()
+                    .map_or(Action::None, |row| {
+                        activate_settings_row(app, &profile, row)
+                    }),
                 CanopyKey::Esc => {
                     app.profile_menu.stage = MenuStage::Browse;
                     Action::None
