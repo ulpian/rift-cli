@@ -55,19 +55,27 @@ pub(crate) struct RiftRecallServer {
     thread_id: McpThreadId,
     /// Monotonic ordinal allocated only after a request decodes successfully.
     next_call_ordinal: AtomicU64,
+    /// Flipped true when the concurrent startup ingest finishes (P5): the
+    /// handshake never waits on it, but the first tool call does — so the
+    /// transport comes up instantly and still never serves an empty world.
+    ingest_ready: tokio::sync::watch::Receiver<bool>,
 }
 
 impl RiftRecallServer {
-    fn new(repo: &Path) -> Result<Self> {
+    fn new(repo: &Path, ingest_ready: tokio::sync::watch::Receiver<bool>) -> Result<Self> {
         let mut seed = [0u8; 32];
         getrandom::getrandom(&mut seed)
             .map_err(|_| RiftError::crypto("MCP thread identity unavailable"))?;
-        Self::new_with_thread_id(repo, McpThreadId::from_seed(&seed))
+        Self::new_with_thread_id(repo, McpThreadId::from_seed(&seed), ingest_ready)
     }
 
     /// Deterministic constructor used by tests; production calls [`Self::new`]
     /// with OS entropy.
-    fn new_with_thread_id(repo: &Path, thread_id: McpThreadId) -> Result<Self> {
+    fn new_with_thread_id(
+        repo: &Path,
+        thread_id: McpThreadId,
+        ingest_ready: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Self> {
         let rift_dir = repo.join(".rift");
         // Fail-closed: a missing/malformed config resolves to secure defaults.
         let config = match EffectiveConfig::load(&rift_dir) {
@@ -81,6 +89,7 @@ impl RiftRecallServer {
             budget: tokio::sync::Mutex::new(TurnBudget::default()),
             thread_id,
             next_call_ordinal: AtomicU64::new(0),
+            ingest_ready,
         })
     }
 
@@ -264,6 +273,12 @@ impl ServerHandler for RiftRecallServer {
             .map_err(|_| ErrorData::invalid_params("unknown tool", None))?;
         let call = self.next_call(tool);
 
+        // First-serve gate (P5): never serve an empty world — but never block
+        // the HANDSHAKE on ingest either (the transport must come up
+        // instantly; on a large repo the startup ingest takes tens of
+        // seconds, during which the server previously answered nothing).
+        ingest_gate(&mut self.ingest_ready.clone()).await;
+
         let result = async {
             // Open the read-only recall store for this repo.
             let db = crate::recall_db_path(&self.repo)
@@ -372,16 +387,43 @@ async fn startup_ingest(repo: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Wait until the startup ingest reports done. Fail-open by design: a dropped
+/// sender (the ingest task died without reporting) unblocks serving — the
+/// ingest is best-effort and the server then serves whatever is already
+/// projected, never failing closed against the agent.
+async fn ingest_gate(ready: &mut tokio::sync::watch::Receiver<bool>) {
+    let _ = ready.wait_for(|done| *done).await;
+}
+
 /// Run the stdio MCP server until the agent closes stdin (EOF → graceful exit).
+///
+/// The startup ingest (P5: a fresh spawn must not serve an empty world) runs
+/// **concurrently** with the transport: the handshake answers immediately,
+/// and only the first `tools/call` awaits ingest completion via
+/// [`ingest_gate`]. Blocking the transport on ingest made the server appear
+/// dead for tens of seconds per spawn on large repos.
 ///
 /// # Errors
 /// [`RiftError::Substrate`] if the transport fails to initialize or run.
 pub(crate) async fn serve_mcp(repo: &Path) -> Result<()> {
-    // Populate the projection first; a fresh spawn must not serve an empty world.
-    if let Err(e) = startup_ingest(repo).await {
-        tracing::warn!(error = %e, "startup ingest deferred; serving existing projection");
-    }
-    let handler = RiftRecallServer::new(repo)?;
+    let (ingest_done, ingest_ready) = tokio::sync::watch::channel(false);
+    let ingest_repo = repo.to_path_buf();
+    // A dedicated thread + current-thread runtime: `startup_ingest` holds the
+    // non-`Send` `GixSubstrate` across awaits, so it cannot ride tokio::spawn.
+    std::thread::spawn(move || {
+        let run = || -> Result<()> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| RiftError::substrate(format!("ingest runtime: {e}")))?
+                .block_on(startup_ingest(&ingest_repo))
+        };
+        if let Err(e) = run() {
+            tracing::warn!(error = %e, "startup ingest deferred; serving existing projection");
+        }
+        let _ = ingest_done.send(true);
+    });
+    let handler = RiftRecallServer::new(repo, ingest_ready)?;
     let running = handler
         .serve(rmcp::transport::stdio())
         .await
@@ -461,11 +503,16 @@ mod tests {
         assert_eq!(got, PathBuf::from(rift_name()));
     }
 
+    fn ready_now() -> tokio::sync::watch::Receiver<bool> {
+        tokio::sync::watch::channel(true).1
+    }
+
     #[test]
     fn decoded_call_ids_are_stable_per_process_and_unique_per_ordinal() {
         let tmp = tempfile::tempdir().unwrap();
         let thread_a = McpThreadId::from_seed(b"a");
-        let server_a = RiftRecallServer::new_with_thread_id(tmp.path(), thread_a).unwrap();
+        let server_a =
+            RiftRecallServer::new_with_thread_id(tmp.path(), thread_a, ready_now()).unwrap();
         let first = server_a.next_call(ToolName::KnownState);
         let second = server_a.next_call(ToolName::KnownState);
         assert_eq!(first.thread_id, thread_a);
@@ -474,9 +521,33 @@ mod tests {
         assert_eq!(first.tool_name, "rift_known_state");
 
         let thread_b = McpThreadId::from_seed(b"b");
-        let server_b = RiftRecallServer::new_with_thread_id(tmp.path(), thread_b).unwrap();
+        let server_b =
+            RiftRecallServer::new_with_thread_id(tmp.path(), thread_b, ready_now()).unwrap();
         let other = server_b.next_call(ToolName::KnownState);
         assert_ne!(first.thread_id, other.thread_id);
         assert_ne!(first.call_id, other.call_id);
+    }
+
+    #[tokio::test]
+    async fn ingest_gate_opens_on_done_and_fails_open_on_a_dropped_sender() {
+        // Already done → passes through immediately.
+        let (tx, mut rx) = tokio::sync::watch::channel(true);
+        ingest_gate(&mut rx).await;
+        drop(tx);
+
+        // Done reported after serving started → the gate opens on the flip.
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        let gate = tokio::spawn(async move {
+            ingest_gate(&mut rx).await;
+        });
+        tx.send(true).unwrap();
+        gate.await.unwrap();
+
+        // The ingest task died without reporting (sender dropped while false):
+        // fail-open — serving proceeds on the existing projection rather than
+        // hanging the agent forever.
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        drop(tx);
+        ingest_gate(&mut rx).await;
     }
 }
