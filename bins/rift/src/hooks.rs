@@ -1309,6 +1309,88 @@ mod tests {
         assert_eq!(row[0].get_i64(1).unwrap(), 500);
     }
 
+    /// M61-03 (ADR-0049): a REAL `PackBuilt` event — built by the events
+    /// crate, not hand-rolled JSON — lands with `tokens_returned > 0` in both
+    /// audit relations, through both envelope paths rift-memd emits. Before
+    /// the seam, pack rows audited 0 by key-name mismatch (the figure hid in
+    /// `total_tokens`); a real refusal likewise carries its own payload cost.
+    #[test]
+    fn real_serve_events_audit_nonzero_returned_in_both_relations() {
+        use rift_recall_events::{
+            McpCallContext, McpCallId, McpTerminal, McpThreadId, MemdEvent,
+        };
+        use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore};
+        let s = SqliteStore::open_in_memory().unwrap();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        let pack = MemdEvent::PackBuilt {
+            sections: 4,
+            total_tokens: 500,
+            estimated_tokens_returned: 648,
+            estimated_tokens_avoided: 2_551_121,
+        };
+        // v1 path: the content-addressed envelope.
+        rt.block_on(append_memd_audit(&s, pack.to_hook_json().as_bytes(), 100))
+            .unwrap();
+        let rows = rt
+            .block_on(s.query(
+                "SELECT tokens_returned, tokens_avoided FROM memd_audit_event \
+                 WHERE verb = 'memd.pack_built'",
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get_i64(0).unwrap(), 648, "the seam's measure, not 0");
+        assert_eq!(rows[0].get_i64(1).unwrap(), 2_551_121);
+
+        // v2 path: the invocation-addressed terminal envelope carries the SAME
+        // figure into memd_call_event (and the legacy savings row).
+        let thread = McpThreadId::from_seed(b"process-neutral");
+        let call = McpCallContext {
+            thread_id: thread,
+            call_id: McpCallId::derive(thread, 1),
+            tool_name: "rift_context_pack".into(),
+        };
+        let v2 = McpTerminal::Event(&pack)
+            .to_hook_json(&call, rift_core::Timestamp::from_millis(500));
+        rt.block_on(append_memd_audit(&s, v2.as_bytes(), 999))
+            .unwrap();
+        let calls = rt
+            .block_on(s.query(
+                "SELECT tokens_returned FROM memd_call_event \
+                 WHERE terminal_verb = 'memd.pack_built'",
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].get_i64(0).unwrap(), 648);
+        assert_eq!(
+            rt.block_on(s.count("memd_audit_event")).unwrap(),
+            2,
+            "the v2 decision also retains a legacy savings row"
+        );
+
+        // A real refusal audits its own (small) payload cost, never 0 and
+        // never the withheld bytes (ADR-0049: no class exempt from accounting).
+        let refused = MemdEvent::Refused {
+            target: "file:secrets/.env@sha256:ab".into(),
+            reason: "policy_denied_exact".into(),
+            estimated_tokens_returned: 91,
+        };
+        rt.block_on(append_memd_audit(&s, refused.to_hook_json().as_bytes(), 200))
+            .unwrap();
+        let refusal = rt
+            .block_on(s.query(
+                "SELECT tokens_returned FROM memd_audit_event WHERE verb = 'memd.refused'",
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(refusal[0].get_i64(0).unwrap(), 91);
+    }
+
     #[test]
     fn work_tree_resolution_handles_main_and_linked_worktrees() {
         let tmp = tempfile::tempdir().unwrap();

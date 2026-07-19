@@ -77,4 +77,7 @@ rift-tokens = { version = "0.0.1", path = "../../crates/rift-tokens" }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# The audit-integration test routes REAL serve events (not hand-rolled JSON)
+# through the same envelopes rift-memd emits (M61-03).
+rift-recall-events = { version = "0.0.1", path = "../../crates/rift-recall-events" }
 tempfile = { workspace = true }

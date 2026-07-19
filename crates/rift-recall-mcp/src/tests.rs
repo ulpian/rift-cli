@@ -1052,6 +1052,262 @@ proptest::proptest! {
     }
 }
 
+/// Seed a store with a drawn corpus: one checkpoint, one revision + one read
+/// per file, `est[i]` as the captured `input_tokens`. Returns `(store,
+/// [(path, sha)])` in the deterministic id order candidates load in.
+fn corpus_store(est: &[u32]) -> (SqliteStore, Vec<(String, String)>) {
+    let s = SqliteStore::open_in_memory().unwrap();
+    apply_migrations(&s, &recall_migrations()).unwrap();
+    block(s.insert_or_ignore(
+        "n_checkpoint",
+        &[
+            "node_id",
+            "dialect",
+            "ordinal",
+            "prev_checkpoint",
+            "strategy",
+            "merkle_root",
+            "developer",
+        ],
+        &[
+            Value::text("c1"),
+            Value::text("rift"),
+            Value::Int(1),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ],
+    ))
+    .unwrap();
+    let mut corpus = Vec::new();
+    for (i, tokens) in est.iter().enumerate() {
+        let path = format!("src/file_{i:02}.rs");
+        let sha = format!("{:064x}", i + 1);
+        let rev = format!("rev_{i:02}");
+        block(s.insert_or_ignore(
+            "n_file_revision",
+            &["node_id", "path", "blob_oid", "content_sha256", "size"],
+            &[
+                Value::text(&rev),
+                Value::text(&path),
+                Value::text(&sha),
+                Value::text(&sha),
+                Value::Int(10),
+            ],
+        ))
+        .unwrap();
+        block(s.insert_or_ignore(
+            "n_file_read",
+            &[
+                "node_id",
+                "checkpoint_id",
+                "tool_call_id",
+                "file_revision",
+                "input_tokens",
+                "read_ordinal",
+                "byte_range_lo",
+                "byte_range_hi",
+            ],
+            &[
+                Value::text(format!("read_{rev}")),
+                Value::text("c1"),
+                Value::text(format!("tc_{rev}")),
+                Value::text(&rev),
+                Value::Int(i64::from(*tokens)),
+                Value::Int(1),
+                Value::Null,
+                Value::Null,
+            ],
+        ))
+        .unwrap();
+        corpus.push((path, sha));
+    }
+    (s, corpus)
+}
+
+use proptest::prelude::{prop_assert, prop_assert_eq};
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+    /// The M61-03 property (ADR-0049; PRD stories 11–14): over arbitrary
+    /// corpora, ceilings, request budgets, and call sequences across all 8
+    /// tools, every Ok response satisfies — returned == the measured payload;
+    /// event figures == response figures; avoided == baseline − returned;
+    /// bounded tools fit the effective cap or ship the empty skeleton with an
+    /// honest `truncated ⇔ dropped`; and the REAL `TurnBudget` never departs
+    /// from a shadow model that can never exceed its ceilings.
+    #[test]
+    fn turn_budget_and_figures_hold_over_arbitrary_call_sequences(
+        est in proptest::collection::vec(0u32..2000, 1..12),
+        max_calls in 1u32..6,
+        max_tokens in 0u32..3000,
+        req_budget in 0u32..=4000,
+        seq in proptest::collection::vec(
+            (0usize..8, proptest::bool::ANY, proptest::bool::ANY, proptest::bool::ANY),
+            1..8,
+        ),
+    ) {
+        let cfg = cfg();
+        let (store, corpus) = corpus_store(&est);
+        let reader = MemorySubstrate::local();
+        let s = McpServer::new(PolicyEngine::new(&cfg));
+        let c = ctx(&store, &reader);
+        let sum_est: u32 = est.iter().fold(0u32, |a, &t| a.saturating_add(t));
+        let est_of = |path: &str| -> u32 {
+            corpus
+                .iter()
+                .position(|(p, _)| p == path)
+                .and_then(|i| est.get(i).copied())
+                .unwrap_or(0)
+        };
+        let (first_path, first_sha) = corpus.first().cloned().unwrap();
+
+        let mut budget = TurnBudget::new(max_calls, max_tokens);
+        // The shadow model: what ADR-0004 + ADR-0049 say MUST happen.
+        let (mut calls_used, mut tokens_used) = (0u32, 0u32);
+
+        for (tool_idx, with_params, know_first, with_reason) in seq {
+            let tool = TOOL_SURFACE[tool_idx];
+            let known: Vec<String> = if know_first {
+                vec![first_sha.clone()]
+            } else {
+                Vec::new()
+            };
+            let req = ToolRequest {
+                task: with_params.then(|| "fix things".to_string()),
+                files_in_focus: if with_params {
+                    vec![first_path.clone()]
+                } else {
+                    Vec::new()
+                },
+                token_budget: req_budget,
+                known_hashes: known,
+                target: Some(match tool {
+                    ToolName::RetrieveExact => {
+                        format!("file:{first_path}@sha256:{first_sha}")
+                    }
+                    _ => first_path.clone(),
+                }),
+                reason: with_reason.then(|| "debugging the crash".to_string()),
+                ..Default::default()
+            };
+
+            // Shadow step 0: the anchor resets the draw-down (ADR-0004).
+            if matches!(tool, ToolName::KnownState) {
+                calls_used = 0;
+                tokens_used = 0;
+            }
+            // Shadow step 1: the per-turn call ceiling.
+            if calls_used >= max_calls {
+                prop_assert_eq!(
+                    block(s.dispatch(tool, &req, &c, &mut budget)),
+                    Err(ToolError::BudgetCallsExhausted)
+                );
+                continue;
+            }
+            calls_used += 1;
+            // Shadow step 2: the query-aware requirement (W5).
+            if tool.is_ranking_sensitive() && !with_params {
+                prop_assert_eq!(
+                    block(s.dispatch(tool, &req, &c, &mut budget)),
+                    Err(ToolError::QueryParamsRequired)
+                );
+                continue;
+            }
+
+            let remaining_before = max_tokens.saturating_sub(tokens_used);
+            match block(s.dispatch(tool, &req, &c, &mut budget)) {
+                Ok(resp) => {
+                    let measured = rift_tokens::count(&resp.payload.to_string());
+                    prop_assert_eq!(resp.estimated_tokens_returned, measured);
+                    prop_assert_eq!(
+                        resp.event.tokens_returned(),
+                        resp.estimated_tokens_returned
+                    );
+                    prop_assert_eq!(
+                        resp.event.tokens_avoided(),
+                        resp.estimated_tokens_avoided
+                    );
+                    // Net avoided against the tool's gross baseline.
+                    let baseline = match tool {
+                        ToolName::KnownState
+                        | ToolName::DiffSince
+                        | ToolName::ContextPack => sum_est,
+                        ToolName::FileIfChanged => est_of(&first_path),
+                        ToolName::ChangedHunks => est_of(
+                            resp.payload["path"].as_str().unwrap_or_default(),
+                        ),
+                        ToolName::ReadSummary
+                        | ToolName::RetrieveExact
+                        | ToolName::CostHotspots => 0,
+                    };
+                    prop_assert_eq!(
+                        resp.estimated_tokens_avoided,
+                        baseline.saturating_sub(resp.estimated_tokens_returned)
+                    );
+                    // Bounded manifests: fit the effective cap or ship the
+                    // empty skeleton; truncation is honest.
+                    if matches!(tool, ToolName::KnownState | ToolName::DiffSince) {
+                        let cap = if req_budget == 0 {
+                            DEFAULT_MANIFEST_TOKENS
+                        } else {
+                            req_budget.clamp(1, MAX_MANIFEST_TOKENS)
+                        }
+                        .min(remaining_before);
+                        let kept = match tool {
+                            ToolName::KnownState => resp.payload["envelopes"]
+                                .as_array()
+                                .map_or(0, Vec::len),
+                            _ => {
+                                resp.payload["changed"].as_array().map_or(0, Vec::len)
+                                    + resp.payload["unchanged"]
+                                        .as_array()
+                                        .map_or(0, Vec::len)
+                            }
+                        };
+                        let omitted = resp.payload["omitted"].as_u64().unwrap_or(0) as usize;
+                        prop_assert_eq!(kept + omitted, corpus.len());
+                        prop_assert_eq!(
+                            resp.payload["truncated"].as_bool(),
+                            Some(omitted > 0)
+                        );
+                        prop_assert!(
+                            resp.estimated_tokens_returned <= cap || kept == 0,
+                            "manifest over cap without full truncation: \
+                             returned={} cap={} kept={kept}",
+                            resp.estimated_tokens_returned,
+                            cap
+                        );
+                    }
+                    // Shadow step 3: the seam's single clamped charge.
+                    tokens_used = tokens_used.saturating_add(
+                        resp.estimated_tokens_returned.min(remaining_before),
+                    );
+                }
+                Err(ToolError::PackBudgetTooSmall { .. }) => {
+                    prop_assert!(
+                        matches!(tool, ToolName::ContextPack),
+                        "only the pack fail-louds on budget"
+                    );
+                }
+                Err(other) => prop_assert!(false, "unexpected error: {other:?}"),
+            }
+            // The REAL budget never departs from the shadow — and the shadow
+            // structurally cannot exceed its ceilings.
+            prop_assert_eq!(
+                budget.tokens_remaining(),
+                max_tokens.saturating_sub(tokens_used)
+            );
+            prop_assert_eq!(
+                budget.calls_remaining(),
+                max_calls.saturating_sub(calls_used)
+            );
+            prop_assert!(tokens_used <= max_tokens);
+        }
+    }
+}
+
 #[test]
 fn token_accounting_is_non_negative_and_honest() {
     let cfg = cfg();

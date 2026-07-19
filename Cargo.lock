@@ -2788,6 +2788,7 @@ dependencies = [
  "rift-core",
  "rift-git",
  "rift-hashchain",
+ "rift-recall-events",
  "rift-recall-ledger",
  "rift-recall-mcp",
  "rift-recall-policy",
