@@ -208,10 +208,11 @@ fn budget_never_exceeded_over_a_turn() {
     let cfg = cfg();
     let store = seeded_store();
     let reader = MemorySubstrate::local();
-    // Tiny token ceiling: the emitted figure is the MEASURED payload count
-    // (ADR-0049 — it may exceed a tiny ceiling until the manifest cap lands in
-    // M61-02), while the charge clamps so the budget counter never breaches.
-    // M61-03 replaces this with the arbitrary-call-sequence property test.
+    // The skeleton edge (ADR-0049 §5): a ceiling so tiny even the empty
+    // manifest skeleton exceeds it. Every entry drops (kept == 0), the
+    // truncation is honest, the skeleton still ships (the anchor is never
+    // stranded), and the clamped charge drains the ceiling without wrapping.
+    // M61-03 grows this into the arbitrary-call-sequence property test.
     let s = McpServer::new(PolicyEngine::new(&cfg));
     let mut budget = TurnBudget::new(4, 3);
     let resp = block(s.dispatch(
@@ -221,19 +222,135 @@ fn budget_never_exceeded_over_a_turn() {
         &mut budget,
     ))
     .unwrap();
+    assert_eq!(resp.payload["envelopes"].as_array().unwrap().len(), 0);
+    assert_eq!(resp.payload["truncated"], true);
+    assert_eq!(resp.payload["omitted"], 2, "both seeded entries dropped");
     assert_eq!(
         resp.estimated_tokens_returned,
         rift_tokens::count(&resp.payload.to_string()),
-        "returned is the measured payload count"
-    );
-    assert!(
-        resp.estimated_tokens_returned > 3,
-        "the un-truncated manifest exceeds the tiny ceiling (M61-02 adds the cap)"
+        "returned is the measured (skeleton) payload count"
     );
     assert_eq!(
         budget.tokens_remaining(),
         0,
         "the clamped charge drains the ceiling, never wraps past it"
+    );
+}
+
+#[test]
+fn manifest_cap_composes_default_max_and_remaining() {
+    // No request budget → the pack-parity default.
+    let b = TurnBudget::new(4, 2000);
+    assert_eq!(manifest_cap(&ToolRequest::default(), &b), 1200);
+    // An explicit budget clamps to the hard maximum…
+    let roomy = TurnBudget::new(4, 10_000);
+    let big = ToolRequest {
+        token_budget: 999_999,
+        ..Default::default()
+    };
+    assert_eq!(manifest_cap(&big, &roomy), MAX_MANIFEST_TOKENS);
+    // …and small explicit budgets pass through.
+    let small = ToolRequest {
+        token_budget: 50,
+        ..Default::default()
+    };
+    assert_eq!(manifest_cap(&small, &roomy), 50);
+    // The remaining turn budget always composes in.
+    let drained = TurnBudget::new(4, 10);
+    assert_eq!(manifest_cap(&ToolRequest::default(), &drained), 10);
+}
+
+#[test]
+fn fit_to_cap_keeps_the_largest_fitting_prefix_deterministically() {
+    let build = |kept: usize, truncated: bool| {
+        serde_json::json!({
+            "items": (0..kept).map(|i| format!("item-number-{i}")).collect::<Vec<_>>(),
+            "truncated": truncated,
+        })
+    };
+    // A cap sized to a mid prefix keeps a fitting prefix (postcondition).
+    let cap = rift_tokens::count(&build(7, true).to_string());
+    let (payload, kept) = fit_to_cap(cap, 20, &build);
+    assert!(kept > 0 && kept < 20);
+    assert!(rift_tokens::count(&payload.to_string()) <= cap);
+    assert_eq!(payload["truncated"], true);
+    // Deterministic: same inputs, same output.
+    let (again, kept_again) = fit_to_cap(cap, 20, &build);
+    assert_eq!(payload, again);
+    assert_eq!(kept, kept_again);
+    // A full fit is the fast path, untruncated.
+    let (full, all) = fit_to_cap(u32::MAX, 20, &build);
+    assert_eq!(all, 20);
+    assert_eq!(full["truncated"], false);
+    // Nothing droppable (n == 0): the skeleton ships UNtruncated even over a
+    // tiny cap — nothing was omitted, so `truncated` must not lie.
+    let (skeleton, none) = fit_to_cap(0, 0, &build);
+    assert_eq!(none, 0);
+    assert_eq!(skeleton["truncated"], false);
+}
+
+#[test]
+fn known_state_truncates_to_the_ranked_prefix() {
+    let cfg = cfg();
+    let store = seeded_store();
+    let reader = MemorySubstrate::local();
+    let s = McpServer::new(PolicyEngine::new(&cfg));
+    let c = ctx(&store, &reader);
+    // Full manifest first: both entries, rank order (src/a.rs is the focus).
+    let mut roomy = TurnBudget::new(4, 10_000);
+    let full = block(s.dispatch(ToolName::KnownState, &ranking_req(), &c, &mut roomy)).unwrap();
+    let envs = full.payload["envelopes"].as_array().unwrap().clone();
+    assert_eq!(envs.len(), 2);
+    assert_eq!(envs[0]["path"], "src/a.rs", "rank order: the focus file leads");
+    // Budget exactly the one-entry truncated payload → the ranked prefix
+    // survives, the tail drops, and the truncation is honest.
+    let expected = serde_json::json!({
+        "tool": "known_state",
+        "envelopes": [envs[0].clone()],
+        "truncated": true,
+        "omitted": 1,
+    });
+    let req = ToolRequest {
+        token_budget: rift_tokens::count(&expected.to_string()),
+        ..ranking_req()
+    };
+    let mut budget = TurnBudget::new(4, 10_000);
+    let resp = block(s.dispatch(ToolName::KnownState, &req, &c, &mut budget)).unwrap();
+    assert_eq!(resp.payload, expected);
+    // Anchor-then-charge (ADR-0004 + ADR-0049): the anchor refilled the turn,
+    // then the seam charged exactly the measured manifest.
+    assert_eq!(
+        budget.tokens_remaining(),
+        10_000 - resp.estimated_tokens_returned,
+        "the fresh turn allowance minus the seam's single charge"
+    );
+}
+
+#[test]
+fn diff_since_drops_unchanged_before_changed() {
+    let cfg = cfg();
+    let store = seeded_store();
+    let reader = MemorySubstrate::local();
+    let s = McpServer::new(PolicyEngine::new(&cfg));
+    let c = ctx(&store, &reader);
+    // The agent holds src/a.rs → a is unchanged, b is changed (n = 2).
+    let expected = serde_json::json!({
+        "tool": "diff_since",
+        "changed": [{ "path": "src/b.rs", "new_sha256": SHA_B }],
+        "unchanged": [],
+        "truncated": true,
+        "omitted": 1,
+    });
+    let req = ToolRequest {
+        known_hashes: vec![SHA_A.into()],
+        token_budget: rift_tokens::count(&expected.to_string()),
+        ..Default::default()
+    };
+    let mut budget = TurnBudget::new(4, 10_000);
+    let resp = block(s.dispatch(ToolName::DiffSince, &req, &c, &mut budget)).unwrap();
+    assert_eq!(
+        resp.payload, expected,
+        "the unchanged tail drops first; the changed entry (the tool's point) survives"
     );
 }
 

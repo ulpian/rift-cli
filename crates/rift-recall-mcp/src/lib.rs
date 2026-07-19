@@ -376,13 +376,22 @@ impl<'a> McpServer<'a> {
                 &mut vbudget,
             ));
         }
-        // No summaries are inlined yet (W2), so the manifest never truncates
-        // here; the manifest cap + drop-tail truncation land with M61-02.
-        let payload = json!({
-            "tool": "known_state",
-            "envelopes": envelopes.iter().map(envelope_view).collect::<Vec<_>>(),
-            "truncated": false,
-        });
+        // The manifest cap (ADR-0049 §4/§5): known_state anchored in dispatch
+        // step 0, so the trial sees the fresh allowance. Entries are already
+        // in rank order — truncation keeps the highest-ranked prefix and says
+        // so honestly (`truncated`, `omitted`).
+        let cap = manifest_cap(req, budget);
+        let views: Vec<Value> = envelopes.iter().map(envelope_view).collect();
+        let n = views.len();
+        let build = |kept: usize, truncated: bool| {
+            json!({
+                "tool": "known_state",
+                "envelopes": views.get(..kept).unwrap_or(&[]),
+                "truncated": truncated,
+                "omitted": n.saturating_sub(kept),
+            })
+        };
+        let (payload, _kept) = fit_to_cap(cap, n, &build);
         Ok(Self::respond(
             ToolName::KnownState,
             payload,
@@ -412,7 +421,25 @@ impl<'a> McpServer<'a> {
                 changed.push(json!({ "path": lc.candidate.path, "new_sha256": lc.content_sha256 }));
             }
         }
-        let payload = json!({ "tool": "diff_since", "changed": changed, "unchanged": unchanged });
+        // The manifest cap bounds the delta list too (ADR-0049 §5). Droppable
+        // order is the concatenation [changed…, unchanged…] with drops from
+        // the tail: unchanged paths (cheap, least informative) go before
+        // changed entries (the tool's point). Entry order inside each list is
+        // the deterministic id order the candidates load in.
+        let cap = manifest_cap(req, budget);
+        let n = changed.len().saturating_add(unchanged.len());
+        let build = |kept: usize, truncated: bool| {
+            let changed_kept = kept.min(changed.len());
+            let unchanged_kept = kept.saturating_sub(changed.len());
+            json!({
+                "tool": "diff_since",
+                "changed": changed.get(..changed_kept).unwrap_or(&[]),
+                "unchanged": unchanged.get(..unchanged_kept).unwrap_or(&[]),
+                "truncated": truncated,
+                "omitted": n.saturating_sub(kept),
+            })
+        };
+        let (payload, _kept) = fit_to_cap(cap, n, &build);
         Ok(Self::respond(
             ToolName::DiffSince,
             payload,
@@ -1034,6 +1061,64 @@ impl<'a> McpServer<'a> {
 
 /// The per-tool changed-hunk cap (W6 default).
 pub const MAX_CHANGED_HUNKS: u32 = 8;
+
+/// The default manifest token cap when the request carries no budget
+/// (ADR-0049 §4 — pack parity: mirrors `DEFAULT_PACK_TOKENS`, deliberately
+/// below the turn ceiling so an unbudgeted anchor call leaves room for
+/// same-turn content serves).
+pub const DEFAULT_MANIFEST_TOKENS: u32 = 1200;
+
+/// The hard ceiling an explicit manifest `token_budget` is clamped to
+/// (ADR-0049 §4 — pack parity: mirrors `MAX_PACK_TOKENS`).
+pub const MAX_MANIFEST_TOKENS: u32 = 4000;
+
+/// The effective manifest cap (ADR-0049 §4): the pack-parity default/max
+/// split composed with the remaining turn budget. A non-charging trial —
+/// the single charge stays at the respond seam.
+fn manifest_cap(req: &ToolRequest, budget: &TurnBudget) -> u32 {
+    if req.token_budget == 0 {
+        DEFAULT_MANIFEST_TOKENS
+    } else {
+        req.token_budget.clamp(1, MAX_MANIFEST_TOKENS)
+    }
+    .min(budget.tokens_remaining())
+}
+
+/// The largest droppable-entry prefix whose serialized payload fits `cap`
+/// (ADR-0049 §5). `build(kept, truncated)` rebuilds the full payload for a
+/// prefix of `kept` entries; entries must be ordered so dropping from the
+/// tail is the right sacrifice (rank order for the manifest, unchanged-last
+/// for the delta list). Deterministic: a fast-path full fit, a binary search
+/// for the largest fitting prefix, then a defensive linear walk-down — BPE
+/// token counts are not formally monotone under concatenation, so the
+/// postcondition (`fits(kept) || kept == 0`) is guaranteed, not assumed.
+/// With nothing droppable (`n == 0`) or nothing fitting, the skeleton still
+/// ships (the anchor is never stranded); the seam's clamped charge absorbs a
+/// skeleton that exceeds a tiny cap.
+fn fit_to_cap(cap: u32, n: usize, build: &dyn Fn(usize, bool) -> Value) -> (Value, usize) {
+    let full = build(n, false);
+    if n == 0 || rift_tokens::count(&full.to_string()) <= cap {
+        return (full, n);
+    }
+    let fits = |k: usize| rift_tokens::count(&build(k, true).to_string()) <= cap;
+    // Binary search over [0, n): find the first prefix length that does NOT
+    // fit (assuming monotone prefix costs), then step back one.
+    let (mut lo, mut hi) = (0usize, n);
+    while lo < hi {
+        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
+        if fits(mid) {
+            lo = mid.saturating_add(1);
+        } else {
+            hi = mid;
+        }
+    }
+    let mut kept = lo.saturating_sub(1);
+    // Walk down to certainty (non-monotone counts cannot break the bound).
+    while kept > 0 && !fits(kept) {
+        kept = kept.saturating_sub(1);
+    }
+    (build(kept, true), kept)
+}
 
 /// Render an [`Envelope`] to a JSON view (state tag + hash, never raw bytes for
 /// the manifest states).
