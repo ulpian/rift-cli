@@ -39,6 +39,7 @@ pub mod gate_m56;
 pub mod gate_m57;
 pub mod gate_m58;
 pub mod gate_m59;
+pub mod gate_m61;
 pub mod pin_cut;
 
 /// A fallible meta-check: `Ok(violations)` (empty ⇒ healthy) or a hard `Err`

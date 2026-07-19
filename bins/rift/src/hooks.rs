@@ -1316,9 +1316,7 @@ mod tests {
     /// `total_tokens`); a real refusal likewise carries its own payload cost.
     #[test]
     fn real_serve_events_audit_nonzero_returned_in_both_relations() {
-        use rift_recall_events::{
-            McpCallContext, McpCallId, McpTerminal, McpThreadId, MemdEvent,
-        };
+        use rift_recall_events::{McpCallContext, McpCallId, McpTerminal, McpThreadId, MemdEvent};
         use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore};
         let s = SqliteStore::open_in_memory().unwrap();
         apply_migrations(&s, &recall_migrations()).unwrap();
@@ -1343,7 +1341,11 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].get_i64(0).unwrap(), 648, "the seam's measure, not 0");
+        assert_eq!(
+            rows[0].get_i64(0).unwrap(),
+            648,
+            "the seam's measure, not 0"
+        );
         assert_eq!(rows[0].get_i64(1).unwrap(), 2_551_121);
 
         // v2 path: the invocation-addressed terminal envelope carries the SAME
@@ -1354,8 +1356,8 @@ mod tests {
             call_id: McpCallId::derive(thread, 1),
             tool_name: "rift_context_pack".into(),
         };
-        let v2 = McpTerminal::Event(&pack)
-            .to_hook_json(&call, rift_core::Timestamp::from_millis(500));
+        let v2 =
+            McpTerminal::Event(&pack).to_hook_json(&call, rift_core::Timestamp::from_millis(500));
         rt.block_on(append_memd_audit(&s, v2.as_bytes(), 999))
             .unwrap();
         let calls = rt
@@ -1380,8 +1382,12 @@ mod tests {
             reason: "policy_denied_exact".into(),
             estimated_tokens_returned: 91,
         };
-        rt.block_on(append_memd_audit(&s, refused.to_hook_json().as_bytes(), 200))
-            .unwrap();
+        rt.block_on(append_memd_audit(
+            &s,
+            refused.to_hook_json().as_bytes(),
+            200,
+        ))
+        .unwrap();
         let refusal = rt
             .block_on(s.query(
                 "SELECT tokens_returned FROM memd_audit_event WHERE verb = 'memd.refused'",

@@ -301,7 +301,10 @@ fn known_state_truncates_to_the_ranked_prefix() {
     let full = block(s.dispatch(ToolName::KnownState, &ranking_req(), &c, &mut roomy)).unwrap();
     let envs = full.payload["envelopes"].as_array().unwrap().clone();
     assert_eq!(envs.len(), 2);
-    assert_eq!(envs[0]["path"], "src/a.rs", "rank order: the focus file leads");
+    assert_eq!(
+        envs[0]["path"], "src/a.rs",
+        "rank order: the focus file leads"
+    );
     // Budget exactly the one-entry truncated payload → the ranked prefix
     // survives, the tail drops, and the truncation is honest.
     let expected = serde_json::json!({
@@ -1383,7 +1386,10 @@ fn every_tool_emits_the_measured_payload_count() {
         let mut budget = TurnBudget::new(8, 10_000);
         let resp = block(s.dispatch(tool, &req, &c, &mut budget)).unwrap();
         let measured = rift_tokens::count(&resp.payload.to_string());
-        assert!(measured > 0, "{tool:?}: a serialized response is never free");
+        assert!(
+            measured > 0,
+            "{tool:?}: a serialized response is never free"
+        );
         assert_eq!(
             resp.estimated_tokens_returned, measured,
             "{tool:?}: returned == measured payload count"
