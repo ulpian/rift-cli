@@ -307,6 +307,93 @@ pub fn line_points(values: &[f64], max: f64, xsamples: u16) -> Vec<PlotPoint> {
     out
 }
 
+/// Rasterize explicit connected segments at a requested sub-cell resolution.
+/// Every segment is clipped to the normalized plot square; non-finite vertices
+/// break the line rather than escaping the target rectangle.
+#[must_use]
+pub fn connected_line_points(
+    vertices: &[PlotPoint],
+    samples_x: u32,
+    samples_y: u32,
+) -> Vec<PlotPoint> {
+    if vertices.is_empty() || samples_x == 0 || samples_y == 0 {
+        return Vec::new();
+    }
+    if let [point] = vertices {
+        return if valid_unit(*point) {
+            vec![*point]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut out = Vec::new();
+    for pair in vertices.windows(2) {
+        let Some((&a, &b)) = pair.first().zip(pair.get(1)) else {
+            continue;
+        };
+        let Some((a, b)) = clip_segment(a, b) else {
+            continue;
+        };
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let steps = (dx.abs() * samples_x as f32)
+            .max(dy.abs() * samples_y as f32)
+            .ceil()
+            .max(1.0) as u32;
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            out.push(PlotPoint {
+                x: a.x + dx * t,
+                y: a.y + dy * t,
+            });
+        }
+    }
+    out
+}
+
+fn valid_unit(p: PlotPoint) -> bool {
+    p.x.is_finite() && p.y.is_finite() && (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y)
+}
+
+/// Liang–Barsky clipping against `[0,1]²`.
+pub(crate) fn clip_segment(a: PlotPoint, b: PlotPoint) -> Option<(PlotPoint, PlotPoint)> {
+    if !a.x.is_finite() || !a.y.is_finite() || !b.x.is_finite() || !b.y.is_finite() {
+        return None;
+    }
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let mut lo = 0.0f32;
+    let mut hi = 1.0f32;
+    for (p, q) in [(-dx, a.x), (dx, 1.0 - a.x), (-dy, a.y), (dy, 1.0 - a.y)] {
+        if p.abs() <= f32::EPSILON {
+            if q < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let r = q / p;
+        if p < 0.0 {
+            lo = lo.max(r);
+        } else {
+            hi = hi.min(r);
+        }
+        if lo > hi {
+            return None;
+        }
+    }
+    Some((
+        PlotPoint {
+            x: a.x + lo * dx,
+            y: a.y + lo * dy,
+        },
+        PlotPoint {
+            x: a.x + hi * dx,
+            y: a.y + hi * dy,
+        },
+    ))
+}
+
 /// Gauge: a horizontal fill covering `fraction` (clamped `[0, 1]`) of the plot
 /// width, `ylevels` dots thick — the sub-cell horizontal meter.
 #[must_use]
@@ -412,6 +499,40 @@ mod tests {
 
         assert_eq!(lit_cells(&braille), lit_cells(&blocks));
         assert!(!lit_cells(&braille).is_empty());
+    }
+
+    #[test]
+    fn connected_lines_fill_segments_and_clip_to_the_unit_square() {
+        let points = connected_line_points(
+            &[
+                PlotPoint { x: -1.0, y: 0.5 },
+                PlotPoint { x: 0.5, y: 0.5 },
+                PlotPoint { x: 2.0, y: 1.0 },
+            ],
+            40,
+            16,
+        );
+        assert!(points.len() > 20, "segments must be rasterized, not dotted");
+        assert!(points.iter().all(|p| valid_unit(*p)));
+        assert!(points.iter().any(|p| p.x <= f32::EPSILON));
+        assert!(points.iter().any(|p| (p.x - 1.0).abs() <= f32::EPSILON));
+    }
+
+    #[test]
+    fn non_finite_vertex_breaks_a_connected_line_safely() {
+        let points = connected_line_points(
+            &[
+                PlotPoint { x: 0.0, y: 0.0 },
+                PlotPoint {
+                    x: f32::NAN,
+                    y: 0.5,
+                },
+                PlotPoint { x: 1.0, y: 1.0 },
+            ],
+            20,
+            8,
+        );
+        assert!(points.is_empty());
     }
 
     #[test]

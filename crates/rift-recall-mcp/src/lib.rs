@@ -9,8 +9,11 @@
 //! Every dispatch passes through middleware that enforces the per-turn budget
 //! (W6), requires query-aware params on ranking-sensitive tools (W5), gates exact
 //! retrieval through policy with a mandatory reason (W6/W7/W10), and produces
-//! exactly one `memd.*` event carrying honest `returned`/`avoided` token figures
-//! — so every serve decision is audited (the serve↔event bijection).
+//! exactly one `memd.*` event — so every serve decision is audited (the
+//! serve↔event bijection). The `returned`/`avoided` figures are sealed at the
+//! **accounting seam** (ADR-0049): the payload is serialized once, counted with
+//! the real tokenizer, and charged against the turn budget in exactly one
+//! place, so the figures are measured, not asserted.
 #![forbid(unsafe_code)]
 #![cfg_attr(
     test,
@@ -192,9 +195,11 @@ pub struct ToolRequest {
 pub struct ToolResponse {
     /// The tool that produced it.
     pub tool: ToolName,
-    /// Estimated tokens returned (honest tiktoken count of inlined bytes).
+    /// Estimated tokens returned — the honest tokenizer count of the serialized
+    /// payload the transport ships (the accounting seam's measure, ADR-0049).
     pub estimated_tokens_returned: u32,
-    /// Estimated tokens avoided vs full re-read (labeled counterfactual).
+    /// Estimated tokens avoided vs full re-read — net: the gross ingest-time
+    /// baseline minus `estimated_tokens_returned`, saturating (ADR-0049).
     pub estimated_tokens_avoided: u32,
     /// The tokenizer that produced `estimated_tokens_returned`.
     pub tokenizer: &'static str,
@@ -290,12 +295,12 @@ impl<'a> McpServer<'a> {
         // 3. dispatch to the store-backed handler.
         match tool {
             ToolName::KnownState => self.known_state(req, ctx, budget).await,
-            ToolName::DiffSince => Self::diff_since(req, ctx).await,
-            ToolName::FileIfChanged => Self::file_if_changed(req, ctx).await,
+            ToolName::DiffSince => Self::diff_since(req, ctx, budget).await,
+            ToolName::FileIfChanged => Self::file_if_changed(req, ctx, budget).await,
             ToolName::ChangedHunks => Self::changed_hunks(req, ctx, budget).await,
             ToolName::ReadSummary => Self::read_summary(req, ctx, budget).await,
             ToolName::RetrieveExact => self.retrieve_exact(req, ctx, budget).await,
-            ToolName::CostHotspots => Self::cost_hotspots(req, ctx).await,
+            ToolName::CostHotspots => Self::cost_hotspots(req, ctx, budget).await,
             ToolName::ContextPack => self.context_pack(req, ctx, budget).await,
         }
     }
@@ -341,12 +346,13 @@ impl<'a> McpServer<'a> {
         let ranked = Self::ranked_candidates(req, ctx).await?;
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let mut envelopes: Vec<Envelope> = Vec::new();
-        let mut avoided = 0u32;
+        let mut baseline = 0u32;
 
         // Every per-artifact result is built by the sealed `manifest_envelope`
         // (ADR-0016) — no ArtifactState is constructed in this handler. Inline
-        // content (summaries) draws from the turn budget; manifest-first, most
-        // entries carry no bytes.
+        // content (summaries, W2) will draw on this trial allowance;
+        // manifest-first, most entries carry no bytes. The trial never touches
+        // the turn budget — the single charge happens at the respond seam.
         let mut vbudget = Budget::new(budget.tokens_remaining());
         for lc in &ranked {
             let c = &lc.candidate;
@@ -356,7 +362,7 @@ impl<'a> McpServer<'a> {
             } else {
                 SeenStatus::NotSeenOrChanged
             };
-            avoided = avoided.saturating_add(c.est_tokens);
+            baseline = baseline.saturating_add(c.est_tokens);
             // Provenance: a tracked file blob → CodeFact (ADR-0003). Real summaries
             // are resolved here once ingest populates them (W2); until then a live
             // revision with no bound summary is available_by_handle, never "deleted".
@@ -370,35 +376,26 @@ impl<'a> McpServer<'a> {
                 &mut vbudget,
             ));
         }
-        // Account the inline content charged against the server-held turn budget.
-        let returned = budget
-            .tokens_remaining()
-            .saturating_sub(vbudget.remaining());
-        let _ = budget.try_tokens(returned);
-        // No summaries are inlined yet (W2), so the manifest never truncates here.
-        let truncated = false;
-
+        // No summaries are inlined yet (W2), so the manifest never truncates
+        // here; the manifest cap + drop-tail truncation land with M61-02.
         let payload = json!({
             "tool": "known_state",
             "envelopes": envelopes.iter().map(envelope_view).collect::<Vec<_>>(),
-            "truncated": truncated,
+            "truncated": false,
         });
-        let event = MemdEvent::ManifestServed {
-            estimated_tokens_returned: returned,
-            estimated_tokens_avoided: avoided,
-        };
         Ok(Self::respond(
             ToolName::KnownState,
-            returned,
-            avoided,
             payload,
-            event,
+            baseline,
+            budget,
+            manifest_event,
         ))
     }
 
     async fn diff_since<S: CanonicalStore, R: SubstrateReader>(
         req: &ToolRequest,
         ctx: &RecallContext<'_, S, R>,
+        budget: &mut TurnBudget,
     ) -> Result<ToolResponse, ToolError> {
         let loaded = load_candidates(ctx.store, &ctx.scope, ctx.now)
             .await
@@ -406,9 +403,9 @@ impl<'a> McpServer<'a> {
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let mut changed = Vec::new();
         let mut unchanged = Vec::new();
-        let mut avoided = 0u32;
+        let mut baseline = 0u32;
         for lc in &loaded {
-            avoided = avoided.saturating_add(lc.candidate.est_tokens);
+            baseline = baseline.saturating_add(lc.candidate.est_tokens);
             if known.contains(lc.content_sha256.as_str()) {
                 unchanged.push(json!(lc.candidate.path));
             } else {
@@ -416,22 +413,19 @@ impl<'a> McpServer<'a> {
             }
         }
         let payload = json!({ "tool": "diff_since", "changed": changed, "unchanged": unchanged });
-        let event = MemdEvent::ManifestServed {
-            estimated_tokens_returned: 0,
-            estimated_tokens_avoided: avoided,
-        };
         Ok(Self::respond(
             ToolName::DiffSince,
-            0,
-            avoided,
             payload,
-            event,
+            baseline,
+            budget,
+            manifest_event,
         ))
     }
 
     async fn file_if_changed<S: CanonicalStore, R: SubstrateReader>(
         req: &ToolRequest,
         ctx: &RecallContext<'_, S, R>,
+        budget: &mut TurnBudget,
     ) -> Result<ToolResponse, ToolError> {
         let path = req.target.clone().unwrap_or_default();
         let loaded = load_candidates(ctx.store, &ctx.scope, ctx.now)
@@ -439,7 +433,7 @@ impl<'a> McpServer<'a> {
             .map_err(|e| ToolError::Internal(e.to_string()))?;
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let latest = loaded.iter().find(|l| l.candidate.path == path);
-        let (state, avoided) = match latest {
+        let (state, baseline) = match latest {
             None => (
                 json!({ "state": "invalid", "path": path, "reason": "path_not_found" }),
                 0,
@@ -454,16 +448,12 @@ impl<'a> McpServer<'a> {
             ),
         };
         let payload = json!({ "tool": "file_if_changed", "result": state });
-        let event = MemdEvent::ManifestServed {
-            estimated_tokens_returned: 0,
-            estimated_tokens_avoided: avoided,
-        };
         Ok(Self::respond(
             ToolName::FileIfChanged,
-            0,
-            avoided,
             payload,
-            event,
+            baseline,
+            budget,
+            manifest_event,
         ))
     }
 
@@ -477,11 +467,13 @@ impl<'a> McpServer<'a> {
         let ranked = Self::ranked_candidates(req, ctx).await?;
         let Some(top) = ranked.first() else {
             let payload = json!({ "tool": "changed_hunks", "hunks": [], "omitted": 0 });
-            let event = MemdEvent::ManifestServed {
-                estimated_tokens_returned: 0,
-                estimated_tokens_avoided: 0,
-            };
-            return Ok(Self::respond(ToolName::ChangedHunks, 0, 0, payload, event));
+            return Ok(Self::respond(
+                ToolName::ChangedHunks,
+                payload,
+                0,
+                budget,
+                manifest_event,
+            ));
         };
         let rows = ctx
             .store
@@ -492,10 +484,13 @@ impl<'a> McpServer<'a> {
             )
             .await
             .map_err(|e| ToolError::Internal(e.to_string()))?;
-        // Cap at the configured max-hunks and the per-turn token budget.
+        // Cap at the configured max-hunks and the per-turn token allowance. The
+        // per-hunk omission is a NON-CHARGING trial against a local mirror of
+        // the remaining budget — the single real charge happens at the respond
+        // seam (ADR-0049).
         let max_hunks = MAX_CHANGED_HUNKS as usize;
         let mut hunks = Vec::new();
-        let mut returned = 0u32;
+        let mut trial = budget.tokens_remaining();
         let mut omitted = 0u32;
         for (i, r) in rows.iter().enumerate() {
             if i >= max_hunks {
@@ -506,11 +501,11 @@ impl<'a> McpServer<'a> {
             let len = r.get_i64(1).unwrap_or(0).max(0);
             let view = json!({ "lo": lo, "hi": lo + len });
             let cost = rift_tokens::count(&view.to_string());
-            if !budget.try_tokens(cost) {
+            if cost > trial {
                 omitted += 1;
                 continue;
             }
-            returned += cost;
+            trial -= cost;
             hunks.push(view);
         }
         let payload = json!({
@@ -520,17 +515,13 @@ impl<'a> McpServer<'a> {
             "omitted": omitted,
             "source_hash": top.content_sha256,
         });
-        let avoided = top.candidate.est_tokens;
-        let event = MemdEvent::ManifestServed {
-            estimated_tokens_returned: returned,
-            estimated_tokens_avoided: avoided,
-        };
+        let baseline = top.candidate.est_tokens;
         Ok(Self::respond(
             ToolName::ChangedHunks,
-            returned,
-            avoided,
             payload,
-            event,
+            baseline,
+            budget,
+            manifest_event,
         ))
     }
 
@@ -556,45 +547,47 @@ impl<'a> McpServer<'a> {
             .await
             .map_err(|e| ToolError::Internal(e.to_string()))?;
         let bound = rows.first().and_then(|r| r.get_text(0).ok());
-        let (result, returned, event) = match (bound, current) {
+        // Each arm yields the result view, the gross baseline the response
+        // stands in for, and its event builder; the seam supplies the figures.
+        type EventBuilder = Box<dyn FnOnce(u32, u32) -> MemdEvent + Send>;
+        let (result, baseline, event): (Value, u32, EventBuilder) = match (bound, current) {
             (Some(bound), Some(lc)) if bound == lc.content_sha256 => {
                 // valid: the bound source is still current.
                 let summary = format!("summary bound to {bound}");
-                let cost = rift_tokens::count(&summary);
-                let _ = budget.try_tokens(cost);
+                let handle = format!("summary:{path}");
                 (
                     json!({ "state": "summary", "path": path, "source_hash": bound, "summary": summary }),
-                    cost,
-                    MemdEvent::SummaryServed {
-                        handle: format!("summary:{path}"),
-                        estimated_tokens_returned: cost,
-                        estimated_tokens_avoided: lc.candidate.est_tokens.saturating_sub(cost),
-                    },
+                    lc.candidate.est_tokens,
+                    Box::new(move |returned, avoided| MemdEvent::SummaryServed {
+                        handle,
+                        estimated_tokens_returned: returned,
+                        estimated_tokens_avoided: avoided,
+                    }),
                 )
             }
-            (Some(_), Some(lc)) => (
-                json!({ "state": "stale", "path": path, "current_hash": lc.content_sha256 }),
-                0,
-                MemdEvent::Invalidated {
-                    handle: format!("summary:{path}"),
-                },
-            ),
+            (Some(_), Some(lc)) => {
+                let handle = format!("summary:{path}");
+                (
+                    json!({ "state": "stale", "path": path, "current_hash": lc.content_sha256 }),
+                    0,
+                    Box::new(move |returned, _| MemdEvent::Invalidated {
+                        handle,
+                        estimated_tokens_returned: returned,
+                    }),
+                )
+            }
             _ => (
                 json!({ "state": "unavailable", "path": path, "reason": "not_bound" }),
                 0,
-                MemdEvent::ManifestServed {
-                    estimated_tokens_returned: 0,
-                    estimated_tokens_avoided: 0,
-                },
+                Box::new(manifest_event),
             ),
         };
         let payload = json!({ "tool": "read_summary", "result": result });
-        let avoided = event.tokens_avoided();
         Ok(Self::respond(
             ToolName::ReadSummary,
-            returned,
-            avoided,
             payload,
+            baseline,
+            budget,
             event,
         ))
     }
@@ -638,12 +631,15 @@ impl<'a> McpServer<'a> {
                             &target,
                             trust,
                             OmitReason::PolicyDeniedExact,
+                            budget,
                         ));
                     }
                 };
                 let cost = rift_tokens::count(&body);
-                // Downgrade (W7): a sensitive exact that will not fit the budget is
-                // served as a handle, never a partial secret. Still audited.
+                // Downgrade (W7): a sensitive exact that will not fit the remaining
+                // budget is served as a handle, never a partial secret. The trial
+                // is on the INNER body count (whole-or-nothing) and never charges;
+                // the seam charges the serialized response. Still audited.
                 if self
                     .policy
                     .downgrade_for(&policy_path, budget.tokens_remaining() >= cost)
@@ -653,39 +649,50 @@ impl<'a> McpServer<'a> {
                         "tool": "retrieve_exact",
                         "result": { "state": "available_by_handle", "handle": target.clone(), "reason": "sensitive_over_budget" },
                     });
-                    let event = MemdEvent::Refused {
-                        target: target.clone(),
-                        reason: "sensitive_over_budget".to_string(),
-                    };
-                    return Ok(Self::respond(ToolName::RetrieveExact, 0, 0, payload, event));
+                    return Ok(Self::respond(
+                        ToolName::RetrieveExact,
+                        payload,
+                        0,
+                        budget,
+                        move |returned, _| MemdEvent::Refused {
+                            target,
+                            reason: "sensitive_over_budget".to_string(),
+                            estimated_tokens_returned: returned,
+                        },
+                    ));
                 }
-                let returned = charge(budget, cost);
                 let payload = json!({
                     "tool": "retrieve_exact",
                     "result": { "state": "exact", "path": policy_path, "body": body },
                 });
-                let event = MemdEvent::ExactRetrieved {
-                    handle: target,
-                    reason,
-                    estimated_tokens_returned: returned,
-                };
                 Ok(Self::respond(
                     ToolName::RetrieveExact,
-                    returned,
-                    0,
                     payload,
-                    event,
+                    0,
+                    budget,
+                    move |returned, _| MemdEvent::ExactRetrieved {
+                        handle: target,
+                        reason,
+                        estimated_tokens_returned: returned,
+                    },
                 ))
             }
-            AuditDecision::Deny(reason) => Ok(Self::refuse_exact(&target, trust, reason)),
+            AuditDecision::Deny(reason) => Ok(Self::refuse_exact(&target, trust, reason, budget)),
         }
     }
 
     /// Build the audited refusal for an exact request. Untrusted content is
     /// surfaced only as a neutral digest + handle (W9); trusted-but-denied content
     /// (missing reason, denied/sensitive path) is refused with a neutral reason
-    /// tag. Either way a single terminal `Refused` event is emitted (W10 bijection).
-    fn refuse_exact(target: &str, trust: Trust, reason: OmitReason) -> ToolResponse {
+    /// tag. Either way a single terminal `Refused` event is emitted (W10
+    /// bijection), and the refusal payload is measured and charged like any
+    /// serve — no response class is exempt at the seam (ADR-0049).
+    fn refuse_exact(
+        target: &str,
+        trust: Trust,
+        reason: OmitReason,
+        budget: &mut TurnBudget,
+    ) -> ToolResponse {
         let payload = if trust.is_untrusted() {
             let digest = UntrustedPayload::from_trust(trust, Vec::new()).map_or_else(
                 || serialize_untrusted("tool_output", b"", target),
@@ -695,16 +702,25 @@ impl<'a> McpServer<'a> {
         } else {
             json!({ "tool": "retrieve_exact", "result": { "state": "refused", "reason": omit_tag(reason) } })
         };
-        let event = MemdEvent::Refused {
-            target: target.to_string(),
-            reason: omit_tag(reason).to_string(),
-        };
-        Self::respond(ToolName::RetrieveExact, 0, 0, payload, event)
+        let target = target.to_string();
+        let tag = omit_tag(reason).to_string();
+        Self::respond(
+            ToolName::RetrieveExact,
+            payload,
+            0,
+            budget,
+            move |returned, _| MemdEvent::Refused {
+                target,
+                reason: tag,
+                estimated_tokens_returned: returned,
+            },
+        )
     }
 
     async fn cost_hotspots<S: CanonicalStore, R: SubstrateReader>(
         req: &ToolRequest,
         ctx: &RecallContext<'_, S, R>,
+        budget: &mut TurnBudget,
     ) -> Result<ToolResponse, ToolError> {
         let loaded = load_candidates(ctx.store, &ctx.scope, ctx.now)
             .await
@@ -736,11 +752,13 @@ impl<'a> McpServer<'a> {
             .collect();
         // Descriptive only — the payload carries no directive (W7).
         let payload = json!({ "tool": "cost_hotspots", "hotspots": hotspots, "note": COST_NOTE });
-        let event = MemdEvent::ManifestServed {
-            estimated_tokens_returned: 0,
-            estimated_tokens_avoided: 0,
-        };
-        Ok(Self::respond(ToolName::CostHotspots, 0, 0, payload, event))
+        Ok(Self::respond(
+            ToolName::CostHotspots,
+            payload,
+            0,
+            budget,
+            manifest_event,
+        ))
     }
 
     #[allow(clippy::too_many_lines)] // one cohesive assemble: key, sections, render
@@ -949,52 +967,65 @@ impl<'a> McpServer<'a> {
 
         // The pack budget composes with the remaining TURN budget (PRD story
         // 9): the effective cap is min(pack target, hard ceiling, remaining).
+        // `compile` is a pure trial — the single charge happens at the seam.
         let pack = rift_recall_pack::compile(&preq, budget.tokens_remaining()).map_err(
             |rift_recall_pack::PackError::BudgetTooSmall { needed, cap }| {
                 ToolError::PackBudgetTooSmall { needed, cap }
             },
         )?;
-        let rendered = pack.render();
-        let returned = charge(budget, rift_tokens::count(&rendered));
-        let avoided = ranked
+        let baseline = ranked
             .iter()
             .map(|l| l.candidate.est_tokens)
             .fold(0u32, u32::saturating_add);
+        let sections = u32::try_from(pack.sections.len()).unwrap_or(u32::MAX);
+        let total_tokens = pack.total_tokens;
         let payload = json!({
             "tool": "context_pack",
             "sections": pack.sections.iter().map(|s| json!({ "kind": format!("{:?}", s.kind), "lines": s.lines })).collect::<Vec<_>>(),
-            "total_tokens": pack.total_tokens,
+            "total_tokens": total_tokens,
             "pack_key": pack_key.clone(),
             // The honest-cache note (ADR-0020 #3): this server composes every
             // section fresh; a future cache must disclose per-section provenance.
             "cache": { "pack_key": pack_key, "sections_cached": [], "composed": "fresh" },
         });
-        let event = MemdEvent::PackBuilt {
-            sections: u32::try_from(pack.sections.len()).unwrap_or(u32::MAX),
-            total_tokens: pack.total_tokens,
-            estimated_tokens_avoided: avoided,
-        };
         Ok(Self::respond(
             ToolName::ContextPack,
-            returned,
-            avoided,
             payload,
-            event,
+            baseline,
+            budget,
+            move |returned, avoided| MemdEvent::PackBuilt {
+                sections,
+                total_tokens,
+                estimated_tokens_returned: returned,
+                estimated_tokens_avoided: avoided,
+            },
         ))
     }
 
+    /// The accounting seam (ADR-0049): serialize the payload once (the same
+    /// bytes the transport ships — serde_json default field order is
+    /// load-bearing), count it with the real tokenizer, perform the single
+    /// clamped turn-budget charge, and seal the event from those same figures.
+    /// `baseline` is the gross ingest-time estimate this response stands in
+    /// for; the emitted `avoided` is net (`baseline − returned`, saturating).
+    /// Handlers never mutate the budget — every shaping decision upstream is a
+    /// non-charging trial against `tokens_remaining()`.
     fn respond(
         tool: ToolName,
-        returned: u32,
-        avoided: u32,
         payload: Value,
-        event: MemdEvent,
+        baseline: u32,
+        budget: &mut TurnBudget,
+        event: impl FnOnce(u32, u32) -> MemdEvent,
     ) -> ToolResponse {
+        let returned = rift_tokens::count(&payload.to_string());
+        let _ = charge(budget, returned);
+        let avoided = baseline.saturating_sub(returned);
+        let event = event(returned, avoided);
         ToolResponse {
             tool,
             estimated_tokens_returned: returned,
             estimated_tokens_avoided: avoided,
-            tokenizer: rift_tokens::TOKENIZER,
+            tokenizer: rift_tokens::provenance(),
             payload,
             event,
         }
@@ -1060,11 +1091,21 @@ pub fn handle_display_path(target: &str) -> String {
 }
 
 /// Charge `cost` against the turn budget, returning the amount actually charged
-/// (clamped to the remaining budget so the ceiling is never breached).
+/// (clamped to the remaining budget so the ceiling is never breached). Called
+/// from exactly one place — the respond seam (ADR-0049; structurally tested).
 fn charge(budget: &mut TurnBudget, cost: u32) -> u32 {
     let allowed = cost.min(budget.tokens_remaining());
     let _ = budget.try_tokens(allowed);
     allowed
+}
+
+/// The manifest-shaped event builder every list/awareness tool hands to the
+/// respond seam (the figures are supplied by the seam, ADR-0049).
+fn manifest_event(returned: u32, avoided: u32) -> MemdEvent {
+    MemdEvent::ManifestServed {
+        estimated_tokens_returned: returned,
+        estimated_tokens_avoided: avoided,
+    }
 }
 
 /// A stable, neutral tag for an omit reason (never leaks content).

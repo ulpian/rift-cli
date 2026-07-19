@@ -59,8 +59,8 @@ pub use col2::{
 };
 pub use col3::{
     fmt_km, ActivityData, ActivityView, BreakdownData, BreakdownView, CallsData, Col3, DayBar,
-    NicReading, NicView, PanelMetrics, RecallView, SavingsData, ThreadsView, TokensData,
-    TokensView,
+    NicReading, NicView, PanelMetrics, RecallView, SavingsData, ThreadCallSeries, ThreadsView,
+    TokensData, TokensView,
 };
 pub use colour_picker::{ColourPickerState, PickerStage, RESET_ROW};
 pub use command::{

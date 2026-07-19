@@ -18,6 +18,6 @@ expression: "col3_text(&col3_with_data(), 19)"
 │- recall: —                     │
 ╰────────────────────────────────╯
 ╭─ recall ───────────────────────╮
-│saved 42%  (6.0K tokens)        │
-│· mcp calls: 17 total           │
-│· threads: 2 active             │
+│saved 42% (6.0K)                │
+│17 MCP calls · 2 active sessions│
+│# t-abcd                        │

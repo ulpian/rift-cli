@@ -3,8 +3,8 @@
 //! Canopy's bar/line charts rasterize normalized points into a bare rectangle —
 //! shape without magnitude. This helper adds a light quantitative frame *around*
 //! the plot (the raster is untouched, ADR-0014): a left **Y-tick gutter**
-//! (min / mid / max, humanized), a bottom **X-label row** (category or day
-//! labels), and a **legend key** (series colour → name). It reserves the gutter
+//! (min / mid / max, humanized), a bottom **X-label row** (categorical labels or
+//! positioned time ticks), and a **legend key** (series colour → name). It reserves the gutter
 //! columns + the label row (+ a legend row when a legend is given) and returns
 //! the shrunk plot [`Rect`] the bars fill — the same "shrink the rect to leave a
 //! label row" the activity card already made, generalized.
@@ -14,7 +14,7 @@
 //! bars are **data**, drawn inside it — so the axis never lights a data cell and
 //! the paint-never-moves-a-lit-cell property holds across the frame. The empty
 //! case still draws the axis and a `0` baseline (placeholder-not-fake-zero).
-//! Applied to the two cartesian charts only; the radial gauges are excluded.
+//! Applied to Canopy's cartesian charts only; the radial gauges are excluded.
 
 use crate::layout::Rect;
 use crate::render::frame::{Color, Frame, Style};
@@ -26,17 +26,33 @@ pub const MIN_GUTTER: u16 = 3;
 /// wide tick can never eat the bars (the fog note's ceiling).
 pub const MAX_GUTTER: u16 = 6;
 
+/// One explicitly positioned X-axis tick for time-series charts.
+#[derive(Clone, Copy, Debug)]
+pub struct XTick<'a> {
+    /// Normalized horizontal position, clamped to `0..=1`.
+    pub position: f32,
+    /// Short terminal label.
+    pub label: &'a str,
+}
+
+/// The two X-axis layouts used by Canopy's cartesian charts.
+pub enum XAxis<'a> {
+    /// One evenly strided label per categorical bar group.
+    Categories(&'a [String]),
+    /// Explicit normalized positions for time-series ticks.
+    Positions(&'a [XTick<'a>]),
+}
+
 /// A cartesian chart's axis frame (ADR-0030). The Y ticks are derived from `max`
-/// via `humanize` (min = 0, mid = max/2, max); `x_labels` are drawn one per bar
-/// group across the plot; `legend` (colour → name) draws a key row above the
-/// chart (empty ⇒ no legend row).
+/// via `humanize` (min = 0, mid = max/2, max); `x_axis` selects categorical or
+/// positioned labels; `legend` (colour → name) draws a key row above the chart.
 pub struct AxisSpec<'a> {
     /// The data ceiling (the bars' autoscaled max) — the top Y tick.
     pub max: f64,
     /// Humanizes a Y value into a short label (e.g. `col3::fmt_km`).
     pub humanize: fn(f64) -> String,
-    /// The X labels, one per bar group (day or class names).
-    pub x_labels: &'a [String],
+    /// Category labels or explicit positional ticks.
+    pub x_axis: XAxis<'a>,
     /// The legend key: (colour, name) per series; empty draws no legend row.
     pub legend: &'a [(Color, &'a str)],
 }
@@ -139,22 +155,45 @@ pub fn draw(frame: &mut Frame, theme: Theme, r: Rect, spec: &AxisSpec<'_>, unico
         let tx = r.x + gutter.saturating_sub(w).saturating_sub(1);
         frame.put_str(tx, ty, label, theme.dim());
     }
-    // The X-label row on the bottom, one label per group strided across the plot.
-    if !spec.x_labels.is_empty() {
-        let label_row = r.y + r.h.saturating_sub(1);
-        let n = u16::try_from(spec.x_labels.len()).unwrap_or(1).max(1);
-        let stride = (plot.w / n).max(1);
-        for (i, label) in spec.x_labels.iter().enumerate() {
-            let Ok(iu) = u16::try_from(i) else { break };
-            let x = plot.x + iu * stride;
-            if x >= plot.x + plot.w {
-                break;
+    // The X-label row on the bottom: either one label per categorical group or
+    // explicitly positioned time ticks.
+    let label_row = r.y + r.h.saturating_sub(1);
+    match &spec.x_axis {
+        XAxis::Categories(labels) if !labels.is_empty() => {
+            let n = u16::try_from(labels.len()).unwrap_or(1).max(1);
+            let stride = (plot.w / n).max(1);
+            for (i, label) in labels.iter().enumerate() {
+                let Ok(iu) = u16::try_from(i) else { break };
+                let x = plot.x + iu * stride;
+                if x >= plot.x + plot.w {
+                    break;
+                }
+                let clipped: String = label.chars().take(usize::from(stride)).collect();
+                frame.put_str(x, label_row, &clipped, theme.dim());
             }
-            // Clip each label to its stride so neighbours never collide.
-            let room = usize::from(stride.max(1));
-            let clipped: String = label.chars().take(room).collect();
-            frame.put_str(x, label_row, &clipped, theme.dim());
         }
+        XAxis::Positions(ticks) => {
+            let right = plot.x.saturating_add(plot.w);
+            for tick in *ticks {
+                let position = if tick.position.is_finite() {
+                    tick.position.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let center =
+                    plot.x + (position * f32::from(plot.w.saturating_sub(1))).round() as u16;
+                let label_w = u16::try_from(tick.label.chars().count())
+                    .unwrap_or(plot.w)
+                    .min(plot.w);
+                let x = center
+                    .saturating_sub(label_w / 2)
+                    .clamp(plot.x, right.saturating_sub(label_w));
+                let clipped: String = tick.label.chars().take(usize::from(label_w)).collect();
+                frame.put_str(x, label_row, &clipped, theme.dim());
+            }
+        }
+        XAxis::Categories(_) => {}
     }
     plot
 }
@@ -170,7 +209,7 @@ mod tests {
         AxisSpec {
             max,
             humanize: fmt_km,
-            x_labels: x,
+            x_axis: XAxis::Categories(x),
             legend,
         }
     }
@@ -257,5 +296,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn positioned_time_ticks_anchor_left_middle_and_right() {
+        let mut frame = Frame::new(Size::new(30, 8));
+        let ticks = [
+            XTick {
+                position: 0.0,
+                label: "-30m",
+            },
+            XTick {
+                position: 0.5,
+                label: "-15m",
+            },
+            XTick {
+                position: 1.0,
+                label: "last",
+            },
+        ];
+        let spec = AxisSpec {
+            max: 4.0,
+            humanize: fmt_km,
+            x_axis: XAxis::Positions(&ticks),
+            legend: &[],
+        };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 30,
+            h: 8,
+        };
+        let plot = draw(&mut frame, Theme::rift_dark(), rect, &spec, true);
+        let row: String = (0..frame.width())
+            .map(|x| frame.get(x, 7).map_or(' ', |c| c.ch))
+            .collect();
+        assert!(row.contains("-30m"));
+        assert!(row.contains("-15m"));
+        assert!(row.contains("last"));
+        assert!(plot.h < rect.h, "tick chrome reserves a row");
     }
 }

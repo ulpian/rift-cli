@@ -208,7 +208,10 @@ fn budget_never_exceeded_over_a_turn() {
     let cfg = cfg();
     let store = seeded_store();
     let reader = MemorySubstrate::local();
-    // tiny token ceiling: the manifest must truncate rather than overflow.
+    // Tiny token ceiling: the emitted figure is the MEASURED payload count
+    // (ADR-0049 — it may exceed a tiny ceiling until the manifest cap lands in
+    // M61-02), while the charge clamps so the budget counter never breaches.
+    // M61-03 replaces this with the arbitrary-call-sequence property test.
     let s = McpServer::new(PolicyEngine::new(&cfg));
     let mut budget = TurnBudget::new(4, 3);
     let resp = block(s.dispatch(
@@ -218,11 +221,20 @@ fn budget_never_exceeded_over_a_turn() {
         &mut budget,
     ))
     .unwrap();
-    assert!(
-        resp.estimated_tokens_returned <= 3,
-        "returned must not exceed the ceiling"
+    assert_eq!(
+        resp.estimated_tokens_returned,
+        rift_tokens::count(&resp.payload.to_string()),
+        "returned is the measured payload count"
     );
-    assert!(budget.tokens_remaining() <= 3);
+    assert!(
+        resp.estimated_tokens_returned > 3,
+        "the un-truncated manifest exceeds the tiny ceiling (M61-02 adds the cap)"
+    );
+    assert_eq!(
+        budget.tokens_remaining(),
+        0,
+        "the clamped charge drains the ceiling, never wraps past it"
+    );
 }
 
 #[test]
@@ -371,7 +383,12 @@ fn untrusted_exact_is_refused_with_neutral_digest_only() {
     .unwrap();
     // W9: untrusted content is never served raw — refused, only a neutral digest.
     assert!(matches!(resp.event, MemdEvent::Refused { .. }));
-    assert_eq!(resp.estimated_tokens_returned, 0);
+    // Refusals are measured and charged like any serve (ADR-0049): the figure
+    // is the refusal payload's own cost, never the withheld bytes.
+    assert_eq!(
+        resp.estimated_tokens_returned,
+        rift_tokens::count(&resp.payload.to_string())
+    );
     assert_eq!(resp.payload["result"]["state"], "refused");
     assert!(resp.payload["result"]["neutral_digest"].is_object());
 }
@@ -879,7 +896,9 @@ fn red_team_untrusted_exact_never_echoes_the_payload() {
             "untrusted payload leaked into the response: {span}"
         );
     }
-    assert_eq!(resp.estimated_tokens_returned, 0);
+    // The refusal is measured (ADR-0049) — its cost is the refusal payload
+    // itself, which the leak assertions above prove holds no hostile bytes.
+    assert_eq!(resp.estimated_tokens_returned, rift_tokens::count(&json));
 }
 
 #[test]
@@ -930,9 +949,107 @@ fn token_accounting_is_non_negative_and_honest() {
         &mut budget,
     ))
     .unwrap();
-    // avoided is the captured re-read cost (400 + 50) and dominates the manifest.
+    // A manifest is never free (ADR-0049): returned is the measured payload…
+    assert!(resp.estimated_tokens_returned > 0);
+    assert_eq!(
+        resp.estimated_tokens_returned,
+        rift_tokens::count(&resp.payload.to_string())
+    );
+    // …and avoided is NET: the captured re-read baseline (400 + 50) minus the
+    // manifest's own cost, which still dominates for this corpus.
     assert!(resp.estimated_tokens_avoided >= resp.estimated_tokens_returned);
     assert!(resp.estimated_tokens_avoided > 0);
+    assert_eq!(
+        resp.estimated_tokens_avoided,
+        450_u32.saturating_sub(resp.estimated_tokens_returned)
+    );
+}
+
+/// ADR-0049 (M61-01): every tool's emitted figure IS the measured payload —
+/// `returned == rift_tokens::count(serialized payload)` — and the sealed event
+/// carries the same pair wherever its variant has the fields (`Refused`/
+/// `Invalidated` audit the decision, not figures — their accessors return 0 by
+/// design).
+#[test]
+fn every_tool_emits_the_measured_payload_count() {
+    let cfg = cfg();
+    let store = seeded_store();
+    let reader = MemorySubstrate::local().with_blob(SHA_A, b"fn main() {}\n");
+    let s = McpServer::new(PolicyEngine::new(&cfg));
+    let c = ctx(&store, &reader);
+    let calls: Vec<(ToolName, ToolRequest)> = vec![
+        (ToolName::KnownState, ranking_req()),
+        (ToolName::DiffSince, ToolRequest::default()),
+        (
+            ToolName::FileIfChanged,
+            ToolRequest {
+                target: Some("src/a.rs".into()),
+                ..Default::default()
+            },
+        ),
+        (ToolName::ChangedHunks, ranking_req()),
+        (
+            ToolName::ReadSummary,
+            ToolRequest {
+                target: Some("src/a.rs".into()),
+                ..Default::default()
+            },
+        ),
+        (
+            ToolName::RetrieveExact,
+            ToolRequest {
+                target: Some(format!("file:src/a.rs@sha256:{SHA_A}")),
+                reason: Some("debugging the crash".into()),
+                ..Default::default()
+            },
+        ),
+        (ToolName::CostHotspots, ToolRequest::default()),
+        (ToolName::ContextPack, ranking_req()),
+    ];
+    for (tool, req) in calls {
+        let mut budget = TurnBudget::new(8, 10_000);
+        let resp = block(s.dispatch(tool, &req, &c, &mut budget)).unwrap();
+        let measured = rift_tokens::count(&resp.payload.to_string());
+        assert!(measured > 0, "{tool:?}: a serialized response is never free");
+        assert_eq!(
+            resp.estimated_tokens_returned, measured,
+            "{tool:?}: returned == measured payload count"
+        );
+        assert_eq!(
+            resp.event.tokens_returned(),
+            resp.estimated_tokens_returned,
+            "{tool:?}: event figure == response figure (every variant, ADR-0049)"
+        );
+        assert_eq!(
+            resp.event.tokens_avoided(),
+            resp.estimated_tokens_avoided,
+            "{tool:?}: event avoided == response avoided"
+        );
+    }
+}
+
+/// ADR-0049 (M61-01, structural): exactly one `TurnBudget` token-charge site —
+/// `try_tokens` appears only inside `charge`, and `charge` is called only at
+/// the respond seam. The call ceiling (`try_call`) lives only in the dispatch
+/// middleware. A second charge site (a handler mutating the budget) trips this.
+#[test]
+fn turn_budget_has_exactly_one_token_charge_site() {
+    let src = include_str!("lib.rs");
+    assert_eq!(
+        src.matches(".try_tokens(").count(),
+        1,
+        "try_tokens must appear only inside charge()"
+    );
+    assert_eq!(
+        src.matches("charge(budget,").count(),
+        1,
+        "charge must be called only at the respond seam"
+    );
+    assert_eq!(
+        src.matches(".try_call(").count(),
+        1,
+        "the call ceiling is drawn only in dispatch middleware"
+    );
 }
 
 /// ADR-0016 §2: no serve path constructs a four-state envelope or a pack

@@ -738,7 +738,7 @@ fn draw_activity(
         let spec = crate::axis::AxisSpec {
             max,
             humanize: crate::col3::fmt_km,
-            x_labels: &x_labels,
+            x_axis: crate::axis::XAxis::Categories(&x_labels),
             legend: &legend,
         };
         crate::axis::draw(frame, theme, inner, &spec, ctx.unicode)

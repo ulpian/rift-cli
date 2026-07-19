@@ -1,14 +1,11 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 194
 expression: "col3_text(&col3_with_data(), 30)"
 ---
 ╭─ token usage  Σ 7.5K ──────────╮
 │# input  # read  # output  # cach
 │48K           █                 │
-│              █                 │
-│24K           █                 │
-│  0    ▄      █      █      ▄   │
+│240    ▄      █      ▄      ▄   │
 │    in     rd     out    ca     │
 │in 5.2K                         │
 │rd 48K                          │
@@ -16,10 +13,8 @@ expression: "col3_text(&col3_with_data(), 30)"
 ╰────────────────────────────────╯
 ╭─ system ───────────────────────╮
 │62% Capable  [2 threads]        │
-│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀            │
-│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀            │
-│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀            │
-│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀            │
+│████████████████████            │
+│████████████████████            │
 │ session - idle                 │
 │- capture: —                    │
 │- burn: —                       │
@@ -27,9 +22,13 @@ expression: "col3_text(&col3_with_data(), 30)"
 │- recall: —                     │
 ╰────────────────────────────────╯
 ╭─ recall ───────────────────────╮
-│saved 42%  (6.0K tokens)        │
-│· mcp calls: 17 total           │
-│· threads: 2 active             │
-│                                │
-│                                │
+│saved 42% (6.0K)                │
+│17 MCP calls · 2 active sessions│
+│# t-abcd                        │
+│ 6    ▄     ▄    ▄     ▄     ▄  │
+│     ▄██   █▀▄   ██▄   ██    ██ │
+│ 3  ██ █▄▄██ █ ▄██ █ █▄█ █ █▄▀▀▄│
+│   █▀▀  ██▀▀ ▀██▀▀ ▀▄█▀  █▄▀▀  ▀│
+│ 0 ▀     ▀     ▀    ▀     ▀     │
+│   -30m        -15m         last│
 ╰────────────────────────────────╯

@@ -58,6 +58,14 @@ pub const GAUGE_RAMP: [(f32, Color); 3] = [
 /// Recall MCP-calls bars — a cool cyan, distinct from the green savings line.
 pub const RECALL_CALLS: Color = Color::Rgb(0x5c, 0xc4, 0xe0);
 
+/// Four distinct MCP-connection strokes for the Recall time series.
+pub const RECALL_THREADS: [Color; 4] = [
+    RECALL_CALLS,
+    Color::Rgb(0xb4, 0x8c, 0xff),
+    Color::Rgb(0xf0, 0xb4, 0x5c),
+    Color::Rgb(0x6c, 0xe0, 0x9a),
+];
+
 /// The muted foreground text fades in FROM (ADR-0022) and descriptions rest at.
 pub const MUTED: Color = Color::Rgb(0x5a, 0x64, 0x5a);
 
@@ -379,6 +387,15 @@ impl Theme {
     #[must_use]
     pub fn graph_calls(self) -> Color {
         self.overrides.graph.unwrap_or(RECALL_CALLS)
+    }
+
+    /// The four Recall connection strokes. A graph override owns the primary
+    /// line; the remaining hues stay distinct so multi-series meaning survives.
+    #[must_use]
+    pub fn recall_thread_colors(self) -> [Color; 4] {
+        let mut colours = RECALL_THREADS;
+        colours[0] = self.graph_calls();
+        colours
     }
 
     /// The body foreground (the text slot, else [`BODY_FG`]).

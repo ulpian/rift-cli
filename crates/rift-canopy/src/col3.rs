@@ -104,7 +104,7 @@ pub const SECTIONS: [SectionSpec; 3] = [
     SectionSpec {
         id: SectionId::Recall,
         weight: 2,
-        min_rows: 5,
+        min_rows: 10,
         priority: Priority::Medium,
     },
 ];
@@ -284,10 +284,25 @@ pub struct SavingsData {
 /// Recall MCP call numbers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallsData {
-    /// Calls per bucket (oldest first).
+    /// Total attributed calls across all schema-v2 history.
+    pub total: u64,
+    /// Exclusive end of the event-anchored 30-minute window.
+    pub window_end_ms: i64,
+    /// The four most recently active MCP connections in the visible window.
+    pub series: Vec<ThreadCallSeries>,
+    /// Additional real connections omitted from the chart; never aggregated.
+    pub hidden_threads: usize,
+}
+
+/// One MCP process/connection's calls per minute, oldest bucket first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadCallSeries {
+    /// Opaque process/connection identity (not a capture-session id).
+    pub thread_id: String,
+    /// Terminal timestamp of this connection's freshest visible call.
+    pub last_call_at: i64,
+    /// Exactly 30 event-anchored one-minute buckets.
     pub rate: Vec<f64>,
-    /// Total calls across the visible history.
-    pub total: f64,
 }
 
 /// The threads section: distinct active sessions in the recent window.
@@ -434,7 +449,8 @@ pub(crate) fn should_animate(from: &Col3, to: &Col3) -> bool {
         || matches!((&from.savings, &to.savings),
             (RecallView::Data(a), RecallView::Data(b)) if series_changed(&a.rate, &b.rate))
         || matches!((&from.calls, &to.calls),
-            (RecallView::Data(a), RecallView::Data(b)) if series_changed(&a.rate, &b.rate))
+            (RecallView::Data(a), RecallView::Data(b)) if calls_can_animate(a, b)
+                && a.series.iter().zip(&b.series).any(|(x, y)| x.rate != y.rate))
 }
 
 /// The displayed `Col3` at tween progress `t ∈ [0, 1]`: `from`'s series eased
@@ -469,14 +485,41 @@ pub(crate) fn interpolate(from: &Col3, to: &Col3, t: f32) -> Col3 {
             total: b.total,
             pct: b.pct, // a headline: the savings % is taken from the target
         }),
-        calls: interp_recall(&from.calls, &to.calls, |a, b| CallsData {
-            rate: lerp_series(&a.rate, &b.rate, t).unwrap_or_else(|| b.rate.clone()),
-            total: b.total,
+        calls: interp_recall(&from.calls, &to.calls, |a, b| {
+            if !calls_can_animate(a, b) {
+                return b.clone();
+            }
+            CallsData {
+                total: b.total,
+                window_end_ms: b.window_end_ms,
+                series: a
+                    .series
+                    .iter()
+                    .zip(&b.series)
+                    .map(|(x, y)| ThreadCallSeries {
+                        thread_id: y.thread_id.clone(),
+                        last_call_at: y.last_call_at,
+                        rate: lerp_series(&x.rate, &y.rate, t).unwrap_or_else(|| y.rate.clone()),
+                    })
+                    .collect(),
+                hidden_threads: b.hidden_threads,
+            }
         }),
         threads: to.threads.clone(),
         // Domain metrics are headlines — taken from the target immediately.
         metrics: to.metrics.clone(),
     }
+}
+
+/// Calls may ease only when every sample still denotes the same time bucket
+/// and MCP connection. A shifted window or reordered thread set snaps.
+fn calls_can_animate(a: &CallsData, b: &CallsData) -> bool {
+    a.window_end_ms == b.window_end_ms
+        && a.series.len() == b.series.len()
+        && a.series
+            .iter()
+            .zip(&b.series)
+            .all(|(x, y)| x.thread_id == y.thread_id && x.rate.len() == y.rate.len())
 }
 
 // --- rendering ---------------------------------------------------------------
@@ -595,7 +638,9 @@ pub fn draw_one(
                 col3, theme, focused, unicode, collapsed, rect, backend, frame,
             );
         }
-        SectionId::Recall => draw_recall_panel(col3, theme, focused, collapsed, rect, frame),
+        SectionId::Recall => draw_recall_panel(
+            col3, theme, focused, unicode, collapsed, rect, backend, frame,
+        ),
     }
 }
 
@@ -698,7 +743,7 @@ fn draw_token_panel(
             let spec = crate::axis::AxisSpec {
                 max,
                 humanize: fmt_km,
-                x_labels: &x_labels,
+                x_axis: crate::axis::XAxis::Categories(&x_labels),
                 legend,
             };
             crate::axis::draw(frame, theme, chart, &spec, unicode)
@@ -997,71 +1042,219 @@ fn draw_recall_panel(
     col3: &Col3,
     theme: Theme,
     focused: bool,
+    unicode: bool,
     collapsed: bool,
     rect: Rect,
+    backend: &mut dyn RenderBackend,
     frame: &mut Frame,
 ) {
     let inner = panel_frame(theme, Section::Recall, focused, "recall", rect, frame);
-    match &col3.savings {
-        RecallView::Disabled => {
-            body(
-                frame,
-                inner,
-                0,
-                "recall off — /toggle total-recall",
-                theme.dim(),
-            );
-            return;
-        }
-        RecallView::Quiet => {
-            body(
-                frame,
-                inner,
-                0,
-                "enabled, no serves yet — see `rift doctor`",
-                theme.dim(),
-            );
-            return;
-        }
-        RecallView::Data(sd) => {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let pct = (sd.pct * 100.0).round() as u8;
-            // Savings % beside the absolute tokens avoided.
-            body(
-                frame,
-                inner,
-                0,
-                &format!("saved {pct}%  ({} tokens)", fmt_km(sd.total)),
-                theme.tile_value(theme.graph_accent()),
-            );
-        }
-    }
-    if collapsed {
+    if draw_recall_placeholder(col3, theme, inner, frame) {
         return;
     }
-    // MCP calls + threads as dot-labelled rows.
-    let calls = match &col3.calls {
-        RecallView::Data(c) => format!("{} total", fmt_km(c.total)),
-        _ => "—".to_string(),
+    let (savings, call_total, hidden, sessions) = recall_headlines(col3);
+    let hidden_text = if hidden > 0 {
+        format!(" · +{hidden} hidden")
+    } else {
+        String::new()
     };
+    if collapsed || inner.w < 28 || inner.h < 7 {
+        body(frame, inner, 0, &savings, theme.body());
+        if inner.w >= 30 {
+            body(
+                frame,
+                inner,
+                1,
+                &format!("{call_total} calls · {sessions} active sessions"),
+                theme.body(),
+            );
+        } else {
+            body(
+                frame,
+                inner,
+                1,
+                &format!("{call_total} calls"),
+                theme.body(),
+            );
+            body(
+                frame,
+                inner,
+                2,
+                &format!("{sessions} active sessions"),
+                theme.body(),
+            );
+        }
+        return;
+    }
+    body(
+        frame,
+        inner,
+        0,
+        &savings,
+        theme.tile_value(theme.graph_accent()),
+    );
     body(
         frame,
         inner,
         1,
-        &format!("· mcp calls: {calls}"),
+        &format!("{call_total} MCP calls · {sessions} active sessions{hidden_text}"),
         theme.body(),
     );
-    let threads = match &col3.threads {
-        ThreadsView::Count(n) => format!("{n} active"),
-        ThreadsView::NoSessions => "none".to_string(),
+
+    let RecallView::Data(calls) = &col3.calls else {
+        body(
+            frame,
+            inner,
+            3,
+            "(no attributed MCP calls yet)",
+            theme.dim(),
+        );
+        return;
     };
-    body(
-        frame,
-        inner,
-        2,
-        &format!("· threads: {threads}"),
-        theme.body(),
-    );
+    if calls.series.is_empty() {
+        body(frame, inner, 3, "(no calls in window)", theme.dim());
+        return;
+    }
+
+    let chart = Rect {
+        x: inner.x,
+        y: inner.y + 2,
+        w: inner.w,
+        h: inner.h.saturating_sub(2),
+    };
+    draw_call_chart(calls, theme, unicode, chart, backend, frame);
+}
+
+fn draw_recall_placeholder(col3: &Col3, theme: Theme, inner: Rect, frame: &mut Frame) -> bool {
+    if matches!(col3.savings, RecallView::Disabled) && matches!(col3.calls, RecallView::Disabled) {
+        body(
+            frame,
+            inner,
+            0,
+            "recall off — /toggle total-recall",
+            theme.dim(),
+        );
+        return true;
+    }
+    if matches!(col3.savings, RecallView::Quiet) && matches!(col3.calls, RecallView::Quiet) {
+        body(
+            frame,
+            inner,
+            0,
+            "enabled, no serves yet — see `rift doctor`",
+            theme.dim(),
+        );
+        return true;
+    }
+    false
+}
+
+fn recall_headlines(col3: &Col3) -> (String, u64, usize, String) {
+    let savings = match &col3.savings {
+        RecallView::Data(sd) => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let pct = (sd.pct * 100.0).round() as u8;
+            format!("saved {pct}% ({})", fmt_km(sd.total))
+        }
+        RecallView::Quiet | RecallView::Disabled => "saved —".to_string(),
+    };
+    let (call_total, hidden) = match &col3.calls {
+        RecallView::Data(calls) => (calls.total, calls.hidden_threads),
+        RecallView::Quiet | RecallView::Disabled => (0, 0),
+    };
+    let sessions = match &col3.threads {
+        ThreadsView::Count(count) => count.to_string(),
+        ThreadsView::NoSessions => "0".to_string(),
+    };
+    (savings, call_total, hidden, sessions)
+}
+
+fn draw_call_chart(
+    calls: &CallsData,
+    theme: Theme,
+    unicode: bool,
+    chart: Rect,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+) {
+    let y_max = call_y_max(&calls.series);
+    let colours = theme.recall_thread_colors();
+    let labels: Vec<String> = calls
+        .series
+        .iter()
+        .map(|s| format!("t-{}", s.thread_id.chars().take(4).collect::<String>()))
+        .collect();
+    let legend: Vec<(Color, &str)> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            (
+                colours.get(i).copied().unwrap_or(theme.graph_calls()),
+                label.as_str(),
+            )
+        })
+        .collect();
+    let (past_30, past_15) = if unicode {
+        ("−30m", "−15m")
+    } else {
+        ("-30m", "-15m")
+    };
+    let x_ticks = [
+        crate::axis::XTick {
+            position: 0.0,
+            label: past_30,
+        },
+        crate::axis::XTick {
+            position: 0.5,
+            label: past_15,
+        },
+        crate::axis::XTick {
+            position: 1.0,
+            label: "last",
+        },
+    ];
+    let spec = crate::axis::AxisSpec {
+        max: y_max,
+        humanize: fmt_call_tick,
+        x_axis: crate::axis::XAxis::Positions(&x_ticks),
+        legend: &legend,
+    };
+    let plot_rect = crate::axis::draw(frame, theme, chart, &spec, unicode);
+    if plot_rect.w == 0 || plot_rect.h == 0 {
+        return;
+    }
+    for (i, series) in calls.series.iter().enumerate() {
+        let vertices = plot::sparkline_points(&series.rate, y_max);
+        backend.polyline(
+            &vertices,
+            plot_rect,
+            Style::fg(colours.get(i).copied().unwrap_or(theme.graph_calls())),
+            frame,
+        );
+    }
+}
+
+fn fmt_call_tick(value: f64) -> String {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let value = value.round().max(0.0) as u64;
+    value.to_string()
+}
+
+/// One integral scale shared by every visible call line: zero at the bottom and
+/// the smallest even ceiling at least as high as the busiest minute (minimum 2).
+fn call_y_max(series: &[ThreadCallSeries]) -> f64 {
+    let observed = series
+        .iter()
+        .flat_map(|item| item.rate.iter().copied())
+        .filter(|value| value.is_finite())
+        .fold(0.0f64, f64::max)
+        .ceil();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let observed = observed.max(0.0) as u64;
+    let ceiling = observed.max(2);
+    #[allow(clippy::cast_precision_loss)]
+    let ceiling = ceiling.saturating_add(ceiling % 2) as f64;
+    ceiling
 }
 
 #[cfg(test)]
@@ -1118,7 +1311,7 @@ mod tests {
     #[test]
     fn a_short_column_scrolls_the_expanded_panels() {
         // The scroll offset moves content (ADR-0031): below the expanded content
-        // height (20), a different offset windows a different slice; a tall column
+        // height, a different offset windows a different slice; a tall column
         // fits, so the offset is inert (the old code's no-op, now the fit path).
         let col3 = Col3 {
             tokens: TokensView::Data(TokensData {
@@ -1142,10 +1335,11 @@ mod tests {
         let scrolled = text_of(&draw_at(&col3, 34, 12, 5));
         assert_ne!(top, scrolled, "the offset scrolls the panels");
         // A column taller than the expanded content ignores the offset.
-        let fit_a = text_of(&draw_at(&col3, 34, 24, 0));
-        let fit_b = text_of(&draw_at(&col3, 34, 24, 5));
+        let fit_h = content_rows(&SectionId::ALL);
+        let fit_a = text_of(&draw_at(&col3, 34, fit_h, 0));
+        let fit_b = text_of(&draw_at(&col3, 34, fit_h, 5));
         assert_eq!(fit_a, fit_b, "a fitting column has nothing to scroll");
-        assert_eq!(max_scroll(&SectionId::ALL, 24), 0);
+        assert_eq!(max_scroll(&SectionId::ALL, fit_h), 0);
         assert!(max_scroll(&SectionId::ALL, 12) > 0);
     }
 
@@ -1366,16 +1560,22 @@ mod tests {
                 pct: 0.42,
             }),
             calls: RecallView::Data(CallsData {
-                rate: vec![1.0],
-                total: 17.0,
+                total: 17,
+                window_end_ms: 1_800_000,
+                series: vec![ThreadCallSeries {
+                    thread_id: "abcd1234".into(),
+                    last_call_at: 1_799_000,
+                    rate: vec![1.0; 30],
+                }],
+                hidden_threads: 0,
             }),
             threads: ThreadsView::Count(3),
             ..Col3::default()
         };
         let text = text_of(&draw_to(&data, 40, 24));
         assert!(text.contains("saved 42%"), "savings % + tokens: \n{text}");
-        assert!(text.contains("mcp calls: 17"));
-        assert!(text.contains("threads: 3 active"));
+        assert!(text.contains("17 MCP calls"));
+        assert!(text.contains("3 active sessions"));
     }
 
     #[test]
@@ -1480,6 +1680,43 @@ mod tests {
         };
         assert!(!should_animate(&from, &to_len));
         assert_eq!(interpolate(&from, &to_len, 0.5).tokens, to_len.tokens);
+    }
+
+    #[test]
+    fn recall_lines_snap_when_the_window_or_thread_identity_changes() {
+        let calls = |window_end_ms, thread_id: &str, value| CallsData {
+            total: 1,
+            window_end_ms,
+            series: vec![ThreadCallSeries {
+                thread_id: thread_id.into(),
+                last_call_at: window_end_ms - 1,
+                rate: vec![value; 30],
+            }],
+            hidden_threads: 0,
+        };
+        let base = calls(1_800_000, "thread-a", 1.0);
+        assert!(calls_can_animate(&base, &calls(1_800_000, "thread-a", 2.0)));
+        assert!(!calls_can_animate(
+            &base,
+            &calls(1_860_000, "thread-a", 2.0)
+        ));
+        assert!(!calls_can_animate(
+            &base,
+            &calls(1_800_000, "thread-b", 2.0)
+        ));
+    }
+
+    #[test]
+    fn recall_lines_share_the_smallest_even_integral_scale() {
+        let series = |values: &[f64]| ThreadCallSeries {
+            thread_id: "thread".into(),
+            last_call_at: 0,
+            rate: values.to_vec(),
+        };
+        assert_eq!(call_y_max(&[]), 2.0);
+        assert_eq!(call_y_max(&[series(&[0.0, 1.0])]), 2.0);
+        assert_eq!(call_y_max(&[series(&[2.0]), series(&[3.0])]), 4.0);
+        assert_eq!(call_y_max(&[series(&[6.0])]), 6.0);
     }
 
     #[test]

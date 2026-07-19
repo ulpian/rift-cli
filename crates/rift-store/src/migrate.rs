@@ -464,12 +464,34 @@ pub fn recall_ingest_watermark_schema_sql() -> String {
     sql
 }
 
+/// The v7 additive recall migration: one append-only neutral fact for every
+/// decoded MCP invocation, attributed to its serving process/connection.
+#[must_use]
+pub fn recall_memd_call_schema_sql() -> String {
+    use crate::schema::{recall_v7_call_tables, RECALL_CALL_EVENT_INDEX_SQL};
+    let mut sql = String::new();
+    for table in recall_v7_call_tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    sql.push_str(RECALL_CALL_EVENT_INDEX_SQL);
+    for table in recall_v7_call_tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
 /// The recall projection's migration set (applied to a fresh `recall.db`).
 /// [`apply_migrations`] creates the meta tables itself, so version 1 is the
 /// recall graph schema directly; version 2 adds the outcome-label store;
 /// version 3 adds the key-custody table; version 4 adds the memd serve-audit
 /// relation; version 5 adds the content→blob-oid map; version 6 adds the
-/// durable ingest watermark.
+/// durable ingest watermark; version 7 adds per-thread MCP call attribution.
 #[must_use]
 pub fn recall_migrations() -> Vec<Migration> {
     vec![
@@ -502,6 +524,11 @@ pub fn recall_migrations() -> Vec<Migration> {
             version: 6,
             name: "recall_ingest_watermark",
             sql: recall_ingest_watermark_schema_sql(),
+        },
+        Migration {
+            version: 7,
+            name: "recall_memd_calls",
+            sql: recall_memd_call_schema_sql(),
         },
     ]
 }
@@ -855,13 +882,14 @@ mod tests {
     #[test]
     fn recall_core_excludes_v2_outcome_label() {
         let migs = recall_migrations();
-        assert_eq!(migs.len(), 6);
+        assert_eq!(migs.len(), 7);
         assert_eq!(migs[0].name, "recall_core");
         assert_eq!(migs[1].name, "recall_outcome_labels");
         assert_eq!(migs[2].name, "recall_key_custody");
         assert_eq!(migs[3].name, "recall_memd_audit");
         assert_eq!(migs[4].name, "recall_blob_oid_map");
         assert_eq!(migs[5].name, "recall_ingest_watermark");
+        assert_eq!(migs[6].name, "recall_memd_calls");
         // v1 must NOT mention outcome_label (else its checksum would have moved
         // when the table was added to the registry).
         assert!(
@@ -898,11 +926,19 @@ mod tests {
             .contains("CREATE TABLE IF NOT EXISTS n_blob_oid_map"));
         assert!(migs[4].sql.contains("n_blob_oid_map_no_update"));
         assert!(!migs[4].sql.contains("ingest_watermark"));
-        // v6 creates exactly the durable ingest watermark + its guards.
+        // v6 creates exactly the durable ingest watermark + its guards and
+        // must not absorb the v7 attributed-call table.
         assert!(migs[5]
             .sql
             .contains("CREATE TABLE IF NOT EXISTS ingest_watermark"));
         assert!(migs[5].sql.contains("ingest_watermark_no_update"));
+        assert!(!migs[5].sql.contains("memd_call_event"));
+        // v7 creates the invocation-addressed call table, guards, and indexes.
+        assert!(migs[6]
+            .sql
+            .contains("CREATE TABLE IF NOT EXISTS memd_call_event"));
+        assert!(migs[6].sql.contains("memd_call_event_no_update"));
+        assert!(migs[6].sql.contains("idx_memd_call_thread_recorded"));
     }
 
     /// Applying v1 then v2 to a fresh recall.db is a clean upgrade (no checksum
@@ -911,11 +947,11 @@ mod tests {
     fn recall_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &recall_migrations()).unwrap();
-        assert_eq!(out.applied, 6);
-        assert_eq!(out.high_water, 6);
+        assert_eq!(out.applied, 7);
+        assert_eq!(out.high_water, 7);
         let again = apply_migrations(&s, &recall_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 6);
+        assert_eq!(again.skipped, 7);
     }
 
     /// The canopy UI-state migrations create the append-only tables (v1 core +

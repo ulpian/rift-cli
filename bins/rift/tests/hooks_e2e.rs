@@ -395,7 +395,10 @@ fn agent_hook_never_fails_agent_on_bad_input() {
     let code = run_rift(
         &["hooks", "claude-code", "SessionStart"],
         Some("not json at all"),
-        &[("RIFT_CACHE_DIR", cache.to_str().unwrap())],
+        &[
+            ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
+            ("RIFT_NO_KEYCHAIN", "1"),
+        ],
     );
     assert_eq!(code, 0, "a bad payload never fails the agent");
 
@@ -404,7 +407,10 @@ fn agent_hook_never_fails_agent_on_bad_input() {
     let code2 = run_rift(
         &["hooks", "claude-code", "SessionStart"],
         Some(good),
-        &[("RIFT_CACHE_DIR", cache.to_str().unwrap())],
+        &[
+            ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
+            ("RIFT_NO_KEYCHAIN", "1"),
+        ],
     );
     assert_eq!(code2, 0);
 }

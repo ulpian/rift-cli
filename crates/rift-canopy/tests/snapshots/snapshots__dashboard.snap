@@ -9,8 +9,8 @@ expression: frame_text(&f)
 │              │0 ev · 0 se · 0 ck              │                              #
 │              │(no features)                   │                              #
 │              │(no projection yet)             │                              #
-│              │                                ╰──────────────────────────────#
-│              │                                ╭─ system ─────────────────────#
+│              │                                ╰──────────────────────────────|
+│              │                                ╭─ system ─────────────────────|
 │              │                                │                              |
 │              │                                │(no model calls yet)          |
 │              │                                │- capture: —                  |

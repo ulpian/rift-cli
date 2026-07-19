@@ -21,4 +21,4 @@ expression: "col3_text(&rift_canopy::Col3::default(), 20)"
 │recall off — /toggle total-recal│
 │                                │
 │                                │
-╰────────────────────────────────╯
+│                                │

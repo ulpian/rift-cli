@@ -56,6 +56,29 @@ pub struct Bus {
     pub req_tx: Sender<DataRequest>,
     /// The loop drains bus updates from here (bus → loop).
     pub evt_rx: Receiver<Event>,
+    /// Owns the worker lifetime. Its drop synchronously tears down the native
+    /// watcher, so a finished dashboard cannot leave platform watcher state
+    /// behind while a new bus starts.
+    _worker: WorkerGuard,
+}
+
+/// Synchronous lifetime guard for the worker that owns the native watcher.
+///
+/// The public request forwarder remains detached: after the request senders
+/// close it exits on its own, and it owns no platform resources. The worker,
+/// however, must be joined so dropping a [`Bus`] means its watcher is gone.
+struct WorkerGuard {
+    shutdown_tx: Sender<WorkerMsg>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(WorkerMsg::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// Spawn the data-bus worker, seeded to refresh every currently-registered
@@ -74,6 +97,18 @@ pub fn spawn_with_root(root: PathBuf, initial_paths: Vec<String>) -> Bus {
     spawn_with_watcher(root, initial_paths, Box::new(NotifyWatcher::default()))
 }
 
+/// Spawn against an explicit root with native notifications disabled.
+///
+/// This is the deterministic integration-test seam for feed and polling
+/// behaviour. Filesystem-wake behaviour is tested separately through an
+/// injected watcher, so tests that do not own native OS notification timing
+/// can exercise the documented poll-only fallback directly.
+#[doc(hidden)]
+#[must_use]
+pub fn spawn_poll_only_with_root(root: PathBuf, initial_paths: Vec<String>) -> Bus {
+    spawn_with_watcher(root, initial_paths, Box::new(PollOnlyWatcher))
+}
+
 /// The bound on the bus→loop update channel (ADR-0010 decision 3): a write
 /// storm can stage at most this many in-flight updates; everything beyond is
 /// coalesced latest-per-(project, feed) in the worker's [`Outbox`].
@@ -88,6 +123,9 @@ pub(crate) enum WorkerMsg {
     /// poll remains the sole truth, so missed/duplicated/spurious wakes are
     /// harmless by construction.
     Wake,
+    /// The public request side closed; tear down the worker and its native
+    /// watcher promptly instead of leaking them until process exit.
+    Shutdown,
 }
 
 /// The wake-signal seam: implementations watch the cache root and deliver
@@ -112,6 +150,15 @@ pub(crate) trait WakeWatcher: Send {
     /// most — never one per tracked project (the macOS FSEvents caution).
     /// Default: poll-only watchers ignore it.
     fn set_active_session_dir(&mut self, _dir: Option<&Path>) {}
+}
+
+/// Watcher implementation for the reference poll-only fallback.
+struct PollOnlyWatcher;
+
+impl WakeWatcher for PollOnlyWatcher {
+    fn watch(&mut self, _root: &Path, _wake: Sender<WorkerMsg>) -> Result<(), String> {
+        Err("poll-only".to_string())
+    }
 }
 
 /// The production watcher: `notify`'s recommended platform backend.
@@ -182,10 +229,19 @@ pub(crate) fn spawn_with_watcher(
                     return;
                 }
             }
+            let _ = msg_tx.send(WorkerMsg::Shutdown);
         });
     }
-    thread::spawn(move || worker(&msg_rx, msg_tx, &evt_tx, &root, watcher));
-    Bus { req_tx, evt_rx }
+    let shutdown_tx = msg_tx.clone();
+    let handle = thread::spawn(move || worker(&msg_rx, msg_tx, &evt_tx, &root, watcher));
+    Bus {
+        req_tx,
+        evt_rx,
+        _worker: WorkerGuard {
+            shutdown_tx,
+            handle: Some(handle),
+        },
+    }
 }
 
 /// The worker loop. It waits for a message **or** the observer's poll interval,
@@ -236,16 +292,19 @@ fn worker(
         let mut timed_out = false;
         let active_before = active.clone();
         match msg_rx.recv_timeout(observer.interval()) {
+            Ok(WorkerMsg::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
             Ok(first) => {
                 // Coalesce a burst so a storm of requests/wakes collapses to one
                 // read per project (backpressure by set-union, not queue growth).
                 collect(first, &mut to_read, &mut active, &mut woke_by_fs);
                 while let Ok(msg) = msg_rx.try_recv() {
+                    if matches!(&msg, WorkerMsg::Shutdown) {
+                        return;
+                    }
                     collect(msg, &mut to_read, &mut active, &mut woke_by_fs);
                 }
             }
             Err(RecvTimeoutError::Timeout) => timed_out = true,
-            Err(RecvTimeoutError::Disconnected) => return,
         }
         if active != active_before {
             session_dir = active.as_deref().and_then(session_dir_for);
@@ -486,6 +545,7 @@ fn collect(
         }
         WorkerMsg::Request(DataRequest::SetActive(None)) => *active = None,
         WorkerMsg::Wake => *woke_by_fs = true,
+        WorkerMsg::Shutdown => {}
     }
 }
 
@@ -1767,6 +1827,30 @@ mod tests {
                 ],
             ))
             .unwrap();
+            rt.block_on(store.insert(
+                "memd_call_event",
+                &[
+                    "call_id",
+                    "thread_id",
+                    "tool_name",
+                    "terminal_verb",
+                    "tokens_returned",
+                    "tokens_avoided",
+                    "recorded_at",
+                    "schema_version",
+                ],
+                &[
+                    Value::text(format!("c{i}")),
+                    Value::text("mcp-thread"),
+                    Value::text("rift_read_summary"),
+                    Value::text("memd.summary_served"),
+                    Value::Int(10),
+                    Value::Int(*avoided),
+                    Value::Int(*t),
+                    Value::Int(1),
+                ],
+            ))
+            .unwrap();
         }
     }
 
@@ -1817,6 +1901,7 @@ mod tests {
                     f.payload,
                     rift_canopy::FeedPayload::Recall {
                         savings: rift_canopy::RecallView::Data(_),
+                        calls: rift_canopy::RecallView::Data(_),
                         ..
                     }
                 ) {

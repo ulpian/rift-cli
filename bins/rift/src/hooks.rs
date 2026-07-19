@@ -663,10 +663,72 @@ fn record_memd_event() -> Result<()> {
     rt.block_on(append_memd_audit(&store, &body, now_ms()))
 }
 
-/// Parse a `memd.*` hook envelope and append it to the recall serve-audit
-/// relation, content-addressed on the event's idempotency key (a re-delivered
-/// handoff is a no-op). Neutral fields only: `handle`/`reason` name *what* and
-/// *why*, never the withheld bytes (W10). A malformed envelope defers (no write).
+/// Validate and append the schema-v2 invocation fact. `None` means the
+/// envelope was partial or internally inconsistent and must be deferred.
+async fn append_memd_call(
+    store: &impl rift_store::CanonicalStore,
+    env: &serde_json::Value,
+    audit_id: &str,
+    verb: &str,
+) -> Result<Option<(i64, i64, i64)>> {
+    use rift_store::Value;
+
+    let Some(call) = env.get("call") else {
+        return Ok(None);
+    };
+    let (Some(call_id), Some(thread_id), Some(tool_name), Some(recorded_at)) = (
+        call.get("call_id").and_then(serde_json::Value::as_str),
+        call.get("thread_id").and_then(serde_json::Value::as_str),
+        call.get("tool_name").and_then(serde_json::Value::as_str),
+        call.get("recorded_at").and_then(serde_json::Value::as_i64),
+    ) else {
+        return Ok(None);
+    };
+    if call_id != audit_id {
+        return Ok(None);
+    }
+    let returned = call
+        .get("tokens_returned")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let avoided = call
+        .get("tokens_avoided")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    store
+        .insert_or_ignore(
+            "memd_call_event",
+            &[
+                "call_id",
+                "thread_id",
+                "tool_name",
+                "terminal_verb",
+                "tokens_returned",
+                "tokens_avoided",
+                "recorded_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(call_id),
+                Value::text(thread_id),
+                Value::text(tool_name),
+                Value::text(verb),
+                Value::Int(returned),
+                Value::Int(avoided),
+                Value::Int(recorded_at),
+                Value::Int(2),
+            ],
+        )
+        .await?;
+    Ok(Some((recorded_at, returned, avoided)))
+}
+
+/// Parse a `memd.*` hook envelope and append its neutral audit facts. Schema v1
+/// writes the legacy serve-decision relation. Schema v2 additionally writes one
+/// invocation-addressed `memd_call_event`; successful decisions also retain the
+/// legacy savings row. A malformed envelope defers (no write).
 async fn append_memd_audit(
     store: &impl rift_store::CanonicalStore,
     envelope: &[u8],
@@ -684,6 +746,13 @@ async fn append_memd_audit(
     ) else {
         return Ok(());
     };
+    let schema = env
+        .get("schema")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if schema != 1 && schema != 2 {
+        return Ok(());
+    }
     let payload = env
         .get("payload")
         .cloned()
@@ -704,6 +773,30 @@ async fn append_memd_audit(
             .unwrap_or(0)
     };
 
+    // V2 is the per-invocation contract. All fields are neutral and required;
+    // a partial envelope is deferred rather than inventing attribution.
+    let call_fields = if schema == 2 {
+        let Some(fields) = append_memd_call(store, &env, audit_id, verb).await? else {
+            return Ok(());
+        };
+        Some(fields)
+    } else {
+        None
+    };
+
+    // Internal errors are calls but not serve decisions and therefore carry no
+    // savings fact in the legacy relation.
+    if verb == "memd.internal_error" {
+        return Ok(());
+    }
+    let (recorded_at, tokens_returned, tokens_avoided) = call_fields.unwrap_or_else(|| {
+        (
+            now,
+            i64_field("estimated_tokens_returned"),
+            i64_field("estimated_tokens_avoided"),
+        )
+    });
+
     store
         .insert_or_ignore(
             "memd_audit_event",
@@ -722,9 +815,9 @@ async fn append_memd_audit(
                 Value::text(verb),
                 handle.as_deref().map_or(Value::Null, Value::text),
                 reason.as_deref().map_or(Value::Null, Value::text),
-                Value::Int(i64_field("estimated_tokens_returned")),
-                Value::Int(i64_field("estimated_tokens_avoided")),
-                Value::Int(now),
+                Value::Int(tokens_returned),
+                Value::Int(tokens_avoided),
+                Value::Int(recorded_at),
                 Value::Int(1),
             ],
         )
@@ -1158,6 +1251,62 @@ mod tests {
         rt.block_on(append_memd_audit(&s, b"{ not json", 400))
             .unwrap();
         assert_eq!(rt.block_on(s.count("memd_audit_event")).unwrap(), 2);
+        assert_eq!(
+            rt.block_on(s.count("memd_call_event")).unwrap(),
+            0,
+            "legacy envelopes are savings-only"
+        );
+
+        // V2 is invocation-addressed: two identical outcomes with different
+        // call ids are two calls, while replaying one envelope is a no-op.
+        let v2 = |call_id: &str, verb: &str| {
+            serde_json::json!({
+                "schema": 2,
+                "verb": verb,
+                "idempotency_key": call_id,
+                "call": {
+                    "call_id": call_id,
+                    "thread_id": "thread-neutral",
+                    "tool_name": "rift_read_summary",
+                    "recorded_at": 500,
+                    "tokens_returned": 10,
+                    "tokens_avoided": 90
+                },
+                "payload": {
+                    "kind": "summary_served",
+                    "handle": "summary:neutral",
+                    "estimated_tokens_returned": 10,
+                    "estimated_tokens_avoided": 90
+                }
+            })
+            .to_string()
+        };
+        let c1 = v2("call-1", "memd.summary_served");
+        let c2 = v2("call-2", "memd.summary_served");
+        rt.block_on(append_memd_audit(&s, c1.as_bytes(), 999))
+            .unwrap();
+        rt.block_on(append_memd_audit(&s, c1.as_bytes(), 999))
+            .unwrap();
+        rt.block_on(append_memd_audit(&s, c2.as_bytes(), 999))
+            .unwrap();
+        assert_eq!(rt.block_on(s.count("memd_call_event")).unwrap(), 2);
+        assert_eq!(rt.block_on(s.count("memd_audit_event")).unwrap(), 4);
+
+        // A post-decode internal failure counts as a call but never as savings.
+        let internal = v2("call-3", "memd.internal_error");
+        rt.block_on(append_memd_audit(&s, internal.as_bytes(), 999))
+            .unwrap();
+        assert_eq!(rt.block_on(s.count("memd_call_event")).unwrap(), 3);
+        assert_eq!(rt.block_on(s.count("memd_audit_event")).unwrap(), 4);
+        let row = rt
+            .block_on(s.query(
+                "SELECT terminal_verb, recorded_at FROM memd_call_event \
+                 WHERE call_id = 'call-3'",
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(row[0].get_text(0).unwrap(), "memd.internal_error");
+        assert_eq!(row[0].get_i64(1).unwrap(), 500);
     }
 
     #[test]

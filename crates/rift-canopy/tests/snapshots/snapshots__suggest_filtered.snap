@@ -1,6 +1,5 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 662
 expression: "render_state(&mut suggest_state(\"se\"))"
 ---
  RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
@@ -11,20 +10,20 @@ expression: "render_state(&mut suggest_state(\"se\"))"
 │                  ││                                      ││                                      │
 │                  │╰──────────────────────────────────────╯│                                      │
 │                  │(none yet)                              │                                      │
-│                  │0 sensitive paths                       │                                      │
-│                  │╭─ capture ────────────────────────────╮│                                      │
-│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  │╰──────────────────────────────────────╯
-│                  │││    0     ││    0     ││    0     │  │╭─ system ─────────────────────────────╮
+│                  │0 sensitive paths                       ╰──────────────────────────────────────╯
+│                  │╭─ capture ────────────────────────────╮╭─ system ─────────────────────────────╮
+│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  ││                                      │
+│                  │││    0     ││    0     ││    0     │  ││(no model calls yet)                  │
 │                  ││╰──────────╯╰──────────╯╰──────────╯  ││                                      │
-│                  ││                                      ││                                      │
-│                  │╰──────────────────────────────────────╯│(no model calls yet)                  │
-│                  │╭─ features ───────────────────────────╮│                                      │
-│                  ││(no features)                         ││ session - idle                       │
 │                  ││                                      ││- capture: —                          │
-│                  ││                                      ││- burn: —                             │
-│                  │╰──────────────────────────────────────╯│- projection: —                       │
-│                  │╭─ activity · 7d ──────────────────────╮│- recall: —                           │
-│                  ││(no projection yet)                   │╰──────────────────────────────────────╯
+│                  │╰──────────────────────────────────────╯│- burn: —                             │
+│                  │╭─ features ───────────────────────────╮│- projection: —                       │
+│                  ││(no features)                         ││- recall: —                           │
+│                  ││                                      │╰──────────────────────────────────────╯
+│                  ││                                      │╭─ recall ─────────────────────────────╮
+│                  │╰──────────────────────────────────────╯│recall off — /toggle total-recall     │
+│                  │╭─ activity · 7d ──────────────────────╮│                                      │
+│                  ││(no projection yet)                   ││                                      │
 ╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
 │> select  /select [project]      select a project row                                             │
 │  session  /session [list|show <id>] inspect sessions                                             │

@@ -21,7 +21,7 @@ use rift_canopy::{
     AppState, BreakdownView, CanopyKey, DataRequest, EntryKind, Event, NullFeatureManager,
     PersistOp, Project, ProjectStatus, TokensView,
 };
-use rift_canopy_data::{runtime, spawn_with_root};
+use rift_canopy_data::{runtime, spawn_poll_only_with_root};
 use rift_core::Result as RiftResult;
 use rift_git::repo_id_for;
 use rift_store::{projection_db_under, CanonicalStore, SqliteStore, Value};
@@ -197,7 +197,7 @@ fn token_sections_render_live_from_a_seeded_projection() {
     seed_token_fact(root.path(), &path, "c1", 1_000, (500, 2_000, 100, 700));
     seed_token_fact(root.path(), &path, "c2", 8_000, (300, 4_000, 0, 500));
 
-    let bus = spawn_with_root(root.path().to_path_buf(), vec![path.clone()]);
+    let bus = spawn_poll_only_with_root(root.path().to_path_buf(), vec![path.clone()]);
     // NO subscribe is sent by this test (M5-02): the loop's own startup prime
     // must go live on its own — req_sink is wired to the real bus, exactly as
     // the interactive launch wires it.
@@ -283,7 +283,7 @@ fn a_mid_run_rebuild_drives_a_full_re_read() {
     let path = make_project(root.path(), "reb");
     seed_token_fact(root.path(), &path, "c1", 1_000, (100, 0, 0, 0));
 
-    let bus = spawn_with_root(root.path().to_path_buf(), vec![path.clone()]);
+    let bus = spawn_poll_only_with_root(root.path().to_path_buf(), vec![path.clone()]);
     bus.req_tx
         .send(DataRequest::SetActive(Some(path.clone())))
         .unwrap();
@@ -348,7 +348,7 @@ fn metrics_hold_while_idle_and_move_on_capture() {
     seed_session_row(root.path(), &path, "s1", S0);
     seed_session_event(root.path(), &path, "e1", "s1", S0 + 60_000);
 
-    let bus = spawn_with_root(root.path().to_path_buf(), vec![path.clone()]);
+    let bus = spawn_poll_only_with_root(root.path().to_path_buf(), vec![path.clone()]);
     bus.req_tx
         .send(DataRequest::SetActive(Some(path.clone())))
         .unwrap();

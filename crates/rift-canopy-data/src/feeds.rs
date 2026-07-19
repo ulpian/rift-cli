@@ -18,11 +18,13 @@
 //! a panel (user story 17) — the scope property is tested over multi-repo
 //! fixtures.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use rift_canopy::col3::{
     ActivityData, ActivityView, BreakdownData, BreakdownView, CallsData, DayBar, NicReading,
-    NicView, PanelMetrics, RecallView, SavingsData, ThreadsView, TokensData, TokensView,
+    NicView, PanelMetrics, RecallView, SavingsData, ThreadCallSeries, ThreadsView, TokensData,
+    TokensView,
 };
 use rift_canopy::{FeedPayload, FeedUpdate, LiveSessions, SessionsRead};
 use rift_git::repo_id_for;
@@ -348,9 +350,9 @@ pub fn compute_recall(root: &Path, path: &str, live: Option<LiveSessions>) -> Fe
             ThreadsView::NoSessions
         }
     });
-    let (savings, calls) = match read_audit_rows(root, path) {
-        RecallDb::Absent => (RecallView::Disabled, RecallView::Disabled),
-        RecallDb::Quiet => (RecallView::Quiet, RecallView::Quiet),
+    let savings = match read_audit_rows(root, path) {
+        RecallDb::Absent => RecallView::Disabled,
+        RecallDb::Quiet => RecallView::Quiet,
         RecallDb::Rows(rows) => {
             let saved: Vec<(i64, f64)> = rows
                 .iter()
@@ -360,7 +362,6 @@ pub fn compute_recall(root: &Path, path: &str, live: Option<LiveSessions>) -> Fe
                     (r.t, v)
                 })
                 .collect();
-            let calls_rows: Vec<(i64, f64)> = rows.iter().map(|r| (r.t, 1.0)).collect();
             // Savings % over the whole served audit trail: avoided / (avoided +
             // served), through the ledger's guarded ratio so the number can
             // never drift from `avoidable_context_rate` (M55-07).
@@ -372,18 +373,17 @@ pub fn compute_recall(root: &Path, path: &str, live: Option<LiveSessions>) -> Fe
             let avoided = sum_u64(|r| r.tokens_avoided);
             let returned = sum_u64(|r| r.tokens_returned);
             let pct = rift_recall_ledger::savings_rate(avoided, avoided.saturating_add(returned));
-            (
-                RecallView::Data(SavingsData {
-                    rate: bucket_values(&saved),
-                    total: crate::series::saturating_sum(saved.iter().map(|(_, v)| *v)),
-                    pct,
-                }),
-                RecallView::Data(CallsData {
-                    rate: bucket_values(&calls_rows),
-                    total: crate::series::saturating_sum(calls_rows.iter().map(|(_, v)| *v)),
-                }),
-            )
+            RecallView::Data(SavingsData {
+                rate: bucket_values(&saved),
+                total: crate::series::saturating_sum(saved.iter().map(|(_, v)| *v)),
+                pct,
+            })
         }
+    };
+    let calls = match read_call_data(root, path) {
+        CallDb::Absent => RecallView::Disabled,
+        CallDb::Quiet => RecallView::Quiet,
+        CallDb::Data(data) => RecallView::Data(data),
     };
     FeedUpdate {
         project: path.to_string(),
@@ -740,6 +740,98 @@ enum RecallDb {
     Rows(Vec<AuditRow>),
 }
 
+/// The attributed-call read outcome. It is independent of the legacy savings
+/// trail so internal-error-only calls and legacy-savings-only databases are
+/// both represented honestly.
+enum CallDb {
+    Absent,
+    Quiet,
+    Data(CallsData),
+}
+
+const CALL_BUCKET_MS: i64 = 60_000;
+const CALL_BUCKETS: usize = 30;
+const VISIBLE_CALL_THREADS: usize = 4;
+
+/// Read a bounded, event-anchored per-thread call window. The all-time total is
+/// a separate aggregate; only the final 30 minutes of rows enter memory.
+fn read_call_data(root: &Path, path: &str) -> CallDb {
+    let Ok(repo) = recall_repo_id(Path::new(path)) else {
+        return CallDb::Absent;
+    };
+    let db = recall_db_under(root, &repo);
+    if !db.exists() {
+        return CallDb::Absent;
+    }
+    let (Ok(store), Ok(rt)) = (SqliteStore::open(&db), runtime()) else {
+        return CallDb::Quiet;
+    };
+    let Ok(Some(total_i64)) =
+        rt.block_on(store.query_opt_i64("SELECT COUNT(*) FROM memd_call_event", &[]))
+    else {
+        return CallDb::Quiet; // pre-v7 database or temporarily unreadable
+    };
+    if total_i64 <= 0 {
+        return CallDb::Quiet;
+    }
+    let Ok(Some(latest)) =
+        rt.block_on(store.query_opt_i64("SELECT MAX(recorded_at) FROM memd_call_event", &[]))
+    else {
+        return CallDb::Quiet;
+    };
+    let latest_minute = latest.div_euclid(CALL_BUCKET_MS) * CALL_BUCKET_MS;
+    let window_end_ms = latest_minute.saturating_add(CALL_BUCKET_MS);
+    let window_start_ms = window_end_ms
+        .saturating_sub(CALL_BUCKET_MS.saturating_mul(i64::try_from(CALL_BUCKETS).unwrap_or(30)));
+    let Ok(rows) = rt.block_on(store.query(
+        "SELECT thread_id, recorded_at FROM memd_call_event \
+         WHERE recorded_at >= ? AND recorded_at < ? \
+         ORDER BY recorded_at, call_id",
+        &[Value::Int(window_start_ms), Value::Int(window_end_ms)],
+    )) else {
+        return CallDb::Quiet;
+    };
+
+    let mut grouped: BTreeMap<String, (i64, Vec<f64>)> = BTreeMap::new();
+    for row in rows {
+        let (Ok(thread_id), Ok(recorded_at)) = (row.get_text(0), row.get_i64(1)) else {
+            continue;
+        };
+        let offset = recorded_at.saturating_sub(window_start_ms) / CALL_BUCKET_MS;
+        let Ok(bucket) = usize::try_from(offset) else {
+            continue;
+        };
+        let entry = grouped
+            .entry(thread_id)
+            .or_insert_with(|| (recorded_at, vec![0.0; CALL_BUCKETS]));
+        entry.0 = entry.0.max(recorded_at);
+        if let Some(value) = entry.1.get_mut(bucket) {
+            *value += 1.0;
+        }
+    }
+    let mut series: Vec<ThreadCallSeries> = grouped
+        .into_iter()
+        .map(|(thread_id, (last_call_at, rate))| ThreadCallSeries {
+            thread_id,
+            last_call_at,
+            rate,
+        })
+        .collect();
+    series.sort_by(|a, b| {
+        b.last_call_at
+            .cmp(&a.last_call_at)
+            .then_with(|| a.thread_id.cmp(&b.thread_id))
+    });
+    let hidden_threads = series.len().saturating_sub(VISIBLE_CALL_THREADS);
+    series.truncate(VISIBLE_CALL_THREADS);
+    CallDb::Data(CallsData {
+        total: u64::try_from(total_i64).unwrap_or(u64::MAX),
+        window_end_ms,
+        series,
+        hidden_threads,
+    })
+}
+
 /// Read the served `memd.*` audit events from the project's own recall.db.
 fn read_audit_rows(root: &Path, path: &str) -> RecallDb {
     // recall.db is keyed by `recall_repo_id`, NOT the capture `repo_id_for`
@@ -1035,6 +1127,64 @@ mod tests {
                 ],
             ))
             .unwrap();
+            rt.block_on(store.insert(
+                "memd_call_event",
+                &[
+                    "call_id",
+                    "thread_id",
+                    "tool_name",
+                    "terminal_verb",
+                    "tokens_returned",
+                    "tokens_avoided",
+                    "recorded_at",
+                    "schema_version",
+                ],
+                &[
+                    Value::text(format!("c{i}")),
+                    Value::text(format!("thread-{}", i % 2)),
+                    Value::text("rift_read_summary"),
+                    Value::text("memd.summary_served"),
+                    Value::Int(10),
+                    Value::Int(*avoided),
+                    Value::Int(*t),
+                    Value::Int(1),
+                ],
+            ))
+            .unwrap();
+        }
+    }
+
+    fn seed_call_events(root: &Path, path: &str, events: &[(&str, &str, i64)]) {
+        let repo = recall_repo_id(Path::new(path)).unwrap();
+        let db = recall_db_under(root, &repo);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = runtime().unwrap();
+        for (call_id, thread_id, recorded_at) in events {
+            rt.block_on(store.insert(
+                "memd_call_event",
+                &[
+                    "call_id",
+                    "thread_id",
+                    "tool_name",
+                    "terminal_verb",
+                    "tokens_returned",
+                    "tokens_avoided",
+                    "recorded_at",
+                    "schema_version",
+                ],
+                &[
+                    Value::text(*call_id),
+                    Value::text(*thread_id),
+                    Value::text("rift_known_state"),
+                    Value::text("memd.internal_error"),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(*recorded_at),
+                    Value::Int(1),
+                ],
+            ))
+            .unwrap();
         }
     }
 
@@ -1177,11 +1327,90 @@ mod tests {
         let RecallView::Data(cd) = calls else {
             panic!("expected calls data");
         };
-        assert!(
-            (cd.total - 3.0).abs() < f64::EPSILON,
-            "one call per served event"
-        );
+        assert_eq!(cd.total, 3, "one attributed call per served event");
+        assert_eq!(cd.series.len(), 2);
+        assert!(cd.series.iter().all(|s| s.rate.len() == 30));
         assert_eq!(threads, ThreadsView::Count(3));
+    }
+
+    #[test]
+    fn legacy_serves_remain_savings_only_without_call_backfill() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "legacy");
+        let repo = recall_repo_id(Path::new(&proj)).unwrap();
+        let db = recall_db_under(root.path(), &repo);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = runtime().unwrap();
+        rt.block_on(store.insert(
+            "memd_audit_event",
+            &[
+                "audit_id",
+                "verb",
+                "handle",
+                "reason",
+                "tokens_returned",
+                "tokens_avoided",
+                "recorded_at",
+                "schema_version",
+            ],
+            &[
+                Value::text("legacy"),
+                Value::text("memd.summary_served"),
+                Value::text("summary:neutral"),
+                Value::Null,
+                Value::Int(10),
+                Value::Int(90),
+                Value::Int(1_000),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        let FeedPayload::Recall { savings, calls, .. } =
+            compute_recall(root.path(), &proj, None).payload
+        else {
+            panic!("expected Recall");
+        };
+        assert!(matches!(savings, RecallView::Data(_)));
+        assert_eq!(calls, RecallView::Quiet);
+    }
+
+    #[test]
+    fn call_series_are_event_anchored_limited_and_stable_while_idle() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "calls");
+        seed_call_events(
+            root.path(),
+            &proj,
+            &[
+                ("old", "thread-old", 59_999), // outside visible window
+                ("a0", "thread-a", 60_000),    // first visible bucket
+                ("a1", "thread-a", 1_800_000), // last visible bucket
+                ("b", "thread-b", 1_799_000),
+                ("c", "thread-c", 1_798_000),
+                ("d", "thread-d", 1_797_000),
+                ("e", "thread-e", 1_796_000),
+            ],
+        );
+        let first = compute_recall(root.path(), &proj, None);
+        let second = compute_recall(root.path(), &proj, None);
+        assert_eq!(first, second, "idle recompute must be byte-identical");
+        let FeedPayload::Recall { savings, calls, .. } = first.payload else {
+            panic!("expected Recall");
+        };
+        assert_eq!(savings, RecallView::Quiet, "internal errors save nothing");
+        let RecallView::Data(calls) = calls else {
+            panic!("decoded internal failures are still attributed calls");
+        };
+        assert_eq!(calls.total, 7, "all-time total includes the old call");
+        assert_eq!(calls.window_end_ms, 1_860_000);
+        assert_eq!(calls.series.len(), 4);
+        assert_eq!(calls.hidden_threads, 1);
+        assert_eq!(calls.series[0].thread_id, "thread-a");
+        assert_eq!(calls.series[0].rate.len(), 30);
+        assert_eq!(calls.series[0].rate[0], 1.0);
+        assert_eq!(calls.series[0].rate[29], 1.0);
+        assert!(calls.series.iter().all(|s| s.thread_id != "thread-old"));
     }
 
     #[test]

@@ -152,6 +152,18 @@ pub trait RenderBackend {
         crate::plot::draw_blocks(frame, area, points, paint);
     }
 
+    /// Connected polyline for time-series graphs. The default rasterizes every
+    /// clipped segment through the portable points contract; xRE overrides the
+    /// high-fidelity tier with `SampleBuffer::line` + the Braille CellShader.
+    fn polyline(&mut self, vertices: &[PlotPoint], area: Rect, style: Style, frame: &mut Frame) {
+        let points = crate::plot::connected_line_points(
+            vertices,
+            u32::from(area.w).saturating_mul(2),
+            u32::from(area.h).saturating_mul(4),
+        );
+        self.plot(&points, area, &Paint::Solid(style), frame);
+    }
+
     /// Dev-only hot-reload tick (no-op unless built with hot-reload).
     fn hot_reload_tick(&mut self) {}
 }

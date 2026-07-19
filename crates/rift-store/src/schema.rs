@@ -1191,6 +1191,22 @@ const MEMD_AUDIT_EVENT_COLUMNS: &[Column] = &[
     Column::int("schema_version"),
 ];
 
+// --- attributed MCP calls (per process/connection, per decoded invocation) --
+// Unlike `memd_audit_event`, whose legacy ids are outcome-content addressed,
+// this relation uses an invocation id. It therefore counts two identical calls
+// twice while still making replay of one hook envelope idempotent. Only neutral
+// routing/metric facts live here; tool arguments and transcript bytes never do.
+const MEMD_CALL_EVENT_COLUMNS: &[Column] = &[
+    Column::text("call_id"),
+    Column::text("thread_id"),
+    Column::text("tool_name"),
+    Column::text("terminal_verb"),
+    Column::int("tokens_returned"),
+    Column::int("tokens_avoided"),
+    Column::int("recorded_at"),
+    Column::int("schema_version"),
+];
+
 // --- content→blob-oid map (ADR-0005) ---------------------------------------
 // Handles bind content by `content_sha256` (the hash of the file bytes as read),
 // but git addresses blobs by object id (`sha1("blob <len>\0" ‖ bytes)`). This
@@ -1327,6 +1343,13 @@ const RECALL_TABLES: &[CanonicalTable] = &[
         primary_key: &["watermark_id"],
         unique: NO_UNIQUE,
     },
+    // --- v7 additive (per-thread MCP call attribution) -----------------------
+    CanonicalTable {
+        name: "memd_call_event",
+        columns: MEMD_CALL_EVENT_COLUMNS,
+        primary_key: &["call_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// The number of v1 (`recall_core` migration) recall tables. Tables after this
@@ -1348,6 +1371,9 @@ pub(crate) const RECALL_V4_TABLE_COUNT: usize = 16;
 
 /// One past the last v5 (`recall_blob_oid_map` migration) table.
 pub(crate) const RECALL_V5_TABLE_COUNT: usize = 17;
+
+/// One past the last v6 (`recall_ingest_watermark` migration) table.
+pub(crate) const RECALL_V6_TABLE_COUNT: usize = 18;
 
 /// The v1 recall tables (the `recall_core` migration's source of truth).
 #[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
@@ -1383,11 +1409,17 @@ pub(crate) fn recall_v5_blob_map_tables() -> &'static [CanonicalTable] {
 }
 
 /// The v6-additive recall tables (the `recall_ingest_watermark` migration): the
-/// durable incremental-ingest watermark. Open-ended (the current registry end);
-/// the next additive recall migration bounds it and starts past it.
+/// durable incremental-ingest watermark. Frozen once v6 shipped.
 #[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
 pub(crate) fn recall_v6_watermark_tables() -> &'static [CanonicalTable] {
-    &RECALL_TABLES[RECALL_V5_TABLE_COUNT..]
+    &RECALL_TABLES[RECALL_V5_TABLE_COUNT..RECALL_V6_TABLE_COUNT]
+}
+
+/// The v7-additive recall tables: one neutral terminal fact per decoded MCP
+/// invocation, attributed to the serving process/connection.
+#[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
+pub(crate) fn recall_v7_call_tables() -> &'static [CanonicalTable] {
+    &RECALL_TABLES[RECALL_V6_TABLE_COUNT..]
 }
 
 /// Secondary indexes for the recall graph (appended after the tables in the
@@ -1403,6 +1435,11 @@ CREATE INDEX IF NOT EXISTS idx_fread_ckpt ON n_file_read(checkpoint_id);\n";
 /// Looks up a subject's belief history for effective-label resolution.
 pub const RECALL_OUTCOME_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS idx_outcome_subject ON outcome_label(subject_kind, subject_id);\n";
+
+/// Indexes for event-anchored call windows and per-thread grouping in Canopy.
+pub const RECALL_CALL_EVENT_INDEX_SQL: &str = "\
+CREATE INDEX IF NOT EXISTS idx_memd_call_recorded ON memd_call_event(recorded_at);\n\
+CREATE INDEX IF NOT EXISTS idx_memd_call_thread_recorded ON memd_call_event(thread_id, recorded_at);\n";
 
 /// The registry of recall (`recall.db`) canonical tables (v1 core + additive).
 /// The immutability property test iterates this **in addition to**

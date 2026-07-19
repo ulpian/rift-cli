@@ -17,11 +17,13 @@
 //! follow-up once a turn signal is available.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rift_config::EffectiveConfig;
 use rift_core::Timestamp;
 use rift_core::{Result, RiftError};
+use rift_recall_events::{McpCallContext, McpCallId, McpTerminal, McpThreadId};
 use rift_recall_mcp::{
     decode_request, McpServer, RecallContext, ToolName, ToolRequest, TOOL_SURFACE,
 };
@@ -48,10 +50,24 @@ pub(crate) struct RiftRecallServer {
     /// start: denied globs, transcript allow-list, fail-closed flag (W1).
     serve_policy: ServePolicy,
     budget: tokio::sync::Mutex<TurnBudget>,
+    /// Opaque identity of this stdio server process/connection. Deliberately
+    /// unrelated to capture-session ids.
+    thread_id: McpThreadId,
+    /// Monotonic ordinal allocated only after a request decodes successfully.
+    next_call_ordinal: AtomicU64,
 }
 
 impl RiftRecallServer {
     fn new(repo: &Path) -> Result<Self> {
+        let mut seed = [0u8; 32];
+        getrandom::getrandom(&mut seed)
+            .map_err(|_| RiftError::crypto("MCP thread identity unavailable"))?;
+        Self::new_with_thread_id(repo, McpThreadId::from_seed(&seed))
+    }
+
+    /// Deterministic constructor used by tests; production calls [`Self::new`]
+    /// with OS entropy.
+    fn new_with_thread_id(repo: &Path, thread_id: McpThreadId) -> Result<Self> {
         let rift_dir = repo.join(".rift");
         // Fail-closed: a missing/malformed config resolves to secure defaults.
         let config = match EffectiveConfig::load(&rift_dir) {
@@ -63,7 +79,22 @@ impl RiftRecallServer {
             config,
             serve_policy: ServePolicy::load(&rift_dir),
             budget: tokio::sync::Mutex::new(TurnBudget::default()),
+            thread_id,
+            next_call_ordinal: AtomicU64::new(0),
         })
+    }
+
+    /// Allocate the identity for one already-decoded request.
+    fn next_call(&self, tool: ToolName) -> McpCallContext {
+        let ordinal = self
+            .next_call_ordinal
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        McpCallContext {
+            thread_id: self.thread_id,
+            call_id: McpCallId::derive(self.thread_id, ordinal),
+            tool_name: tool.wire_name().to_string(),
+        }
     }
 
     /// The policy engine for a call: the effective config plus the serve-policy
@@ -158,10 +189,10 @@ fn rift_bin_beside(exe: Option<PathBuf>, exists: impl Fn(&Path) -> bool) -> Path
 /// non-fatal — the serve already succeeded — but it is logged loudly (stderr,
 /// gated by `RIFT_LOG`): a *silent* failure here is exactly what makes the
 /// dashboard read "no serves yet" forever.
-fn emit_event(event: &rift_recall_events::MemdEvent) {
+fn emit_terminal(call: &McpCallContext, terminal: McpTerminal<'_>, recorded_at: Timestamp) {
     use std::process::{Command, Stdio};
-    let verb = event.verb();
-    let json = event.to_hook_json();
+    let verb = terminal.verb();
+    let json = terminal.to_hook_json(call, recorded_at);
     let bin = rift_bin();
     match Command::new(&bin)
         .args(["hooks", "memd", verb])
@@ -231,53 +262,66 @@ impl ServerHandler for RiftRecallServer {
             .map_or(serde_json::Value::Null, serde_json::Value::Object);
         let (tool, req) = decode_request(&request.name, &params)
             .map_err(|_| ErrorData::invalid_params("unknown tool", None))?;
+        let call = self.next_call(tool);
 
-        // Open the read-only recall store for this repo.
-        let db = crate::recall_db_path(&self.repo)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        let store = crate::open_recall_db(&db)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let result = async {
+            // Open the read-only recall store for this repo.
+            let db = crate::recall_db_path(&self.repo)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            let store = crate::open_recall_db(&db)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        // Resolve the target's git blob oid via the ADR-0005 map BEFORE the
-        // non-`Send` `GixSubstrate` is opened synchronously (so it never crosses an
-        // await). Only retrieve_exact needs real bytes.
-        let exact_oid = if tool.is_exact() {
-            match &req.target {
-                Some(target) => {
-                    let sha = rift_recall_mcp::exact_sha(target);
-                    rift_recall_ledger::blob_map::blob_oid_for(&store, sha)
-                        .await
-                        .ok()
-                        .flatten()
+            // Resolve the target's git blob oid via the ADR-0005 map BEFORE the
+            // non-`Send` `GixSubstrate` is opened synchronously (so it never crosses an
+            // await). Only retrieve_exact needs real bytes.
+            let exact_oid = if tool.is_exact() {
+                match &req.target {
+                    Some(target) => {
+                        let sha = rift_recall_mcp::exact_sha(target);
+                        rift_recall_ledger::blob_map::blob_oid_for(&store, sha)
+                            .await
+                            .ok()
+                            .flatten()
+                    }
+                    None => None,
                 }
-                None => None,
+            } else {
+                None
+            };
+            // Build a `Send` in-memory reader seeded with the one requested blob.
+            let reader = build_reader(&self.repo, tool, &req, exact_oid.as_deref());
+
+            let repo_id = crate::repo_id_for(&self.repo)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            let ctx = RecallContext {
+                store: &store,
+                reader: &reader,
+                scope: Scope::default_for(repo_id.as_str(), u32::MAX),
+                now: Timestamp::now(),
+            };
+            let server = McpServer::new(self.policy());
+            // Draw down the server-held per-turn budget (anchored by known_state).
+            let mut budget = self.budget.lock().await;
+            server
+                .dispatch(tool, &req, &ctx, &mut budget)
+                .await
+                .map_err(|e| ErrorData::internal_error(format!("{e:?}"), None))
+        }
+        .await;
+
+        let terminal_at = Timestamp::now();
+        match result {
+            Ok(resp) => {
+                emit_terminal(&call, McpTerminal::Event(&resp.event), terminal_at);
+                Ok(CallToolResult::success(vec![Content::text(
+                    resp.payload.to_string(),
+                )]))
             }
-        } else {
-            None
-        };
-        // Build a `Send` in-memory reader seeded with the one requested blob.
-        let reader = build_reader(&self.repo, tool, &req, exact_oid.as_deref());
-
-        let repo_id = crate::repo_id_for(&self.repo)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        let ctx = RecallContext {
-            store: &store,
-            reader: &reader,
-            scope: Scope::default_for(repo_id.as_str(), u32::MAX),
-            now: Timestamp::now(),
-        };
-        let server = McpServer::new(self.policy());
-        // Draw down the server-held per-turn budget (anchored by known_state).
-        let mut budget = self.budget.lock().await;
-        let resp = server
-            .dispatch(tool, &req, &ctx, &mut budget)
-            .await
-            .map_err(|e| ErrorData::internal_error(format!("{e:?}"), None))?;
-
-        emit_event(&resp.event);
-        Ok(CallToolResult::success(vec![Content::text(
-            resp.payload.to_string(),
-        )]))
+            Err(error) => {
+                emit_terminal(&call, McpTerminal::InternalError, terminal_at);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -415,5 +459,24 @@ mod tests {
         // current_exe() unavailable → still a usable bare name, never a panic.
         let got = rift_bin_beside(None, |_| true);
         assert_eq!(got, PathBuf::from(rift_name()));
+    }
+
+    #[test]
+    fn decoded_call_ids_are_stable_per_process_and_unique_per_ordinal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let thread_a = McpThreadId::from_seed(b"a");
+        let server_a = RiftRecallServer::new_with_thread_id(tmp.path(), thread_a).unwrap();
+        let first = server_a.next_call(ToolName::KnownState);
+        let second = server_a.next_call(ToolName::KnownState);
+        assert_eq!(first.thread_id, thread_a);
+        assert_eq!(second.thread_id, thread_a);
+        assert_ne!(first.call_id, second.call_id);
+        assert_eq!(first.tool_name, "rift_known_state");
+
+        let thread_b = McpThreadId::from_seed(b"b");
+        let server_b = RiftRecallServer::new_with_thread_id(tmp.path(), thread_b).unwrap();
+        let other = server_b.next_call(ToolName::KnownState);
+        assert_ne!(first.thread_id, other.thread_id);
+        assert_ne!(first.call_id, other.call_id);
     }
 }

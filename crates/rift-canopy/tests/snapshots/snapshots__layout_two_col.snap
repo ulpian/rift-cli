@@ -12,7 +12,7 @@ expression: "render_at(60, 20)"
 │                  │
 │                  │╭─ token usage ────────────────────────#
 │                  ││(no token activity yet)               #
-│                  ││                                      #
+│                  ││                                      |
 │                  ││                                      |
 │                  ││                                      |
 │                  ││                                      |

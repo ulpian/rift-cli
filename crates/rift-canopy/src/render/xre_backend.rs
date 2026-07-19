@@ -83,6 +83,28 @@ impl RenderBackend for XreBackend {
             crate::plot::draw_blocks(frame, area, points, paint);
         }
     }
+
+    fn polyline(
+        &mut self,
+        vertices: &[crate::plot::PlotPoint],
+        area: crate::layout::Rect,
+        style: crate::render::frame::Style,
+        frame: &mut Frame,
+    ) {
+        #[cfg(feature = "xre-3d")]
+        {
+            if self.caps.contains(Capabilities::MESH_3D) {
+                crate::render::xre_hires::draw_polyline(vertices, area, style, frame);
+                return;
+            }
+        }
+        let points = crate::plot::connected_line_points(
+            vertices,
+            u32::from(area.w).saturating_mul(2),
+            u32::from(area.h).saturating_mul(4),
+        );
+        self.plot(&points, area, &crate::plot::Paint::Solid(style), frame);
+    }
 }
 
 /// Copy a Canopy [`Frame`] into a reused `xre_core::CellBuffer`, resizing it to

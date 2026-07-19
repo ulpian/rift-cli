@@ -15,6 +15,7 @@ name = "rift-memd"
 path = "src/main.rs"
 
 [dependencies]
+getrandom = { workspace = true }
 rift-core = { version = "0.0.1", path = "../../crates/rift-core" }
 rift-recall-ledger = { version = "0.0.1", path = "../../crates/rift-recall-ledger" }
 rift-recall-mcp = { version = "0.0.1", path = "../../crates/rift-recall-mcp" }
@@ -35,3 +36,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 # The agent-spawned stdio MCP transport (process lifetime = session).
 rmcp = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }

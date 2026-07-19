@@ -1,6 +1,5 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 733
 expression: "render_state(&mut\nlifecycle_state(Some(rift_canopy::FeatureRuntime::Enabling)))"
 ---
  RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
@@ -11,22 +10,22 @@ expression: "render_state(&mut\nlifecycle_state(Some(rift_canopy::FeatureRuntime
 │                  ││                                      ││                                      │
 │                  │╰──────────────────────────────────────╯│                                      │
 │                  │(none yet)                              │                                      │
-│                  │0 sensitive paths                       │                                      │
-│                  │╭─ capture ────────────────────────────╮│                                      │
-│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  │╰──────────────────────────────────────╯
-│                  │││    0     ││    0     ││    0     │  │╭─ system ─────────────────────────────╮
+│                  │0 sensitive paths                       ╰──────────────────────────────────────╯
+│                  │╭─ capture ────────────────────────────╮╭─ system ─────────────────────────────╮
+│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  ││                                      │
+│                  │││    0     ││    0     ││    0     │  ││(no model calls yet)                  │
 │                  ││╰──────────╯╰──────────╯╰──────────╯  ││                                      │
+│                  ││                                      ││- capture: —                          │
+│                  │╰──────────────────────────────────────╯│- burn: —                             │
+│                  │╭─ features ───────────────────────────╮│- projection: —                       │
+│                  ││  [x] fff (fuzzy find) · M7           ││- recall: —                           │
+│                  ││  [x] codegraph · M7                  │╰──────────────────────────────────────╯
+│                  ││    [x] typescript · M7               │╭─ recall ─────────────────────────────╮
+│                  │╰──────────────────────────────────────╯│recall off — /toggle total-recall     │
+│                  │╭─ activity · 7d ──────────────────────╮│                                      │
+│                  ││(no projection yet)                   ││                                      │
 │                  ││                                      ││                                      │
-│                  │╰──────────────────────────────────────╯│(no model calls yet)                  │
-│                  │╭─ features ───────────────────────────╮│                                      │
-│                  ││  [x] fff (fuzzy find) · M7           ││ session - idle                       │
-│                  ││  [x] codegraph · M7                  ││- capture: —                          │
-│                  ││    [x] typescript · M7               ││- burn: —                             │
-│                  │╰──────────────────────────────────────╯│- projection: —                       │
-│                  │╭─ activity · 7d ──────────────────────╮│- recall: —                           │
-│                  ││(no projection yet)                   │╰──────────────────────────────────────╯
-│                  ││                                      │╭─ recall ─────────────────────────────╮
-│                  ││                                      ││recall off — /toggle total-recall     │
+│                  ││                                      ││                                      │
 │                  ││                                      ││                                      │
 │                  ││                                      ││                                      │
 │[+][^][v][x]      ││                                      ││                                      │

@@ -162,8 +162,18 @@ fn col3_with_data() -> rift_canopy::Col3 {
             pct: 0.42,
         }),
         calls: rift_canopy::RecallView::Data(rift_canopy::CallsData {
-            rate: vec![1.0, 3.0, 2.0, 5.0, 4.0, 2.0],
-            total: 17.0,
+            total: 17,
+            window_end_ms: 1_800_000,
+            series: vec![rift_canopy::ThreadCallSeries {
+                thread_id: "abcd1234".into(),
+                last_call_at: 1_799_000,
+                rate: [1.0, 3.0, 2.0, 5.0, 4.0, 2.0]
+                    .into_iter()
+                    .cycle()
+                    .take(30)
+                    .collect(),
+            }],
+            hidden_threads: 0,
         }),
         threads: rift_canopy::ThreadsView::Count(2),
         metrics: rift_canopy::PanelMetrics::default(),
@@ -187,6 +197,25 @@ fn col3_text(col3: &rift_canopy::Col3, h: u16) -> String {
         &mut f,
     );
     frame_text(&f)
+}
+
+/// Render the Recall surface alone so responsive states are not hidden behind
+/// the column stack's scroll viewport.
+fn recall_text(col3: &rift_canopy::Col3, w: u16, h: u16, collapsed: bool) -> String {
+    let mut frame = Frame::new(Size::new(w, h));
+    let mut backend = AsciiBackend::new(Capabilities::empty());
+    let rect = frame.rect();
+    rift_canopy::col3::draw_one(
+        col3,
+        rift_canopy::col3::SectionId::Recall,
+        false,
+        false,
+        collapsed,
+        rect,
+        &mut backend,
+        &mut frame,
+    );
+    frame_text(&frame)
 }
 
 #[test]
@@ -226,6 +255,41 @@ fn golden_col3_unknown_model_and_quiet_recall() {
         ..col3_with_data()
     };
     insta::assert_snapshot!("col3_unknown_and_quiet", col3_text(&col3, 20));
+}
+
+#[test]
+fn golden_recall_responsive_and_attribution_states() {
+    let populated = col3_with_data();
+    let legacy = rift_canopy::Col3 {
+        calls: rift_canopy::RecallView::Quiet,
+        ..populated.clone()
+    };
+    let four_and_hidden = rift_canopy::Col3 {
+        calls: rift_canopy::RecallView::Data(rift_canopy::CallsData {
+            total: 72,
+            window_end_ms: 1_800_000,
+            series: (0u16..4)
+                .map(|thread| rift_canopy::ThreadCallSeries {
+                    thread_id: format!("{thread:04x}feedface"),
+                    last_call_at: 1_799_000 - i64::from(thread),
+                    rate: (0u16..30)
+                        .map(|bucket| f64::from((bucket + thread) % 7))
+                        .collect(),
+                })
+                .collect(),
+            hidden_threads: 2,
+        }),
+        ..populated.clone()
+    };
+
+    let snapshot = format!(
+        "COLLAPSED\n{}\n\nNARROW\n{}\n\nLEGACY SAVINGS ONLY\n{}\n\nFOUR THREADS + HIDDEN\n{}",
+        recall_text(&populated, 42, 5, true),
+        recall_text(&populated, 24, 12, false),
+        recall_text(&legacy, 42, 12, false),
+        recall_text(&four_and_hidden, 54, 12, false),
+    );
+    insta::assert_snapshot!("recall_responsive_states", snapshot);
 }
 
 // --- graph widgets (M4-09): fixed series, block (floor) tier ----------------
@@ -433,7 +497,7 @@ fn golden_axis_frame() {
     let spec = AxisSpec {
         max: 1_600_000.0,
         humanize: fmt_km,
-        x_labels: &x,
+        x_axis: rift_canopy::axis::XAxis::Categories(&x),
         legend: &legend,
     };
     let mut f = Frame::new(Size::new(40, 10));

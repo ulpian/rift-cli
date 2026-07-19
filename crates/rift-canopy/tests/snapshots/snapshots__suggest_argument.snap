@@ -1,6 +1,5 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 667
 expression: "render_state(&mut suggest_state(\"toggle \"))"
 ---
  RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
@@ -11,18 +10,18 @@ expression: "render_state(&mut suggest_state(\"toggle \"))"
 │                  ││                                      ││                                      │
 │                  │╰──────────────────────────────────────╯│                                      │
 │                  │(none yet)                              │                                      │
-│                  │0 sensitive paths                       │                                      │
-│                  │╭─ capture ────────────────────────────╮│                                      │
-│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  │╰──────────────────────────────────────╯
-│                  │││    0     ││    0     ││    0     │  │╭─ system ─────────────────────────────╮
+│                  │0 sensitive paths                       ╰──────────────────────────────────────╯
+│                  │╭─ capture ────────────────────────────╮╭─ system ─────────────────────────────╮
+│                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  ││                                      │
+│                  │││    0     ││    0     ││    0     │  ││(no model calls yet)                  │
 │                  ││╰──────────╯╰──────────╯╰──────────╯  ││                                      │
-│                  ││                                      ││                                      │
-│                  │╰──────────────────────────────────────╯│(no model calls yet)                  │
-│                  │╭─ features ───────────────────────────╮│                                      │
-│                  ││(no features)                         ││ session - idle                       │
 │                  ││                                      ││- capture: —                          │
-│                  ││                                      ││- burn: —                             │
-│                  │╰──────────────────────────────────────╯│- projection: —                       │
+│                  │╰──────────────────────────────────────╯│- burn: —                             │
+│                  │╭─ features ───────────────────────────╮│- projection: —                       │
+│                  ││(no features)                         ││- recall: —                           │
+│                  ││                                      │╰──────────────────────────────────────╯
+│                  ││                                      │╭─ recall ─────────────────────────────╮
+│                  │╰──────────────────────────────────────╯│recall off — /toggle total-recall     │
 ╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
 │> toggle fff  /toggle <feature>  flip a feature for the selected project                          │
 │  toggle codegraph  /toggle <feature> flip a feature for the selected project                     │

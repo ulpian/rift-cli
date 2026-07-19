@@ -13,7 +13,7 @@
 
 use xre_core::math::UVec2;
 use xre_core::{Cell as XCell, Color as XColor};
-use xre_render::{CellShader, HalfBlock, Sample, SampleBuffer};
+use xre_render::{Braille, CellShader, HalfBlock, Sample, SampleBuffer};
 
 use super::frame::{Color, Frame, Mods, Style};
 use crate::layout::Rect;
@@ -54,6 +54,61 @@ pub(crate) fn draw(points: &[PlotPoint], area: Rect, paint: &Paint, frame: &mut 
         buf.put(sx, sy, Sample::new(1.0, rgb, 0.0));
     }
     let shader = HalfBlock;
+    for cy in 0..area.h {
+        for cx in 0..area.w {
+            if let Some(cell) = shader.shade(&buf, u32::from(cx), u32::from(cy)) {
+                frame.set(area.x + cx, area.y + cy, cell.glyph, from_xre_cell(&cell));
+            }
+        }
+    }
+}
+
+/// Draw an actual connected polyline through xRenderEngine's wireframe path and
+/// resolve its 2×4 samples with the Braille CellShader. Filled plots continue to
+/// use [`draw`] and `HalfBlock`.
+pub(crate) fn draw_polyline(vertices: &[PlotPoint], area: Rect, style: Style, frame: &mut Frame) {
+    if area.w == 0 || area.h == 0 || vertices.is_empty() {
+        return;
+    }
+    let mut buf = SampleBuffer::new(UVec2::new(u32::from(area.w), u32::from(area.h)), SX, SY);
+    let width = buf.width();
+    let height = buf.height();
+    if width == 0 || height == 0 {
+        return;
+    }
+    let sample = |p: PlotPoint| -> Option<(f32, f32, f32)> {
+        if !p.x.is_finite()
+            || !p.y.is_finite()
+            || !(0.0..=1.0).contains(&p.x)
+            || !(0.0..=1.0).contains(&p.y)
+        {
+            return None;
+        }
+        Some((
+            p.x * (width - 1) as f32,
+            (1.0 - p.y) * (height - 1) as f32,
+            0.0,
+        ))
+    };
+    let rgb = fg_rgb(style);
+    if let [only] = vertices {
+        if let Some((x, y, z)) = sample(*only) {
+            buf.point(x, y, Sample::new(1.0, rgb, z));
+        }
+    } else {
+        for pair in vertices.windows(2) {
+            let Some((&a, &b)) = pair.first().zip(pair.get(1)) else {
+                continue;
+            };
+            let Some((a, b)) = crate::plot::clip_segment(a, b) else {
+                continue;
+            };
+            if let (Some(a), Some(b)) = (sample(a), sample(b)) {
+                buf.line(a, b, rgb, 1.0);
+            }
+        }
+    }
+    let shader = Braille::default();
     for cy in 0..area.h {
         for cx in 0..area.w {
             if let Some(cell) = shader.shade(&buf, u32::from(cx), u32::from(cy)) {
@@ -169,5 +224,30 @@ mod tests {
                 assert_eq!(f.get(x, y).map(|c| c.ch), Some(' '));
             }
         }
+    }
+
+    #[test]
+    fn polyline_resolves_through_braille_shader() {
+        let mut frame = Frame::new(Size::new(12, 5));
+        draw_polyline(
+            &[
+                PlotPoint { x: 0.0, y: 0.0 },
+                PlotPoint { x: 0.5, y: 1.0 },
+                PlotPoint { x: 1.0, y: 0.0 },
+            ],
+            Rect {
+                x: 1,
+                y: 1,
+                w: 10,
+                h: 3,
+            },
+            Style::fg(Color::Rgb(0x5c, 0xc4, 0xe0)),
+            &mut frame,
+        );
+        let lit: Vec<_> = frame.cells().iter().filter(|cell| cell.ch != ' ').collect();
+        assert!(!lit.is_empty());
+        assert!(lit
+            .iter()
+            .all(|cell| (0x2800..=0x28ff).contains(&(cell.ch as u32))));
     }
 }
