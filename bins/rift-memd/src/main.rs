@@ -88,6 +88,11 @@ enum Cmd {
         /// Repository whose recall.db records the experiment rows.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Run the PAID real-model sweep instead (ADR-0043): owner-invoked,
+        /// env-keyed (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`), spend-capped,
+        /// recording fixtures for offline replay. Never part of any test.
+        #[arg(long)]
+        real_model: bool,
     },
 }
 
@@ -109,8 +114,12 @@ fn main() -> Result<()> {
     // The eval verb is dispatched OUTSIDE the runtime: `replay_served` owns
     // its own current-thread runtimes internally (the GixSubstrate-free
     // fixture path), and nesting block_on inside an ambient runtime panics.
-    if let Some(Cmd::Eval { repo }) = &cli.command {
-        return eval_cmd::run_eval(repo);
+    if let Some(Cmd::Eval { repo, real_model }) = &cli.command {
+        return if *real_model {
+            eval_cmd::run_real_sweep(repo)
+        } else {
+            eval_cmd::run_eval(repo)
+        };
     }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -144,7 +153,13 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         // Dispatched pre-runtime in `main`; unreachable here, kept total.
-        Cmd::Eval { repo } => eval_cmd::run_eval(&repo),
+        Cmd::Eval { repo, real_model } => {
+            if real_model {
+                eval_cmd::run_real_sweep(&repo)
+            } else {
+                eval_cmd::run_eval(&repo)
+            }
+        }
     }
 }
 

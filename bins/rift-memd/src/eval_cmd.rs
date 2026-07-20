@@ -126,6 +126,72 @@ pub(crate) fn run_eval(repo: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The committed sweep-fixtures home (repo-relative; the owner runs the paid
+/// sweep from a checkout).
+const FIXTURES_DIR: &str = "crates/rift-recall-eval/fixtures/sweep-v1";
+
+/// The PAID real-model sweep (ADR-0043; protocol per M6-08): load the
+/// versioned sweep config (writing the v1 default if absent), drive the grid
+/// through the env-keyed transport under the spend cap, record the dedup'd
+/// JSONL fixtures, and derive + write the provenance-stamped `EvalDefaults`.
+/// Owner-invoked only; keys come from the environment at call time.
+///
+/// # Errors
+/// A config/fixture I/O failure, or the transport aborting before any trial.
+pub(crate) fn run_real_sweep(repo: &Path) -> Result<()> {
+    use rift_recall_eval::sweep::{render_fixtures, run_sweep, SweepConfig, UreqTransport};
+    let dir = repo.join(FIXTURES_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let config_path = dir.join("config.json");
+    let config: SweepConfig = if config_path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&config_path)?)
+            .map_err(|e| rift_core::RiftError::storage(format!("sweep config: {e}")))?
+    } else {
+        let v1 = SweepConfig::v1();
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&v1)
+                .map_err(|e| rift_core::RiftError::storage(format!("sweep config: {e}")))?,
+        )?;
+        v1
+    };
+    println!(
+        "sweep config v{}: {} models, cap ${:.2}",
+        config.version,
+        config.models.len(),
+        config.spend_cap_usd
+    );
+    let mut transport = UreqTransport;
+    let out = run_sweep(&config, &mut transport);
+    let (packs, trials) = render_fixtures(&out);
+    std::fs::write(dir.join("packs.jsonl"), packs)?;
+    std::fs::write(dir.join("trials.jsonl"), trials)?;
+    let defaults = rift_recall_eval::defaults::derive_defaults(
+        &out.trials,
+        config.version,
+        env!("CARGO_PKG_VERSION"),
+    );
+    std::fs::write(
+        dir.join("eval-defaults.json"),
+        serde_json::to_string_pretty(&defaults)
+            .map_err(|e| rift_core::RiftError::storage(format!("eval defaults: {e}")))?,
+    )?;
+    println!(
+        "recorded {} trials ({} distinct packs); spent ${:.4}",
+        out.trials.len(),
+        out.packs.len(),
+        f64::from(u32::try_from(out.spent_micro_usd / 100).unwrap_or(u32::MAX)) / 10_000.0
+    );
+    if let Some(reason) = out.aborted {
+        println!("ABORTED: {reason} (partial results salvaged)");
+    }
+    println!(
+        "eval-defaults.json derived ({} models)",
+        defaults.per_model.len()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

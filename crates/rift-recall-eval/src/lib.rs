@@ -35,8 +35,10 @@
 
 use rift_recall_pack::{compile, PackRequest, SectionEntry, Sensitivity};
 
+pub mod defaults;
 mod record;
 mod served;
+pub mod sweep;
 pub use record::{
     deterministic_corpus, render_report, run_id, seeded_regression_runs, EvalRunRecord,
 };

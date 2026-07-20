@@ -18,8 +18,10 @@ path = "src/main.rs"
 getrandom = { workspace = true }
 rift-core = { version = "0.0.1", path = "../../crates/rift-core" }
 # The `eval` verb (ADR-0042): runs the deterministic Lost-in-Delta conditions
-# end-to-end and appends the bitemporal experiment rows.
-rift-recall-eval = { version = "0.0.1", path = "../../crates/rift-recall-eval" }
+# end-to-end and appends the bitemporal experiment rows. The `real-model`
+# feature carries ADR-0043's paid sweep transport — reachable ONLY through
+# the explicit `eval --real-model` invocation, never from cargo test.
+rift-recall-eval = { version = "0.0.1", path = "../../crates/rift-recall-eval", features = ["real-model"] }
 rift-recall-ledger = { version = "0.0.1", path = "../../crates/rift-recall-ledger" }
 rift-recall-mcp = { version = "0.0.1", path = "../../crates/rift-recall-mcp" }
 rift-recall-events = { version = "0.0.1", path = "../../crates/rift-recall-events" }
