@@ -33,4 +33,6 @@ rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# The committed go/no-go report snapshot (ADR-0042 #2).
+insta = { workspace = true }
 proptest = { workspace = true }

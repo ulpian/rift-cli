@@ -146,6 +146,14 @@ pub trait AgentAdapter: Send + Sync {
     fn usage(&self, _verb: &str, _native: &serde_json::Value) -> Option<TokenUsage> {
         None
     }
+
+    /// Extract a provider-reported snapshot of the primary model context at a
+    /// boundary whose call-grain semantics this adapter understands. This is
+    /// deliberately separate from [`usage`](Self::usage), which may aggregate
+    /// a whole turn and include sidechains.
+    fn main_context_usage(&self, _verb: &str, _native: &serde_json::Value) -> Option<TokenUsage> {
+        None
+    }
 }
 
 /// The content/identity-derived idempotency key for a canonical event (P8 S2):

@@ -398,14 +398,12 @@ enum FeedKind {
     Status,
     /// Token spend + breakdown.
     Tokens,
-    /// The nic-gauge reading.
-    Nic,
-    /// Recall savings/calls/threads.
+    /// Atomic System-panel snapshot.
+    System,
+    /// Recall savings/calls.
     Recall,
     /// The activity card's trailing-week bars.
     Activity,
-    /// The system panel's domain metrics.
-    Metrics,
     /// The data-plane health report (global — one key for the whole plane).
     Health,
 }
@@ -417,10 +415,9 @@ fn feed_key(ev: &Event) -> (String, FeedKind) {
         Event::Feed(f) => {
             let kind = match f.payload {
                 rift_canopy::FeedPayload::Tokens { .. } => FeedKind::Tokens,
-                rift_canopy::FeedPayload::Nic(_) => FeedKind::Nic,
+                rift_canopy::FeedPayload::System { .. } => FeedKind::System,
                 rift_canopy::FeedPayload::Recall { .. } => FeedKind::Recall,
                 rift_canopy::FeedPayload::Activity(_) => FeedKind::Activity,
-                rift_canopy::FeedPayload::Metrics(_) => FeedKind::Metrics,
             };
             (f.project.clone(), kind)
         }
@@ -493,33 +490,19 @@ fn stage_read(
     // read of it — a Rebuilt-driven read is thereby the re-bootstrap, and the
     // reducer's periodic re-stat keeps recall.db-only changes fresh too.
     if is_active {
-        // ONE active-sessions read per recomputation: the gauge badge, the
-        // threads section, and the metrics' session anchor all derive from
-        // the same pass by construction (user story 6 — the one-query
-        // invariant, widened by ADR-0047 to carry the newest live id).
+        // ONE active-sessions read per recomputation: the badge, context, and
+        // recent-activity scope all derive from the same native identities.
         let now = now_ms();
         let sessions = crate::feeds::read_active_sessions(&path, now);
         outbox.stage(Event::Feed(crate::feeds::compute_tokens(root, &path)));
-        outbox.stage(Event::Feed(crate::feeds::compute_nic(
-            root,
-            &path,
-            sessions.live,
+        outbox.stage(Event::Feed(crate::feeds::compute_system(
+            root, &path, &sessions,
         )));
-        outbox.stage(Event::Feed(crate::feeds::compute_recall(
-            root,
-            &path,
-            sessions.live,
-        )));
+        outbox.stage(Event::Feed(crate::feeds::compute_recall(root, &path)));
         // The activity card stays on the injected clock (calendar-day
-        // bucketing); the panel metrics are event-anchored (ADR-0047) — the
-        // live session's id is their only session input, never `now`.
+        // bucketing); System activity is event-anchored and never uses `now`.
         outbox.stage(Event::Feed(crate::feeds::compute_activity(
             root, &path, now,
-        )));
-        outbox.stage(Event::Feed(crate::feeds::compute_metrics(
-            root,
-            &path,
-            sessions.newest_live.as_deref(),
         )));
     }
 }

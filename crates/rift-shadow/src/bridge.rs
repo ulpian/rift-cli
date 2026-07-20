@@ -232,6 +232,15 @@ pub async fn ingest_hook(
             crate::project::project_usage(store, anchor, &facts, ctx, &usage, now_ms).await?;
         }
     }
+    if let Some(usage) = registry
+        .get(&raw.agent)
+        .and_then(|a| a.main_context_usage(&raw.verb, &raw.payload))
+    {
+        if let Some(anchor) = events.last() {
+            crate::project::project_main_context(store, anchor, &raw.verb, &facts, ctx, &usage)
+                .await?;
+        }
+    }
 
     // Current phase (Idle if no cache yet).
     let mut state = existing

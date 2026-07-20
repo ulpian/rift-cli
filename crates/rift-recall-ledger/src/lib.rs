@@ -33,6 +33,7 @@ pub mod hunks;
 pub mod ingest;
 pub mod metrics;
 pub mod outcome;
+pub mod production;
 pub mod scope_query;
 pub mod tokens;
 pub mod validity_store;

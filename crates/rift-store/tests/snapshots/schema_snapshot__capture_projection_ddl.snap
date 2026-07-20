@@ -1,5 +1,6 @@
 ---
 source: crates/rift-store/tests/schema_snapshot.rs
+assertion_line: 43
 expression: schema_dump(&default_migrations())
 ---
 -- table _migrations
@@ -80,6 +81,16 @@ CREATE TABLE attribution_hunk (
   method_version TEXT NOT NULL,
   schema_version INTEGER NOT NULL,
   PRIMARY KEY (checkpoint_id, file_revision_id, hunk_ordinal, category)
+) STRICT
+
+-- table capture_session_identity
+CREATE TABLE capture_session_identity (
+  session_id TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  native_session_id TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (session_id),
+  UNIQUE (agent, native_session_id)
 ) STRICT
 
 -- table captured_event
@@ -188,6 +199,21 @@ CREATE TABLE key_metadata (
   supersedes_id TEXT,
   schema_version INTEGER NOT NULL,
   PRIMARY KEY (key_id)
+) STRICT
+
+-- table main_context_observation
+CREATE TABLE main_context_observation (
+  observation_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  uncached_input INTEGER NOT NULL,
+  cached_input INTEGER NOT NULL,
+  cache_creation INTEGER NOT NULL,
+  output INTEGER NOT NULL,
+  counter_method TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (observation_id)
 ) STRICT
 
 -- table model_call
@@ -470,6 +496,12 @@ CREATE TRIGGER attribution_no_delete BEFORE DELETE ON attribution BEGIN SELECT R
 -- trigger attribution_no_update
 CREATE TRIGGER attribution_no_update BEFORE UPDATE ON attribution BEGIN SELECT RAISE(ABORT, 'rift: attribution is append-only (UPDATE forbidden)'); END
 
+-- trigger capture_session_identity_no_delete
+CREATE TRIGGER capture_session_identity_no_delete BEFORE DELETE ON capture_session_identity BEGIN SELECT RAISE(ABORT, 'rift: capture_session_identity is append-only (DELETE forbidden)'); END
+
+-- trigger capture_session_identity_no_update
+CREATE TRIGGER capture_session_identity_no_update BEFORE UPDATE ON capture_session_identity BEGIN SELECT RAISE(ABORT, 'rift: capture_session_identity is append-only (UPDATE forbidden)'); END
+
 -- trigger captured_event_no_delete
 CREATE TRIGGER captured_event_no_delete BEFORE DELETE ON captured_event BEGIN SELECT RAISE(ABORT, 'rift: captured_event is append-only (DELETE forbidden)'); END
 
@@ -523,6 +555,12 @@ CREATE TRIGGER key_metadata_no_delete BEFORE DELETE ON key_metadata BEGIN SELECT
 
 -- trigger key_metadata_no_update
 CREATE TRIGGER key_metadata_no_update BEFORE UPDATE ON key_metadata BEGIN SELECT RAISE(ABORT, 'rift: key_metadata is append-only (UPDATE forbidden)'); END
+
+-- trigger main_context_observation_no_delete
+CREATE TRIGGER main_context_observation_no_delete BEFORE DELETE ON main_context_observation BEGIN SELECT RAISE(ABORT, 'rift: main_context_observation is append-only (DELETE forbidden)'); END
+
+-- trigger main_context_observation_no_update
+CREATE TRIGGER main_context_observation_no_update BEFORE UPDATE ON main_context_observation BEGIN SELECT RAISE(ABORT, 'rift: main_context_observation is append-only (UPDATE forbidden)'); END
 
 -- trigger model_call_no_delete
 CREATE TRIGGER model_call_no_delete BEFORE DELETE ON model_call BEGIN SELECT RAISE(ABORT, 'rift: model_call is append-only (DELETE forbidden)'); END

@@ -217,7 +217,7 @@ const SESSION_IN_CHECKPOINT_COLUMNS: &[Column] = &[
 // ----- Sessions / turns / calls / files (P2 S3) ----------------------------
 
 const SESSION_COLUMNS: &[Column] = &[
-    Column::text("session_id"),    // ULID
+    Column::text("session_id"),    // sha256(agent, native session id)
     Column::text("agent"),         // 'claude-code' | …
     Column::text("model_primary"), // headline model
     Column::text("repo_id"),
@@ -845,6 +845,19 @@ const TABLES: &[CanonicalTable] = &[
         primary_key: &["tool_call_id"],
         unique: NO_UNIQUE,
     },
+    // --- capture v7 additive (truthful System panel, M5.14) -----------------
+    CanonicalTable {
+        name: "capture_session_identity",
+        columns: CAPTURE_SESSION_IDENTITY_COLUMNS,
+        primary_key: &["session_id"],
+        unique: &[&["agent", "native_session_id"]],
+    },
+    CanonicalTable {
+        name: "main_context_observation",
+        columns: MAIN_CONTEXT_OBSERVATION_COLUMNS,
+        primary_key: &["observation_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// Columns for the v5 `projection_meta` key/value table (ADR-0010).
@@ -859,6 +872,29 @@ const FILE_READ_TOKENS_COLUMNS: &[Column] = &[
     Column::text("tool_call_id"), // FK: tool_call (1:1, sparse)
     Column::int("input_tokens"),  // measured over the read-time bytes
     Column::text("tokenizer"),    // e.g. 'cl100k_base' (provenance)
+    Column::int("schema_version"),
+];
+
+/// Columns for the v7 native-to-canonical capture-session identity relation.
+const CAPTURE_SESSION_IDENTITY_COLUMNS: &[Column] = &[
+    Column::text("session_id"),
+    Column::text("agent"),
+    Column::text("native_session_id"),
+    Column::int("schema_version"),
+];
+
+/// Columns for prospective main-chain context snapshots. These remain
+/// intentionally distinct from whole-turn `token_usage` spend rows.
+const MAIN_CONTEXT_OBSERVATION_COLUMNS: &[Column] = &[
+    Column::text("observation_id"),
+    Column::text("session_id"),
+    Column::text("model"),
+    Column::int("observed_at"),
+    Column::int("uncached_input"),
+    Column::int("cached_input"),
+    Column::int("cache_creation"),
+    Column::int("output"),
+    Column::text("counter_method"),
     Column::int("schema_version"),
 ];
 
@@ -898,6 +934,9 @@ pub(crate) const CAPTURE_PROJECTION_META_TABLE_COUNT: usize = 36;
 /// the capture registry. The next additive capture migration starts here.
 pub(crate) const CAPTURE_READ_TOKENS_TABLE_COUNT: usize = 37;
 
+/// Boundary after the v7 M5.14 identity and context-observation relations.
+pub(crate) const CAPTURE_SYSTEM_TABLE_COUNT: usize = 39;
+
 /// The v3 `capture_identity` tables (frozen once shipped — see
 /// [`CAPTURE_IDENTITY_TABLE_COUNT`]).
 #[must_use]
@@ -925,6 +964,13 @@ pub(crate) fn capture_projection_meta_tables() -> &'static [CanonicalTable] {
 #[allow(clippy::indexing_slicing)] // same compile-time bound as above
 pub(crate) fn capture_read_tokens_tables() -> &'static [CanonicalTable] {
     &TABLES[CAPTURE_PROJECTION_META_TABLE_COUNT..CAPTURE_READ_TOKENS_TABLE_COUNT]
+}
+
+/// The v7 M5.14 session-identity and main-context observation tables.
+#[must_use]
+#[allow(clippy::indexing_slicing)]
+pub(crate) fn capture_system_tables() -> &'static [CanonicalTable] {
+    &TABLES[CAPTURE_READ_TOKENS_TABLE_COUNT..CAPTURE_SYSTEM_TABLE_COUNT]
 }
 
 /// The registry of canonical (append-only) tables. The immutability property
@@ -1350,6 +1396,13 @@ const RECALL_TABLES: &[CanonicalTable] = &[
         primary_key: &["call_id"],
         unique: NO_UNIQUE,
     },
+    // --- v8 additive (ADR-0042 eval experiment records) ----------------------
+    CanonicalTable {
+        name: "eval_run",
+        columns: EVAL_RUN_COLUMNS,
+        primary_key: &["run_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// The number of v1 (`recall_core` migration) recall tables. Tables after this
@@ -1374,6 +1427,10 @@ pub(crate) const RECALL_V5_TABLE_COUNT: usize = 17;
 
 /// One past the last v6 (`recall_ingest_watermark` migration) table.
 pub(crate) const RECALL_V6_TABLE_COUNT: usize = 18;
+
+/// One past the last v7 (`recall_memd_calls` migration) table. Frozen once v7
+/// shipped: later tables append past it and ship in their own migration.
+pub(crate) const RECALL_V7_TABLE_COUNT: usize = 19;
 
 /// The v1 recall tables (the `recall_core` migration's source of truth).
 #[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
@@ -1416,10 +1473,18 @@ pub(crate) fn recall_v6_watermark_tables() -> &'static [CanonicalTable] {
 }
 
 /// The v7-additive recall tables: one neutral terminal fact per decoded MCP
-/// invocation, attributed to the serving process/connection.
+/// invocation, attributed to the serving process/connection. Frozen once v7
+/// shipped (the next additive migration starts past [`RECALL_V7_TABLE_COUNT`]).
 #[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
 pub(crate) fn recall_v7_call_tables() -> &'static [CanonicalTable] {
-    &RECALL_TABLES[RECALL_V6_TABLE_COUNT..]
+    &RECALL_TABLES[RECALL_V6_TABLE_COUNT..RECALL_V7_TABLE_COUNT]
+}
+
+/// The v8-additive recall tables (ADR-0042): the append-only bitemporal eval
+/// experiment records the M8 gate reads history from.
+#[allow(clippy::indexing_slicing)] // compile-time constant bound (see capture_v1_tables)
+pub(crate) fn recall_v8_eval_tables() -> &'static [CanonicalTable] {
+    &RECALL_TABLES[RECALL_V7_TABLE_COUNT..]
 }
 
 /// Secondary indexes for the recall graph (appended after the tables in the
@@ -1440,6 +1505,48 @@ pub const RECALL_OUTCOME_INDEX_SQL: &str =
 pub const RECALL_CALL_EVENT_INDEX_SQL: &str = "\
 CREATE INDEX IF NOT EXISTS idx_memd_call_recorded ON memd_call_event(recorded_at);\n\
 CREATE INDEX IF NOT EXISTS idx_memd_call_thread_recorded ON memd_call_event(thread_id, recorded_at);\n";
+
+// --- eval experiment records (ADR-0042, M6-07) ------------------------------
+// Append-only bitemporal verdicts of the Lost-in-Delta harness: what the code
+// concluded, when it was true, and when we learned it. NOT rebuildable from
+// the substrate (it captures what-code-concluded-when) — exactly why the rows
+// are bitemporal and append-only, mirroring `verification_run`'s posture. The
+// run id is content-addressed (`sha256(task_set ‖ condition ‖ code_version)`)
+// so re-running an identical experiment is an idempotent no-op. Percentages
+// are stored as **basis points** (pct × 100, integer) so the record stays
+// byte-deterministic across platforms.
+
+/// The closed set of eval conditions (ADR-0019: deterministic conditions gate;
+/// real-model runs are recorded but never gate).
+pub const EVAL_RUN_CONDITIONS: &[&str] =
+    &["served", "synthetic", "seeded-regression", "real-model"];
+
+/// The closed verdict vocabulary (mirrors `rift_recall_eval::Verdict`).
+pub const EVAL_RUN_VERDICTS: &[&str] = &["go", "no-go"];
+
+const EVAL_RUN_COLUMNS: &[Column] = &[
+    Column::text("run_id"), // = sha256(task_set ‖ condition ‖ code_version)
+    Column::text("task_set"),
+    Column::text_one_of("condition", EVAL_RUN_CONDITIONS),
+    Column::text("code_version"),
+    Column::int("thresholds_version"), // the GaThresholds the verdict used
+    Column::int("runs"),               // paired runs scored
+    Column::int("p10_token_savings_bp"),
+    Column::int("p50_token_savings_bp"), // the gated median, basis points
+    Column::int("p90_token_savings_bp"),
+    Column::int("p50_cost_savings_bp"),
+    Column::int("baseline_tokens"),          // Σ full-read baseline
+    Column::int("delta_tokens"),             // Σ delta-served spend
+    Column::int("emitted_avoided_tokens"),   // Σ serving-side claims
+    Column::int("reconcile_over_estimates"), // claims flagged over ±5%
+    Column::int("max_latency_steps"),
+    Column::text_one_of("verdict", EVAL_RUN_VERDICTS),
+    Column::text_null("failing_dimensions"), // comma-joined, NULL on go
+    Column::int("valid_from"),               // valid-time: when the verdict held
+    Column::int_null("valid_to"),            // NULL = still the current belief
+    Column::int("recorded_at"),              // transaction-time: when recorded
+    Column::int("schema_version"),
+];
 
 /// The registry of recall (`recall.db`) canonical tables (v1 core + additive).
 /// The immutability property test iterates this **in addition to**

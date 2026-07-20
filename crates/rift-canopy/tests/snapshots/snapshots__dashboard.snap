@@ -12,10 +12,10 @@ expression: frame_text(&f)
 │              │                                ╰──────────────────────────────|
 │              │                                ╭─ system ─────────────────────|
 │              │                                │                              |
-│              │                                │(no model calls yet)          |
-│              │                                │- capture: —                  |
-│[+][^][v][x]  │                                │- burn: —                     |
-╰──────────────╯                                │- projection: —               |
+│              │                                │context unavailable           |
+│              │                                │- events · 5m: —              |
+│[+][^][v][x]  │                                │- tokens · 5m: —              |
+╰──────────────╯                                │- MCP calls · 5m: —           |
  j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette
 ╭─ command ────────────────────────────────────────────────────────────────────╮
 │/█                                                                            │

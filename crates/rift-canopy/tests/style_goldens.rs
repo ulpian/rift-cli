@@ -354,7 +354,7 @@ fn a_palette_changes_nothing_on_the_floor_tiers() {
     );
 }
 
-// ---- M55-12: the dumbometer donut (radial on SUBCELL, bar degrade) ----------
+// ---- M5.14: context pressure (radial on SUBCELL, bar degrade) ---------------
 
 /// Render the system panel for a 62% reading, on a backend whose capabilities
 /// `caps` decide radial-vs-bar. Used to pin the donut's two tiers.
@@ -363,10 +363,21 @@ fn system_panel(caps: Capabilities, w: u16, h: u16) -> Frame {
     let col3 = Col3 {
         nic: NicView::Reading(NicReading {
             pct: 62,
-            band: "Capable",
+            band: "Moderate",
             model: "claude-fable-5".into(),
-            threads: 2,
+            active_sessions: 2,
         }),
+        active_sessions: rift_canopy::ActiveSessionsView::Count(2),
+        metrics: rift_canopy::PanelMetrics {
+            events_5m: Some(42),
+            tokens_5m: Some(12_400),
+            mcp_calls_5m: Some(7),
+            projection_bytes: Some(18_600_000),
+            context_used: Some(124_000),
+            context_window: Some(200_000),
+            context_scope: rift_canopy::SystemScope::CurrentSessions,
+            activity_scope: rift_canopy::SystemScope::CurrentSessions,
+        },
         ..Col3::default()
     };
     let mut f = Frame::new(Size::new(w, h));
@@ -374,7 +385,7 @@ fn system_panel(caps: Capabilities, w: u16, h: u16) -> Frame {
     let unicode = caps.contains(Capabilities::UNICODE);
     rift_canopy::col3::draw(
         &col3,
-        &rift_canopy::col3::SectionId::ALL,
+        &[rift_canopy::col3::SectionId::System],
         false,
         unicode,
         rift_canopy::layout::Rect { x: 0, y: 0, w, h },
@@ -391,12 +402,12 @@ fn golden_donut_radial_on_subcell_and_bar_degrade() {
     let sub = Capabilities::TRUECOLOR | Capabilities::UNICODE | Capabilities::SUBCELL;
     insta::assert_snapshot!(
         "donut_radial",
-        common::style_snapshot(&system_panel(sub, 30, 34), Tier::Truecolor)
+        common::style_snapshot(&system_panel(sub, 30, 14), Tier::Truecolor)
     );
     let plain = Capabilities::TRUECOLOR | Capabilities::UNICODE;
     insta::assert_snapshot!(
         "donut_bar_degrade",
-        common::style_snapshot(&system_panel(plain, 30, 34), Tier::Truecolor)
+        common::style_snapshot(&system_panel(plain, 30, 14), Tier::Truecolor)
     );
 }
 
@@ -407,7 +418,13 @@ fn donut_unknown_model_shows_no_percentage() {
     let col3 = Col3 {
         nic: NicView::UnknownModel {
             model: "mystery-9000".into(),
-            threads: 1,
+            active_sessions: 1,
+        },
+        active_sessions: rift_canopy::ActiveSessionsView::Count(1),
+        metrics: rift_canopy::PanelMetrics {
+            context_used: Some(125),
+            context_scope: rift_canopy::SystemScope::CurrentSessions,
+            ..rift_canopy::PanelMetrics::default()
         },
         ..Col3::default()
     };
@@ -415,7 +432,7 @@ fn donut_unknown_model_shows_no_percentage() {
     let mut b = TierBackend { caps: sub };
     rift_canopy::col3::draw(
         &col3,
-        &rift_canopy::col3::SectionId::ALL,
+        &[rift_canopy::col3::SectionId::System],
         false,
         true,
         rift_canopy::layout::Rect {

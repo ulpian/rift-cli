@@ -88,6 +88,7 @@ fn seed_session_row(root: &Path, path: &str, id: &str, started_at: i64) {
     let repo = repo_id_for(Path::new(path)).unwrap();
     let store = SqliteStore::open(projection_db_under(root, &repo)).unwrap();
     let rt = runtime().unwrap();
+    let canonical = rift_core::capture_session_row_id("claude-code", id);
     rt.block_on(store.insert(
         "session",
         &[
@@ -99,10 +100,39 @@ fn seed_session_row(root: &Path, path: &str, id: &str, started_at: i64) {
             "schema_version",
         ],
         &[
-            Value::text(id),
+            Value::text(canonical.clone()),
             Value::text("claude-code"),
             Value::text("m"),
             Value::text("r"),
+            Value::Int(started_at),
+            Value::Int(1),
+        ],
+    ))
+    .unwrap();
+    rt.block_on(store.insert(
+        "capture_session_identity",
+        &["session_id", "agent", "native_session_id", "schema_version"],
+        &[
+            Value::text(canonical.clone()),
+            Value::text("claude-code"),
+            Value::text(id),
+            Value::Int(1),
+        ],
+    ))
+    .unwrap();
+    rt.block_on(store.insert(
+        "session_event",
+        &[
+            "event_id",
+            "session_id",
+            "kind",
+            "occurred_at",
+            "schema_version",
+        ],
+        &[
+            Value::text(format!("end-{id}")),
+            Value::text(canonical),
+            Value::text("end"),
             Value::Int(started_at),
             Value::Int(1),
         ],
@@ -338,10 +368,7 @@ fn a_mid_run_rebuild_drives_a_full_re_read() {
 }
 
 #[test]
-fn metrics_hold_while_idle_and_move_on_capture() {
-    // ADR-0047 end-to-end: the panel metrics are session-scoped and
-    // event-anchored — they move when the transcript moves, and HOLD (no
-    // drifting value) while nothing is captured.
+fn system_counts_hold_while_idle_and_move_on_capture() {
     let root = tempfile::tempdir().unwrap();
     let path = make_project(root.path(), "sess");
     const S0: i64 = 1_000_000;
@@ -353,9 +380,8 @@ fn metrics_hold_while_idle_and_move_on_capture() {
         .send(DataRequest::SetActive(Some(path.clone())))
         .unwrap();
 
-    // The first Metrics: 1 event over a 60s span → floored to 1min → 1.0/min.
-    let held = wait_for_capture_rate(&bus.evt_rx, 1.0, Duration::from_secs(15))
-        .expect("the first Metrics feed never arrived");
+    let held = wait_for_event_count(&bus.evt_rx, 1, Duration::from_secs(15))
+        .expect("the first System feed never arrived");
 
     // IDLE: nothing captured. Wall-clock advances across several poll
     // cycles — any Metrics that arrives (idempotent recomputes are allowed)
@@ -364,35 +390,35 @@ fn metrics_hold_while_idle_and_move_on_capture() {
     let deadline = std::time::Instant::now() + Duration::from_secs(4);
     while std::time::Instant::now() < deadline {
         if let Ok(Event::Feed(f)) = bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
-            if let rift_canopy::FeedPayload::Metrics(m) = &f.payload {
+            if let rift_canopy::FeedPayload::System { metrics: m, .. } = &f.payload {
                 assert_eq!(m, &held, "an idle recompute must hold the value exactly");
             }
         }
     }
 
-    // A new captured event re-anchors: 2 events over 10min → 0.2/min.
-    seed_session_event(root.path(), &path, "e2", "s1", S0 + 10 * 60_000);
-    let moved = wait_for_capture_rate(&bus.evt_rx, 0.2, Duration::from_secs(15))
-        .expect("the re-anchored Metrics feed never arrived");
-    // No live-session cache exists in this fixture, so the held anchor is the
-    // newest projection session — rendered as the dimmed hold (ADR-0047).
+    seed_session_event(root.path(), &path, "e2", "s1", S0 + 4 * 60_000);
+    let moved = wait_for_event_count(&bus.evt_rx, 2, Duration::from_secs(15))
+        .expect("the re-anchored System feed never arrived");
     assert!(
-        !moved.session_live,
-        "no cache → the anchor is a held fallback"
+        matches!(
+            moved.activity_scope,
+            rift_canopy::SystemScope::LastCompletedSession
+        ),
+        "no cache means an explicitly labelled completed-session hold"
     );
 }
 
-/// Drain the bus until a Metrics feed with the given capture rate arrives.
-fn wait_for_capture_rate(
+/// Drain the bus until a System feed with the given event count arrives.
+fn wait_for_event_count(
     rx: &Receiver<Event>,
-    rate: f64,
+    count: u64,
     total: Duration,
 ) -> Option<rift_canopy::PanelMetrics> {
     let deadline = std::time::Instant::now() + total;
     while std::time::Instant::now() < deadline {
         if let Ok(Event::Feed(f)) = rx.recv_timeout(Duration::from_millis(250)) {
-            if let rift_canopy::FeedPayload::Metrics(m) = f.payload {
-                if m.capture_per_min.is_some_and(|v| (v - rate).abs() < 1e-9) {
+            if let rift_canopy::FeedPayload::System { metrics: m, .. } = f.payload {
+                if m.events_5m == Some(count) {
                     return Some(m);
                 }
             }

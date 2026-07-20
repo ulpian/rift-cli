@@ -35,7 +35,11 @@
 
 use rift_recall_pack::{compile, PackRequest, SectionEntry, Sensitivity};
 
+mod record;
 mod served;
+pub use record::{
+    deterministic_corpus, render_report, run_id, seeded_regression_runs, EvalRunRecord,
+};
 pub use served::{replay_served, replay_served_with_capture};
 
 /// The versioned go/no-go thresholds (ADR-0019 #1). Any change to the bar is
@@ -56,6 +60,12 @@ pub struct GaThresholds {
 
 impl GaThresholds {
     /// The v1 thresholds: 15% P50 savings (token and cost), 16-step envelope.
+    ///
+    /// **Provenance (M6-02 → M6-12):** the measured reread-report over this
+    /// repo's own captured sessions found **33.7% avoidable context** (1.38M
+    /// tokens across 8 sessions, 213/357 reads resolved) — comfortably above
+    /// the 15% bar, so V1 stands on measured evidence rather than the
+    /// synthetic 22% golden alone. A future re-calibration bumps `version`.
     pub const V1: Self = Self {
         version: 1,
         min_p50_token_savings_pct: 15.0,

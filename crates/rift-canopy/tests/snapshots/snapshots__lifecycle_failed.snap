@@ -13,12 +13,12 @@ expression: "render_state(&mut\nlifecycle_state(Some(rift_canopy::FeatureRuntime
 │                  │0 sensitive paths                       ╰──────────────────────────────────────╯
 │                  │╭─ capture ────────────────────────────╮╭─ system ─────────────────────────────╮
 │                  ││╭─ . event ╮╭─ = sessi ╮╭─ ^ check ╮  ││                                      │
-│                  │││    0     ││    0     ││    0     │  ││(no model calls yet)                  │
-│                  ││╰──────────╯╰──────────╯╰──────────╯  ││                                      │
-│                  ││                                      ││- capture: —                          │
-│                  │╰──────────────────────────────────────╯│- burn: —                             │
-│                  │╭─ features ───────────────────────────╮│- projection: —                       │
-│                  ││  [x] fff (fuzzy find) · M7           ││- recall: —                           │
+│                  │││    0     ││    0     ││    0     │  ││context unavailable                   │
+│                  ││╰──────────╯╰──────────╯╰──────────╯  ││[0 active sessions]                   │
+│                  ││                                      ││- events · 5m: —                      │
+│                  │╰──────────────────────────────────────╯│- tokens · 5m: —                      │
+│                  │╭─ features ───────────────────────────╮│- MCP calls · 5m: —                   │
+│                  ││  [x] fff (fuzzy find) · M7           ││- projection storage: —               │
 │                  ││  [x] codegraph · M7                  │╰──────────────────────────────────────╯
 │                  ││    [x] typescript · M7               │╭─ recall ─────────────────────────────╮
 │                  │╰──────────────────────────────────────╯│recall off — /toggle total-recall     │

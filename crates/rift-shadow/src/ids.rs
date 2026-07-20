@@ -28,7 +28,27 @@ fn tagged(tag: &str, parts: &[&str]) -> String {
 /// agent keeps two agents' coincidentally-equal native ids distinct.
 #[must_use]
 pub fn session_row_id(agent: &str, native_session: &str) -> String {
-    tagged("session", &[agent, native_session])
+    rift_core::capture_session_row_id(agent, native_session)
+}
+
+/// A `main_context_observation.observation_id`, anchored to canonical hook
+/// coordinates so redelivery is a set-union no-op.
+#[must_use]
+pub fn context_observation_id(
+    session_row_id: &str,
+    verb: &str,
+    turn_ordinal: u32,
+    payload_sha256: &str,
+) -> String {
+    tagged(
+        "main_context_observation",
+        &[
+            session_row_id,
+            verb,
+            &turn_ordinal.to_string(),
+            payload_sha256,
+        ],
+    )
 }
 
 /// A `session_event.event_id`.

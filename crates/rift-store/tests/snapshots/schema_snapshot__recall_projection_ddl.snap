@@ -48,6 +48,32 @@ CREATE TABLE digest_blob (
   PRIMARY KEY (digest_ref)
 ) STRICT
 
+-- table eval_run
+CREATE TABLE eval_run (
+  run_id TEXT NOT NULL,
+  task_set TEXT NOT NULL,
+  condition TEXT NOT NULL CHECK (condition IN ('served', 'synthetic', 'seeded-regression', 'real-model')),
+  code_version TEXT NOT NULL,
+  thresholds_version INTEGER NOT NULL,
+  runs INTEGER NOT NULL,
+  p10_token_savings_bp INTEGER NOT NULL,
+  p50_token_savings_bp INTEGER NOT NULL,
+  p90_token_savings_bp INTEGER NOT NULL,
+  p50_cost_savings_bp INTEGER NOT NULL,
+  baseline_tokens INTEGER NOT NULL,
+  delta_tokens INTEGER NOT NULL,
+  emitted_avoided_tokens INTEGER NOT NULL,
+  reconcile_over_estimates INTEGER NOT NULL,
+  max_latency_steps INTEGER NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('go', 'no-go')),
+  failing_dimensions TEXT,
+  valid_from INTEGER NOT NULL,
+  valid_to INTEGER,
+  recorded_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (run_id)
+) STRICT
+
 -- table graph_edge
 CREATE TABLE graph_edge (
   edge_id TEXT NOT NULL,
@@ -258,6 +284,12 @@ CREATE TRIGGER digest_blob_no_delete BEFORE DELETE ON digest_blob BEGIN SELECT R
 
 -- trigger digest_blob_no_update
 CREATE TRIGGER digest_blob_no_update BEFORE UPDATE ON digest_blob BEGIN SELECT RAISE(ABORT, 'rift: digest_blob is append-only (UPDATE forbidden)'); END
+
+-- trigger eval_run_no_delete
+CREATE TRIGGER eval_run_no_delete BEFORE DELETE ON eval_run BEGIN SELECT RAISE(ABORT, 'rift: eval_run is append-only (DELETE forbidden)'); END
+
+-- trigger eval_run_no_update
+CREATE TRIGGER eval_run_no_update BEFORE UPDATE ON eval_run BEGIN SELECT RAISE(ABORT, 'rift: eval_run is append-only (UPDATE forbidden)'); END
 
 -- trigger graph_edge_no_delete
 CREATE TRIGGER graph_edge_no_delete BEFORE DELETE ON graph_edge BEGIN SELECT RAISE(ABORT, 'rift: graph_edge is append-only (DELETE forbidden)'); END

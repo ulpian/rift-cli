@@ -37,8 +37,9 @@ pub mod time;
 pub use error::{Result, RiftError};
 pub use event::{AgentId, CanonicalEvent, EventKind, Trust};
 pub use id::{
-    Blake3Id, CallId, CheckpointId, CounterUlidSource, FileRevisionId, MonotonicUlidSource,
-    ProjectId, RepoId, SessionId, Sha256Id, SummaryId, ToolCallId, TurnId, Ulid, UlidSource,
+    capture_session_row_id, Blake3Id, CallId, CheckpointId, CounterUlidSource, FileRevisionId,
+    MonotonicUlidSource, ProjectId, RepoId, SessionId, Sha256Id, SummaryId, ToolCallId, TurnId,
+    Ulid, UlidSource,
 };
 pub use identity::{
     bind_session, binding_basis, binding_evidence, snapshot as identity_snapshot, BindingBasis,

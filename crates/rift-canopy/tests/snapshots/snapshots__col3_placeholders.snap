@@ -11,11 +11,11 @@ expression: "col3_text(&rift_canopy::Col3::default(), 20)"
 ╰────────────────────────────────╯
 ╭─ system ───────────────────────╮
 │                                │
-│(no model calls yet)            │
-│- capture: —                    │
-│- burn: —                       │
-│- projection: —                 │
-│- recall: —                     │
+│context unavailable             │
+│- events · 5m: —                │
+│- tokens · 5m: —                │
+│- MCP calls · 5m: —             │
+│- projection storage: —         │
 ╰────────────────────────────────╯
 ╭─ recall ───────────────────────╮
 │recall off — /toggle total-recal│

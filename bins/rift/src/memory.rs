@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 
 use rift_config::EffectiveConfig;
 use rift_core::{Result, RiftError, Timestamp};
-use rift_recall_ledger::ingest::{self, IngestOptions};
 use rift_recall_ledger::metrics::{compute_metrics, record_metric_snapshot, ContextMetrics};
 use rift_recall_mcp::{McpServer, RecallContext, ToolName, ToolRequest, ToolResponse};
 use rift_recall_policy::{PolicyEngine, ServePolicy, TurnBudget};
@@ -26,12 +25,15 @@ use rift_store::{CanonicalStore, SqliteStore, Value};
 
 use crate::cli::{exit, MemoryCmd, Outcome};
 
-/// Route one `rift memory` subcommand to its handler.
+/// Route one `rift memory` subcommand to its handler. Repo-scoped: the target
+/// is the WORKTREE ROOT discovered upward from `root` (M6-13 — a subdirectory
+/// invocation must answer for the repo, never report a false-empty cwd).
 pub(crate) fn run(cmd: &MemoryCmd, root: &Path) -> Result<Outcome> {
+    let repo = crate::worktree_root(root);
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(RiftError::from)?;
-    rt.block_on(dispatch(cmd, root))
+    rt.block_on(dispatch(cmd, &repo))
 }
 
 async fn dispatch(cmd: &MemoryCmd, repo: &Path) -> Result<Outcome> {
@@ -64,30 +66,11 @@ pub(crate) async fn refresh_recall(
     sub: &GixSubstrate,
     repo: &Path,
 ) -> Result<std::collections::BTreeSet<String>> {
-    let (reads, _issues) = ingest::read_facts_all(sub)?;
-    let paths = ingest::read_paths(&reads);
-    let blobs = worktree::hash_blobs(repo, &paths);
-    rift_recall_ledger::blob_map::persist_blob_oid_map(store, &blobs, 0).await?;
-    // The token fallback rides EVERY ingest front door (M6-12): first writer
-    // wins on content-addressed rows, so an unresolved launch-time ingest
-    // would freeze 0-token reads that rift-memd could have resolved.
-    let capture = rift_store::capture_projection_db_for_repo(repo)
-        .ok()
-        .filter(|db| db.exists())
-        .and_then(|db| rift_store::open_capture_projection(&db).ok());
-    let opts = IngestOptions {
-        token_estimate_by_hash: rift_recall_ledger::tokens::fallback_token_estimates(
-            &reads,
-            store,
-            capture.as_ref(),
-            sub,
-            repo,
-        )
-        .await,
-        ..IngestOptions::default()
-    };
-    ingest::ingest_with(store, sub, &opts).await?;
-    Ok(paths)
+    // The ONE shared production pass (M6-15): both front doors wrap the same
+    // builder, so first-writer-wins can no longer freeze a divergent
+    // projection (this door used to skip the developer axis entirely).
+    let pass = rift_recall_ledger::production::production_ingest(store, sub, repo).await?;
+    Ok(pass.read_paths)
 }
 
 /// The dashboard's launch auto-ingest (M5-06, PRD user story 29): one pass for

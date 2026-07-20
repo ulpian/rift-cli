@@ -22,9 +22,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use rift_canopy::col3::{
-    ActivityData, ActivityView, BreakdownData, BreakdownView, CallsData, DayBar, NicReading,
-    NicView, PanelMetrics, RecallView, SavingsData, ThreadCallSeries, ThreadsView, TokensData,
-    TokensView,
+    ActiveSessionsView, ActivityData, ActivityView, BreakdownData, BreakdownView, CallsData,
+    DayBar, NicReading, NicView, PanelMetrics, RecallView, SavingsData, ThreadCallSeries,
+    TokensData, TokensView,
 };
 use rift_canopy::{FeedPayload, FeedUpdate, LiveSessions, SessionsRead};
 use rift_git::repo_id_for;
@@ -210,21 +210,21 @@ fn breakdown_data(rows: &[TokenRow]) -> BreakdownData {
     }
 }
 
-/// What the shared per-recompute session read yields: the badge value (the
-/// one-query invariant — the threads section and the gauge badge receive
-/// this same value, so they can never disagree, user story 6) plus the
-/// newest live session's id — the anchor the session-scoped panel metrics
-/// hang their event-anchored span on (ADR-0047).
+/// What the shared per-recompute session read yields: the badge value and all
+/// native identities from the same cache pass, so scope and presentation
+/// cannot disagree.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ActiveRead {
     /// The live-session badge value (thread count + running-since).
     pub live: Option<LiveSessions>,
-    /// The newest live session's id (`None` = nothing live / no anchor).
-    pub newest_live: Option<String>,
+    /// Complete identities retained from every live cache.
+    pub identities: Vec<crate::session::LiveSessionIdentity>,
+    /// Number of live caches whose identity is incomplete.
+    pub unresolved: u16,
 }
 
 /// The active-sessions read the W4 feeds share: **one** call to the single
-/// query per recomputation — every consumer (threads, badge, metrics anchor)
+/// query per recomputation — every consumer (badge, context, activity scope)
 /// reads this same pass, so they can never disagree (user story 6).
 #[must_use]
 pub fn read_active_sessions(path: &str, now_ms: i64) -> ActiveRead {
@@ -235,7 +235,8 @@ pub fn read_active_sessions(path: &str, now_ms: i64) -> ActiveRead {
     match detail.read {
         SessionsRead::Ok(live) => ActiveRead {
             live,
-            newest_live: detail.newest_live,
+            identities: detail.identities,
+            unresolved: detail.unresolved,
         },
         // A corrupt cache is surfaced by the STATUS path; the feeds treat it
         // as no live sessions rather than inventing a count or an anchor.
@@ -243,51 +244,40 @@ pub fn read_active_sessions(path: &str, now_ms: i64) -> ActiveRead {
     }
 }
 
-/// Compute the Nic feed: the freshest thread's context reading through the
-/// [`NicGauge`] trait (ADR-0012 — the formula, bands, and reference table live
-/// in rift-nic-gauge), with the thread badge fed by the shared
-/// `active_sessions` value. An unknown model yields the explicit indicator,
-/// never a defaulted percentage (user story 5).
+/// Compute the entire System panel from one live-cache read. Context, active
+/// sessions, explicit scope, recent counts, and storage are one payload, so a
+/// reducer can never display values from different recomputations.
 #[must_use]
-pub fn compute_nic(root: &Path, path: &str, live: Option<LiveSessions>) -> FeedUpdate {
-    let threads = live.map_or(0, |l| l.active_sessions);
-    let nic = match read_last_call(root, path) {
-        None => NicView::NoData,
-        Some(last) => {
-            // Context occupancy after the freshest call: the full prompt
-            // (uncached + cache reads + cache writes) plus its output.
-            let used = last.used_tokens();
-            match ReferenceGauge.reading(&last.model, used) {
-                Reading::Known(k) => NicView::Reading(NicReading {
-                    pct: k.pct,
-                    band: k.band().label(),
-                    model: last.model,
-                    threads,
-                }),
-                Reading::UnknownModel { .. } => NicView::UnknownModel {
-                    model: last.model,
-                    threads,
-                },
-            }
-        }
+pub fn compute_system(root: &Path, path: &str, active: &ActiveRead) -> FeedUpdate {
+    let count = active.live.map_or(0, |live| live.active_sessions);
+    let sessions = if count > 0 {
+        ActiveSessionsView::Count(count)
+    } else {
+        ActiveSessionsView::NoSessions
     };
+    let (context, metrics) = read_system(root, path, active, count);
     FeedUpdate {
         project: path.to_string(),
-        payload: FeedPayload::Nic(nic),
+        payload: FeedPayload::System {
+            context,
+            metrics,
+            active_sessions: sessions,
+        },
     }
 }
 
-/// The freshest model call's identity + token classes.
-struct LastCall {
+/// One separately-captured main-chain context observation.
+struct ContextObservation {
     model: String,
+    observed_at: i64,
     uncached_input: i64,
     cached_input: i64,
     cache_creation: i64,
     output: i64,
 }
 
-impl LastCall {
-    /// Context tokens in use after this call (clamped, saturating).
+impl ContextObservation {
+    /// Context tokens in use at this observation (clamped, saturating).
     fn used_tokens(&self) -> u64 {
         let clamp = |v: i64| u64::try_from(v.max(0)).unwrap_or(0);
         clamp(self.uncached_input)
@@ -297,32 +287,292 @@ impl LastCall {
     }
 }
 
-/// Read the freshest usage-bearing model call, scoped to the projection.
-fn read_last_call(root: &Path, path: &str) -> Option<LastCall> {
-    let repo = repo_id_for(Path::new(path)).ok()?;
+use rift_canopy::col3::SystemScope;
+
+struct SessionSet {
+    canonical: Vec<String>,
+    native: Vec<String>,
+    scope: SystemScope,
+}
+
+fn read_system(
+    root: &Path,
+    path: &str,
+    active: &ActiveRead,
+    active_count: u16,
+) -> (NicView, PanelMetrics) {
+    let Ok(repo) = repo_id_for(Path::new(path)) else {
+        return (NicView::NoData, PanelMetrics::default());
+    };
     let db = projection_db_under(root, &repo);
+    let recall = recall_repo_id(Path::new(path))
+        .ok()
+        .map(|id| recall_db_under(root, &id));
+    let projection_bytes = db.exists().then(|| {
+        std::fs::metadata(&db)
+            .map_or(0, |meta| meta.len())
+            .saturating_add(
+                recall
+                    .as_ref()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .map_or(0, |meta| meta.len()),
+            )
+    });
     if !db.exists() {
-        return None;
+        return (NicView::NoData, PanelMetrics::default());
     }
-    let store = SqliteStore::open(&db).ok()?;
-    let rt = runtime().ok()?;
+    let (Ok(store), Ok(rt)) = (SqliteStore::open(&db), runtime()) else {
+        return (
+            NicView::NoData,
+            PanelMetrics {
+                projection_bytes,
+                ..PanelMetrics::default()
+            },
+        );
+    };
+
+    let Some(session_set) = resolve_session_set(&store, &rt, active, active_count) else {
+        return (
+            NicView::NoData,
+            PanelMetrics {
+                projection_bytes,
+                ..PanelMetrics::default()
+            },
+        );
+    };
+    let (events_5m, tokens_5m, mcp_calls_5m) =
+        recent_activity(&store, &rt, recall.as_deref(), &session_set);
+
+    let current_context = if session_set.scope == SystemScope::CurrentSessions {
+        freshest_context(&store, &rt, &session_set.canonical)
+            .map(|observation| (observation, SystemScope::CurrentSessions))
+    } else {
+        freshest_context(&store, &rt, &session_set.canonical)
+            .map(|observation| (observation, SystemScope::LastCompletedSession))
+    };
+    let selected_context = current_context.or_else(|| {
+        (session_set.scope == SystemScope::CurrentSessions)
+            .then(|| freshest_completed_context(&store, &rt))
+            .flatten()
+            .map(|observation| (observation, SystemScope::LastCompletedSession))
+    });
+
+    let (context, context_used, context_window, context_scope) = match selected_context {
+        Some((observation, scope)) => {
+            let used = observation.used_tokens();
+            let window = ReferenceGauge.window_for_model(&observation.model);
+            let view = match ReferenceGauge.reading(&observation.model, used) {
+                Reading::Known(known) => NicView::Reading(NicReading {
+                    pct: known.pct,
+                    band: known.band().label(),
+                    model: observation.model,
+                    active_sessions: active_count,
+                }),
+                Reading::UnknownModel { .. } => NicView::UnknownModel {
+                    model: observation.model,
+                    active_sessions: active_count,
+                },
+            };
+            (view, Some(used), window, scope)
+        }
+        None => (NicView::NoData, None, None, SystemScope::Unavailable),
+    };
+
+    (
+        context,
+        PanelMetrics {
+            events_5m,
+            tokens_5m,
+            mcp_calls_5m,
+            projection_bytes,
+            context_used,
+            context_window,
+            context_scope,
+            activity_scope: session_set.scope,
+        },
+    )
+}
+
+fn resolve_session_set(
+    store: &SqliteStore,
+    rt: &tokio::runtime::Runtime,
+    active: &ActiveRead,
+    active_count: u16,
+) -> Option<SessionSet> {
+    if active_count > 0 {
+        if active.unresolved > 0 || usize::from(active_count) != active.identities.len() {
+            return None;
+        }
+        let mut canonical = Vec::with_capacity(active.identities.len());
+        let mut native = Vec::with_capacity(active.identities.len());
+        for identity in &active.identities {
+            let expected =
+                rift_core::capture_session_row_id(&identity.agent, &identity.native_session_id);
+            let rows = rt
+                .block_on(store.query(
+                    "SELECT session_id FROM capture_session_identity \
+                     WHERE agent = ? AND native_session_id = ?",
+                    &[
+                        Value::text(identity.agent.clone()),
+                        Value::text(identity.native_session_id.clone()),
+                    ],
+                ))
+                .ok()?;
+            let resolved = rows.first()?.get_text(0).ok()?;
+            if resolved != expected {
+                return None;
+            }
+            canonical.push(resolved);
+            native.push(identity.native_session_id.clone());
+        }
+        return Some(SessionSet {
+            canonical,
+            native,
+            scope: SystemScope::CurrentSessions,
+        });
+    }
+
     let rows = rt
         .block_on(store.query(
-            "SELECT mc.model, tu.uncached_input, tu.cached_input, \
-                    tu.cache_creation, tu.output \
-             FROM token_usage tu JOIN model_call mc ON mc.call_id = tu.call_id \
-             ORDER BY mc.started_at DESC, tu.call_id DESC LIMIT 1",
+            "SELECT se.session_id, csi.native_session_id \
+             FROM session_event se JOIN capture_session_identity csi \
+               ON csi.session_id = se.session_id \
+             WHERE se.kind = 'end' \
+             ORDER BY se.occurred_at DESC, se.event_id DESC LIMIT 1",
             &[],
         ))
         .ok()?;
-    let r = rows.first()?;
-    Some(LastCall {
-        model: r.get_text(0).ok()?,
-        uncached_input: r.get_i64(1).ok()?,
-        cached_input: r.get_i64(2).ok()?,
-        cache_creation: r.get_i64(3).ok()?,
-        output: r.get_i64(4).ok()?,
+    let row = rows.first()?;
+    Some(SessionSet {
+        canonical: vec![row.get_text(0).ok()?],
+        native: vec![row.get_text(1).ok()?],
+        scope: SystemScope::LastCompletedSession,
     })
+}
+
+fn freshest_context(
+    store: &SqliteStore,
+    rt: &tokio::runtime::Runtime,
+    session_ids: &[String],
+) -> Option<ContextObservation> {
+    session_ids
+        .iter()
+        .filter_map(|session_id| {
+            let rows = rt
+                .block_on(store.query(
+                    "SELECT model, observed_at, uncached_input, cached_input, \
+                            cache_creation, output \
+                     FROM main_context_observation WHERE session_id = ? \
+                     ORDER BY observed_at DESC, observation_id DESC LIMIT 1",
+                    &[Value::text(session_id.clone())],
+                ))
+                .ok()?;
+            context_from_row(rows.first()?)
+        })
+        .max_by_key(|observation| observation.observed_at)
+}
+
+fn freshest_completed_context(
+    store: &SqliteStore,
+    rt: &tokio::runtime::Runtime,
+) -> Option<ContextObservation> {
+    let rows = rt
+        .block_on(store.query(
+            "SELECT o.model, o.observed_at, o.uncached_input, o.cached_input, \
+                    o.cache_creation, o.output \
+             FROM main_context_observation o JOIN session_event se \
+               ON se.session_id = o.session_id AND se.kind = 'end' \
+             ORDER BY se.occurred_at DESC, o.observed_at DESC, o.observation_id DESC LIMIT 1",
+            &[],
+        ))
+        .ok()?;
+    context_from_row(rows.first()?)
+}
+
+fn context_from_row(row: &rift_store::Row) -> Option<ContextObservation> {
+    Some(ContextObservation {
+        model: row.get_text(0).ok()?,
+        observed_at: row.get_i64(1).ok()?,
+        uncached_input: row.get_i64(2).ok()?,
+        cached_input: row.get_i64(3).ok()?,
+        cache_creation: row.get_i64(4).ok()?,
+        output: row.get_i64(5).ok()?,
+    })
+}
+
+fn recent_activity(
+    store: &SqliteStore,
+    rt: &tokio::runtime::Runtime,
+    recall: Option<&Path>,
+    sessions: &SessionSet,
+) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let end = sessions
+        .native
+        .iter()
+        .filter_map(|native| {
+            rt.block_on(store.query_opt_i64(
+                "SELECT MAX(occurred_at_ms) FROM captured_event WHERE session_id = ?",
+                &[Value::text(native.clone())],
+            ))
+            .ok()
+            .flatten()
+        })
+        .max();
+    let Some(end) = end else {
+        return (Some(0), Some(0), recall.map(|_| 0));
+    };
+    let start = end.saturating_sub(5 * 60 * 1000);
+    let mut events = 0u64;
+    for native in &sessions.native {
+        let count = rt
+            .block_on(store.query_opt_i64(
+                "SELECT COUNT(*) FROM captured_event \
+                 WHERE session_id = ? AND occurred_at_ms >= ? AND occurred_at_ms <= ?",
+                &[
+                    Value::text(native.clone()),
+                    Value::Int(start),
+                    Value::Int(end),
+                ],
+            ))
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        events = events.saturating_add(u64::try_from(count.max(0)).unwrap_or(0));
+    }
+    let mut tokens = 0u64;
+    for canonical in &sessions.canonical {
+        let count = rt
+            .block_on(store.query_opt_i64(
+                "SELECT COALESCE(SUM(tu.uncached_input + tu.cached_input + \
+                        tu.cache_creation + tu.output), 0) \
+                 FROM token_usage tu JOIN model_call mc ON mc.call_id = tu.call_id \
+                 JOIN turn t ON t.turn_id = mc.turn_id \
+                 WHERE t.session_id = ? AND mc.started_at >= ? AND mc.started_at <= ?",
+                &[
+                    Value::text(canonical.clone()),
+                    Value::Int(start),
+                    Value::Int(end),
+                ],
+            ))
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        tokens = tokens.saturating_add(u64::try_from(count.max(0)).unwrap_or(0));
+    }
+    let calls = recall.filter(|path| path.exists()).and_then(|path| {
+        let recall_store = SqliteStore::open(path).ok()?;
+        let count = rt
+            .block_on(recall_store.query_opt_i64(
+                "SELECT COUNT(*) FROM memd_call_event \
+                 WHERE recorded_at >= ? AND recorded_at <= ?",
+                &[Value::Int(start), Value::Int(end)],
+            ))
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        Some(u64::try_from(count.max(0)).unwrap_or(0))
+    });
+    (Some(events), Some(tokens), calls)
 }
 
 /// One served `memd.*` audit fact.
@@ -332,24 +582,15 @@ struct AuditRow {
     tokens_returned: i64,
 }
 
-/// Compute the Recall feed: tokens saved (rate + cumulative) and MCP calls
-/// per bucket from the served `memd.*` audit events in the project's own
-/// recall.db, plus the threads count from the shared `active_sessions` value
-/// (the Recall payload carries it — the M4-15 answer to "which feed kind").
+/// Compute the Recall feed: tokens saved (rate + cumulative) and process-scoped
+/// MCP call threads from the project's own recall.db.
 ///
 /// Disabled-vs-quiet (M4-15 decision, recorded): **recall.db absent** means
 /// recall was never enabled here → the enable-prompting placeholder;
 /// recall.db present with no served events is enabled-but-quiet → the
 /// visibly distinct honest-empty state. Neither is ever a zero line.
 #[must_use]
-pub fn compute_recall(root: &Path, path: &str, live: Option<LiveSessions>) -> FeedUpdate {
-    let threads = live.map_or(ThreadsView::NoSessions, |l| {
-        if l.active_sessions > 0 {
-            ThreadsView::Count(l.active_sessions)
-        } else {
-            ThreadsView::NoSessions
-        }
-    });
+pub fn compute_recall(root: &Path, path: &str) -> FeedUpdate {
     let savings = match read_audit_rows(root, path) {
         RecallDb::Absent => RecallView::Disabled,
         RecallDb::Quiet => RecallView::Quiet,
@@ -387,11 +628,7 @@ pub fn compute_recall(root: &Path, path: &str, live: Option<LiveSessions>) -> Fe
     };
     FeedUpdate {
         project: path.to_string(),
-        payload: FeedPayload::Recall {
-            savings,
-            calls,
-            threads,
-        },
+        payload: FeedPayload::Recall { savings, calls },
     }
 }
 
@@ -483,251 +720,6 @@ fn read_day_counts(root: &Path, path: &str, now_ms: i64) -> Option<Vec<DayBar>> 
     tally("session", "started_at", &|b| &mut b.sessions);
     tally("checkpoint", "created_at", &|b| &mut b.checkpoints);
     Some(bars)
-}
-
-/// Compute the Panel-metrics feed (M55-07, reshaped by ADR-0047): the system
-/// panel's four domain metrics, rated over the **current session's** own
-/// event-anchored span. Each is honest about absence — a missing projection
-/// or disabled recall yields `None`, never a fake zero. `active_session` is
-/// the newest live session's id from the shared session read (the anchor).
-/// No wall clock enters the computation: with no new captured data the
-/// output is byte-identical, so the values hold exactly while idle and the
-/// reducer's dirty gate suppresses any redraw.
-#[must_use]
-pub fn compute_metrics(root: &Path, path: &str, active_session: Option<&str>) -> FeedUpdate {
-    let metrics = read_metrics(root, path, active_session);
-    FeedUpdate {
-        project: path.to_string(),
-        payload: FeedPayload::Metrics(metrics),
-    }
-}
-
-/// The span the metric rates are computed over (ADR-0047): which session
-/// scopes the counts, and the event-anchored `[start, end]` window the
-/// denominators derive from. Both ends are **captured** times — never `now` —
-/// so a rate moves only when the transcript moves.
-struct SessionAnchor {
-    /// s0 — the anchoring session's `started_at` (or, in the sessionless
-    /// fallback, the earliest captured event).
-    start: i64,
-    /// e0 — the newest captured event in scope (clamped to ≥ `start`).
-    end: i64,
-    /// The anchoring session's id (`None` = the whole-projection fallback).
-    session: Option<String>,
-    /// Whether the anchor is the LIVE session (`false` = held from the most
-    /// recent finished session — rendered dimmed).
-    live: bool,
-}
-
-/// The anchor's span in `unit_ms` units, floored to one whole unit
-/// (ADR-0047): a sub-unit span reports the count *as* the rate rather than
-/// extrapolating a wild figure from a tiny sample — and the denominator can
-/// never be zero.
-#[allow(clippy::cast_precision_loss)]
-fn span_units(a: &SessionAnchor, unit_ms: f64) -> f64 {
-    ((a.end.saturating_sub(a.start)).max(0) as f64 / unit_ms).max(1.0)
-}
-
-/// Resolve the session anchor down the fallback ladder: the live session
-/// once its `session` row has landed → the newest projection session (its
-/// final rates HOLD when nothing is live, rendered dimmed) → the events
-/// themselves (a projection captured before sessions existed) → `None` (a
-/// readable but empty projection — the rate rows render their placeholder).
-fn resolve_anchor(
-    store: &SqliteStore,
-    rt: &tokio::runtime::Runtime,
-    active_session: Option<&str>,
-) -> Option<SessionAnchor> {
-    if let Some(sid) = active_session {
-        if let Some(start) = rt
-            .block_on(store.query_opt_i64(
-                "SELECT started_at FROM session WHERE session_id = ?",
-                &[Value::text(sid)],
-            ))
-            .ok()
-            .flatten()
-        {
-            return Some(anchor_for(store, rt, sid, start, true));
-        }
-    }
-    let newest = rt
-        .block_on(store.query(
-            "SELECT session_id, started_at FROM session \
-             ORDER BY started_at DESC, session_id DESC LIMIT 1",
-            &[],
-        ))
-        .ok()
-        .and_then(|rows| {
-            let r = rows.first()?;
-            Some((r.get_text(0).ok()?, r.get_i64(1).ok()?))
-        });
-    if let Some((sid, start)) = newest {
-        return Some(anchor_for(store, rt, &sid, start, false));
-    }
-    // No session rows at all: anchor on the events themselves. MIN/MAX over
-    // an empty table read as SQL NULL → `None` → no anchor (honest absence).
-    let bound = |agg: &str| -> Option<i64> {
-        rt.block_on(store.query_opt_i64(
-            &format!("SELECT {agg}(occurred_at_ms) FROM captured_event"),
-            &[],
-        ))
-        .ok()
-        .flatten()
-    };
-    let start = bound("MIN")?;
-    let end = bound("MAX")?.max(start);
-    Some(SessionAnchor {
-        start,
-        end,
-        session: None,
-        live: false,
-    })
-}
-
-/// Build a session's anchor: `[started_at, newest captured event]`. A
-/// session with no events yet — or events somehow timed before its start —
-/// spans zero (the per-unit floor keeps the rates finite).
-fn anchor_for(
-    store: &SqliteStore,
-    rt: &tokio::runtime::Runtime,
-    sid: &str,
-    start: i64,
-    live: bool,
-) -> SessionAnchor {
-    let end = rt
-        .block_on(store.query_opt_i64(
-            "SELECT MAX(occurred_at_ms) FROM captured_event WHERE session_id = ?",
-            &[Value::text(sid)],
-        ))
-        .ok()
-        .flatten()
-        .unwrap_or(start)
-        .max(start);
-    SessionAnchor {
-        start,
-        end,
-        session: Some(sid.to_string()),
-        live,
-    }
-}
-
-/// The two projection-side rates over the anchor's span: captured events
-/// (session-exact where a session anchors) and the four-class token sum over
-/// `[start, end]` per minute of span. Tokens are time-window scoped —
-/// `model_call` reaches a session only via `turn`, so the uniform
-/// `[s0, e0]` window is the robust reading (ADR-0047).
-fn session_rates(
-    store: &SqliteStore,
-    rt: &tokio::runtime::Runtime,
-    a: &SessionAnchor,
-) -> (Option<f64>, Option<f64>) {
-    let count = |sql: &str, params: &[Value]| -> f64 {
-        #[allow(clippy::cast_precision_loss)]
-        let n = rt
-            .block_on(store.query_opt_i64(sql, params))
-            .ok()
-            .flatten()
-            .unwrap_or(0) as f64;
-        n
-    };
-    let events = match &a.session {
-        Some(sid) => count(
-            "SELECT COUNT(*) FROM captured_event WHERE session_id = ?",
-            &[Value::text(sid)],
-        ),
-        None => count("SELECT COUNT(*) FROM captured_event", &[]),
-    };
-    let tokens = count(
-        &format!(
-            "SELECT COALESCE(SUM(tu.uncached_input + tu.cached_input + \
-                    tu.cache_creation + tu.output), 0) \
-             FROM token_usage tu JOIN model_call mc ON mc.call_id = tu.call_id \
-             WHERE mc.started_at >= {s0} AND mc.started_at <= {e0}",
-            s0 = a.start,
-            e0 = a.end,
-        ),
-        &[],
-    );
-    let span_min = span_units(a, 60_000.0);
-    (Some(events / span_min), Some(tokens / span_min))
-}
-
-/// Read the four domain metrics, scoped to the project's own databases and
-/// anchored to the active session's event-anchored span (ADR-0047).
-fn read_metrics(root: &Path, path: &str, active_session: Option<&str>) -> PanelMetrics {
-    let Ok(repo) = repo_id_for(Path::new(path)) else {
-        return PanelMetrics::default();
-    };
-    let db = projection_db_under(root, &repo);
-    // recall.db is keyed by `recall_repo_id` (the serve/audit writer's
-    // authority — `rift hooks memd` / `rift-memd`), a DIFFERENT digest from the
-    // capture `repo_id_for` that keys projection.db above. Resolving recall.db
-    // with the capture id opened the wrong, empty file and stranded the panel
-    // on "no serves yet" (paths.rs:120 — recall_repo_id is the single authority).
-    let recall = match recall_repo_id(Path::new(path)) {
-        Ok(rid) => recall_db_under(root, &rid),
-        Err(_) => return PanelMetrics::default(),
-    };
-
-    // Projection size: the capture + recall projections' on-disk bytes
-    // (instantaneous — the one row that never had a window).
-    let projection_bytes = if db.exists() {
-        let cap = std::fs::metadata(&db).map_or(0, |m| m.len());
-        let rec = std::fs::metadata(&recall).map_or(0, |m| m.len());
-        Some(cap.saturating_add(rec))
-    } else {
-        None
-    };
-
-    // The anchor + the two projection-side rates.
-    let (anchor, capture_per_min, tokens_per_min) = if db.exists() {
-        match (SqliteStore::open(&db).ok(), runtime().ok()) {
-            (Some(store), Some(rt)) => match resolve_anchor(&store, &rt, active_session) {
-                Some(a) => {
-                    let (cap, tok) = session_rates(&store, &rt, &a);
-                    (Some(a), cap, tok)
-                }
-                None => (None, None, None),
-            },
-            _ => (None, None, None),
-        }
-    } else {
-        (None, None, None)
-    };
-
-    // Recall load: serves inside the anchored span, per hour of span. With
-    // no span at all there is nothing to rate against — honest absence.
-    let recall_per_hour = match (&anchor, recall.exists()) {
-        (Some(a), true) => match (SqliteStore::open(&recall).ok(), runtime().ok()) {
-            (Some(store), Some(rt)) => {
-                #[allow(clippy::cast_precision_loss)]
-                let serves = rt
-                    .block_on(store.query_opt_i64(
-                        &format!(
-                            "SELECT COUNT(*) FROM memd_audit_event \
-                             WHERE recorded_at >= {s0} AND recorded_at <= {e0}",
-                            s0 = a.start,
-                            e0 = a.end,
-                        ),
-                        &[],
-                    ))
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0) as f64;
-                Some(serves / span_units(a, 3_600_000.0))
-            }
-            _ => None,
-        },
-        _ => None,
-    };
-
-    PanelMetrics {
-        capture_per_min,
-        tokens_per_min,
-        projection_bytes,
-        recall_per_hour,
-        session_live: anchor.is_some_and(|a| a.live),
-    }
 }
 
 /// The recall.db read outcome.
@@ -1188,33 +1180,156 @@ mod tests {
         }
     }
 
-    #[test]
-    fn nic_reads_the_freshest_call_through_the_gauge_crate() {
-        let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "p");
-        let store = open_proj(root.path(), &proj);
-        let rt = runtime().unwrap();
-        // Older small call, newer big call: the reading is the newest.
-        seed_token_fact(&store, &rt, "c1", 1_000, (1_000, 0, 0, 100));
-        seed_token_fact(&store, &rt, "c2", 9_000, (20_000, 100_000, 0, 4_000));
+    fn active(native: &str) -> ActiveRead {
+        ActiveRead {
+            live: live(1),
+            identities: vec![crate::session::LiveSessionIdentity {
+                agent: "claude-code".into(),
+                native_session_id: native.into(),
+                updated_at_ms: 9_000,
+            }],
+            unresolved: 0,
+        }
+    }
 
-        let update = compute_nic(root.path(), &proj, live(2));
-        let FeedPayload::Nic(NicView::Reading(r)) = update.payload else {
-            panic!("expected a Reading");
-        };
-        // used = 124_000 over claude's 200k window → 62%.
-        assert_eq!(r.pct, 62);
-        assert_eq!(r.band, "Capable");
-        assert_eq!(r.threads, 2, "the badge carries the shared query value");
-        assert_eq!(r.model, "claude-fable-5");
+    fn seed_context_observation(
+        store: &SqliteStore,
+        rt: &tokio::runtime::Runtime,
+        native: &str,
+        canonical: &str,
+        model: &str,
+        context: (i64, i64, i64, i64),
+    ) {
+        rt.block_on(store.insert(
+            "main_context_observation",
+            &[
+                "observation_id",
+                "session_id",
+                "model",
+                "observed_at",
+                "uncached_input",
+                "cached_input",
+                "cache_creation",
+                "output",
+                "counter_method",
+                "schema_version",
+            ],
+            &[
+                Value::text(format!("context-{native}")),
+                Value::text(canonical),
+                Value::text(model),
+                Value::Int(8_500),
+                Value::Int(context.0),
+                Value::Int(context.1),
+                Value::Int(context.2),
+                Value::Int(context.3),
+                Value::text("provider_reported"),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+    }
+
+    fn seed_system_session(
+        store: &SqliteStore,
+        rt: &tokio::runtime::Runtime,
+        native: &str,
+        model: &str,
+        context: (i64, i64, i64, i64),
+    ) -> String {
+        let canonical = rift_core::capture_session_row_id("claude-code", native);
+        rt.block_on(store.insert(
+            "session",
+            &[
+                "session_id",
+                "agent",
+                "model_primary",
+                "repo_id",
+                "started_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(canonical.clone()),
+                Value::text("claude-code"),
+                Value::text(model),
+                Value::text("repo"),
+                Value::Int(1_000),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        rt.block_on(store.insert(
+            "capture_session_identity",
+            &["session_id", "agent", "native_session_id", "schema_version"],
+            &[
+                Value::text(canonical.clone()),
+                Value::text("claude-code"),
+                Value::text(native),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        rt.block_on(store.insert(
+            "turn",
+            &[
+                "turn_id",
+                "session_id",
+                "ordinal",
+                "started_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(format!("turn-{native}")),
+                Value::text(canonical.clone()),
+                Value::Int(1),
+                Value::Int(8_000),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        rt.block_on(store.insert(
+            "captured_event",
+            &[
+                "idempotency_key",
+                "session_id",
+                "turn_ordinal",
+                "event_ordinal",
+                "kind",
+                "trust",
+                "payload_sha256",
+                "occurred_at_ms",
+                "schema_version",
+            ],
+            &[
+                Value::text(format!("event-{native}")),
+                Value::text(native),
+                Value::Int(1),
+                Value::Int(0),
+                Value::text("turn_end"),
+                Value::text("transcript_untrusted"),
+                Value::text("aa"),
+                Value::Int(9_000),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        seed_context_observation(store, rt, native, &canonical, model, context);
+        canonical
     }
 
     #[test]
-    fn nic_unknown_model_is_the_explicit_indicator_never_a_percentage() {
+    fn system_uses_main_context_not_huge_aggregate_spend() {
         let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "p");
+        let proj = make_project(root.path(), "system");
         let store = open_proj(root.path(), &proj);
         let rt = runtime().unwrap();
+        let canonical = seed_system_session(
+            &store,
+            &rt,
+            "native-1",
+            "claude-fable-5",
+            (10_000, 30_000, 5_000, 5_000),
+        );
         rt.block_on(store.insert(
             "model_call",
             &[
@@ -1225,10 +1340,10 @@ mod tests {
                 "schema_version",
             ],
             &[
-                Value::text("c1"),
-                Value::text("t1"),
-                Value::text("mystery-model-9000"),
-                Value::Int(1_000),
+                Value::text("huge"),
+                Value::text("turn-native-1"),
+                Value::text("claude-fable-5"),
+                Value::Int(8_900),
                 Value::Int(1),
             ],
         ))
@@ -1245,33 +1360,251 @@ mod tests {
                 "schema_version",
             ],
             &[
-                Value::text("c1"),
-                Value::Int(100),
+                Value::text("huge"),
+                Value::Int(1_000_000),
                 Value::Int(0),
                 Value::Int(0),
-                Value::Int(10),
+                Value::Int(0),
                 Value::text("provider_reported"),
                 Value::Int(1),
             ],
         ))
         .unwrap();
+        assert_eq!(
+            canonical,
+            rift_core::capture_session_row_id("claude-code", "native-1")
+        );
 
-        let update = compute_nic(root.path(), &proj, live(1));
-        match update.payload {
-            FeedPayload::Nic(NicView::UnknownModel { model, threads }) => {
-                assert_eq!(model, "mystery-model-9000");
-                assert_eq!(threads, 1);
-            }
-            other => panic!("an unknown model must never read a percentage: {other:?}"),
-        }
+        let first = compute_system(root.path(), &proj, &active("native-1"));
+        assert_eq!(
+            first,
+            compute_system(root.path(), &proj, &active("native-1")),
+            "unchanged canonical data yields a byte-identical System payload"
+        );
+        let FeedPayload::System {
+            context: NicView::Reading(reading),
+            metrics,
+            active_sessions,
+        } = first.payload
+        else {
+            panic!("expected atomic System reading");
+        };
+        assert_eq!(reading.pct, 25, "50k / 200k, never the 1M turn aggregate");
+        assert_eq!(reading.band, "Clear");
+        assert_eq!(metrics.context_used, Some(50_000));
+        assert_eq!(metrics.tokens_5m, Some(1_000_000));
+        assert_eq!(metrics.events_5m, Some(1));
+        assert_eq!(metrics.activity_scope, SystemScope::CurrentSessions);
+        assert_eq!(active_sessions, ActiveSessionsView::Count(1));
     }
 
     #[test]
-    fn nic_no_calls_is_nodata() {
+    fn unresolved_live_identity_never_falls_back() {
         let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "p");
-        let update = compute_nic(root.path(), &proj, None);
-        assert!(matches!(update.payload, FeedPayload::Nic(NicView::NoData)));
+        let proj = make_project(root.path(), "unresolved");
+        let active = ActiveRead {
+            live: live(1),
+            identities: Vec::new(),
+            unresolved: 1,
+        };
+        let FeedPayload::System {
+            context, metrics, ..
+        } = compute_system(root.path(), &proj, &active).payload
+        else {
+            panic!("expected System");
+        };
+        assert_eq!(context, NicView::NoData);
+        assert_eq!(metrics.activity_scope, SystemScope::Unavailable);
+        assert!(metrics.events_5m.is_none());
+    }
+
+    #[test]
+    fn system_aggregates_all_live_sessions_and_counts_terminal_invocations() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "multi");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_system_session(&store, &rt, "native-a", "claude-fable-5", (10, 0, 0, 0));
+        seed_system_session(&store, &rt, "native-b", "claude-fable-5", (20, 0, 0, 0));
+        seed_system_session(
+            &store,
+            &rt,
+            "native-inactive",
+            "claude-fable-5",
+            (99_000, 0, 0, 0),
+        );
+        seed_event_for(&store, &rt, "old-active-event", "native-a", -400_000);
+        let other_proj = make_project(root.path(), "other-project");
+        let other_store = open_proj(root.path(), &other_proj);
+        seed_system_session(
+            &other_store,
+            &rt,
+            "native-other",
+            "claude-fable-5",
+            (199_000, 0, 0, 0),
+        );
+        seed_call_events(
+            root.path(),
+            &proj,
+            &[
+                ("in-a", "thread-a", 8_500),
+                ("in-b", "thread-b", 9_000),
+                ("old", "thread-a", -400_000),
+            ],
+        );
+        let active = ActiveRead {
+            live: live(2),
+            identities: vec![
+                crate::session::LiveSessionIdentity {
+                    agent: "claude-code".into(),
+                    native_session_id: "native-a".into(),
+                    updated_at_ms: 8_000,
+                },
+                crate::session::LiveSessionIdentity {
+                    agent: "claude-code".into(),
+                    native_session_id: "native-b".into(),
+                    updated_at_ms: 9_000,
+                },
+            ],
+            unresolved: 0,
+        };
+        let FeedPayload::System {
+            metrics,
+            active_sessions,
+            ..
+        } = compute_system(root.path(), &proj, &active).payload
+        else {
+            panic!("expected System");
+        };
+        assert_eq!(active_sessions, ActiveSessionsView::Count(2));
+        assert_eq!(metrics.events_5m, Some(2));
+        assert_eq!(metrics.mcp_calls_5m, Some(2));
+        assert_eq!(
+            metrics.context_used,
+            Some(20),
+            "inactive sessions and other projections cannot leak"
+        );
+    }
+
+    #[test]
+    fn system_unknown_model_shows_used_without_percentage() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "unknown");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_system_session(&store, &rt, "native-1", "mystery-model", (100, 20, 0, 5));
+        let FeedPayload::System {
+            context, metrics, ..
+        } = compute_system(root.path(), &proj, &active("native-1")).payload
+        else {
+            panic!("expected System");
+        };
+        assert!(matches!(context, NicView::UnknownModel { .. }));
+        assert_eq!(metrics.context_used, Some(125));
+        assert_eq!(metrics.context_window, None);
+    }
+
+    #[test]
+    fn system_holds_completed_context_when_current_session_has_no_sample() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "held");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        let old = seed_system_session(
+            &store,
+            &rt,
+            "old-native",
+            "claude-fable-5",
+            (10_000, 20_000, 0, 5_000),
+        );
+        rt.block_on(store.insert(
+            "session_event",
+            &[
+                "event_id",
+                "session_id",
+                "kind",
+                "occurred_at",
+                "schema_version",
+            ],
+            &[
+                Value::text("old-end"),
+                Value::text(old),
+                Value::text("end"),
+                Value::Int(9_100),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+
+        let native = "current-native";
+        let current = rift_core::capture_session_row_id("claude-code", native);
+        rt.block_on(store.insert(
+            "session",
+            &[
+                "session_id",
+                "agent",
+                "model_primary",
+                "repo_id",
+                "started_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(current.clone()),
+                Value::text("claude-code"),
+                Value::text("claude-fable-5"),
+                Value::text("repo"),
+                Value::Int(10_000),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        rt.block_on(store.insert(
+            "capture_session_identity",
+            &["session_id", "agent", "native_session_id", "schema_version"],
+            &[
+                Value::text(current),
+                Value::text("claude-code"),
+                Value::text(native),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        rt.block_on(store.insert(
+            "captured_event",
+            &[
+                "idempotency_key",
+                "session_id",
+                "turn_ordinal",
+                "event_ordinal",
+                "kind",
+                "trust",
+                "payload_sha256",
+                "occurred_at_ms",
+                "schema_version",
+            ],
+            &[
+                Value::text("current-event"),
+                Value::text(native),
+                Value::Int(1),
+                Value::Int(0),
+                Value::text("tool_call"),
+                Value::text("transcript_untrusted"),
+                Value::text("bb"),
+                Value::Int(10_500),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        let FeedPayload::System {
+            metrics, context, ..
+        } = compute_system(root.path(), &proj, &active(native)).payload
+        else {
+            panic!("expected System");
+        };
+        assert!(matches!(context, NicView::Reading(_)));
+        assert_eq!(metrics.context_scope, SystemScope::LastCompletedSession);
+        assert_eq!(metrics.activity_scope, SystemScope::CurrentSessions);
+        assert_eq!(metrics.context_used, Some(35_000));
     }
 
     #[test]
@@ -1279,22 +1612,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p");
         // No recall.db → Disabled (the enable prompt), never a zero line.
-        let update = compute_recall(root.path(), &proj, None);
-        let FeedPayload::Recall {
-            savings,
-            calls,
-            threads,
-        } = update.payload
-        else {
+        let update = compute_recall(root.path(), &proj);
+        let FeedPayload::Recall { savings, calls } = update.payload else {
             panic!("expected Recall");
         };
         assert_eq!(savings, RecallView::Disabled);
         assert_eq!(calls, RecallView::Disabled);
-        assert_eq!(threads, ThreadsView::NoSessions);
 
         // recall.db exists but has no served events → Quiet (visibly distinct).
         seed_recall_db(root.path(), &proj, &[]);
-        let update = compute_recall(root.path(), &proj, None);
+        let update = compute_recall(root.path(), &proj);
         let FeedPayload::Recall { savings, calls, .. } = update.payload else {
             panic!("expected Recall");
         };
@@ -1311,13 +1638,8 @@ mod tests {
             &proj,
             &[(1_000, 500), (2_000, 1_500), (3_000, 0)],
         );
-        let update = compute_recall(root.path(), &proj, live(3));
-        let FeedPayload::Recall {
-            savings,
-            calls,
-            threads,
-        } = update.payload
-        else {
+        let update = compute_recall(root.path(), &proj);
+        let FeedPayload::Recall { savings, calls } = update.payload else {
             panic!("expected Recall");
         };
         let RecallView::Data(sd) = savings else {
@@ -1330,7 +1652,6 @@ mod tests {
         assert_eq!(cd.total, 3, "one attributed call per served event");
         assert_eq!(cd.series.len(), 2);
         assert!(cd.series.iter().all(|s| s.rate.len() == 30));
-        assert_eq!(threads, ThreadsView::Count(3));
     }
 
     #[test]
@@ -1366,8 +1687,7 @@ mod tests {
             ],
         ))
         .unwrap();
-        let FeedPayload::Recall { savings, calls, .. } =
-            compute_recall(root.path(), &proj, None).payload
+        let FeedPayload::Recall { savings, calls, .. } = compute_recall(root.path(), &proj).payload
         else {
             panic!("expected Recall");
         };
@@ -1392,8 +1712,8 @@ mod tests {
                 ("e", "thread-e", 1_796_000),
             ],
         );
-        let first = compute_recall(root.path(), &proj, None);
-        let second = compute_recall(root.path(), &proj, None);
+        let first = compute_recall(root.path(), &proj);
+        let second = compute_recall(root.path(), &proj);
         assert_eq!(first, second, "idle recompute must be byte-identical");
         let FeedPayload::Recall { savings, calls, .. } = first.payload else {
             panic!("expected Recall");
@@ -1440,8 +1760,7 @@ mod tests {
         // Real serves land under the recall id.
         seed_recall_db(root.path(), &proj, &[(1_000, 500), (2_000, 700)]);
 
-        let FeedPayload::Recall { savings, calls, .. } =
-            compute_recall(root.path(), &proj, None).payload
+        let FeedPayload::Recall { savings, calls, .. } = compute_recall(root.path(), &proj).payload
         else {
             panic!("expected Recall");
         };
@@ -1455,26 +1774,24 @@ mod tests {
     }
 
     #[test]
-    fn one_query_invariant_badge_equals_threads_by_construction() {
-        // The bus reads active_sessions ONCE and hands the same value to both
-        // feeds: the gauge badge and the threads section cannot disagree.
+    fn atomic_system_badge_equals_context_count_by_construction() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p");
         let store = open_proj(root.path(), &proj);
         let rt = runtime().unwrap();
-        seed_token_fact(&store, &rt, "c1", 1_000, (10, 0, 0, 5));
-        seed_recall_db(root.path(), &proj, &[(1_000, 100)]);
-
-        let shared = live(4);
-        let nic = compute_nic(root.path(), &proj, shared);
-        let recall = compute_recall(root.path(), &proj, shared);
-        let FeedPayload::Nic(NicView::Reading(r)) = nic.payload else {
-            panic!("expected a Reading");
+        seed_system_session(&store, &rt, "native-1", "claude-fable-5", (10, 0, 0, 5));
+        let FeedPayload::System {
+            context: NicView::Reading(reading),
+            active_sessions,
+            ..
+        } = compute_system(root.path(), &proj, &active("native-1")).payload
+        else {
+            panic!("expected System");
         };
-        let FeedPayload::Recall { threads, .. } = recall.payload else {
-            panic!("expected Recall");
-        };
-        assert_eq!(ThreadsView::Count(r.threads), threads);
+        assert_eq!(
+            ActiveSessionsView::Count(reading.active_sessions),
+            active_sessions
+        );
     }
 
     #[test]
@@ -1484,12 +1801,12 @@ mod tests {
         let pb = make_project(root.path(), "b");
         seed_recall_db(root.path(), &pa, &[(1_000, 700)]);
         // b has NO recall.db: a's events must not leak into b's sections.
-        let ub = compute_recall(root.path(), &pb, None);
+        let ub = compute_recall(root.path(), &pb);
         let FeedPayload::Recall { savings, .. } = ub.payload else {
             panic!("expected Recall");
         };
         assert_eq!(savings, RecallView::Disabled);
-        let ua = compute_recall(root.path(), &pa, None);
+        let ua = compute_recall(root.path(), &pa);
         let FeedPayload::Recall {
             savings: RecallView::Data(sd),
             ..
@@ -1502,7 +1819,7 @@ mod tests {
 
     // --- M55-06: the activity feed ------------------------------------------
 
-    use rift_canopy::col3::{ActivityView, PanelMetrics};
+    use rift_canopy::col3::ActivityView;
 
     /// Seed a `session` row started at `t`.
     fn seed_session(store: &SqliteStore, rt: &tokio::runtime::Runtime, id: &str, t: i64) {
@@ -1557,8 +1874,7 @@ mod tests {
         seed_event_for(store, rt, key, "s", t);
     }
 
-    /// Seed one captured event for an explicit session — the session-scoped
-    /// metrics tests (ADR-0047) need events in more than one session.
+    /// Seed one captured event for an explicit native session identity.
     fn seed_event_for(
         store: &SqliteStore,
         rt: &tokio::runtime::Runtime,
@@ -1686,199 +2002,6 @@ mod tests {
         assert!(!weekday_label(-5).is_empty());
     }
 
-    // --- M55-07 / ADR-0047: the session-scoped panel-metrics feed -----------
-
-    #[test]
-    fn metrics_missing_projection_is_all_absent() {
-        let root = tempfile::tempdir().unwrap();
-        let proj = root.path().join("plain");
-        std::fs::create_dir_all(&proj).unwrap();
-        let FeedPayload::Metrics(m) =
-            compute_metrics(root.path(), &proj.to_string_lossy(), None).payload
-        else {
-            panic!("expected Metrics");
-        };
-        assert_eq!(
-            m,
-            PanelMetrics::default(),
-            "no projection → every metric absent"
-        );
-        assert!(m.capture_per_min.is_none());
-        assert!(m.projection_bytes.is_none());
-        assert!(m.recall_per_hour.is_none());
-        assert!(!m.session_live);
-    }
-
-    #[test]
-    fn metrics_rates_are_scoped_to_the_active_sessions_span() {
-        let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "p");
-        let store = open_proj(root.path(), &proj);
-        let rt = runtime().unwrap();
-        // The active session "s": started at S0, events through S0+30min.
-        const S0: i64 = 1_000_000;
-        seed_session(&store, &rt, "s", S0);
-        seed_event_for(&store, &rt, "e1", "s", S0 + 10 * 60_000);
-        seed_event_for(&store, &rt, "e2", "s", S0 + 20 * 60_000);
-        seed_event_for(&store, &rt, "e3", "s", S0 + 30 * 60_000);
-        // Another session's event inside the same wall-time span: capture is
-        // session-EXACT, so it must not count.
-        seed_session(&store, &rt, "other", S0 - 3_600_000);
-        seed_event_for(&store, &rt, "ex", "other", S0 + 5 * 60_000);
-        // 600 tokens inside [S0, S0+30min] (tokens are span-scoped).
-        seed_token_fact(&store, &rt, "c1", S0 + 5 * 60_000, (100, 200, 0, 300));
-        // A model call BEFORE the session: outside the span, never counted.
-        seed_token_fact(&store, &rt, "c0", S0 - 10 * 60_000, (999, 0, 0, 0));
-
-        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, Some("s")).payload else {
-            panic!("expected Metrics");
-        };
-        // Span = [S0, S0+30min] → 3 session events / 30 min = 0.1/min.
-        let cap = m.capture_per_min.expect("readable projection → present");
-        assert!(
-            (cap - 3.0 / 30.0).abs() < 1e-9,
-            "capture rate over the session span: {cap}"
-        );
-        // 600 span-scoped tokens / 30 min = 20/min (the pre-session 999 excluded).
-        let burn = m.tokens_per_min.expect("present");
-        assert!(
-            (burn - 600.0 / 30.0).abs() < 1e-9,
-            "burn rate over the session span: {burn}"
-        );
-        assert!(m.session_live, "anchored to the LIVE session");
-        // A projection exists → its byte size is present and non-zero.
-        assert!(m.projection_bytes.is_some_and(|b| b > 0));
-        // No recall.db → recall load absent (never a fake zero).
-        assert!(m.recall_per_hour.is_none(), "disabled recall → absent");
-    }
-
-    #[test]
-    fn metrics_hold_when_only_the_clock_advances() {
-        // The ADR-0047 key property: no wall clock enters the computation —
-        // the same captured data yields byte-identical metrics no matter when
-        // they are recomputed, so idle recomputes are no-ops by construction
-        // (the reducer's dirty gate then suppresses any redraw).
-        let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "p");
-        let store = open_proj(root.path(), &proj);
-        let rt = runtime().unwrap();
-        seed_session(&store, &rt, "s", 1_000_000);
-        seed_event_for(&store, &rt, "e1", "s", 1_000_000 + 60_000);
-        seed_token_fact(&store, &rt, "c1", 1_000_000 + 30_000, (10, 20, 0, 5));
-
-        let a = compute_metrics(root.path(), &proj, Some("s"));
-        let b = compute_metrics(root.path(), &proj, Some("s"));
-        assert_eq!(a, b, "recomputing over unchanged data is identical");
-        // And the value only moves when the transcript moves: a new event
-        // advances the span, so the rate changes.
-        seed_event_for(&store, &rt, "e2", "s", 1_000_000 + 10 * 60_000);
-        let c = compute_metrics(root.path(), &proj, Some("s"));
-        assert_ne!(a, c, "a new captured event re-anchors the span");
-    }
-
-    #[test]
-    fn metrics_zero_span_floors_to_the_unit() {
-        // A single event (span 0) reports the count AS the rate — the
-        // per-unit floor — never NaN/inf and never a wild extrapolation.
-        let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "p");
-        let store = open_proj(root.path(), &proj);
-        let rt = runtime().unwrap();
-        const S0: i64 = 5_000_000;
-        seed_session(&store, &rt, "s", S0);
-        seed_event_for(&store, &rt, "e1", "s", S0);
-        seed_token_fact(&store, &rt, "c1", S0, (100, 0, 0, 0));
-        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, Some("s")).payload else {
-            panic!("expected Metrics");
-        };
-        let cap = m.capture_per_min.expect("present");
-        assert!(cap.is_finite());
-        assert!((cap - 1.0).abs() < 1e-9, "1 event in a zero span → 1.0/min");
-        let burn = m.tokens_per_min.expect("present");
-        assert!((burn - 100.0).abs() < 1e-9, "100 tokens, floored to /1min");
-    }
-
-    #[test]
-    fn metrics_fall_back_to_the_newest_session_when_none_live() {
-        // No live session: the most recent projection session anchors — its
-        // final rates HOLD (rendered dimmed via `session_live = false`).
-        let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "p");
-        let store = open_proj(root.path(), &proj);
-        let rt = runtime().unwrap();
-        seed_session(&store, &rt, "old", 1_000_000);
-        seed_event_for(&store, &rt, "eo", "old", 1_000_000 + 60_000);
-        seed_session(&store, &rt, "new", 9_000_000);
-        seed_event_for(&store, &rt, "en1", "new", 9_000_000 + 5 * 60_000);
-        seed_event_for(&store, &rt, "en2", "new", 9_000_000 + 10 * 60_000);
-        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, None).payload else {
-            panic!("expected Metrics");
-        };
-        // Anchored to "new": 2 events / 10 min.
-        let cap = m.capture_per_min.expect("present");
-        assert!((cap - 0.2).abs() < 1e-9, "newest session anchors: {cap}");
-        assert!(!m.session_live, "a held fallback is not live");
-    }
-
-    #[test]
-    fn metrics_active_session_wins_over_newer_rows() {
-        // The LIVE session anchors even when another session started later —
-        // liveness (the cache) beats recency (the table).
-        let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "p");
-        let store = open_proj(root.path(), &proj);
-        let rt = runtime().unwrap();
-        seed_session(&store, &rt, "mine", 1_000_000);
-        seed_event_for(&store, &rt, "e1", "mine", 1_000_000 + 60_000);
-        seed_session(&store, &rt, "newer", 9_000_000);
-        seed_event_for(&store, &rt, "e2", "newer", 9_000_000 + 60_000);
-        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, Some("mine")).payload
-        else {
-            panic!("expected Metrics");
-        };
-        assert!((m.capture_per_min.unwrap() - 1.0).abs() < 1e-9);
-        assert!(m.session_live);
-    }
-
-    #[test]
-    fn metrics_empty_projection_rates_absent_bytes_present() {
-        // Readable projection, zero sessions AND zero events: nothing to
-        // anchor on → the rates are honestly absent; the size is a fact.
-        let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "quiet");
-        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, None).payload else {
-            panic!("expected Metrics");
-        };
-        assert!(m.capture_per_min.is_none());
-        assert!(m.tokens_per_min.is_none());
-        assert!(m.recall_per_hour.is_none());
-        assert!(m.projection_bytes.is_some_and(|b| b > 0));
-        assert!(!m.session_live);
-    }
-
-    #[test]
-    fn metrics_recall_load_is_span_scoped() {
-        let root = tempfile::tempdir().unwrap();
-        let proj = make_project(root.path(), "p");
-        let store = open_proj(root.path(), &proj);
-        let rt = runtime().unwrap();
-        // Session span = [S0, S0 + 2h].
-        const S0: i64 = 10_000_000;
-        seed_session(&store, &rt, "s", S0);
-        seed_event_for(&store, &rt, "e1", "s", S0 + 2 * 3_600_000);
-        // One serve inside the span, one before it (excluded).
-        seed_recall_db(root.path(), &proj, &[(S0 - 5_000, 50), (S0 + 1_000, 100)]);
-        let FeedPayload::Metrics(m) = compute_metrics(root.path(), &proj, Some("s")).payload else {
-            panic!("expected Metrics");
-        };
-        // 1 in-span serve / 2h of span = 0.5/hr.
-        assert_eq!(m.recall_per_hour, Some(0.5));
-        assert!(
-            m.projection_bytes.is_some_and(|b| b > 0),
-            "recall.db adds to size"
-        );
-    }
-
     #[test]
     fn savings_pct_is_the_ledger_ratio_no_drift() {
         // The feed's savings % is provably `savings_rate(Σavoided, Σavoided+Σreturned)`
@@ -1890,7 +2013,7 @@ mod tests {
         let FeedPayload::Recall {
             savings: RecallView::Data(sd),
             ..
-        } = compute_recall(root.path(), &proj, None).payload
+        } = compute_recall(root.path(), &proj).payload
         else {
             panic!("expected savings data");
         };
@@ -1912,7 +2035,7 @@ mod tests {
         let FeedPayload::Recall {
             savings: RecallView::Data(sd),
             ..
-        } = compute_recall(root.path(), &proj, None).payload
+        } = compute_recall(root.path(), &proj).payload
         else {
             panic!("expected savings data");
         };

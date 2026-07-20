@@ -1,0 +1,104 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: snapshot
+---
+CURRENT
+╭─ system ─────────────────────────╮
+│62% Moderate · claude-fable-5     │
+│124K/200K · current sessions      │
+│[2 active sessions]               │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│ scope - current sessions         │
+│- events · 5m: 42                 │
+│- tokens · 5m: 12K                │
+│- MCP calls · 5m: 7               │
+│- projection storage: 17.7MB      │
+╰──────────────────────────────────╯
+
+LAST COMPLETED
+╭─ system ─────────────────────────╮
+│62% Moderate · claude-fable-5     │
+│124K/200K · previous session      │
+│[0 active sessions]               │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│ scope - last completed session   │
+│- events · 5m: 42                 │
+│- tokens · 5m: 12K                │
+│- MCP calls · 5m: 7               │
+│- projection storage: 17.7MB      │
+╰──────────────────────────────────╯
+
+HELD PREVIOUS
+╭─ system ─────────────────────────╮
+│62% Moderate · claude-fable-5     │
+│124K/200K · previous session      │
+│[2 active sessions]               │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀             │
+│ scope - current sessions         │
+│- events · 5m: 42                 │
+│- tokens · 5m: 12K                │
+│- MCP calls · 5m: 7               │
+│- projection storage: 17.7MB      │
+╰──────────────────────────────────╯
+
+UNAVAILABLE
+╭─ system ─────────────────────────╮
+│                                  │
+│                                  │
+│                                  │
+│context unavailable               │
+│[2 active sessions]               │
+│                                  │
+│                                  │
+│ scope - session unavailable      │
+│- events · 5m: —                  │
+│- tokens · 5m: —                  │
+│- MCP calls · 5m: —               │
+│- projection storage: 17.7MB      │
+╰──────────────────────────────────╯
+
+UNKNOWN MODEL
+╭─ system ─────────────────────────╮
+│~ future-model                    │
+│124K / unknown                    │
+│current sessions                  │
+│[2 active sessions]               │
+│                                  │
+│                                  │
+│                                  │
+│ scope - current sessions         │
+│- events · 5m: 42                 │
+│- tokens · 5m: 12K                │
+│- MCP calls · 5m: 7               │
+│- projection storage: 17.7MB      │
+╰──────────────────────────────────╯
+
+NARROW
+╭─ system ─────────────╮
+│62% Moderate · claude-│
+│124K/200K · current se│
+│[2 active sessions]   │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀        │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀        │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀        │
+│▀▀▀▀▀▀▀▀▀▀▀▀▀▀        │
+│ scope - current sessi│
+│- events · 5m: 42     │
+│- tokens · 5m: 12K    │
+│- MCP calls · 5m: 7   │
+│- projection storage: │
+╰──────────────────────╯
+
+COLLAPSED
+╭─ system ─────────────────────────╮
+│62% Moderate  ·  2 active sessions│
+╰──────────────────────────────────╯

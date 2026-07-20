@@ -947,23 +947,21 @@ fn try_ingest_agent_hook(agent: &str, args: &[String]) -> Result<()> {
 
 /// Native Claude Code hooks carry no `usage` fields; the transcript named by
 /// the payload's `transcript_path` holds the provider-reported numbers
-/// (M2-15). On a turn end, read a bounded tail and inject the turn's summed
-/// usage — and its model, for pricing — into the payload before ingest.
+/// (M2-15). At observable main-chain boundaries, read a bounded tail and
+/// inject one call-grain context snapshot. On a turn end, also inject the
+/// existing whole-turn spend aggregate for pricing and burn accounting.
 /// Best-effort and honest: a missing, unreadable, or usage-free transcript
 /// leaves the fields absent, never fabricated.
 fn enrich_native_usage(raw: &mut rift_shadow::hooks::RawHook) {
     use rift_shadow::hooks::transcript::{turn_usage_from_tail, MAX_TAIL_BYTES};
     use rift_shadow::hooks::AgentId;
 
-    if raw.agent != AgentId::CLAUDE_CODE || raw.verb != "Stop" {
+    if raw.agent != AgentId::CLAUDE_CODE || !matches!(raw.verb.as_str(), "PreToolUse" | "Stop") {
         return;
     }
     let Some(obj) = raw.payload.as_object_mut() else {
         return;
     };
-    if obj.contains_key("usage") {
-        return; // provider-carried usage always wins
-    }
     let Some(path) = obj
         .get("transcript_path")
         .and_then(serde_json::Value::as_str)
@@ -976,19 +974,43 @@ fn enrich_native_usage(raw: &mut rift_shadow::hooks::RawHook) {
     let Some(turn) = turn_usage_from_tail(&tail) else {
         return;
     };
-    let mut usage = serde_json::Map::new();
-    for (key, count) in [
-        ("input_tokens", turn.usage.input),
-        ("output_tokens", turn.usage.output),
-        ("cache_read_input_tokens", turn.usage.cache_read),
-        ("cache_creation_input_tokens", turn.usage.cache_write),
-    ] {
-        if let Some(n) = count {
-            usage.insert(key.to_owned(), n.into());
+
+    if raw.verb == "Stop" && !obj.contains_key("usage") {
+        let mut usage = serde_json::Map::new();
+        for (key, count) in [
+            ("input_tokens", turn.usage.input),
+            ("output_tokens", turn.usage.output),
+            ("cache_read_input_tokens", turn.usage.cache_read),
+            ("cache_creation_input_tokens", turn.usage.cache_write),
+        ] {
+            if let Some(n) = count {
+                usage.insert(key.to_owned(), n.into());
+            }
+        }
+        obj.insert("usage".to_owned(), usage.into());
+    }
+
+    if !obj.contains_key("context_usage") {
+        if let Some(context) = &turn.main_context {
+            let mut usage = serde_json::Map::new();
+            for (key, count) in [
+                ("input_tokens", context.usage.input),
+                ("output_tokens", context.usage.output),
+                ("cache_read_input_tokens", context.usage.cache_read),
+                ("cache_creation_input_tokens", context.usage.cache_write),
+            ] {
+                if let Some(n) = count {
+                    usage.insert(key.to_owned(), n.into());
+                }
+            }
+            obj.insert("context_usage".to_owned(), usage.into());
         }
     }
-    obj.insert("usage".to_owned(), usage.into());
-    if let Some(model) = turn.model {
+    if let Some(model) = turn
+        .main_context
+        .and_then(|context| context.model)
+        .or(turn.model)
+    {
         obj.entry("model".to_owned())
             .or_insert_with(|| model.into());
     }
@@ -1420,5 +1442,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(work_tree_from_git_dir(&wt_git), Some(linked_wt));
+    }
+
+    #[test]
+    fn claude_transcript_enrichment_separates_context_from_turn_spend() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("session.jsonl");
+        let lines = [
+            serde_json::json!({"type":"user","message":{"content":"go"}}),
+            serde_json::json!({"type":"assistant","isSidechain":false,"message":{"model":"claude-fable-5","usage":{"input_tokens":10,"output_tokens":1}}}),
+            serde_json::json!({"type":"assistant","isSidechain":true,"message":{"model":"claude-fable-5","usage":{"input_tokens":900_000,"output_tokens":100_000}}}),
+            serde_json::json!({"type":"assistant","isSidechain":false,"message":{"model":"claude-fable-5","usage":{"input_tokens":20,"output_tokens":2,"cache_read_input_tokens":30}}}),
+        ]
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(&transcript, lines).unwrap();
+        let mut raw = rift_shadow::hooks::RawHook {
+            agent: rift_shadow::hooks::AgentId::CLAUDE_CODE,
+            verb: "Stop".into(),
+            session: "native".into(),
+            turn: None,
+            occurred_at_ms: 1,
+            payload: serde_json::json!({"transcript_path": transcript}),
+        };
+        enrich_native_usage(&mut raw);
+        assert_eq!(
+            raw.payload
+                .pointer("/usage/input_tokens")
+                .and_then(serde_json::Value::as_u64),
+            Some(900_030)
+        );
+        assert_eq!(
+            raw.payload
+                .pointer("/context_usage/input_tokens")
+                .and_then(serde_json::Value::as_u64),
+            Some(20)
+        );
+        assert_eq!(
+            raw.payload
+                .pointer("/context_usage/cache_read_input_tokens")
+                .and_then(serde_json::Value::as_u64),
+            Some(30)
+        );
+        assert_eq!(
+            raw.payload.get("model").and_then(serde_json::Value::as_str),
+            Some("claude-fable-5")
+        );
     }
 }

@@ -12,12 +12,9 @@
 //! never a panic and never a silent "quiet"; files over [`MAX_CACHE_BYTES`]
 //! are treated as corrupt rather than parsed.
 //!
-//! [`active_sessions`] is **the** single active-sessions query (PRD-M4 user
-//! story 6): both of its consumers — the column-3 *threads section* and the
-//! nic-gauge *thread badge* (W4, M4-14/M4-15) — call it and nothing else, so
-//! the two can never disagree. [`sessions_detail`] is the same single pass,
-//! additionally surfacing the **newest live** session's id — the anchor the
-//! session-scoped panel metrics hang their event-anchored span on (ADR-0047).
+//! [`sessions_detail`] is the single active-session cache pass. It returns the
+//! badge signal plus every live native identity so the atomic System feed can
+//! resolve scope without selecting a misleading fallback.
 
 use std::path::Path;
 
@@ -48,8 +45,7 @@ const LIVE_STATES: &[&str] = &["active", "compacting", "ending"];
 /// ([`SessionsRead`], unchanged contract) plus the id of the **newest live**
 /// session — greatest `updated_at_ms`, ties broken toward the greater id so
 /// the pick is deterministic. The id anchors the session-scoped panel
-/// metrics (ADR-0047); the badge feeds the status truth table and the
-/// gauge/threads pair exactly as before.
+/// metrics (ADR-0047); the badge also feeds the status truth table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionsDetail {
     /// The active-sessions badge signal.
@@ -58,6 +54,23 @@ pub struct SessionsDetail {
     /// corrupt read, or when the winning cache carries no id (leniency: an
     /// id-less cache still counts toward the badge but cannot anchor).
     pub newest_live: Option<String>,
+    /// Every live cache that carries both identity halves, sorted
+    /// deterministically by update time then identity.
+    pub identities: Vec<LiveSessionIdentity>,
+    /// Live caches that count toward the badge but cannot be resolved because
+    /// either the native session id or adapter name is absent.
+    pub unresolved: u16,
+}
+
+/// Identity facts retained from one live top-level capture-session cache.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LiveSessionIdentity {
+    /// Adapter name (`claude-code`, ...).
+    pub agent: String,
+    /// Adapter-native session id.
+    pub native_session_id: String,
+    /// Cache update time in epoch milliseconds.
+    pub updated_at_ms: i64,
 }
 
 /// **The** single active-sessions query: distinct live sessions for the repo
@@ -84,6 +97,8 @@ pub fn sessions_detail(git_dir: &Path, now_ms: i64) -> SessionsDetail {
     let corrupt = SessionsDetail {
         read: SessionsRead::Corrupt,
         newest_live: None,
+        identities: Vec::new(),
+        unresolved: 0,
     };
     let dir = git_dir.join(SESSIONS_DIR);
     let entries = match std::fs::read_dir(&dir) {
@@ -92,6 +107,8 @@ pub fn sessions_detail(git_dir: &Path, now_ms: i64) -> SessionsDetail {
             return SessionsDetail {
                 read: SessionsRead::Ok(None),
                 newest_live: None,
+                identities: Vec::new(),
+                unresolved: 0,
             }
         }
         Err(_) => return corrupt, // exists but unlistable
@@ -100,6 +117,8 @@ pub fn sessions_detail(git_dir: &Path, now_ms: i64) -> SessionsDetail {
     let mut since_ms = i64::MAX;
     // The newest live entry seen so far: (updated_at_ms, session_id).
     let mut newest: Option<(i64, String)> = None;
+    let mut identities = Vec::new();
+    let mut unresolved = 0u16;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
@@ -118,11 +137,18 @@ pub fn sessions_detail(git_dir: &Path, now_ms: i64) -> SessionsDetail {
                 if cache.live && fresh {
                     live = live.saturating_add(1);
                     since_ms = since_ms.min(cache.updated_at_ms);
-                    if let Some(id) = cache.session_id {
-                        let candidate = (cache.updated_at_ms, id);
+                    if let (Some(id), Some(agent)) = (cache.session_id, cache.agent) {
+                        let candidate = (cache.updated_at_ms, id.clone());
                         if newest.as_ref().is_none_or(|best| candidate > *best) {
                             newest = Some(candidate);
                         }
+                        identities.push(LiveSessionIdentity {
+                            agent,
+                            native_session_id: id,
+                            updated_at_ms: cache.updated_at_ms,
+                        });
+                    } else {
+                        unresolved = unresolved.saturating_add(1);
                     }
                 }
             }
@@ -133,14 +159,25 @@ pub fn sessions_detail(git_dir: &Path, now_ms: i64) -> SessionsDetail {
         return SessionsDetail {
             read: SessionsRead::Ok(None),
             newest_live: None,
+            identities: Vec::new(),
+            unresolved: 0,
         };
     }
+    identities.sort_by(|a, b| {
+        (a.updated_at_ms, &a.agent, &a.native_session_id).cmp(&(
+            b.updated_at_ms,
+            &b.agent,
+            &b.native_session_id,
+        ))
+    });
     SessionsDetail {
         read: SessionsRead::Ok(Some(LiveSessions {
             active_sessions: live,
             since_ms,
         })),
         newest_live: newest.map(|(_, id)| id),
+        identities,
+        unresolved,
     }
 }
 
@@ -151,6 +188,8 @@ struct CacheFacts {
     /// The cache's `session_id`, when present — the metrics anchor. Optional
     /// by leniency: only `state` + `updated_at_ms` are *required*.
     session_id: Option<String>,
+    /// Adapter name, optional under the lenient cache contract.
+    agent: Option<String>,
 }
 
 /// Parse one cache file's bytes, leniently and totally: unknown fields are
@@ -165,10 +204,12 @@ fn parse_cache(bytes: &[u8]) -> Option<CacheFacts> {
         .get("session_id")
         .and_then(|v| v.as_str())
         .map(str::to_owned);
+    let agent = obj.get("agent").and_then(|v| v.as_str()).map(str::to_owned);
     Some(CacheFacts {
         live: LIVE_STATES.contains(&state),
         updated_at_ms,
         session_id,
+        agent,
     })
 }
 
@@ -248,6 +289,8 @@ mod tests {
             }))
         );
         assert_eq!(detail.newest_live.as_deref(), Some("a-id"));
+        assert_eq!(detail.identities.len(), 2);
+        assert_eq!(detail.unresolved, 0);
     }
 
     #[test]
@@ -270,6 +313,8 @@ mod tests {
             }))
         );
         assert_eq!(detail.newest_live, None);
+        assert!(detail.identities.is_empty());
+        assert_eq!(detail.unresolved, 1);
     }
 
     #[test]

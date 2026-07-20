@@ -23,7 +23,9 @@ use rift_store::{
 };
 
 use crate::ids;
-use crate::project::{payload_facts, project_event, project_usage, ProjectionCtx};
+use crate::project::{
+    payload_facts, project_event, project_main_context, project_usage, ProjectionCtx,
+};
 
 /// The checkpoint branch the bridge ingests.
 pub const CHECKPOINT_BRANCH: &str = "rift/checkpoints/v1";
@@ -288,6 +290,12 @@ pub async fn ingest_from_substrate(
                 .and_then(|a| a.usage(&rec.verb, &rec.payload))
             {
                 project_usage(store, &ev, &facts, ctx, &usage, now_ms).await?;
+            }
+            if let Some(usage) = registry
+                .get(&agent_id)
+                .and_then(|a| a.main_context_usage(&rec.verb, &rec.payload))
+            {
+                project_main_context(store, &ev, &rec.verb, &facts, ctx, &usage).await?;
             }
         }
         report.shards_projected += 1;

@@ -1,10 +1,8 @@
 //! Column 3 — the three live panels (M55-11/12/13, ADR-0024 §4): the M4 six
 //! sections regroup into **token usage** (the four-class categorical chart + Σ
-//! total + read fraction + five class-coloured stat tiles), **system** (the
-//! dumbometer donut + four domain metrics), and **recall** (savings % + tokens
-//! avoided, MCP calls, threads). None of the M4 data is dropped — the token
-//! time-series moves into the burn-rate metric, the breakdown becomes the
-//! chart+tiles, nic becomes the donut, savings/calls/threads compose recall.
+//! total + read fraction + five class-coloured stat tiles), **system** (context
+//! pressure + recent activity + projection storage), and **recall** (savings %
+//! + tokens avoided and process-scoped MCP call threads).
 //!
 //! Each panel is an individually-bordered themed card, sized by the shared
 //! [`crate::stack`] solver and **honest about absence** (user stories 5/9): a
@@ -34,9 +32,9 @@ pub enum SectionId {
     /// Token usage: the four-class categorical chart + Σ total + the read
     /// fraction + five class-coloured stat tiles.
     TokenUsage,
-    /// System: the dumbometer donut + the four domain metrics.
+    /// System: context pressure + recent activity + projection storage.
     System,
-    /// Recall: savings % + tokens avoided, MCP calls, threads.
+    /// Recall: savings % + tokens avoided and process-scoped MCP call threads.
     Recall,
 }
 
@@ -235,8 +233,8 @@ pub enum NicView {
     UnknownModel {
         /// The model id whose window is missing from the reference table.
         model: String,
-        /// Distinct active sessions (the thread badge).
-        threads: u16,
+        /// Distinct active top-level capture sessions.
+        active_sessions: u16,
     },
     /// A measured reading.
     Reading(NicReading),
@@ -247,13 +245,13 @@ pub enum NicView {
 pub struct NicReading {
     /// Percent of the window in use (0..=100).
     pub pct: u8,
-    /// The band label (Smart/Capable/Thinking/Strained/Dumb).
+    /// Neutral pressure band (Clear/Moderate/High/Very High/Critical).
     pub band: &'static str,
     /// The model the reading is for.
     pub model: String,
-    /// Distinct active sessions (the thread badge; the same query as the
-    /// Threads section by construction — user story 6).
-    pub threads: u16,
+    /// Distinct active top-level capture sessions (the same query as the
+    /// active-session badge by construction).
+    pub active_sessions: u16,
 }
 
 /// A recall-derived section: the three honest states (user story 9).
@@ -305,9 +303,9 @@ pub struct ThreadCallSeries {
     pub rate: Vec<f64>,
 }
 
-/// The threads section: distinct active sessions in the recent window.
+/// Distinct active top-level capture sessions.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub enum ThreadsView {
+pub enum ActiveSessionsView {
     /// The session cache shows nothing live.
     #[default]
     NoSessions,
@@ -315,29 +313,42 @@ pub enum ThreadsView {
     Count(u16),
 }
 
-/// The four **domain** metrics of the system panel (M55-07/12, ADR-0024 §4;
-/// rates reshaped by ADR-0047): each honest about absence — a missing
-/// projection or disabled recall renders its placeholder, never a fake zero.
-/// Domain facts about *Rift*, not host telemetry. The rates are computed over
-/// the **current session's** event-anchored span, so they move only when the
-/// transcript moves and hold exactly while idle.
+/// The auditable facts carried by the atomic System-panel feed.
+///
+/// Recent activity is event-anchored over five minutes, context usage comes
+/// from a separate main-chain observation, and storage is the capture + Recall
+/// projection size. Missing authorities remain `None`; no value is fabricated.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PanelMetrics {
-    /// Capture rate — the session's captured events per minute of its span
-    /// (`None` = no readable projection).
-    pub capture_per_min: Option<f64>,
-    /// Tokens burn rate — the session's tokens per minute of its span
-    /// (`None` = no token facts).
-    pub tokens_per_min: Option<f64>,
+    /// Captured canonical events in the event-anchored five-minute window.
+    pub events_5m: Option<u64>,
+    /// Whole-turn token spend in the same five-minute window.
+    pub tokens_5m: Option<u64>,
+    /// Terminal MCP invocations in the same window.
+    pub mcp_calls_5m: Option<u64>,
     /// Projection size — on-disk bytes of the capture + recall projections
     /// (`None` = no projection on disk).
     pub projection_bytes: Option<u64>,
-    /// Recall load — MCP serves inside the session span, per hour of span
-    /// (`None` = recall disabled / no recall.db).
-    pub recall_per_hour: Option<f64>,
-    /// Whether the rates anchor to the LIVE session. `false` = held from the
-    /// most recent finished session — the rows render dimmed (ADR-0047).
-    pub session_live: bool,
+    /// Tokens in the selected main-chain context observation.
+    pub context_used: Option<u64>,
+    /// Model window for that observation (`None` for an unknown model).
+    pub context_window: Option<u64>,
+    /// Whether the context observation belongs to current or previous work.
+    pub context_scope: SystemScope,
+    /// Which session set the five-minute activity facts describe.
+    pub activity_scope: SystemScope,
+}
+
+/// Explicit scope for System-panel facts; no silent fallback exists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SystemScope {
+    /// Aggregated across all currently live top-level capture sessions.
+    CurrentSessions,
+    /// Held from the most recently completed session.
+    LastCompletedSession,
+    /// Identity or data needed to establish scope is unavailable.
+    #[default]
+    Unavailable,
 }
 
 /// A single trailing-week day of activity: one grouped bar of the three capture
@@ -388,8 +399,8 @@ pub struct Col3 {
     pub savings: RecallView<SavingsData>,
     /// Recall MCP calls.
     pub calls: RecallView<CallsData>,
-    /// Threads.
-    pub threads: ThreadsView,
+    /// Top-level capture sessions currently live.
+    pub active_sessions: ActiveSessionsView,
     /// The system panel's four domain metrics (M55-07). Headlines — taken from
     /// the target immediately, never tweened.
     pub metrics: PanelMetrics,
@@ -405,7 +416,7 @@ pub struct Col3 {
 //
 // The **nic-gauge does not tween**: its `pct` is *both* the gauge fill and the
 // title headline (`"{pct}% {band}"`), so easing it would desync the number from
-// its band (e.g. show "80% Smart" mid-transition). The meter snaps to each
+// its band (e.g. show "80% Clear" mid-transition). The meter snaps to each
 // reading — consistent, and standard for a small horizontal gauge.
 
 /// Linear interpolation of two `f64`s at `t ∈ [0, 1]`.
@@ -505,7 +516,7 @@ pub(crate) fn interpolate(from: &Col3, to: &Col3, t: f32) -> Col3 {
                 hidden_threads: b.hidden_threads,
             }
         }),
-        threads: to.threads.clone(),
+        active_sessions: to.active_sessions.clone(),
         // Domain metrics are headlines — taken from the target immediately.
         metrics: to.metrics.clone(),
     }
@@ -829,19 +840,24 @@ fn draw_system_panel(
     frame: &mut Frame,
 ) {
     let inner = panel_frame(theme, Section::System, focused, "system", rect, frame);
+    let active = match col3.active_sessions {
+        ActiveSessionsView::Count(count) => count,
+        ActiveSessionsView::NoSessions => 0,
+    };
+    let active_label = active_sessions_label(active);
     if collapsed {
         let head = match &col3.nic {
-            NicView::Reading(r) => format!("{}% {}  ·  {} threads", r.pct, r.band, r.threads),
-            NicView::UnknownModel { threads, .. } => format!("? unknown  ·  {threads} threads"),
-            NicView::NoData => "(no model calls yet)".to_string(),
+            NicView::Reading(r) => format!("{}% {}  ·  {active_label}", r.pct, r.band),
+            NicView::UnknownModel { .. } => format!("context ?  ·  {active_label}"),
+            NicView::NoData => format!("context unavailable  ·  {active_label}"),
         };
         body(frame, inner, 0, &head, theme.body());
         return;
     }
     // The donut occupies the top; the domain metrics the bottom rows — plus,
     // where the panel is tall enough, one hint row naming the rates' scope
-    // (ADR-0047): `session · live` while the live session anchors them,
-    // `session · idle` (dim) while a finished session's rates are held.
+    // current-session facts are labelled directly; completed-session facts
+    // hold dimmed without ever being called idle.
     let m = &col3.metrics;
     let hint = inner.h >= 8;
     let metric_rows = 4u16 + u16::from(hint);
@@ -852,23 +868,26 @@ fn draw_system_panel(
         w: inner.w,
         h: gauge_h,
     };
-    draw_dumbometer(&col3.nic, theme, unicode, gauge_rect, backend, frame);
+    draw_context_pressure(
+        &col3.nic, m, active, theme, unicode, gauge_rect, backend, frame,
+    );
     let base = inner.h.saturating_sub(metric_rows);
     if hint {
         let sep = if unicode { "·" } else { "-" };
-        let (word, style) = if m.session_live {
-            ("live", theme.body())
-        } else {
-            ("idle", theme.dim())
+        let (word, style) = match m.activity_scope {
+            SystemScope::CurrentSessions => ("current sessions", theme.body()),
+            SystemScope::LastCompletedSession => ("last completed session", theme.dim()),
+            SystemScope::Unavailable => ("session unavailable", theme.dim()),
         };
         body(
             frame,
             Rect {
                 x: inner.x + 1,
+                w: inner.w.saturating_sub(1),
                 ..inner
             },
             base,
-            &format!("session {sep} {word}"),
+            &format!("scope {sep} {word}"),
             style,
         );
     }
@@ -877,20 +896,24 @@ fn draw_system_panel(
     // an absence); the projection size is instantaneous and always body.
     let rows = [
         (
-            "capture",
-            m.capture_per_min.map(|v| format!("{v:.1}/min")),
-            !m.session_live,
+            "events · 5m",
+            m.events_5m.map(|value| value.to_string()),
+            m.activity_scope != SystemScope::CurrentSessions,
         ),
         (
-            "burn",
-            m.tokens_per_min.map(|v| format!("{}/min", fmt_km(v))),
-            !m.session_live,
+            "tokens · 5m",
+            m.tokens_5m.map(|value| fmt_km(value as f64)),
+            m.activity_scope != SystemScope::CurrentSessions,
         ),
-        ("projection", m.projection_bytes.map(fmt_bytes), false),
         (
-            "recall",
-            m.recall_per_hour.map(|v| format!("{v:.1}/hr")),
-            !m.session_live,
+            "MCP calls · 5m",
+            m.mcp_calls_5m.map(|value| value.to_string()),
+            m.activity_scope != SystemScope::CurrentSessions,
+        ),
+        (
+            "projection storage",
+            m.projection_bytes.map(fmt_bytes),
+            false,
         ),
     ];
     let rows_base = base + u16::from(hint);
@@ -909,6 +932,7 @@ fn draw_system_panel(
             frame,
             Rect {
                 x: inner.x + 1,
+                w: inner.w.saturating_sub(1),
                 ..inner
             },
             dy,
@@ -923,11 +947,14 @@ fn value_present(text: &str) -> bool {
     !text.ends_with('—')
 }
 
-/// Draw the dumbometer: a radial donut on SUBCELL-capable backends, degrading
+/// Draw context pressure: a radial donut on SUBCELL-capable backends, degrading
 /// to the shipped horizontal gauge bar elsewhere; the unknown-model indicator
 /// and the no-data placeholder render explicitly (never a percentage; ADR-0012).
-fn draw_dumbometer(
+#[allow(clippy::too_many_arguments)]
+fn draw_context_pressure(
     nic: &NicView,
+    metrics: &PanelMetrics,
+    active_sessions: u16,
     theme: Theme,
     unicode: bool,
     rect: Rect,
@@ -938,77 +965,192 @@ fn draw_dumbometer(
         return;
     }
     match nic {
-        NicView::NoData => body(frame, rect, rect.h / 2, "(no model calls yet)", theme.dim()),
-        NicView::UnknownModel { model, threads } => {
-            let q = Icon::CheckPending.glyph(unicode);
+        NicView::NoData => {
+            body(frame, rect, rect.h / 2, "context unavailable", theme.dim());
             body(
                 frame,
                 rect,
-                rect.h / 2,
-                &format!("{q} unknown window: {model}"),
+                rect.h / 2 + 1,
+                &format!("[{}]", active_sessions_label(active_sessions)),
+                theme.body(),
+            );
+        }
+        NicView::UnknownModel { model, .. } => {
+            let q = Icon::CheckPending.glyph(unicode);
+            body(frame, rect, 0, &format!("{q} {model}"), theme.dim());
+            body(
+                frame,
+                rect,
+                1,
+                &format!("{} / unknown", context_used(metrics)),
                 theme.dim(),
             );
             body(
                 frame,
                 rect,
-                rect.h / 2 + 1,
-                &format!("[{threads} threads]"),
+                2,
+                context_scope_label(metrics.context_scope),
+                theme.dim(),
+            );
+            body(
+                frame,
+                rect,
+                3,
+                &format!("[{}]", active_sessions_label(active_sessions)),
                 theme.body(),
             );
         }
         NicView::Reading(r) => {
-            let colour = theme::band_color(r.band);
-            let subcell = backend.capabilities().contains(Capabilities::SUBCELL);
-            if subcell && rect.h >= 5 {
-                // The radial arc via the plot seam, centered.
-                let samples = rect
-                    .w
-                    .saturating_mul(rect.h)
-                    .saturating_mul(2)
-                    .clamp(16, 720);
-                let pts = plot::donut_points(r.pct, samples);
-                backend.plot(&pts, rect, &Paint::Solid(Style::fg(colour)), frame);
-                // Centered percent + band; the thread badge below.
-                center(
-                    frame,
-                    rect,
-                    rect.h / 2,
-                    &format!("{}%", r.pct),
-                    theme.tile_value(colour),
-                );
-                center(frame, rect, rect.h / 2 + 1, r.band, theme.dim());
-                center(
-                    frame,
-                    rect,
-                    rect.h.saturating_sub(1),
-                    &format!("[{} threads]", r.threads),
-                    theme.body(),
-                );
+            if backend.capabilities().contains(Capabilities::SUBCELL) && rect.h >= 5 {
+                draw_context_radial(r, metrics, active_sessions, theme, rect, backend, frame);
             } else {
-                // Degrade: the shipped horizontal gauge bar.
-                body(
-                    frame,
-                    rect,
-                    0,
-                    &format!("{}% {}  [{} threads]", r.pct, r.band, r.threads),
-                    theme.body(),
-                );
-                if rect.h > 1 {
-                    let bar = Rect {
-                        x: rect.x,
-                        y: rect.y + 1,
-                        w: rect.w,
-                        h: rect.h - 1,
-                    };
-                    let pts = plot::gauge_points(
-                        f32::from(r.pct) / 100.0,
-                        bar.w.saturating_mul(2).max(2),
-                        bar.h.saturating_mul(4).clamp(1, 4),
-                    );
-                    backend.plot(&pts, bar, &Paint::HRamp(&theme::GAUGE_RAMP), frame);
-                }
+                draw_context_bar(r, metrics, active_sessions, theme, rect, backend, frame);
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_context_radial(
+    reading: &NicReading,
+    metrics: &PanelMetrics,
+    active_sessions: u16,
+    theme: Theme,
+    rect: Rect,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+) {
+    let colour = theme::band_color(reading.band);
+    let samples = rect
+        .w
+        .saturating_mul(rect.h)
+        .saturating_mul(2)
+        .clamp(16, 720);
+    let pts = plot::donut_points(reading.pct, samples);
+    backend.plot(&pts, rect, &Paint::Solid(Style::fg(colour)), frame);
+    center(
+        frame,
+        rect,
+        0,
+        &format!(
+            "{} · {}/{}",
+            reading.model,
+            context_used(metrics),
+            metrics
+                .context_window
+                .map_or_else(|| "?".to_string(), |v| fmt_km(v as f64))
+        ),
+        if metrics.context_scope == SystemScope::CurrentSessions {
+            theme.body()
+        } else {
+            theme.dim()
+        },
+    );
+    center(
+        frame,
+        rect,
+        1,
+        context_scope_label(metrics.context_scope),
+        theme.dim(),
+    );
+    center(
+        frame,
+        rect,
+        rect.h / 2,
+        &format!("{}%", reading.pct),
+        theme.tile_value(colour),
+    );
+    center(frame, rect, rect.h / 2 + 1, reading.band, theme.dim());
+    center(
+        frame,
+        rect,
+        rect.h.saturating_sub(1),
+        &format!("[{}]", active_sessions_label(active_sessions)),
+        theme.body(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_context_bar(
+    reading: &NicReading,
+    metrics: &PanelMetrics,
+    active_sessions: u16,
+    theme: Theme,
+    rect: Rect,
+    backend: &mut dyn RenderBackend,
+    frame: &mut Frame,
+) {
+    body(
+        frame,
+        rect,
+        0,
+        &format!("{}% {} · {}", reading.pct, reading.band, reading.model),
+        theme.body(),
+    );
+    if rect.h > 1 {
+        body(
+            frame,
+            rect,
+            1,
+            &format!(
+                "{}/{} · {}",
+                context_used(metrics),
+                metrics
+                    .context_window
+                    .map_or_else(|| "?".to_string(), |v| fmt_km(v as f64)),
+                context_scope_label(metrics.context_scope)
+            ),
+            if metrics.context_scope == SystemScope::CurrentSessions {
+                theme.body()
+            } else {
+                theme.dim()
+            },
+        );
+    }
+    if rect.h > 2 {
+        body(
+            frame,
+            rect,
+            2,
+            &format!("[{}]", active_sessions_label(active_sessions)),
+            theme.body(),
+        );
+    }
+    if rect.h > 3 {
+        let bar = Rect {
+            x: rect.x,
+            y: rect.y + 3,
+            w: rect.w,
+            h: rect.h - 3,
+        };
+        let pts = plot::gauge_points(
+            f32::from(reading.pct) / 100.0,
+            bar.w.saturating_mul(2).max(2),
+            bar.h.saturating_mul(4).clamp(1, 4),
+        );
+        backend.plot(&pts, bar, &Paint::HRamp(&theme::GAUGE_RAMP), frame);
+    }
+}
+
+fn context_used(metrics: &PanelMetrics) -> String {
+    metrics
+        .context_used
+        .map_or_else(|| "?".to_string(), |value| fmt_km(value as f64))
+}
+
+fn active_sessions_label(count: u16) -> String {
+    if count == 1 {
+        "1 active session".to_string()
+    } else {
+        format!("{count} active sessions")
+    }
+}
+
+fn context_scope_label(scope: SystemScope) -> &'static str {
+    match scope {
+        SystemScope::CurrentSessions => "current sessions",
+        SystemScope::LastCompletedSession => "previous session",
+        SystemScope::Unavailable => "session unavailable",
     }
 }
 
@@ -1065,7 +1207,7 @@ fn draw_recall_panel(
                 frame,
                 inner,
                 1,
-                &format!("{call_total} calls · {sessions} active sessions"),
+                &format!("{call_total} calls · {sessions}"),
                 theme.body(),
             );
         } else {
@@ -1076,13 +1218,7 @@ fn draw_recall_panel(
                 &format!("{call_total} calls"),
                 theme.body(),
             );
-            body(
-                frame,
-                inner,
-                2,
-                &format!("{sessions} active sessions"),
-                theme.body(),
-            );
+            body(frame, inner, 2, &sessions, theme.body());
         }
         return;
     }
@@ -1097,7 +1233,7 @@ fn draw_recall_panel(
         frame,
         inner,
         1,
-        &format!("{call_total} MCP calls · {sessions} active sessions{hidden_text}"),
+        &format!("{call_total} MCP calls · {sessions}{hidden_text}"),
         theme.body(),
     );
 
@@ -1162,9 +1298,9 @@ fn recall_headlines(col3: &Col3) -> (String, u64, usize, String) {
         RecallView::Data(calls) => (calls.total, calls.hidden_threads),
         RecallView::Quiet | RecallView::Disabled => (0, 0),
     };
-    let sessions = match &col3.threads {
-        ThreadsView::Count(count) => count.to_string(),
-        ThreadsView::NoSessions => "0".to_string(),
+    let sessions = match &col3.active_sessions {
+        ActiveSessionsView::Count(count) => active_sessions_label(*count),
+        ActiveSessionsView::NoSessions => active_sessions_label(0),
     };
     (savings, call_total, hidden, sessions)
 }
@@ -1449,16 +1585,19 @@ mod tests {
         // changes across the gauge crate's boundaries (49/50, 94/95).
         assert!(plot::donut_points(50, 200).len() > plot::donut_points(20, 200).len());
         assert!(plot::donut_points(95, 200).len() >= plot::donut_points(94, 200).len());
-        // The band colour steps at the gauge crate's boundaries (49→Smart /
-        // 50→Capable, 94→Strained / 95→Dumb); the correspondence to
+        // The band colour steps at the gauge crate's boundaries (49→Clear /
+        // 50→Moderate, 94→Very High / 95→Critical); the correspondence to
         // `Band::from_pct` is proven in the data-plane gate leg (nic-gauge dep).
-        assert_ne!(theme::band_color("Smart"), theme::band_color("Capable"));
-        assert_ne!(theme::band_color("Strained"), theme::band_color("Dumb"));
+        assert_ne!(theme::band_color("Clear"), theme::band_color("Moderate"));
+        assert_ne!(
+            theme::band_color("Very High"),
+            theme::band_color("Critical")
+        );
         // The unknown-model indicator renders explicitly, never a percentage.
         let col3 = Col3 {
             nic: NicView::UnknownModel {
                 model: "mystery".into(),
-                threads: 1,
+                active_sessions: 1,
             },
             ..Col3::default()
         };
@@ -1477,59 +1616,84 @@ mod tests {
     fn system_metrics_render_placeholders_for_absent_sources() {
         let col3 = Col3 {
             metrics: PanelMetrics {
-                capture_per_min: Some(2.5),
-                tokens_per_min: None,
+                events_5m: Some(3),
+                tokens_5m: None,
                 projection_bytes: Some(4096),
-                recall_per_hour: None,
-                session_live: true,
+                mcp_calls_5m: None,
+                activity_scope: SystemScope::CurrentSessions,
+                ..PanelMetrics::default()
             },
             ..Col3::default()
         };
         let text = text_of(&draw_to(&col3, 40, 24));
-        assert!(text.contains("capture: 2.5/min"));
+        assert!(text.contains("events · 5m: 3"));
         assert!(
-            text.contains("burn: —"),
+            text.contains("tokens · 5m: —"),
             "an absent metric is an honest dash"
         );
-        assert!(text.contains("projection: 4KB"));
-        assert!(text.contains("recall: —"));
+        assert!(text.contains("projection storage: 4KB"));
+        assert!(text.contains("MCP calls · 5m: —"));
     }
 
     #[test]
-    fn system_panel_hints_the_rates_session_scope() {
-        // ADR-0047: the hint row names the rates' scope — `live` while the
-        // live session anchors them, `idle` while a finished session's rates
-        // are held (and the rate rows render dimmed). ASCII backend → the
-        // `-` separator.
+    fn system_panel_hints_the_activity_scope() {
         let live = Col3 {
             metrics: PanelMetrics {
-                capture_per_min: Some(2.5),
-                session_live: true,
+                events_5m: Some(3),
+                activity_scope: SystemScope::CurrentSessions,
                 ..PanelMetrics::default()
             },
             ..Col3::default()
         };
         let text = text_of(&draw_to(&live, 40, 30));
         assert!(
-            text.contains("session - live"),
-            "the live hint shows:\n{text}"
+            text.contains("scope - current sessions"),
+            "the current hint shows:\n{text}"
         );
 
         let held = Col3 {
             metrics: PanelMetrics {
-                capture_per_min: Some(2.5),
-                session_live: false,
+                events_5m: Some(3),
+                activity_scope: SystemScope::LastCompletedSession,
                 ..PanelMetrics::default()
             },
             ..Col3::default()
         };
         let text = text_of(&draw_to(&held, 40, 30));
         assert!(
-            text.contains("session - idle"),
+            text.contains("scope - last completed session"),
             "the held hint shows:\n{text}"
         );
         // The held rates themselves still show (a stale marker, not absence).
-        assert!(text.contains("capture: 2.5/min"));
+        assert!(text.contains("events · 5m: 3"));
+    }
+
+    #[test]
+    fn held_context_is_dimmed_and_labelled_previous_session() {
+        let col3 = Col3 {
+            nic: NicView::Reading(NicReading {
+                pct: 25,
+                band: "Clear",
+                model: "claude-fable-5".into(),
+                active_sessions: 0,
+            }),
+            metrics: PanelMetrics {
+                context_used: Some(50_000),
+                context_window: Some(200_000),
+                context_scope: SystemScope::LastCompletedSession,
+                ..PanelMetrics::default()
+            },
+            ..Col3::default()
+        };
+        let text = text_of(&draw_to(&col3, 48, 30));
+        assert!(text.contains("previous session"), "held label:\n{text}");
+        assert!(text.contains("0 active sessions"));
+    }
+
+    #[test]
+    fn active_session_badge_pluralizes_honestly() {
+        assert_eq!(active_sessions_label(1), "1 active session");
+        assert_eq!(active_sessions_label(2), "2 active sessions");
     }
 
     #[test]
@@ -1537,14 +1701,14 @@ mod tests {
         // A short panel drops the hint row, never a metric row.
         let col3 = Col3 {
             metrics: PanelMetrics {
-                capture_per_min: Some(2.5),
-                session_live: true,
+                events_5m: Some(3),
+                activity_scope: SystemScope::CurrentSessions,
                 ..PanelMetrics::default()
             },
             ..Col3::default()
         };
         let text = text_of(&draw_to(&col3, 40, 12));
-        assert!(text.contains("capture: 2.5/min"), "rows survive:\n{text}");
+        assert!(text.contains("events · 5m: 3"), "rows survive:\n{text}");
     }
 
     #[test]
@@ -1569,7 +1733,7 @@ mod tests {
                 }],
                 hidden_threads: 0,
             }),
-            threads: ThreadsView::Count(3),
+            active_sessions: ActiveSessionsView::Count(3),
             ..Col3::default()
         };
         let text = text_of(&draw_to(&data, 40, 24));
@@ -1728,18 +1892,18 @@ mod tests {
                 pct,
                 band,
                 model: "m".into(),
-                threads: 1,
+                active_sessions: 1,
             }),
             ..Col3::default()
         };
-        let from = reading(80, "Strained");
-        let to = reading(20, "Smart");
+        let from = reading(80, "High");
+        let to = reading(20, "Clear");
         assert!(
             !should_animate(&from, &to),
             "a nic reading change must not arm a tween"
         );
         // interpolate at any progress shows the TARGET reading verbatim — pct and
-        // band always agree, never "80% Smart".
+        // band always agree, never "80% Clear".
         for t in [0.0, 0.5, 1.0] {
             assert_eq!(interpolate(&from, &to, t).nic, to.nic);
         }

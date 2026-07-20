@@ -152,9 +152,9 @@ fn col3_with_data() -> rift_canopy::Col3 {
         }),
         nic: rift_canopy::NicView::Reading(rift_canopy::NicReading {
             pct: 62,
-            band: "Capable",
+            band: "Moderate",
             model: "claude-fable-5".into(),
-            threads: 2,
+            active_sessions: 2,
         }),
         savings: rift_canopy::RecallView::Data(rift_canopy::SavingsData {
             rate: vec![0.0, 400.0, 1200.0, 800.0, 2000.0, 1600.0],
@@ -175,8 +175,17 @@ fn col3_with_data() -> rift_canopy::Col3 {
             }],
             hidden_threads: 0,
         }),
-        threads: rift_canopy::ThreadsView::Count(2),
-        metrics: rift_canopy::PanelMetrics::default(),
+        active_sessions: rift_canopy::ActiveSessionsView::Count(2),
+        metrics: rift_canopy::PanelMetrics {
+            events_5m: Some(42),
+            tokens_5m: Some(12_400),
+            mcp_calls_5m: Some(7),
+            projection_bytes: Some(18_600_000),
+            context_used: Some(124_000),
+            context_window: Some(200_000),
+            context_scope: rift_canopy::SystemScope::CurrentSessions,
+            activity_scope: rift_canopy::SystemScope::CurrentSessions,
+        },
     }
 }
 
@@ -193,6 +202,22 @@ fn col3_text(col3: &rift_canopy::Col3, h: u16) -> String {
         false,
         area,
         0,
+        &mut b,
+        &mut f,
+    );
+    frame_text(&f)
+}
+
+fn system_text(col3: &rift_canopy::Col3, w: u16, h: u16, collapsed: bool) -> String {
+    let mut f = Frame::new(Size::new(w, h));
+    let mut b = AsciiBackend::new(Capabilities::empty());
+    rift_canopy::col3::draw_one(
+        col3,
+        rift_canopy::col3::SectionId::System,
+        false,
+        false,
+        collapsed,
+        f.rect(),
         &mut b,
         &mut f,
     );
@@ -248,13 +273,78 @@ fn golden_col3_unknown_model_and_quiet_recall() {
     let col3 = rift_canopy::Col3 {
         nic: rift_canopy::NicView::UnknownModel {
             model: "mystery-model-9000".into(),
-            threads: 1,
+            active_sessions: 1,
         },
         savings: rift_canopy::RecallView::Quiet,
         calls: rift_canopy::RecallView::Quiet,
+        metrics: rift_canopy::PanelMetrics {
+            context_used: Some(125),
+            context_window: None,
+            context_scope: rift_canopy::SystemScope::CurrentSessions,
+            ..col3_with_data().metrics
+        },
         ..col3_with_data()
     };
     insta::assert_snapshot!("col3_unknown_and_quiet", col3_text(&col3, 20));
+}
+
+#[test]
+fn golden_system_scope_and_responsive_states() {
+    let current = col3_with_data();
+    let completed = rift_canopy::Col3 {
+        nic: rift_canopy::NicView::Reading(rift_canopy::NicReading {
+            active_sessions: 0,
+            ..match current.nic.clone() {
+                rift_canopy::NicView::Reading(reading) => reading,
+                _ => unreachable!(),
+            }
+        }),
+        active_sessions: rift_canopy::ActiveSessionsView::NoSessions,
+        metrics: rift_canopy::PanelMetrics {
+            context_scope: rift_canopy::SystemScope::LastCompletedSession,
+            activity_scope: rift_canopy::SystemScope::LastCompletedSession,
+            ..current.metrics.clone()
+        },
+        ..current.clone()
+    };
+    let held = rift_canopy::Col3 {
+        metrics: rift_canopy::PanelMetrics {
+            context_scope: rift_canopy::SystemScope::LastCompletedSession,
+            activity_scope: rift_canopy::SystemScope::CurrentSessions,
+            ..current.metrics.clone()
+        },
+        ..current.clone()
+    };
+    let unavailable = rift_canopy::Col3 {
+        nic: rift_canopy::NicView::NoData,
+        metrics: rift_canopy::PanelMetrics {
+            projection_bytes: current.metrics.projection_bytes,
+            ..rift_canopy::PanelMetrics::default()
+        },
+        ..current.clone()
+    };
+    let unknown = rift_canopy::Col3 {
+        nic: rift_canopy::NicView::UnknownModel {
+            model: "future-model".into(),
+            active_sessions: 2,
+        },
+        metrics: rift_canopy::PanelMetrics {
+            context_window: None,
+            ..current.metrics.clone()
+        },
+        ..current.clone()
+    };
+    let snapshot = format!(
+        "CURRENT\n{}\n\nLAST COMPLETED\n{}\n\nHELD PREVIOUS\n{}\n\nUNAVAILABLE\n{}\n\nUNKNOWN MODEL\n{}\n\nNARROW\n{}\n\nCOLLAPSED\n{}",
+        system_text(&current, 36, 14, false),
+        system_text(&completed, 36, 14, false),
+        system_text(&held, 36, 14, false),
+        system_text(&unavailable, 36, 14, false),
+        system_text(&unknown, 36, 14, false),
+        system_text(&current, 24, 14, false),
+        system_text(&current, 36, 3, true),
+    );
+    insta::assert_snapshot!("system_scope_states", snapshot);
 }
 
 #[test]

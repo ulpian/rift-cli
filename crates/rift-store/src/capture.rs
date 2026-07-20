@@ -15,6 +15,107 @@ use rift_core::Result;
 
 use crate::{CanonicalStore, Value};
 
+/// Explicit mapping between one adapter-native session identity and the
+/// canonical capture-session row id shared by projection and Canopy.
+#[derive(Debug, Clone)]
+pub struct CaptureSessionIdentityRow {
+    /// Canonical capture-session row id.
+    pub session_id: String,
+    /// Adapter name such as `claude-code`.
+    pub agent: String,
+    /// Session id emitted by the adapter.
+    pub native_session_id: String,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a native-to-canonical capture-session identity (idempotent).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_capture_session_identity(
+    store: &impl CanonicalStore,
+    r: &CaptureSessionIdentityRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "capture_session_identity",
+            &["session_id", "agent", "native_session_id", "schema_version"],
+            &[
+                Value::text(r.session_id.clone()),
+                Value::text(r.agent.clone()),
+                Value::text(r.native_session_id.clone()),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
+/// A prospective main-chain context snapshot. Unlike [`TokenUsageRow`], this
+/// is one model context at one observable boundary, never whole-turn spend.
+#[derive(Debug, Clone)]
+pub struct MainContextObservationRow {
+    /// Content-addressed logical observation id.
+    pub observation_id: String,
+    /// Canonical capture-session row id.
+    pub session_id: String,
+    /// Provider model identifier.
+    pub model: String,
+    /// Observation valid-time in epoch milliseconds.
+    pub observed_at: i64,
+    /// Uncached input tokens currently in the context.
+    pub uncached_input: i64,
+    /// Cached-read input tokens currently in the context.
+    pub cached_input: i64,
+    /// Cache-creation tokens currently in the context.
+    pub cache_creation: i64,
+    /// Output tokens currently in the context.
+    pub output: i64,
+    /// Counter provenance, for example `provider_reported`.
+    pub counter_method: String,
+    /// Row schema version.
+    pub schema_version: i64,
+}
+
+/// Record a main-context observation (idempotent on its logical hook boundary).
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+pub async fn record_main_context_observation(
+    store: &impl CanonicalStore,
+    r: &MainContextObservationRow,
+) -> Result<bool> {
+    store
+        .insert_or_ignore(
+            "main_context_observation",
+            &[
+                "observation_id",
+                "session_id",
+                "model",
+                "observed_at",
+                "uncached_input",
+                "cached_input",
+                "cache_creation",
+                "output",
+                "counter_method",
+                "schema_version",
+            ],
+            &[
+                Value::text(r.observation_id.clone()),
+                Value::text(r.session_id.clone()),
+                Value::text(r.model.clone()),
+                Value::Int(r.observed_at),
+                Value::Int(r.uncached_input),
+                Value::Int(r.cached_input),
+                Value::Int(r.cache_creation),
+                Value::Int(r.output),
+                Value::text(r.counter_method.clone()),
+                Value::Int(r.schema_version),
+            ],
+        )
+        .await
+}
+
 /// A `file_revision` row: a `path@blob_oid` is one immutable, content-addressed
 /// fact (P2 S3 / db-design §4.4).
 #[derive(Debug, Clone)]

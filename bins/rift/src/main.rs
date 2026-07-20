@@ -395,8 +395,19 @@ impl ProvisionOutcome {
     }
 }
 
+/// The worktree root for repo-scoped legs: walk up from `start` through the
+/// rift-git discovery seam, so a subdirectory invocation reports the REPO,
+/// never a false-empty cwd (M6-13 — the resurrected M5-01 incident class).
+/// Outside any repo, `start` passes through unchanged and the legs report
+/// their honest empties.
+pub(crate) fn worktree_root(start: &std::path::Path) -> std::path::PathBuf {
+    rift_git::discover(start).map_or_else(|_| start.to_path_buf(), |p| p.work_tree)
+}
+
 /// `rift doctor`: report capture-backend readiness without any network I/O.
-fn cmd_doctor(root: &std::path::Path) -> Outcome {
+/// Repo-scoped legs diagnose the discovered worktree root (M6-13).
+fn cmd_doctor(start: &std::path::Path) -> Outcome {
+    let root = &worktree_root(start);
     let status = backend_status();
     let mut human = format!("rift doctor\n  capture backend: {status}");
     let mut json = serde_json::json!({ "capture_backend": status });
@@ -1116,6 +1127,24 @@ mod tests {
 
     /// The grammar↔clap drift guard (M5-08): every read-only palette request
     /// reaches a real handler against an EXPLICIT repository root — never
+    /// M6-13: repo-scoped legs answer for the DISCOVERED worktree root, so a
+    /// subdirectory invocation never reports a false-empty cwd (the M5-01
+    /// zero-checkpoints incident class, resurfaced as a doctor UX trap).
+    #[test]
+    fn worktree_root_discovers_the_repo_from_a_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let sub = repo.join("a").join("b");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(worktree_root(&sub), repo, "walks up to the worktree root");
+        assert_eq!(worktree_root(&repo), repo, "the root maps to itself");
+        // Outside any repo: passthrough — the legs report honest empties.
+        let bare = tmp.path().join("norepo");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(worktree_root(&bare), bare);
+    }
+
     /// process cwd — and a non-repo root answers honestly (never a panic).
     /// The mutating arms are pinned by the same exhaustive `match` in
     /// `dispatch_request` (a new request variant fails to compile until it

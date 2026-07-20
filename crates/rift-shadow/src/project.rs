@@ -14,10 +14,11 @@
 use rift_core::{CanonicalEvent, EventKind, Result};
 use rift_shadow_cost::{call_cost_micros, ClassPrices, CounterMethod, TokenUsage};
 use rift_store::{
-    effective_prices, record_cost_fact, record_model_call, record_session, record_session_event,
-    record_subagent_session, record_token_usage, record_turn, CanonicalStore, CostFact,
-    ModelCallRow, SessionEventRow, SessionRow, SubagentSessionRow, TokenUsageRow, ToolCallRow,
-    TurnRow,
+    effective_prices, record_capture_session_identity, record_cost_fact,
+    record_main_context_observation, record_model_call, record_session, record_session_event,
+    record_subagent_session, record_token_usage, record_turn, CanonicalStore,
+    CaptureSessionIdentityRow, CostFact, MainContextObservationRow, ModelCallRow, SessionEventRow,
+    SessionRow, SubagentSessionRow, TokenUsageRow, ToolCallRow, TurnRow,
 };
 
 use crate::ids;
@@ -139,6 +140,16 @@ pub async fn project_event(
             model_primary: facts.model.clone().unwrap_or_default(),
             repo_id: ctx.repo_id.to_owned(),
             started_at: ev.occurred_at_ms,
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    record_capture_session_identity(
+        store,
+        &CaptureSessionIdentityRow {
+            session_id: session_row.clone(),
+            agent: ctx.agent.to_owned(),
+            native_session_id: ev.session.clone(),
             schema_version: i64::from(ev.schema_version),
         },
     )
@@ -400,6 +411,49 @@ pub async fn project_usage(
     Ok(())
 }
 
+/// Project one adapter-authorized main-chain context snapshot. This writes no
+/// `model_call`, spend, cost, or Recall accounting rows: context pressure and
+/// whole-turn accounting are separate facts by construction.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on an insert failure.
+pub async fn project_main_context(
+    store: &impl CanonicalStore,
+    ev: &CanonicalEvent,
+    verb: &str,
+    facts: &PayloadFacts,
+    ctx: ProjectionCtx<'_>,
+    usage: &rift_shadow_hooks::AdapterTokenUsage,
+) -> Result<()> {
+    let Some(model) = facts.model.as_ref().filter(|model| !model.is_empty()) else {
+        return Ok(());
+    };
+    let session_id = ids::session_row_id(ctx.agent, &ev.session);
+    let clamp = |value: Option<u64>| i64::try_from(value.unwrap_or(0)).unwrap_or(i64::MAX);
+    record_main_context_observation(
+        store,
+        &MainContextObservationRow {
+            observation_id: ids::context_observation_id(
+                &session_id,
+                verb,
+                ev.turn_ordinal,
+                &ev.payload_sha256.to_hex(),
+            ),
+            session_id,
+            model: model.clone(),
+            observed_at: ev.occurred_at_ms,
+            uncached_input: clamp(usage.input),
+            cached_input: clamp(usage.cache_read),
+            cache_creation: clamp(usage.cache_write),
+            output: clamp(usage.output),
+            counter_method: CounterMethod::ProviderReported.as_str().to_owned(),
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +513,7 @@ mod tests {
         assert_eq!(s.count("tool_call").await.unwrap(), 1);
         assert_eq!(s.count("model_call").await.unwrap(), 1);
         assert_eq!(s.count("subagent_session").await.unwrap(), 1);
+        assert_eq!(s.count("capture_session_identity").await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -517,6 +572,45 @@ mod tests {
             0,
             "no price on file → no fabricated cost"
         );
+    }
+
+    #[tokio::test]
+    async fn main_context_is_append_only_and_separate_from_turn_spend() {
+        let s = store();
+        let facts = payload_facts(&serde_json::json!({ "model": "claude-fable-5" }));
+        let event = ev(EventKind::TurnEnd, 1, 3);
+        project_event(&s, &event, &facts, CTX).await.unwrap();
+        let spend = rift_shadow_hooks::AdapterTokenUsage {
+            input: Some(900_000),
+            output: Some(100_000),
+            cache_read: None,
+            cache_write: None,
+        };
+        project_usage(&s, &event, &facts, CTX, &spend, 50)
+            .await
+            .unwrap();
+        let context = rift_shadow_hooks::AdapterTokenUsage {
+            input: Some(10_000),
+            output: Some(2_000),
+            cache_read: Some(20_000),
+            cache_write: Some(1_000),
+        };
+        for _ in 0..2 {
+            project_main_context(&s, &event, "Stop", &facts, CTX, &context)
+                .await
+                .unwrap();
+        }
+        assert_eq!(s.count("token_usage").await.unwrap(), 1);
+        assert_eq!(s.count("main_context_observation").await.unwrap(), 1);
+        let rows = s
+            .query(
+                "SELECT uncached_input + cached_input + cache_creation + output \
+                 FROM main_context_observation",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0].get_i64(0).unwrap(), 33_000);
     }
 
     /// M6-12 round trip: a read fact carrying a token estimate persists it

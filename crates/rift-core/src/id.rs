@@ -22,6 +22,7 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::RiftError;
+use sha2::{Digest as _, Sha256};
 
 // --- hex helpers (no external `hex` dep; keeps rift-core dependency-light) ----
 
@@ -60,6 +61,22 @@ fn decode_hex_32(kind: &str, s: &str) -> crate::Result<[u8; 32]> {
         }
     }
     Ok(out)
+}
+
+/// Derive the canonical capture-session row id from an adapter name and its
+/// native session id.
+///
+/// This is the single identity authority shared by capture projection and
+/// Canopy. Its encoding is byte-identical to the original `rift-shadow`
+/// derivation so existing projection rows remain addressable.
+#[must_use]
+pub fn capture_session_row_id(agent: &str, native_session_id: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"session\0");
+    hash.update(agent.as_bytes());
+    hash.update(b"\0");
+    hash.update(native_session_id.as_bytes());
+    encode_hex(&hash.finalize())
 }
 
 // --- content-addressed byte ids ---------------------------------------------
@@ -576,6 +593,18 @@ mod tests {
         assert!(RepoId::new("").is_err());
         assert!(RepoId::new("has space").is_err());
         assert!(RepoId::new("x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn capture_session_identity_derivation_is_pinned() {
+        assert_eq!(
+            capture_session_row_id("claude-code", "native-session"),
+            "537d79c24262f69f543305cd0ec7142f912d29e3c9e7e6315e4b1a47d5805c2a"
+        );
+        assert_ne!(
+            capture_session_row_id("claude-code", "native-session"),
+            capture_session_row_id("codex", "native-session")
+        );
     }
 
     proptest::proptest! {

@@ -1,0 +1,17 @@
+---
+source: crates/rift-recall-eval/src/record.rs
+expression: report
+---
+=== Lost-in-Delta go/no-go report ===
+condition: seeded-regression
+thresholds: v1 (P50 token >= 15.0%, P50 cost >= 15.0%, latency <= 16 steps)
+
+task                                baseline    delta  saved% steps  ok       claim  reconciled
+regression_served_n10_changed1_pos0     11064    11064   0.00%    10  yes          0  within
+regression_served_n20_changed2_pos1     22114    22114   0.00%    20  yes          0  within
+regression_served_n40_changed2_pos0     44214    44214   0.00%    40  yes          0  within
+regression_served_n15_changed3_pos2     16589    16589   0.00%    15  yes          0  within
+
+token savings percentiles: P10 0.00% | P50 0.00% | P90 0.00%
+reconciliation: 4/4 within ±5% | 0 over-estimate(s)
+verdict: NO-GO [token_savings, cost_savings, latency_envelope]

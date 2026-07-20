@@ -106,6 +106,25 @@ impl AgentAdapter for ClaudeCodeAdapter {
         };
         u.is_present().then_some(u)
     }
+
+    fn main_context_usage(&self, verb: &str, native: &serde_json::Value) -> Option<TokenUsage> {
+        if !matches!(verb, "PreToolUse" | "Stop") {
+            return None;
+        }
+        let u = TokenUsage {
+            input: rift_agent::read_count(native, &["context_usage", "input_tokens"]),
+            output: rift_agent::read_count(native, &["context_usage", "output_tokens"]),
+            cache_read: rift_agent::read_count(
+                native,
+                &["context_usage", "cache_read_input_tokens"],
+            ),
+            cache_write: rift_agent::read_count(
+                native,
+                &["context_usage", "cache_creation_input_tokens"],
+            ),
+        };
+        u.is_present().then_some(u)
+    }
 }
 
 #[cfg(test)]
@@ -169,5 +188,26 @@ mod tests {
             .usage("Stop", &serde_json::json!({}))
             .is_none());
         assert!(ClaudeCodeAdapter.usage("SessionStart", &with).is_none());
+    }
+
+    #[test]
+    fn main_context_extraction_is_opt_in_and_separate() {
+        let payload = serde_json::json!({
+            "usage": {"input_tokens": 900_000},
+            "context_usage": {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 4
+            }
+        });
+        let context = ClaudeCodeAdapter
+            .main_context_usage("PreToolUse", &payload)
+            .unwrap();
+        assert_eq!(context.input, Some(10));
+        assert_eq!(context.cache_read, Some(30));
+        assert!(ClaudeCodeAdapter
+            .main_context_usage("PostToolUse", &payload)
+            .is_none());
     }
 }

@@ -28,6 +28,17 @@ pub struct TurnUsage {
     pub usage: TokenUsage,
     /// The model of the turn's last main-chain assistant message.
     pub model: Option<String>,
+    /// Freshest provider-reported usage from one non-sidechain assistant call.
+    pub main_context: Option<MainContextUsage>,
+}
+
+/// One main-chain model context observed at a transcript boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainContextUsage {
+    /// Usage from exactly one non-sidechain assistant message.
+    pub usage: TokenUsage,
+    /// Model named by that assistant message.
+    pub model: Option<String>,
 }
 
 /// Sum the just-ended turn's provider-reported usage from a transcript tail.
@@ -36,6 +47,7 @@ pub struct TurnUsage {
 pub fn turn_usage_from_tail(tail: &[u8]) -> Option<TurnUsage> {
     let mut usage = TokenUsage::default();
     let mut model: Option<String> = None;
+    let mut main_context: Option<MainContextUsage> = None;
     for line in tail.split(|b| *b == b'\n').rev() {
         // A partial first line of a truncated tail fails to parse and is
         // skipped, like any other garbage line.
@@ -50,18 +62,54 @@ pub fn turn_usage_from_tail(tail: &[u8]) -> Option<TurnUsage> {
                     add(&mut usage.cache_read, u, "cache_read_input_tokens");
                     add(&mut usage.cache_write, u, "cache_creation_input_tokens");
                 }
-                if model.is_none() && !is_sidechain(&v) {
-                    model = v
+                if !is_sidechain(&v) {
+                    let line_model = v
                         .pointer("/message/model")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned);
+                    if model.is_none() {
+                        model.clone_from(&line_model);
+                    }
+                    if main_context.is_none() {
+                        let line_usage = usage_at(v.pointer("/message/usage"));
+                        if line_usage.is_present() {
+                            main_context = Some(MainContextUsage {
+                                usage: line_usage,
+                                model: line_model,
+                            });
+                        }
+                    }
                 }
             }
             Some("user") if is_real_prompt(&v) => break,
             _ => {}
         }
     }
-    usage.is_present().then_some(TurnUsage { usage, model })
+    usage.is_present().then_some(TurnUsage {
+        usage,
+        model,
+        main_context,
+    })
+}
+
+fn usage_at(value: Option<&serde_json::Value>) -> TokenUsage {
+    let Some(value) = value else {
+        return TokenUsage::default();
+    };
+    TokenUsage {
+        input: value
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64),
+        output: value
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64),
+        cache_read: value
+            .get("cache_read_input_tokens")
+            .and_then(serde_json::Value::as_u64),
+        cache_write: value
+            .get("cache_creation_input_tokens")
+            .and_then(serde_json::Value::as_u64),
+    }
 }
 
 /// Whether a `user` line is a real prompt (the turn boundary): tool-result
@@ -140,6 +188,12 @@ mod tests {
         assert_eq!(t.usage.cache_read, Some(300));
         assert_eq!(t.usage.cache_write, Some(30));
         assert_eq!(t.model.as_deref(), Some("claude-fable-5"));
+        let main = t.main_context.expect("freshest main-chain sample");
+        assert_eq!(main.usage.input, Some(30));
+        assert_eq!(main.usage.output, Some(3));
+        assert_eq!(main.usage.cache_read, Some(100));
+        assert_eq!(main.usage.cache_write, Some(10));
+        assert_eq!(main.model.as_deref(), Some("claude-fable-5"));
     }
 
     #[test]

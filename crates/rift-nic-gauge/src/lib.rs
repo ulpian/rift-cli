@@ -1,10 +1,10 @@
-//! The nic-gauge: context-window fullness → a five-band "Smart→Dumb" meter.
+//! Context pressure: context-window fullness mapped to five neutral bands.
 //!
 //! **The single owner** (ADR-0012) of the gauge formula, the band mapping, and
 //! the model→context-size reference table. The dashboard consumes it through
 //! the [`NicGauge`] trait via the data plane, so it can never disagree with the
-//! formula it no longer contains. Computed from rift-shadow's per-turn token
-//! capture against the model's known window — zero extra tokens, fully local.
+//! formula it no longer contains. Computed from a prospective main-chain
+//! context observation against the model's known window — fully local.
 //!
 //! Unknown models are **explicit in the type** ([`Reading::UnknownModel`]):
 //! there is no default window, so absent reference data can never masquerade
@@ -20,24 +20,23 @@
     )
 )]
 
-/// The five gauge bands, named for what a filling context does to the model
-/// (the dumbometer concept), at the spec thresholds (ADR-0012):
-/// `Smart` (< 50) / `Capable` (< 70) / `Thinking` (< 85) / `Strained` (< 95) /
-/// `Dumb` (≥ 95) — percent of the model's context window in use.
+/// The five neutral context-pressure bands at the ADR-0012 thresholds:
+/// `Clear` (< 50) / `Moderate` (< 70) / `High` (< 85) /
+/// `Very High` (< 95) / `Critical` (≥ 95).
 ///
 /// `Ord` follows fullness, so the band mapping is provably monotonic.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Band {
     /// Under 50% full: full reasoning headroom.
-    Smart,
+    Clear,
     /// 50–69% full: healthy, still comfortable.
-    Capable,
+    Moderate,
     /// 70–84% full: degradation begins to be felt.
-    Thinking,
+    High,
     /// 85–94% full: nearing context collapse.
-    Strained,
+    VeryHigh,
     /// 95%+ full: effective reasoning has degraded badly.
-    Dumb,
+    Critical,
 }
 
 impl Band {
@@ -45,11 +44,11 @@ impl Band {
     #[must_use]
     pub fn from_pct(pct: u8) -> Self {
         match pct.min(100) {
-            0..=49 => Self::Smart,
-            50..=69 => Self::Capable,
-            70..=84 => Self::Thinking,
-            85..=94 => Self::Strained,
-            _ => Self::Dumb,
+            0..=49 => Self::Clear,
+            50..=69 => Self::Moderate,
+            70..=84 => Self::High,
+            85..=94 => Self::VeryHigh,
+            _ => Self::Critical,
         }
     }
 
@@ -57,11 +56,11 @@ impl Band {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Smart => "Smart",
-            Self::Capable => "Capable",
-            Self::Thinking => "Thinking",
-            Self::Strained => "Strained",
-            Self::Dumb => "Dumb",
+            Self::Clear => "Clear",
+            Self::Moderate => "Moderate",
+            Self::High => "High",
+            Self::VeryHigh => "Very High",
+            Self::Critical => "Critical",
         }
     }
 }
@@ -194,34 +193,34 @@ mod tests {
     #[test]
     fn bands_at_spec_thresholds() {
         // ADR-0012: 50/70/85/95.
-        assert_eq!(Band::from_pct(0), Band::Smart);
-        assert_eq!(Band::from_pct(49), Band::Smart);
-        assert_eq!(Band::from_pct(50), Band::Capable);
-        assert_eq!(Band::from_pct(69), Band::Capable);
-        assert_eq!(Band::from_pct(70), Band::Thinking);
-        assert_eq!(Band::from_pct(84), Band::Thinking);
-        assert_eq!(Band::from_pct(85), Band::Strained);
-        assert_eq!(Band::from_pct(94), Band::Strained);
-        assert_eq!(Band::from_pct(95), Band::Dumb);
-        assert_eq!(Band::from_pct(100), Band::Dumb);
-        assert_eq!(Band::from_pct(255), Band::Dumb); // clamps
+        assert_eq!(Band::from_pct(0), Band::Clear);
+        assert_eq!(Band::from_pct(49), Band::Clear);
+        assert_eq!(Band::from_pct(50), Band::Moderate);
+        assert_eq!(Band::from_pct(69), Band::Moderate);
+        assert_eq!(Band::from_pct(70), Band::High);
+        assert_eq!(Band::from_pct(84), Band::High);
+        assert_eq!(Band::from_pct(85), Band::VeryHigh);
+        assert_eq!(Band::from_pct(94), Band::VeryHigh);
+        assert_eq!(Band::from_pct(95), Band::Critical);
+        assert_eq!(Band::from_pct(100), Band::Critical);
+        assert_eq!(Band::from_pct(255), Band::Critical); // clamps
     }
 
     #[test]
-    fn labels_keep_the_dumbometer_names() {
+    fn labels_are_neutral_pressure_names() {
         let labels: Vec<&str> = [
-            Band::Smart,
-            Band::Capable,
-            Band::Thinking,
-            Band::Strained,
-            Band::Dumb,
+            Band::Clear,
+            Band::Moderate,
+            Band::High,
+            Band::VeryHigh,
+            Band::Critical,
         ]
         .iter()
         .map(|b| b.label())
         .collect();
         assert_eq!(
             labels,
-            vec!["Smart", "Capable", "Thinking", "Strained", "Dumb"]
+            vec!["Clear", "Moderate", "High", "Very High", "Critical"]
         );
     }
 
@@ -229,7 +228,7 @@ mod tests {
     fn percentage_is_used_over_window() {
         assert_eq!(known_reading(100_000, 200_000).pct, 50);
         assert_eq!(known_reading(0, 200_000).pct, 0);
-        assert_eq!(known_reading(100_000, 200_000).band(), Band::Capable);
+        assert_eq!(known_reading(100_000, 200_000).band(), Band::Moderate);
     }
 
     #[test]

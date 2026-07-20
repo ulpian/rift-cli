@@ -10,12 +10,12 @@ expression: "col3_text(&col3, 20)"
 │out 9.1K                        │
 ╰────────────────────────────────╯
 ╭─ system ───────────────────────╮
-│                                │
-│~ unknown window: mystery-model-│
-│- capture: —                    │
-│- burn: —                       │
-│- projection: —                 │
-│- recall: —                     │
+│~ mystery-model-9000            │
+│125 / unknown                   │
+│- events · 5m: 42               │
+│- tokens · 5m: 12K              │
+│- MCP calls · 5m: 7             │
+│- projection storage: 17.7MB    │
 ╰────────────────────────────────╯
 ╭─ recall ───────────────────────╮
 │enabled, no serves yet — see `ri│

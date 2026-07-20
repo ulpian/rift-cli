@@ -47,7 +47,7 @@ pub const BREAKDOWN: [Color; 4] = [
     Color::Rgb(0xf0, 0xb4, 0x5c), // cache-write — secondary (amber)
 ];
 
-/// The nic-gauge / dumbometer thermometer ramp: green (empty) → amber → red
+/// The context-pressure thermometer ramp: green (empty) → amber → red
 /// (full). Sampled by fill fraction, so a fuller meter reddens.
 pub const GAUGE_RAMP: [(f32, Color); 3] = [
     (0.0, Color::Rgb(0x6c, 0xe0, 0x9a)),
@@ -134,7 +134,7 @@ pub enum Section {
     Activity,
     /// Column 3 — the token-usage panel.
     TokenUsage,
-    /// Column 3 — the system panel (the dumbometer donut + domain metrics).
+    /// Column 3 — the system panel (context-pressure donut + domain metrics).
     System,
     /// Column 3 — the recall panel.
     Recall,
@@ -513,18 +513,18 @@ impl Theme {
     }
 }
 
-/// The dumbometer band colour (M55-12): a per-band step from green (Smart) to
-/// red (Dumb), so the donut arc changes colour at the band boundaries
+/// Context-pressure colour: a per-band step from green (Clear) to red
+/// (Critical), changing at the boundaries
 /// `rift-nic-gauge` owns (49/50, 94/95). Presentation only — the bands and
 /// their boundaries live in the gauge crate (ADR-0012).
 #[must_use]
 pub fn band_color(band: &str) -> Color {
     match band {
-        "Smart" => Color::Rgb(0x6c, 0xe0, 0x9a),    // green
-        "Capable" => Color::Rgb(0xa8, 0xe0, 0x6c),  // yellow-green
-        "Thinking" => Color::Rgb(0xf0, 0xc4, 0x5c), // amber
-        "Strained" => Color::Rgb(0xf0, 0x94, 0x5c), // orange
-        "Dumb" => Color::Rgb(0xf0, 0x5c, 0x5c),     // red
+        "Clear" => Color::Rgb(0x6c, 0xe0, 0x9a),     // green
+        "Moderate" => Color::Rgb(0xa8, 0xe0, 0x6c),  // yellow-green
+        "High" => Color::Rgb(0xf0, 0xc4, 0x5c),      // amber
+        "Very High" => Color::Rgb(0xf0, 0x94, 0x5c), // orange
+        "Critical" => Color::Rgb(0xf0, 0x5c, 0x5c),  // red
         _ => MUTED,
     }
 }
@@ -1043,7 +1043,7 @@ mod tests {
             dark.status_dot(crate::ProjectStatus::Idle)
         );
         assert_eq!(themed.selection(), dark.selection());
-        assert_eq!(band_color("Smart"), Color::Rgb(0x6c, 0xe0, 0x9a));
+        assert_eq!(band_color("Clear"), Color::Rgb(0x6c, 0xe0, 0x9a));
     }
 
     #[test]

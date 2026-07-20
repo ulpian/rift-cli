@@ -103,22 +103,26 @@ pub enum FeedPayload {
         /// The breakdown section.
         breakdown: crate::col3::BreakdownView,
     },
-    /// The nic-gauge section.
-    Nic(crate::col3::NicView),
-    /// The recall sections + the threads count.
+    /// One atomic System-panel snapshot: context, recent activity/storage, and
+    /// the shared active-session count always advance together.
+    System {
+        /// Main-chain context pressure.
+        context: crate::col3::NicView,
+        /// Five-minute activity, storage, and explicit scopes.
+        metrics: crate::col3::PanelMetrics,
+        /// Top-level capture sessions currently live.
+        active_sessions: crate::col3::ActiveSessionsView,
+    },
+    /// The Recall savings and MCP-thread chart.
     Recall {
         /// Recall savings.
         savings: crate::col3::RecallView<crate::col3::SavingsData>,
         /// Recall MCP calls.
         calls: crate::col3::RecallView<crate::col3::CallsData>,
-        /// Distinct active sessions.
-        threads: crate::col3::ThreadsView,
     },
     /// The activity card's trailing-week grouped daily bars (M55-06). Patches
     /// the column-2 activity card, not column 3.
     Activity(crate::col3::ActivityView),
-    /// The system panel's four domain metrics (M55-07). Patches `Col3.metrics`.
-    Metrics(crate::col3::PanelMetrics),
 }
 
 /// A per-project update from the live data bus (P8). Carries already-scoped,
@@ -959,25 +963,21 @@ fn apply_feed(s: &mut AppState, update: FeedUpdate) {
             col3.breakdown = breakdown;
             s.set_col3(col3);
         }
-        FeedPayload::Nic(nic) => {
+        FeedPayload::System {
+            context,
+            metrics,
+            active_sessions,
+        } => {
             let mut col3 = (*s.col3).clone();
-            col3.nic = nic;
+            col3.nic = context;
+            col3.metrics = metrics;
+            col3.active_sessions = active_sessions;
             s.set_col3(col3);
         }
-        FeedPayload::Recall {
-            savings,
-            calls,
-            threads,
-        } => {
+        FeedPayload::Recall { savings, calls } => {
             let mut col3 = (*s.col3).clone();
             col3.savings = savings;
             col3.calls = calls;
-            col3.threads = threads;
-            s.set_col3(col3);
-        }
-        FeedPayload::Metrics(metrics) => {
-            let mut col3 = (*s.col3).clone();
-            col3.metrics = metrics;
             s.set_col3(col3);
         }
     }
@@ -2680,17 +2680,22 @@ mod tests {
         use crate::col3::PanelMetrics;
         let mut s = ready(vec![project("a")]);
         let metrics = PanelMetrics {
-            capture_per_min: Some(1.5),
-            tokens_per_min: Some(600.0),
+            events_5m: Some(3),
+            tokens_5m: Some(600),
+            mcp_calls_5m: Some(2),
             projection_bytes: Some(4096),
-            recall_per_hour: None,
-            session_live: true,
+            activity_scope: crate::col3::SystemScope::CurrentSessions,
+            ..PanelMetrics::default()
         };
         update(
             &mut s,
             Event::Feed(FeedUpdate {
                 project: "/r/a".into(),
-                payload: FeedPayload::Metrics(metrics.clone()),
+                payload: FeedPayload::System {
+                    context: crate::col3::NicView::NoData,
+                    metrics: metrics.clone(),
+                    active_sessions: crate::col3::ActiveSessionsView::NoSessions,
+                },
             }),
         );
         assert_eq!(s.snapshot().col3.metrics, metrics);
@@ -4393,12 +4398,16 @@ mod tests {
         // tween, and its own value must show immediately.
         let nic = Event::Feed(FeedUpdate {
             project: "/r/a".into(),
-            payload: FeedPayload::Nic(crate::col3::NicView::Reading(crate::col3::NicReading {
-                pct: 50,
-                band: "Thinking",
-                model: "m".into(),
-                threads: 1,
-            })),
+            payload: FeedPayload::System {
+                context: crate::col3::NicView::Reading(crate::col3::NicReading {
+                    pct: 50,
+                    band: "Moderate",
+                    model: "m".into(),
+                    active_sessions: 1,
+                }),
+                metrics: crate::col3::PanelMetrics::default(),
+                active_sessions: crate::col3::ActiveSessionsView::Count(1),
+            },
         });
         update(&mut s, nic);
         assert!(

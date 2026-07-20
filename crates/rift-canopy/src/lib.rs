@@ -58,9 +58,9 @@ pub use col2::{
     SettingsSummary, ToggleChange, ToggleEvent, ToggleRow, ToggleState, ToggleView,
 };
 pub use col3::{
-    fmt_km, ActivityData, ActivityView, BreakdownData, BreakdownView, CallsData, Col3, DayBar,
-    NicReading, NicView, PanelMetrics, RecallView, SavingsData, ThreadCallSeries, ThreadsView,
-    TokensData, TokensView,
+    fmt_km, ActiveSessionsView, ActivityData, ActivityView, BreakdownData, BreakdownView,
+    CallsData, Col3, DayBar, NicReading, NicView, PanelMetrics, RecallView, SavingsData,
+    SystemScope, ThreadCallSeries, TokensData, TokensView,
 };
 pub use colour_picker::{ColourPickerState, PickerStage, RESET_ROW};
 pub use command::{

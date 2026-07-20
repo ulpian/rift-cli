@@ -291,9 +291,17 @@ pub fn capture_read_tokens_schema_sql() -> String {
     capture_slice_sql(crate::schema::capture_read_tokens_tables())
 }
 
+/// The v7 additive capture migration (M5.14): explicit native-to-canonical
+/// session identity and prospective main-chain context observations.
+#[must_use]
+pub fn capture_system_schema_sql() -> String {
+    capture_slice_sql(crate::schema::capture_system_tables())
+}
+
 /// The default migration set: meta tables, the canonical schema, the identity
 /// relations, the turn-boundary relations (+ price seed), the projection-meta
-/// table (the ADR-0010 rebuild epoch), then the read-token estimates (M6-12).
+/// table (the ADR-0010 rebuild epoch), read-token estimates (M6-12), and the
+/// M5.14 System identity/context relations.
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
     vec![
@@ -326,6 +334,11 @@ pub fn default_migrations() -> Vec<Migration> {
             version: 6,
             name: "capture_read_tokens",
             sql: capture_read_tokens_schema_sql(),
+        },
+        Migration {
+            version: 7,
+            name: "capture_system_truth",
+            sql: capture_system_schema_sql(),
         },
     ]
 }
@@ -486,12 +499,36 @@ pub fn recall_memd_call_schema_sql() -> String {
     sql
 }
 
+/// The v8 additive recall migration (ADR-0042): the append-only bitemporal
+/// `eval_run` experiment records — what the eval concluded, when it held, and
+/// when we learned it. Kept separate so adding it never perturbs the v1–v7
+/// checksums.
+#[must_use]
+pub fn recall_eval_run_schema_sql() -> String {
+    use crate::schema::recall_v8_eval_tables;
+    let mut sql = String::new();
+    for table in recall_v8_eval_tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    for table in recall_v8_eval_tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
 /// The recall projection's migration set (applied to a fresh `recall.db`).
 /// [`apply_migrations`] creates the meta tables itself, so version 1 is the
 /// recall graph schema directly; version 2 adds the outcome-label store;
 /// version 3 adds the key-custody table; version 4 adds the memd serve-audit
 /// relation; version 5 adds the content→blob-oid map; version 6 adds the
-/// durable ingest watermark; version 7 adds per-thread MCP call attribution.
+/// durable ingest watermark; version 7 adds per-thread MCP call attribution;
+/// version 8 adds the ADR-0042 eval experiment records.
 #[must_use]
 pub fn recall_migrations() -> Vec<Migration> {
     vec![
@@ -529,6 +566,11 @@ pub fn recall_migrations() -> Vec<Migration> {
             version: 7,
             name: "recall_memd_calls",
             sql: recall_memd_call_schema_sql(),
+        },
+        Migration {
+            version: 8,
+            name: "recall_eval_run",
+            sql: recall_eval_run_schema_sql(),
         },
     ]
 }
@@ -643,7 +685,39 @@ pub fn open_migrated(
 /// # Errors
 /// See [`open_migrated`].
 pub fn open_capture_projection(path: impl AsRef<std::path::Path>) -> Result<SqliteStore> {
-    open_migrated(path, &default_migrations())
+    let store = open_migrated(path, &default_migrations())?;
+    backfill_capture_session_identities(&store)?;
+    Ok(store)
+}
+
+/// Backfill the identity bridge from immutable hook-audit facts. Only sessions
+/// already present in the normalized projection are admitted; reruns are
+/// append-only no-ops and never invent a fallback mapping.
+fn backfill_capture_session_identities(store: &SqliteStore) -> Result<()> {
+    store.with_conn(|conn| {
+        let facts = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT agent, session_id FROM agent_hook_event \
+                 WHERE session_id IS NOT NULL ORDER BY agent, session_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let tx = conn.unchecked_transaction()?;
+        for (agent, native_session_id) in facts {
+            let session_id = rift_core::capture_session_row_id(&agent, &native_session_id);
+            tx.execute(
+                "INSERT OR IGNORE INTO capture_session_identity \
+                 (session_id, agent, native_session_id, schema_version) \
+                 SELECT ?, ?, ?, 1 WHERE EXISTS \
+                 (SELECT 1 FROM session WHERE session_id = ?)",
+                rusqlite::params![&session_id, agent, native_session_id, &session_id],
+            )?;
+        }
+        tx.commit()
+    })
 }
 
 /// The pure migration planner shared by the sync (reference-engine) and
@@ -780,8 +854,8 @@ mod tests {
     async fn applies_pending_migrations_in_order() {
         let s = store();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
-        assert_eq!(out.applied, 6);
-        assert_eq!(out.high_water, 6);
+        assert_eq!(out.applied, 7);
+        assert_eq!(out.high_water, 7);
         // canonical tables exist (insert succeeds)
         s.insert(
             "session",
@@ -815,12 +889,12 @@ mod tests {
         let out = apply_migrations_on(&s, &default_migrations())
             .await
             .unwrap();
-        assert_eq!(out.applied, 6);
-        assert_eq!(out.high_water, 6);
+        assert_eq!(out.applied, 7);
+        assert_eq!(out.high_water, 7);
         // The sync runner sees everything applied (same _migrations ledger).
         let again = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 6);
+        assert_eq!(again.skipped, 7);
         // And the tamper lock holds through the seam.
         let mut edited = default_migrations();
         edited[1].sql.push_str("\n-- tampered");
@@ -850,7 +924,7 @@ mod tests {
         /// schema as one full apply, with prefix members skipped (checksums
         /// verified), never re-applied.
         #[test]
-        fn apply_then_apply_is_noop(split in 0usize..=5) {
+        fn apply_then_apply_is_noop(split in 0usize..=7) {
             let migs = default_migrations();
             let s = store();
             let first = apply_migrations(&s, &migs[..split]).unwrap();
@@ -858,7 +932,7 @@ mod tests {
             let rest = apply_migrations(&s, &migs).unwrap();
             proptest::prop_assert_eq!(rest.skipped, split);
             proptest::prop_assert_eq!(rest.applied, migs.len() - split);
-            proptest::prop_assert_eq!(rest.high_water, 6);
+            proptest::prop_assert_eq!(rest.high_water, 7);
 
             let fresh = store();
             apply_migrations(&fresh, &migs).unwrap();
@@ -873,7 +947,7 @@ mod tests {
         apply_migrations(&s, &default_migrations()).unwrap();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(out.applied, 0);
-        assert_eq!(out.skipped, 6);
+        assert_eq!(out.skipped, 7);
     }
 
     /// The additive contract for the recall projection: `recall_core` (v1) must
@@ -882,7 +956,7 @@ mod tests {
     #[test]
     fn recall_core_excludes_v2_outcome_label() {
         let migs = recall_migrations();
-        assert_eq!(migs.len(), 7);
+        assert_eq!(migs.len(), 8);
         assert_eq!(migs[0].name, "recall_core");
         assert_eq!(migs[1].name, "recall_outcome_labels");
         assert_eq!(migs[2].name, "recall_key_custody");
@@ -890,6 +964,7 @@ mod tests {
         assert_eq!(migs[4].name, "recall_blob_oid_map");
         assert_eq!(migs[5].name, "recall_ingest_watermark");
         assert_eq!(migs[6].name, "recall_memd_calls");
+        assert_eq!(migs[7].name, "recall_eval_run");
         // v1 must NOT mention outcome_label (else its checksum would have moved
         // when the table was added to the registry).
         assert!(
@@ -933,12 +1008,19 @@ mod tests {
             .contains("CREATE TABLE IF NOT EXISTS ingest_watermark"));
         assert!(migs[5].sql.contains("ingest_watermark_no_update"));
         assert!(!migs[5].sql.contains("memd_call_event"));
-        // v7 creates the invocation-addressed call table, guards, and indexes.
+        // v7 creates the invocation-addressed call table, guards, and indexes —
+        // and must NOT have absorbed the v8 eval-run table (checksum lock for
+        // existing v7 recall.dbs).
         assert!(migs[6]
             .sql
             .contains("CREATE TABLE IF NOT EXISTS memd_call_event"));
         assert!(migs[6].sql.contains("memd_call_event_no_update"));
         assert!(migs[6].sql.contains("idx_memd_call_thread_recorded"));
+        assert!(!migs[6].sql.contains("eval_run"));
+        // v8 creates exactly the bitemporal eval experiment records + guards.
+        assert!(migs[7].sql.contains("CREATE TABLE IF NOT EXISTS eval_run"));
+        assert!(migs[7].sql.contains("eval_run_no_update"));
+        assert!(migs[7].sql.contains("eval_run_no_delete"));
     }
 
     /// Applying v1 then v2 to a fresh recall.db is a clean upgrade (no checksum
@@ -947,11 +1029,11 @@ mod tests {
     fn recall_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &recall_migrations()).unwrap();
-        assert_eq!(out.applied, 7);
-        assert_eq!(out.high_water, 7);
+        assert_eq!(out.applied, 8);
+        assert_eq!(out.high_water, 8);
         let again = apply_migrations(&s, &recall_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 7);
+        assert_eq!(again.skipped, 8);
     }
 
     /// The canopy UI-state migrations create the append-only tables (v1 core +
@@ -1146,14 +1228,15 @@ mod tests {
     fn capture_registry_growth_lands_past_frozen_boundaries() {
         use crate::schema::{
             canonical_tables, capture_identity_tables, capture_projection_meta_tables,
-            capture_read_tokens_tables, capture_turn_boundary_tables,
+            capture_read_tokens_tables, capture_system_tables, capture_turn_boundary_tables,
         };
         assert_eq!(
             capture_v1_tables().len()
                 + capture_identity_tables().len()
                 + capture_turn_boundary_tables().len()
                 + capture_projection_meta_tables().len()
-                + capture_read_tokens_tables().len(),
+                + capture_read_tokens_tables().len()
+                + capture_system_tables().len(),
             canonical_tables().len(),
             "a new capture table must extend a NEW slice (and migration), not fall between"
         );
@@ -1176,6 +1259,11 @@ mod tests {
             capture_projection_meta_tables().last().map(|t| t.name),
             Some("projection_meta"),
             "the v5 boundary moved — capture_projection_meta's checksum will break"
+        );
+        assert_eq!(
+            capture_system_tables().last().map(|t| t.name),
+            Some("main_context_observation"),
+            "the v7 boundary moved — capture_system_truth's checksum will break"
         );
     }
 
@@ -1204,7 +1292,7 @@ mod tests {
         let migs: i64 = again
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0)))
             .unwrap();
-        assert_eq!(migs, 6);
+        assert_eq!(migs, 7);
     }
 
     /// The step-05 filesystem control: a projection opened through the standard
@@ -1224,6 +1312,57 @@ mod tests {
             0o700,
             "projection dir must be owner-only"
         );
+    }
+
+    #[test]
+    fn v7_identity_backfill_derives_production_session_id_append_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("projection.db");
+        let old = open_migrated(&db, &default_migrations()[..6]).unwrap();
+        let canonical = rift_core::capture_session_row_id("claude-code", "native-42");
+        old.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO session \
+                 (session_id, agent, model_primary, repo_id, started_at, schema_version) \
+                 VALUES (?, 'claude-code', '', 'repo', 1, 1)",
+                [&canonical],
+            )?;
+            conn.execute(
+                "INSERT INTO agent_hook_event \
+                 (hook_event_id, agent, verb, session_id, received_at, outcome, schema_version) \
+                 VALUES ('hook', 'claude-code', 'Stop', 'native-42', 2, 'recorded', 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        drop(old);
+
+        let upgraded = open_capture_projection(&db).unwrap();
+        let mapping: (String, String, String) = upgraded
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT session_id, agent, native_session_id \
+                     FROM capture_session_identity",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            mapping,
+            (canonical, "claude-code".into(), "native-42".into())
+        );
+        drop(upgraded);
+        let reopened = open_capture_projection(&db).unwrap();
+        let count: i64 = reopened
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM capture_session_identity", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(count, 1, "backfill redelivery is an insert-only no-op");
     }
 
     /// Pins that every table gets its `_schema_version` seed row. NOTE the

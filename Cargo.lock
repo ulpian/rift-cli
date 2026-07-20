@@ -3009,6 +3009,7 @@ dependencies = [
  "getrandom 0.2.17",
  "rift-config",
  "rift-core",
+ "rift-recall-eval",
  "rift-recall-events",
  "rift-recall-ledger",
  "rift-recall-mcp",
@@ -3037,6 +3038,7 @@ dependencies = [
 name = "rift-recall-eval"
 version = "0.0.1"
 dependencies = [
+ "insta",
  "proptest",
  "rift-config",
  "rift-core",

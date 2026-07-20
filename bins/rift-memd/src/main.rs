@@ -18,11 +18,12 @@
 
 use std::path::{Path, PathBuf};
 
+mod eval_cmd;
 mod mcp_serve;
 
 use clap::{Parser, Subcommand};
 use rift_core::{RepoId, Result, RiftError, Timestamp};
-use rift_recall_ledger::ingest::{self, IngestOptions, IngestReport};
+use rift_recall_ledger::ingest::{self, IngestReport};
 use rift_recall_ledger::metrics::{compute_metrics, record_metric_snapshot};
 use rift_recall_ledger::{doctor as graph_doctor, outcome};
 use rift_recall_mcp::TOOL_SURFACE;
@@ -81,6 +82,13 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Run the deterministic Lost-in-Delta eval conditions, append the
+    /// bitemporal `eval_run` rows, and print the go/no-go reports (ADR-0042).
+    Eval {
+        /// Repository whose recall.db records the experiment rows.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
 }
 
 /// Diagnostic logging (05 §5.7): structured `tracing` to stderr, opt-in via
@@ -97,15 +105,22 @@ fn init_tracing() {
 
 fn main() -> Result<()> {
     init_tracing();
+    let cli = Cli::parse();
+    // The eval verb is dispatched OUTSIDE the runtime: `replay_served` owns
+    // its own current-thread runtimes internally (the GixSubstrate-free
+    // fixture path), and nesting block_on inside an ambient runtime panics.
+    if let Some(Cmd::Eval { repo }) = &cli.command {
+        return eval_cmd::run_eval(repo);
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| RiftError::storage(format!("tokio runtime: {e}")))?;
-    rt.block_on(run())
+    rt.block_on(run(cli))
 }
 
-async fn run() -> Result<()> {
-    match Cli::parse().command.unwrap_or(Cmd::Status {
+async fn run(cli: Cli) -> Result<()> {
+    match cli.command.unwrap_or(Cmd::Status {
         repo: PathBuf::from("."),
     }) {
         Cmd::Metrics { repo, json } => metrics(&repo, json).await,
@@ -128,6 +143,8 @@ async fn run() -> Result<()> {
             println!("{}", mcp_serve::mcp_config_json(&repo));
             Ok(())
         }
+        // Dispatched pre-runtime in `main`; unreachable here, kept total.
+        Cmd::Eval { repo } => eval_cmd::run_eval(&repo),
     }
 }
 
@@ -148,48 +165,11 @@ pub(crate) fn open_recall_db(db: &Path) -> Result<SqliteStore> {
     rift_store::open_migrated(db, &recall_migrations())
 }
 
-/// Open the M1 capture projection for `repo`, if it exists — shared context
-/// for the developer axis and the token fallback (one open per ingest pass).
-/// Best-effort: a missing/unreadable projection is `None`, never an error.
-pub(crate) fn open_capture_for(repo: &Path) -> Option<SqliteStore> {
-    rift_store::capture_projection_db_for_repo(repo)
-        .ok()
-        .filter(|db| db.exists())
-        .and_then(|db| rift_store::open_capture_projection(&db).ok())
-}
-
-/// The production [`IngestOptions`]: the identity plane's `session → developer`
-/// join, read from the M1 capture projection's `session_binding` rows when the
-/// projection exists (hashed ids only — never a raw name/email). Best-effort: a
-/// missing capture projection yields default options, and the developer axis
-/// stays null rather than guessed.
-pub(crate) async fn ingest_options(capture: Option<&SqliteStore>) -> IngestOptions {
-    let mut opts = IngestOptions::default();
-    let Some(store) = capture else {
-        return opts;
-    };
-    // Append-only bindings: later rows supersede, so last-recorded wins.
-    if let Ok(rows) = store
-        .query(
-            "SELECT session_id, developer_id FROM session_binding ORDER BY recorded_at ASC",
-            &[],
-        )
-        .await
-    {
-        for r in &rows {
-            if let (Ok(session), Ok(dev)) = (r.get_text(0), r.get_text(1)) {
-                opts.developer_by_session.insert(session, dev);
-            }
-        }
-    }
-    opts
-}
-
 /// The full production ingest pass, shared by `metrics`, `rebuild`, and the MCP
-/// server's startup ingest: persist the ADR-0005 blob-oid map **first** (so the
-/// same run's changed-hunk pass can resolve bytes on a real repo), then the
-/// incremental graph ingest with the developer axis, then outcome-label
-/// derivation at the injected `now`.
+/// server's startup ingest: the ONE shared builder (M6-15,
+/// [`rift_recall_ledger::production::production_ingest`] — blob-oid map first,
+/// then the incremental graph ingest with the developer axis + token
+/// fallback), followed by outcome-label derivation at the injected `now`.
 pub(crate) async fn ingest_all(
     store: &SqliteStore,
     sub: &GixSubstrate,
@@ -200,23 +180,9 @@ pub(crate) async fn ingest_all(
     outcome::DeriveReport,
     Vec<worktree::WorktreeBlob>,
 )> {
-    let (reads, _issues) = ingest::read_facts_all(sub)?;
-    let paths = ingest::read_paths(&reads);
-    let blobs = worktree::hash_blobs(repo, &paths);
-    rift_recall_ledger::blob_map::persist_blob_oid_map(store, &blobs, 0).await?;
-    let capture = open_capture_for(repo);
-    let mut opts = ingest_options(capture.as_ref()).await;
-    opts.token_estimate_by_hash = rift_recall_ledger::tokens::fallback_token_estimates(
-        &reads,
-        store,
-        capture.as_ref(),
-        sub,
-        repo,
-    )
-    .await;
-    let report = ingest::ingest_with(store, sub, &opts).await?;
+    let pass = rift_recall_ledger::production::production_ingest(store, sub, repo).await?;
     let labels = outcome::derive_labels(store, sub, now).await?;
-    Ok((report, labels, blobs))
+    Ok((pass.report, labels, pass.blobs))
 }
 
 /// Ingest the repo's checkpoints into recall.db, then compute + report scoped metrics.
