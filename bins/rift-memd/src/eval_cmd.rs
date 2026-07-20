@@ -163,6 +163,17 @@ pub(crate) fn run_real_sweep(repo: &Path) -> Result<()> {
     );
     let mut transport = UreqTransport;
     let out = run_sweep(&config, &mut transport);
+    // An empty run (e.g. missing keys → first-call abort) writes NOTHING: the
+    // committed fixtures and the artifact's honest provenance stay untouched —
+    // a zero-trial "derived-from-sweep" would be exactly the unmeasured-claim
+    // failure the plane exists to prevent (W13).
+    if out.trials.is_empty() {
+        println!(
+            "no trials completed — fixtures and eval-defaults.json left untouched\n{}",
+            out.aborted.as_deref().unwrap_or("(no abort reason)")
+        );
+        return Ok(());
+    }
     let (packs, trials) = render_fixtures(&out);
     std::fs::write(dir.join("packs.jsonl"), packs)?;
     std::fs::write(dir.join("trials.jsonl"), trials)?;
