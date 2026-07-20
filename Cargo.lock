@@ -3038,9 +3038,18 @@ name = "rift-recall-eval"
 version = "0.0.1"
 dependencies = [
  "proptest",
+ "rift-config",
+ "rift-core",
+ "rift-recall-events",
+ "rift-recall-ledger",
+ "rift-recall-mcp",
  "rift-recall-pack",
+ "rift-recall-policy",
+ "rift-recall-substrate",
  "rift-recall-types",
+ "rift-store",
  "rift-tokens",
+ "tokio",
 ]
 
 [[package]]

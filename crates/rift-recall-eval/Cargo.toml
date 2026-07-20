@@ -11,12 +11,26 @@ description = "Lost-in-Delta eval harness: deterministic replay, savings/non-deg
 workspace = true
 
 [dependencies]
+# The REAL serve surface under reconciliation (M6-06): the delta condition
+# drives the transport-independent dispatcher in-process — the same envelopes,
+# budgets, policy gates, and audit events as `rift-memd serve --mcp` — over a
+# fixture store, so the emitted claim the harness reconciles is the serving
+# side's own number, never the harness's arithmetic.
+rift-config = { version = "0.0.1", path = "../rift-config" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-events = { version = "0.0.1", path = "../rift-recall-events" }
+rift-recall-ledger = { version = "0.0.1", path = "../rift-recall-ledger" }
+rift-recall-mcp = { version = "0.0.1", path = "../rift-recall-mcp" }
 # The pack under test: the delta-served runs compile real packs.
 rift-recall-pack = { version = "0.0.1", path = "../rift-recall-pack" }
+rift-recall-policy = { version = "0.0.1", path = "../rift-recall-policy" }
+rift-recall-substrate = { version = "0.0.1", path = "../rift-recall-substrate" }
 rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+rift-store = { version = "0.0.1", path = "../rift-store" }
 # The one token-counting authority (ADR-0006): measured savings use the same
 # tokenizer the serving side reports, so reconciliation is apples-to-apples.
 rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
+tokio = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

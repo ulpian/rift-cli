@@ -35,6 +35,9 @@
 
 use rift_recall_pack::{compile, PackRequest, SectionEntry, Sensitivity};
 
+mod served;
+pub use served::{replay_served, replay_served_with_capture};
+
 /// The versioned go/no-go thresholds (ADR-0019 #1). Any change to the bar is
 /// an explicit, reviewable edit to a versioned value — never a silent tune.
 /// The default 15% is the PRD-M6 calibration seed; re-calibration from the M2
@@ -119,19 +122,61 @@ pub enum Verdict {
     NoGo(Vec<Dimension>),
 }
 
-/// Median of a pre-sorted slice (`0.0` for empty — an empty eval never passes
-/// the savings bar, so absence of evidence is never a `Go`).
-fn p50(sorted: &[f64]) -> f64 {
+/// Linear-interpolated percentile of a pre-sorted slice (`0.0` for empty —
+/// an empty eval never passes the savings bar, so absence of evidence is
+/// never a `Go`). At `q = 0.5` this is exactly the median the verdict has
+/// always used (exact middle for odd `n`, midpoint of the two middles for
+/// even `n`).
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn percentile_linear(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
-    let mid = sorted.len() / 2;
-    if sorted.len() % 2 == 1 {
-        sorted.get(mid).copied().unwrap_or(0.0)
-    } else {
-        let hi = sorted.get(mid).copied().unwrap_or(0.0);
-        let lo = sorted.get(mid.saturating_sub(1)).copied().unwrap_or(0.0);
-        f64::midpoint(lo, hi)
+    let rank = q.clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
+    let lo_idx = rank.floor() as usize;
+    let hi_idx = rank.ceil() as usize;
+    let lo = sorted.get(lo_idx).copied().unwrap_or(0.0);
+    let hi = sorted.get(hi_idx).copied().unwrap_or(0.0);
+    let frac = rank - rank.floor();
+    lo + (hi - lo) * frac
+}
+
+/// Median of a pre-sorted slice (the verdict's P50 — see
+/// [`percentile_linear`]).
+fn p50(sorted: &[f64]) -> f64 {
+    percentile_linear(sorted, 0.5)
+}
+
+/// Token-savings percentiles over a run set (M6-06): the distribution beside
+/// the P50 the verdict gates on — verdict logic stays P50; P10/P90 are
+/// reporting, showing the tails the median hides.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SavingsPercentiles {
+    /// The 10th percentile of per-run token-savings percent (the worst tail).
+    pub p10: f64,
+    /// The median (the same figure the verdict gates on).
+    pub p50: f64,
+    /// The 90th percentile (the best tail).
+    pub p90: f64,
+}
+
+/// The P10/P50/P90 of per-run token-savings percent (`0.0`s for an empty
+/// run set — absence of evidence is never savings).
+#[must_use]
+pub fn savings_percentiles(runs: &[PairedRun]) -> SavingsPercentiles {
+    let mut pct: Vec<f64> = runs
+        .iter()
+        .map(|r| savings_pct(r.baseline.tokens, r.delta.tokens))
+        .collect();
+    pct.sort_by(f64::total_cmp);
+    SavingsPercentiles {
+        p10: percentile_linear(&pct, 0.1),
+        p50: percentile_linear(&pct, 0.5),
+        p90: percentile_linear(&pct, 0.9),
     }
 }
 
@@ -561,6 +606,71 @@ mod tests {
     fn thresholds_are_versioned_values() {
         assert_eq!(GaThresholds::V1.version, 1);
         assert!((GaThresholds::V1.min_p50_token_savings_pct - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn savings_percentiles_bracket_the_gated_median() {
+        // Runs with 0%, 10%, 20%, 30%, 40% savings: P50 must equal the
+        // verdict's median exactly; the tails bracket it.
+        let run = |delta_tokens: u64| PairedRun {
+            name: "p".into(),
+            baseline: RunMetrics {
+                tokens: 100,
+                cost: 100,
+                success: true,
+                tests_passed: true,
+                human_mod_ok: true,
+                latency_steps: 1,
+            },
+            delta: RunMetrics {
+                tokens: delta_tokens,
+                cost: delta_tokens,
+                success: true,
+                tests_passed: true,
+                human_mod_ok: true,
+                latency_steps: 1,
+            },
+            emitted_tokens_avoided: 100 - delta_tokens,
+        };
+        let runs: Vec<PairedRun> = [100, 90, 80, 70, 60].map(run).into_iter().collect();
+        let p = savings_percentiles(&runs);
+        assert!((p.p50 - 20.0).abs() < f64::EPSILON, "p50 = the median");
+        assert!(p.p10 < p.p50 && p.p50 < p.p90);
+        // Empty: absence of evidence is never savings.
+        let empty = savings_percentiles(&[]);
+        assert!((empty.p10, empty.p50, empty.p90) == (0.0, 0.0, 0.0));
+    }
+
+    proptest::proptest! {
+        /// Order statistics: for ANY run set, p10 ≤ p50 ≤ p90 (M6-06).
+        #[test]
+        fn percentiles_are_ordered(deltas in proptest::collection::vec(0u64..=1000, 0..24)) {
+            let runs: Vec<PairedRun> = deltas
+                .iter()
+                .map(|&d| PairedRun {
+                    name: "p".into(),
+                    baseline: RunMetrics {
+                        tokens: 1000,
+                        cost: 1000,
+                        success: true,
+                        tests_passed: true,
+                        human_mod_ok: true,
+                        latency_steps: 1,
+                    },
+                    delta: RunMetrics {
+                        tokens: d,
+                        cost: d,
+                        success: true,
+                        tests_passed: true,
+                        human_mod_ok: true,
+                        latency_steps: 1,
+                    },
+                    emitted_tokens_avoided: 1000 - d,
+                })
+                .collect();
+            let p = savings_percentiles(&runs);
+            proptest::prop_assert!(p.p10 <= p.p50 && p.p50 <= p.p90);
+        }
     }
 
     proptest::proptest! {
