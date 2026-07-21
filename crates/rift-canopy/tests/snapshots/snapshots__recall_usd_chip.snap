@@ -1,0 +1,14 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "recall_text(&col3, 40, 10, false)"
+---
+╭─ recall ─────────────────────────────╮
+│saved 42% (6.0K)  [~$105.90]          │
+│17 MCP calls · 2 active sessions      │
+│# t-abcd                              │
+│ 6    ▄▄     ▄▄     ▄▄     ▄▄     ▄▄  │
+│    ▄ █▀█  ▄ █▀█  ▄ █▀█  ▄ █▀█  ▄ █▀█ │
+│ 3 ▄██▀  █▄██▀  █▄██▀  █▄██▀  █▄██▀  █│
+│ 0 ▀      ▀      ▀      ▀      ▀      │
+│   -30m           -15m            last│
+╰──────────────────────────────────────╯

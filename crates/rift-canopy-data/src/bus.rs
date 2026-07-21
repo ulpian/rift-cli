@@ -498,7 +498,7 @@ fn stage_read(
         outbox.stage(Event::Feed(crate::feeds::compute_system(
             root, &path, &sessions,
         )));
-        outbox.stage(Event::Feed(crate::feeds::compute_recall(root, &path)));
+        outbox.stage(Event::Feed(crate::feeds::compute_recall(root, &path, now)));
         // The activity card stays on the injected clock (calendar-day
         // bucketing); System activity is event-anchored and never uses `now`.
         outbox.stage(Event::Feed(crate::feeds::compute_activity(

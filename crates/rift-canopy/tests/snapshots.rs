@@ -160,6 +160,9 @@ fn col3_with_data() -> rift_canopy::Col3 {
             rate: vec![0.0, 400.0, 1200.0, 800.0, 2000.0, 1600.0],
             total: 6000.0,
             pct: 0.42,
+            usd_saved_micros: None,
+            usd_label: None,
+            usd_rows: vec![],
         }),
         calls: rift_canopy::RecallView::Data(rift_canopy::CallsData {
             total: 17,
@@ -241,6 +244,20 @@ fn recall_text(col3: &rift_canopy::Col3, w: u16, h: u16, collapsed: bool) -> Str
         &mut frame,
     );
     frame_text(&frame)
+}
+
+#[test]
+fn golden_recall_usd_chip() {
+    // The ADR-0051 USD-estimate chip on the Recall headline (M5.15): present
+    // only with an honest figure, tilde mandatory, drawn from the same solver
+    // the hit-test reads. The other goldens keep `None` and are untouched —
+    // absence draws nothing.
+    let mut col3 = col3_with_data();
+    if let rift_canopy::RecallView::Data(sd) = &mut col3.savings {
+        sd.usd_saved_micros = Some(105_900_000);
+        sd.usd_label = Some("~$105.90".to_owned());
+    }
+    insta::assert_snapshot!("recall_usd_chip", recall_text(&col3, 40, 10, false));
 }
 
 #[test]

@@ -60,6 +60,44 @@ INSERT INTO price_table (price_id, model, token_class, unit_price_micros, curren
   ('m1seed-claude-haiku-4-5-output',          'claude-haiku-4-5',  'output',          5000000, 'USD', 0, NULL, 1782864000000, NULL, 1);
 ";
 
+/// The M5.15 price append (ADR-0051 §8): the models this toolchain actually
+/// runs. The M1 seed predates them — M515-03 measured **zero** intersection
+/// between it (sonnet-4-5, opus-4-1, haiku-4-5) and the observed set below, so
+/// without this append `effective_prices` returns `None` for every live model
+/// and the savings estimate correctly renders nothing at all.
+///
+/// Provenance: the provider's published per-MTok pricing, transcribed at
+/// authoring time (2026-07-20) — never from model memory. Cached-read is 0.1×
+/// input and cache-creation 1.25× input (the 5-minute-TTL write premium): the
+/// same derivation the M1 seed above uses.
+///
+/// `claude-sonnet-5` carries two **valid-time** epochs: its introductory rate
+/// holds through 2026-08-31 and the standard rate takes over 2026-09-01. This
+/// is what the bitemporal relation is for — `effective_class_price` filters on
+/// `valid_to`, so the figure stays correct across the changeover with no
+/// further migration. `recorded_at` is fixed at 2026-07-20T00:00:00Z for
+/// migration byte-stability. A later correction is a NEW superseding row —
+/// never an UPDATE of these.
+pub(crate) const PRICE_SEED_CURRENT_SQL: &str = "\
+INSERT INTO price_table (price_id, model, token_class, unit_price_micros, currency, valid_from, valid_to, recorded_at, supersedes_id, schema_version) VALUES
+  ('m515seed-claude-opus-4-8-uncached_input',       'claude-opus-4-8', 'uncached_input',  5000000, 'USD', 0, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-opus-4-8-cached_input',         'claude-opus-4-8', 'cached_input',     500000, 'USD', 0, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-opus-4-8-cache_creation',       'claude-opus-4-8', 'cache_creation',  6250000, 'USD', 0, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-opus-4-8-output',               'claude-opus-4-8', 'output',         25000000, 'USD', 0, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-fable-5-uncached_input',        'claude-fable-5',  'uncached_input', 10000000, 'USD', 0, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-fable-5-cached_input',          'claude-fable-5',  'cached_input',    1000000, 'USD', 0, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-fable-5-cache_creation',        'claude-fable-5',  'cache_creation', 12500000, 'USD', 0, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-fable-5-output',                'claude-fable-5',  'output',         50000000, 'USD', 0, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-sonnet-5-uncached_input-intro', 'claude-sonnet-5', 'uncached_input',  2000000, 'USD', 0, 1788220800000, 1784505600000, NULL, 1),
+  ('m515seed-claude-sonnet-5-cached_input-intro',   'claude-sonnet-5', 'cached_input',     200000, 'USD', 0, 1788220800000, 1784505600000, NULL, 1),
+  ('m515seed-claude-sonnet-5-cache_creation-intro', 'claude-sonnet-5', 'cache_creation',  2500000, 'USD', 0, 1788220800000, 1784505600000, NULL, 1),
+  ('m515seed-claude-sonnet-5-output-intro',         'claude-sonnet-5', 'output',         10000000, 'USD', 0, 1788220800000, 1784505600000, NULL, 1),
+  ('m515seed-claude-sonnet-5-uncached_input-std',   'claude-sonnet-5', 'uncached_input',  3000000, 'USD', 1788220800000, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-sonnet-5-cached_input-std',     'claude-sonnet-5', 'cached_input',     300000, 'USD', 1788220800000, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-sonnet-5-cache_creation-std',   'claude-sonnet-5', 'cache_creation',  3750000, 'USD', 1788220800000, NULL, 1784505600000, NULL, 1),
+  ('m515seed-claude-sonnet-5-output-std',           'claude-sonnet-5', 'output',         15000000, 'USD', 1788220800000, NULL, 1784505600000, NULL, 1);
+";
+
 /// One migration: an ordered, checksum-locked unit of additive DDL.
 #[derive(Debug, Clone)]
 pub struct Migration {
@@ -298,10 +336,20 @@ pub fn capture_system_schema_sql() -> String {
     capture_slice_sql(crate::schema::capture_system_tables())
 }
 
+/// The v8 additive capture migration (ADR-0051 §8): append the current models'
+/// prices to the bitemporal catalog. Insert-only — it adds no DDL and touches
+/// no existing row, so the v1–v7 checksums are untouched (the frozen-prefix
+/// rule migration 5's comment states).
+#[must_use]
+pub fn capture_price_seed_current_sql() -> String {
+    PRICE_SEED_CURRENT_SQL.to_string()
+}
+
 /// The default migration set: meta tables, the canonical schema, the identity
 /// relations, the turn-boundary relations (+ price seed), the projection-meta
-/// table (the ADR-0010 rebuild epoch), read-token estimates (M6-12), and the
-/// M5.14 System identity/context relations.
+/// table (the ADR-0010 rebuild epoch), read-token estimates (M6-12), the
+/// M5.14 System identity/context relations, and the M5.15 current-model price
+/// append (ADR-0051 §8).
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
     vec![
@@ -339,6 +387,11 @@ pub fn default_migrations() -> Vec<Migration> {
             version: 7,
             name: "capture_system_truth",
             sql: capture_system_schema_sql(),
+        },
+        Migration {
+            version: 8,
+            name: "capture_price_seed_current",
+            sql: capture_price_seed_current_sql(),
         },
     ]
 }
@@ -854,8 +907,8 @@ mod tests {
     async fn applies_pending_migrations_in_order() {
         let s = store();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
-        assert_eq!(out.applied, 7);
-        assert_eq!(out.high_water, 7);
+        assert_eq!(out.applied, 8);
+        assert_eq!(out.high_water, 8);
         // canonical tables exist (insert succeeds)
         s.insert(
             "session",
@@ -880,6 +933,61 @@ mod tests {
         .unwrap();
     }
 
+    /// M515-02 (ADR-0051 §8): the models the toolchain actually runs are priced
+    /// across all four classes, the M1 rows are untouched by the append, and
+    /// `claude-sonnet-5` resolves its introductory rate before the changeover
+    /// and the standard rate on and after it.
+    #[tokio::test]
+    async fn current_model_prices_are_seeded_and_bitemporal() {
+        let s = store();
+        apply_migrations(&s, &default_migrations()).unwrap();
+        let now = 1_784_505_600_000_i64; // 2026-07-20T00:00:00Z
+
+        // effective_prices yields None unless ALL FOUR classes are on file, so
+        // a Some here is the whole "this model produces a real figure" claim.
+        for model in ["claude-opus-4-8", "claude-fable-5", "claude-sonnet-5"] {
+            assert!(
+                crate::effective_prices(&s, model, now, now)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{model} must price all four classes"
+            );
+        }
+
+        let opus = crate::effective_prices(&s, "claude-opus-4-8", now, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(opus.uncached_input, 5_000_000);
+        assert_eq!(opus.cached_input, 500_000); // 0.1× input
+        assert_eq!(opus.cache_creation, 6_250_000); // 1.25× input
+        assert_eq!(opus.output, 25_000_000);
+
+        // The M1 seed is untouched — the append never rewrites a prior belief.
+        let legacy = crate::effective_prices(&s, "claude-sonnet-4-5", now, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy.uncached_input, 3_000_000);
+        assert_eq!(legacy.output, 15_000_000);
+
+        // Bitemporal valid-time: intro rate before 2026-09-01, standard on it.
+        let changeover = 1_788_220_800_000_i64; // 2026-09-01T00:00:00Z
+        let intro = crate::effective_prices(&s, "claude-sonnet-5", changeover - 1, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(intro.uncached_input, 2_000_000);
+        assert_eq!(intro.output, 10_000_000);
+        let standard = crate::effective_prices(&s, "claude-sonnet-5", changeover, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(standard.uncached_input, 3_000_000);
+        assert_eq!(standard.output, 15_000_000);
+    }
+
     /// The seam-generic runner is equivalent to the reference runner: applies
     /// the same set, is idempotent across BOTH runners (shared checksum lock),
     /// and refuses a tampered migration.
@@ -889,12 +997,12 @@ mod tests {
         let out = apply_migrations_on(&s, &default_migrations())
             .await
             .unwrap();
-        assert_eq!(out.applied, 7);
-        assert_eq!(out.high_water, 7);
+        assert_eq!(out.applied, 8);
+        assert_eq!(out.high_water, 8);
         // The sync runner sees everything applied (same _migrations ledger).
         let again = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 7);
+        assert_eq!(again.skipped, 8);
         // And the tamper lock holds through the seam.
         let mut edited = default_migrations();
         edited[1].sql.push_str("\n-- tampered");
@@ -932,7 +1040,7 @@ mod tests {
             let rest = apply_migrations(&s, &migs).unwrap();
             proptest::prop_assert_eq!(rest.skipped, split);
             proptest::prop_assert_eq!(rest.applied, migs.len() - split);
-            proptest::prop_assert_eq!(rest.high_water, 7);
+            proptest::prop_assert_eq!(rest.high_water, 8);
 
             let fresh = store();
             apply_migrations(&fresh, &migs).unwrap();
@@ -947,7 +1055,7 @@ mod tests {
         apply_migrations(&s, &default_migrations()).unwrap();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(out.applied, 0);
-        assert_eq!(out.skipped, 7);
+        assert_eq!(out.skipped, 8);
     }
 
     /// The additive contract for the recall projection: `recall_core` (v1) must
@@ -1292,7 +1400,7 @@ mod tests {
         let migs: i64 = again
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0)))
             .unwrap();
-        assert_eq!(migs, 7);
+        assert_eq!(migs, 8);
     }
 
     /// The step-05 filesystem control: a projection opened through the standard

@@ -53,6 +53,11 @@ pub enum Target {
     RetryRow(usize),
     /// A column-3 graph section.
     Section(col3::SectionId),
+    /// The `[~$…]` USD-savings chip on the Recall headline (ADR-0051): opens
+    /// the read-only breakdown modal explaining how the estimate was
+    /// composed. Only hit when an honest figure exists — no figure, no chip,
+    /// no target.
+    RecallCost,
     /// The bottom command bar.
     CommandBar,
     /// The dispatch overlay's Confirm button (mouse Enter — confirm only).
@@ -151,6 +156,7 @@ impl Target {
                 | Target::RailRemove
                 | Target::ToggleRow(_)
                 | Target::RetryRow(_)
+                | Target::RecallCost
                 | Target::ProfileSettings(_)
                 | Target::ProfileNew
                 | Target::ProfileMenuClose
@@ -434,6 +440,7 @@ fn hit_model(
             ColumnRole::Cards => Some(toggle_or_focus(vm, &scol.card_kinds(), scol.rect, col, row)),
             ColumnRole::Sections => Some(section_or_focus(
                 &scol.section_ids(),
+                &vm.col3,
                 scol.rect,
                 vm.graphs_scroll,
                 col,
@@ -529,6 +536,7 @@ fn hit_grid(vm: &ViewModel, r: PanelRects, col: u16, row: u16) -> Option<Target>
     if contains(r.col3, col, row) {
         return Some(section_or_focus(
             &col3::SectionId::ALL,
+            &vm.col3,
             r.col3,
             vm.graphs_scroll,
             col,
@@ -550,9 +558,14 @@ fn hit_single(vm: &ViewModel, body: Rect, col: u16, row: u16) -> Option<Target> 
     if contains(panel, col, row) {
         return Some(match vm.focus {
             Panel::Detail => toggle_or_focus(vm, &CardKind::ALL, panel, col, row),
-            Panel::Graphs => {
-                section_or_focus(&col3::SectionId::ALL, panel, vm.graphs_scroll, col, row)
-            }
+            Panel::Graphs => section_or_focus(
+                &col3::SectionId::ALL,
+                &vm.col3,
+                panel,
+                vm.graphs_scroll,
+                col,
+                row,
+            ),
             Panel::Projects | Panel::Command => project_or_focus(vm, panel, col, row),
         });
     }
@@ -667,6 +680,7 @@ fn on_scrollbar(area: Rect, offset: usize, content_len: usize, col: u16, row: u1
 /// so a click resolves to the panel actually on screen.
 fn section_or_focus(
     ids: &[col3::SectionId],
+    data: &col3::Col3,
     rect: Rect,
     offset: usize,
     col: u16,
@@ -690,6 +704,27 @@ fn section_or_focus(
         };
         for slot in col3::solve_stack(ids, solve_h) {
             if content_row >= slot.y && content_row < slot.y.saturating_add(slot.rows) {
+                // The USD-savings chip on the Recall headline (ADR-0051 §7)
+                // wins over the section body. Recomputed from the SAME solver
+                // the renderer drew with — in the blended space this loop
+                // already works in (screen x, content-space y) — so the
+                // clickable cells are exactly the drawn glyphs. No figure,
+                // collapsed, or narrow → the solver says None → plain section.
+                if slot.id == col3::SectionId::Recall {
+                    let panel = Rect {
+                        x: inner.x,
+                        y: slot.y,
+                        w: inner.w,
+                        h: slot.rows,
+                    };
+                    if let Some(chip) =
+                        col3::recall_cost_rect(data, slot.collapsed, inner_of(panel))
+                    {
+                        if contains(chip, col, content_row) {
+                            return Target::RecallCost;
+                        }
+                    }
+                }
                 return Target::Section(slot.id);
             }
         }
@@ -1016,6 +1051,81 @@ mod tests {
                 Some(Target::Section(_) | Target::PanelFocus(Panel::Graphs))
             ),
             "graphs column resolves to a section or its focus, got {hit:?}"
+        );
+    }
+
+    /// ADR-0051 §7: the chip's clickable cells are exactly the drawn glyphs
+    /// — same solver on both sides — and it outranks the section under it;
+    /// without an honest figure the same cells are plain section clicks.
+    #[test]
+    fn recall_cost_chip_wins_over_its_section_exactly_on_its_cells() {
+        use crate::col3::{RecallView, SavingsData};
+        let mut data = col3::Col3 {
+            savings: RecallView::Data(SavingsData {
+                rate: vec![1.0],
+                total: 6000.0,
+                pct: 0.42,
+                usd_saved_micros: Some(6_250_000),
+                usd_label: Some("~$6.25".to_owned()),
+                usd_rows: vec![],
+            }),
+            ..col3::Col3::default()
+        };
+        let ids = col3::SectionId::ALL;
+        // Tall enough that the expanded stack fits (the un-scrolled path).
+        let content = col3::content_rows(&ids);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: content + 2,
+        };
+        let inner = inner_of(rect);
+        // Recompute the chip cell the same way the resolver does.
+        let slot = col3::solve_stack(&ids, inner.h)
+            .into_iter()
+            .find(|s| s.id == col3::SectionId::Recall)
+            .expect("recall slot");
+        assert!(!slot.collapsed, "fixture must exercise the wide path");
+        let panel = Rect {
+            x: inner.x,
+            y: slot.y,
+            w: inner.w,
+            h: slot.rows,
+        };
+        let chip = col3::recall_cost_rect(&data, false, inner_of(panel)).expect("an honest figure");
+        // Blended space → screen: y is content-space (no scroll ⇒ + inner.y).
+        let screen_row = inner.y + chip.y;
+        assert_eq!(
+            section_or_focus(&ids, &data, rect, 0, chip.x, screen_row),
+            Target::RecallCost,
+            "the chip's own cells hit the chip"
+        );
+        assert_eq!(
+            section_or_focus(&ids, &data, rect, 0, chip.x + chip.w - 1, screen_row),
+            Target::RecallCost,
+            "…all the way to its last cell"
+        );
+        assert_eq!(
+            section_or_focus(&ids, &data, rect, 0, chip.x - 1, screen_row),
+            Target::Section(col3::SectionId::Recall),
+            "one cell left (the gap) is the plain section"
+        );
+        assert!(Target::RecallCost.is_button(), "button semantics");
+
+        // No honest figure → the exact same cells are plain section clicks.
+        data.savings = RecallView::Data(SavingsData {
+            rate: vec![1.0],
+            total: 6000.0,
+            pct: 0.42,
+            usd_saved_micros: None,
+            usd_label: None,
+            usd_rows: vec![],
+        });
+        assert_eq!(
+            section_or_focus(&ids, &data, rect, 0, chip.x, screen_row),
+            Target::Section(col3::SectionId::Recall),
+            "no figure, no chip, no target"
         );
     }
 

@@ -151,8 +151,16 @@ fn forgotten_registration_is_caught() {
     let store = SqliteStore::open_in_memory().expect("open store");
     apply_migrations(&store, &default_migrations()).expect("apply base migrations");
     // A developer adds a data table via a migration but forgets canonical_tables().
+    // Derive the version from the shipped set rather than hardcoding it, so
+    // landing a new migration doesn't collide with this canary.
+    let next_version = default_migrations()
+        .iter()
+        .map(|m| m.version)
+        .max()
+        .expect("shipped migration set is non-empty")
+        + 1;
     let rogue = vec![Migration {
-        version: 8, // one past the shipped set (v7 = capture_system_truth)
+        version: next_version, // one past the shipped set, whatever it is
         name: "rogue_unregistered",
         sql: "CREATE TABLE IF NOT EXISTS audit_log \
               (id INTEGER PRIMARY KEY, note TEXT) STRICT;"

@@ -3108,6 +3108,7 @@ dependencies = [
  "rift-git",
  "rift-nic-gauge",
  "rift-recall-ledger",
+ "rift-shadow-cost",
  "rift-store",
  "serde_json",
  "tempfile",

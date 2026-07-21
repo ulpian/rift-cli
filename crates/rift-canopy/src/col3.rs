@@ -266,6 +266,32 @@ pub enum RecallView<T> {
     Data(T),
 }
 
+/// One per-model row composing the USD savings estimate (M5.15 / ADR-0051):
+/// an attributed slice of the avoided tokens priced at that model's
+/// uncached-input rate. The rows are what the breakdown modal renders, so the
+/// headline is explained by exactly the numbers that produced it.
+///
+/// Labels are pre-rendered by the one money authority (`rift-shadow-cost`,
+/// via the data plane) — the render layer draws strings and never does money
+/// math or formatting of its own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsdRow {
+    /// The model id (e.g. `claude-opus-4-8`).
+    pub model: String,
+    /// Avoided tokens attributed to this model (a largest-remainder slice;
+    /// all rows' tokens sum to exactly the avoided total).
+    pub tokens: u64,
+    /// The uncached-input rate applied, micro-USD per MTok. `None` = no
+    /// seeded price: the row contributes no dollars, honestly.
+    pub price_per_mtok_micros: Option<i64>,
+    /// `tokens` valued at the rate, micro-USD. `None` iff unpriced.
+    pub subtotal_micros: Option<i64>,
+    /// Catalog rate label (`"$5.00/MTok"`, no tilde — a recorded fact).
+    pub rate_label: Option<String>,
+    /// Estimate label (`"~$39.31"`, tilde mandatory). `None` iff unpriced.
+    pub subtotal_label: Option<String>,
+}
+
 /// Recall savings numbers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavingsData {
@@ -277,6 +303,17 @@ pub struct SavingsData {
     /// headline (never tweened) — recall's value as a rate, not just a counter
     /// (user story 26).
     pub pct: f64,
+    /// Estimated USD saved (ADR-0051), integer micro-USD: the sum of the
+    /// priced [`UsdRow`] subtotals. `None` is honest absence — no resolvable
+    /// pricing basis — and draws no chip. A headline like `pct`: copied from
+    /// the target frame, never tweened (money must not animate).
+    pub usd_saved_micros: Option<i64>,
+    /// The chip label, pre-rendered by the money authority (`"~$105.90"`).
+    /// `Some` exactly when [`Self::usd_saved_micros`] is.
+    pub usd_label: Option<String>,
+    /// The per-model rows whose priced subtotals compose the headline
+    /// (empty exactly when [`Self::usd_saved_micros`] is `None`).
+    pub usd_rows: Vec<UsdRow>,
 }
 
 /// Recall MCP call numbers.
@@ -495,6 +532,11 @@ pub(crate) fn interpolate(from: &Col3, to: &Col3, t: f32) -> Col3 {
             rate: lerp_series(&a.rate, &b.rate, t).unwrap_or_else(|| b.rate.clone()),
             total: b.total,
             pct: b.pct, // a headline: the savings % is taken from the target
+            // Money never animates (ADR-0051 §7): the estimate and its rows
+            // are headlines, copied straight from the target like `pct`.
+            usd_saved_micros: b.usd_saved_micros,
+            usd_label: b.usd_label.clone(),
+            usd_rows: b.usd_rows.clone(),
         }),
         calls: interp_recall(&from.calls, &to.calls, |a, b| {
             if !calls_can_animate(a, b) {
@@ -1229,6 +1271,17 @@ fn draw_recall_panel(
         &savings,
         theme.tile_value(theme.graph_accent()),
     );
+    // The USD estimate chip (ADR-0051): drawn from the same solver the
+    // hit-test reads, so pixels == target. Absent label → no chip at all
+    // (honest absence, never a fabricated figure). Flashless by design:
+    // col3 carries no press-pulse plumbing (recorded M5.15 decision).
+    if let Some(chip) = recall_cost_rect(col3, collapsed, inner) {
+        if let RecallView::Data(sd) = &col3.savings {
+            if let Some(label) = sd.usd_label.as_deref() {
+                frame.put_str(chip.x, chip.y, &format!("[{label}]"), theme.key_hint());
+            }
+        }
+    }
     body(
         frame,
         inner,
@@ -1283,6 +1336,126 @@ fn draw_recall_placeholder(col3: &Col3, theme: Theme, inner: Rect, frame: &mut F
         return true;
     }
     false
+}
+
+/// The clickable USD-savings chip on the Recall headline row (ADR-0051 §7):
+/// `[~$105.90]`, two cells after the `saved …` text. **One solver** feeds the
+/// draw and the hit-test, so the glyphs and the click target are always the
+/// same cells (`hit_test` recomputes geometry; a second solver would put
+/// clicks on the wrong cells).
+///
+/// `None` — and therefore no chip anywhere — when there is no honest figure
+/// (`usd_label` absent, ADR-0051 §5 rung 4), in the collapsed/narrow path
+/// (the panel is already shedding text), or when the whole chip cannot fit
+/// on the headline row.
+#[must_use]
+pub fn recall_cost_rect(col3: &Col3, collapsed: bool, inner: Rect) -> Option<Rect> {
+    if collapsed || inner.w < 28 || inner.h < 7 {
+        return None;
+    }
+    let RecallView::Data(sd) = &col3.savings else {
+        return None;
+    };
+    let label = sd.usd_label.as_deref()?;
+    let (savings, _, _, _) = recall_headlines(col3);
+    let headline = u16::try_from(savings.chars().count()).ok()?;
+    let w = u16::try_from(label.chars().count().checked_add(2)?).ok()?;
+    let x = inner.x.checked_add(headline)?.checked_add(2)?;
+    (u32::from(x) + u32::from(w) <= u32::from(inner.x) + u32::from(inner.w)).then_some(Rect {
+        x,
+        y: inner.y,
+        w,
+        h: 1,
+    })
+}
+
+/// Thousands-grouped token count (`7862400` → `"7,862,400"`) for the
+/// breakdown modal: its rows must *visibly* sum to the headline, so no lossy
+/// K/M humanizing there. Tokens are counts, not money — money strings only
+/// ever come pre-rendered from the money authority.
+#[must_use]
+pub fn fmt_count(n: u64) -> String {
+    let digits = n.to_string();
+    let len = digits.chars().count();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// The breakdown modal's body (ADR-0051 §3) — the full disclosed basis:
+/// net avoided tokens, the class assumption, one row per model (attributed
+/// slice × catalog rate = subtotal), the composing total, the unpriced
+/// coverage when any, and the estimate-of-an-estimate statement. Pure over
+/// the savings view-model; every money string was pre-rendered by the one
+/// money authority, so this function formats counts and assembles lines —
+/// it never computes or formats money.
+#[must_use]
+pub fn usd_breakdown_lines(sd: &SavingsData) -> Vec<String> {
+    let Some(total_label) = sd.usd_label.as_deref() else {
+        // Defensive: the chip never draws without a figure, so this modal is
+        // unreachable in practice — but if reached, it stays honest.
+        return vec![
+            "no dollar figure: no seeded price applies to this".to_owned(),
+            "project's models — the token headline stands alone".to_owned(),
+        ];
+    };
+    let avoided: u64 = sd.usd_rows.iter().map(|r| r.tokens).sum();
+    let mut lines = vec![
+        format!("net tokens avoided   {}", fmt_count(avoided)),
+        "priced as uncached input, at the current seeded".to_owned(),
+        "rates; split by each model's share of this project's".to_owned(),
+        "observed input tokens".to_owned(),
+        String::new(),
+    ];
+    let name_w = sd
+        .usd_rows
+        .iter()
+        .map(|r| r.model.chars().count())
+        .max()
+        .unwrap_or(0);
+    let tok_w = sd
+        .usd_rows
+        .iter()
+        .map(|r| fmt_count(r.tokens).chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut unpriced_tokens: u64 = 0;
+    for r in &sd.usd_rows {
+        let tokens = fmt_count(r.tokens);
+        if let (Some(rate), Some(sub)) = (&r.rate_label, &r.subtotal_label) {
+            lines.push(format!(
+                "{model:<name_w$}  {tokens:>tok_w$} tok x {rate} = {sub}",
+                model = r.model,
+            ));
+        } else {
+            unpriced_tokens = unpriced_tokens.saturating_add(r.tokens);
+            lines.push(format!(
+                "{model:<name_w$}  {tokens:>tok_w$} tok — no seeded price",
+                model = r.model,
+            ));
+        }
+    }
+    lines.push(format!("total = {total_label}"));
+    if unpriced_tokens > 0 {
+        lines.push(String::new());
+        lines.push(format!(
+            "{} tok carry no seeded price and add nothing to",
+            fmt_count(unpriced_tokens)
+        ));
+        lines.push("the total — the figure covers the priced share only".to_owned());
+    }
+    lines.push(String::new());
+    lines.push("~ marks an estimate, not a bill: token counts are".to_owned());
+    lines.push("cl100k_base (not the provider's billing tokenizer),".to_owned());
+    lines.push("and the per-model split is attributed from observed".to_owned());
+    lines.push("usage — the serve trail records no per-serve model".to_owned());
+    lines.push("(ADR-0051).".to_owned());
+    lines
 }
 
 fn recall_headlines(col3: &Col3) -> (String, u64, usize, String) {
@@ -1722,6 +1895,9 @@ mod tests {
                 rate: vec![1.0],
                 total: 6000.0,
                 pct: 0.42,
+                usd_saved_micros: None,
+                usd_label: None,
+                usd_rows: vec![],
             }),
             calls: RecallView::Data(CallsData {
                 total: 17,
@@ -1740,6 +1916,217 @@ mod tests {
         assert!(text.contains("saved 42%"), "savings % + tokens: \n{text}");
         assert!(text.contains("17 MCP calls"));
         assert!(text.contains("3 active sessions"));
+    }
+
+    /// A Col3 whose savings carry the USD estimate (ADR-0051 fixtures).
+    fn usd_col3(label: Option<&str>) -> Col3 {
+        Col3 {
+            savings: RecallView::Data(SavingsData {
+                rate: vec![1.0],
+                total: 6000.0,
+                pct: 0.42,
+                usd_saved_micros: label.map(|_| 6_250_000),
+                usd_label: label.map(str::to_owned),
+                usd_rows: vec![],
+            }),
+            ..Col3::default()
+        }
+    }
+
+    /// ADR-0051 §7: the chip's glyphs land exactly on the cells the shared
+    /// solver reports — pixels == target, one geometry for draw and hit-test.
+    #[test]
+    fn usd_chip_draws_exactly_where_the_shared_solver_says() {
+        let col3 = usd_col3(Some("~$6.25"));
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 10,
+        };
+        let mut f = Frame::new(Size::new(40, 10));
+        let mut b = AsciiBackend::new(Capabilities::empty());
+        draw_one(
+            &col3,
+            SectionId::Recall,
+            false,
+            false,
+            false,
+            rect,
+            &mut b,
+            &mut f,
+        );
+        // Recompute the inner rect through the same chrome solver the panel
+        // used (geometry is theme-independent).
+        let mut scratch = Frame::new(Size::new(40, 10));
+        let inner = panel_frame(
+            Theme::rift_dark(),
+            Section::Recall,
+            false,
+            "recall",
+            rect,
+            &mut scratch,
+        );
+        let chip = recall_cost_rect(&col3, false, inner).expect("an honest figure draws a chip");
+        // The drawn text at the chip's cells is exactly `[~$6.25]`.
+        let drawn: String = (chip.x..chip.x + chip.w)
+            .map(|x| f.get(x, chip.y).map_or(' ', |c| c.ch))
+            .collect();
+        assert_eq!(drawn, "[~$6.25]");
+        assert!(drawn.contains('~'), "the estimate marker is mandatory");
+        // And nowhere else: the row before the chip is the headline text.
+        let row: String = (inner.x..inner.x + inner.w)
+            .map(|x| f.get(x, chip.y).map_or(' ', |c| c.ch))
+            .collect();
+        assert_eq!(row.matches('[').count(), 1, "one chip only: {row}");
+    }
+
+    /// Honest absence and degraded layouts draw no chip at all (never a
+    /// fabricated figure, never a truncated one).
+    #[test]
+    fn usd_chip_absent_without_an_honest_figure_or_room() {
+        // No figure → no chip anywhere in the drawn panel.
+        let none = usd_col3(None);
+        let text = text_of(&draw_to(&none, 40, 24));
+        assert!(!text.contains('['), "no chip without a figure: {text}");
+
+        let some = usd_col3(Some("~$6.25"));
+        let inner = Rect {
+            x: 1,
+            y: 1,
+            w: 38,
+            h: 8,
+        };
+        // Collapsed path: the panel is shedding text; the chip goes first.
+        assert_eq!(recall_cost_rect(&some, true, inner), None);
+        // Narrow / short inners: below the wide-path floor, no chip.
+        assert_eq!(
+            recall_cost_rect(
+                &some,
+                false,
+                Rect {
+                    x: 1,
+                    y: 1,
+                    w: 27,
+                    h: 8
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            recall_cost_rect(
+                &some,
+                false,
+                Rect {
+                    x: 1,
+                    y: 1,
+                    w: 38,
+                    h: 6
+                }
+            ),
+            None
+        );
+        // A row too tight for the whole chip refuses rather than truncates:
+        // headline "saved 42% (6.0K)" = 16 cells + 2 gap + 8 chip = 26 < 28
+        // fits at w=28... shrink until it cannot: chip needs x+w ≤ inner end.
+        let tight = Rect {
+            x: 1,
+            y: 1,
+            w: 28,
+            h: 8,
+        };
+        // 16 + 2 = 18 offset, +8 = 26 ≤ 28 → fits; w=25 would fail the wide
+        // floor first, so prove the fit guard with a longer label instead.
+        let long = usd_col3(Some("~$1,234,567.89"));
+        assert_eq!(
+            recall_cost_rect(&long, false, tight),
+            None,
+            "a chip that cannot fit whole is not drawn at all"
+        );
+    }
+
+    /// ADR-0051 §3: the modal discloses the whole basis — rows that visibly
+    /// sum, the class assumption, unpriced coverage, and the
+    /// estimate-of-an-estimate statement. Every money string is pre-rendered
+    /// (this function never formats money).
+    #[test]
+    fn breakdown_lines_disclose_the_whole_basis() {
+        let sd = SavingsData {
+            rate: vec![1.0],
+            total: 1_000_500.0,
+            pct: 0.9,
+            usd_saved_micros: Some(2_500_000),
+            usd_label: Some("~$2.50".to_owned()),
+            usd_rows: vec![
+                UsdRow {
+                    model: "claude-opus-4-8".to_owned(),
+                    tokens: 500_000,
+                    price_per_mtok_micros: Some(5_000_000),
+                    subtotal_micros: Some(2_500_000),
+                    rate_label: Some("$5.00/MTok".to_owned()),
+                    subtotal_label: Some("~$2.50".to_owned()),
+                },
+                UsdRow {
+                    model: "mystery-model".to_owned(),
+                    tokens: 500_500,
+                    price_per_mtok_micros: None,
+                    subtotal_micros: None,
+                    rate_label: None,
+                    subtotal_label: None,
+                },
+            ],
+        };
+        let body = usd_breakdown_lines(&sd).join("\n");
+        // The net total is the rows' exact sum, thousands-grouped.
+        assert!(body.contains("net tokens avoided   1,000,500"), "{body}");
+        assert!(
+            body.contains("uncached input"),
+            "the class is named: {body}"
+        );
+        // Priced row: slice × catalog rate = tilde'd subtotal.
+        assert!(body.contains("500,000 tok x $5.00/MTok = ~$2.50"), "{body}");
+        // Unpriced row: slice kept, marked, no dollars anywhere on it.
+        assert!(body.contains("mystery-model"), "{body}");
+        assert!(body.contains("no seeded price"), "{body}");
+        // The composing total and the unpriced-coverage disclosure.
+        assert!(body.contains("total = ~$2.50"), "{body}");
+        assert!(
+            body.contains("500,500 tok carry no seeded price"),
+            "coverage is disclosed: {body}"
+        );
+        // The honesty statement, verbatim anchors.
+        assert!(body.contains("estimate, not a bill"), "{body}");
+        assert!(body.contains("cl100k_base"), "{body}");
+        assert!(body.contains("attributed from observed"), "{body}");
+    }
+
+    #[test]
+    fn fmt_count_groups_thousands() {
+        assert_eq!(fmt_count(0), "0");
+        assert_eq!(fmt_count(999), "999");
+        assert_eq!(fmt_count(1_000), "1,000");
+        assert_eq!(fmt_count(14_594_095), "14,594,095");
+    }
+
+    /// ADR-0051 §7: money never animates — the estimate and its rows are
+    /// headlines, copied from the target frame exactly like `pct`.
+    #[test]
+    fn money_is_a_headline_never_tweened() {
+        let mut from = usd_col3(Some("~$1.00"));
+        if let RecallView::Data(sd) = &mut from.savings {
+            sd.usd_saved_micros = Some(1_000_000);
+        }
+        let to = usd_col3(Some("~$6.25"));
+        let mid = interpolate(&from, &to, 0.5);
+        let RecallView::Data(sd) = mid.savings else {
+            panic!("expected Data");
+        };
+        assert_eq!(
+            sd.usd_saved_micros,
+            Some(6_250_000),
+            "target's figure, not a blend"
+        );
+        assert_eq!(sd.usd_label.as_deref(), Some("~$6.25"));
     }
 
     #[test]

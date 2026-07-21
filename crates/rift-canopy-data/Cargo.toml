@@ -28,6 +28,10 @@ tokio = { workspace = true }
 rift-nic-gauge = { version = "0.0.1", path = "../rift-nic-gauge" }
 # The recall savings % is the ledger's guarded ratio (M55-07 — no drift).
 rift-recall-ledger = { version = "0.0.1", path = "../rift-recall-ledger" }
+# The one money authority (ADR-0051 §4): avoided-token valuation, the
+# largest-remainder partition, and the ~$ / $ formatters. The render layer
+# receives finished figures and labels; money math never leaves this seam.
+rift-shadow-cost = { version = "0.0.1", path = "../rift-shadow-cost" }
 # fs-notify as a wake-signal only (ADR-0010); failure degrades to PollOnly.
 notify = { workspace = true }
 # The lenient local session-cache parser (M4-06; contract mirrored, no

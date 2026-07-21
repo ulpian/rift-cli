@@ -24,13 +24,17 @@ use std::path::Path;
 use rift_canopy::col3::{
     ActiveSessionsView, ActivityData, ActivityView, BreakdownData, BreakdownView, CallsData,
     DayBar, NicReading, NicView, PanelMetrics, RecallView, SavingsData, ThreadCallSeries,
-    TokensData, TokensView,
+    TokensData, TokensView, UsdRow,
 };
 use rift_canopy::{FeedPayload, FeedUpdate, LiveSessions, SessionsRead};
 use rift_git::repo_id_for;
 use rift_nic_gauge::{NicGauge as _, Reading, ReferenceGauge};
+use rift_shadow_cost::{
+    avoided_tokens_micros, fmt_usd_estimate, fmt_usd_exact, partition_largest_remainder,
+};
 use rift_store::{
-    projection_db_under, recall_db_under, recall_repo_id, CanonicalStore, SqliteStore, Value,
+    effective_prices, projection_db_under, recall_db_under, recall_repo_id, CanonicalStore,
+    SqliteStore, Value,
 };
 
 use crate::store::runtime;
@@ -582,15 +586,18 @@ struct AuditRow {
     tokens_returned: i64,
 }
 
-/// Compute the Recall feed: tokens saved (rate + cumulative) and process-scoped
-/// MCP call threads from the project's own recall.db.
+/// Compute the Recall feed: tokens saved (rate + cumulative + the estimated
+/// USD figure, ADR-0051) and process-scoped MCP call threads from the
+/// project's own recall.db. `now_ms` is the injected clock (the
+/// [`compute_activity`] precedent): the *current* prices value the cumulative
+/// avoided total — per-serve historical re-pricing is explicitly out of scope.
 ///
 /// Disabled-vs-quiet (M4-15 decision, recorded): **recall.db absent** means
 /// recall was never enabled here → the enable-prompting placeholder;
 /// recall.db present with no served events is enabled-but-quiet → the
 /// visibly distinct honest-empty state. Neither is ever a zero line.
 #[must_use]
-pub fn compute_recall(root: &Path, path: &str) -> FeedUpdate {
+pub fn compute_recall(root: &Path, path: &str, now_ms: i64) -> FeedUpdate {
     let savings = match read_audit_rows(root, path) {
         RecallDb::Absent => RecallView::Disabled,
         RecallDb::Quiet => RecallView::Quiet,
@@ -611,13 +618,26 @@ pub fn compute_recall(root: &Path, path: &str) -> FeedUpdate {
                     .map(|r| u64::try_from(f(r).max(0)).unwrap_or(0))
                     .fold(0u64, u64::saturating_add)
             };
+            // NET avoided (ADR-0049) — the same figure the % uses. Gross
+            // (avoided + returned) would double-count against the ratio's
+            // denominator; the money multiplies the net value only.
             let avoided = sum_u64(|r| r.tokens_avoided);
             let returned = sum_u64(|r| r.tokens_returned);
             let pct = rift_recall_ledger::savings_rate(avoided, avoided.saturating_add(returned));
+            let (usd_saved_micros, usd_label, usd_rows) =
+                match read_usd_savings(root, path, avoided, now_ms) {
+                    Some((total, rows)) => (Some(total), Some(fmt_usd_estimate(total)), rows),
+                    // Rung 4 (ADR-0051 §5): no honest figure → no chip at
+                    // all; the token headline stands alone.
+                    None => (None, None, Vec::new()),
+                };
             RecallView::Data(SavingsData {
                 rate: bucket_values(&saved),
                 total: crate::series::saturating_sum(saved.iter().map(|(_, v)| *v)),
                 pct,
+                usd_saved_micros,
+                usd_label,
+                usd_rows,
             })
         }
     };
@@ -630,6 +650,130 @@ pub fn compute_recall(root: &Path, path: &str) -> FeedUpdate {
         project: path.to_string(),
         payload: FeedPayload::Recall { savings, calls },
     }
+}
+
+/// One model's share of the observed input-token mix, with its resolved
+/// uncached-input rate (micro-USD per MTok; `None` = no seeded price).
+struct MixShare {
+    model: String,
+    weight: u64,
+    price_per_mtok: Option<i64>,
+}
+
+/// The pure ADR-0051 §5 ladder over an already-resolved mix (rungs 1–3):
+/// partition `avoided` across the shares (largest remainder — slices sum to
+/// exactly `avoided`), price each slice at its model's rate, and sum the
+/// priced subtotals into the headline.
+///
+/// `None` when there is no honest figure: no basis to divide on, or **no
+/// share is priced** — a positive saving must never surface as a fabricated
+/// `~$0.00` (§3). Partially priced mixes (rung 2) succeed: unpriced rows keep
+/// their token slice and contribute no dollars, and the modal discloses them.
+fn usd_breakdown(avoided: u64, mix: &[MixShare]) -> Option<(i64, Vec<UsdRow>)> {
+    let weights: Vec<u64> = mix.iter().map(|m| m.weight).collect();
+    let slices = partition_largest_remainder(avoided, &weights)?;
+    let mut rows = Vec::with_capacity(mix.len());
+    let mut total: i64 = 0;
+    let mut any_priced = false;
+    for (share, tokens) in mix.iter().zip(slices) {
+        let rate = share.price_per_mtok.filter(|p| *p >= 0);
+        let subtotal = avoided_tokens_micros(tokens, rate);
+        if let Some(s) = subtotal {
+            any_priced = true;
+            total = total.saturating_add(s);
+        }
+        rows.push(UsdRow {
+            model: share.model.clone(),
+            tokens,
+            price_per_mtok_micros: rate,
+            subtotal_micros: subtotal,
+            rate_label: rate.map(|p| format!("{}/MTok", fmt_usd_exact(p))),
+            subtotal_label: subtotal.map(fmt_usd_estimate),
+        });
+    }
+    if !any_priced {
+        return None;
+    }
+    Some((total, rows))
+}
+
+/// Resolve the observed model mix and current prices from the **capture**
+/// projection and value the avoided total (ADR-0051 §2). Read-only, and
+/// `None` on *any* failure — a pricing problem degrades to "no chip", never a
+/// broken panel (§9).
+///
+/// Identity is one resolution per projection: this opens projection.db under
+/// the capture `repo_id_for`, while the avoided tokens came from recall.db
+/// under `recall_repo_id` — the M515-03-confirmed split; resolving them the
+/// same way is the recorded dashboard defect.
+fn read_usd_savings(
+    root: &Path,
+    path: &str,
+    avoided: u64,
+    now_ms: i64,
+) -> Option<(i64, Vec<UsdRow>)> {
+    let repo = repo_id_for(Path::new(path)).ok()?;
+    let db = projection_db_under(root, &repo);
+    if !db.exists() {
+        return None;
+    }
+    let store = SqliteStore::open(&db).ok()?;
+    let rt = runtime().ok()?;
+    // The observed mix (M515-03): each model's share of *input* tokens
+    // (uncached + cached) across all captured history — cumulative, matching
+    // the cumulative avoided total it partitions. Deterministic order.
+    let mix_rows = rt
+        .block_on(store.query(
+            "SELECT m.model, SUM(t.uncached_input + t.cached_input) AS w \
+             FROM model_call m JOIN token_usage t ON t.call_id = m.call_id \
+             GROUP BY m.model HAVING w > 0 \
+             ORDER BY w DESC, m.model ASC",
+            &[],
+        ))
+        .ok()?;
+    let mut mix: Vec<MixShare> = Vec::with_capacity(mix_rows.len());
+    for r in mix_rows {
+        let (Ok(model), Ok(w)) = (r.get_text(0), r.get_i64(1)) else {
+            continue;
+        };
+        mix.push(MixShare {
+            model,
+            weight: u64::try_from(w.max(0)).unwrap_or(0),
+            price_per_mtok: None,
+        });
+    }
+    if mix.is_empty() {
+        // Rung 3: no usable input-token mix — the most-frequent captured
+        // model carries the whole total as a single disclosed reference row.
+        // (`session.model_primary` is NOT a source: measured empty, M515-03.)
+        let model = rt
+            .block_on(store.query(
+                "SELECT model, COUNT(*) AS c FROM model_call \
+                 GROUP BY model ORDER BY c DESC, model ASC LIMIT 1",
+                &[],
+            ))
+            .ok()?
+            .first()
+            .and_then(|r| r.get_text(0).ok())?;
+        mix.push(MixShare {
+            model,
+            weight: 1,
+            price_per_mtok: None,
+        });
+    }
+    // Current prices (the ADR-0051 §3 decision: today's rate on the
+    // cumulative total), through the production bitemporal resolver — never
+    // a reimplementation of the price SQL, and never the dead in-memory
+    // table. `None` unless all four classes are seeded, which is stricter
+    // and honest.
+    for share in &mut mix {
+        share.price_per_mtok = rt
+            .block_on(effective_prices(&store, &share.model, now_ms, now_ms))
+            .ok()
+            .flatten()
+            .map(|p| p.uncached_input);
+    }
+    usd_breakdown(avoided, &mix)
 }
 
 // --- W3: the activity feed + the panel-metrics feed (M55-06/07) --------------
@@ -902,6 +1046,20 @@ pub(crate) fn seed_token_fact(
     started_at: i64,
     classes: (i64, i64, i64, i64),
 ) {
+    seed_model_fact(store, rt, call_id, "claude-fable-5", started_at, classes);
+}
+
+/// [`seed_token_fact`] with the model made explicit — the USD-savings tests
+/// need a real multi-model mix (M515-03's shape).
+#[cfg(test)]
+pub(crate) fn seed_model_fact(
+    store: &SqliteStore,
+    rt: &tokio::runtime::Runtime,
+    call_id: &str,
+    model: &str,
+    started_at: i64,
+    classes: (i64, i64, i64, i64),
+) {
     rt.block_on(store.insert(
         "model_call",
         &[
@@ -914,7 +1072,7 @@ pub(crate) fn seed_token_fact(
         &[
             Value::text(call_id),
             Value::text("t1"),
-            Value::text("claude-fable-5"),
+            Value::text(model),
             Value::Int(started_at),
             Value::Int(1),
         ],
@@ -949,6 +1107,40 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use rift_canopy::col3::{BreakdownView, TokensView};
+
+    /// The injected clock for recall-feed tests: 2026-07-20T00:00:00Z. Any
+    /// value ≥ the test price rows' `recorded_at` works; pinned for
+    /// determinism (no test reads the wall clock).
+    const USD_NOW: i64 = 1_784_505_600_000;
+
+    /// Seed a model's full four-class price row set (ADR-0051: a partial
+    /// catalog prices nothing) — cached at 0.1×, write at 1.25×, output at
+    /// 5×, the shipped seeds' derivation.
+    fn seed_price(store: &SqliteStore, rt: &tokio::runtime::Runtime, model: &str, uncached: i64) {
+        for (class, price) in [
+            ("uncached_input", uncached),
+            ("cached_input", uncached / 10),
+            ("cache_creation", uncached + uncached / 4),
+            ("output", uncached * 5),
+        ] {
+            rt.block_on(rift_store::record_price(
+                store,
+                &rift_store::PriceTableRow {
+                    price_id: format!("test-{model}-{class}"),
+                    model: model.to_owned(),
+                    token_class: class.to_owned(),
+                    unit_price_micros: price,
+                    currency: "USD".to_owned(),
+                    valid_from: 0,
+                    valid_to: None,
+                    recorded_at: 1,
+                    supersedes_id: None,
+                    schema_version: 1,
+                },
+            ))
+            .unwrap();
+        }
+    }
 
     fn make_project(root: &Path, name: &str) -> String {
         let proj = root.join(name);
@@ -1612,7 +1804,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p");
         // No recall.db → Disabled (the enable prompt), never a zero line.
-        let update = compute_recall(root.path(), &proj);
+        let update = compute_recall(root.path(), &proj, USD_NOW);
         let FeedPayload::Recall { savings, calls } = update.payload else {
             panic!("expected Recall");
         };
@@ -1621,7 +1813,7 @@ mod tests {
 
         // recall.db exists but has no served events → Quiet (visibly distinct).
         seed_recall_db(root.path(), &proj, &[]);
-        let update = compute_recall(root.path(), &proj);
+        let update = compute_recall(root.path(), &proj, USD_NOW);
         let FeedPayload::Recall { savings, calls, .. } = update.payload else {
             panic!("expected Recall");
         };
@@ -1638,7 +1830,7 @@ mod tests {
             &proj,
             &[(1_000, 500), (2_000, 1_500), (3_000, 0)],
         );
-        let update = compute_recall(root.path(), &proj);
+        let update = compute_recall(root.path(), &proj, USD_NOW);
         let FeedPayload::Recall { savings, calls } = update.payload else {
             panic!("expected Recall");
         };
@@ -1652,6 +1844,284 @@ mod tests {
         assert_eq!(cd.total, 3, "one attributed call per served event");
         assert_eq!(cd.series.len(), 2);
         assert!(cd.series.iter().all(|s| s.rate.len() == 30));
+    }
+
+    /// Rung 1 (ADR-0051 §5): a fully priced mix composes the headline — the
+    /// rows' tokens sum to exactly the avoided total, the priced subtotals
+    /// sum to exactly the headline, and every label carries its marker.
+    #[test]
+    fn usd_full_mix_composes_the_headline() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        // The observed mix: 3M input tokens on opus, 1M on fable (input =
+        // uncached + cached; output never weighs the split).
+        seed_model_fact(
+            &store,
+            &rt,
+            "c1",
+            "claude-opus-4-8",
+            1_000,
+            (2_000_000, 1_000_000, 0, 999),
+        );
+        seed_model_fact(
+            &store,
+            &rt,
+            "c2",
+            "claude-fable-5",
+            2_000,
+            (600_000, 400_000, 0, 999),
+        );
+        seed_price(&store, &rt, "claude-opus-4-8", 5_000_000);
+        seed_price(&store, &rt, "claude-fable-5", 10_000_000);
+        seed_recall_db(root.path(), &proj, &[(1_000, 600_000), (2_000, 400_000)]);
+
+        let FeedPayload::Recall { savings, .. } =
+            compute_recall(root.path(), &proj, USD_NOW).payload
+        else {
+            panic!("expected Recall");
+        };
+        let RecallView::Data(sd) = savings else {
+            panic!("expected savings data");
+        };
+        // 1M avoided split 3:1 → 750k @ $5/MTok + 250k @ $10/MTok = $6.25.
+        assert_eq!(sd.usd_saved_micros, Some(6_250_000));
+        assert_eq!(sd.usd_label.as_deref(), Some("~$6.25"));
+        assert_eq!(sd.usd_rows.len(), 2);
+        assert_eq!(sd.usd_rows.iter().map(|r| r.tokens).sum::<u64>(), 1_000_000);
+        let priced: i64 = sd.usd_rows.iter().filter_map(|r| r.subtotal_micros).sum();
+        assert_eq!(priced, 6_250_000, "subtotals compose the headline exactly");
+        // Deterministic order: heaviest share first.
+        assert_eq!(sd.usd_rows[0].model, "claude-opus-4-8");
+        assert_eq!(sd.usd_rows[0].tokens, 750_000);
+        assert_eq!(sd.usd_rows[0].rate_label.as_deref(), Some("$5.00/MTok"));
+        assert_eq!(sd.usd_rows[0].subtotal_label.as_deref(), Some("~$3.75"));
+        assert_eq!(sd.usd_rows[1].model, "claude-fable-5");
+        assert_eq!(sd.usd_rows[1].subtotal_label.as_deref(), Some("~$2.50"));
+    }
+
+    /// Rung 2: an unpriced model keeps its token slice, contributes no
+    /// dollars, and the headline honestly covers only the priced share.
+    #[test]
+    fn usd_partial_coverage_prices_what_it_can() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_model_fact(
+            &store,
+            &rt,
+            "c1",
+            "claude-opus-4-8",
+            1_000,
+            (1_000_000, 0, 0, 0),
+        );
+        seed_model_fact(
+            &store,
+            &rt,
+            "c2",
+            "mystery-model",
+            2_000,
+            (1_000_000, 0, 0, 0),
+        );
+        seed_price(&store, &rt, "claude-opus-4-8", 5_000_000);
+        // mystery-model: no seeded price.
+        seed_recall_db(root.path(), &proj, &[(1_000, 1_000_000)]);
+
+        let FeedPayload::Recall { savings, .. } =
+            compute_recall(root.path(), &proj, USD_NOW).payload
+        else {
+            panic!("expected Recall");
+        };
+        let RecallView::Data(sd) = savings else {
+            panic!("expected savings data");
+        };
+        // Even split (1M:1M): only opus's 500k slice is priced → $2.50.
+        assert_eq!(sd.usd_saved_micros, Some(2_500_000));
+        let unpriced: Vec<_> = sd
+            .usd_rows
+            .iter()
+            .filter(|r| r.subtotal_micros.is_none())
+            .collect();
+        assert_eq!(unpriced.len(), 1);
+        assert_eq!(unpriced[0].model, "mystery-model");
+        assert_eq!(unpriced[0].tokens, 500_000, "the slice is kept, undollared");
+        assert_eq!(unpriced[0].rate_label, None);
+        assert_eq!(unpriced[0].subtotal_label, None);
+    }
+
+    /// Rung 3: no input-token mix at all — the most-frequent captured model
+    /// carries the whole total as a single disclosed reference row.
+    #[test]
+    fn usd_no_mix_falls_back_to_most_frequent_model() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        // model_call rows without token_usage: calls observed, no mix.
+        for (id, model) in [
+            ("c1", "claude-opus-4-8"),
+            ("c2", "claude-opus-4-8"),
+            ("c3", "claude-fable-5"),
+        ] {
+            rt.block_on(store.insert(
+                "model_call",
+                &[
+                    "call_id",
+                    "turn_id",
+                    "model",
+                    "started_at",
+                    "schema_version",
+                ],
+                &[
+                    Value::text(id),
+                    Value::text("t1"),
+                    Value::text(model),
+                    Value::Int(1_000),
+                    Value::Int(1),
+                ],
+            ))
+            .unwrap();
+        }
+        seed_price(&store, &rt, "claude-opus-4-8", 5_000_000);
+        seed_recall_db(root.path(), &proj, &[(1_000, 2_000_000)]);
+
+        let FeedPayload::Recall { savings, .. } =
+            compute_recall(root.path(), &proj, USD_NOW).payload
+        else {
+            panic!("expected Recall");
+        };
+        let RecallView::Data(sd) = savings else {
+            panic!("expected savings data");
+        };
+        assert_eq!(sd.usd_rows.len(), 1, "one reference row");
+        assert_eq!(sd.usd_rows[0].model, "claude-opus-4-8", "most frequent");
+        assert_eq!(sd.usd_rows[0].tokens, 2_000_000, "carries the whole total");
+        assert_eq!(sd.usd_saved_micros, Some(10_000_000)); // 2M @ $5/MTok
+    }
+
+    /// Rung 4: honest absence — no capture projection, or nothing priced,
+    /// yields no figure at all while the token headline stands untouched.
+    /// Never `Some(0)` for a real saving.
+    #[test]
+    fn usd_absent_when_nothing_is_priced_or_no_capture() {
+        // (a) recall data exists but there is no capture projection at all.
+        let root = tempfile::tempdir().unwrap();
+        let proj_dir = root.path().join("bare");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let proj = proj_dir.to_string_lossy().into_owned();
+        seed_recall_db(root.path(), &proj, &[(1_000, 500)]);
+        let FeedPayload::Recall { savings, .. } =
+            compute_recall(root.path(), &proj, USD_NOW).payload
+        else {
+            panic!("expected Recall");
+        };
+        let RecallView::Data(sd) = savings else {
+            panic!("expected savings data");
+        };
+        assert!(
+            (sd.total - 500.0).abs() < f64::EPSILON,
+            "tokens stand alone"
+        );
+        assert_eq!(sd.usd_saved_micros, None);
+        assert_eq!(sd.usd_label, None);
+        assert!(sd.usd_rows.is_empty());
+
+        // (b) a mix exists but no model has a seeded price → still None.
+        let proj2 = make_project(root.path(), "unpriced");
+        let store = open_proj(root.path(), &proj2);
+        let rt = runtime().unwrap();
+        seed_model_fact(
+            &store,
+            &rt,
+            "c1",
+            "mystery-model",
+            1_000,
+            (1_000_000, 0, 0, 0),
+        );
+        seed_recall_db(root.path(), &proj2, &[(1_000, 500)]);
+        let FeedPayload::Recall { savings, .. } =
+            compute_recall(root.path(), &proj2, USD_NOW).payload
+        else {
+            panic!("expected Recall");
+        };
+        let RecallView::Data(sd) = savings else {
+            panic!("expected savings data");
+        };
+        assert_eq!(sd.usd_saved_micros, None, "never a fabricated ~$0.00");
+        assert!(sd.usd_rows.is_empty());
+    }
+
+    /// The money multiplies the NET avoided figure (ADR-0049) — the same
+    /// value the percentage uses — never gross (net + returned).
+    #[test]
+    fn usd_values_net_avoided_not_gross() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_model_fact(
+            &store,
+            &rt,
+            "c1",
+            "claude-opus-4-8",
+            1_000,
+            (1_000_000, 0, 0, 0),
+        );
+        seed_price(&store, &rt, "claude-opus-4-8", 5_000_000);
+        // Two serves, each returned=10 (the fixture's fixed cost): net
+        // avoided is 1_000_000; gross would be 1_000_020.
+        seed_recall_db(root.path(), &proj, &[(1_000, 600_000), (2_000, 400_000)]);
+
+        let FeedPayload::Recall { savings, .. } =
+            compute_recall(root.path(), &proj, USD_NOW).payload
+        else {
+            panic!("expected Recall");
+        };
+        let RecallView::Data(sd) = savings else {
+            panic!("expected savings data");
+        };
+        // net 1M @ $5/MTok = $5.00 exactly; gross would price 20 more tokens.
+        assert_eq!(sd.usd_saved_micros, Some(5_000_000));
+    }
+
+    /// The pure ladder: no basis and all-unpriced are both absence, and a
+    /// partially priced mix reports exactly its priced sum.
+    #[test]
+    fn usd_breakdown_ladder_edges() {
+        // No shares at all → no basis.
+        assert!(usd_breakdown(1_000, &[]).is_none());
+        // Shares exist but nothing is priced → absence, never Some(0).
+        let unpriced = [
+            MixShare {
+                model: "a".into(),
+                weight: 1,
+                price_per_mtok: None,
+            },
+            MixShare {
+                model: "b".into(),
+                weight: 1,
+                price_per_mtok: None,
+            },
+        ];
+        assert!(usd_breakdown(1_000, &unpriced).is_none());
+        // A negative price is nonsense input, treated as unpriced.
+        let nonsense = [MixShare {
+            model: "a".into(),
+            weight: 1,
+            price_per_mtok: Some(-5),
+        }];
+        assert!(usd_breakdown(1_000, &nonsense).is_none());
+        // Zero avoided with a priced share is a real zero: "~$0.00" is honest.
+        let priced = [MixShare {
+            model: "a".into(),
+            weight: 1,
+            price_per_mtok: Some(5_000_000),
+        }];
+        let (total, rows) = usd_breakdown(0, &priced).unwrap();
+        assert_eq!(total, 0);
+        assert_eq!(rows[0].tokens, 0);
     }
 
     #[test]
@@ -1687,7 +2157,8 @@ mod tests {
             ],
         ))
         .unwrap();
-        let FeedPayload::Recall { savings, calls, .. } = compute_recall(root.path(), &proj).payload
+        let FeedPayload::Recall { savings, calls, .. } =
+            compute_recall(root.path(), &proj, USD_NOW).payload
         else {
             panic!("expected Recall");
         };
@@ -1712,8 +2183,8 @@ mod tests {
                 ("e", "thread-e", 1_796_000),
             ],
         );
-        let first = compute_recall(root.path(), &proj);
-        let second = compute_recall(root.path(), &proj);
+        let first = compute_recall(root.path(), &proj, USD_NOW);
+        let second = compute_recall(root.path(), &proj, USD_NOW);
         assert_eq!(first, second, "idle recompute must be byte-identical");
         let FeedPayload::Recall { savings, calls, .. } = first.payload else {
             panic!("expected Recall");
@@ -1760,7 +2231,8 @@ mod tests {
         // Real serves land under the recall id.
         seed_recall_db(root.path(), &proj, &[(1_000, 500), (2_000, 700)]);
 
-        let FeedPayload::Recall { savings, calls, .. } = compute_recall(root.path(), &proj).payload
+        let FeedPayload::Recall { savings, calls, .. } =
+            compute_recall(root.path(), &proj, USD_NOW).payload
         else {
             panic!("expected Recall");
         };
@@ -1801,12 +2273,12 @@ mod tests {
         let pb = make_project(root.path(), "b");
         seed_recall_db(root.path(), &pa, &[(1_000, 700)]);
         // b has NO recall.db: a's events must not leak into b's sections.
-        let ub = compute_recall(root.path(), &pb);
+        let ub = compute_recall(root.path(), &pb, USD_NOW);
         let FeedPayload::Recall { savings, .. } = ub.payload else {
             panic!("expected Recall");
         };
         assert_eq!(savings, RecallView::Disabled);
-        let ua = compute_recall(root.path(), &pa);
+        let ua = compute_recall(root.path(), &pa, USD_NOW);
         let FeedPayload::Recall {
             savings: RecallView::Data(sd),
             ..
@@ -2013,7 +2485,7 @@ mod tests {
         let FeedPayload::Recall {
             savings: RecallView::Data(sd),
             ..
-        } = compute_recall(root.path(), &proj).payload
+        } = compute_recall(root.path(), &proj, USD_NOW).payload
         else {
             panic!("expected savings data");
         };
@@ -2035,7 +2507,7 @@ mod tests {
         let FeedPayload::Recall {
             savings: RecallView::Data(sd),
             ..
-        } = compute_recall(root.path(), &proj).payload
+        } = compute_recall(root.path(), &proj, USD_NOW).payload
         else {
             panic!("expected savings data");
         };

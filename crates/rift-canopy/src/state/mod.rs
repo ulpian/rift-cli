@@ -1240,6 +1240,28 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             s.dirty = true;
             Flow::Continue(Effects::default())
         }
+        // The USD-savings chip (ADR-0051 §6): opens the read-only breakdown
+        // as an `Overlay::Results` — the existing modal surface, so the
+        // shared close X, focus ring, scroll, and hints come with zero new
+        // parity wiring. Reads the TRUTH col3 (never the animated display).
+        Target::RecallCost => {
+            if let crate::col3::RecallView::Data(sd) = &s.col3.savings {
+                let title = match sd.usd_label.as_deref() {
+                    Some(label) => format!("recall savings — {label}"),
+                    None => "recall savings".to_owned(),
+                };
+                let lines = crate::col3::usd_breakdown_lines(sd);
+                s.app.open_overlay(Overlay::Results {
+                    title,
+                    lines,
+                    scroll: 0,
+                    footer: None,
+                    truncated: false,
+                });
+            }
+            s.dirty = true;
+            Flow::Continue(Effects::default())
+        }
         // The header actions (M55-04) map onto the exact same effects their
         // keys produce — `?` help, `/` palette, `q` quit.
         Target::HeaderHelp => {
@@ -1430,7 +1452,9 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
         Some(
             Target::ToggleRow(_) | Target::RetryRow(_) | Target::Scrollbar(ScrollRegion::Detail),
         ) => Panel::Detail,
-        Some(Target::Section(_) | Target::Scrollbar(ScrollRegion::Graphs)) => Panel::Graphs,
+        Some(Target::Section(_) | Target::RecallCost | Target::Scrollbar(ScrollRegion::Graphs)) => {
+            Panel::Graphs
+        }
         Some(Target::PanelFocus(p)) => p,
         // The wheel moves the suggest highlight (never inserts, never runs).
         Some(Target::SuggestRow(_)) => {
@@ -2580,6 +2604,69 @@ mod tests {
         assert!(s.advance_anim(PULSE_DECAY)); // overshoots → clamps to 0
         assert_eq!(s.select_pulse, 0.0, "decays to rest");
         assert!(!s.anim_active());
+    }
+
+    /// ADR-0051 §6: the chip opens the breakdown as the existing read-only
+    /// `Overlay::Results` — full disclosed basis, no new modal surface.
+    #[test]
+    fn clicking_the_cost_chip_opens_the_breakdown_modal() {
+        use crate::col3::{RecallView, SavingsData, UsdRow};
+        let mut s = ready(vec![project("a")]);
+        let mut col3 = (*s.col3).clone();
+        col3.savings = RecallView::Data(SavingsData {
+            rate: vec![1.0],
+            total: 1_000_000.0,
+            pct: 0.9,
+            usd_saved_micros: Some(6_250_000),
+            usd_label: Some("~$6.25".to_owned()),
+            usd_rows: vec![
+                UsdRow {
+                    model: "claude-opus-4-8".to_owned(),
+                    tokens: 750_000,
+                    price_per_mtok_micros: Some(5_000_000),
+                    subtotal_micros: Some(3_750_000),
+                    rate_label: Some("$5.00/MTok".to_owned()),
+                    subtotal_label: Some("~$3.75".to_owned()),
+                },
+                UsdRow {
+                    model: "claude-fable-5".to_owned(),
+                    tokens: 250_000,
+                    price_per_mtok_micros: Some(10_000_000),
+                    subtotal_micros: Some(2_500_000),
+                    rate_label: Some("$10.00/MTok".to_owned()),
+                    subtotal_label: Some("~$2.50".to_owned()),
+                },
+            ],
+        });
+        s.set_col3(col3);
+        let _ = apply_click(&mut s, Target::RecallCost);
+        let Some(Overlay::Results { title, lines, .. }) = &s.app.overlay else {
+            panic!(
+                "expected the breakdown Results overlay, got {:?}",
+                s.app.overlay
+            );
+        };
+        assert_eq!(title, "recall savings — ~$6.25");
+        let body = lines.join("\n");
+        assert!(body.contains("net tokens avoided   1,000,000"), "{body}");
+        assert!(body.contains("claude-opus-4-8"), "{body}");
+        assert!(body.contains("$5.00/MTok"), "{body}");
+        assert!(body.contains("~$3.75"), "{body}");
+        assert!(body.contains("total = ~$6.25"), "{body}");
+        assert!(body.contains("estimate, not a bill"), "{body}");
+        assert!(
+            body.contains("cl100k_base"),
+            "the tokenizer basis is disclosed: {body}"
+        );
+    }
+
+    /// Without an honest figure there is no chip to click; a stray
+    /// `RecallCost` (e.g. a race with a feed update) opens nothing.
+    #[test]
+    fn a_stray_cost_click_without_a_figure_opens_nothing() {
+        let mut s = ready(vec![project("a")]);
+        let _ = apply_click(&mut s, Target::RecallCost);
+        assert!(s.app.overlay.is_none(), "no figure, no modal");
     }
 
     #[test]
