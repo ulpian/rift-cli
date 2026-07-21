@@ -181,6 +181,11 @@ pub struct Effects {
     /// the colour picker's swatches (ADR-0045 §5): set when the picker opens
     /// for a profile whose overrides the state can't derive purely.
     pub load_picker_theme: Option<String>,
+    /// A directory whose immediate children the loop should list through the
+    /// injected lister (ADR-0052 §2) — the reducer only *requests*. The reply
+    /// lands on `App.explorer` in the same iteration, before the next frame, so
+    /// navigation never shows a loading state.
+    pub list_dir: Option<std::path::PathBuf>,
 }
 
 impl Effects {
@@ -195,6 +200,7 @@ impl Effects {
             && !self.reload_profiles
             && self.load_membership.is_none()
             && self.load_picker_theme.is_none()
+            && self.list_dir.is_none()
     }
 }
 
@@ -818,6 +824,7 @@ impl AppState {
             profile_menu: self.app.profile_menu.clone(),
             theme: self.theme,
             colour_picker: self.app.colour_picker.clone(),
+            explorer: self.app.explorer.clone(),
         }
     }
 }
@@ -1040,16 +1047,26 @@ fn on_mouse(s: &mut AppState, m: MouseInput) -> Flow {
         return Flow::Continue(Effects::default());
     }
     let editing_drag = s.app.mode == Mode::PanelEditor && s.app.editor.drag.is_some();
-    let vm = s.snapshot();
+    // The snapshot is taken PER ACTING ARM, never up front: a `Moved` event
+    // must do no per-event work at all (the ~0% idle invariant this function's
+    // doc comment promises), and the snapshot now carries the destination
+    // explorer's listing — up to `MAX_ENTRIES` owned names.
     match m.kind {
-        MouseKind::Down(MouseButton::Left) => match hit_test(&vm, m.col, m.row) {
-            Some(target) => apply_click(s, target),
-            None => Flow::Continue(Effects::default()),
-        },
+        MouseKind::Down(MouseButton::Left) => {
+            let vm = s.snapshot();
+            match hit_test(&vm, m.col, m.row) {
+                Some(target) => apply_click(s, target),
+                None => Flow::Continue(Effects::default()),
+            }
+        }
         // The scoped drag exception: only while a pickup/divider drag is live.
-        MouseKind::Drag(MouseButton::Left) if editing_drag => drag_update(s, &vm, m),
+        MouseKind::Drag(MouseButton::Left) if editing_drag => {
+            let vm = s.snapshot();
+            drag_update(s, &vm, m)
+        }
         MouseKind::Up(MouseButton::Left) if editing_drag => drop_drag(s),
         MouseKind::ScrollUp | MouseKind::ScrollDown => {
+            let vm = s.snapshot();
             let down = matches!(m.kind, MouseKind::ScrollDown);
             apply_scroll(s, &vm, m.col, m.row, down)
         }
@@ -1221,12 +1238,13 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             s.dirty = true;
             Flow::Continue(Effects::default())
         }
-        // The wizard's primary action (ADR-0029) — begin registering a project,
-        // the click equivalent of the `a` key from the first-run modal.
+        // The wizard's primary action (ADR-0029) — raise the destination
+        // explorer, the click equivalent of the `a` key from the first-run
+        // modal (ADR-0052 §6: all three affordances, one door).
         Target::WizardAdd => {
-            s.app.start_add_project();
             s.dirty = true;
-            Flow::Continue(Effects::default())
+            let action = crate::input::enter_explorer(&mut s.app);
+            profile_or_fold_action(s, action)
         }
         // An inert click surface: the overlay body, and a scrollbar (an overflow
         // indicator only — ADR-0031; the wheel scrolls the region in apply_scroll,
@@ -1421,6 +1439,47 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
             s.app.colour_picker.reset();
             Flow::Continue(Effects::default())
         }
+        // The destination explorer's mouse plane (ADR-0052 §8) — every arm
+        // delegates to the SAME act helper its key uses, so click ≡ key by
+        // construction rather than by a parallel implementation.
+        Target::ExplorerRow(i) => {
+            s.dirty = true;
+            s.app.explorer.cursor = i.min(s.app.explorer.visible_len().saturating_sub(1));
+            s.app.clamp_scrolls(s.size);
+            // A directory row descends (cursor + Enter); a file row only moves
+            // the cursor — files are context, never choices.
+            let action = crate::input::explorer_descend(&s.app);
+            profile_or_fold_action(s, action)
+        }
+        Target::ExplorerUp => {
+            s.dirty = true;
+            let action = crate::input::explorer_up(&s.app);
+            profile_or_fold_action(s, action)
+        }
+        Target::ExplorerSelect => {
+            s.dirty = true;
+            let action = crate::input::explorer_select(&mut s.app);
+            profile_or_fold_action(s, action)
+        }
+        Target::ExplorerTypePath => {
+            s.dirty = true;
+            crate::input::explorer_type_path(&mut s.app);
+            Flow::Continue(Effects::default())
+        }
+        Target::ExplorerDotfiles => {
+            s.dirty = true;
+            crate::input::explorer_toggle_hidden(&mut s.app);
+            s.app.clamp_scrolls(s.size);
+            Flow::Continue(Effects::default())
+        }
+        // The explorer's close `[x]` (ADR-0046): closes the MODE — the pointer
+        // twin of Esc, never the overlay close path.
+        Target::ExplorerClose => {
+            s.dirty = true;
+            s.app.mode = Mode::Normal;
+            s.app.explorer.reset();
+            Flow::Continue(Effects::default())
+        }
         // A grip press (ADR-0034) begins a unit drag: pick the unit up and arm the
         // drag, which `drag_update`/`drop_drag` carry to the release. The keyboard
         // (pick/move/drop) is the equivalent path.
@@ -1446,6 +1505,7 @@ fn apply_click(s: &mut AppState, target: Target) -> Flow {
 /// Apply a scroll-wheel event over the panel under the cursor, using the same
 /// per-panel vertical semantics as the keyboard: projects move the selection,
 /// detail moves the toggle cursor, graphs scroll their viewport.
+#[allow(clippy::too_many_lines)] // one arm per wheel-bearing target — a dispatch table
 fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool) -> Flow {
     let panel = match hit_test(vm, col, row) {
         Some(Target::ProjectRow(_) | Target::Scrollbar(ScrollRegion::Rail)) => Panel::Projects,
@@ -1468,6 +1528,22 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
                 s.dirty = true;
             }
             return Flow::Continue(Effects::default());
+        }
+        // The destination explorer's wheel (ADR-0052 §7) — the first mode-modal
+        // to scroll. Placed BEFORE the generic overlay-body arm, and guarded on
+        // the mode with no overlay, so a Notice over the explorer still owns the
+        // wheel (an overlay always outranks a mode).
+        Some(
+            Target::ExplorerRow(_)
+            | Target::ExplorerUp
+            | Target::ExplorerSelect
+            | Target::ExplorerTypePath
+            | Target::ExplorerDotfiles
+            | Target::ExplorerClose
+            | Target::OverlayBody
+            | Target::Scrollbar(ScrollRegion::Modal),
+        ) if s.app.mode == Mode::Explorer && s.app.overlay.is_none() => {
+            return explorer_wheel(s, down);
         }
         // The wheel scrolls an open Results overlay like `j`/`k`.
         Some(
@@ -1507,6 +1583,12 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
             | Target::MemberAddOpen
             | Target::PickerRow(_)
             | Target::PickerClose
+            | Target::ExplorerRow(_)
+            | Target::ExplorerUp
+            | Target::ExplorerSelect
+            | Target::ExplorerTypePath
+            | Target::ExplorerDotfiles
+            | Target::ExplorerClose
             | Target::WizardAdd
             | Target::RailAdd
             | Target::RailReorderUp
@@ -1547,6 +1629,22 @@ fn apply_scroll(s: &mut AppState, vm: &ViewModel, col: u16, row: u16, down: bool
     }
 }
 
+/// Scroll the destination explorer's listing by one row (ADR-0052 §7) — the
+/// first mode-modal wheel. Clamped to the listing's true overflow against the
+/// SAME viewport solver the renderer draws with, so the wheel can never run
+/// past the end into empty space.
+fn explorer_wheel(s: &mut AppState, down: bool) -> Flow {
+    let list_h = usize::from(crate::view::explorer_list_area(crate::view::modal_rect(s.size)).h);
+    let max = s.app.explorer.visible_len().saturating_sub(list_h);
+    s.app.explorer.scroll = if down {
+        s.app.explorer.scroll.saturating_add(1).min(max)
+    } else {
+        s.app.explorer.scroll.saturating_sub(1)
+    };
+    s.dirty = true;
+    Flow::Continue(Effects::default())
+}
+
 /// Fold the existing [`Action`] (from [`on_key`]) into a [`Flow`]/[`Effects`].
 /// `RemoveProject`/`ReorderProject`/`ToggleFeature`/`RetryFeature` are handled in
 /// [`update`] (they need the selected project + toggle state), so they never reach
@@ -1575,6 +1673,11 @@ fn fold_action(action: Action) -> Flow {
         | Action::SetThemeSlot { .. } => Flow::Continue(Effects::default()),
         Action::AddProject(path) => Flow::Continue(Effects {
             persist: vec![PersistOp::AddProject { path }],
+            ..Effects::default()
+        }),
+        // The lister seam (ADR-0052 §2): the reducer requests, the loop walks.
+        Action::ExplorerList(path) => Flow::Continue(Effects {
+            list_dir: Some(path),
             ..Effects::default()
         }),
     }
@@ -1905,10 +2008,11 @@ fn apply_rail_action(s: &mut AppState, target: &Target) -> Flow {
     s.app.set_focus(Panel::Projects);
     s.dirty = true;
     match target {
+        // The `+` chip raises the destination explorer through the ONE entry
+        // door (ADR-0052 §6) — the click twin of `a`, not a second seeding.
         Target::RailAdd => {
-            s.app.mode = Mode::AddProject;
-            s.app.command_line.clear();
-            Flow::Continue(Effects::default())
+            let action = crate::input::enter_explorer(&mut s.app);
+            profile_or_fold_action(s, action)
         }
         Target::RailRemove => {
             let sel = s.app.selected_project().map(|p| p.path.clone());
@@ -2291,6 +2395,10 @@ pub struct ViewModel {
     /// the picker renderer and its hit-test read it while
     /// `mode == ColourPicker`.
     pub colour_picker: crate::colour_picker::ColourPickerState,
+    /// The destination explorer's state (ADR-0052), copied from `App.explorer`
+    /// — the explorer renderer and its hit-test read it while
+    /// `mode == Explorer`.
+    pub explorer: crate::explorer::ExplorerState,
 }
 
 impl ViewModel {
@@ -2901,8 +3009,11 @@ mod tests {
     #[test]
     fn add_project_action_becomes_persist_effect() {
         let mut s = ready(vec![]);
-        // enter add-project mode and type a path, then Enter
+        // `a` browses (ADR-0052 §6); `i` falls back to the typed flow, then a
+        // path and Enter — the same funnel the explorer's select reuses.
         update(&mut s, Event::Key(CanopyKey::Char('a')));
+        update(&mut s, Event::Key(CanopyKey::Char('i')));
+        assert_eq!(s.app.mode, Mode::AddProject);
         for c in "/tmp/x".chars() {
             update(&mut s, Event::Key(CanopyKey::Char(c)));
         }
@@ -3652,6 +3763,312 @@ mod tests {
                 "the picker's X returns to the menu"
             );
         }
+        // The destination explorer (ADR-0052 §8), driven through REAL entry —
+        // and in both its visual states, because the X must survive every one.
+        //
+        // ADR-0046 §5, for whoever adds the next modal surface: registering
+        // here is a DUTY, not a courtesy. The draw and hit `if vm.mode ==`
+        // chains compile clean when a surface is forgotten, and these
+        // hand-listed fixtures — this sweep, `keymap`'s `ALL`/`app_in`/
+        // `fingerprint`, `Target::is_button`, and the `click_on` mirrors — are
+        // the only things that turn CI red when it is.
+        for with_entries in [true, false] {
+            let mut s = ready(vec![project("a")]);
+            s.app.home_dir = Some("/home/dev".into());
+            let e = effects_of(update(&mut s, Event::Key(CanopyKey::Char('a'))));
+            assert_eq!(
+                e.list_dir,
+                Some(std::path::PathBuf::from("/home/dev")),
+                "entry requests the start listing on the way in"
+            );
+            s.app.explorer.apply(if with_entries {
+                home_listing()
+            } else {
+                crate::explorer::DirListing {
+                    path: std::path::PathBuf::from("/home/dev"),
+                    entries: vec![],
+                    omitted: 0,
+                    error: Some("permission denied".into()),
+                }
+            });
+            let vm = s.snapshot();
+            let cr = crate::view::modal_close_rect(crate::view::modal_rect(vm.size)).unwrap();
+            assert_eq!(
+                crate::hit::hit_test(&vm, cr.x, cr.y),
+                Some(Target::ExplorerClose),
+                "the explorer lost its close X (entries={with_entries})"
+            );
+            let _ = apply_click(&mut s, Target::ExplorerClose);
+            assert_eq!(s.app.mode, Mode::Normal, "the X closes the MODE");
+            assert!(s.app.overlay.is_none(), "…and never touches the overlay");
+            assert_eq!(
+                s.app.explorer,
+                crate::explorer::ExplorerState::default(),
+                "closing rests the state"
+            );
+        }
+    }
+
+    // ---- ADR-0052: the destination explorer ---------------------------------
+
+    fn dir(name: &str) -> crate::explorer::ExplorerEntry {
+        crate::explorer::ExplorerEntry {
+            name: name.into(),
+            is_dir: true,
+        }
+    }
+
+    fn file(name: &str) -> crate::explorer::ExplorerEntry {
+        crate::explorer::ExplorerEntry {
+            name: name.into(),
+            is_dir: false,
+        }
+    }
+
+    /// The explorer's fixture listing of `/home/dev` (never a filesystem read).
+    fn home_listing() -> crate::explorer::DirListing {
+        crate::explorer::DirListing {
+            path: std::path::PathBuf::from("/home/dev"),
+            entries: vec![dir(".config"), dir("alpha"), dir("beta"), file("notes.md")],
+            omitted: 0,
+            error: None,
+        }
+    }
+
+    /// A dashboard browsing `/home/dev` over [`home_listing`].
+    fn browsing() -> AppState {
+        let mut s = ready(vec![project("a")]);
+        s.app.home_dir = Some("/home/dev".into());
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Char('a'))));
+        assert_eq!(e.list_dir, Some(std::path::PathBuf::from("/home/dev")));
+        s.app.explorer.apply(home_listing());
+        s
+    }
+
+    #[test]
+    fn an_explorer_list_action_folds_to_the_lister_seam() {
+        // ADR-0052 §2: the reducer never reads the filesystem — it requests.
+        let path = std::path::PathBuf::from("/home/dev/alpha");
+        let e = effects_of(fold_action(Action::ExplorerList(path.clone())));
+        assert_eq!(e.list_dir, Some(path));
+        assert!(!e.is_empty(), "a listing request is real work for the loop");
+        assert!(e.persist.is_empty() && e.data_requests.is_empty());
+    }
+
+    #[test]
+    fn every_add_project_affordance_arrives_through_the_one_door() {
+        // ADR-0052 §6: `a`, the rail `+`, and both twins of the wizard primary
+        // land in Mode::Explorer requesting the SAME start directory.
+        let start = Some(std::path::PathBuf::from("/home/dev"));
+
+        let mut s = ready(vec![project("a")]);
+        s.app.home_dir = Some("/home/dev".into());
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Char('a'))));
+        assert_eq!((s.app.mode, e.list_dir), (Mode::Explorer, start.clone()));
+
+        let mut s = ready(vec![project("a")]);
+        s.app.home_dir = Some("/home/dev".into());
+        let m = click_on(Target::RailAdd, &mut s);
+        let e = effects_of(update(&mut s, Event::Mouse(m)));
+        assert_eq!((s.app.mode, e.list_dir), (Mode::Explorer, start.clone()));
+
+        // The wizard, by key and by click, on an empty registry.
+        for by_click in [false, true] {
+            let mut s = AppState::new(vec![], Size::new(120, 40));
+            s.app.splash.skip();
+            s.app.home_dir = Some("/home/dev".into());
+            assert!(s.app.showing_wizard());
+            let e = if by_click {
+                let m = click_on(Target::WizardAdd, &mut s);
+                effects_of(update(&mut s, Event::Mouse(m)))
+            } else {
+                effects_of(update(&mut s, Event::Key(CanopyKey::Enter)))
+            };
+            assert_eq!(s.app.mode, Mode::Explorer, "by_click={by_click}");
+            assert_eq!(e.list_dir, start.clone(), "by_click={by_click}");
+            assert!(s.app.overlay.is_none(), "the wizard's overlay dropped");
+        }
+    }
+
+    #[test]
+    fn explorer_clicks_mirror_their_keys() {
+        // ADR-0046: every act the hints teach is reachable by click, and every
+        // click is a key's twin — proven through the PURE hit-test (`click_on`
+        // finds the drawn cell), so a solver drift shows up here.
+        //
+        // A directory-row click ≡ cursor + Enter.
+        let mut s = browsing();
+        let m = click_on(Target::ExplorerRow(1), &mut s); // → beta
+        let e = effects_of(update(&mut s, Event::Mouse(m)));
+        assert_eq!(e.list_dir, Some(std::path::PathBuf::from("/home/dev/beta")));
+        let mut keyed = browsing();
+        update(&mut keyed, Event::Key(CanopyKey::Char('j')));
+        let ek = effects_of(update(&mut keyed, Event::Key(CanopyKey::Enter)));
+        assert_eq!(e.list_dir, ek.list_dir, "row-click ≡ Enter");
+
+        // The back row ≡ Backspace.
+        let mut s = browsing();
+        let m = click_on(Target::ExplorerUp, &mut s);
+        let e = effects_of(update(&mut s, Event::Mouse(m)));
+        assert_eq!(e.list_dir, Some(std::path::PathBuf::from("/home")));
+
+        // The select chip ≡ `s` — both persist the OPEN folder and land in
+        // Normal (so the success notice reaches the dashboard).
+        let mut s = browsing();
+        let m = click_on(Target::ExplorerSelect, &mut s);
+        let e = effects_of(update(&mut s, Event::Mouse(m)));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::AddProject {
+                path: "/home/dev".into()
+            }]
+        );
+        assert_eq!(s.app.mode, Mode::Normal);
+        let mut keyed = browsing();
+        let ek = effects_of(update(&mut keyed, Event::Key(CanopyKey::Char('s'))));
+        assert_eq!(e.persist, ek.persist, "the chip ≡ `s`");
+        assert_eq!(keyed.app.mode, Mode::Normal);
+
+        // The type-path chip ≡ `i`.
+        let mut s = browsing();
+        let m = click_on(Target::ExplorerTypePath, &mut s);
+        update(&mut s, Event::Mouse(m));
+        assert_eq!(s.app.mode, Mode::AddProject);
+        assert!(s.app.command_line.is_empty(), "today's flow exactly");
+
+        // The dotfiles chip ≡ `.` — the act the status line teaches, reachable
+        // by pointer (ADR-0046; the one mirror the first cut was missing).
+        let mut s = browsing();
+        let m = click_on(Target::ExplorerDotfiles, &mut s);
+        update(&mut s, Event::Mouse(m));
+        assert!(s.app.explorer.show_hidden, "the chip revealed dot-entries");
+        assert_eq!(s.app.explorer.visible_len(), 4);
+        let mut keyed = browsing();
+        update(&mut keyed, Event::Key(CanopyKey::Char('.')));
+        assert_eq!(
+            s.app.explorer, keyed.app.explorer,
+            "the chip and the key leave IDENTICAL state"
+        );
+        // …and it toggles back.
+        let m = click_on(Target::ExplorerDotfiles, &mut s);
+        update(&mut s, Event::Mouse(m));
+        assert!(!s.app.explorer.show_hidden);
+
+        // The X ≡ Esc.
+        let mut s = browsing();
+        let m = click_on(Target::ExplorerClose, &mut s);
+        update(&mut s, Event::Mouse(m));
+        assert_eq!(s.app.mode, Mode::Normal);
+        assert_eq!(s.app.explorer, crate::explorer::ExplorerState::default());
+        let mut keyed = browsing();
+        update(&mut keyed, Event::Key(CanopyKey::Esc));
+        assert_eq!(keyed.app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_file_row_click_only_moves_the_cursor() {
+        let mut s = browsing();
+        let m = click_on(Target::ExplorerRow(2), &mut s); // → notes.md
+        let e = effects_of(update(&mut s, Event::Mouse(m)));
+        assert!(e.list_dir.is_none(), "files are context, never choices");
+        assert_eq!(s.app.explorer.cursor, 2, "the cursor still moved");
+        assert_eq!(s.app.mode, Mode::Explorer);
+    }
+
+    #[test]
+    fn the_explorer_wheel_clamps_at_both_ends_and_yields_to_an_overlay() {
+        let mut s = browsing();
+        s.app.explorer.entries = (0..200).map(|i| dir(&format!("d{i:03}"))).collect();
+        let list_h =
+            usize::from(crate::view::explorer_list_area(crate::view::modal_rect(s.size)).h);
+        let modal = crate::view::modal_rect(s.size);
+        let (col, row) = (modal.x + 2, crate::view::explorer_list_area(modal).y);
+        let wheel = |down| crate::input::MouseInput {
+            kind: if down {
+                crate::input::MouseKind::ScrollDown
+            } else {
+                crate::input::MouseKind::ScrollUp
+            },
+            col,
+            row,
+        };
+        update(&mut s, Event::Mouse(wheel(false)));
+        assert_eq!(s.app.explorer.scroll, 0, "clamped at the top");
+        for _ in 0..500 {
+            update(&mut s, Event::Mouse(wheel(true)));
+        }
+        assert_eq!(
+            s.app.explorer.scroll,
+            200 - list_h,
+            "never past the listing's end (ADR-0031)"
+        );
+        // An overlay over the explorer outranks the mode and owns the wheel.
+        let mut s = browsing();
+        s.app.explorer.entries = (0..200).map(|i| dir(&format!("d{i:03}"))).collect();
+        s.app
+            .open_overlay(Overlay::notice("added", vec!["ok".into()]));
+        update(&mut s, Event::Mouse(wheel(true)));
+        assert_eq!(s.app.explorer.scroll, 0, "the notice swallowed the wheel");
+    }
+
+    #[test]
+    fn keyboard_movement_follows_the_cursor_without_stealing_a_free_offset() {
+        // ADR-0052 §7: the first mode-modal follow-cursor clamp.
+        let mut s = browsing();
+        s.app.explorer.entries = (0..200).map(|i| dir(&format!("d{i:03}"))).collect();
+        let list_h =
+            usize::from(crate::view::explorer_list_area(crate::view::modal_rect(s.size)).h);
+        for _ in 0..list_h + 5 {
+            update(&mut s, Event::Key(CanopyKey::Char('j')));
+        }
+        assert_eq!(s.app.explorer.cursor, list_h + 5);
+        assert_eq!(
+            s.app.explorer.scroll,
+            list_h + 5 + 1 - list_h,
+            "the viewport followed the cursor down"
+        );
+        // A wheel-set offset that still shows the cursor survives a redraw.
+        let mut s = browsing();
+        s.app.explorer.entries = (0..200).map(|i| dir(&format!("d{i:03}"))).collect();
+        s.app.explorer.cursor = 30;
+        s.app.explorer.scroll = 28;
+        s.app.clamp_scrolls(s.size);
+        assert_eq!(s.app.explorer.scroll, 28, "an in-view cursor moves nothing");
+    }
+
+    #[test]
+    fn selecting_a_destination_registers_it_and_add_is_untouched() {
+        // The funnel (ADR-0052 §5): select yields exactly the typed flow's op.
+        let mut s = browsing();
+        update(&mut s, Event::Key(CanopyKey::Enter)); // descend to alpha…
+        s.app.explorer.apply(crate::explorer::DirListing {
+            path: std::path::PathBuf::from("/home/dev/alpha"),
+            entries: vec![dir("src")],
+            omitted: 0,
+            error: None,
+        });
+        let e = effects_of(update(&mut s, Event::Key(CanopyKey::Char('s'))));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::AddProject {
+                path: "/home/dev/alpha".into()
+            }],
+            "the folder that is OPEN, one level down"
+        );
+
+        // `/add` still registers the launch cwd and never raises the explorer.
+        let mut s = ready(vec![project("a")]);
+        s.app.launch_cwd = Some("/r/here".into());
+        s.app.home_dir = Some("/home/dev".into());
+        let e = effects_of(run_line(&mut s, "add"));
+        assert_eq!(
+            e.persist,
+            vec![PersistOp::AddProject {
+                path: "/r/here".into()
+            }]
+        );
+        assert!(e.list_dir.is_none(), "/add browses nothing");
+        assert_eq!(s.app.mode, Mode::Normal);
     }
 
     #[test]
@@ -4009,10 +4426,13 @@ mod tests {
 
     #[test]
     fn rail_buttons_raise_the_same_effects_as_keys_and_flash() {
-        // Add → enters AddProject mode (like the `a` key) and press-flashes.
+        // Add → raises the destination explorer (like the `a` key, through the
+        // one entry door — ADR-0052 §6) and press-flashes.
         let mut s = ready(vec![project("a"), project("b")]);
-        let _ = apply_click(&mut s, Target::RailAdd);
-        assert_eq!(s.app.mode, Mode::AddProject);
+        s.app.home_dir = Some("/home/dev".into());
+        let e = effects_of(apply_click(&mut s, Target::RailAdd));
+        assert_eq!(s.app.mode, Mode::Explorer);
+        assert_eq!(e.list_dir, Some(std::path::PathBuf::from("/home/dev")));
         assert_eq!(s.pressed, Some(Target::RailAdd));
         // Remove selected → the same PersistOp the `d` key raises.
         let mut s = ready(vec![project("a"), project("b")]);
@@ -4050,6 +4470,11 @@ mod tests {
             Target::ToggleRow(0),
             Target::RetryRow(0),
             Target::WizardAdd,
+            Target::ExplorerUp,
+            Target::ExplorerSelect,
+            Target::ExplorerTypePath,
+            Target::ExplorerDotfiles,
+            Target::ExplorerClose,
         ] {
             assert!(target.is_button(), "{target:?} must be a button");
             let mut s = ready(vec![project("a")]);
@@ -4062,6 +4487,10 @@ mod tests {
         }
         // A selection/focus target is not a button and does not flash.
         assert!(!Target::ProjectRow(0).is_button());
+        assert!(
+            !Target::ExplorerRow(0).is_button(),
+            "a list row selects; it is not a chip"
+        );
         let mut s = ready(vec![project("a")]);
         let _ = apply_click(&mut s, Target::ProjectRow(0));
         assert!(s.pressed.is_none());
@@ -4792,17 +5221,22 @@ mod tests {
     }
 
     #[test]
-    fn the_wizard_primary_click_enters_add_project_mode_and_flashes() {
+    fn the_wizard_primary_click_raises_the_explorer_and_flashes() {
         let mut s = AppState::new(vec![], Size::new(120, 40));
         s.app.splash.skip();
         s.reduced_motion = false;
+        s.app.home_dir = Some("/home/dev".into());
         assert!(s.app.showing_wizard());
-        let flow = apply_click(&mut s, Target::WizardAdd);
-        assert!(matches!(flow, Flow::Continue(_)));
+        let e = effects_of(apply_click(&mut s, Target::WizardAdd));
+        assert_eq!(
+            e.list_dir,
+            Some(std::path::PathBuf::from("/home/dev")),
+            "the click twin requests the same start listing the key does"
+        );
         assert_eq!(
             s.app.mode,
-            Mode::AddProject,
-            "the wizard begins add-project"
+            Mode::Explorer,
+            "the wizard begins with browsing (ADR-0052 §6)"
         );
         assert!(s.app.overlay.is_none(), "the wizard dismissed");
         assert_eq!(s.press_pulse, 1.0, "the primary button flashed on click");

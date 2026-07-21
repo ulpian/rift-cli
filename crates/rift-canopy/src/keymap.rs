@@ -61,6 +61,8 @@ pub enum HintContext {
     ProfileConfirm,
     /// Picking a profile's theme colours (ADR-0039).
     ColourPicker,
+    /// Browsing for a project's destination (ADR-0052).
+    Explorer,
     /// A results overlay is open.
     OverlayResults,
     /// A confirm overlay is open.
@@ -103,6 +105,7 @@ pub fn context(
                 MenuStage::ConfirmDelete { .. } => HintContext::ProfileConfirm,
             },
             Mode::ColourPicker => HintContext::ColourPicker,
+            Mode::Explorer => HintContext::Explorer,
             Mode::Normal => match focus {
                 Panel::Projects => HintContext::Rail,
                 Panel::Detail => HintContext::Detail,
@@ -197,6 +200,15 @@ const COLOUR_PICKER: &[Hint] = &[
     hint("⏎", "select", CanopyKey::Enter),
     hint("esc", "back", CanopyKey::Esc),
 ];
+const EXPLORER: &[Hint] = &[
+    hint("j/k", "move", CanopyKey::Down),
+    hint("⏎", "open", CanopyKey::Enter),
+    hint("⌫", "up", CanopyKey::Backspace),
+    hint("s", "select", CanopyKey::Char('s')),
+    hint("i", "type path", CanopyKey::Char('i')),
+    hint(".", "dotfiles", CanopyKey::Char('.')),
+    hint("esc", "close", CanopyKey::Esc),
+];
 const OVERLAY_RESULTS: &[Hint] = &[
     hint("j/k", "scroll", CanopyKey::Down),
     hint("esc", "dismiss", CanopyKey::Esc),
@@ -229,6 +241,7 @@ pub fn hints(ctx: HintContext) -> &'static [Hint] {
         HintContext::ProfileNaming => PROFILE_NAMING,
         HintContext::ProfileConfirm => PROFILE_CONFIRM,
         HintContext::ColourPicker => COLOUR_PICKER,
+        HintContext::Explorer => EXPLORER,
         HintContext::OverlayResults => OVERLAY_RESULTS,
         HintContext::OverlayConfirm => OVERLAY_CONFIRM,
         HintContext::OverlayMessage => OVERLAY_MESSAGE,
@@ -376,6 +389,32 @@ mod tests {
                 app.colour_picker.slot_cursor = 1;
                 app.colour_picker.preset_cursor = 2;
             }
+            HintContext::Explorer => {
+                // A listed directory mid-cursor: `⏎` has a directory under the
+                // cursor, `⌫` a real parent, `.` a dot-entry to reveal, and
+                // `j`/`k` room to move (ADR-0052).
+                app.mode = Mode::Explorer;
+                app.explorer.cwd = std::path::PathBuf::from("/r/deep");
+                app.explorer.entries = vec![
+                    crate::explorer::ExplorerEntry {
+                        name: "alpha".into(),
+                        is_dir: true,
+                    },
+                    crate::explorer::ExplorerEntry {
+                        name: "beta".into(),
+                        is_dir: true,
+                    },
+                    crate::explorer::ExplorerEntry {
+                        name: "notes.md".into(),
+                        is_dir: false,
+                    },
+                    crate::explorer::ExplorerEntry {
+                        name: ".hidden".into(),
+                        is_dir: true,
+                    },
+                ];
+                app.explorer.cursor = 1;
+            }
             HintContext::OverlayResults => {
                 app.overlay = Some(Overlay::Results {
                     title: "t".into(),
@@ -427,7 +466,10 @@ mod tests {
             // editor key (move/reorder/resize/reset) registers as handled.
             app.editor,
             app.layout,
-        ) + &format!("|{:?}|{:?}", app.profile_menu, app.colour_picker)
+        ) + &format!(
+            "|{:?}|{:?}|{:?}",
+            app.profile_menu, app.colour_picker, app.explorer
+        )
     }
 
     /// The M55-04 derivation proof: every hinted key, fed to the reducer in
@@ -435,7 +477,7 @@ mod tests {
     /// an action is returned. A hint can never advertise a dead key.
     #[test]
     fn every_hint_key_is_handled_by_the_reducer() {
-        const ALL: [HintContext; 18] = [
+        const ALL: [HintContext; 19] = [
             HintContext::Rail,
             HintContext::Detail,
             HintContext::Graphs,
@@ -450,6 +492,7 @@ mod tests {
             HintContext::ProfileNaming,
             HintContext::ProfileConfirm,
             HintContext::ColourPicker,
+            HintContext::Explorer,
             HintContext::OverlayResults,
             HintContext::OverlayConfirm,
             HintContext::OverlayMessage,

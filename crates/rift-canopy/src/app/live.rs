@@ -113,10 +113,11 @@ impl EventSource for MergedEvents {
 /// Everything the live loop needs from its host — **the** single injection
 /// point (ADR-0011): a new event source or channel becomes a new field here,
 /// wired in [`run`], and the loop body never changes.
-pub struct LoopDeps<'m, F, R>
+pub struct LoopDeps<'m, F, R, L>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
     R: FnMut() -> RiftResult<Vec<Project>>,
+    L: FnMut(&std::path::Path) -> crate::explorer::DirListing,
 {
     /// Launch options (ascii / skip-splash) from the CLI flags.
     pub opts: CanopyOpts,
@@ -140,6 +141,10 @@ where
     /// loader): the active profile, live names, membership, and (profile,
     /// project) arrangements; the binary wires it to the canopy store.
     pub profile_loader: &'m mut dyn crate::profile::ProfileLoader,
+    /// The destination explorer's lister seam (ADR-0052 §2): one directory's
+    /// immediate children, infallibly. The binary wires it to the data plane's
+    /// real walk; tests inject scripted listings.
+    pub list_dir: L,
 }
 
 /// Launch Canopy on the real terminal until the user quits, over the host
@@ -149,10 +154,11 @@ where
 ///
 /// # Errors
 /// [`rift_core::RiftError`] on a terminal enter/read/present failure.
-pub fn run<F, R>(deps: LoopDeps<'_, F, R>) -> RiftResult<()>
+pub fn run<F, R, L>(deps: LoopDeps<'_, F, R, L>) -> RiftResult<()>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
     R: FnMut() -> RiftResult<Vec<Project>>,
+    L: FnMut(&std::path::Path) -> crate::explorer::DirListing,
 {
     let LoopDeps {
         opts,
@@ -164,6 +170,7 @@ where
         dispatcher,
         mut reload,
         profile_loader,
+        mut list_dir,
     } = deps;
     let caps = crate::render::caps::detect(opts.ascii);
     let probe = xre_term::Capabilities::probe();
@@ -191,6 +198,9 @@ where
     // prime subscribes the project the developer launched from; `/add`
     // registers exactly this directory (the reducer never reads cwd).
     state.app.launch_cwd.clone_from(&opts.launch_cwd);
+    // The destination explorer's start directory (ADR-0052 §6): home, resolved
+    // by the binary's env ladder, falling back to the launch cwd then `/`.
+    state.app.home_dir.clone_from(&opts.home_dir);
     crate::apply_launch_cwd(
         &mut state.app,
         opts.launch_cwd.as_deref(),
@@ -219,6 +229,7 @@ where
         dispatcher,
         &mut reload,
         profile_loader,
+        &mut list_dir,
     )
 }
 

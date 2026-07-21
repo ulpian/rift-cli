@@ -31,6 +31,7 @@ pub mod colour_picker;
 pub mod command;
 pub mod dispatch;
 pub mod editor;
+pub mod explorer;
 pub mod hit;
 pub mod input;
 pub mod keymap;
@@ -72,6 +73,7 @@ pub use dispatch::{
     NullDispatcher, OutcomeClass, Overlay, OverlayControl, Severity, OVERLAY_MAX_LINES,
 };
 pub use editor::EditorState;
+pub use explorer::{sort_entries, DirListing, ExplorerEntry, ExplorerState, MAX_ENTRIES};
 pub use hit::{hit_test, Target};
 pub use input::{on_key, Action, CanopyKey, Mode, MouseButton, MouseInput, MouseKind};
 pub use layout::{solve, PanelRects, Rect};
@@ -282,6 +284,14 @@ pub struct App {
     /// and its two cursors. Only meaningful while `mode == Mode::ColourPicker`;
     /// resting otherwise.
     pub colour_picker: crate::colour_picker::ColourPickerState,
+    /// The destination explorer's transient interaction state (ADR-0052) — the
+    /// browsed directory, its listing, the cursor/scroll, the dot toggle, and
+    /// any inline error. Only meaningful while `mode == Mode::Explorer`;
+    /// resting otherwise.
+    pub explorer: crate::explorer::ExplorerState,
+    /// The operator's home directory — the explorer's start (ADR-0052 §6), set
+    /// from `CanopyOpts` at startup. The reducer never reads the environment.
+    pub home_dir: Option<String>,
 }
 
 impl App {
@@ -317,6 +327,8 @@ impl App {
             startup_profile: None,
             profile_menu: crate::profile_menu::ProfileMenuState::default(),
             colour_picker: crate::colour_picker::ColourPickerState::default(),
+            explorer: crate::explorer::ExplorerState::default(),
+            home_dir: None,
         }
     }
 
@@ -528,6 +540,11 @@ impl App {
     /// (a fitting column scrolls nothing).
     pub fn clamp_scrolls(&mut self, size: crate::render::frame::Size) {
         use crate::layout::{choose_mode, single_panel, solve, two_col, LayoutMode};
+        // The explorer is the first scrolling mode-modal (ADR-0052 §7), and its
+        // viewport is the modal's list area — not a dashboard column — so it
+        // clamps here first, before the too-small early-out (a modal degrades to
+        // near-full-screen rather than vanishing).
+        self.clamp_explorer_scroll(size);
         let body = crate::layout::Rect {
             x: 0,
             y: 1,
@@ -566,6 +583,28 @@ impl App {
             &crate::col3::SectionId::ALL,
             col3.h,
         ));
+    }
+
+    /// Clamp the destination explorer's cursor and scroll (ADR-0052 §7): the
+    /// cursor onto the current visible list, the offset to the listing's true
+    /// overflow, and then a two-sided **follow-cursor** pass so keyboard
+    /// movement keeps the cursor on screen. A cursor already in view leaves a
+    /// free (wheel-set) offset exactly where the operator put it.
+    fn clamp_explorer_scroll(&mut self, size: crate::render::frame::Size) {
+        let list_h = usize::from(crate::view::explorer_list_area(crate::view::modal_rect(size)).h);
+        let len = self.explorer.visible_len();
+        self.explorer.cursor = self.explorer.cursor.min(len.saturating_sub(1));
+        let max_scroll = len.saturating_sub(list_h);
+        self.explorer.scroll = self.explorer.scroll.min(max_scroll);
+        if list_h == 0 {
+            return;
+        }
+        if self.explorer.cursor < self.explorer.scroll {
+            self.explorer.scroll = self.explorer.cursor;
+        } else if self.explorer.cursor >= self.explorer.scroll + list_h {
+            self.explorer.scroll = self.explorer.cursor + 1 - list_h;
+        }
+        self.explorer.scroll = self.explorer.scroll.min(max_scroll);
     }
 
     /// Move the column-2 feature-toggle cursor down/up, clamped to the six toggles.

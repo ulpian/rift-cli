@@ -827,6 +827,16 @@ fn launch_cwd_context() -> (Option<String>, bool) {
     (Some(canonical.to_string_lossy().into_owned()), is_repo)
 }
 
+/// The operator's home directory — the destination explorer's start (ADR-0052
+/// §6). The same env ladder `rift_registry::resolve_from` walks (`HOME` on
+/// unix, `USERPROFILE` on Windows; no `dirs` crate), resolved once here so the
+/// render crate stays env-free. `None` lets the reducer fall back to the launch
+/// cwd, then `/`.
+fn home_dir_from(env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    env(key).filter(|h| !h.is_empty())
+}
+
 fn print_ascii_frame(
     projects: Vec<Project>,
     loader: &mut dyn rift_canopy::ProfileLoader,
@@ -944,6 +954,7 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
                 launch_cwd,
                 launch_cwd_is_repo,
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                home_dir: home_dir_from(|k| std::env::var(k).ok()),
             };
             // Spawn the live data bus (P8), seeded to populate every registered
             // project's status; it feeds updates in and takes requests back out.
@@ -976,6 +987,10 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
                 dispatcher: &mut dispatcher,
                 reload,
                 profile_loader: &mut profile_loader,
+                // The destination explorer's lister seam (ADR-0052 §2): the
+                // real walk lives in the data plane, injected exactly like
+                // `on_persist` — the reducer only ever requests a directory.
+                list_dir: rift_canopy_data::list_dir,
             }) {
                 Ok(()) => return Ok(()),
                 Err(e) => {

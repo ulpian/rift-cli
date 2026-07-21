@@ -87,6 +87,13 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
         draw_colour_picker(vm, unicode, frame);
     }
 
+    // The destination explorer (ADR-0052): the same modal geometry and scrim,
+    // its state on the snapshot. Drawn before the overlay layer, so a success
+    // notice paints on top of it exactly like it does over the dashboard.
+    if vm.mode == crate::input::Mode::Explorer {
+        draw_explorer(vm, unicode, frame);
+    }
+
     // The dispatch overlay layers over the body (ADR-0021 "Dispatch posture"):
     // results scroll, confirms gate, the running line holds during a dispatch.
     // It sizes itself as a centered modal (ADR-0026) from `vm.size`.
@@ -733,6 +740,338 @@ fn draw_profile_menu(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
                 severity_style(crate::dispatch::Severity::Warning),
             );
         }
+    }
+}
+
+// ---- The destination explorer's geometry (ADR-0052 §7) --------------------
+//
+// One solver per region feeds BOTH the draw and the hit-test (ADR-0046), and
+// the row solver is the tree's first to honour a scroll offset — the profile
+// menu simply stops drawing past the frame, which a directory listing cannot
+// afford. Layout inside the modal's inner box: the `⬑ ..` back row on top, the
+// scrolling list beneath it, then the status line and the button row on the two
+// bottom rows (7 entry rows at the 40×12 modal floor).
+
+/// The explorer's inner content box, or `None` when the frame is too small to
+/// host the surface at all (the one size guard all four solvers share).
+fn explorer_inner(modal: Rect) -> Option<Rect> {
+    (modal.w >= 4 && modal.h >= 5).then(|| Rect {
+        x: modal.x + 1,
+        y: modal.y + 1,
+        w: modal.w - 2,
+        h: modal.h - 2,
+    })
+}
+
+/// A zero-sized rect anchored at `modal`'s origin (the "no such region" reply
+/// every explorer solver returns, matching `profile_menu_row_rect`'s shape).
+fn explorer_empty(modal: Rect) -> Rect {
+    Rect {
+        x: modal.x,
+        y: modal.y,
+        w: 0,
+        h: 0,
+    }
+}
+
+/// The `⬑ ..` back row — the explorer's top inner row, full width.
+#[must_use]
+pub fn explorer_up_rect(modal: Rect) -> Rect {
+    explorer_inner(modal).map_or_else(
+        || explorer_empty(modal),
+        |inner| Rect {
+            x: inner.x,
+            y: inner.y,
+            w: inner.w,
+            h: 1,
+        },
+    )
+}
+
+/// The scrolling entry-list viewport: everything between the back row and the
+/// status + button rows. Zero-height on a frame with no room to spare.
+#[must_use]
+pub fn explorer_list_area(modal: Rect) -> Rect {
+    explorer_inner(modal).map_or_else(
+        || explorer_empty(modal),
+        |inner| Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            w: inner.w,
+            h: inner.h.saturating_sub(3),
+        },
+    )
+}
+
+/// The row rect for **visible** entry `i` at viewport offset `scroll` — the
+/// scroll-aware solver draw and hit share. Zero-sized when the row is scrolled
+/// out of the viewport in either direction (never clamped into a wrong row).
+#[must_use]
+pub fn explorer_row_rect(modal: Rect, i: usize, scroll: usize) -> Rect {
+    let list = explorer_list_area(modal);
+    if list.h == 0 {
+        return explorer_empty(modal);
+    }
+    let Some(dy) = i.checked_sub(scroll).and_then(|d| u16::try_from(d).ok()) else {
+        return explorer_empty(modal);
+    };
+    if dy >= list.h {
+        return explorer_empty(modal);
+    }
+    Rect {
+        x: list.x,
+        y: list.y + dy,
+        w: list.w,
+        h: 1,
+    }
+}
+
+/// The explorer's action chips, in display order — `(wide label, narrow
+/// fallback)`. One source for the draw, the measurement, and the target
+/// mapping (the `MEMBERS_CHIPS` contract). The narrow form exists so a chip
+/// **degrades** rather than vanishing: an act the surface teaches must stay
+/// clickable at every width it draws at, down to the 24-column tier where the
+/// modal is narrower than `MIN_MODAL_COLS` (ADR-0046).
+pub const EXPLORER_BUTTONS: [(&str, &str); 2] = [
+    ("[ select destination ]", "[ select ]"),
+    ("[ input as path ]", "[ path ]"),
+];
+
+/// The dot-entry toggle's chip — the click twin of `.`, right-aligned inside
+/// the back row rather than sitting with the action chips, so it keeps its own
+/// width budget and survives the narrow tiers (the `profile_menu_settings_rect`
+/// precedent).
+pub const EXPLORER_DOTFILES_CHIP: &str = "[.dotfiles]";
+
+/// The dot-toggle chip's rect. Zero-sized only when the back row cannot host a
+/// chip beside the `..` label at all.
+#[must_use]
+pub fn explorer_dotfiles_rect(modal: Rect) -> Rect {
+    let up = explorer_up_rect(modal);
+    let chip_w = u16::try_from(EXPLORER_DOTFILES_CHIP.chars().count()).unwrap_or(0);
+    if up.h == 0 || up.w < chip_w.saturating_add(8) {
+        return explorer_empty(modal);
+    }
+    Rect {
+        x: up.x + up.w - chip_w - 1,
+        y: up.y,
+        w: chip_w,
+        h: 1,
+    }
+}
+
+/// The explorer's chip rects on the inner bottom row, left-aligned with 1-cell
+/// gaps — one solver for the draw and the hit-test (ADR-0046), returning the
+/// label it measured with so the two sides can never disagree about the text.
+/// Each chip takes its wide label when it fits and its narrow fallback
+/// otherwise; a chip that fits in neither form clips away **whole** (never
+/// half-drawn). Both acts stay clickable down to the 24-column tier.
+#[must_use]
+pub fn explorer_button_rects(modal: Rect) -> Vec<(Rect, crate::hit::Target, &'static str)> {
+    let Some(inner) = explorer_inner(modal) else {
+        return Vec::new();
+    };
+    let targets = [
+        crate::hit::Target::ExplorerSelect,
+        crate::hit::Target::ExplorerTypePath,
+    ];
+    let y = inner.y + inner.h - 1;
+    let right = inner.x + inner.w;
+    let mut x = inner.x + 1;
+    let mut out = Vec::with_capacity(EXPLORER_BUTTONS.len());
+    for ((wide, narrow), target) in EXPLORER_BUTTONS.iter().zip(targets) {
+        let fits = |text: &str| {
+            let w = u16::try_from(text.chars().count()).unwrap_or(0);
+            (x.saturating_add(w) <= right).then_some(w)
+        };
+        let Some((w, text)) = fits(wide)
+            .map(|w| (w, *wide))
+            .or_else(|| fits(narrow).map(|w| (w, *narrow)))
+        else {
+            break; // too narrow in either form: the chip clips away whole
+        };
+        out.push((Rect { x, y, w, h: 1 }, target, text));
+        x = x.saturating_add(w).saturating_add(1);
+    }
+    out
+}
+
+/// The explorer's status line: the inline error, else the truncation
+/// disclosure, else the muted key hints (the ADR-0052 precedence — a problem
+/// always outranks a count, and a count outranks a reminder).
+#[must_use]
+fn explorer_status_line(explorer: &crate::explorer::ExplorerState) -> (String, bool) {
+    if let Some(err) = &explorer.error {
+        return (format!(" ! {}", sanitize_for_terminal(err)), true);
+    }
+    if explorer.omitted > 0 {
+        let kept = explorer.entries.len();
+        return (
+            format!(
+                " showing {kept} of {}",
+                kept.saturating_add(explorer.omitted)
+            ),
+            false,
+        );
+    }
+    (
+        " ⏎ open · ⌫ up · s select · i type path · . dotfiles · esc close".to_owned(),
+        false,
+    )
+}
+
+/// Draw the destination explorer (ADR-0052): the shared centered modal frame +
+/// scrim, the open folder in the title (elided from the LEFT so the basename
+/// survives), the `⬑ ..` back row, the scrolling entry list (directories
+/// enterable, files dimmed and inert), an overflow scrollbar, the status line,
+/// and the two action chips. Every stage carries the close `[x]` (ADR-0046).
+/// Pure drawing over the snapshot; every name passes the shared sanitizer.
+#[allow(clippy::too_many_lines)] // one linear pass over the surface's regions
+fn draw_explorer(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
+    let rect = modal_rect(vm.size);
+    if rect.w < 8 || rect.h < 5 {
+        return;
+    }
+    draw_scrim(frame, rect);
+    for dy in 0..rect.h {
+        for dx in 0..rect.w {
+            frame.set(
+                rect.x + dx,
+                rect.y + dy,
+                ' ',
+                Style::DEFAULT.with_bg(vm.theme.surface_bg()),
+            );
+        }
+    }
+    // The title names what `[ select destination ]` will register — so it is
+    // elided from the left, keeping the basename that identifies the folder.
+    // The budget leaves room for the corner glyphs and the close `[x]`.
+    const TITLE_PREFIX: &str = "add project · ";
+    let budget = usize::from(rect.w.saturating_sub(8));
+    let cwd = sanitize_for_terminal(&vm.explorer.display_cwd());
+    let title = if budget > TITLE_PREFIX.chars().count() {
+        format!(
+            "{TITLE_PREFIX}{}",
+            elide_left(&cwd, budget - TITLE_PREFIX.chars().count())
+        )
+    } else {
+        "add project".to_owned()
+    };
+    let inner = frame.border(rect, &title, ACCENT);
+    if let Some(cr) = modal_close_rect(rect) {
+        let style = menu_close_style(vm, &crate::hit::Target::ExplorerClose);
+        frame.put_str(cr.x, cr.y, "[x]", style);
+    }
+
+    // The back row — dimmed and inert at the filesystem root (a calm edge).
+    let up = explorer_up_rect(rect);
+    if up.h > 0 {
+        let at_root = vm.explorer.cwd.parent().is_none();
+        let glyph = if unicode { "⬑" } else { "^" };
+        let style = if at_root {
+            vm.theme.dim()
+        } else {
+            let bg = crate::chrome::press_flash_bg(
+                vm.theme,
+                vm.button_flash(&crate::hit::Target::ExplorerUp),
+            )
+            .unwrap_or(vm.theme.surface_bg());
+            Style::fg(crate::theme::MUTED).with_bg(bg)
+        };
+        clip_line(frame, inner, up.y - inner.y, &format!(" {glyph} .."), style);
+    }
+    // The dot-toggle's click twin (ADR-0046), right-aligned in the back row:
+    // the status line teaches `.`, so a pointer must be able to press it too.
+    // Lit in the accent while dot-entries are shown, muted while hidden — the
+    // state reads off the chip itself.
+    let dots = explorer_dotfiles_rect(rect);
+    if dots.w > 0 {
+        let bg = crate::chrome::press_flash_bg(
+            vm.theme,
+            vm.button_flash(&crate::hit::Target::ExplorerDotfiles),
+        )
+        .unwrap_or(vm.theme.surface_bg());
+        let fg = if vm.explorer.show_hidden {
+            crate::theme::ACCENT
+        } else {
+            crate::theme::MUTED
+        };
+        frame.put_str(
+            dots.x,
+            dots.y,
+            EXPLORER_DOTFILES_CHIP,
+            Style::fg(fg).with_bg(bg),
+        );
+    }
+
+    // The entries, through the scroll-aware solver.
+    let visible = vm.explorer.visible();
+    let list = explorer_list_area(rect);
+    if visible.is_empty() && list.h > 0 {
+        clip_line(
+            frame,
+            inner,
+            list.y - inner.y,
+            " (empty directory)",
+            Style::fg(crate::theme::MUTED),
+        );
+    }
+    let marker = if unicode { '▸' } else { '>' };
+    for (i, entry) in visible.iter().enumerate() {
+        let rr = explorer_row_rect(rect, i, vm.explorer.scroll);
+        if rr.h == 0 {
+            continue; // scrolled out of the viewport
+        }
+        let on_cursor = i == vm.explorer.cursor;
+        let style = if on_cursor {
+            Style::fg(vm.theme.body_fg()).with_bg(crate::theme::SELECT_BG)
+        } else if entry.is_dir {
+            Style::fg(vm.theme.body_fg())
+        } else {
+            vm.theme.dim()
+        };
+        if on_cursor {
+            for dx in 0..rr.w {
+                frame.set(rr.x + dx, rr.y, ' ', style);
+            }
+        }
+        let name = sanitize_for_terminal(&entry.name);
+        let line = if entry.is_dir {
+            format!(" {marker} {name}/")
+        } else {
+            format!("   {name}")
+        };
+        clip_line(frame, inner, rr.y - inner.y, &line, style);
+    }
+    // The overflow indicator only (ADR-0031) — a fitting listing draws none.
+    draw_overflow_bar(
+        frame,
+        list,
+        vm.explorer.scroll,
+        vm.explorer.visible_len(),
+        vm.theme,
+        unicode,
+    );
+
+    // The status line, then the chips, on the two bottom inner rows.
+    if inner.h >= 2 {
+        let (line, is_error) = explorer_status_line(&vm.explorer);
+        let style = if is_error {
+            severity_style(crate::dispatch::Severity::Warning)
+        } else {
+            Style::fg(crate::theme::MUTED)
+        };
+        clip_line(frame, inner, inner.h - 2, &line, style);
+    }
+    for (chip, target, text) in explorer_button_rects(rect) {
+        let bg = crate::chrome::press_flash_bg(vm.theme, vm.button_flash(&target))
+            .unwrap_or(vm.theme.surface_bg());
+        frame.put_str(
+            chip.x,
+            chip.y,
+            text,
+            Style::fg(crate::theme::MUTED).with_bg(bg),
+        );
     }
 }
 
@@ -1723,6 +2062,25 @@ fn elide(s: &str, w: usize) -> String {
     }
 }
 
+/// Truncate `s` to at most `w` cells from the **left**, prefixing an ellipsis
+/// when it is cut — the mirror of [`elide`], for paths, where the tail (the
+/// basename) is the part that identifies what you are looking at.
+fn elide_left(s: &str, w: usize) -> String {
+    let count = s.chars().count();
+    if count <= w {
+        return s.to_string();
+    }
+    match w {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let mut out = String::from("…");
+            out.extend(s.chars().skip(count - (w - 1)));
+            out
+        }
+    }
+}
+
 /// The visible `[start, end)` slice of a `len`-item list of `height` rows that
 /// keeps `selected` in view (scroll-to-selection). Deterministic in its inputs.
 /// Shared with [`crate::hit`] so a click resolves to the same project row the
@@ -1821,6 +2179,309 @@ mod tests {
         assert!(text.contains(PROFILE_SETTINGS_CHIP), "chips render: {text}");
         assert!(text.contains("[ + new profile ]"), "{text}");
         assert!(text.contains("[x]"), "the close X renders: {text}");
+    }
+
+    // ---- ADR-0052: the destination explorer -------------------------------
+
+    fn dir(name: &str) -> crate::explorer::ExplorerEntry {
+        crate::explorer::ExplorerEntry {
+            name: name.to_owned(),
+            is_dir: true,
+        }
+    }
+
+    fn file(name: &str) -> crate::explorer::ExplorerEntry {
+        crate::explorer::ExplorerEntry {
+            name: name.to_owned(),
+            is_dir: false,
+        }
+    }
+
+    /// A capability-bearing backend, so a glyph test can exercise BOTH sides of
+    /// the one Unicode switch (`AsciiBackend` always reports the empty set).
+    struct CapsBackend {
+        caps: crate::render::Capabilities,
+    }
+    impl crate::render::RenderBackend for CapsBackend {
+        fn name(&self) -> &'static str {
+            "caps"
+        }
+        fn capabilities(&self) -> crate::render::Capabilities {
+            self.caps
+        }
+        fn present(&mut self, _frame: &Frame) -> Result<(), crate::render::RenderError> {
+            Ok(())
+        }
+    }
+
+    /// The drawn text of one row of the explorer's modal — so a status-line
+    /// assertion reads the modal itself, not the dashboard's hint bar beneath.
+    fn explorer_row_text(s: &mut AppState, dy_from_inner_bottom: u16) -> String {
+        let vm = s.snapshot();
+        let mut f = Frame::new(vm.size);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+        draw(&vm, &mut b, &mut f);
+        let modal = modal_rect(vm.size);
+        let y = modal.y + modal.h - 1 - dy_from_inner_bottom;
+        (modal.x..modal.x + modal.w)
+            .map(|x| f.get(x, y).map_or(' ', |c| c.ch))
+            .collect()
+    }
+
+    /// A state browsing `/home/dev/codebase` with two dirs and a file listed.
+    fn explorer_state() -> AppState {
+        let mut s = profiled_state();
+        s.app.home_dir = Some("/home/dev/codebase".into());
+        crate::input::enter_explorer(&mut s.app);
+        s.app.explorer.apply(crate::explorer::DirListing {
+            path: std::path::PathBuf::from("/home/dev/codebase"),
+            entries: vec![dir("alpha"), dir("beta"), file("notes.md")],
+            omitted: 0,
+            error: None,
+        });
+        s
+    }
+
+    #[test]
+    fn explorer_draws_the_open_folder_its_rows_and_both_affordances() {
+        let mut s = explorer_state();
+        let text = render_to_text(&s.snapshot());
+        assert!(
+            text.contains("add project"),
+            "the frame names the act: {text}"
+        );
+        assert!(
+            text.contains("codebase"),
+            "the title carries the open folder's basename: {text}"
+        );
+        assert!(text.contains(".."), "the back row renders: {text}");
+        assert!(text.contains("alpha/"), "directories wear the `/`: {text}");
+        assert!(text.contains("beta/"), "{text}");
+        assert!(
+            text.contains("notes.md") && !text.contains("notes.md/"),
+            "files list without the directory suffix: {text}"
+        );
+        // Both acts have a drawn chip, and the mode carries the shared close X.
+        assert!(text.contains(EXPLORER_BUTTONS[0].0), "{text}");
+        assert!(text.contains(EXPLORER_BUTTONS[1].0), "{text}");
+        assert!(text.contains("[x]"), "the close X renders: {text}");
+    }
+
+    #[test]
+    fn explorer_dims_files_and_fills_the_cursor_row() {
+        let mut s = explorer_state();
+        s.app.explorer.cursor = 1; // → beta/
+        let vm = s.snapshot();
+        let mut f = Frame::new(vm.size);
+        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+        draw(&vm, &mut b, &mut f);
+        let modal = modal_rect(vm.size);
+        let cursor_row = explorer_row_rect(modal, 1, 0);
+        assert!(cursor_row.h > 0);
+        let cell = f.get(cursor_row.x, cursor_row.y).expect("a drawn cell");
+        assert_eq!(
+            cell.style.bg,
+            crate::theme::SELECT_BG,
+            "the cursor row is a filled pill"
+        );
+        // The file row (index 2) reads as context, not a choice.
+        let file_row = explorer_row_rect(modal, 2, 0);
+        let file_cell = f
+            .get(file_row.x + 3, file_row.y)
+            .expect("the file row's first glyph");
+        assert_eq!(
+            file_cell.style.fg,
+            vm.theme.dim().fg,
+            "files are dimmed and inert"
+        );
+    }
+
+    #[test]
+    fn explorer_title_elides_a_long_path_from_the_left() {
+        let mut s = explorer_state();
+        let deep = format!("/home/dev{}/final", "/very-long-directory-name".repeat(8));
+        s.app.explorer.cwd = std::path::PathBuf::from(&deep);
+        let text = render_to_text(&s.snapshot());
+        assert!(
+            text.contains("final"),
+            "the basename survives the elision — it is what select registers: {text}"
+        );
+        assert!(
+            !text.contains("/home/dev/very-long"),
+            "the head is what gets cut: {text}"
+        );
+        assert!(text.contains('…'), "the cut is marked: {text}");
+    }
+
+    #[test]
+    fn explorer_status_line_prefers_the_error_then_the_truncation_then_hints() {
+        // The status line is the modal's second-from-bottom inner row (the
+        // chips take the last), read directly so the dashboard's own hint bar
+        // beneath cannot answer for it.
+        let mut s = explorer_state();
+        let status = explorer_row_text(&mut s, 2);
+        assert!(status.contains("s select"), "hints at rest: {status}");
+        // …truncation outranks them…
+        s.app.explorer.omitted = 7;
+        let status = explorer_row_text(&mut s, 2);
+        assert!(status.contains("showing 3 of 10"), "{status}");
+        assert!(
+            !status.contains("s select"),
+            "the count replaces the hints: {status}"
+        );
+        // …and an error outranks everything.
+        s.app.explorer.error = Some("permission denied".into());
+        let status = explorer_row_text(&mut s, 2);
+        assert!(status.contains("permission denied"), "{status}");
+        assert!(
+            !status.contains("showing 3 of 10"),
+            "a problem outranks a count: {status}"
+        );
+    }
+
+    #[test]
+    fn explorer_shows_an_empty_directory_and_a_bar_only_on_overflow() {
+        let mut s = explorer_state();
+        s.app.explorer.entries.clear();
+        assert!(render_to_text(&s.snapshot()).contains("(empty directory)"));
+
+        // The bar is asserted on the DRAWN frame — the track's own cells in the
+        // list viewport's right column — not on `chrome::scrollbar` in the
+        // abstract, so this pins what `draw_explorer` actually paints.
+        let track_glyphs = |s: &mut AppState| {
+            let vm = s.snapshot();
+            let mut f = Frame::new(vm.size);
+            let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+            draw(&vm, &mut b, &mut f);
+            let list = explorer_list_area(modal_rect(vm.size));
+            let x = list.x + list.w - 1;
+            (0..list.h)
+                .filter(|dy| {
+                    f.get(x, list.y + dy)
+                        .is_some_and(|c| c.ch == '|' || c.ch == '#')
+                })
+                .count()
+        };
+        let mut fits = explorer_state();
+        assert_eq!(track_glyphs(&mut fits), 0, "three rows fit — no bar drawn");
+        let mut overflows = explorer_state();
+        overflows.app.explorer.entries = (0..200).map(|i| dir(&format!("d{i:03}"))).collect();
+        let drawn = track_glyphs(&mut overflows);
+        assert_eq!(
+            drawn,
+            usize::from(explorer_list_area(modal_rect(overflows.size)).h),
+            "an overflowing listing paints a full-height track"
+        );
+    }
+
+    #[test]
+    fn the_dotfiles_toggle_has_a_drawn_chip_at_every_width_the_surface_draws() {
+        // ADR-0046 (and PRD story 8): the status line teaches `.`, so a pointer
+        // must be able to press it — at every width, not just the wide one.
+        let mut s = explorer_state();
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains(EXPLORER_DOTFILES_CHIP), "{text}");
+        for w in [24u16, 40, 80, 120] {
+            let modal = modal_rect(crate::render::frame::Size::new(w, 24));
+            assert!(
+                explorer_dotfiles_rect(modal).w > 0,
+                "the dot-toggle chip vanished at {w} columns"
+            );
+        }
+        // It reads its own state: accent while showing, muted while hiding.
+        let style_at = |s: &mut AppState| {
+            let vm = s.snapshot();
+            let mut f = Frame::new(vm.size);
+            let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
+            draw(&vm, &mut b, &mut f);
+            let chip = explorer_dotfiles_rect(modal_rect(vm.size));
+            f.get(chip.x, chip.y).map(|c| c.style.fg)
+        };
+        assert_eq!(style_at(&mut s), Some(crate::theme::MUTED));
+        s.app.explorer.show_hidden = true;
+        assert_eq!(style_at(&mut s), Some(crate::theme::ACCENT));
+    }
+
+    #[test]
+    fn explorer_chips_degrade_rather_than_vanish_on_narrow_tiers() {
+        // ADR-0046: a chip never renders half a label — but an act the surface
+        // teaches must stay clickable, so a chip that cannot fit its wide label
+        // takes the narrow one instead. Both acts survive down to the 24-column
+        // tier (where the modal is narrower than MIN_MODAL_COLS).
+        for w in [24u16, 40, 80, 120] {
+            let chips = explorer_button_rects(modal_rect(crate::render::frame::Size::new(w, 24)));
+            assert_eq!(
+                chips.iter().map(|c| c.1.clone()).collect::<Vec<_>>(),
+                vec![
+                    crate::hit::Target::ExplorerSelect,
+                    crate::hit::Target::ExplorerTypePath,
+                ],
+                "both acts must be clickable at {w} columns"
+            );
+            for (rect, _, text) in &chips {
+                assert_eq!(
+                    usize::from(rect.w),
+                    text.chars().count(),
+                    "the solver measured the label it reports at {w} columns"
+                );
+                assert!(
+                    EXPLORER_BUTTONS
+                        .iter()
+                        .any(|(a, b)| *a == *text || *b == *text),
+                    "chips only ever draw a declared label"
+                );
+            }
+        }
+        // The wide labels win when there is room; the narrow ones stand in when
+        // there is not.
+        let wide = explorer_button_rects(modal_rect(crate::render::frame::Size::new(120, 40)));
+        assert_eq!(wide[0].2, EXPLORER_BUTTONS[0].0);
+        assert_eq!(wide[1].2, EXPLORER_BUTTONS[1].0);
+        let narrow = explorer_button_rects(modal_rect(crate::render::frame::Size::new(24, 24)));
+        assert_eq!(narrow[0].2, EXPLORER_BUTTONS[0].1);
+        assert_eq!(narrow[1].2, EXPLORER_BUTTONS[1].1);
+    }
+
+    #[test]
+    fn explorer_glyphs_swap_between_unicode_and_ascii() {
+        let mut s = explorer_state();
+        let vm = s.snapshot();
+        let render = |caps| {
+            let mut f = Frame::new(vm.size);
+            let mut b = CapsBackend { caps };
+            draw(&vm, &mut b, &mut f);
+            let mut out = String::new();
+            for y in 0..f.height() {
+                for x in 0..f.width() {
+                    out.push(f.get(x, y).map_or(' ', |c| c.ch));
+                }
+                out.push('\n');
+            }
+            out
+        };
+        let ascii = render(crate::render::Capabilities::empty());
+        let unicode = render(crate::render::Capabilities::UNICODE);
+        assert!(ascii.contains("> alpha/"), "the ASCII marker: {ascii}");
+        assert!(ascii.contains("^ .."), "the ASCII back row: {ascii}");
+        assert!(unicode.contains("▸ alpha/"), "the Unicode marker");
+        assert!(unicode.contains("⬑ .."), "the Unicode back row");
+    }
+
+    #[test]
+    fn explorer_rows_scroll_with_the_offset_and_clip_out_of_view() {
+        let modal = modal_rect(crate::render::frame::Size::new(120, 40));
+        let list = explorer_list_area(modal);
+        assert!(list.h > 0);
+        // At rest row 0 is the viewport's top…
+        assert_eq!(explorer_row_rect(modal, 0, 0).y, list.y);
+        // …scrolled by two, row 2 takes the top and rows 0/1 are gone whole.
+        assert_eq!(explorer_row_rect(modal, 2, 2).y, list.y);
+        assert_eq!(explorer_row_rect(modal, 1, 2).h, 0, "scrolled off the top");
+        assert_eq!(
+            explorer_row_rect(modal, usize::from(list.h) + 2, 2).h,
+            0,
+            "past the viewport's bottom"
+        );
     }
 
     #[test]

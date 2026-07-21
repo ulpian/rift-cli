@@ -47,6 +47,11 @@ pub struct CanopyOpts {
     /// The binary's version, shown in the header (M55-04). Injected like the
     /// launch cwd so the render crate stays env-free; empty hides the segment.
     pub version: String,
+    /// The operator's home directory — the destination explorer's start
+    /// (ADR-0052 §6), resolved in the binary by the `HOME` / `USERPROFILE` env
+    /// ladder (no `dirs` crate) so the render crate stays env-free. `None`
+    /// falls back to the launch cwd, then `/`.
+    pub home_dir: Option<String>,
 }
 
 /// A source of already-translated Canopy [`Event`]s.
@@ -128,6 +133,10 @@ pub fn prime_startup(state: &AppState, req_sink: &mut dyn FnMut(DataRequest)) {
 /// `manager` performs the feature install/remove actions the reducer plans
 /// (Canopy never installs anything itself); a failure becomes a status toast.
 ///
+/// `list_dir` is the destination explorer's lister seam (ADR-0052 §2): the
+/// reducer only requests a directory; this closure performs the walk and its
+/// (infallible) reply lands on the state in the same iteration.
+///
 /// # Errors
 /// [`rift_core::RiftError`] on a terminal present/read failure.
 #[allow(clippy::too_many_arguments)] // ADR-0011: every host dependency is one explicit seam
@@ -141,6 +150,7 @@ pub fn event_loop<F, R>(
     dispatcher: &mut dyn CommandDispatcher,
     reload: &mut R,
     loader: &mut dyn crate::profile::ProfileLoader,
+    list_dir: &mut dyn FnMut(&std::path::Path) -> crate::explorer::DirListing,
 ) -> RiftResult<()>
 where
     F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
@@ -200,6 +210,7 @@ where
                     let load = effects.load_layout.take();
                     let load_members = effects.load_membership.take();
                     let load_picker = effects.load_picker_theme.take();
+                    let listing_request = effects.list_dir.take();
                     let reload_profiles = effects.reload_profiles;
                     // A pinned launch defers its `selected` write to the
                     // session's FIRST persist batch (ADR-0045 §4): prepending
@@ -258,6 +269,17 @@ where
                     if let Some(profile) = load_picker {
                         let overrides = loader.theme(&profile)?;
                         state.app.colour_picker.target_overrides = overrides;
+                        state.dirty = true;
+                    }
+                    // The destination explorer's listing (ADR-0052 §2): the
+                    // walk crosses the injected seam and lands here, in the
+                    // SAME iteration — before the next `render_if_dirty` — so
+                    // traversal never shows a loading frame. The reply is
+                    // infallible: a failure arrives folded into the listing
+                    // and `apply` keeps the operator where they were.
+                    if let Some(path) = listing_request {
+                        state.app.explorer.apply(list_dir(&path));
+                        state.app.clamp_scrolls(state.size);
                         state.dirty = true;
                     }
                     for action in actions {
@@ -620,6 +642,12 @@ mod tests {
         Ok(vec![])
     }
 
+    /// The lister seam's inert double (ADR-0052 §2): every listing is empty, so
+    /// a loop test that never opens the explorer is unaffected by the seam.
+    fn no_lister(_path: &std::path::Path) -> crate::explorer::DirListing {
+        crate::explorer::DirListing::default()
+    }
+
     fn ready_state() -> AppState {
         let mut s = AppState::new(vec![], Size::new(80, 24));
         s.app.splash.skip();
@@ -687,6 +715,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         );
 
         assert_eq!(
@@ -766,6 +795,7 @@ mod tests {
             &mut dispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         assert_eq!(dispatcher.calls.len(), 1, "one dispatch crossed the seam");
@@ -905,6 +935,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut loader,
+            &mut no_lister,
         )
         .unwrap();
 
@@ -984,6 +1015,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut loader,
+            &mut no_lister,
         )
         .unwrap();
         assert!(
@@ -1039,6 +1071,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut loader,
+            &mut no_lister,
         )
         .unwrap();
         assert_eq!(
@@ -1108,6 +1141,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut loader,
+            &mut no_lister,
         )
         .unwrap();
         assert_eq!(
@@ -1164,6 +1198,7 @@ mod tests {
             &mut dispatcher,
             &mut reload,
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         assert_eq!(dispatcher.calls.len(), 1);
@@ -1192,6 +1227,7 @@ mod tests {
             &mut dispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         assert!(dispatcher.calls.is_empty(), "cancel dispatches nothing");
@@ -1213,6 +1249,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         );
         assert!(r.is_ok());
         assert!(state.app.quit);
@@ -1255,6 +1292,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         // initial + one per batch (2 batches) = 3 presents.
@@ -1277,6 +1315,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         // initial render + render after the quit key = 2; the idle tick added none.
@@ -1326,6 +1365,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         // Before any tween, the loop polls at the idle cadence…
@@ -1365,6 +1405,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         assert!(
@@ -1392,16 +1433,148 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         assert_eq!(state.size, Size::new(120, 40));
+    }
+
+    /// A backend that records the drawn text of every presented frame, so a
+    /// loop test can prove WHAT the operator saw, not just what state held.
+    struct RecordingBackend {
+        frames: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+    impl RenderBackend for RecordingBackend {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::empty()
+        }
+        fn present(&mut self, frame: &Frame) -> Result<(), RenderError> {
+            let mut text = String::new();
+            for y in 0..frame.height() {
+                for x in 0..frame.width() {
+                    text.push(frame.get(x, y).map_or(' ', |c| c.ch));
+                }
+                text.push('\n');
+            }
+            self.frames.borrow_mut().push(text);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_lister_seam_is_invoked_once_and_lands_before_the_next_frame() {
+        // ADR-0052 §2: the reducer requests a directory, the LOOP walks it, and
+        // the reply lands in the SAME iteration — so traversal never presents a
+        // loading state. Proven end to end: the very next frame shows the rows.
+        let frames = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut backend = RecordingBackend {
+            frames: frames.clone(),
+        };
+        let mut src = ScriptedEvents::new(vec![
+            vec![Event::Key(CanopyKey::Char('a'))],
+            vec![Event::Key(CanopyKey::Quit)],
+        ]);
+        let mut state = ready_state();
+        state.size = Size::new(120, 40);
+        state.app.home_dir = Some("/home/dev".into());
+        let mut asked: Vec<std::path::PathBuf> = Vec::new();
+        let mut lister = |path: &std::path::Path| {
+            asked.push(path.to_path_buf());
+            crate::explorer::DirListing {
+                path: path.to_path_buf(),
+                entries: vec![crate::explorer::ExplorerEntry {
+                    name: "alpha".into(),
+                    is_dir: true,
+                }],
+                omitted: 0,
+                error: None,
+            }
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut lister,
+        )
+        .unwrap();
+
+        assert_eq!(
+            asked,
+            vec![std::path::PathBuf::from("/home/dev")],
+            "the lister is invoked exactly once, with the requested directory"
+        );
+        assert_eq!(
+            state.app.explorer.cwd,
+            std::path::PathBuf::from("/home/dev"),
+            "the listing landed on the state"
+        );
+        assert!(frames
+            .borrow()
+            .iter()
+            .any(|f| f.contains("alpha/") && f.contains("add project")));
+    }
+
+    #[test]
+    fn a_failed_listing_lands_as_an_inline_error_through_the_loop() {
+        // The stay-put contract, proven through the loop rather than by unit:
+        // the walk fails, the operator keeps the seeded directory and gets a
+        // reason — the explorer never ejects them.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![
+            vec![Event::Key(CanopyKey::Char('a'))],
+            vec![Event::Key(CanopyKey::Quit)],
+        ]);
+        let mut state = ready_state();
+        state.app.home_dir = Some("/home/dev".into());
+        let mut lister = |path: &std::path::Path| crate::explorer::DirListing {
+            path: path.to_path_buf(),
+            entries: vec![],
+            omitted: 0,
+            error: Some("permission denied".into()),
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut NullFeatureManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut lister,
+        )
+        .unwrap();
+        assert_eq!(
+            state.app.explorer.error.as_deref(),
+            Some("permission denied")
+        );
+        assert_eq!(
+            state.app.explorer.cwd,
+            std::path::PathBuf::from("/home/dev"),
+            "the seeded directory survived the failure"
+        );
+        assert!(state.app.explorer.entries.is_empty());
     }
 
     #[test]
     fn add_project_effect_invokes_on_add() {
         let mut backend = MockBackend { presents: 0 };
         let mut src = ScriptedEvents::new(vec![
-            vec![Event::Key(CanopyKey::Char('a'))],
+            // `a` browses, `i` falls back to the typed flow (ADR-0052 §6).
+            vec![
+                Event::Key(CanopyKey::Char('a')),
+                Event::Key(CanopyKey::Char('i')),
+            ],
             "/tmp/x"
                 .chars()
                 .map(|c| Event::Key(CanopyKey::Char(c)))
@@ -1433,6 +1606,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         assert_eq!(seen, vec!["/tmp/x".to_string()]);
@@ -1490,6 +1664,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         // M5-12 (ADR-0013): the RESULT drives the row — Failed-with-reason
@@ -1541,6 +1716,7 @@ mod tests {
             &mut crate::dispatch::NullDispatcher,
             &mut || Ok(vec![]),
             &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
         )
         .unwrap();
         assert!(state.app.feature_runtime.is_empty(), "transient cleared");

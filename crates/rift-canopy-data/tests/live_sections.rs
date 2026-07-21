@@ -269,6 +269,8 @@ fn token_sections_render_live_from_a_seeded_projection() {
         &mut rift_canopy::NullDispatcher,
         &mut || Ok(vec![]),
         &mut rift_canopy::NullProfileLoader,
+        // The lister seam is unused here — this loop never opens the explorer.
+        &mut rift_canopy_data::list_dir,
     )
     .unwrap();
 

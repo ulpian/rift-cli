@@ -123,6 +123,26 @@ pub enum Target {
     /// The colour picker's close `[x]` (ADR-0046): closes the picker back to
     /// the profile menu — the pointer twin of Esc-to-the-end.
     PickerClose,
+    /// A row in the open destination explorer (ADR-0052), by **visible** index:
+    /// a click moves the cursor there and, on a directory row, descends —
+    /// exactly like cursoring + `Enter`. A file row only moves the cursor.
+    ExplorerRow(usize),
+    /// The explorer's `⬑ ..` back row — steps one level up, the click twin of
+    /// Backspace. Inert at the filesystem root.
+    ExplorerUp,
+    /// The explorer's `[ select destination ]` chip — registers the folder
+    /// currently open, the click twin of `s`.
+    ExplorerSelect,
+    /// The explorer's `[ input as path ]` chip — falls back to today's typed
+    /// flow, the click twin of `i`.
+    ExplorerTypePath,
+    /// The explorer's `[.dotfiles]` chip — shows/hides dot-entries, the click
+    /// twin of `.`. Right-aligned in the back row so it survives every width
+    /// the surface draws at (ADR-0046: a hinted act is always clickable).
+    ExplorerDotfiles,
+    /// The explorer's close `[x]` (ADR-0046): closes the MODE — the pointer
+    /// twin of Esc. Never `OverlayClose` (that clears an overlay, not a mode).
+    ExplorerClose,
     /// A unit's grip in panel-editor mode (ADR-0034): a press picks it up / drops
     /// it. Carries the unit's `(column, unit)` cursor so the drop knows the source.
     GripBar(crate::editor::Cursor),
@@ -165,6 +185,11 @@ impl Target {
                 | Target::MemberRemove
                 | Target::MemberAddOpen
                 | Target::PickerClose
+                | Target::ExplorerUp
+                | Target::ExplorerSelect
+                | Target::ExplorerTypePath
+                | Target::ExplorerDotfiles
+                | Target::ExplorerClose
         )
     }
 }
@@ -237,6 +262,11 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
     // selects through the same modal geometry the renderer draws.
     if vm.mode == crate::input::Mode::ColourPicker {
         return hit_colour_picker(vm, size, col, row);
+    }
+    // The destination explorer owns the surface while open (ADR-0052): rows
+    // descend, the chips act, and the scrim outside the frame is inert.
+    if vm.mode == crate::input::Mode::Explorer {
+        return hit_explorer(vm, size, col, row);
     }
     // Panel-editor mode owns the full grid's clicks: grips pick up units, dividers
     // resize (ADR-0034). Editing is Full3Col-only; the narrow tiers stay normal.
@@ -413,6 +443,66 @@ fn hit_colour_picker(
         let rr = crate::view::colour_picker_row_rect(rect, i);
         if rr.h > 0 && contains(rr, col, row) {
             return Some(Target::PickerRow(i));
+        }
+    }
+    Some(Target::OverlayBody)
+}
+
+/// Hit-test the open destination explorer (ADR-0052): the close X, the action
+/// chips, the back row, the list's overflow scrollbar, then an entry row — each
+/// resolved through the EXACT solvers `view::draw_explorer` drew with, so a
+/// click lands on the cell the operator sees. The scroll offset maps the
+/// viewport row back to its visible index, so a scrolled list stays honest. The
+/// rest of the frame is an inert body; outside it, nothing.
+fn hit_explorer(
+    vm: &ViewModel,
+    size: crate::render::frame::Size,
+    col: u16,
+    row: u16,
+) -> Option<Target> {
+    // The same floor `draw_explorer` refuses to paint below — a frame too short
+    // to draw the surface must not resolve clicks on affordances that are not
+    // on screen (notably the close X, whose rect exists from 8 columns).
+    let rect = crate::view::modal_rect(size);
+    if rect.w < 8 || rect.h < 5 || !contains(rect, col, row) {
+        return None;
+    }
+    // The close `[x]` (ADR-0046 §2) — the mode's own close, never the overlay's.
+    if let Some(cr) = crate::view::modal_close_rect(rect) {
+        if contains(cr, col, row) {
+            return Some(Target::ExplorerClose);
+        }
+    }
+    for (chip, target, _) in crate::view::explorer_button_rects(rect) {
+        if contains(chip, col, row) {
+            return Some(target);
+        }
+    }
+    // The dot-toggle chip sits INSIDE the back row, so it outranks it.
+    let dots = crate::view::explorer_dotfiles_rect(rect);
+    if dots.w > 0 && contains(dots, col, row) {
+        return Some(Target::ExplorerDotfiles);
+    }
+    let up = crate::view::explorer_up_rect(rect);
+    if up.h > 0 && contains(up, col, row) {
+        return Some(Target::ExplorerUp);
+    }
+    // The list's overflow scrollbar sits on the viewport's right edge and wins
+    // over the row beneath it (the column-3 / rail precedent).
+    let list = crate::view::explorer_list_area(rect);
+    if on_scrollbar(
+        list,
+        vm.explorer.scroll,
+        vm.explorer.visible_len(),
+        col,
+        row,
+    ) {
+        return Some(Target::Scrollbar(ScrollRegion::Modal));
+    }
+    if let Some(dy) = local_row(list, col, row) {
+        let idx = vm.explorer.scroll.saturating_add(usize::from(dy));
+        if idx < vm.explorer.visible_len() {
+            return Some(Target::ExplorerRow(idx));
         }
     }
     Some(Target::OverlayBody)
@@ -1021,6 +1111,128 @@ mod tests {
         );
     }
 
+    // ---- ADR-0052: the destination explorer's mouse plane ------------------
+
+    fn dir(name: &str) -> crate::explorer::ExplorerEntry {
+        crate::explorer::ExplorerEntry {
+            name: name.into(),
+            is_dir: true,
+        }
+    }
+
+    /// A state browsing a listing of `n` directories at a full-grid size.
+    fn explorer_state(n: usize) -> AppState {
+        let mut s = AppState::new(vec![project("a")], Size::new(120, 40));
+        s.app.splash.skip();
+        s.app.home_dir = Some("/home/dev".into());
+        crate::input::enter_explorer(&mut s.app);
+        s.app.explorer.apply(crate::explorer::DirListing {
+            path: std::path::PathBuf::from("/home/dev"),
+            entries: (0..n).map(|i| dir(&format!("d{i:03}"))).collect(),
+            omitted: 0,
+            error: None,
+        });
+        s
+    }
+
+    #[test]
+    fn explorer_pixels_equal_targets_on_every_drawn_affordance() {
+        let mut s = explorer_state(4);
+        let v = s.snapshot();
+        let modal = crate::view::modal_rect(v.size);
+        // The close X — the MODE's own, never `OverlayClose`.
+        let cr = crate::view::modal_close_rect(modal).unwrap();
+        assert_eq!(hit_test(&v, cr.x, cr.y), Some(Target::ExplorerClose));
+        assert_eq!(
+            hit_test(&v, cr.x + cr.w - 1, cr.y),
+            Some(Target::ExplorerClose)
+        );
+        // The back row — and the dot-toggle chip that sits inside it, which
+        // must outrank the row it overlaps (both ends of the chip).
+        let up = crate::view::explorer_up_rect(modal);
+        assert_eq!(hit_test(&v, up.x, up.y), Some(Target::ExplorerUp));
+        let dots = crate::view::explorer_dotfiles_rect(modal);
+        assert!(dots.w > 0, "the dot-toggle chip renders at this width");
+        assert_eq!(hit_test(&v, dots.x, dots.y), Some(Target::ExplorerDotfiles));
+        assert_eq!(
+            hit_test(&v, dots.x + dots.w - 1, dots.y),
+            Some(Target::ExplorerDotfiles)
+        );
+        assert_eq!(
+            hit_test(&v, dots.x - 1, dots.y),
+            Some(Target::ExplorerUp),
+            "one cell left of the chip is the back row again"
+        );
+        // Every listed row, both ends.
+        for i in 0..4usize {
+            let rr = crate::view::explorer_row_rect(modal, i, 0);
+            assert!(rr.h > 0);
+            assert_eq!(hit_test(&v, rr.x, rr.y), Some(Target::ExplorerRow(i)));
+            assert_eq!(
+                hit_test(&v, rr.x + rr.w - 1, rr.y),
+                Some(Target::ExplorerRow(i))
+            );
+        }
+        // Both chips.
+        for (chip, target, _) in crate::view::explorer_button_rects(modal) {
+            assert_eq!(hit_test(&v, chip.x, chip.y), Some(target.clone()));
+            assert_eq!(
+                hit_test(&v, chip.x + chip.w - 1, chip.y),
+                Some(target.clone()),
+                "{target:?} resolves across its whole label"
+            );
+        }
+        // A viewport row past the listing is inert body — never a phantom row.
+        let empty = crate::view::explorer_row_rect(modal, 5, 0);
+        assert!(empty.h > 0, "the viewport row exists…");
+        assert_eq!(
+            hit_test(&v, empty.x, empty.y),
+            Some(Target::OverlayBody),
+            "…but there is no fifth entry to click"
+        );
+        // Outside the frame nothing is clickable (the scrim is inert).
+        assert_eq!(hit_test(&v, modal.x.saturating_sub(2), modal.y + 2), None);
+    }
+
+    #[test]
+    fn a_scrolled_explorer_maps_the_viewport_row_back_to_its_visible_index() {
+        let mut s = explorer_state(200);
+        s.app.explorer.scroll = 20;
+        let v = s.snapshot();
+        let modal = crate::view::modal_rect(v.size);
+        let list = crate::view::explorer_list_area(modal);
+        // The viewport's top row is entry 20, not entry 0 (the profile menu's
+        // zero-sizing would have made this a wrong-row click).
+        assert_eq!(hit_test(&v, list.x, list.y), Some(Target::ExplorerRow(20)));
+        assert_eq!(
+            hit_test(&v, list.x, list.y + list.h - 1),
+            Some(Target::ExplorerRow(20 + usize::from(list.h) - 1))
+        );
+    }
+
+    #[test]
+    fn the_explorer_scrollbar_resolves_where_it_is_drawn_and_only_on_overflow() {
+        let mut s = explorer_state(200);
+        let v = s.snapshot();
+        let modal = crate::view::modal_rect(v.size);
+        let list = crate::view::explorer_list_area(modal);
+        let bar = crate::chrome::scrollbar(list, 0, 200).expect("200 rows overflow");
+        for dy in 0..bar.track.h {
+            assert_eq!(
+                hit_test(&v, bar.track.x, bar.track.y + dy),
+                Some(Target::Scrollbar(ScrollRegion::Modal)),
+            );
+        }
+        // A fitting listing has no bar — the same cell is just a row.
+        let mut s = explorer_state(2);
+        let v = s.snapshot();
+        assert_eq!(
+            hit_test(&v, bar.track.x, bar.track.y),
+            Some(Target::ExplorerRow(0)),
+            "no overflow, no bar, no scrollbar target"
+        );
+    }
+
     #[test]
     fn clicking_a_project_row_resolves_to_its_index() {
         let v = vm(120, 40);
@@ -1354,6 +1566,27 @@ mod tests {
         fn hit_test_never_panics(w in 0u16..300, h in 0u16..120, col in 0u16..300, row in 0u16..120) {
             let mut s = AppState::new(vec![project("a")], Size::new(w, h));
             s.app.splash.skip();
+            let v = s.snapshot();
+            let _ = hit_test(&v, col, row);
+        }
+
+        /// …including over the destination explorer, whose scroll-aware solvers
+        /// are the first geometry in the tree to take an offset — at any size,
+        /// with any listing length and any offset (ADR-0052 §7).
+        #[test]
+        fn explorer_hit_test_never_panics(
+            w in 0u16..300,
+            h in 0u16..120,
+            col in 0u16..300,
+            row in 0u16..120,
+            entries in 0usize..40,
+            scroll in 0usize..60,
+        ) {
+            let mut s = AppState::new(vec![project("a")], Size::new(w, h));
+            s.app.splash.skip();
+            crate::input::enter_explorer(&mut s.app);
+            s.app.explorer.entries = (0..entries).map(|i| dir(&format!("d{i}"))).collect();
+            s.app.explorer.scroll = scroll;
             let v = s.snapshot();
             let _ = hit_test(&v, col, row);
         }
