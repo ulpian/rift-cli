@@ -1,0 +1,1062 @@
+//! The condense operation (shadow → permanent, redacted checkpoint).
+//!
+//! Condense is the single point where **raw local** capture becomes **durable**
+//! data, so it is the one-way redaction gate in action: the
+//! raw bytes pass through [`redact`](rift_shadow_redact) and only the resulting
+//! `RedactedBytes` flow onward — a path that skips redaction does not compile.
+//! The git write of the checkpoint shard happens behind the
+//! [`ShadowBackend`] seam; Rift orchestrates *when*. It is idempotent:
+//! identical content → identical `checkpoint_id`.
+
+use std::path::Path;
+
+use rift_core::{Result, SecretBytes};
+use rift_shadow_hooks::strategy::{ArchiveReason, StrategyKind};
+use rift_shadow_redact::RulePackSet;
+use rift_store::{
+    record_archive_decision, record_substrate_block_event, ArchiveDecisionRow, CanonicalStore,
+    SubstrateBlockEventRow,
+};
+
+use crate::backend::{CheckpointArchive, RedactionReportView, ShadowBackend};
+use crate::sha256_hex;
+
+/// A content-addressed checkpoint id (lowercase hex).
+pub type CheckpointId = String;
+
+/// **The one derivation of a new checkpoint id**: `sha256(session ‖ \0 ‖
+/// sha256_hex(shard Merkle root))`, where the root is
+/// [`shard_merkle_root`](crate::backend::shard_merkle_root) over the shard's
+/// content artifacts in canonical name order.
+///
+/// The RULE — the byte formula — lives in [`rift_core::checkpoint_id`], which
+/// is its single writer; this function is the leaf-spec side's call-through,
+/// kept so every caller keeps naming the derivation through the crate that
+/// owns *what a shard root is*. What this crate decides is the LEAF SPEC (what
+/// bytes feed the root); what `rift-core` decides is the arithmetic.
+///
+/// **Why the root and not a list of digests.** The id has to bind every artifact
+/// the shard stores, or an unbound one makes the shard tree differ at an
+/// unchanged path and the second archive of a live session takes a hard
+/// `Integrity` refusal (a defect once planted in
+/// `an_id_unbound_artifact_hard_fails_the_second_archive_of_a_session` before
+/// this closed it). The alternative was to fold one more digest per artifact into
+/// the formula — which works, and needs a NEW formula, a new accepted-set entry
+/// and a new sync-format paragraph every single time an artifact is added. The
+/// root already commits to all of them, in order, and is already DERIVED rather
+/// than supplied. Binding it means a future artifact extends the LEAF SPEC and
+/// the id rule never moves again.
+///
+/// The consequences are the ones the archive already relies on:
+///
+/// * A byte change in any content artifact moves the root, so it moves the id,
+///   so it mints a NEW checkpoint — cleanly appended, exactly as a grown
+///   read-fact set already did.
+/// * `metadata.json` and `content_hash.txt` are NOT leaves (the root lives in the
+///   first and the second is a digest over it), so anchor drift — a second commit
+///   in one session — leaves the id alone and the re-archive stays an idempotent
+///   no-op.
+/// * A tamperer who edits an artifact and recomputes the recorded root passes the
+///   strict Merkle pass and still fails here, because the id is the shard's PATH
+///   and re-deriving it is not something writing a file can fix.
+#[must_use]
+pub fn derive_checkpoint_id(session: &str, shard_root: rift_core::Sha256Id) -> CheckpointId {
+    rift_core::checkpoint_id::from_root(session, shard_root)
+}
+
+/// Every checkpoint id a shard of this **declared era** could legitimately
+/// address, newest derivation first.
+///
+/// A checker asks "is the shard's own path in this set?"; the writer never asks
+/// at all — it derives from its own artifacts (`CheckpointArchive::
+/// derived_checkpoint_id`), so there is exactly one site that decides what a new
+/// id is and this function cannot drift into being a second one.
+///
+/// **The era gate is load-bearing, and it is deliberately not symmetric.**
+/// Epochs ≤ 2 accept both pre-root derivations, because being permissive about
+/// the past is what stops a checker calling an honest shard tampered — the
+/// failure this program has already had once, on the owner's own history. Epoch
+/// 3+ accepts ONLY the root binding, because accepting a pre-root derivation
+/// there would re-open the hole the era exists to close: a tamperer could edit
+/// `full.jsonl`, recompute the recorded root, and keep the path.
+///
+/// **Relabelling DOWN does not buy the looser rule**, and that is structural
+/// rather than lucky: the two eras' rules produce different ids for the same
+/// bytes, so a shard's PATH is evidence of the era that minted it and the label
+/// cannot be moved out from under it. Measured in `bins/rift`'s
+/// `relabelling_a_root_bound_shard_into_the_capture_era_does_not_hide_it`.
+///
+/// Accepting a superseded derivation costs about one bit and no security
+/// property: every entry is SHA-256 over the same content, so forging one from
+/// chosen bytes is a preimage attack.
+/// An empty set means **no era rule grants this shard an id at all** — a
+/// session list the root-bound rule refuses (empty, or NUL-carrying), or a
+/// multi-session shard declaring a pre-root era whose rules were
+/// single-session by construction (no writer ever minted one; the label is
+/// evidence of an edit). A checker maps the empty set to tamper.
+#[must_use]
+pub fn checkpoint_ids_for_shard(
+    sessions: &[String],
+    canon_version: u32,
+    leaves: &crate::backend::ShardLeafBytes<'_>,
+) -> Vec<CheckpointId> {
+    if canon_version >= crate::backend::ROOT_BOUND_ID_MIN_CANON_VERSION {
+        let refs: Vec<&str> = sessions.iter().map(String::as_str).collect();
+        return rift_core::checkpoint_id::from_root_sessions(
+            &refs,
+            crate::backend::shard_merkle_root(leaves),
+        )
+        .into_iter()
+        .collect();
+    }
+    let [session] = sessions else {
+        return Vec::new();
+    };
+    vec![
+        rift_core::checkpoint_id::from_capture(session, leaves.content_redacted, leaves.tool_calls),
+        rift_core::checkpoint_id::from_capture_only(session, leaves.content_redacted),
+    ]
+}
+
+/// The checkpoint id `condense` will derive for `(session, raw_capture,
+/// read_facts)` — computable **before** the archive runs (it depends on the
+/// session, the redacted capture, and the already-captured read facts — never
+/// the commit oid), which is what lets `prepare-commit-msg` inject a
+/// `Rift-Checkpoint` trailer that the post-commit archive then makes true.
+///
+/// The prediction misses only if one of its inputs changes in the instants
+/// between the two hooks: a read fact landing, or — since the inclusion
+/// controls put content in the capture — an opted-in working-tree file being
+/// rewritten (a build touching
+/// an included `.env`, say). Either way the archive still lands under its true
+/// id and the trailer is one change stale: a recorded limitation, never a lost
+/// checkpoint. The two hooks can only ever disagree about *when* they looked,
+/// never about *what* they measured, because both read the caller's single
+/// capture definition.
+///
+/// **Ruled 2026-08-29: the prediction does not see the transcript,
+/// permanently.** The archive binds
+/// the session transcript into the id, so a transcript-carrying session's
+/// trailer does not match its checkpoint — pinned as a fact in
+/// `tests::a_condense_with_a_transcript_diverges_from_the_trailer_prediction`
+/// (load-bearing). Including it here would mean reading, compacting and
+/// redacting the agent's transcript file inside `prepare-commit-msg`, which
+/// cannot detach and owns the 100 ms HARD git-latency ceiling — a cost that
+/// grows with session length. The decision: the
+/// trailer is a CLAIM. It stays exact for transcript-less sessions; for the
+/// rest the read side resolves through the trailer/anchor union
+/// (`bins/rift/src/provenance.rs`, the `checkpoint_commit` anchor the shard
+/// itself recorded), which is the permanent answer rather than a stopgap.
+/// "Predicted id == landed id" is retired as a property.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if redaction fails.
+pub fn predicted_checkpoint_id(
+    session: &str,
+    raw_capture: &SecretBytes,
+    read_facts: &[crate::backend::ArchivedReadFact],
+    packs: &RulePackSet,
+) -> Result<CheckpointId> {
+    predicted_checkpoint_id_from(session, predict_redaction(raw_capture, packs)?, read_facts)
+}
+
+/// The REDACTION half of [`predicted_checkpoint_id`], separable so the
+/// `prepare-commit-msg` hook can time it on its own.
+///
+/// **Why this is a function and not an inlined line.** When this seam was cut,
+/// the hook's 100 ms budget had never been measured at any opted-in
+/// `.worktreeinclude` size and the 1 MiB ceiling was only *predicted* to breach
+/// it by 40-220%. It has been measured since, through this very phase: `redact`
+/// is **74% of hook-body time** and doubles to **138.50 ms** at the old ceiling,
+/// which is what set the new one at 8 KiB
+/// ([`crate::inclusion::MAX_TOTAL_BYTES`]). "It is in `predict_id`" was not an
+/// actionable finding; "it is in the redaction inside `predict_id`" was, and
+/// that is the finding this split produced. The alternatives all corrupt the thing they measure:
+/// redacting a second time to time it doubles the dominant cost inside the one
+/// hook that cannot detach, and re-deriving the id beside the redaction is the
+/// second-implementation defect this module's own comment says has already been
+/// paid for three times. So the split is here, where the single implementation
+/// lives, and the caller composes.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if redaction fails.
+pub fn predict_redaction(
+    raw_capture: &SecretBytes,
+    packs: &RulePackSet,
+) -> Result<rift_shadow_redact::RedactionOutput> {
+    rift_shadow_redact::redact_with(raw_capture, packs)
+}
+
+/// The ID half of [`predicted_checkpoint_id`], over an already-redacted capture.
+///
+/// The prediction assembles the ARCHIVE the post-commit hook will write and asks
+/// it for its own id, rather than re-deriving one beside it. Two implementations
+/// of an id rule is the defect this program has now paid for three times; the
+/// anchoring fields inside are placeholders because they are provably not inputs
+/// (`anchor drift is not capture drift`, backend tests), and the two hooks would
+/// disagree about them anyway — that is the whole reason the id excludes them.
+///
+/// **This is that single implementation.** [`predicted_checkpoint_id`] is now
+/// its composition with [`predict_redaction`] and holds no rule of its own, so
+/// splitting the two for timing added a seam and not a second answer.
+///
+/// # Errors
+/// [`rift_core::RiftError::Validity`] if the capture names no NUL-free session.
+pub fn predicted_checkpoint_id_from(
+    session: &str,
+    out: rift_shadow_redact::RedactionOutput,
+    read_facts: &[crate::backend::ArchivedReadFact],
+) -> Result<CheckpointId> {
+    let archive = archive_for_id(
+        session,
+        out.redacted,
+        RedactionReportView::from_redact(&out.report),
+        read_facts.to_vec(),
+    );
+    archive
+        .derived_checkpoint_id()
+        .ok_or_else(|| rift_core::RiftError::validity("a checkpoint id needs 1+ NUL-free sessions"))
+}
+
+/// A [`CheckpointArchive`] carrying exactly the artifacts that decide an id, with
+/// placeholders for the anchoring fields the derivation excludes.
+fn archive_for_id(
+    session: &str,
+    content: rift_core::RedactedBytes,
+    report: RedactionReportView,
+    read_facts: Vec<crate::backend::ArchivedReadFact>,
+) -> CheckpointArchive {
+    CheckpointArchive {
+        repo: std::path::PathBuf::new(),
+        commit: String::new(),
+        checkpoint_id: String::new(),
+        sessions: vec![session.to_owned()],
+        strategy: String::new(),
+        prev_hash: None,
+        events: Vec::new(),
+        read_facts,
+        content,
+        report,
+        transcript: None,
+        tasks: Vec::new(),
+        // The id derivation never reads the time (metadata is not a Merkle
+        // leaf), so the prediction carries none rather than inventing one —
+        // and, for the same reason, no worktree label either: the trailer's
+        // prediction is about the CAPTURE, and a label would make the
+        // prediction depend on where it was computed.
+        created_at_ms: None,
+        worktree: None,
+        session_worktrees: std::collections::BTreeMap::new(),
+    }
+}
+
+/// Condense raw shadow capture into a durable, redacted checkpoint and record the
+/// `archive_decision`. `commit_oid` is the anchoring commit (HEAD) the substrate
+/// archives against.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if redaction, the substrate archive, or the audit
+/// insert fails.
+#[allow(clippy::too_many_arguments)] // one gate, one call shape; a params struct would hide which caller passes what
+pub async fn condense(
+    backend: &impl ShadowBackend,
+    store: &impl CanonicalStore,
+    repo: &Path,
+    session: &str,
+    raw_capture: &SecretBytes,
+    strategy: StrategyKind,
+    reason: ArchiveReason,
+    commit_oid: &str,
+    now_ms: i64,
+    read_facts: Vec<crate::backend::ArchivedReadFact>,
+    packs: &RulePackSet,
+    transcript: Option<crate::backend::ArchivedTranscript>,
+    tasks: Vec<crate::backend::ArchivedTask>,
+) -> Result<CheckpointId> {
+    // ONE-WAY GATE: redact first. Nothing past this line sees the raw bytes; the
+    // checkpoint id is content-addressed over the *redacted* form.
+    let out = rift_shadow_redact::redact_with(raw_capture, packs)?;
+    let report = RedactionReportView::from_redact(&out.report);
+
+    // The backend writes the shard behind the `ShadowBackend` seam. The archive
+    // carries the anchoring `repo`/`commit` plus the full structural content
+    // (id, sessions, strategy, redacted capture, redaction report).
+    //
+    // The Merkle root is NOT passed here. It used to be, and every caller passed
+    // `checkpoint_merkle_root(&[])` because no per-turn event stream is threaded
+    // yet — one constant on every shard this repository ever archived, so the
+    // recorded root committed to nothing. It is now derived from the shard's own
+    // artifacts inside `CheckpointArchive::merkle_root`, which is why condense
+    // cannot get it wrong: there is nowhere left to supply it.
+    let mut archive = CheckpointArchive {
+        repo: repo.to_path_buf(),
+        commit: commit_oid.to_owned(),
+        // Filled from the archive itself on the next line: the id is a function
+        // of the artifacts this archive will write, and the only way to be sure
+        // it addresses them is to ask the assembled archive rather than to
+        // compute an id beside it and hope the two agree.
+        checkpoint_id: String::new(),
+        sessions: vec![session.to_owned()],
+        strategy: strategy.as_str().to_owned(),
+        prev_hash: None,
+        events: Vec::new(),
+        read_facts,
+        content: out.redacted,
+        report,
+        // Already through the gate: `ArchivedTranscript` is constructible only
+        // from `RedactedBytes` (`archived_transcript` is the one writer of the
+        // raw→artifact flow, and it redacts each artifact before this sees it).
+        transcript,
+        // The subagent tasks, HANDED IN — never filtered here. A task that
+        // started before this checkpoint's boundary still belongs to the
+        // checkpoint that saw it finish (the rollup rule),
+        // and the pin for that is the test right below the divergence pin.
+        tasks,
+        // The capture event's own recorded time — the hook stamped it and
+        // passed it down; nothing on this path reads a clock of its own. It
+        // lands in `metadata.json` as `created_at`, which is what the bridge
+        // reads back into `checkpoint.created_at`: native checkpoints stop
+        // carrying the unknown-time sentinel.
+        created_at_ms: Some(now_ms),
+        // WHICH WORKTREE THIS ARCHIVE RAN IN, derived HERE
+        // rather than handed in. `repo` is the checkout the caller is
+        // archiving from — the session-end path passes its work tree, the
+        // post-commit worker passes `repo.work_tree` — so this is the one
+        // place the archiving worktree is known, and deriving it here is what
+        // keeps the two archive entry points from disagreeing about it.
+        // `None` when `repo` is not in a readable repository, which is what
+        // every hand-built fixture is: the member stays absent and their
+        // frozen bytes stay frozen.
+        worktree: crate::backend::WorktreeLabel::of(repo),
+        // Single-session by construction on this path; see the field's doc.
+        session_worktrees: std::collections::BTreeMap::new(),
+    };
+    archive.checkpoint_id = archive.derived_checkpoint_id().ok_or_else(|| {
+        rift_core::RiftError::validity("a checkpoint id needs 1+ NUL-free sessions")
+    })?;
+    let checkpoint_id = archive.checkpoint_id.clone();
+    if let Err(e) = backend.archive_checkpoint(&archive) {
+        // A default-deny refusal is an audited fact, not just an error:
+        // the archive root verb is the refused token. Audit best-effort — the
+        // refusal itself must still surface even if the audit insert fails.
+        if matches!(e, rift_core::RiftError::PolicyDenied(_)) {
+            let _ = record_block(store, "checkpoint", "screen-refused", now_ms).await;
+        }
+        return Err(e);
+    }
+
+    record_archive_decision(
+        store,
+        &ArchiveDecisionRow {
+            decision_id: decision_id(session, strategy, reason, now_ms, Some(&checkpoint_id)),
+            session_id: Some(session.to_owned()),
+            strategy: strategy.as_str().to_owned(),
+            reason: reason.as_str().to_owned(),
+            archived: true,
+            checkpoint_id: Some(checkpoint_id.clone()),
+            decided_at: now_ms,
+            schema_version: 1,
+        },
+    )
+    .await?;
+    Ok(checkpoint_id)
+}
+
+/// Record a default-deny refusal of an archive as an append-only
+/// `substrate_block_event`. `verb` is the refused root token only —
+/// never key/transcript bytes.
+///
+/// It lived in a `provision` module that existed to install and audit a foreign
+/// capture binary; that module died with the binary on 2026-08-11. This did not,
+/// because a backend that refuses is a fact about *this* archive, and the seam
+/// still admits one.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on insert failure.
+async fn record_block(
+    store: &impl CanonicalStore,
+    verb: &str,
+    reason: &str,
+    now_ms: i64,
+) -> Result<()> {
+    let row = SubstrateBlockEventRow {
+        block_id: sha256_hex(&[
+            verb.as_bytes(),
+            b"\0",
+            reason.as_bytes(),
+            b"\0",
+            now_ms.to_string().as_bytes(),
+        ]),
+        verb: verb.to_owned(),
+        reason: reason.to_owned(),
+        occurred_at: now_ms,
+        schema_version: 1,
+    };
+    record_substrate_block_event(store, &row).await?;
+    Ok(())
+}
+
+/// Derive an `archive_decision` id. A retried hook at the same `decided_at` is
+/// idempotent; a genuinely later decision differs by `decided_at`.
+pub(crate) fn decision_id(
+    session: &str,
+    strategy: StrategyKind,
+    reason: ArchiveReason,
+    decided_at: i64,
+    checkpoint_id: Option<&str>,
+) -> String {
+    sha256_hex(&[
+        session.as_bytes(),
+        b"\0",
+        strategy.as_str().as_bytes(),
+        b"\0",
+        reason.as_str().as_bytes(),
+        b"\0",
+        decided_at.to_string().as_bytes(),
+        b"\0",
+        checkpoint_id.unwrap_or("").as_bytes(),
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rift_store::SqliteStore;
+
+    fn store() -> SqliteStore {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.create_canonical_schema().unwrap();
+        s
+    }
+
+    /// The session id the id-derivation tests archive under.
+    const SESSION: &str = "01JSESSION";
+
+    /// A backend whose write fails the way a plumbing failure does: an error out
+    /// of `archive_checkpoint` and no shard on the substrate.
+    struct FailingBackend;
+    impl ShadowBackend for FailingBackend {
+        fn archive_checkpoint(&self, _archive: &CheckpointArchive) -> Result<()> {
+            Err(rift_core::RiftError::storage(
+                "the shard could not be written",
+            ))
+        }
+    }
+
+    /// A backend that records the id of every archive it is handed. Counting the
+    /// calls is the point: `condense` must not short-circuit a repeat.
+    #[derive(Default)]
+    struct CountingBackend {
+        archived: std::cell::RefCell<Vec<String>>,
+    }
+    impl ShadowBackend for CountingBackend {
+        fn archive_checkpoint(&self, archive: &CheckpointArchive) -> Result<()> {
+            self.archived
+                .borrow_mut()
+                .push(archive.checkpoint_id.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_backend_archive_records_no_archived_row() {
+        // Audit honesty: `archived=1` may exist only when the substrate
+        // write landed. A backend that fails must error out of condense BEFORE
+        // the decision row is written — no false facts.
+        let s = store();
+        let backend = FailingBackend;
+        let raw = SecretBytes::new(Vec::new());
+        let err = condense(
+            &backend,
+            &s,
+            std::path::Path::new("/tmp/repo"),
+            "01JSESSION",
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1,
+            Vec::new(),
+            &RulePackSet::builtin(),
+            None,
+            Vec::new(),
+        )
+        .await
+        .expect_err("a failed backend archive fails condense");
+        assert!(
+            err.to_string().contains("could not be written"),
+            "reason surfaced: {err}"
+        );
+        assert_eq!(
+            s.count("archive_decision").await.unwrap(),
+            0,
+            "no archived=1 row for an archive that never landed"
+        );
+    }
+
+    #[tokio::test]
+    async fn condense_is_idempotent_and_redacts() {
+        let s = store();
+        let backend = CountingBackend::default();
+        let raw = SecretBytes::new(b"secret token=AKIAIOSFODNN7EXAMPLE in capture".to_vec());
+        let repo = std::path::Path::new("/tmp/repo");
+
+        let id1 = condense(
+            &backend,
+            &s,
+            repo,
+            "01JSESSION",
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1,
+            Vec::new(),
+            &RulePackSet::builtin(),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        // identical content → identical checkpoint id (idempotent)
+        let id2 = condense(
+            &backend,
+            &s,
+            repo,
+            "01JSESSION",
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1,
+            Vec::new(),
+            &RulePackSet::builtin(),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(id1, id2);
+        // same decided_at + content → one decision row
+        assert_eq!(s.count("archive_decision").await.unwrap(), 1);
+        // …and the backend really was asked twice for the same id, so the single
+        // row is idempotence and not a skipped second archive.
+        assert_eq!(backend.archived.borrow().as_slice(), &[id1.clone(), id2]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_archive_is_audited_as_a_block_event() {
+        use crate::backend::ShadowBackend;
+
+        /// A backend that refuses every archive as a policy block (screen refusal).
+        struct RefusingBackend;
+        impl ShadowBackend for RefusingBackend {
+            fn archive_checkpoint(&self, _archive: &CheckpointArchive) -> rift_core::Result<()> {
+                Err(rift_core::RiftError::PolicyDenied("refused".into()))
+            }
+        }
+
+        let s = store();
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let out = condense(
+            &RefusingBackend,
+            &s,
+            std::path::Path::new("/r"),
+            "01JSESSION",
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1,
+            Vec::new(),
+            &RulePackSet::builtin(),
+            None,
+            Vec::new(),
+        )
+        .await;
+        assert!(matches!(out, Err(rift_core::RiftError::PolicyDenied(_))));
+        assert_eq!(
+            s.count("substrate_block_event").await.unwrap(),
+            1,
+            "the refusal left an append-only audit row"
+        );
+    }
+
+    /// The writer's id is a function of the bytes the writer archived — asserted
+    /// through the archive's own artifact renderers, which is the pair `rift
+    /// verify` re-derives from. If the id ever stops addressing the shard it
+    /// sits in, the shard path stops being a binding and the last thing a
+    /// tamperer cannot recompute is gone.
+    #[test]
+    fn the_archived_id_is_derivable_from_the_artifacts_the_archive_writes() {
+        use crate::backend::{ArchivedReadFact, CheckpointArchive, RedactionReportView};
+
+        let facts = vec![ArchivedReadFact {
+            tool_use_id: "t1".into(),
+            tool_name: "Read".into(),
+            path: "a.rs".into(),
+            content_sha256: "aa".into(),
+            input_tokens: None,
+        }];
+        let content = rift_shadow_redact::redact(&SecretBytes::new(b"capture".to_vec()))
+            .unwrap()
+            .redacted;
+        let mut archive = CheckpointArchive {
+            repo: std::path::PathBuf::from("/tmp/r"),
+            commit: "abc123".to_owned(),
+            checkpoint_id: String::new(),
+            sessions: vec![SESSION.to_owned()],
+            strategy: "manual-commit".to_owned(),
+            prev_hash: None,
+            events: Vec::new(),
+            read_facts: facts,
+            content,
+            report: RedactionReportView {
+                total_spans: 0,
+                bytes_masked: 0,
+                allowlisted: 0,
+                rule_pack_versions: vec!["builtin@2026.06.0".to_owned()],
+                input_sha256: "c".repeat(64),
+                by_detector: std::collections::BTreeMap::new(),
+                by_class: std::collections::BTreeMap::new(),
+            },
+            transcript: None,
+            tasks: Vec::new(),
+            created_at_ms: Some(1),
+            // A hand-built archive is in no repository: the member is ABSENT, which
+            // is what keeps every frozen anchor and golden byte-identical.
+            worktree: None,
+            session_worktrees: std::collections::BTreeMap::new(),
+        };
+        archive.checkpoint_id = archive.derived_checkpoint_id().unwrap();
+        let id = archive.checkpoint_id.clone();
+        assert_eq!(
+            derive_checkpoint_id(&archive.sessions[0], archive.merkle_root()),
+            id,
+            "the id must address the root over the artifacts the shard carries"
+        );
+
+        // …and every leaf artifact moves it, which is the property that makes
+        // the shard TREE a function of the shard PATH. Each arm below is a
+        // separate artifact; the root is the archive's own, so these are not
+        // three restatements of one hash call.
+        let mut other_session = archive.clone();
+        other_session.sessions = vec!["01JOTHERSESSION".to_owned()];
+        assert_ne!(
+            other_session.derived_checkpoint_id().unwrap(),
+            id,
+            "session"
+        );
+
+        let mut edited = archive.clone();
+        edited.content = rift_shadow_redact::redact(&SecretBytes::new(b"edited".to_vec()))
+            .unwrap()
+            .redacted;
+        assert_ne!(
+            edited.derived_checkpoint_id().unwrap(),
+            id,
+            "content.redacted"
+        );
+
+        let mut no_facts = archive.clone();
+        no_facts.read_facts = Vec::new();
+        assert_ne!(
+            no_facts.derived_checkpoint_id().unwrap(),
+            id,
+            "tool_calls.jsonl"
+        );
+
+        let mut with_report = archive.clone();
+        with_report.report.total_spans += 1;
+        assert_ne!(
+            with_report.derived_checkpoint_id().unwrap(),
+            id,
+            "redaction_report.json — a leaf the pre-root derivation did NOT bind"
+        );
+
+        // …and the anchoring commit does NOT, or a second commit in one session
+        // would mint a new shard for unchanged capture and idempotence would go.
+        let mut later = archive.clone();
+        later.commit = "def456".to_owned();
+        later.created_at_ms = later.created_at_ms.map(|ms| ms + 60_000);
+        assert_eq!(
+            later.derived_checkpoint_id().unwrap(),
+            id,
+            "anchor drift is not capture drift"
+        );
+
+        // N ≥ 2 is DEFINED — and it is a different
+        // identity from any single session's, because cardinality and order
+        // are part of the full form. (This assertion used to be `is_none()`:
+        // the writer refused to guess until the rule existed.)
+        let mut two = archive.clone();
+        two.sessions.push("01JSECOND".to_owned());
+        let two_id = two.derived_checkpoint_id().expect("N >= 2 is defined now");
+        assert_ne!(two_id, id, "a second session is a different identity");
+        // …and a session id carrying the frame byte is refused, not framed.
+        let mut nul = archive.clone();
+        nul.sessions = vec!["bad\0session".to_owned()];
+        assert!(nul.derived_checkpoint_id().is_none(), "NUL is refused");
+    }
+
+    /// A session id from this repository's own checkpoint branch. Not a secret —
+    /// it is committed in that shard's `metadata.json` — and it is here because
+    /// the pin below is only worth anything against the real bytes.
+    const MEASURED_SESSION: &str = "ac5515af-4e58-426d-b45c-9e52b7ebd7da";
+
+    /// **The superseded derivation, pinned to the shard that still carries it.**
+    ///
+    /// `f62a4930…` is a live shard on `refs/heads/rift/checkpoints/v1` in this
+    /// repository: `canon_version` 1, one session, an empty capture, no read
+    /// facts. Under [`rift_core::checkpoint_id::from_capture`] it re-derives to
+    /// `23b75dac…` and would be called tampered; under
+    /// [`rift_core::checkpoint_id::from_capture_only`] it re-derives to itself.
+    ///
+    /// So this test is the reason `checkpoint_ids_for_shard` returns a set. If
+    /// the superseded derivation is ever dropped as "dead code", this reds with
+    /// the id of the shard that the drop would have condemned.
+    ///
+    /// It also pins the era gate from the OTHER side: all 103 shards on that ref
+    /// are epoch 1, so if epoch 1 ever started demanding the root binding, every
+    /// one of them would be called tampered at once.
+    #[test]
+    fn the_superseded_derivation_still_addresses_a_live_shard() {
+        use crate::backend::ShardLeafBytes;
+        const MEASURED_ID: &str =
+            "f62a493024792e8f4dc540579c3389e2b4f8826be45d3f51ebb336a4424cf960";
+        let leaves = ShardLeafBytes {
+            content_redacted: b"",
+            ..ShardLeafBytes::default()
+        };
+        let ids = checkpoint_ids_for_shard(&[MEASURED_SESSION.to_owned()], 1, &leaves);
+        assert!(
+            ids.iter().any(|i| i == MEASURED_ID),
+            "the live shard f62a4930… must still address its own bytes: {ids:?}"
+        );
+        assert_ne!(
+            rift_core::checkpoint_id::from_capture(MEASURED_SESSION, b"", None),
+            MEASURED_ID,
+            "…and it is NOT that era's newer derivation, which is the whole point"
+        );
+        // The set is newest-first within the era.
+        assert_eq!(
+            ids.first().map(String::as_str),
+            Some(rift_core::checkpoint_id::from_capture(MEASURED_SESSION, b"", None).as_str())
+        );
+        // …and the ROOT-BOUND era does not accept either of them, or binding the
+        // root would buy nothing: a tamperer would just satisfy the older rule.
+        let root_era = checkpoint_ids_for_shard(
+            &[MEASURED_SESSION.to_owned()],
+            crate::backend::ROOT_BOUND_ID_MIN_CANON_VERSION,
+            &leaves,
+        );
+        assert!(
+            !root_era.iter().any(|i| ids.contains(i)),
+            "epoch 3 must not accept a pre-root derivation: {root_era:?}"
+        );
+    }
+
+    /// 2c wiring + the recorded trailer divergence, both as facts.
+    ///
+    /// A condense handed a sealed transcript archives it: the shard gains the
+    /// pair through the durable path and the id moves. And the trailer
+    /// PREDICTION — transcript-blind by ruling (decision (b), 2026-08-29:
+    /// `prepare-commit-msg` owns the 100 ms budget and the read-side union is
+    /// the permanent answer) — matches the transcript-less condense exactly
+    /// and the transcript-carrying one not at all. If the prediction ever
+    /// learns the transcript, the second half of this test reds and the
+    /// ruling above must be revisited with it.
+    #[tokio::test]
+    async fn a_condense_with_a_transcript_diverges_from_the_trailer_prediction() {
+        let s = store();
+        let backend = crate::backend::NativeBackend::in_memory();
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let packs = RulePackSet::builtin();
+        let predicted = predicted_checkpoint_id(SESSION, &raw, &[], &packs).unwrap();
+
+        let (pair, raw_lines) = crate::transcript::archived_transcript(
+            &SecretBytes::new(br#"{"type":"user","message":"hi"}"#.to_vec()),
+            0,
+            &packs,
+        )
+        .unwrap();
+        assert_eq!(raw_lines, 1, "one non-empty raw line consumed");
+        let with_transcript = condense(
+            &backend,
+            &s,
+            std::path::Path::new("/r"),
+            SESSION,
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1,
+            Vec::new(),
+            &packs,
+            Some(pair),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            with_transcript, predicted,
+            "the transcript moves the id; the trailer prediction does not see it (recorded)"
+        );
+        // The shard really carries the pair, through the durable path:
+        // content.redacted + transcript.compact.jsonl + transcript.jsonl.
+        assert_eq!(backend.writer().durable_count(), 3);
+
+        let bare = condense(
+            &backend,
+            &s,
+            std::path::Path::new("/r"),
+            SESSION,
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            2,
+            Vec::new(),
+            &packs,
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            bare, predicted,
+            "without a transcript the prediction is exact — the divergence is the transcript alone"
+        );
+    }
+
+    /// **Item 6 must not widen the trailer divergence.** The shape digest
+    /// derives from read facts, which BOTH hooks see — so the trailer
+    /// prediction stays EXACT for a fact-carrying, transcript-less session
+    /// even though its shard now carries a digest leaf. (The transcript-side
+    /// digests ride the one recorded divergence, whose pin is the test
+    /// above.) If digest derivation ever splits between the two paths, this
+    /// equality reds.
+    #[tokio::test]
+    async fn the_trailer_prediction_stays_exact_for_a_fact_carrying_session() {
+        let s = store();
+        let backend = crate::backend::NativeBackend::in_memory();
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let packs = RulePackSet::builtin();
+        let facts = vec![crate::backend::ArchivedReadFact {
+            tool_use_id: "t1".into(),
+            tool_name: "Read".into(),
+            path: "src/a.rs".into(),
+            content_sha256: "aa".into(),
+            input_tokens: None,
+        }];
+        let predicted = predicted_checkpoint_id(SESSION, &raw, &facts, &packs).unwrap();
+        let archived = condense(
+            &backend,
+            &s,
+            std::path::Path::new("/r"),
+            SESSION,
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1,
+            facts,
+            &packs,
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            archived, predicted,
+            "the shape digest derives from facts both hooks share"
+        );
+    }
+
+    /// **The rollup rule, pinned at the assembly.** A
+    /// subagent that STARTED before this checkpoint's boundary still rolls up
+    /// to the checkpoint that saw it finish: condense hands its `tasks` to the
+    /// archive verbatim — no window filter on `started_at_ms` — so the id the
+    /// backend receives equals the id of an archive constructed with that task
+    /// included, and the parent metadata's `task_tokens` sums it. If condense
+    /// ever grows a boundary gate on tasks, the id comparison here reds.
+    #[tokio::test]
+    async fn a_task_started_before_the_boundary_still_rolls_up_to_the_parent() {
+        use crate::backend::{ArchivedTask, NativeBackend};
+
+        let s = store();
+        let backend = NativeBackend::in_memory();
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let packs = RulePackSet::builtin();
+        // A transcript whose boundary is past line 0: the second line is this
+        // checkpoint's slice, so line 0 — and anything that happened during it,
+        // including the task's start — precedes the boundary.
+        let raw_transcript = br#"{"type":"user","message":"first"}
+{"type":"user","message":"second"}"#;
+        let (pair, _) = crate::transcript::archived_transcript(
+            &SecretBytes::new(raw_transcript.to_vec()),
+            1,
+            &packs,
+        )
+        .unwrap();
+        assert!(pair.compact_start > 0, "the boundary is real");
+        let before_boundary_task = ArchivedTask {
+            tool_use_id: "toolu_early".into(),
+            agent_id: "explore".into(),
+            // Started long before the checkpoint (and its boundary) existed…
+            started_at_ms: 1,
+            ended_at_ms: 900,
+            input_tokens: Some(120),
+            output_tokens: Some(34),
+            transcript: None,
+        };
+
+        let archived = condense(
+            &backend,
+            &s,
+            std::path::Path::new("/r"),
+            SESSION,
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1_000,
+            Vec::new(),
+            &packs,
+            Some(pair.clone()),
+            vec![before_boundary_task.clone()],
+        )
+        .await
+        .unwrap();
+
+        // The id condense archived equals the id of an archive that INCLUDES
+        // the early task — i.e. nothing filtered it out on its start time.
+        let out = rift_shadow_redact::redact_with(&raw, &packs).unwrap();
+        let mut twin = archive_for_id(
+            SESSION,
+            out.redacted,
+            RedactionReportView::from_redact(&out.report),
+            Vec::new(),
+        );
+        twin.transcript = Some(pair);
+        twin.tasks = vec![before_boundary_task];
+        assert_eq!(
+            archived,
+            twin.derived_checkpoint_id().unwrap(),
+            "condense must hand tasks to the archive unfiltered"
+        );
+        // …and the parent-side rollup sums the early task's tokens.
+        assert_eq!(twin.task_token_rollup(), Some((120, 34)));
+        let meta = String::from_utf8(twin.metadata_json()).unwrap();
+        assert!(
+            meta.contains(r#""task_tokens":{"input_tokens":120,"output_tokens":34}"#),
+            "the rollup rides the parent metadata: {meta}"
+        );
+    }
+
+    #[tokio::test]
+    async fn redaction_survival_seeded_secret_never_in_checkpoint_inputs() {
+        // The checkpoint id is derived over the REDACTED bytes; a seeded secret in
+        // the raw capture is masked before it can address anything durable.
+        let raw_secret = "AKIAIOSFODNN7EXAMPLE";
+        let out = rift_shadow_redact::redact(&SecretBytes::new(
+            format!("aws key {raw_secret} here").into_bytes(),
+        ))
+        .unwrap();
+        let redacted = String::from_utf8_lossy(out.redacted.as_slice()).into_owned();
+        assert!(
+            !redacted.contains(raw_secret),
+            "seeded secret must not survive"
+        );
+    }
+    /// The label is derived from **the worktree the condense ran
+    /// in** — `repo`, the checkout the caller is archiving from — and not
+    /// handed in by a caller who could get it wrong. A condense outside any
+    /// repository (which every hand-built fixture is) carries no member at all,
+    /// which is what keeps the frozen anchors and goldens frozen.
+    #[tokio::test]
+    async fn a_condense_labels_the_shard_with_the_worktree_it_ran_in() {
+        /// A backend that keeps the whole archive, so the member can be read.
+        #[derive(Default)]
+        struct KeepingBackend {
+            last: std::cell::RefCell<Option<CheckpointArchive>>,
+        }
+        impl ShadowBackend for KeepingBackend {
+            fn archive_checkpoint(&self, archive: &CheckpointArchive) -> Result<()> {
+                *self.last.borrow_mut() = Some(archive.clone());
+                Ok(())
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let main_git = rift_git::test_support::fake_repo(&tmp.path().join("main")).unwrap();
+        let member_tree = tmp.path().join("member");
+        let admin =
+            rift_git::test_support::fake_worktree(&main_git, &member_tree, "swt-a").unwrap();
+        std::fs::write(admin.join("HEAD"), "ref: refs/heads/swt/a-foundations\n").unwrap();
+
+        let run_in = |repo: &std::path::Path| {
+            let backend = KeepingBackend::default();
+            let s = store();
+            let raw = SecretBytes::new(Vec::new());
+            let repo = repo.to_path_buf();
+            async move {
+                condense(
+                    &backend,
+                    &s,
+                    &repo,
+                    "01JSESSION",
+                    &raw,
+                    StrategyKind::ManualCommit,
+                    ArchiveReason::Commit,
+                    "abc123",
+                    1,
+                    Vec::new(),
+                    &RulePackSet::builtin(),
+                    None,
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+                let kept = backend.last.borrow().clone().unwrap();
+                kept
+            }
+        };
+
+        let from_member = run_in(&member_tree).await;
+        let label = from_member.worktree.clone().expect("a member is labelled");
+        assert_eq!(label.name, "swt-a", "the ADMIN name, not the checkout's");
+        assert!(label.linked);
+        assert_eq!(label.branch.as_deref(), Some("swt/a-foundations"));
+        assert_eq!(label.token.len(), 12);
+        assert!(
+            from_member.session_worktrees.is_empty(),
+            "one session, no map"
+        );
+
+        let from_main = run_in(&tmp.path().join("main")).await;
+        let main_label = from_main
+            .worktree
+            .clone()
+            .expect("the main tree is labelled");
+        assert_eq!(main_label.name, "main");
+        assert!(!main_label.linked);
+        assert_ne!(main_label.token, label.token, "two members, two tokens");
+
+        // Outside any repository the member is ABSENT — unknown, never `main`
+        // — and the metadata bytes are what they always were.
+        let nowhere = run_in(&tmp.path().join("nowhere")).await;
+        assert_eq!(nowhere.worktree, None);
+        assert!(
+            !String::from_utf8(nowhere.metadata_json())
+                .unwrap()
+                .contains("worktree"),
+            "a label-less condense writes the bytes it always wrote"
+        );
+
+        // And the label moves no id: the same capture, two worktrees, one
+        // checkpoint id.
+        assert_eq!(from_member.checkpoint_id, from_main.checkpoint_id);
+        assert_eq!(from_member.checkpoint_id, nowhere.checkpoint_id);
+    }
+}

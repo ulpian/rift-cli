@@ -1,0 +1,113 @@
+# benchmarks/floors.toml — the declaration published numbers are judged against.
+#
+# A row states ONE bar for one scenario, ABSOLUTE and in the row's own unit.
+# Where a throughput bar was originally derived, the convention was:
+#
+#     bar = min(per-run medians over >= 3 fresh runs at the shipped caps)
+#           x 0.5, rounded down to at most two significant figures
+#
+# THE x0.5 IS NOT A NOISE BUDGET, and this file says so where it is read rather
+# than in a log nobody opens. Run-to-run variance on this hardware has been
+# measured reaching +98% between two identical runs of the same binary
+# (benchmarks/hook-latency.md 9.8); no factor of two absorbs that. The halving
+# is a PUBLICATION CONVENTION so that a tracked artifact can be checked for
+# internal consistency without the check becoming a live performance gate that
+# reds on machine weather.
+#
+# What reads this file: benches/native-baseline/tests/artifact_consistency.rs — an
+# ARTIFACT-CONSISTENCY guard, not a live measurement. It answers "do the
+# published numbers, the published bars and the published provenance agree
+# with each other". It never answers "is this machine fast today".
+#
+# STATUS values and what each one costs:
+#   underived      the structure exists, the number does not. The guard reports
+#                  the row PENDING with the command that fills it, and binds
+#                  nothing. Never a pass.
+#   derived        a number that follows arithmetically from the medians beside
+#                  it. The guard recomputes the convention and reds if the two
+#                  disagree, so a hand-typed bar cannot quietly stop being
+#                  derived.
+#   owner-ratified a bar an owner SET. Not derived and not re-derivable.
+#
+# WHY ALL FOUR ROWS ARE OWNER-RATIFIED, as of 2026-09-02. The three throughput
+# numbers below were derived by the convention above, from three fresh runs of
+# the whole catalogue on a quiet machine with every subject committed clean.
+# On 2026-09-02 this repository's history was collapsed to a single fresh root,
+# and the commits those runs named stopped existing here. A derivation nobody
+# can re-run is worse than a decision somebody made, so the owner ratified the
+# three numbers as set bars on that date and the derivation lists were emptied.
+# The numbers did not move: 71 shards/s, 27 checkpoints/s, 11 events/s are the
+# same bars the runs implied. The published artifacts stayed exactly as
+# measured and are now kept as RECORDS — real, quotable as history, and barred
+# from setting a bar. Re-deriving any row means measuring three fresh runs on
+# a quiet machine, writing the medians and their artifact stems back in, and
+# setting the status to `derived` again.
+#
+# The displacement row was never derived at all: its bar is the owner's hard
+# 100 ms of git latency, ruled and not re-derivable from any median.
+
+schema_version = 1
+
+# --------------------------------------------------------------------------
+[[floor]]
+scenario = "import-throughput"
+kind = "throughput"
+status = "owner-ratified"
+work_unit = "shards"
+min_units_per_s = 71
+machine_class = "macos / x86_64 / 8 logical CPUs"
+protocol = "1 warmup + 3 measured iterations (Protocol::heavy), one fresh repository per iteration"
+caps = "MAX_TOTAL_BYTES=8192; MAX_FILE_BYTES=4096"
+measured_paths = ["crates/rift-shadow/src/legacy_import.rs", "crates/rift-recall-substrate/src/walker.rs", "bins/rift/src/main.rs", "benches/native-baseline/src/scenario.rs", "benches/native-baseline/src/legacy.rs"]
+derivation_medians = []
+derivation_artifacts = []
+derivation = "An owner's bar, ratified 2026-09-02. It was first obtained by the convention floor = min(per-run medians over >= 3 fresh runs at the shipped caps) x 0.5, rounded down to <= 2 significant figures — a PUBLICATION CONVENTION for an artifact-consistency guard, not a live measurement, and the x0.5 is NOT a noise budget. The medians and their artifact stems were removed when the history holding their subject commits was collapsed, because a derivation nobody can re-run is not a derivation."
+note = "HONESTY, and it is not a footnote: no legacy artifact was ever obtained (crates/rift-shadow/legacy-fixtures/README.md — 'Nothing here was fetched'), so this rate is TRUE ABOUT OUR OWN RECONSTRUCTION OF THE FORMAT AND SILENT ABOUT THE FORMAT ITSELF. It is never a format-compatibility claim."
+
+# --------------------------------------------------------------------------
+[[floor]]
+scenario = "verify-throughput"
+kind = "throughput"
+status = "owner-ratified"
+work_unit = "checkpoints"
+min_units_per_s = 27
+machine_class = "macos / x86_64 / 8 logical CPUs"
+protocol = "1 warmup + 3 measured iterations (Protocol::heavy), one shared repository"
+caps = "MAX_TOTAL_BYTES=8192; MAX_FILE_BYTES=4096"
+measured_paths = ["bins/rift/src/verify.rs", "crates/rift-hashchain/src/lib.rs", "crates/rift-shadow/src/backend.rs"]
+derivation_medians = []
+derivation_artifacts = []
+derivation = "An owner's bar, ratified 2026-09-02. It was first obtained by the convention floor = min(per-run medians over >= 3 fresh runs at the shipped caps) x 0.5, rounded down to <= 2 significant figures — a PUBLICATION CONVENTION for an artifact-consistency guard, not a live measurement, and the x0.5 is NOT a noise budget. The medians and their artifact stems were removed when the history holding their subject commits was collapsed, because a derivation nobody can re-run is not a derivation."
+note = "The row has previously been observed with an EMPTY corpus (0 checkpoints), which is unmeasurable as a rate rather than a slow one. The published runs each record one real checkpoint per measured iteration."
+
+# --------------------------------------------------------------------------
+[[floor]]
+scenario = "condense"
+kind = "throughput"
+status = "owner-ratified"
+work_unit = "events"
+min_units_per_s = 11
+machine_class = "macos / x86_64 / 8 logical CPUs"
+protocol = "1 warmup + 3 measured iterations (Protocol::heavy), one fresh repository per iteration, one scripted session of 3 turns / 25 hooks per iteration"
+caps = "MAX_TOTAL_BYTES=8192; MAX_FILE_BYTES=4096"
+measured_paths = ["crates/rift-shadow/src/condense.rs", "crates/rift-shadow/src/backend.rs", "crates/rift-shadow-hooks/src/lib.rs", "bins/rift/src/hooks.rs"]
+derivation_medians = []
+derivation_artifacts = []
+derivation = "An owner's bar, ratified 2026-09-02. It was first obtained by the convention floor = min(per-run medians over >= 3 fresh runs at the shipped caps) x 0.5, rounded down to <= 2 significant figures — a PUBLICATION CONVENTION for an artifact-consistency guard, not a live measurement, and the x0.5 is NOT a noise budget. The medians and their artifact stems were removed when the history holding their subject commits was collapsed, because a derivation nobody can re-run is not a derivation."
+note = "The denominator is MEASURED, not scripted: the probe counts the canonical events the projection actually holds, so a drive that silently stopped ingesting collapses the rate instead of holding it up with a constant."
+
+# --------------------------------------------------------------------------
+[[floor]]
+scenario = "enable-displacement"
+kind = "latency"
+status = "owner-ratified"
+work_unit = ""
+budget_ms = 100
+machine_class = "macos / x86_64 / 8 logical CPUs"
+protocol = "3 warmup + 11 measured commits per arm, both orders measured in the same run against a bare-commit control"
+caps = "MAX_TOTAL_BYTES=8192; MAX_FILE_BYTES=4096"
+measured_paths = ["bins/rift/src/main.rs", "bins/rift/src/hooks.rs", "crates/rift-shadow-hooks/src/lib.rs", "crates/rift-store/src/migrate.rs", "benches/native-baseline/src/displace.rs"]
+derivation_medians = []
+derivation_artifacts = []
+derivation = "NOT a derived floor, and never was. This scenario is a paired LATENCY displacement measure and is NEVER a throughput floor: an enable that does more work per second is not thereby better, and a commit that takes longer is not thereby doing more. Its bar is the owner's — 100 ms of git latency, HARD — and an owner's bar is ruled, not derived from medians."
+note = "The claim under test is DISPLACEMENT, not speed: projection init was moved to `rift enable` time by an owner decision, so the cost must appear at enable and be ABSENT from the first commit. Two orders in one run — enable-then-commit vs commit-without-prior-enable — because a single order cannot tell a cost that moved from a cost that vanished. The first-commit arm is the one held to the 100 ms budget."

@@ -1,0 +1,3 @@
+Please deploy using AWS key AKIAIOSFODNN7EXAMPLE and notify ada@example.com.
+Here is a token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
+The rest of this prompt is ordinary prose about billing retries.

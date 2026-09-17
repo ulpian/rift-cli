@@ -1,0 +1,37 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 225
+expression: "render_state(&mut\nproject_settings_state(Size::new(100, 32),\nrift_canopy::ProjectInitialization::Initialized,\nrift_canopy::ProjectPolicyState::Invalid,))"
+---
+ RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
+╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────#
+│># rift-c╭─ Project Settings · rift-cli ─────────────────────────────────────────────[x]╮         #
+│ # rift-s│Recall                                                                        │         #
+│         │  Total Recall · locked                                                       │         #
+│         │  per-turn delta injection · custom effective budget: 777 · locked            │         #
+│         │  documents as Markdown · locked                                              │         #
+│         │  native search · locked                                                      │         #
+│         │                                                                              │         #
+│         │Capture                                                                       │─────────#
+│         │  tool-call capture · locked                                                  │─────────#
+│         │  token-usage capture · locked                                                │         #
+│         │  raw transcripts · locked                                                    │         #
+│         │                                                                              │         #
+│         │Security / Policy                                                             │         #
+│         │  policy: invalid · fail-closed                                               │         #
+│         │  sensitive paths: 11                                                         │         #
+│         │  redactor packs: 2 loaded · 1 failed                                         │─────────|
+│         │  .rift/config.toml is invalid; repair it before changing settings            │─────────|
+│         │                                                                              │tings    |
+│         │Integrations                                                                  │         |
+│         │> Claude Code · PATH command · managed                                     [x]│    [tok]|
+│         │  Codex · PATH command + VS Code extension · capture managed · hooks manag [x]│         |
+│         │About: Installed: PATH command (availability only); wiring: managed.          │         |
+│         │                                                                              │         |
+│         │ j/k move · enter/space apply · pgup/pgdn scroll · esc/x close                │         |
+│[+][^][v]╰──────────────────────────────────────────────────────────────────────────────╯         |
+╰──────────────────╯╰──────────────────────────────────────╯│                                      |
+ j/k move  ·  ⏎ apply  ·  esc close
+╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
+│/█                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

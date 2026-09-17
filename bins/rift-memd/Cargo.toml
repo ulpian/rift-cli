@@ -1,0 +1,64 @@
+[package]
+name = "rift-memd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "rift-total-recall binary: metrics | rebuild | status | doctor | eval."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rift-memd"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+getrandom = { workspace = true }
+rift-core = { version = "0.0.1", path = "../../crates/rift-core" }
+# `--repo` is discovery-resolved through the repository family, never taken as a
+# bare path, so a linked worktree resolves to the family's one identity.
+rift-git = { version = "0.0.1", path = "../../crates/rift-git" }
+# The `eval` verb: runs the deterministic Lost-in-Delta conditions end-to-end
+# and appends the bitemporal experiment rows. The paid sweep transport is NOT
+# enabled here: it is this binary's own opt-in `real-model` feature (below), so
+# the shipped default build links no HTTP client at all — a compile-time gate,
+# not a convention.
+rift-recall-eval = { version = "0.0.1", path = "../../crates/rift-recall-eval" }
+rift-recall-ledger = { version = "0.0.1", path = "../../crates/rift-recall-ledger" }
+rift-recall-serve = { version = "0.0.1", path = "../../crates/rift-recall-serve" }
+rift-recall-events = { version = "0.0.1", path = "../../crates/rift-recall-events" }
+rift-recall-policy = { version = "0.0.1", path = "../../crates/rift-recall-policy" }
+rift-recall-substrate = { version = "0.0.1", path = "../../crates/rift-recall-substrate" }
+rift-recall-types = { version = "0.0.1", path = "../../crates/rift-recall-types" }
+rift-config = { version = "0.0.1", path = "../../crates/rift-config" }
+# The recall.db projection (a separate store from the capture projection.db).
+rift-store = { version = "0.0.1", path = "../../crates/rift-store" }
+clap = { workspace = true }
+# Structured, redaction-safe diagnostics on stderr; opt in with RIFT_LOG.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# The graph ingest/metrics seam is async; the daemon drives it on a runtime.
+tokio = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[features]
+# The paid real-model sweep: owner-invoked `eval --real-model`,
+# reachable only from a build that opted in — `cargo build -p rift-memd
+# --features real-model`. Off by default; `ci-meta` (`real_model_is_opt_in`)
+# keeps it out of every `default`/dependency `features` array, and
+# `no_network_crate_in_the_resolved_graph` keeps the default-resolved graph
+# of both binaries free of HTTP clients.
+real-model = ["rift-recall-eval/real-model"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The repository fixtures the family refusals are asserted over (`fake_repo`):
+# a dev-only feature of a dependency this binary already has. The crate-graph
+# snapshot counts `[dependencies]` edges only, so this adds no edge to it.
+rift-git = { version = "0.0.1", path = "../../crates/rift-git", features = [
+    "test-support",
+] }

@@ -1,0 +1,87 @@
+# Rust build artifacts
+/target
+/target-tests
+
+# cargo-fuzz build output + crash artifacts (seed corpora ARE committed)
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/Cargo.lock
+
+# Backup files from rustfmt
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+*.swp
+.idea/
+
+# Agent / tooling local overrides (committed files are the shared defaults)
+.claude/agents
+.claude/commands
+.claude/settings.local.json
+.mcp.local.json
+
+# Design notes under docs/ stay on this machine and are never tracked: a
+# glossary, setup notes and research notes that a fresh clone does not need.
+# The one exception is the human guide under docs/guide/, which IS tracked —
+# it is the written explanation of how the toolchain works and it ships with
+# the code, so it is reviewed like any other source file.
+/docs/*
+!/docs/guide/
+
+# Local run state written by the hooks (per-session injection markers): a
+# decision this machine made, never a fact other checkouts should inherit.
+/.rift/state/
+
+# Machine-local integration state: capture descriptors and install manifests
+# embed this machine's absolute rift binary path, and their ownership hashes
+# live in the gitignored /.rift/state/ manifest — a tracked descriptor without
+# its manifest reads as a conflict on every fresh clone. Never track these;
+# `rift enable` regenerates them per machine.
+/.rift/agents/
+/.codex/hooks.json
+
+# Local read-side caches (regenerable from the checkpoint branch / Turso projection)
+**/*.duckdb
+**/*.sqlite
+*.db
+*.db-wal
+*.db-shm
+/.cache
+
+# NOTE: Cargo.lock is intentionally committed (this workspace produces a binary).
+
+# insta pending snapshots (accepted goldens are tracked; pendings are review artifacts)
+*.snap.new
+
+# Deleted, and must stay deleted. These paths held code that was removed
+# outright — the wrapper backend went in one atomic change: crate, workspace
+# member, pin machinery and every product mention — and this machine's iCloud
+# sync RESURRECTS deleted files: they were observed untracked-present in a
+# sibling checkout on 2026-08-18. An ignore rule only works if it names the
+# file exactly, so these paths are spelled in full; two FURTHER removed paths
+# carrying the retired product name are deliberately absent from this list, and
+# `xtask ci-meta` builds those two from fragments so that no source file ever
+# stores their joined spelling.
+/xtask/src/pin_cut.rs
+/.rift/rewrite.toml
+# The next two joined by owner decision on 2026-08-20, and they are why this
+# list is not specific to the wrapper: both had been deleted once, and both came
+# back as manifest-only scaffolds with an empty `src/` — STAGED, not merely
+# present. No compile references them, so nothing else would have objected;
+# committing them would have reddened `xtask::check_members_match_dirs`
+# (a filesystem walk) in CI, on every checkout at once.
+/crates/rift-fff/
+/crates/rift-codegraph/
+# Deleted 2026-08-25, when the recall stdio transport was retired. These two
+# paths are spelled out on purpose — the entries exist to keep the deleted
+# files dead, so they must name them exactly.
+/.mcp.json
+/bins/rift-memd/src/mcp_serve.rs
+/bins/rift-doc/
+
+data/
+windsup/

@@ -1,0 +1,21 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# PROVENANCE OF THESE FOUR SEEDS, because the header above would otherwise
+# read as "this property once failed on shipped code", which it did not.
+# They were produced by DELIBERATE MUTANTS of `parse_checkpoint_claims`,
+# introduced and reverted while proving the property is not vacuous: drop
+# `trim_start` (indented trailers unseen), drop the dedup, pin `ordinal` to a
+# constant, and case-fold `is_checkpoint_id`. Each seed is the minimal witness
+# proptest shrank to for one of those four mutants — an indented trailer, a
+# duplicated id, two distinct ids, an uppercase value — so replaying them first
+# on every run is what keeps that mutation testing durable instead of a
+# one-off claim in a commit message. The unmutated parser passes all four.
+cc 8ac98e9cdb321355cc1def49cca519587138807757927df465b93c5f3027040a # shrinks to lines = [Trailer { text: " <retired-key>:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", dialect: Legacy, yields: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") }]
+cc eba59fdfbac1e7d311f7f9c2b13ab4e2cb58026d5104b70993e1f399f2e1adac # shrinks to lines = [Trailer { text: "<retired-key>:abc1234", dialect: Legacy, yields: Some("abc1234") }, Trailer { text: "<retired-key>:abc1234", dialect: Legacy, yields: Some("abc1234") }]
+cc 8c668d6e4293a252e8c62ea3df556b18871ff354138b8bc7931d299572e037bf # shrinks to lines = [Trailer { text: "<retired-key>:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", dialect: Legacy, yields: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") }, Trailer { text: "<retired-key>:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", dialect: Legacy, yields: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") }]
+cc 0dd0de7ca849bf01624612c29b79d5f190e3377abe0221cb5250b77430cda238 # shrinks to lines = [Trailer { text: "<retired-key>:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", dialect: Legacy, yields: None }]

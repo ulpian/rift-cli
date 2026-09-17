@@ -1,0 +1,4 @@
+name: team
+rules:
+  - id: r
+    regex: a

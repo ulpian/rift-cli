@@ -1,0 +1,53 @@
+# Proptest generators that can never produce a newline — SHRINK-ONLY.
+#
+# `proptest::string::string_regex` parses with `ParserBuilder::new().build()`,
+# whose `dot_matches_new_line` defaults to false, so a `.`-based regex generator
+# never yields `\n` (measured: 0 newline-bearing samples in 5000 for `.{0,400}`,
+# `.*` and `.{1,40}`; 4237/5000 once `(?s)` is prefixed). Each property below
+# therefore holds only over SINGLE-LINE input, while reading as though it holds
+# over arbitrary input.
+#
+# That gap matters here more than in most codebases: the capture document is
+# line-oriented, pack lines are role-marker-anchored per line, commit trailers
+# are column-0-anchored, and TOML is line-oriented.
+#
+# To remove a line: prefix that generator's regex with `(?s)` and delete the
+# entry. If the property then FAILS, that is a finding to report and fix — never
+# narrow the generator back until it passes. `ci-meta` fails on a stale entry
+# too, so this file cannot quietly become a parking lot.
+#
+# ADDING `(?s)` IS NOT THE FIX — IT IS THE FIRST HALF OF IT. Three measured
+# lessons, each from a branch that had already "fixed" a site here:
+#
+#   1. REACH is not COVERAGE. `(?s)` took one site from 0% to 85% multi-line
+#      draws, and its four assertions still executed ZERO times in 200,000
+#      cases, because the generator never spelled the key those assertions are
+#      about. It caught 0 of 5 deliberate mutants before and after.
+#   2. SPELLING is not ASSEMBLY, and neither is free. A property whose alphabet
+#      contained the defect found it in 0 of 256 cases because its draw never
+#      assembled the two tokens adjacently. Shaping the draw toward the
+#      failure's structure raised the per-case hit rate 2x-90x (the spread is
+#      real: it depends on how the control is spelled, so quote the control's
+#      definition alongside any multiple, or quote only the sign).
+#   3. The ORACLE can drift with the code. A guard asserting "nothing is
+#      published here that the old pipeline masked" was implemented by calling
+#      the LIVE proposal function — which carried the branch's own new
+#      detectors — so it was structurally blind to the whole class it existed
+#      to catch, and stayed green while an out-of-tree differential found 498
+#      leaks. Freeze what the reference runs, and pin that the frozen set still
+#      partitions the live one.
+#
+# So: add `(?s)`, then MEASURE that the generator reaches the class, that it
+# assembles it, and that the assertions examine it — each against a RESTORED
+# defect, never argued. A site "fixed" with a vacuous assertion is worse than
+# one still listed here: it reads as covered and it passes the gate.
+#
+# Owned by whoever owns the crate. Added 2026-08-07 during an adversarial review.
+
+# --- redaction + trust plane: multi-line input is the whole capture case
+
+# --- recall serve/validity: the false-memory and untrusted-render planes
+
+# --- capture: a newline inside a session id is precisely an injection vector
+
+# --- canopy: both control-character properties, and `\n` is the one they miss

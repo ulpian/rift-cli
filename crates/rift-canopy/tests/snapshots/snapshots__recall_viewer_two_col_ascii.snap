@@ -1,0 +1,28 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "render_state_with_caps(&mut state, Capabilities::empty())"
+---
+ RIFT  Canopy  *
+╭─ projects  2 ────╮╭─ checkpoints · 2 ────────────────────╮
+│># rift-cli      *││[ Filter ]                            │
+│ # rift-site     o││> 2025-08-11T10:40Z · recorded        │
+│                  ││  Add read-only Recall Viewer fixtures│
+│                  ││  cp a1b2c3d4e5f6 · commit 0123456789a│
+│                  ││  rift/br refs/heads/rift/checkpoints/│
+│                  ││  main +1 · compact · partial · !parse│
+│                  ││                                      │
+│                  │╰──────────────────────────────────────╯
+│                  │╭─ timeline · a1b2c3d4e5f6 ────────────╮
+│                  ││[ Full session ]         [ Dashboard ]│
+│                  ││◆ Checkpoint summary                 #│
+│                  ││  ┆ facts grouped by field; not an ev#│
+│                  ││  • checkpoint a1b2c3d4e5f6 · 2025-08|│
+│                  ││    anchor: 0123456789ab             |│
+│                  ││    chain: #42 · strategy: compact   |│
+│                  ││    partial projection               |│
+│                  ││◆ Recall summary                     |│
+╰──────────────────╯╰──────────────────────────────────────╯
+Tab pane · j/k move · PgUp/PgDn page · f Filter · F Full ses
+╭─ command ────────────────────────────────────────────────╮
+│/█                                                        │
+╰──────────────────────────────────────────────────────────╯

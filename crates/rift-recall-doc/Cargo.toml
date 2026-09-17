@@ -1,0 +1,32 @@
+[package]
+name = "rift-recall-doc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Document-to-Markdown conversion behind the DocConverter seam: fourteen office and PDF extensions, capped, deterministic, no network."
+
+[lints]
+workspace = true
+
+[features]
+default = ["doc"]
+# The engine. With `doc` off the seam still compiles — the trait, the caps, the
+# extension table, the provenance line and the table cap are all engine-free —
+# so a size-constrained build drops fourteen parsers without dropping a caller.
+doc = ["dep:anydoc"]
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+thiserror = { workspace = true }
+# The two-process conversion protocol (`wire`): one JSON object between the
+# parent half of this crate and the child `rift` re-spawns. Not optional and
+# not behind the engine feature -- the parent half is exactly the half a build
+# WITHOUT the parsers needs, and `serde_json` is already in every shipped
+# binary's graph, so this adds nothing to either one.
+serde_json = { workspace = true }
+# Pure Rust, no network: the hosted OCR path this project publishes exists only
+# in its Node and Python bindings, never in the crate. Optional so the feature
+# above can take the parsers out of a build.
+anydoc = { workspace = true, optional = true }

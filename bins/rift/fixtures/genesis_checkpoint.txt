@@ -1,0 +1,10 @@
+# rift verify fixture — one genesis checkpoint's event leaves, one per line.
+# `rift verify` recomputes the Merkle root (SHA-256, via rift-hashchain) over
+# these leaves and proves the projection's stored chain matches it. Blank lines
+# and lines beginning with '#' are ignored. Editing a leaf changes the root, so
+# a stored projection built from the old leaves will (correctly) fail to verify.
+session-start session=demo agent=claude model=claude-opus-4
+prompt user "summarize the repository layout"
+tool-call read path=README.md bytes=2048
+assistant "Rift is a Rust TUI + CLI for AI-agent session capture."
+checkpoint strategy=manual-commit ordinal=0

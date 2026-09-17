@@ -1,0 +1,21 @@
+# Occurrences of a hook-response literal that are NOT hook responses.
+#
+# One place composes an agent's hook response: `crates/rift-agent/src/respond.rs`.
+# The `one-gate-chokepoint` leg of `cargo run -p xtask -- gate-intercept`
+# enforces that by screening the production half of every other `.rs` file
+# under `crates/` and `bins/` for the literals a response is made of. A few of
+# those spellings are ordinary English that this codebase also uses for
+# unrelated things, and those sites are listed here rather than left to a
+# reader's judgement each time the gate runs.
+#
+# Format, pipe-separated, one site per line:
+#
+#   <path> | <literal> | <exact count> | <why this is not a hook response>
+#
+# The count is part of the entry on purpose: an allow-list keyed by file alone
+# would silently cover a SECOND, real occurrence added to the same file later.
+# An entry whose count no longer matches is a violation in both directions, so
+# this list shrinks when the site goes away instead of accumulating debt.
+
+bins/rift/src/investigate.rs | "decision" | 1 | The serialized name of an investigation finding's kind, parsed back off disk. Nothing here reads or writes an agent hook.
+crates/rift-recall-pack/src/entry.rs | "decision" | 1 | The same finding kind, rendered into a pack entry's line. A pack is text for a person, not a response to a hook.

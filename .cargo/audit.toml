@@ -1,0 +1,26 @@
+# cargo-audit config — mirrors deny.toml's [advisories].ignore.
+#
+# RUSTSEC-2025-0141 (`bincode` 1.3.3 unmaintained) is pulled by Syntect 5.3.0's
+# required `default-syntaxes` feature solely to decode Syntect's bundled syntax
+# dump; Rift passes it no untrusted bytes. There is no supported Syntect feature
+# composition that keeps the required defaults without it.
+#
+# RUSTSEC-2026-0189 no longer needs an ignore: the advisory-bearing dependency
+# was deleted outright rather than migrated, which is the exit condition the
+# narrow ignore named. Removed in the same commit as the dependency.
+#
+# NOTE: when the deferred `turso` dependency is wired back, add
+# RUSTSEC-2026-0183 / -0184 (`git2` unsound) and
+# RUSTSEC-2024-0436 (`paste` unmaintained) here and in deny.toml — they reach the
+# lockfile only via that optional, default-off feature.
+#
+# RUSTSEC-2026-0192: ttf-parser 0.25.1 is unmaintained, not vulnerable, and the
+# advisory itself says no safe upgrade exists. It arrives on the document path,
+# ttf-parser <- lopdf <- pdf-inspector <- anydoc, and it is the only advisory in
+# that whole graph -- everything else there is clean, licences included, with no
+# exception. Dropping the format that pulls it is not on the table: PDF support
+# is the one thing the size budget may never trade away. Re-evaluate when
+# pdf-inspector moves off ttf-parser (the advisory names skrifa).
+[advisories]
+# Keep in lockstep with deny.toml and re-evaluate at each dependency review.
+ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2026-0192"]

@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 14d1e86755c07f366f7eceae394c1ed4eea6cb4976ad4a291743588117397025 # shrinks to a = 469559, b = 1, ia = "0", ib = "A"
+cc 8fa08c0dbb73e450c91435a28f16c1626c3d2821ad8d07b30d514867a06ea29c # shrinks to prefix = "rift-cursor/", version = "1", seq = "007", id = "a"
+cc 4635bbf3be02381a6a43ab7a880cbc0ca9d9543e98afaf59ce0684f50dd7c356 # shrinks to prefix = "rift-cursor/", version = "0", seq = "1", id = "a"

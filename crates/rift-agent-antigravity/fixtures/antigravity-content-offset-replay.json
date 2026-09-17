@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "kind": "sanitized_local_installed_client_observation",
+    "observed_date": "2026-09-04",
+    "client_family": "antigravity",
+    "client_version": "1.1.25",
+    "vendor_schema": false
+  },
+  "scope": {
+    "tool": "view_file",
+    "path": "imp/LEDGER.md",
+    "large_ledger": true
+  },
+  "meaning": "Each result_observed value records only whether a bounded adjacent result record was present in the sanitized local transcript. It does not establish the client's delivered-result semantics.",
+  "observations": [
+    {
+      "ordinal": 1,
+      "request": { "ContentOffset": 230000, "StartLine": 270, "EndLine": 339 },
+      "result_observed": false,
+      "result_metadata": null
+    },
+    {
+      "ordinal": 2,
+      "request": { "ContentOffset": 150000, "StartLine": 270, "EndLine": 339 },
+      "result_observed": true,
+      "result_metadata": { "record_kind": "GENERIC", "status": "DONE", "content_chars": 45662, "content_lines": 27 }
+    },
+    {
+      "ordinal": 3,
+      "request": { "ContentOffset": 185000, "StartLine": 287, "EndLine": 341 },
+      "result_observed": false,
+      "result_metadata": null
+    },
+    {
+      "ordinal": 4,
+      "request": { "ContentOffset": 40000, "StartLine": 287, "EndLine": 341 },
+      "result_observed": true,
+      "result_metadata": { "record_kind": "GENERIC", "status": "DONE", "content_chars": 46578, "content_lines": 30 }
+    },
+    {
+      "ordinal": 5,
+      "request": { "ContentOffset": 95000, "StartLine": 287, "EndLine": 341 },
+      "result_observed": true,
+      "result_metadata": { "record_kind": "GENERIC", "status": "DONE", "content_chars": 46729, "content_lines": 31 }
+    },
+    {
+      "ordinal": 6,
+      "request": { "ContentOffset": 130000, "StartLine": 308, "EndLine": 341 },
+      "result_observed": false,
+      "result_metadata": null
+    },
+    {
+      "ordinal": 7,
+      "request": { "ContentOffset": 0, "StartLine": 308, "EndLine": 341 },
+      "result_observed": true,
+      "result_metadata": { "record_kind": "GENERIC", "status": "DONE", "content_chars": 46634, "content_lines": 32 }
+    },
+    {
+      "ordinal": 8,
+      "request": { "ContentOffset": 135000, "StartLine": 330, "EndLine": 341 },
+      "result_observed": false,
+      "result_metadata": null
+    },
+    {
+      "ordinal": 9,
+      "request": { "ContentOffset": 0, "StartLine": 330, "EndLine": 341 },
+      "result_observed": true,
+      "result_metadata": { "record_kind": "GENERIC", "status": "DONE", "content_chars": 34165, "content_lines": 21 }
+    },
+    {
+      "ordinal": 10,
+      "request": { "ContentOffset": 0, "StartLine": 341, "EndLine": 345 },
+      "result_observed": true,
+      "result_metadata": { "record_kind": "GENERIC", "status": "DONE", "content_chars": 655, "content_lines": 10 }
+    }
+  ]
+}

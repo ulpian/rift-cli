@@ -1,0 +1,1 @@
+refs/heads/{retired}/checkpoints/v1 ab34cd56ef78 sharded-branch epoch-0 (no canon_version field); merkle_root SET to the value its own events derive, so this fixture is the self-consistent arm

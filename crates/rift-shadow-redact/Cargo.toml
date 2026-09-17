@@ -1,0 +1,27 @@
+[package]
+name = "rift-shadow-redact"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Two-pass redaction pipeline: vendor-secret/credential/PII detectors + entropy; the sole constructor of RedactedBytes (the one-way gate)."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+regex = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+# The JSONL walker parses transcript lines so a placeholder lands inside a
+# string value and the emitted line still parses.
+serde_json = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+# A synthetic corpus on disk, so the false-positive guard's arms are calibrated
+# against a corpus whose every hit is known, instead of by mutating this
+# repository. Already pinned by the workspace; dev-only.
+tempfile = { workspace = true }

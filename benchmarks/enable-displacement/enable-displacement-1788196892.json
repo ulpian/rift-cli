@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "harness_version": "0.0.1",
+  "generated_at_unix": 1788196892,
+  "scenario": "enable-displacement",
+  "host": {
+    "os": "macos",
+    "arch": "x86_64",
+    "logical_cpus": 8,
+    "rss_probe": "n/a (displacement sweep)"
+  },
+  "subject": {
+    "state": "present",
+    "binary": "/Users/ulpian/rift-worktrees/swt-gate/target/release/rift",
+    "version": "rift 0.0.1",
+    "source": "repo target/release",
+    "binary_mtime_unix": 1788195998,
+    "git_describe": null,
+    "dirty": null
+  },
+  "source_clock": {
+    "newest_unix": 1788195342,
+    "newest_path": "bins/rift/src/workflows.rs",
+    "files": 330,
+    "newest_subsec_nanos": 112960591
+  },
+  "protocol": {
+    "warmup": 3,
+    "iterations": 11
+  },
+  "budget_ms": 100,
+  "arms": [
+    {
+      "arm": {
+        "id": "A_bare",
+        "title": "first commit, nothing installed (control)",
+        "act": "bare-commit",
+        "note": null
+      },
+      "stats": {
+        "samples": 11,
+        "failures": 0,
+        "min_ns": 33242892,
+        "p50_ns": 34227883,
+        "p95_ns": 37228781,
+        "max_ns": 37228781,
+        "mean_ns": 34415219,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "attestation": {
+        "load1": 3.9,
+        "void_above": 8.0
+      },
+      "trailer_present": null
+    },
+    {
+      "arm": {
+        "id": "E0_enable",
+        "title": "`rift init` itself — a wall time, not a git latency",
+        "act": "enable",
+        "note": "Never quoted against the bare-commit control: initializing a repository and committing to one are different acts, and a ratio between them would be a number wearing a unit it does not have."
+      },
+      "stats": {
+        "samples": 11,
+        "failures": 0,
+        "min_ns": 152100618,
+        "p50_ns": 162404843,
+        "p95_ns": 192346664,
+        "max_ns": 192346664,
+        "mean_ns": 163952012,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "attestation": {
+        "load1": 3.9,
+        "void_above": 8.0
+      },
+      "trailer_present": null
+    },
+    {
+      "arm": {
+        "id": "E1_commit_after_enable",
+        "title": "the first commit in a repository enabled beforehand",
+        "act": "first-commit-after-enable",
+        "note": "The arm the hard 100 ms git-latency budget binds: it is what a user's next commit costs."
+      },
+      "stats": {
+        "samples": 11,
+        "failures": 0,
+        "min_ns": 63296208,
+        "p50_ns": 64425405,
+        "p95_ns": 68992922,
+        "max_ns": 68992922,
+        "mean_ns": 65098375,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "attestation": {
+        "load1": 3.99,
+        "void_above": 8.0
+      },
+      "trailer_present": false
+    },
+    {
+      "arm": {
+        "id": "E2_commit_without_prior_enable",
+        "title": "the first commit with the projection state not yet there",
+        "act": "first-commit-without-prior-enable",
+        "note": "FAITHFUL SIMULATION, recorded as such: there is no supported way to install rift's hooks without initializing, because `rift init` does both — which is the claim under test. This arm runs the real `rift init` through the real binary and then removes the projection state the hook path would find, leaving the installed hooks in place. It is not a user flow; it is the counterfactual the displacement claim is measured against."
+      },
+      "stats": {
+        "samples": 11,
+        "failures": 0,
+        "min_ns": 63821574,
+        "p50_ns": 65540764,
+        "p95_ns": 144446145,
+        "max_ns": 144446145,
+        "mean_ns": 73371679,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "attestation": {
+        "load1": 3.91,
+        "void_above": 8.0
+      },
+      "trailer_present": false
+    }
+  ]
+}

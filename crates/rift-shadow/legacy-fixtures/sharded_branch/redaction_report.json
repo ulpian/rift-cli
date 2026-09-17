@@ -1,0 +1,1 @@
+{"total_spans":2,"bytes_masked":48,"allowlisted":1,"rule_pack_versions":["legacy@0.7.8"],"input_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","by_detector":{"pii.email":1,"secret.token":1}}

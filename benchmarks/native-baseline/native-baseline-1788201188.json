@@ -1,0 +1,865 @@
+{
+  "schema_version": 9,
+  "harness_version": "0.0.1",
+  "generated_at_unix": 1788201188,
+  "host": {
+    "os": "macos",
+    "arch": "x86_64",
+    "logical_cpus": 8,
+    "rss_probe": "/usr/bin/time -l (bytes)"
+  },
+  "source_clock": {
+    "newest_unix": 1788195342,
+    "newest_path": "bins/rift/src/workflows.rs",
+    "files": 330,
+    "newest_subsec_nanos": 112960591
+  },
+  "attestation": {
+    "load1": 4.03,
+    "void_above": 8.0
+  },
+  "legs": [
+    {
+      "id": "rift",
+      "status": {
+        "state": "present",
+        "binary": "target/release/rift",
+        "version": "rift 0.0.1",
+        "source": "repo target/release",
+        "binary_mtime_unix": 1788195998,
+        "git_describe": null,
+        "dirty": null
+      },
+      "binary_bytes": 17144552
+    },
+    {
+      "id": "reference",
+      "status": {
+        "state": "absent",
+        "reason": "no pin manifest and no $RIFT_BENCH_REFERENCE_BIN: the backend leg is inactive (the harness never provisions it)"
+      },
+      "binary_bytes": null
+    }
+  ],
+  "driver": {
+    "state": "present",
+    "binary": "target/release/vogon",
+    "version": "{\"name\":\"vogon\",\"schema\":1,\"script_sha256\":\"5770c4767dfc61db0c9066380a8a8a2ca07cc5f1a5ff91afbd2fb2840ab1dfe0\",\"source_fnv1a\":\"2b531933c75718ff\",\"version\":\"0.0.1\"}",
+    "source": "repo target/release",
+    "binary_mtime_unix": 1788195821,
+    "git_describe": null,
+    "dirty": null
+  },
+  "fixtures": [
+    {
+      "schema_version": 1,
+      "spec": {
+        "name": "small",
+        "seed": 1592590337,
+        "dirs": 3,
+        "files_per_dir": 4,
+        "lines_per_file": 40,
+        "commits": 8,
+        "files_per_commit": 2,
+        "session_turns": 20
+      },
+      "spec_digest": "2fdf2afaa3f2a0ce",
+      "head_oid": "437881472e7d1f9fd8ab2438d3aafad308d976e9",
+      "worktree_files": 12,
+      "worktree_bytes": 35161
+    },
+    {
+      "schema_version": 1,
+      "spec": {
+        "name": "medium",
+        "seed": 1592590338,
+        "dirs": 20,
+        "files_per_dir": 25,
+        "lines_per_file": 120,
+        "commits": 200,
+        "files_per_commit": 6,
+        "session_turns": 10000
+      },
+      "spec_digest": "fa10aea4e8b6d6cd",
+      "head_oid": "0c7d9d7a2383e2a9b380f0fa88a8f93b4f38109b",
+      "worktree_files": 500,
+      "worktree_bytes": 4457612
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "hook-round-trip",
+      "title": "agent hook in → event ingested → process exited (`PreToolUse`, warm session)",
+      "fixture": "small",
+      "headline": true,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 500
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift hooks claude-code PreToolUse",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 17996768,
+            "p50_ns": 18734965,
+            "p95_ns": 20317393,
+            "max_ns": 20584051,
+            "mean_ns": 18852456,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6729728,
+          "ingest": {
+            "events_before": 3,
+            "events_after": 33,
+            "required_growth": 30
+          },
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "hook-session-start",
+      "title": "the session's first hook (`SessionStart`, new session each iteration)",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 500
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift hooks claude-code SessionStart",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 46399478,
+            "p50_ns": 48568129,
+            "p95_ns": 51508518,
+            "max_ns": 126716008,
+            "mean_ns": 51227493,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6627328,
+          "ingest": {
+            "events_before": 3,
+            "events_after": 33,
+            "required_growth": 30
+          },
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "hook-prompt-submit",
+      "title": "a user prompt opens a turn (`UserPromptSubmit`)",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 500
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift hooks claude-code UserPromptSubmit",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 40623040,
+            "p50_ns": 41529926,
+            "p95_ns": 59713828,
+            "max_ns": 103291827,
+            "mean_ns": 45344400,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6545408,
+          "ingest": {
+            "events_before": 3,
+            "events_after": 33,
+            "required_growth": 30
+          },
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "hook-read-tool",
+      "title": "a read-shaped tool call (`PreToolUse` / `Read`): worktree hash; the BPE count is journaled for the detached worker, never taken here",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 500
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift hooks claude-code PreToolUse",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 18106534,
+            "p50_ns": 18835959,
+            "p95_ns": 21335308,
+            "max_ns": 22229489,
+            "mean_ns": 19216213,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6533120,
+          "ingest": {
+            "events_before": 3,
+            "events_after": 33,
+            "required_growth": 30
+          },
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "hook-tool-result",
+      "title": "a tool result (`PostToolUse`, after its own `PreToolUse`)",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 500
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift hooks claude-code PostToolUse",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 15013486,
+            "p50_ns": 16086301,
+            "p95_ns": 18140464,
+            "max_ns": 18853585,
+            "mean_ns": 16296276,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6426624,
+          "ingest": {
+            "events_before": 6,
+            "events_after": 66,
+            "required_growth": 60
+          },
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "hook-stop",
+      "title": "end of turn (`Stop`, closing a turn opened this iteration; its spend is settled by the next hook, not here)",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 500
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift hooks claude-code Stop",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 47531739,
+            "p50_ns": 50397280,
+            "p95_ns": 89076981,
+            "max_ns": 182106430,
+            "mean_ns": 57629949,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6520832,
+          "ingest": {
+            "events_before": 12,
+            "events_after": 132,
+            "required_growth": 120
+          },
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "hook-session-end",
+      "title": "end of session (`SessionEnd`, after a whole scripted session; the condense is journaled for the detached worker, never run here)",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 500
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift hooks claude-code SessionEnd",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 21009924,
+            "p50_ns": 22900663,
+            "p95_ns": 25733215,
+            "max_ns": 25895585,
+            "mean_ns": 23089634,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6324224,
+          "ingest": {
+            "events_before": 15,
+            "events_after": 165,
+            "required_growth": 150
+          },
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "hook-replay",
+      "title": "the same event delivered again (`PreToolUse`): the dedup no-op, not a round-trip",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 500
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift hooks claude-code PreToolUse",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 15625865,
+            "p50_ns": 15827380,
+            "p95_ns": 16813573,
+            "max_ns": 17170578,
+            "mean_ns": 15944471,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6467584,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "identity-attribution",
+      "title": "first-touch identity binding: child processes per session's first hook (the machine id is read from the salted cache once the install has derived it)",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 500
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift hooks claude-code SessionStart",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 45701555,
+            "p50_ns": 48214003,
+            "p95_ns": 74108063,
+            "max_ns": 82355675,
+            "mean_ns": 51994203,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6414336,
+          "ingest": {
+            "events_before": 3,
+            "events_after": 33,
+            "required_growth": 30
+          },
+          "child_spawns": {
+            "total": 0,
+            "by_program": {
+              "git": 0,
+              "ioreg": 0
+            }
+          }
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "cold-status",
+      "title": "cold `status` (fresh copy per iteration)",
+      "fixture": "small",
+      "headline": true,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": null,
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift status",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 11363437,
+            "p50_ns": 12309874,
+            "p95_ns": 13297953,
+            "max_ns": 13545801,
+            "mean_ns": 12360982,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 4923392,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "checkpoint-list",
+      "title": "`checkpoint list` over recorded checkpoints",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": null,
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift checkpoint list",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 11136074,
+            "p50_ns": 11543053,
+            "p95_ns": 14604752,
+            "max_ns": 14802819,
+            "mean_ns": 11816527,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 4927488,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "condense",
+      "title": "condensation at commit: one scripted session (3 turns, 25 hooks) then a commit",
+      "fixture": "medium",
+      "headline": true,
+      "wired": true,
+      "protocol": {
+        "warmup": 1,
+        "iterations": 3
+      },
+      "budget": {
+        "kind": "throughput",
+        "min_units_per_s": null
+      },
+      "work_unit": "events",
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "vogon drive --rift <repo>/target/release/rift --agent claude-code --turns 3 --repo <sandbox>/iter-3 --commit",
+          "stats": {
+            "samples": 3,
+            "failures": 0,
+            "min_ns": 1172118213,
+            "p50_ns": 1193250577,
+            "p95_ns": 1214782069,
+            "max_ns": 1214782069,
+            "mean_ns": 1193383619,
+            "units_per_iteration": 28
+          },
+          "peak_rss_bytes": 6877184,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "resume-restore",
+      "title": "session resume: restore transcript + metadata from the branch's latest checkpoint",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": null,
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift --json session resume main --force",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 121500150,
+            "p50_ns": 126758786,
+            "p95_ns": 138281583,
+            "max_ns": 163993215,
+            "mean_ns": 128740158,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6238208,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "import-throughput",
+      "title": "read a pre-Rift capture history: 64 reconstructed shards, walked and parsed",
+      "fixture": "small",
+      "headline": true,
+      "wired": true,
+      "protocol": {
+        "warmup": 1,
+        "iterations": 3
+      },
+      "budget": {
+        "kind": "throughput",
+        "min_units_per_s": null
+      },
+      "work_unit": "shards",
+      "caveat": "This rate is true about our own reconstruction of the pre-Rift on-disk format and silent about the format itself. No legacy artifact was ever fetched — the README beside the golden shards under `legacy-fixtures/` says so in its own words, \"Nothing here was fetched\" — and every spelling in these shards is cited there to a declaration that already lived in this repository, and the corpus is that frozen shard replicated under distinct ids. It measures the reader — the walk, the parse, the root re-derivation. It is never a format-compatibility claim.",
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift import --from-legacy",
+          "stats": {
+            "samples": 3,
+            "failures": 0,
+            "min_ns": 439320221,
+            "p50_ns": 445867434,
+            "p95_ns": 465940391,
+            "max_ns": 465940391,
+            "mean_ns": 450376015,
+            "units_per_iteration": 64
+          },
+          "peak_rss_bytes": 6840320,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "blame-why",
+      "title": "line → checkpoint → prompt provenance (`why <file>:1` on a line this iteration's session wrote)",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": null,
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift --json why bench/why_32.txt:1",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 58165593,
+            "p50_ns": 60279493,
+            "p95_ns": 62407620,
+            "max_ns": 63776007,
+            "mean_ns": 60428940,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 6213632,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "verify-throughput",
+      "title": "re-derive the hash chain and cross-check (rift-only)",
+      "fixture": "medium",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 1,
+        "iterations": 3
+      },
+      "budget": {
+        "kind": "throughput",
+        "min_units_per_s": null
+      },
+      "work_unit": "checkpoints",
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift verify",
+          "stats": {
+            "samples": 3,
+            "failures": 0,
+            "min_ns": 17552400,
+            "p50_ns": 17786478,
+            "p95_ns": 17987478,
+            "max_ns": 17987478,
+            "mean_ns": 17775452,
+            "units_per_iteration": 1
+          },
+          "peak_rss_bytes": 5726208,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "worktree-add-adopt",
+      "title": "`git worktree add` in a family with an agent enabled: the checkout that pays full adoption",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 100
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "git worktree add --quiet <sandbox>/members/m32 -b bench-member-32",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 68919085,
+            "p50_ns": 71272643,
+            "p95_ns": 78748684,
+            "max_ns": 78849180,
+            "mean_ns": 72271940,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 2510848,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "member-switch",
+      "title": "`git switch` in a member the previous checkout already provisioned: the fast path",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": {
+        "kind": "latency",
+        "p50_ms": 100,
+        "p95_ms": 100
+      },
+      "work_unit": null,
+      "caveat": null,
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "git switch --quiet bench-switch-32",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 33947517,
+            "p50_ns": 35051217,
+            "p95_ns": 41679636,
+            "max_ns": 182905587,
+            "mean_ns": 40431810,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 3174400,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "recall-known-state",
+      "title": "`recall known-state` over a repository with real ancestry: the walk containment added to a serve",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 3,
+        "iterations": 30
+      },
+      "budget": null,
+      "work_unit": null,
+      "caveat": "This is the WHOLE serve, not the walk. The containment design budgets the ancestry walk at <= 20 ms p50 ADDED to this verb, and an added cost is a difference between two measurements: this row is one of them, and the other is the same verb on a build without the branch axis. Quote the difference a paired run reports, never this number, as the cost of containment.",
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift recall known-state --json --task finish the parser change 32 --file src/mod_0002/file_0000.rs",
+          "stats": {
+            "samples": 30,
+            "failures": 0,
+            "min_ns": 118937348,
+            "p50_ns": 132158161,
+            "p95_ns": 142272048,
+            "max_ns": 144786544,
+            "mean_ns": 132418565,
+            "units_per_iteration": null
+          },
+          "peak_rss_bytes": 38293504,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    },
+    {
+      "id": "recall-compounding",
+      "title": "a linked member is served the reads its sibling captured: the family's shared store, from a checkout that captured none of it",
+      "fixture": "small",
+      "headline": false,
+      "wired": true,
+      "protocol": {
+        "warmup": 1,
+        "iterations": 3
+      },
+      "budget": {
+        "kind": "throughput",
+        "min_units_per_s": null
+      },
+      "work_unit": "tokens-avoided",
+      "caveat": "The work unit is the tokens ONE serve in a linked member avoided out of the family's shared store — the member captured none of those reads itself. The published compounding ratio is that figure over the same serve's figure under the per-path baseline (one store per checkout, which is what a member had before one identity per repository family keyed the store), and a paired run prints both numerators beside it. A ratio without its two numerators is not a measurement, and this row's number is one of them, not the ratio.",
+      "legs": {
+        "rift": {
+          "outcome": "measured",
+          "command": "rift recall known-state --json --task finish the parser change 3 --file src/mod_0000/file_0003.rs",
+          "stats": {
+            "samples": 3,
+            "failures": 0,
+            "min_ns": 118626490,
+            "p50_ns": 122261074,
+            "p95_ns": 122572677,
+            "max_ns": 122572677,
+            "mean_ns": 121153413,
+            "units_per_iteration": 1383
+          },
+          "peak_rss_bytes": 37601280,
+          "ingest": null,
+          "child_spawns": null
+        }
+      },
+      "comparison": null
+    }
+  ]
+}

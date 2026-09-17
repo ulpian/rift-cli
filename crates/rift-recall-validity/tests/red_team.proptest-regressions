@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ff1be1c7ee27f684790bfbc917b193e808d294a8da9e140ff4c20706d42ac8fb # shrinks to marker = "system:", gaps = [[], [], [], [], [], [2], [], [], [], [], [], []], upper = [false, false, false, false, false, false, false, false, false, false, false, false], prefix = "", suffix = ""
+cc 0f85fadd0d43b737b140ab1b76f73b61b12cc0510dfd72f6de04398ad1bb4f86 # shrinks to marker = "system:", gaps = [[], [], [], [5], [], [], [], [], [], [], [], []], upper = [false, false, false, false, false, false, false, false, false, false, false, false], prefix = "", suffix = ""

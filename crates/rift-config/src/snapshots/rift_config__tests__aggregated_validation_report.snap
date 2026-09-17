@@ -1,0 +1,5 @@
+---
+source: crates/rift-config/src/lib.rs
+expression: err.to_string()
+---
+config error: unsupported schema_version 99 (supported: [1]); model "m1" appears in both allow and deny; empty glob in paths.sensitive_paths

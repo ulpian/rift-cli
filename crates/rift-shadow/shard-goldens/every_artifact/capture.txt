@@ -1,0 +1,13 @@
+rift-capture/1
+f docs/BUILD.md
+ # Building
+
+ The workspace pins its toolchain in `rust-toolchain.toml`.
+ A C compiler is required: the SQLite amalgamation is compiled from source.
+f src/lib.rs
+ mod artifact_bridge;
+ mod backend;
+ mod digest;
+ mod transcript;
+
+ pub use backend::CheckpointArchive;

@@ -1,0 +1,42 @@
+[package]
+name = "rift-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native git plumbing: worktree/common-dir discovery, additive object writes behind a RedactedBytes type wall, and the argv-safe shell-out to `git` for reset/checkout."
+
+[lints]
+workspace = true
+
+[features]
+# The gix-backed read seam (`GixBlobReader`) ships by default (builds offline),
+# but lives behind a feature so `--no-default-features` still builds the write
+# side + worktree discovery + the in-memory `MemoryBlobReader` with no gix.
+default = ["gix"]
+gix = ["dep:gix"]
+# Repository fixtures (`test_support`) other crates' tests build the same shape
+# from. Off by default: none of it reaches a shipped binary.
+test-support = []
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+sha2 = { workspace = true }
+# The family manifest: a machine-local JSON record in the common
+# dir. Both are already in the shipped binaries' resolved graph.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Transient machine-fingerprint hygiene (identity.rs): wiped after hashing.
+zeroize = { workspace = true }
+# Read-side git object access (blobs/trees) for diff-capture. We use only
+# the read surface (open/Tree/ObjectId), matching the workspace gix audit rationale.
+gix = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Hardened discovery is asserted over generated trees, not three hand-picked
+# ones: a phantom `.git` can be planted at any depth.
+proptest = { workspace = true }
+# Construct a RedactedBytes via the sanctioned redaction gate (its sole constructor).
+rift-shadow-redact = { version = "0.0.1", path = "../rift-shadow-redact" }

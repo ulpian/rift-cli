@@ -1,0 +1,49 @@
+[package]
+name = "rift-recall-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native file search behind the SearchEngine seam: a per-member path index, Rift's own frecency, fuzzy path ranking and a budgeted content primitive."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+# The sensitive-path globs a walk must never index are the repository's own
+# policy, and this matches them with the repository's own matcher rather than a
+# second glob dialect that could disagree with it about `secrets/**`.
+rift-config = { version = "0.0.1", path = "../rift-config" }
+# The read ledger's row grammar. Frecency is a query over rows this crate never
+# writes, so it takes the parser and nothing else.
+rift-agent = { version = "0.0.1", path = "../rift-agent" }
+thiserror = { workspace = true }
+# The four pure-Rust pieces. The finder's own umbrella crate is not pure Rust —
+# it takes a vendored libgit2, an LMDB binding and a filesystem watcher — so the
+# pieces are taken separately and repository state keeps coming from gix.
+# `safe_read`: the matcher's SIMD backends otherwise read up to a vector's
+# width past the end of a haystack whenever the read stays inside the same
+# 4 KiB page — a standard trick that cannot fault on real hardware, but is a
+# heap-buffer-overflow to the sanitizer and undefined behaviour to the
+# compiler. The fuzz target found it in seconds. The feature turns the
+# over-read off in favour of masked partial loads; the cost is a few
+# instructions on haystacks shorter than a vector, and what it buys is a
+# process that decides hook responses and never reads past an allocation.
+neo_frizbee = { workspace = true }
+# `default-features` keeps the parser's `ripgrep` grammar and leaves `zlob` (a
+# Zig build dependency) off, which is the whole reason this pin is exact.
+fff-query-parser = { workspace = true }
+fff-grep = { workspace = true }
+ignore = { workspace = true }
+# Git status: which of the indexed paths the developer is working on right now.
+gix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+# The one repository-fixture builder: a `.git` gix will open has to be the
+# `.git` git itself writes, and the workspace has exactly one place that knows
+# what those bytes are.
+rift-git = { version = "0.0.1", path = "../rift-git", features = ["test-support"] }

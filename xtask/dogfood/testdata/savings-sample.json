@@ -1,0 +1,38 @@
+{
+  "by_family": [
+    {
+      "decisions": 1,
+      "family": "claude-code",
+      "read_tokens": 472420,
+      "sessions_with_reads": 1,
+      "tokens_avoided": 479,
+      "tokens_returned": 101
+    }
+  ],
+  "definition": "avoided / (avoided + read), over the window in `window`",
+  "excluded": [],
+  "families_share_pct": 0.10129012749022519,
+  "note": null,
+  "overall": {
+    "honesty": 378,
+    "read_tokens": 472420,
+    "relation": "memd_audit_event",
+    "sessions_with_reads": 1,
+    "share_pct": 0.10129012749022519,
+    "tokens_avoided": 479,
+    "tokens_returned": 101
+  },
+  "projection_db": "/home/dev/.cache/rift/4d9d222b7b91fd9642236cbf6877bb3d/projection.db",
+  "recall_db": "/home/dev/.cache/rift/94b3809e5b054142bbe7ff682196dcf7/recall.db",
+  "share_excluding_undenominated_pct": 0.10129012749022519,
+  "window": {
+    "boundary_ms": 1788830405506,
+    "boundary_source": "since the boundary marker at 2026-09-08T01:20:05.506Z, set 2026-09-08T01:20:05.506Z by `rift savings reset`",
+    "enforce_cut_ms": 1788567575834,
+    "enforce_cut_source": "first memd.read_intercepted row",
+    "enforce_sessions": 12,
+    "marker_set_at_ms": 1788830405506,
+    "marker_set_by": "rift savings reset",
+    "observe_sessions": 17
+  }
+}

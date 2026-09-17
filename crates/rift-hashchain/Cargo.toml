@@ -1,0 +1,18 @@
+[package]
+name = "rift-hashchain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tamper-evident hash chain + per-checkpoint Merkle roots (SHA-256, substrate-compatible)."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

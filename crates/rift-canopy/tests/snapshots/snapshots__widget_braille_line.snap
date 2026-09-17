@@ -1,0 +1,12 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: frame_text(&f)
+---
+╭─ plot ─────────────────╮
+│          ⠈⠡⡀    ⡀      │
+│         ⢀⠁ ⠈⠢  ⡐⠈      │
+│     ⢀⠊⠢ ⠄    ⠑⠌  ⠁   ⢀⠊│
+│     ⠄  ⠑         ⠈⡀⢀⠔⠁ │
+│⢀⠔⠉⠒⠌              ⠠⠂   │
+│⠁                       │
+╰────────────────────────╯

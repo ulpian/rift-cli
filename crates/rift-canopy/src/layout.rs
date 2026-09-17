@@ -1,0 +1,554 @@
+//! Layout math for the three-column grid (20/40/40) plus the bottom command row.
+//!
+//! Pure geometry — no rendering — so the split logic is unit- and property-
+//! testable. [`solve`] tiles a given area **exactly** (no gap/overlap) into three
+//! columns above a reserved command row, honoring per-panel minimum widths. The
+//! responsive degradation ladder (Full3Col → TwoCol → SinglePanel → TooSmall)
+//! is chosen by [`choose_mode`]; [`solve`] delivers the nominal grid.
+
+/// A rectangle in terminal cells.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Rect {
+    /// Left edge.
+    pub x: u16,
+    /// Top edge.
+    pub y: u16,
+    /// Width in cells.
+    pub w: u16,
+    /// Height in cells.
+    pub h: u16,
+}
+
+/// Rows reserved for the bottom command panel (1 input line + border).
+pub const COMMAND_ROWS: u16 = 3;
+/// Rows for the hint bar above the command panel (the dashboard information architecture).
+pub const HINT_ROWS: u16 = 1;
+/// The smallest body area (rows above the bottom chrome) that still shows the
+/// hint bar. Below it the hint collapses to zero rows — content wins over
+/// teaching chrome, honestly (the bar vanishes; it never squeezes a panel).
+const MIN_ROWS_FOR_HINT: u16 = COMMAND_ROWS + 7;
+/// Minimum width for column 1 (a project name + status fits).
+pub const MIN_COL1: u16 = 16;
+/// Minimum width for column 2 (detail labels + toggles fit).
+pub const MIN_COL2: u16 = 32;
+/// Minimum width for column 3 (a graph + axis fits).
+pub const MIN_COL3: u16 = 28;
+/// Minimum body rows (above the command row) for the full three-column grid.
+pub const MIN_BODY_ROWS: u16 = 8;
+/// Below this width the dashboard shows the "terminal too small" notice.
+pub const MIN_NOTICE_COLS: u16 = 24;
+/// Below this height the dashboard shows the "terminal too small" notice.
+pub const MIN_NOTICE_ROWS: u16 = 6;
+
+/// The responsive layout tier for a given terminal size — a pure function of the
+/// size, so the same size always yields the same tier (no hysteresis).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LayoutMode {
+    /// The nominal 20/40/40 grid + command row.
+    Full3Col,
+    /// Projects on the left; detail stacked over graphs on the right.
+    TwoCol,
+    /// One panel at a time (switched by focus), with a tab strip.
+    SinglePanel,
+    /// Below the minimum: a centered "terminal too small" notice.
+    TooSmall,
+}
+
+/// Choose the layout tier for `size`. Width drives the column count; a hard floor
+/// on both dimensions falls back to the notice. Pure and total.
+#[must_use]
+pub fn choose_mode(size: crate::render::frame::Size) -> LayoutMode {
+    let (w, h) = (size.w, size.h);
+    if w < MIN_NOTICE_COLS || h < MIN_NOTICE_ROWS {
+        LayoutMode::TooSmall
+    } else if w < MIN_COL1 + MIN_COL2 + MIN_COL3 {
+        if w < MIN_COL1 + MIN_COL2 {
+            LayoutMode::SinglePanel
+        } else {
+            LayoutMode::TwoCol
+        }
+    } else {
+        LayoutMode::Full3Col
+    }
+}
+
+/// The five panel rectangles the dashboard renders into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PanelRects {
+    /// Column 1 — projects (≈20%).
+    pub col1: Rect,
+    /// Column 2 — detail + toggles (≈40%).
+    pub col2: Rect,
+    /// Column 3 — live graphs (≈40%).
+    pub col3: Rect,
+    /// The hint bar above the command row (zero-height when collapsed).
+    pub hint: Rect,
+    /// The bottom command row.
+    pub command: Rect,
+}
+
+/// Tile `area` into the 20/40/40 columns above the bottom chrome (hint bar +
+/// command row). The columns and chrome **exactly** cover `area` (no
+/// gaps/overlaps) and each column meets its minimum width when `area` is wide
+/// enough to host all three (guaranteed by `choose_mode`'s Full3Col threshold).
+#[must_use]
+pub fn solve(area: Rect) -> PanelRects {
+    let (body, hint, command) = chrome_split(area);
+    let (w1, w2, w3) = split_3(area.w, [20, 40, 40], [MIN_COL1, MIN_COL2, MIN_COL3]);
+    let col1 = Rect {
+        x: body.x,
+        y: body.y,
+        w: w1,
+        h: body.h,
+    };
+    let col2 = Rect {
+        x: body.x.saturating_add(w1),
+        y: body.y,
+        w: w2,
+        h: body.h,
+    };
+    let col3 = Rect {
+        x: body.x.saturating_add(w1).saturating_add(w2),
+        y: body.y,
+        w: w3,
+        h: body.h,
+    };
+    PanelRects {
+        col1,
+        col2,
+        col3,
+        hint,
+        command,
+    }
+}
+
+/// Carve the bottom chrome off `area`, returning `(body, hint, command)`. The
+/// command row is reserved first; the hint bar takes one more row only when the
+/// area is tall enough (`MIN_ROWS_FOR_HINT`) — below that it collapses to a
+/// zero-height rect (drawn as nothing) so panels never lose rows to chrome.
+#[must_use]
+pub fn chrome_split(area: Rect) -> (Rect, Rect, Rect) {
+    let cmd_h = area.h.min(COMMAND_ROWS);
+    let hint_h = if area.h >= MIN_ROWS_FOR_HINT {
+        HINT_ROWS
+    } else {
+        0
+    };
+    let body_h = area.h.saturating_sub(cmd_h).saturating_sub(hint_h);
+    let body = Rect {
+        x: area.x,
+        y: area.y,
+        w: area.w,
+        h: body_h,
+    };
+    let hint = Rect {
+        x: area.x,
+        y: area.y.saturating_add(body_h),
+        w: area.w,
+        h: hint_h,
+    };
+    let command = Rect {
+        x: area.x,
+        y: area.y.saturating_add(body_h).saturating_add(hint_h),
+        w: area.w,
+        h: cmd_h,
+    };
+    (body, hint, command)
+}
+
+/// The rows the bottom chrome (hint + command) occupies for a body area of
+/// height `h` — shared with the overlay/suggest geometry so surfaces anchored
+/// "above the command bar" sit above the hint bar too.
+#[must_use]
+pub fn bottom_chrome_rows(h: u16) -> u16 {
+    let hint_h = if h >= MIN_ROWS_FOR_HINT { HINT_ROWS } else { 0 };
+    h.min(COMMAND_ROWS).saturating_add(hint_h)
+}
+
+/// The two-column degraded layout: projects on the left, detail stacked over
+/// graphs on the right, above the bottom chrome. `col1`=projects, `col2`=detail
+/// (top-right), `col3`=graphs (bottom-right).
+#[must_use]
+pub fn two_col(area: Rect) -> PanelRects {
+    let (body, hint, command) = chrome_split(area);
+    let left = (body.w / 3).max(MIN_COL1).min(body.w);
+    let right_w = body.w.saturating_sub(left);
+    let right_x = body.x.saturating_add(left);
+    let top_h = body.h / 2;
+    let col1 = Rect {
+        x: body.x,
+        y: body.y,
+        w: left,
+        h: body.h,
+    };
+    let col2 = Rect {
+        x: right_x,
+        y: body.y,
+        w: right_w,
+        h: top_h,
+    };
+    let col3 = Rect {
+        x: right_x,
+        y: body.y.saturating_add(top_h),
+        w: right_w,
+        h: body.h.saturating_sub(top_h),
+    };
+    PanelRects {
+        col1,
+        col2,
+        col3,
+        hint,
+        command,
+    }
+}
+
+/// The single-panel degraded layout: a 1-row tab strip, one body panel, and the
+/// bottom chrome. Returns `(tabs, panel, hint, command)`.
+#[must_use]
+pub fn single_panel(area: Rect) -> (Rect, Rect, Rect, Rect) {
+    let (body, hint, command) = chrome_split(area);
+    let tabs_h = body.h.min(1);
+    let tabs = Rect {
+        x: body.x,
+        y: body.y,
+        w: body.w,
+        h: tabs_h,
+    };
+    let panel = Rect {
+        x: body.x,
+        y: body.y.saturating_add(tabs_h),
+        w: body.w,
+        h: body.h.saturating_sub(tabs_h),
+    };
+    (tabs, panel, hint, command)
+}
+
+/// Split `total` into three widths by `pct` (the remainder lands on the middle
+/// column so the three sum to `total` exactly), then raise any column below its
+/// minimum. Returns the proportional split unchanged when `total` is too narrow
+/// to host all minimums (the degraded modes take over there).
+fn split_3(total: u16, pct: [u16; 3], min: [u16; 3]) -> (u16, u16, u16) {
+    let [p0, _p1, p2] = pct;
+    let [m0, m1, m2] = min;
+    let t = u32::from(total);
+    let w0 = u16::try_from(t.saturating_mul(u32::from(p0)) / 100).unwrap_or(0);
+    let w2 = u16::try_from(t.saturating_mul(u32::from(p2)) / 100).unwrap_or(0);
+    // Remainder → middle column so the three always sum to `total` exactly.
+    let w1 = total.saturating_sub(w0).saturating_sub(w2);
+    enforce_minimums((w0, w1, w2), (m0, m1, m2), total)
+}
+
+/// Raise any column below its minimum to that minimum, reclaiming the deficit
+/// from the columns that still have surplus (widest surplus first) so the total
+/// width is preserved. A no-op when `total < ma + mb + mc` (the degraded modes
+/// handle that case).
+fn enforce_minimums(
+    (a, b, c): (u16, u16, u16),
+    (ma, mb, mc): (u16, u16, u16),
+    total: u16,
+) -> (u16, u16, u16) {
+    let min_sum = u32::from(ma) + u32::from(mb) + u32::from(mc);
+    if u32::from(total) < min_sum {
+        return (a, b, c);
+    }
+    let need = ma.saturating_sub(a) + mb.saturating_sub(b) + mc.saturating_sub(c);
+    if need == 0 {
+        return (a, b, c);
+    }
+    // Raise deficient columns to their minimums…
+    let mut a = a.max(ma);
+    let mut b = b.max(mb);
+    let mut c = c.max(mc);
+    // …then reclaim `need` cells from the widest surplus column, one at a time.
+    for _ in 0..need {
+        let sa = a.saturating_sub(ma);
+        let sb = b.saturating_sub(mb);
+        let sc = c.saturating_sub(mc);
+        if sa >= sb && sa >= sc && sa > 0 {
+            a = a.saturating_sub(1);
+        } else if sb >= sc && sb > 0 {
+            b = b.saturating_sub(1);
+        } else if sc > 0 {
+            c = c.saturating_sub(1);
+        } else {
+            break;
+        }
+    }
+    (a, b, c)
+}
+
+/// Split `total` into `weights.len()` widths by weight (the whole remainder lands
+/// on the **first maximal-weight column** so the widths sum to `total` exactly),
+/// then raise any column below its minimum ([`enforce_minimums_n`]). The
+/// N-column generalization of [`split_3`] behind the data-driven layout model
+/// (the data-driven layout model); `split_n(t, [20,40,40], [MIN_COL1,MIN_COL2,MIN_COL3])` equals
+/// `split_3(t, …)` at every width (the fidelity pin, proptested). `weights` and
+/// `min` must be the same length; a zero total-weight yields all-zero widths.
+#[must_use]
+pub(crate) fn split_n(total: u16, weights: &[u16], min: &[u16]) -> Vec<u16> {
+    let n = weights.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let total_weight: u32 = weights.iter().map(|&w| u32::from(w)).sum();
+    let mut widths: Vec<u16> = if total_weight == 0 {
+        vec![0; n]
+    } else {
+        weights
+            .iter()
+            .map(|&w| {
+                u16::try_from(u32::from(total).saturating_mul(u32::from(w)) / total_weight)
+                    .unwrap_or(0)
+            })
+            .collect()
+    };
+    // The whole remainder → the first maximal-weight column, so the widths sum to
+    // `total` exactly (mirrors `split_3`'s remainder-to-the-middle for [20,40,40]).
+    let assigned: u16 = widths.iter().copied().fold(0, u16::saturating_add);
+    let remainder = total.saturating_sub(assigned);
+    if remainder > 0 {
+        if let Some(idx) = max_weight_index(weights) {
+            if let Some(w) = widths.get_mut(idx) {
+                *w = w.saturating_add(remainder);
+            }
+        }
+    }
+    enforce_minimums_n(&mut widths, min, total);
+    widths
+}
+
+/// The index of the first maximal-weight column, or `None` for an empty slice.
+fn max_weight_index(weights: &[u16]) -> Option<usize> {
+    weights
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, &w)| (w, std::cmp::Reverse(*i)))
+        .map(|(i, _)| i)
+}
+
+/// The slice generalization of [`enforce_minimums`]: raise any column below its
+/// minimum, reclaiming the deficit from the widest surplus column (one cell at a
+/// time) so the total is preserved. A no-op when `total` cannot host every
+/// minimum (the degraded tiers handle that) or the lengths disagree.
+fn enforce_minimums_n(widths: &mut [u16], min: &[u16], total: u16) {
+    if widths.len() != min.len() {
+        return;
+    }
+    let min_sum: u32 = min.iter().map(|&m| u32::from(m)).sum();
+    if u32::from(total) < min_sum {
+        return;
+    }
+    let need: u16 = widths
+        .iter()
+        .zip(min)
+        .map(|(&w, &m)| m.saturating_sub(w))
+        .fold(0, u16::saturating_add);
+    if need == 0 {
+        return;
+    }
+    for (w, &m) in widths.iter_mut().zip(min) {
+        *w = (*w).max(m);
+    }
+    for _ in 0..need {
+        // The widest surplus column gives up one cell (first on a tie).
+        let victim = widths
+            .iter()
+            .zip(min)
+            .enumerate()
+            .filter(|(_, (&w, &m))| w > m)
+            .max_by_key(|(i, (&w, &m))| (w - m, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i);
+        match victim.and_then(|i| widths.get_mut(i)) {
+            Some(w) => *w = w.saturating_sub(1),
+            None => break,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area(w: u16, h: u16) -> Rect {
+        Rect { x: 0, y: 0, w, h }
+    }
+
+    fn size(w: u16, h: u16) -> crate::render::frame::Size {
+        crate::render::frame::Size::new(w, h)
+    }
+
+    #[test]
+    fn choose_mode_thresholds() {
+        // Full three-column grid at and above the min-sum width with enough rows.
+        assert_eq!(choose_mode(size(76, 20)), LayoutMode::Full3Col);
+        assert_eq!(choose_mode(size(200, 50)), LayoutMode::Full3Col);
+        // Just under the three-column width but wide enough for two columns.
+        assert_eq!(choose_mode(size(75, 20)), LayoutMode::TwoCol);
+        assert_eq!(choose_mode(size(48, 20)), LayoutMode::TwoCol);
+        // Under two columns' width → a single panel.
+        assert_eq!(choose_mode(size(47, 20)), LayoutMode::SinglePanel);
+        assert_eq!(
+            choose_mode(size(MIN_NOTICE_COLS, 20)),
+            LayoutMode::SinglePanel
+        );
+        // Below either floor → the notice.
+        assert_eq!(
+            choose_mode(size(MIN_NOTICE_COLS - 1, 20)),
+            LayoutMode::TooSmall
+        );
+        assert_eq!(
+            choose_mode(size(120, MIN_NOTICE_ROWS - 1)),
+            LayoutMode::TooSmall
+        );
+        assert_eq!(choose_mode(size(0, 0)), LayoutMode::TooSmall);
+    }
+
+    #[test]
+    fn two_col_and_single_panel_tile_within_area() {
+        let r = two_col(area(60, 20));
+        // projects on the left; detail over graphs on the right, all inside width.
+        assert_eq!(r.col1.x, 0);
+        assert_eq!(r.col2.x, r.col1.w);
+        assert_eq!(r.col3.x, r.col1.w);
+        assert_eq!(r.col2.y + r.col2.h, r.col3.y, "detail sits above graphs");
+        assert!(r.col1.w + r.col2.w <= 60);
+        // The hint bar sits between the body and the command row.
+        assert_eq!(r.hint.y, r.col1.h);
+        assert_eq!(r.command.y, r.hint.y + r.hint.h);
+
+        let (tabs, panel, hint, command) = single_panel(area(40, 16));
+        assert_eq!(tabs.h, 1);
+        assert_eq!(panel.y, tabs.y + 1);
+        assert_eq!(hint.y, panel.y + panel.h);
+        assert_eq!(command.y, hint.y + hint.h);
+        assert_eq!(command.h, COMMAND_ROWS);
+    }
+
+    #[test]
+    fn command_and_hint_rows_are_reserved() {
+        let r = solve(area(120, 40));
+        assert_eq!(r.command.h, COMMAND_ROWS);
+        assert_eq!(r.hint.h, HINT_ROWS, "tall terminals carry the hint bar");
+        assert_eq!(r.command.y, 40 - COMMAND_ROWS);
+        assert_eq!(r.hint.y, 40 - COMMAND_ROWS - HINT_ROWS);
+        assert_eq!(r.col1.h, 40 - COMMAND_ROWS - HINT_ROWS);
+        assert_eq!(r.command.w, 120);
+    }
+
+    #[test]
+    fn hint_bar_collapses_honestly_when_short() {
+        // Below the threshold the hint bar takes zero rows — the body and the
+        // command row keep everything (the bar vanishes, panels never shrink).
+        let short = solve(area(120, MIN_ROWS_FOR_HINT - 1));
+        assert_eq!(short.hint.h, 0);
+        assert_eq!(short.col1.h + short.command.h, MIN_ROWS_FOR_HINT - 1);
+        // At the threshold it appears.
+        let tall = solve(area(120, MIN_ROWS_FOR_HINT));
+        assert_eq!(tall.hint.h, HINT_ROWS);
+    }
+
+    #[test]
+    fn split_3_is_20_40_40_at_common_widths() {
+        for &w in &[100u16, 120, 200] {
+            let (a, b, c) = split_3(w, [20, 40, 40], [MIN_COL1, MIN_COL2, MIN_COL3]);
+            assert_eq!(a + b + c, w, "columns sum to width exactly at w={w}");
+            assert_eq!(a, w * 20 / 100, "col1 ≈ 20% at w={w}");
+            // col2 absorbs the rounding remainder, so it is ≥ 40%.
+            assert!(b >= w * 40 / 100, "col2 ≥ 40% at w={w}");
+        }
+    }
+
+    #[test]
+    fn minimums_are_enforced_at_the_narrow_boundary() {
+        // At the exact min-sum width every column lands on its minimum.
+        let w = MIN_COL1 + MIN_COL2 + MIN_COL3; // 76
+        let (a, b, c) = split_3(w, [20, 40, 40], [MIN_COL1, MIN_COL2, MIN_COL3]);
+        assert_eq!((a, b, c), (MIN_COL1, MIN_COL2, MIN_COL3));
+        assert_eq!(a + b + c, w);
+    }
+
+    #[test]
+    fn columns_abut_with_no_gap_or_overlap() {
+        let r = solve(area(137, 30));
+        assert_eq!(r.col1.x, 0);
+        assert_eq!(r.col2.x, r.col1.x + r.col1.w);
+        assert_eq!(r.col3.x, r.col2.x + r.col2.w);
+        assert_eq!(r.col3.x + r.col3.w, 137);
+    }
+
+    #[test]
+    fn zero_or_huge_size_never_panics() {
+        for &(w, h) in &[(0, 0), (1, 1), (2, 3), (u16::MAX, u16::MAX), (u16::MAX, 1)] {
+            let r = solve(area(w, h));
+            // command never exceeds the area height…
+            assert!(r.command.h <= h);
+            // …and the columns never exceed the area width.
+            assert!(
+                u32::from(r.col1.w) + u32::from(r.col2.w) + u32::from(r.col3.w) <= u32::from(w)
+            );
+        }
+    }
+
+    proptest::proptest! {
+        /// For any area wide enough for the grid, the three columns + command row
+        /// tile it exactly (no gap/overlap) and the columns sum to the width.
+        #[test]
+        fn tiling_is_exact_and_gapless(
+            w in (MIN_COL1 + MIN_COL2 + MIN_COL3)..4000u16,
+            h in (COMMAND_ROWS + 1)..300u16,
+        ) {
+            let r = solve(area(w, h));
+            // horizontal: columns abut and cover the full width
+            proptest::prop_assert_eq!(r.col1.x, 0);
+            proptest::prop_assert_eq!(r.col2.x, r.col1.x + r.col1.w);
+            proptest::prop_assert_eq!(r.col3.x, r.col2.x + r.col2.w);
+            proptest::prop_assert_eq!(r.col3.x + r.col3.w, w);
+            // vertical: body + hint + command cover the full height
+            proptest::prop_assert_eq!(r.col1.h + r.hint.h + r.command.h, h);
+            proptest::prop_assert_eq!(r.hint.y, r.col1.h);
+            proptest::prop_assert_eq!(r.command.y, r.col1.h + r.hint.h);
+        }
+
+        /// No column drops below its minimum width once the grid fits.
+        #[test]
+        fn no_panel_has_zero_width_above_minimum(
+            w in (MIN_COL1 + MIN_COL2 + MIN_COL3)..4000u16,
+        ) {
+            let (a, b, c) = split_3(w, [20, 40, 40], [MIN_COL1, MIN_COL2, MIN_COL3]);
+            proptest::prop_assert!(a >= MIN_COL1);
+            proptest::prop_assert!(b >= MIN_COL2);
+            proptest::prop_assert!(c >= MIN_COL3);
+            proptest::prop_assert_eq!(a + b + c, w);
+        }
+
+        /// The fidelity pin (the data-driven layout model): `split_n` at the default weights equals
+        /// the shipped `split_3` at **every** width, so the data-driven layout's
+        /// default renders the grid byte-for-byte identically.
+        #[test]
+        fn split_n_matches_split_3_for_the_default(w in 0..8000u16) {
+            let (a, b, c) = split_3(w, [20, 40, 40], [MIN_COL1, MIN_COL2, MIN_COL3]);
+            let n = split_n(w, &[20, 40, 40], &[MIN_COL1, MIN_COL2, MIN_COL3]);
+            proptest::prop_assert_eq!(n, vec![a, b, c]);
+        }
+
+        /// `split_n` tiles exactly for an arbitrary column set once the width
+        /// admits every minimum: the widths sum to the total and no column drops
+        /// below its minimum.
+        #[test]
+        fn split_n_tiles_exactly_for_arbitrary_columns(
+            weights in proptest::collection::vec(1u16..100, 1..6),
+            extra in 0u32..4000,
+        ) {
+            let mins: Vec<u16> = weights.iter().map(|_| 8u16).collect();
+            let min_sum: u16 = mins.iter().copied().fold(0, u16::saturating_add);
+            let total = min_sum.saturating_add(u16::try_from(extra).unwrap_or(0));
+            let widths = split_n(total, &weights, &mins);
+            proptest::prop_assert_eq!(widths.len(), weights.len());
+            let sum: u16 = widths.iter().copied().fold(0, u16::saturating_add);
+            proptest::prop_assert_eq!(sum, total, "widths tile the total exactly");
+            for (w, m) in widths.iter().zip(&mins) {
+                proptest::prop_assert!(w >= m, "no column below its minimum");
+            }
+        }
+    }
+}

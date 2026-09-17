@@ -1,0 +1,19 @@
+# Security-critical crates gated at >=95% line coverage. Adding a crate here is a
+# one-line, reviewable change. Blank lines and '#' comments are ignored.
+# `cargo run -p xtask -- check-coverage <cov.json>` enforces the threshold and
+# fails CLOSED if a listed crate is absent from the coverage report.
+rift-crypto
+rift-hashchain
+rift-store
+rift-recall-policy
+rift-shadow-redact
+# The false-memory guard: security-critical, so it is held to >=95% too.
+rift-recall-validity
+# Fourteen document parsers over untrusted bytes -- run in a child process,
+# `rift` re-spawned on its hidden `hooks doc` route, never in the hook process
+# itself -- plus the caller half that must not believe what that process says
+# back: held to >=95% line coverage too.
+rift-recall-doc
+# The search index is untrusted bytes decoded in the hook process, and the
+# sensitive-path union is applied here for search: held to >=95% line too.
+rift-recall-search

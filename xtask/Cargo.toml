@@ -1,0 +1,36 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Workspace meta-checks (crate-graph topology, toolchain pin, lint/package inheritance) run under `cargo test`."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+toml = { workspace = true }
+serde_json = { workspace = true }
+# The savings calibration writes one scratch checkout's serving overlay with
+# every read lever off, and edits that document rather than replacing it.
+toml_edit = { workspace = true }
+# `replay-savings` replays recorded transcripts through the SHIPPED recogniser
+# and the SHIPPED decision rather than a second opinion about either, so the
+# harness reflects whatever grammar the checkout it is built from has. All four
+# are leaves of the graph from here: nothing depends on xtask.
+rift-agent = { version = "0.0.1", path = "../crates/rift-agent" }
+rift-agent-claude-code = { version = "0.0.1", path = "../crates/rift-agent-claude-code" }
+rift-core = { version = "0.0.1", path = "../crates/rift-core" }
+rift-recall-validity = { version = "0.0.1", path = "../crates/rift-recall-validity" }
+rift-tokens = { version = "0.0.1", path = "../crates/rift-tokens" }
+
+[dev-dependencies]
+# Committed crate-graph adjacency snapshot.
+insta = { workspace = true }
+# The off arm's policy is asserted through the loader that actually reads it,
+# rather than through the bytes the harness wrote (dev-only).
+rift-recall-policy = { version = "0.0.1", path = "../crates/rift-recall-policy" }
+tempfile = { workspace = true }

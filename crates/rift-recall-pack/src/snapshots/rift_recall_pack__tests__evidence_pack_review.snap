@@ -1,0 +1,63 @@
+---
+source: crates/rift-recall-pack/src/tests.rs
+expression: "serde_json::to_string_pretty(&evidence).unwrap()"
+---
+{
+  "schema_version": 1,
+  "kind": "review",
+  "pack_key": "5c2833e67a07a73f29e6b460e51abf621d34273a2ce9d18a2523ba98a039243a",
+  "tokenizer": "cl100k_base",
+  "total_tokens": 251,
+  "sections": [
+    {
+      "section": "critical_top",
+      "lines": [
+        "CRITICAL: evidence:2 is a sensitive path touched in this range",
+        "CRITICAL: attribution over this range is 41% confident - the split is not settled"
+      ]
+    },
+    {
+      "section": "review_scope",
+      "lines": [
+        "scope: commits main..HEAD",
+        "scope: 7 commit(s), 3 session(s), 12 file(s)"
+      ]
+    },
+    {
+      "section": "review_signals",
+      "lines": [
+        "signal: attribution ai=120 mixed=30 human=50 lines",
+        "signal: attribution confidence 41%",
+        "signal: failing tests 2 across 7 commit(s)",
+        "signal: tokens in=18000 out=2400 cache_read=96000 cache_write=1200",
+        "signal: recall savings 41000 avoided - 3100 injected = 37900 net"
+      ]
+    },
+    {
+      "section": "changed",
+      "lines": [
+        "file: evidence:182@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa changed:\nfn retry() {\n    backoff();\n}",
+        "file: evidence:43@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa available (sensitive; summary withheld)"
+      ]
+    },
+    {
+      "section": "recommended",
+      "lines": [
+        "retrieve: evidence:182@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    {
+      "section": "cost_warning",
+      "lines": [
+        "Informational only: these areas account for the most repeated read tokens."
+      ]
+    },
+    {
+      "section": "critical_tail",
+      "lines": [
+        "CRITICAL: evidence:2 is a sensitive path touched in this range",
+        "CRITICAL: attribution over this range is 41% confident - the split is not settled"
+      ]
+    }
+  ]
+}

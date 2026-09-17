@@ -1,0 +1,37 @@
+# The channels Rift may answer an agent on — one row per (family, verb,
+# channel), sorted, and nothing else.
+#
+# Why this file exists at all. The channel table lives in code
+# (`rift_agent::respond::CAPABILITIES`), and each adapter's own unit test
+# already proves its family's rows in that table and the rows in its pinned
+# output-surface artifact are the same set, in both directions. What no unit
+# test could give is a REVIEW surface: a widened channel showed up as a diff
+# buried in a 200-line source file, visible only to someone who already knew
+# to look. Here it is one line, in a file whose only job is to be read.
+#
+# The gate leg `pinned-channels` compares this file against the capability
+# rows fenced in every `crates/rift-agent-*/fixtures/*-hook-output-surface.md`.
+# So the chain is: code table == fixture rows (the adapters' tests) == this
+# file (the gate). Widening a channel means touching all three, and a reviewer
+# who reads nothing else sees the widening here.
+#
+# The family name is the adapter crate's suffix; the rest of the line is the
+# fixture's own row, byte for byte.
+family=antigravity verb=PostInvocation channel=Neutral
+family=antigravity verb=PostToolUse channel=Neutral
+family=antigravity verb=PreInvocation channel=InjectSteps kind=user_message
+family=antigravity verb=PreToolUse channel=DenyWithReason reason_field=reason confirmed=true
+family=antigravity verb=Stop channel=Neutral
+family=claude-code verb=PostToolUse channel=AdditionalContext limit_field=none
+family=claude-code verb=PreCompact channel=Neutral
+family=claude-code verb=PreToolUse channel=DenyWithReason reason_field=permissionDecisionReason confirmed=true
+family=claude-code verb=PreToolUse channel=UpdatedInput forms=document_sidecar_path,grep_head_limit
+family=claude-code verb=SessionStart channel=AdditionalContext limit_field=none
+family=claude-code verb=SubagentStart channel=AdditionalContext limit_field=none
+family=claude-code verb=UserPromptSubmit channel=AdditionalContext limit_field=none
+family=codex verb=PostCompact channel=Neutral
+family=codex verb=PreCompact channel=Neutral
+family=codex verb=PreToolUse channel=DenyWithReason reason_field=permissionDecisionReason confirmed=true
+family=codex verb=PreToolUse channel=UpdatedInput forms=shell_read_replacement
+family=codex verb=SessionStart channel=AdditionalContext limit_field=additionalContextLimit
+family=codex verb=UserPromptSubmit channel=AdditionalContext limit_field=additionalContextLimit

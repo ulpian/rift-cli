@@ -1,0 +1,56 @@
+[package]
+name = "rift-bench-native-baseline"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.94"
+license = "Apache-2.0"
+publish = false
+description = "Comparison harness: drives rift through identical scripted sessions over generated fixture repositories and audits the tracked benchmark artifacts."
+
+# Deliberately its OWN workspace root. The harness has no reason to join the
+# product feature graph: it is a black-box driver over *binaries*, so it never
+# links a rift crate, and keeping it out of the root manifest means a benchmark
+# dependency can never reach a shipped build. Its own lockfile is committed
+# (it produces a binary).
+[workspace]
+
+[[bin]]
+name = "vs-reference"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+# Mirrors the workspace lint posture (a nested workspace cannot inherit it).
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "warn"
+indexing_slicing = "warn"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+items_after_statements = "allow"
+too_many_arguments = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"
+format_push_string = "allow"
+module_name_repetitions = "allow"
+doc_markdown = "allow"

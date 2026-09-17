@@ -1,0 +1,408 @@
+{
+  "schema_version": 1,
+  "harness_version": "0.0.1",
+  "generated_at_unix": 1787128951,
+  "host": {
+    "os": "macos",
+    "arch": "x86_64",
+    "logical_cpus": 8,
+    "rss_probe": "n/a (git-latency sweep)"
+  },
+  "subject": {
+    "state": "present",
+    "binary": "/Users/ulpian/Documents/codebase/rift/rift-lane-substrate/target/release/rift",
+    "version": "rift 0.0.1",
+    "source": "repo target/release",
+    "binary_mtime_unix": 1787120056
+  },
+  "source_clock": {
+    "newest_unix": 1787119840,
+    "newest_path": "crates/rift-shadow/src/lib.rs",
+    "files": 302,
+    "newest_subsec_nanos": 33359329
+  },
+  "git_version": "git version 2.50.1 (Apple Git-155)",
+  "protocol": {
+    "warmup": 3,
+    "iterations": 21
+  },
+  "budget_ms": 100,
+  "arms": [
+    {
+      "arm": {
+        "id": "A_bare",
+        "title": "bare commit, no hooks installed (control)",
+        "capture": "off",
+        "include": null
+      },
+      "stats": {
+        "samples": 21,
+        "failures": 0,
+        "min_ns": 44097621,
+        "p50_ns": 47937041,
+        "p95_ns": 68439700,
+        "max_ns": 68922068,
+        "mean_ns": 51973275,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "oracles": {
+        "projections": {},
+        "trailer_present": false,
+        "verify_checkpoints": null,
+        "verify_shards": null,
+        "captured_events": null,
+        "explain_files_read": null
+      },
+      "phases": {}
+    },
+    {
+      "arm": {
+        "id": "D1_newline_50k",
+        "title": "live session + `.worktreeinclude` over 8 files (51200 B read, 102592 B handed on, 2.00x)",
+        "capture": "live",
+        "include": {
+          "files": 8,
+          "lines_per_file": 6400,
+          "line_width": 0
+        }
+      },
+      "stats": {
+        "samples": 21,
+        "failures": 0,
+        "min_ns": 132917002,
+        "p50_ns": 161286205,
+        "p95_ns": 238445292,
+        "max_ns": 241859646,
+        "mean_ns": 171079970,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "oracles": {
+        "projections": {
+          "rift/<repo-id>/projection.db": 679936,
+          "rift/canopy/ui-state.db": 90112
+        },
+        "trailer_present": true,
+        "verify_checkpoints": 22,
+        "verify_shards": 23,
+        "captured_events": 100,
+        "explain_files_read": null
+      },
+      "phases": {
+        "post-commit": {
+          "discover": 39,
+          "enqueue": 649,
+          "gix_open": 1092,
+          "head_hex": 544,
+          "live_sessions": 1425,
+          "spawn_worker": 1816,
+          "total": 5848
+        },
+        "prepare-commit-msg": {
+          "attribution_preview": 606,
+          "discover": 50,
+          "live_sessions": 1426,
+          "open_projection": 3445,
+          "predict_id": 30151,
+          "raw_capture": 1459,
+          "read_facts": 155,
+          "redact": 29238,
+          "rule_packs": 18,
+          "tokio_build": 23,
+          "total": 38479
+        }
+      }
+    },
+    {
+      "arm": {
+        "id": "E1_newline_64k",
+        "title": "live session + `.worktreeinclude` over 8 files (65536 B read, 131264 B handed on, 2.00x)",
+        "capture": "live",
+        "include": {
+          "files": 8,
+          "lines_per_file": 8192,
+          "line_width": 0
+        }
+      },
+      "stats": {
+        "samples": 21,
+        "failures": 0,
+        "min_ns": 134925827,
+        "p50_ns": 179267908,
+        "p95_ns": 218310514,
+        "max_ns": 220108071,
+        "mean_ns": 179006184,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "oracles": {
+        "projections": {
+          "rift/<repo-id>/projection.db": 679936,
+          "rift/canopy/ui-state.db": 90112
+        },
+        "trailer_present": true,
+        "verify_checkpoints": 22,
+        "verify_shards": 23,
+        "captured_events": 100,
+        "explain_files_read": null
+      },
+      "phases": {
+        "post-commit": {
+          "discover": 43,
+          "enqueue": 684,
+          "gix_open": 1367,
+          "head_hex": 640,
+          "live_sessions": 1699,
+          "spawn_worker": 1832,
+          "total": 6581
+        },
+        "prepare-commit-msg": {
+          "attribution_preview": 608,
+          "discover": 78,
+          "live_sessions": 2203,
+          "open_projection": 4409,
+          "predict_id": 34428,
+          "raw_capture": 2853,
+          "read_facts": 201,
+          "redact": 33208,
+          "rule_packs": 44,
+          "tokio_build": 30,
+          "total": 46036
+        }
+      }
+    },
+    {
+      "arm": {
+        "id": "E2_newline_96k",
+        "title": "live session + `.worktreeinclude` over 8 files (98304 B read, 196800 B handed on, 2.00x)",
+        "capture": "live",
+        "include": {
+          "files": 8,
+          "lines_per_file": 12288,
+          "line_width": 0
+        }
+      },
+      "stats": {
+        "samples": 21,
+        "failures": 0,
+        "min_ns": 133819961,
+        "p50_ns": 176037006,
+        "p95_ns": 228477583,
+        "max_ns": 303640748,
+        "mean_ns": 183537399,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "oracles": {
+        "projections": {
+          "rift/<repo-id>/projection.db": 679936,
+          "rift/canopy/ui-state.db": 90112
+        },
+        "trailer_present": true,
+        "verify_checkpoints": 22,
+        "verify_shards": 22,
+        "captured_events": 100,
+        "explain_files_read": null
+      },
+      "phases": {
+        "post-commit": {
+          "discover": 45,
+          "enqueue": 803,
+          "gix_open": 1126,
+          "head_hex": 573,
+          "live_sessions": 1825,
+          "spawn_worker": 3018,
+          "total": 7707
+        },
+        "prepare-commit-msg": {
+          "attribution_preview": 366,
+          "discover": 34,
+          "live_sessions": 1152,
+          "open_projection": 3973,
+          "predict_id": 29539,
+          "raw_capture": 3523,
+          "read_facts": 182,
+          "redact": 28431,
+          "rule_packs": 40,
+          "tokio_build": 29,
+          "total": 39664
+        }
+      }
+    },
+    {
+      "arm": {
+        "id": "E3_newline_128k",
+        "title": "live session + `.worktreeinclude` over 8 files (131072 B read, 262336 B handed on, 2.00x)",
+        "capture": "live",
+        "include": {
+          "files": 8,
+          "lines_per_file": 16384,
+          "line_width": 0
+        }
+      },
+      "stats": {
+        "samples": 21,
+        "failures": 0,
+        "min_ns": 134139993,
+        "p50_ns": 177728824,
+        "p95_ns": 244808191,
+        "max_ns": 251393223,
+        "mean_ns": 184154411,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "oracles": {
+        "projections": {
+          "rift/canopy/ui-state.db": 90112,
+          "rift/<repo-id>/projection.db": 679936
+        },
+        "trailer_present": true,
+        "verify_checkpoints": 22,
+        "verify_shards": 23,
+        "captured_events": 100,
+        "explain_files_read": null
+      },
+      "phases": {
+        "post-commit": {
+          "discover": 31,
+          "enqueue": 652,
+          "gix_open": 1049,
+          "head_hex": 570,
+          "live_sessions": 2014,
+          "spawn_worker": 1802,
+          "total": 6413
+        },
+        "prepare-commit-msg": {
+          "attribution_preview": 490,
+          "discover": 40,
+          "live_sessions": 1168,
+          "open_projection": 3878,
+          "predict_id": 35583,
+          "raw_capture": 4496,
+          "read_facts": 196,
+          "redact": 34064,
+          "rule_packs": 43,
+          "tokio_build": 27,
+          "total": 46792
+        }
+      }
+    },
+    {
+      "arm": {
+        "id": "E4_newline_192k",
+        "title": "live session + `.worktreeinclude` over 8 files (196608 B read, 393408 B handed on, 2.00x)",
+        "capture": "live",
+        "include": {
+          "files": 8,
+          "lines_per_file": 24576,
+          "line_width": 0
+        }
+      },
+      "stats": {
+        "samples": 21,
+        "failures": 0,
+        "min_ns": 149158832,
+        "p50_ns": 183283123,
+        "p95_ns": 236399891,
+        "max_ns": 246671914,
+        "mean_ns": 187425194,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "oracles": {
+        "projections": {
+          "rift/<repo-id>/projection.db": 671744,
+          "rift/canopy/ui-state.db": 90112
+        },
+        "trailer_present": true,
+        "verify_checkpoints": 21,
+        "verify_shards": 22,
+        "captured_events": 100,
+        "explain_files_read": null
+      },
+      "phases": {
+        "post-commit": {
+          "discover": 31,
+          "enqueue": 469,
+          "gix_open": 799,
+          "head_hex": 361,
+          "live_sessions": 931,
+          "spawn_worker": 1994,
+          "total": 4842
+        },
+        "prepare-commit-msg": {
+          "attribution_preview": 370,
+          "discover": 31,
+          "live_sessions": 963,
+          "open_projection": 3578,
+          "predict_id": 34075,
+          "raw_capture": 6849,
+          "read_facts": 190,
+          "redact": 32119,
+          "rule_packs": 30,
+          "tokio_build": 27,
+          "total": 47048
+        }
+      }
+    },
+    {
+      "arm": {
+        "id": "E5_newline_250k_8f",
+        "title": "live session + `.worktreeinclude` over 8 files (256000 B read, 512192 B handed on, 2.00x)",
+        "capture": "live",
+        "include": {
+          "files": 8,
+          "lines_per_file": 32000,
+          "line_width": 0
+        }
+      },
+      "stats": {
+        "samples": 21,
+        "failures": 0,
+        "min_ns": 158661897,
+        "p50_ns": 194472419,
+        "p95_ns": 244160633,
+        "max_ns": 258994907,
+        "mean_ns": 198880150,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "oracles": {
+        "projections": {
+          "rift/<repo-id>/projection.db": 671744,
+          "rift/canopy/ui-state.db": 90112
+        },
+        "trailer_present": true,
+        "verify_checkpoints": 21,
+        "verify_shards": 21,
+        "captured_events": 100,
+        "explain_files_read": null
+      },
+      "phases": {
+        "post-commit": {
+          "discover": 59,
+          "enqueue": 653,
+          "gix_open": 1297,
+          "head_hex": 617,
+          "live_sessions": 1475,
+          "spawn_worker": 2143,
+          "total": 6572
+        },
+        "prepare-commit-msg": {
+          "attribution_preview": 430,
+          "discover": 39,
+          "live_sessions": 1399,
+          "open_projection": 4434,
+          "predict_id": 55757,
+          "raw_capture": 6805,
+          "read_facts": 180,
+          "redact": 51464,
+          "rule_packs": 45,
+          "tokio_build": 28,
+          "total": 70665
+        }
+      }
+    }
+  ]
+}

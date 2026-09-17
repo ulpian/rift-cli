@@ -1,0 +1,130 @@
+# cargo-fuzz package — a SEPARATE workspace (own [workspace] table) so the main
+# `cargo build/test --workspace` on stable never tries to build it; it needs a
+# nightly toolchain + libFuzzer. Run with: `cargo +nightly fuzz run config_parse`.
+[package]
+name = "rift-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.94"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rift-config = { path = "../crates/rift-config", version = "0.0.1" }
+rift-agent = { path = "../crates/rift-agent", version = "0.0.1" }
+rift-core = { path = "../crates/rift-core", version = "0.0.1" }
+rift-shadow-redact = { path = "../crates/rift-shadow-redact", version = "0.0.1" }
+rift-shadow-attribution = { path = "../crates/rift-shadow-attribution", version = "0.0.1" }
+rift-shadow-hooks = { path = "../crates/rift-shadow-hooks", version = "0.0.1" }
+rift-recall-substrate = { path = "../crates/rift-recall-substrate", version = "0.0.1", default-features = false }
+rift-recall-serve = { path = "../crates/rift-recall-serve", version = "0.0.1" }
+rift-recall-doc = { path = "../crates/rift-recall-doc", version = "0.0.1" }
+rift-recall-search = { path = "../crates/rift-recall-search", version = "0.0.1" }
+rift-canopy = { path = "../crates/rift-canopy", version = "0.0.1", default-features = false }
+serde_json = "1"
+
+# Every parser that reads untrusted bytes gets a fuzz target as it lands.
+[[bin]]
+name = "config_parse"
+path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "run_hook"
+path = "fuzz_targets/run_hook.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "redact"
+path = "fuzz_targets/redact.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "redact_jsonl"
+path = "fuzz_targets/redact_jsonl.rs"
+test = false
+doc = false
+bench = false
+
+# The rule-pack path, fuzzed by owner decision: user-authored policy files off
+# disk,
+# through the loader and the compiler, into the pipeline.
+[[bin]]
+name = "fuzz_pack_load"
+path = "fuzz_targets/fuzz_pack_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diff"
+path = "fuzz_targets/diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "glob_match"
+path = "fuzz_targets/glob_match.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checkpoint_artifact"
+path = "fuzz_targets/checkpoint_artifact.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_request"
+path = "fuzz_targets/mcp_request.rs"
+test = false
+doc = false
+bench = false
+
+# The one grammar Rift reads out of an agent's shell command lines: untrusted
+# text, classified before anything else on the hook path.
+[[bin]]
+name = "shell_read"
+path = "fuzz_targets/shell_read.rs"
+test = false
+doc = false
+bench = false
+
+# Fourteen container formats, over files an agent found in a repository: the
+# largest parser surface in the tree, and the newest.
+[[bin]]
+name = "doc_convert"
+path = "fuzz_targets/doc_convert.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+
+[[bin]]
+name = "palette_parse"
+path = "fuzz_targets/palette_parse.rs"
+test = false
+doc = false
+bench = false
+
+# The two untrusted inputs of native search: a query a model composed, and an
+# index file living in a work tree the agent being served can write to.
+[[bin]]
+name = "search_query"
+path = "fuzz_targets/search_query.rs"
+test = false
+doc = false
+bench = false

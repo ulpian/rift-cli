@@ -1,0 +1,32 @@
+[package]
+name = "rift-shadow-attribution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Human-vs-agent line attribution math (LIFO ownership) and confidence scoring."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+serde = { workspace = true }
+sha2 = { workspace = true }
+# Diff-capture layer (H_i/A_i/C boundaries → hunks) for line attribution.
+imara-diff = { workspace = true }
+# The read-side blob seam: capture reads commit trees/blobs through `BlobReader`
+# (gix internal to rift-git) — no gix types leak here. `default-features = false`
+# keeps this crate's own build gix-free (it only needs the trait + in-memory double).
+rift-git = { version = "0.0.1", path = "../rift-git", default-features = false }
+
+[dev-dependencies]
+proptest = { workspace = true }
+# Test-only: the frozen-wire-value pin on `TrailerDialect` asserts the serde
+# `rename` survives, which needs a real serializer to be worth anything.
+serde_json = { workspace = true }
+# The history-rewrite fixtures build real git repositories under a
+# temp root: squash / rebase / cherry-pick / amend, hermetically and
+# deterministically. Test-only — this crate stays pure at runtime.
+tempfile = { workspace = true }

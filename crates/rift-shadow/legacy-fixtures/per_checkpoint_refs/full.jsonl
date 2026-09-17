@@ -1,0 +1,2 @@
+{"session":"01JLEGACYSESSIONC","turn_ordinal":0,"event_ordinal":0,"kind":"session.start","verb":"SessionStart","agent":"claude-code","occurred_at_ms":100,"payload_sha256":"1111111111111111111111111111111111111111111111111111111111111111","payload":{"model":"legacy-model-2"}}
+{"session":"01JLEGACYSESSIONC","turn_ordinal":1,"event_ordinal":0,"kind":"tool.call","verb":"PreToolUse","agent":"claude-code","occurred_at_ms":110,"payload_sha256":"2222222222222222222222222222222222222222222222222222222222222222","payload":{"tool_name":"Bash"}}

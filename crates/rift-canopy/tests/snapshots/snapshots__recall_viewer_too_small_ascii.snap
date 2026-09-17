@@ -1,0 +1,7 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "render_state_with_caps(&mut state, Capabilities::empty())"
+---
+
+
+Terminal too small (ne

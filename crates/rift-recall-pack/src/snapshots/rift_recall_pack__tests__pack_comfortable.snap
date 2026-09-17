@@ -1,0 +1,24 @@
+---
+source: crates/rift-recall-pack/src/tests.rs
+expression: comfortable.render()
+---
+CRITICAL: evidence:1's last provenance was reverted - verify before reuse
+file: evidence:892@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa changed:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+file: evidence:475@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa changed:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+file: evidence:614@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa changed:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+file: evidence:811@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa summary: signatures unchanged
+retrieve: evidence:182@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Informational only: these areas account for the most repeated read tokens.
+CRITICAL: evidence:1's last provenance was reverted - verify before reuse

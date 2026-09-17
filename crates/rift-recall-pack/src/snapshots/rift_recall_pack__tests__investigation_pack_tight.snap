@@ -1,0 +1,10 @@
+---
+source: crates/rift-recall-pack/src/tests.rs
+expression: tight.render()
+---
+CRITICAL: 1 finding(s) here are unverified notes, not facts - corroborate before acting
+seed: path
+seed: error signature @sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+finding: unverified lesson (cites file evidence:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) - transcript: bytes=64, lines=1, referenced_paths=0, error_signatures=0
+budget: 3 item(s) dropped
+CRITICAL: 1 finding(s) here are unverified notes, not facts - corroborate before acting

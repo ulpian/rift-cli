@@ -1,0 +1,13 @@
+schema_version = 1
+
+[features]
+total_recall = true
+
+[project]
+name = "rift-cli"
+
+[capture]
+raw_transcripts = true
+acknowledge_risk = true
+checkpoint_strategy = "scheduled"
+schedule_interval_minutes = 30

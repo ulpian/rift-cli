@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8de9abd0ce69f368ad3ff3e68556f012aa6656a98b85197e08967c53071533ff # shrinks to doc = "ssn=https://alice:001 01 0001@h.com"
+cc 2969d0961b1f7033f683a047af23a66a8f581ea71f62ea1ce440e6e74e1cc0b3 # shrinks to doc = "https://alice:001 01 0001@h.com"
+cc 7df652096fedc76ae3a948f964f6757c69b3f16b76fb9fae5b4619d7c4339b8e # shrinks to doc = "https://alice:AAAAAAAA@h.com"
+cc 1b44c5f2ab28851888bf592eb3e289be5f6801be2b13635b30e692267a45b519 # shrinks to doc = "https://:AAAAAAAA@db.example.com"
+cc 523b9a644253665f6c5c980a8a74d1c6f5d0fa86bec30e945ba0386c1e7da734 # shrinks to doc = "taxpayer_id=001-05-2034.AAAAAAAA"
+cc 3117234b2cb88305f9808a7da520aac67d4dacebe43894190970f6bc4e4faff2 # shrinks to doc = "\0"

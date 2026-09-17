@@ -1,0 +1,26 @@
+[package]
+name = "rift-agent-install"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Project-scoped native agent configuration and truthful Recall integration status."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-store = { version = "0.0.1", path = "../rift-store" }
+rift-shadow-hooks = { version = "0.0.1", path = "../rift-shadow-hooks" }
+blake3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml_edit = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+rift-agent = { version = "0.0.1", path = "../rift-agent" }
+tempfile = { workspace = true }

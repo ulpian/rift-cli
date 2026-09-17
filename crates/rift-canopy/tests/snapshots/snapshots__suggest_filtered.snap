@@ -1,0 +1,36 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "render_state(&mut suggest_state(\"se\"))"
+---
+ RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
+╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────#
+│># rift-cli      *││rift-cli (repo)                       ││(no token activity yet)               #
+│ # rift-site     o││path: /r/rift-cli                     ││                                      #
+│                  ││* running                             ││                                      #
+│                  ││[ Recall Viewer ] [ Project Settings ]││                                      #
+│                  │╰──────────────────────────────────────╯│                                      #
+│                  │╭─ models · Σ 0 calls ─────────────────╮│                                      #
+│                  ││(none yet)                            ││                                      #
+│                  ││                                      │╰──────────────────────────────────────#
+│                  ││                                      │╭─ system ─────────────────────────────#
+│                  ││                                      ││                                      #
+│                  ││                                      ││context unavailable                   #
+│                  ││                                      ││- events · 5m: —                      #
+│                  ││                                      ││- tokens · 5m: —                      #
+│                  ││                                      ││- serves · 5m: —                      #
+│                  ││                                      ││- projection storage: —               #
+│                  │╰──────────────────────────────────────╯╰──────────────────────────────────────|
+│                  │╭─ activity · 30d ─────────────────────╮╭─ recall ─────────────────────────────|
+│                  ││(no projection yet)                   ││recall off — open Project Settings    |
+│                  ││                                      ││                                      |
+│                  ││                                      ││[24h][7d][30d][all]              [tok]|
+╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
+│> select  /select [project]      select a project row                                             │
+│  session  /session [list|show <id>] inspect sessions                                             │
+│  settings  /settings            open repository Project Settings                                 │
+│  disable  /disable <agent>      remove an agent's hook wiring                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓ highlight  ·  tab insert  ·  ⏎ run  ·  esc close
+╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
+│/se█                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

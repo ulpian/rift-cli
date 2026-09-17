@@ -1,0 +1,41 @@
+[package]
+name = "rift-shadow-hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Git + agent hook lifecycle capture: canonical events, agent adapters, session state machine, checkpoint strategies."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-hashchain = { version = "0.0.1", path = "../rift-hashchain" }
+# Plugin SDK + first-party adapters (the built-in registry).
+rift-agent = { version = "0.0.1", path = "../rift-agent" }
+rift-agent-claude-code = { version = "0.0.1", path = "../rift-agent-claude-code" }
+rift-agent-codex = { version = "0.0.1", path = "../rift-agent-codex" }
+rift-agent-gemini = { version = "0.0.1", path = "../rift-agent-gemini" }
+rift-agent-antigravity = { version = "0.0.1", path = "../rift-agent-antigravity" }
+rift-agent-cursor = { version = "0.0.1", path = "../rift-agent-cursor" }
+rift-agent-copilot = { version = "0.0.1", path = "../rift-agent-copilot" }
+rift-agent-opencode = { version = "0.0.1", path = "../rift-agent-opencode" }
+rift-agent-factory-droid = { version = "0.0.1", path = "../rift-agent-factory-droid" }
+rift-agent-ollama = { version = "0.0.1", path = "../rift-agent-ollama" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+# The `vogon` fake-agent end-to-end test asserts what the SHIPPED binary
+# durably wrote, so it reads the repository's own projection back. Dev-only:
+# `xtask`'s adjacency snapshot is built from normal + build dependencies
+# (`workspace_dep_edges`), so none of these adds a crate-graph edge, and the
+# product dependency direction is unchanged.
+rift-git = { version = "0.0.1", path = "../rift-git" }
+rift-store = { version = "0.0.1", path = "../rift-store" }
+tokio = { workspace = true }

@@ -1,0 +1,20 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "format!(\"{expanded}\\n--- collapsed ---\\n{collapsed}\")"
+---
+╭─ system ─────────────────────────────╮
+│62% Moderate · claude-fable-5         │
+│124k/200k · current sessions          │
+│[2 active sessions]                   │
+│████████████████████████              │
+│ scope - current sessions             │
+│- events · 5m: 42                     │
+│- tokens · 5m: 12k                    │
+│- serves · 5m: 7                      │
+│- projection storage: 17.7MB          │
+│- watch: poll-only                    │
+╰──────────────────────────────────────╯
+--- collapsed ---
+╭─ system ─────────────────────────────────────────────╮
+│62% Moderate  ·  2 active sessions  ·  poll-only      │
+╰──────────────────────────────────────────────────────╯

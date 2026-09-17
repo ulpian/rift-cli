@@ -1,0 +1,16 @@
+---
+source: crates/rift-recall-pack/src/tests.rs
+expression: tight.render()
+---
+CRITICAL: evidence:2 is a sensitive path touched in this range
+CRITICAL: attribution over this range is 41% confident - the split is not settled
+scope: commits main..HEAD
+scope: 7 commit(s), 3 session(s), 12 file(s)
+signal: attribution ai=120 mixed=30 human=50 lines
+signal: attribution confidence 41%
+signal: failing tests 2 across 7 commit(s)
+signal: tokens in=18000 out=2400 cache_read=96000 cache_write=1200
+signal: recall savings 41000 avoided - 3100 injected = 37900 net
+budget: 4 item(s) dropped
+CRITICAL: evidence:2 is a sensitive path touched in this range
+CRITICAL: attribution over this range is 41% confident - the split is not settled

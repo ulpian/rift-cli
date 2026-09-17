@@ -1,0 +1,24 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "render_state_with_caps(&mut state, Capabilities::empty())"
+---
+ RIFT  Canopy  *
+ Projects  Checkpoints [Timeline]
+╭─ timeline · a1b2c3d4e5f6 ────────────────╮
+│[ Full session ]             [ Dashboard ]│
+│◆ Checkpoint summary                     #│
+│  ┆ facts grouped by field; not an event #│
+│  • checkpoint a1b2c3d4e5f6 · 2025-08-11T#│
+│    anchor: 0123456789ab                 #│
+│    chain: #42 · strategy: compact       #│
+│    partial projection                   |│
+│◆ Recall summary                         |│
+│  ┆ repository-wide totals are not checkp|│
+│  • durable Recall state                 |│
+│    coverage: 2/2 IDs · 3 origins · 8 ser|│
+│◆ Transcript                             |│
+╰──────────────────────────────────────────╯
+Tab pane · j/k move · PgUp/PgDn page · f Fil
+╭─ command ────────────────────────────────╮
+│/█                                        │
+╰──────────────────────────────────────────╯

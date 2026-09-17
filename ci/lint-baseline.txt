@@ -1,0 +1,35 @@
+# The workspace lint-table baseline.
+# `cargo run -p xtask -- ci-meta` diffs [workspace.lints.*] in Cargo.toml against
+# this file, so silently dropping/downgrading a lint (e.g. indexing_slicing)
+# fails CI. Changing a lint level is a two-file, reviewable change: edit
+# Cargo.toml AND this baseline together, with rationale in the commit.
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "warn"
+indexing_slicing = "warn"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+items_after_statements = "allow"
+too_many_arguments = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+match_wildcard_for_single_variants = "allow"
+ref_option = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"
+should_implement_trait = "allow"
+format_push_string = "allow"
+float_cmp = "allow"
+module_name_repetitions = "allow"
+doc_markdown = "allow"

@@ -1,0 +1,527 @@
+---
+source: crates/rift-store/tests/schema_snapshot.rs
+expression: schema_dump(&recall_migrations())
+---
+-- index idx_edge_from
+CREATE INDEX idx_edge_from ON graph_edge(from_node, kind)
+
+-- index idx_edge_to
+CREATE INDEX idx_edge_to   ON graph_edge(to_node, kind)
+
+-- index idx_fread_ckpt
+CREATE INDEX idx_fread_ckpt ON n_file_read(checkpoint_id)
+
+-- index idx_fread_rev
+CREATE INDEX idx_fread_rev  ON n_file_read(file_revision)
+
+-- index idx_mcp_connection_client_time
+CREATE INDEX idx_mcp_connection_client_time ON mcp_connection_event(client, occurred_at)
+
+-- index idx_memd_audit_citation_pack_ordinal
+CREATE INDEX idx_memd_audit_citation_pack_ordinal ON memd_audit_citation(pack_key, ordinal)
+
+-- index idx_memd_call_recorded
+CREATE INDEX idx_memd_call_recorded ON memd_call_event(recorded_at)
+
+-- index idx_memd_call_thread_recorded
+CREATE INDEX idx_memd_call_thread_recorded ON memd_call_event(thread_id, recorded_at)
+
+-- index idx_node_kind
+CREATE INDEX idx_node_kind ON graph_node(kind)
+
+-- index idx_outcome_subject
+CREATE INDEX idx_outcome_subject ON outcome_label(subject_kind, subject_id)
+
+-- index idx_serve_call_channel_recorded
+CREATE INDEX idx_serve_call_channel_recorded ON serve_call_event(channel, recorded_at)
+
+-- index idx_serve_call_recorded
+CREATE INDEX idx_serve_call_recorded ON serve_call_event(recorded_at)
+
+-- table _migrations
+CREATE TABLE _migrations (
+version    INTEGER PRIMARY KEY,
+name       TEXT    NOT NULL,
+checksum   TEXT    NOT NULL,
+applied_at TEXT    NOT NULL
+) STRICT
+
+-- table _schema_version
+CREATE TABLE _schema_version (
+table_name     TEXT PRIMARY KEY,
+schema_version INTEGER NOT NULL
+) STRICT
+
+-- table digest_blob
+CREATE TABLE digest_blob (
+  digest_ref TEXT NOT NULL,
+  bytes BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (digest_ref)
+) STRICT
+
+-- table eval_run
+CREATE TABLE eval_run (
+  run_id TEXT NOT NULL,
+  task_set TEXT NOT NULL,
+  condition TEXT NOT NULL CHECK (condition IN ('served', 'synthetic', 'seeded-regression', 'real-model')),
+  code_version TEXT NOT NULL,
+  thresholds_version INTEGER NOT NULL,
+  runs INTEGER NOT NULL,
+  p10_token_savings_bp INTEGER NOT NULL,
+  p50_token_savings_bp INTEGER NOT NULL,
+  p90_token_savings_bp INTEGER NOT NULL,
+  p50_cost_savings_bp INTEGER NOT NULL,
+  baseline_tokens INTEGER NOT NULL,
+  delta_tokens INTEGER NOT NULL,
+  emitted_avoided_tokens INTEGER NOT NULL,
+  reconcile_over_estimates INTEGER NOT NULL,
+  max_latency_steps INTEGER NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('go', 'no-go')),
+  failing_dimensions TEXT,
+  valid_from INTEGER NOT NULL,
+  valid_to INTEGER,
+  recorded_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (run_id)
+) STRICT
+
+-- table graph_edge
+CREATE TABLE graph_edge (
+  edge_id TEXT NOT NULL,
+  from_node TEXT NOT NULL,
+  to_node TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('created', 'linked_to', 'called', 'read', 'produced', 'changed', 'in', 'failed_with', 'spent', 'binds', 'invalidated_by', 'derived_from', 'deletion_depends_on')),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (edge_id),
+  UNIQUE (from_node, to_node, kind)
+) STRICT
+
+-- table graph_node
+CREATE TABLE graph_node (
+  node_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('Checkpoint', 'Session', 'Turn', 'ModelCall', 'TokenUsage', 'CostEstimate', 'ToolCall', 'ToolResult', 'FileRevision', 'FileRead', 'ChangedHunk', 'TestRun', 'ErrorSignature', 'Commit', 'Branch', 'PR', 'Summary', 'Handle')),
+  ref_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table ingest_watermark
+CREATE TABLE ingest_watermark (
+  watermark_id TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  branch_tip TEXT NOT NULL,
+  ingested_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (watermark_id)
+) STRICT
+
+-- table key_metadata
+CREATE TABLE key_metadata (
+  key_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  wrapped_dek BLOB NOT NULL,
+  kek_ref TEXT NOT NULL,
+  cipher TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  supersedes_id TEXT,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (key_id)
+) STRICT
+
+-- table mcp_connection_event
+CREATE TABLE mcp_connection_event (
+  event_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  client TEXT NOT NULL,
+  peer_name TEXT,
+  peer_version TEXT,
+  phase TEXT NOT NULL CHECK (phase IN ('opened', 'closed')),
+  occurred_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (event_id)
+) STRICT
+
+-- table memd_audit_citation
+CREATE TABLE memd_audit_citation (
+  audit_id TEXT NOT NULL,
+  pack_key TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (audit_id)
+) STRICT
+
+-- table memd_audit_event
+CREATE TABLE memd_audit_event (
+  audit_id TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  handle TEXT,
+  reason TEXT,
+  tokens_returned INTEGER NOT NULL,
+  tokens_avoided INTEGER NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (audit_id)
+) STRICT
+
+-- table memd_call_event
+CREATE TABLE memd_call_event (
+  call_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  terminal_verb TEXT NOT NULL,
+  tokens_returned INTEGER NOT NULL,
+  tokens_avoided INTEGER NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (call_id)
+) STRICT
+
+-- table metric_snapshot
+CREATE TABLE metric_snapshot (
+  snapshot_id TEXT NOT NULL,
+  scope_hash TEXT NOT NULL,
+  total_input_tokens INTEGER NOT NULL,
+  repeated_read_tokens INTEGER NOT NULL,
+  avoidable_tokens INTEGER NOT NULL,
+  computed_at INTEGER NOT NULL,
+  PRIMARY KEY (snapshot_id)
+) STRICT
+
+-- table n_blob_oid_map
+CREATE TABLE n_blob_oid_map (
+  content_sha256 TEXT NOT NULL,
+  blob_oid TEXT NOT NULL,
+  path TEXT NOT NULL,
+  first_seen INTEGER NOT NULL,
+  PRIMARY KEY (content_sha256)
+) STRICT
+
+-- table n_changed_hunk
+CREATE TABLE n_changed_hunk (
+  node_id TEXT NOT NULL,
+  commit_id TEXT NOT NULL,
+  file_revision TEXT NOT NULL,
+  old_start INTEGER,
+  old_len INTEGER,
+  new_start INTEGER,
+  new_len INTEGER,
+  is_binary INTEGER NOT NULL,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table n_checkpoint
+CREATE TABLE n_checkpoint (
+  node_id TEXT NOT NULL,
+  dialect TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  prev_checkpoint TEXT,
+  strategy TEXT,
+  merkle_root TEXT,
+  developer TEXT,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table n_checkpoint_commit
+CREATE TABLE n_checkpoint_commit (
+  node_id TEXT NOT NULL,
+  commit_oid TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table n_checkpoint_worktree
+CREATE TABLE n_checkpoint_worktree (
+  node_id TEXT NOT NULL,
+  worktree_token TEXT NOT NULL,
+  worktree_name TEXT NOT NULL,
+  is_linked INTEGER NOT NULL,
+  branch TEXT,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table n_file_read
+CREATE TABLE n_file_read (
+  node_id TEXT NOT NULL,
+  checkpoint_id TEXT NOT NULL,
+  tool_call_id TEXT NOT NULL,
+  file_revision TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  read_ordinal INTEGER NOT NULL,
+  byte_range_lo INTEGER,
+  byte_range_hi INTEGER,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table n_file_revision
+CREATE TABLE n_file_revision (
+  node_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  blob_oid TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table n_session
+CREATE TABLE n_session (
+  node_id TEXT NOT NULL,
+  developer TEXT,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table n_token_usage
+CREATE TABLE n_token_usage (
+  node_id TEXT NOT NULL,
+  checkpoint_id TEXT NOT NULL,
+  call_id TEXT NOT NULL,
+  uncached_in INTEGER NOT NULL,
+  cached_in INTEGER NOT NULL,
+  cache_write INTEGER NOT NULL,
+  output INTEGER NOT NULL,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table n_tool_call
+CREATE TABLE n_tool_call (
+  node_id TEXT NOT NULL,
+  checkpoint_id TEXT NOT NULL,
+  tool_use_id TEXT NOT NULL,
+  tool_name TEXT,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table outcome_label
+CREATE TABLE outcome_label (
+  label_id TEXT NOT NULL,
+  subject_kind TEXT NOT NULL CHECK (subject_kind IN ('session', 'checkpoint', 'file_revision')),
+  subject_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('merged', 'tests_passed', 'reverted', 'abandoned', 'low_human_mod', 'high_human_mod')),
+  valid_from INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL,
+  evidence_ref TEXT NOT NULL,
+  supersedes TEXT,
+  PRIMARY KEY (label_id)
+) STRICT
+
+-- table retention_lineage
+CREATE TABLE retention_lineage (
+  node_id TEXT NOT NULL,
+  source_artifact TEXT NOT NULL,
+  retention_class TEXT NOT NULL,
+  derived_from TEXT,
+  deletion_depends_on TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table serve_call_event
+CREATE TABLE serve_call_event (
+  call_id TEXT NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('hook_inject', 'skill_cli')),
+  tool_name TEXT NOT NULL,
+  terminal_verb TEXT NOT NULL,
+  tokens_returned INTEGER NOT NULL,
+  tokens_avoided INTEGER NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (call_id)
+) STRICT
+
+-- table serve_grant_event
+CREATE TABLE serve_grant_event (
+  grant_id TEXT NOT NULL,
+  audit_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  reason_text TEXT NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (grant_id)
+) STRICT
+
+-- table serve_session_event
+CREATE TABLE serve_session_event (
+  channel TEXT NOT NULL CHECK (channel IN ('hook_inject', 'skill_cli')),
+  first_served_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (channel)
+) STRICT
+
+-- table summary_binding
+CREATE TABLE summary_binding (
+  summary_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  source_sha256 TEXT NOT NULL,
+  bound_blob_oid TEXT NOT NULL,
+  extractor_ver INTEGER NOT NULL,
+  policy_ver INTEGER NOT NULL,
+  redaction_ver INTEGER NOT NULL,
+  digest_ref TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (summary_id)
+) STRICT
+
+-- trigger digest_blob_no_delete
+CREATE TRIGGER digest_blob_no_delete BEFORE DELETE ON digest_blob BEGIN SELECT RAISE(ABORT, 'rift: digest_blob is append-only (DELETE forbidden)'); END
+
+-- trigger digest_blob_no_update
+CREATE TRIGGER digest_blob_no_update BEFORE UPDATE ON digest_blob BEGIN SELECT RAISE(ABORT, 'rift: digest_blob is append-only (UPDATE forbidden)'); END
+
+-- trigger eval_run_no_delete
+CREATE TRIGGER eval_run_no_delete BEFORE DELETE ON eval_run BEGIN SELECT RAISE(ABORT, 'rift: eval_run is append-only (DELETE forbidden)'); END
+
+-- trigger eval_run_no_update
+CREATE TRIGGER eval_run_no_update BEFORE UPDATE ON eval_run BEGIN SELECT RAISE(ABORT, 'rift: eval_run is append-only (UPDATE forbidden)'); END
+
+-- trigger graph_edge_no_delete
+CREATE TRIGGER graph_edge_no_delete BEFORE DELETE ON graph_edge BEGIN SELECT RAISE(ABORT, 'rift: graph_edge is append-only (DELETE forbidden)'); END
+
+-- trigger graph_edge_no_update
+CREATE TRIGGER graph_edge_no_update BEFORE UPDATE ON graph_edge BEGIN SELECT RAISE(ABORT, 'rift: graph_edge is append-only (UPDATE forbidden)'); END
+
+-- trigger graph_node_no_delete
+CREATE TRIGGER graph_node_no_delete BEFORE DELETE ON graph_node BEGIN SELECT RAISE(ABORT, 'rift: graph_node is append-only (DELETE forbidden)'); END
+
+-- trigger graph_node_no_update
+CREATE TRIGGER graph_node_no_update BEFORE UPDATE ON graph_node BEGIN SELECT RAISE(ABORT, 'rift: graph_node is append-only (UPDATE forbidden)'); END
+
+-- trigger ingest_watermark_no_delete
+CREATE TRIGGER ingest_watermark_no_delete BEFORE DELETE ON ingest_watermark BEGIN SELECT RAISE(ABORT, 'rift: ingest_watermark is append-only (DELETE forbidden)'); END
+
+-- trigger ingest_watermark_no_update
+CREATE TRIGGER ingest_watermark_no_update BEFORE UPDATE ON ingest_watermark BEGIN SELECT RAISE(ABORT, 'rift: ingest_watermark is append-only (UPDATE forbidden)'); END
+
+-- trigger key_metadata_no_delete
+CREATE TRIGGER key_metadata_no_delete BEFORE DELETE ON key_metadata BEGIN SELECT RAISE(ABORT, 'rift: key_metadata is append-only (DELETE forbidden)'); END
+
+-- trigger key_metadata_no_update
+CREATE TRIGGER key_metadata_no_update BEFORE UPDATE ON key_metadata BEGIN SELECT RAISE(ABORT, 'rift: key_metadata is append-only (UPDATE forbidden)'); END
+
+-- trigger mcp_connection_event_no_delete
+CREATE TRIGGER mcp_connection_event_no_delete BEFORE DELETE ON mcp_connection_event BEGIN SELECT RAISE(ABORT, 'rift: mcp_connection_event is append-only (DELETE forbidden)'); END
+
+-- trigger mcp_connection_event_no_update
+CREATE TRIGGER mcp_connection_event_no_update BEFORE UPDATE ON mcp_connection_event BEGIN SELECT RAISE(ABORT, 'rift: mcp_connection_event is append-only (UPDATE forbidden)'); END
+
+-- trigger memd_audit_citation_no_delete
+CREATE TRIGGER memd_audit_citation_no_delete BEFORE DELETE ON memd_audit_citation BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_citation is append-only (DELETE forbidden)'); END
+
+-- trigger memd_audit_citation_no_update
+CREATE TRIGGER memd_audit_citation_no_update BEFORE UPDATE ON memd_audit_citation BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_citation is append-only (UPDATE forbidden)'); END
+
+-- trigger memd_audit_event_no_delete
+CREATE TRIGGER memd_audit_event_no_delete BEFORE DELETE ON memd_audit_event BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_event is append-only (DELETE forbidden)'); END
+
+-- trigger memd_audit_event_no_update
+CREATE TRIGGER memd_audit_event_no_update BEFORE UPDATE ON memd_audit_event BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_event is append-only (UPDATE forbidden)'); END
+
+-- trigger memd_call_event_no_delete
+CREATE TRIGGER memd_call_event_no_delete BEFORE DELETE ON memd_call_event BEGIN SELECT RAISE(ABORT, 'rift: memd_call_event is append-only (DELETE forbidden)'); END
+
+-- trigger memd_call_event_no_update
+CREATE TRIGGER memd_call_event_no_update BEFORE UPDATE ON memd_call_event BEGIN SELECT RAISE(ABORT, 'rift: memd_call_event is append-only (UPDATE forbidden)'); END
+
+-- trigger metric_snapshot_no_delete
+CREATE TRIGGER metric_snapshot_no_delete BEFORE DELETE ON metric_snapshot BEGIN SELECT RAISE(ABORT, 'rift: metric_snapshot is append-only (DELETE forbidden)'); END
+
+-- trigger metric_snapshot_no_update
+CREATE TRIGGER metric_snapshot_no_update BEFORE UPDATE ON metric_snapshot BEGIN SELECT RAISE(ABORT, 'rift: metric_snapshot is append-only (UPDATE forbidden)'); END
+
+-- trigger n_blob_oid_map_no_delete
+CREATE TRIGGER n_blob_oid_map_no_delete BEFORE DELETE ON n_blob_oid_map BEGIN SELECT RAISE(ABORT, 'rift: n_blob_oid_map is append-only (DELETE forbidden)'); END
+
+-- trigger n_blob_oid_map_no_update
+CREATE TRIGGER n_blob_oid_map_no_update BEFORE UPDATE ON n_blob_oid_map BEGIN SELECT RAISE(ABORT, 'rift: n_blob_oid_map is append-only (UPDATE forbidden)'); END
+
+-- trigger n_changed_hunk_no_delete
+CREATE TRIGGER n_changed_hunk_no_delete BEFORE DELETE ON n_changed_hunk BEGIN SELECT RAISE(ABORT, 'rift: n_changed_hunk is append-only (DELETE forbidden)'); END
+
+-- trigger n_changed_hunk_no_update
+CREATE TRIGGER n_changed_hunk_no_update BEFORE UPDATE ON n_changed_hunk BEGIN SELECT RAISE(ABORT, 'rift: n_changed_hunk is append-only (UPDATE forbidden)'); END
+
+-- trigger n_checkpoint_commit_no_delete
+CREATE TRIGGER n_checkpoint_commit_no_delete BEFORE DELETE ON n_checkpoint_commit BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_commit is append-only (DELETE forbidden)'); END
+
+-- trigger n_checkpoint_commit_no_update
+CREATE TRIGGER n_checkpoint_commit_no_update BEFORE UPDATE ON n_checkpoint_commit BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_commit is append-only (UPDATE forbidden)'); END
+
+-- trigger n_checkpoint_no_delete
+CREATE TRIGGER n_checkpoint_no_delete BEFORE DELETE ON n_checkpoint BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint is append-only (DELETE forbidden)'); END
+
+-- trigger n_checkpoint_no_update
+CREATE TRIGGER n_checkpoint_no_update BEFORE UPDATE ON n_checkpoint BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint is append-only (UPDATE forbidden)'); END
+
+-- trigger n_checkpoint_worktree_no_delete
+CREATE TRIGGER n_checkpoint_worktree_no_delete BEFORE DELETE ON n_checkpoint_worktree BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_worktree is append-only (DELETE forbidden)'); END
+
+-- trigger n_checkpoint_worktree_no_update
+CREATE TRIGGER n_checkpoint_worktree_no_update BEFORE UPDATE ON n_checkpoint_worktree BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_worktree is append-only (UPDATE forbidden)'); END
+
+-- trigger n_file_read_no_delete
+CREATE TRIGGER n_file_read_no_delete BEFORE DELETE ON n_file_read BEGIN SELECT RAISE(ABORT, 'rift: n_file_read is append-only (DELETE forbidden)'); END
+
+-- trigger n_file_read_no_update
+CREATE TRIGGER n_file_read_no_update BEFORE UPDATE ON n_file_read BEGIN SELECT RAISE(ABORT, 'rift: n_file_read is append-only (UPDATE forbidden)'); END
+
+-- trigger n_file_revision_no_delete
+CREATE TRIGGER n_file_revision_no_delete BEFORE DELETE ON n_file_revision BEGIN SELECT RAISE(ABORT, 'rift: n_file_revision is append-only (DELETE forbidden)'); END
+
+-- trigger n_file_revision_no_update
+CREATE TRIGGER n_file_revision_no_update BEFORE UPDATE ON n_file_revision BEGIN SELECT RAISE(ABORT, 'rift: n_file_revision is append-only (UPDATE forbidden)'); END
+
+-- trigger n_session_no_delete
+CREATE TRIGGER n_session_no_delete BEFORE DELETE ON n_session BEGIN SELECT RAISE(ABORT, 'rift: n_session is append-only (DELETE forbidden)'); END
+
+-- trigger n_session_no_update
+CREATE TRIGGER n_session_no_update BEFORE UPDATE ON n_session BEGIN SELECT RAISE(ABORT, 'rift: n_session is append-only (UPDATE forbidden)'); END
+
+-- trigger n_token_usage_no_delete
+CREATE TRIGGER n_token_usage_no_delete BEFORE DELETE ON n_token_usage BEGIN SELECT RAISE(ABORT, 'rift: n_token_usage is append-only (DELETE forbidden)'); END
+
+-- trigger n_token_usage_no_update
+CREATE TRIGGER n_token_usage_no_update BEFORE UPDATE ON n_token_usage BEGIN SELECT RAISE(ABORT, 'rift: n_token_usage is append-only (UPDATE forbidden)'); END
+
+-- trigger n_tool_call_no_delete
+CREATE TRIGGER n_tool_call_no_delete BEFORE DELETE ON n_tool_call BEGIN SELECT RAISE(ABORT, 'rift: n_tool_call is append-only (DELETE forbidden)'); END
+
+-- trigger n_tool_call_no_update
+CREATE TRIGGER n_tool_call_no_update BEFORE UPDATE ON n_tool_call BEGIN SELECT RAISE(ABORT, 'rift: n_tool_call is append-only (UPDATE forbidden)'); END
+
+-- trigger outcome_label_no_delete
+CREATE TRIGGER outcome_label_no_delete BEFORE DELETE ON outcome_label BEGIN SELECT RAISE(ABORT, 'rift: outcome_label is append-only (DELETE forbidden)'); END
+
+-- trigger outcome_label_no_update
+CREATE TRIGGER outcome_label_no_update BEFORE UPDATE ON outcome_label BEGIN SELECT RAISE(ABORT, 'rift: outcome_label is append-only (UPDATE forbidden)'); END
+
+-- trigger retention_lineage_no_delete
+CREATE TRIGGER retention_lineage_no_delete BEFORE DELETE ON retention_lineage BEGIN SELECT RAISE(ABORT, 'rift: retention_lineage is append-only (DELETE forbidden)'); END
+
+-- trigger retention_lineage_no_update
+CREATE TRIGGER retention_lineage_no_update BEFORE UPDATE ON retention_lineage BEGIN SELECT RAISE(ABORT, 'rift: retention_lineage is append-only (UPDATE forbidden)'); END
+
+-- trigger serve_call_event_no_delete
+CREATE TRIGGER serve_call_event_no_delete BEFORE DELETE ON serve_call_event BEGIN SELECT RAISE(ABORT, 'rift: serve_call_event is append-only (DELETE forbidden)'); END
+
+-- trigger serve_call_event_no_update
+CREATE TRIGGER serve_call_event_no_update BEFORE UPDATE ON serve_call_event BEGIN SELECT RAISE(ABORT, 'rift: serve_call_event is append-only (UPDATE forbidden)'); END
+
+-- trigger serve_grant_event_no_delete
+CREATE TRIGGER serve_grant_event_no_delete BEFORE DELETE ON serve_grant_event BEGIN SELECT RAISE(ABORT, 'rift: serve_grant_event is append-only (DELETE forbidden)'); END
+
+-- trigger serve_grant_event_no_update
+CREATE TRIGGER serve_grant_event_no_update BEFORE UPDATE ON serve_grant_event BEGIN SELECT RAISE(ABORT, 'rift: serve_grant_event is append-only (UPDATE forbidden)'); END
+
+-- trigger serve_session_event_no_delete
+CREATE TRIGGER serve_session_event_no_delete BEFORE DELETE ON serve_session_event BEGIN SELECT RAISE(ABORT, 'rift: serve_session_event is append-only (DELETE forbidden)'); END
+
+-- trigger serve_session_event_no_update
+CREATE TRIGGER serve_session_event_no_update BEFORE UPDATE ON serve_session_event BEGIN SELECT RAISE(ABORT, 'rift: serve_session_event is append-only (UPDATE forbidden)'); END
+
+-- trigger summary_binding_no_delete
+CREATE TRIGGER summary_binding_no_delete BEFORE DELETE ON summary_binding BEGIN SELECT RAISE(ABORT, 'rift: summary_binding is append-only (DELETE forbidden)'); END
+
+-- trigger summary_binding_no_update
+CREATE TRIGGER summary_binding_no_update BEFORE UPDATE ON summary_binding BEGIN SELECT RAISE(ABORT, 'rift: summary_binding is append-only (UPDATE forbidden)'); END

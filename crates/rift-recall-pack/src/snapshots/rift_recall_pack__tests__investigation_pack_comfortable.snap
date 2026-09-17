@@ -1,0 +1,13 @@
+---
+source: crates/rift-recall-pack/src/tests.rs
+expression: comfortable.render()
+---
+CRITICAL: 2 finding(s) here are unverified notes, not facts - corroborate before acting
+seed: path
+seed: error signature @sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+finding: unverified lesson (cites file evidence:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) - transcript: bytes=64, lines=1, referenced_paths=0, error_signatures=0
+finding: unverified error_signature (cites file evidence:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) - transcript: bytes=54, lines=1, referenced_paths=0, error_signatures=1
+file: evidence:182@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa changed:
+fn retry() { backoff(); }
+retrieve: evidence:182@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+CRITICAL: 2 finding(s) here are unverified notes, not facts - corroborate before acting

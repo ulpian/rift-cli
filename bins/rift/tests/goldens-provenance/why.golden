@@ -1,0 +1,60 @@
+{
+  "attribution": {
+    "agent_added": 2,
+    "confidence_milli": 850,
+    "human_added": 1,
+    "human_modified_agent": 0
+  },
+  "checkpoint": {
+    "created_at_ms": 1756000200000,
+    "files_touched": 1,
+    "id": "8eeb6bff4031fd0e43fabafc80a05c29f4ca26123ebc008f9da98d454738bf4b",
+    "strategy": "manual-commit",
+    "worktree": null
+  },
+  "cost": {
+    "amount_micros": null,
+    "cache_creation": 0,
+    "cached_input": 0,
+    "output": 8,
+    "session_id": "504c496d7cce81b87d15f8818163c6a3867fa60b0a8b520964939575c11c1ac5",
+    "uncached_input": 64
+  },
+  "file": "f.rs",
+  "handles": {
+    "file": "file:f.rs@sha256:49e5ab7eb50b84ab791a464363506fca587318ec5400cfe9d9f08ef43f22103a"
+  },
+  "line": 2,
+  "prompt": {
+    "extracted": true,
+    "line": 0,
+    "sha256": "e2cc1e4358a9b45e63a88e24d0b894032f312655b38930ace2ca510af32cbc2c",
+    "text": "wire the alpha parser"
+  },
+  "reads": {
+    "counts": 1,
+    "facts": 2,
+    "messages": 1
+  },
+  "schema_version": 1,
+  "selection": {
+    "basis": "file_touched",
+    "checkpoint_id": "8eeb6bff4031fd0e43fabafc80a05c29f4ca26123ebc008f9da98d454738bf4b",
+    "considered": 2,
+    "resolved": true
+  },
+  "sessions": [
+    {
+      "agent": "claude-code",
+      "model": "claude-sonnet-4-5",
+      "session_id": "504c496d7cce81b87d15f8818163c6a3867fa60b0a8b520964939575c11c1ac5"
+    }
+  ],
+  "span": {
+    "commit": "7d335625a917ea34796b2cd755a0da559d28517c",
+    "end": 2,
+    "path": "f.rs",
+    "start": 2
+  },
+  "tag": "mixed"
+}

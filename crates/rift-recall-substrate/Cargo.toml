@@ -1,0 +1,39 @@
+[package]
+name = "rift-recall-substrate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Read-only substrate reader over the checkpoint/shadow branches (gix seam) with incremental watermarks."
+
+[lints]
+workspace = true
+
+[features]
+# The pure-Rust gix-backed reader ships by default (it builds offline), but lives
+# behind a feature so `--no-default-features` still builds with only the in-memory
+# `MemorySubstrate`. The gix backend never leaks `gix` types across the seam.
+default = ["gix"]
+gix = ["dep:gix"]
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Plain SHA-256 of worktree file bytes, to match read-time `content_sha256`.
+sha2 = { workspace = true }
+# Git blob object id (SHA-1 "blob <len>\0" framing) for the content→blob-oid map.
+sha1 = { workspace = true }
+# Pure-Rust, read-side git object/ref access plugs in behind SubstrateReader:
+gix = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+insta = { workspace = true }
+tempfile = { workspace = true }
+# The delta ledger (FileRead, read_facts_*, RecallMetrics) now layers OVER the
+# substrate; the gix integration test exercises that path (dev-only back-edge,
+# which Cargo permits for dev-dependencies).
+rift-recall-ledger = { version = "0.0.1", path = "../rift-recall-ledger" }

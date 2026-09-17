@@ -1,0 +1,17 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "recall_text(&col3, 40, 13, false)"
+---
+╭─ recall ─────────────────────────────╮
+│saved 37.5% (6.0k)  [of 90% target]   │
+│17 serves · 2 active sessions         │
+│[24h][7d][30d][all]              [tok]│
+│read  @@@@@@@@@@@@@@@@@@@@@@@@@@@  10k│
+│saved @@@@@@@@@@@@@@@@+           6.0k│
+│# hook                                │
+│ 6    ▄▄     ▄▄     ▄▄     ▄▄     ▄▄  │
+│    ▄ █▀█  ▄ █▀█  ▄ █▀█  ▄ █▀█  ▄ █▀█ │
+│ 3 ▄██▀  █▄██▀  █▄██▀  █▄██▀  █▄██▀  █│
+│ 0 ▀      ▀      ▀      ▀      ▀      │
+│   -30m           -15m            last│
+╰──────────────────────────────────────╯

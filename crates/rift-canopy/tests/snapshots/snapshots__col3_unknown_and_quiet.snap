@@ -1,0 +1,24 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "col3_text(&col3, 20)"
+---
+╭─ token usage  Σ 7.5k ──────────╮
+│+------------------------------+│
+│|R***********************O#####|│
+│|########################=#####|│
+│|########################C*****|│
+│+------------------------------+│
+│input 5.2k read 48k     read 90%│
+│output 9.1k cache-write 3.3k    │
+╰────────────────────────────────╯
+╭─ system ───────────────────────╮
+│~ mystery-model-9000            │
+│125 / unknown                   │
+│- events · 5m: 42               │
+│- tokens · 5m: 12k              │
+│- serves · 5m: 7                │
+│- projection storage: 17.7MB    │
+╰────────────────────────────────╯
+╭─ recall ───────────────────────╮
+│enabled, no serves yet — see `ri│
+│                                │

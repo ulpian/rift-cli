@@ -1,0 +1,17 @@
+---
+source: crates/rift-core/src/error.rs
+expression: "rendered.join(\"\\n\")"
+---
+immutability violation: <reason>
+validity error: <reason>
+policy denied: <reason>
+storage error: <reason>
+substrate error: <reason>
+migration error: <reason>
+config error: <reason>
+crypto error: <reason>
+integrity error: <reason>
+not found: <reason>
+io error: <reason>
+serialize error: <reason>
+<reason>

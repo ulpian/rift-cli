@@ -1,0 +1,244 @@
+# Rift — Cargo workspace.
+# Every third-party dependency is pinned once in [workspace.dependencies] below
+# and referenced from each crate as `{ workspace = true }`, so a version lives
+# in exactly one place: a bump is a one-line, reviewable change and two crates
+# can never disagree about which version of a dependency they compile against.
+[workspace]
+resolver = "2"
+members = [
+  "crates/rift-core",
+  "crates/rift-config",
+  "crates/rift-crypto",
+  "crates/rift-hashchain",
+  "crates/rift-git",
+  "crates/rift-store",
+  "crates/rift-shadow",
+  "crates/rift-shadow-hooks",
+  "crates/rift-shadow-attribution",
+  "crates/rift-shadow-redact",
+  "crates/rift-shadow-cost",
+  "crates/rift-agent",
+  "crates/rift-agent-install",
+  "crates/rift-agent-claude-code",
+  "crates/rift-agent-codex",
+  "crates/rift-agent-gemini",
+  "crates/rift-agent-antigravity",
+  "crates/rift-agent-cursor",
+  "crates/rift-agent-copilot",
+  "crates/rift-agent-opencode",
+  "crates/rift-agent-factory-droid",
+  "crates/rift-agent-ollama",
+  "crates/rift-recall-types",
+  "crates/rift-recall-substrate",
+  "crates/rift-recall-ledger",
+  "crates/rift-recall-validity",
+  "crates/rift-recall-rank",
+  "crates/rift-recall-pack",
+  "crates/rift-recall-policy",
+  "crates/rift-recall-serve",
+  "crates/rift-recall-events",
+  "crates/rift-recall-eval",
+  "crates/rift-recall-doc",
+  "crates/rift-recall-search",
+  "crates/rift-tokens",
+  "crates/rift-canopy",
+  "crates/rift-canopy-data",
+  "crates/rift-registry",
+  "crates/rift-nic-gauge",
+  "bins/rift",
+  "bins/rift-memd",
+  "xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/ulpian/rift"
+authors = ["Ulpian Morina"]
+
+# ---------------------------------------------------------------------------
+# Pinned external dependencies (single source of truth).
+# Versions marked (verify) should be re-checked against crates.io at the moment
+# the crate is first wired in; turso is BETA and pre-1.0.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# Storage — Turso (SQLite-compatible Rust rewrite: MVCC, async, native vectors).
+# DEFERRED: the pin is kept for the eventual wiring, but NO crate references it,
+# so it stays out of Cargo.lock. When it was evaluated, turso 0.1.5 lacked
+# CREATE TRIGGER / STRICT / encryption — so it could not host the SQL-layer
+# immutability guard — and pulling it in adds advisory-bearing git2 + paste.
+# Re-evaluate before adding `turso = { workspace = true }` to any crate.
+turso = "0.1"                  # (verify) BETA; deferred pending re-evaluation
+# Filesystem notification. By decision, fs events are a WAKE-SIGNAL only
+# (a fresh {cursor, epoch} poll stays the sole truth), so a missed or
+# spurious event is harmless by construction. Lives only in rift-canopy-data.
+notify = "6.1"
+# Reference store for the testable vertical slice: SQLite-compatible, synchronous,
+# runs the SAME SQL/triggers Turso will. Production target stays `turso` behind the seam.
+rusqlite = { version = "0.32", features = ["bundled"] }   # (verify) needs a C compiler (bundled SQLite)
+# TUI / 3D render engine (first-party)
+# xRenderEngine (xre) 0.2 — depend on the terminal + 2D TUI layers directly, NOT the
+# `xre-rs` facade: the facade pulls xre-engine (ECS), xre-render (software 3D) and
+# xre-cello (scene/OBJ) as non-optional deps, which a 2D dashboard does not need.
+# `default-features = false` on xre-tui drops its `render` (Viewport3D) + `parallel`
+# (rayon) defaults, leaving just crossterm + glam + unicode-width.
+xre-core = { version = "0.2", default-features = false }
+xre-term = { version = "0.2", default-features = false }
+xre-tui = { version = "0.2", default-features = false }
+# The software sub-cell rasterizer (SampleBuffer + density shaders). Standard
+# xre builds use its CellShaders for charts; `xre-3d` additionally enables the
+# scene/mesh path. `default-features = false` drops its rayon `parallel` default.
+xre-render = { version = "0.2", default-features = false }
+# The Windows console probe behind `rift-canopy`'s `render::caps::detect`: it
+# asks the console to enable VT processing and reports whether it did, which is
+# the one fact the environment cannot tell us (Windows Terminal, conhost and
+# VS Code set none of `COLORTERM`/`TERM`/`LANG`). Already resolved in the graph
+# at this version via xre-term; `windows` is the only feature the probe needs.
+crossterm = { version = "0.28", default-features = false, features = ["windows"] }
+# Git plumbing (pure-Rust, read-side). Pinned high enough to clear RUSTSEC-2025-0001
+# (gix-worktree-state ≥0.17), -2025-0021 (gix-features ≥0.41), and -2025-0140
+# (gix-date ≥0.12); we use only the read-side surface (open/Tree/ObjectId), so the
+# bump is API-stable.
+gix = "0.78"                   # gitoxide
+# Native file search: the three pure-Rust pieces of an existing file finder,
+# plus the walker. The finder's published umbrella crate is NOT pure Rust — it
+# takes a non-optional vendored libgit2, an LMDB binding and a filesystem
+# watcher, none of which may enter this workspace — so the pieces are taken
+# separately and repository state keeps coming from gix. Pinned with `=`
+# because that project publishes a nightly to crates.io most days: an exact
+# requirement makes every bump a reviewed line, and each bump re-checks the
+# resolved graph for the three things this list exists to keep out. What was
+# checked at these versions, and the check to repeat on every bump:
+# `cargo tree --edges normal,build` over the pins names no git2/libgit2, no
+# heed/LMDB, no notify, no tree-sitter and no HTTP client; its only `-sys` crate
+# is core-foundation-sys, a macOS framework binding this lockfile already
+# carries via keyring; and it pulls no cc/cmake/bindgen, so nothing here needs a
+# C toolchain. Deliberately no crate count: that number depends on how the
+# throwaway probe is built, so two honest reviewers get two answers and the
+# comment ages into a thing nobody can reproduce.
+# DEFERRED like `turso` below: no crate references these yet, so they stay out
+# of Cargo.lock until the search seam crate is wired.
+neo_frizbee = { version = "=0.11.0", features = ["safe_read"] } # MIT — SIMD Smith-Waterman fuzzy scoring; safe_read: the AVX2 backend's page-bounded over-read is undefined behaviour the fuzz target reached
+fff-query-parser = "=0.10.6"   # MIT — the query grammar; no dependencies
+fff-grep = "=0.10.6"           # MIT — content matching over bstr + memchr
+ignore = "=0.4.33"             # Unlicense OR MIT — gitignore-aware walking
+# Document conversion to GitHub-flavoured Markdown: pure Rust, no network (the
+# hosted OCR path exists only in this project's Node/Python bindings, not in the
+# crate). DEFERRED on the same terms as the four above.
+anydoc = "=0.2.4"              # MIT
+# Diff / hunks
+imara-diff = "0.1"             # (verify)
+# Text-only Recall Viewer highlighting. Scope parsing only: no Oniguruma,
+# bundled themes, HTML/YAML loaders, or custom grammars.
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
+# Hashing
+blake3 = "1"
+sha2 = "0.10"
+# Git blob object id (SHA-1 loose-object framing) for the content→blob-oid map.
+# Already vendored transitively via gix, so this adds no new tree.
+sha1 = "0.10"
+# Symbols — pinned for a future dependency-aware expansion; no crate references it yet.
+tree-sitter = "0.24"           # (verify)
+# Tokenization (budget enforcement within ~5% of billing tokenizers)
+tiktoken-rs = "0.6"            # (verify)
+# In-memory graph working set
+petgraph = "0.6"
+# Async / parallel
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "time"] }
+# Async trait objects for the storage seam (Store/StoreConn). Object-safe `&dyn
+# Store` is required by the spec; native async-in-trait is not object-safe at the
+# 1.94 MSRV, so the seam uses async-trait (the Turso engine plugs in behind it).
+async-trait = "0.1"
+rayon = "1"
+# CLI / errors / logging
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+toml_edit = { version = "0.22", features = ["serde"] }
+# Redaction (linear-time, no backreferences → ReDoS-safe)
+regex = "1"
+# HTTP(S) client. Referenced only by rift-recall-eval's real-model feature —
+# the owner-invoked paid eval transport, never enabled by `cargo test`.
+# rustls (ring provider) — NOT native-tls, so no banned openssl-sys on Linux.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Security / secrets hygiene
+zeroize = { version = "1", features = ["derive"] }
+secrecy = "0.10"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"                  # envelope-key derivation (HKDF-SHA256)
+getrandom = "0.2"             # OS CSPRNG for keys/nonces (no rand_core version dance)
+# OS keychain (optional `keyring` feature in rift-store). Native backends only
+# (no dbus/secret-service) so it compiles on headless CI across all three OSes:
+# Security.framework (macOS), Credential Manager (Windows), kernel keyutils (Linux).
+keyring = { version = "3", default-features = false, features = [
+  "apple-native",
+  "windows-native",
+  "linux-native",
+] }
+# Testing
+insta = "1"
+proptest = "1"
+criterion = "0.5"
+tempfile = "3"               # on-disk fixtures for the gix substrate reader (dev-only)
+
+# ---------------------------------------------------------------------------
+# Workspace-wide lints. Security posture: deny unsafe by default (crates that
+# must use FFI override locally with #![allow(unsafe_code)] + justification).
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Groups get a lower priority than the individual lints below, so a specific
+# lint always wins over its group (and silences the "same priority" warning).
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Security-relevant lints stay on (a panic in a hook must not abort a git op).
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "warn"
+# No un-audited `a[i]` that can panic: a panic in a hook must not abort the
+# developer's git operation. Sites indexing by construction-checked bounds
+# (fixed-size arrays, length-checked ranges, `chunks_exact`) carry a narrow,
+# justified `#[allow]` instead of a global downgrade.
+indexing_slicing = "warn"
+# Purely-stylistic pedantic lints we accept project-wide (not correctness or
+# security): intentional numeric casts for display/estimates, closures after
+# statements, broad-but-deliberate signatures, exact float comparisons in tests.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+items_after_statements = "allow"
+too_many_arguments = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+match_wildcard_for_single_variants = "allow"
+ref_option = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"
+should_implement_trait = "allow"
+format_push_string = "allow"
+float_cmp = "allow"
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+panic = "unwind"

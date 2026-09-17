@@ -1,0 +1,59 @@
+---
+source: crates/rift-canopy/tests/style_goldens.rs
+expression: "common::style_snapshot(&system_panel(plain, 30, 14), Tier::Truecolor)"
+---
+[Truecolor]
+|╭─ system ───────────────────╮|
+|│62% Moderate · claude-fable-│|
+|│124k/200k · current sessions│|
+|│[2 active sessions]         │|
+|│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀          │|
+|│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀          │|
+|│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀          │|
+|│▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀          │|
+|│ scope · current sessions   │|
+|│· events · 5m: 42           │|
+|│· tokens · 5m: 12k          │|
+|│· serves · 5m: 7            │|
+|│· projection storage: 17.7MB│|
+|╰────────────────────────────╯|
+
+· style ids ·
+|000111111000000000000000000000|
+|022222222222222222222222222220|
+|022222222222222222222222222220|
+|02222222222222222222.........0|
+|03456789abcdefghijk..........0|
+|03456789abcdefghijk..........0|
+|03456789abcdefghijk..........0|
+|03456789abcdefghijk..........0|
+|0.222222222222222222222222...0|
+|0l2222222222222222...........0|
+|0l22222222222222222..........0|
+|0l222222222222222............0|
+|0l2222222222222222222222222220|
+|000000000000000000000000000000|
+
+· legend ·
+0  fg=#3a4240  bg=.  -
+1  fg=#f0b45c  bg=.  +bold
+2  fg=#d8ddd8  bg=.  -
+3  fg=#73df99  bg=.  -
+4  fg=#7fde96  bg=.  -
+5  fg=#8adc93  bg=.  -
+6  fg=#94db90  bg=.  -
+7  fg=#9dd98d  bg=.  -
+8  fg=#a6d789  bg=.  -
+9  fg=#aed686  bg=.  -
+a  fg=#b6d483  bg=.  -
+b  fg=#bdd27f  bg=.  -
+c  fg=#c4d17c  bg=.  -
+d  fg=#cbcf78  bg=.  -
+e  fg=#d1cd74  bg=.  -
+f  fg=#d7cc70  bg=.  -
+g  fg=#ddca6c  bg=.  -
+h  fg=#e3c867  bg=.  -
+i  fg=#e9c663  bg=.  -
+j  fg=#eec55e  bg=.  -
+k  fg=#f0bf5c  bg=.  -
+l  fg=#5a645a  bg=.  -

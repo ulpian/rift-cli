@@ -1,0 +1,1708 @@
+//! The Canopy application shell: the synchronous frame/event loop.
+//!
+//! The loop is deliberately **synchronous** (no `tokio`): it blocks in
+//! [`EventSource::poll`] for input, applies the pure [`update`] reducer, performs
+//! the returned [`Effects`], and redraws **only when `dirty`** — so a quiescent
+//! dashboard idles at ~0% CPU. The loop body and effect handling are engine-free
+//! and generic over [`EventSource`] + `dyn RenderBackend`, so they are unit-tested
+//! headlessly with a scripted source and a mock backend. The live terminal driver
+//! ([`live`], `#[cfg(feature = "xre")]`) supplies the real event source, the
+//! panic-safe terminal guard, and [`live::run`] — the bare-`rift` entry.
+
+#[cfg(feature = "xre")]
+pub mod live;
+
+use std::time::{Duration, Instant};
+
+use rift_core::Result as RiftResult;
+
+use crate::dispatch::{CommandDispatcher, DispatchRequest};
+use crate::render::{RenderBackend, RenderError};
+use crate::state::{update, AppState, DataRequest, Effects, Event, Flow, PersistOp};
+use crate::{Mode, Project, ProjectSettingsManager};
+
+/// How long a poll blocks before yielding a `Tick` (input wakes it sooner). The
+/// idle cadence — quiescent, no redraw, so CPU stays ~0%.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The fast cadence used **only** while a column-3 tween is in flight (~30fps),
+/// so an easing graph redraws smoothly; the loop drops back to [`POLL_INTERVAL`]
+/// the moment the tween settles.
+const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Options for launching Canopy (from the bare-`rift` CLI flags).
+#[derive(Clone, Debug, Default)]
+pub struct CanopyOpts {
+    /// Force the ASCII fallback backend (`--ascii` / `NO_COLOR`).
+    pub ascii: bool,
+    /// Skip the startup splash (`--skip-splash` / `RIFT_SPLASH=never`).
+    pub skip_splash: bool,
+    /// Direct read-only Recall Viewer launch. `None` starts the dashboard.
+    pub viewer_launch: Option<crate::recall_viewer::ViewerLaunch>,
+    /// The canonicalized process launch directory — drives the initial
+    /// selection (see [`crate::apply_launch_cwd`]). `None` keeps index 0.
+    pub launch_cwd: Option<String>,
+    /// Whether the launch cwd sits inside a git repository (bin-resolved).
+    /// With no registered match this shows the two-ways-in hint — the cwd is
+    /// never auto-added.
+    pub launch_cwd_is_repo: bool,
+    /// The binary's version, shown in the header. Injected like the
+    /// launch cwd so the render crate stays env-free; empty hides the segment.
+    pub version: String,
+    /// The operator's home directory — the destination explorer's start
+    /// (the destination explorer), resolved in the binary by the `HOME` / `USERPROFILE` env
+    /// ladder (no `dirs` crate) so the render crate stays env-free. `None`
+    /// falls back to the launch cwd, then `/`.
+    pub home_dir: Option<String>,
+}
+
+/// A source of already-translated Canopy [`Event`]s.
+///
+/// `poll` blocks up to `timeout`; an **empty** result means the timeout elapsed
+/// (the loop treats that as a `Tick`). The live source pumps the terminal; the
+/// test source replays a script — so the loop is driveable without a terminal.
+pub trait EventSource {
+    /// Block up to `timeout` for the next batch of events.
+    ///
+    /// # Errors
+    /// Propagates a terminal read failure from the live source.
+    fn poll(&mut self, timeout: Duration) -> RiftResult<Vec<Event>>;
+}
+
+/// Map a render error onto the shared error type (summary only — never bytes).
+pub(crate) fn render_err(e: RenderError) -> rift_core::RiftError {
+    rift_core::RiftError::Other(e.to_string())
+}
+
+/// The shared profile-plane load: the live profiles, the
+/// restored active id, and — when one is active — its theme, all
+/// through the injected loader, onto the state **before the first frame**.
+/// `event_loop` calls this at its launch seam; the headless one-frame render
+/// calls the same function, so the interactive and headless runs exercise
+/// **one** startup path (an earlier headless frame skipped this load fully and
+/// was structurally blind to the whole class of defects).
+///
+/// # Errors
+/// Propagates a loader read failure.
+pub fn load_profile_plane(
+    state: &mut AppState,
+    loader: &mut dyn crate::profile::ProfileLoader,
+) -> RiftResult<()> {
+    let (active, profiles) = loader.profiles()?;
+    // The startup pin: a LIVE pin overrides the last-selected
+    // fold at launch; a dead pin loses to the chain. A pure read — launch
+    // writes nothing, so relaunching is idempotent by construction.
+    let pinned = loader.startup()?;
+    let fold_active = active.clone().unwrap_or_default();
+    let resolved = pinned
+        .clone()
+        .filter(|p| profiles.iter().any(|e| e.profile_id == *p))
+        .or(active)
+        .unwrap_or_default();
+    if !resolved.is_empty() {
+        let overrides = loader.theme(&resolved)?;
+        state.set_theme(overrides);
+    }
+    // When the pin diverged from the fold, the session's first WRITE will
+    // prepend the synchronizing `SelectProfile`.
+    state.select_sync_pending = !resolved.is_empty() && resolved != fold_active;
+    state.app.set_profiles(profiles, resolved);
+    state.app.startup_profile = pinned;
+    Ok(())
+}
+
+/// The shared startup prime: one `Refresh` per tracked project, then
+/// the subscribe for the initial selection — the same requests a selection
+/// change or persist-apply would issue, sent once at startup so the first
+/// frame's data is already being computed. `event_loop` calls this before its
+/// first poll; the headless frame calls it in place of a hand-rolled send, so
+/// the interactive and headless runs exercise **one** startup path.
+pub fn prime_startup(state: &AppState, req_sink: &mut dyn FnMut(DataRequest)) {
+    for p in &state.app.projects {
+        req_sink(DataRequest::Refresh(p.path.clone()));
+    }
+    let active = state.app.selected_project().map(|p| p.path.clone());
+    req_sink(DataRequest::SetActive(active));
+}
+
+/// Run the dashboard loop: render-if-dirty, block for events, reduce, apply
+/// effects, repeat — until a quit. `on_persist` performs one append-only registry
+/// mutation (add/remove/relabel/reorder) and returns the refreshed project
+/// list; a persistence failure becomes a transient status line, never an abort.
+/// `req_sink` forwards data requests to the live data bus; the bus feeds
+/// updates back in through `src` as [`Event::ProjectData`].
+///
+/// `list_dir` is the destination explorer's lister seam: the
+/// reducer only requests a directory; this closure performs the walk and its
+/// (infallible) reply lands on the state in the same iteration.
+///
+/// # Errors
+/// [`rift_core::RiftError`] on a terminal present/read failure.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one explicit host seam + loop table
+pub fn event_loop<F, R>(
+    backend: &mut dyn RenderBackend,
+    src: &mut dyn EventSource,
+    state: &mut AppState,
+    on_persist: &mut F,
+    req_sink: &mut dyn FnMut(DataRequest),
+    settings_manager: &mut dyn ProjectSettingsManager,
+    dispatcher: &mut dyn CommandDispatcher,
+    reload: &mut R,
+    loader: &mut dyn crate::profile::ProfileLoader,
+    list_dir: &mut dyn FnMut(&std::path::Path) -> crate::explorer::DirListing,
+) -> RiftResult<()>
+where
+    F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
+    R: FnMut() -> RiftResult<Vec<Project>>,
+{
+    // The profile plane loads BEFORE the first frame: the header
+    // shows the restored active profile's name — and the dashboard wears its
+    // theme — from frame one. The project list itself was injected
+    // by the host (already profile-scoped), so this only fills the identity —
+    // it never clobbers the injected rows.
+    load_profile_plane(state, loader)?;
+    // Launch is live by construction: the prime runs at the loop seam, BEFORE
+    // the first poll, so the bus computes feeds for the initial selection with
+    // zero key events (the blind spot this closes was a subscribe only the
+    // headless vehicle ever sent).
+    prime_startup(state, req_sink);
+    // Load the initially-selected project's saved layout (scoped to the active
+    // profile), so a rearranged dashboard is restored
+    // on launch, before the first frame.
+    load_project_layout(state, loader)?;
+    let mut last = Instant::now();
+    loop {
+        render_if_dirty(backend, state)?;
+        if state.app.quit {
+            break;
+        }
+        // Poll fast only while a graph tween is settling; idle otherwise.
+        let timeout = if state.anim_active() {
+            FRAME_INTERVAL
+        } else {
+            POLL_INTERVAL
+        };
+        let events = src.poll(timeout)?;
+        // Advance any in-flight tween by the real elapsed time; a settling frame
+        // dirties, but at rest `advance_anim` is a no-op and never redraws.
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(last);
+        last = now;
+        if state.advance_anim(dt) {
+            state.dirty = true;
+        }
+        if events.is_empty() {
+            // Timeout → a tick (idle: no redraw, so CPU stays ~0%).
+            let _ = update(state, Event::Tick);
+            continue;
+        }
+        for ev in events {
+            match update(state, ev) {
+                Flow::Quit => state.app.quit = true,
+                Flow::Continue(mut effects) => {
+                    // Dispatches and Project Settings actions run HERE (not in
+                    // apply_effects): their running frames must present before
+                    // synchronous work holds the loop (the synchronous event loop posture;
+                    // user-initiated).
+                    let pending = std::mem::take(&mut effects.dispatches);
+                    let settings_actions = std::mem::take(&mut effects.project_settings_actions);
+                    let load = effects.load_layout.take();
+                    let load_members = effects.load_membership.take();
+                    let load_picker = effects.load_picker_theme.take();
+                    let listing_request = effects.list_dir.take();
+                    let reload_profiles = effects.reload_profiles;
+                    // A pinned launch defers its `selected` write to the
+                    // session's FIRST persist batch: prepending
+                    // the synchronizing SelectProfile here aligns the store's
+                    // fold-active with the shown profile before any op that
+                    // implicitly targets "the active profile" lands.
+                    if state.select_sync_pending && !effects.persist.is_empty() {
+                        state.select_sync_pending = false;
+                        let switching = effects
+                            .persist
+                            .iter()
+                            .any(|op| matches!(op, PersistOp::SelectProfile { .. }));
+                        if !switching && !state.app.active_profile.is_empty() {
+                            effects.persist.insert(
+                                0,
+                                PersistOp::SelectProfile {
+                                    profile: state.app.active_profile.clone(),
+                                },
+                            );
+                        }
+                    }
+                    // Whether an actual switch is in this batch — the sticky-
+                    // session discriminator.
+                    let select_landed = effects
+                        .persist
+                        .iter()
+                        .any(|op| matches!(op, PersistOp::SelectProfile { .. }));
+                    if !effects.is_empty() {
+                        apply_effects(effects, state, on_persist, req_sink);
+                    }
+                    // A profile change reloads the whole view — names, active
+                    // id, membership, selection, arrangement — through the one
+                    // loader seam (the profile plane), after the persist landed.
+                    if reload_profiles {
+                        reload_profile_plane(state, loader, req_sink, select_landed)?;
+                    }
+                    // A selection change loads the new project's saved layout
+                    // — through the injected loader, applied to state.
+                    if let Some(path) = load {
+                        let m = loader
+                            .layout(&state.app.active_profile, &path)?
+                            .unwrap_or_default();
+                        state.set_layout(m);
+                    }
+                    // The members editor re-reads its rows through the seam
+                    // (the profile hub) — on entry and after every membership
+                    // op, AFTER the persist landed (the load_layout pattern).
+                    if let Some(profile) = load_members {
+                        let members = loader.projects(&profile)?;
+                        let catalogue = loader.catalogue()?;
+                        state.app.set_membership_lists(members, catalogue);
+                        state.dirty = true;
+                    }
+                    // A non-active profile's picker swatches load through the
+                    // seam — the active profile seeds purely.
+                    if let Some(profile) = load_picker {
+                        let overrides = loader.theme(&profile)?;
+                        state.app.colour_picker.target_overrides = overrides;
+                        state.dirty = true;
+                    }
+                    // The destination explorer's listing: the
+                    // walk crosses the injected seam and lands here, in the
+                    // SAME iteration — before the next `render_if_dirty` — so
+                    // traversal never shows a loading frame. The reply is
+                    // infallible: a failure arrives folded into the listing
+                    // and `apply` keeps the operator where they were.
+                    if let Some(path) = listing_request {
+                        state.app.explorer.apply(list_dir(&path));
+                        state.app.clamp_scrolls(state.size);
+                        state.dirty = true;
+                    }
+                    for action in settings_actions {
+                        if matches!(action.kind, crate::ProjectSettingsActionKind::Init) {
+                            run_project_init(backend, state, settings_manager, req_sink, action)?;
+                        } else {
+                            run_project_settings_action(
+                                backend,
+                                state,
+                                settings_manager,
+                                req_sink,
+                                action,
+                            )?;
+                        }
+                    }
+                    for (req, repo) in pending {
+                        run_dispatch(
+                            backend, state, dispatcher, reload, req_sink, on_persist, req, &repo,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_project_settings_action(
+    backend: &mut dyn RenderBackend,
+    state: &mut AppState,
+    manager: &mut dyn ProjectSettingsManager,
+    req_sink: &mut dyn FnMut(DataRequest),
+    action: crate::ProjectSettingsAction,
+) -> RiftResult<()> {
+    state.app.project_settings.running = true;
+    state.app.project_settings.result = Some("working…".to_owned());
+    state.dirty = true;
+    render_if_dirty(backend, state)?;
+    match manager.apply(&action) {
+        Ok(view) => {
+            let path = view.path.clone();
+            state.app.project_settings.refresh(view);
+            state.app.project_settings.result = Some("saved and verified".to_owned());
+            state.app.project_settings.failed_action = None;
+            req_sink(DataRequest::Refresh(path));
+        }
+        Err(reason) => {
+            state.app.project_settings.running = false;
+            state.app.project_settings.result = Some(reason);
+            state.app.project_settings.failed_action = Some(action);
+        }
+    }
+    state.dirty = true;
+    Ok(())
+}
+
+/// Set a project up as `rift init` would, in the progress dialog: the
+/// Running frame opens before any work, every step the manager reports
+/// re-presents it while the synchronous work holds the loop, and the finished
+/// log stays up as a message — green when every step landed, red naming the
+/// failure — until the developer closes it. The add flow's act, run here
+/// beside the dispatches rather than inside the settings modal's own running
+/// state because no modal page is open: the dialog IS the surface.
+fn run_project_init(
+    backend: &mut dyn RenderBackend,
+    state: &mut AppState,
+    manager: &mut dyn ProjectSettingsManager,
+    req_sink: &mut dyn FnMut(DataRequest),
+    action: crate::ProjectSettingsAction,
+) -> RiftResult<()> {
+    let path = action.path.clone();
+    let name = state
+        .app
+        .projects
+        .iter()
+        .find(|p| p.path == path)
+        .map_or_else(
+            || path.rsplit('/').next().unwrap_or(&path).to_owned(),
+            |p| p.name.clone(),
+        );
+    state
+        .app
+        .open_overlay(crate::dispatch::Overlay::running(format!(
+            "setup of {name}"
+        )));
+    state.dirty = true;
+    render_if_dirty(backend, state)?; // the empty frame is visible before the first step
+    let mut log = crate::SetupLog::default();
+    let result = manager.initialize(&action, &mut |progress| {
+        log.record(progress);
+        if let Some(crate::dispatch::Overlay::Running { lines, .. }) = state.app.overlay.as_mut() {
+            *lines = log.lines();
+        }
+        state.dirty = true;
+        // A frame that fails to present is not a setup failure: the work goes
+        // on, and the outcome still lands as the message below.
+        let _ = render_if_dirty(backend, state);
+    });
+    let mut body = log.lines();
+    match result {
+        Ok(view) => {
+            if state.app.mode == Mode::ProjectSettings {
+                state.app.project_settings.refresh(view);
+            }
+            state.open_alert(crate::dispatch::Message::success(
+                format!("{name} is set up"),
+                body,
+            ));
+        }
+        Err(reason) => {
+            if !body.is_empty() {
+                body.push(String::new());
+            }
+            body.push(reason);
+            state.open_alert(crate::dispatch::Message::error(
+                format!("setup of {name} failed"),
+                body,
+            ));
+        }
+    }
+    req_sink(DataRequest::Refresh(path));
+    state.dirty = true;
+    Ok(())
+}
+
+/// Present the current frame when dirty (shared by the loop and the
+/// pre-dispatch running frame).
+fn render_if_dirty(backend: &mut dyn RenderBackend, state: &mut AppState) -> RiftResult<()> {
+    if state.dirty {
+        let vm = state.snapshot();
+        let mut frame = backend.begin_frame(state.size);
+        crate::view::draw(&vm, backend, &mut frame);
+        backend.present(&frame).map_err(render_err)?;
+        state.dirty = false;
+    }
+    Ok(())
+}
+
+/// Load and apply the currently-selected project's saved layout (scoped to the
+/// active profile) through the injected loader. No
+/// selection ⇒ nothing to load. A missing/reset layout applies the default
+/// (the loader returns `None`).
+fn load_project_layout(
+    state: &mut AppState,
+    loader: &mut dyn crate::profile::ProfileLoader,
+) -> RiftResult<()> {
+    if let Some(path) = state.app.selected_project().map(|p| p.path.clone()) {
+        let m = loader
+            .layout(&state.app.active_profile, &path)?
+            .unwrap_or_default();
+        state.set_layout(m);
+    }
+    Ok(())
+}
+
+/// Reload the whole profile plane after a profile persist op:
+/// the live names + active id, the active profile's membership view, the
+/// selection (kept by path where the project survives the switch), the bus
+/// subscription, and the (profile, project) arrangement — all through the one
+/// injected loader. Runtime project status stays runtime-only: the bus re-feeds
+/// it through the re-issued requests, exactly like a persist-apply.
+fn reload_profile_plane(
+    state: &mut AppState,
+    loader: &mut dyn crate::profile::ProfileLoader,
+    req_sink: &mut dyn FnMut(DataRequest),
+    select_landed: bool,
+) -> RiftResult<()> {
+    let (fold_active, profiles) = loader.profiles()?;
+    // Sticky sessions: a pinned launch never writes `selected`,
+    // so the fold's active and the session's shown profile may differ. Adopt
+    // the fold only when a switch landed in this batch or the shown profile
+    // died; otherwise keep showing what we show — its name list, membership,
+    // arrangement, and theme still reload below.
+    let shown = state.app.active_profile.clone();
+    let shown_live = !shown.is_empty() && profiles.iter().any(|p| p.profile_id == shown);
+    let active = if select_landed || !shown_live {
+        fold_active.unwrap_or_default()
+    } else {
+        shown
+    };
+    state.app.set_profiles(profiles, active.clone());
+    state.app.startup_profile = loader.startup()?;
+    if !active.is_empty() {
+        let keep = state.app.selected_project().map(|p| p.path.clone());
+        let projects = loader.projects(&active)?;
+        state.app.set_projects(projects);
+        if let Some(path) = keep {
+            state.app.select_path(&path);
+        }
+        prime_startup(state, req_sink);
+        load_project_layout(state, loader)?;
+        // The switch re-themes through the same reload path:
+        // projects, arrangements, and colours swap as one view.
+        let overrides = loader.theme(&active)?;
+        state.set_theme(overrides);
+    }
+    state.dirty = true;
+    Ok(())
+}
+
+/// Run one delegated dispatch synchronously: present the running frame, cross
+/// the injected dispatcher seam, feed the outcome back through the reducer,
+/// and — after a successful MUTATING verb — reload the registry through the
+/// injected reload hook, follow the selection, and re-fire the subscribe (the
+/// persist-apply pattern), so a palette-side prune is reflected immediately.
+#[allow(clippy::too_many_arguments)]
+fn run_dispatch<F, R>(
+    backend: &mut dyn RenderBackend,
+    state: &mut AppState,
+    dispatcher: &mut dyn CommandDispatcher,
+    reload: &mut R,
+    req_sink: &mut dyn FnMut(DataRequest),
+    on_persist: &mut F,
+    req: DispatchRequest,
+    repo: &str,
+) -> RiftResult<()>
+where
+    F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
+    R: FnMut() -> RiftResult<Vec<Project>>,
+{
+    state.dirty = true;
+    render_if_dirty(backend, state)?; // the running line is visible while we block
+    let outcome = dispatcher.dispatch(&req, std::path::Path::new(repo));
+    let reload_needed = req.is_mutating() && outcome.code == 0;
+    if let Flow::Continue(effects) = update(
+        state,
+        Event::DispatchDone {
+            request: req,
+            outcome,
+        },
+    ) {
+        if !effects.is_empty() {
+            apply_effects(effects, state, on_persist, req_sink);
+        }
+    }
+    if reload_needed {
+        // A mutating dispatch in a pinned, not-yet-synchronized session first
+        // aligns the fold with the shown profile — else the
+        // reload hook would hand back the wrong profile's rows.
+        if state.select_sync_pending && !state.app.active_profile.is_empty() {
+            state.select_sync_pending = false;
+            let _ = on_persist(&PersistOp::SelectProfile {
+                profile: state.app.active_profile.clone(),
+            });
+        }
+        if let Ok(projects) = reload() {
+            let keep = state.app.selected_project().map(|p| p.path.clone());
+            state.app.set_projects(projects);
+            if let Some(path) = keep {
+                state.app.select_path(&path);
+            }
+            prime_startup(state, req_sink);
+            state.dirty = true;
+        }
+    }
+    Ok(())
+}
+
+/// Perform the side effects the reducer returned: forward data requests to the
+/// bus and apply append-only persistence. Reducer purity is preserved — all
+/// I/O happens here.
+fn apply_effects<F>(
+    effects: Effects,
+    state: &mut AppState,
+    on_persist: &mut F,
+    req_sink: &mut dyn FnMut(DataRequest),
+) where
+    F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
+{
+    for req in effects.data_requests {
+        req_sink(req);
+    }
+    for op in effects.persist {
+        apply_persist(state, on_persist, &op, req_sink);
+    }
+}
+
+/// Apply one append-only persistence op and reflect the refreshed registry back
+/// into the dashboard: keep the selection on the same project, set a status line,
+/// and (re-)track every current project on the bus so new adds get live data.
+fn apply_persist<F>(
+    state: &mut AppState,
+    on_persist: &mut F,
+    op: &PersistOp,
+    req_sink: &mut dyn FnMut(DataRequest),
+) where
+    F: FnMut(&PersistOp) -> RiftResult<Vec<Project>>,
+{
+    let keep = state.app.selected_project().map(|p| p.path.clone());
+    match on_persist(op) {
+        Ok(projects) => {
+            state.app.set_projects(projects);
+            if let PersistOp::AddProject { path } = op {
+                // The add flow lands on the new row and asks its first status
+                // read whether to open the setup wizard (the reducer decides,
+                // once the data plane has looked at the machine).
+                state.app.select_path(path);
+                state.pending_setup_prompt = Some(path.clone());
+            } else if let Some(path) = keep {
+                state.app.select_path(&path); // selection follows the same project
+            }
+            // A success is a Notice; it auto-dismisses. When the
+            // removal emptied the registry, `set_projects` already raised the
+            // wizard, which the Notice's settle-close re-raises after it fades.
+            // A theme apply is the one silent op (the colour picker and its presets): the live repaint
+            // IS the acknowledgement — a toast would cover the preview.
+            if !matches!(op, PersistOp::SetProfileTheme { .. }) {
+                state.open_notice(crate::dispatch::Message::success(
+                    "registry",
+                    vec![persist_status(op)],
+                ));
+            }
+            // Track every current project on the bus (new adds included), and
+            // prioritize the selection so its live status/detail refreshes.
+            for p in &state.app.projects {
+                req_sink(DataRequest::Refresh(p.path.clone()));
+            }
+            let active = state.app.selected_project().map(|p| p.path.clone());
+            req_sink(DataRequest::SetActive(active));
+        }
+        Err(e) => state.open_alert(crate::dispatch::Message::error(
+            "registry",
+            vec![e.to_string()],
+        )),
+    }
+    state.dirty = true;
+}
+
+/// A short toast line for a completed persistence op.
+fn persist_status(op: &PersistOp) -> String {
+    match op {
+        PersistOp::AddProject { path } => format!("registered {path}"),
+        PersistOp::RemoveProject { path } => format!("removed {path}"),
+        PersistOp::RelabelProject { label, .. } => format!("relabeled to {label}"),
+        PersistOp::ReorderProject { up, .. } | PersistOp::ReorderProfileProject { up, .. } => {
+            format!("moved {}", if *up { "up" } else { "down" })
+        }
+        PersistOp::SetLayout { layout, .. } => {
+            if layout.is_some() {
+                "saved layout".to_string()
+            } else {
+                "reset layout".to_string()
+            }
+        }
+        PersistOp::CreateProfile { name } => format!("created profile {name}"),
+        PersistOp::DuplicateProfile { name, .. } => format!("duplicated to {name}"),
+        PersistOp::RenameProfile { name, .. } => format!("renamed profile to {name}"),
+        PersistOp::RemoveProfile { .. } => "deleted profile".to_string(),
+        PersistOp::SelectProfile { .. } => "switched profile".to_string(),
+        PersistOp::AddProfileProject { path, .. } => format!("added {path} to profile"),
+        PersistOp::RemoveProfileProject { path, .. } => {
+            format!("removed {path} from profile")
+        }
+        PersistOp::SetProfileTheme { slot, colour, .. } => {
+            if colour.is_some() {
+                format!("set {slot} colour")
+            } else {
+                format!("reset {slot} colour")
+            }
+        }
+        PersistOp::SetStartupProfile { profile } => {
+            if profile.is_some() {
+                "pinned startup profile".to_string()
+            } else {
+                "startup follows last selected".to_string()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::frame::{Frame, Size};
+    use crate::render::Capabilities;
+    use crate::state::Event;
+    use crate::{CanopyKey, EntryKind};
+
+    /// A render backend that counts presents (the headless loop probe).
+    struct MockBackend {
+        presents: usize,
+    }
+    impl RenderBackend for MockBackend {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::empty()
+        }
+        fn present(&mut self, _frame: &Frame) -> Result<(), RenderError> {
+            self.presents += 1;
+            Ok(())
+        }
+    }
+
+    /// A scripted event source: each `poll` yields the next batch (then ticks).
+    struct ScriptedEvents {
+        steps: std::collections::VecDeque<Vec<Event>>,
+    }
+    impl ScriptedEvents {
+        fn new(steps: Vec<Vec<Event>>) -> Self {
+            Self {
+                steps: steps.into(),
+            }
+        }
+    }
+    impl EventSource for ScriptedEvents {
+        fn poll(&mut self, _timeout: Duration) -> RiftResult<Vec<Event>> {
+            Ok(self.steps.pop_front().unwrap_or_default())
+        }
+    }
+
+    /// A scripted source that also records the timeout it was polled with, so a
+    /// test can prove the loop polls fast only while a tween settles.
+    struct TimeoutRecordingEvents {
+        steps: std::collections::VecDeque<Vec<Event>>,
+        seen: Vec<Duration>,
+    }
+    impl EventSource for TimeoutRecordingEvents {
+        fn poll(&mut self, timeout: Duration) -> RiftResult<Vec<Event>> {
+            self.seen.push(timeout);
+            Ok(self.steps.pop_front().unwrap_or_default())
+        }
+    }
+
+    fn no_persist(_op: &PersistOp) -> RiftResult<Vec<Project>> {
+        Ok(vec![])
+    }
+
+    /// The lister seam's inert double (the destination explorer): every listing is empty, so
+    /// a loop test that never opens the explorer is unaffected by the seam.
+    fn no_lister(_path: &std::path::Path) -> crate::explorer::DirListing {
+        crate::explorer::DirListing::default()
+    }
+
+    fn ready_state() -> AppState {
+        let mut s = AppState::new(vec![], Size::new(80, 24));
+        s.app.splash.skip();
+        s.app.overlay = None; // dismiss the first-run wizard; drive the dashboard
+        s
+    }
+
+    #[test]
+    fn startup_prime_subscribes_before_the_first_poll_with_zero_key_events() {
+        // The escape this closes: launch must be live BY CONSTRUCTION —
+        // the loop itself issues one Refresh per project + the SetActive for
+        // the initial selection before it ever polls for input. The shared
+        // marker log proves the order; no key event is ever injected.
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum Mark {
+            Req(DataRequest),
+            Poll,
+        }
+        let log: Rc<RefCell<Vec<Mark>>> = Rc::new(RefCell::new(Vec::new()));
+
+        struct MarkingSource {
+            log: Rc<RefCell<Vec<Mark>>>,
+        }
+        impl EventSource for MarkingSource {
+            fn poll(&mut self, _t: Duration) -> RiftResult<Vec<Event>> {
+                self.log.borrow_mut().push(Mark::Poll);
+                // End the loop with ZERO events — the prime must already be done.
+                Err(rift_core::RiftError::Other("scripted stop".into()))
+            }
+        }
+
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = MarkingSource { log: log.clone() };
+        let mut state = AppState::new(
+            vec![
+                Project {
+                    name: "a".into(),
+                    path: "/a".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+                Project {
+                    name: "b".into(),
+                    path: "/b".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+            ],
+            Size::new(80, 24),
+        );
+        state.app.splash.skip();
+
+        let sink_log = log.clone();
+        let mut sink = move |req: DataRequest| sink_log.borrow_mut().push(Mark::Req(req));
+        let _ = event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut sink,
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        );
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                Mark::Req(DataRequest::Refresh("/a".into())),
+                Mark::Req(DataRequest::Refresh("/b".into())),
+                Mark::Req(DataRequest::SetActive(Some("/a".into()))),
+                Mark::Poll,
+            ],
+            "the full prime precedes the first poll"
+        );
+    }
+
+    /// A dispatcher that records requests and answers with a scripted code.
+    struct RecordingDispatcher {
+        calls: Vec<(crate::dispatch::DispatchRequest, String)>,
+        code: i32,
+    }
+    impl crate::dispatch::CommandDispatcher for RecordingDispatcher {
+        fn dispatch(
+            &mut self,
+            req: &crate::dispatch::DispatchRequest,
+            repo: &std::path::Path,
+        ) -> crate::dispatch::DispatchOutcome {
+            self.calls
+                .push((req.clone(), repo.to_string_lossy().into_owned()));
+            crate::dispatch::DispatchOutcome {
+                code: self.code,
+                human: "scripted".into(),
+                json: None,
+            }
+        }
+    }
+
+    fn keys(line: &str) -> Vec<Event> {
+        let mut evs = vec![Event::Key(CanopyKey::Char('/'))];
+        evs.extend(line.chars().map(|c| Event::Key(CanopyKey::Char(c))));
+        evs.push(Event::Key(CanopyKey::Enter));
+        evs
+    }
+
+    fn one_project_state() -> AppState {
+        let mut s = AppState::new(
+            vec![Project {
+                name: "a".into(),
+                path: "/r/a".into(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }],
+            Size::new(100, 32),
+        );
+        s.app.splash.skip();
+        s
+    }
+
+    #[test]
+    fn read_only_verb_crosses_the_dispatcher_and_lands_in_the_overlay() {
+        let mut backend = MockBackend { presents: 0 };
+        let mut script = keys("status");
+        // The Results overlay swallows the first Esc (dismiss); Quit then exits.
+        script.push(Event::Key(CanopyKey::Esc));
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let mut dispatcher = RecordingDispatcher {
+            calls: vec![],
+            code: 0,
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut dispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        )
+        .unwrap();
+        assert_eq!(dispatcher.calls.len(), 1, "one dispatch crossed the seam");
+        assert_eq!(
+            dispatcher
+                .calls
+                .first()
+                .map(|(r, p)| (r.clone(), p.clone())),
+            Some((crate::dispatch::DispatchRequest::Status, "/r/a".into())),
+            "the request carries the SELECTED project's path"
+        );
+        // The outcome landed in the Results overlay (pinned by the reducer
+        // test dispatch_done_renders_the_results_overlay); the script's Esc
+        // then dismissed it — Esc never quits the dashboard from an overlay.
+        assert!(state.app.overlay.is_none(), "Esc dismissed the overlay");
+        assert!(backend.presents >= 2, "a running frame presented mid-turn");
+    }
+
+    /// A profile loader double that records every read and serves a two-profile
+    /// plane whose active id lives in a shared cell (the persist seam moves it,
+    /// exactly like the real store's `selected` fold). `pinned` plays the
+    /// startup-pin fold.
+    struct RecordingLoader {
+        active: std::rc::Rc<std::cell::RefCell<String>>,
+        calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        pinned: Option<String>,
+    }
+    impl crate::profile::ProfileLoader for RecordingLoader {
+        fn profiles(&mut self) -> RiftResult<(Option<String>, Vec<crate::profile::ProfileEntry>)> {
+            self.calls.borrow_mut().push("profiles".into());
+            let entries = [("pf0", "default"), ("pf1", "lab")]
+                .iter()
+                .enumerate()
+                .map(|(i, (id, name))| crate::profile::ProfileEntry {
+                    profile_id: (*id).to_string(),
+                    name: (*name).to_string(),
+                    created_at: i64::try_from(i).unwrap_or(0),
+                })
+                .collect();
+            Ok((Some(self.active.borrow().clone()), entries))
+        }
+        fn projects(&mut self, profile: &str) -> RiftResult<Vec<Project>> {
+            self.calls.borrow_mut().push(format!("projects:{profile}"));
+            let path = if profile == "pf1" { "/x" } else { "/a" };
+            Ok(vec![Project {
+                name: path.trim_start_matches('/').into(),
+                path: path.into(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }])
+        }
+        fn layout(
+            &mut self,
+            profile: &str,
+            path: &str,
+        ) -> RiftResult<Option<crate::layout_model::LayoutModel>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("layout:{profile}:{path}"));
+            if profile == "pf1" && path == "/x" {
+                let mut m = crate::layout_model::LayoutModel::default();
+                m.columns.swap(0, 1);
+                return Ok(Some(m));
+            }
+            Ok(None)
+        }
+        fn theme(&mut self, profile: &str) -> RiftResult<crate::theme::ThemeOverrides> {
+            self.calls.borrow_mut().push(format!("theme:{profile}"));
+            let mut o = crate::theme::ThemeOverrides::NONE;
+            if profile == "pf1" {
+                o.set(
+                    crate::theme::ThemeSlot::Background,
+                    Some(crate::render::frame::Color::Rgb(1, 2, 3)),
+                );
+            }
+            Ok(o)
+        }
+        fn startup(&mut self) -> RiftResult<Option<String>> {
+            self.calls.borrow_mut().push("startup".into());
+            Ok(self.pinned.clone())
+        }
+        fn catalogue(&mut self) -> RiftResult<Vec<Project>> {
+            self.calls.borrow_mut().push("catalogue".into());
+            Ok(vec![
+                Project {
+                    name: "a".into(),
+                    path: "/a".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+                Project {
+                    name: "x".into(),
+                    path: "/x".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+            ])
+        }
+    }
+
+    #[test]
+    fn a_profile_switch_reloads_the_whole_view_through_the_loader_seam() {
+        // `Enter` in the profile menu emits SelectProfile;
+        // the loop then reloads names, membership, selection, and the
+        // (profile, project) arrangement through the ONE injected loader.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![vec![
+            Event::Key(CanopyKey::Char('p')),
+            Event::Key(CanopyKey::Char('j')),
+            Event::Key(CanopyKey::Enter),
+            Event::Key(CanopyKey::Quit),
+        ]]);
+        let mut state = one_project_state();
+        let active = std::rc::Rc::new(std::cell::RefCell::new("pf0".to_string()));
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut loader = RecordingLoader {
+            active: std::rc::Rc::clone(&active),
+            calls: std::rc::Rc::clone(&calls),
+            pinned: None,
+        };
+        let persisted = std::cell::RefCell::new(Vec::new());
+        let persist_active = std::rc::Rc::clone(&active);
+        let mut on_persist = |op: &PersistOp| {
+            if let PersistOp::SelectProfile { profile } = op {
+                *persist_active.borrow_mut() = profile.clone();
+            }
+            persisted.borrow_mut().push(op.clone());
+            Ok(vec![])
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut on_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut loader,
+            &mut no_lister,
+        )
+        .unwrap();
+
+        assert_eq!(
+            *persisted.borrow(),
+            vec![PersistOp::SelectProfile {
+                profile: "pf1".into()
+            }],
+            "the switch is one superseding persist op"
+        );
+        assert_eq!(state.app.active_profile, "pf1", "the identity followed");
+        assert_eq!(
+            state
+                .app
+                .projects
+                .iter()
+                .map(|p| p.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/x"],
+            "membership swapped to the new profile's view"
+        );
+        let mut swapped = crate::layout_model::LayoutModel::default();
+        swapped.columns.swap(0, 1);
+        assert_eq!(
+            state.app.layout, swapped,
+            "the (profile, project) arrangement restored through the seam"
+        );
+        assert!(
+            calls.borrow().iter().any(|c| c == "layout:pf1:/x"),
+            "the layout read was profile-scoped: {:?}",
+            calls.borrow()
+        );
+        // The switch re-themed as part of the same reload.
+        assert_eq!(
+            state.theme().overrides().background,
+            Some(crate::render::frame::Color::Rgb(1, 2, 3)),
+            "colours swap with the view"
+        );
+    }
+
+    #[test]
+    fn entering_members_loads_through_the_loader_and_lands_the_lists() {
+        // The reducer only REQUESTS the lists; the loop reads the
+        // edited profile's view + the catalogue through the one seam.
+        let mut backend = MockBackend { presents: 0 };
+        let mut script = vec![
+            Event::Key(CanopyKey::Char('p')),
+            Event::Key(CanopyKey::Char('j')), // cursor → pf1
+            Event::Key(CanopyKey::Char('s')),
+        ];
+        // Settings cursor → the Projects row, then Enter opens the editor.
+        let projects_row = crate::profile_menu::SettingsRow::ALL
+            .iter()
+            .position(|r| matches!(r, crate::profile_menu::SettingsRow::Projects))
+            .unwrap();
+        for _ in 0..projects_row {
+            script.push(Event::Key(CanopyKey::Char('j')));
+        }
+        script.push(Event::Key(CanopyKey::Enter));
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let active = std::rc::Rc::new(std::cell::RefCell::new("pf0".to_string()));
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut loader = RecordingLoader {
+            active: std::rc::Rc::clone(&active),
+            calls: std::rc::Rc::clone(&calls),
+            pinned: None,
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut |_| Ok(vec![]),
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut loader,
+            &mut no_lister,
+        )
+        .unwrap();
+        assert!(
+            calls.borrow().iter().any(|c| c == "projects:pf1"),
+            "the member view read was profile-scoped: {:?}",
+            calls.borrow()
+        );
+        assert!(
+            calls.borrow().iter().any(|c| c == "catalogue"),
+            "the add stage's candidate source loaded: {:?}",
+            calls.borrow()
+        );
+        assert_eq!(
+            state
+                .app
+                .profile_menu
+                .members
+                .iter()
+                .map(|p| p.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/x"],
+            "the edited profile's view landed on the editor"
+        );
+        assert_eq!(state.app.profile_menu.catalogue.len(), 2);
+    }
+
+    #[test]
+    fn a_pinned_launch_shows_the_pinned_profile_and_writes_nothing() {
+        // The pin overrides the last-selected fold at launch —
+        // identity AND theme — and launch stays a pure read: zero persists.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![vec![Event::Key(CanopyKey::Quit)]]);
+        let mut state = one_project_state();
+        let active = std::rc::Rc::new(std::cell::RefCell::new("pf0".to_string()));
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut loader = RecordingLoader {
+            active: std::rc::Rc::clone(&active),
+            calls: std::rc::Rc::clone(&calls),
+            pinned: Some("pf1".to_string()),
+        };
+        let persisted = std::cell::RefCell::new(Vec::new());
+        let mut on_persist = |op: &PersistOp| {
+            persisted.borrow_mut().push(op.clone());
+            Ok(vec![])
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut on_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut loader,
+            &mut no_lister,
+        )
+        .unwrap();
+        assert_eq!(
+            state.app.active_profile, "pf1",
+            "the live pin wins the launch resolution"
+        );
+        assert_eq!(
+            state.theme().overrides().background,
+            Some(crate::render::frame::Color::Rgb(1, 2, 3)),
+            "the dashboard wears the pinned profile's theme from frame one"
+        );
+        assert!(
+            calls.borrow().iter().any(|c| c == "startup"),
+            "the pin loaded through the seam: {:?}",
+            calls.borrow()
+        );
+        assert!(
+            persisted.borrow().is_empty(),
+            "launch writes nothing: {:?}",
+            persisted.borrow()
+        );
+        assert!(
+            state.select_sync_pending,
+            "the deferred selected-sync stays armed until the first write"
+        );
+    }
+
+    #[test]
+    fn a_pinned_sessions_first_write_syncs_then_the_view_stays() {
+        // A pinned session's first persist batch prepends the
+        // synchronizing SelectProfile, so the fold's active aligns with the
+        // shown profile and a non-select op can never snap the view back.
+        let mut backend = MockBackend { presents: 0 };
+        let mut script = vec![Event::Key(CanopyKey::Char('p'))];
+        script.push(Event::Key(CanopyKey::Char('n')));
+        for ch in "qa".chars() {
+            script.push(Event::Key(CanopyKey::Char(ch)));
+        }
+        script.push(Event::Key(CanopyKey::Enter));
+        script.push(Event::Key(CanopyKey::Esc));
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let active = std::rc::Rc::new(std::cell::RefCell::new("pf0".to_string()));
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut loader = RecordingLoader {
+            active: std::rc::Rc::clone(&active),
+            calls: std::rc::Rc::clone(&calls),
+            pinned: Some("pf1".to_string()),
+        };
+        let persisted = std::cell::RefCell::new(Vec::new());
+        let persist_active = std::rc::Rc::clone(&active);
+        let mut on_persist = |op: &PersistOp| {
+            if let PersistOp::SelectProfile { profile } = op {
+                *persist_active.borrow_mut() = profile.clone();
+            }
+            persisted.borrow_mut().push(op.clone());
+            Ok(vec![])
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut on_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut loader,
+            &mut no_lister,
+        )
+        .unwrap();
+        assert_eq!(
+            *persisted.borrow(),
+            vec![
+                PersistOp::SelectProfile {
+                    profile: "pf1".into()
+                },
+                PersistOp::CreateProfile { name: "qa".into() },
+            ],
+            "the first write carries the deferred selected-sync FIRST"
+        );
+        assert_eq!(
+            state.app.active_profile, "pf1",
+            "the shown profile never snapped back to the pre-pin fold"
+        );
+        assert!(
+            !state.select_sync_pending,
+            "the sync is one-shot — later batches carry no prepend"
+        );
+    }
+
+    #[test]
+    fn mutating_verb_dispatches_only_after_confirm_and_reloads() {
+        let mut backend = MockBackend { presents: 0 };
+        // /rebuild → confirm overlay → Enter confirms → dispatch → reload.
+        let mut script = keys("rebuild");
+        script.push(Event::Key(CanopyKey::Enter)); // the confirm
+        script.push(Event::Key(CanopyKey::Esc)); // dismiss the results overlay
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let mut dispatcher = RecordingDispatcher {
+            calls: vec![],
+            code: 0,
+        };
+        let mut reloads = 0u32;
+        let mut reload = || {
+            reloads += 1;
+            Ok(vec![Project {
+                name: "a".into(),
+                path: "/r/a".into(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }])
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut dispatcher,
+            &mut reload,
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        )
+        .unwrap();
+        assert_eq!(dispatcher.calls.len(), 1);
+        assert_eq!(reloads, 1, "a successful mutation reloads the registry");
+    }
+
+    #[test]
+    fn cancelled_confirm_dispatches_nothing() {
+        let mut backend = MockBackend { presents: 0 };
+        let mut script = keys("gc");
+        script.push(Event::Key(CanopyKey::Esc)); // cancel the confirm
+        script.push(Event::Key(CanopyKey::Quit));
+        let mut src = ScriptedEvents::new(vec![script]);
+        let mut state = one_project_state();
+        let mut dispatcher = RecordingDispatcher {
+            calls: vec![],
+            code: 0,
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut dispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        )
+        .unwrap();
+        assert!(dispatcher.calls.is_empty(), "cancel dispatches nothing");
+        assert!(state.app.overlay.is_none());
+    }
+
+    #[test]
+    fn quit_event_breaks_loop() {
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![vec![Event::Key(CanopyKey::Quit)]]);
+        let mut state = ready_state();
+        let r = event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        );
+        assert!(r.is_ok());
+        assert!(state.app.quit);
+        assert!(backend.presents >= 1);
+    }
+
+    #[test]
+    fn dirty_gating_coalesces_redraws() {
+        // Two keys in ONE poll batch must produce ONE redraw, not two.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![
+            vec![Event::Key(CanopyKey::Down), Event::Key(CanopyKey::Down)],
+            vec![Event::Key(CanopyKey::Quit)],
+        ]);
+        let mut state = AppState::new(
+            vec![
+                Project {
+                    name: "a".into(),
+                    path: "/a".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+                Project {
+                    name: "b".into(),
+                    path: "/b".into(),
+                    status: crate::ProjectStatus::Idle,
+                    kind: EntryKind::Repo,
+                },
+            ],
+            Size::new(80, 24),
+        );
+        state.app.splash.skip();
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        )
+        .unwrap();
+        // initial + one per batch (2 batches) = 3 presents.
+        assert_eq!(backend.presents, 3);
+    }
+
+    #[test]
+    fn idle_tick_does_not_redraw() {
+        // An empty poll batch (tick) followed by quit: the tick must NOT redraw.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![vec![], vec![Event::Key(CanopyKey::Quit)]]);
+        let mut state = ready_state();
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        )
+        .unwrap();
+        // initial render + render after the quit key = 2; the idle tick added none.
+        assert_eq!(backend.presents, 2);
+    }
+
+    #[test]
+    fn tween_polls_fast_then_idle_stays_slow() {
+        use crate::col3::{RecallView, SavingsData};
+        use crate::state::{FeedPayload, FeedUpdate};
+        // The call chart is what animates on this card: the savings figures
+        // are headlines over one window and snap whole.
+        let feed = |rate: Vec<f64>| {
+            Event::Feed(FeedUpdate {
+                project: "/r/a".into(),
+                payload: FeedPayload::Recall {
+                    savings: RecallView::Data(SavingsData {
+                        target_pct: Some(90),
+                        ..SavingsData::default()
+                    }),
+                    calls: RecallView::Data(crate::col3::CallsData {
+                        total: 3,
+                        window_end_ms: 1_800_000,
+                        series: vec![crate::col3::ChannelCallSeries {
+                            channel: "hook_inject".into(),
+                            last_call_at: 1_799_000,
+                            rate,
+                        }],
+                    }),
+                },
+            })
+        };
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = TimeoutRecordingEvents {
+            steps: std::collections::VecDeque::from(vec![
+                vec![feed(vec![1.0, 2.0])], // placeholder→Data: snaps (still idle)
+                vec![feed(vec![5.0, 6.0])], // Data→Data: arms the tween
+                vec![],                     // a settling frame → fast poll
+                vec![Event::Key(CanopyKey::Quit)],
+            ]),
+            seen: Vec::new(),
+        };
+        let mut state = AppState::new(
+            vec![Project {
+                name: "a".into(),
+                path: "/r/a".into(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }],
+            Size::new(80, 24),
+        );
+        state.app.splash.skip();
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        )
+        .unwrap();
+        // Before any tween, the loop polls at the idle cadence…
+        assert_eq!(src.seen[0], POLL_INTERVAL);
+        assert_eq!(src.seen[1], POLL_INTERVAL);
+        // …and once a Data→Data feed lands, it polls fast to animate the settle.
+        assert!(
+            src.seen.contains(&FRAME_INTERVAL),
+            "a tween must trigger fast polling, saw {:?}",
+            src.seen
+        );
+    }
+
+    #[test]
+    fn startup_sweep_fast_polls_then_settles_and_never_re_fires() {
+        // Once the sweep is armed, the loop fast-polls (FRAME_INTERVAL)
+        // until it settles, then drops back to the idle cadence; the one-shot
+        // sweep never re-fires on a headless (never-armed) frame.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = TimeoutRecordingEvents {
+            steps: std::collections::VecDeque::from(vec![
+                vec![], // a sweeping frame → fast poll
+                vec![], // still sweeping → fast poll
+                vec![Event::Key(CanopyKey::Quit)],
+            ]),
+            seen: Vec::new(),
+        };
+        let mut state = one_project_state();
+        state.arm_startup_sweep();
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        )
+        .unwrap();
+        assert!(
+            src.seen.first() == Some(&FRAME_INTERVAL),
+            "the armed sweep fast-polls its reveal, saw {:?}",
+            src.seen
+        );
+    }
+
+    #[test]
+    fn resize_updates_size() {
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![
+            vec![Event::Resize(Size::new(120, 40))],
+            vec![Event::Key(CanopyKey::Quit)],
+        ]);
+        let mut state = ready_state();
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        )
+        .unwrap();
+        assert_eq!(state.size, Size::new(120, 40));
+    }
+
+    /// A backend that records the drawn text of every presented frame, so a
+    /// loop test can prove WHAT the operator saw, not just what state held.
+    struct RecordingBackend {
+        frames: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+    impl RenderBackend for RecordingBackend {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::empty()
+        }
+        fn present(&mut self, frame: &Frame) -> Result<(), RenderError> {
+            let mut text = String::new();
+            for y in 0..frame.height() {
+                for x in 0..frame.width() {
+                    text.push(frame.get(x, y).map_or(' ', |c| c.ch));
+                }
+                text.push('\n');
+            }
+            self.frames.borrow_mut().push(text);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_lister_seam_is_invoked_once_and_lands_before_the_next_frame() {
+        // the destination explorer: the reducer requests a directory, the LOOP walks it, and
+        // the reply lands in the SAME iteration — so traversal never presents a
+        // loading state. Proven end to end: the very next frame shows the rows.
+        let frames = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut backend = RecordingBackend {
+            frames: frames.clone(),
+        };
+        let mut src = ScriptedEvents::new(vec![
+            vec![Event::Key(CanopyKey::Char('a'))],
+            vec![Event::Key(CanopyKey::Quit)],
+        ]);
+        let mut state = ready_state();
+        state.size = Size::new(120, 40);
+        state.app.home_dir = Some("/home/dev".into());
+        let mut asked: Vec<std::path::PathBuf> = Vec::new();
+        let mut lister = |path: &std::path::Path| {
+            asked.push(path.to_path_buf());
+            crate::explorer::DirListing {
+                path: path.to_path_buf(),
+                entries: vec![crate::explorer::ExplorerEntry {
+                    name: "alpha".into(),
+                    is_dir: true,
+                    tag: None,
+                }],
+                omitted: 0,
+                error: None,
+            }
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut lister,
+        )
+        .unwrap();
+
+        assert_eq!(
+            asked,
+            vec![std::path::PathBuf::from("/home/dev")],
+            "the lister is invoked exactly once, with the requested directory"
+        );
+        assert_eq!(
+            state.app.explorer.cwd,
+            std::path::PathBuf::from("/home/dev"),
+            "the listing landed on the state"
+        );
+        assert!(frames
+            .borrow()
+            .iter()
+            .any(|f| f.contains("alpha/") && f.contains("add project")));
+    }
+
+    #[test]
+    fn a_failed_listing_lands_as_an_inline_error_through_the_loop() {
+        // The stay-put contract, proven through the loop rather than by unit:
+        // the walk fails, the operator keeps the seeded directory and gets a
+        // reason — the explorer never ejects them.
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![
+            vec![Event::Key(CanopyKey::Char('a'))],
+            vec![Event::Key(CanopyKey::Quit)],
+        ]);
+        let mut state = ready_state();
+        state.app.home_dir = Some("/home/dev".into());
+        let mut lister = |path: &std::path::Path| crate::explorer::DirListing {
+            path: path.to_path_buf(),
+            entries: vec![],
+            omitted: 0,
+            error: Some("permission denied".into()),
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut no_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut lister,
+        )
+        .unwrap();
+        assert_eq!(
+            state.app.explorer.error.as_deref(),
+            Some("permission denied")
+        );
+        assert_eq!(
+            state.app.explorer.cwd,
+            std::path::PathBuf::from("/home/dev"),
+            "the seeded directory survived the failure"
+        );
+        assert!(state.app.explorer.entries.is_empty());
+    }
+
+    #[test]
+    fn add_project_effect_invokes_on_add() {
+        let mut backend = MockBackend { presents: 0 };
+        let mut src = ScriptedEvents::new(vec![
+            // `a` browses, `i` falls back to the typed flow (the destination explorer).
+            vec![
+                Event::Key(CanopyKey::Char('a')),
+                Event::Key(CanopyKey::Char('i')),
+            ],
+            "/tmp/x"
+                .chars()
+                .map(|c| Event::Key(CanopyKey::Char(c)))
+                .collect(),
+            vec![Event::Key(CanopyKey::Enter)],
+            vec![Event::Key(CanopyKey::Quit)],
+        ]);
+        let mut state = ready_state();
+        let mut seen: Vec<String> = Vec::new();
+        let mut on_persist = |op: &PersistOp| {
+            let PersistOp::AddProject { path } = op else {
+                return Ok(vec![]);
+            };
+            seen.push(path.clone());
+            Ok(vec![Project {
+                name: "x".into(),
+                path: path.clone(),
+                status: crate::ProjectStatus::Idle,
+                kind: EntryKind::Repo,
+            }])
+        };
+        event_loop(
+            &mut backend,
+            &mut src,
+            &mut state,
+            &mut on_persist,
+            &mut |_| {},
+            &mut crate::NullProjectSettingsManager,
+            &mut crate::dispatch::NullDispatcher,
+            &mut || Ok(vec![]),
+            &mut crate::profile::NullProfileLoader,
+            &mut no_lister,
+        )
+        .unwrap();
+        assert_eq!(seen, vec!["/tmp/x".to_string()]);
+        assert!(
+            matches!(&state.app.overlay, Some(crate::dispatch::Overlay::Notice(m))
+                if m.body.iter().any(|l| l.contains("registered /tmp/x"))),
+            "the add success opened a Notice: {:?}",
+            state.app.overlay
+        );
+        // The add landed on the new row and deferred the setup-wizard
+        // decision to its first status read (the reducer's test covers the
+        // decision itself).
+        assert_eq!(
+            state.app.selected_project().map(|p| p.path.as_str()),
+            Some("/tmp/x")
+        );
+        assert_eq!(state.pending_setup_prompt.as_deref(), Some("/tmp/x"));
+    }
+}

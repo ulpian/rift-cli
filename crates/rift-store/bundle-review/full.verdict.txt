@@ -1,0 +1,32 @@
+VERDICT  PROPERTY                                    DETAIL
+PASS     frame.header                                rift-bundle/1
+PASS     frame.parts                                 manifest=632B, segment=664B, gitbundle=2521B
+PASS     frame.no_trailing_bytes                     
+PASS     manifest.version                            schema_version=1
+PASS     manifest.field_set_and_order                schema_version,repo_id,from_cursor,to_cursor,ref_list,chain_head,segment_sha256,gitbundle_sha256
+PASS     manifest.canonical_bytes(round-trip)        byte-identical
+PASS     digest.3_segment_sha256                     matches
+PASS     digest.3_gitbundle_sha256                   matches
+PASS     segment.1_seq_arithmetic                    to.seq=3 from.seq=0 links=3
+PASS     segment.2_first_link_attaches               from==ORIGIN so first prev must be `-`
+PASS     segment.3_prev_chaining                     2 inner links checked
+PASS     segment.4_to_is_last_link                   
+PASS     agree.5_from_cursor                         rift-cursor/1:0: vs rift-cursor/1:0:
+PASS     agree.5_to_cursor                           rift-cursor/1:3:9af57b9e80db9ce657c69728b546354d5afb27f48e17a4c8568e553799230d9e vs rift-cursor/1:3:9af57b9e80db9ce657c69728b546354d5afb27f48e17a4c8568e553799230d9e
+PASS     agree.5_chain_head                          manifest=9af57b9e80db9ce657c69728b546354d5afb27f48e17a4c8568e553799230d9e segment_last=9af57b9e80db9ce657c69728b546354d5afb27f48e17a4c8568e553799230d9e
+PASS     refs.6_legal_names                          2 refs
+PASS     refs.6_legal_oids                           all 40/64 lowercase hex
+PASS     refs.unique_names                           
+INFO     refs.sorted_by_name(GUESS14)                sorted
+PASS     pure.steps_1_6_offline                      no git/store/clock/network used up to here
+PASS     git.7_bundle_intact                         
+PASS     git.ref_list_matches_bundle_heads(GUESS13)  bundle heads=2 manifest ref_list=2
+PASS     git.8_objects_present                       all targets resolve
+PASS     git.9_fast_forward_only                     absent=2 already_present=0 fast-forward=0
+PASS     chain_ref.trailers_present                  3 chain commits, 0 missing a Rift-Chain-Checkpoint trailer
+PASS     chain_ref.positions_match_segment           3 link(s) sit at their claimed chain_seq
+PASS     chain_ref.to_cursor_position                to.chain_seq=3 of 3 chain entries
+
+26 pass, 0 fail, 1 info
+ACCEPTED
+full exit=0

@@ -1,0 +1,55 @@
+[package]
+name = "rift-canopy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "rift-canopy TUI: 3-column dashboard, nic-gauge, slash-command palette, splash — behind a RenderBackend seam with an ASCII fallback."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The first-party xRenderEngine terminal + 2D TUI layers plug in behind the
+# RenderBackend seam (live raw-mode loop, panels, widgets); the ASCII fallback is
+# always available. We depend on the term/core/tui layers directly rather than
+# the `xre-rs` facade, which would also pull the 3D engine + ECS + scene loader.
+xre = ["dep:xre-core", "dep:xre-term", "dep:xre-tui", "dep:xre-render", "dep:crossterm"]
+# Off by default: the Full3d splash tier + legacy hi-res graph tier. Standard
+# `xre` already carries xre-render for chart CellShaders; this feature also
+# re-enables xre-tui's scene/render layer.
+xre-3d = ["xre", "xre-tui/render"]
+# Reserved (off by default): parallel rasterization (rayon) for the 3D raster.
+parallel = ["xre", "xre-tui/parallel", "xre-render?/parallel"]
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+xre-core = { workspace = true, optional = true }
+xre-term = { workspace = true, optional = true }
+xre-tui = { workspace = true, optional = true }
+xre-render = { workspace = true, optional = true }
+# Splash preferences (seen_splash / mode / reduced_motion) persist as a global
+# per-user TOML; the registry crate provides the config-dir resolver we reuse.
+rift-registry = { version = "0.0.1", path = "../rift-registry" }
+toml = { workspace = true }
+serde = { workspace = true }
+
+# The Windows console probe (`render::caps::detect`): the console is asked to
+# enable VT processing and reports whether it did — the fact the env-only probe
+# in xre-term cannot learn on Windows. Off Windows this table is inert.
+[target.'cfg(windows)'.dependencies]
+crossterm = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+insta = { workspace = true }
+criterion = { workspace = true }
+
+# Documents the Full3d ≤ 8 ms/frame budget (`director::FRAME_BUDGET`)
+# that the runtime probe enforces by downgrading resolution, then tier.
+[[bench]]
+name = "splash_frame"
+harness = false

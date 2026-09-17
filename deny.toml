@@ -1,0 +1,78 @@
+# cargo-deny — the supply-chain gate, run in CI: advisories, license policy,
+# banned crates, and which registries a dependency may come from.
+[advisories]
+version = 2
+yanked = "deny"
+# RUSTSEC-2025-0141: `bincode` 1.3.3 is unmaintained, not vulnerable. Syntect
+# 5.3.0's locked `default-syntaxes` feature uses it to decode Syntect's own
+# bundled syntax dump; Rift never feeds untrusted bytes through bincode. Syntect
+# exposes no supported feature composition that keeps the required defaults and
+# removes this dependency. Re-evaluate with each Syntect upgrade.
+#
+# RUSTSEC-2026-0189 no longer needs an ignore: the advisory-bearing dependency
+# was deleted outright — the stdio-only server transport it gated, and the crate
+# itself — rather than migrated across its pre-1.0 to 1.4 API break. Deleting it
+# is the exit condition the original ignore named, so the ignore went away in the
+# same commit as the dependency.
+#
+# RUSTSEC-2026-0192: ttf-parser 0.25.1 is unmaintained, not vulnerable, and the
+# advisory itself says no safe upgrade exists. It arrives on the document path,
+# ttf-parser <- lopdf <- pdf-inspector <- anydoc, and it is the only advisory in
+# that whole graph -- everything else there is clean, licences included, with no
+# exception. Dropping the format that pulls it is not on the table: PDF support
+# is the one thing the size budget may never trade away. Re-evaluate when
+# pdf-inspector moves off ttf-parser (the advisory names skrifa).
+#
+# NOTE: when the deferred `turso` dependency is wired back, it pulls
+# advisory-bearing transitives that must be ignored HERE and in
+# `.cargo/audit.toml` (they reach the lockfile only via that
+# optional, default-off feature): RUSTSEC-2026-0183 / -0184 (`git2` unsound — a
+# build-dep of turso's `built`; unsound APIs never called) and RUSTSEC-2024-0436
+# (`paste` unmaintained — a `turso_core` proc-macro).
+ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2026-0192"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"          # no wildcard version reqs in our own manifests
+allow = []
+deny = [
+  { name = "openssl-sys" }, # prefer rustls; avoid system OpenSSL
+]
+
+[licenses]
+version = 2
+# Permissive licenses only in the blanket allow. Copyleft is handled by the
+# annotated per-crate exceptions below, never by widening this list — that way
+# every non-permissive dependency is a deliberate, reviewed entry.
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.9
+# The five deferred pins for native file search and document conversion
+# (neo_frizbee, fff-query-parser, fff-grep, ignore, anydoc) need NO exception:
+# their complete resolved graph at the exact pinned versions was read against
+# this same policy — `cargo deny check licenses` in a throwaway crate carrying
+# these five and this file — and cleared the permissive allow list above with
+# zero errors and no exception. No crate count is quoted: it varies with how
+# the probe is built, so it would be a figure a later reviewer cannot match.
+# No crate references them yet, so they are not in Cargo.lock and this run does
+# not see them; re-run the check in the commit that wires each one.
+exceptions = [
+  # `webpki-roots` ships the Mozilla CA-certificate *data* set under the Community
+  # Data License Agreement – Permissive 2.0 (a permissive *data* license, not code).
+  # It is pulled by `ureq`'s rustls root store ONLY on rift-recall-eval's
+  # real-model feature — the owner-invoked paid eval transport.
+  { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+  # `uluru` (via `gix-pack`) is MPL-2.0 — weak, file-level copyleft acceptable for
+  # a linked dependency; it imposes no obligation on our own source. Scoped so any
+  # FUTURE MPL dependency is a conscious, reviewed addition rather than a silent pass.
+  { name = "uluru", allow = ["MPL-2.0"] },
+  # `notify` (the wake-signal watcher, rift-canopy-data only) is
+  # CC0-1.0 — a public-domain dedication, MORE permissive than the blanket
+  # allow; it sits in an exception only because the allow list is deliberately
+  # never widened. Scoped to this one crate.
+  { name = "notify", allow = ["CC0-1.0"] },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

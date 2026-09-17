@@ -1,0 +1,1 @@
+refs/{retired}/checkpoints/01/01JQZ8T9WQKX3M7VN2P4RB6CDE per-checkpoint-refs ULID id; canon_version present and 0; merkle_root deliberately NOT derivable from its events, so this fixture is the mismatch arm — the realistic epoch-0 case

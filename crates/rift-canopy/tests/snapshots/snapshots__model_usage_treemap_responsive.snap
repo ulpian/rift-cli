@@ -1,0 +1,32 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: output
+---
+expanded
+╭─ models · Σ 222 calls ───────────────────────╮
+│+--------------------------------------------+│
+│|A######################B####################|│
+│|#######################=####################|│
+│|#######################C***************D****|│
+│|#######################=###############=####|│
+│+--------------------------------------------+│
+│A claude-opus-4-1               ×120 · runtime│
+│B gpt-5-codex                    ×62 · runtime│
+│C gemini-2.5-pro                 ×31 · runtime│
+│D local-qwen                      ×9 · runtime│
+│E configured-next              ×0 · configured│
+╰──────────────────────────────────────────────╯
+
+fallback
+╭─ models · Σ 222 ca ╮
+│A cla ×120 · runtime│
+│B gpt- ×62 · runtime│
+│C gemi ×31 · runtime│
+│D local ×9 · runtime│
+│E co ×0 · configured│
+╰────────────────────╯
+
+collapsed
+╭─ models · Σ 222 calls ───────╮
+│5 models · 222 calls          │
+╰──────────────────────────────╯

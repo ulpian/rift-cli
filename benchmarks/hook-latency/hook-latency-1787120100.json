@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "harness_version": "0.0.1",
+  "generated_at_unix": 1787120100,
+  "host": {
+    "os": "macos",
+    "arch": "x86_64",
+    "logical_cpus": 8,
+    "rss_probe": "n/a (git-latency sweep)"
+  },
+  "subject": {
+    "state": "present",
+    "binary": "/Users/ulpian/Documents/codebase/rift/rift-lane-substrate/target/release/rift",
+    "version": "rift 0.0.1",
+    "source": "repo target/release",
+    "binary_mtime_unix": 1787120056
+  },
+  "source_clock": {
+    "newest_unix": 1787119840,
+    "newest_path": "crates/rift-shadow/src/lib.rs",
+    "files": 302,
+    "newest_subsec_nanos": 33359329
+  },
+  "git_version": "git version 2.50.1 (Apple Git-155)",
+  "protocol": {
+    "warmup": 3,
+    "iterations": 11
+  },
+  "budget_ms": 100,
+  "arms": [
+    {
+      "arm": {
+        "id": "A_bare",
+        "title": "bare commit, no hooks installed (control)",
+        "capture": "off",
+        "include": null
+      },
+      "stats": {
+        "samples": 11,
+        "failures": 0,
+        "min_ns": 35307142,
+        "p50_ns": 40899775,
+        "p95_ns": 46254531,
+        "max_ns": 46254531,
+        "mean_ns": 40619384,
+        "units_per_iteration": null
+      },
+      "error": null,
+      "oracles": {
+        "projections": {},
+        "trailer_present": false,
+        "verify_checkpoints": null,
+        "verify_shards": null,
+        "captured_events": null,
+        "explain_files_read": null
+      },
+      "phases": {}
+    },
+    {
+      "arm": {
+        "id": "B0_idle",
+        "title": "hooks installed, nothing opted in, no live session",
+        "capture": "idle",
+        "include": null
+      },
+      "stats": null,
+      "error": "`/Users/ulpian/Documents/codebase/rift/rift-lane-substrate/target/release/rift init --no-provision --no-recall` exited with Some(2): error: unexpected argument '--no-provision' found\n\nUsage: rift init [OPTIONS]\n\nFor more information, try '--help'.\n",
+      "oracles": {
+        "projections": {},
+        "trailer_present": false,
+        "verify_checkpoints": null,
+        "verify_shards": null,
+        "captured_events": null,
+        "explain_files_read": null
+      },
+      "phases": {}
+    },
+    {
+      "arm": {
+        "id": "B1_live",
+        "title": "hooks installed, a session live at commit time",
+        "capture": "live",
+        "include": null
+      },
+      "stats": null,
+      "error": "`/Users/ulpian/Documents/codebase/rift/rift-lane-substrate/target/release/rift init --no-provision --no-recall` exited with Some(2): error: unexpected argument '--no-provision' found\n\nUsage: rift init [OPTIONS]\n\nFor more information, try '--help'.\n",
+      "oracles": {
+        "projections": {},
+        "trailer_present": false,
+        "verify_checkpoints": null,
+        "verify_shards": null,
+        "captured_events": null,
+        "explain_files_read": null
+      },
+      "phases": {}
+    },
+    {
+      "arm": {
+        "id": "C1_include_50k",
+        "title": "live session + `.worktreeinclude` over 8 files (51200 B read, 52696 B handed on, 1.03x)",
+        "capture": "live",
+        "include": {
+          "files": 8,
+          "lines_per_file": 100,
+          "line_width": 63
+        }
+      },
+      "stats": null,
+      "error": "`/Users/ulpian/Documents/codebase/rift/rift-lane-substrate/target/release/rift init --no-provision --no-recall` exited with Some(2): error: unexpected argument '--no-provision' found\n\nUsage: rift init [OPTIONS]\n\nFor more information, try '--help'.\n",
+      "oracles": {
+        "projections": {},
+        "trailer_present": false,
+        "verify_checkpoints": null,
+        "verify_shards": null,
+        "captured_events": null,
+        "explain_files_read": null
+      },
+      "phases": {}
+    },
+    {
+      "arm": {
+        "id": "C2_include_250k",
+        "title": "live session + `.worktreeinclude` over 40 files (256000 B read, 263480 B handed on, 1.03x)",
+        "capture": "live",
+        "include": {
+          "files": 40,
+          "lines_per_file": 100,
+          "line_width": 63
+        }
+      },
+      "stats": null,
+      "error": "`/Users/ulpian/Documents/codebase/rift/rift-lane-substrate/target/release/rift init --no-provision --no-recall` exited with Some(2): error: unexpected argument '--no-provision' found\n\nUsage: rift init [OPTIONS]\n\nFor more information, try '--help'.\n",
+      "oracles": {
+        "projections": {},
+        "trailer_present": false,
+        "verify_checkpoints": null,
+        "verify_shards": null,
+        "captured_events": null,
+        "explain_files_read": null
+      },
+      "phases": {}
+    },
+    {
+      "arm": {
+        "id": "C3_include_1mib",
+        "title": "live session + `.worktreeinclude` over 16 files (1048576 B read, 1066352 B handed on, 1.02x)",
+        "capture": "live",
+        "include": {
+          "files": 16,
+          "lines_per_file": 1024,
+          "line_width": 63
+        }
+      },
+      "stats": null,
+      "error": "`/Users/ulpian/Documents/codebase/rift/rift-lane-substrate/target/release/rift init --no-provision --no-recall` exited with Some(2): error: unexpected argument '--no-provision' found\n\nUsage: rift init [OPTIONS]\n\nFor more information, try '--help'.\n",
+      "oracles": {
+        "projections": {},
+        "trailer_present": false,
+        "verify_checkpoints": null,
+        "verify_shards": null,
+        "captured_events": null,
+        "explain_files_read": null
+      },
+      "phases": {}
+    }
+  ]
+}

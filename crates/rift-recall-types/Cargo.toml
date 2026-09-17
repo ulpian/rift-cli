@@ -1,0 +1,21 @@
+[package]
+name = "rift-recall-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared recall types: content-addressed handles, the four-state response envelope, trust tags."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+serde = { workspace = true }
+# `full.jsonl` records carry a redacted JSON payload (identity fields only).
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

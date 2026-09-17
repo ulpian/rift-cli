@@ -1,0 +1,46 @@
+---
+source: xtask/src/lib.rs
+expression: rendered
+---
+rift -> rift-agent, rift-agent-install, rift-canopy, rift-canopy-data, rift-config, rift-core, rift-crypto, rift-git, rift-hashchain, rift-recall-doc, rift-recall-ledger, rift-recall-policy, rift-recall-search, rift-recall-serve, rift-recall-substrate, rift-recall-types, rift-registry, rift-shadow, rift-store, rift-tokens
+rift-agent -> rift-core, rift-recall-types
+rift-agent-antigravity -> rift-agent, rift-core
+rift-agent-claude-code -> rift-agent, rift-core
+rift-agent-codex -> rift-agent, rift-core
+rift-agent-copilot -> rift-agent, rift-core
+rift-agent-cursor -> rift-agent, rift-core
+rift-agent-factory-droid -> rift-agent, rift-core
+rift-agent-gemini -> rift-agent, rift-core
+rift-agent-install -> rift-core, rift-shadow-hooks, rift-store
+rift-agent-ollama -> rift-agent, rift-core
+rift-agent-opencode -> rift-agent, rift-core
+rift-canopy -> rift-core, rift-registry
+rift-canopy-data -> rift-agent-install, rift-canopy, rift-config, rift-core, rift-git, rift-nic-gauge, rift-recall-ledger, rift-recall-policy, rift-recall-substrate, rift-recall-types, rift-shadow-attribution, rift-shadow-cost, rift-store
+rift-config -> rift-core
+rift-core -> (none)
+rift-crypto -> rift-core
+rift-git -> rift-core
+rift-hashchain -> rift-core
+rift-memd -> rift-config, rift-core, rift-git, rift-recall-eval, rift-recall-events, rift-recall-ledger, rift-recall-policy, rift-recall-serve, rift-recall-substrate, rift-recall-types, rift-store
+rift-nic-gauge -> rift-core
+rift-recall-doc -> rift-core
+rift-recall-eval -> rift-config, rift-core, rift-recall-events, rift-recall-ledger, rift-recall-pack, rift-recall-policy, rift-recall-serve, rift-recall-substrate, rift-recall-types, rift-store, rift-tokens
+rift-recall-events -> rift-core
+rift-recall-ledger -> rift-core, rift-recall-rank, rift-recall-substrate, rift-recall-types, rift-recall-validity, rift-store, rift-tokens
+rift-recall-pack -> rift-core, rift-recall-types, rift-recall-validity, rift-tokens
+rift-recall-policy -> rift-config, rift-core, rift-recall-types
+rift-recall-rank -> rift-core, rift-recall-types
+rift-recall-search -> rift-agent, rift-config, rift-core
+rift-recall-serve -> rift-core, rift-recall-events, rift-recall-ledger, rift-recall-pack, rift-recall-policy, rift-recall-rank, rift-recall-substrate, rift-recall-types, rift-recall-validity, rift-store, rift-tokens
+rift-recall-substrate -> rift-core, rift-recall-types
+rift-recall-types -> rift-core
+rift-recall-validity -> rift-core, rift-recall-types
+rift-registry -> rift-core
+rift-shadow -> rift-core, rift-git, rift-hashchain, rift-recall-substrate, rift-recall-types, rift-shadow-attribution, rift-shadow-cost, rift-shadow-hooks, rift-shadow-redact, rift-store
+rift-shadow-attribution -> rift-core, rift-git
+rift-shadow-cost -> rift-core, rift-tokens
+rift-shadow-hooks -> rift-agent, rift-agent-antigravity, rift-agent-claude-code, rift-agent-codex, rift-agent-copilot, rift-agent-cursor, rift-agent-factory-droid, rift-agent-gemini, rift-agent-ollama, rift-agent-opencode, rift-core, rift-hashchain
+rift-shadow-redact -> rift-core
+rift-store -> rift-core, rift-crypto, rift-hashchain
+rift-tokens -> (none)
+xtask -> rift-agent, rift-agent-claude-code, rift-core, rift-recall-validity, rift-tokens

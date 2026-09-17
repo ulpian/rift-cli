@@ -1,0 +1,10 @@
+{
+  "version": 0,
+  "sweep_config_version": 1,
+  "code_version": "0.0.1",
+  "provenance": "pre-sweep-conservative-fallback",
+  "per_model": [],
+  "fallback_placement": "Duplicated",
+  "fallback_max_prior_sessions": 2,
+  "fallback_tail_repeat_tokens": 150
+}

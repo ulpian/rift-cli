@@ -1,0 +1,18 @@
+---
+source: crates/rift-recall-pack/src/tests.rs
+expression: tight.render()
+---
+CRITICAL: evidence:1's last provenance was reverted - verify before reuse
+file: evidence:892@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa changed:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+file: evidence:475@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa changed:
+fn work() {
+    // a hunk of changed lines
+    do_the_thing();
+}
+file: evidence:614@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa available (budget_exhausted)
+budget: 3 item(s) dropped
+CRITICAL: evidence:1's last provenance was reverted - verify before reuse

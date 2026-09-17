@@ -1,0 +1,45 @@
+[package]
+name = "rift-recall-serve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded recall tool surface + budget/policy middleware, served over hook injection and CLI skills; transport-independent dispatcher seam."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+rift-recall-policy = { version = "0.0.1", path = "../rift-recall-policy" }
+rift-recall-events = { version = "0.0.1", path = "../rift-recall-events" }
+# The handlers query the recall.db projection + the read-only substrate, rank the
+# results, build four-state envelopes, and compile packs. (All acyclic: none of
+# these depend on rift-recall-serve.)
+rift-store = { version = "0.0.1", path = "../rift-store" }
+rift-recall-ledger = { version = "0.0.1", path = "../rift-recall-ledger" }
+rift-recall-validity = { version = "0.0.1", path = "../rift-recall-validity" }
+rift-recall-pack = { version = "0.0.1", path = "../rift-recall-pack" }
+rift-recall-rank = { version = "0.0.1", path = "../rift-recall-rank" }
+rift-recall-substrate = { version = "0.0.1", path = "../rift-recall-substrate", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Honest token accounting (returned/avoided) for every content-bearing response.
+rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
+
+[dev-dependencies]
+insta = { workspace = true }
+rift-config = { version = "0.0.1", path = "../rift-config" }
+# The one mint of `RedactedBytes`. A basis snapshot is durable content, so the
+# fixtures that write one seal it the way production does rather than through
+# a test-only door — there is no test-only door, and this dependency is how
+# that stays true.
+rift-shadow-redact = { version = "0.0.1", path = "../rift-shadow-redact" }
+proptest = { workspace = true }
+tokio = { workspace = true }
+# A real checkout for the fixtures that ask what a file is NOW (the current
+# side of a held-revision diff is the working tree, not the projection).
+tempfile = { workspace = true }

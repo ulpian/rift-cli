@@ -1,0 +1,4 @@
+{"content":[{"text":"the digest module is not declared in lib.rs; locate every module declaration and report which one is absent","type":"text"}],"ts":"2026-08-01T00:00:06Z","type":"user","v":1}
+{"content":[{"id":"toolu_01GREPA","input":{"path":"crates/rift-shadow/src/lib.rs","pattern":"^(pub )?mod "},"name":"Grep","type":"tool_use"}],"id":"msg_01SUBAGENTA","input_tokens":800,"output_tokens":24,"ts":"2026-08-01T00:00:07Z","type":"assistant","v":1}
+{"content":[{"result":"mod artifact_bridge;\nmod backend;\nmod bridge;\nmod commit_capture;\nmod condense;\nmod executor;\nmod ids;\nmod inclusion;\nmod legacy_import;\nmod parity;\nmod project;\nmod soak;\nmod transcript;\nmod turn_boundary;\n","tool_use_id":"toolu_01GREPA","type":"tool_result"}],"ts":"2026-08-01T00:00:08Z","type":"user","v":1}
+{"content":[{"text":"`digest` is the one absent declaration.","type":"text"}],"id":"msg_01SUBAGENTB","ts":"2026-08-01T00:00:09Z","type":"assistant","v":1}

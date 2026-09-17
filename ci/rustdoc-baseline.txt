@@ -1,0 +1,21 @@
+# ci/rustdoc-baseline.txt — the rustdoc warning sites this tree still carries.
+#
+# SHRINK-ONLY, in the shape of ci/proptest-newline-baseline.txt: `xtask
+# rustdoc-baseline` runs `cargo doc --workspace --no-deps --all-features
+# --message-format=json` (with RUSTDOCFLAGS unset, so warnings stay warnings
+# and can be enumerated), keys every warning as `<repo-relative file>\t<rustdoc
+# message>` — no line number, because lines move and a site is a claim about a
+# file, not a coordinate — and holds BOTH arms: a site not listed here is a
+# violation ("fix the doc comment"), and a listed site that no longer warns is
+# a violation ("delete the line — this baseline only shrinks"). It cannot
+# become a parking lot.
+#
+# The `docs` CI job runs `cargo doc` with `-D warnings` AND this subcommand;
+# with an empty list the two agree exactly. The list is empty because the
+# 2026-08-29 clean-up resolved all 141 sites as doc-comment-only edits.
+# The owner decided on 2026-08-30 that the file exists anyway, so
+# a future warning that cannot be fixed in the same commit has one honest home
+# — here, by name — instead of a blanket allow.
+#
+# Format: one site per line, `file<TAB>message`. Comments and blank lines are
+# ignored. Sorted; duplicates are a violation.

@@ -1,0 +1,22 @@
+---
+source: crates/rift-recall-serve/src/tests.rs
+expression: "render_golden_pack(&store, &reader, 1000)"
+---
+[CriticalTop]
+CRITICAL: evidence:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa's last provenance was reverted - verify before reuse
+CRITICAL: evidence:2@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb's last provenance was reverted - verify before reuse
+[Changed]
+file: evidence:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa changed:
+L2-L2:
+b
+
+[Unchanged]
+file: evidence:2@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb available (source_deleted_or_redacted)
+[Recommended]
+retrieve: evidence:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+retrieve: evidence:2@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+[CostWarning]
+Informational only: these areas account for the most repeated read tokens.
+[CriticalTail]
+CRITICAL: evidence:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa's last provenance was reverted - verify before reuse
+CRITICAL: evidence:2@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb's last provenance was reverted - verify before reuse

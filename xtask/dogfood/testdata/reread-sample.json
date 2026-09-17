@@ -1,0 +1,34 @@
+{
+  "levers": {
+    "kinds": [
+      {
+        "rows": 22,
+        "tokens_avoided": 0,
+        "tokens_returned": 2314,
+        "verb": "memd.manifest_injected"
+      },
+      {
+        "rows": 6,
+        "tokens_avoided": 0,
+        "tokens_returned": 126,
+        "verb": "memd.manifest_served"
+      },
+      {
+        "rows": 6,
+        "tokens_avoided": 14467,
+        "tokens_returned": 563,
+        "verb": "memd.read_intercepted"
+      },
+      {
+        "rows": 8,
+        "tokens_avoided": 0,
+        "tokens_returned": 1283,
+        "verb": "memd.recovery_injected"
+      }
+    ],
+    "note": null,
+    "recall_db": "/home/dev/.cache/rift/aaaa/recall.db",
+    "tokens_avoided": 14467,
+    "tokens_returned": 4286
+  }
+}

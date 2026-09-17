@@ -1,0 +1,17 @@
+content.redacted
+content_hash.txt
+digest.failures.json
+digest.intent.json
+digest.log.json
+digest.shape.json
+full.jsonl
+metadata.json
+redaction_report.json
+sessions/0/metadata.json
+sessions/1/metadata.json
+tasks/toolu_01TASKFIXTURE/metadata.json
+tasks/toolu_01TASKFIXTURE/transcript.compact.jsonl
+tasks/toolu_01TASKFIXTURE/transcript.jsonl
+tool_calls.jsonl
+transcript.compact.jsonl
+transcript.jsonl

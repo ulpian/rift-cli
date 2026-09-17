@@ -1,0 +1,19 @@
+checkpoint_id 01JQZ8T9WQKX3M7VN2P4RB6CDE
+layout per-checkpoint-refs
+epoch 0
+strategy manual-commit
+commit 2222222222222222222222222222222222222222
+developer f0e1d2c3b4a59687
+created_at -
+sessions 01JLEGACYSESSIONC
+merkle_root 11d09e50513040344c989a99a76b7c2114775d0626879b51435de43b717be7e9
+prev_hash e7e9ddd09e50513040344c989a99a76b7c2114775d0626879b51435de43b717b
+report_valid true
+root_check mismatch
+rederived_root d9b74da14a0fcf894bf341b4e72d2c7b774467e15a93b67357ce840f058c7af8
+report spans=0 masked=0 allowlisted=0 packs=legacy@0.9.1 input=3333333333333333333333333333333333333333333333333333333333333333
+artifacts content_hash.txt,full.jsonl,metadata.json,redaction_report.json
+events 2
+event session=01JLEGACYSESSIONC turn=0 ordinal=0 kind=session.start verb=SessionStart agent=claude-code at=100 payload=1111111111111111111111111111111111111111111111111111111111111111
+event session=01JLEGACYSESSIONC turn=1 ordinal=0 kind=tool.call verb=PreToolUse agent=claude-code at=110 payload=2222222222222222222222222222222222222222222222222222222222222222
+issues -

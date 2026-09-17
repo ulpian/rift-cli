@@ -1,0 +1,22 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: frame_text(&f)
+---
+ RIFT  Canopy  *                      ? Help  / Palette  e Panel Editor  q Quit
+╭─ projects  2 ╮[recall] rift-cli · r [settings]╭─ token usage ────────────────#
+│># rift-cli  *│0 models · 0 calls              │(no token activity yet)       #
+│ # rift-si…  o│(no projection yet)             │                              #
+│              │                                │                              |
+│              │                                │                              |
+│              │                                │                              |
+│              │                                │                              |
+│              │                                │                              |
+│              │                                ╰──────────────────────────────|
+│              │                                ╭─ system ─────────────────────|
+│              │                                │                              |
+│[+][^][v][x]  │                                │context unavailable           |
+╰──────────────╯                                │- events · 5m: —              |
+ j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette
+╭─ command ────────────────────────────────────────────────────────────────────╮
+│/█                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯

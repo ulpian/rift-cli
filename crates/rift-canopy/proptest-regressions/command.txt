@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc aa50fc7e9b7563081d3758db742574be07b363ba18183f1e3e500e6a719014b4 # shrinks to input = "¡Aࠀa a\00\0a  ¡\0\0Aaa𐀀a𐀀a𐀀0\0𐀓3-\u{b4545}?<q\"D\n\t=KȺ{&\u{3f4e0}\u{baa03}\"킇\u{bb9ef}.\"&\"W/\u{202e}🕴\u{5f70f}öHѨ\t\u{b107a}${\u{aa3b4}\u{b5500}\u{b}🕴+\u{202e}\u{ca809}曧🕴𮢥/\u{cd347}.\u{9b1a0}\u{1b}&Ѩ\u{7736d}<|V\u{f90fd}$Qo\u{202e}\u{64f82}\u{b}v<�{`H|\u{f95ea}_+𭪠_?\u{1b}\u{cc93d}/Ã\u{feff}u쵵\"\u{7f48c}St\rP.$\u{42ec8}\u{94}'\u{5b5bd}h`\u{109894}¢\u{85292}\u{e4e4d}\u{10f292}\u{10edba}\u{feff}:I檪:\u{85}q:\u{44c80}.i\u{7eff8};\u{b}'{{\n2\u{feff}\u{10e06a}r\u{af007}\u{ba558}\u{202e}W<*🕴\\ȺC\u{1056d2}\u{e9d6e}zd=Ѩ\u{a913b}*D<\u{51447}`\u{def8b}\u{dc406}\n%pѨe$/qi*u\tà:cY\u{7f}\u{e5ad9}'\u{b}\u{10a1c6}e.u¥\u{202e}\u{1ed61}t�E\u{d5be4}'=\tⴀ;'m7s\r?\"\u{5e8dd}\u{bad5b}\0Ä`\u{feff}O'*\\\u{73302}u�\u{feff}{\u{1b}.\u{e31aa}Ⱥ?\u{b}Ⱥ\u{e366f}:\u{d8977}\u{11a5a}Ѩ\u{5d99e}\n!`{Ѩ\u{3ddfa}\u{b1cd6}𭣐𩑌!U\u{66c2f}\u{b}\u{95535}:\t\u{202e}"
+cc 5a39ecce135ac7312c4fc054354d3a839b12cfa4a626d5a8b42f8284272c0500 # shrinks to input = "/\"¡"

@@ -1,0 +1,54 @@
+[package]
+name = "rift-recall-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lost-in-Delta eval harness: deterministic replay, savings/non-degradation metrics, and the go/no-go gate they feed."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The REAL serve surface under reconciliation: the delta condition
+# drives the transport-independent dispatcher in-process — the same envelopes,
+# budgets, policy gates, and audit events as `rift recall <verb>` — over a
+# fixture store, so the emitted claim the harness reconciles is the serving
+# side's own number, never the harness's arithmetic.
+rift-config = { version = "0.0.1", path = "../rift-config" }
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-events = { version = "0.0.1", path = "../rift-recall-events" }
+rift-recall-ledger = { version = "0.0.1", path = "../rift-recall-ledger" }
+rift-recall-serve = { version = "0.0.1", path = "../rift-recall-serve" }
+# The pack under test: the delta-served runs compile real packs.
+rift-recall-pack = { version = "0.0.1", path = "../rift-recall-pack" }
+rift-recall-policy = { version = "0.0.1", path = "../rift-recall-policy" }
+rift-recall-substrate = { version = "0.0.1", path = "../rift-recall-substrate" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+rift-store = { version = "0.0.1", path = "../rift-store" }
+# The one token-counting authority: measured savings use the same
+# tokenizer the serving side reports, so reconciliation is apples-to-apples.
+rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
+# Sweep config / trial records / EvalDefaults are data, not code: committed
+# JSON fixtures, replayed offline.
+# The temporary repository the intercepted condition writes its policy into:
+# the lever it measures is resolved from a real `.rift/policies/serve.toml`, and
+# never from this repository's.
+tempfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+# The paid transport (feature-gated; owner-invoked, never in tests).
+ureq = { workspace = true, optional = true, features = ["json"] }
+
+[features]
+# The real-model transport: reachable from an explicit CLI invocation only —
+# `cargo test` never enables network code paths.
+real-model = ["dep:ureq"]
+
+[dev-dependencies]
+# The committed go/no-go report snapshot: the verdict's wording is reviewed on
+# change, so a decision report cannot shift shape unnoticed.
+insta = { workspace = true }
+proptest = { workspace = true }

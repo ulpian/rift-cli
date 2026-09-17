@@ -1,0 +1,36 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "render_state(&mut suggest_state(\"\"))"
+---
+ RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
+╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────#
+│># rift-cli      *││rift-cli (repo)                       ││(no token activity yet)               #
+│ # rift-site     o││path: /r/rift-cli                     ││                                      #
+│                  ││* running                             ││                                      #
+│                  ││[ Recall Viewer ] [ Project Settings ]││                                      #
+│                  │╰──────────────────────────────────────╯│                                      #
+│                  │╭─ models · Σ 0 calls ─────────────────╮│                                      #
+│                  ││(none yet)                            ││                                      #
+│                  ││                                      │╰──────────────────────────────────────#
+│                  ││                                      │╭─ system ─────────────────────────────#
+│                  ││                                      ││                                      #
+│                  ││                                      ││context unavailable                   #
+│                  ││                                      ││- events · 5m: —                      #
+│                  ││                                      ││- tokens · 5m: —                      #
+│                  ││                                      ││- serves · 5m: —                      #
+│                  ││                                      ││- projection storage: —               #
+│                  │╰──────────────────────────────────────╯╰──────────────────────────────────────|
+╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
+│> help  /help                    show every palette verb                                          │
+│  status  /status                capture / projection health snapshot                             │
+│  select  /select [project]      select a project row                                             │
+│  settings  /settings            open repository Project Settings                                 │
+│  viewer  /viewer [target] [--repo path] open the read-only checkpoint and Recall viewer          │
+│  memory  /memory <verb>         ask the recall plane (diffs, hotspots, rereads)                  │
+│  doctor  /doctor                backend + memory-chain readiness                                 │
+│  add  /add                      register the launch directory                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓ highlight  ·  tab insert  ·  ⏎ run  ·  esc close
+╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
+│/█                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -1,0 +1,48 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: text
+---
+╭─ token usage ──────────────────╮
+│(no token activity yet)         │
+│                                │
+│                                │
+│                                │
+│                                │
+│                                │
+│                                │
+╰────────────────────────────────╯
+╭─ system ───────────────────────╮
+│                                │
+│context unavailable             │
+│- events · 5m: —                │
+│- tokens · 5m: —                │
+│- serves · 5m: —                │
+│- projection storage: —         │
+╰────────────────────────────────╯
+╭─ recall ───────────────────────╮
+│recall off — open Project Settin│
+│                                │
+│[24h][7d][30d][all]        [tok]│
+│                                │
+│                                │
+│                                │
+│                                │
+│                                │
+│                                │
+│                                │
+│                                │
+╰────────────────────────────────╯
+╭─ dispatch ─────────────────────╮
+│(no capture projection here)    │
+│                                │
+│                                │
+│                                │
+│                                │
+╰────────────────────────────────╯
+╭─ recap ────────────────────────╮
+│(no capture projection here)    │
+│                                │
+│                                │
+│                                │
+│                                │
+│                                │

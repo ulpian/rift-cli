@@ -1,0 +1,25 @@
+[package]
+name = "rift-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rift shared core: error type, identifiers, local identity, time, and immutability primitives."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+# Contract snapshot of every RiftError Display form: an error message users and
+# scripts read is reviewed on change, never silently reworded.
+insta = { workspace = true }

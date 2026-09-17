@@ -1,0 +1,20 @@
+[package]
+name = "rift-shadow-cost"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Four-class token/cost model, versioned bitemporal price tables, and a token estimator."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+serde = { workspace = true }
+# Billing-grade tokenization: the one workspace counting authority.
+rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
+
+[dev-dependencies]
+proptest = { workspace = true }

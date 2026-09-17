@@ -1,0 +1,25 @@
+# Per-turn manifest injection: ON, at the default the serving policy ships with.
+# The owner turned it on deliberately, on 2026-08-08, to collect real
+# injected-spend data: the audit separates `memd.manifest_injected` from
+# `memd.manifest_served`, so the honesty check on claimed savings is a query
+# over live rows instead of a heuristic.
+#
+# Measured cost on this repository's 572-revision projection when the decision
+# was made: +81 ms p50 on a silent turn, ~+500 ms (~1.9x its own control) on an
+# injecting one; injecting turns follow a projection move, not every prompt.
+# Quote the ratio, not the milliseconds — absolutes move ~2x with machine
+# load; ratios reproduce. The planned latency work (a 100 ms git-latency
+# budget, no daemon) is expected to cut the projection-open share; re-measure
+# after it lands.
+#
+# History, kept so the number's lineage stays auditable: an EARLIER note here
+# cited "p50 2363 ms / 23x", withdrawn by the people who measured it as
+# confounded (arms built from fixtures with different capture histories, judged
+# against one foreign control); a LATER note set the budget to 0 pending
+# further work. Both are superseded by the decision above.
+#
+# This governs the PER-TURN manifest only. The once-per-session pointer is
+# gated on `recall_enabled()`, not on this budget. A budget of 1..=33 is ON yet
+# too small to carry the 34-token frame — it injects nothing and still pays the
+# projection open; do not set one.
+injection_turn_budget = 400

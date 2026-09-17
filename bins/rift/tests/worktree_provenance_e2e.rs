@@ -1,0 +1,527 @@
+//! End-to-end: **every provenance surface names
+//! the worktree its answer came from, and says `unknown` when nothing recorded
+//! one.**
+//!
+//! Two claims, driven through the shipped binary against a real
+//! `git worktree add`, because both are about what an operator and an agent
+//! actually read:
+//!
+//! * the two **non-hook** writers — `rift session attach`
+//!   and `rift import` — record a `session_worktree` observation with their own
+//!   basis, so a transcript adopted by hand is provenanced like one a hook saw;
+//! * the seven provenance verbs print the label, and print `unknown` — never
+//!   `main` — for the data written before worktree provenance existed, which
+//!   every existing repository is full of.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+mod common;
+use common::rift_cmd;
+
+/// Hermetic `git`: no system/global config, a fixed identity, every
+/// re-targeting variable scrubbed.
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", dir.join("absent-gitconfig"))
+        .env("GIT_AUTHOR_NAME", "T")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "T")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .expect("git is on PATH");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A family: a main work tree and one linked member named `member`, each with
+/// the policy file `rift init` would find, plus a redirected `HOME` so the
+/// agent-default transcript lookup lands inside the fixture.
+struct Family {
+    _tmp: tempfile::TempDir,
+    main: PathBuf,
+    member: PathBuf,
+    cache: PathBuf,
+    home: PathBuf,
+}
+
+const POLICY: &str = "schema_version = 1\n\
+     [project]\nname = \"fixture\"\n\
+     [paths]\nsensitive_paths = [\"secrets/**\"]\n";
+
+fn family() -> Family {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let main = root.join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    git_in(&main, &["init", "-q", "-b", "main"]);
+    std::fs::write(main.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    git_in(&main, &["add", "a.txt"]);
+    git_in(&main, &["commit", "-q", "-m", "seed"]);
+    std::fs::create_dir_all(main.join(".rift")).unwrap();
+    std::fs::write(main.join(".rift/config.toml"), POLICY).unwrap();
+    // The family is set up on this machine: its projection exists under the
+    // cache root every spawn below is handed. The member shares it.
+    let cache = root.join("cache");
+    common::provision_here(&main, &cache);
+
+    let member = root.join("member");
+    git_in(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "member",
+            member.to_str().unwrap(),
+        ],
+    );
+    std::fs::create_dir_all(member.join(".rift")).unwrap();
+    std::fs::write(member.join(".rift/config.toml"), POLICY).unwrap();
+
+    Family {
+        cache,
+        home: root.join("home"),
+        _tmp: tmp,
+        main,
+        member,
+    }
+}
+
+/// Run `rift` from `cwd` with the family's own cache root and a redirected
+/// `HOME`. `RIFT_CAPTURE_SYNC=1` on every spawn: the post-commit worker is
+/// detached otherwise, and a test that raced it would be flaky about facts it
+/// is asserting.
+fn rift(f: &Family, cwd: &Path, args: &[&str]) -> (i32, String, String) {
+    let out = rift_cmd(cwd)
+        .args(args)
+        .env("RIFT_CACHE_DIR", &f.cache)
+        .env("RIFT_CONFIG_DIR", f.main.join(".rift-conf"))
+        .env("RIFT_CAPTURE_SYNC", "1")
+        .env("RIFT_NO_KEYCHAIN", "1")
+        .env("RIFT_HEADLESS", "1")
+        .env("HOME", &f.home)
+        .output()
+        .expect("rift runs");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `rift --json …`, parsed. Fails loudly with both streams on a non-zero exit.
+fn rift_json(f: &Family, cwd: &Path, args: &[&str]) -> serde_json::Value {
+    let mut line = vec!["--json"];
+    line.extend_from_slice(args);
+    let (code, out, err) = rift(f, cwd, &line);
+    assert_eq!(code, 0, "rift {args:?} exited {code}: {out}{err}");
+    serde_json::from_str(&out).unwrap_or_else(|e| panic!("rift {args:?} json: {e}: {out}"))
+}
+
+/// claude-code's per-repository transcript directory under the fixture's
+/// `HOME`: the absolute worktree path with `/` and `.` folded to `-`, and on
+/// Windows `\` and the drive's `:` as well (its own project directory for
+/// `c:\Users\…\x` is `c--Users-…-x`). The binary discovers the worktree
+/// CANONICALIZED (macOS `/var` → `/private/var`), so the munge is computed
+/// over the canonical path, spelled plainly first so the name stays relative.
+fn transcript_dir(f: &Family, work_tree: &Path) -> PathBuf {
+    let munged: String = common::shell_spelling(&work_tree.canonicalize().unwrap())
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '.' || c == ':' {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    f.home.join(".claude").join("projects").join(munged)
+}
+
+/// Write one minimal native transcript for `session` under `dir`.
+fn plant_transcript(dir: &Path, session: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    std::fs::write(
+        &path,
+        concat!(r#"{"type":"user","message":"out of band work"}"#, "\n"),
+    )
+    .unwrap();
+    path
+}
+
+/// Every `session_worktree` row in the FAMILY's projection, as
+/// `(session_id, worktree_name, basis)`.
+fn observations(f: &Family) -> Vec<(String, String, String)> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        // The family adopts the main work tree's ids, so main's
+        // own id names the one projection every member writes to.
+        let repo_id = rift_git::repo_id_for(&f.main).unwrap();
+        let db = rift_store::projection_db_under(&f.cache, &repo_id);
+        assert!(db.exists(), "no family projection at {}", db.display());
+        let store = rift_store::SqliteStore::open_read_only(&db).unwrap();
+        rift_store::CanonicalStore::query(
+            &store,
+            "SELECT session_id, worktree_name, basis FROM session_worktree \
+             ORDER BY first_observed_at, observation_id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r.get_text(0).unwrap(),
+                r.get_text(1).unwrap(),
+                r.get_text(2).unwrap(),
+            )
+        })
+        .collect()
+    })
+}
+
+/// ★ Six provenance bases are defined; the agent hook decides between three of
+/// them. These are the two a **human** decides, and they were the gap this file
+/// closes.
+///
+/// Both verbs run in a LINKED MEMBER, and both must record that member — the
+/// checkout the operator adopted the transcript from. Nothing is inferred about
+/// where the agent originally worked: that would be a claim, and the honest
+/// fact is that a human filed it here.
+///
+/// The `import` arm also proves the idempotence the relation is built for: the
+/// observation is content-addressed over the observed state, so a second
+/// import over an unchanged transcript store adds no row.
+#[test]
+fn attach_and_import_record_the_worktree_they_ran_in() {
+    let f = family();
+
+    // `attach` — an out-of-band session found at the agent's default location
+    // for the MEMBER's work tree.
+    let attach_dir = transcript_dir(&f, &f.member);
+    plant_transcript(&attach_dir, "oob-1");
+    let attached = rift_json(
+        &f,
+        &f.member,
+        &["session", "attach", "oob-1", "--agent", "claude-code"],
+    );
+    assert!(
+        attached["checkpoint_id"].is_string(),
+        "attach archived: {attached}"
+    );
+
+    let rows = observations(&f);
+    assert_eq!(rows.len(), 1, "one observation for one attach: {rows:?}");
+    assert_eq!(rows[0].1, "member", "the member it was attached from");
+    assert_eq!(rows[0].2, "attach", "and the basis says which verb");
+
+    // `import` — a bulk read of a second session from an explicit source, run
+    // from the same member.
+    let import_dir = f.main.parent().unwrap().join("store");
+    plant_transcript(&import_dir, "imp-1");
+    let imported = rift_json(
+        &f,
+        &f.member,
+        &[
+            "import",
+            "claude-code",
+            "--path",
+            import_dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(imported["imported"], 1, "{imported}");
+
+    let rows = observations(&f);
+    assert_eq!(rows.len(), 2, "attach and import, one row each: {rows:?}");
+    let bases: Vec<&str> = rows.iter().map(|r| r.2.as_str()).collect();
+    assert!(bases.contains(&"import"), "{rows:?}");
+    assert!(
+        rows.iter().all(|r| r.1 == "member"),
+        "both ran in the member: {rows:?}"
+    );
+
+    // Re-import, unchanged: the id is the state's own, so nothing is added.
+    let again = rift_json(
+        &f,
+        &f.member,
+        &[
+            "import",
+            "claude-code",
+            "--path",
+            import_dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(again["already_imported"], 1, "{again}");
+    assert_eq!(
+        observations(&f).len(),
+        2,
+        "a repeated observation of the same state is not a second row"
+    );
+}
+
+/// The family's projection, opened for writing so a test can plant the shape
+/// every repository built before worktree provenance existed is in.
+fn family_projection(f: &Family) -> (rift_store::SqliteStore, tokio::runtime::Runtime) {
+    let repo_id = rift_git::repo_id_for(&f.main).unwrap();
+    let db = rift_store::projection_db_under(&f.cache, &repo_id);
+    let store = rift_store::open_capture_projection(&db).expect("open the family projection");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    (store, rt)
+}
+
+/// A 64-char hex id made of one repeated nibble.
+fn hex_id(c: char) -> String {
+    std::iter::repeat_n(c, 64).collect()
+}
+
+/// Plant a **pre-provenance** checkpoint and session: rows in every relation
+/// the verbs read, and NO row in either v14 provenance relation. This is the
+/// shape back-filling is forbidden for, and therefore the one every `unknown` in
+/// this test is an honest answer about.
+fn plant_without_worktree_provenance(f: &Family, at: i64) -> (String, String) {
+    use rift_core::Sha256Id;
+    let (store, rt) = family_projection(f);
+    let checkpoint = hex_id('c');
+    let session = hex_id('5');
+    let revision = hex_id('7');
+    rt.block_on(async {
+        rift_store::record_checkpoint(
+            &store,
+            &rift_store::CheckpointRecord {
+                checkpoint_id: Sha256Id::parse_hex(&checkpoint.clone()).unwrap(),
+                strategy: "manual-commit".to_owned(),
+                created_at: at,
+                merkle_root: Sha256Id::parse_hex(&hex_id('9')).unwrap(),
+                prev: None,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        rift_store::record_session(
+            &store,
+            &rift_store::SessionRow {
+                session_id: session.clone(),
+                agent: "claude-code".to_owned(),
+                model_primary: "claude-sonnet-4-5".to_owned(),
+                repo_id: rift_git::repo_id_for(&f.main).unwrap().as_str().to_owned(),
+                started_at: at,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        rift_store::record_session_in_checkpoint(
+            &store,
+            &rift_store::SessionInCheckpointRow {
+                checkpoint_id: checkpoint.clone(),
+                session_id: session.clone(),
+                ordinal: 0,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        rift_store::record_captured_event(
+            &store,
+            &rift_store::CapturedEventRow {
+                idempotency_key: hex_id('e'),
+                session_id: session.clone(),
+                turn_ordinal: 0,
+                event_ordinal: 0,
+                kind: "user_prompt".to_owned(),
+                trust: "trusted".to_owned(),
+                payload_sha256: hex_id('a'),
+                occurred_at_ms: at,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        rift_store::record_file_revision(
+            &store,
+            &rift_store::FileRevisionRow {
+                file_revision_id: revision.clone(),
+                path: "f.rs".to_owned(),
+                blob_oid: hex_id('b'),
+                content_sha256: hex_id('d'),
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        rift_store::record_attribution(
+            &store,
+            &rift_store::AttributionRow {
+                checkpoint_id: checkpoint.clone(),
+                file_revision_id: revision,
+                agent_added: 2,
+                human_added: 1,
+                human_modified_agent: 0,
+                agent_removed_by_human: 0,
+                confidence_milli: 850,
+                method_version: "v1".to_owned(),
+                supersedes_pk: None,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    (checkpoint, session)
+}
+
+/// ★ The RENDERING clause, at every surface it covers: the seven
+/// provenance verbs print the worktree they came from, and print `unknown` —
+/// **never `main`** — for data no observation and no shard member covers.
+///
+/// The two arms are one fixture, so neither can pass by the other's data being
+/// absent: a session attached in the LINKED member (which the capture path
+/// labels) beside a checkpoint and session planted in the pre-provenance shape
+/// (rows in every relation the verbs read, and none in either v14 one). Every
+/// assertion is against the HUMAN output, because that clause is about what an
+/// operator reads; the `--json` twin is asserted beside it so the two cannot
+/// drift.
+///
+/// `main` is asserted ABSENT rather than merely unequal: the failure this
+/// guards is a reader that defaults an absent label to the main work tree,
+/// which would print exactly the right-looking word.
+#[test]
+fn every_provenance_verb_carries_worktree_or_unknown() {
+    let f = family();
+
+    // The NAMED arm: a real archive from the linked member.
+    plant_transcript(&transcript_dir(&f, &f.member), "oob-1");
+    let attached = rift_json(
+        &f,
+        &f.member,
+        &["session", "attach", "oob-1", "--agent", "claude-code"],
+    );
+    let named_checkpoint = attached["checkpoint_id"].as_str().unwrap().to_owned();
+    let named_session = "oob-1";
+
+    // A commit in the member that CLAIMS it, so `blame`/`why` resolve.
+    std::fs::write(f.member.join("f.rs"), "one\ntwo\nthree\n").unwrap();
+    git_in(&f.member, &["add", "f.rs"]);
+    git_in(
+        &f.member,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            &format!("work\n\nRift-Checkpoint: {named_checkpoint}"),
+        ],
+    );
+
+    // The UNKNOWN arm, planted in the same projection.
+    let (old_checkpoint, old_session) = plant_without_worktree_provenance(&f, 1_700_000_000_000);
+
+    // 1-2. `rift checkpoint explain` and `rift checkpoint show`, both arms
+    // wherever each verb can reach them. `explain` resolves its target through
+    // the SHARD catalogue, and every shard this capture path writes carries the
+    // member, so its unknown arm is unreachable from a live archive and is
+    // pinned instead where the shape exists: the frozen `explain.golden` (built
+    // from hand-made memberless archives) and
+    // `the_explain_header_names_the_member_or_says_it_is_unknown`. Stated here
+    // rather than left as a gap in the table.
+    for verb in [vec!["checkpoint", "explain"], vec!["checkpoint", "show"]] {
+        let mut named = verb.clone();
+        named.push(&named_checkpoint);
+        let (code, out, err) = rift(&f, &f.member, &named);
+        assert_eq!(code, 0, "{verb:?}: {out}{err}");
+        assert!(out.contains("archived_in: member"), "{verb:?}: {out}");
+    }
+    let (code, out, err) = rift(&f, &f.member, &["checkpoint", "show", &old_checkpoint]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("archived_in: unknown"), "{out}");
+    assert!(!out.contains("archived_in: main"), "{out}");
+
+    // 3-4. `rift blame` and `rift why` — the checkpoint the commit claims.
+    for verb in [vec!["blame", "f.rs"], vec!["why", "f.rs:2"]] {
+        let (code, out, err) = rift(&f, &f.member, &verb);
+        assert_eq!(code, 0, "{verb:?}: {out}{err}");
+        assert!(out.contains("archived_in: member"), "{verb:?}: {out}");
+    }
+
+    // 5-7. The three window verbs: the spread names BOTH arms at once, which
+    // is the shape a real repository is in during the upgrade.
+    for verb in [
+        vec!["dispatch", "--for-agent"],
+        vec!["recap"],
+        vec!["review"],
+    ] {
+        let doc = rift_json(&f, &f.member, &verb);
+        let spread: Vec<&str> = doc["worktrees"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{verb:?} carries no worktrees: {doc}"))
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert!(spread.contains(&"member"), "{verb:?}: {spread:?}");
+        assert!(spread.contains(&"unknown"), "{verb:?}: {spread:?}");
+        assert!(
+            !spread.contains(&"main"),
+            "{verb:?} named the main work tree for data no shard placed there: {spread:?}"
+        );
+    }
+    // …and the human twin says the same thing, in the two verbs that render one.
+    for verb in [vec!["dispatch"], vec!["recap"]] {
+        let (code, out, err) = rift(&f, &f.member, &verb);
+        assert_eq!(code, 0, "{verb:?}: {out}{err}");
+        assert!(
+            out.contains("worktrees   member, unknown"),
+            "{verb:?}: {out}"
+        );
+    }
+
+    // 8. `rift session list|info|show` — the observation side of D4.
+    let (code, out, err) = rift(&f, &f.member, &["session", "list"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("worktree=member"), "{out}");
+    assert!(out.contains("worktree=unknown"), "{out}");
+
+    let (code, out, err) = rift(&f, &f.member, &["session", "info", named_session]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("worktree: member"), "{out}");
+    assert!(out.contains("observed in member"), "{out}");
+    assert!(out.contains("basis attach"), "{out}");
+
+    let (code, out, err) = rift(&f, &f.member, &["session", "show", &old_session]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("worktree: unknown"), "{out}");
+    assert!(!out.contains("worktree: main"), "{out}");
+
+    // The `--json` twin of the two session shapes, so the surfaces cannot drift.
+    let info = rift_json(&f, &f.member, &["session", "info", named_session]);
+    assert_eq!(info["worktree"], "member", "{info}");
+    assert_eq!(info["worktree_history"][0]["basis"], "attach", "{info}");
+    let show = rift_json(&f, &f.member, &["session", "show", &old_session]);
+    assert_eq!(show["worktree"], serde_json::Value::Null, "{show}");
+}

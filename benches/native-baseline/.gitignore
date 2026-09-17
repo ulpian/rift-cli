@@ -1,0 +1,12 @@
+# Generated fixture repositories + per-run sandboxes. Everything under here is
+# reproducible from a FixtureSpec (`vs-reference fixtures build`), so it is never
+# tracked.
+# No trailing slash: on a machine where these are symlinked off a synced
+# volume (iCloud eviction mid-measure is real), a `dir/` pattern would not
+# match the link and the link would show up as untracked.
+/.fixtures
+/.runs
+
+# This package is its own workspace root, so it has its own build directory
+# (the repo-root .gitignore's `/target` is root-anchored and does not cover it).
+/target

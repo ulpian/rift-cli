@@ -1,0 +1,230 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  # Cheap single-leg gates first: a fmt/clippy failure reports in minutes
+  # without burning three OS legs.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+        with: { components: "rustfmt" }
+      - run: cargo fmt --all --check
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+        with: { components: "clippy" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # The shipped (default-feature) configuration of the two crates that
+      # carry `real-model`: cfg drift behind the opt-in is visible here, not
+      # only under --all-features.
+      - run: cargo clippy -p rift-memd -p rift-recall-eval --all-targets -- -D warnings
+      # The configuration the binary's manifest advertises and nothing else
+      # builds: no terminal backend, no search seam, no document seam. An item
+      # that exists only for one of those features shows up here as dead code,
+      # and a `use` of an optional crate that is not behind its feature is a
+      # compile error here — both have happened, and neither is visible in any
+      # other leg. `xtask`'s `the_clippy_job_checks_the_feature_off_configuration`
+      # keeps this step from being dropped quietly.
+      - run: cargo clippy -p rift --no-default-features --all-targets -- -D warnings
+  test:
+    strategy:
+      # A Windows-only break must stay visible even when Linux fails first.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+  release-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --release
+  # Proves the declared MSRV floor (rust-version = 1.94) actually compiles, even
+  # though the dev/build toolchain is pinned to 1.96.0 (rust-toolchain.toml).
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-features
+  # Coverage as a gate, not a dashboard: ≥85% line workspace-wide + ≥75% branch
+  # workspace-wide + ≥95% line for the security crates (ci/security-crates.txt),
+  # enforced by xtask. Branch instrumentation (`--branch`) requires a nightly
+  # rustc, so this job (only) runs nightly — selected explicitly with `+nightly`,
+  # because rust-toolchain.toml would otherwise pin every `cargo` call to 1.96.0.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: "llvm-tools-preview" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-llvm-cov --locked
+      # Run the instrumented suite once (with branch data); render reports from
+      # the same run. keychain_os.rs is an untestable OS-I/O boundary — excluded.
+      - run: cargo +nightly llvm-cov --workspace --all-features --branch --no-report
+      - run: cargo +nightly llvm-cov report --lcov --skip-functions --output-path lcov.info --fail-under-lines 85 --ignore-filename-regex 'keychain_os\.rs'
+      - run: cargo +nightly llvm-cov report --json --output-path cov.json --ignore-filename-regex 'keychain_os\.rs'
+      - run: cargo run -p xtask -- check-coverage cov.json   # per-crate ≥95% line + ≥75% branch
+      # Coverage-drop signal on every PR: the summary lands in the job
+      # summary page, so a large-but-above-threshold drop is visible.
+      - run: cargo +nightly llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with: { name: coverage-lcov, path: lcov.info }
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-deny cargo-audit --locked
+      - run: cargo deny check
+      - run: cargo audit --deny warnings   # honours .cargo/audit.toml ignores
+  # Guards on the guards: required jobs, read-only workflow permissions, the
+  # lint-table baseline, no unsafe, no crate-root blanket allows, no schema
+  # fast-path in bins — plus actionlint on this file.
+  ci-meta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -p xtask -- ci-meta
+      # actionlint validates the workflow YAML itself (tag-pinned docker image,
+      # consistent with the repo's documented tag-pinning posture).
+      - run: docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:latest -color
+  # The read-interception guard: one file composes an agent's hook response, the
+  # channels Rift answers on are a reviewable list, nothing a hook decides with
+  # opens a store, one module writes the sentences a model reads, an amended
+  # tool call names one of two fields, and a cache is keyed by the repository
+  # family. Every leg is a read-only screen over the tracked tree, so this job
+  # neither builds the workspace nor needs a fetch depth beyond the checkout;
+  # `cargo test -p xtask` (in the `test` job) is what proves the legs still
+  # catch a planted violation.
+  gate-intercept:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -p xtask -- gate-intercept
+  # The nested benchmark workspace (benches/native-baseline) is not a root-workspace
+  # member, so the three-OS `test` job never reaches its tests — this job is
+  # their only run. fetch-depth: 0 is load-bearing, not hygiene: the
+  # artifact-staleness arm runs `git merge-base --is-ancestor` and
+  # `git log -1 -- <paths>` against real history (src/provenance.rs), which a
+  # shallow clone answers wrongly.
+  bench-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: "benches/native-baseline" }
+      - name: bench workspace gate
+        working-directory: benches/native-baseline
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+  # Every fuzz target survives a smoke budget on PRs. A crash here is
+  # a real finding, not flakiness — the job is required. Long-budget runs are
+  # scheduled in fuzz-nightly.yml.
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: "fuzz" }
+      - run: cargo install cargo-fuzz --locked
+      - name: fuzz each target for 60s
+        working-directory: fuzz
+        run: |
+          for t in config_parse run_hook redact redact_jsonl fuzz_pack_load diff glob_match checkpoint_artifact mcp_request palette_parse search_query shell_read doc_convert; do
+            cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=25
+          done
+  # The prompt-injection red-team gate: the append-only corpus
+  # (crates/rift-recall-validity/fixtures/injection_corpus.jsonl) runs
+  # through the universal untrusted-content serve chokepoint, and the serve surface
+  # is checked for verbatim leakage. A forbidden-span leak blocks merge — never
+  # advisory.
+  red-team:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p rift-recall-validity --test red_team
+      - run: cargo test -p rift-recall-serve red_team
+      # The pack-path leg: the append-only corpus rendered through the
+      # typed, budgeted pack — zero forbidden spans in ANY section, both ends.
+      - run: cargo test -p rift-recall-pack red_team
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      # The rustdoc gate. Zero baseline — every warning (broken
+      # intra-doc link, private-item link, ambiguous path) is a red, so a
+      # docstring cannot rot into a link nobody can follow.
+      - run: cargo doc --workspace --no-deps --all-features
+      # ...and the shrink-only site list beside it (a deliberate owner choice):
+      # with an empty list the two agree; a site that cannot be fixed in the same
+      # commit has one honest home, by name, instead of a blanket allow.
+      - run: cargo run -q -p xtask -- rustdoc-baseline
+  dialect-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      # The dialect suites — legacy-import goldens (both layouts), the two-era
+      # dual-source store, the frozen shard artifacts, the golden anchors and
+      # the gix walker — as one named, required job rather than an unnamed
+      # slice of `test`. `ci-meta`
+      # (`dialect_conformance_job_runs_every_suite`) holds this list equal to
+      # `DIALECT_SUITES`; the `#[ignore]`d bless paths never run here.
+      - run: cargo test -p rift-shadow --test legacy_import_golden --test dual_source --test shard_goldens --test parity_anchors
+      - run: cargo test -p rift-recall-substrate --test gix_walker
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # @nightly auto-selects the latest nightly that actually carries the
+      # requested components. Scope: the security crates whose zeroize/AEAD drop
+      # paths must be miri-clean, plus the FFI-bearing crates.
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: "miri, rust-src" }
+      # Advisory until the first real `unsafe`/FFI module lands — that is the
+      # promotion condition — but visibly so: continue-on-error surfaces the
+      # failure state in the UI instead of `|| true` swallowing it.
+      - run: cargo +nightly miri test -p rift-crypto -p rift-hashchain -p rift-canopy
+        continue-on-error: true
+  # NOTE: ASAN/TSAN advisory jobs are deferred until the first unsafe/FFI seam
+  # lands — the workspace is #![forbid(unsafe_code)] end-to-end today, so there
+  # is no undefined-behavior surface for the sanitizers to exercise.
+  # NOTE: a Turso advisory job was removed together with the turso dependency
+  # when review dropped that dependency. Restore it (clippy + test `-p rift-store
+  # --features turso`, continue-on-error) if/when the turso dep is wired back.

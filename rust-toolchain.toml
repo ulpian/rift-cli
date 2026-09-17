@@ -1,0 +1,9 @@
+[toolchain]
+channel = "1.96.0"
+# `rust-src` supports `-Z build-std` (sanitizer builds) and the nightly miri job.
+# `miri` itself is nightly-only and is provisioned by the dedicated CI miri job
+# (dtolnay/rust-toolchain@nightly); listing it here would make rustup fail to
+# materialise this stable pin. MSRV is 1.94 (Cargo.toml / clippy.toml), guarded
+# by the dedicated `msrv` CI job.
+components = ["rustfmt", "clippy", "rust-src"]
+profile = "default"

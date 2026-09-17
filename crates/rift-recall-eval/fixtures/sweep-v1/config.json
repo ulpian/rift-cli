@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "family": "anthropic",
+      "id": "claude-opus-4-8",
+      "price_in_per_mtok": 15.0,
+      "price_out_per_mtok": 75.0
+    },
+    {
+      "family": "anthropic",
+      "id": "claude-sonnet-5",
+      "price_in_per_mtok": 3.0,
+      "price_out_per_mtok": 15.0
+    },
+    {
+      "family": "anthropic",
+      "id": "claude-haiku-4-5-20251001",
+      "price_in_per_mtok": 0.8,
+      "price_out_per_mtok": 4.0
+    },
+    {
+      "family": "openai",
+      "id": "openai-top-tier-pin-at-run",
+      "price_in_per_mtok": 10.0,
+      "price_out_per_mtok": 40.0
+    },
+    {
+      "family": "openai",
+      "id": "openai-mid-tier-pin-at-run",
+      "price_in_per_mtok": 2.5,
+      "price_out_per_mtok": 10.0
+    },
+    {
+      "family": "openai",
+      "id": "openai-small-tier-pin-at-run",
+      "price_in_per_mtok": 0.6,
+      "price_out_per_mtok": 2.4
+    }
+  ],
+  "saturations": [
+    1,
+    2,
+    5,
+    10
+  ],
+  "trials_per_cell": 3,
+  "temperature": 0.0,
+  "spend_cap_usd": 50.0
+}

@@ -1,0 +1,33 @@
+[package]
+name = "rift-recall-pack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Context-pack compiler: edge-placed sections, hard token ceiling, deterministic (cache-friendly) output."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+# Sealed-constructor outputs (Envelope / NeutralDigest) are the only material
+# a SectionEntry can be built from: unvalidated text has no way in.
+rift-recall-validity = { version = "0.0.1", path = "../rift-recall-validity" }
+# The one token-counting authority backs pack budgeting.
+rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
+# The input-keyed PackKey is a SHA-256 over the immutable pack inputs, so the
+# same inputs always name the same pack.
+sha2 = { workspace = true }
+# The serialized evidence pack (the sync wire shape) is Serialize-ONLY: a pack
+# is written out, never parsed back in, so no section text can enter without
+# passing a sealed SectionEntry constructor.
+serde = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+# The append-only red-team corpus is JSONL; the pack-path leak test parses it.
+serde_json = { workspace = true }

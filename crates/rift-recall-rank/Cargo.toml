@@ -1,0 +1,19 @@
+[package]
+name = "rift-recall-rank"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Task-aware ranking signals (focus/error overlap, recency) with outcome-labeled ordering."
+
+[lints]
+workspace = true
+
+[dependencies]
+rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

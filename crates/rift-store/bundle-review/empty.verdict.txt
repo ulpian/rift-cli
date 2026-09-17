@@ -1,0 +1,21 @@
+VERDICT  PROPERTY                              DETAIL
+PASS     frame.header                          rift-bundle/1
+PASS     frame.parts                           manifest=696B, segment=191B, gitbundle=2521B
+PASS     frame.no_trailing_bytes               
+PASS     manifest.version                      schema_version=1
+PASS     manifest.field_set_and_order          schema_version,repo_id,from_cursor,to_cursor,ref_list,chain_head,segment_sha256,gitbundle_sha256
+PASS     manifest.canonical_bytes(round-trip)  byte-identical
+PASS     digest.3_segment_sha256               matches
+PASS     digest.3_gitbundle_sha256             matches
+PASS     segment.1_seq_arithmetic              to.seq=3 from.seq=3 links=0
+PASS     segment.empty_from_eq_to              
+INFO     segment.2_first_link_attaches         vacuous (empty segment)
+INFO     segment.3_prev_chaining               vacuous (empty segment)
+INFO     segment.4_to_is_last_link             vacuous (empty segment)
+PASS     agree.5_from_cursor                   rift-cursor/1:3:9af57b9e80db9ce657c69728b546354d5afb27f48e17a4c8568e553799230d9e vs rift-cursor/1:3:9af57b9e80db9ce657c69728b546354d5afb27f48e17a4c8568e553799230d9e
+PASS     agree.5_to_cursor                     rift-cursor/1:3:9af57b9e80db9ce657c69728b546354d5afb27f48e17a4c8568e553799230d9e vs rift-cursor/1:3:9af57b9e80db9ce657c69728b546354d5afb27f48e17a4c8568e553799230d9e
+FAIL     agree.5_chain_head                    manifest=9af57b9e80db9ce657c69728b546354d5afb27f48e17a4c8568e553799230d9e segment_last=<empty>
+
+12 pass, 1 fail, 3 info
+REFUSED: agree: manifest and segment describe different windows
+empty exit=2

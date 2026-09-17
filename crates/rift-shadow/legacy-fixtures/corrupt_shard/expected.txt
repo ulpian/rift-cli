@@ -1,0 +1,20 @@
+checkpoint_id ab34cd56ef79
+layout sharded-branch
+epoch 0
+strategy -
+commit -
+developer -
+created_at -
+sessions 
+merkle_root -
+prev_hash -
+report_valid false
+root_check not-derivable
+rederived_root -
+report spans=3 masked=48 allowlisted=0 packs= input=-
+artifacts content_hash.txt,full.jsonl,metadata.json,redaction_report.json
+events 2
+event session=01JCORRUPT turn=0 ordinal=0 kind=session_start verb=SessionStart agent=- at=10 payload=-
+event session=01JCORRUPT turn=1 ordinal=1 kind=session_end verb=SessionEnd agent=- at=30 payload=-
+issue metadata.json: unparseable
+issue full.jsonl: 1 unparseable line(s)
