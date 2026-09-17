@@ -802,7 +802,7 @@ fn resolve_card_window(path: &str, now_ms: i64, window: RecallWindow) -> CardWin
 /// → the visibly distinct honest-empty state. Neither is ever a zero line.
 ///
 /// `window` is the viewer's chosen period, and it is resolved **once**
-/// ([`CardWindow`]) into the cut every read below takes: the presence probe,
+/// (`CardWindow`) into the cut every read below takes: the presence probe,
 /// the share, the mix the money is priced through, and the serve count. The
 /// headline is the share itself — `avoided ÷ (avoided + read)`, the figure
 /// `rift savings` publishes — so the card and the command line cannot show two

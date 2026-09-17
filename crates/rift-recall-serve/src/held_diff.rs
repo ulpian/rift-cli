@@ -38,6 +38,8 @@
 //!    difference the repository made, so [`held_diff_of`] degrades the whole
 //!    answer where one appears, and the verb that serves lines refuses to
 //!    serve them.
+//!
+//! [`held_diff_of`]: crate::held_diff::held_diff_of
 
 use rift_recall_ledger::hunks::{compute_hunks, is_binary, split_lines, Hunk};
 use rift_recall_substrate::SubstrateReader;

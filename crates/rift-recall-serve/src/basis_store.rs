@@ -61,6 +61,8 @@
 //!
 //! Nothing here opens a store, spawns a process or initialises a tokenizer.
 //! The writer is the detached worker's; a serving path only ever reads.
+//!
+//! [`BasisStore::put`]: crate::basis_store::BasisStore::put
 
 use std::path::{Path, PathBuf};
 
