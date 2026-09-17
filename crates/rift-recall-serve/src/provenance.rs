@@ -31,6 +31,10 @@
 //! truncates — [`downgraded`] leaves the tag and the runnable command and drops
 //! the facts — which is the same sacrifice the sensitive-path rule makes for the
 //! same reason: half a fact is worse than a pointer to the whole one.
+//!
+//! [`agent_label`]: crate::provenance::agent_label
+//! [`git_subject`]: crate::provenance::git_subject
+//! [`downgraded`]: crate::provenance::downgraded
 
 use rift_recall_types::{CheckpointFacts, ProvenanceOracle};
 use serde_json::{json, Value};
@@ -144,7 +148,7 @@ fn is_invisible(c: char) -> bool {
 /// space, so no subject can spell a new line, move a cursor or reverse a run of
 /// text in a terminal that renders this document; runs of whitespace collapse,
 /// so the bound cannot be padded around; and the whole is cut at
-/// [`MAX_SUBJECT`] characters, counted as characters rather than bytes.
+/// `MAX_SUBJECT` characters, counted as characters rather than bytes.
 ///
 /// It is deliberately **not** put through the pushed alphabet. That allowlist
 /// exists for spans Rift injects into a model's context unasked, where a

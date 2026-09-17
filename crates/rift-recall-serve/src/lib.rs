@@ -379,7 +379,7 @@ pub enum DecodeError {
 /// **The lookup half of the one `/` spelling.** Every path a caller states —
 /// the focus set, and a `target` on a verb whose target is a path
 /// ([`ToolName::target_is_path`]) — leaves here
-/// [`slash_spelled`](rift_recall_substrate::worktree::slash_spelled), the same
+/// [`slash_spelled`], the same
 /// normaliser the ingest keys rows with. Rows and lookups then agree by
 /// construction rather than by both happening to be typed the same way, so a
 /// Windows caller who types `bins\rift\src\hooks.rs` is answered about the
