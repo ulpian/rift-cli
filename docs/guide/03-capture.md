@@ -96,6 +96,14 @@ asks git **where hooks actually resolve** rather than assuming
 `<git dir>/hooks`, so a configured hooks path cannot leave one directory
 looking healthy while git runs from another.
 
+An install also **removes** an entry Rift wrote under a name it no longer
+installs: a repository set up while the list was longer goes on running that
+entry on every merge and every rebase step, against a binary that no longer
+answers to the name. It removes only entries Rift wrote — a hook of your own
+under the same name is left exactly where it is, and one an older install moved
+aside under the suffix goes back to its own name. `rift doctor` names a retired
+entry, and `--fix` removes it.
+
 ### Keep-if-healthy, and the binary of record
 
 Git resolves hooks through the repository's *common* directory, so one install

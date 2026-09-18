@@ -1,6 +1,7 @@
-//! `rift hook install`: writing the seven absolute-path git-hook entries into
-//! the directory git runs hooks from, and the family-site bookkeeping that
-//! records which binary a family's hooks point at. Separate because it is the
+//! `rift hook install`: writing the absolute-path git-hook entries into the
+//! directory git runs hooks from, removing the entries Rift wrote there under
+//! names it no longer installs, and the family-site bookkeeping that records
+//! which binary a family's hooks point at. Separate because it is the
 //! one surface that edits a checkout's hook directory; the git hooks the rest
 //! of this tree answers are the entries it wrote.
 
@@ -218,37 +219,64 @@ pub(crate) fn family_sites(common_dir: &Path) -> FamilySites {
     }
 }
 
-/// What an install did, as the one line a person reads.
+/// What an install did, as the lines a person reads.
 ///
-/// A kept family says so — "nothing happened" is the *point* of the default
-/// policy, and a command that printed nothing would read as one that failed.
-/// One line, because `rift init` folds this into a report of its own and seven
-/// hook paths there are noise; `rift hooks install` prints the paths itself.
+/// The outcome is one line and comes first — a kept family says so, because
+/// "nothing happened" is the *point* of the default policy and a command that
+/// printed nothing would read as one that failed, and because `rift init`
+/// folds that first line into a report of its own. A sweep of the names Rift
+/// no longer installs adds a second: it is the rare line, and removing an
+/// entry from a person's hooks directory is never done without saying so.
 pub(crate) fn report_lines(report: &HookInstallReport) -> Vec<String> {
+    let mut lines = vec![outcome_line(report)];
+    if !report.removed.is_empty() {
+        lines.push(format!(
+            "removed {} retired git hook(s): {}",
+            report.removed.len(),
+            hook_names(&report.removed)
+        ));
+    }
+    lines
+}
+
+/// Hook paths as the names git knows them by, in one clause.
+pub(crate) fn hook_names(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| {
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The one line the outcome is worth: refused, kept, or written.
+fn outcome_line(report: &HookInstallReport) -> String {
     let of_record = report.binary.as_ref().map_or_else(
         || " (no binary of record)".to_owned(),
         |bin| format!(" (binary of record: {})", bin.display()),
     );
     if let Some(refused) = &report.refused {
-        return vec![format!("git hooks: left alone — {refused}")];
+        return format!("git hooks: left alone — {refused}");
     }
     if !report.kept.is_empty() {
-        return vec![format!(
+        return format!(
             "git hooks: {} already healthy, left alone{of_record}",
             report.kept.len()
-        )];
+        );
     }
-    let written = report.written();
     let verb = if report.repointed.is_empty() {
         "installed"
     } else {
         "re-pointed"
     };
-    vec![format!(
+    format!(
         "{verb} {} git hooks in {}{of_record}",
-        written.len(),
+        report.written().len(),
         report.hooks_dir.display()
-    )]
+    )
 }
 
 /// Create, here and now, the two things capture otherwise creates lazily on a
