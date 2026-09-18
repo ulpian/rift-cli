@@ -273,6 +273,48 @@ fn a_refused_agent_is_reported_and_init_still_finishes() {
     );
 }
 
+/// ★ A family with a **projection and no hooks** is not set up here, and
+/// running setup over it wires what it never had.
+///
+/// An agent hook opens the family's projection on first contact, so that
+/// file is no proof of an install: a repository whose git hooks were never
+/// installed carries one and used to read as set up, which is an add that
+/// installs nothing and a repository that captures nothing. Both halves are
+/// asserted: what this repository reports before setup, and what setup
+/// leaves behind on a repository that already has a projection.
+#[test]
+fn a_projection_without_hooks_is_unfinished_setup_that_init_completes() {
+    let f = Family::new();
+    let cache = f.home.join("cache");
+    // The state an agent hook alone leaves: the family's projection, and
+    // nothing else on this machine.
+    common::provision_here(&f.main, &cache);
+    assert_eq!(
+        rift_canopy_data::bus::project_settings_view_under(&cache, &f.main).initialization,
+        rift_canopy::ProjectInitialization::SetupIncomplete,
+        "a projection nothing installed is setup left half done"
+    );
+
+    let (code, out) = f.rift(&f.main, &["init", "--no-recall"]);
+    assert_eq!(code, 0, "setup runs over an existing projection: {out}");
+
+    let hooks = f.main.join(".git/hooks");
+    for name in rift_shadow::hooks::HOOK_NAMES {
+        assert!(hooks.join(name).exists(), "hook {name} installed: {out}");
+    }
+    let record = rift_shadow::hooks::binary_of_record_path(&f.main.join(".git/rift-family"));
+    assert!(
+        record.is_file(),
+        "the install recorded its binary at {}",
+        record.display()
+    );
+    assert_eq!(
+        rift_canopy_data::bus::project_settings_view_under(&cache, &f.main).initialization,
+        rift_canopy::ProjectInitialization::Initialized,
+        "and the repository reads as set up only now"
+    );
+}
+
 /// ★ `rift projects list --worktrees` lists the family's members
 /// under their repository, and the bare command's output does not move.
 ///

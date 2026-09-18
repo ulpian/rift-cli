@@ -186,10 +186,13 @@ reviewable adjacency list.
   own. Codex's `.codex/hooks.json` groups are a separate, independently
   fingerprinted fact; preserve unrelated groups and refuse conflicts/symlinks.
 - **"Initialized" is per machine.** A repository is set up where its family's
-  projection exists under the machine's cache root (`family::provisioned_here`
-  in the bin; the bus reads the same file under its root). `.rift/` is
-  committed configuration that travels with a clone and proves nothing; never
-  reintroduce it as the test. A config-only clone is `NotProvisioned`: the
+  projection exists under the machine's cache root **and** its hook install is
+  on record (the family's `binary.json` naming a binary that is still there).
+  The hook gates ask only for the projection (`family::provisioned_here` in the
+  bin): a running hook is its own proof. The dashboard and Project Settings ask
+  for both, because an agent hook creates the projection on first contact.
+  `.rift/` is committed configuration that travels with a clone and proves
+  nothing; never reintroduce it as the test. A config-only clone is `NotProvisioned`: the
   wizard stages machine-local steps only and never writes the tracked policy.
 - **Worktrees are family members.** A linked git worktree is a shadow member
   of its repository family: one minted family identity in the git common dir

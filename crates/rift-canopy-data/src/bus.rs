@@ -858,6 +858,11 @@ impl ProjectRead {
 /// git's `prunable` — canonicalises to nothing and takes the first branch:
 /// `Error(RepoMissing)`, whose hint on a worktree row says prunable.
 ///
+/// **A projection is not an install.** Before any capture-shaped reading, a
+/// family whose binary of record names no live binary answers
+/// `SetupIncomplete` — the same answer the settings page gives, so the card
+/// and its modal cannot disagree about whether there is setup left to do.
+///
 /// The watermark is `Some` iff the projection is open and readable, and `None`
 /// iff it is absent/unreadable — the same `None` the change observer treats as
 /// [`ChangeKind::Unavailable`].
@@ -890,24 +895,24 @@ fn read_project(root: &Path, path: &str) -> ProjectRead {
     // a linked worktree reads the family's store, and a directory that is not a
     // repository has no family — which reads exactly like no projection,
     // because family identity mints no per-path store to give it one.
-    let db = project_family(&dir).map(|f| projection_db_for_family_under(root, &f));
+    let family = project_family(&dir);
+    let db = family
+        .as_ref()
+        .map(|family| projection_db_for_family_under(root, family));
     let Some(db) = db.filter(|db| db.exists()) else {
-        // No projection on this machine. `.rift/` is committed configuration
-        // and proves nothing about this machine, so it reads as configured
-        // elsewhere, never as initialized; a directory outside any repository
-        // has no family and can never hold one.
-        let projection = if !family_read.repository {
-            ProjectionState::NotRepository
-        } else if dir.join(".rift").is_dir() {
-            ProjectionState::Configured
-        } else {
-            ProjectionState::Uninitialized
-        };
+        let projection = projection_absent(family_read.repository, &dir);
         return ProjectRead::plain(
             status_of(true, projection, sessions, false, provisioned),
             None,
         );
     };
+    // The projection is not the install. An agent hook opens the store on
+    // first contact, so a family nothing was ever wired in carries a
+    // projection; the card reads it the way the settings page does, and the
+    // add flow's act is the one this status asks for.
+    if family.is_some_and(|family| !hooks_installed_here(&family)) {
+        return ProjectRead::plain(ProjectStatus::SetupIncomplete, None);
+    }
     // The projection exists: open once, read the watermark + freshest event.
     let Some((mark, last_ts)) = open_and_read(&db) else {
         return ProjectRead::plain(
@@ -931,6 +936,21 @@ fn read_project(root: &Path, path: &str) -> ProjectRead {
         ),
         mark: Some(mark),
         running_members: family_read.running_members,
+    }
+}
+
+/// How a path with no projection under this machine's root reads.
+///
+/// `.rift/` is committed configuration and proves nothing about this machine,
+/// so a checkout carrying it is configured elsewhere, never initialized; a
+/// directory outside any repository has no family and can never hold one.
+fn projection_absent(repository: bool, dir: &Path) -> ProjectionState {
+    if !repository {
+        ProjectionState::NotRepository
+    } else if dir.join(".rift").is_dir() {
+        ProjectionState::Configured
+    } else {
+        ProjectionState::Uninitialized
     }
 }
 
@@ -1246,12 +1266,12 @@ fn project_setting_rows(
     levers: ServeLevers,
 ) -> Vec<ProjectSettingRow> {
     let injection_budget = levers.injection_budget;
-    // Setup defaults Recall on; an initialized or configured-elsewhere
-    // project shows the value its configuration declares.
-    let recall = matches!(
-        initialization,
-        ProjectInitialization::NotInitialized | ProjectInitialization::SetupIncomplete
-    ) || effective.is_some_and(rift_config::EffectiveConfig::recall_enabled);
+    // Recall is on unless the repository's configuration writes it off — the
+    // setup default and the declared value are one answer, so a repository
+    // that committed `total_recall = false` is not talked out of it by a
+    // wizard. An unreadable configuration falls back to the secure default,
+    // which is on.
+    let recall = effective.is_none_or(rift_config::EffectiveConfig::recall_enabled);
     // A configured-elsewhere project's toggles are read-only facts: setup on
     // this machine must never rewrite the repository's committed file.
     let actionable = editable && initialization.settings_editable();
@@ -1294,10 +1314,16 @@ fn project_setting_rows(
 }
 
 /// Whether the project is set up **on this machine**: the family's projection
-/// exists under `root`. `.rift/` is committed configuration and travels with
-/// a clone, so it proves nothing about this machine; reading it as
-/// "initialized" is what kept a fresh clone's setup wizard (and its pre-ticked
-/// detected agents) from ever appearing on a second machine.
+/// exists under `root` **and** its git hooks were installed here.
+///
+/// Neither half is enough on its own. `.rift/` is committed configuration and
+/// travels with a clone, so it proves nothing about this machine; reading it
+/// as "initialized" is what kept a fresh clone's setup wizard (and its
+/// pre-ticked detected agents) from ever appearing on a second machine. The
+/// projection proves little more: an agent hook opens the store on first
+/// contact and creates it, so a family nothing ever installed hooks for
+/// carries one — and read as initialized, it offered no setup to the one
+/// repository that needed it most.
 fn project_initialization(root: &Path, dir: &Path) -> ProjectInitialization {
     if dir.join(".rift/state/project-setup.json").is_file() {
         return ProjectInitialization::SetupIncomplete;
@@ -1311,13 +1337,29 @@ fn project_initialization(root: &Path, dir: &Path) -> ProjectInitialization {
             ProjectInitialization::NotRepository
         };
     };
-    if projection_db_for_family_under(root, &family).exists() {
-        ProjectInitialization::Initialized
-    } else if dir.join(".rift").is_dir() {
-        ProjectInitialization::NotProvisioned
-    } else {
-        ProjectInitialization::NotInitialized
+    if !projection_db_for_family_under(root, &family).exists() {
+        return if dir.join(".rift").is_dir() {
+            ProjectInitialization::NotProvisioned
+        } else {
+            ProjectInitialization::NotInitialized
+        };
     }
+    if hooks_installed_here(&family) {
+        ProjectInitialization::Initialized
+    } else {
+        ProjectInitialization::SetupIncomplete
+    }
+}
+
+/// Whether this machine installed `family`'s git hooks: its binary of record
+/// names an executable that is still there.
+///
+/// The record is the install's own note, written beside the family manifest,
+/// so this is one small JSON file read during a status — never on a hook's
+/// path, which decides nothing from here.
+fn hooks_installed_here(family: &rift_git::Family) -> bool {
+    let dir = rift_git::family::family_dir_under(|key| std::env::var(key).ok(), &family.common_dir);
+    rift_shadow_hooks::read_binary_of_record(&dir).is_some_and(|record| record.is_live())
 }
 
 fn native_settings_integrations(
@@ -1791,11 +1833,17 @@ mod tests {
 
     /// Build a project directory + its per-repo projection under `root`, seeded
     /// with `events` captured-event rows. Returns the project path.
+    ///
+    /// The family's hook install is recorded too, because that is what a
+    /// repository set up on this machine has: a projection nobody installed
+    /// hooks for is setup left half done, and every status below is about a
+    /// project that finished setting up.
     fn make_project(root: &Path, name: &str, events: usize) -> PathBuf {
         let proj = root.join(name);
         std::fs::create_dir_all(&proj).unwrap();
         // A repository, because every store the bus opens is its family's.
         rift_git::test_support::fake_repo(&proj).unwrap();
+        record_hooks_installed(&proj);
         let repo = repo_id_for(&proj).unwrap();
         let db = projection_db_under(root, &repo);
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
@@ -1812,6 +1860,24 @@ mod tests {
         let state = work_tree.join(".rift/state");
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join("native-integrations.json"), "{}").unwrap();
+    }
+
+    /// Where `repo`'s family keeps its manifest and its binary of record.
+    fn family_dir_of(repo: &Path) -> PathBuf {
+        let family = project_family(repo).unwrap();
+        rift_git::family::family_dir_under(|k| std::env::var(k).ok(), &family.common_dir)
+    }
+
+    /// Record a live binary of record for `repo`'s family: the note the git
+    /// hook install leaves behind, and the second half of "set up here". The
+    /// path recorded is this test binary, which is an executable that exists.
+    fn record_hooks_installed(repo: &Path) {
+        rift_shadow_hooks::record_binary_of_record(
+            &family_dir_of(repo),
+            &std::env::current_exe().unwrap(),
+            rift_shadow_hooks::RecordedBy::Init,
+        )
+        .unwrap();
     }
 
     /// Write a live session cache under `git_dir`, claiming `work_tree` — the
@@ -3521,8 +3587,33 @@ mod tests {
         assert!(!rows[3].detected() && !rows[3].selected);
     }
 
-    /// Initialized means **this machine holds the family's projection** —
-    /// never that `.rift/` exists. A clone whose `.rift/config.toml` travelled
+    /// The card says what the settings page says. A family whose git hooks
+    /// were never installed is setup left half done, however healthy its
+    /// projection reads; with the install on record the same projection —
+    /// nothing captured in it yet — is a repository picking up.
+    #[test]
+    fn a_projection_with_no_recorded_install_is_setup_incomplete_on_the_card() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "fresh", 0);
+        std::fs::remove_file(rift_shadow_hooks::binary_of_record_path(&family_dir_of(
+            &proj,
+        )))
+        .unwrap();
+        assert_eq!(
+            read_project(root.path(), &proj.to_string_lossy()).status,
+            ProjectStatus::SetupIncomplete
+        );
+
+        record_hooks_installed(&proj);
+        assert_eq!(
+            read_project(root.path(), &proj.to_string_lossy()).status,
+            ProjectStatus::PickingUp
+        );
+    }
+
+    /// Initialized means **this machine holds the family's projection AND
+    /// installed its hooks** — never that `.rift/` exists, and never the
+    /// projection alone. A clone whose `.rift/config.toml` travelled
     /// with the repository reads as configured elsewhere: its committed
     /// values are shown read-only, the wizard is offered, and detected
     /// supported agents are pre-ticked for it, exactly as on a fresh
@@ -3556,11 +3647,26 @@ mod tests {
             ProjectStatus::NotProvisioned
         );
 
-        // Provisioning is the projection appearing under this machine's root.
+        // A projection is not provisioning. An agent hook creates one on
+        // first contact, so a family whose hooks were never installed can
+        // carry a projection and nothing else.
         let family = project_family(repo.path()).unwrap();
         let db = projection_db_for_family_under(root.path(), &family);
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         std::fs::write(&db, b"").unwrap();
+        let view = project_settings_view_under(root.path(), repo.path());
+        assert_eq!(
+            view.initialization,
+            ProjectInitialization::SetupIncomplete,
+            "a projection with no recorded hook install is setup left half done"
+        );
+        assert!(
+            !view.settings[0].enabled,
+            "and the committed Recall value is still the one shown"
+        );
+
+        // The recorded hook install is the other half.
+        record_hooks_installed(repo.path());
         assert_eq!(
             project_settings_view_under(root.path(), repo.path()).initialization,
             ProjectInitialization::Initialized
@@ -3588,6 +3694,7 @@ mod tests {
         let db = projection_db_for_family_under(root.path(), &family);
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         std::fs::write(&db, b"").unwrap();
+        record_hooks_installed(repo.path());
         std::fs::create_dir_all(repo.path().join(".rift/policies")).unwrap();
         std::fs::write(
             repo.path().join(".rift/config.toml"),

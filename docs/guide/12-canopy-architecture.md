@@ -272,7 +272,20 @@ machine and never offered the setup page. Two projection states carry the
 distinction to the pure truth table (`Configured` → `NotProvisioned`,
 `NotRepository` → `NotRepository`), and the Project Settings projection reads
 the same file through the same root, so a card and its modal cannot disagree
-about which page to open. The setup page's default plan is computed from the
+about which page to open.
+
+Both projections then ask one further question, of one further file: does the
+family's **binary of record**, beside its manifest in the common dir, name a
+binary that is still there? That file is what the git-hook install leaves
+behind, and the projection cannot stand in for it — an agent hook opens the
+store on first contact and creates one, so a family nothing has wired carries a
+projection of its own. Without the record the card and the page agree on
+`SetupIncomplete`, and the act that status asks for is the wizard, which
+installs what is missing and re-runs safely over what is already there. The
+hook decisions ask only for the projection, so nothing on a hook's path reads
+this file.
+
+The setup page's default plan is computed from the
 installer's own diagnostic — the row is a pure projection of it, tested with
 synthetic statuses — so the pre-tick and `rift init`'s auto-wire share one
 detection predicate and cannot offer different agents. A view becomes a plan

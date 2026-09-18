@@ -1010,17 +1010,21 @@ pub fn update(s: &mut AppState, ev: Event) -> Flow {
                 s.dirty = true;
             }
             // The add flow's deferred decision: the first read of a project
-            // just registered sets it up — `rift init` with the detected
-            // default plan, shown step by step in the progress dialog — when
-            // there is a setup to perform: never initialized here, or
-            // configured by the repository but not set up on this machine.
-            // It stays quiet for a project that is already set up or is not
-            // a repository at all. Adding a project IS initializing it;
+            // just registered sets it up — `rift init` with the plan the
+            // setup page would open with, shown step by step in the progress
+            // dialog — when there is a setup to perform: never initialized
+            // here, configured by the repository but not set up on this
+            // machine, or set up only half way (a projection whose hook
+            // install is not on record, or a setup plan left pending). It
+            // stays quiet for a project that is already set up or is not a
+            // repository at all. Adding a project IS initializing it;
             // Project Settings stays the surface for changing the choices
             // afterwards, not a confirm step in the way of the first one.
             if s.pending_setup_prompt.as_deref() == Some(pd.project.as_str()) {
                 s.pending_setup_prompt = None;
-                if pd.status.repository_card_only()
+                let unfinished =
+                    pd.status.repository_card_only() || pd.status == ProjectStatus::SetupIncomplete;
+                if unfinished
                     && pd.status != ProjectStatus::NotRepository
                     && s.app.mode == Mode::Normal
                 {
@@ -3567,14 +3571,18 @@ mod tests {
 
     /// The add flow's deferred wizard: a project just registered opens
     /// Project Settings on its first status read when there is a setup to
-    /// offer — never initialized, or configured by the repository but not set
-    /// up on this machine — and stays quiet when it is already set up here
-    /// or is not a repository at all. One read decides, whatever it says.
+    /// offer — never initialized, configured by the repository but not set
+    /// up on this machine, or set up only half way — and stays quiet when it
+    /// is already set up here or is not a repository at all. One read
+    /// decides, whatever it says.
     #[test]
     fn a_newly_added_project_opens_setup_only_when_there_is_setup_to_offer() {
         for (status, opens) in [
             (ProjectStatus::NotProvisioned, true),
             (ProjectStatus::NotInitialized, true),
+            // A family carrying a projection whose hooks were never
+            // installed: there is setup left to do, so the add does it.
+            (ProjectStatus::SetupIncomplete, true),
             (ProjectStatus::Idle, false),
             (ProjectStatus::NotRepository, false),
         ] {

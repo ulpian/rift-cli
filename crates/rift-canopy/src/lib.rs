@@ -158,17 +158,22 @@ pub enum ProjectStatus {
     /// The registered path is not inside a git repository. It has no family,
     /// so nothing can provision it; the card says so and offers no wizard.
     NotRepository,
-    /// Initialization started but at least one selected local step is pending.
+    /// Setup is unfinished: a selected local step is still pending, or the
+    /// family's projection is here without the hook install that makes it
+    /// mean something.
     SetupIncomplete,
     /// A **linked worktree** of an initialized family that has never been
     /// provisioned: no `.rift/state/native-integrations.json`, so no adapter
     /// in it is wired to Rift and nothing it does is captured (the family view).
     ///
-    /// Deliberately **not** [`Self::SetupIncomplete`], which is injected from
-    /// `.rift/state/project-setup.json` and means "resume the setup wizard"
-    /// everywhere else in the UI. An unadopted member has no plan file to
-    /// resume, so reusing that variant would offer an affordance that leads
-    /// nowhere; the act this one wants is `rift worktree adopt`.
+    /// Deliberately **not** [`Self::SetupIncomplete`], which names a family
+    /// whose own setup is unfinished — a plan left pending in
+    /// `.rift/state/project-setup.json`, or a projection whose hook install
+    /// is not on record — and means "run the setup wizard" everywhere else
+    /// in the UI. The family this member belongs to is set up; it is the
+    /// checkout that is not, so reusing that variant would offer an
+    /// affordance that fixes nothing here. The act this one wants is
+    /// `rift worktree adopt`.
     NotAdopted,
     /// A problem reading the project's state.
     Error(StatusError),

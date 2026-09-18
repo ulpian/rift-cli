@@ -24,6 +24,11 @@ rift-agent-install = { version = "0.0.1", path = "../rift-agent-install" }
 rift-recall-policy = { version = "0.0.1", path = "../rift-recall-policy" }
 # Repo identity (the projection scope key) + worktree plumbing.
 rift-git = { version = "0.0.1", path = "../rift-git" }
+# The family's binary of record — the note the git hook install leaves behind,
+# read (never written) so a status can tell a set-up family from one that only
+# has a projection. The edge points this way only: the capture hooks know
+# nothing of the dashboard, so the graph stays acyclic.
+rift-shadow-hooks = { version = "0.0.1", path = "../rift-shadow-hooks" }
 # Canonical Git checkpoint/shadow readers and their lenient artifact types.
 rift-recall-substrate = { version = "0.0.1", path = "../rift-recall-substrate" }
 rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
