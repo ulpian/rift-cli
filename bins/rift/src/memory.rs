@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rift_agent::read_ledger::{Interval, Line as LedgerLine};
+use rift_agent::window_journal::{Interval, Line as JournalLine};
 use rift_config::EffectiveConfig;
 use rift_core::{Result, RiftError, Timestamp};
 use rift_recall_ledger::metrics::{compute_metrics, record_metric_snapshot, ContextMetrics};
@@ -1293,7 +1293,7 @@ pub(crate) fn render_levers(l: &Levers, read_tokens: u64) -> String {
     out
 }
 
-// ----- what this member's own window ledgers say ---------------------------
+// ----- what this member's own window journals say ---------------------------
 
 /// How many turns after an eviction a read still counts as recovery.
 ///
@@ -1359,19 +1359,19 @@ pub(crate) struct RetryAfterDeny {
     pub(crate) retried: u64,
 }
 
-/// What this member's read ledgers say about the window that is open.
+/// What this member's window journals say about the window that is open.
 ///
-/// The ledgers are per-member run state, not a family store: this is what one
+/// The journals are per-member run state, not a family store: this is what one
 /// checkout's context windows did. Windows are not sessions — a subagent has
-/// its own ledger under its parent's session id — so both are counted and
+/// its own journal under its parent's session id — so both are counted and
 /// neither is reported as the other.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct WindowLedgers {
+pub(crate) struct WindowJournals {
     /// The directory the rows came from.
     pub(crate) dir: String,
     /// Why the numbers are absent, when they are.
     pub(crate) note: Option<String>,
-    /// Context windows with a ledger file.
+    /// Context windows with a journal file.
     pub(crate) windows: u64,
     /// Lines across all of them.
     pub(crate) lines: u64,
@@ -1380,7 +1380,7 @@ pub(crate) struct WindowLedgers {
     /// Their measured tokens.
     pub(crate) read_tokens: u64,
     /// Reads whose bytes could not be re-counted under the identity the
-    /// ledger named them by.
+    /// journal named them by.
     pub(crate) reads_unmeasured: u64,
     /// Reads whose slice is past the cap, and so were never eligible for a
     /// decline at all.
@@ -1407,7 +1407,7 @@ pub(crate) struct WindowLedgers {
     pub(crate) post_compaction_tokens: u64,
 }
 
-impl WindowLedgers {
+impl WindowJournals {
     /// An empty result carrying the reason it is empty.
     fn unavailable(dir: String, note: String) -> Self {
         Self {
@@ -1433,7 +1433,7 @@ impl WindowLedgers {
     }
 }
 
-/// The bytes a ledger line named, re-counted under the identity it named them
+/// The bytes a journal line named, re-counted under the identity it named them
 /// by — or nothing.
 ///
 /// The working file is the only source consulted, and only while it still
@@ -1492,14 +1492,14 @@ impl SliceMeter {
 /// A revision the window read is a plain decline; a revision it holds only by
 /// having written it is a delta decline. Anything else is a decline this
 /// reader cannot name, and it says so rather than guessing.
-fn frame_before(lines: &[LedgerLine], path: &str, revision: &str) -> &'static str {
+fn frame_before(lines: &[JournalLine], path: &str, revision: &str) -> &'static str {
     let mut frame = "unknown";
     for line in lines {
         match line {
-            LedgerLine::Read {
+            JournalLine::Read {
                 path: p, hash: h, ..
             } if p == path && h.to_hex() == revision => frame = "plain",
-            LedgerLine::Edit {
+            JournalLine::Edit {
                 path: p,
                 hash_new: h,
                 ..
@@ -1512,14 +1512,14 @@ fn frame_before(lines: &[LedgerLine], path: &str, revision: &str) -> &'static st
 
 /// Fold one window's lines into the running figures.
 #[allow(clippy::too_many_lines)]
-fn fold_window(lines: &[LedgerLine], meter: &mut SliceMeter, out: &mut WindowLedgers) {
+fn fold_window(lines: &[JournalLine], meter: &mut SliceMeter, out: &mut WindowJournals) {
     let mut retries: BTreeMap<&'static str, (u64, u64)> = BTreeMap::new();
     let mut last_read: Option<(String, Interval)> = None;
     let mut evicted_at: Option<u32> = None;
     for (i, line) in lines.iter().enumerate() {
         out.lines = out.lines.saturating_add(1);
         match line {
-            LedgerLine::Read {
+            JournalLine::Read {
                 turn,
                 path,
                 hash,
@@ -1550,7 +1550,7 @@ fn fold_window(lines: &[LedgerLine], meter: &mut SliceMeter, out: &mut WindowLed
                 }
                 last_read = Some((path.clone(), *range));
             }
-            LedgerLine::Observe {
+            JournalLine::Observe {
                 path, hash, range, ..
             } => {
                 out.pool_reads = out.pool_reads.saturating_add(1);
@@ -1567,7 +1567,7 @@ fn fold_window(lines: &[LedgerLine], meter: &mut SliceMeter, out: &mut WindowLed
                     None => out.pool_unmeasured = out.pool_unmeasured.saturating_add(1),
                 }
             }
-            LedgerLine::Deny {
+            JournalLine::Deny {
                 turn,
                 path,
                 hash,
@@ -1582,7 +1582,7 @@ fn fold_window(lines: &[LedgerLine], meter: &mut SliceMeter, out: &mut WindowLed
                 // inside the same turn. A later turn coming back to the file is
                 // ordinary work, not a retry of a decline.
                 let asked_again = lines.iter().skip(i + 1).any(|later| match later {
-                    LedgerLine::Read {
+                    JournalLine::Read {
                         turn: t,
                         path: p,
                         hash: h,
@@ -1595,17 +1595,17 @@ fn fold_window(lines: &[LedgerLine], meter: &mut SliceMeter, out: &mut WindowLed
                     entry.1 = entry.1.saturating_add(1);
                 }
             }
-            LedgerLine::Evict { turn, .. } => {
+            JournalLine::Evict { turn, .. } => {
                 out.evictions = out.evictions.saturating_add(1);
                 evicted_at = Some(*turn);
             }
             // Neither is a read, a decline or an emptying: an announcement
             // and its booking are counted where the savings are, not in a
             // report about the reads that happened.
-            LedgerLine::Expect { .. }
-            | LedgerLine::Edit { .. }
-            | LedgerLine::Hold { .. }
-            | LedgerLine::Prevented { .. } => {}
+            JournalLine::Expect { .. }
+            | JournalLine::Edit { .. }
+            | JournalLine::Hold { .. }
+            | JournalLine::Prevented { .. } => {}
         }
     }
     for (frame, (denies, retried)) in retries {
@@ -1623,25 +1623,25 @@ fn fold_window(lines: &[LedgerLine], meter: &mut SliceMeter, out: &mut WindowLed
     }
 }
 
-/// Read every window ledger this member holds and fold them into one account.
+/// Read every window journal this member holds and fold them into one account.
 ///
 /// Only the append files are read — the live one and the rolled ones. A
 /// snapshot is a fold of rolled files the decision path uses to answer
 /// quickly; reading the rows themselves is what a report wants, and it cannot
 /// double-count a row it never reads twice.
-pub(crate) fn window_ledgers(
+pub(crate) fn window_journals(
     work_tree: &Path,
     max_slice_bytes: u64,
     min_slice_lines: u32,
-) -> WindowLedgers {
-    let dir = crate::read_ledger::dir(work_tree);
+) -> WindowJournals {
+    let dir = crate::window_journal::dir(work_tree);
     let shown = dir.display().to_string();
     // A directory this member cannot read is a NOTE with the reason, not a
     // silent zero: an empty pool and an unreadable one are different facts.
     if let Err(e) = std::fs::read_dir(&dir) {
-        return WindowLedgers::unavailable(shown, e.to_string());
+        return WindowJournals::unavailable(shown, e.to_string());
     }
-    let mut out = WindowLedgers::unavailable(shown, String::new());
+    let mut out = WindowJournals::unavailable(shown, String::new());
     out.note = None;
     out.max_slice_bytes = max_slice_bytes;
     out.min_slice_lines = min_slice_lines;
@@ -1659,7 +1659,7 @@ pub(crate) fn window_ledgers(
 /// One window is one key however many files it has rolled through, and only
 /// the append files are read: a snapshot is a fold of rows this pass reads for
 /// itself, so a pass that read both would count them twice.
-fn member_windows(dir: &Path) -> Vec<Vec<LedgerLine>> {
+fn member_windows(dir: &Path) -> Vec<Vec<JournalLine>> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -1677,11 +1677,11 @@ fn member_windows(dir: &Path) -> Vec<Vec<LedgerLine>> {
     let mut out = Vec::with_capacity(keyed.len());
     for (_, mut files) in keyed {
         files.sort();
-        let mut lines: Vec<LedgerLine> = Vec::new();
+        let mut lines: Vec<JournalLine> = Vec::new();
         for file in &files {
             if let Ok(text) = std::fs::read_to_string(file) {
                 lines.extend(
-                    rift_agent::read_ledger::Ledger::parse(&text)
+                    rift_agent::window_journal::Journal::parse(&text)
                         .lines()
                         .to_vec(),
                 );
@@ -1692,9 +1692,9 @@ fn member_windows(dir: &Path) -> Vec<Vec<LedgerLine>> {
     out
 }
 
-/// The window ledgers of the member `repo` is, judged against the caps this
+/// The window journals of the member `repo` is, judged against the caps this
 /// repository's own policy resolves for Claude Code.
-pub(crate) fn member_window_ledgers(repo: &Path) -> WindowLedgers {
+pub(crate) fn member_window_journals(repo: &Path) -> WindowJournals {
     let policy = rift_recall_policy::ServePolicy::load(&repo.join(".rift"));
     let agent = rift_core::AgentId::CLAUDE_CODE;
     let effective = rift_recall_policy::resolve(
@@ -1702,14 +1702,14 @@ pub(crate) fn member_window_ledgers(repo: &Path) -> WindowLedgers {
         agent.as_str(),
         crate::recall::family_capability(&agent),
     );
-    window_ledgers(repo, effective.max_slice_bytes, effective.min_slice_lines)
+    window_journals(repo, effective.max_slice_bytes, effective.min_slice_lines)
 }
 
-/// Render the window-ledger block (golden-locked).
+/// Render the window-journal block (golden-locked).
 #[allow(clippy::too_many_lines)]
-pub(crate) fn render_window_ledgers(w: &WindowLedgers) -> String {
+pub(crate) fn render_window_journals(w: &WindowJournals) -> String {
     let mut out = String::new();
-    out.push_str("window ledgers (this member's own run state):\n");
+    out.push_str("window journals (this member's own run state):\n");
     out.push_str(&format!("  directory:             {}\n", w.dir));
     if let Some(note) = &w.note {
         out.push_str(&format!("  not measured:          {note}\n"));
@@ -1895,7 +1895,7 @@ fn share_of(avoided: u64, read: u64) -> Option<f64> {
 }
 
 /// One of the two windows: every figure the relations and this member's
-/// ledgers hold between its bounds.
+/// journals hold between its bounds.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct WindowPane {
     /// The per-family rows.
@@ -1905,9 +1905,9 @@ pub(crate) struct WindowPane {
     pub(crate) tokens_avoided: u64,
     /// Σ returned over that relation inside the window.
     pub(crate) tokens_returned: u64,
-    /// Context windows of THIS member with a ledger line inside it.
+    /// Context windows of THIS member with a journal line inside it.
     pub(crate) windows: u64,
-    /// Ledger lines inside it.
+    /// Journal lines inside it.
     pub(crate) lines: u64,
     /// Read-shaped calls among them.
     pub(crate) reads: u64,
@@ -2166,27 +2166,27 @@ pub(crate) fn build_pane(
     pane
 }
 
-/// When a ledger line was written, in epoch milliseconds.
-fn line_at_ms(line: &LedgerLine) -> i64 {
+/// When a journal line was written, in epoch milliseconds.
+fn line_at_ms(line: &JournalLine) -> i64 {
     let ms = match line {
-        LedgerLine::Read { at_ms, .. }
-        | LedgerLine::Deny { at_ms, .. }
-        | LedgerLine::Observe { at_ms, .. }
-        | LedgerLine::Expect { at_ms, .. }
-        | LedgerLine::Edit { at_ms, .. }
-        | LedgerLine::Hold { at_ms, .. }
-        | LedgerLine::Prevented { at_ms, .. }
-        | LedgerLine::Evict { at_ms, .. } => *at_ms,
+        JournalLine::Read { at_ms, .. }
+        | JournalLine::Deny { at_ms, .. }
+        | JournalLine::Observe { at_ms, .. }
+        | JournalLine::Expect { at_ms, .. }
+        | JournalLine::Edit { at_ms, .. }
+        | JournalLine::Hold { at_ms, .. }
+        | JournalLine::Prevented { at_ms, .. }
+        | JournalLine::Evict { at_ms, .. } => *at_ms,
     };
     i64::try_from(ms).unwrap_or(i64::MAX)
 }
 
-/// Fold this member's ledger lines into the two windows.
+/// Fold this member's journal lines into the two windows.
 ///
 /// A decline's frame and its retry are decided over the WHOLE window's lines,
 /// not the half the cut left it: a decline is judged by everything its window
 /// had read before it, whichever side of the boundary that reading was on.
-pub(crate) fn fold_split_ledgers(
+pub(crate) fn fold_split_journals(
     work_tree: &Path,
     boundary_ms: Option<i64>,
     observe: &mut WindowPane,
@@ -2194,7 +2194,7 @@ pub(crate) fn fold_split_ledgers(
 ) {
     let cut = boundary_ms.unwrap_or(i64::MAX);
     let mut meter = SliceMeter::new(work_tree);
-    for lines in member_windows(&crate::read_ledger::dir(work_tree)) {
+    for lines in member_windows(&crate::window_journal::dir(work_tree)) {
         let (mut in_observe, mut in_enforce) = (false, false);
         let mut retries: BTreeMap<(bool, &'static str), (u64, u64)> = BTreeMap::new();
         for (i, line) in lines.iter().enumerate() {
@@ -2211,9 +2211,9 @@ pub(crate) fn fold_split_ledgers(
             };
             pane.lines = pane.lines.saturating_add(1);
             match line {
-                LedgerLine::Read { .. } => pane.reads = pane.reads.saturating_add(1),
-                LedgerLine::Observe { .. } => pane.observed = pane.observed.saturating_add(1),
-                LedgerLine::Deny {
+                JournalLine::Read { .. } => pane.reads = pane.reads.saturating_add(1),
+                JournalLine::Observe { .. } => pane.observed = pane.observed.saturating_add(1),
+                JournalLine::Deny {
                     turn,
                     path,
                     hash,
@@ -2236,7 +2236,7 @@ pub(crate) fn fold_split_ledgers(
                     // The repeat the decline bounds: the same key, asked for
                     // again inside the same turn — the fail-open raw retry.
                     let asked_again = lines.iter().skip(i + 1).any(|later| match later {
-                        LedgerLine::Read {
+                        JournalLine::Read {
                             turn: t,
                             path: p,
                             hash: h,
@@ -2249,11 +2249,11 @@ pub(crate) fn fold_split_ledgers(
                         entry.1 = entry.1.saturating_add(1);
                     }
                 }
-                LedgerLine::Expect { .. }
-                | LedgerLine::Edit { .. }
-                | LedgerLine::Evict { .. }
-                | LedgerLine::Hold { .. }
-                | LedgerLine::Prevented { .. } => {}
+                JournalLine::Expect { .. }
+                | JournalLine::Edit { .. }
+                | JournalLine::Evict { .. }
+                | JournalLine::Hold { .. }
+                | JournalLine::Prevented { .. } => {}
             }
         }
         if in_observe {
@@ -2311,7 +2311,7 @@ pub(crate) async fn family_enforce_split(repo: &Path) -> EnforceSplit {
     let cut = boundary.unwrap_or(i64::MAX);
     let mut observe = build_pane(&sessions, &facts, &classes, &serve, &audit, cut, false);
     let mut enforce = build_pane(&sessions, &facts, &classes, &serve, &audit, cut, true);
-    fold_split_ledgers(repo, boundary, &mut observe, &mut enforce);
+    fold_split_journals(repo, boundary, &mut observe, &mut enforce);
     EnforceSplit {
         boundary_ms: boundary,
         boundary_source: match boundary {
@@ -2381,7 +2381,7 @@ fn render_pane(label: &str, p: &WindowPane) -> String {
         p.tokens_avoided.saturating_add(p.read_tokens())
     ));
     out.push_str(&format!(
-        "    ledgers: {} windows, {} lines, {} reads, {} observed, {} declined\n",
+        "    journals: {} windows, {} lines, {} reads, {} observed, {} declined\n",
         p.windows, p.lines, p.reads, p.observed, p.declined
     ));
     out.push_str(&format!(
@@ -3109,8 +3109,8 @@ async fn reread_report(
     let levers = family_levers(repo).await;
     // And the fourth source: this member's own run state. The decisions the
     // gate took live in files, not in either projection, and a pool nobody
-    // declined is only ever in the ledger that recorded observing it.
-    let windows = member_window_ledgers(repo);
+    // declined is only ever in the journal that recorded observing it.
+    let windows = member_window_journals(repo);
     // And the same four sources again, cut once at the moment the gate began
     // declining: an observe half and an enforce half, so the two are compared
     // as measured windows rather than as one blended total.
@@ -3125,7 +3125,7 @@ async fn reread_report(
         // different periods, the report says so here rather than let one
         // figure's name stand over two of them.
         family_window_note(repo),
-        render_window_ledgers(&windows),
+        render_window_journals(&windows),
         render_enforce_split(&split)
     );
     let db_path: PathBuf = crate::family::recall_db(repo)?;
@@ -3138,7 +3138,7 @@ async fn reread_report(
             "per_session": report.per_session,
             "repeat_classes": classes,
             "levers": levers,
-            "window_ledgers": windows,
+            "window_journals": windows,
             "enforce_split": split,
             "snapshot": "appended",
             "recall_db": db_path.display().to_string(),
@@ -3817,7 +3817,7 @@ repeat classes (capture projection):
             held_revisions: 4,
             held_with_blob: 3,
         };
-        let windows = WindowLedgers {
+        let windows = WindowJournals {
             dir: "/repo/.rift/state/reads".to_owned(),
             note: None,
             windows: 2,
@@ -3876,7 +3876,7 @@ repeat classes (capture projection):
         let rendered = format!(
             "{}{}",
             render_levers(&levers, classes.total_tokens()),
-            render_window_ledgers(&windows)
+            render_window_journals(&windows)
         );
         let golden = "\
 levers (audit relations, everything recorded since the reset):
@@ -3894,7 +3894,7 @@ pull after injection (a skill call within 600000 ms of one):
 basis availability (recorded read revisions):
   held revisions:        4
   reachable as a blob:   3 (75.0%)
-window ledgers (this member's own run state):
+window journals (this member's own run state):
   directory:             /repo/.rift/state/reads
   windows:               2
   lines:                 12
@@ -3929,8 +3929,8 @@ window ledgers (this member's own run state):
         (tmp, revision)
     }
 
-    /// Write one window's ledger file.
-    fn window_file(root: &Path, key: &str, lines: &[LedgerLine]) {
+    /// Write one window's journal file.
+    fn window_file(root: &Path, key: &str, lines: &[JournalLine]) {
         let dir = root.join(".rift").join("state").join("reads");
         std::fs::create_dir_all(&dir).unwrap();
         let body = lines.iter().fold(String::new(), |mut acc, l| {
@@ -3945,8 +3945,8 @@ window ledgers (this member's own run state):
         rift_core::Sha256Id::parse_hex(hex).unwrap()
     }
 
-    fn read_line(turn: u32, hash: &str, lo: u32, hi: u32) -> LedgerLine {
-        LedgerLine::Read {
+    fn read_line(turn: u32, hash: &str, lo: u32, hi: u32) -> JournalLine {
+        JournalLine::Read {
             turn,
             path: "a.txt".to_owned(),
             hash: revision_id(hash),
@@ -3956,8 +3956,8 @@ window ledgers (this member's own run state):
         }
     }
 
-    fn observe_line(turn: u32, hash: &str, lo: u32, hi: u32) -> LedgerLine {
-        LedgerLine::Observe {
+    fn observe_line(turn: u32, hash: &str, lo: u32, hi: u32) -> JournalLine {
+        JournalLine::Observe {
             turn,
             path: "a.txt".to_owned(),
             hash: revision_id(hash),
@@ -3983,7 +3983,7 @@ window ledgers (this member's own run state):
                 observe_line(4, &rev, 1, 150),
             ],
         );
-        let w = window_ledgers(tmp.path(), 98_304, 24);
+        let w = window_journals(tmp.path(), 98_304, 24);
         assert_eq!(w.pool_reads, 3);
         assert!(w.pool_tokens > 0, "the pool is priced, not just counted");
         assert_eq!(w.pool_unmeasured, 0);
@@ -4005,7 +4005,7 @@ window ledgers (this member's own run state):
         assert_eq!(priced, w.pool_tokens, "the buckets partition the pool");
     }
 
-    /// ★ A slice whose bytes are no longer the bytes the ledger named is
+    /// ★ A slice whose bytes are no longer the bytes the journal named is
     /// declared unmeasured, never re-counted under the new bytes: pricing a
     /// slice nobody read is worse than admitting the count is missing.
     #[test]
@@ -4017,7 +4017,7 @@ window ledgers (this member's own run state):
             &[read_line(1, &rev, 1, 40), observe_line(2, &rev, 1, 40)],
         );
         std::fs::write(tmp.path().join("a.txt"), "everything is different now\n").unwrap();
-        let w = window_ledgers(tmp.path(), 98_304, 24);
+        let w = window_journals(tmp.path(), 98_304, 24);
         assert_eq!((w.reads, w.read_tokens, w.reads_unmeasured), (1, 0, 1));
         assert_eq!((w.pool_reads, w.pool_tokens, w.pool_unmeasured), (1, 0, 1));
     }
@@ -4030,7 +4030,7 @@ window ledgers (this member's own run state):
     #[test]
     fn a_retry_is_counted_inside_the_turn_and_against_its_own_frame() {
         let (tmp, rev) = seeded_tree(200);
-        let denied = |turn: u32, lo: u32, hi: u32| LedgerLine::Deny {
+        let denied = |turn: u32, lo: u32, hi: u32| JournalLine::Deny {
             turn,
             path: "a.txt".to_owned(),
             hash: revision_id(&rev),
@@ -4046,7 +4046,7 @@ window ledgers (this member's own run state):
                 denied(2, 1, 100),
                 read_line(2, &rev, 1, 100),
                 // Held by having written it: a delta decline, not retried.
-                LedgerLine::Edit {
+                JournalLine::Edit {
                     turn: 3,
                     path: "b.txt".to_owned(),
                     hash_old: None,
@@ -4056,7 +4056,7 @@ window ledgers (this member's own run state):
                     full: true,
                     at_ms: 4,
                 },
-                LedgerLine::Deny {
+                JournalLine::Deny {
                     turn: 4,
                     path: "b.txt".to_owned(),
                     hash: revision_id(&rev),
@@ -4065,7 +4065,7 @@ window ledgers (this member's own run state):
                 },
             ],
         );
-        let w = window_ledgers(tmp.path(), 98_304, 24);
+        let w = window_journals(tmp.path(), 98_304, 24);
         let mut rows: Vec<(String, u64, u64)> = w
             .retries
             .iter()
@@ -4090,16 +4090,16 @@ window ledgers (this member's own run state):
                 read_line(1, &rev, 1, 50),
                 read_line(1, &rev, 51, 100),
                 read_line(1, &rev, 101, 150),
-                LedgerLine::Evict {
+                JournalLine::Evict {
                     turn: 2,
-                    reason: rift_agent::read_ledger::EvictReason::Compact,
+                    reason: rift_agent::window_journal::EvictReason::Compact,
                     at_ms: 6,
                 },
                 read_line(3, &rev, 1, 50),
                 read_line(9, &rev, 120, 170),
             ],
         );
-        let w = window_ledgers(tmp.path(), 98_304, 24);
+        let w = window_journals(tmp.path(), 98_304, 24);
         assert_eq!(w.adjacent_reads, 2, "two abutting pairs, not three reads");
         assert_eq!(w.evictions, 1);
         assert!(
@@ -4108,11 +4108,11 @@ window ledgers (this member's own run state):
         );
     }
 
-    /// Windows are counted as windows. A subagent has a ledger of its own
+    /// Windows are counted as windows. A subagent has a journal of its own
     /// under its parent's session id, so a count of windows is not a count of
     /// sessions and this report never prints one as the other.
     #[test]
-    fn windows_are_counted_per_ledger_and_rolled_files_are_one_window() {
+    fn windows_are_counted_per_journal_and_rolled_files_are_one_window() {
         let (tmp, rev) = seeded_tree(200);
         window_file(tmp.path(), "w1", &[read_line(1, &rev, 1, 10)]);
         window_file(tmp.path(), "w2", &[read_line(1, &rev, 1, 10)]);
@@ -4125,7 +4125,7 @@ window ledgers (this member's own run state):
         // A snapshot is a fold of rows this pass reads for itself: reading it
         // too would count them twice.
         std::fs::write(dir.join("w1.1.snapshot.json"), "{}").unwrap();
-        let w = window_ledgers(tmp.path(), 98_304, 24);
+        let w = window_journals(tmp.path(), 98_304, 24);
         assert_eq!((w.windows, w.reads), (2, 3));
     }
 
@@ -4257,7 +4257,7 @@ window ledgers (this member's own run state):
     #[test]
     fn a_declined_slice_is_priced_by_length_in_the_window_it_was_booked_in() {
         let (tmp, rev) = seeded_tree(200);
-        let deny = |turn: u32, lo: u32, hi: u32, at_ms: u64| LedgerLine::Deny {
+        let deny = |turn: u32, lo: u32, hi: u32, at_ms: u64| JournalLine::Deny {
             turn,
             path: "a.txt".to_owned(),
             hash: revision_id(&rev),
@@ -4265,11 +4265,11 @@ window ledgers (this member's own run state):
             at_ms,
         };
         let mut first = read_line(1, &rev, 1, 40);
-        if let LedgerLine::Read { at_ms, .. } = &mut first {
+        if let JournalLine::Read { at_ms, .. } = &mut first {
             *at_ms = 10;
         }
         let mut retry = read_line(1, &rev, 1, 40);
-        if let LedgerLine::Read { at_ms, .. } = &mut retry {
+        if let JournalLine::Read { at_ms, .. } = &mut retry {
             *at_ms = 30;
         }
         window_file(
@@ -4278,7 +4278,7 @@ window ledgers (this member's own run state):
             &[first, deny(1, 1, 40, 20), retry, deny(4, 1, 150, 90)],
         );
         let (mut observe, mut enforce) = (WindowPane::new(), WindowPane::new());
-        fold_split_ledgers(tmp.path(), Some(50), &mut observe, &mut enforce);
+        fold_split_journals(tmp.path(), Some(50), &mut observe, &mut enforce);
 
         assert_eq!((observe.windows, enforce.windows), (1, 1), "it straddles");
         assert_eq!((observe.reads, observe.declined), (2, 1));
@@ -4395,7 +4395,7 @@ observe and enforce windows (the post-reset data, cut once):
     (no session, read or decision in this window)
     honesty (audit relation): avoided 0 − returned 0 = 0
     savings: avoided ÷ (avoided + read) = n/a (0 ÷ 0)
-    ledgers: 0 windows, 0 lines, 0 reads, 0 observed, 0 declined
+    journals: 0 windows, 0 lines, 0 reads, 0 observed, 0 declined
     retry after decline   declines     retried
       (no decline was recorded in this window)
     declined by length       reads      tokens  unmeasured
@@ -4408,7 +4408,7 @@ observe and enforce windows (the post-reset data, cut once):
     claude-code              4     4      2      4        900     2     1    1       900       180    50.0%
     honesty (audit relation): avoided 900 − returned 180 = 720
     savings: avoided ÷ (avoided + read) = 50.0% (900 ÷ 1800)
-    ledgers: 2 windows, 9 lines, 5 reads, 1 observed, 2 declined
+    journals: 2 windows, 9 lines, 5 reads, 1 observed, 2 declined
     retry after decline   declines     retried
       plain                      2           1  50.0%
     declined by length       reads      tokens  unmeasured

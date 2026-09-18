@@ -54,7 +54,7 @@ pub const CONDITION: &str = "intercepted";
 const FAMILY: &str = "claude-code";
 
 /// The lines of context a delta frame's suggested window carries — the shipped
-/// default (`rift_agent::read_ledger::Limits::context_lines`), restated here
+/// default (`rift_agent::window_journal::Limits::context_lines`), restated here
 /// because this crate is downstream of neither the hook path nor the agent SDK.
 const CONTEXT_LINES: u32 = 3;
 

@@ -514,8 +514,8 @@ fn injection_response(agent: &AgentId, verb: &str, text: &str) -> Option<Value> 
 /// What the gate has been asked to do about a tool call the agent is about to
 /// make.
 ///
-/// This is deliberately not [`crate::read_ledger::Decision`]. That type says
-/// what the *ledger* concluded and carries the shape of a decline, in line
+/// This is deliberately not [`crate::window_journal::Decision`]. That type says
+/// what the *journal* concluded and carries the shape of a decline, in line
 /// numbers; this one carries the sentence a model will read, already rendered
 /// by the one renderer that is allowed to write it. Keeping them apart is what
 /// keeps this module out of the business of composing text: `gate` passes the

@@ -6664,7 +6664,7 @@ async fn read_token_rows(cache: &Path, repo: &Path, call: &str) -> Vec<(i64, Str
 /// read's own `tool_call` row (`file_read_tokens`, insert-or-ignore); a
 /// redelivered read writes no second row; and the archive that follows
 /// carries the figure in the shard, so every downstream reader (Canopy, the
-/// recall ledger, cost) sees it as if it had been measured inline.
+/// recall journal, cost) sees it as if it had been measured inline.
 #[tokio::test]
 async fn a_reads_token_count_lands_from_the_worker_at_the_reads_own_row() {
     let tmp = tempfile::tempdir().unwrap();
@@ -7018,10 +7018,10 @@ fn a_hook_outside_any_repository_writes_nothing() {
     );
 }
 
-// --- the read ledger ---------------------------------------------------------
+// --- the window journal ------------------------------------------------------
 
-/// The files in this checkout's read-ledger directory, by name.
-fn read_ledger_files(repo: &Path) -> Vec<String> {
+/// The files in this checkout's window-journal directory, by name.
+fn window_journal_files(repo: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(repo.join(".rift").join("state").join("reads"))
         .into_iter()
         .flatten()
@@ -7033,7 +7033,7 @@ fn read_ledger_files(repo: &Path) -> Vec<String> {
 }
 
 /// Through the real binary: the agent edits a file it read in full, and the
-/// window's ledger says where the file changed, by how much, and that the
+/// window's journal says where the file changed, by how much, and that the
 /// window still holds every line of the revision it left behind.
 ///
 /// The bytes the edit put there are bytes the agent authored, so the follow-up
@@ -7068,8 +7068,8 @@ fn an_edit_hook_leaves_the_window_holding_the_bytes_it_wrote() {
     std::fs::write(&file, "a\nnew\nnewer\nc\n").unwrap();
     agent_hook(&repo, "PostToolUse", "e2e-live-1", 2, &edit, &env);
 
-    let names = read_ledger_files(&repo);
-    let name = names.first().expect("one context window, one ledger");
+    let names = window_journal_files(&repo);
+    let name = names.first().expect("one context window, one journal");
     let path = repo.join(".rift").join("state").join("reads").join(name);
     let rows: Vec<serde_json::Value> = std::fs::read_to_string(&path)
         .unwrap()
@@ -7109,15 +7109,15 @@ fn an_edit_hook_leaves_the_window_holding_the_bytes_it_wrote() {
     );
 }
 
-/// Through the real binary: a read arrives, and the window's own ledger says
+/// Through the real binary: a read arrives, and the window's own journal says
 /// which lines of which revision it was handed — one file under this
 /// checkout's run state, named for the context window and nothing else.
 ///
 /// The second read of the same lines is the whole point. Nothing is declined
-/// while the lever is in observe, but the ledger says out loud that a decline
+/// while the lever is in observe, but the journal says out loud that a decline
 /// is what those bytes were worth, which is the number the flip is decided on.
 #[test]
-fn a_read_hook_leaves_the_window_a_ledger_of_the_lines_it_was_handed() {
+fn a_read_hook_leaves_the_window_a_journal_of_the_lines_it_was_handed() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
     let cache = tmp.path().join("cache");
@@ -7134,10 +7134,10 @@ fn a_read_hook_leaves_the_window_a_ledger_of_the_lines_it_was_handed() {
 
     agent_hook(&repo, "PreToolUse", "e2e-live-1", 1, &read, &env);
 
-    let names = read_ledger_files(&repo);
-    assert_eq!(names.len(), 1, "one context window, one ledger: {names:?}");
+    let names = window_journal_files(&repo);
+    assert_eq!(names.len(), 1, "one context window, one journal: {names:?}");
     let name = names.first().unwrap();
-    let stem = name.strip_suffix(".jsonl").expect("a ledger file: {name}");
+    let stem = name.strip_suffix(".jsonl").expect("a journal file: {name}");
     assert_eq!(
         stem.len(),
         64,
@@ -7205,18 +7205,18 @@ fn a_read_hook_leaves_the_window_a_ledger_of_the_lines_it_was_handed() {
     assert_eq!(kinds, vec!["read", "observe", "evict", "read"], "{kinds:?}");
 }
 
-/// The kinds of line the one context window's ledger holds, in order — the
+/// The kinds of line the one context window's journal holds, in order — the
 /// record a decision leaves behind, read back from the file the product wrote.
-fn ledger_kinds(repo: &Path) -> Vec<String> {
-    let names = read_ledger_files(repo);
-    let name = names.first().expect("one context window, one ledger");
-    ledger_kinds_of(repo, name)
+fn journal_kinds(repo: &Path) -> Vec<String> {
+    let names = window_journal_files(repo);
+    let name = names.first().expect("one context window, one journal");
+    journal_kinds_of(repo, name)
 }
 
 /// The same, for a walk that puts two context windows in one repository: one
-/// ledger file per window, named for the window rather than for the order the
+/// journal file per window, named for the window rather than for the order the
 /// directory happens to list them in.
-fn ledger_kinds_of(repo: &Path, name: &str) -> Vec<String> {
+fn journal_kinds_of(repo: &Path, name: &str) -> Vec<String> {
     std::fs::read_to_string(repo.join(".rift").join("state").join("reads").join(name))
         .unwrap()
         .lines()
@@ -7378,7 +7378,7 @@ fn a_verification_read_is_declined_once_and_the_ways_out_of_it_are_open() {
     );
 
     assert_eq!(
-        ledger_kinds(&repo),
+        journal_kinds(&repo),
         vec!["read", "edit", "deny", "read", "read"],
         "declined once, then handed the bytes twice and recorded as holding them"
     );
@@ -7476,7 +7476,7 @@ fn claude_code_verification_walk(repo: &Path, file: &Path, env: &[(&str, &str)])
 /// only sight of the edit that agent has; taking it away would buy a saving
 /// with the one thing the read exists to provide. The edit is
 /// still recorded — the coverage of the old bytes still has to stop being
-/// coverage — so what is missing from that ledger is the decision, not the
+/// coverage — so what is missing from that journal is the decision, not the
 /// line.
 #[test]
 fn a_family_whose_edit_echo_is_not_pinned_is_never_declined_on_its_own_edit() {
@@ -7504,12 +7504,12 @@ fn a_family_whose_edit_echo_is_not_pinned_is_never_declined_on_its_own_edit() {
         None,
         "a decline here would remove this agent's only sight of its own edit: {verify}"
     );
-    let unpinned = read_ledger_files(&repo);
+    let unpinned = window_journal_files(&repo);
     let [agy] = unpinned.as_slice() else {
         panic!("one window so far, got {unpinned:?}");
     };
     assert_eq!(
-        ledger_kinds_of(&repo, agy),
+        journal_kinds_of(&repo, agy),
         vec!["read", "edit", "read"],
         "the edit is recorded and the read runs; only the decision is absent"
     );
@@ -7523,12 +7523,12 @@ fn a_family_whose_edit_echo_is_not_pinned_is_never_declined_on_its_own_edit() {
         reason.contains("changed only at lines 2-3"),
         "with the places, in the numbering it is about to see: {reason}"
     );
-    let both = read_ledger_files(&repo);
+    let both = window_journal_files(&repo);
     let cc = both
         .iter()
         .find(|name| *name != agy)
-        .expect("the second window has its own ledger");
-    assert_eq!(ledger_kinds_of(&repo, cc), vec!["read", "edit", "deny"]);
+        .expect("the second window has its own journal");
+    assert_eq!(journal_kinds_of(&repo, cc), vec!["read", "edit", "deny"]);
 }
 
 /// Repository-wide enforcement reaches Antigravity without an agent-specific
@@ -7597,9 +7597,9 @@ fn repository_wide_enforcement_reaches_antigravity_with_one_retry_escape() {
     assert_eq!(declined_with(&third), None, "the identical retry runs");
 
     assert_eq!(
-        ledger_kinds(&repo),
+        journal_kinds(&repo),
         vec!["read", "deny", "read"],
-        "the ledger records the active decision and bounded retry"
+        "the journal records the active decision and bounded retry"
     );
 }
 
@@ -7642,9 +7642,9 @@ fn agent_hook_stdout(
 /// This is the whole boundary in one walk, and each step is a fact the unit
 /// tests cannot state: that the second boundary verb is wired at all (the
 /// family's pinned surface carries two, and only one of them was written on
-/// before), that the map travels in the field the client reads, that the ledger
-/// lines the compaction did not delete are what it is built from, and that the
-/// same hook arriving twice does not hand the map over twice.
+/// before), that the map travels in the field the client reads, that the
+/// journal lines the compaction did not delete are what it is built from, and
+/// that the same hook arriving twice does not hand the map over twice.
 #[test]
 fn a_compacted_context_is_handed_what_it_stopped_holding() {
     let tmp = tempfile::tempdir().unwrap();
@@ -7712,11 +7712,11 @@ fn a_compacted_context_is_handed_what_it_stopped_holding() {
         "one eviction, one map: {again}"
     );
 
-    // And the read after the compaction is a first read again: the ledger kept
+    // And the read after the compaction is a first read again: the journal kept
     // the lines it was built from, and they satisfy nothing.
     agent_hook(&repo, "PreToolUse", "e2e-live-1", 5, &read, &env);
     assert_eq!(
-        ledger_kinds(&repo),
+        journal_kinds(&repo),
         vec!["read", "evict", "evict", "hold", "evict", "read"],
         "the pre-eviction lines stay, the map records what it announced, and \
          the re-read is not a repeat"
@@ -7817,8 +7817,9 @@ fn a_subagents_window_is_introduced_once_at_the_verb_that_opens_it() {
         "a second subagent of the same turn is a second window"
     );
 
-    // Three windows, three markers, each named by the key the read ledger uses
-    // — which is what makes the parent's claim and the children's independent.
+    // Three windows, three markers, each named by the key the window journal
+    // uses — which is what makes the parent's claim and the children's
+    // independent.
     let markers: std::collections::BTreeSet<String> =
         std::fs::read_dir(repo.join(".rift").join("state").join("injection"))
             .unwrap()
@@ -7923,7 +7924,7 @@ fn the_second_post_compaction_read_of_an_unchanged_file_is_denied() {
     assert!(second.contains("b.txt"), "{second}");
 
     assert_eq!(
-        ledger_kinds(&repo),
+        journal_kinds(&repo),
         vec!["read", "deny", "evict", "evict", "hold", "read", "deny"],
         "declined, compacted, told what it had held, allowed, declined — and \
          the read that follows the announcement answers it, so nothing books \
@@ -7934,7 +7935,7 @@ fn the_second_post_compaction_read_of_an_unchanged_file_is_denied() {
 /// The reads this family makes: twelve bounded `sed` reads through `shell`, spelled the way
 /// the client spells them — a relative path resolved against the working
 /// directory the payload states. The strict recogniser is what puts those
-/// lines in the ledger a map is built from, so without it this family's map
+/// lines in the journal a map is built from, so without it this family's map
 /// would be empty; and nothing declines them, because this family is observed.
 /// Each call is also the standing assertion that injection stays off the gate
 /// path: this verb answers zero bytes.
@@ -8032,8 +8033,8 @@ fn assert_the_map_dropped_whole_entries(map: &str, files: &[String]) {
 /// home), that both of its boundary verbs are wired, that the quiet turn stays
 /// quiet, that the reads this family makes through `shell` are what the map is
 /// built from, that the map rides the first boundary hook after this family's
-/// own compaction signal — it names no source, so the ledger's last signal is
-/// what decides — and that a map larger than the budget is paid for in whole
+/// own compaction signal — it names no source, so the journal's last signal
+/// is what decides — and that a map larger than the budget is paid for in whole
 /// entries and a count, never in a cut the client makes.
 ///
 /// Boundary injection is independent of whether a separate tool call is
@@ -8129,8 +8130,8 @@ fn codex_receives_the_pointer_and_manifest_through_its_pinned_channel() {
 
     let files = codex_shell_reads(&repo, "codex-e2e-1", &env);
     // Its compaction signal, then the next hook that can carry text: this
-    // family names no source on a boundary, so the ledger's last signal is what
-    // makes this the hook that meets a context which lost its state.
+    // family names no source on a boundary, so the journal's last signal is
+    // what makes this the hook that meets a context which lost its state.
     hook("PostCompact", &format!("{{{}}}", session("codex-e2e-1")));
     let map = context_of(
         &hook(

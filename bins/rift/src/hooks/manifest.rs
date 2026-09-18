@@ -1,5 +1,5 @@
 //! The per-turn delta manifest (injection tier b) and the stamps that let a
-//! quiet turn stay silent without opening anything. The ledger knows what
+//! quiet turn stay silent without opening anything. The journal knows what
 //! changed since the state the agent already holds, and that is the part worth
 //! pushing — but it is pushed onto the agent's critical path, unrequested, so
 //! every rule here is about costing the turn as little as possible and saying
@@ -65,14 +65,14 @@ pub(super) struct HeldRevision {
 /// from reads alone would compare the checkout against the revision the agent
 /// held *before its own edit* and announce that edit back to it, every turn,
 /// as news.
-fn held_revisions(ledger: &rift_agent::read_ledger::Ledger) -> Vec<HeldRevision> {
-    use rift_agent::read_ledger::Line;
+fn held_revisions(journal: &rift_agent::window_journal::Journal) -> Vec<HeldRevision> {
+    use rift_agent::window_journal::Line;
     let mut out: Vec<HeldRevision> = Vec::new();
-    for line in ledger.live() {
+    for line in journal.live() {
         // Through the one normaliser on the way in, because every later
         // comparison is against a `/`-spelled name: the projection's own delta
         // (so a file does not get named twice), the serving policy's globs,
-        // and the worktree hasher. A window whose ledger predates the `/` rule
+        // and the worktree hasher. A window whose journal predates the `/` rule
         // is answered about its files rather than about two spellings of them.
         let respell = |p: &str| rift_recall_substrate::worktree::slash_spelled(p).into_owned();
         let (path, hash, at_ms) = match line {
@@ -101,7 +101,7 @@ fn held_revisions(ledger: &rift_agent::read_ledger::Ledger) -> Vec<HeldRevision>
     out
 }
 
-/// The revisions this window holds, from the read ledger the gate writes.
+/// The revisions this window holds, from the window journal the gate writes.
 ///
 /// Priced deliberately: it parses the payload and reads a bounded file, so it
 /// is passed to [`turn_manifest`] as a thunk and called only on the turns that
@@ -120,7 +120,7 @@ pub(super) fn held_now(
         return Vec::new();
     }
     // The context window, not the session — the same key the gate wrote the
-    // ledger under, so a subagent is answered about its own reads and never
+    // journal under, so a subagent is answered about its own reads and never
     // its parent's.
     let registry = AdapterRegistry::with_builtin();
     let window = registry
@@ -128,9 +128,9 @@ pub(super) fn held_now(
         .map(|adapter| adapter.facts(verb, &raw.payload))
         .and_then(|facts| facts.child_session);
     held_revisions(
-        &crate::read_ledger::ReadLedger::open(repo, &raw.session, window.as_deref())
+        &crate::window_journal::WindowJournal::open(repo, &raw.session, window.as_deref())
             .load()
-            .ledger,
+            .journal,
     )
 }
 
@@ -210,10 +210,10 @@ impl ManifestRow {
 /// what the projection reports against the baseline.
 ///
 /// Held first, and that order is the honesty of the frame's own sentence. It
-/// says "file(s) you have read changed", and a file the ledger has a read or
+/// says "file(s) you have read changed", and a file the journal has a read or
 /// an edit for is one the session demonstrably read; the baseline is a set of
 /// hashes the manifest once *announced*, which is a weaker claim and stays the
-/// fallback for the sessions the ledger knows nothing about.
+/// fallback for the sessions the journal knows nothing about.
 ///
 /// Three rules bound it. A path this repository does not serve is not served
 /// by a new renderer either, and is left out before its bytes are touched. A
@@ -396,14 +396,14 @@ fn moved_held_files(
 /// Write down what a manifest just told this window it holds.
 ///
 /// The mirror of [`held_now`], through the same payload and the same window
-/// key: the manifest is built from what the ledger says the window holds, and
-/// this is the ledger being told what the window was then told. It is called
+/// key: the manifest is built from what the journal says the window holds, and
+/// this is the journal being told what the window was then told. It is called
 /// only on the turns that actually injected, with the entries the frame
 /// actually named.
 ///
-/// The lines it announces are the ones the ledger already records for that
+/// The lines it announces are the ones the journal already records for that
 /// revision — which is what the manifest's own entry was derived from — so a
-/// file whose coverage is in two pieces, or whose revision the ledger has
+/// file whose coverage is in two pieces, or whose revision the journal has
 /// nothing for, announces nothing and books nothing later.
 pub(super) fn announce_now(
     repo: &std::path::Path,
@@ -434,8 +434,8 @@ pub(super) fn announce_now(
         .get(agent)
         .map(|adapter| adapter.facts(verb, &raw.payload))
         .and_then(|facts| facts.child_session);
-    let ledger = crate::read_ledger::ReadLedger::open(repo, &raw.session, window.as_deref());
-    let lines = ledger.load().ledger;
+    let journal = crate::window_journal::WindowJournal::open(repo, &raw.session, window.as_deref());
+    let lines = journal.load().journal;
     let at_ms = u64::try_from(raw.occurred_at_ms).unwrap_or_default();
     let turn = raw.turn.unwrap_or_default();
     for (path, hash) in named {
@@ -444,7 +444,7 @@ pub(super) fn announce_now(
         };
         let coverage = lines.coverage(path, hash);
         announce_holds(
-            &ledger,
+            &journal,
             &engine,
             turn,
             at_ms,
@@ -454,7 +454,7 @@ pub(super) fn announce_now(
 }
 
 /// One entry a pushed frame named: the path, and the revision the window
-/// holds of it, in the spelling the relation and the ledger both use.
+/// holds of it, in the spelling the relation and the journal both use.
 type NamedHold = (String, String);
 
 /// What one turn should do. Pure — the decision is a function of the baseline,
@@ -568,7 +568,7 @@ fn decide_turn(
                 .flat_map(|row| row.accounts.iter().cloned())
                 .collect(),
             // A row with no held revision announces nothing about one: the
-            // baseline knows the file moved and the session's own ledger does
+            // baseline knows the file moved and the session's own journal does
             // not say what it holds of it.
             named: fitted
                 .named
@@ -704,11 +704,11 @@ pub(super) fn turn_manifest(
     }
     // The window keys the baseline and the stamp by its hash, never as a path
     // component — the same rule, and the same function, the tier-(a) marker
-    // and the read ledger follow. Per window rather than per session because
+    // and the window journal follow. Per window rather than per session because
     // the held set this manifest is decided against is already per window: a
     // parent keyed by the session alone would be told that "files you have
     // read changed" about files only its subagents ever read.
-    let key = crate::read_ledger::key(session, agent_id);
+    let key = crate::window_journal::key(session, agent_id);
     // LEVEL 1 of the silence precondition: if neither file has
     // moved since the last turn that accounted for them, the answer is the
     // silence that turn already established, and it is given here — before the
@@ -848,7 +848,7 @@ pub(super) fn turn_manifest(
             // instead would cost the same turn and leave a staler stamp.
             record_stamp(repo, &key, accounted, scoped.as_deref());
             // What this turn told the window it holds, written to the
-            // window's own ledger — the input to booking the reads those
+            // window's own journal — the input to booking the reads those
             // entries make unnecessary.
             announce(&named);
             Some(text)
@@ -878,7 +878,7 @@ fn delta_is_complete(payload: &serde_json::Value) -> bool {
 }
 
 /// The delta the projection reports against `known`: changed paths with their
-/// new content hashes, in the ledger's own rank order, plus whether that list
+/// new content hashes, in the journal's own rank order, plus whether that list
 /// is the whole delta ([`delta_is_complete`]). `None` means the question could
 /// not be asked, which is answered like any other unavailable answer — with
 /// silence.
@@ -938,7 +938,7 @@ pub(crate) fn seed_manifest_baseline(
 ) {
     // The main thread's own window: a resume restores the conversation, and a
     // subagent window does not outlive the turn that spawned it.
-    let key = crate::read_ledger::key(native_session, None);
+    let key = crate::window_journal::key(native_session, None);
     write_baseline(repo, &key, &merged_baseline(&[], hashes));
 }
 
@@ -1886,7 +1886,7 @@ mod manifest_tests {
 
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-keyed", None);
+        let key = crate::window_journal::key("s-keyed", None);
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -1965,7 +1965,7 @@ mod manifest_tests {
         let body = br#"{"session_id":"s-manifest"}"#;
         let pointer =
             session_pointer_in(repo.path(), &CC, PROMPT, body).expect("turn 1 is the pointer");
-        let key = crate::read_ledger::key("s-manifest", None);
+        let key = crate::window_journal::key("s-manifest", None);
         assert_eq!(read_baseline(repo.path(), &key), None, "no baseline yet");
 
         // Turn 2: the claim is already held, so this is the manifest tier. It
@@ -2036,7 +2036,7 @@ mod manifest_tests {
                 assert!(!text.contains("AWS_SECRET"), "{text}");
             }
         }
-        let key = crate::read_ledger::key(hostile, None);
+        let key = crate::window_journal::key(hostile, None);
         assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(
             baseline_dir(repo.path(), &key).is_dir(),
@@ -2061,7 +2061,7 @@ mod manifest_tests {
     fn an_unmoved_projection_is_answered_without_opening_it() {
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-skip", None);
+        let key = crate::window_journal::key("s-skip", None);
 
         // An empty baseline: everything in the projection is a delta.
         write_baseline(repo.path(), &key, &[]);
@@ -2096,7 +2096,7 @@ mod manifest_tests {
     fn a_baseline_the_turn_did_not_write_is_never_skipped_over() {
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-baseline", None);
+        let key = crate::window_journal::key("s-baseline", None);
 
         write_baseline(repo.path(), &key, &[]);
         arm_stamp(repo.path(), &key);
@@ -2134,7 +2134,7 @@ mod manifest_tests {
     fn a_moved_projection_is_never_skipped_over() {
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-moved", None);
+        let key = crate::window_journal::key("s-moved", None);
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -2181,7 +2181,7 @@ mod manifest_tests {
     fn a_silent_turn_records_the_stamp_that_makes_the_next_one_free() {
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-silent", None);
+        let key = crate::window_journal::key("s-silent", None);
 
         // A baseline that already covers both seeded revisions: a real delta
         // query that comes back empty, which is the Silent branch.
@@ -2250,7 +2250,7 @@ mod manifest_tests {
     fn a_truncated_delta_records_no_stamp_and_keeps_draining() {
         let repo = enabled_repo();
         let db = seed_many(repo.path(), 64);
-        let key = crate::read_ledger::key("s-drain", None);
+        let key = crate::window_journal::key("s-drain", None);
 
         // Turn 1 of the manifest tier: bootstrap. It absorbs the prefix the
         // response carried — not the whole projection.
@@ -2304,7 +2304,7 @@ mod manifest_tests {
     fn an_unfittable_delta_records_no_stamp_and_stays_owed() {
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-unfit", None);
+        let key = crate::window_journal::key("s-unfit", None);
         let budget = |n: u32| {
             let pol = repo.path().join(".rift").join("policies");
             std::fs::create_dir_all(&pol).unwrap();
@@ -2369,7 +2369,7 @@ mod manifest_tests {
     fn an_injecting_turn_leaves_a_stamp_that_makes_the_next_turn_walk() {
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-stale", None);
+        let key = crate::window_journal::key("s-stale", None);
         let current = |k: &str| current_stamp(repo.path(), k);
 
         write_baseline(repo.path(), &key, &[]);
@@ -2418,7 +2418,7 @@ mod manifest_tests {
     fn a_quiet_member_is_not_reinjected_by_a_divergent_siblings_write() {
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-quiet", None);
+        let key = crate::window_journal::key("s-quiet", None);
 
         write_baseline(repo.path(), &key, &[]);
         arm_stamp(repo.path(), &key);
@@ -2474,7 +2474,7 @@ mod manifest_tests {
     fn a_siblings_write_on_the_members_ancestry_does_reinject() {
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-compound", None);
+        let key = crate::window_journal::key("s-compound", None);
 
         write_baseline(repo.path(), &key, &[]);
         arm_stamp(repo.path(), &key);
@@ -2505,7 +2505,7 @@ mod manifest_tests {
     fn a_hostile_stamp_file_costs_work_never_correctness() {
         let repo = enabled_repo();
         let db = seed_projection(repo.path());
-        let key = crate::read_ledger::key("s-hostile", None);
+        let key = crate::window_journal::key("s-hostile", None);
         write_baseline(repo.path(), &key, &[]);
 
         let real = format!(
@@ -2569,26 +2569,26 @@ mod manifest_tests {
     /// hash to — the line the gate writes on a read it let through.
     fn held_read(repo: &std::path::Path, session: &str, rel: &str, text: &str, at_ms: u64) {
         let lines = u32::try_from(text.lines().count().max(1)).unwrap();
-        crate::read_ledger::ReadLedger::open(repo, session, None)
-            .append(&rift_agent::read_ledger::Line::Read {
+        crate::window_journal::WindowJournal::open(repo, session, None)
+            .append(&rift_agent::window_journal::Line::Read {
                 turn: 1,
                 path: rel.to_owned(),
                 hash: rift_core::Sha256Id::parse_hex(&rift_shadow::sha256_hex(&[text.as_bytes()]))
                     .unwrap(),
-                range: rift_agent::read_ledger::Interval::new(1, lines).unwrap(),
+                range: rift_agent::window_journal::Interval::new(1, lines).unwrap(),
                 total_lines: lines,
                 at_ms,
             })
             .unwrap();
     }
 
-    /// The revisions a window holds, read from the ledger the gate wrote —
+    /// The revisions a window holds, read from the journal the gate wrote —
     /// the thunk the production caller passes.
-    fn held_from_ledger(repo: &std::path::Path, session: &str) -> Vec<HeldRevision> {
+    fn held_from_journal(repo: &std::path::Path, session: &str) -> Vec<HeldRevision> {
         held_revisions(
-            &crate::read_ledger::ReadLedger::open(repo, session, None)
+            &crate::window_journal::WindowJournal::open(repo, session, None)
                 .load()
-                .ledger,
+                .journal,
         )
     }
 
@@ -2605,7 +2605,7 @@ mod manifest_tests {
     /// — the one its own read recorded, not the one the checkout has now — and
     /// **A manifest entry is an announcement, and it is written down.** The
     /// entry names the revision the window holds and where it moved; the
-    /// window's ledger records that it was told, which is what the read it
+    /// window's journal records that it was told, which is what the read it
     /// then does not make is booked against. A file the manifest did not
     /// name announces nothing.
     #[test]
@@ -2621,7 +2621,7 @@ mod manifest_tests {
         let session = "s-announce";
         held_read(&repo, session, "moved.txt", basis, 20);
         held_read(&repo, session, "still.txt", "one\n", 10);
-        let key = crate::read_ledger::key(session, None);
+        let key = crate::window_journal::key(session, None);
         write_baseline(&repo, &key, &[]);
         std::fs::write(repo.join("moved.txt"), "alpha\nBRAVO\ncharlie\n").unwrap();
 
@@ -2630,7 +2630,7 @@ mod manifest_tests {
             session,
             None,
             None,
-            &|| held_from_ledger(&repo, session),
+            &|| held_from_journal(&repo, session),
             &|named| {
                 announce_now(
                     &repo,
@@ -2646,15 +2646,15 @@ mod manifest_tests {
         .expect("a file the session holds moved");
         assert!(text.contains("moved.txt"), "{text}");
 
-        let ledger = crate::read_ledger::ReadLedger::open(&repo, session, None)
+        let journal = crate::window_journal::WindowJournal::open(&repo, session, None)
             .load()
-            .ledger;
+            .journal;
         assert!(
-            ledger.standing_hold("moved.txt").is_some(),
+            journal.standing_hold("moved.txt").is_some(),
             "the entry the manifest named is an announcement: {text}"
         );
         assert!(
-            ledger.standing_hold("still.txt").is_none(),
+            journal.standing_hold("still.txt").is_none(),
             "a file the manifest did not name was not announced: {text}"
         );
     }
@@ -2686,7 +2686,7 @@ mod manifest_tests {
         // Most recently read leads the walk, so the guarded file is read last.
         held_read(&repo, session, "moved.txt", basis, 10);
         held_read(&repo, session, "private/secret.txt", basis, 20);
-        let key = crate::read_ledger::key(session, None);
+        let key = crate::window_journal::key(session, None);
         write_baseline(&repo, &key, &[]);
         std::fs::write(repo.join("moved.txt"), "alpha\nBRAVO\ncharlie\n").unwrap();
         std::fs::write(
@@ -2700,7 +2700,7 @@ mod manifest_tests {
             session,
             None,
             None,
-            &|| held_from_ledger(&repo, session),
+            &|| held_from_journal(&repo, session),
             &|named| {
                 announce_now(
                     &repo,
@@ -2720,12 +2720,12 @@ mod manifest_tests {
             "the guarded file is not named: {text}"
         );
 
-        let ledger = crate::read_ledger::ReadLedger::open(&repo, session, None)
+        let journal = crate::window_journal::WindowJournal::open(&repo, session, None)
             .load()
-            .ledger;
-        assert!(ledger.standing_hold("moved.txt").is_some(), "{text}");
+            .journal;
+        assert!(journal.standing_hold("moved.txt").is_some(), "{text}");
         assert_eq!(
-            ledger.standing_hold("private/secret.txt"),
+            journal.standing_hold("private/secret.txt"),
             None,
             "a guarded path is never announced: {text}"
         );
@@ -2771,7 +2771,7 @@ mod manifest_tests {
 
         // A baseline that exists and is empty: this session is known, and
         // known to hold nothing it has been told about.
-        let key = crate::read_ledger::key(session, None);
+        let key = crate::window_journal::key(session, None);
         write_baseline(&repo, &key, &[]);
         std::fs::write(repo.join("moved.txt"), "alpha\nBRAVO\ncharlie\n").unwrap();
         let text = turn_manifest(
@@ -2779,7 +2779,7 @@ mod manifest_tests {
             session,
             None,
             None,
-            &|| held_from_ledger(&repo, session),
+            &|| held_from_journal(&repo, session),
             &|_| {},
         )
         .expect("a file the session holds moved");
@@ -2804,7 +2804,7 @@ mod manifest_tests {
         // silence is the absorption's and not the stamp's.
         let echo = "s-echo";
         held_read(&repo, echo, "moved.txt", basis, 20);
-        let echo_key = crate::read_ledger::key(echo, None);
+        let echo_key = crate::window_journal::key(echo, None);
         write_baseline(
             &repo,
             &echo_key,
@@ -2818,7 +2818,7 @@ mod manifest_tests {
                 echo,
                 None,
                 None,
-                &|| held_from_ledger(&repo, echo),
+                &|| held_from_journal(&repo, echo),
                 &|_| {}
             ),
             None,
@@ -2828,14 +2828,14 @@ mod manifest_tests {
         // answered with the silence the property names.
         let quiet = "s-quiet-held";
         held_read(&repo, quiet, "still.txt", "one\n", 10);
-        write_baseline(&repo, &crate::read_ledger::key(quiet, None), &[]);
+        write_baseline(&repo, &crate::window_journal::key(quiet, None), &[]);
         assert_eq!(
             turn_manifest(
                 &repo,
                 quiet,
                 None,
                 None,
-                &|| held_from_ledger(&repo, quiet),
+                &|| held_from_journal(&repo, quiet),
                 &|_| {}
             ),
             None,
@@ -2850,18 +2850,18 @@ mod manifest_tests {
     #[test]
     fn the_revision_a_window_holds_is_the_last_one_it_read_or_wrote() {
         let hash = |n: u8| rift_core::Sha256Id::parse_hex(&format!("{n:064x}")).unwrap();
-        let read = |path: &str, h: u8, at_ms: u64| rift_agent::read_ledger::Line::Read {
+        let read = |path: &str, h: u8, at_ms: u64| rift_agent::window_journal::Line::Read {
             turn: 1,
             path: path.to_owned(),
             hash: hash(h),
-            range: rift_agent::read_ledger::Interval::new(1, 9).unwrap(),
+            range: rift_agent::window_journal::Interval::new(1, 9).unwrap(),
             total_lines: 9,
             at_ms,
         };
-        let ledger = rift_agent::read_ledger::Ledger::from_lines(vec![
+        let journal = rift_agent::window_journal::Journal::from_lines(vec![
             read("a.rs", 1, 10),
             read("b.rs", 2, 20),
-            rift_agent::read_ledger::Line::Edit {
+            rift_agent::window_journal::Line::Edit {
                 turn: 2,
                 path: "a.rs".to_owned(),
                 hash_old: Some(hash(1)),
@@ -2872,7 +2872,7 @@ mod manifest_tests {
                 at_ms: 30,
             },
         ]);
-        let held = held_revisions(&ledger);
+        let held = held_revisions(&journal);
         assert_eq!(
             held.iter()
                 .map(|h| (h.path.as_str(), h.hash.as_str()))
@@ -2885,35 +2885,35 @@ mod manifest_tests {
         );
         // An eviction empties it: what a window holds after losing its context
         // is what it has read since, and the recovery map owns the rest.
-        let mut evicted = ledger;
-        evicted.push(rift_agent::read_ledger::Line::Evict {
+        let mut evicted = journal;
+        evicted.push(rift_agent::window_journal::Line::Evict {
             turn: 3,
-            reason: rift_agent::read_ledger::EvictReason::PreCompact,
+            reason: rift_agent::window_journal::EvictReason::PreCompact,
             at_ms: 40,
         });
         assert!(held_revisions(&evicted).is_empty());
     }
 
-    /// A window whose ledger predates the `/` rule holds the same files as one
+    /// A window whose journal predates the `/` rule holds the same files as one
     /// written after it. The two spellings fold into one entry — so a manifest
     /// cannot name one file twice — and the entry carries the spelling every
     /// row, every policy glob and the push guard's alphabet use.
     #[test]
     fn a_held_path_is_respelled_before_anything_compares_it() {
         let hash = |n: u8| rift_core::Sha256Id::parse_hex(&format!("{n:064x}")).unwrap();
-        let read = |path: &str, h: u8, at_ms: u64| rift_agent::read_ledger::Line::Read {
+        let read = |path: &str, h: u8, at_ms: u64| rift_agent::window_journal::Line::Read {
             turn: 1,
             path: path.to_owned(),
             hash: hash(h),
-            range: rift_agent::read_ledger::Interval::new(1, 9).unwrap(),
+            range: rift_agent::window_journal::Interval::new(1, 9).unwrap(),
             total_lines: 9,
             at_ms,
         };
-        let ledger = rift_agent::read_ledger::Ledger::from_lines(vec![
+        let journal = rift_agent::window_journal::Journal::from_lines(vec![
             read(r"bins\rift\src\hooks.rs", 1, 10),
             read("bins/rift/src/hooks.rs", 2, 20),
         ]);
-        let held = held_revisions(&ledger);
+        let held = held_revisions(&journal);
         assert_eq!(
             held.iter()
                 .map(|h| (h.path.as_str(), h.hash.as_str()))

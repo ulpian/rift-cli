@@ -1,25 +1,26 @@
 //! Frecency: which files this developer's agents actually open, and when.
 //!
-//! Rift already records every file an agent was handed — that is what the read
-//! ledger is — and the projection already counts every read it has ever
-//! ingested. Frecency is a **query over those facts**, not a store: there is no
-//! access database to keep, to grow, to garbage-collect or to key by a checkout
-//! path.
+//! Rift already records every file an agent was handed — that is what the
+//! window journal is — and the projection already counts every read it has
+//! ever ingested. Frecency is a **query over those facts**, not a store: there
+//! is no access database to keep, to grow, to garbage-collect or to key by a
+//! checkout path.
 //!
 //! ## Why this compounds across the family
 //!
 //! A worktree family is one repository: the developer opens a second checkout
 //! to work on a branch, an agent spawns a subagent in a temporary one, and the
-//! same handful of files are the interesting ones in all of them. The read
-//! ledgers are per member — coverage is a claim about the bytes *that* checkout
-//! held — but the *interest* they record is the family's. So the facts are
-//! folded over every member handed in, keyed by the repository-relative path
-//! each ledger already uses, and a file opened ten times in a sibling worktree
+//! same handful of files are the interesting ones in all of them. The window
+//! journals are per member — coverage is a claim about the bytes *that*
+//! checkout held — but the *interest* they record is the family's. So the facts
+//! are folded over every member handed in, keyed by the repository-relative
+//! path each journal already uses, and a file opened ten times in a sibling
+//! worktree
 //! this morning is warm here this afternoon.
 //!
 //! ## What a missing fact does
 //!
-//! Nothing, in the safe direction. A ledger that cannot be read, a row that
+//! Nothing, in the safe direction. A journal that cannot be read, a row that
 //! does not parse, a member that has been deleted, a projection nobody opened —
 //! each leaves a path with fewer accesses than it really has, which ranks it
 //! colder. Frecency is a tie-breaker over a fuzzy match, so a cold path is a
@@ -28,18 +29,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use rift_agent::read_ledger::Line;
+use rift_agent::window_journal::Line;
 
-/// How many ledger files one member's directory may contribute.
+/// How many journal files one member's directory may contribute.
 ///
 /// The directory is folded by its writer, so a member in ordinary use holds a
 /// handful; a cap is here because this directory sits in a work tree an agent
 /// can write to, and a rebuild must not become unbounded because something
 /// filled it.
-const MAX_LEDGER_FILES: usize = 512;
+const MAX_JOURNAL_FILES: usize = 512;
 
-/// How many bytes one ledger file may contribute.
-const MAX_LEDGER_BYTES: u64 = 8 * 1_024 * 1_024;
+/// How many bytes one journal file may contribute.
+const MAX_JOURNAL_BYTES: u64 = 8 * 1_024 * 1_024;
 
 /// What is known about one path's history.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,7 +70,7 @@ impl FrecencyFacts {
         Self::default()
     }
 
-    /// The facts every one of these members' read ledgers carries.
+    /// The facts every one of these members' window journals carries.
     ///
     /// The members are the family's checkouts, this one included. Order does
     /// not matter and neither do duplicates: counting is addition and recency
@@ -83,7 +84,7 @@ impl FrecencyFacts {
         facts
     }
 
-    /// Fold one member's read ledgers in.
+    /// Fold one member's window journals in.
     pub fn absorb_member(&mut self, work_tree: &Path) {
         let dir = crate::reads_dir(work_tree);
         let Ok(read_dir) = std::fs::read_dir(&dir) else {
@@ -103,16 +104,16 @@ impl FrecencyFacts {
             .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         {
             files.insert(path);
-            if files.len() > MAX_LEDGER_FILES {
+            if files.len() > MAX_JOURNAL_FILES {
                 files.pop_last();
             }
         }
         for file in files {
-            self.absorb_ledger(&file);
+            self.absorb_journal(&file);
         }
     }
 
-    /// Fold **one** ledger file in.
+    /// Fold **one** journal file in.
     ///
     /// The whole directory is the family's interest; one file is one context
     /// window's own, and a caller on a latency budget can afford exactly that
@@ -124,8 +125,8 @@ impl FrecencyFacts {
     /// file past the size bound, a line that does not parse — because a path
     /// with fewer accesses than it really has ranks colder and never
     /// disappears.
-    pub fn absorb_ledger(&mut self, file: &Path) {
-        if std::fs::metadata(file).is_ok_and(|m| m.len() > MAX_LEDGER_BYTES) {
+    pub fn absorb_journal(&mut self, file: &Path) {
+        if std::fs::metadata(file).is_ok_and(|m| m.len() > MAX_JOURNAL_BYTES) {
             return;
         }
         let Ok(text) = std::fs::read_to_string(file) else {
@@ -181,7 +182,7 @@ impl FrecencyFacts {
     }
 }
 
-/// The path a ledger row is about, and when it happened.
+/// The path a journal row is about, and when it happened.
 ///
 /// Every row that names a file counts, including a decline: a read Rift
 /// declined is a file the agent was interested in and already holds, which is
@@ -216,14 +217,14 @@ mod tests {
             turn: 1,
             path: path.to_owned(),
             hash: hash(1),
-            range: rift_agent::read_ledger::Interval::new(1, 10).unwrap(),
+            range: rift_agent::window_journal::Interval::new(1, 10).unwrap(),
             total_lines: 10,
             at_ms,
         }
         .to_json_line()
     }
 
-    fn ledger(work_tree: &Path, key: &str, rows: &[String]) {
+    fn journal(work_tree: &Path, key: &str, rows: &[String]) {
         let dir = crate::reads_dir(work_tree);
         std::fs::create_dir_all(&dir).unwrap();
         let mut body = String::new();
@@ -242,12 +243,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let here = dir.path().join("main");
         let sibling = dir.path().join("feature");
-        ledger(
+        journal(
             &here,
             "aaaa",
             &[read_row("src/bus.rs", 1_000), read_row("src/ui.rs", 900)],
         );
-        ledger(
+        journal(
             &sibling,
             "bbbb",
             &[read_row("src/bus.rs", 5_000), read_row("src/bus.rs", 4_000)],
@@ -273,13 +274,13 @@ mod tests {
     }
 
     /// The directory an agent can write to is read defensively: a row that is
-    /// not a ledger row, a file that is not a ledger, a member that is not
+    /// not a journal row, a file that is not a journal, a member that is not
     /// there — each contributes nothing and none of them is an error.
     #[test]
-    fn a_damaged_ledger_costs_facts_and_nothing_else() {
+    fn a_damaged_journal_costs_facts_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
         let here = dir.path().join("main");
-        ledger(
+        journal(
             &here,
             "aaaa",
             &[
@@ -295,24 +296,24 @@ mod tests {
         assert_eq!(facts.len(), 1, "only the row that parsed");
     }
 
-    /// The cap on one member's ledger directory keeps the same files however
+    /// The cap on one member's journal directory keeps the same files however
     /// the filesystem hands them over.
     ///
     /// `read_dir` has no defined order, so a cap taken from the iterator would
     /// fold whichever files the directory happened to list first — a different
     /// set after a rewrite, a compaction, or on another machine, and therefore
     /// a different ranking for the same repository. Two directories holding
-    /// exactly the same ledgers, created in opposite orders, must fold to one
+    /// exactly the same journals, created in opposite orders, must fold to one
     /// history, and the names that survive must be the smallest ones.
     #[test]
-    fn the_ledger_cap_keeps_the_same_files_whatever_order_the_directory_lists() {
+    fn the_journal_cap_keeps_the_same_files_whatever_order_the_directory_lists() {
         let dir = tempfile::tempdir().unwrap();
         let ascending = dir.path().join("ascending");
         let descending = dir.path().join("descending");
-        let over_the_cap = MAX_LEDGER_FILES + 4;
+        let over_the_cap = MAX_JOURNAL_FILES + 4;
         let mut keys: Vec<usize> = (0..over_the_cap).collect();
         for key in &keys {
-            ledger(
+            journal(
                 &ascending,
                 &format!("{key:04}"),
                 &[read_row(&path_of(*key), 1_000)],
@@ -320,7 +321,7 @@ mod tests {
         }
         keys.reverse();
         for key in &keys {
-            ledger(
+            journal(
                 &descending,
                 &format!("{key:04}"),
                 &[read_row(&path_of(*key), 1_000)],
@@ -330,16 +331,16 @@ mod tests {
         let one_way = FrecencyFacts::from_members(&[ascending]);
         let the_other = FrecencyFacts::from_members(&[descending]);
         assert_eq!(one_way, the_other, "the cap bit a different set of files");
-        assert_eq!(one_way.len(), MAX_LEDGER_FILES);
+        assert_eq!(one_way.len(), MAX_JOURNAL_FILES);
         assert_eq!(
             one_way.get(&path_of(0)).accesses,
             1,
-            "the first ledger by name is inside the cap"
+            "the first journal by name is inside the cap"
         );
         assert_eq!(
             one_way.get(&path_of(over_the_cap - 1)),
             PathFacts::default(),
-            "the last ledger by name is the one dropped"
+            "the last journal by name is the one dropped"
         );
     }
 
@@ -355,8 +356,8 @@ mod tests {
     fn every_row_that_names_a_file_counts_and_the_window_row_does_not() {
         let dir = tempfile::tempdir().unwrap();
         let here = dir.path().join("main");
-        let range = rift_agent::read_ledger::Interval::new(1, 10).unwrap();
-        ledger(
+        let range = rift_agent::window_journal::Interval::new(1, 10).unwrap();
+        journal(
             &here,
             "aaaa",
             &[
@@ -396,7 +397,7 @@ mod tests {
                 .to_json_line(),
                 Line::Evict {
                     turn: 3,
-                    reason: rift_agent::read_ledger::EvictReason::Compact,
+                    reason: rift_agent::window_journal::EvictReason::Compact,
                     at_ms: 50,
                 }
                 .to_json_line(),
@@ -452,24 +453,24 @@ mod tests {
     /// directory would have given for that window, and none of its
     /// neighbours' — which is what a caller on a hook's budget can afford.
     #[test]
-    fn one_windows_ledger_folds_without_its_neighbours() {
+    fn one_windows_journal_folds_without_its_neighbours() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        ledger(root, "mine", &[read_row("src/mine.rs", 10)]);
-        ledger(root, "theirs", &[read_row("src/theirs.rs", 20)]);
+        journal(root, "mine", &[read_row("src/mine.rs", 10)]);
+        journal(root, "theirs", &[read_row("src/theirs.rs", 20)]);
         let reads = crate::reads_dir(root);
 
         let mut one = FrecencyFacts::new();
-        one.absorb_ledger(&reads.join("mine.jsonl"));
+        one.absorb_journal(&reads.join("mine.jsonl"));
         assert_eq!(one.get("src/mine.rs").accesses, 1);
         assert_eq!(one.get("src/mine.rs").last_at_ms, 10);
         assert_eq!(one.get("src/theirs.rs"), PathFacts::default());
 
-        // A file that is not there, and one that is not a ledger, are silence
+        // A file that is not there, and one that is not a journal, are silence
         // rather than an error: a colder ranking, never an absent one.
-        one.absorb_ledger(&reads.join("gone.jsonl"));
+        one.absorb_journal(&reads.join("gone.jsonl"));
         std::fs::write(reads.join("odd.jsonl"), "not json\n").unwrap();
-        one.absorb_ledger(&reads.join("odd.jsonl"));
+        one.absorb_journal(&reads.join("odd.jsonl"));
         assert_eq!(one.len(), 1);
 
         // The whole directory is still both windows.

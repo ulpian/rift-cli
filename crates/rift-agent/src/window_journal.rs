@@ -1,10 +1,10 @@
 //! What one context window has already been given, as lines of a revision —
 //! and nothing else.
 //!
-//! This module is the pure half of the read ledger: a line schema, an interval
-//! set, and the decision taken over them. It touches no filesystem, reads no
-//! clock and opens no store; every timestamp and every hash arrives as an
-//! argument. The half that appends to a file and survives two processes
+//! This module is the pure half of the window journal: a line schema, an
+//! interval set, and the decision taken over them. It touches no filesystem,
+//! reads no clock and opens no store; every timestamp and every hash arrives
+//! as an argument. The half that appends to a file and survives two processes
 //! writing at once lives in the binary, beside the other local run state.
 //!
 //! Three rules shape everything here.
@@ -13,7 +13,7 @@
 //!    Recording less than was really delivered costs a saving; recording more
 //!    costs a wrong decision about content an agent does not hold. Only the
 //!    first is acceptable, so an unpinned span does not resolve into this
-//!    line ledger at all.
+//!    line journal at all.
 //! 2. **Coverage belongs to a revision, not to a file.** Any byte change —
 //!    an edit, a formatter, a branch switch — gives the file a new hash, and
 //!    a new hash starts with no coverage at all. No interval is ever shifted
@@ -22,7 +22,7 @@
 //! 3. **Lines carry identifiers, never content.** Paths, hashes, line
 //!    numbers, counts. A line whose hash fields are not 64 lowercase hex
 //!    characters, or whose shape does not match its kind, is dropped when the
-//!    ledger is read: the worst a malformed or forged line can cost is a
+//!    journal is read: the worst a malformed or forged line can cost is a
 //!    saving that is not taken.
 
 use rift_core::Sha256Id;
@@ -62,7 +62,7 @@ pub const LINE_VERSION: u32 = 1;
 /// and it is believed over this arithmetic, in both directions: a slice far
 /// over this size is credited in full when the result says the call was
 /// answered in full, and cut back to the run the result names when it says it
-/// was cut short. The ceiling is what the ledger falls back to when nothing
+/// was cut short. The ceiling is what the journal falls back to when nothing
 /// says anything, which is every family whose result shape no run has pinned.
 pub const DEFAULT_MAX_DELIVERED_BYTES: usize = 47_500;
 
@@ -151,7 +151,7 @@ impl Interval {
 /// Each of these is a signal some family publishes at the moment its context
 /// is summarised, cleared or rebuilt. They are kept apart rather than folded
 /// into one token because the share of reading that follows each is a
-/// different number, and the ledger is where that number comes from.
+/// different number, and the journal is where that number comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EvictReason {
     /// The client announced it is about to summarise the conversation.
@@ -169,7 +169,7 @@ pub enum EvictReason {
     /// what the result states it received.
     ///
     /// It is not a boundary the family announces about its conversation — it
-    /// is a correction this ledger makes about itself, and it is an eviction
+    /// is a correction this journal makes about itself, and it is an eviction
     /// because coverage is a union of what was read and a union has no way to
     /// take a line back. It costs the window the savings its other reads had
     /// earned; it can never cost it bytes it was actually handed, because the
@@ -207,7 +207,7 @@ impl EvictReason {
     }
 }
 
-/// One entry in a context window's ledger.
+/// One entry in a context window's journal.
 ///
 /// The spelling of a path here is whatever the recorder keys coverage by, and
 /// a recorder that had the bytes in hand keys it by the checkout's own
@@ -277,7 +277,7 @@ pub enum Line {
     ///
     /// Only what a hook can observe is written here. A citation of the file
     /// in the model's own prose is not a tool call, no family reports one,
-    /// and nothing in this ledger pretends otherwise.
+    /// and nothing in this journal pretends otherwise.
     Hold {
         /// The turn the announcement was made in.
         turn: u32,
@@ -327,7 +327,7 @@ pub enum Line {
         turn: u32,
         /// The file, in the one spelling coverage is keyed by.
         path: String,
-        /// The revision the file had before, where the ledger knew it.
+        /// The revision the file had before, where the journal knew it.
         hash_old: Option<Sha256Id>,
         /// The revision the file has now.
         hash_new: Sha256Id,
@@ -383,7 +383,7 @@ impl Line {
         }
     }
 
-    /// The line as the single JSON object a ledger file holds one of per row.
+    /// The line as the single JSON object a journal file holds one of per row.
     ///
     /// No newline: the caller that appends decides how a row ends, and a
     /// writer that concatenates is not this module's business.
@@ -580,7 +580,7 @@ fn u64_at(object: &Map<String, Value>, key: &str) -> Option<u64> {
 
 /// A hash field: 64 lowercase hex characters and nothing else.
 ///
-/// Uppercase is refused even though it would parse, because a ledger with two
+/// Uppercase is refused even though it would parse, because a journal with two
 /// spellings of one hash has two coverage sets for one revision.
 fn hash_at(object: &Map<String, Value>, key: &str) -> Option<Sha256Id> {
     let text = text_at(object, key)?;
@@ -718,18 +718,18 @@ impl DenyKey {
 
 /// The lines of one context window, in the order they were written.
 #[derive(Clone, Debug, Default)]
-pub struct Ledger {
+pub struct Journal {
     lines: Vec<Line>,
 }
 
-impl Ledger {
-    /// A ledger over lines already in hand.
+impl Journal {
+    /// A journal over lines already in hand.
     #[must_use]
     pub fn from_lines(lines: Vec<Line>) -> Self {
         Self { lines }
     }
 
-    /// A ledger read from a file's text, one row per line, dropping every row
+    /// A journal read from a file's text, one row per line, dropping every row
     /// that is not a line this version wrote — including a torn last row,
     /// which is what a reader finds when it arrives mid-append.
     #[must_use]
@@ -1063,7 +1063,7 @@ pub enum Mode {
     /// that sizes the pool before anyone's session changes.
     #[default]
     Observe,
-    /// A read the ledger proves is already held may be declined, once.
+    /// A read the journal proves is already held may be declined, once.
     Enforce,
 }
 
@@ -1228,11 +1228,11 @@ impl ResolvedRead {
         }
     }
 
-    /// The line range that can be credited under the legacy ledger API.
+    /// The line range that can be credited under the legacy journal API.
     ///
     /// Hook callers now reject incomplete delivery before recording at all;
     /// the single-line fallback remains for replay compatibility with older
-    /// ledger records and direct users of this pure helper.
+    /// journal records and direct users of this pure helper.
     #[must_use]
     pub fn range_delivered(&self, slice_bytes: usize, limits: Limits) -> Interval {
         if self.delivery_is_complete(slice_bytes, limits) {
@@ -1422,17 +1422,17 @@ fn suggested_window(hull: Interval, total_lines: u32, context_lines: u32) -> Opt
 /// be declined at all.
 fn shape_of(
     read: &ResolvedRead,
-    ledger: &Ledger,
+    journal: &Journal,
     limits: Limits,
     echo: EditEcho,
 ) -> Option<DenyShape> {
-    if !ledger.read_coverage(&read.path, read.hash).is_empty() {
+    if !journal.read_coverage(&read.path, read.hash).is_empty() {
         return Some(DenyShape::Plain);
     }
     // Nothing of this revision was read, so what the window holds it holds by
     // having written: the file changed since it last read, and the honest
     // thing to say is where.
-    let Some(Line::Edit { sites, shift, .. }) = ledger.wrote_in_full(&read.path, read.hash) else {
+    let Some(Line::Edit { sites, shift, .. }) = journal.wrote_in_full(&read.path, read.hash) else {
         return None;
     };
     if echo == EditEcho::Unpinned {
@@ -1491,7 +1491,7 @@ fn shape_of(
 #[must_use]
 pub fn decide(
     read: &ResolvedRead,
-    ledger: &Ledger,
+    journal: &Journal,
     mode: Mode,
     channel: Option<Channel>,
     echo: EditEcho,
@@ -1501,13 +1501,13 @@ pub fn decide(
     if mode == Mode::Off || slice_bytes > limits.max_slice_bytes {
         return Decision::Allow;
     }
-    if !ledger.coverage(&read.path, read.hash).contains(read.range) {
+    if !journal.coverage(&read.path, read.hash).contains(read.range) {
         return Decision::Allow;
     }
-    if ledger.denied(&read.deny_key()) {
+    if journal.denied(&read.deny_key()) {
         return Decision::Allow;
     }
-    let Some(shape) = shape_of(read, ledger, limits, echo) else {
+    let Some(shape) = shape_of(read, journal, limits, echo) else {
         return Decision::Allow;
     };
     // The floor, last: a slice too short for a decline to pay for itself is
@@ -1616,18 +1616,18 @@ mod tests {
     /// weighed against.
     #[test]
     fn an_unanswered_announcement_stands() {
-        let ledger = Ledger::from_lines(vec![
+        let journal = Journal::from_lines(vec![
             held_read("src/lib.rs", 3, 1, 40, 1),
             held_hold("src/lib.rs", 3, 1, 40),
         ]);
         assert_eq!(
-            ledger.standing_hold("src/lib.rs"),
+            journal.standing_hold("src/lib.rs"),
             Some(StandingHold {
                 hash: hash(3),
                 range: run(1, 40)
             })
         );
-        assert_eq!(ledger.standing_hold("src/other.rs"), None);
+        assert_eq!(journal.standing_hold("src/other.rs"), None);
     }
 
     /// Each of the three answers ends an announcement, and each is a way the
@@ -1652,10 +1652,10 @@ mod tests {
             },
         ];
         for answer in answers {
-            let ledger =
-                Ledger::from_lines(vec![held_hold("src/lib.rs", 3, 1, 40), answer.clone()]);
+            let journal =
+                Journal::from_lines(vec![held_hold("src/lib.rs", 3, 1, 40), answer.clone()]);
             assert_eq!(
-                ledger.standing_hold("src/lib.rs"),
+                journal.standing_hold("src/lib.rs"),
                 None,
                 "{} answered nothing",
                 answer.kind()
@@ -1671,7 +1671,7 @@ mod tests {
     /// been handed.
     #[test]
     fn an_observed_reread_answers_the_announcement() {
-        let ledger = Ledger::from_lines(vec![
+        let journal = Journal::from_lines(vec![
             held_read("src/lib.rs", 3, 1, 40, 10),
             held_hold("src/lib.rs", 3, 1, 40),
             Line::Observe {
@@ -1682,10 +1682,10 @@ mod tests {
                 at_ms: 20,
             },
         ]);
-        assert_eq!(ledger.standing_hold("src/lib.rs"), None);
+        assert_eq!(journal.standing_hold("src/lib.rs"), None);
         // And it answers only its own file: the observation says nothing
         // about a file nobody asked for.
-        let elsewhere = Ledger::from_lines(vec![
+        let elsewhere = Journal::from_lines(vec![
             held_hold("src/lib.rs", 3, 1, 40),
             Line::Observe {
                 turn: 2,
@@ -1710,7 +1710,7 @@ mod tests {
     #[test]
     fn a_booking_answers_every_decline_that_shares_a_line_with_it() {
         let booked = |lo, hi| {
-            Ledger::from_lines(vec![Line::Prevented {
+            Journal::from_lines(vec![Line::Prevented {
                 turn: 2,
                 path: "src/lib.rs".to_owned(),
                 hash: hash(3),
@@ -1747,7 +1747,7 @@ mod tests {
             reason: EvictReason::Compact,
             at_ms: 30,
         });
-        assert!(!Ledger::from_lines(lines).prevented_intersects(
+        assert!(!Journal::from_lines(lines).prevented_intersects(
             "src/lib.rs",
             hash(3),
             run(10, 20)
@@ -1758,7 +1758,7 @@ mod tests {
     /// holds the bytes was never going to skip the read.
     #[test]
     fn an_emptying_ends_an_announcement() {
-        let ledger = Ledger::from_lines(vec![
+        let journal = Journal::from_lines(vec![
             held_hold("src/lib.rs", 3, 1, 40),
             Line::Evict {
                 turn: 2,
@@ -1766,7 +1766,7 @@ mod tests {
                 at_ms: 30,
             },
         ]);
-        assert_eq!(ledger.standing_hold("src/lib.rs"), None);
+        assert_eq!(journal.standing_hold("src/lib.rs"), None);
     }
 
     /// A read line, spelled once for the tests that build a history out of
@@ -1801,23 +1801,23 @@ mod tests {
     /// moment a compacted context asks what it held.
     #[test]
     fn the_map_is_the_generation_the_last_eviction_ended() {
-        let mut ledger = Ledger::default();
+        let mut journal = Journal::default();
         assert!(
-            ledger.held_before_eviction().is_empty(),
+            journal.held_before_eviction().is_empty(),
             "a fresh window is recovering from nothing"
         );
-        ledger.push(held_read("src/lib.rs", 0x3f, 1, 500, 10));
+        journal.push(held_read("src/lib.rs", 0x3f, 1, 500, 10));
         assert!(
-            ledger.held_before_eviction().is_empty(),
+            journal.held_before_eviction().is_empty(),
             "a window that still holds its reads is not recovering either"
         );
 
-        ledger.push(held_read("src/hooks.rs", 0x40, 20, 30, 20));
-        ledger.push(held_read("src/lib.rs", 0x3f, 400, 600, 30));
-        ledger.push(evict(EvictReason::PreCompact, 40));
-        ledger.push(evict(EvictReason::Compact, 41));
+        journal.push(held_read("src/hooks.rs", 0x40, 20, 30, 20));
+        journal.push(held_read("src/lib.rs", 0x3f, 400, 600, 30));
+        journal.push(evict(EvictReason::PreCompact, 40));
+        journal.push(evict(EvictReason::Compact, 41));
 
-        let held = ledger.held_before_eviction();
+        let held = journal.held_before_eviction();
         assert_eq!(
             held.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
             ["src/lib.rs", "src/hooks.rs"],
@@ -1833,10 +1833,10 @@ mod tests {
 
         // The generation after the boundary is its own: what it read is what
         // the NEXT boundary hands back, and the recovered generation is gone.
-        ledger.push(held_read("src/only-now.rs", 0x41, 1, 9, 50));
-        ledger.push(evict(EvictReason::Compact, 60));
+        journal.push(held_read("src/only-now.rs", 0x41, 1, 9, 50));
+        journal.push(evict(EvictReason::Compact, 60));
         assert_eq!(
-            ledger
+            journal
                 .held_before_eviction()
                 .iter()
                 .map(|h| h.path.as_str())
@@ -1852,11 +1852,11 @@ mod tests {
     /// is the one thing the map must never say.
     #[test]
     fn a_file_read_at_two_revisions_is_two_entries() {
-        let mut ledger = Ledger::default();
-        ledger.push(held_read("src/lib.rs", 0x3f, 1, 10, 10));
-        ledger.push(held_read("src/lib.rs", 0x40, 1, 20, 20));
-        ledger.push(evict(EvictReason::Resume, 30));
-        let held = ledger.held_before_eviction();
+        let mut journal = Journal::default();
+        journal.push(held_read("src/lib.rs", 0x3f, 1, 10, 10));
+        journal.push(held_read("src/lib.rs", 0x40, 1, 20, 20));
+        journal.push(evict(EvictReason::Resume, 30));
+        let held = journal.held_before_eviction();
         assert_eq!(held.len(), 2);
         assert_eq!(held[0].hash, hash(0x40), "the newer revision leads");
         assert_eq!(held[0].held.runs(), [run(1, 20)]);
@@ -1869,9 +1869,9 @@ mod tests {
     /// reached the window.
     #[test]
     fn only_reads_are_held() {
-        let mut ledger = Ledger::from_lines(one_of_each());
-        ledger.push(evict(EvictReason::Clear, 99));
-        let held = ledger.held_before_eviction();
+        let mut journal = Journal::from_lines(one_of_each());
+        journal.push(evict(EvictReason::Clear, 99));
+        let held = journal.held_before_eviction();
         assert_eq!(held.len(), 1, "{held:?}");
         assert_eq!(held[0].path, "src/lib.rs");
         assert_eq!(held[0].held.runs(), [run(1, 500)]);
@@ -1883,29 +1883,29 @@ mod tests {
     /// there to be listed, and they satisfy nothing.
     #[test]
     fn deny_is_not_rearmed_for_pre_eviction_coverage() {
-        let mut ledger = Ledger::default();
-        ledger.push(held_read("src/lib.rs", 0x3f, 1, 500, 10));
+        let mut journal = Journal::default();
+        journal.push(held_read("src/lib.rs", 0x3f, 1, 500, 10));
         assert!(
-            ledger
+            journal
                 .coverage("src/lib.rs", hash(0x3f))
                 .contains(run(1, 500)),
             "before the boundary the window holds the lines"
         );
-        ledger.push(evict(EvictReason::Compact, 20));
+        journal.push(evict(EvictReason::Compact, 20));
 
         assert!(
-            ledger.coverage("src/lib.rs", hash(0x3f)).is_empty(),
+            journal.coverage("src/lib.rs", hash(0x3f)).is_empty(),
             "after it, nothing may be declined"
         );
         assert_eq!(
-            ledger.held_before_eviction()[0].held.runs(),
+            journal.held_before_eviction()[0].held.runs(),
             [run(1, 500)],
             "and the same lines are exactly what the map lists"
         );
 
         // The re-read is a first read again, and re-arms the decline itself.
-        ledger.push(held_read("src/lib.rs", 0x3f, 1, 500, 30));
-        assert!(ledger
+        journal.push(held_read("src/lib.rs", 0x3f, 1, 500, 30));
+        assert!(journal
             .coverage("src/lib.rs", hash(0x3f))
             .contains(run(1, 500)));
     }
@@ -2264,26 +2264,28 @@ mod tests {
     /// never received is gone too, which is the point.
     #[test]
     fn a_truncated_read_grants_no_coverage_past_what_was_delivered() {
-        let mut ledger = Ledger::from_lines(vec![held_read("src/a.rs", 1, 1, 900, 1)]);
-        assert!(ledger.coverage("src/a.rs", hash(1)).contains(run(500, 900)));
-        ledger.push(Line::Evict {
+        let mut journal = Journal::from_lines(vec![held_read("src/a.rs", 1, 1, 900, 1)]);
+        assert!(journal
+            .coverage("src/a.rs", hash(1))
+            .contains(run(500, 900)));
+        journal.push(Line::Evict {
             turn: 2,
             reason: EvictReason::Truncate,
             at_ms: 2,
         });
-        ledger.push(held_read("src/a.rs", 1, 1, 40, 3));
-        let coverage = ledger.coverage("src/a.rs", hash(1));
+        journal.push(held_read("src/a.rs", 1, 1, 40, 3));
+        let coverage = journal.coverage("src/a.rs", hash(1));
         assert!(coverage.contains(run(1, 40)), "the delivery is held");
         assert!(
             !coverage.contains(run(41, 41)),
             "and the first line past it is not"
         );
         assert!(
-            ledger
+            journal
                 .recorded_coverage("src/a.rs", hash(1))
                 .contains(run(500, 900)),
             "what was recorded is still recorded: a correction to coverage is \
-             not a rewriting of the ledger"
+             not a rewriting of the journal"
         );
     }
 
@@ -2415,10 +2417,10 @@ mod tests {
             // a torn final append, cut mid-write
             r#"{"v":1,"k":"read","t":4,"p":"src/li"#,
         );
-        let ledger = Ledger::parse(&text);
-        assert_eq!(ledger.lines(), [good], "only the well-formed row survives");
+        let journal = Journal::parse(&text);
+        assert_eq!(journal.lines(), [good], "only the well-formed row survives");
         assert!(
-            ledger
+            journal
                 .coverage("src/lib.rs", hash(0x3f))
                 .contains(run(1, 50)),
             "and it still carries its coverage"
@@ -2427,7 +2429,7 @@ mod tests {
 
     #[test]
     fn a_write_of_the_whole_file_covers_it_without_a_read() {
-        let ledger = Ledger::from_lines(vec![Line::Edit {
+        let journal = Journal::from_lines(vec![Line::Edit {
             turn: 1,
             path: "src/new.rs".to_owned(),
             hash_old: None,
@@ -2437,12 +2439,12 @@ mod tests {
             full: true,
             at_ms: 1,
         }]);
-        assert!(ledger.read_coverage("src/new.rs", hash(0x11)).is_empty());
-        assert!(ledger
+        assert!(journal.read_coverage("src/new.rs", hash(0x11)).is_empty());
+        assert!(journal
             .coverage("src/new.rs", hash(0x11))
             .contains(run(1, 40)));
         assert!(
-            ledger
+            journal
                 .coverage("src/new.rs", hash(0x11))
                 .contains(run(900, 1000)),
             "every line of it, however long the file turns out to be"
@@ -2451,7 +2453,7 @@ mod tests {
 
     #[test]
     fn an_edit_that_grants_no_coverage_grants_none() {
-        let ledger = Ledger::from_lines(vec![Line::Edit {
+        let journal = Journal::from_lines(vec![Line::Edit {
             turn: 1,
             path: "src/lib.rs".to_owned(),
             hash_old: Some(hash(0x3f)),
@@ -2461,8 +2463,8 @@ mod tests {
             full: false,
             at_ms: 1,
         }]);
-        assert!(ledger.coverage("src/lib.rs", hash(0x40)).is_empty());
-        assert!(ledger.wrote_in_full("src/lib.rs", hash(0x40)).is_none());
+        assert!(journal.coverage("src/lib.rs", hash(0x40)).is_empty());
+        assert!(journal.wrote_in_full("src/lib.rs", hash(0x40)).is_none());
     }
 
     #[test]
@@ -2472,19 +2474,19 @@ mod tests {
             hash: hash(0x3f),
             range: run(lo, hi),
         };
-        let ledger = Ledger::from_lines(vec![Line::Deny {
+        let journal = Journal::from_lines(vec![Line::Deny {
             turn: 3,
             path: "src/lib.rs".to_owned(),
             hash: hash(0x3f),
             range: run(1, 50),
             at_ms: 3,
         }]);
-        assert!(ledger.denied(&key(1, 50)));
+        assert!(journal.denied(&key(1, 50)));
         assert!(
-            !ledger.denied(&key(1, 51)),
+            !journal.denied(&key(1, 51)),
             "a wider request is its own key"
         );
-        assert!(!ledger.denied(&key(2, 50)), "so is a narrower one");
+        assert!(!journal.denied(&key(2, 50)), "so is a narrower one");
     }
 
     proptest::proptest! {
@@ -2502,18 +2504,18 @@ mod tests {
                 .enumerate()
                 .map(|(i, (lo, span))| read_line(i as u32, "src/lib.rs", 0, *lo, lo + span))
                 .collect();
-            let ledger = Ledger::from_lines(lines);
+            let journal = Journal::from_lines(lines);
 
             proptest::prop_assert!(
-                !ledger.coverage("src/lib.rs", hash(0)).is_empty(),
+                !journal.coverage("src/lib.rs", hash(0)).is_empty(),
                 "the revision that was read holds something"
             );
             proptest::prop_assert!(
-                ledger.coverage("src/lib.rs", hash(other_seed)).is_empty(),
+                journal.coverage("src/lib.rs", hash(other_seed)).is_empty(),
                 "and every other revision holds nothing"
             );
             proptest::prop_assert!(
-                ledger.coverage("other/file.rs", hash(0)).is_empty(),
+                journal.coverage("other/file.rs", hash(0)).is_empty(),
                 "as does every other path"
             );
         }
@@ -2549,10 +2551,10 @@ mod tests {
                 at_ms: u64::from(turn),
             };
             // Two losses, with a read and a decline between them: only the
-            // last loss may bound what is still held. A ledger that starts
+            // last loss may bound what is still held. A journal that starts
             // reading at the first one would find both of the middle lines
             // and answer as though the window still held them.
-            let ledger = Ledger::from_lines(vec![
+            let journal = Journal::from_lines(vec![
                 read_line(1, "src/lib.rs", 0x3f, range.lo, range.hi),
                 decline(2),
                 lost(3, reason_pick),
@@ -2562,15 +2564,15 @@ mod tests {
             ]);
 
             proptest::prop_assert!(
-                ledger.coverage("src/lib.rs", hash(0x3f)).is_empty(),
+                journal.coverage("src/lib.rs", hash(0x3f)).is_empty(),
                 "nothing is held once the window lost it"
             );
             proptest::prop_assert!(
-                ledger.recorded_coverage("src/lib.rs", hash(0x3f)).contains(range),
+                journal.recorded_coverage("src/lib.rs", hash(0x3f)).contains(range),
                 "but the record of the read survives for the map"
             );
             proptest::prop_assert!(
-                !ledger.denied(&DenyKey {
+                !journal.denied(&DenyKey {
                     path: "src/lib.rs".to_owned(),
                     hash: hash(0x3f),
                     range,
@@ -2644,7 +2646,7 @@ mod tests {
     ///
     /// A3 §1 is a loop: a model that answers a decline by making the identical
     /// call again must not meet the same decline, or the conversation cannot
-    /// leave the turn. The ledger's memory of the decline is tested above;
+    /// leave the turn. The journal's memory of the decline is tested above;
     /// this is the rule that memory exists for — `decide` consulting it — and
     /// it is the test that reddens when that consultation is short-circuited.
     ///
@@ -2654,11 +2656,11 @@ mod tests {
     /// one request and not one window.
     #[test]
     fn a_key_already_declined_is_never_declined_a_second_time() {
-        let held = |lines: Vec<Line>| Ledger::from_lines(lines);
-        let decide_now = |ledger: &Ledger, read: &ResolvedRead| {
+        let held = |lines: Vec<Line>| Journal::from_lines(lines);
+        let decide_now = |journal: &Journal, read: &ResolvedRead| {
             decide(
                 read,
-                ledger,
+                journal,
                 Mode::Enforce,
                 Some(CONFIRMED),
                 EditEcho::Pinned,
@@ -2750,11 +2752,11 @@ mod tests {
 
         // And it answers for the repeat that follows, which is the whole point
         // of recording it: the same call again is inside coverage.
-        let ledger = Ledger::from_lines(vec![line]);
+        let journal = Journal::from_lines(vec![line]);
         assert!(matches!(
             decide(
                 &whole,
-                &ledger,
+                &journal,
                 Mode::Enforce,
                 Some(CONFIRMED),
                 EditEcho::Pinned,
@@ -2819,11 +2821,11 @@ mod tests {
             0,
             1,
         );
-        let ledger = Ledger::from_lines(vec![line]);
+        let journal = Journal::from_lines(vec![line]);
         assert_eq!(
             decide(
                 &read,
-                &ledger,
+                &journal,
                 Mode::Enforce,
                 Some(CONFIRMED),
                 EditEcho::Pinned,
@@ -2999,7 +3001,7 @@ mod tests {
         else {
             panic!("the statement credits the file");
         };
-        let ledger = Ledger::from_lines(vec![Line::Read {
+        let journal = Journal::from_lines(vec![Line::Read {
             turn: 1,
             path: read.path.clone(),
             hash: read.hash,
@@ -3011,7 +3013,7 @@ mod tests {
         let declining = |slice_bytes| {
             decide(
                 &inside,
-                &ledger,
+                &journal,
                 Mode::Enforce,
                 Some(CONFIRMED),
                 EditEcho::Pinned,
@@ -3047,14 +3049,14 @@ mod tests {
             assert_eq!(ResolvedRead::new(&request, hash(3), 900), None);
         }
 
-        // With no fabricated seed line in the ledger, a later pinned span is
+        // With no fabricated seed line in the journal, a later pinned span is
         // allowed and cannot be observed or denied.
-        let ledger = Ledger::default();
+        let journal = Journal::default();
         let wider = resolved("src/lib.rs", 3, 7, 60, 900);
         assert_eq!(
             decide(
                 &wider,
-                &ledger,
+                &journal,
                 Mode::Enforce,
                 Some(CONFIRMED),
                 EditEcho::Pinned,
@@ -3067,7 +3069,7 @@ mod tests {
 
     #[test]
     fn a_request_inside_a_single_edit_site_is_allowed() {
-        let ledger = Ledger::from_lines(vec![
+        let journal = Journal::from_lines(vec![
             read_line(1, "src/lib.rs", 0x3f, 1, 900),
             Line::Edit {
                 turn: 2,
@@ -3086,7 +3088,7 @@ mod tests {
         assert_eq!(
             decide(
                 &inside,
-                &ledger,
+                &journal,
                 Mode::Enforce,
                 Some(CONFIRMED),
                 EditEcho::Pinned,
@@ -3101,7 +3103,7 @@ mod tests {
         assert_eq!(
             decide(
                 &whole,
-                &ledger,
+                &journal,
                 Mode::Enforce,
                 Some(CONFIRMED),
                 EditEcho::Pinned,
@@ -3119,7 +3121,7 @@ mod tests {
 
     #[test]
     fn a_file_written_in_full_is_declined_without_naming_every_line_as_changed() {
-        let ledger = Ledger::from_lines(vec![Line::Edit {
+        let journal = Journal::from_lines(vec![Line::Edit {
             turn: 1,
             path: "src/new.rs".to_owned(),
             hash_old: None,
@@ -3133,7 +3135,7 @@ mod tests {
         assert_eq!(
             decide(
                 &read,
-                &ledger,
+                &journal,
                 Mode::Enforce,
                 Some(CONFIRMED),
                 EditEcho::Pinned,
@@ -3145,12 +3147,12 @@ mod tests {
     }
 
     /// The edit-echo gate is a fact about a *family*, not a stand-down for
-    /// everyone: on one ledger and one read, both shapes an edit line can
+    /// everyone: on one journal and one read, both shapes an edit line can
     /// produce are still produced where the echo is pinned, and both are
     /// allowed where it is not.
     #[test]
     fn the_same_edit_is_decided_for_a_pinned_family_and_allowed_for_an_unpinned_one() {
-        let edited = Ledger::from_lines(vec![
+        let edited = Journal::from_lines(vec![
             read_line(1, "src/lib.rs", 0x3f, 1, 900),
             Line::Edit {
                 turn: 2,
@@ -3163,7 +3165,7 @@ mod tests {
                 at_ms: 2,
             },
         ]);
-        let written = Ledger::from_lines(vec![Line::Edit {
+        let written = Journal::from_lines(vec![Line::Edit {
             turn: 1,
             path: "src/new.rs".to_owned(),
             hash_old: None,
@@ -3175,10 +3177,10 @@ mod tests {
         }]);
         let verification = resolved("src/lib.rs", 0x40, 1, 908, 908);
         let read_back = resolved("src/new.rs", 0x11, 1, 40, 40);
-        let at = |read: &ResolvedRead, ledger: &Ledger, echo| {
+        let at = |read: &ResolvedRead, journal: &Journal, echo| {
             decide(
                 read,
-                ledger,
+                journal,
                 Mode::Enforce,
                 Some(CONFIRMED),
                 echo,
@@ -3224,7 +3226,7 @@ mod tests {
         ) {
             let hi = lo + span;
             let total_lines = hi + total_extra;
-            let ledger = Ledger::from_lines(vec![Line::Read {
+            let journal = Journal::from_lines(vec![Line::Read {
                 turn: 1,
                 path: "src/lib.rs".to_owned(),
                 hash: hash(0x3f),
@@ -3239,14 +3241,14 @@ mod tests {
 
             let exact = resolved("src/lib.rs", 0x3f, lo, hi, total_lines);
             proptest::prop_assert_eq!(
-                decide(&exact, &ledger, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits),
+                decide(&exact, &journal, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits),
                 Decision::Deny(DenyShape::Plain),
                 "exactly what was handed over is held"
             );
 
             let one_past = resolved("src/lib.rs", 0x3f, lo, hi + 1, total_lines);
             proptest::prop_assert_eq!(
-                decide(&one_past, &ledger, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits),
+                decide(&one_past, &journal, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits),
                 Decision::Allow,
                 "one line further is not"
             );
@@ -3254,7 +3256,7 @@ mod tests {
             if lo > 1 {
                 let one_before = resolved("src/lib.rs", 0x3f, lo - 1, hi, total_lines);
                 proptest::prop_assert_eq!(
-                    decide(&one_before, &ledger, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits),
+                    decide(&one_before, &journal, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits),
                     Decision::Allow,
                     "nor is one line earlier"
                 );
@@ -3276,11 +3278,11 @@ mod tests {
             ],
             cap in 1usize..=64_000,
         ) {
-            let ledger = Ledger::from_lines(vec![read_line(1, "src/lib.rs", 0x3f, 1, 900)]);
+            let journal = Journal::from_lines(vec![read_line(1, "src/lib.rs", 0x3f, 1, 900)]);
             let limits = Limits { max_slice_bytes: cap, min_slice_lines: 1, ..Limits::default() };
             let read = resolved("src/lib.rs", 0x3f, 1, 900, 900);
             let at = |slice: usize| decide(
-                &read, &ledger, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, slice, limits
+                &read, &journal, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, slice, limits
             );
 
             proptest::prop_assert_eq!(
@@ -3318,14 +3320,14 @@ mod tests {
             under in 1u32..=200,
         ) {
             let span = |lines: u32| {
-                let ledger = Ledger::from_lines(vec![read_line(1, "src/lib.rs", 0x3f, 1, 900)]);
+                let journal = Journal::from_lines(vec![read_line(1, "src/lib.rs", 0x3f, 1, 900)]);
                 let read = resolved("src/lib.rs", 0x3f, 1, lines, 900);
                 let limits = Limits {
                     min_slice_lines: floor,
                     ..Limits::default()
                 };
                 decide(
-                    &read, &ledger, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits
+                    &read, &journal, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits
                 )
             };
 
@@ -3375,13 +3377,13 @@ mod tests {
                     at_ms: 2,
                 });
             }
-            let ledger = Ledger::from_lines(lines);
+            let journal = Journal::from_lines(lines);
             let limits = Limits::default();
             let seed = if edited { 0x40 } else { 0x3f };
             let read = resolved("src/lib.rs", seed, lo, lo + span, 900);
 
-            let enforcing = decide(&read, &ledger, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, slice, limits);
-            let observing = decide(&read, &ledger, Mode::Observe, Some(CONFIRMED), EditEcho::Pinned, slice, limits);
+            let enforcing = decide(&read, &journal, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, slice, limits);
+            let observing = decide(&read, &journal, Mode::Observe, Some(CONFIRMED), EditEcho::Pinned, slice, limits);
 
             proptest::prop_assert!(
                 !matches!(observing, Decision::Deny(_)),
@@ -3408,8 +3410,8 @@ mod tests {
             }
         }
 
-        /// ★ With the lever off, nothing is ever declined, whatever the ledger
-        /// says and whatever the family's channel offers.
+        /// ★ With the lever off, nothing is ever declined, whatever the
+        /// journal says and whatever the family's channel offers.
         #[test]
         fn off_never_denies(
             lo in 1u32..=800,
@@ -3430,12 +3432,12 @@ mod tests {
                     at_ms: 2,
                 });
             }
-            let ledger = Ledger::from_lines(lines);
+            let journal = Journal::from_lines(lines);
             let seed = if edited { 0x40 } else { 0x3f };
             let read = resolved("src/lib.rs", seed, lo, lo + span, 900);
 
             proptest::prop_assert_eq!(
-                decide(&read, &ledger, Mode::Off, Some(CONFIRMED), EditEcho::Pinned, slice, Limits::default()),
+                decide(&read, &journal, Mode::Off, Some(CONFIRMED), EditEcho::Pinned, slice, Limits::default()),
                 Decision::Allow
             );
         }
@@ -3455,12 +3457,12 @@ mod tests {
                 Some(Channel::Neutral),
                 Some(Channel::AdditionalContext { limit_field: None }),
             ];
-            let ledger = Ledger::from_lines(vec![read_line(1, "src/lib.rs", 0x3f, 1, 900)]);
+            let journal = Journal::from_lines(vec![read_line(1, "src/lib.rs", 0x3f, 1, 900)]);
             let read = resolved("src/lib.rs", 0x3f, lo, lo + span, 900);
 
             let decision = decide(
                 &read,
-                &ledger,
+                &journal,
                 Mode::Enforce,
                 channels[channel_pick % channels.len()],
                 EditEcho::Pinned,
@@ -3500,7 +3502,7 @@ mod tests {
             } else {
                 vec![run(site_lo, (site_lo + site_span).min(TOTAL))]
             };
-            let ledger = Ledger::from_lines(vec![
+            let journal = Journal::from_lines(vec![
                 read_line(1, "src/lib.rs", 0x3f, 1, TOTAL),
                 Line::Edit {
                     turn: 2,
@@ -3518,7 +3520,7 @@ mod tests {
 
             let decision = decide(
                 &read,
-                &ledger,
+                &journal,
                 mode,
                 Some(CONFIRMED),
                 EditEcho::Unpinned,
@@ -3550,7 +3552,7 @@ mod tests {
             const PATHS: [&str; 2] = ["src/lib.rs", "src/other.rs"];
             const TOTAL: u32 = 60;
             let limits = Limits::default();
-            let mut ledger = Ledger::default();
+            let mut journal = Journal::default();
             let mut epoch = 0usize;
             // A key is a path, a revision and a range: two revisions of one
             // file are two questions, and each gets its own single answer.
@@ -3559,7 +3561,7 @@ mod tests {
             for (turn, (action, lo, span, which)) in steps.into_iter().enumerate() {
                 let path = PATHS[which];
                 if action == 3 {
-                    ledger.push(Line::Evict {
+                    journal.push(Line::Evict {
                         turn: turn as u32,
                         reason: EvictReason::Clear,
                         at_ms: turn as u64,
@@ -3573,7 +3575,7 @@ mod tests {
                 let read = resolved(path, seed, lo * 8, lo * 8 + span, TOTAL);
                 let decision = decide(
                     &read,
-                    &ledger,
+                    &journal,
                     Mode::Enforce,
                     Some(CONFIRMED),
                     EditEcho::Pinned,
@@ -3589,7 +3591,7 @@ mod tests {
                     );
                     seen.push(key);
                 }
-                ledger.push(record(
+                journal.push(record(
                     &read,
                     &decision,
                     0,

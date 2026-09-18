@@ -205,8 +205,8 @@ class SubagentStartHookSpecificOutput(TypedDict):
 The matching **input** type is what makes the window separable at all (upstream
 lines 383-388). `agent_id` and `agent_type` are *required* on it, while the
 conversation's `session_id` arrives on `BaseHookInput` — so one payload names
-both the session and the window inside it, which is exactly the pair the read
-ledger is already keyed by.
+both the session and the window inside it, which is exactly the pair the
+window journal is already keyed by.
 
 ```python
 class SubagentStartHookInput(BaseHookInput):
@@ -308,7 +308,7 @@ above says the reason is shown to the model, and this says a model read it.
 
 The payload key sets, as the hook logged them. Session ids are elided after
 their first group, and the `agent_id` values are the client's own; a subagent's
-`PreToolUse` is included because it is the same window key the read ledger is
+`PreToolUse` is included because it is the same window key the window journal is
 already written under.
 
 ```text

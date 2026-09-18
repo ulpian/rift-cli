@@ -93,8 +93,8 @@ pub struct IndexKey {
 /// One path the checkout holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileEntry {
-    /// The path relative to the work tree, in the same spelling the read
-    /// ledger keys coverage by, with `/` separators on every platform.
+    /// The path relative to the work tree, in the same spelling the window
+    /// journal keys coverage by, with `/` separators on every platform.
     pub path: String,
     /// Its modification time in milliseconds at the time of the walk.
     pub mtime_ms: u64,

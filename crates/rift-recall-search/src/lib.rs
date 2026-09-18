@@ -13,7 +13,7 @@
 //!   path matches the letters typed; it cannot know that this developer's
 //!   agents opened `bus.rs` eleven times this week or that `layout.rs` is the
 //!   file they have uncommitted right now. Those facts are already recorded —
-//!   the read ledgers of every member of the worktree family, and the
+//!   the window journals of every member of the worktree family, and the
 //!   projection's own read counts — so frecency is a query over them and never
 //!   a database of its own.
 //! - **The frecency facts arrive as an argument.** [`FrecencyFacts`] is built
@@ -103,7 +103,7 @@ impl From<SearchError> for RiftError {
 
 /// Where one checkout keeps its search state.
 ///
-/// Per member, under the ignored run-state root, exactly as the read ledgers
+/// Per member, under the ignored run-state root, exactly as the window journals
 /// are: the path set is a fact about *this* checkout, and a linked worktree of
 /// the same family holds different files at the same names. The family-wide
 /// caches live in the common directory; this one deliberately does not, and a
@@ -119,7 +119,7 @@ pub fn index_path(work_tree: &Path) -> PathBuf {
     state_dir(work_tree).join("index.bin")
 }
 
-/// Where one checkout keeps the read ledgers frecency is a query over.
+/// Where one checkout keeps the window journals frecency is a query over.
 ///
 /// Named here because this crate reads them and does not own them: the rows
 /// are written by the hook path, in a spelling this crate only parses.

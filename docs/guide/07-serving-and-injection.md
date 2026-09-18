@@ -75,7 +75,7 @@ it cannot advertise a verb that does not exist.
 **Once per context window, and only once.** The right to inject is claimed by an
 exclusive create of a marker under `.rift/state/injection/`, named by the *hash*
 of the session id and the agent id inside it — the same key, from the same
-function, that the read ledger is written under
+function, that the window journal is written under
 ([§6.12](06-recall.md#612-what-a-context-window-already-holds)); an
 agent-supplied string never becomes a path component. One process wins it and
 the decision counts only once that write has persisted; a crashed or retried
@@ -139,8 +139,8 @@ the sentence "file(s) you have read changed" is literally true wherever the
 record has lines, and falls back to the older behaviour where it has none.
 
 **The baseline and its stamp are keyed by the window too**, by the same
-function the pointer marker and the read ledger use — the session id and the
-agent id inside it, hashed together. The held set was already per window, so a
+function the pointer marker and the window journal use — the session id and
+the agent id inside it, hashed together. The held set was already per window, so a
 baseline keyed by the session alone made the two halves of one decision
 disagree: a parent would be told that *files you have read changed* about files
 only a subagent ever read. The verb that opens a subagent's window is

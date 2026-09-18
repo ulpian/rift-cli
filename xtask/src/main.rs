@@ -19,7 +19,7 @@
 //!   the booked saving is worth against the removal that measures, at twice
 //!   the spend.
 //! * `replay-savings` — an offline, model-free replay of recorded Claude Code
-//!   transcripts through this build's own read recogniser and read-ledger
+//!   transcripts through this build's own read recogniser and window-journal
 //!   decision. It reads private transcripts and prints aggregates only; it is
 //!   a measurement, never a gate.
 //! * `rustdoc-baseline` — the shrink-only baseline of rustdoc warning sites

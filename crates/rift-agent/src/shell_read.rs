@@ -23,8 +23,8 @@
 //! these commands by itself: of 864 shell reads in eight sessions, 35 were a
 //! bare simple command, and most of the other 829 were a `cd` into a
 //! directory, a trailing `| head -N`, or several reads joined by `&&`. Every
-//! one of those was a read of this repository that the ledger never saw, and
-//! a read the ledger never saw can never be declined and never counted. So
+//! one of those was a read of this repository that the journal never saw, and
+//! a read the journal never saw can never be declined and never counted. So
 //! three *composition* rules sit above the vocabulary — an optional leading
 //! `cd <dir> &&`, a trailing `| head -N` or `| tail -N` on a read, and a chain
 //! of reads joined by `&&` or `;`. Each one is a shape whose delivered lines

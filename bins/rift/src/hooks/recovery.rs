@@ -63,10 +63,10 @@ struct RecoveryEntry {
     hash: String,
     held: Vec<(u32, u32)>,
     verdict: RecoveryVerdict,
-    /// The revision the window read, spelled as the ledger writes it.
+    /// The revision the window read, spelled as the journal writes it.
     revision: rift_core::Sha256Id,
-    /// The runs the window holds of that revision, as the ledger writes them.
-    runs: Vec<rift_agent::read_ledger::Interval>,
+    /// The runs the window holds of that revision, as the journal writes them.
+    runs: Vec<rift_agent::window_journal::Interval>,
 }
 
 /// A field of a hook payload, whichever of the two accepted shapes it arrived
@@ -116,12 +116,12 @@ fn recovery_hook(agent: &rift_core::AgentId, verb: &str) -> bool {
 /// the conversation was rebuilt from a summary or a transcript rather than
 /// begun. Codex publishes its compaction on both sides of the summary but names
 /// no source, so its boundary is "the next hook that can carry text", which the
-/// ledger's own last signal decides ([`recovery_follows_the_boundary`]).
+/// journal's own last signal decides ([`recovery_follows_the_boundary`]).
 ///
 /// Antigravity publishes no compaction signal at all. What it publishes is a
 /// counter, and its first invocation is the only execution boundary it names —
 /// so the map rides that, and what decides whether there is a map to give is
-/// the same thing that decides it everywhere else: whether the window's ledger
+/// the same thing that decides it everywhere else: whether the window's journal
 /// holds a boundary with reads before it. A family that never announces one
 /// therefore rarely has a map to be handed, which is the honest position: an
 /// execution boundary is not a statement that the context was rebuilt, and
@@ -142,17 +142,17 @@ fn recovery_verb(agent: &rift_core::AgentId, verb: &str, payload: &serde_json::V
 
 /// Whether the window's own last signal says this hook follows a boundary.
 ///
-/// For the family whose verb already said so, the ledger only has to have a
+/// For the family whose verb already said so, the journal only has to have a
 /// boundary at all. For the family whose boundary is announced on a different
 /// hook, the last signal must be the one that closes a compaction — otherwise
 /// this is an ordinary turn, and an ordinary turn is answered by the manifest
 /// or by silence.
 fn recovery_follows_the_boundary(
     agent: &rift_core::AgentId,
-    last: Option<rift_agent::read_ledger::EvictReason>,
+    last: Option<rift_agent::window_journal::EvictReason>,
 ) -> bool {
     if *agent == rift_core::AgentId::CODEX {
-        return last == Some(rift_agent::read_ledger::EvictReason::PostCompact);
+        return last == Some(rift_agent::window_journal::EvictReason::PostCompact);
     }
     last.is_some()
 }
@@ -161,7 +161,7 @@ fn recovery_follows_the_boundary(
 /// there is nothing to hand it.
 ///
 /// Every gate fails to `None`, and the order they are asked in is the cost
-/// order: the verb and the source are a string comparison, the ledger is a
+/// order: the verb and the source are a string comparison, the journal is a
 /// bounded file read, the verdicts are a hash of at most sixteen files, and the
 /// store is opened last and only to book what the map cost. A fresh session
 /// stops at the first gate; a session that never lost anything stops at the
@@ -197,23 +197,23 @@ pub(super) fn recovery_map(
         return None;
     }
     // The context window, not the session — the same key the gate wrote the
-    // ledger under, so a subagent is handed its own window's map and never its
+    // journal under, so a subagent is handed its own window's map and never its
     // parent's.
     let registry = AdapterRegistry::with_builtin();
     let window = registry
         .get(agent)
         .map(|adapter| adapter.facts(verb, &raw.payload))
         .and_then(|facts| facts.child_session);
-    let window_ledger = crate::read_ledger::ReadLedger::open(repo, &raw.session, window.as_deref());
-    let ledger = window_ledger.load().ledger;
-    let last = ledger.lines().iter().rev().find_map(|line| match line {
-        rift_agent::read_ledger::Line::Evict { reason, .. } => Some(*reason),
+    let on_disk = crate::window_journal::WindowJournal::open(repo, &raw.session, window.as_deref());
+    let journal = on_disk.load().journal;
+    let last = journal.lines().iter().rev().find_map(|line| match line {
+        rift_agent::window_journal::Line::Evict { reason, .. } => Some(*reason),
         _ => None,
     });
     if !recovery_follows_the_boundary(agent, last) {
         return None;
     }
-    let held = ledger.held_before_eviction();
+    let held = journal.held_before_eviction();
     if held.is_empty() {
         // A session that lost nothing it had read — a fresh one, or one whose
         // reads Rift never saw — is told nothing. There is no honest listing to
@@ -272,7 +272,7 @@ pub(super) fn recovery_map(
         return None;
     }
     record_recovery_injection(repo, agent, &text);
-    announce_recovery(&window_ledger, &engine, &raw, &entries, &named);
+    announce_recovery(&on_disk, &engine, &raw, &entries, &named);
     Some(text)
 }
 
@@ -285,7 +285,7 @@ pub(super) fn recovery_map(
 /// speaks about positions in the list this returns, so there is no second
 /// index space for a dropped file to shift.
 fn recovery_entries(
-    held: &[rift_agent::read_ledger::HeldFile],
+    held: &[rift_agent::window_journal::HeldFile],
     denied: &dyn Fn(&str) -> bool,
     verdict: &mut dyn FnMut(&str, rift_core::Sha256Id) -> RecoveryVerdict,
 ) -> (Vec<RecoveryEntry>, usize) {
@@ -333,7 +333,7 @@ fn recovery_announcements<'a>(
     Item = (
         &'a str,
         rift_core::Sha256Id,
-        &'a [rift_agent::read_ledger::Interval],
+        &'a [rift_agent::window_journal::Interval],
     ),
 > {
     named.iter().filter_map(|at| {
@@ -348,14 +348,14 @@ fn recovery_announcements<'a>(
 /// budget dropped reached the model as a count, and a count is not a fact
 /// about a file.
 fn announce_recovery(
-    ledger: &crate::read_ledger::ReadLedger,
+    journal: &crate::window_journal::WindowJournal,
     engine: &rift_recall_policy::PolicyEngine<'_>,
     raw: &rift_shadow::hooks::RawHook,
     entries: &[RecoveryEntry],
     named: &[usize],
 ) {
     announce_holds(
-        ledger,
+        journal,
         engine,
         raw.turn.unwrap_or_default(),
         u64::try_from(raw.occurred_at_ms).unwrap_or_default(),
@@ -380,7 +380,7 @@ fn announce_recovery(
 /// Best-effort throughout — a line that cannot be written is an announcement
 /// nothing will be booked against, which costs a figure and never a claim.
 pub(super) fn announce_holds<'a>(
-    ledger: &crate::read_ledger::ReadLedger,
+    journal: &crate::window_journal::WindowJournal,
     engine: &rift_recall_policy::PolicyEngine<'_>,
     turn: u32,
     at_ms: u64,
@@ -388,7 +388,7 @@ pub(super) fn announce_holds<'a>(
         Item = (
             &'a str,
             rift_core::Sha256Id,
-            &'a [rift_agent::read_ledger::Interval],
+            &'a [rift_agent::window_journal::Interval],
         ),
     >,
 ) {
@@ -397,7 +397,7 @@ pub(super) fn announce_holds<'a>(
             continue;
         }
         let [range] = runs else { continue };
-        let _ = ledger.append(&rift_agent::read_ledger::Line::Hold {
+        let _ = journal.append(&rift_agent::window_journal::Line::Hold {
             turn,
             path: path.to_owned(),
             hash,
@@ -519,7 +519,7 @@ fn claim_recovery(
     repo: &std::path::Path,
     session: &str,
     window: Option<&str>,
-    held: &[rift_agent::read_ledger::HeldFile],
+    held: &[rift_agent::window_journal::HeldFile],
 ) -> bool {
     use std::fmt::Write as _;
     let dir = repo.join(".rift").join("state").join("recovery");
@@ -527,7 +527,7 @@ fn claim_recovery(
         return false;
     }
     // Hashed, so nothing an agent supplied — a session id, a path — becomes a
-    // path component here, exactly as on the ledger's own file names.
+    // path component here, exactly as on the journal's own file names.
     let mut fingerprint = format!("{session}\u{0}{}", window.unwrap_or_default());
     for file in held {
         let _ = write!(
@@ -618,15 +618,15 @@ mod recovery_tests {
     /// revision it has right now.
     fn read_and_hold(repo: &std::path::Path, session: &str, rel: &str, text: &str, at_ms: u64) {
         std::fs::write(repo.join(rel), text).unwrap();
-        let ledger = crate::read_ledger::ReadLedger::open(repo, session, None);
+        let journal = crate::window_journal::WindowJournal::open(repo, session, None);
         let lines = u32::try_from(text.lines().count().max(1)).unwrap();
-        ledger
-            .append(&rift_agent::read_ledger::Line::Read {
+        journal
+            .append(&rift_agent::window_journal::Line::Read {
                 turn: 1,
                 path: rel.to_owned(),
                 hash: rift_core::Sha256Id::parse_hex(&rift_shadow::sha256_hex(&[text.as_bytes()]))
                     .unwrap(),
-                range: rift_agent::read_ledger::Interval::new(1, lines).unwrap(),
+                range: rift_agent::window_journal::Interval::new(1, lines).unwrap(),
                 total_lines: lines,
                 at_ms,
             })
@@ -634,10 +634,10 @@ mod recovery_tests {
     }
 
     fn evict(repo: &std::path::Path, session: &str, at_ms: u64) {
-        crate::read_ledger::ReadLedger::open(repo, session, None)
-            .append(&rift_agent::read_ledger::Line::Evict {
+        crate::window_journal::WindowJournal::open(repo, session, None)
+            .append(&rift_agent::window_journal::Line::Evict {
                 turn: 1,
-                reason: rift_agent::read_ledger::EvictReason::PreCompact,
+                reason: rift_agent::window_journal::EvictReason::PreCompact,
                 at_ms,
             })
             .unwrap();
@@ -659,7 +659,7 @@ mod recovery_tests {
     }
 
     /// **What the map said, written down.** A recovery map that names a file
-    /// tells the window it holds it, and the window's own ledger records the
+    /// tells the window it holds it, and the window's own journal records the
     /// announcement — which is what a later act on that file is booked
     /// against. Only the files the map named: a path it did not carry is a
     /// count, not a fact the model was given.
@@ -674,14 +674,14 @@ mod recovery_tests {
 
         let cfg = rift_config::EffectiveConfig::load(&repo.join(".rift")).unwrap();
         let map = recovery_map(&repo, &cfg, &CC, START, &compacted(session)).expect("a map");
-        let ledger = crate::read_ledger::ReadLedger::open(&repo, session, None)
+        let journal = crate::window_journal::WindowJournal::open(&repo, session, None)
             .load()
-            .ledger;
-        let mut announced: Vec<(String, u32, u32)> = ledger
+            .journal;
+        let mut announced: Vec<(String, u32, u32)> = journal
             .lines()
             .iter()
             .filter_map(|line| match line {
-                rift_agent::read_ledger::Line::Hold { path, range, .. } => {
+                rift_agent::window_journal::Line::Hold { path, range, .. } => {
                     Some((path.clone(), range.lo, range.hi))
                 }
                 _ => None,
@@ -695,7 +695,7 @@ mod recovery_tests {
         );
         for (path, ..) in &announced {
             assert!(
-                ledger.standing_hold(path).is_some(),
+                journal.standing_hold(path).is_some(),
                 "{path} is what a later act is weighed against"
             );
         }
@@ -1067,7 +1067,7 @@ mod recovery_tests {
     /// the gate that keeps a full listing off an ordinary turn.
     #[test]
     fn only_a_families_own_boundary_signal_asks_for_a_map() {
-        use rift_agent::read_ledger::EvictReason;
+        use rift_agent::window_journal::EvictReason;
         let agy = rift_core::AgentId::ANTIGRAVITY;
         let codex = rift_core::AgentId::CODEX;
 
@@ -1389,7 +1389,7 @@ mod recovery_tests {
     ///
     /// So the fixture puts the denied path *first*, which is the only order
     /// that can skew, and asserts the two halves that matter: the frame names
-    /// the served file, and the ledger's announcement is about that same file
+    /// the served file, and the journal's announcement is about that same file
     /// and nothing else.
     #[test]
     fn a_recovery_map_announces_only_what_it_named_when_a_denied_path_precedes() {
@@ -1416,13 +1416,13 @@ mod recovery_tests {
         assert!(!map.contains("secret"), "the guarded file is not: {map}");
 
         let announced: Vec<(String, u32, u32)> =
-            crate::read_ledger::ReadLedger::open(&repo, session, None)
+            crate::window_journal::WindowJournal::open(&repo, session, None)
                 .load()
-                .ledger
+                .journal
                 .lines()
                 .iter()
                 .filter_map(|line| match line {
-                    rift_agent::read_ledger::Line::Hold { path, range, .. } => {
+                    rift_agent::window_journal::Line::Hold { path, range, .. } => {
                         Some((path.clone(), range.lo, range.hi))
                     }
                     _ => None,
@@ -1453,12 +1453,12 @@ mod recovery_tests {
         let cfg = rift_config::EffectiveConfig::load(&repo.join(".rift")).unwrap();
         let engine = rift_recall_policy::PolicyEngine::new(&cfg)
             .with_serve_policy(rift_recall_policy::ServePolicy::load(&repo.join(".rift")));
-        let ledger = crate::read_ledger::ReadLedger::open(&repo, "s-guard", None);
+        let journal = crate::window_journal::WindowJournal::open(&repo, "s-guard", None);
         let hash =
             rift_core::Sha256Id::parse_hex(&rift_shadow::sha256_hex(&[b"x".as_slice()])).unwrap();
-        let runs = [rift_agent::read_ledger::Interval::new(1, 30).unwrap()];
+        let runs = [rift_agent::window_journal::Interval::new(1, 30).unwrap()];
         announce_holds(
-            &ledger,
+            &journal,
             &engine,
             1,
             10,
@@ -1468,7 +1468,7 @@ mod recovery_tests {
             ]
             .into_iter(),
         );
-        let lines = ledger.load().ledger;
+        let lines = journal.load().journal;
         assert_eq!(lines.standing_hold("private/secret.txt"), None);
         assert!(lines.standing_hold("src.rs").is_some());
     }
@@ -1483,7 +1483,7 @@ mod recovery_tests {
         use proptest::prelude::*;
 
         proptest!(|(mask in proptest::collection::vec(any::<bool>(), 1..12))| {
-            let held: Vec<rift_agent::read_ledger::HeldFile> = mask
+            let held: Vec<rift_agent::window_journal::HeldFile> = mask
                 .iter()
                 .enumerate()
                 .map(|(at, denied)| {
@@ -1492,12 +1492,12 @@ mod recovery_tests {
                     } else {
                         format!("src/{at}.rs")
                     };
-                    let mut set = rift_agent::read_ledger::IntervalSet::new();
+                    let mut set = rift_agent::window_journal::IntervalSet::new();
                     set.insert(
-                        rift_agent::read_ledger::Interval::new(1, u32::try_from(at + 1).unwrap())
+                        rift_agent::window_journal::Interval::new(1, u32::try_from(at + 1).unwrap())
                             .unwrap(),
                     );
-                    rift_agent::read_ledger::HeldFile {
+                    rift_agent::window_journal::HeldFile {
                         path,
                         hash: rift_core::Sha256Id::parse_hex(&rift_shadow::sha256_hex(&[
                             format!("{at}").as_bytes(),
@@ -1520,7 +1520,7 @@ mod recovery_tests {
             // Every position, in every order, including ones no renderer would
             // produce: each resolves to its own entry or to nothing.
             let named: Vec<usize> = (0..held.len() + 2).rev().collect();
-            let announced: Vec<(&str, rift_core::Sha256Id, &[rift_agent::read_ledger::Interval])> =
+            let announced: Vec<(&str, rift_core::Sha256Id, &[rift_agent::window_journal::Interval])> =
                 recovery_announcements(&entries, &named).collect();
             prop_assert_eq!(announced.len(), entries.len());
             for (path, hash, runs) in announced {

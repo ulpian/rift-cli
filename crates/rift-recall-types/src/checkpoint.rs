@@ -265,7 +265,8 @@ pub struct ToolCallRecord {
 }
 
 impl ToolCallRecord {
-    /// Whether this call is a file *read* (the only shape the reread ledger counts).
+    /// Whether this call is a file *read* (the only shape the window journal
+    /// counts).
     #[must_use]
     pub fn is_read(&self) -> bool {
         self.tool_name.as_deref().is_some_and(|n| {

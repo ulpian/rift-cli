@@ -550,7 +550,7 @@ fn session_context_candidate_in(
     }
     let session = payload_session_id(body)?;
     // The context window, not the session — the same key the gate writes the
-    // read ledger under, so a subagent claims its own pointer and its own
+    // window journal under, so a subagent claims its own pointer and its own
     // baseline instead of sharing its parent's.
     let window = context_window(agent, verb, body);
     // Tier (c) is asked first, because it is the one turn where the answer is
@@ -690,7 +690,7 @@ fn payload_session_id(body: &[u8]) -> Option<String> {
 /// answered with silence.
 ///
 /// **Keyed by the window, not the session**, through
-/// [`crate::read_ledger::key`] itself rather than a second statement of its
+/// [`crate::window_journal::key`] itself rather than a second statement of its
 /// rule: a subagent's hooks arrive under the parent's session id and carry
 /// their own agent id, so a marker keyed by the session alone is one marker
 /// for two contexts — the parent takes the pointer and the subagent, which has
@@ -711,7 +711,7 @@ fn claim_injection(
     std::fs::create_dir_all(&dir).ok()?;
     // The session and agent ids are agent-supplied text; their hash is the
     // filename so no payload string ever becomes a path component.
-    let name = crate::read_ledger::key(session, agent_id);
+    let name = crate::window_journal::key(session, agent_id);
     let path = dir.join(format!("{name}.json"));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -928,9 +928,9 @@ mod injection_tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), 3, "three windows, three occurrences");
-        // The occurrence a spend row is keyed by is the read ledger's key, and
-        // not a second rule that happens to agree with it today.
-        assert!(names.contains(&crate::read_ledger::key("s-shared", Some("a0e79504"))));
+        // The occurrence a spend row is keyed by is the window journal's key,
+        // and not a second rule that happens to agree with it today.
+        assert!(names.contains(&crate::window_journal::key("s-shared", Some("a0e79504"))));
     }
 
     /// A session id is agent-supplied text: it names the claim but never

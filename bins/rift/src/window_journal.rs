@@ -1,4 +1,4 @@
-//! The read ledger on disk: one append-only file per context window, under
+//! The window journal on disk: one append-only file per context window, under
 //! this checkout's `.rift/state/`.
 //!
 //! The decision — what a window has been handed, and what may be declined
@@ -71,7 +71,7 @@
 use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use rift_agent::read_ledger::{DenyKey, EvictReason, Interval, IntervalSet, Ledger, Line};
+use rift_agent::window_journal::{DenyKey, EvictReason, Interval, IntervalSet, Journal, Line};
 
 /// How many rows a live file may hold before it is folded.
 pub(crate) const MAX_LIVE_LINES: usize = 4_096;
@@ -81,7 +81,7 @@ pub(crate) const MAX_LIVE_LINES: usize = 4_096;
 /// Atomicity is what keeps two appending processes from interleaving, and it
 /// is a property of a *single* write of a bounded size. A row that would not
 /// fit is refused rather than split, and a refused row is one line of
-/// coverage the ledger does not have. Ordinary rows are a few hundred bytes;
+/// coverage the journal does not have. Ordinary rows are a few hundred bytes;
 /// only a pathological path or a long list of edited sites comes near this.
 pub(crate) const MAX_APPEND_BYTES: usize = 4_096;
 
@@ -114,7 +114,7 @@ const FOLD_AT_BYTES: u64 = MAX_LIVE_LINES as u64 * MIN_ROW_BYTES;
 /// The schema every snapshot this writes carries, and the only one it reads.
 const SNAPSHOT_SCHEMA: u32 = 1;
 
-/// Where one checkout keeps its read ledgers.
+/// Where one checkout keeps its window journals.
 ///
 /// Per checkout by design: the bytes at a path differ between members of a
 /// worktree family, and coverage is a claim about bytes. The directory is
@@ -149,23 +149,23 @@ fn is_key(s: &str) -> bool {
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
-/// What one `load` found: the ledger itself, and how many rows were dropped
+/// What one `load` found: the journal itself, and how many rows were dropped
 /// for not parsing (the number the operator diagnostic reports).
 pub(crate) struct Loaded {
     /// The lines, oldest first, as the decision reads them.
-    pub(crate) ledger: Ledger,
+    pub(crate) journal: Journal,
     /// Rows dropped anywhere for not being a line this version wrote.
     pub(crate) dropped: usize,
 }
 
-/// One context window's ledger, as a place on disk.
-pub(crate) struct ReadLedger {
+/// One context window's journal, as a place on disk.
+pub(crate) struct WindowJournal {
     dir: PathBuf,
     key: String,
 }
 
-impl ReadLedger {
-    /// The ledger of one context window in one checkout. Opens nothing and
+impl WindowJournal {
+    /// The journal of one context window in one checkout. Opens nothing and
     /// creates nothing; the first append makes the directory.
     pub(crate) fn open(work_tree: &Path, session_id: &str, agent_id: Option<&str>) -> Self {
         Self {
@@ -223,7 +223,7 @@ impl ReadLedger {
         let _ = self.absorb_history(&mut lines, &mut dropped, None);
         absorb_file(&self.live_path(), 0, None, &mut lines, &mut dropped);
         Loaded {
-            ledger: Ledger::from_lines(lines),
+            journal: Journal::from_lines(lines),
             dropped,
         }
     }
@@ -231,7 +231,7 @@ impl ReadLedger {
     /// Append one line, folding first if the live file has filled up.
     ///
     /// The error is the caller's signal to let the call it was deciding about
-    /// proceed: a line that could not be written is a line the ledger does not
+    /// proceed: a line that could not be written is a line the journal does not
     /// have, and everything downstream reads that as less coverage. Nothing
     /// here panics and nothing here blocks.
     pub(crate) fn append(&self, line: &Line) -> std::io::Result<()> {
@@ -240,7 +240,7 @@ impl ReadLedger {
         if row.len() > MAX_APPEND_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "a ledger row longer than one atomic append is refused",
+                "a journal row longer than one atomic append is refused",
             ));
         }
         std::fs::create_dir_all(&self.dir)?;
@@ -259,13 +259,13 @@ impl ReadLedger {
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::WriteZero,
-                "a ledger row was written in part",
+                "a journal row was written in part",
             ))
         }
     }
 
     /// Fold when the live file has reached the cap, and never mind if it
-    /// cannot: an unfolded ledger is a slower one, not a wrong one.
+    /// cannot: an unfolded journal is a slower one, not a wrong one.
     fn fold_if_full(&self) {
         if std::fs::metadata(self.live_path()).is_ok_and(|m| m.len() >= FOLD_AT_BYTES) {
             let _ = self.fold();
@@ -669,13 +669,13 @@ fn merge_stretch(stretch: &[&Line], out: &mut Vec<Line>) {
 /// Whether this window's last word on exactly these lines is a decline that
 /// nothing has answered since.
 ///
-/// The question a tool's *result* asks: a call the ledger declined has no
+/// The question a tool's *result* asks: a call the journal declined has no
 /// result, so one arriving means the client ran the call anyway. Read from the
 /// newest line back, and only since the window was last emptied — a decline
 /// before an emptying is spent, and the read that follows it is a legitimate
 /// first read of bytes the window no longer holds.
-pub(crate) fn deny_stands(ledger: &Ledger, key: &DenyKey) -> bool {
-    ledger.live().iter().rev().find_map(|line| match line {
+pub(crate) fn deny_stands(journal: &Journal, key: &DenyKey) -> bool {
+    journal.live().iter().rev().find_map(|line| match line {
         Line::Deny {
             path, hash, range, ..
         } if key.matches(path, *hash, *range) => Some(true),
@@ -692,12 +692,12 @@ pub(crate) fn deny_stands(ledger: &Ledger, key: &DenyKey) -> bool {
 /// A client too old to understand a decision on the channel it was sent on
 /// runs the call regardless, and the read that follows is how that shows. It
 /// is not a failure of the decision — the bytes did reach the window and the
-/// ledger records that they did — but a count of them is the difference
+/// journal records that they did — but a count of them is the difference
 /// between "the model asked again" and "the client never asked the model".
-pub(crate) fn ineffective_denies(ledger: &Ledger) -> usize {
+pub(crate) fn ineffective_denies(journal: &Journal) -> usize {
     let mut standing: Vec<DenyKey> = Vec::new();
     let mut ineffective = 0usize;
-    for line in ledger.lines() {
+    for line in journal.lines() {
         match line {
             Line::Deny {
                 path, hash, range, ..
@@ -809,7 +809,7 @@ fn newlines_between(text: &str, from: usize, to: usize) -> u32 {
 /// What this window already knew about a file, at the moment something
 /// changed it.
 ///
-/// The revision is the newest one the ledger names for the path — by the
+/// The revision is the newest one the journal names for the path — by the
 /// millisecond the line was written, never by where it sits in the file. Rows
 /// from two processes appending at once arrive in whatever order the calls
 /// land in, and a fold rewrites a stretch of them into merged reads followed
@@ -825,15 +825,15 @@ pub(crate) struct PriorRevision {
     pub(crate) held_in_full: bool,
 }
 
-/// What the ledger knew about `path` before this change, or `None` when it
+/// What the journal knew about `path` before this change, or `None` when it
 /// knew nothing — or when two lines of the same millisecond disagree about
 /// which revision was the last one, which is a tie nobody can break and the
 /// safe answer to is "nothing is known".
-pub(crate) fn prior_revision(ledger: &Ledger, path: &str) -> Option<PriorRevision> {
+pub(crate) fn prior_revision(journal: &Journal, path: &str) -> Option<PriorRevision> {
     let mut newest_at = 0u64;
     let mut hash: Option<rift_core::Sha256Id> = None;
     let mut tied = false;
-    for line in ledger.live() {
+    for line in journal.live() {
         let seen = match line {
             Line::Read {
                 path: p,
@@ -861,7 +861,7 @@ pub(crate) fn prior_revision(ledger: &Ledger, path: &str) -> Option<PriorRevisio
         return None;
     }
     let hash = hash?;
-    let total_lines = ledger
+    let total_lines = journal
         .live()
         .iter()
         .filter_map(|line| match line {
@@ -875,10 +875,10 @@ pub(crate) fn prior_revision(ledger: &Ledger, path: &str) -> Option<PriorRevisio
         })
         .max();
     let held_in_full = match total_lines.and_then(|n| Interval::new(1, n)) {
-        Some(whole) => ledger.coverage(path, hash).contains(whole),
+        Some(whole) => journal.coverage(path, hash).contains(whole),
         // Nothing here says how long the file was, so the only way this window
         // can hold all of it is by having written all of it.
-        None => ledger.wrote_in_full(path, hash).is_some(),
+        None => journal.wrote_in_full(path, hash).is_some(),
     };
     Some(PriorRevision {
         hash,
@@ -889,8 +889,8 @@ pub(crate) fn prior_revision(ledger: &Ledger, path: &str) -> Option<PriorRevisio
 
 /// The hash a whole-file write said its bytes would have, where one was
 /// recorded before the write landed.
-pub(crate) fn expected_write(ledger: &Ledger, path: &str) -> Option<rift_core::Sha256Id> {
-    ledger
+pub(crate) fn expected_write(journal: &Journal, path: &str) -> Option<rift_core::Sha256Id> {
+    journal
         .live()
         .iter()
         .filter_map(|line| match line {
@@ -955,7 +955,7 @@ pub(crate) fn edit_facts(
     prior: Option<PriorRevision>,
 ) -> EditFacts {
     let held_before = prior.is_some_and(|p| p.held_in_full);
-    // The file's own growth, where the ledger knows how long it was: two
+    // The file's own growth, where the journal knows how long it was: two
     // measured lengths, not an estimate.
     let measured_shift = prior
         .and_then(|p| p.total_lines)
@@ -1027,10 +1027,10 @@ pub(crate) fn edit_facts(
     }
 }
 
-/// What one checkout's read ledgers amount to, for the operator diagnostic.
+/// What one checkout's window journals amount to, for the operator diagnostic.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Survey {
-    /// Context windows with a ledger here.
+    /// Context windows with a journal here.
     pub(crate) windows: usize,
     /// Snapshot files across all of them.
     pub(crate) snapshots: usize,
@@ -1042,7 +1042,7 @@ pub(crate) struct Survey {
     pub(crate) ineffective: usize,
 }
 
-/// Count this checkout's read ledgers and the rows that did not parse.
+/// Count this checkout's window journals and the rows that did not parse.
 ///
 /// Read the way the decision reads them — through the snapshots, not as a
 /// naive file walk — so that the count is what a window actually holds. Opens
@@ -1068,19 +1068,19 @@ pub(crate) fn survey(work_tree: &Path) -> Survey {
         ..Survey::default()
     };
     for key in keys {
-        let loaded = ReadLedger {
+        let loaded = WindowJournal {
             dir: root.clone(),
             key,
         }
         .load();
-        survey.lines += loaded.ledger.lines().len();
+        survey.lines += loaded.journal.lines().len();
         survey.dropped += loaded.dropped;
-        survey.ineffective += ineffective_denies(&loaded.ledger);
+        survey.ineffective += ineffective_denies(&loaded.journal);
     }
     survey
 }
 
-/// Remove the read ledgers a checkout has finished with, and nothing else.
+/// Remove the window journals a checkout has finished with, and nothing else.
 ///
 /// "Finished with" is the file's own age against the same time-to-live every
 /// other transient is swept by. A window still being written to keeps its
@@ -1098,7 +1098,7 @@ pub(crate) fn sweep_expired(work_tree: &Path, now_ms: i64, ttl_ms: i64, dry_run:
             continue;
         };
         // A file whose age cannot be read is kept. Removing on an unknown
-        // age would delete a live window's ledger on a filesystem that
+        // age would delete a live window's journal on a filesystem that
         // reports no times, and the whole point of this sweep is disk, which
         // can wait.
         let age_known = meta
@@ -1119,7 +1119,7 @@ pub(crate) fn sweep_expired(work_tree: &Path, now_ms: i64, ttl_ms: i64, dry_run:
     removed
 }
 
-/// The `(file name, path)` pairs directly in this checkout's ledger directory.
+/// The `(file name, path)` pairs directly in this checkout's journal directory.
 fn entries(work_tree: &Path) -> Vec<(String, PathBuf)> {
     std::fs::read_dir(dir(work_tree))
         .into_iter()
@@ -1159,24 +1159,24 @@ fn classify(name: &str) -> Option<(String, Kind)> {
 
 #[cfg(test)]
 mod tests {
-    use rift_agent::read_ledger::Interval;
+    use rift_agent::window_journal::Interval;
 
     use super::*;
 
     /// Where the child process this suite spawns is told to write.
-    const CHILD_DIR: &str = "RIFT_TEST_READ_LEDGER_DIR";
+    const CHILD_DIR: &str = "RIFT_TEST_WINDOW_JOURNAL_DIR";
     /// Which name the child process writes its rows under.
-    const CHILD_TAG: &str = "RIFT_TEST_READ_LEDGER_TAG";
+    const CHILD_TAG: &str = "RIFT_TEST_WINDOW_JOURNAL_TAG";
     /// The test the child process is asked to run — itself, filtered to one.
     const CHILD_TEST: &str =
-        "read_ledger::tests::an_appending_child_writes_every_row_it_is_asked_for";
+        "window_journal::tests::an_appending_child_writes_every_row_it_is_asked_for";
     /// How many rows each appending process writes.
     const CHILD_ROWS: u32 = 300;
 
     /// Rows in the live file, counted from the file rather than from anything
     /// that parsed it: what is on disk, whether or not it is a line.
-    fn rows_on_disk(ledger: &ReadLedger) -> usize {
-        std::fs::read_to_string(ledger.live_path())
+    fn rows_on_disk(journal: &WindowJournal) -> usize {
+        std::fs::read_to_string(journal.live_path())
             .map(|text| text.lines().count())
             .unwrap_or_default()
     }
@@ -1220,7 +1220,7 @@ mod tests {
     /// would let the parent's reads decline the child's calls — bytes the
     /// child was never handed.
     #[test]
-    fn a_subagent_gets_its_own_ledger_under_its_parents_session() {
+    fn a_subagent_gets_its_own_journal_under_its_parents_session() {
         let parent = key("session-1", None);
         let child = key("session-1", Some("agent-7"));
         assert_ne!(parent, child);
@@ -1243,51 +1243,51 @@ mod tests {
     #[test]
     fn a_torn_final_line_is_dropped() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
-        ledger.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
-        ledger.append(&read(2, "b.rs", 1, 1, 10)).unwrap();
+        let journal = WindowJournal::open(tmp.path(), "s", None);
+        journal.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
+        journal.append(&read(2, "b.rs", 1, 1, 10)).unwrap();
         // Exactly what a torn write leaves: a prefix of a row, no newline.
         let mut file = std::fs::OpenOptions::new()
             .append(true)
-            .open(ledger.live_path())
+            .open(journal.live_path())
             .unwrap();
         file.write_all(br#"{"v":1,"k":"read","t":3,"p":"c.rs","h":"#)
             .unwrap();
         drop(file);
 
-        let loaded = ledger.load();
-        assert_eq!(loaded.ledger.lines().len(), 2, "the whole rows survive");
+        let loaded = journal.load();
+        assert_eq!(loaded.journal.lines().len(), 2, "the whole rows survive");
         assert_eq!(loaded.dropped, 1, "the torn one is counted, not read");
         assert_eq!(
-            rows_on_disk(&ledger),
+            rows_on_disk(&journal),
             3,
             "the torn row is still a row on disk"
         );
         assert!(loaded
-            .ledger
+            .journal
             .coverage("a.rs", hash(1))
             .contains(Interval::new(1, 40).unwrap()));
         assert!(
-            loaded.ledger.coverage("c.rs", hash(1)).is_empty(),
+            loaded.journal.coverage("c.rs", hash(1)).is_empty(),
             "a row that did not parse contributes nothing at all"
         );
     }
 
     /// A row too long to write in one call is refused outright. Splitting it
     /// would let another process's append land in the middle of it, and two
-    /// half-rows are worse than none: the ledger simply does not learn this
+    /// half-rows are worse than none: the journal simply does not learn this
     /// line, and the read it was about goes ahead.
     #[test]
     fn a_row_that_cannot_be_written_atomically_is_refused_and_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
+        let journal = WindowJournal::open(tmp.path(), "s", None);
         let long = "x".repeat(MAX_APPEND_BYTES);
-        let error = ledger
+        let error = journal
             .append(&read(1, &long, 1, 1, 10))
             .expect_err("a row past the atomic bound is refused");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(!ledger.live_path().exists(), "nothing was written");
-        assert!(ledger.load().ledger.lines().is_empty());
+        assert!(!journal.live_path().exists(), "nothing was written");
+        assert!(journal.load().journal.lines().is_empty());
     }
 
     /// The fold is a change of representation, not of meaning. What the window
@@ -1297,56 +1297,56 @@ mod tests {
     #[test]
     fn the_snapshot_preserves_coverage_and_denies() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
+        let journal = WindowJournal::open(tmp.path(), "s", None);
         // Contiguous halves of one revision, an unrelated file, and a decline.
         for turn in 0..200u32 {
-            ledger
+            journal
                 .append(&read(turn, "a.rs", 1, turn * 2 + 1, turn * 2 + 2))
                 .unwrap();
         }
-        ledger.append(&read(200, "b.rs", 2, 10, 20)).unwrap();
-        ledger.append(&deny(201, "a.rs", 1, 1, 40)).unwrap();
-        let before = ledger.load();
+        journal.append(&read(200, "b.rs", 2, 10, 20)).unwrap();
+        journal.append(&deny(201, "a.rs", 1, 1, 40)).unwrap();
+        let before = journal.load();
         assert!(before
-            .ledger
+            .journal
             .coverage("a.rs", hash(1))
             .contains(Interval::new(1, 400).unwrap()));
 
-        let ordinal = ledger.fold().unwrap().expect("the fold rolled the file");
+        let ordinal = journal.fold().unwrap().expect("the fold rolled the file");
         assert_eq!(ordinal, 1);
-        assert!(ledger.snapshot_path(1).exists());
-        assert!(ledger.rolled_path(1).exists());
-        assert!(!ledger.live_path().exists(), "appends start a fresh file");
+        assert!(journal.snapshot_path(1).exists());
+        assert!(journal.rolled_path(1).exists());
+        assert!(!journal.live_path().exists(), "appends start a fresh file");
 
-        let after = ledger.load();
+        let after = journal.load();
         assert_eq!(
-            after.ledger.coverage("a.rs", hash(1)).runs(),
-            before.ledger.coverage("a.rs", hash(1)).runs(),
+            after.journal.coverage("a.rs", hash(1)).runs(),
+            before.journal.coverage("a.rs", hash(1)).runs(),
             "the same lines are held after the fold as before it"
         );
         assert_eq!(
-            after.ledger.coverage("b.rs", hash(2)).runs(),
-            before.ledger.coverage("b.rs", hash(2)).runs()
+            after.journal.coverage("b.rs", hash(2)).runs(),
+            before.journal.coverage("b.rs", hash(2)).runs()
         );
         assert!(
-            after.ledger.denied(&deny_key("a.rs", 1, 1, 40)),
+            after.journal.denied(&deny_key("a.rs", 1, 1, 40)),
             "a decline already made must not be made a second time"
         );
         assert!(
-            after.ledger.lines().len() < before.ledger.lines().len() / 10,
+            after.journal.lines().len() < before.journal.lines().len() / 10,
             "the point of the fold is fewer rows: {} from {}",
-            after.ledger.lines().len(),
-            before.ledger.lines().len()
+            after.journal.lines().len(),
+            before.journal.lines().len()
         );
-        // And the folded ledger keeps accepting rows.
-        ledger.append(&read(202, "c.rs", 3, 1, 5)).unwrap();
-        let later = ledger.load();
+        // And the folded journal keeps accepting rows.
+        journal.append(&read(202, "c.rs", 3, 1, 5)).unwrap();
+        let later = journal.load();
         assert!(later
-            .ledger
+            .journal
             .coverage("c.rs", hash(3))
             .contains(Interval::new(1, 5).unwrap()));
         assert!(later
-            .ledger
+            .journal
             .coverage("a.rs", hash(1))
             .contains(Interval::new(1, 400).unwrap()));
     }
@@ -1358,36 +1358,36 @@ mod tests {
     #[test]
     fn the_fold_never_carries_coverage_across_an_emptying() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
-        ledger.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
-        ledger
+        let journal = WindowJournal::open(tmp.path(), "s", None);
+        journal.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
+        journal
             .append(&Line::Evict {
                 turn: 2,
                 reason: EvictReason::PreCompact,
                 at_ms: 2,
             })
             .unwrap();
-        ledger.append(&read(3, "a.rs", 1, 41, 60)).unwrap();
-        ledger.fold().unwrap().expect("folded");
+        journal.append(&read(3, "a.rs", 1, 41, 60)).unwrap();
+        journal.fold().unwrap().expect("folded");
 
-        let after = ledger.load();
+        let after = journal.load();
         assert!(
             !after
-                .ledger
+                .journal
                 .coverage("a.rs", hash(1))
                 .contains(Interval::new(1, 40).unwrap()),
             "lines read before the emptying are no longer held"
         );
         assert!(
             after
-                .ledger
+                .journal
                 .coverage("a.rs", hash(1))
                 .contains(Interval::new(41, 60).unwrap()),
             "lines read after it are"
         );
         assert!(
             after
-                .ledger
+                .journal
                 .recorded_coverage("a.rs", hash(1))
                 .contains(Interval::new(1, 40).unwrap()),
             "and what was read before it is still on the record, for the map"
@@ -1401,22 +1401,22 @@ mod tests {
     #[test]
     fn a_snapshot_and_the_rows_after_it_are_read_as_one_history() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
-        std::fs::create_dir_all(&ledger.dir).unwrap();
+        let journal = WindowJournal::open(tmp.path(), "s", None);
+        std::fs::create_dir_all(&journal.dir).unwrap();
         // What the fold read, and what a straggler appended after it did.
         let folded = format!("{}\n", read(1, "folded.rs", 1, 1, 40).to_json_line());
         let straggler = format!("{}\n", read(2, "straggler.rs", 1, 1, 10).to_json_line());
         std::fs::write(
-            ledger.rolled_path(1),
+            journal.rolled_path(1),
             format!("{folded}{straggler}").as_bytes(),
         )
         .unwrap();
         std::fs::write(
-            ledger.snapshot_path(1),
+            journal.snapshot_path(1),
             serde_json::json!({
                 "schema_version": SNAPSHOT_SCHEMA,
                 "ordinal": 1,
-                "source": format!("{}.1.rolled.jsonl", ledger.key),
+                "source": format!("{}.1.rolled.jsonl", journal.key),
                 "source_bytes": folded.len(),
                 "lines": [read(1, "folded.rs", 1, 1, 40).to_json_line()],
             })
@@ -1424,21 +1424,21 @@ mod tests {
             .as_bytes(),
         )
         .unwrap();
-        ledger.append(&read(3, "live.rs", 1, 1, 5)).unwrap();
+        journal.append(&read(3, "live.rs", 1, 1, 5)).unwrap();
 
-        let loaded = ledger.load();
+        let loaded = journal.load();
         assert_eq!(loaded.dropped, 0);
         for (path, hi) in [("folded.rs", 40), ("straggler.rs", 10), ("live.rs", 5)] {
             assert!(
                 loaded
-                    .ledger
+                    .journal
                     .coverage(path, hash(1))
                     .contains(Interval::new(1, hi).unwrap()),
                 "{path}: a reader sees every piece of the history"
             );
         }
         assert_eq!(
-            loaded.ledger.lines().len(),
+            loaded.journal.lines().len(),
             3,
             "and the rows the snapshot already accounted for are not read twice"
         );
@@ -1459,17 +1459,17 @@ mod tests {
     #[test]
     fn a_row_appended_while_the_fold_runs_is_still_read_back() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
-        ledger.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
+        let journal = WindowJournal::open(tmp.path(), "s", None);
+        journal.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
         // A sibling hook that opened the live file before the roll. Its writes
         // follow the file, not the name.
         let mut sibling = std::fs::OpenOptions::new()
             .append(true)
-            .open(ledger.live_path())
+            .open(journal.live_path())
             .unwrap();
 
-        let (ordinal, caps) = ledger.roll().unwrap().expect("the roll claimed the fold");
-        let (merged, accounted) = ledger.merged_history(&caps);
+        let (ordinal, caps) = journal.roll().unwrap().expect("the roll claimed the fold");
+        let (merged, accounted) = journal.merged_history(&caps);
         // Here: the fold has read, and has not yet written its snapshot.
         let evicted = Line::Evict {
             turn: 2,
@@ -1480,16 +1480,18 @@ mod tests {
         row.push('\n');
         sibling.write_all(row.as_bytes()).unwrap();
         drop(sibling);
-        ledger.write_snapshot(ordinal, &accounted, &merged).unwrap();
+        journal
+            .write_snapshot(ordinal, &accounted, &merged)
+            .unwrap();
 
-        let loaded = ledger.load();
+        let loaded = journal.load();
         assert!(
-            loaded.ledger.lines().contains(&evicted),
+            loaded.journal.lines().contains(&evicted),
             "the row landed on disk and the reader must still find it: {:?}",
-            loaded.ledger.lines(),
+            loaded.journal.lines(),
         );
         assert!(
-            loaded.ledger.coverage("a.rs", hash(1)).is_empty(),
+            loaded.journal.coverage("a.rs", hash(1)).is_empty(),
             "and it empties the window, which is what makes losing it a wrong decline"
         );
     }
@@ -1508,17 +1510,17 @@ mod tests {
     #[test]
     fn a_straggler_row_in_an_older_rolled_file_survives_a_later_fold() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
-        ledger.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
+        let journal = WindowJournal::open(tmp.path(), "s", None);
+        journal.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
         // A sibling hook that opened the live file before the first roll.
         let mut sibling = std::fs::OpenOptions::new()
             .append(true)
-            .open(ledger.live_path())
+            .open(journal.live_path())
             .unwrap();
 
-        assert_eq!(ledger.fold().unwrap(), Some(1));
-        ledger.append(&read(2, "b.rs", 1, 1, 40)).unwrap();
-        assert_eq!(ledger.fold().unwrap(), Some(2), "a second fold, later");
+        assert_eq!(journal.fold().unwrap(), Some(1));
+        journal.append(&read(2, "b.rs", 1, 1, 40)).unwrap();
+        assert_eq!(journal.fold().unwrap(), Some(2), "a second fold, later");
 
         // Only now does the straggler write, into the file it still holds —
         // the one the first fold rolled aside, two folds ago.
@@ -1532,23 +1534,23 @@ mod tests {
         sibling.write_all(row.as_bytes()).unwrap();
         drop(sibling);
 
-        let loaded = ledger.load();
+        let loaded = journal.load();
         assert!(
-            loaded.ledger.lines().contains(&evicted),
+            loaded.journal.lines().contains(&evicted),
             "the row is in the oldest rolled file and must still be read: {:?}",
-            loaded.ledger.lines(),
+            loaded.journal.lines(),
         );
         assert!(
-            loaded.ledger.coverage("a.rs", hash(1)).is_empty()
-                && loaded.ledger.coverage("b.rs", hash(1)).is_empty(),
+            loaded.journal.coverage("a.rs", hash(1)).is_empty()
+                && loaded.journal.coverage("b.rs", hash(1)).is_empty(),
             "and it empties the window, which is what makes losing it a wrong decline"
         );
         // A third fold must not lose it again: the account it writes carries
         // every rolled file, not just the one it made.
-        ledger.append(&read(4, "c.rs", 1, 1, 5)).unwrap();
-        assert_eq!(ledger.fold().unwrap(), Some(3));
+        journal.append(&read(4, "c.rs", 1, 1, 5)).unwrap();
+        assert_eq!(journal.fold().unwrap(), Some(3));
         assert!(
-            ledger.load().ledger.lines().contains(&evicted),
+            journal.load().journal.lines().contains(&evicted),
             "the folded history keeps it"
         );
     }
@@ -1560,21 +1562,21 @@ mod tests {
     #[test]
     fn an_unreadable_snapshot_is_read_as_an_emptying() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
-        std::fs::create_dir_all(&ledger.dir).unwrap();
-        std::fs::write(ledger.snapshot_path(1), b"{ not json").unwrap();
-        ledger.append(&read(3, "live.rs", 1, 1, 5)).unwrap();
+        let journal = WindowJournal::open(tmp.path(), "s", None);
+        std::fs::create_dir_all(&journal.dir).unwrap();
+        std::fs::write(journal.snapshot_path(1), b"{ not json").unwrap();
+        journal.append(&read(3, "live.rs", 1, 1, 5)).unwrap();
 
-        let loaded = ledger.load();
+        let loaded = journal.load();
         assert_eq!(loaded.dropped, 1, "the loss is counted, not silent");
         assert_eq!(
-            loaded.ledger.lines().first().map(Line::kind),
+            loaded.journal.lines().first().map(Line::kind),
             Some("evict"),
             "a history that cannot be shown empties what came before it"
         );
         assert!(
             loaded
-                .ledger
+                .journal
                 .coverage("live.rs", hash(1))
                 .contains(Interval::new(1, 5).unwrap()),
             "and what came after it is untouched"
@@ -1587,16 +1589,16 @@ mod tests {
     #[test]
     fn a_file_past_the_budget_holds_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
-        ledger.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
+        let journal = WindowJournal::open(tmp.path(), "s", None);
+        journal.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
         let filler = vec![b'\n'; usize::try_from(MAX_FILE_BYTES).unwrap() + 1];
         let mut file = std::fs::OpenOptions::new()
             .append(true)
-            .open(ledger.live_path())
+            .open(journal.live_path())
             .unwrap();
         file.write_all(&filler).unwrap();
         drop(file);
-        assert!(ledger.load().ledger.coverage("a.rs", hash(1)).is_empty());
+        assert!(journal.load().journal.coverage("a.rs", hash(1)).is_empty());
     }
 
     /// The live file folds itself once it is long enough, without anyone
@@ -1604,27 +1606,27 @@ mod tests {
     #[test]
     fn an_append_past_the_cap_folds_the_file_first() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = ReadLedger::open(tmp.path(), "s", None);
+        let journal = WindowJournal::open(tmp.path(), "s", None);
         let rows = 2_000u32;
         for turn in 1..=rows {
-            ledger.append(&read(turn, "a.rs", 1, turn, turn)).unwrap();
+            journal.append(&read(turn, "a.rs", 1, turn, turn)).unwrap();
         }
-        assert_eq!(ledger.ordinals(".snapshot.json").len(), 1, "folded once");
+        assert_eq!(journal.ordinals(".snapshot.json").len(), 1, "folded once");
 
-        let rolled = std::fs::read_to_string(ledger.rolled_path(1)).unwrap();
+        let rolled = std::fs::read_to_string(journal.rolled_path(1)).unwrap();
         assert!(
             rolled.lines().count() <= MAX_LIVE_LINES,
             "a file is folded before it passes the cap in rows, never after"
         );
-        let loaded = ledger.load();
+        let loaded = journal.load();
         assert_eq!(loaded.dropped, 0);
         assert!(
-            rows_on_disk(&ledger) < rows as usize,
+            rows_on_disk(&journal) < rows as usize,
             "the rows after the fold are in a fresh file"
         );
         assert!(
             loaded
-                .ledger
+                .journal
                 .coverage("a.rs", hash(1))
                 .contains(Interval::new(1, rows).unwrap()),
             "every line read before and after the fold is still held"
@@ -1642,7 +1644,7 @@ mod tests {
     }
 
     /// The sweep is by the file's own age, and by nothing else. A window that
-    /// is still being written to keeps its ledger — disarming a live
+    /// is still being written to keeps its journal — disarming a live
     /// conversation would cost every saving left in it — and a file this
     /// module did not write is left exactly where it is, however it got there.
     #[test]
@@ -1651,11 +1653,11 @@ mod tests {
         let root = tmp.path().join("repo");
         rift_git::test_support::fake_repo(&root).unwrap();
 
-        let old = ReadLedger::open(&root, "a-session-that-ended", None);
+        let old = WindowJournal::open(&root, "a-session-that-ended", None);
         old.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
         old.fold().unwrap().expect("folded");
         old.append(&read(2, "a.rs", 1, 41, 60)).unwrap();
-        let live = ReadLedger::open(&root, "a-session-in-progress", None);
+        let live = WindowJournal::open(&root, "a-session-in-progress", None);
         live.append(&read(1, "b.rs", 1, 1, 10)).unwrap();
         // Something this module did not write, in the same directory.
         let stranger = dir(&root).join("notes.txt");
@@ -1671,17 +1673,17 @@ mod tests {
         }
 
         let dry = crate::session_verbs::clean(&root, true, 14).unwrap();
-        assert_eq!(dry.json["expired_read_ledgers"], 3);
+        assert_eq!(dry.json["expired_window_journals"], 3);
         assert!(old.live_path().exists(), "a dry run removes nothing");
 
         let out = crate::session_verbs::clean(&root, false, 14).unwrap();
-        assert_eq!(out.json["expired_read_ledgers"], 3);
+        assert_eq!(out.json["expired_window_journals"], 3);
         assert!(!old.live_path().exists());
         assert!(!old.rolled_path(1).exists());
         assert!(!old.snapshot_path(1).exists());
         assert!(
             live.live_path().exists(),
-            "a window still being written to keeps its ledger"
+            "a window still being written to keeps its journal"
         );
         assert!(
             stranger.exists(),
@@ -1689,18 +1691,18 @@ mod tests {
         );
     }
 
-    /// The operator count reads the ledgers the way the decision reads them —
+    /// The operator count reads the journals the way the decision reads them —
     /// through the snapshots — and says plainly how many rows it had to drop.
     #[test]
     fn the_survey_counts_windows_snapshots_and_rows_it_could_not_read() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(survey(tmp.path()), Survey::default(), "an empty checkout");
 
-        let one = ReadLedger::open(tmp.path(), "s1", None);
+        let one = WindowJournal::open(tmp.path(), "s1", None);
         one.append(&read(1, "a.rs", 1, 1, 40)).unwrap();
         one.fold().unwrap().expect("folded");
         one.append(&read(2, "a.rs", 1, 41, 60)).unwrap();
-        let two = ReadLedger::open(tmp.path(), "s1", Some("subagent"));
+        let two = WindowJournal::open(tmp.path(), "s1", Some("subagent"));
         two.append(&read(1, "b.rs", 1, 1, 10)).unwrap();
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -1718,8 +1720,8 @@ mod tests {
     }
 
     /// One appending process, run two ways: on its own, from the ordinary
-    /// suite, and as the child [`concurrent_appends_from_two_processes_never_corrupt_the_ledger`]
-    /// spawns into a ledger another process is appending to at the same time.
+    /// suite, and as the child [`concurrent_appends_from_two_processes_never_corrupt_the_journal`]
+    /// spawns into a journal another process is appending to at the same time.
     /// Either way the claim is the same — every row it was asked for is in the
     /// file afterwards, whole.
     #[test]
@@ -1730,30 +1732,30 @@ mod tests {
             _ => (solo.path().to_path_buf(), "alone".to_owned()),
         };
         let name = format!("{tag}.rs");
-        let ledger = ReadLedger::open(&root, "one-window", None);
+        let journal = WindowJournal::open(&root, "one-window", None);
         for turn in 1..=CHILD_ROWS {
-            ledger
+            journal
                 .append(&read(turn, &name, 1, turn, turn))
                 .expect("an append this process asked for");
         }
-        let loaded = ledger.load();
+        let loaded = journal.load();
         assert!(
             loaded
-                .ledger
+                .journal
                 .coverage(&name, hash(1))
                 .contains(Interval::new(1, CHILD_ROWS).unwrap()),
             "every row this process wrote is in the file it wrote them to"
         );
     }
 
-    /// Two real processes append to one window's ledger at the same time.
+    /// Two real processes append to one window's journal at the same time.
     ///
     /// A client may run its hooks in parallel and a model may issue parallel
     /// tool calls, so this is the ordinary case, not a stress test. Every row
     /// must survive whole: none torn in half by the other process's write,
     /// none interleaved into an unparseable one, and none lost.
     #[test]
-    fn concurrent_appends_from_two_processes_never_corrupt_the_ledger() {
+    fn concurrent_appends_from_two_processes_never_corrupt_the_journal() {
         let tmp = tempfile::tempdir().unwrap();
         let exe = std::env::current_exe().expect("this test binary");
         let tags = ["alpha", "beta"];
@@ -1777,7 +1779,7 @@ mod tests {
             );
         }
 
-        let window = ReadLedger::open(tmp.path(), "one-window", None);
+        let window = WindowJournal::open(tmp.path(), "one-window", None);
         let loaded = window.load();
         assert_eq!(loaded.dropped, 0, "no row was torn or interleaved");
         assert_eq!(
@@ -1785,12 +1787,12 @@ mod tests {
             2 * CHILD_ROWS as usize,
             "every row both processes wrote is on disk, once"
         );
-        assert_eq!(loaded.ledger.lines().len(), 2 * CHILD_ROWS as usize);
+        assert_eq!(loaded.journal.lines().len(), 2 * CHILD_ROWS as usize);
         for tag in tags {
             let name = format!("{tag}.rs");
             assert!(
                 loaded
-                    .ledger
+                    .journal
                     .coverage(&name, hash(1))
                     .contains(Interval::new(1, CHILD_ROWS).unwrap()),
                 "{name}: every line one process recorded is held"

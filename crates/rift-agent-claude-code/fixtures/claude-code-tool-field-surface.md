@@ -229,7 +229,7 @@ Re-verify: fetch the `retrieved-from` URL to a scratch file, then
 
 ### `agent_id` on the tool-lifecycle hooks (upstream lines 287-310, 312-318)
 
-A subagent's hooks arrive under the parent's session id, so a ledger keyed by
+A subagent's hooks arrive under the parent's session id, so a journal keyed by
 session alone would let a subagent's read answer for a context window that
 never saw it. This is the field that separates them, and the comment says
 plainly both that the tool-lifecycle hooks are the ones that carry it and that
@@ -666,7 +666,7 @@ named are the ones that fill it.
 **Four facts follow.**
 
 **A single simple command is the exception, not the rule.** 35 of 864 — four
-percent. The other 829 were reads of this repository that no ledger recorded,
+percent. The other 829 were reads of this repository that no journal recorded,
 so they could never be declined and never entered the denominator any savings
 share divides by. That is an accounting hole, not a conservative choice: the
 tokens were spent either way.

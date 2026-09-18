@@ -254,8 +254,8 @@ fn focus_paths(repo: &Path, files: &[String]) -> Vec<String> {
     files.iter().map(|f| repo_relative(repo, f)).collect()
 }
 
-/// The name a verb argument keys the ledger with: repository-relative and
-/// `/`-spelled, whichever base and separator the caller typed it with.
+/// The name a verb argument keys the window journal with: repository-relative
+/// and `/`-spelled, whichever base and separator the caller typed it with.
 fn repo_relative(repo: &Path, path: &str) -> String {
     use rift_recall_substrate::worktree::repo_relative_slash;
     let trimmed = path.strip_prefix("./").unwrap_or(path);
@@ -467,8 +467,8 @@ fn owe_document_conversion(repo: &Path, req: &rift_recall_serve::ToolRequest) ->
 /// to, and it is why this verb is safe to call on any repository.
 ///
 /// The facts the ranking needs are gathered *here* rather than in the engine,
-/// which is what keeps the engine a pure function of its arguments: the read
-/// ledgers of every member of the family (so a file a sibling worktree opened
+/// which is what keeps the engine a pure function of its arguments: the window
+/// journals of every member of the family (so a file a sibling worktree opened
 /// this morning is warm here this afternoon), the projection's own read counts,
 /// and what git says is in flight.
 #[cfg(feature = "search")]
@@ -686,7 +686,7 @@ fn git_word(status: &rift_recall_search::StatusFacts, path: &str) -> rift_recall
 
 /// Every checkout of this repository family, this one included.
 ///
-/// The read ledgers are per member and the interest they record is the
+/// The window journals are per member and the interest they record is the
 /// family's, so a file a sibling worktree opened this morning ranks warm here
 /// this afternoon. A repository that cannot be enumerated contributes this
 /// checkout alone, which ranks colder rather than wrongly.
@@ -707,11 +707,12 @@ fn family_work_trees(repo: &Path) -> Vec<std::path::PathBuf> {
 
 /// How many times the projection has recorded a read of each path.
 ///
-/// The half of frecency the ledgers cannot see: reads ingested from checkpoints
-/// this checkout's own run state never held. They carry no time of their own —
-/// they are the whole history rather than an event — so they add accesses and
-/// leave recency to the ledgers. Bounded, and read best-effort: a projection
-/// that will not answer ranks every path colder, never wrongly.
+/// The half of frecency the window journals cannot see: reads ingested from
+/// checkpoints this checkout's own run state never held. They carry no time of
+/// their own — they are the whole history rather than an event — so they add
+/// accesses and leave recency to the window journals. Bounded, and read
+/// best-effort: a projection that will not answer ranks every path colder,
+/// never wrongly.
 #[cfg(feature = "search")]
 async fn family_read_counts(store: &SqliteStore) -> Vec<(String, u32)> {
     use rift_store::CanonicalStore as _;

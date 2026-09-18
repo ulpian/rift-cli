@@ -117,8 +117,8 @@ pub(crate) enum JobKind {
     /// the redaction gate, which is the worker's to do because it costs more
     /// than a hook has.
     BasisSnapshot {
-        /// Repo-relative path of the bytes read, in the `/` spelling the read
-        /// ledger keys by.
+        /// Repo-relative path of the bytes read, in the `/` spelling the
+        /// window journal keys by.
         rel_path: String,
         /// SHA-256 (hex) of the bytes at read time — the snapshot's key, and
         /// what the worker verifies before it keeps anything.
@@ -248,7 +248,7 @@ pub(crate) enum ServeAuditKind {
 /// The bytes an avoided figure is the token count of.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AuditBasis {
-    /// Repo-relative path, in the spelling the read ledger keys by.
+    /// Repo-relative path, in the spelling the window journal keys by.
     pub rel_path: String,
     /// SHA-256 (hex) of the bytes at decision time.
     pub content_sha256: String,

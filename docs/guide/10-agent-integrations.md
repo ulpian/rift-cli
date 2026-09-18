@@ -390,7 +390,7 @@ installed only there. What those runs settled:
   agent id, the context field on it reached the subagent, and the text was still
   held after the subagent's own tool calls — while neither the session-start nor
   the prompt-submission hook fired for that window at all. Which is why the
-  pointer's claim, the manifest baseline and the read ledger are all keyed by
+  pointer's claim, the manifest baseline and the window journal are all keyed by
   the same (session, agent) pair rather than by the session.
 - **An injected step's kind decides whether it survives.** On the
   per-invocation channel, an ephemeral message reaches the model at the

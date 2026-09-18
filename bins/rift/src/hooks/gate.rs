@@ -1,4 +1,4 @@
-//! The read gate: the silence precondition a read must pass, the ledger step
+//! The read gate: the silence precondition a read must pass, the journal step
 //! that decides it, the audit row and journal entry a decision leaves, and the
 //! frame a denied read is answered with. Separate because this is the
 //! decision path the intercept gate walks: nothing reachable from here opens a
@@ -36,13 +36,13 @@ fn gate_policy(
     (policy, effective)
 }
 
-/// The read ledger's mode, as the pure decision names it.
-const fn gate_mode(mode: rift_recall_policy::Mode) -> rift_agent::read_ledger::Mode {
-    use rift_agent::read_ledger::Mode as Ledger;
+/// The window journal's mode, as the pure decision names it.
+const fn gate_mode(mode: rift_recall_policy::Mode) -> rift_agent::window_journal::Mode {
+    use rift_agent::window_journal::Mode as Journal;
     match mode {
-        rift_recall_policy::Mode::Off => Ledger::Off,
-        rift_recall_policy::Mode::Observe => Ledger::Observe,
-        rift_recall_policy::Mode::Enforce => Ledger::Enforce,
+        rift_recall_policy::Mode::Off => Journal::Off,
+        rift_recall_policy::Mode::Observe => Journal::Observe,
+        rift_recall_policy::Mode::Enforce => Journal::Enforce,
     }
 }
 
@@ -126,8 +126,8 @@ const DELIVERY_TOTAL_LINES: &str = "totalLines";
 fn stated_delivery(
     agent: &rift_core::AgentId,
     payload: &serde_json::Value,
-) -> Option<rift_agent::read_ledger::StatedDelivery> {
-    use rift_agent::read_ledger::StatedDelivery;
+) -> Option<rift_agent::window_journal::StatedDelivery> {
+    use rift_agent::window_journal::StatedDelivery;
     if *agent != rift_core::AgentId::CLAUDE_CODE {
         return None;
     }
@@ -161,7 +161,7 @@ fn stated_delivery(
     let from_object = file.and_then(|file| {
         let lines = stated(file, DELIVERY_NUM_LINES)?;
         let lo = stated(file, DELIVERY_START_LINE).unwrap_or(1);
-        rift_agent::read_ledger::Interval::new(lo, lo.checked_add(lines.checked_sub(1)?)?)
+        rift_agent::window_journal::Interval::new(lo, lo.checked_add(lines.checked_sub(1)?)?)
     });
     // The cut-short reading comes first, so a result that both sets the flag
     // and carries a contradictory count is read the way that can only cost a
@@ -183,22 +183,22 @@ fn stated_delivery(
 /// Anything it cannot read outright is no run at all rather than a guess: the
 /// caller's answer to that is the read's own first line, which is the smallest
 /// claim there is.
-fn notice_lines(notice: &str) -> Option<rift_agent::read_ledger::Interval> {
+fn notice_lines(notice: &str) -> Option<rift_agent::window_journal::Interval> {
     let clause = notice.split_once(TRUNCATION_NOTICE_LINES)?.1;
     let digits = |text: &str| text.trim().parse::<u32>().ok();
     let (lo, rest) = clause.split_once('-')?;
     let hi = rest.split(|c: char| !c.is_ascii_digit()).next()?;
-    rift_agent::read_ledger::Interval::new(digits(lo)?, digits(hi)?)
+    rift_agent::window_journal::Interval::new(digits(lo)?, digits(hi)?)
 }
 
 /// Move this window's coverage to what a result says it was handed — in
 /// whichever direction the statement points.
 ///
 /// Both directions are the same rule, decided by
-/// [`rift_agent::read_ledger::reconcile_delivery`], and only the writing is
+/// [`rift_agent::window_journal::reconcile_delivery`], and only the writing is
 /// here:
 ///
-/// - **credit**, where the result states more than the ledger was able to
+/// - **credit**, where the result states more than the journal was able to
 ///   claim. Coverage is a union of `read` intervals, so the addition is one
 ///   append and costs the window nothing it already had. This is the only
 ///   route by which a delivery too large for the size rule to vouch for ever
@@ -218,16 +218,16 @@ fn notice_lines(notice: &str) -> Option<rift_agent::read_ledger::Interval> {
 ///
 /// Returns whether it wrote anything.
 fn reconcile_delivered_lines(
-    ledger: &crate::read_ledger::ReadLedger,
-    read: &rift_agent::read_ledger::ResolvedRead,
-    recorded: rift_agent::read_ledger::Interval,
-    delivered: rift_agent::read_ledger::StatedDelivery,
+    journal: &crate::window_journal::WindowJournal,
+    read: &rift_agent::window_journal::ResolvedRead,
+    recorded: rift_agent::window_journal::Interval,
+    delivered: rift_agent::window_journal::StatedDelivery,
     turn: u32,
     at_ms: u64,
 ) -> bool {
-    use rift_agent::read_ledger::{reconcile_delivery, EvictReason, Line, Reconcile};
+    use rift_agent::window_journal::{reconcile_delivery, EvictReason, Line, Reconcile};
     let credit = |range| {
-        let _ = ledger.append(&Line::Read {
+        let _ = journal.append(&Line::Read {
             turn,
             path: read.path.clone(),
             hash: read.hash,
@@ -243,7 +243,7 @@ fn reconcile_delivered_lines(
             true
         }
         Reconcile::TakeBack(kept) => {
-            let _ = ledger.append(&Line::Evict {
+            let _ = journal.append(&Line::Evict {
                 turn,
                 reason: EvictReason::Truncate,
                 at_ms,
@@ -266,25 +266,25 @@ fn reconcile_delivered_lines(
 /// repository is configured.
 const fn gate_edit_echo(
     effective: &rift_recall_policy::Effective,
-) -> rift_agent::read_ledger::EditEcho {
+) -> rift_agent::window_journal::EditEcho {
     if effective.pinned_edit_echo {
-        rift_agent::read_ledger::EditEcho::Pinned
+        rift_agent::window_journal::EditEcho::Pinned
     } else {
-        rift_agent::read_ledger::EditEcho::Unpinned
+        rift_agent::window_journal::EditEcho::Unpinned
     }
 }
 
 /// The bounds one decision reads, from the same resolved policy.
-fn gate_limits(effective: &rift_recall_policy::Effective) -> rift_agent::read_ledger::Limits {
-    rift_agent::read_ledger::Limits {
+fn gate_limits(effective: &rift_recall_policy::Effective) -> rift_agent::window_journal::Limits {
+    rift_agent::window_journal::Limits {
         max_slice_bytes: usize::try_from(effective.max_slice_bytes)
             .unwrap_or(rift_agent::DEFAULT_MAX_SLICE_BYTES),
         min_slice_lines: effective.min_slice_lines,
-        ..rift_agent::read_ledger::Limits::default()
+        ..rift_agent::window_journal::Limits::default()
     }
 }
 
-/// What this hook does about the read ledger, if anything.
+/// What this hook does about the window journal, if anything.
 pub(crate) enum GateStep {
     /// A tool call that may be read-shaped: resolve, decide, record.
     Decide,
@@ -292,7 +292,7 @@ pub(crate) enum GateStep {
     /// have: one arriving says the client ran the call regardless.
     CrossCheck,
     /// The context window stopped holding what it was given.
-    Evict(rift_agent::read_ledger::EvictReason),
+    Evict(rift_agent::window_journal::EvictReason),
 }
 
 /// Which step a `(family, verb)` is, from the pinned surfaces alone.
@@ -319,7 +319,7 @@ pub(crate) fn gate_step(
     verb: &str,
     payload: &serde_json::Value,
 ) -> Option<GateStep> {
-    use rift_agent::read_ledger::EvictReason;
+    use rift_agent::window_journal::EvictReason;
     let claude_code = *agent == rift_core::AgentId::CLAUDE_CODE;
     let codex = *agent == rift_core::AgentId::CODEX;
     let source = || payload.get("source").and_then(serde_json::Value::as_str);
@@ -383,7 +383,7 @@ impl GateFile {
     }
 
     /// How many bytes the lines `lo..=hi` amount to.
-    fn slice_bytes(&self, run: rift_agent::read_ledger::Interval) -> usize {
+    fn slice_bytes(&self, run: rift_agent::window_journal::Interval) -> usize {
         self.bytes
             .split_inclusive(|byte| *byte == b'\n')
             .skip(run.lo as usize - 1)
@@ -457,7 +457,7 @@ pub(crate) fn payload_cwd(facts: &rift_agent::HookFacts) -> Option<PathBuf> {
 /// never handed:
 ///
 /// * a path this checkout has no name for ([`gate_rel_path`]), or one naming
-///   something that is not a file, belongs to no checkout this ledger
+///   something that is not a file, belongs to no checkout this journal
 ///   describes;
 /// * a file past `max_bytes` — the repository's own inline-hash cap — is not
 ///   hashed, because the budget is the agent's and a saving is not worth
@@ -495,16 +495,16 @@ pub(super) fn gate_file(
     })
 }
 
-/// The read ledger's side of one agent hook: what this context window is
+/// The window journal's side of one agent hook: what this context window is
 /// being handed, and what it has stopped holding.
 ///
-/// Runs before the ingest and opens no store: the ledger is a file under this
+/// Runs before the ingest and opens no store: the journal is a file under this
 /// checkout's own run state, the decision is pure, and the whole step is worth
 /// a hash of at most a megabyte plus one read and one append. Every failure
-/// leaves the ledger with less than really happened, which costs a saving and
+/// leaves the journal with less than really happened, which costs a saving and
 /// can never produce a decline of lines the window does not hold.
 ///
-/// A hook that names no session records nothing: the ledger is one context
+/// A hook that names no session records nothing: the journal is one context
 /// window's, and there is no window to name.
 /// Run the read gate, and hand back the adapter registry it built.
 ///
@@ -516,9 +516,9 @@ pub(super) fn gate_file(
 ///
 /// The gate runs **before** the ingest, because the ingest is not on its
 /// critical path, and before anything opens a store, because it never needs
-/// one. It is guarded on its own so that a panic in it costs the ledger a
+/// one. It is guarded on its own so that a panic in it costs the journal a
 /// line and the capture nothing.
-pub(super) fn read_ledger_step(
+pub(super) fn window_journal_step(
     t: &crate::hooktime::HookTimer,
     raw: &rift_shadow::hooks::RawHook,
     git_dir: &Path,
@@ -564,7 +564,7 @@ pub(super) fn read_ledger_step(
     };
     // What the window WROTE is coverage of a revision nobody read: the bytes
     // came out of the agent's own payload. Guarded apart from the gate so that
-    // a panic in either costs one line of one ledger, and the accounting the
+    // a panic in either costs one line of one journal, and the accounting the
     // gate journaled is answered by the same worker either way.
     t.phase("edit_record", || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -596,7 +596,7 @@ pub(super) fn read_ledger_step(
     });
     *search = searches.answer;
     // Handed back the moment it is known, and before the ingest below can
-    // fail: the decline is already a line of the window's ledger, so the
+    // fail: the decline is already a line of the window's journal, so the
     // answer the agent gets says the same thing whatever becomes of the rest.
     *decline = outcome.deny_reason;
     (
@@ -670,7 +670,7 @@ fn prevented_record(
     let cwd = payload_cwd(&facts);
     // The context window, not the session — the same key everything else on
     // this path is written under.
-    let ledger = crate::read_ledger::ReadLedger::open(
+    let journal = crate::window_journal::WindowJournal::open(
         work_tree,
         &raw.session,
         facts.child_session.as_deref(),
@@ -678,13 +678,13 @@ fn prevented_record(
     let Ok(root) = work_tree.canonicalize() else {
         return false;
     };
-    // The ledger is consulted BEFORE the file is hashed: the overwhelming
+    // The journal is consulted BEFORE the file is hashed: the overwhelming
     // majority of edits are of files nothing was announced about, and those
     // must cost one small file read and no hash at all.
     let Some(rel_path) = gate_rel_path(&root, &named, cwd.as_deref()) else {
         return false;
     };
-    let Some(hold) = ledger.load().ledger.standing_hold(&rel_path) else {
+    let Some(hold) = journal.load().journal.standing_hold(&rel_path) else {
         return false;
     };
     let Some(file) = gate_file(
@@ -703,8 +703,8 @@ fn prevented_record(
     // The line first, and the row only if it landed. The line is what bounds
     // the booking to one per announcement, so a row written beside a line that
     // could not be written is a figure a second act would book again.
-    if ledger
-        .append(&rift_agent::read_ledger::Line::Prevented {
+    if journal
+        .append(&rift_agent::window_journal::Line::Prevented {
             turn,
             path: rel_path.clone(),
             hash: hold.hash,
@@ -731,7 +731,7 @@ fn prevented_record(
 ///
 /// `lines` is the announced run, or `None` where the announcement was about
 /// the whole file — the two are the same distinction
-/// [`rift_agent::read_ledger::Interval::is_whole_file`] draws, and the whole
+/// [`rift_agent::window_journal::Interval::is_whole_file`] draws, and the whole
 /// file is priced as the whole file rather than as four billion lines.
 fn journal_prevented(
     git_dir: &Path,
@@ -739,7 +739,7 @@ fn journal_prevented(
     raw: &rift_shadow::hooks::RawHook,
     rel_path: &str,
     blob_oid: &str,
-    hold: rift_agent::read_ledger::StandingHold,
+    hold: rift_agent::window_journal::StandingHold,
     effective: &rift_recall_policy::Effective,
 ) -> bool {
     use crate::agent_queue::{AuditBasis, AuditLines, ServeAudit, ServeAuditKind};
@@ -803,7 +803,7 @@ pub(crate) static AUDIT_IDS: std::sync::LazyLock<rift_core::MonotonicUlidSource>
 
 /// The accounting row a read decision owes, or `None` when it owes none.
 ///
-/// An allowed read owes nothing: nothing was decided, and the ledger line is
+/// An allowed read owes nothing: nothing was decided, and the journal line is
 /// the whole record. A decline owes the row that carries what it saved and
 /// what its reason cost; a decline that was only observed owes the row that
 /// sizes the pool without claiming any of it. `frame` is the text the model
@@ -817,15 +817,15 @@ pub(crate) static AUDIT_IDS: std::sync::LazyLock<rift_core::MonotonicUlidSource>
 /// nothing: a decline answers the announcement, so no booking follows it.
 fn read_decision_audit(
     agent: &rift_core::AgentId,
-    read: &rift_agent::read_ledger::ResolvedRead,
+    read: &rift_agent::window_journal::ResolvedRead,
     blob_oid: &str,
-    decision: &rift_agent::read_ledger::Decision,
+    decision: &rift_agent::window_journal::Decision,
     frame: &str,
     booked: bool,
     call_id: String,
 ) -> Option<crate::agent_queue::ServeAudit> {
     use crate::agent_queue::{AuditBasis, AuditLines, ServeAudit, ServeAuditKind};
-    use rift_agent::read_ledger::Decision;
+    use rift_agent::window_journal::Decision;
     let declined = matches!(decision, Decision::Deny(_));
     let decision = match decision {
         Decision::Allow => return None,
@@ -865,18 +865,18 @@ fn read_decision_audit(
 ///
 /// A shape with nothing exact left to say has no frame, and a decline with no
 /// frame is an unexplained tool failure — so the call runs instead, and the
-/// ledger records the lines it will have delivered.
+/// journal records the lines it will have delivered.
 fn gate_answer(
-    held: &rift_agent::read_ledger::Ledger,
-    read: &rift_agent::read_ledger::ResolvedRead,
-    decision: rift_agent::read_ledger::Decision,
+    held: &rift_agent::window_journal::Journal,
+    read: &rift_agent::window_journal::ResolvedRead,
+    decision: rift_agent::window_journal::Decision,
     context_lines: u32,
 ) -> (
-    rift_agent::read_ledger::Decision,
+    rift_agent::window_journal::Decision,
     Option<String>,
     Option<String>,
 ) {
-    use rift_agent::read_ledger::Decision;
+    use rift_agent::window_journal::Decision;
     let frame = gate_frame(held, read, &decision, context_lines);
     let decision = match (&decision, &frame) {
         (Decision::Deny(_), None) => Decision::Allow,
@@ -900,14 +900,14 @@ fn gate_resolve(
     request: rift_agent::ReadRequest,
     cwd: Option<&Path>,
     effective: &rift_recall_policy::Effective,
-) -> Option<(GateFile, rift_agent::read_ledger::ResolvedRead)> {
+) -> Option<(GateFile, rift_agent::window_journal::ResolvedRead)> {
     let file = gate_file(
         work_tree,
         &request.path,
         cwd,
         effective.max_inline_hash_bytes,
     )?;
-    let read = rift_agent::read_ledger::ResolvedRead::new(
+    let read = rift_agent::window_journal::ResolvedRead::new(
         &rift_agent::ReadRequest {
             path: file.rel_path.clone(),
             ..request
@@ -940,7 +940,7 @@ fn gate_resolve(
 ///
 /// A subagent's window shares its parent's session id and therefore its turn.
 /// That is the honest answer: the turn is a property of the conversation, and
-/// the window it belongs to is already keyed separately by the ledger itself.
+/// the window it belongs to is already keyed separately by the journal itself.
 pub(crate) fn gate_turn(raw: &rift_shadow::hooks::RawHook, git_dir: &Path) -> u32 {
     if let Some(turn) = raw.turn {
         return turn;
@@ -958,15 +958,15 @@ pub(crate) fn gate_turn(raw: &rift_shadow::hooks::RawHook, git_dir: &Path) -> u3
 /// answered nothing, so a slice past the size density can vouch for still runs
 /// untouched and still creates no coverage here; the coverage arrives one hook
 /// later, from the result, through
-/// [`rift_agent::read_ledger::reconcile_delivery`]. What that costs is a
+/// [`rift_agent::window_journal::reconcile_delivery`]. What that costs is a
 /// parallel identical read issued in the same turn: both calls reach this
 /// boundary before either result does, so neither can be declined on the
 /// other. That is a saving not taken, which is the direction every rule on
 /// this path leans.
 fn gate_delivery_is_actionable(
-    read: &rift_agent::read_ledger::ResolvedRead,
+    read: &rift_agent::window_journal::ResolvedRead,
     slice_bytes: usize,
-    limits: rift_agent::read_ledger::Limits,
+    limits: rift_agent::window_journal::Limits,
 ) -> bool {
     slice_bytes <= limits.max_slice_bytes && read.delivery_is_complete(slice_bytes, limits)
 }
@@ -974,17 +974,17 @@ fn gate_delivery_is_actionable(
 /// The same reconciliation against what this call was credited with before its
 /// result arrived, and nothing at all where the result stated nothing.
 fn reconcile_stated_delivery(
-    ledger: &crate::read_ledger::ReadLedger,
-    read: &rift_agent::read_ledger::ResolvedRead,
-    stated: Option<rift_agent::read_ledger::StatedDelivery>,
+    journal: &crate::window_journal::WindowJournal,
+    read: &rift_agent::window_journal::ResolvedRead,
+    stated: Option<rift_agent::window_journal::StatedDelivery>,
     slice_bytes: usize,
-    limits: rift_agent::read_ledger::Limits,
+    limits: rift_agent::window_journal::Limits,
     turn: u32,
     at_ms: u64,
 ) {
     if let Some(delivered) = stated {
         reconcile_delivered_lines(
-            ledger,
+            journal,
             read,
             read.range_delivered(slice_bytes, limits),
             delivered,
@@ -1007,7 +1007,7 @@ pub(super) fn read_gate(
 ) -> GateOutcome {
     let quiet = GateOutcome::default();
     // A lever nobody is holding decides nothing and records nothing: an
-    // unreadable policy and an explicit `off` both land here, and the ledger
+    // unreadable policy and an explicit `off` both land here, and the journal
     // this repository never asked for is never written.
     if effective.read_deny == rift_recall_policy::Mode::Off || raw.session.is_empty() {
         return quiet;
@@ -1025,20 +1025,21 @@ pub(super) fn read_gate(
     let facts = adapter.facts(&raw.verb, &raw.payload);
     let cwd = payload_cwd(&facts);
     let window = facts.child_session;
-    let ledger = crate::read_ledger::ReadLedger::open(work_tree, &raw.session, window.as_deref());
+    let journal =
+        crate::window_journal::WindowJournal::open(work_tree, &raw.session, window.as_deref());
     let turn = gate_turn(raw, git_dir);
     let at_ms = u64::try_from(raw.occurred_at_ms).unwrap_or_default();
     if let GateStep::Evict(reason) = step {
         // The lines before it are kept: they stop being coverage and become
         // the map of what the window has just stopped holding.
-        let _ = ledger.append(&rift_agent::read_ledger::Line::Evict {
+        let _ = journal.append(&rift_agent::window_journal::Line::Evict {
             turn,
             reason,
             at_ms,
         });
         return quiet;
     }
-    // What the result says about its own delivery, read before the ledger is
+    // What the result says about its own delivery, read before the journal is
     // consulted because it is three field lookups and it decides whether a
     // result with no decline behind it is work at all. A statement either way
     // is work: one that names less than the record claims takes lines back,
@@ -1048,17 +1049,17 @@ pub(super) fn read_gate(
         GateStep::CrossCheck => stated_delivery(&raw.agent, &raw.payload),
         _ => None,
     };
-    let held = ledger.load().ledger;
+    let held = journal.load().journal;
     if matches!(step, GateStep::CrossCheck)
         && stated.is_none()
         && !held
             .live()
             .iter()
-            .any(|line| matches!(line, rift_agent::read_ledger::Line::Deny { .. }))
+            .any(|line| matches!(line, rift_agent::window_journal::Line::Deny { .. }))
     {
         // Nothing was declined, so a result cannot contradict a decline, and
         // the read behind it was recorded before the call ran. Answered from
-        // the ledger alone: the check must not cost a hash it cannot use.
+        // the journal alone: the check must not cost a hash it cannot use.
         return quiet;
     }
     // Every read the call performs, not just its first. One shell command
@@ -1072,13 +1073,13 @@ pub(super) fn read_gate(
     let pass = GatePass {
         step,
         held: &held,
-        ledger: &ledger,
+        journal: &journal,
         stated,
         limits: gate_limits(effective),
         turn,
         at_ms,
     };
-    // Phase one: decide every member against ONE snapshot of the ledger,
+    // Phase one: decide every member against ONE snapshot of the journal,
     // deciding nothing about the call as a whole yet.
     let mut members =
         gate_decide_members(raw, work_tree, cwd.as_deref(), effective, &pass, &requests);
@@ -1091,11 +1092,14 @@ pub(super) fn read_gate(
     let wholly_declined = members.len() == requests.len()
         && members
             .iter()
-            .all(|m| matches!(m.decision, rift_agent::read_ledger::Decision::Deny(_)));
+            .all(|m| matches!(m.decision, rift_agent::window_journal::Decision::Deny(_)));
     if !wholly_declined {
         for member in &mut members {
-            if matches!(member.decision, rift_agent::read_ledger::Decision::Deny(_)) {
-                member.decision = rift_agent::read_ledger::Decision::Allow;
+            if matches!(
+                member.decision,
+                rift_agent::window_journal::Decision::Deny(_)
+            ) {
+                member.decision = rift_agent::window_journal::Decision::Allow;
                 member.frame = None;
             }
         }
@@ -1123,7 +1127,7 @@ pub(super) fn read_gate(
 /// The facts every member of one call is decided and recorded against.
 ///
 /// Gathered once because they are properties of the *call*, not of the member:
-/// the step it arrived on, the ledger snapshot every member is judged against,
+/// the step it arrived on, the journal snapshot every member is judged against,
 /// and the moment it is all being written at. Passing them as one value is
 /// also what keeps the two halves below from drifting apart — a member decided
 /// against one snapshot and recorded against another would be a decision about
@@ -1132,14 +1136,14 @@ struct GatePass<'a> {
     /// Which step of the gate this call is at.
     step: GateStep,
     /// The window's lines as they stood when the call arrived.
-    held: &'a rift_agent::read_ledger::Ledger,
-    /// The ledger those lines are appended to.
-    ledger: &'a crate::read_ledger::ReadLedger,
+    held: &'a rift_agent::window_journal::Journal,
+    /// The journal those lines are appended to.
+    journal: &'a crate::window_journal::WindowJournal,
     /// What the result said about its own delivery, on the step that has a
     /// result at all.
-    stated: Option<rift_agent::read_ledger::StatedDelivery>,
+    stated: Option<rift_agent::window_journal::StatedDelivery>,
     /// The policy ceilings in force.
-    limits: rift_agent::read_ledger::Limits,
+    limits: rift_agent::window_journal::Limits,
     /// The turn every line written here carries.
     turn: u32,
     /// The moment it carries.
@@ -1149,7 +1153,7 @@ struct GatePass<'a> {
 /// One read of a call that may perform several, decided and not yet recorded.
 ///
 /// The phase split is the whole reason this type exists: a member's decision
-/// is reached against the ledger as it stood when the call arrived, and only
+/// is reached against the journal as it stood when the call arrived, and only
 /// once every member has one does the call as a whole get to say whether a
 /// decline travels. Recording inside the first pass would write declines that
 /// the second pass then has to take back.
@@ -1157,11 +1161,11 @@ struct GateMember {
     /// The file this member named, as this checkout spells it.
     file: GateFile,
     /// The member's request resolved against that file.
-    read: rift_agent::read_ledger::ResolvedRead,
+    read: rift_agent::window_journal::ResolvedRead,
     /// How many bytes the run of lines it asked for holds.
     slice_bytes: usize,
     /// What was decided about it.
-    decision: rift_agent::read_ledger::Decision,
+    decision: rift_agent::window_journal::Decision,
     /// The rendered sentence that decision would be answered with, where
     /// there is one.
     frame: Option<String>,
@@ -1204,7 +1208,7 @@ fn gate_decide_members(
             // model however the decision was answered, so the honest record is
             // that the window holds them now; the decline standing just before
             // that read is the pair a diagnostic counts.
-            if !crate::read_ledger::deny_stands(pass.held, &read.deny_key()) {
+            if !crate::window_journal::deny_stands(pass.held, &read.deny_key()) {
                 // No decline to contradict, so there is no decision to reach
                 // and nothing to journal — but a result that states its own
                 // delivery still moves this window's coverage: back, where it
@@ -1212,7 +1216,7 @@ fn gate_decide_members(
                 // call was answered in full and the slice was too large for the
                 // size rule to have credited it before the call ran.
                 reconcile_stated_delivery(
-                    pass.ledger,
+                    pass.journal,
                     &read,
                     pass.stated,
                     slice_bytes,
@@ -1222,9 +1226,9 @@ fn gate_decide_members(
                 );
                 continue;
             }
-            rift_agent::read_ledger::Decision::Allow
+            rift_agent::window_journal::Decision::Allow
         } else {
-            rift_agent::read_ledger::decide(
+            rift_agent::window_journal::decide(
                 &read,
                 pass.held,
                 gate_mode(effective.read_deny),
@@ -1247,7 +1251,7 @@ fn gate_decide_members(
     members
 }
 
-/// Phase three: write each member's decision into the window's ledger and
+/// Phase three: write each member's decision into the window's journal and
 /// journal the accounting it owes, and say whether the worker was left
 /// anything at all.
 ///
@@ -1264,7 +1268,7 @@ fn gate_record_members(
     let mut journaled = false;
     for member in members {
         // Whether this window has already booked any of these bytes as a read
-        // that never happened. Asked of the ledger this gate already has open
+        // that never happened. Asked of the journal this gate already has open
         // — no second file, no store, no tokenizer — and only where a decline
         // is actually being made, so the ordinary allowed call pays nothing
         // for it.
@@ -1272,13 +1276,15 @@ fn gate_record_members(
         // Any of them, not all of them: this decline books its whole run or
         // none of it, so a booking that already holds part of the run is a
         // booking this claim would double.
-        let booked = matches!(member.decision, rift_agent::read_ledger::Decision::Deny(_))
-            && pass.held.prevented_intersects(
-                &member.read.path,
-                member.read.hash,
-                member.read.range,
-            );
-        let _ = pass.ledger.append(&rift_agent::read_ledger::record(
+        let booked = matches!(
+            member.decision,
+            rift_agent::window_journal::Decision::Deny(_)
+        ) && pass.held.prevented_intersects(
+            &member.read.path,
+            member.read.hash,
+            member.read.range,
+        );
+        let _ = pass.journal.append(&rift_agent::window_journal::record(
             &member.read,
             &member.decision,
             member.slice_bytes,
@@ -1290,7 +1296,7 @@ fn gate_record_members(
         // just written credits the window with what the size rule could vouch
         // for, and this moves it to what the client says actually arrived.
         reconcile_stated_delivery(
-            pass.ledger,
+            pass.journal,
             &member.read,
             pass.stated,
             member.slice_bytes,
@@ -1298,7 +1304,7 @@ fn gate_record_members(
             pass.turn,
             pass.at_ms,
         );
-        // The decision is recorded in the window's own ledger either way; what
+        // The decision is recorded in the window's own journal either way; what
         // is journaled here is the accounting the worker owes for it, the
         // frame included — a row that books what a decline avoided and says
         // nothing about what its reason cost is a row that flatters itself.
@@ -1326,9 +1332,9 @@ fn journal_decision(
     git_dir: &Path,
     work_tree: &Path,
     raw: &rift_shadow::hooks::RawHook,
-    read: &rift_agent::read_ledger::ResolvedRead,
+    read: &rift_agent::window_journal::ResolvedRead,
     blob_oid: &str,
-    decision: &rift_agent::read_ledger::Decision,
+    decision: &rift_agent::window_journal::Decision,
     frame: &str,
     booked: bool,
 ) -> bool {
@@ -1356,13 +1362,13 @@ fn journal_decision(
 ///
 /// The frame says "unchanged since turn N", and N is that moment, not the turn
 /// the repeat is being made in. Read off the live lines rather than tracked
-/// separately, because the ledger is already the record of when a window was
+/// separately, because the journal is already the record of when a window was
 /// given what.
 fn held_since(
-    held: &rift_agent::read_ledger::Ledger,
-    read: &rift_agent::read_ledger::ResolvedRead,
+    held: &rift_agent::window_journal::Journal,
+    read: &rift_agent::window_journal::ResolvedRead,
 ) -> Option<u64> {
-    use rift_agent::read_ledger::Line;
+    use rift_agent::window_journal::Line;
     held.live()
         .iter()
         .rev()
@@ -1395,12 +1401,12 @@ fn held_since(
 /// sent the model nothing, and a rendered sentence nobody read is not a cost
 /// the accounting may book against it.
 fn gate_frame(
-    held: &rift_agent::read_ledger::Ledger,
-    read: &rift_agent::read_ledger::ResolvedRead,
-    decision: &rift_agent::read_ledger::Decision,
+    held: &rift_agent::window_journal::Journal,
+    read: &rift_agent::window_journal::ResolvedRead,
+    decision: &rift_agent::window_journal::Decision,
     context_lines: u32,
 ) -> Option<String> {
-    use rift_agent::read_ledger::{Decision, DenyShape};
+    use rift_agent::window_journal::{Decision, DenyShape};
     let Decision::Deny(shape) = decision else {
         return None;
     };
@@ -1431,7 +1437,7 @@ fn gate_frame(
 
 #[cfg(test)]
 mod read_gate_tests {
-    use rift_agent::read_ledger::{Interval, Line, StatedDelivery};
+    use rift_agent::window_journal::{Interval, Line, StatedDelivery};
     use rift_shadow::hooks::RawHook;
 
     use super::*;
@@ -1526,17 +1532,17 @@ mod read_gate_tests {
     }
 
     fn lines_of(work_tree: &Path, session: &str, window: Option<&str>) -> Vec<Line> {
-        crate::read_ledger::ReadLedger::open(work_tree, session, window)
+        crate::window_journal::WindowJournal::open(work_tree, session, window)
             .load()
-            .ledger
+            .journal
             .lines()
             .to_vec()
     }
 
-    fn lines_ledger(work_tree: &Path, session: &str) -> rift_agent::read_ledger::Ledger {
-        crate::read_ledger::ReadLedger::open(work_tree, session, None)
+    fn lines_journal(work_tree: &Path, session: &str) -> rift_agent::window_journal::Journal {
+        crate::window_journal::WindowJournal::open(work_tree, session, None)
             .load()
-            .ledger
+            .journal
     }
 
     /// The levers as this repository ships them, resolved for one family:
@@ -2941,11 +2947,11 @@ mod read_gate_tests {
             vec!["read", "evict", "read"],
             "the claim is taken back and the delivery written again: {lines:?}"
         );
-        let ledger = lines_ledger(tmp.path(), "s-1");
-        let [Line::Read { path, hash, .. }] = ledger.live() else {
-            panic!("one live read, got {:?}", ledger.live());
+        let journal = lines_journal(tmp.path(), "s-1");
+        let [Line::Read { path, hash, .. }] = journal.live() else {
+            panic!("one live read, got {:?}", journal.live());
         };
-        let coverage = ledger.coverage(path, *hash);
+        let coverage = journal.coverage(path, *hash);
         assert!(
             coverage.contains(Interval::new(1, 40).expect("a run")),
             "the lines the result says arrived are held"
@@ -2962,7 +2968,7 @@ mod read_gate_tests {
 
     /// A result that says nothing about being cut short says nothing at all:
     /// absence is silence, never a statement that the whole range arrived, and
-    /// a ledger that took a line back on silence would forgo savings on every
+    /// a journal that took a line back on silence would forgo savings on every
     /// ordinary read.
     #[test]
     fn a_result_that_states_no_truncation_takes_nothing_back() {
@@ -3037,9 +3043,9 @@ mod read_gate_tests {
             ),
             tmp.path(),
         );
-        let ledger = lines_ledger(tmp.path(), "s-1");
-        let [Line::Read { range, .. }] = ledger.live() else {
-            panic!("one live read, got {:?}", ledger.live());
+        let journal = lines_journal(tmp.path(), "s-1");
+        let [Line::Read { range, .. }] = journal.live() else {
+            panic!("one live read, got {:?}", journal.live());
         };
         assert_eq!(*range, Interval::new(10, 10).expect("a run"));
     }
@@ -3069,9 +3075,9 @@ mod read_gate_tests {
             &hook("claude-code", "PostToolUse", "s-1", payload),
             tmp.path(),
         );
-        let ledger = lines_ledger(tmp.path(), "s-1");
-        let [Line::Read { range, .. }] = ledger.live() else {
-            panic!("one live read, got {:?}", ledger.live());
+        let journal = lines_journal(tmp.path(), "s-1");
+        let [Line::Read { range, .. }] = journal.live() else {
+            panic!("one live read, got {:?}", journal.live());
         };
         assert_eq!(
             *range,
@@ -3105,7 +3111,7 @@ mod read_gate_tests {
             &hook("claude-code", "PreToolUse", "s-1", command(None)),
             tmp.path(),
         );
-        let before = lines_ledger(tmp.path(), "s-1");
+        let before = lines_journal(tmp.path(), "s-1");
         let [Line::Read { range, .. }] = before.live() else {
             panic!("one live read, got {:?}", before.live());
         };
@@ -3130,9 +3136,12 @@ mod read_gate_tests {
             ),
             tmp.path(),
         );
-        let ledger = lines_ledger(tmp.path(), "s-1");
-        let [Line::Read { range, .. }] = ledger.live() else {
-            panic!("one live read after the take-back, got {:?}", ledger.live());
+        let journal = lines_journal(tmp.path(), "s-1");
+        let [Line::Read { range, .. }] = journal.live() else {
+            panic!(
+                "one live read after the take-back, got {:?}",
+                journal.live()
+            );
         };
         assert_eq!(
             *range,
@@ -3302,7 +3311,7 @@ mod read_gate_tests {
         let (tmp, file) = checkout(6_000);
         let bytes = std::fs::metadata(&file).expect("the fixture").len();
         assert!(
-            bytes > rift_agent::read_ledger::DEFAULT_MAX_DELIVERED_BYTES as u64,
+            bytes > rift_agent::window_journal::DEFAULT_MAX_DELIVERED_BYTES as u64,
             "the walk is only about a slice past the bound: {bytes} bytes"
         );
         let whole = read_of(&file, None, None);
@@ -3333,9 +3342,9 @@ mod read_gate_tests {
             tmp.path(),
             &enforce,
         );
-        let ledger = lines_ledger(tmp.path(), "s-1");
-        let [Line::Read { range, .. }] = ledger.live() else {
-            panic!("the statement credits one read, got {:?}", ledger.live());
+        let journal = lines_journal(tmp.path(), "s-1");
+        let [Line::Read { range, .. }] = journal.live() else {
+            panic!("the statement credits one read, got {:?}", journal.live());
         };
         assert_eq!(
             *range,
@@ -3370,7 +3379,7 @@ mod read_gate_tests {
             tmp.path(),
             &enforce,
         );
-        let cut = lines_ledger(tmp.path(), "s-2");
+        let cut = lines_journal(tmp.path(), "s-2");
         let [Line::Read { range, .. }] = cut.live() else {
             panic!("the statement credits one read, got {:?}", cut.live());
         };
@@ -3402,7 +3411,7 @@ mod read_gate_tests {
         // "line NNNN\n" is ten bytes from line 1000 on, so five thousand lines
         // are about 50 KB: over the bound, with a prefix of it under.
         let (tmp, file) = checkout(6_000);
-        let bound = rift_agent::read_ledger::DEFAULT_MAX_DELIVERED_BYTES;
+        let bound = rift_agent::window_journal::DEFAULT_MAX_DELIVERED_BYTES;
         let bytes = std::fs::read(&file).expect("the fixture");
         let upto = |lines: u32| -> usize {
             bytes
@@ -3479,7 +3488,7 @@ mod read_gate_tests {
     fn announce(work_tree: &Path, session: &str, rel: &str, lo: u32, hi: u32) {
         let (blob, _) = rift_recall_substrate::worktree::hash_blob_bytes(work_tree, rel)
             .expect("the fixture file");
-        crate::read_ledger::ReadLedger::open(work_tree, session, None)
+        crate::window_journal::WindowJournal::open(work_tree, session, None)
             .append(&Line::Hold {
                 turn: 4,
                 path: rel.to_owned(),
@@ -3628,7 +3637,7 @@ mod read_gate_tests {
     /// Under the shipped line floor a repeat of a short slice is decided
     /// against and let through: the call RUNS and the bytes arrive in the
     /// window. The edit that follows has replaced no read, so it books
-    /// nothing — the `observe` in the ledger names what Rift did, never what
+    /// nothing — the `observe` in the journal names what Rift did, never what
     /// the tool delivered.
     #[test]
     fn an_observed_reread_of_a_held_file_leaves_the_edit_nothing_to_book() {
@@ -3958,7 +3967,7 @@ mod read_gate_tests {
     /// read books nothing at all.
     #[test]
     fn a_decline_books_its_frame_and_an_allowed_read_books_nothing() {
-        use rift_agent::read_ledger::{Decision, DenyShape, ResolvedRead};
+        use rift_agent::window_journal::{Decision, DenyShape, ResolvedRead};
         let read = ResolvedRead::new(
             &rift_agent::ReadRequest {
                 path: "src.rs".to_owned(),
@@ -4015,7 +4024,7 @@ mod read_gate_tests {
 
     /// One call the gate refuses to record anything about.
     ///
-    /// Every refusal in the gate leans the same way, because a ledger holding
+    /// Every refusal in the gate leans the same way, because a journal holding
     /// less than really happened costs a saving, where one claiming bytes the
     /// window never had costs the agent its content.
     fn refused(work_tree: &Path, why: &str, agent: &str, payload: serde_json::Value) {
@@ -4049,7 +4058,7 @@ mod read_gate_tests {
         gate(&call, here);
         assert!(
             lines_of(here, "", None).is_empty(),
-            "a hook naming no window has no ledger to write to"
+            "a hook naming no window has no journal to write to"
         );
         refused(
             here,
@@ -4062,7 +4071,7 @@ mod read_gate_tests {
         );
         for (why, path) in [
             (
-                "a file of another tree is of no checkout this ledger describes",
+                "a file of another tree is of no checkout this journal describes",
                 &elsewhere,
             ),
             (
@@ -4201,7 +4210,7 @@ mod read_gate_tests {
     /// Three ways a directory can fail to be stated, and every one of them
     /// leans the same way: no `cwd` at all; a `cwd` that is itself relative
     /// and so names no place; and a `cwd` outside this checkout, whose file
-    /// this ledger has no name for. A guess in any of the three would put a
+    /// this journal has no name for. A guess in any of the three would put a
     /// window's coverage on bytes some other file holds — which is the one
     /// error that costs an agent its content rather than a saving.
     #[test]
@@ -4220,7 +4229,7 @@ mod read_gate_tests {
                 Some("./sub".to_owned()),
             ),
             (
-                "a directory outside this checkout names a file of no checkout this ledger \
+                "a directory outside this checkout names a file of no checkout this journal \
                  describes",
                 Some(elsewhere.display().to_string()),
             ),
@@ -4237,7 +4246,7 @@ mod read_gate_tests {
     }
 
     /// A subagent's hooks arrive under its parent's session id and carry their
-    /// own agent id. Two windows, two ledgers: the parent must not be told it
+    /// own agent id. Two windows, two journals: the parent must not be told it
     /// holds what only the child was handed.
     #[test]
     fn a_subagent_records_under_its_own_context_window() {
@@ -4406,7 +4415,7 @@ mod read_gate_tests {
             // family records a read through is not what this is about: Codex
             // reads through its shell, and its signals answer for whatever its
             // window was handed.
-            let window = crate::read_ledger::ReadLedger::open(here, "s-4", None);
+            let window = crate::window_journal::WindowJournal::open(here, "s-4", None);
             window
                 .append(&Line::Read {
                     turn: 1,
@@ -4418,7 +4427,7 @@ mod read_gate_tests {
                 })
                 .expect("the window holds a read");
             assert!(
-                !window.load().ledger.coverage("src.rs", held).is_empty(),
+                !window.load().journal.coverage("src.rs", held).is_empty(),
                 "{agent}: it holds the read before the signal arrives"
             );
 
@@ -4432,13 +4441,13 @@ mod read_gate_tests {
                 "{agent} {verb}: the signal is named, not merged into one token"
             );
             assert!(
-                window.load().ledger.coverage("src.rs", held).is_empty(),
+                window.load().journal.coverage("src.rs", held).is_empty(),
                 "{agent} {verb}: and what was read before it is no longer held"
             );
             assert!(
                 !window
                     .load()
-                    .ledger
+                    .journal
                     .recorded_coverage("src.rs", held)
                     .is_empty(),
                 "{agent} {verb}: while staying on the record, as the map of what it lost"
@@ -4482,7 +4491,7 @@ mod read_gate_tests {
     }
 
     /// A client too old to act on the channel a decision was sent on runs the
-    /// call anyway, and its *result* arrives for a call the ledger declined.
+    /// call anyway, and its *result* arrives for a call the journal declined.
     /// The bytes reached the model, so the window is recorded as holding them
     /// — and the pair of lines is what says the decision went unheeded.
     #[test]
@@ -4490,7 +4499,7 @@ mod read_gate_tests {
         let (tmp, file) = checkout(40);
         let here = tmp.path();
         let held = revision(here, "src.rs");
-        let window = crate::read_ledger::ReadLedger::open(here, "s-6", None);
+        let window = crate::window_journal::WindowJournal::open(here, "s-6", None);
         window
             .append(&Line::Deny {
                 turn: 1,
@@ -4515,7 +4524,7 @@ mod read_gate_tests {
             "the decline stands and the read that happened is beside it"
         );
         assert_eq!(
-            crate::read_ledger::ineffective_denies(&window.load().ledger),
+            crate::window_journal::ineffective_denies(&window.load().journal),
             1,
             "and the pair is what a diagnostic counts"
         );
@@ -4526,7 +4535,7 @@ mod read_gate_tests {
         assert_eq!(lines_of(here, "s-6", None).len(), 2);
     }
 
-    /// The ordinary result — of a read nobody declined — leaves the ledger
+    /// The ordinary result — of a read nobody declined — leaves the journal
     /// alone. The read was recorded before the call ran, and recording it
     /// again would say the window was handed the lines twice.
     #[test]
@@ -4546,7 +4555,7 @@ mod read_gate_tests {
             vec!["read"]
         );
         assert_eq!(
-            crate::read_ledger::ineffective_denies(&lines_ledger(here, "s-7")),
+            crate::window_journal::ineffective_denies(&lines_journal(here, "s-7")),
             0
         );
     }
@@ -4925,7 +4934,7 @@ mod read_gate_tests {
     /// second identical command line runs.**
     ///
     /// This family has no structured read tool, so every saving it can offer
-    /// runs through the strict grammar: what the ledger holds came off a
+    /// runs through the strict grammar: what the journal holds came off a
     /// command line, and so does the request matched against it. The walk is
     /// the whole rule in one session — the first read is the saving, the
     /// identical repeat is the decline, the repeat after that is honoured, and
@@ -5296,7 +5305,7 @@ mod read_gate_tests {
     /// resolves here, which is why this is the state a repository lands in when
     /// its file cannot be parsed rather than the state it has to ask for.
     #[test]
-    fn a_lever_that_is_off_leaves_no_ledger() {
+    fn a_lever_that_is_off_leaves_no_journal() {
         let (tmp, file) = checkout(60);
         let here = tmp.path();
         let off = levers("claude-code", rift_recall_policy::Mode::Off);

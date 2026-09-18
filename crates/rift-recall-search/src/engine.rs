@@ -75,7 +75,7 @@ const RECENCY_BUCKETS: [(u64, u64); 5] = [
 
 /// How much less a file's own age counts than an agent having opened it.
 ///
-/// A file is modified by tools, generators and merges; a read ledger row is
+/// A file is modified by tools, generators and merges; a window journal row is
 /// somebody deciding to look at it. Both are recency, and only one of them is
 /// evidence of interest.
 const MTIME_RECENCY_DIVISOR: u64 = 3;
@@ -487,11 +487,11 @@ mod tests {
     }
 
     fn read_row(path: &str, at_ms: u64) -> String {
-        rift_agent::read_ledger::Line::Read {
+        rift_agent::window_journal::Line::Read {
             turn: 1,
             path: path.to_owned(),
             hash: rift_core::Sha256Id::from_bytes([3; 32]),
-            range: rift_agent::read_ledger::Interval::new(1, 20).unwrap(),
+            range: rift_agent::window_journal::Interval::new(1, 20).unwrap(),
             total_lines: 20,
             at_ms,
         }

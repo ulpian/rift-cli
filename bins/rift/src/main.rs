@@ -57,7 +57,6 @@ mod project_settings;
 mod provenance;
 mod push_queue;
 mod query;
-mod read_ledger;
 mod recall;
 mod redactor_packs;
 mod review;
@@ -67,6 +66,7 @@ mod search_measure;
 mod session_verbs;
 mod sync;
 mod verify;
+mod window_journal;
 mod workflows;
 mod worktree;
 
@@ -1220,7 +1220,7 @@ fn cmd_doctor_with_mode(start: &std::path::Path, fix: bool, strict_read_only: bo
     human.push_str(&binary_human);
     let (wiring_human, wiring_json) = doctor_worktree_wiring(root, fix && !strict_read_only);
     human.push_str(&wiring_human);
-    let (reads_human, reads_json) = doctor_read_ledgers(root);
+    let (reads_human, reads_json) = doctor_window_journals(root);
     human.push_str(&reads_human);
     let (retired_human, retired_json) = doctor_retired_config_keys(root);
     human.push_str(&retired_human);
@@ -1247,7 +1247,7 @@ fn cmd_doctor_with_mode(start: &std::path::Path, fix: bool, strict_read_only: bo
         obj.insert("hooks_target".into(), hooks_json);
         obj.insert("binary_of_record".into(), binary_json);
         obj.insert("worktree_wiring".into(), wiring_json);
-        obj.insert("read_ledgers".into(), reads_json);
+        obj.insert("window_journals".into(), reads_json);
         obj.insert("retired_config_keys".into(), retired_json);
         obj.insert("document_store".into(), documents_json);
         obj.insert("basis_store".into(), basis_json);
@@ -1520,7 +1520,7 @@ fn document_converter_line() -> Option<String> {
     None
 }
 
-/// The per-window read ledgers this checkout holds, read-only.
+/// The window journals this checkout holds, one per context window, read-only.
 ///
 /// Two numbers and one warning. The counts say how much local run state the
 /// gate has accumulated here; the rows that did not parse say whether anything
@@ -1529,16 +1529,16 @@ fn document_converter_line() -> Option<String> {
 /// saving not taken, but a directory full of them is worth knowing about
 /// before anyone asks why nothing is ever declined. Fixes nothing: `rift clean`
 /// is what removes them, by age.
-fn doctor_read_ledgers(repo: &std::path::Path) -> (String, serde_json::Value) {
-    let survey = read_ledger::survey(repo);
+fn doctor_window_journals(repo: &std::path::Path) -> (String, serde_json::Value) {
+    let survey = window_journal::survey(repo);
     if survey.windows == 0 {
         return (
-            "\n  read ledgers:   none".to_owned(),
+            "\n  window journals: none".to_owned(),
             serde_json::json!({ "windows": 0 }),
         );
     }
     let mut human = format!(
-        "\n  read ledgers:   {} context window(s), {} snapshot(s), {} line(s)",
+        "\n  window journals: {} context window(s), {} snapshot(s), {} line(s)",
         survey.windows, survey.snapshots, survey.lines,
     );
     if survey.dropped > 0 {
@@ -4296,27 +4296,27 @@ fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
 mod tests {
     use super::*;
 
-    /// The doctor names the read ledgers it found, and says out loud when a
+    /// The doctor names the window journals it found, and says out loud when a
     /// row in one of them could not be read, or when a client ran a read in
     /// spite of a decision not to — the two states that are invisible
     /// otherwise, because an unreadable row is dropped rather than reported
     /// and a decision nobody acted on leaves the read looking ordinary.
     #[test]
-    fn the_doctor_names_the_read_ledgers_and_the_rows_it_dropped() {
+    fn the_doctor_names_the_window_journals_and_the_rows_it_dropped() {
         let tmp = tempfile::tempdir().unwrap();
-        let (human, json) = doctor_read_ledgers(tmp.path());
-        assert!(human.contains("read ledgers:   none"), "{human}");
+        let (human, json) = doctor_window_journals(tmp.path());
+        assert!(human.contains("window journals: none"), "{human}");
         assert_eq!(json["windows"], 0);
 
-        let reads = read_ledger::dir(tmp.path());
+        let reads = window_journal::dir(tmp.path());
         std::fs::create_dir_all(&reads).unwrap();
         std::fs::write(
-            reads.join(format!("{}.jsonl", read_ledger::key("s", None))),
+            reads.join(format!("{}.jsonl", window_journal::key("s", None))),
             b"{\"v\":1,\"k\":\"evict\",\"t\":1,\"reason\":\"clear\",\"at\":1}\nnot a row\n",
         )
         .unwrap();
 
-        let (human, json) = doctor_read_ledgers(tmp.path());
+        let (human, json) = doctor_window_journals(tmp.path());
         assert!(
             human.contains("1 context window(s), 0 snapshot(s), 1 line(s)"),
             "{human}"
@@ -4333,11 +4333,11 @@ mod tests {
              {{\"v\":1,\"k\":\"read\",\"t\":1,\"p\":\"a.rs\",\"h\":\"{hash}\",\"lo\":1,\"hi\":9,\"n\":9,\"at\":2}}\n"
         );
         std::fs::write(
-            reads.join(format!("{}.jsonl", read_ledger::key("s2", None))),
+            reads.join(format!("{}.jsonl", window_journal::key("s2", None))),
             pair.as_bytes(),
         )
         .unwrap();
-        let (human, json) = doctor_read_ledgers(tmp.path());
+        let (human, json) = doctor_window_journals(tmp.path());
         assert!(
             human.contains("1 read(s) ran in spite of a decision not to"),
             "{human}"

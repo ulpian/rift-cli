@@ -15,7 +15,7 @@ use super::agent::arm_agent_replacement;
 use super::archive::archive_now;
 use super::doc_gate::DocAnswer;
 use super::gate::{
-    gate_file, gate_rel_path, gate_step, gate_turn, payload_cwd, read_ledger_step, GateStep,
+    gate_file, gate_rel_path, gate_step, gate_turn, payload_cwd, window_journal_step, GateStep,
 };
 use super::git::{effective_config, spawn_capture_worker, strategy_kind, CAPTURE_SYNC_ENV};
 use super::worker::{drain_capture_queue, owe_session_start_passes};
@@ -55,7 +55,7 @@ fn edit_step(verb: &str) -> Option<EditStep> {
 /// The edit record itself, guarded and timed by the step that calls it.
 ///
 /// It opens no store, hashes at most the policy's inline cap, and every
-/// refusal below leaves the ledger knowing less than really happened — which
+/// refusal below leaves the journal knowing less than really happened — which
 /// costs a saving and can never claim bytes a window does not hold.
 pub(super) fn edit_record(
     registry: &AdapterRegistry,
@@ -65,7 +65,7 @@ pub(super) fn edit_record(
     effective: &rift_recall_policy::Effective,
 ) {
     // The same lever, so the same switch: a repository that turned the read
-    // ledger off keeps no ledger, and what a window wrote is a line of one.
+    // journal off keeps no journal, and what a window wrote is a line of one.
     if effective.read_deny == rift_recall_policy::Mode::Off || raw.session.is_empty() {
         return;
     }
@@ -81,7 +81,8 @@ pub(super) fn edit_record(
     let facts = adapter.facts(&raw.verb, &raw.payload);
     let cwd = payload_cwd(&facts);
     let window = facts.child_session;
-    let ledger = crate::read_ledger::ReadLedger::open(work_tree, &raw.session, window.as_deref());
+    let journal =
+        crate::window_journal::WindowJournal::open(work_tree, &raw.session, window.as_deref());
     let turn = gate_turn(raw, git_dir);
     let at_ms = u64::try_from(raw.occurred_at_ms).unwrap_or_default();
     if matches!(step, EditStep::Expect) {
@@ -96,7 +97,7 @@ pub(super) fn edit_record(
         let Some(path) = gate_rel_path(&root, &request.path, cwd.as_deref()) else {
             return;
         };
-        let _ = ledger.append(&rift_agent::read_ledger::Line::Expect {
+        let _ = journal.append(&rift_agent::window_journal::Line::Expect {
             turn,
             path,
             hash: content_sha256,
@@ -116,22 +117,22 @@ pub(super) fn edit_record(
     ) else {
         return;
     };
-    let held = ledger.load().ledger;
-    let prior = crate::read_ledger::prior_revision(&held, &file.rel_path);
-    let facts = crate::read_ledger::edit_facts(
+    let held = journal.load().journal;
+    let prior = crate::window_journal::prior_revision(&held, &file.rel_path);
+    let facts = crate::window_journal::edit_facts(
         &request.kind,
         file.text(),
         file.total_lines,
         file.hash,
-        crate::read_ledger::expected_write(&held, &file.rel_path),
+        crate::window_journal::expected_write(&held, &file.rel_path),
         prior,
     );
     if facts.is_silent() && prior.is_some_and(|p| p.hash == file.hash) {
         // Nothing about the file changed and nothing was learned: a call that
-        // did not land leaves the ledger exactly as it found it.
+        // did not land leaves the journal exactly as it found it.
         return;
     }
-    let _ = ledger.append(&rift_agent::read_ledger::Line::Edit {
+    let _ = journal.append(&rift_agent::window_journal::Line::Edit {
         turn,
         path: file.rel_path,
         hash_old: prior.map(|p| p.hash),
@@ -185,7 +186,7 @@ pub(super) fn try_ingest_agent_hook(
     // WHAT THIS CONTEXT WINDOW IS BEING HANDED AND WHAT IT HAS WRITTEN, and
     // the one registry the rest of this hook maps its payload through.
     let (registry, gate_journaled) =
-        read_ledger_step(&t, &raw, &git_dir, &work_tree, decline, document, search);
+        window_journal_step(&t, &raw, &git_dir, &work_tree, decline, document, search);
     arm_agent_replacement(&work_tree, &raw, decline.as_deref());
     // One identity for the whole repository family: a hook
     // fired in a linked worktree lands in the projection its main work tree
@@ -1036,7 +1037,7 @@ fn drive_post_ingest(
 /// has, and whether the window that made it holds the result.
 #[cfg(test)]
 mod edit_record_tests {
-    use rift_agent::read_ledger::{Interval, Line};
+    use rift_agent::window_journal::{Interval, Line};
     use rift_shadow::hooks::RawHook;
 
     use super::*;
@@ -1071,9 +1072,9 @@ mod edit_record_tests {
     }
 
     fn lines_of(work_tree: &Path, session: &str) -> Vec<Line> {
-        crate::read_ledger::ReadLedger::open(work_tree, session, None)
+        crate::window_journal::WindowJournal::open(work_tree, session, None)
             .load()
-            .ledger
+            .journal
             .lines()
             .to_vec()
     }
@@ -1136,15 +1137,15 @@ mod edit_record_tests {
             "the agent authored every byte and they are all there"
         );
 
-        let ledger = crate::read_ledger::ReadLedger::open(tmp.path(), "s-1", None)
+        let journal = crate::window_journal::WindowJournal::open(tmp.path(), "s-1", None)
             .load()
-            .ledger;
+            .journal;
         let hash = match lines.get(1) {
             Some(Line::Edit { hash_new, .. }) => *hash_new,
             _ => panic!("the change names a revision"),
         };
         assert!(
-            ledger
+            journal
                 .coverage("new.rs", hash)
                 .contains(Interval::new(1, 3).expect("a run")),
             "writing a file in full is holding it in full"
@@ -1183,11 +1184,11 @@ mod edit_record_tests {
         };
         assert!(sites.is_empty(), "no place to point at");
         assert!(!*full, "the file is not the bytes the payload carried");
-        let ledger = crate::read_ledger::ReadLedger::open(tmp.path(), "s-2", None)
+        let journal = crate::window_journal::WindowJournal::open(tmp.path(), "s-2", None)
             .load()
-            .ledger;
+            .journal;
         assert!(
-            ledger.coverage("fmt.rs", *hash_new).is_empty(),
+            journal.coverage("fmt.rs", *hash_new).is_empty(),
             "a revision nobody read and nobody wrote is held by nobody"
         );
     }
@@ -1300,10 +1301,10 @@ mod edit_record_tests {
         };
         assert!(sites.is_empty(), "two candidates are no site at all");
         assert!(!*full);
-        let ledger = crate::read_ledger::ReadLedger::open(tmp.path(), "s-11", None)
+        let journal = crate::window_journal::WindowJournal::open(tmp.path(), "s-11", None)
             .load()
-            .ledger;
-        assert!(ledger.coverage("twice.rs", *hash_new).is_empty());
+            .journal;
+        assert!(journal.coverage("twice.rs", *hash_new).is_empty());
     }
 
     /// Every occurrence when every occurrence was asked for — and none at all
@@ -1359,7 +1360,7 @@ mod edit_record_tests {
 
     /// A list of changed places long enough to threaten the one atomic write a
     /// row is has to stop being a list, because a row that cannot be written
-    /// leaves the ledger nothing at all — and because "the file changed in
+    /// leaves the journal nothing at all — and because "the file changed in
     /// thirty-three places" is "the file changed".
     ///
     /// The cap is pinned here against the row it exists to protect: raising it
@@ -1393,7 +1394,7 @@ mod edit_record_tests {
             path: "a".repeat(120),
             hash_old: Some(rift_core::Sha256Id::from_bytes([0xab; 32])),
             hash_new: rift_core::Sha256Id::from_bytes([0xcd; 32]),
-            sites: (0..crate::read_ledger::MAX_EDIT_SITES)
+            sites: (0..crate::window_journal::MAX_EDIT_SITES)
                 .filter_map(|n| {
                     let lo = u32::try_from(n).ok()? * 1_000 + 900_000;
                     Interval::new(lo, lo + 40)
@@ -1404,7 +1405,7 @@ mod edit_record_tests {
             at_ms: u64::MAX,
         };
         assert!(
-            widest.to_json_line().len() < crate::read_ledger::MAX_APPEND_BYTES,
+            widest.to_json_line().len() < crate::window_journal::MAX_APPEND_BYTES,
             "the fullest row this writes, and its newline, still fit one write"
         );
     }
@@ -1508,7 +1509,7 @@ mod edit_record_tests {
     }
 
     /// A call that changed nothing leaves nothing: a tool that failed and a
-    /// tool that was never run are the same file on disk, and the ledger has
+    /// tool that was never run are the same file on disk, and the journal has
     /// nothing to say about either.
     #[test]
     fn a_change_that_did_not_land_records_nothing() {
@@ -1534,7 +1535,7 @@ mod edit_record_tests {
         );
     }
 
-    /// The refusals, each of which leaves the ledger knowing less than really
+    /// The refusals, each of which leaves the journal knowing less than really
     /// happened and never more.
     #[test]
     fn a_change_this_checkout_cannot_stand_behind_records_nothing() {
@@ -1572,7 +1573,7 @@ mod edit_record_tests {
         }
     }
 
-    /// A window that names no session has no ledger to write to, and a family
+    /// A window that names no session has no journal to write to, and a family
     /// this build does not carry has no fields to read.
     #[test]
     fn a_hook_with_no_window_to_speak_of_records_nothing() {
