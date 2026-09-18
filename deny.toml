@@ -56,11 +56,6 @@ confidence-threshold = 0.9
 # No crate references them yet, so they are not in Cargo.lock and this run does
 # not see them; re-run the check in the commit that wires each one.
 exceptions = [
-  # `webpki-roots` ships the Mozilla CA-certificate *data* set under the Community
-  # Data License Agreement – Permissive 2.0 (a permissive *data* license, not code).
-  # It is pulled by `ureq`'s rustls root store ONLY on rift-recall-eval's
-  # real-model feature — the owner-invoked paid eval transport.
-  { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
   # `uluru` (via `gix-pack`) is MPL-2.0 — weak, file-level copyleft acceptable for
   # a linked dependency; it imposes no obligation on our own source. Scoped so any
   # FUTURE MPL dependency is a conscious, reviewed addition rather than a silent pass.

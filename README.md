@@ -72,12 +72,11 @@ cargo run -p rift-memd -- status # inspect the recall projection
 `rift` is the whole product for daily use: capture, serving and Canopy run in
 that one process, and `rift recall` keeps the recall projection fresh on its
 own. `rift-memd` is the separate projection binary (`metrics`, `rebuild`,
-`status`, `doctor`, `eval`) — it reports the measured baseline, rebuilds the
-projection from git, and hosts the opt-in paid evaluation sweep, so it must
-stay out of the hook-path binary (size cap; no network crate in the shipped
-graph). **Distribution requirement:** the downloadable build's CLI installer
-wizard must offer, as an optional step, to also download and install
-`rift-memd`. No packaging or installer exists yet.
+`status`, `doctor`, `eval`) — it reports the measured baseline and rebuilds the
+projection from git, so it must stay out of the hook-path binary (size cap; no
+network crate in the shipped graph). **Distribution requirement:** the
+downloadable build's CLI installer wizard must offer, as an optional step, to
+also download and install `rift-memd`. No packaging or installer exists yet.
 
 ### Automatic Total Recall setup
 

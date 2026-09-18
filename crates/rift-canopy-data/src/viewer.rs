@@ -1078,7 +1078,6 @@ fn build_detail(
     ));
     segments.push(shadow_context_segment(
         &substrate,
-        &projection_path,
         entry.anchor_commit.as_deref(),
     ));
     segments.push(transcript_segment(&substrate, entry));
@@ -1327,13 +1326,7 @@ fn discovered_checkpoint_counts(project: &Path) -> Result<(i64, i64)> {
     Ok((ids, origins))
 }
 
-#[allow(clippy::too_many_lines)] // one union pass over live refs and lifecycle-only rows
-fn shadow_context_segment(
-    substrate: &GixSubstrate,
-    projection_path: &Path,
-    anchor: Option<&str>,
-) -> ViewerTimelineSegment {
-    let lifecycle = shadow_lifecycle(projection_path);
+fn shadow_context_segment(substrate: &GixSubstrate, anchor: Option<&str>) -> ViewerTimelineSegment {
     let anchor_prefix = anchor.map(|value| value.chars().take(7).collect::<String>());
     let mut refs = [Dialect::Rift, Dialect::Legacy]
         .into_iter()
@@ -1347,90 +1340,26 @@ fn shadow_context_segment(
             .then_with(|| a.full_name.cmp(&b.full_name))
     });
     let mut items = Vec::new();
-    let mut matched_lifecycle = BTreeSet::new();
     for shadow in refs {
-        let state_key = if lifecycle.contains_key(&shadow.full_name) {
-            Some(shadow.full_name.clone())
-        } else {
-            shadow
-                .full_name
-                .strip_prefix("refs/heads/")
-                .filter(|name| lifecycle.contains_key(*name))
-                .map(str::to_owned)
-        };
-        let state = state_key.as_deref().and_then(|key| lifecycle.get(key));
-        if let Some(key) = state_key {
-            matched_lifecycle.insert(key);
-        }
         let tip_time = substrate
             .commit_meta(&shadow.tip)
             .ok()
             .flatten()
             .and_then(|meta| compact_utc(meta.committed_ms));
-        let mut body = vec![
-            fact_line("ref", &shadow.full_name),
-            fact_line("base commit discriminator", &shadow.commit7),
-            fact_line("worktree discriminator", &shadow.wt6),
-            fact_line("tip", &shadow.tip),
-            fact_line("tip time", tip_time.as_deref().unwrap_or("unknown")),
-        ];
-        if let Some((kind, at)) = state {
-            body.push(fact_line(
-                "latest projected lifecycle",
-                &format!(
-                    "{kind} at {}",
-                    compact_utc(*at).unwrap_or_else(|| "unknown".to_owned())
-                ),
-            ));
-        } else {
-            body.push(fact_line("latest projected lifecycle", "unavailable"));
-        }
         items.push(ViewerTimelineItem {
             id: format!("shadow:{}", shadow.full_name),
             title: format!("{} · {}", shadow.dialect.label(), shadow.full_name),
-            timestamp: tip_time,
+            timestamp: tip_time.clone(),
             summary: vec![fact_line(
                 "metadata only",
                 "raw shadow payload was not read",
             )],
-            body,
-            expanded_body: None,
-            collapsed: true,
-            full_session_only: false,
-        });
-    }
-    let mut lifecycle_only = lifecycle
-        .iter()
-        .filter(|(branch, _)| !matched_lifecycle.contains(*branch))
-        .collect::<Vec<_>>();
-    lifecycle_only.sort_by(|(a, _), (b, _)| {
-        let anchor_match = |branch: &str| {
-            anchor_prefix
-                .as_deref()
-                .is_some_and(|prefix| branch.split('/').any(|part| part == prefix))
-        };
-        anchor_match(b).cmp(&anchor_match(a)).then_with(|| a.cmp(b))
-    });
-    for (branch, (kind, at)) in lifecycle_only {
-        let timestamp = compact_utc(*at);
-        items.push(ViewerTimelineItem {
-            id: format!("shadow-lifecycle:{branch}"),
-            title: format!("projected lifecycle · {branch}"),
-            timestamp: timestamp.clone(),
-            summary: vec![fact_line(
-                "metadata only",
-                "no live local ref remains; raw shadow payload was not read",
-            )],
             body: vec![
-                fact_line("projected branch", branch),
-                fact_line("live local ref", "absent"),
-                fact_line(
-                    "latest projected lifecycle",
-                    &format!(
-                        "{kind} at {}",
-                        timestamp.unwrap_or_else(|| "unknown".to_owned())
-                    ),
-                ),
+                fact_line("ref", &shadow.full_name),
+                fact_line("base commit discriminator", &shadow.commit7),
+                fact_line("worktree discriminator", &shadow.wt6),
+                fact_line("tip", &shadow.tip),
+                fact_line("tip time", tip_time.as_deref().unwrap_or("unknown")),
             ],
             expanded_body: None,
             collapsed: true,
@@ -1455,38 +1384,11 @@ fn shadow_context_segment(
     ViewerTimelineSegment {
         title: "Shadow context".to_owned(),
         boundary: Some(
-            "metadata-only union of live local refs and projected lifecycle rows; no raw shadow content is read"
-                .to_owned(),
+            "metadata-only list of live local refs; no raw shadow content is read".to_owned(),
         ),
         ordered_by_time: false,
         items,
     }
-}
-
-fn shadow_lifecycle(path: &Path) -> BTreeMap<String, (String, i64)> {
-    let Some(store) = open_existing_read_only(path) else {
-        return BTreeMap::new();
-    };
-    let Ok(rt) = runtime() else {
-        return BTreeMap::new();
-    };
-    let Ok(rows) = rt.block_on(store.query(
-        "SELECT sb.branch_name, e.kind, e.occurred_at FROM shadow_branch sb \
-         JOIN shadow_branch_event e ON e.shadow_branch_id = sb.shadow_branch_id \
-         ORDER BY e.occurred_at ASC, e.event_id ASC",
-        &[],
-    )) else {
-        return BTreeMap::new();
-    };
-    let mut result = BTreeMap::new();
-    for row in rows {
-        let (Ok(branch), Ok(kind), Ok(at)) = (row.get_text(0), row.get_text(1), row.get_i64(2))
-        else {
-            continue;
-        };
-        result.insert(branch, (kind, at));
-    }
-    result
 }
 
 fn transcript_segment(

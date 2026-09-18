@@ -15,8 +15,7 @@
 //!   black-box fail.
 //!
 //! Everything here is **deterministic** — scripted agent, injected fixtures,
-//! no clock, no network, no model — so the CI verdict is reproducible
-//! (real-model runs stay behind a flag and never gate). Latency
+//! no clock, no network, no model — so the CI verdict is reproducible. Latency
 //! is measured as deterministic *steps* (one read or retrieval = one step),
 //! the reproducible proxy for the wall-clock envelope.
 //!
@@ -36,11 +35,9 @@
 
 use rift_recall_pack::{compile, EvidenceRef, PackRequest, SectionEntry, Sensitivity};
 
-pub mod defaults;
 mod intercepted;
 mod record;
 mod served;
-pub mod sweep;
 pub use intercepted::{corpus_honesty_figures, replay_intercepted, CONDITION as INTERCEPTED};
 pub use record::{
     deterministic_corpus, render_report, run_id, seeded_regression_runs, EvalRunRecord,
@@ -101,7 +98,7 @@ pub struct RunMetrics {
     /// (proxied by success in the scripted agent).
     pub tests_passed: bool,
     /// Whether the human-modification outcome is acceptable (the scripted
-    /// agent never regresses this; real-model runs may).
+    /// agent never regresses this).
     pub human_mod_ok: bool,
     /// Deterministic latency: one step per read/retrieval.
     pub latency_steps: u32,

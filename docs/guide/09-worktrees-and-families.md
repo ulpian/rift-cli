@@ -186,9 +186,9 @@ worktree adopt [PATH]` on demand (defaulting to the checkout you stand in);
 `rift init` inside a member, which also registers the family *root* (§9.11); and
 `rift doctor --fix`, across every member that needs it.
 
-### The seventh git hook
+### The worktree-adoption git hook
 
-Rift installs seven git hooks; `post-checkout` is the one this chapter added.
+Rift installs five git hooks; `post-checkout` is the one this chapter added.
 Git runs it after `git worktree add` with the new worktree as the working
 directory and — measured on git 2.50.1 — with `GIT_DIR` **unset**, so the
 forwarded git-directory argument is a relative `.git` that in a linked member
@@ -635,9 +635,6 @@ retires the administrative entry afterwards.
   recorded identity: minting is a product act, and that binary projects.
 - **Adoption cannot grant Codex trust**, and does not try — that approval is
   yours to give in Codex.
-- **The per-checkout narrowing of recall scope is built but unused by any
-  shipped serving path**: every serving caller uses the sharing default, and the
-  narrowing is exercised only by the containment tests.
 - **There is no doctor leg for identity drift.** Doctor covers phantoms, the
   push queue, prunable members, orphan projections, the hook target, the binary
   of record and member wiring, but does not compare the recorded identifiers
@@ -645,8 +642,8 @@ retires the administrative entry afterwards.
   `rift family remint --adopt-main` is the repair and the history file is the
   audit trail ([18-known-gaps.md](18-known-gaps.md)).
 - **The dead-schema table for raw shadow branches is still empty** and has no
-  writer; §9.8's two relations are the provenance
-  ([18-known-gaps.md](18-known-gaps.md)).
+  writer; §9.8's two relations are the provenance. Nothing on the dashboard
+  reads them any more ([18-known-gaps.md](18-known-gaps.md)).
 
 ---
 

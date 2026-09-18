@@ -16,8 +16,8 @@
 //! million tokens and versioned per `(provider, model, effective_from)` so a
 //! price change is a new entry and "what did this cost on date X" is answerable
 //! (bitemporal, as the schema requires). Token *estimation* is a fast
-//! heuristic; a billing-grade tokenizer (`tiktoken-rs`) plugs in behind
-//! [`estimate_tokens`] when exactness is needed.
+//! heuristic ([`estimate_tokens`]); the counts this crate turns into money are
+//! the ones a provider reported.
 #![forbid(unsafe_code)]
 #![cfg_attr(
     test,
@@ -131,7 +131,7 @@ impl PriceTable {
 pub enum CounterMethod {
     /// Counts the provider returned in the API response (most authoritative).
     ProviderReported,
-    /// An exact BPE tokenizer (`rift-tokens` / `cl100k_base`, via [`BpeTokenizer`]).
+    /// An exact BPE tokenizer (`rift-tokens` / `cl100k_base`).
     Tiktoken,
     /// The built-in deterministic heuristic estimator (the offline floor).
     Heuristic,
@@ -149,54 +149,6 @@ impl CounterMethod {
     }
 }
 
-/// A token counter behind a seam, so a billing-grade tokenizer (`tiktoken-rs`) can
-/// drop in later without touching callers. The default impl is the heuristic.
-pub trait Tokenizer {
-    /// Count the tokens in `text`. Must be deterministic and never panic.
-    fn count(&self, text: &str) -> u64;
-
-    /// The provenance tier this tokenizer records.
-    fn method(&self) -> CounterMethod;
-}
-
-/// The built-in deterministic estimator (no model vocab, no network). It is the
-/// pluggable floor: a real BPE tokenizer can replace it behind [`Tokenizer`].
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HeuristicTokenizer;
-
-impl Tokenizer for HeuristicTokenizer {
-    fn count(&self, text: &str) -> u64 {
-        estimate_tokens(text)
-    }
-    fn method(&self) -> CounterMethod {
-        CounterMethod::Heuristic
-    }
-}
-
-/// The billing-grade tokenizer: counts through `rift-tokens`
-/// (`cl100k_base`) — the same single authority ledger metrics and pack budgets
-/// use — and reports [`CounterMethod::Tiktoken`] provenance. If the BPE cannot
-/// initialize, counts silently degrade to the conservative fallback and the
-/// provenance honestly reports [`CounterMethod::Heuristic`].
-///
-/// Used as the estimate fallback when an adapter reports no provider counts;
-/// provider-reported counts always win when present.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct BpeTokenizer;
-
-impl Tokenizer for BpeTokenizer {
-    fn count(&self, text: &str) -> u64 {
-        u64::from(rift_tokens::count(text))
-    }
-    fn method(&self) -> CounterMethod {
-        if rift_tokens::provenance() == rift_tokens::TOKENIZER {
-            CounterMethod::Tiktoken
-        } else {
-            CounterMethod::Heuristic
-        }
-    }
-}
-
 /// Flush an ASCII alphanumeric run to a token estimate: ~4 chars/token (English
 /// BPE rule of thumb), at least one token for a non-empty run.
 fn alnum_run_tokens(run: u64) -> u64 {
@@ -208,8 +160,7 @@ fn alnum_run_tokens(run: u64) -> u64 {
 }
 
 /// Estimate the token count of a UTF-8 string with a deterministic, panic-free
-/// heuristic that is the pluggable floor behind [`Tokenizer`] (a billing-grade BPE
-/// tokenizer can replace it without touching callers).
+/// heuristic.
 ///
 /// It is sharper than a flat `chars/4`: ASCII alphanumeric runs cost ~4 chars per
 /// token, ASCII punctuation/symbols ~1 token each, and non-ASCII scalars (CJK,
@@ -488,10 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_seam_reports_method() {
-        let t = HeuristicTokenizer;
-        assert_eq!(t.count("hello world"), estimate_tokens("hello world"));
-        assert_eq!(t.method(), CounterMethod::Heuristic);
+    fn every_counter_method_has_its_persisted_token() {
         assert_eq!(CounterMethod::Heuristic.as_str(), "estimator:heuristic");
         assert_eq!(
             CounterMethod::ProviderReported.as_str(),

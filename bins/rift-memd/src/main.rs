@@ -76,14 +76,6 @@ enum Cmd {
         /// Repository whose recall.db records the experiment rows.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
-        /// Run the PAID real-model sweep instead: owner-invoked,
-        /// env-keyed (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`), spend-capped,
-        /// recording fixtures for offline replay. Never part of any test, and
-        /// absent from the default build: only `--features real-model`
-        /// compiles this flag and the transport behind it.
-        #[cfg(feature = "real-model")]
-        #[arg(long)]
-        real_model: bool,
     },
 }
 
@@ -106,17 +98,7 @@ fn main() -> Result<()> {
     // its own current-thread runtimes internally (the GixSubstrate-free
     // fixture path), and nesting block_on inside an ambient runtime panics.
     let command = match cli.command {
-        Some(Cmd::Eval {
-            repo,
-            #[cfg(feature = "real-model")]
-            real_model,
-        }) => {
-            #[cfg(feature = "real-model")]
-            if real_model {
-                return eval_cmd::run_real_sweep(&repo);
-            }
-            return eval_cmd::run_eval(&repo);
-        }
+        Some(Cmd::Eval { repo }) => return eval_cmd::run_eval(&repo),
         other => other,
     };
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -134,9 +116,9 @@ async fn run(command: Option<Cmd>) -> Result<()> {
         Cmd::Rebuild { repo } => rebuild(&repo).await,
         Cmd::Status { repo } => status(&repo).await,
         Cmd::Doctor { repo } => doctor(&repo).await,
-        // Dispatched pre-runtime in `main` (the real-model arm included, when
-        // compiled); unreachable here, kept total on the offline path.
-        Cmd::Eval { repo, .. } => eval_cmd::run_eval(&repo),
+        // Dispatched pre-runtime in `main`; unreachable here, kept total on
+        // the offline path.
+        Cmd::Eval { repo } => eval_cmd::run_eval(&repo),
     }
 }
 

@@ -92,10 +92,6 @@ pub enum GitEvent {
     PostCommit,
     /// `pre-push` — refs about to leave.
     PrePush,
-    /// `post-merge` — a merge/pull landed.
-    PostMerge,
-    /// `post-rewrite` — an amend/rebase rewrote history.
-    PostRewrite,
     /// A PR-open/update signal (host/agent specific).
     PrSignal,
 }

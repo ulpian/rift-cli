@@ -653,9 +653,9 @@ fn inspect_wiring(repo: &Path, token: &str, adapter: &dyn AgentAdapter) -> Nativ
 /// long before here.
 ///
 /// Claude Code joined this table late. Until then the only emitter of its
-/// fragment was [`super::install_all`], whose last product caller went away in
-/// `fce2baea` (2026-08-11) — so `rift enable --agent claude-code` wrote a
-/// descriptor advertising nine hooks and registered none of them, in every
+/// fragment was the legacy whole-set installer, whose last product caller went
+/// away in `fce2baea` (2026-08-11) — so `rift enable --agent claude-code`
+/// wrote a descriptor advertising nine hooks and registered none of them, in every
 /// fresh clone and every linked worktree, and nothing reddened because nothing
 /// compared the two.
 fn hook_family(agent_token: &str) -> Option<super::ClientFamily> {
@@ -973,9 +973,9 @@ fn recognizable_antigravity_hook_fragment(value: &serde_json::Value) -> bool {
 /// [`a_rift_group_under_a_retired_verb_key_is_still_a_conflict`].
 ///
 /// **2. The legacy installer's manifest**, `.rift/agents/recall-install.json`,
-/// which fingerprints the fragment it wrote per client. That installer
-/// ([`super::install_all`]) is the one that wrote the Claude Code fragment
-/// until `fce2baea`, and on a machine that ran it the fingerprint is the only
+/// which fingerprints the fragment it wrote per client. The legacy installer
+/// is the one that wrote the Claude Code fragment until `fce2baea`, and on a
+/// machine that ran it the fingerprint is the only
 /// record naming this file as Rift's — the native manifest has never held a
 /// `hooks` entry for Claude Code.
 ///
@@ -1476,23 +1476,26 @@ fn display_name(token: &str) -> &'static str {
     }
 }
 
+/// The instructions file Rift writes its Recall region into, per adapter.
+///
+/// The table names exactly the tokens [`install_recall_skill`] will write for —
+/// the agents this alpha captures. A path defined for a token the writer
+/// refuses is a channel that cannot be reached: it reads as support and is
+/// not.
 fn skill_path(token: &str) -> Option<&'static str> {
     match token {
         "claude-code" => Some(".claude/skills/rift-recall/SKILL.md"),
         "codex" => Some("AGENTS.md"),
-        "gemini" => Some("GEMINI.md"),
         "antigravity" => Some(".agents/rules/rift-recall.md"),
-        "cursor" => Some(".cursor/rules/rift-recall.mdc"),
-        "copilot-cli" => Some(".github/instructions/rift-recall.instructions.md"),
-        "opencode" => Some(".opencode/skills/rift-recall.md"),
-        "factory-droid" => Some(".factory/rules/rift-recall.md"),
-        "ollama" => Some(".rift/agents/ollama-recall.md"),
         _ => None,
     }
 }
 
+/// Whether the file at [`skill_path`] is one the repository already uses for
+/// its own instructions, so Rift writes inside a fence and never owns the
+/// whole document.
 fn skill_is_shared(token: &str) -> bool {
-    matches!(token, "codex" | "gemini")
+    token == "codex"
 }
 
 /// The YAML frontmatter a family's channel requires ahead of Rift's fence.
@@ -2150,7 +2153,7 @@ mod tests {
 
     /// **D12: the Claude Code hook fragment had no live writer.**
     ///
-    /// [`super::install_all`] was the only emitter of
+    /// The legacy whole-set installer was the only emitter of
     /// `hook_fragment(ClaudeCode, …)`, and its last product caller went away in
     /// `fce2baea` (2026-08-11). From then on `rift enable --agent claude-code`
     /// wrote a descriptor advertising nine verbs, recorded it in the manifest,
@@ -2314,9 +2317,9 @@ mod tests {
     /// refreshed, never called a conflict.
     ///
     /// This is the state of every machine that ran `rift recall init` before
-    /// `fce2baea`: `.claude/settings.local.json` holds a fragment
-    /// [`super::install_all`] wrote, `.rift/agents/recall-install.json`
-    /// fingerprints it, and the native manifest has never held a `hooks` entry
+    /// `fce2baea`: `.claude/settings.local.json` holds a fragment the legacy
+    /// installer wrote, `.rift/agents/recall-install.json` fingerprints it,
+    /// and the native manifest has never held a `hooks` entry
     /// for Claude Code. Without this arm the writer's first act on a real
     /// machine would be to refuse to repair its own output.
     #[test]
@@ -3371,14 +3374,17 @@ mod tests {
             "ollama",
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join(skill_path(token).unwrap());
             let error = install_recall_skill(dir.path(), token, "Ask Rift.")
                 .expect_err("a coming-soon adapter must be refused before writing");
             assert!(
                 error.to_string().contains("coming soon"),
                 "{token}: {error}"
             );
-            assert!(!path.exists(), "{token} received a rules file");
+            assert_eq!(
+                skill_path(token),
+                None,
+                "{token} keeps an instructions path the writer refuses to use"
+            );
             assert!(
                 !manifest_path(dir.path()).exists(),
                 "{token} received an ownership manifest"

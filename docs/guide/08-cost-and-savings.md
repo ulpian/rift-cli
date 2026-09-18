@@ -96,16 +96,18 @@ re-measuring rendered packs), the delta ledger's changed-hunk budgeting, and the
 ingest-time backfill of
 [§8.12](#812-the-measured-baseline-repeated-and-avoidable-context).
 
-**Two places that do not.** The cost crate's tokenizer seam, meant as the
-fallback for a call whose adapter reported no counts, is constructed nowhere,
-because the capture path only writes counts a provider reported
-(`crates/rift-shadow-cost/src/lib.rs:159-195`,
-`crates/rift-shadow/src/project.rs:376-394`); and the validity crate sizes its
-internal trials with a local characters-over-four estimate
-(`crates/rift-recall-validity/src/lib.rs:673-677`). Neither affects a published
-figure — the first is unreached, the second shapes only non-charging trials
-measured again at the seam — but "one counter everywhere" is the design, not yet
-the code.
+**One place that does not.** The validity crate sizes its internal trials with
+a local characters-over-four estimate
+(`crates/rift-recall-validity/src/lib.rs:673-677`). It affects no published
+figure — those trials never charge, and what they shape is measured again at
+the seam — but "one counter everywhere" is the design, not yet the code.
+
+**The capture path counts nothing**, which is the other half of the same
+discipline. It records what the provider reported and, where an adapter reports
+nothing, records no count rather than an estimated one
+(`crates/rift-shadow/src/project.rs:376-394`). The cost crate keeps a heuristic
+for sizing decisions and no token counter of its own, because a second way of
+producing a number that reaches a bill is a second authority for that number.
 
 ---
 
@@ -881,10 +883,10 @@ where a pack returns nothing, so it can never reach the pack leg's numbers and
 is measured on its own terms.
 
 Both reports are committed snapshots, so a verdict change is a reviewed diff
-rather than silent drift. The served report's four tasks spend 594 to 647
-tokens against baselines of 11064 to 44214 — 94.15%, 97.31%, 98.56% and 96.12%
+rather than silent drift. The served report's four tasks spend 543 to 595
+tokens against baselines of 11064 to 44214 — 94.62%, 97.54%, 98.67% and 96.44%
 saved in 2 steps each — all reconciled within ±5% with 0 over-estimates, for
-percentiles P10 94.74% | P50 96.72% | P90 98.19% against thresholds v1 (P50
+percentiles P10 95.17% | P50 96.99% | P90 98.34% against thresholds v1 (P50
 token ≥ 15.0%, P50 cost ≥ 15.0%, latency ≤ 16 steps) — verdict GO. Those percentages are **over a synthetic corpus of small fixture
 files** exercising corpus size, changed-set size and fact position: evidence
 that the machinery works and the gate is calibrated, not a promise about your
@@ -900,54 +902,7 @@ the median.
 
 ---
 
-## 8.14 The paid model sweep: designed, never run
-
-A deterministic scripted agent cannot measure real model *attention*: varying
-where a decisive fact sits in a context window and seeing whether the model
-finds it needs real models. So a sweep exists — model-agnostic (model ids are
-configuration data), covering both provider families, forcing the decisive fact
-into four placements (beginning, middle, end, duplicated at both ends) under
-increasing prior context, with a hard per-sweep spend cap that aborts and
-salvages partial results.
-
-Its safety properties are structural. The real transport compiles only behind an
-opt-in build feature, so the default build links no HTTP client, and a
-repository check enforces that no network crate appears in the shipped binaries'
-dependency graph. It is an explicit command-line invocation,
-never a test — no test in this workspace touches the network. API keys arrive
-from the environment at call time and are never stored, persisted or logged;
-errors carry identifiers, never key bytes. Every trial is recorded as a fixture,
-so analysis and re-derivation replay offline with no key and no network,
-quarantining the one nondeterministic step to the paid run.
-
-**It has not been run**, and the committed defaults artifact says so in its
-provenance field:
-
-```json
-{
-  "provenance": "pre-sweep-conservative-fallback",
-  "per_model": [],
-  "fallback_placement": "Duplicated",
-  "fallback_max_prior_sessions": 2,
-  "fallback_tail_repeat_tokens": 150
-}
-```
-
-So the placement defaults are that conservative fallback — repeat the decisive
-fact at both ends, assume no more than two prior sessions' worth of context —
-applied uniformly, because there is no measured curve. A zero-trial run writes
-nothing: an artifact labelled "derived from sweep" with no trials behind it
-would be exactly the unmeasured claim this plane exists to prevent. A second gap
-sits beside it: the artifact is *written* by the sweep verb and *read* by
-nothing, and no path tells a serve which model the client is
-running, so per-model placement cannot mean anything yet. Real-model results
-were never going to gate CI — the deterministic harness is the floor — but the defaults
-today rest on a prior rather than measurement
-([Chapter 18](18-known-gaps.md)).
-
----
-
-## 8.15 What these numbers do not cover
+## 8.14 What these numbers do not cover
 
 - **Per-serve model attribution does not exist**, and threading the requesting
   model onto the audit trail is a capture-and-serve-plane change; when it lands,

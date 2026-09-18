@@ -13,7 +13,6 @@
     )
 )]
 
-use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -200,15 +199,6 @@ pub struct ClientStatus {
     pub action: Option<String>,
 }
 
-/// The result of configuring every first-class client.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstallReport {
-    /// Per-client status after the write.
-    pub clients: Vec<ClientStatus>,
-    /// Files whose content changed.
-    pub changed_files: Vec<PathBuf>,
-}
-
 /// Installation/configuration failure. Never carries config or transcript bytes.
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
@@ -228,242 +218,6 @@ pub enum InstallError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct OwnershipManifest {
-    schema_version: u16,
-    clients: Vec<OwnedClient>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct OwnedClient {
-    client: ClientFamily,
-    hook_path: String,
-    hook_fingerprint: String,
-}
-
-#[derive(Clone)]
-struct PlannedWrite {
-    path: PathBuf,
-    bytes: Vec<u8>,
-}
-
-/// Configure every first-class client using project-scoped native files.
-///
-/// All existing files are parsed and all conflicts are resolved before the
-/// first write. An I/O error during the final atomic replacement can still
-/// leave a partial installation; rerunning is idempotent and repairs it.
-///
-/// # Errors
-/// Returns [`InstallError`] for malformed files, unowned reserved entries, or
-/// filesystem failures.
-pub fn install_all(
-    repo: &Path,
-    rift_bin: &Path,
-    adopt_existing: bool,
-) -> Result<InstallReport, InstallError> {
-    let mut writes = Vec::new();
-    let mut owned = Vec::new();
-    let mut unsupported = Vec::new();
-    let previous_manifest = read_manifest(repo);
-
-    for client in ClientFamily::ALL {
-        // **THE SECOND DOOR, closed here.** `enable` refuses an agent this
-        // alpha does not capture before it writes a descriptor; this function is
-        // a DIFFERENT entry point — `rift recall init` — and it wired every
-        // family regardless, so once Gemini CLI left the alpha set Rift refused
-        // to `enable` it while `recall init` still wired it.
-        //
-        // MEASURED, not hypothetical: on the tree that planted this, the main
-        // checkout's own `.gemini/settings.json`
-        // carried NINE Rift hook keys plus a retired server entry, and
-        // `.rift/agents/recall-install.json` claimed the `gemini` client.
-        //
-        // An unsupported family stages no writes and claims no ownership, and
-        // its existing Rift-owned entries are REMOVED after the write phase —
-        // fingerprint-gated, so a user's own entries are never touched, and
-        // after the phase so "resolve every conflict before the first write"
-        // still holds. It keeps its row in [`diagnose`], because the shape is
-        // registered-but-refusing: unlisted would be the worse answer.
-        if !rift_shadow_hooks::is_alpha_supported(client.token()) {
-            unsupported.push(client);
-            continue;
-        }
-        let expected_hooks = hook_fragment(client, rift_bin);
-        let hook_path = repo.join(client.hook_path());
-        let previous_hook_fingerprint = previous_manifest
-            .as_ref()
-            .and_then(|manifest| manifest.clients.iter().find(|owned| owned.client == client))
-            .map(|owned| owned.hook_fingerprint.as_str());
-
-        // Gemini's hook path IS its whole native settings file
-        // (`.gemini/settings.json`) — there is no longer a separate
-        // server-entry half sharing it, so it takes the same standard-hooks
-        // merge every non-Antigravity family does.
-        let bytes = if client == ClientFamily::Antigravity {
-            merge_antigravity_hooks(
-                &hook_path,
-                &expected_hooks,
-                previous_hook_fingerprint,
-                adopt_existing,
-            )?
-        } else {
-            merge_standard_hooks(
-                &hook_path,
-                client,
-                &expected_hooks,
-                previous_hook_fingerprint,
-                adopt_existing,
-            )?
-        };
-        writes.push(PlannedWrite {
-            path: hook_path.clone(),
-            bytes,
-        });
-
-        owned.push(OwnedClient {
-            client,
-            hook_path: client.hook_path().to_owned(),
-            hook_fingerprint: fingerprint_json(&expected_hooks),
-        });
-    }
-
-    let mut changed_files = apply_planned(collate(repo, writes, owned))?;
-    // The unsupported families, after every supported write has landed. Their
-    // config paths are disjoint from every supported family's, so this cannot
-    // undo work above it; it is sequenced last only so the pre-write conflict
-    // resolution above stays exactly as documented.
-    for client in unsupported {
-        let previous = previous_manifest
-            .as_ref()
-            .and_then(|manifest| manifest.clients.iter().find(|owned| owned.client == client));
-        for path in unwire_client(repo, client, previous)? {
-            if !changed_files.contains(&path) {
-                changed_files.push(path);
-            }
-        }
-    }
-
-    Ok(InstallReport {
-        clients: diagnose(repo, false),
-        changed_files,
-    })
-}
-
-/// Fold the planned writes into one map keyed by path and add the ownership
-/// manifest.
-///
-/// Keying by path is load-bearing, not tidiness: Gemini's hooks share one
-/// native settings file with its other entries, so two planned writes can name
-/// it and the later one — which was produced from the earlier one's bytes —
-/// must win.
-fn collate(
-    repo: &Path,
-    writes: Vec<PlannedWrite>,
-    owned: Vec<OwnedClient>,
-) -> BTreeMap<PathBuf, Vec<u8>> {
-    let mut by_path = BTreeMap::<PathBuf, Vec<u8>>::new();
-    for write in writes {
-        by_path.insert(write.path, write.bytes);
-    }
-    let manifest = OwnershipManifest {
-        schema_version: 1,
-        clients: owned,
-    };
-    by_path.insert(
-        repo.join(".rift/agents/recall-install.json"),
-        pretty_json(&serde_json::to_value(manifest).unwrap_or_default()),
-    );
-    by_path
-}
-
-/// Write every planned file whose bytes differ from what is on disk, and return
-/// the paths actually rewritten. A byte-identical plan changes nothing, which is
-/// what makes `install_all` idempotent.
-fn apply_planned(by_path: BTreeMap<PathBuf, Vec<u8>>) -> Result<Vec<PathBuf>, InstallError> {
-    let mut changed = Vec::new();
-    for (path, bytes) in by_path {
-        if std::fs::read(&path).ok().as_deref() == Some(bytes.as_slice()) {
-            continue;
-        }
-        atomic_write(&path, &bytes)?;
-        changed.push(path);
-    }
-    Ok(changed)
-}
-
-/// Remove Rift's own hook entries for one client, leaving everything else in
-/// its config file untouched. Returns the paths actually rewritten.
-///
-/// Fingerprint-gated through the same remover `remove_all` uses, so an entry
-/// Rift does not own is left exactly where it is: withdrawing support must
-/// never become an excuse to edit a file Rift did not write.
-fn unwire_client(
-    repo: &Path,
-    client: ClientFamily,
-    previous: Option<&OwnedClient>,
-) -> Result<Vec<PathBuf>, InstallError> {
-    let mut changed = Vec::new();
-    let hook_path = repo.join(client.hook_path());
-
-    let hook_bytes = if client == ClientFamily::Antigravity {
-        remove_antigravity_hooks(&hook_path, previous.map(|o| o.hook_fingerprint.as_str()))?
-    } else {
-        remove_standard_hooks(
-            &hook_path,
-            client,
-            previous.map(|o| o.hook_fingerprint.as_str()),
-        )?
-    };
-    if let Some(bytes) = hook_bytes {
-        atomic_write(&hook_path, &bytes)?;
-        if !changed.contains(&hook_path) {
-            changed.push(hook_path);
-        }
-    }
-    Ok(changed)
-}
-
-/// Remove only recognizable Rift-owned native entries, leaving Recall data and
-/// unrelated user configuration intact.
-///
-/// # Errors
-/// Returns [`InstallError`] when a touched config is malformed or cannot be written.
-pub fn remove_all(repo: &Path) -> Result<Vec<PathBuf>, InstallError> {
-    let manifest = read_manifest(repo);
-    let mut changed = Vec::new();
-    for client in ClientFamily::ALL {
-        let owned = manifest
-            .as_ref()
-            .and_then(|m| m.clients.iter().find(|o| o.client == client));
-        let hook_path = repo.join(client.hook_path());
-
-        let hook_bytes = if client == ClientFamily::Antigravity {
-            remove_antigravity_hooks(&hook_path, owned.map(|o| o.hook_fingerprint.as_str()))?
-        } else {
-            remove_standard_hooks(
-                &hook_path,
-                client,
-                owned.map(|o| o.hook_fingerprint.as_str()),
-            )?
-        };
-        if let Some(bytes) = hook_bytes {
-            atomic_write(&hook_path, &bytes)?;
-            if !changed.contains(&hook_path) {
-                changed.push(hook_path);
-            }
-        }
-    }
-    let manifest_path = repo.join(".rift/agents/recall-install.json");
-    if manifest_path.exists() {
-        std::fs::remove_file(&manifest_path).map_err(|source| InstallError::Io {
-            path: manifest_path.clone(),
-            source,
-        })?;
-        changed.push(manifest_path);
-    }
-    Ok(changed)
 }
 
 /// Diagnose native configuration, optional executables, and connection leases.
@@ -1112,11 +866,6 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), InstallError> {
     })
 }
 
-fn read_manifest(repo: &Path) -> Option<OwnershipManifest> {
-    let bytes = std::fs::read(repo.join(".rift/agents/recall-install.json")).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
 fn command_version(binary: &Path) -> Option<String> {
     let mut child = Command::new(binary)
         .arg("--version")
@@ -1440,348 +1189,6 @@ mod tests {
         }
     }
 
-    /// **`recall init` is a second door, and it must refuse what `enable`
-    /// refuses.**
-    ///
-    /// `native::enable` has refused an unsupported agent since the alpha set was
-    /// made binding, but `install_all` wired every `ClientFamily` regardless —
-    /// so once Gemini CLI was demoted out of that set, Rift declined to `enable` it and `rift recall init`
-    /// wired it anyway. This test drives both halves: nothing is written for an
-    /// unsupported family, and an installation that predates the demotion is
-    /// un-wired rather than left contradicting the product's own refusal.
-    ///
-    /// The row STAYS in `diagnose` — registered but refusing; unlisted is the
-    /// worse answer — which is why the client count below is still four.
-    #[test]
-    fn recall_init_wires_only_the_agents_this_alpha_supports() {
-        let tmp = tempfile::tempdir().unwrap();
-        let report = install(tmp.path());
-        assert_eq!(report.clients.len(), 4, "every family stays LISTED");
-
-        for client in ClientFamily::ALL {
-            let hooks = std::fs::read(tmp.path().join(client.hook_path()))
-                .ok()
-                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-            let wired = hooks.is_some_and(|v| fragment_contains_rift_command(&v, client));
-            assert_eq!(
-                wired,
-                rift_shadow_hooks::is_alpha_supported(client.token()),
-                "{}: wired={wired}, supported={}",
-                client.token(),
-                rift_shadow_hooks::is_alpha_supported(client.token())
-            );
-        }
-        let manifest = read_manifest(tmp.path()).unwrap();
-        let claimed: Vec<&str> = manifest.clients.iter().map(|o| o.client.token()).collect();
-        assert_eq!(
-            claimed,
-            rift_shadow_hooks::ALPHA_AGENTS,
-            "Rift claims ownership of exactly the clients it wires"
-        );
-
-        // …and the pre-demotion installation is un-wired, not left behind.
-        // Reconstructed by wiring the family explicitly, which is what every
-        // repo installed before the demotion already has on disk.
-        let gemini = ClientFamily::Gemini;
-        let path = tmp.path().join(gemini.hook_path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let expected = hook_fragment(gemini, Path::new("/opt/rift/bin/rift"));
-        std::fs::write(
-            &path,
-            merge_standard_hooks(&path, gemini, &expected, None, false).unwrap(),
-        )
-        .unwrap();
-        let planted: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(
-            fragment_contains_rift_command(&planted, gemini),
-            "THE PLANT: a pre-demotion repo really does carry Rift's Gemini hooks"
-        );
-        let mut manifest = read_manifest(tmp.path()).unwrap();
-        manifest.clients.push(OwnedClient {
-            client: gemini,
-            hook_path: gemini.hook_path().to_owned(),
-            hook_fingerprint: fingerprint_json(&expected),
-        });
-        std::fs::write(
-            tmp.path().join(".rift/agents/recall-install.json"),
-            pretty_json(&serde_json::to_value(&manifest).unwrap()),
-        )
-        .unwrap();
-
-        install(tmp.path());
-        let after: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(
-            !fragment_contains_rift_command(&after, gemini),
-            "an install that predates the demotion must be un-wired: {after}"
-        );
-    }
-
-    /// A user's own entry in an unsupported client's config is NOT Rift's to
-    /// remove. Withdrawing support may not become an excuse to edit a file Rift
-    /// did not write.
-    #[test]
-    fn unwiring_an_unsupported_client_never_touches_what_rift_does_not_own() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(ClientFamily::Gemini.hook_path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let user = serde_json::json!({
-            "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo mine"}]}]},
-            "theme": "dark"
-        });
-        let bytes = pretty_json(&user);
-        std::fs::write(&path, &bytes).unwrap();
-
-        install(tmp.path());
-
-        let after: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(
-            after, user,
-            "a user's Gemini settings must survive untouched"
-        );
-    }
-
-    fn install(repo: &Path) -> InstallReport {
-        install_all(repo, Path::new("/opt/rift/bin/rift"), false).unwrap()
-    }
-
-    #[test]
-    fn installs_all_native_surfaces_idempotently() {
-        let tmp = tempfile::tempdir().unwrap();
-        let first = install(tmp.path());
-        assert_eq!(first.clients.len(), 4);
-        assert!(tmp.path().join(".claude/settings.local.json").exists());
-        assert!(tmp.path().join(".codex/hooks.json").exists());
-        assert!(tmp.path().join(".agents/hooks.json").exists());
-        // No server-entry artifact is written anymore. The
-        // paths below are named literally on purpose: this is a guard that
-        // keeps retired files dead, so it must spell them exactly.
-        assert!(!tmp.path().join(".mcp.json").exists());
-        assert!(!tmp.path().join(".codex/config.toml").exists());
-        assert!(!tmp.path().join(".agents/mcp_config.json").exists());
-        // `.gemini/settings.json` is deliberately ABSENT since the demotion:
-        // `recall init` no longer wires an agent this alpha does not capture.
-        // Asserted as an absence rather than deleted, because "we stopped
-        // writing that file" is exactly the kind of change that should have to
-        // be stated. See recall_init_wires_only_the_agents_this_alpha_supports.
-        assert!(!tmp.path().join(".gemini/settings.json").exists());
-
-        let second = install(tmp.path());
-        assert!(second.changed_files.is_empty());
-        let codex = std::fs::read_to_string(tmp.path().join(".codex/hooks.json")).unwrap();
-        assert!(codex.contains("hooks codex"));
-    }
-
-    /// Install/remove no longer write, merge, or even READ
-    /// `.mcp.json`/`.codex/config.toml` — proven here as a NEGATIVE claim (the
-    /// bytes are untouched, both directions), replacing the old
-    /// merge-preserves-unrelated-keys coverage that made no sense once nothing
-    /// merges into these files at all. The retired paths are spelled literally,
-    /// because they are the guard: a rename here would quietly stop asserting
-    /// anything.
-    #[test]
-    fn install_and_remove_never_touch_the_retired_mcp_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".codex")).unwrap();
-        let mcp_json = r#"{"mcpServers":{"other":{"command":"other"}},"keep":7}"#;
-        let codex_toml = "model = \"gpt-test\"\n";
-        std::fs::write(tmp.path().join(".mcp.json"), mcp_json).unwrap();
-        std::fs::write(tmp.path().join(".codex/config.toml"), codex_toml).unwrap();
-
-        install(tmp.path());
-        assert_eq!(
-            std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap(),
-            mcp_json,
-            "install must not touch a pre-existing .mcp.json"
-        );
-        assert_eq!(
-            std::fs::read_to_string(tmp.path().join(".codex/config.toml")).unwrap(),
-            codex_toml,
-            "install must not touch a pre-existing .codex/config.toml"
-        );
-
-        remove_all(tmp.path()).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap(),
-            mcp_json,
-            "remove must not touch .mcp.json either"
-        );
-        assert_eq!(
-            std::fs::read_to_string(tmp.path().join(".codex/config.toml")).unwrap(),
-            codex_toml,
-            "remove must not touch .codex/config.toml either"
-        );
-    }
-
-    #[test]
-    fn recognized_legacy_claude_hooks_migrate_without_adopt() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
-        let legacy = serde_json::json!({
-            "$schema": "https://json.schemastore.org/claude-code-settings.json",
-            "hooks": {
-                "SessionStart": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": "'/old/rift' hooks claude-code SessionStart"
-                    }]
-                }],
-                "PreToolUse": [{
-                    "matcher": "Read",
-                    "hooks": [{"type": "command", "command": "echo keep"}]
-                }]
-            }
-        });
-        std::fs::write(
-            tmp.path().join(".claude/settings.local.json"),
-            pretty_json(&legacy),
-        )
-        .unwrap();
-
-        let first = install(tmp.path());
-        assert_eq!(first.clients.len(), ClientFamily::ALL.len());
-        let path = tmp.path().join(".claude/settings.local.json");
-        let migrated: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(migrated["$schema"], legacy["$schema"]);
-        assert!(migrated["hooks"]["PreToolUse"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|group| group.to_string().contains("echo keep")));
-        assert!(migrated["hooks"]["SessionStart"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|group| group.to_string().contains("/opt/rift/bin/rift")));
-        assert!(!migrated.to_string().contains("/old/rift"));
-
-        let before = std::fs::read(&path).unwrap();
-        let second = install(tmp.path());
-        assert!(second.changed_files.is_empty());
-        assert_eq!(std::fs::read(path).unwrap(), before);
-    }
-
-    #[test]
-    fn reinstall_refuses_manifest_owned_hooks_modified_by_the_user() {
-        let tmp = tempfile::tempdir().unwrap();
-        install(tmp.path());
-        let path = tmp.path().join(".claude/settings.local.json");
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        value["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
-            serde_json::json!("/opt/rift/bin/rift hooks claude-code SessionStart --changed");
-        let modified = pretty_json(&value);
-        std::fs::write(&path, &modified).unwrap();
-
-        let error = install_all(tmp.path(), Path::new("/opt/rift/bin/rift"), false).unwrap_err();
-        assert!(error.to_string().contains("installed Rift hooks changed"));
-        assert_eq!(std::fs::read(path).unwrap(), modified);
-    }
-
-    /// **The two installers must not call each other's refresh "user-modified".**
-    ///
-    /// `native::enable` and `install_all` keep separate ownership manifests
-    /// (`.rift/state/native-integrations.json` vs
-    /// `.rift/agents/recall-install.json`). After the native path refreshes
-    /// `.codex/hooks.json` — a binary moved, or a verb table did —
-    /// the recall manifest's fingerprint is stale, and before the shape
-    /// exemption this reinstall refused with "installed Rift hooks changed"
-    /// even though every byte of the fragment is Rift's own emission. The
-    /// refusal now requires the fragment to ALSO fail
-    /// [`recognizable_rift_hook_fragment`], so only a fragment a user actually
-    /// touched refuses — pinned by the test directly above, whose modified
-    /// command fails the shape.
-    #[test]
-    fn a_natively_refreshed_codex_fragment_reinstalls_without_adopt() {
-        let tmp = tempfile::tempdir().unwrap();
-        install(tmp.path());
-        let path = tmp.path().join(".codex/hooks.json");
-
-        // What the native installer leaves behind: the same emission for a
-        // different absolute binary, with a user group alongside.
-        let mut refreshed = hook_fragment(ClientFamily::Codex, Path::new("/elsewhere/rift"));
-        let user_group =
-            serde_json::json!({"hooks": [{"type": "command", "command": "user-start"}]});
-        refreshed["SessionStart"]
-            .as_array_mut()
-            .unwrap()
-            .insert(0, user_group.clone());
-        std::fs::write(&path, pretty_json(&serde_json::json!({"hooks": refreshed}))).unwrap();
-
-        let report = install(tmp.path());
-        assert!(
-            report.changed_files.iter().any(|file| file == &path),
-            "the reinstall must rewrite the refreshed fragment, not refuse it"
-        );
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(
-            value["hooks"]["SessionStart"][0], user_group,
-            "the user's group must survive the rewrite"
-        );
-        assert!(
-            value.to_string().contains("/opt/rift/bin/rift"),
-            "commands must point at this install's binary again"
-        );
-        assert!(!value.to_string().contains("/elsewhere/rift"));
-        assert!(
-            install(tmp.path()).changed_files.is_empty(),
-            "the fingerprint must be re-recorded, or every install rewrites"
-        );
-    }
-
-    /// Removal symmetry for the same population: a Rift-shaped fragment whose
-    /// manifest fingerprint went stale still removes its Rift groups and only
-    /// its Rift groups.
-    #[test]
-    fn removal_accepts_a_rift_shaped_fragment_the_manifest_no_longer_fingerprints() {
-        let tmp = tempfile::tempdir().unwrap();
-        install(tmp.path());
-        let path = tmp.path().join(".codex/hooks.json");
-        let mut refreshed = hook_fragment(ClientFamily::Codex, Path::new("/elsewhere/rift"));
-        let user_group =
-            serde_json::json!({"hooks": [{"type": "command", "command": "user-start"}]});
-        refreshed["SessionStart"]
-            .as_array_mut()
-            .unwrap()
-            .insert(0, user_group.clone());
-        std::fs::write(&path, pretty_json(&serde_json::json!({"hooks": refreshed}))).unwrap();
-
-        remove_all(tmp.path()).unwrap();
-        let remaining: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(
-            remaining,
-            serde_json::json!({"hooks": {"SessionStart": [user_group]}}),
-            "only Rift's groups leave; the user's stays"
-        );
-    }
-
-    /// The premise moved from the retired server-entry file to the hooks path
-    /// it shares the "reject before any write" claim
-    /// with: a malformed EXISTING hook file must abort the whole install
-    /// before `apply_planned` writes anything — including a different
-    /// client's file — never just refuse its own merge in isolation.
-    #[test]
-    fn malformed_hook_input_is_rejected_before_any_write() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
-        std::fs::write(tmp.path().join(".claude/settings.local.json"), "{").unwrap();
-        assert!(install_all(tmp.path(), Path::new("/rift"), false).is_err());
-        assert_eq!(
-            std::fs::read(tmp.path().join(".claude/settings.local.json")).unwrap(),
-            b"{",
-            "the malformed file itself must be left exactly as it was"
-        );
-        assert!(
-            !tmp.path().join(".codex/hooks.json").exists(),
-            "a later client's write must not land once an earlier one failed"
-        );
-    }
-
     #[test]
     fn fresh_and_stale_connection_leases_are_distinct() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1828,13 +1235,9 @@ mod tests {
 
     #[test]
     fn antigravity_shape_is_named_and_pretool_is_gated() {
-        let tmp = tempfile::tempdir().unwrap();
-        install(tmp.path());
-        let hooks: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(tmp.path().join(".agents/hooks.json")).unwrap())
-                .unwrap();
-        assert!(hooks["rift-recall"]["PreToolUse"].is_array());
-        assert_eq!(hooks["rift-recall"]["PreToolUse"][0]["matcher"], "*");
+        let bundle = hook_fragment(ClientFamily::Antigravity, Path::new("/opt/rift/bin/rift"));
+        assert!(bundle["PreToolUse"].is_array());
+        assert_eq!(bundle["PreToolUse"][0]["matcher"], "*");
     }
 
     /// **Every verb this family's adapter declares is registered, in the shape
@@ -1851,14 +1254,8 @@ mod tests {
     /// verb under a matcher would be a fragment its client cannot read.
     #[test]
     fn every_verb_the_antigravity_adapter_declares_is_registered_in_its_own_shape() {
-        let tmp = tempfile::tempdir().unwrap();
-        install(tmp.path());
-        let hooks: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(tmp.path().join(".agents/hooks.json")).unwrap())
-                .unwrap();
-        let bundle = hooks["rift-recall"]
-            .as_object()
-            .expect("the bundle Rift reserves");
+        let emitted = hook_fragment(ClientFamily::Antigravity, Path::new("/opt/rift/bin/rift"));
+        let bundle = emitted.as_object().expect("the bundle Rift reserves");
         let declared = standard_events(ClientFamily::Antigravity);
         assert!(
             declared.contains(&"PreInvocation") && declared.contains(&"PostInvocation"),
@@ -1905,22 +1302,18 @@ mod tests {
     }
 
     /// **The limit written into a hook file is the limit the hook fits its text
-    /// to** — one number, read here from the emission that actually lands on
-    /// disk and compared against the table the hook reads.
+    /// to** — one number, read here from the emission that lands on disk and
+    /// compared against the table the hook reads.
     ///
     /// Written on the two boundary handlers that carry context and on no other:
     /// the key means nothing on a tool handler, and a number written where it
     /// means nothing is a number a later reader has to disprove.
     #[test]
     fn the_context_limit_written_into_a_hook_file_is_the_one_the_hook_assumes() {
-        let tmp = tempfile::tempdir().unwrap();
-        install(tmp.path());
-        let hooks: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(tmp.path().join(".codex/hooks.json")).unwrap())
-                .unwrap();
+        let hooks = hook_fragment(ClientFamily::Codex, Path::new("/opt/rift/bin/rift"));
         let expected = u64::from(rift_agent::respond::DECLARED_CONTEXT_LIMIT_TOKENS);
         for verb in &standard_events(ClientFamily::Codex) {
-            let handler = &hooks["hooks"][*verb][0]["hooks"][0];
+            let handler = &hooks[*verb][0]["hooks"][0];
             let written = handler["additionalContextLimit"].as_u64();
             assert_eq!(
                 written,
@@ -1937,14 +1330,17 @@ mod tests {
                 assert!(written.is_none(), "{verb} has no context channel to bound");
             }
         }
-        // No other family declares one, so no other family's file carries the
-        // key — an absence worth asserting, because writing it everywhere would
-        // also pass the equality above.
-        let claude =
-            std::fs::read_to_string(tmp.path().join(".claude/settings.local.json")).unwrap();
-        assert!(!claude.contains("additionalContextLimit"), "{claude}");
-        let agy = std::fs::read_to_string(tmp.path().join(".agents/hooks.json")).unwrap();
-        assert!(!agy.contains("additionalContextLimit"), "{agy}");
+        // No other family declares one, so no other family's emission carries
+        // the key — an absence worth asserting, because writing it everywhere
+        // would also pass the equality above.
+        for other in [ClientFamily::ClaudeCode, ClientFamily::Antigravity] {
+            let emitted = hook_fragment(other, Path::new("/opt/rift/bin/rift")).to_string();
+            assert!(
+                !emitted.contains("additionalContextLimit"),
+                "{}: {emitted}",
+                other.token()
+            );
+        }
     }
 
     #[test]

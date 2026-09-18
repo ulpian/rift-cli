@@ -2151,8 +2151,10 @@ CREATE INDEX IF NOT EXISTS idx_serve_call_channel_recorded ON serve_call_event(c
 // are stored as **basis points** (pct × 100, integer) so the record stays
 // byte-deterministic across platforms.
 
-/// The closed set of eval conditions (deterministic conditions gate; real-model
-/// runs are recorded but never gate).
+/// The closed set of eval conditions, frozen by the migration that created the
+/// table. `real-model` was written for a paid sweep that no longer exists and
+/// no row ever carried; the vocabulary is on an append-only relation, so it
+/// stays rather than becoming a migration on a shipped one.
 pub const EVAL_RUN_CONDITIONS: &[&str] =
     &["served", "synthetic", "seeded-regression", "real-model"];
 

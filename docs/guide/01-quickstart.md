@@ -85,10 +85,10 @@ empty, because every absent key falls back to a secure default, making an empty
 config a *safe* one rather than an unconfigured one
 ([02-configuration.md](02-configuration.md)).
 
-### It installs seven git hooks
+### It installs five git hooks
 
-`commit-msg`, `prepare-commit-msg`, `post-commit`, `post-merge`,
-`post-rewrite`, `post-checkout` and `pre-push`, installed into the git
+`commit-msg`, `prepare-commit-msg`, `post-commit`, `post-checkout` and
+`pre-push`, installed into the git
 **common** directory so every worktree in the family shares them, reported with
 the binary of record they point at. Three properties matter more than the list.
 They **never block you**: a failing hook, or a missing Rift, must not stop a
@@ -189,7 +189,7 @@ Two files in the checkout are yours and authoritative: `.rift/config.toml`
 (capture, redaction, retention) and `.rift/policies/serve.toml` (what Recall
 may serve, to whom, under what budget). The rest is Rift's:
 `.rift/agents/*.json`, one descriptor per wired agent; `.rift/state/`,
-per-checkout run state and adoption markers; the seven hooks and their sidecar
+per-checkout run state and adoption markers; the five hooks and their sidecar
 markers in the git common directory's `hooks/`; this family's minted identity
 in `<git common dir>/rift-family/`, never to be hand-edited; the project list
 at `~/.config/rift/projects.toml`; and the projection database at

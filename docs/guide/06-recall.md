@@ -367,13 +367,13 @@ pack's contract; it is **domain-separated per pack kind**, so the same inputs
 compiled as two kinds cannot collide; and it is **length-prefixed**, so no two
 input sets collide by concatenation ambiguity.
 
-The rendered output is never the key. Any pack cache is content-addressed by the
-input key, throwaway and never authoritative, and every response carries a
-disclosure block naming its key, which sections came from a cache, and whether
-the pack was composed fresh. There is no pack cache today — every section is
-composed fresh and the block says so with an empty cached list — and the field
-exists ahead of the cache so adding one cannot quietly change what a pack
-means.
+The rendered output is never the key. Any pack cache would be content-addressed
+by the input key, throwaway and never authoritative. There is no pack cache
+today — every section is composed fresh — so the response carries the key and
+nothing about caching: a disclosure block reporting an always-empty cached list
+reads as a live optimisation, and the day a cache is added it has to disclose
+per-section provenance beside the key rather than inherit a field that was
+always telling the same answer.
 
 ---
 

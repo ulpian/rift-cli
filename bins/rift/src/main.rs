@@ -4470,7 +4470,7 @@ mod tests {
         let (human, json) = doctor_hooks_target_with(&root, false, Some(stand_in.clone()));
         assert!(human.contains("will not run"), "{human}");
         assert!(human.contains("dangling"), "{human}");
-        assert_eq!(json["broken"], 7, "the seventh hook joined the family");
+        assert_eq!(json["broken"], rift_shadow::hooks::HOOK_NAMES.len());
         assert_eq!(json["healed"], 0, "a report is not a repair");
         let (record_human, record_json) = doctor_binary_of_record(&root);
         assert!(record_human.contains("none yet"), "{record_human}");
@@ -4478,7 +4478,7 @@ mod tests {
 
         let (human, json) = doctor_hooks_target_with(&root, true, Some(stand_in.clone()));
         assert!(human.contains("HEALED"), "{human}");
-        assert_eq!(json["healed"], 7);
+        assert_eq!(json["healed"], rift_shadow::hooks::HOOK_NAMES.len());
         for name in rift_shadow::hooks::HOOK_NAMES {
             assert_eq!(
                 std::fs::read_link(hooks_dir.join(name)).unwrap(),

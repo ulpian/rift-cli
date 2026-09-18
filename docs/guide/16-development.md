@@ -105,7 +105,7 @@ stays green. The fifteenth, `release-build`, is not required.
 | Job | Runs | What it proves |
 |---|---|---|
 | `fmt` | `cargo fmt --all --check` | Formatting is mechanical; review never spends time on it |
-| `clippy` | `-D warnings` over the workspace, then a default-features pass over the two crates carrying an opt-in paid feature, then the `rift` binary with **no** default features | Lint drift behind an opt-in stays visible, unmasked by `--all-features`; and the build with every optional feature off is a build somebody ships |
+| `clippy` | `-D warnings` over the workspace, then the `rift` binary with **no** default features | The build with every optional feature off is a build somebody ships, and an item that exists only behind a feature shows up there as dead code |
 | `test` | `cargo test --workspace --all-features` on Linux, macOS and Windows | Platform breaks found on the platform; `fail-fast` is **off**, so a Windows-only break survives a Linux failure |
 | `msrv` | `cargo build --workspace --all-features` on 1.94 | The declared minimum version compiles |
 | `coverage` | Instrumented run on nightly plus the coverage gate | [§16.6](#166-coverage-as-a-gate-not-a-dashboard) |
@@ -158,7 +158,7 @@ usage: xtask <check-coverage <cov.json> | ci-meta | rustdoc-baseline>
 `cargo run -p xtask -- ci-meta` is the check that watches the other checks. It
 reads the repository — source files, the git index, the resolved dependency
 tree — and runs no test suite, opens no database, reaches no network. Each of
-its fifteen sub-checks returns violations, and the command fails if any list
+its fourteen sub-checks returns violations, and the command fails if any list
 is non-empty:
 
 | # | Check | What it refuses |
@@ -175,9 +175,8 @@ is non-empty:
 | 10 | No network client in the resolved graph | The same, over both shipped binaries' default-resolved trees, catching a client behind an external intermediary. Fails closed on empty output |
 | 11 | The conformance job runs every suite | A `--test` set in that job's body that is not the declared suite list |
 | 12 | The fuzzy matcher reads inside its bounds | The workspace pin for the search matcher without the feature that keeps its vectorised backends inside the bytes they were handed. It is a dependency's compile-time setting, so nothing in this repository's own source would notice it going missing |
-| 13 | The paid model path stays opt-in | A manifest enabling the paid evaluation feature through a feature array or a default feature |
-| 14 | Deleted paths stay deleted | A deliberately removed path — a retired kill-switch file, two reversed crate directories, a retired server entry point — back on disk, in the index, or (where naming it in `.gitignore` is safe) unignored, so a bulk `git add -A` cannot resurrect one. It reports how many paths it examined |
-| 15 | The retired-vocabulary screen | Retired planning shorthand in any tracked file's path or content bytes. No exclusions — lockfiles, snapshots, fixtures and this guide are in the corpus; symlinks are read as link text, never followed; a scan of nothing is itself a failure |
+| 13 | Deleted paths stay deleted | A deliberately removed path — a retired kill-switch file, two reversed crate directories, a retired server entry point — back on disk, in the index, or (where naming it in `.gitignore` is safe) unignored, so a bulk `git add -A` cannot resurrect one. It reports how many paths it examined |
+| 14 | The retired-vocabulary screen | Retired planning shorthand in any tracked file's path or content bytes. No exclusions — lockfiles, snapshots, fixtures and this guide are in the corpus; symlinks are read as link text, never followed; a scan of nothing is itself a failure |
 
 The newline check matters because the capture document, the pack lines, the
 commit trailers and the config format are all line-oriented. The schema and
@@ -453,12 +452,12 @@ the mirrored ignore list.
 
 ## 16.11 The git hooks in your checkout
 
-If Rift is capturing a repository you work in, **seven** git hooks are installed
+If Rift is capturing a repository you work in, **five** git hooks are installed
 in the checkout. In the order the installer declares them
 (`crates/rift-shadow-hooks/src/install.rs`):
 
-`prepare-commit-msg`, `commit-msg`, `post-commit`, `post-rewrite`, `pre-push`,
-`post-merge`, `post-checkout`.
+`prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-push`,
+`post-checkout`.
 
 On Unix each is a direct link to the `rift` binary, routed by the name it was
 invoked under; on Windows a small shim per name does the same. Beside each link
@@ -467,11 +466,9 @@ how Rift later tells "my link, pointing where I left it" from "somebody else's
 hook with the same name". A hook that already existed is chained aside, never
 overwritten.
 
-Two of the seven are installed and routed but have no handler body yet; they
-hold their slot in the dispatch table. See [03-capture.md](03-capture.md) for
-what each hook with a body records and for the latency budgets — capture is on
-the critical path of your `git commit`, and the design bends around not being
-felt there.
+Every one of them has a handler body. See [03-capture.md](03-capture.md) for
+what each records and for the latency budgets — capture is on the critical path
+of your `git commit`, and the design bends around not being felt there.
 
 **Turning wiring off and on.** `rift disable --agent <name>` and
 `rift enable --agent <name>` operate on **an agent client's** wiring — the
@@ -481,13 +478,13 @@ repository initialisation, and the installer's health probe reports a family
 missing a hook as unhealthy so the next install repairs it.
 
 **Holding the hooks aside.** Sometimes you want them out of the way — a long
-interactive rebase that would otherwise fire the rewrite hook on every step.
-This is not a product feature: rename the hook files in `.git/hooks` yourself,
-do your work, rename them back.
+scripted run that would otherwise fire the commit hooks on every step. This is
+not a product feature: rename the hook files in `.git/hooks` yourself, do your
+work, rename them back.
 
 ```bash
 cd "$(git rev-parse --git-dir)/hooks"
-for h in commit-msg post-checkout post-commit post-merge post-rewrite pre-push prepare-commit-msg; do
+for h in commit-msg post-checkout post-commit pre-push prepare-commit-msg; do
   mv "$h" "$h.held"     # reverse the two names to restore afterwards
 done
 ```
@@ -501,7 +498,7 @@ the signal you want if you forget to restore them.
 > Tip: **never** run the hook installer while the hooks are held aside. Its
 > entry point is a hidden command handing its trailing arguments straight to the
 > router, so it does not honour `--help`: asking for help performs a real
-> install and re-links all seven. To know what it does, read `install.rs`.
+> install and re-links all five. To know what it does, read `install.rs`.
 
 ---
 

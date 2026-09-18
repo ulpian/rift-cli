@@ -38,7 +38,7 @@ rift-recall-validity -> rift-core, rift-recall-types
 rift-registry -> rift-core
 rift-shadow -> rift-core, rift-git, rift-hashchain, rift-recall-substrate, rift-recall-types, rift-shadow-attribution, rift-shadow-cost, rift-shadow-hooks, rift-shadow-redact, rift-store
 rift-shadow-attribution -> rift-core, rift-git
-rift-shadow-cost -> rift-core, rift-tokens
+rift-shadow-cost -> rift-core
 rift-shadow-hooks -> rift-agent, rift-agent-antigravity, rift-agent-claude-code, rift-agent-codex, rift-agent-copilot, rift-agent-cursor, rift-agent-factory-droid, rift-agent-gemini, rift-agent-ollama, rift-agent-opencode, rift-core, rift-hashchain
 rift-shadow-redact -> rift-core
 rift-store -> rift-core, rift-crypto, rift-hashchain
