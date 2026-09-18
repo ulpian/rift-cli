@@ -368,9 +368,9 @@ pub(crate) fn production_half(text: &str) -> String {
 /// a gate of last resort — and by this workspace's own precedent, a gate of
 /// last resort must not depend on another gate to be correct.
 ///
-/// Deliberately NOT a uniqueness rule (`count != 1` → report): `bins/rift/src/
-/// hooks.rs` legitimately carries three test modules, and a gate that cries
-/// wolf on the largest file in `bins/` gets silenced.
+/// Deliberately NOT a uniqueness rule (`count != 1` → report): a file may
+/// legitimately carry several test modules (`crates/rift-canopy/src/suggest.rs`
+/// carries three), and a gate that cries wolf on a large file gets silenced.
 ///
 /// Residual, stated rather than papered over: a string or block comment holding
 /// the exact sequence `\n#[cfg(test)]\nmod ` at column zero still truncates. No
@@ -1927,9 +1927,9 @@ mod tests {
         }
     }
 
-    /// `bins/rift/src/hooks.rs` carries three test modules, which is why this
-    /// is not a uniqueness rule: the cut is at the FIRST module boundary, and
-    /// everything after it is test code.
+    /// A file may carry several test modules, which is why this is not a
+    /// uniqueness rule: the cut is at the FIRST module boundary, and everything
+    /// after it is test code.
     #[test]
     fn several_test_modules_cut_at_the_first() {
         let src = "pub fn p() {}\n#[cfg(test)]\nmod a { fn t() { create_canonical_schema(); } }\n#[cfg(test)]\nmod b {}\n";

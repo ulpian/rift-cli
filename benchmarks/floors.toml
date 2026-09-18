@@ -90,7 +90,7 @@ min_units_per_s = 11
 machine_class = "macos / x86_64 / 8 logical CPUs"
 protocol = "1 warmup + 3 measured iterations (Protocol::heavy), one fresh repository per iteration, one scripted session of 3 turns / 25 hooks per iteration"
 caps = "MAX_TOTAL_BYTES=8192; MAX_FILE_BYTES=4096"
-measured_paths = ["crates/rift-shadow/src/condense.rs", "crates/rift-shadow/src/backend.rs", "crates/rift-shadow-hooks/src/lib.rs", "bins/rift/src/hooks.rs"]
+measured_paths = ["crates/rift-shadow/src/condense.rs", "crates/rift-shadow/src/backend.rs", "crates/rift-shadow-hooks/src/lib.rs", "bins/rift/src/hooks/"]
 derivation_medians = []
 derivation_artifacts = []
 derivation = "An owner's bar, ratified 2026-09-02. It was first obtained by the convention floor = min(per-run medians over >= 3 fresh runs at the shipped caps) x 0.5, rounded down to <= 2 significant figures — a PUBLICATION CONVENTION for an artifact-consistency guard, not a live measurement, and the x0.5 is NOT a noise budget. The medians and their artifact stems were removed when the history holding their subject commits was collapsed, because a derivation nobody can re-run is not a derivation."
@@ -106,7 +106,7 @@ budget_ms = 100
 machine_class = "macos / x86_64 / 8 logical CPUs"
 protocol = "3 warmup + 11 measured commits per arm, both orders measured in the same run against a bare-commit control"
 caps = "MAX_TOTAL_BYTES=8192; MAX_FILE_BYTES=4096"
-measured_paths = ["bins/rift/src/main.rs", "bins/rift/src/hooks.rs", "crates/rift-shadow-hooks/src/lib.rs", "crates/rift-store/src/migrate.rs", "benches/native-baseline/src/displace.rs"]
+measured_paths = ["bins/rift/src/main.rs", "bins/rift/src/hooks/", "crates/rift-shadow-hooks/src/lib.rs", "crates/rift-store/src/migrate.rs", "benches/native-baseline/src/displace.rs"]
 derivation_medians = []
 derivation_artifacts = []
 derivation = "NOT a derived floor, and never was. This scenario is a paired LATENCY displacement measure and is NEVER a throughput floor: an enable that does more work per second is not thereby better, and a commit that takes longer is not thereby doing more. Its bar is the owner's — 100 ms of git latency, HARD — and an owner's bar is ruled, not derived from medians."

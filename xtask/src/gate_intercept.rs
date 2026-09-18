@@ -1546,7 +1546,7 @@ mod tests {
     #[test]
     fn a_planted_store_call_on_the_decision_path_is_caught() {
         let clean = vec![(
-            "bins/rift/src/hooks.rs".to_owned(),
+            "bins/rift/src/hooks/gate.rs".to_owned(),
             "fn read_ledger_step() { read_gate(); }\n\
              fn read_gate() { helper(); }\n\
              fn edit_record() {}\nfn gate_policy() {}\nfn gate_step() {}\nfn edit_step() {}\n\
@@ -1582,7 +1582,7 @@ mod tests {
     #[test]
     fn a_planted_in_process_parser_on_the_decision_path_is_caught() {
         let clean = vec![(
-            "bins/rift/src/hooks.rs".to_owned(),
+            "bins/rift/src/hooks/gate.rs".to_owned(),
             "fn read_ledger_step() {}\nfn read_gate() {}\nfn edit_record() {}\n\
              fn gate_policy() {}\nfn gate_step() {}\nfn edit_step() {}\nfn gate() {}\n\
              fn respond_with_decision() {}\n\
@@ -1635,7 +1635,7 @@ mod tests {
         let planted: Vec<(String, String)> = corpus
             .into_iter()
             .map(|(rel, text)| {
-                if rel != "bins/rift/src/hooks.rs" {
+                if rel != "bins/rift/src/hooks/gate.rs" {
                     return (rel, text);
                 }
                 let at = text
@@ -1698,7 +1698,7 @@ mod tests {
     #[test]
     fn a_store_opened_off_the_decision_path_is_not_a_finding() {
         let corpus = vec![(
-            "bins/rift/src/hooks.rs".to_owned(),
+            "bins/rift/src/hooks/gate.rs".to_owned(),
             "fn read_ledger_step() {}\nfn read_gate() {}\nfn edit_record() {}\n\
              fn gate_policy() {}\nfn gate_step() {}\nfn edit_step() {}\nfn gate() {}\n\
              fn respond_with_decision() {}\n\
