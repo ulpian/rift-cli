@@ -83,7 +83,8 @@ impl ProjectSettingId {
 /// configuration that travels with a clone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectInitialization {
-    /// The family's projection exists here and no setup plan is pending.
+    /// The family's projection exists here, its hook install is on record,
+    /// and no setup plan is pending.
     Initialized,
     /// Neither `.rift/` nor a projection exists.
     NotInitialized,
@@ -95,7 +96,8 @@ pub enum ProjectInitialization {
     /// Not inside a git repository: there is no family to provision, so no
     /// wizard is offered.
     NotRepository,
-    /// A resumable setup plan exists under ignored `.rift/state/`.
+    /// Setup is unfinished: a resumable plan under ignored `.rift/state/`,
+    /// or a family carrying a projection that nothing ever wired hooks for.
     SetupIncomplete,
 }
 

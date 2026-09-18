@@ -487,6 +487,17 @@ on this machine (run rift init)` under the usual not-initialized exit code, and
 the dashboard shows it as `◌ not set up here`
 ([11-canopy-tour.md](11-canopy-tour.md)).
 
+The dashboard asks for one thing more, because the projection alone is weak
+evidence: an agent hook opens the store on first contact and creates it, so a
+repository whose git hooks were never installed can carry one. A family is set
+up here when its projection sits under the cache root **and** its **binary of
+record** — `<common_dir>/rift-family/binary.json` in the table below, the note
+the hook install leaves naming the binary the hooks point at — names a binary
+that is still there. Without it the card and the setup page both read the
+repository as setup left half done, and the wizard installs what is missing; it
+re-runs safely over what already exists. The hook gates ask only for the
+projection: a hook that is running is its own proof that hooks are installed.
+
 ### The table
 
 | Location | Holds | Safe to delete? |

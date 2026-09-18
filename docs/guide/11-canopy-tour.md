@@ -124,7 +124,7 @@ The status glyph on the right:
 | `·` | `-` | Registered, but `rift init` has not been run anywhere |
 | `◌` | `s` | Configured by the repository — its `.rift/` came with the clone — but not set up on this machine; `s` opens the setup |
 | `×` | `x` | Not inside a git repository, so there is nothing to set up |
-| `◐` | `~` | Setup was started and at least one selected step is still pending |
+| `◒` | `~` | Setup is unfinished: a selected step is still pending, or the projection is here without the hook install; `s` opens the setup |
 | `◔` | `a` | A linked worktree of an initialized family that was never wired |
 | `!` | `!` | A read error — the row says what it was |
 

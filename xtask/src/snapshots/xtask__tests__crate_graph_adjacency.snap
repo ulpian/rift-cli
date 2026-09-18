@@ -15,7 +15,7 @@ rift-agent-install -> rift-core, rift-shadow-hooks, rift-store
 rift-agent-ollama -> rift-agent, rift-core
 rift-agent-opencode -> rift-agent, rift-core
 rift-canopy -> rift-core, rift-registry
-rift-canopy-data -> rift-agent-install, rift-canopy, rift-config, rift-core, rift-git, rift-nic-gauge, rift-recall-ledger, rift-recall-policy, rift-recall-substrate, rift-recall-types, rift-shadow-attribution, rift-shadow-cost, rift-store
+rift-canopy-data -> rift-agent-install, rift-canopy, rift-config, rift-core, rift-git, rift-nic-gauge, rift-recall-ledger, rift-recall-policy, rift-recall-substrate, rift-recall-types, rift-shadow-attribution, rift-shadow-cost, rift-shadow-hooks, rift-store
 rift-config -> rift-core
 rift-core -> (none)
 rift-crypto -> rift-core
