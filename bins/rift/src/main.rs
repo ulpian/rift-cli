@@ -2066,7 +2066,7 @@ fn doctor_prunable_worktrees(repo: &std::path::Path) -> (String, serde_json::Val
 /// reported an error — because an unrelated command re-pointed the family at a
 /// `/tmp` binary that was then deleted. This leg is the loud version of that
 /// condition, which is why it prints the count even when the answer is "all
-/// seven are fine".
+/// five are fine".
 ///
 /// The directory is **git's answer**, not our default: with `core.hooksPath`
 /// set, `<common_dir>/hooks` can be immaculate and never run.
@@ -2092,73 +2092,158 @@ fn doctor_hooks_target_with(
         return (String::new(), serde_json::json!({ "readable": false }));
     };
     let dir = hooks::effective_hooks_dir(repo).unwrap_or_else(|| paths.common_dir.join("hooks"));
-    let broken = broken_hooks(&dir);
-    let total = rift_shadow::hooks::HOOK_NAMES.len();
-    let report = |broken: &[(String, String)], healed: usize, refused: Option<&str>| {
-        serde_json::json!({
-            "hooks_dir": dir.display().to_string(),
-            "hooks": total,
-            "broken": broken.len(),
-            "found": broken
-                .iter()
-                .map(|(name, state)| serde_json::json!({ "hook": name, "state": state }))
-                .collect::<Vec<_>>(),
-            "healed": healed,
-            "refused": refused,
-        })
-    };
-    if broken.is_empty() {
+    let found = hook_findings(&dir);
+    if found.is_empty() {
         return (
-            format!(
-                "\n  hooks:          {total} of {total} live at {}",
-                dir.display()
-            ),
-            report(&broken, 0, None),
+            hooks_headline(&dir, &found),
+            hooks_report(&dir, &found, 0, None),
         );
     }
-    // **A repository with no Rift hooks is not a finding, and `--fix` never
-    // installs one.** Provisioning is `rift init`'s act; a diagnosis that wired
-    // capture into a checkout nobody asked to wire would be the same class of
-    // side effect this whole rule removes. Rift has been here when one of the
-    // entries is managed — a dangling managed link included (D13) — or when the
-    // family has recorded a binary.
-    let managed = rift_shadow::hooks::HOOK_NAMES
-        .iter()
-        .filter(|name| rift_shadow::hooks::is_managed_hook(&dir.join(name)))
-        .count();
-    if managed == 0
-        && rift_shadow::hooks::read_binary_of_record(&hooks::family_sites(&paths.common_dir).dir)
-            .is_none()
-    {
+    if !rift_has_been_here(&dir, &paths.common_dir, &found) {
         return (
             format!(
                 "\n  hooks:          not installed at {} (`rift init` installs them)",
                 dir.display()
             ),
-            report(&[], 0, None),
+            hooks_report(&dir, &HookFindings::default(), 0, None),
         );
     }
-    let mut human = format!(
-        "\n  hooks:          {} of {total} will not run (git skips a broken hook SILENTLY) at {}",
-        broken.len(),
-        dir.display()
-    );
-    for (name, state) in &broken {
+    let mut human = hooks_headline(&dir, &found);
+    for (name, state) in found.all() {
         human.push_str(&format!("\n    {name}: {state}"));
     }
     if !fix {
-        human.push_str("\n    safe --fix re-points them at this binary");
-        return (human, report(&broken, 0, None));
+        human.push_str(if found.retired.is_empty() {
+            "\n    safe --fix re-points them at this binary"
+        } else {
+            "\n    safe --fix re-points them at this binary and removes what is retired"
+        });
+        return (human, hooks_report(&dir, &found, 0, None));
     }
     let Some(rift_bin) = rift_bin else {
         human.push_str(
             "\n    --fix cannot read its own path; run \
              `rift hooks install --repoint --binary <path>`",
         );
-        return (human, report(&broken, 0, None));
+        return (human, hooks_report(&dir, &found, 0, None));
     };
-    match hooks::install_family_hooks(
-        &paths.common_dir,
+    let (tail, json) = heal_hooks(repo, &paths.common_dir, &dir, rift_bin, &found);
+    human.push_str(&tail);
+    (human, json)
+}
+
+/// What the hooks leg found: entries that will not run, and entries Rift wrote
+/// under a name it no longer installs.
+///
+/// Two questions with two answers, because they have different repairs — one is
+/// re-pointed, the other removed — and the leg reports both in one list.
+#[derive(Default)]
+struct HookFindings {
+    /// `(hook, why it will not run)`.
+    broken: Vec<(String, String)>,
+    /// `(entry, why it is a finding)`.
+    retired: Vec<(String, String)>,
+}
+
+impl HookFindings {
+    fn is_empty(&self) -> bool {
+        self.broken.is_empty() && self.retired.is_empty()
+    }
+
+    fn all(&self) -> impl Iterator<Item = &(String, String)> {
+        self.broken.iter().chain(self.retired.iter())
+    }
+}
+
+/// Everything about this hooks directory a person has to know.
+fn hook_findings(dir: &std::path::Path) -> HookFindings {
+    HookFindings {
+        broken: broken_hooks(dir),
+        retired: retired_hooks(dir),
+    }
+}
+
+/// The leg's first line.
+///
+/// It prints the count even when nothing is wrong: a dangling hook is git's
+/// quietest failure, and a leg that only spoke up on failure would be one more
+/// silence to interpret.
+fn hooks_headline(dir: &std::path::Path, found: &HookFindings) -> String {
+    let total = rift_shadow::hooks::HOOK_NAMES.len();
+    if !found.broken.is_empty() {
+        return format!(
+            "\n  hooks:          {} of {total} will not run (git skips a broken hook SILENTLY) at {}",
+            found.broken.len(),
+            dir.display()
+        );
+    }
+    if found.retired.is_empty() {
+        return format!(
+            "\n  hooks:          {total} of {total} live at {}",
+            dir.display()
+        );
+    }
+    format!(
+        "\n  hooks:          {total} of {total} live at {}, and {} Rift no longer installs",
+        dir.display(),
+        found.retired.len()
+    )
+}
+
+/// The leg's JSON: the directory, the counts, and every finding by name.
+fn hooks_report(
+    dir: &std::path::Path,
+    found: &HookFindings,
+    healed: usize,
+    refused: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "hooks_dir": dir.display().to_string(),
+        "hooks": rift_shadow::hooks::HOOK_NAMES.len(),
+        "broken": found.broken.len(),
+        "retired": found.retired.len(),
+        "found": found
+            .all()
+            .map(|(name, state)| serde_json::json!({ "hook": name, "state": state }))
+            .collect::<Vec<_>>(),
+        "healed": healed,
+        "refused": refused,
+    })
+}
+
+/// Whether Rift has been in this hooks directory at all.
+///
+/// **A repository with no Rift hooks is not a finding, and `--fix` never
+/// installs one.** Provisioning is `rift init`'s act; a diagnosis that wired
+/// capture into a checkout nobody asked to wire would be the same class of
+/// side effect this whole rule removes. Rift has been here when one of the
+/// entries is managed — a dangling managed link included (D13), and an entry
+/// under a retired name too — or when the family has recorded a binary.
+fn rift_has_been_here(
+    dir: &std::path::Path,
+    common_dir: &std::path::Path,
+    found: &HookFindings,
+) -> bool {
+    let managed = rift_shadow::hooks::HOOK_NAMES
+        .iter()
+        .any(|name| rift_shadow::hooks::is_managed_hook(&dir.join(name)));
+    managed
+        || !found.retired.is_empty()
+        || rift_shadow::hooks::read_binary_of_record(&hooks::family_sites(common_dir).dir).is_some()
+}
+
+/// The repair: the same keep-if-healthy install every other surface runs, under
+/// the same transient screen — so a repair that would point the family INTO a
+/// linked worktree is refused, and says which vantage can do it.
+fn heal_hooks(
+    repo: &std::path::Path,
+    common_dir: &std::path::Path,
+    dir: &std::path::Path,
+    rift_bin: std::path::PathBuf,
+    found: &HookFindings,
+) -> (String, serde_json::Value) {
+    let installed = match hooks::install_family_hooks(
+        common_dir,
         repo,
         None,
         rift_bin,
@@ -2167,29 +2252,55 @@ fn doctor_hooks_target_with(
         },
         rift_shadow::hooks::RecordedBy::SelfHeal,
     ) {
-        Ok(installed) => {
-            if let Some(refused) = installed.refused {
-                human.push_str(&format!(
-                    "\n    --fix REFUSED: {refused}\n    re-run it from the family's main work \
-                     tree, whose binary outlives every member"
-                ));
-                return (human, report(&broken, 0, Some(refused.reason.as_str())));
-            }
-            let healed = installed.written().len();
-            human.push_str(&format!(
-                "\n    HEALED: {healed} hook(s) re-pointed at {} and recorded",
-                installed.binary.as_ref().map_or_else(
-                    || "the running binary".to_owned(),
-                    |bin| bin.display().to_string()
-                )
-            ));
-            (human, report(&broken_hooks(&dir), healed, None))
-        }
+        Ok(installed) => installed,
         Err(error) => {
-            human.push_str(&format!("\n    --fix failed ({error})"));
-            (human, report(&broken, 0, None))
+            return (
+                format!("\n    --fix failed ({error})"),
+                hooks_report(dir, found, 0, None),
+            )
         }
+    };
+    if let Some(refused) = installed.refused {
+        return (
+            format!(
+                "\n    --fix REFUSED: {refused}\n    re-run it from the family's main work \
+                 tree, whose binary outlives every member"
+            ),
+            hooks_report(dir, found, 0, Some(refused.reason.as_str())),
+        );
     }
+    let healed = installed.written().len();
+    (
+        healed_lines(&installed),
+        hooks_report(dir, &hook_findings(dir), healed, None),
+    )
+}
+
+/// What the repair did, in the two sentences it can be: what it re-pointed,
+/// and what it removed.
+fn healed_lines(installed: &rift_shadow::hooks::HookInstallReport) -> String {
+    let mut lines = String::new();
+    if !installed.written().is_empty() {
+        lines.push_str(&format!(
+            "\n    HEALED: {} hook(s) re-pointed at {} and recorded",
+            installed.written().len(),
+            installed.binary.as_ref().map_or_else(
+                || "the running binary".to_owned(),
+                |bin| bin.display().to_string()
+            )
+        ));
+    }
+    if !installed.removed.is_empty() {
+        lines.push_str(&format!(
+            "\n    REMOVED: {} retired hook(s): {}",
+            installed.removed.len(),
+            hooks::hook_names(&installed.removed)
+        ));
+    }
+    if lines.is_empty() {
+        lines.push_str("\n    --fix found nothing left to do");
+    }
+    lines
 }
 
 /// Every hook in the directory git runs that cannot execute, and why.
@@ -2218,6 +2329,29 @@ fn broken_hooks(dir: &std::path::Path) -> Vec<(String, String)> {
         }
     }
     broken
+}
+
+/// Every entry Rift wrote under a name it no longer installs.
+///
+/// The directory is the source here, never [`rift_shadow::hooks::HOOK_NAMES`]:
+/// an entry under a name that left the list is invisible to a scan of the
+/// list, and git goes on running it regardless — which is the whole finding.
+fn retired_hooks(dir: &std::path::Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut retired: Vec<(String, String)> = entries
+        .flatten()
+        .filter(|entry| rift_shadow::hooks::is_retired_hook(&entry.path()))
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                "retired (a hook Rift no longer installs)".to_owned(),
+            )
+        })
+        .collect();
+    retired.sort();
+    retired
 }
 
 /// The family's binary of record: what it names, whether that binary is still
@@ -4547,6 +4681,86 @@ mod tests {
             deleted,
             "a refusal changes nothing"
         );
+    }
+
+    /// A name that left the dispatch table leaves the directory. The entry is
+    /// still a link to the binary, so git still runs it — on every merge and
+    /// every step of a rebase — and the binary answers a name it cannot route
+    /// with a usage error. The leg names it, and `--fix` is what removes it.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_names_an_entry_rift_no_longer_installs_and_fix_removes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&root).unwrap();
+        let stand_in = std::path::PathBuf::from("/bin/echo");
+        let hooks_dir = install_five_hooks(&git_dir, &root, &stand_in);
+        // The shape a family provisioned before the list shrank carries: a
+        // managed entry under a name nothing routes any more.
+        let retired = hooks_dir.join("post-merge");
+        std::os::unix::fs::symlink(tmp.path().join("gone/rift"), &retired).unwrap();
+
+        let (human, json) = doctor_hooks_target_with(&root, false, Some(stand_in.clone()));
+        assert!(
+            human.contains("post-merge: retired (a hook Rift no longer installs)"),
+            "{human}"
+        );
+        assert_eq!(json["broken"], 0, "the hooks Rift installs are all fine");
+        assert_eq!(json["retired"], 1);
+        assert_eq!(json["healed"], 0, "a report is not a repair");
+        assert!(std::fs::symlink_metadata(&retired).is_ok());
+
+        let (human, json) = doctor_hooks_target_with(&root, true, Some(stand_in));
+        assert!(human.contains("REMOVED: 1"), "{human}");
+        assert_eq!(json["retired"], 0, "the second reading is clean");
+        assert!(
+            std::fs::symlink_metadata(&retired).is_err(),
+            "--fix removed it"
+        );
+    }
+
+    /// The leg reports Rift's entries, not the directory's. A `post-merge` of
+    /// the user's own is not a finding and `--fix` never touches it.
+    #[test]
+    fn a_hook_rift_did_not_write_under_a_retired_name_is_not_a_finding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&root).unwrap();
+        let stand_in = std::path::PathBuf::from("/bin/echo");
+        let hooks_dir = install_five_hooks(&git_dir, &root, &stand_in);
+        let theirs = hooks_dir.join("post-merge");
+        std::fs::write(&theirs, "#!/bin/sh\necho theirs\n").unwrap();
+
+        let (human, json) = doctor_hooks_target_with(&root, true, Some(stand_in));
+
+        assert_eq!(json["broken"], 0);
+        assert_eq!(json["retired"], 0);
+        assert!(!human.contains("post-merge"), "{human}");
+        assert!(std::fs::read_to_string(&theirs)
+            .unwrap()
+            .contains("echo theirs"));
+    }
+
+    /// The five hooks as the installer writes them, so a doctor fixture starts
+    /// from a family that is genuinely set up. Returns the hooks directory.
+    fn install_five_hooks(
+        git_dir: &std::path::Path,
+        root: &std::path::Path,
+        rift_bin: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let report = hooks::install_family_hooks(
+            git_dir,
+            root,
+            None,
+            rift_bin.to_path_buf(),
+            rift_shadow::hooks::HookInstallPolicy::Repoint {
+                allow_transient: false,
+            },
+            rift_shadow::hooks::RecordedBy::HooksInstall,
+        )
+        .unwrap();
+        assert_eq!(report.repointed.len(), rift_shadow::hooks::HOOK_NAMES.len());
+        report.hooks_dir
     }
 
     #[test]

@@ -46,7 +46,9 @@ pub(crate) use gate::payload_cwd;
 pub(crate) use gate::{gate_step, gate_turn, GateStep, AUDIT_IDS};
 #[cfg(feature = "search")]
 pub(crate) use git::effective_config;
-pub(crate) use install::{effective_hooks_dir, family_sites, install_family_hooks, report_lines};
+pub(crate) use install::{
+    effective_hooks_dir, family_sites, hook_names, install_family_hooks, report_lines,
+};
 pub(crate) use manifest::seed_manifest_baseline;
 pub(crate) use recovery::basis_snapshots_at;
 pub(crate) use sweep::{sweep_stale_sessions, SessionSweep};

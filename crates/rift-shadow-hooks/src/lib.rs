@@ -39,10 +39,10 @@ pub mod wire;
 
 pub use claim::{claim_session_agent, session_owner, Claim};
 pub use install::{
-    binary_of_record_path, install_hooks_with, is_executable_file, is_managed_hook, is_transient,
-    read_binary_of_record, record_binary_of_record, shim_text, BinaryOfRecord, BinaryRecord,
-    FamilySites, HookInstall, HookInstallPolicy, HookInstallReport, RecordedBy, RefusedBinary,
-    TransientReason, HOOK_NAMES,
+    binary_of_record_path, install_hooks_with, is_executable_file, is_managed_hook,
+    is_retired_hook, is_transient, read_binary_of_record, record_binary_of_record, shim_text,
+    BinaryOfRecord, BinaryRecord, FamilySites, HookInstall, HookInstallPolicy, HookInstallReport,
+    RecordedBy, RefusedBinary, TransientReason, HOOK_NAMES,
 };
 pub use push::{screen_push, PushDecision, PushRef};
 pub use session_cache::{
