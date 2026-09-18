@@ -22,10 +22,7 @@ rift-core = { version = "0.0.1", path = "../../crates/rift-core" }
 # bare path, so a linked worktree resolves to the family's one identity.
 rift-git = { version = "0.0.1", path = "../../crates/rift-git" }
 # The `eval` verb: runs the deterministic Lost-in-Delta conditions end-to-end
-# and appends the bitemporal experiment rows. The paid sweep transport is NOT
-# enabled here: it is this binary's own opt-in `real-model` feature (below), so
-# the shipped default build links no HTTP client at all — a compile-time gate,
-# not a convention.
+# and appends the bitemporal experiment rows.
 rift-recall-eval = { version = "0.0.1", path = "../../crates/rift-recall-eval" }
 rift-recall-ledger = { version = "0.0.1", path = "../../crates/rift-recall-ledger" }
 rift-recall-serve = { version = "0.0.1", path = "../../crates/rift-recall-serve" }
@@ -44,15 +41,6 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-
-[features]
-# The paid real-model sweep: owner-invoked `eval --real-model`,
-# reachable only from a build that opted in — `cargo build -p rift-memd
-# --features real-model`. Off by default; `ci-meta` (`real_model_is_opt_in`)
-# keeps it out of every `default`/dependency `features` array, and
-# `no_network_crate_in_the_resolved_graph` keeps the default-resolved graph
-# of both binaries free of HTTP clients.
-real-model = ["rift-recall-eval/real-model"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

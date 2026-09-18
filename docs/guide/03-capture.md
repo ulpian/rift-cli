@@ -60,9 +60,9 @@ nothing.
 
 ---
 
-## 3.3 The seven git hooks
+## 3.3 The five git hooks
 
-`rift init` (or `rift hook install`) writes seven entries. The list *is* the
+`rift init` (or `rift hook install`) writes five entries. The list *is* the
 dispatch table — a direct link is routed by the name it was invoked under — so
 name and behaviour cannot drift apart.
 
@@ -71,15 +71,15 @@ name and behaviour cannot drift apart.
 | `prepare-commit-msg` | Adds the `Rift-Checkpoint` and `Rift-Attribution` trailers when a session is live. Only rewrites the message file; never rejects. |
 | `commit-msg` | Normalizes those trailers idempotently — deduplicated, canonical order. Never rejects. |
 | `post-commit` | The main capture beat: records which commit and which session this was, then hands the heavy work to a detached worker. |
-| `post-rewrite` | Installed and routed; no capture work today. An amend or rebase is a lifecycle signal the decision layer already names, so the entry is in place for when a strategy uses it. |
 | `pre-push` | Screens the refs about to leave the machine and refuses Rift's internal ones, treats the push as the "work is leaving" signal for the on-push strategy, and drains the push queue. |
-| `post-merge` | Installed and routed; like `post-rewrite`, no capture work today. |
 | `post-checkout` | The one moment git tells Rift a worktree was born, from inside the new tree. Used to adopt a new family member — see [09-worktrees-and-families.md](09-worktrees-and-families.md). |
 
-Two of the seven are honest placeholders, and this guide says so rather than
-implying coverage that does not exist. Nothing is silently skipped: they are
-installed, routed and guarded like the rest, and their handler simply has no
-body yet.
+Every entry has a body, and there is no entry for an amend, a rebase or a
+merge. A name in this list *is* an installed, routed hook, so one with nothing
+behind it reads as coverage Rift does not have. What that costs is stated
+rather than implied: a rebase that moves the commits a session recorded leaves
+the ledger holding pre-rewrite shapes
+([18-known-gaps.md](18-known-gaps.md)).
 
 ### How they are installed
 

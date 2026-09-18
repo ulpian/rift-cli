@@ -1,4 +1,4 @@
-//! End-to-end: **the seventh hook.**
+//! End-to-end: **the worktree-adoption hook.**
 //!
 //! `git worktree add` is the one moment git tells Rift a worktree was born, and
 //! it tells it from *inside* the new tree: measured on git 2.50.1 (2026-08-30)
@@ -282,7 +282,7 @@ fn family(wired: bool) -> Family {
 /// ★ The hook `git worktree add` fires wires the member it was
 /// fired inside, and firing it again writes nothing.
 ///
-/// This is the whole point of the seventh hook: a fresh `git worktree add`
+/// This is the whole point of `post-checkout`: a fresh `git worktree add`
 /// leaves a checkout with no `.rift/agents/*.json` and no client fragment, so
 /// an agent launched there runs with **zero** Rift hooks and nothing says so.
 /// The wiring must name the family's **binary of record** — not the binary
@@ -616,7 +616,7 @@ fn post_checkout_in_the_main_work_tree_takes_the_fast_path() {
     );
 }
 
-/// The seventh link, routed by `argv[0]` and fired by git itself.
+/// The installed link, routed by `argv[0]` and fired by git itself.
 ///
 /// Unix-only and deliberately **not** enumerated as load-bearing: it depends on
 /// the direct-symlink install (`#[cfg(unix)]` in `write_hooks`) and on git
@@ -626,13 +626,13 @@ fn post_checkout_in_the_main_work_tree_takes_the_fast_path() {
 /// handler, with no other dispatch change.
 #[cfg(unix)]
 #[test]
-fn git_worktree_add_runs_the_installed_seventh_link() {
+fn git_worktree_add_runs_the_installed_adoption_link() {
     let f = family(true);
     let hook = f.main.join(".git/hooks/post-checkout");
     assert_eq!(
         std::fs::read_link(&hook).unwrap(),
         Path::new(common::rift_bin()),
-        "the seventh hook is a direct link to the binary, like the six"
+        "this hook is a direct link to the binary, like every other one"
     );
 
     let second = f.main.parent().unwrap().join("second");
@@ -653,7 +653,7 @@ fn git_worktree_add_runs_the_installed_seventh_link() {
 
     assert!(
         second.join(PROVISIONED).is_file(),
-        "git ran the seventh hook and it wired the member it was born in"
+        "git ran the adoption hook and it wired the member it was born in"
     );
     assert!(second.join(".rift/agents/claude-code.json").is_file());
     assert!(!second.join(MARKER).exists());

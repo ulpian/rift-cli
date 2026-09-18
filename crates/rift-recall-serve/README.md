@@ -540,17 +540,15 @@ summarized).
     { "kind": "CriticalTail","lines": ["CRITICAL: src/a.rs's last provenance was reverted - verify before reuse"] }
   ],
   "total_tokens": 148,
-  "pack_key": "…",
-  "cache": { "pack_key": "…", "sections_cached": [], "composed": "fresh" }
+  "pack_key": "…"
 }
 ```
 
 `pack_key` is **input-keyed**: derived from the query, the ranked
 `(candidate_id, content_hash)` list, the serve-policy version, and the token
 budget — computed before rendering, never from the output bytes. Identical
-inputs ⇒ identical key. The `cache` block is an honesty disclosure: this implementation
-composes every section fresh (`sections_cached: []`); a future caching layer
-must disclose per-section provenance there.
+inputs ⇒ identical key. Every section is composed fresh; a caching layer
+would have to disclose per-section provenance beside the key.
 
 ---
 

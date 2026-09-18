@@ -25,10 +25,6 @@ jobs:
         with: { components: "clippy" }
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      # The shipped (default-feature) configuration of the two crates that
-      # carry `real-model`: cfg drift behind the opt-in is visible here, not
-      # only under --all-features.
-      - run: cargo clippy -p rift-memd -p rift-recall-eval --all-targets -- -D warnings
       # The configuration the binary's manifest advertises and nothing else
       # builds: no terminal backend, no search seam, no document seam. An item
       # that exists only for one of those features shows up here as dead code,

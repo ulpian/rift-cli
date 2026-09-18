@@ -277,10 +277,9 @@ depends on the same input producing the same output forever. The one place a
 model was considered, a heavy batched privacy pass over captured content, was
 deliberately not built; the pipeline redacts with deterministic detectors first.
 
-**Enforced by** rule 10's graph check (a model call needs a client, and there is
-none), and by `real_model_is_opt_in`, which asserts that the one feature that
-*can* talk to a paid model — an offline evaluation harness the owner invokes by
-hand — stays off in every default build.
+**Enforced by** rule 10's graph check: a model call needs an HTTP client, no
+workspace crate declares one, and the resolved dependency graph of both shipped
+binaries is read to prove it.
 
 **Read more.** [04](04-redaction-and-secrets.md),
 [08](08-cost-and-savings.md).

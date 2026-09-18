@@ -1,6 +1,6 @@
 //! Git-hook installation (GUI-client safe, never-clobber).
 //!
-//! Installs the seven hooks of [`HOOK_NAMES`] by **absolute** path, so a desktop
+//! Installs the five hooks of [`HOOK_NAMES`] by **absolute** path, so a desktop
 //! GUI with a sparse `PATH` still finds Rift. On Unix, an unoccupied hook is a
 //! direct symlink to the binary: this avoids paying a fresh shell-script launch
 //! on every commit. A hook that must preserve a pre-existing user hook remains a
@@ -53,23 +53,21 @@ const CHAINED_SUFFIX: &str = ".rift-chained";
 #[cfg(unix)]
 const LINK_MARKER_SUFFIX: &str = ".rift-managed-link";
 
-/// The git hooks Rift installs: the six capture hooks, and `post-checkout`.
+/// The git hooks Rift installs: the four capture hooks, and `post-checkout`.
 ///
 /// The list is the whole dispatch table. A direct Unix link is routed by its
-/// `argv[0]` against these names (`bins/rift/src/hooks.rs`), and a Windows shim
-/// is written per name, so a seventh entry here **is** a seventh installed,
-/// routed hook and nothing else changes. Growing it has one deliberate
-/// consequence: a family installed while the list was shorter is missing a hook,
-/// the health probe behind [`HookInstallPolicy::KeepIfHealthy`] reports it
-/// unhealthy, and the next such install writes all of them and records the
-/// repair.
+/// `argv[0]` against these names (`bins/rift/src/hooks/git.rs`), and a Windows
+/// shim is written per name, so an entry here **is** an installed, routed hook
+/// and nothing else changes — which is also why a name with no capture body
+/// does not belong in it. Growing it has one deliberate consequence: a family
+/// installed while the list was shorter is missing a hook, the health probe
+/// behind [`HookInstallPolicy::KeepIfHealthy`] reports it unhealthy, and the
+/// next such install writes all of them and records the repair.
 pub const HOOK_NAMES: &[&str] = &[
     "prepare-commit-msg",
     "commit-msg",
     "post-commit",
-    "post-rewrite",
     "pre-push",
-    "post-merge",
     // The only moment git tells Rift a worktree was born, and it tells it from
     // inside the new tree.
     "post-checkout",
@@ -1163,39 +1161,38 @@ mod tests {
         assert!(record.history.is_empty(), "keeping supersedes nothing");
     }
 
-    /// ★ The seventh hook is installed by this chokepoint and
-    /// nothing else, and a family installed before the list grew is repaired.
+    /// ★ `post-checkout` is installed by this chokepoint and nothing else,
+    /// and a family installed while the list was shorter is repaired.
     ///
     /// `post-checkout` is the only moment git tells Rift a worktree was born,
-    /// and it is reached the way the other six are: a name in [`HOOK_NAMES`],
+    /// and it is reached the way every other one is: a name in [`HOOK_NAMES`],
     /// written here and routed by `argv[0]` in the bin. So the first half of
     /// this test is that the name is in the list and the entry lands.
     ///
-    /// The second half is the consequence nobody may discover by surprise. Every
-    /// family on every machine was installed while this list held six, so each
-    /// of them is now missing a hook — [`healthy_binary`] must call that
-    /// *unhealthy* so the next `KeepIfHealthy` install writes the seventh and
-    /// records the repair. A list that grew while the health probe kept saying
-    /// "fine" would install the hook nowhere and report nothing, which is the
-    /// silence this whole design exists to prevent.
+    /// The second half is the consequence nobody may discover by surprise. A
+    /// family installed before the name joined the list is missing a hook —
+    /// [`healthy_binary`] must call that *unhealthy* so the next
+    /// `KeepIfHealthy` install writes it and records the repair. A list that
+    /// changed while the health probe kept saying "fine" would install the
+    /// hook nowhere and report nothing, which is the silence this whole design
+    /// exists to prevent.
     #[test]
-    fn the_seventh_hook_is_installed_and_a_six_hook_family_is_not_healthy() {
+    fn the_worktree_hook_is_installed_and_a_family_missing_it_is_not_healthy() {
         assert!(
             HOOK_NAMES.contains(&"post-checkout"),
-            "the seventh hook is dispatched by its presence in this list alone"
+            "this hook is dispatched by its presence in this list alone"
         );
         let tmp = tempfile::tempdir().unwrap();
         let bin = fake_binary(&tmp.path().join("live"), "rift");
         install_at(tmp.path(), &bin, repoint());
         let hooks = tmp.path().join(".git/hooks");
-        let seventh = hooks.join("post-checkout");
-        assert!(exists_without_following(&seventh).unwrap(), "installed");
+        let adoption = hooks.join("post-checkout");
+        assert!(exists_without_following(&adoption).unwrap(), "installed");
 
-        // The shape every existing installation is in: the six that existed
-        // before this list grew, and no seventh.
-        std::fs::remove_file(&seventh).unwrap();
+        // The shape an installation from before the name joined is in.
+        std::fs::remove_file(&adoption).unwrap();
         #[cfg(unix)]
-        std::fs::remove_file(link_marker(&seventh)).unwrap();
+        std::fs::remove_file(link_marker(&adoption)).unwrap();
 
         let report = install_at(tmp.path(), &bin, keep(true));
 
@@ -1204,7 +1201,7 @@ mod tests {
             "a family missing a hook is not healthy: {report:?}"
         );
         assert_eq!(report.healed.len(), HOOK_NAMES.len(), "{report:?}");
-        assert!(exists_without_following(&seventh).unwrap(), "healed");
+        assert!(exists_without_following(&adoption).unwrap(), "healed");
         assert!(
             std::fs::symlink_metadata(hooks.join("post-checkout.rift-chained")).is_err(),
             "a hook Rift added to its own list is never chained aside as a user's"

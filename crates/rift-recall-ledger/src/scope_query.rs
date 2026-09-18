@@ -16,9 +16,9 @@
 //!   the member on `feature/x` must not be handed the member on `main`'s last
 //!   known state, because the files it holds are not the files that changed;
 //! * **worktree** — `n_checkpoint_worktree`, the member a shard was *archived*
-//!   in. [`WorktreeScope::Any`] for every serving caller, because a summary
-//!   computed in member A being servable in member B is the whole point of a
-//!   shared store;
+//!   in. Every member of the family is in scope, because a summary computed
+//!   in member A being servable in member B is the whole point of a shared
+//!   store;
 //! * the **checkpoint window** (last-N by walk ordinal), applied last.
 //!
 //! The rule over all of them is literal and has not changed: **they never widen
@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rift_core::Result;
 use rift_recall_types::{
     AncestorSet, AncestryOracle, BranchScope, CheckpointWindow, DeveloperScope, Scope,
-    WorktreeScope, ANCESTRY_WALK_CAP,
+    ANCESTRY_WALK_CAP,
 };
 use rift_store::CanonicalStore;
 use sha2::{Digest, Sha256};
@@ -84,9 +84,7 @@ impl ScopeSet {
     ///
     /// Counted before the last-N window, so it answers "how much of your
     /// family's history is on another line", not "how much fell off the end of
-    /// the page". An explicit [`WorktreeScope::Exact`] narrowing is *not*
-    /// counted here: an omission line exists to report what a caller did not
-    /// ask for, and that narrowing is exactly what it asked for.
+    /// the page".
     #[must_use]
     pub fn omitted_out_of_branch(&self) -> usize {
         self.omitted_out_of_branch
@@ -135,12 +133,6 @@ fn branch_verdict(scope: &Scope, ancestry: &dyn AncestryOracle) -> BranchVerdict
     }
 }
 
-/// One checkpoint's archiving member, as the projection recorded it.
-struct Member {
-    token: String,
-    branch: Option<String>,
-}
-
 /// Whether a checkpoint owned by `dev` (`None` = current/unknown) is in scope.
 fn developer_in_scope(scope: &Scope, dev: Option<&str>) -> bool {
     if scope.cross.developers() {
@@ -157,7 +149,7 @@ fn branch_admits(
     verdict: &BranchVerdict,
     id: &str,
     anchors: &BTreeMap<String, String>,
-    members: &BTreeMap<String, Member>,
+    members: &BTreeMap<String, Option<String>>,
 ) -> bool {
     match verdict {
         BranchVerdict::Open => true,
@@ -167,7 +159,7 @@ fn branch_admits(
         BranchVerdict::Ancestry(set) => anchors.get(id).is_some_and(|oid| set.contains(oid)),
         BranchVerdict::Named(name) => members
             .get(id)
-            .and_then(|m| m.branch.as_deref())
+            .and_then(Option::as_deref)
             .is_some_and(|b| b == name),
     }
 }
@@ -200,25 +192,14 @@ pub async fn in_scope_nodes(
     } else {
         BTreeMap::new()
     };
-    let wants_member = matches!(verdict, BranchVerdict::Named(_))
-        || matches!(scope.worktree, WorktreeScope::Exact(_));
-    let members: BTreeMap<String, Member> = if wants_member {
+    // The branch each checkpoint's archiving member was on, as the projection
+    // recorded it — read only when the branch axis names one.
+    let members: BTreeMap<String, Option<String>> = if matches!(verdict, BranchVerdict::Named(_)) {
         store
-            .query(
-                "SELECT node_id, worktree_token, branch FROM n_checkpoint_worktree",
-                &[],
-            )
+            .query("SELECT node_id, branch FROM n_checkpoint_worktree", &[])
             .await?
             .iter()
-            .filter_map(|r| {
-                Some((
-                    r.get_text(0).ok()?,
-                    Member {
-                        token: r.get_text(1).ok()?,
-                        branch: r.get_opt_text(2).ok()?,
-                    },
-                ))
-            })
+            .filter_map(|r| Some((r.get_text(0).ok()?, r.get_opt_text(1).ok()?)))
             .collect()
     } else {
         BTreeMap::new()
@@ -242,11 +223,6 @@ pub async fn in_scope_nodes(
         if !branch_admits(&verdict, &id, &anchors, &members) {
             omitted_out_of_branch += 1;
             continue;
-        }
-        if let WorktreeScope::Exact(token) = &scope.worktree {
-            if members.get(&id).is_none_or(|m| &m.token != token) {
-                continue; // a narrowing the caller asked for: narrowed, not reported
-            }
         }
         kept.push((id, ordinal));
     }
@@ -355,7 +331,7 @@ impl AncestryOracle for MemoryAncestry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rift_recall_types::{CrossScopeGrant, DeveloperScope, NoAncestry};
+    use rift_recall_types::{CrossScopeGrant, DeveloperScope, NoAncestry, WorktreeScope};
     use rift_store::{recall_migrations, SqliteStore, Value};
 
     fn block<F: std::future::Future>(f: F) -> F::Output {
@@ -529,34 +505,6 @@ mod tests {
         let set = block(in_scope_nodes(&store, &granted, &oracle)).unwrap();
         assert!(set.contains("theirs") && set.contains("anchorless"));
         assert_eq!(set.omitted_out_of_branch(), 0);
-    }
-
-    /// `WorktreeScope::Exact` narrows to what one member archived — a caller
-    /// asking about one checkout's own history, not the family's.
-    #[test]
-    fn exact_worktree_scope_narrows_by_observation() {
-        let store = recall_store();
-        put_checkpoint(&store, "here", 2, None);
-        put_checkpoint(&store, "elsewhere", 1, None);
-        put_member(
-            &store,
-            "here",
-            "0123456789ab",
-            "swt-c",
-            Some("swt/c-recall"),
-        );
-        put_member(&store, "elsewhere", "ba9876543210", "main", Some("main"));
-
-        let mut scope = Scope::unbounded("repo");
-        scope.worktree = WorktreeScope::Exact("0123456789ab".to_owned());
-        let set = block(in_scope_nodes(&store, &scope, &NoAncestry)).unwrap();
-        assert!(set.contains("here"));
-        assert!(!set.contains("elsewhere"));
-        assert_eq!(
-            set.omitted_out_of_branch(),
-            0,
-            "a narrowing the caller asked for is not an omission it needs told about"
-        );
     }
 
     /// `BranchScope::Exact` matches the branch the ARCHIVING member was on, and

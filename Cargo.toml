@@ -165,10 +165,6 @@ toml = "0.8"
 toml_edit = { version = "0.22", features = ["serde"] }
 # Redaction (linear-time, no backreferences → ReDoS-safe)
 regex = "1"
-# HTTP(S) client. Referenced only by rift-recall-eval's real-model feature —
-# the owner-invoked paid eval transport, never enabled by `cargo test`.
-# rustls (ring provider) — NOT native-tls, so no banned openssl-sys on Linux.
-ureq = { version = "3", default-features = false, features = ["rustls"] }
 # Security / secrets hygiene
 zeroize = { version = "1", features = ["derive"] }
 secrecy = "0.10"

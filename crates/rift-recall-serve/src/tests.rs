@@ -784,8 +784,6 @@ fn context_pack_is_input_keyed_and_budget_bounded() {
     ))
     .unwrap();
     assert_ne!(other.payload["pack_key"].as_str().unwrap(), key);
-    // the honest-cache note discloses composition provenance
-    assert_eq!(resp.payload["cache"]["composed"], "fresh");
     assert!(resp.payload["total_tokens"].as_u64().unwrap() <= 500);
 }
 

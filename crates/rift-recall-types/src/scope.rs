@@ -50,10 +50,6 @@ pub enum WorktreeScope {
     /// uses): the point of one shared store is that a summary computed in
     /// member A is served in member B.
     Any,
-    /// Only checkpoints whose **archiving** worktree carries this token
-    /// (`RepoPaths::worktree_token`, 12 lowercase hex — the stated
-    /// semantics). A narrowing the caller asked for explicitly.
-    Exact(String),
 }
 
 /// Which developer's sessions are in scope.

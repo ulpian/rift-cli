@@ -2592,10 +2592,7 @@ impl<'a> ServeDispatcher<'a> {
             "tool": "context_pack",
             "sections": pack.sections.iter().map(|s| json!({ "kind": format!("{:?}", s.kind), "lines": s.lines })).collect::<Vec<_>>(),
             "total_tokens": total_tokens,
-            "pack_key": pack_key.clone(),
-            // The honest-cache note: this server composes every
-            // section fresh; a future cache must disclose per-section provenance.
-            "cache": { "pack_key": pack_key, "sections_cached": [], "composed": "fresh" },
+            "pack_key": pack_key,
         });
         Ok(Self::respond(
             ToolName::ContextPack,

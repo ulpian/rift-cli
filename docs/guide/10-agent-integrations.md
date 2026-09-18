@@ -573,11 +573,10 @@ also asks Codex for a version at or above a floor today's releases do not
 reach. Neither gates anything — `rift recall status` is the real picture, and
 `rift enable` ignores the floor.
 
-Two surfaces exist only for tests: the old four-client installer, kept because
-two of its artefacts are still read as ownership proofs (§10.4), and the
-instructions-file paths defined for all nine tokens, six of them unreachable
-because writing a block requires an enabled agent.
-[18-known-gaps.md](18-known-gaps.md) counts these.
+Two artefacts of a retired four-client installer are still read as ownership
+proofs (§10.4) and written by nothing, because a machine that ran it still
+carries them. The instructions-file paths name exactly the three adapters whose
+blocks can be written; there is no path defined for an adapter Rift refuses.
 
 ---
 

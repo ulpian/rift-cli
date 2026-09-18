@@ -515,7 +515,7 @@ projection: a hook that is running is its own proof that hooks are installed.
 | `<git_dir>/rift-sessions/` | Session ownership markers and usage sidecars for *this* checkout. | Yes; live sessions lose attribution context. |
 | `<git_dir>/rift-capture-queue/` | Commits captured but not yet condensed. | No — pending capture work. |
 | `<git_dir>/rift-agent-queue/` | Agent-hook events journaled for the detached worker. | No — pending capture work. |
-| `<common_dir>/hooks/` | The seven git hooks, as links, plus sidecar markers. | No — capture stops. |
+| `<common_dir>/hooks/` | The five git hooks, as links, plus sidecar markers. | No — capture stops. |
 | `<common_dir>/rift-family/family.json` | The family's minted identity. | **Never hand-edit.** |
 | `<common_dir>/rift-family/family.history.jsonl` | Append-only record of every mint and remint. | No — the audit trail. |
 | `<common_dir>/rift-family/binary.json` | Which `rift` binary the family's hooks point at, with a capped history. | Yes; the next install rewrites it. |
@@ -611,10 +611,10 @@ to run from inside one), the reserved `RIFT_HOOK` marker for the same refusal,
 client's global configuration — and `RIFT_HOOK_TEST_PANIC`, fault injection
 proving a panicking hook cannot fail your git operation.
 
-> **Tip:** The shipped binaries read **no API keys**. The one path that would —
-> a paid evaluation sweep against a hosted model — sits behind a build-time
-> opt-in that is off by default, and the default build links no HTTP client at
-> all. If you are auditing egress, that is the sentence to check.
+> **Tip:** The shipped binaries read **no API keys**, and no build of them
+> links an HTTP client: no workspace crate depends on one, and a repository
+> check reads the resolved dependency graph of both binaries to keep it that
+> way. If you are auditing egress, that is the sentence to check.
 
 ---
 

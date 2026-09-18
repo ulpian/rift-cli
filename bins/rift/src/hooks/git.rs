@@ -78,7 +78,7 @@ fn capture_for(name: &str, git_dir: Option<&str>, fwd: &[String]) -> Result<()> 
         // idempotently. Both only rewrite the message file — never reject.
         "prepare-commit-msg" => trailer_prepare(git_dir, fwd)?,
         "commit-msg" => trailer_normalize(fwd)?,
-        // The seventh hook, the one that adopts a newly created worktree.
+        // The adoption hook, the one that runs when git creates a worktree.
         // `git_dir` is deliberately not passed:
         // on the checkout that matters — `git worktree add` — the forwarded
         // value is a relative `.git` that names a *file*, and the handler

@@ -24,9 +24,6 @@
 //! * `fuzzy_matcher_reads_within_bounds` — the fuzzy matcher's workspace pin
 //!   still carries the feature that keeps its SIMD backends inside the bytes
 //!   they were given.
-//! * `real_model_is_opt_in` — the paid model transport is a compile-time
-//!   opt-in: no manifest enables `real-model` through a dependency's
-//!   `features` array or a `default` feature.
 //! * `retired_vocabulary_screen` — no tracked path or tracked byte carries a
 //!   retired program identifier; citations name their rationale in plain
 //!   words instead of pointing at a document that no longer exists.
@@ -1110,7 +1107,6 @@ pub fn run_all(root: &Path) -> Result<(usize, Vec<String>), String> {
     v.extend(no_network_deps_in_capture_crates(root)?);
     v.extend(dialect_conformance_job_runs_every_suite(root)?);
     v.extend(fuzzy_matcher_reads_within_bounds(root)?);
-    v.extend(real_model_is_opt_in(root)?);
     v.extend(no_network_crate_in_the_resolved_graph(root)?);
     v.extend(deleted_paths_stay_deleted(root)?.1);
     let (scanned, retired) = retired_vocabulary_screen(root)?;
@@ -1292,10 +1288,9 @@ const FUZZY_MATCHER: (&str, &str) = ("neo_frizbee", "safe_read");
 
 /// The one violation this check can report, over a manifest already parsed.
 ///
-/// Split from the file read for the reason `real_model_enabled_by_default` is:
-/// the claim is about a declaration, and a test that states the declaration
-/// directly proves the check on every spelling of it rather than on a
-/// temporary file.
+/// Split from the file read so the claim stays about a declaration: a test
+/// that states the declaration directly proves the check on every spelling of
+/// it rather than on a temporary file.
 fn matcher_pin_carries_bounds(manifest: &toml::Value) -> Vec<String> {
     let (crate_name, feature) = FUZZY_MATCHER;
     let Some(pin) = manifest
@@ -1344,69 +1339,6 @@ pub fn fuzzy_matcher_reads_within_bounds(root: &Path) -> Result<Vec<String>, Str
     )?))
 }
 
-/// The manifests that could switch the paid model transport on without a
-/// flag: the binary that hosts `eval`, the crate that owns the feature, and
-/// the capture binary (which must never grow it at all).
-const REAL_MODEL_MANIFESTS: [&str; 3] = [
-    "bins/rift-memd/Cargo.toml",
-    "crates/rift-recall-eval/Cargo.toml",
-    "bins/rift/Cargo.toml",
-];
-
-/// The two spellings that would enable `real-model` in a default build,
-/// TOML-parsed: a dependency entry's `features = [...]` array naming it, or
-/// a `[features] default` naming it. A dependency section is any of the
-/// forms `declared_dep_keys` reads.
-fn real_model_enabled_by_default(manifest: &toml::Value, rel: &str) -> Vec<String> {
-    let mut v = Vec::new();
-    let names_it = |arr: Option<&toml::Value>| {
-        arr.and_then(toml::Value::as_array)
-            .is_some_and(|a| a.iter().any(|f| f.as_str() == Some("real-model")))
-    };
-    let sections = ["dependencies", "dev-dependencies", "build-dependencies"];
-    let mut tables: Vec<&toml::Value> = vec![manifest];
-    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
-        tables.extend(targets.values());
-    }
-    for table in tables {
-        for section in sections {
-            let Some(deps) = table.get(section).and_then(toml::Value::as_table) else {
-                continue;
-            };
-            for (dep, value) in deps {
-                if names_it(value.get("features")) {
-                    v.push(format!(
-                        "{rel}: dependency `{dep}` enables `real-model` unconditionally — \
-                         the paid transport is an opt-in feature of the binary, never \
-                         a dependency default"
-                    ));
-                }
-            }
-        }
-    }
-    if names_it(manifest.get("features").and_then(|f| f.get("default"))) {
-        v.push(format!(
-            "{rel}: `[features] default` enables `real-model` — the paid transport must \
-             stay off in the default build"
-        ));
-    }
-    v
-}
-
-/// `real-model` is a compile-time opt-in: none of `REAL_MODEL_MANIFESTS`
-/// enables it through a dependency's `features` array or a `default` feature.
-///
-/// # Errors
-/// If a manifest cannot be read or parsed.
-pub fn real_model_is_opt_in(root: &Path) -> Result<Vec<String>, String> {
-    let mut v = Vec::new();
-    for rel in REAL_MODEL_MANIFESTS {
-        let manifest = crate::read_toml(&root.join(rel))?;
-        v.extend(real_model_enabled_by_default(&manifest, rel));
-    }
-    Ok(v)
-}
-
 /// The network crates named in a `cargo tree --prefix none --format {p}`
 /// listing (first word of each line is the package name). An EMPTY listing
 /// is an error, not a pass: a screen that reads nothing must not report
@@ -1432,9 +1364,9 @@ fn network_crates_in_tree(listing: &str) -> Result<Vec<String>, String> {
 /// The DEFAULT-resolved normal-dependency graph of the two shipped binaries
 /// (`rift`, `rift-memd`) names no `NETWORK_CRATES` member — the external
 /// half of invariant §1.4 that the manifest screen cannot see, and the
-/// executable form of the same rule (`ureq` reaches `rift-memd` only through
-/// its opt-in `real-model` feature). `--all-features` builds still compile
-/// the client; reachability stays the explicit CLI flag, and no test calls it.
+/// executable form of the same rule. No workspace crate depends on an HTTP
+/// client today, and this is what reds if one is added behind an external
+/// intermediary the manifest screen cannot read.
 ///
 /// # Errors
 /// If `cargo tree` cannot run, fails, or returns no packages (fail closed).
@@ -1978,40 +1910,6 @@ mod tests {
         let m = normalized_lint_lines(manifest, &["workspace.lints.clippy"]);
         let b = normalized_lint_lines(baseline, &["workspace.lints.clippy"]);
         assert_ne!(m, b, "drift must be visible after normalization");
-    }
-
-    /// The no-paid-transport-by-default rule, both spellings: a dependency `features`
-    /// array and a `default` feature each enable the paid transport in a
-    /// default build, and each is refused; the clean shape passes.
-    #[test]
-    fn a_manifest_that_enables_real_model_by_default_is_refused() {
-        let via_dep: toml::Value = toml::from_str(
-            "[dependencies]\nrift-recall-eval = { path = \"x\", features = [\"real-model\"] }",
-        )
-        .unwrap();
-        let via_table: toml::Value = toml::from_str(
-            "[dependencies.rift-recall-eval]\npath = \"x\"\nfeatures = [\"real-model\"]",
-        )
-        .unwrap();
-        let via_default: toml::Value =
-            toml::from_str("[features]\ndefault = [\"real-model\"]\nreal-model = []").unwrap();
-        for (label, m) in [
-            ("dep", &via_dep),
-            ("table", &via_table),
-            ("default", &via_default),
-        ] {
-            assert_eq!(
-                real_model_enabled_by_default(m, "t/Cargo.toml").len(),
-                1,
-                "{label} must be refused"
-            );
-        }
-        let clean: toml::Value = toml::from_str(
-            "[dependencies]\nrift-recall-eval = { path = \"x\" }\n[features]\nreal-model = [\"rift-recall-eval/real-model\"]",
-        )
-        .unwrap();
-        assert!(real_model_enabled_by_default(&clean, "t/Cargo.toml").is_empty());
-        assert!(real_model_is_opt_in(&workspace_root()).unwrap().is_empty());
     }
 
     /// The matcher's bounds-checking feature is asserted on this workspace,

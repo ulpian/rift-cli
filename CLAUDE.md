@@ -83,7 +83,7 @@ the nested benchmark workspace gets, since the three-OS `test` job never
 reaches it; and `xtask ci-meta`, the guard on the guards (the required-job
 list itself, read-only workflow permissions, the `ci/lint-baseline.txt`
 lint-table lock, no `unsafe`, no crate-root blanket allows, no schema
-fast-path in bins, deleted paths staying deleted, `real-model` opt-in only,
+fast-path in bins, deleted paths staying deleted,
 and no network crate in the shipped binaries' resolved graph); and
 `gate-intercept`, the read-only guard on the read-interception surface (one
 file composes an agent's hook response, the channels answered on match
@@ -201,7 +201,7 @@ reviewable adjacency list.
   and checkpoint carries worktree provenance (`session_worktree`,
   `checkpoint_worktree`); recall serves members through branch containment, so
   savings compound across members — including subagents in temporary
-  worktrees. Adoption is explicit (`rift worktree adopt`, or the seventh
+  worktrees. Adoption is explicit (`rift worktree adopt`, or the
   `post-checkout` hook); nothing re-mints a family identity automatically.
   Minting stays in one chokepoint so a second call site cannot fork a family,
   and every durable state root is keyed by family rather than by checkout path —

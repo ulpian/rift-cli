@@ -8,8 +8,8 @@
 //!   permissions, lint-table baseline, no unsafe, no crate-root blanket allows,
 //!   no schema fast-path in bins, the dialect-conformance job's suite set,
 //!   deleted paths staying deleted, no retired program vocabulary in any
-//!   tracked path or byte, `real-model` opt-in only, no network crate in the
-//!   binaries' default-resolved graph).
+//!   tracked path or byte, no network crate in the binaries' default-resolved
+//!   graph).
 //! * `gate-intercept` — the read-only guard on the read-interception surface;
 //!   one leg per property, each named on its own output line.
 //! * `dogfood` — the scripted-session savings reading, played through the

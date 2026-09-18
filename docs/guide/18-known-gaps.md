@@ -49,15 +49,14 @@ ones.
 
 ## 18.3 Capture
 
-### Two of the seven repository hooks are placeholders
+### A history rewrite leaves the ledger holding pre-rewrite shapes
 
-*Never built.* Five hooks carry a handler: one records a commit, two manage
-message trailers, one adopts a new member checkout. The two firing after a
-history rewrite and after a merge are installed, routed by name, and fall through
-to an empty branch — so a rebase that moves the commits a session recorded leaves
-the ledger holding pre-rewrite shapes, while their presence implies otherwise.
-Closing it needs a decision before a body: the append-only rule forbids editing
-sealed rows, so the answer is a new superseding record.
+*Never built.* Nothing reacts to a rebase, an amend or a merge, and no hook is
+installed for any of them — the absence is visible in the dispatch table rather
+than hidden behind a routed name with an empty body. A session whose commits a
+rebase moves keeps the shapes it recorded before the move. Closing it needs a
+decision before a body: the append-only rule forbids editing sealed rows, so the
+answer is a new superseding record.
 
 **Read more.** [03](03-capture.md),
 [05](05-ledger-and-verification.md).
@@ -440,26 +439,6 @@ plane's rule is that a semantic claim needs evidence, not plausibility.
 
 **Read more.** [07](07-serving-and-injection.md) §7.3.
 
-### The pack compiler's cache honesty exists; the cache does not
-
-*Never built.* The pack compiler carries a block reporting which sections came
-from a cache rather than being recomputed — the honest-answer half of a caching
-design. No cache exists, so the list is always empty: dead weight rather than a
-wrong answer, and the kind that reads as a live optimisation. Closing it takes
-the cache, keyed the way the reporting block already assumes.
-
-**Read more.** [06](06-recall.md).
-
-### A narrowing serve scope has no shipped caller
-
-*Never built.* The serving types can restrict a query to one exact member of a
-repository family. Every shipped caller uses the sharing default instead — the
-whole point of a shared store — so the narrowing value is exercised only by
-containment tests and audit-shaped queries. It is available if a future surface
-wants it, and a change to its semantics affects nothing today.
-
-**Read more.** [09](09-worktrees-and-families.md).
-
 ---
 
 ## 18.7 Cost and savings
@@ -479,26 +458,14 @@ claim is unavailable by rule, not by modesty.
 **Read more.** [08](08-cost-and-savings.md) §8.13,
 [17](17-invariants.md).
 
-### The tokenizer seam has no production constructor
-
-*Never built.* The cost plane defines a tokenizer abstraction with an
-encoding-based implementation behind it, and nothing in the product constructs
-one: the capture path writes provider-reported counts, authoritative when
-present. The seam matters for clients that report nothing, and those cases have
-no counts rather than estimated ones. Closing it means constructing the tokenizer
-at the one place that needs it, and deciding how an estimated count is labelled
-so it is never confused with a reported one.
-
-**Read more.** [08](08-cost-and-savings.md) §8.6.
-
 ### A second, cruder estimator lives in the validity plane
 
-*Honest limit.* Serving-side size checks use a characters-over-four approximation
-rather than the tokenizer seam above. It is used for bounding, not billing — a
-cap decision, not a cost figure — but it is still a second estimator in a
-codebase that otherwise insists on one authority per number. Closing it means
-pointing it at the seam once the seam has a production constructor; the two items
-close together or not at all.
+*Honest limit.* Serving-side size checks use a characters-over-four
+approximation rather than the one counting crate. It is used for bounding, not
+billing — a cap decision, not a cost figure — but it is still a second
+estimator in a codebase that otherwise insists on one authority per number.
+Closing it means counting those trials through the same crate every other
+estimate goes through.
 
 **Read more.** [08](08-cost-and-savings.md).
 
@@ -605,34 +572,6 @@ a client that publishes one.
 
 **Read more.** [08](08-cost-and-savings.md) §8.6.
 
-### The paid model sweep has never been run
-
-*Not run.* Placement defaults for served packs were meant to be derived from a
-paid sweep across real models. Everything except the invocation is built: the
-verb exists, fails fast without keys rather than pretending, and leaves the
-fixtures and committed provenance untouched. The committed defaults artifact
-still carries an empty per-model table and a provenance naming itself a
-conservative pre-sweep fallback, so the defaults rest on a prior, not measurement
-— which is why the design behind them is not marked accepted. Closing it needs
-someone with keys and a budget: pin the model identifiers and prices, run the
-verb, commit the fixtures and the derived artifact, record the spend.
-
-**Read more.** [08](08-cost-and-savings.md) §8.14.
-
-### Even a perfect sweep would change nothing today
-
-*Never built. Read this with the previous entry.* Three things stand between a
-successful sweep and a different served pack: the function reading derived
-defaults has no caller outside its own unit test; no path tells a serve which
-model the client is running, so there is nothing to look defaults up *by*; and
-the artifact's schema lacks the repository-class axis the design named. "Run the
-sweep" is therefore not the whole task, and treating it as one spends money for
-an artifact that changes no behaviour. Closing it means building the consumption
-channel — decide where model identity enters a serve, call the lookup there, and
-extend the schema **before** the run.
-
-**Read more.** [08](08-cost-and-savings.md).
-
 ### `rift recap` prints no savings line
 
 *Measured defect.* The verb's help text advertises a savings summary; its human
@@ -687,9 +626,11 @@ instrument inside the existing one.
 ### Two declared relations have no writer
 
 *Never built (dead schema).* The capture store declares relations for raw shadow
-branches and their events; nothing inserts into either, and the dashboard has a
-read query that returns nothing. A cache for ancestry verdicts is named in the
-design and does not exist at all. Declared-but-unwritten relations sit on the
+branches and their events; nothing inserts into either. The dashboard's read
+query over them is gone; the one remaining reader is `rift gc`, which reports
+nothing to collect because there is nothing there. A cache for ancestry
+verdicts is named in the design and does not exist at all.
+Declared-but-unwritten relations sit on the
 append-only registry, carry their generated immutability guards and appear in the
 schema snapshot — so they look exactly as live as everything else, and only the
 absence of a writer distinguishes them. Closing it means either a writer or a
@@ -750,19 +691,6 @@ bugs disappear. Closing them takes two small adapter edits, whenever the agent
 enters scope.
 
 **Read more.** [10](10-agent-integrations.md) §10.6.
-
-### Two adapter surfaces exist only for tests
-
-*Honest limit.* A whole-set install helper has no production caller and is kept
-for two read-only ownership proofs; skill paths are defined for every adapter
-token, while the code writing them is gated on the adapter being both supported
-and enabled. Neither is a defect, but both are surfaces wider than their use — the
-install helper in particular is the only emitter of one client's hook merge,
-which is why that client's hook file is never written in production. Closing them
-means narrowing the surfaces at the cost of the two ownership proofs, or leaving
-them and knowing what they are.
-
-**Read more.** [10](10-agent-integrations.md).
 
 ---
 
@@ -1015,12 +943,10 @@ assertions, and the second is closer to the truth.
 
 ### Some checks are advisory or opt-in and are not run locally
 
-*Not run, by design.* The undefined-behaviour interpreter leg is advisory; the
-fuzz smoke and its nightly counterpart have their own budgets and run in
-continuous integration, not in the local suite; the paid model evaluation is
-opt-in behind a feature and spends nobody's money without an explicit act. A
-green local run does not mean every check in the project passed — it means the
-required ones did.
+*Not run, by design.* The undefined-behaviour interpreter leg is advisory, and
+the fuzz smoke and its nightly counterpart have their own budgets and run in
+continuous integration, not in the local suite. A green local run does not mean
+every check in the project passed — it means the required ones did.
 
 **Read more.** [16](16-development.md).
 
