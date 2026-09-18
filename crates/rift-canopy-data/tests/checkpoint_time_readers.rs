@@ -100,7 +100,7 @@ const SITES: &[Enumerated] = &[
                which is the only reason a sentinel is not on screen.",
     },
     Enumerated {
-        file: "feeds.rs",
+        file: "feeds/activity.rs",
         quoted: 1,
         from_sql: 0,
         via_cte: 2,
@@ -211,11 +211,14 @@ fn every_reader_of_the_checkpoint_table_is_on_the_enumerated_list() {
 
     let mut unexpected = Vec::new();
     for path in &files {
+        // The src-relative path, not the bare file name: a card of the data
+        // plane is one file of a directory module, and two directories may
+        // hold a reader of the same name.
         let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_owned();
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
         let body = scannable(path);
         let quoted = occurrences(&body, "\"checkpoint\"");
         let from_sql = occurrences(&body, "FROM checkpoint");
