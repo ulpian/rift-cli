@@ -663,19 +663,19 @@ own run state. Three rules make it safe to trust without checking:
   right one.
 
 **The ranking is Rift's own, over facts it already records.** How warm a path
-is comes from read ledgers and the family's recorded per-file read counts; how
-recent it is comes from the modification times in the index; whether it is
+is comes from window journals and the family's recorded per-file read counts;
+how recent it is comes from the modification times in the index; whether it is
 dirty comes from git. There is no second database and no per-machine store to
 keep in step with anything — the score is a query over the record this chapter
 is about.
 
 How much of that a given answer can afford differs, and the difference is
-stated rather than averaged. Asked as a command, the ranking gathers the read
-ledgers of *every member of the family*, which is why a file a sibling worktree
+stated rather than averaged. Asked as a command, the ranking gathers the window
+journals of *every member of the family*, which is why a file a sibling worktree
 read ranks warm in this one — the compounding property of
 [chapter 9](09-worktrees-and-families.md) applied to names. Answered inside a
 hook, it uses the two arguments a hook can afford: the matched paths, and this
-conversation's own read ledger, one bounded file the page cache is already
+conversation's own window journal, one bounded file the page cache is already
 holding. It runs no git status there, because a full status of a working tree
 is not a hook's to run and a frame that tagged nothing is honest where a frame
 that guessed would not be.

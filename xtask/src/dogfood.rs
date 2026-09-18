@@ -642,7 +642,7 @@ pub struct SessionOutcome {
     /// What the client's own event stream said the session cost it, where the
     /// stream carries the figure at all.
     pub client_reported: Option<u64>,
-    /// Lines in the checkout's read ledgers after this session.
+    /// Lines in the checkout's window journals after this session.
     pub ledger_lines: u64,
     /// What the client's own log exposed.
     pub retries: RetryCounts,
@@ -1155,7 +1155,7 @@ fn release_binary(root: &Path) -> Result<PathBuf, String> {
     Ok(rift)
 }
 
-/// Lines across every read ledger in a checkout.
+/// Lines across every window journal in a checkout.
 #[must_use]
 pub fn ledger_lines(scratch: &Path) -> u64 {
     let dir = scratch.join(".rift").join("state").join("reads");

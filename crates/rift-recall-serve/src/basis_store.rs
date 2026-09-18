@@ -53,7 +53,7 @@
 //!
 //! Keyed by the **read's own identity** — the SHA-256 of the bytes as they
 //! were read — because that is the address every held revision travels under:
-//! the read ledger's hold lines, the manifest's `@sha256:` entries, the pull
+//! the window journal's hold lines, the manifest's `@sha256:` entries, the pull
 //! verbs' `--known-hash`. One family, one copy: a linked worktree is a member
 //! of its repository's family, and a snapshot keyed by a checkout path would
 //! be re-taken in every one of them and lost with the first temporary
@@ -103,7 +103,7 @@ pub struct SnapshotMeta {
     /// and the address every held revision travels under.
     pub content_sha256: String,
     /// The repository-relative path the read named, in the `/` spelling the
-    /// read ledger keys by. A content address is half a name, so the reader
+    /// window journal keys by. A content address is half a name, so the reader
     /// binds both (`held_diff::basis_bytes_for_path` gives the reasoning).
     pub path: String,
     /// SHA-256 (hex) of the redacted bytes actually on disk — what a reader

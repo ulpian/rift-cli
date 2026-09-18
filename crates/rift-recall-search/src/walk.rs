@@ -15,8 +15,8 @@
 //!   index cannot be named by a ranked answer, cannot be grepped by the content
 //!   primitive, and cannot leak through a caller that forgot to re-check.
 //! - **Rift's own run state is not searchable.** `.git/` and `.rift/state/` are
-//!   pruned: they hold ledgers, sidecars and this index, none of which is a
-//!   file anybody meant to search for.
+//!   pruned: they hold window journals, sidecars and this index, none of which
+//!   is a file anybody meant to search for.
 //! - **Symbolic links are not followed** — a link out of the work tree is not
 //!   part of it, and a link into it is already indexed under its real name.
 
@@ -217,7 +217,7 @@ fn is_rift_state(path: &Path) -> bool {
 ///
 /// `None` for anything that cannot be spelled that way — a path outside the
 /// root, or a name that is not UTF-8 — because a path Rift cannot write into a
-/// ledger row or a tool call is not a path it can offer as an answer.
+/// window journal row or a tool call is not a path it can offer as an answer.
 fn relative(root: &Path, path: &Path) -> Option<String> {
     let rel = path.strip_prefix(root).ok()?;
     let mut out = String::new();

@@ -856,7 +856,7 @@ pub(crate) fn shadow_refs(repo: &rift_git::RepoPaths) -> Vec<(String, i64)> {
 /// costs is a checkpoint that was never going to land), stale queue temp
 /// files, the `.rift/state/` run caches (manifest baselines + injection
 /// markers — losing them costs one bootstrap turn, never correctness), the
-/// per-window read ledgers past their own TTL (losing one costs a re-read that
+/// per-window journals past their own TTL (losing one costs a re-read that
 /// would have been declined), and the once-per-eviction recovery markers past
 /// the same TTL (losing one costs a recovery map handed over twice).
 ///
@@ -912,12 +912,12 @@ pub(crate) fn clean(root: &Path, dry_run: bool, ttl_days: u32) -> Result<Outcome
         crate::capture_queue::sweep_stale_tmps(&repo.git_dir, now)
     };
 
-    // The per-window read ledgers, by their own age: a window still being
+    // The per-window journals, by their own age: a window still being
     // written to keeps its file, so a live conversation is never disarmed
     // mid-sentence, and nothing in the directory that this tool did not write
     // is touched however it got there.
-    let expired_read_ledgers =
-        crate::read_ledger::sweep_expired(&repo.work_tree, now, ttl_ms, dry_run);
+    let expired_window_journals =
+        crate::window_journal::sweep_expired(&repo.work_tree, now, ttl_ms, dry_run);
 
     // Run-state caches: bootstrap-cost transients only.
     let dropped_state = drop_run_state_caches(&repo.work_tree, dry_run);
@@ -956,7 +956,7 @@ pub(crate) fn clean(root: &Path, dry_run: bool, ttl_days: u32) -> Result<Outcome
         "clean ({mode}): {} shadow ref(s) pruned ({} kept inside TTL), \
          {pruned_queue} stale queue entr{} removed, {swept_tmps} temp file(s) swept, \
          {dropped_state} run-state cache dir(s) dropped, \
-         {expired_read_ledgers} expired read-ledger file(s) removed, \
+         {expired_window_journals} expired window-journal file(s) removed, \
          {expired_recovery_markers} expired recovery marker(s) removed, \
          {sidecars} expired document sidecar(s), {orphan_links} orphan link(s) \
          and {doc_windows} ended document conversation(s) removed, \
@@ -978,7 +978,7 @@ pub(crate) fn clean(root: &Path, dry_run: bool, ttl_days: u32) -> Result<Outcome
             "pruned_queue_entries": pruned_queue,
             "swept_tmp_files": swept_tmps,
             "dropped_state_dirs": dropped_state,
-            "expired_read_ledgers": expired_read_ledgers,
+            "expired_window_journals": expired_window_journals,
             "expired_recovery_markers": expired_recovery_markers,
             "expired_doc_sidecars": sidecars,
             "orphan_doc_links": orphan_links,

@@ -343,7 +343,7 @@ impl Default for DocPolicy {
 /// say what the operator permitted, and every lever below goes `off`.
 pub const SERVE_POLICY_TEMPLATE: &str = r#"# Rift serving policy. Absent = these defaults; unreadable = every lever off.
 
-# Declining a re-read of a range this session's ledger proves the context still
+# Declining a re-read of a range this session's journal proves the context still
 # holds. `observe` reaches the decision and records it without touching the
 # call; `enforce` declines it once, with a reason, and allows the repeat.
 [interception]

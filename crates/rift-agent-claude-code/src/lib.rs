@@ -1411,7 +1411,7 @@ mod pinned_tool_field_surface {
     /// on this family actually writes — a `cd` into a crate, a trailing
     /// `| head`, two `cat`s joined by `&&` — and each of those is one call
     /// carrying several facts. Answering with the first alone would record a
-    /// fraction of the call and leave the rest outside the ledger altogether;
+    /// fraction of the call and leave the rest outside the journal altogether;
     /// answering with none, as this adapter did before, left all of it there.
     #[test]
     fn a_shell_call_answers_with_every_read_the_line_performs() {

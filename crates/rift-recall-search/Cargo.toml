@@ -16,8 +16,8 @@ rift-core = { version = "0.0.1", path = "../rift-core" }
 # policy, and this matches them with the repository's own matcher rather than a
 # second glob dialect that could disagree with it about `secrets/**`.
 rift-config = { version = "0.0.1", path = "../rift-config" }
-# The read ledger's row grammar. Frecency is a query over rows this crate never
-# writes, so it takes the parser and nothing else.
+# The window journal's row grammar. Frecency is a query over rows this crate
+# never writes, so it takes the parser and nothing else.
 rift-agent = { version = "0.0.1", path = "../rift-agent" }
 thiserror = { workspace = true }
 # The four pure-Rust pieces. The finder's own umbrella crate is not pure Rust —

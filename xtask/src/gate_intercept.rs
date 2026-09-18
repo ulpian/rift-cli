@@ -745,7 +745,7 @@ fn screen_channels(stated: &BTreeSet<String>, pinned: &BTreeSet<String>, fixture
 ///
 /// A root that no longer exists is a hard error, not a smaller walk.
 const GATE_ROOTS: [&str; 11] = [
-    "read_ledger_step",
+    "window_journal_step",
     "read_gate",
     "doc_gate",
     "doc_gate_in",
@@ -1546,8 +1546,8 @@ mod tests {
     #[test]
     fn a_planted_store_call_on_the_decision_path_is_caught() {
         let clean = vec![(
-            "bins/rift/src/hooks.rs".to_owned(),
-            "fn read_ledger_step() { read_gate(); }\n\
+            "bins/rift/src/hooks/gate.rs".to_owned(),
+            "fn window_journal_step() { read_gate(); }\n\
              fn read_gate() { helper(); }\n\
              fn edit_record() {}\nfn gate_policy() {}\nfn gate_step() {}\nfn edit_step() {}\n\
              fn gate() {}\nfn respond_with_decision() {}\n\
@@ -1582,8 +1582,8 @@ mod tests {
     #[test]
     fn a_planted_in_process_parser_on_the_decision_path_is_caught() {
         let clean = vec![(
-            "bins/rift/src/hooks.rs".to_owned(),
-            "fn read_ledger_step() {}\nfn read_gate() {}\nfn edit_record() {}\n\
+            "bins/rift/src/hooks/gate.rs".to_owned(),
+            "fn window_journal_step() {}\nfn read_gate() {}\nfn edit_record() {}\n\
              fn gate_policy() {}\nfn gate_step() {}\nfn edit_step() {}\nfn gate() {}\n\
              fn respond_with_decision() {}\n\
              fn doc_gate() { doc_gate_in(); }\nfn doc_gate_in() { sidecar(); }\n\
@@ -1635,7 +1635,7 @@ mod tests {
         let planted: Vec<(String, String)> = corpus
             .into_iter()
             .map(|(rel, text)| {
-                if rel != "bins/rift/src/hooks.rs" {
+                if rel != "bins/rift/src/hooks/gate.rs" {
                     return (rel, text);
                 }
                 let at = text
@@ -1690,7 +1690,7 @@ mod tests {
             "fn other() {}\n".to_owned(),
         )])
         .expect_err("a missing root stops the gate");
-        assert!(err.contains("read_ledger_step"), "{err}");
+        assert!(err.contains("window_journal_step"), "{err}");
     }
 
     /// A store opened by a function nothing on the decision path calls is not
@@ -1698,8 +1698,8 @@ mod tests {
     #[test]
     fn a_store_opened_off_the_decision_path_is_not_a_finding() {
         let corpus = vec![(
-            "bins/rift/src/hooks.rs".to_owned(),
-            "fn read_ledger_step() {}\nfn read_gate() {}\nfn edit_record() {}\n\
+            "bins/rift/src/hooks/gate.rs".to_owned(),
+            "fn window_journal_step() {}\nfn read_gate() {}\nfn edit_record() {}\n\
              fn gate_policy() {}\nfn gate_step() {}\nfn edit_step() {}\nfn gate() {}\n\
              fn respond_with_decision() {}\n\
              fn doc_gate() {}\nfn doc_gate_in() {}\nfn document_verify() {}\n\

@@ -616,7 +616,7 @@ fn name_search(
 /// One directory, as this checkout names it: repository-relative, `/`-spelled,
 /// empty for the root itself.
 ///
-/// One spelling, for the reason the read ledger has one: a relative name
+/// One spelling, for the reason the window journal has one: a relative name
 /// resolved against some other directory, or a symlinked prefix, would make
 /// two answers about two different trees look like one. A relative name is
 /// resolved against the directory the payload itself states and against
@@ -888,7 +888,7 @@ fn warm_index(
 ///
 /// The ranking is the engine's and not this module's: same index, same facts,
 /// same query, same order. What this supplies is the two arguments a hook can
-/// afford — the matched paths, and the window's own read ledger, which is one
+/// afford — the matched paths, and the window's own journal, which is one
 /// bounded file the page cache is already holding. What it deliberately does
 /// not supply is git status: a full status of a working tree is not a hook's
 /// to run, and a frame that tagged nothing is honest where a frame that
@@ -904,7 +904,7 @@ fn rank(
     use rift_recall_search::SearchEngine as _;
     let index = rift_recall_search::PathIndex::new(key, matched).ok()?;
     let mut frecency = rift_recall_search::FrecencyFacts::new();
-    frecency.absorb_ledger(&window.reads(work_tree));
+    frecency.absorb_journal(&window.reads(work_tree));
     Some(
         rift_recall_search::NativeEngine::new(index)
             .with_frecency(frecency)
@@ -1079,8 +1079,9 @@ const DROPPED_MARKER: &str = "dropped";
 /// losing the directory costs one extra cap and can never cost an answer.
 struct SearchWindow {
     dir: PathBuf,
-    /// The window's own identity, which is also what its read ledger is named
-    /// by: one conversation, one key, wherever this member writes about it.
+    /// The window's own identity, which is also what its window journal is
+    /// named by: one conversation, one key, wherever this member writes about
+    /// it.
     #[cfg(feature = "search")]
     key: String,
 }
@@ -1102,7 +1103,7 @@ enum Claim {
 impl SearchWindow {
     /// The window a hook belongs to, as this member sees it.
     fn at(work_tree: &Path, session_id: &str, agent_id: Option<&str>) -> Self {
-        let key = crate::read_ledger::key(session_id, agent_id);
+        let key = crate::window_journal::key(session_id, agent_id);
         Self {
             dir: work_tree
                 .join(".rift/state/search")
@@ -1113,8 +1114,8 @@ impl SearchWindow {
         }
     }
 
-    /// The read ledger this window writes: the same key, in the directory the
-    /// search crate names for it.
+    /// The window journal this window writes: the same key, in the directory
+    /// the search crate names for it.
     #[cfg(feature = "search")]
     fn reads(&self, work_tree: &Path) -> PathBuf {
         rift_recall_search::reads_dir(work_tree).join(format!("{}.jsonl", self.key))
@@ -1746,9 +1747,9 @@ mod tests {
     ///
     /// The skeleton comes first and the walk second, on purpose: the index is
     /// keyed by the newest directory modification time it saw, and a directory
-    /// this hook is about to create — the journal under `.git`, the ledgers
-    /// under `.rift` — would move that key out from under the index the test
-    /// just built. A real checkout has both long before an agent runs.
+    /// this hook is about to create — git's own log under `.git`, the window
+    /// journals under `.rift` — would move that key out from under the index the
+    /// test just built. A real checkout has both long before an agent runs.
     #[cfg(feature = "search")]
     fn indexed(files: &[(&str, &str)]) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("a work tree");

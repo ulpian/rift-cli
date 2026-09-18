@@ -2,12 +2,12 @@
 //! build's read gate would have decided about sessions that already happened.
 //!
 //! The savings figures Rift publishes are booked from decisions it took while
-//! an agent waited. Before a change to the read grammar or the read ledger can
-//! be argued for, somebody has to be able to say what the change is worth on
-//! real traffic, and the only traffic that is not a benchmark is the owner's
-//! own recorded sessions. This replays them: no model is called, no store is
-//! opened, nothing is written, and every number comes out the same on two runs
-//! of the same input.
+//! an agent waited. Before a change to the read grammar or the window journal
+//! can be argued for, somebody has to be able to say what the change is worth
+//! on real traffic, and the only traffic that is not a benchmark is the
+//! owner's own recorded sessions. This replays them: no model is called, no
+//! store is opened, nothing is written, and every number comes out the same on
+//! two runs of the same input.
 //!
 //! **It reads private transcripts and prints aggregates.** The files under a
 //! client's project directory hold the owner's prompts, their paths and their
@@ -19,11 +19,11 @@
 //! ## What it is measuring against
 //!
 //! The recogniser and the decision are the shipped ones, reached through the
-//! real Claude Code adapter and the pure read ledger, so the harness reflects
-//! whatever grammar the checkout it is built from has. That is how a before
-//! and an after are produced: run it on `main`, run it on the branch, compare
-//! the two tables. Nothing about the buckets below is a second opinion about
-//! what a read is.
+//! real Claude Code adapter and the pure window journal, so the harness
+//! reflects whatever grammar the checkout it is built from has. That is how a
+//! before and an after are produced: run it on `main`, run it on the branch,
+//! compare the two tables. Nothing about the buckets below is a second opinion
+//! about what a read is.
 //!
 //! ## The four places a replay has to stand in for something
 //!
@@ -35,7 +35,7 @@
 //!    at zero and advances every time a mutating tool call names it; the hash
 //!    a decision is keyed by is `sha256(path, counter)`. Two reads of one
 //!    counter value are two reads of one revision, which is the only thing
-//!    the ledger asks of a hash.
+//!    the journal asks of a hash.
 //! 2. **Line counts come from the worktree**, or from a whole-file write's own
 //!    payload when the window created the file. A path with neither is left
 //!    undecided rather than guessed at.
@@ -72,7 +72,7 @@
 //!
 //! **A call is decided before it runs and reconciled after it.** At the result
 //! the client states how much of the file it handed over, and
-//! [`read_ledger::reconcile_delivery`] moves the window's coverage to agree
+//! [`window_journal::reconcile_delivery`] moves the window's coverage to agree
 //! with it — forward, which is the only route by which a delivery too large
 //! for the byte ceiling to vouch for ever becomes coverage, and back, where
 //! the result says it was cut short. The harness reads that statement off each
@@ -90,11 +90,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rift_agent::read_ledger::{
-    self, Decision, DenyShape, EditEcho, EvictReason, Interval, Ledger, Limits, Line, Mode,
+use rift_agent::respond::Channel;
+use rift_agent::window_journal::{
+    self, Decision, DenyShape, EditEcho, EvictReason, Interval, Journal, Limits, Line, Mode,
     Reconcile, ResolvedRead, StatedDelivery,
 };
-use rift_agent::respond::Channel;
 use rift_agent::{AgentAdapter, EditKind, ReadRequest};
 use rift_agent_claude_code::ClaudeCodeAdapter;
 use rift_core::Sha256Id;
@@ -273,8 +273,8 @@ pub enum Bucket {
     ClientDedup,
     /// The transcript holds the call and no result for it.
     NoResultRecorded,
-    /// A name or content search: a repository-content channel the read ledger
-    /// never decides about.
+    /// A name or content search: a repository-content channel the window
+    /// journal never decides about.
     Search,
 }
 
@@ -348,7 +348,7 @@ impl Bucket {
         }
     }
 
-    /// Whether the read ledger reached a decision that the range was already
+    /// Whether the window journal reached a decision that the range was already
     /// held — whether or not it acted on it.
     #[must_use]
     pub const fn declinable(self) -> bool {
@@ -404,7 +404,7 @@ pub struct Report {
     pub searches: Tally,
     /// Reads plus searches: the denominator the share is taken over.
     pub repo_content: Tally,
-    /// What the ledger found already held, acted on or not.
+    /// What the journal found already held, acted on or not.
     pub declinable: Tally,
     /// What this build would actually have declined.
     pub declined: Tally,
@@ -438,7 +438,7 @@ pub struct Report {
     pub calls_with_several_reads: u64,
     /// Every read every repository-content call performs, members included.
     pub read_members: u64,
-    /// Members the ledger would have declined, allowed because a sibling read
+    /// Members the journal would have declined, allowed because a sibling read
     /// on the same command line was not held. The price of the all-or-nothing
     /// rule, stated rather than absorbed.
     pub declines_lost_to_a_sibling: u64,
@@ -947,8 +947,8 @@ struct TreeState {
 /// One context window's replay state.
 #[derive(Default)]
 struct WindowState {
-    /// The pure ledger this window's decisions are taken over.
-    ledger: Ledger,
+    /// The pure journal this window's decisions are taken over.
+    journal: Journal,
     /// The turn the next call is made in.
     turn: u32,
     /// Paths this window changed with something other than a whole-file write
@@ -997,7 +997,7 @@ pub fn replay(opts: &Options) -> Result<Report, String> {
                 Event::Turn => state.turn = state.turn.saturating_add(1),
                 Event::Evict => {
                     report.evictions = report.evictions.saturating_add(1);
-                    state.ledger.push(Line::Evict {
+                    state.journal.push(Line::Evict {
                         turn: state.turn,
                         reason: EvictReason::Compact,
                         at_ms: 0,
@@ -1179,7 +1179,7 @@ fn apply_edit(
         .and_then(|lines| Interval::new(1, lines))
         .into_iter()
         .collect();
-    state.ledger.push(Line::Edit {
+    state.journal.push(Line::Edit {
         turn: state.turn,
         path: key.clone(),
         hash_old: Some(hash_old),
@@ -1200,7 +1200,7 @@ fn apply_edit(
 /// the gate reaches a decision at all.
 ///
 /// The shape mirrors the binary's `GateMember`, and for the same reason: a
-/// member's decision is reached against the ledger as it stood when the call
+/// member's decision is reached against the journal as it stood when the call
 /// arrived, and only once every member has one does the call as a whole get
 /// to say whether a decline travels.
 struct Member {
@@ -1257,7 +1257,7 @@ impl Slot {
 /// delivered.
 ///
 /// Five phases, the first three of them the binary's own: resolve and decide
-/// every member against ONE snapshot of the ledger; settle whether the call as
+/// every member against ONE snapshot of the journal; settle whether the call as
 /// a whole is declined, which it is only when declining every part of it would
 /// be right; record what each member decided; reconcile each member that was
 /// not declined against what the result states it was handed; and only then
@@ -1305,7 +1305,7 @@ fn classify_reads(
         return;
     }
     // The client answered the call itself, so no bytes arrived and there is
-    // nothing to credit a window with. Checked before the ledger is touched:
+    // nothing to credit a window with. Checked before the journal is touched:
     // recording a delivery that never happened is the one error a decline
     // cannot survive.
     if CLIENT_DEDUP_MARKERS
@@ -1343,11 +1343,11 @@ fn classify_reads(
             }
         }
     }
-    // Phase three: write each member's decision into the window's ledger.
+    // Phase three: write each member's decision into the window's journal.
     for slot in &slots {
         if let Slot::Member(member) = slot {
             if let Some(decision) = &member.decision {
-                state.ledger.push(read_ledger::record(
+                state.journal.push(window_journal::record(
                     &member.read,
                     decision,
                     member.slice_bytes,
@@ -1377,7 +1377,7 @@ fn classify_reads(
                 // delivery this window is owed coverage for.
                 continue;
             }
-            match read_ledger::reconcile_delivery(&member.read, member.recorded, stated) {
+            match window_journal::reconcile_delivery(&member.read, member.recorded, stated) {
                 Reconcile::Unchanged => {}
                 Reconcile::Credit(range) => {
                     // The whole of what this lever is worth, in one line: a
@@ -1388,17 +1388,17 @@ fn classify_reads(
                         member.bucket = Bucket::CreditedFromStatement;
                     }
                     report.deliveries_credited = report.deliveries_credited.saturating_add(1);
-                    credit_line(&mut state.ledger, &member.read, range, state.turn);
+                    credit_line(&mut state.journal, &member.read, range, state.turn);
                 }
                 Reconcile::TakeBack(kept) => {
                     report.deliveries_taken_back = report.deliveries_taken_back.saturating_add(1);
-                    state.ledger.push(Line::Evict {
+                    state.journal.push(Line::Evict {
                         turn: state.turn,
                         reason: EvictReason::Truncate,
                         at_ms: 0,
                     });
                     if let Some(range) = kept {
-                        credit_line(&mut state.ledger, &member.read, range, state.turn);
+                        credit_line(&mut state.journal, &member.read, range, state.turn);
                     }
                 }
             }
@@ -1450,8 +1450,8 @@ fn classify_reads(
 
 /// Append the one line a credit is: a read of exactly the run the statement
 /// named.
-fn credit_line(ledger: &mut Ledger, read: &ResolvedRead, range: Interval, turn: u32) {
-    ledger.push(Line::Read {
+fn credit_line(journal: &mut Journal, read: &ResolvedRead, range: Interval, turn: u32) {
+    journal.push(Line::Read {
         turn,
         path: read.path.clone(),
         hash: read.hash,
@@ -1524,14 +1524,14 @@ fn resolve_member(
     {
         return member(None, None, false, Bucket::OverCreditBound);
     }
-    let read_coverage = state.ledger.read_coverage(&key, hash);
-    let held_before = state.ledger.coverage(&key, hash).contains(read.range);
+    let read_coverage = state.journal.read_coverage(&key, hash);
+    let held_before = state.journal.coverage(&key, hash).contains(read.range);
     let read_before = !read_coverage.is_empty();
-    let already_declined = state.ledger.denied(&read.deny_key());
-    let rests_on_a_write = state.ledger.wrote_in_full(&key, hash).is_some();
-    let decision = read_ledger::decide(
+    let already_declined = state.journal.denied(&read.deny_key());
+    let rests_on_a_write = state.journal.wrote_in_full(&key, hash).is_some();
+    let decision = window_journal::decide(
         &read,
-        &state.ledger,
+        &state.journal,
         Mode::Enforce,
         replay.channel,
         EditEcho::Pinned,
@@ -1540,7 +1540,12 @@ fn resolve_member(
     );
     // The same fallback the shipped gate takes: a decline whose frame has
     // nothing exact left to say is not a decline.
-    let frame = frame_for(&state.ledger, &read, &decision, replay.limits.context_lines);
+    let frame = frame_for(
+        &state.journal,
+        &read,
+        &decision,
+        replay.limits.context_lines,
+    );
     let decision = match (&decision, &frame) {
         (Decision::Deny(_), None) => Decision::Allow,
         _ => decision,
@@ -1563,7 +1568,7 @@ fn bucket_of(
     held_before: bool,
     read_before: bool,
     already_declined: bool,
-    coverage: &read_ledger::IntervalSet,
+    coverage: &window_journal::IntervalSet,
     range: Interval,
     floor: u32,
 ) -> Bucket {
@@ -1594,7 +1599,7 @@ fn bucket_of(
 
 /// The sentence a decline would carry, through the one sealed renderer.
 fn frame_for(
-    held: &Ledger,
+    held: &Journal,
     read: &ResolvedRead,
     decision: &Decision,
     context_lines: u32,
@@ -1628,7 +1633,7 @@ fn frame_for(
 }
 
 /// The turn this window was last handed — or last authored — these bytes.
-fn held_since(held: &Ledger, read: &ResolvedRead) -> Option<u64> {
+fn held_since(held: &Journal, read: &ResolvedRead) -> Option<u64> {
     held.live()
         .iter()
         .rev()
@@ -1808,7 +1813,7 @@ pub fn render_table(report: &Report) -> String {
 
     out.push_str("\n  what the share is\n");
     out.push_str(&row(
-        "declinable by the ledger",
+        "declinable by the journal",
         report.declinable,
         denominator,
     ));
@@ -1923,7 +1928,7 @@ pub fn render_table(report: &Report) -> String {
     out.push_str(
         "\n  Reading it: the declined share is an estimated upper bound on what this\n  \
          build would have kept out of context, never a claim that the reads would\n  \
-         have happened. Searches are in the denominator and the ledger never\n  \
+         have happened. Searches are in the denominator and the journal never\n  \
          declines one, so the read-only share is the larger of the two rates.\n",
     );
     out

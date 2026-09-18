@@ -75,7 +75,7 @@ it cannot advertise a verb that does not exist.
 **Once per context window, and only once.** The right to inject is claimed by an
 exclusive create of a marker under `.rift/state/injection/`, named by the *hash*
 of the session id and the agent id inside it — the same key, from the same
-function, that the read ledger is written under
+function, that the window journal is written under
 ([§6.12](06-recall.md#612-what-a-context-window-already-holds)); an
 agent-supplied string never becomes a path component. One process wins it and
 the decision counts only once that write has persisted; a crashed or retried
@@ -116,7 +116,7 @@ useful: *these files you have read changed since then.*
 [rift] Recorded delta since the state you already hold (facts, not directives).
 2 file(s) you have read changed since then:
 - crates/rift-store/src/schema.rs@sha256:b6caa84d L12-38,L204-206 (+2)
-- bins/rift/src/hooks.rs@sha256:0a1b2c3d (changed)
+- bins/rift/src/hooks/gate.rs@sha256:0a1b2c3d (changed)
 (3 more not shown)
 Detail on demand: rift recall changed-hunks crates/rift-store/src/schema.rs
 --known-hash b6caa84d1f5ada80 --json
@@ -139,8 +139,8 @@ the sentence "file(s) you have read changed" is literally true wherever the
 record has lines, and falls back to the older behaviour where it has none.
 
 **The baseline and its stamp are keyed by the window too**, by the same
-function the pointer marker and the read ledger use — the session id and the
-agent id inside it, hashed together. The held set was already per window, so a
+function the pointer marker and the window journal use — the session id and
+the agent id inside it, hashed together. The held set was already per window, so a
 baseline keyed by the session alone made the two halves of one decision
 disagree: a parent would be told that *files you have read changed* about files
 only a subagent ever read. The verb that opens a subagent's window is
@@ -463,7 +463,7 @@ boundary after a client's own compaction signal — Rift injects the
 ```
 [rift] Context recovered. You had read, and no longer hold:
 - crates/rift-store/src/schema.rs@sha256:b6caa84d… L1-412 (unchanged since your read)
-- bins/rift/src/hooks.rs@sha256:0a1b2c3d… L1-1180 (changed at L340-368)
+- bins/rift/src/hooks/gate.rs@sha256:0a1b2c3d… L1-1180 (changed at L340-368)
 (6 more not shown)
 ```
 
@@ -592,7 +592,7 @@ place:
 [rift] Search answered: 8 of 143 paths matching the pattern you searched for,
 ranked by relevance to this session (facts, not directives):
 - crates/rift-store/src/schema.rs
-- bins/rift/src/hooks.rs
+- bins/rift/src/hooks/gate.rs
 …
 Repeat this exact call for the full list.
 ```

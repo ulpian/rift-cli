@@ -25,10 +25,10 @@
 use rift_core::{AgentId, CanonicalEvent, EventKind, Sha256Id, Trust};
 
 pub mod conformance;
-pub mod read_ledger;
 pub mod respond;
 pub mod settle;
 pub mod shell_read;
+pub mod window_journal;
 
 /// The canonical-event schema version this SDK builds (bumped additively).
 pub const SCHEMA_VERSION: u16 = 1;
@@ -232,7 +232,7 @@ pub struct ReadRequest {
 
 impl ReadRequest {
     /// The conservative inclusive line bounds before the file clamps them.
-    /// Byte and unknown spans return `None`: the line ledger must not invent a
+    /// Byte and unknown spans return `None`: the line journal must not invent a
     /// conversion or a delivery result.
     #[must_use]
     pub const fn conservative_lines(&self) -> Option<(u32, u32)> {

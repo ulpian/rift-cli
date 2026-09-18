@@ -10,7 +10,7 @@
 //!
 //! The claims are about **shapes**, never about bytes of a path: a decision
 //! envelope, the clauses a reason carries, the kinds of line the window's
-//! ledger ends up holding. A test that pinned the tempdir's own spelling
+//! journal ends up holding. A test that pinned the tempdir's own spelling
 //! would be pinning the machine it ran on.
 #![allow(
     clippy::unwrap_used,
@@ -259,7 +259,7 @@ fn numbered(lines: u32, extra: Option<&str>) -> String {
     body
 }
 
-/// The names of the ledger files one repository holds — one per context
+/// The names of the journal files one repository holds — one per context
 /// window, named for the window rather than for the order a directory lists.
 fn windows(repo: &Path) -> Vec<String> {
     let dir = repo.join(".rift").join("state").join("reads");
@@ -274,7 +274,7 @@ fn windows(repo: &Path) -> Vec<String> {
     names
 }
 
-/// The kinds of line one window's ledger holds, in order.
+/// The kinds of line one window's journal holds, in order.
 fn kinds_of(repo: &Path, window: &str) -> Vec<String> {
     std::fs::read_to_string(repo.join(".rift").join("state").join("reads").join(window))
         .unwrap()
@@ -510,7 +510,7 @@ fn a_subagents_reads_are_never_the_parents_coverage() {
         "the parent never saw those bytes: {parent}"
     );
     let names = windows(&repo);
-    assert_eq!(names.len(), 2, "two windows, two ledgers: {names:?}");
+    assert_eq!(names.len(), 2, "two windows, two journals: {names:?}");
     for window in &names {
         assert_eq!(
             kinds_of(&repo, window),
@@ -1294,7 +1294,7 @@ fn an_antigravity_repeat_is_declined_once_with_the_sealed_frame_and_then_runs() 
     );
     assert!(
         reason.contains("Repeat this exact call if you still need it (it is allowed once)."),
-        "the way out stays open in the text as well as in the ledger: {reason}"
+        "the way out stays open in the text as well as in the journal: {reason}"
     );
     assert!(
         reason.contains("rift recall changed-hunks") && reason.contains("--known-hash"),
@@ -1856,7 +1856,7 @@ fn a_decline_books_what_it_saved_and_what_it_cost_in_both_relations() {
 /// ★ **A read Rift caused not to happen is booked, and shows up in the
 /// figure.** Driven through the shipped binary, one process per hook:
 ///
-/// 1. the window reads a file, so the ledger knows it holds it;
+/// 1. the window reads a file, so the journal knows it holds it;
 /// 2. the context is compacted and the boundary hands it back the map of what
 ///    it stopped holding — Rift telling the window, in so many words, that it
 ///    held this file at this revision and these lines;
@@ -1912,7 +1912,7 @@ fn an_announcement_the_window_acts_on_books_a_read_that_never_happened() {
     };
     assert!(
         kinds_of(&repo, only).contains(&"hold".to_owned()),
-        "and the window's ledger records having been told: {:?}",
+        "and the window's journal records having been told: {:?}",
         kinds_of(&repo, only)
     );
 
@@ -2117,7 +2117,7 @@ enum PoolClass {
 struct PoolMember {
     /// The file's name, as a booked handle spells it.
     name: String,
-    /// The lines the call asked for, as the ledger numbers them.
+    /// The lines the call asked for, as the journal numbers them.
     lo: u32,
     hi: u32,
     class: PoolClass,
@@ -2688,7 +2688,7 @@ fn a_limit_less_read_past_the_delivery_bound_runs_without_coverage() {
             "a delivery this large is never vouched for, so never declined"
         );
     }
-    assert!(windows(&repo).is_empty(), "no coverage ledger is created");
+    assert!(windows(&repo).is_empty(), "no coverage journal is created");
 }
 
 /// A `PostToolUse` result for a limit-less read that states a **complete**

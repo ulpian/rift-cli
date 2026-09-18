@@ -110,7 +110,7 @@ pub enum HookEvent {
     /// End of session.
     SessionEnd,
     /// `PreToolUse` for a file read named **absolutely**, which is the only
-    /// spelling the read ledger stands behind without a stated working
+    /// spelling the window journal stands behind without a stated working
     /// directory — and therefore the only one the gate decides about.
     ///
     /// Delivered first, so nothing about it is a repeat.
@@ -119,7 +119,7 @@ pub enum HookEvent {
     ///
     /// This is the call the gate really pays for: the window already holds
     /// these lines at this revision, so the whole decision runs — hash,
-    /// ledger, predicate, the reason the model is answered with, and the
+    /// journal, predicate, the reason the model is answered with, and the
     /// accounting journalled for the detached worker. The payload differs
     /// from [`Self::ToolCallReadAbs`] in the field a live session varies, so
     /// the two are two events rather than a replay of one.
@@ -739,7 +739,7 @@ fn gate_rows() -> [ScenarioSpec; 2] {
             measurement_owed: Some(OWED_TO_THE_GATE_WINDOW),
             ..hook(
                 ScenarioId::HookReadGate,
-            "a read the gate DECLINES (`PreToolUse` / `Read`, the lines already held, this repository asking for declines): hash, ledger, predicate, the reason the model is answered with, and the accounting journaled for the detached worker",
+            "a read the gate DECLINES (`PreToolUse` / `Read`, the lines already held, this repository asking for declines): hash, journal, predicate, the reason the model is answered with, and the accounting journaled for the detached worker",
             HookEvent::ToolCallReadRepeat,
             // A window that has already declined a key is never asked about it
             // again — one deny per key is what bounds a model that answers a
@@ -2076,8 +2076,8 @@ pub fn parse_answer(id: ScenarioId, stdout: &str) -> Option<Result<(), String>> 
             }
         })),
         // A budget row is a claim about the arm it names. This one names the
-        // decline — the arm that hashes, reads the ledger, decides, composes a
-        // reason and journals the accounting — and the allow path is cheaper
+        // decline — the arm that hashes, reads the journal, decides, composes
+        // a reason and journals the accounting — and the allow path is cheaper
         // than all of that. A row that timed the cheap arm would make its own
         // bar easier to clear, so the probe reads the decision out of the same
         // envelope an agent reads it from and fails the measure on anything

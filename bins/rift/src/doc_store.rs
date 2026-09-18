@@ -314,8 +314,8 @@ const REDIRECT_MARKER: &str = "redirect";
 ///
 /// Per window and not per session: a subagent runs under its parent's session
 /// id with its own agent id and holds different bytes, so it is told
-/// separately — the same key the read ledger is filed under, computed by the
-/// same function.
+/// separately — the same key the window journal is filed under, computed by
+/// the same function.
 ///
 /// Local run state. Losing the directory costs one extra redirect or one extra
 /// substitution and can never cost an answer.
@@ -351,7 +351,7 @@ impl DocWindow {
             dir: work_tree
                 .join(".rift/state/doc")
                 .join(WINDOW_DIR)
-                .join(crate::read_ledger::key(session_id, agent_id)),
+                .join(crate::window_journal::key(session_id, agent_id)),
         }
     }
 
@@ -490,8 +490,9 @@ impl DocWindow {
 ///
 /// A window's markers are the memory of what one conversation was told, and a
 /// conversation that has been over for a month is not going to be told
-/// anything more. Directories only, named the way [`crate::read_ledger::key`]
-/// names one, and a name this module did not write is left alone.
+/// anything more. Directories only, named the way
+/// [`crate::window_journal::key`] names one, and a name this module did not
+/// write is left alone.
 fn sweep_windows(dir: &Path, cutoff_ms: i64, dry_run: bool) -> usize {
     let Ok(entries) = std::fs::read_dir(dir.join(WINDOW_DIR)) else {
         return 0;

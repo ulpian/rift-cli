@@ -107,7 +107,7 @@ pub enum Schema2Terminal<'a> {
     InternalError,
 }
 
-/// The neutral tag on a decision the read ledger proved: the window was
+/// The neutral tag on a decision the window journal proved: the window was
 /// handed these lines already.
 pub const TAG_ALREADY_HELD: &str = "already_held";
 

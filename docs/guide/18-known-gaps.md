@@ -371,10 +371,10 @@ declines to answer.
 
 ### An answered listing ranks on one window's reading, not the family's
 
-*Honest limit.* The command-line search gathers every member's read ledger, so
-warmth compounds across a family. The answer given inside a hook cannot: it
-folds in this conversation's own read ledger, one bounded file, and runs no git
-status, because a tree walk and a full status are exactly what a decision on
+*Honest limit.* The command-line search gathers every member's window journal,
+so warmth compounds across a family. The answer given inside a hook cannot: it
+folds in this conversation's own window journal, one bounded file, and runs no
+git status, because a tree walk and a full status are exactly what a decision on
 that path may not do. The consequence is narrow and worth stating — the ranked
 head a hook offers is ordered by this window's reading, so the compounding claim
 of [09](09-worktrees-and-families.md) belongs to the verb and not to that frame.

@@ -328,7 +328,7 @@ fn script(spec: &Spec) -> Result<Vec<Step>, Fail> {
             // `SubagentStartHookInput`/`SubagentStopHookInput` carry the
             // parent's session id plus a REQUIRED `agent_id`/`agent_type`, and
             // that pair is what keys the window a subagent's pointer, baseline
-            // and read ledger all live under. Scripting the parent's session
+            // and window journal all live under. Scripting the parent's session
             // with a `-sub` suffix instead produced one window where the drive
             // should produce two, so the boundary this walk exists to exercise
             // was never crossed.
