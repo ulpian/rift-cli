@@ -814,7 +814,7 @@ mod injection_tests {
     /// the file is not enough — the injector asks both questions, so a
     /// fixture without a projection exercises the "records nothing" arm.
     pub(in crate::hooks) fn set_up_here(repo: &std::path::Path) {
-        crate::open_projection(repo).expect("the fixture's family projection opens");
+        crate::projection::open_projection(repo).expect("the fixture's family projection opens");
     }
 
     /// Remove the projection `set_up_here` created under the machine cache.
