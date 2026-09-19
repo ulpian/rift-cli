@@ -314,7 +314,7 @@ fn sensitive_touched(root: &Path, files: &[(String, i64)]) -> Vec<String> {
 /// projection carries no per-checkpoint branch or commit dimension". The
 /// premise was false in two ways, and both are worth recording because the
 /// refusal survived review on them: `changed_hunk.commit_id` in the **capture**
-/// schema is a real commit oid (`crates/rift-store/src/capture.rs:217`) — the
+/// schema is a real commit oid (`crates/rift-store/src/capture/files.rs`) — the
 /// "it is the checkpoint id" reading belongs to a differently-shaped RECALL
 /// table — and a per-checkpoint anchor commit is stored in every shard's
 /// `metadata.json` (`CheckpointArchive.commit`), where `rift explain` has been
