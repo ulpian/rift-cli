@@ -87,7 +87,7 @@ struct Enumerated {
 /// sentinel.
 const SITES: &[Enumerated] = &[
     Enumerated {
-        file: "bus.rs",
+        file: "bus/project_read.rs",
         quoted: 1,
         from_sql: 1,
         via_cte: 0,
@@ -119,19 +119,16 @@ const SITES: &[Enumerated] = &[
                older than the window.",
     },
     Enumerated {
-        file: "viewer.rs",
-        quoted: 1,
+        file: "viewer/catalogue.rs",
+        quoted: 0,
         from_sql: 1,
         via_cte: 2,
         via_gather: 0,
         note: "the Recall Viewer catalogue imports and prefixes \
                CHECKPOINT_TIME_CTE, then treats its effective_at >= 0 as the \
-               session-derived tier below a shard-recorded time. The quoted \
-               checkpoint occurrence is a display-fact label, not a table \
-               reader; it is counted because this lexical guard deliberately \
-               does not parse Rust syntax. So is the FROM occurrence, and it \
-               is worth naming because it is the first of its kind here: the \
-               catalogue also runs SELECT ... FROM \
+               session-derived tier below a shard-recorded time. The FROM \
+               occurrence is worth naming because it is the first of its kind \
+               here: the catalogue also runs SELECT ... FROM \
                checkpoint_worktree, a DIFFERENT v14 relation that happens to \
                share the prefix this guard matches on. It reads no time \
                column at all -- checkpoint_id and worktree_name -- so the \
@@ -140,6 +137,19 @@ const SITES: &[Enumerated] = &[
                never main. N/A for the sentinel. Recorded rather than \
                exempted, because a guard that starts skipping prefix matches \
                stops seeing the readers it was built for.",
+    },
+    Enumerated {
+        file: "viewer/detail.rs",
+        quoted: 1,
+        from_sql: 0,
+        via_cte: 0,
+        via_gather: 0,
+        note: "the checkpoint summary card's quoted checkpoint occurrence is a \
+               display-fact label, not a table reader; it is counted because \
+               this lexical guard deliberately does not parse Rust syntax. The \
+               card reads no store at all: its time comes from the catalogue \
+               entry, which the catalogue module already resolved through the \
+               CTE. N/A for the sentinel.",
     },
     Enumerated {
         file: "workflows.rs",

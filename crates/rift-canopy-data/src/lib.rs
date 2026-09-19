@@ -34,7 +34,7 @@
 //!
 //! The four sites are still **enumerated, not summarized**:
 //!
-//! 1. `bus::read_projection_detail` fills
+//! 1. `bus::project_read::read_projection_detail` fills
 //!    `CaptureSummary::last_checkpoint_at_ms` with
 //!    `SELECT created_at FROM checkpoint ORDER BY created_at DESC LIMIT 1`.
 //!    **STILL OPEN, and its stated blocker is now gone.** On the projection
