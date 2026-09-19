@@ -151,7 +151,7 @@ pub async fn record_checkpoint_commit_if_new(
 
 /// A durable claim about one imported (pre-Rift) checkpoint:
 /// never a chain anchor, and never a `checkpoint` row — see the
-/// `imported_checkpoint` table's own doc comment in `schema.rs` for why. Plain
+/// `imported_checkpoint` table's own doc comment in `schema/capture.rs` for why. Plain
 /// strings throughout rather than `Sha256Id`/typed enums: a legacy id is not
 /// necessarily a `Sha256Id` (the whole reason this table exists), and this
 /// crate does not depend on `rift-shadow`'s `Layout`/`RootCheck` types — the

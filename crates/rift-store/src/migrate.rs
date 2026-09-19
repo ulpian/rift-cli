@@ -401,7 +401,7 @@ pub fn capture_verification_witness_schema_sql() -> String {
 /// The v13 `imported_checkpoint` durable-claim relation: a
 /// home for a pre-Rift shard `rift import --from-legacy` read, recording its
 /// layout and root-consistency check without ever granting it a `checkpoint`
-/// row or a chain position (see the table's own doc comment in `schema.rs`).
+/// row or a chain position (see the table's own doc comment in `schema/capture.rs`).
 #[must_use]
 pub fn capture_imported_checkpoint_schema_sql() -> String {
     capture_slice_sql(crate::schema::capture_imported_checkpoint_tables())
@@ -662,7 +662,7 @@ pub fn recall_ingest_watermark_schema_sql() -> String {
 ///
 /// Frozen: this body is checksum-locked and its relation is append-only, so
 /// the shipped spellings inside it survive as read-compat history for a
-/// retired transport. See the FROZEN NAMES banner in `schema.rs`.
+/// retired transport. See the FROZEN NAMES banner in `schema/recall.rs`.
 #[must_use]
 pub fn recall_memd_call_schema_sql() -> String {
     use crate::schema::{recall_v7_call_tables, RECALL_CALL_EVENT_INDEX_SQL};
@@ -735,7 +735,7 @@ pub fn recall_mcp_connection_schema_sql() -> String {
 /// The v10 additive recall migration: the `memd_audit_citation`
 /// companion relation and its pack/ordinal lookup index. A NEW migration
 /// rather than columns on `memd_audit_event` — see that table's own doc
-/// comment in `schema.rs` for why widening it would poison every deployed
+/// comment in `schema/recall.rs` for why widening it would poison every deployed
 /// `recall.db`'s v4 checksum.
 #[must_use]
 pub fn recall_memd_audit_citation_schema_sql() -> String {
