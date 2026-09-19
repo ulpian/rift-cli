@@ -223,7 +223,7 @@ mod tests {
     }
 
     /// The table renders the axis's OWN order (the feed establishes it — see
-    /// `feeds::worktree_axis`; a renderer that re-sorted would hide a
+    /// `feeds::tokens::worktree_axis`; a renderer that re-sorted would hide a
     /// producer that had stopped), aligns on the widest name and the widest
     /// count, and spells an absent name `unknown` — never `main`, never
     /// blank (worktree provenance).

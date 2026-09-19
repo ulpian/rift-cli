@@ -2521,7 +2521,7 @@ mod tests {
     /// the Recall Viewer showed — "Recall store present", durable ingest
     /// coverage, repository-wide serves — was read from a file the writers
     /// never write. The panels had the identical defect and pin it in
-    /// `feeds::tests::recall_reads_the_writers_recall_repo_id_not_the_capture_id`;
+    /// `feeds::savings::tests::recall_reads_the_writers_recall_repo_id_not_the_capture_id`;
     /// this is the viewer's half.
     ///
     /// The second assertion is family identity's: a member resolves the same two
