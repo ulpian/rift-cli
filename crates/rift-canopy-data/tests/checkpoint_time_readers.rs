@@ -87,7 +87,7 @@ struct Enumerated {
 /// sentinel.
 const SITES: &[Enumerated] = &[
     Enumerated {
-        file: "bus.rs",
+        file: "bus/project_read.rs",
         quoted: 1,
         from_sql: 1,
         via_cte: 0,
