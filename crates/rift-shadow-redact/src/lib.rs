@@ -2249,7 +2249,7 @@ mod tests {
     /// or a local `type` alias. A verifier demonstrated all three in a probe crate
     /// outside this repository: it compiles, it mints, and the type-spelled needle
     /// matched none of them. Anchoring on the `::` collapses every qualified path
-    /// into one case, which is the same repair `inclusion.rs` made for `::refuse(`
+    /// into one case, which is the same repair `rift-shadow`'s inclusion screens made for `::refuse(`
     /// after four rounds of widening one spelling at a time.
     ///
     /// **What the wider needle would also catch, stated because it was a live
@@ -2270,7 +2270,7 @@ mod tests {
     /// `seal(..)` after `use rift_core::RedactedBytes::seal`, were that legal for
     /// an inherent associated fn — it is not today), and any file this walk does
     /// not read. The walk reads whole files, so it does not inherit the
-    /// `#[cfg(test)]` horizon hazard that `inclusion.rs` closes for its own screens.
+    /// `#[cfg(test)]` horizon hazard that `rift-shadow`'s inclusion screens close for themselves.
     ///
     /// The walk covers **every** workspace source root, not just `crates/`: a
     /// binary, a build task, a fuzz target or a bench harness compiles against
