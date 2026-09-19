@@ -12,13 +12,13 @@ its own:
 | fact | where it already lived in this repo |
 |---|---|
 | artifact names | `crates/rift-shadow/parity/anchors/*/manifest.json` |
-| shard path `<id[:2]>/<id[2:]>` | `crates/rift-shadow/src/backend.rs` (`shard_path`) |
+| shard path `<id[:2]>/<id[2:]>` | `crates/rift-shadow/src/backend/artifacts.rs` (`shard_path`) |
 | branch ref, short-hex ids | `crates/rift-recall-substrate/src/lib.rs` (`Dialect::checkpoint_ref`) |
 | per-checkpoint refs, ULID ids | the chain-ref layout notes and the current parser declarations |
 | `session_ids`, `commit_oid`, `developer_id` | `crates/rift-recall-types/src/checkpoint.rs` (serde aliases) |
 | `session_id` / `turn` / `event` / `occurred_at` | same file, `FullEventRecord` |
 | `id` / `name` / `file_path` / `sha256` | same file, `ToolCallRecord` |
-| absent `canon_version` ⇒ epoch 0 | `crates/rift-shadow/src/backend.rs` (`NATIVE_CANON_VERSION`) |
+| absent `canon_version` ⇒ epoch 0 | `crates/rift-shadow/src/backend/mod.rs` (`NATIVE_CANON_VERSION`) |
 
 **These bytes are frozen.** Change one and `legacy_import_golden` reds — that is
 the point of them. Never edit an `expected.txt` to make a test pass; if the

@@ -1918,7 +1918,7 @@ mod tests {
     #[test]
     fn the_ceiling_and_the_control_file_still_match_the_product() {
         let root = crate::leg::default_repo_root();
-        let inclusion = root.join("crates/rift-shadow/src/inclusion.rs");
+        let inclusion = root.join("crates/rift-shadow/src/inclusion/mod.rs");
         // A checkout without the product tree cannot check this — but the
         // skip is bounded, not free: if `crates/` is there the file must be
         // readable, so the guard cannot be silently disarmed by a move.

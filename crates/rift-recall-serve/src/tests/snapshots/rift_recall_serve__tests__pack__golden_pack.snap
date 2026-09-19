@@ -1,5 +1,5 @@
 ---
-source: crates/rift-recall-serve/src/tests.rs
+source: crates/rift-recall-serve/src/tests/pack.rs
 expression: "render_golden_pack(&store, &reader, 1000)"
 ---
 [CriticalTop]
