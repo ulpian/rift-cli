@@ -354,7 +354,7 @@ fn a_scripted_session_records_every_verb_including_the_four_never_driven() {
 ///
 /// **The turn-opening prompt is excluded, and that is a fact about the product
 /// rather than a convenience.** The idempotency key carries `turn_ordinal`, and
-/// `effective_turn` (`rift-shadow/src/bridge.rs:480-496`) opens the *next*
+/// `effective_turn` (`rift-shadow/src/bridge/turns.rs`) opens the *next*
 /// ordinal for a `PromptSubmit` arriving on a closed turn. So a prompt
 /// redelivered after its turn ended is not a redelivery at all — it is the
 /// agent asking for a new turn, and it correctly gets one. Everything that does
