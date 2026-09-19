@@ -476,7 +476,7 @@ const RESPONSE_LITERALS: [&str; 5] = [
 ];
 
 /// The one file entitled to compose an agent's hook response.
-const CHOKEPOINT: &str = "crates/rift-agent/src/respond.rs";
+const CHOKEPOINT: &str = "crates/rift-agent/src/respond/mod.rs";
 
 /// Where the exemptions live.
 const CHOKEPOINT_ALLOW: &str = "ci/intercept-chokepoint-allow.txt";
@@ -1761,7 +1761,7 @@ mod tests {
     #[test]
     fn a_third_way_to_amend_a_tool_call_is_caught() {
         let third_form = vec![(
-            "crates/rift-agent/src/respond.rs".to_owned(),
+            "crates/rift-agent/src/respond/mod.rs".to_owned(),
             "fn f() { let _ = Rewrite::ShellCommand { command: \"x\" }; }\n".to_owned(),
         )];
         let leg = screen_rewrites(&third_form).expect("the screen runs");
@@ -1773,7 +1773,7 @@ mod tests {
         );
 
         let third_field = vec![(
-            "crates/rift-agent/src/respond.rs".to_owned(),
+            "crates/rift-agent/src/respond/mod.rs".to_owned(),
             "fn f() { let _ = Rewrite::GrepHeadLimit { tool_input: t, head_limit: 4, path: p }; }\n"
                 .to_owned(),
         )];
@@ -1791,7 +1791,7 @@ mod tests {
     #[test]
     fn a_third_amendment_form_declared_but_never_built_is_caught() {
         let declared = vec![(
-            "crates/rift-agent/src/respond.rs".to_owned(),
+            "crates/rift-agent/src/respond/mod.rs".to_owned(),
             "pub enum Rewrite<'a> {\n    DocumentSidecar { tool_input: &'a Value, file_path: &'a str },\n             \x20   ShellPrefix { tool_input: &'a Value, prefix: &'a str },\n}\n             fn f() { let _ = Rewrite::DocumentSidecar { tool_input: t, file_path: p }; }\n"
                 .to_owned(),
         )];

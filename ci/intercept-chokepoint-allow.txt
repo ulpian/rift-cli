@@ -1,6 +1,6 @@
 # Occurrences of a hook-response literal that are NOT hook responses.
 #
-# One place composes an agent's hook response: `crates/rift-agent/src/respond.rs`.
+# One place composes an agent's hook response: `crates/rift-agent/src/respond/mod.rs`.
 # The `one-gate-chokepoint` leg of `cargo run -p xtask -- gate-intercept`
 # enforces that by screening the production half of every other `.rs` file
 # under `crates/` and `bins/` for the literals a response is made of. A few of
