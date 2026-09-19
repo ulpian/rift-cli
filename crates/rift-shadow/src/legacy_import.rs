@@ -24,7 +24,7 @@
 //!   checkpoints, ids **12 hex**. Ref name per
 //!   `rift_recall_substrate::Dialect::checkpoint_ref`; shard path
 //!   `<id[:2]>/<id[2:]>` per `crate::backend::CheckpointArchive::shard_path`
-//!   (`backend.rs:207`); the 12-hex id fact per the doc comment on
+//!   (`crates/rift-shadow/src/backend/artifacts.rs`); the 12-hex id fact per the doc comment on
 //!   `MIN_ID_LEN` in `crates/rift-shadow-attribution/src/provenance.rs:66`
 //!   ("legacy ids are 12 hex; Rift's are 64").
 //! * [`Layout::PerCheckpointRefs`] — one ref per checkpoint, id **ULID**, the

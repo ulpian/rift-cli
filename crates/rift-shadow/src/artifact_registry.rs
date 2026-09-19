@@ -75,7 +75,7 @@ pub struct ShardArtifact {
 /// tree into and `shard_merkle_leaves` derives leaves in.
 ///
 /// **Measured, not recalled**: this list was taken from `write_shard`'s own
-/// entry construction (`crates/rift-shadow/src/backend.rs`), and
+/// entry construction (`crates/rift-shadow/src/backend/shard.rs`), and
 /// `every_artifact_a_maximal_shard_writes_is_declared` re-measures it against
 /// what a maximal fixture actually emits.
 pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
