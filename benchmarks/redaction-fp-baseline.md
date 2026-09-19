@@ -4,7 +4,7 @@ The redaction gate's false-positive criterion asks for "a false-positive rate me
 repository's own text with a **recorded absolute baseline** (a regression, not a
 comparison)". This file is that record, and
 `the_recorded_false_positive_baseline_holds_over_this_repositorys_own_text`
-(`crates/rift-shadow-redact/src/lib.rs`) is the instrument that keeps it true —
+(`crates/rift-shadow-redact/src/tests/census.rs`) is the instrument that keeps it true —
 the numbers below are read *out of this file* by that test, so a ceiling here is
 load-bearing rather than prose.
 

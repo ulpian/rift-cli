@@ -435,7 +435,7 @@ const SWEEP: &[Row] = &[
                    boundary rather than a missing fact: the adapter half is \
                    where a fact \
                    is read, but the ordinal is advanced in \
-                   crates/rift-shadow/src/bridge.rs and the reconciliation map \
+                   crates/rift-shadow/src/bridge/turns.rs and the reconciliation map \
                    is written from there — a file held elsewhere at the \
                    time of this edit. Recorded, not deferred silently.",
     },

@@ -99,7 +99,7 @@ pub enum HookEvent {
     /// `PostToolUse` for a file read: the event the read observation lands on.
     ///
     /// The bridge records a `RecordedRead` only from `EventKind::ToolResult`
-    /// (`rift-shadow/src/bridge.rs`), so a prelude that wants a serve to find
+    /// (`rift-shadow/src/bridge/mod.rs`), so a prelude that wants a serve to find
     /// a sibling's read must deliver the read's *result*, not just its
     /// `PreToolUse` — which is how Claude Code sends it, and how the landed
     /// compounding fixture (`bins/rift/tests/family_compounding.rs::agent_read`)
