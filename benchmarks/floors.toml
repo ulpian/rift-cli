@@ -106,7 +106,7 @@ budget_ms = 100
 machine_class = "macos / x86_64 / 8 logical CPUs"
 protocol = "3 warmup + 11 measured commits per arm, both orders measured in the same run against a bare-commit control"
 caps = "MAX_TOTAL_BYTES=8192; MAX_FILE_BYTES=4096"
-measured_paths = ["bins/rift/src/main.rs", "bins/rift/src/hooks/", "crates/rift-shadow-hooks/src/lib.rs", "crates/rift-store/src/migrate.rs", "benches/native-baseline/src/displace.rs"]
+measured_paths = ["bins/rift/src/main.rs", "bins/rift/src/hooks/", "crates/rift-shadow-hooks/src/lib.rs", "crates/rift-store/src/migrate/", "benches/native-baseline/src/displace.rs"]
 derivation_medians = []
 derivation_artifacts = []
 derivation = "NOT a derived floor, and never was. This scenario is a paired LATENCY displacement measure and is NEVER a throughput floor: an enable that does more work per second is not thereby better, and a commit that takes longer is not thereby doing more. Its bar is the owner's — 100 ms of git latency, HARD — and an owner's bar is ruled, not derived from medians."

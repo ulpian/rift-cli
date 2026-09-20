@@ -32,10 +32,13 @@ fn no_value_is_interpolated_into_sql() {
 
     let mut offenders = Vec::new();
     for file in &files {
-        // The migration engine seeds `_schema_version` with the table *name* (a
-        // validated `[A-Za-z0-9_]` registry constant, not runtime data) via a
-        // reviewed identifier interpolation — exempt by filename.
-        let is_migrate = file.file_name().is_some_and(|n| n == "migrate.rs");
+        // The migration engine (every plane module under `src/migrate/`) seeds
+        // `_schema_version` with the table *name* (a validated `[A-Za-z0-9_]`
+        // registry constant, not runtime data) via a reviewed identifier
+        // interpolation — exempt by module path.
+        let is_migrate = file
+            .strip_prefix(&src)
+            .is_ok_and(|rel| rel.starts_with("migrate"));
         let text = std::fs::read_to_string(file).expect("read source");
         for (i, line) in text.lines().enumerate() {
             // The smell: a single-quoted interpolation (`'{`) inside a SQL value
