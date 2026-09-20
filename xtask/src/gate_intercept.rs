@@ -892,7 +892,7 @@ fn screen_gate_path(corpus: &[(String, String)]) -> Result<(Leg, BTreeSet<String
 // -------------------------------------------------- leg: one reason renderer ---
 
 /// Where every sentence a model reads from Rift is written.
-const RENDERER: &str = "crates/rift-recall-validity/src/trust.rs";
+const RENDERER: &str = "crates/rift-recall-validity/src/trust/frames/mod.rs";
 
 /// The phrases the renderer opens its lines with, read out of the renderer
 /// itself rather than retyped here.
