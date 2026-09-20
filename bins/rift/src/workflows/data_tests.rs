@@ -1036,7 +1036,7 @@ fn a_trailer_claiming_an_unknown_checkpoint_is_counted_apart_from_the_scope() {
 /// process cannot see a per-process hash seed, a value cached on first use, or
 /// an address-dependent sort. The claim it cannot make is made by
 /// `every_workflow_verb_is_byte_identical_across_two_processes`
-/// (`tests/hooks_e2e.rs`), which drives the shipped binary twice.
+/// (`tests/hooks_workflow_e2e.rs`), which drives the shipped binary twice.
 ///
 /// **That sentence used to name `review_and_investigate_…`, which covers two
 /// DIFFERENT verbs from the two this test covers** — so a docstring here

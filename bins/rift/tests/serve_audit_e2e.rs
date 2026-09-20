@@ -25,7 +25,7 @@ use common::rift_cmd;
 use rift_store::CanonicalStore;
 
 /// Run `rift <args>` from `cwd`; return the exit code and captured stdout.
-/// Mirrors `hooks_e2e.rs`'s `run_rift_stdout` — each `tests/*.rs` file is its
+/// Mirrors `common/hooks_fixture.rs`'s `run_rift_stdout` — each `tests/*.rs` file is its
 /// own crate, so the helper is re-declared rather than shared (only
 /// `common::rift_cmd`, the hermetic spawn chokepoint, is shared).
 fn run_rift_stdout(cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String) {

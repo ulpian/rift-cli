@@ -597,7 +597,7 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
 /// [`drain_capture_queue`], so the condense, the redaction gate and the archive
 /// are the same code either way. The variable chooses **who** drains and
 /// **when**, never **whether**. Both arms are covered end to end: every other
-/// case in `hooks_e2e` sets it (for determinism), and
+/// case in the `hooks_*_e2e` suites sets it (for determinism), and
 /// `the_detached_worker_archives_after_the_hook_has_already_returned` takes the
 /// default path and asserts the same shard and the same drained queue.
 ///

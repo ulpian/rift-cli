@@ -4,7 +4,7 @@
 //! `rift` binary, and this asserts what landed in the repository's own
 //! projection. It is the first **merge-blocking** test that drives
 //! `PreToolUse`, `SubagentStart`, `SubagentStop` or `PreCompact` through a
-//! process: `bins/rift/tests/hooks_e2e.rs` drives **five** — `SessionStart`,
+//! process: the `bins/rift/tests/hooks_*_e2e.rs` suites drive **five** — `SessionStart`,
 //! `UserPromptSubmit`, `PostToolUse`, `Stop`, `SessionEnd` — so a fan-out or a
 //! lifecycle transition only the other four reach was, until now, asserted
 //! in-process or not at all. (`PreToolUse` alone is also spawned by

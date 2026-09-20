@@ -6,7 +6,7 @@
 //! the *sequence* of those processes. Until this binary existed, the only such
 //! sequence any **merge-blocking** test drove was Claude Code's five —
 //! `SessionStart` / `UserPromptSubmit` / `PostToolUse` / `Stop` / `SessionEnd`
-//! (`bins/rift/tests/hooks_e2e.rs`) — so a fan-out or a lifecycle transition
+//! (the `bins/rift/tests/hooks_*_e2e.rs` suites) — so a fan-out or a lifecycle transition
 //! only the other four reach was asserted in-process or not at all.
 //!
 //! The claim is scoped to CI deliberately, because a first draft of this file
@@ -697,7 +697,7 @@ mod tests {
         }
     }
 
-    /// The headline: the four verbs `bins/rift/tests/hooks_e2e.rs` has never
+    /// The headline: the four verbs the `bins/rift/tests/hooks_*_e2e.rs` suites have never
     /// driven through a process are all in the script, and the script the
     /// binary emits is the one the registered adapter agrees with.
     #[test]

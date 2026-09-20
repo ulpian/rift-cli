@@ -660,7 +660,7 @@ mod tests {
     /// discriminator existed deserializes with `work_tree: None`, and
     /// [`live_sessions_for`] must never let a linked worktree adopt it. Pinned
     /// here at the type level and end-to-end in
-    /// `hooks_e2e::a_worktree_adopts_only_the_shared_session_that_names_it`.
+    /// `hooks_worktree_e2e::a_worktree_adopts_only_the_shared_session_that_names_it`.
     #[test]
     fn a_pre_ruling_cache_file_deserializes_with_no_claim() {
         let pre_ruling = br#"{"schema":1,"session_id":"old","state":"active",

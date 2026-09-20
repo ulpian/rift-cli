@@ -921,7 +921,7 @@ fn why_answers_one_line_and_the_json_contract_is_locked() {
 /// `rift checkpoint explain`'s refusal contracts, locked: no claimed
 /// checkpoint at HEAD, an unknown id, and the flag exclusion — each says
 /// exactly why, in the machine shape an agent scripts against. (The
-/// affirmative render over a REAL shard is pinned in `hooks_e2e`, where an
+/// affirmative render over a REAL shard is pinned in `hooks_archive_e2e`, where an
 /// archive exists to explain.)
 #[test]
 fn checkpoint_explain_refuses_cleanly_without_a_checkpoint() {
