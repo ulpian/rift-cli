@@ -279,7 +279,7 @@ fn doctor_store(repo: &Path, strict_read_only: bool) -> rift_core::Result<rift_s
 /// **Condensations, not verifies, and the difference is the whole counter.** A
 /// bare `rift verify` records a `verification_run` row and witnesses nothing, so
 /// it moves none of these numbers and cannot reset them either —
-/// `bins/rift/tests/hooks_e2e.rs::five_bare_verifies_are_not_soak_evidence`
+/// `bins/rift/tests/hooks_chain_e2e.rs::five_bare_verifies_are_not_soak_evidence`
 /// exists to disprove the sentence this comment used to carry. What resets the
 /// streak is a WITNESSED run that came back unclean: a condensation whose verify
 /// found something.

@@ -126,7 +126,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
         // frozen `metadata.json` + `content_hash.txt` goldens, which this
         // fixture exists to hold still. The recorded-time arm of the format is
         // frozen byte-for-byte by the provenance verb goldens instead
-        // (`bins/rift/tests/cli_e2e.rs`), over a shard that carries it.
+        // (`bins/rift/tests/cli_provenance_goldens_e2e.rs`), over a shard that carries it.
         created_at_ms: None,
         // A hand-built archive is in no repository: the member is ABSENT, which
         // is what keeps every frozen anchor and golden byte-identical.

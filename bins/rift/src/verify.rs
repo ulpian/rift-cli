@@ -224,7 +224,7 @@ enum Seeding {
     /// from the comparand: levelling adds missing rows through
     /// `record_checkpoint_if_new`, which is `insert_or_ignore` and so can never
     /// overwrite a row that disagrees. `levelling_cannot_launder_a_planted_
-    /// checkpoint_into_agreement` (hooks_e2e) plants a genuine id with a wrong
+    /// checkpoint_into_agreement` (hooks_chain_e2e) plants a genuine id with a wrong
     /// merkle root and pins the tamper verdict.
     Forbidden,
 }
@@ -3114,7 +3114,7 @@ mod tests {
     /// levels first, so it rarely meets an empty projection at all. Nothing here
     /// can redden if that command-level property is lost — the test that can is
     /// `levelling_cannot_launder_a_planted_checkpoint_into_agreement`
-    /// (`bins/rift/tests/hooks_e2e.rs`), which drives the shipped binary against
+    /// (`bins/rift/tests/hooks_chain_e2e.rs`), which drives the shipped binary against
     /// a planted disagreeing row.
     #[tokio::test]
     async fn verify_never_seeds_the_projection_on_the_git_path() {

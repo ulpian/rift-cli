@@ -36,7 +36,7 @@
 //! **own** family: five of the six serve, and a serve writes an audit row, so a
 //! shared fixture would make the sixth assertion depend on test order.
 //!
-//! The scripted-agent driver is `hooks_e2e.rs`'s: `bins/rift`'s test target
+//! The scripted-agent driver is `common/hooks_fixture.rs`'s: `bins/rift`'s test target
 //! cannot reach the `vogon` binary (it belongs to `rift-shadow-hooks`, and
 //! `CARGO_BIN_EXE_*` names only its own package's binaries), so the fake agent
 //! here is the same stdin-contract hook delivery every other fixture in this

@@ -20,7 +20,8 @@
 //!   it writes into a real projection; `rift doctor --json` reading them back
 //!   through the soak reader.
 //! * **Fixture:** the repository (a tempdir), and the session journal entries,
-//!   written exactly as [`hooks_e2e`](../hooks_e2e.rs)'s seeders write them —
+//!   written exactly as the hooks suites' shared seeder
+//!   (`common/hooks_fixture.rs`) writes them —
 //!   one live session per cycle, so each condensation covers a distinct session
 //!   set and therefore mints a **distinct checkpoint id**. That distinctness is
 //!   the point: a checkpoint id is `from_root_sessions(sessions, merkle_root)`
@@ -120,7 +121,7 @@ fn git_out(dir: &Path, args: &[&str]) -> String {
 }
 
 /// One live native-hook session in the repository's journal — the same JSON
-/// `hooks_e2e`'s seeder writes, with the id and stamp supplied.
+/// `common/hooks_fixture.rs`'s seeder writes, with the id and stamp supplied.
 fn seed_session(repo: &Path, id: &str, updated_at_ms: i64) {
     let sessions = repo.join(".git").join("rift-sessions");
     std::fs::create_dir_all(&sessions).unwrap();
