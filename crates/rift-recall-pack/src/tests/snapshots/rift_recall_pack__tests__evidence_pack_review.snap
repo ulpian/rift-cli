@@ -1,5 +1,5 @@
 ---
-source: crates/rift-recall-pack/src/tests.rs
+source: crates/rift-recall-pack/src/tests/mod.rs
 expression: "serde_json::to_string_pretty(&evidence).unwrap()"
 ---
 {
