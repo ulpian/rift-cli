@@ -88,7 +88,7 @@ The envelope, elided:
   "result": { "tool": "known_state",
     "envelopes": [ { "path": "AGENTS.md", "basis_sha256": "ee2f8418…",
                      "state": "known_unchanged" },
-                   { "path": "crates/rift-store/src/schema.rs",
+                   { "path": "crates/rift-store/src/schema/capture.rs",
                      "basis_sha256": "9c40b1d2…",
                      "state": "available_by_handle",
                      "provenance": { "checkpoints": { "to": "9c40…" },
@@ -98,7 +98,7 @@ The envelope, elided:
                          "cached_input": 30400, "cache_creation": 900,
                          "output": 640 },
                        "cost_micros": 41230,
-                       "why": "rift why crates/rift-store/src/schema.rs --json" } } ],
+                       "why": "rift why crates/rift-store/src/schema/capture.rs --json" } } ],
     "truncated": true, "omitted": 206,
     "containment": { "cross_branch_grant": false, "out_of_branch": 135,
                      "unknown_head": false } } }
