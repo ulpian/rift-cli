@@ -527,7 +527,7 @@ mod tests {
     fn the_allowlist_still_renders_what_a_manifest_is_for() {
         for ok in [
             "crates/rift-recall-validity/src/trust/pushed.rs",
-            "bins/rift/tests/cli_e2e.rs",
+            "bins/rift/tests/cli_provenance_e2e.rs",
             ".github/workflows/ci.yml",
             "docs/guide/07-serving-and-injection.md",
             "summary:log:t1",

@@ -379,7 +379,7 @@ pub(crate) fn safe_path(p: &str) -> String {
 /// quoting, the porcelain would already carry two ordinary-looking `filename`
 /// headers and no per-value check could tell them apart. What stops it is that
 /// git c-quotes the whole pathname — `"b.rs\nfilename hijacked.rs"`, one line,
-/// one header — and `tests/cli_e2e.rs` asserts *that*, against a name whose
+/// one header — and `tests/cli_provenance_e2e.rs` asserts *that*, against a name whose
 /// post-newline segment is deliberately free of control characters so the
 /// assertion depends on the quoting rather than on a fail-safe firing.
 ///
@@ -423,7 +423,7 @@ pub(crate) fn safe_path(p: &str) -> String {
 /// C0 whitespace (`TAB LF VT FF CR`), c-quoted under both settings. So this verb
 /// does not inherit those 19 — **it creates them**, as the price of the
 /// correctness fix that stopped `café.rs` from losing its evidence — and this
-/// guard is what pays it. `tests/cli_e2e.rs` asserts the whole table against
+/// guard is what pays it. `tests/cli_provenance_e2e.rs` asserts the whole table against
 /// real git under both settings, so the price stays measured rather than
 /// narrated.
 ///
@@ -468,7 +468,7 @@ pub(crate) fn safe_path(p: &str) -> String {
 ///
 /// **The backslash asymmetry, decided.** `"` and `\` are c-quoted whatever
 /// `core.quotePath` says (measured, git 2.50.1, both settings, asserted in
-/// `tests/cli_e2e.rs`) — exactly the standing this file gives the C0 class. So
+/// `tests/cli_provenance_e2e.rs`) — exactly the standing this file gives the C0 class. So
 /// either of them in a value git delivered *as itself* is the same
 /// broken-framing evidence, and now fires the same fail-safe. The rule cannot be
 /// "no backslashes", because a c-quoted value is *made* of them; it is **an
@@ -908,7 +908,7 @@ pub(crate) async fn blame(
     // screening, so without it a filename beginning with `-` is parsed as a
     // flag. Load-bearing only for a path that is really tracked *and* really
     // spelled like one, which is why it is pinned against tracked files named
-    // `-w` and `--evil.rs` (`tests/cli_e2e.rs`): git exits 129 for both without
+    // `-w` and `--evil.rs` (`tests/cli_provenance_e2e.rs`): git exits 129 for both without
     // it — the first for want of a path after consuming the option, the second
     // as `error: unknown option` — and 0 with it.
     //
@@ -918,7 +918,7 @@ pub(crate) async fn blame(
     // non-ASCII path silently loses its file evidence and degrades to a guess.
     // Turning it off does not weaken the parse boundary: control characters are
     // c-quoted unconditionally, which `core.quotePath` does not govern
-    // (measured; asserted in `tests/cli_e2e.rs`).
+    // (measured; asserted in `tests/cli_provenance_e2e.rs`).
     let Some(spans) = blamed_spans(&repo, file, range)? else {
         let (what, line_json) = match range {
             // `-L` past the end of the file fails the same way an untracked
@@ -2457,7 +2457,7 @@ mod tests {
     /// 64 characters wide and none of them matched. `rift_git::validate_oid`
     /// has accepted `40 | 64` all along, so the parser was the only disagreeing
     /// half. Asserted against a real `--object-format=sha256` repository in
-    /// `tests/cli_e2e.rs`; this is the parser's half.
+    /// `tests/cli_provenance_e2e.rs`; this is the parser's half.
     #[test]
     fn a_sha256_repository_is_answered_rather_than_reported_empty() {
         let long = |c: char| -> String { std::iter::repeat_n(c, 64).collect() };
@@ -2513,7 +2513,7 @@ mod tests {
     ///
     /// A **C1** control (`U+0080..=U+009F`) is the opposite: it is ≥ 0x80, so
     /// arriving raw is precisely what `core.quotePath=false` asked git for
-    /// (measured on git 2.50.1, asserted end to end in `tests/cli_e2e.rs`). The
+    /// (measured on git 2.50.1, asserted end to end in `tests/cli_provenance_e2e.rs`). The
     /// earlier check folded the two together, so `g\u{85}.rs` — a path git
     /// spelled in full and correctly — lost its file evidence and degraded to a
     /// guess, silently, for a reason that was never about it.
@@ -2647,7 +2647,7 @@ mod tests {
     /// path. *Which* of them git can deliver, and who made them deliverable, is
     /// the subject of
     /// `the_quote_path_flag_this_verb_adds_is_what_makes_nineteen_collisions_reachable`
-    /// in `tests/cli_e2e.rs`: 20 arrive raw under the `core.quotePath=false`
+    /// in `tests/cli_provenance_e2e.rs`: 20 arrive raw under the `core.quotePath=false`
     /// this verb passes, exactly one under git's default.
     ///
     /// The guard's own cost is asserted here too, because "nothing" is the
@@ -2669,7 +2669,7 @@ mod tests {
             // because the line framing consumes them first: `LF` ends the
             // porcelain line, and `str::lines` strips a trailing `CR`. Both are
             // c-quoted by git unconditionally under either `core.quotePath`
-            // (measured in `tests/cli_e2e.rs`), so the class is empty in
+            // (measured in `tests/cli_provenance_e2e.rs`), so the class is empty in
             // practice — and the `CR` residual is pinned below rather than left
             // to be discovered.
             if suffix == '\n' || suffix == '\r' {
@@ -2777,7 +2777,7 @@ mod tests {
     ///
     /// And the cost that would have made the closure wrong: a **c-quoted** value
     /// keeps its spelling. Refusing every backslash would refuse every quoted
-    /// value, which is what `tests/cli_e2e.rs` needs in order to assert that git
+    /// value, which is what `tests/cli_provenance_e2e.rs` needs in order to assert that git
     /// quoted the whole name onto one line at all.
     #[test]
     fn an_unquoted_value_holding_a_byte_git_always_escapes_grounds_no_evidence() {
@@ -2841,7 +2841,7 @@ mod tests {
     /// These are the bytes such a git would emit for a file named
     /// `b.rs\nfilename hijacked.rs` — and nothing in this parser can tell the
     /// second header from a real one, because by then it *is* a real header.
-    /// That is the whole reason `tests/cli_e2e.rs` asserts git's quoting
+    /// That is the whole reason `tests/cli_provenance_e2e.rs` asserts git's quoting
     /// positively instead of asserting that `hijacked.rs` is absent.
     #[test]
     fn a_raw_newline_in_a_filename_value_would_choose_the_attackers_path() {
