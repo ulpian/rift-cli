@@ -5,7 +5,7 @@ use std::path::Path;
 
 use rift_core::Result;
 
-use crate::hooks::ingest::owe_basis_snapshots;
+use crate::hooks::ingest::owed::owe_basis_snapshots;
 use crate::hooks::worker::snapshot_basis_job;
 
 /// A work tree with a real git dir and one file in it.
