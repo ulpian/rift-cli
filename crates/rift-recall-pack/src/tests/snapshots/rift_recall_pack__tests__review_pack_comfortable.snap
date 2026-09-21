@@ -1,5 +1,5 @@
 ---
-source: crates/rift-recall-pack/src/tests.rs
+source: crates/rift-recall-pack/src/tests/mod.rs
 expression: comfortable.render()
 ---
 CRITICAL: evidence:2 is a sensitive path touched in this range

@@ -116,7 +116,7 @@ useful: *these files you have read changed since then.*
 [rift] Recorded delta since the state you already hold (facts, not directives).
 2 file(s) you have read changed since then:
 - crates/rift-store/src/schema/capture.rs@sha256:b6caa84d L12-38,L204-206 (+2)
-- bins/rift/src/hooks/gate.rs@sha256:0a1b2c3d (changed)
+- bins/rift/src/hooks/gate/mod.rs@sha256:0a1b2c3d (changed)
 (3 more not shown)
 Detail on demand: rift recall changed-hunks crates/rift-store/src/schema/capture.rs
 --known-hash b6caa84d1f5ada80 --json
@@ -463,7 +463,7 @@ boundary after a client's own compaction signal — Rift injects the
 ```
 [rift] Context recovered. You had read, and no longer hold:
 - crates/rift-store/src/schema/capture.rs@sha256:b6caa84d… L1-412 (unchanged since your read)
-- bins/rift/src/hooks/gate.rs@sha256:0a1b2c3d… L1-1180 (changed at L340-368)
+- bins/rift/src/hooks/gate/mod.rs@sha256:0a1b2c3d… L1-406 (changed at L160-188)
 (6 more not shown)
 ```
 
@@ -592,7 +592,7 @@ place:
 [rift] Search answered: 8 of 143 paths matching the pattern you searched for,
 ranked by relevance to this session (facts, not directives):
 - crates/rift-store/src/schema/capture.rs
-- bins/rift/src/hooks/gate.rs
+- bins/rift/src/hooks/gate/mod.rs
 …
 Repeat this exact call for the full list.
 ```

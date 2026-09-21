@@ -237,7 +237,8 @@ mod tests {
     use super::*;
     use crate::hooks::audit::{citation_identity_of, read_identified_bytes};
     use crate::hooks::git::{capture_sync_note, CAPTURE_SYNC_ENV};
-    use crate::hooks::ingest::{enrich_native_context, observe_worktree, worktree_read_hasher};
+    use crate::hooks::ingest::enrich_native_context;
+    use crate::hooks::ingest::worktree::{observe_worktree, worktree_read_hasher};
     use crate::hooks::install::hooks_git_dir_or_refusal;
     use crate::hooks::manifest::projection_stamp;
     use crate::hooks::worker::line_slice;

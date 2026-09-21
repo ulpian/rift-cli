@@ -1,5 +1,5 @@
 ---
-source: crates/rift-recall-pack/src/tests.rs
+source: crates/rift-recall-pack/src/tests/mod.rs
 expression: tiny.render()
 ---
 CRITICAL: evidence:1's last provenance was reverted - verify before reuse
