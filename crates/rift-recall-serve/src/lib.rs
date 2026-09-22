@@ -5,7 +5,7 @@
 //! dispatcher plus the real, store-backed handlers, so the whole surface is
 //! testable offline. The stdio transport that used to
 //! wire this dispatcher into an agent-spawned server process is retired; today `rift
-//! recall <verb>` (the skill-CLI channel, `bins/rift/src/recall.rs`) calls
+//! recall <verb>` (the skill-CLI channel, `bins/rift/src/recall/serve.rs`) calls
 //! [`decode_request`]/[`ServeDispatcher::dispatch`] directly, one process per
 //! invocation rather than one long-lived server per session. The dispatcher
 //! itself did not change — that is the point of a transport-independent seam.

@@ -9,7 +9,7 @@
 //! The agent-facing serving plane no longer lives here: a later decision
 //! retired the stdio transport this binary used to speak — agents consume
 //! recall through `rift recall <verb>` (the skill-CLI channel,
-//! `bins/rift/src/recall.rs`) instead.
+//! `bins/rift/src/recall/`) instead.
 #![cfg_attr(
     test,
     allow(

@@ -27,7 +27,7 @@ pub(super) use held::{announce_now, held_now, HeldRevision, NamedHold};
 pub(super) use stamps::projection_stamp;
 
 /// A source of per-**turn** injection ids, process-wide for the same reason
-/// `recall::SERVE_IDS` is: a fresh source inside one millisecond re-emits the
+/// `recall::serve::SERVE_IDS` is: a fresh source inside one millisecond re-emits the
 /// same id. One `UserPromptSubmit` is one turn, and two turns that inject
 /// byte-identical manifests are still two costs — keying by session instead
 /// would collapse them, which is the id-reuse bug class exactly.
