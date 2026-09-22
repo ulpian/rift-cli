@@ -145,8 +145,8 @@ pub fn checkpoint_ids_for_shard(
 /// grows with session length. The decision: the
 /// trailer is a CLAIM. It stays exact for transcript-less sessions; for the
 /// rest the read side resolves through the trailer/anchor union
-/// (`bins/rift/src/provenance.rs`, the `checkpoint_commit` anchor the shard
-/// itself recorded), which is the permanent answer rather than a stopgap.
+/// (`bins/rift/src/provenance/resolve.rs`, the `checkpoint_commit` anchor the
+/// shard itself recorded), which is the permanent answer rather than a stopgap.
 /// "Predicted id == landed id" is retired as a property.
 ///
 /// # Errors

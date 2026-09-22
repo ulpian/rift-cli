@@ -4,7 +4,7 @@
 //! what `core.quotePath=false` buys and costs, what git quotes whatever that
 //! flag says, and what the `--` terminator decides.
 //!
-//! The renderer's own tests (`bins/rift/src/provenance.rs`) are the assurance
+//! The renderer's own tests (`bins/rift/src/provenance/`) are the assurance
 //! for what reaches a terminal; these are the assurance for the route.
 #![allow(
     clippy::unwrap_used,
@@ -333,7 +333,7 @@ fn blame_reports_a_non_ascii_path_as_the_repository_spells_it() {
 
 /// The code points `paths_contain` cannot tell from nothing — exactly
 /// `char::is_whitespace`, and exactly the trailing-collision class swept in
-/// `bins/rift/src/provenance.rs`.
+/// `bins/rift/src/provenance/blame.rs`.
 #[cfg(unix)]
 const COLLIDING_WHITESPACE: [char; 25] = [
     '\u{9}', '\u{a}', '\u{b}', '\u{c}', '\u{d}', '\u{20}', '\u{85}', '\u{a0}', '\u{1680}',
