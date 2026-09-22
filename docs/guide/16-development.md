@@ -454,7 +454,7 @@ the mirrored ignore list.
 
 If Rift is capturing a repository you work in, **five** git hooks are installed
 in the checkout. In the order the installer declares them
-(`crates/rift-shadow-hooks/src/install.rs`):
+(`crates/rift-shadow-hooks/src/install/mod.rs`):
 
 `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-push`,
 `post-checkout`.
@@ -498,7 +498,8 @@ the signal you want if you forget to restore them.
 > Tip: **never** run the hook installer while the hooks are held aside. Its
 > entry point is a hidden command handing its trailing arguments straight to the
 > router, so it does not honour `--help`: asking for help performs a real
-> install and re-links all five. To know what it does, read `install.rs`.
+> install and re-links all five. To know what it does, read the installer
+> module `crates/rift-shadow-hooks/src/install/`.
 
 ---
 
