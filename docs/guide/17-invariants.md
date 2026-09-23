@@ -229,7 +229,7 @@ need not finish before git returns is moved off the path rather than optimised.
 The number is a judgement about where a tool starts feeling like a tax.
 
 **Enforced by** the bars the harness carries — `BUDGET_MS` in
-`benches/native-baseline/src/hooklat.rs:70`, the agent-hook pair in
+`benches/native-baseline/src/hooklat/sweep.rs:39`, the agent-hook pair in
 `benches/native-baseline/src/measure.rs:110-111`, and the `enable-displacement`
 row in [`benchmarks/floors.toml`](../../benchmarks/floors.toml) (lines 93-97) —
 and by the artifact audit, which raises a violation for a measured latency over
