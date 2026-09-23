@@ -517,7 +517,7 @@ work_unit = "checkpoints"
 machine_class = "i5-8279U / macOS 24.6.0 / 8 logical CPUs"
 protocol = "1 warmup + 3 measured iterations"
 caps = "MAX_TOTAL_BYTES=8192"
-measured_paths = ["bins/rift/src/verify.rs"]
+measured_paths = ["bins/rift/src/verify/"]
 derivation_medians = []
 derivation_artifacts = []
 derivation = "min x 0.5, rounded down"
@@ -672,7 +672,7 @@ derivation = "min x 0.5, rounded down"
     #[test]
     fn a_row_with_no_measured_paths_is_refused_at_parse_time() {
         let body = MINIMAL.replace(
-            "measured_paths = [\"bins/rift/src/verify.rs\"]",
+            "measured_paths = [\"bins/rift/src/verify/\"]",
             "measured_paths = []",
         );
         let err = Floors::parse(&body).unwrap_err();
