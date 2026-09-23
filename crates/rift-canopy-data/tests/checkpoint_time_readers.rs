@@ -10,7 +10,7 @@
 //! may neither assume it is always a time nor assume it never is. The
 //! derivation that resolves it (recorded → the tightest lower bound derivable
 //! from the sessions the shard archives → *unresolved*) **used to live in
-//! `bins/rift/src/workflows.rs`, inside a bin-only package no crate could link
+//! `bins/rift/src/workflows/`, inside a bin-only package no crate could link
 //! to. It does not any more.** It is
 //! [`rift_store::window::CHECKPOINT_TIME_CTE`], and this crate now links it —
 //! so the enumeration's job changed with it: it no longer records which sites

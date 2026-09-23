@@ -682,7 +682,7 @@ resolve both edges to midnight, which admitted one millisecond of the day a
 reader asked for.) `--model` splits by model instead of agent. One wrinkle: the
 *human* rendering prints sessions, checkpoints, tokens, tool mix and split but
 no savings line, even though the command's help advertises savings
-(`bins/rift/src/workflows.rs:1149-1191`) — use `--json`, or `rift dispatch`.
+(`render_recap` in `bins/rift/src/workflows/recap.rs`) — use `--json`, or `rift dispatch`.
 `rift-memd metrics` reports the delta-ledger's *baseline* rather than the
 serving trail: total input tokens, `repeated_context_rate`,
 `avoidable_context_rate` and the counts they imply. All of these commands
