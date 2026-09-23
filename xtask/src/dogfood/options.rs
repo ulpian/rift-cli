@@ -1,0 +1,141 @@
+//! The command line: what one invocation was asked for.
+
+use std::path::PathBuf;
+
+use crate::dogfood::Client;
+
+/// How many minutes one scripted session may run before the box fires.
+pub(super) const SESSION_MINUTES: u64 = 10;
+
+/// What one invocation was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Options {
+    /// The clients to play, in table order.
+    pub clients: Vec<Client>,
+    /// How many of the scripted sessions to play, from the first.
+    pub sessions: usize,
+    /// Where the scratch checkouts and logs go. `None` means the default
+    /// under the home directory, stamped with the run's own UTC instant.
+    pub out: Option<PathBuf>,
+    /// Keep the scratch checkouts (and their registry rows) afterwards.
+    pub keep: bool,
+    /// Play every session twice — once with every read lever off, once as
+    /// they ship — and print the calibration between the two arms. It doubles
+    /// what the run spends.
+    pub compare: bool,
+}
+
+/// Parse the argv after the `dogfood` token.
+///
+/// # Errors
+/// A missing or unknown `--client`, a flag without its value, or an
+/// unrecognised flag.
+pub fn parse_args(args: &[String]) -> Result<Options, String> {
+    const USAGE: &str = "usage: xtask dogfood --client <claude-code|codex|antigravity|all> \
+                         [--sessions N] [--out DIR] [--keep] [--compare]";
+    let mut clients = None;
+    let mut sessions = 10usize;
+    let mut out = None;
+    let mut keep = false;
+    let mut compare = false;
+    let mut at = 0usize;
+    while let Some(arg) = args.get(at) {
+        let value = |name: &str| -> Result<String, String> {
+            args.get(at + 1)
+                .cloned()
+                .ok_or_else(|| format!("dogfood: {name} needs a value\n{USAGE}"))
+        };
+        match arg.as_str() {
+            "--client" => {
+                clients = Some(Client::parse(&value("--client")?)?);
+                at += 2;
+            }
+            "--sessions" => {
+                sessions = value("--sessions")?
+                    .parse()
+                    .map_err(|_| format!("dogfood: --sessions wants a number\n{USAGE}"))?;
+                at += 2;
+            }
+            "--out" => {
+                out = Some(PathBuf::from(value("--out")?));
+                at += 2;
+            }
+            "--keep" => {
+                keep = true;
+                at += 1;
+            }
+            "--compare" => {
+                compare = true;
+                at += 1;
+            }
+            other => return Err(format!("dogfood: unknown argument `{other}`\n{USAGE}")),
+        }
+    }
+    let clients = clients.ok_or_else(|| format!("dogfood: --client is required\n{USAGE}"))?;
+    if sessions == 0 {
+        return Err(format!("dogfood: --sessions must be at least 1\n{USAGE}"));
+    }
+    Ok(Options {
+        clients,
+        sessions,
+        out,
+        keep,
+        compare,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dogfood::ALL_CLIENTS;
+
+    /// Every flag, and each way the line can be wrong.
+    #[test]
+    fn the_arguments_parse() {
+        let args: Vec<String> = [
+            "--client",
+            "all",
+            "--sessions",
+            "3",
+            "--out",
+            "/o",
+            "--keep",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let opts = parse_args(&args).unwrap();
+        assert_eq!(opts.clients, ALL_CLIENTS.to_vec());
+        assert_eq!(opts.sessions, 3);
+        assert_eq!(opts.out, Some(PathBuf::from("/o")));
+        assert!(opts.keep);
+        assert!(!opts.compare, "one arm unless the line asks for two");
+        let both = parse_args(&[
+            "--client".to_owned(),
+            "codex".to_owned(),
+            "--compare".to_owned(),
+        ])
+        .unwrap();
+        assert!(both.compare);
+        assert!(!both.keep, "the two flags are independent");
+        let one = parse_args(&["--client".to_owned(), "codex".to_owned()]).unwrap();
+        assert_eq!(one.clients, vec![Client::Codex]);
+        assert_eq!(one.sessions, 10);
+        assert!(!one.keep);
+        assert!(parse_args(&[]).is_err(), "--client is required");
+        assert!(
+            parse_args(&["--compare".to_owned()]).is_err(),
+            "still no client"
+        );
+        assert!(parse_args(&["--client".to_owned(), "vim".to_owned()]).is_err());
+        assert!(parse_args(&["--client".to_owned()]).is_err(), "no value");
+        assert!(parse_args(&["--wat".to_owned()]).is_err());
+        assert!(parse_args(&[
+            "--client".to_owned(),
+            "codex".to_owned(),
+            "--sessions".to_owned(),
+            "0".to_owned()
+        ])
+        .is_err());
+    }
+}
