@@ -58,7 +58,7 @@ min_units_per_s = 71
 machine_class = "macos / x86_64 / 8 logical CPUs"
 protocol = "1 warmup + 3 measured iterations (Protocol::heavy), one fresh repository per iteration"
 caps = "MAX_TOTAL_BYTES=8192; MAX_FILE_BYTES=4096"
-measured_paths = ["crates/rift-shadow/src/legacy_import.rs", "crates/rift-recall-substrate/src/walker.rs", "bins/rift/src/main.rs", "benches/native-baseline/src/scenario.rs", "benches/native-baseline/src/legacy.rs"]
+measured_paths = ["crates/rift-shadow/src/legacy_import.rs", "crates/rift-recall-substrate/src/walker.rs", "bins/rift/src/main.rs", "benches/native-baseline/src/scenario/", "benches/native-baseline/src/legacy.rs"]
 derivation_medians = []
 derivation_artifacts = []
 derivation = "An owner's bar, ratified 2026-09-02. It was first obtained by the convention floor = min(per-run medians over >= 3 fresh runs at the shipped caps) x 0.5, rounded down to <= 2 significant figures — a PUBLICATION CONVENTION for an artifact-consistency guard, not a live measurement, and the x0.5 is NOT a noise budget. The medians and their artifact stems were removed when the history holding their subject commits was collapsed, because a derivation nobody can re-run is not a derivation."

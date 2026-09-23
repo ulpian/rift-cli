@@ -11,7 +11,7 @@
 //!
 //! The claim is scoped to CI deliberately, because a first draft of this file
 //! overstated it. `PreToolUse` **is** spawned as a process elsewhere:
-//! `benches/native-baseline/src/scenario.rs:46,93` sends it for the `ToolCallBash`
+//! `benches/native-baseline/src/scenario/event.rs` sends it for the `ToolCallBash`
 //! and `ToolCallRead` scenarios. That harness is its own workspace
 //! (`benches/native-baseline/Cargo.toml:14`), is not a root member, and is named
 //! nowhere in `.github/workflows/ci.yml` — measured, all three — so it can
