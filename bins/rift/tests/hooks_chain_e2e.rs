@@ -230,7 +230,7 @@ fn doctors_own_sweep_accrues_a_verify_instead_of_swallowing_one() {
 /// `ProjectionVsSource` comparison silently becomes a tautology: verify would
 /// fill the projection from git and then report that it matches git.
 ///
-/// Nothing in the suite drove that path. `verify.rs`'s unit tests call
+/// Nothing in the suite drove that path. `verify`'s unit tests call
 /// `verify_under` directly, `e2e.rs` uses the library verify over an in-memory
 /// store, and the divergence test beside this one plants a *divergence* row,
 /// not a *checkpoint* row — so the sentence in `run_at_with` claiming the

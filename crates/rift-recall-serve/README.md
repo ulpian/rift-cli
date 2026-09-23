@@ -17,7 +17,7 @@ budgeted, policy-gated, and audited.
 | Capabilities | Nine closed retrieval verbs; no transcript/session search |
 | Instructions | *"Start with `rift recall known-state`. Retrieval is budgeted and audited; exact retrieval requires a reason."* |
 | Scope | One repository per invocation; exact reads use the read-only git substrate |
-| Implementation | Transport-independent dispatcher in [`src/lib.rs`](src/lib.rs), called by [`bins/rift/src/recall.rs`](../../bins/rift/src/recall.rs) |
+| Implementation | Transport-independent dispatcher in [`src/lib.rs`](src/lib.rs), called by [`bins/rift/src/recall/serve.rs`](../../bins/rift/src/recall/serve.rs) |
 
 ---
 

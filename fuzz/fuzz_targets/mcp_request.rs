@@ -6,7 +6,7 @@
 //! that used to be `decode_request`'s one caller; the decoder itself is the
 //! transport-independent seam that decision explicitly kept, and today
 //! it decodes the `rift recall <verb>` skill-CLI channel's argv-turned-JSON
-//! instead (`decode_verb` → `decode_request`, `bins/rift/src/recall.rs`). The
+//! instead (`decode_verb` → `decode_request`, `bins/rift/src/recall/serve.rs`). The
 //! target and corpus names stay: renaming a fuzz target discards its
 //! accumulated corpus for no behavioral gain, and the names are wired into the
 //! CI workflows. What it fuzzes has not moved.

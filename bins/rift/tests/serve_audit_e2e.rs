@@ -10,7 +10,7 @@
 //! `rift recall <verb>` (the skill-CLI channel), and its audit
 //! target is the successor pair, `serve_call_event` /
 //! `serve_session_event` (schema 4), written by `record_serve`
-//! (`bins/rift/src/recall.rs`). This test drives the REAL `rift` binary twice
+//! (`bins/rift/src/recall/serve.rs`). This test drives the REAL `rift` binary twice
 //! and reads the REAL `recall.db` projection back — same coverage class as
 //! the test it replaces: real process, real audit write, a leak check over
 //! every persisted column.
