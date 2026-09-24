@@ -151,7 +151,7 @@ fn view_anchor() -> String {
 ///
 /// The anchor is **joined and column-zero**, and its uniqueness is **asserted**
 /// rather than assumed — the two halves of the same fix (`c7ed08e`, the same
-/// class in `xtask/src/ci_meta.rs`). A bare `"fn envelope_view"` needle cuts at
+/// class in `xtask/src/ci_meta/schema.rs`). A bare `"fn envelope_view"` needle cuts at
 /// the *first* occurrence anywhere, so a doc comment that merely QUOTES the
 /// signature — `/// see `fn envelope_view` for the projection` — silently moves
 /// the horizon up and shrinks the screened region to nothing. It fails open, and

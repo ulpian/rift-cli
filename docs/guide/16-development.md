@@ -98,7 +98,7 @@ the recall skill CLI. Use `./skills.sh memd -- status`. See
 `.github/workflows/ci.yml` triggers on pushes to the default branch and every
 pull request, grants `contents: read` and nothing else, and cancels superseded
 runs for the same ref. It declares **fifteen jobs**; fourteen are named in a
-required-job list inside `xtask` (`REQUIRED_JOBS` in `xtask/src/ci_meta.rs`)
+required-job list inside `xtask` (`REQUIRED_JOBS` in `xtask/src/ci_meta/workflow.rs`)
 checked by the `ci-meta` job itself, so a job cannot be quietly deleted while CI
 stays green. The fifteenth, `release-build`, is not required.
 
