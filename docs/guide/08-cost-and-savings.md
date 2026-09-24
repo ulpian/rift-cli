@@ -98,7 +98,7 @@ ingest-time backfill of
 
 **One place that does not.** The validity crate sizes its internal trials with
 a local characters-over-four estimate
-(`crates/rift-recall-validity/src/lib.rs:673-677`). It affects no published
+(`crates/rift-recall-validity/src/envelope.rs:247-251`). It affects no published
 figure — those trials never charge, and what they shape is measured again at
 the seam — but "one counter everywhere" is the design, not yet the code.
 
