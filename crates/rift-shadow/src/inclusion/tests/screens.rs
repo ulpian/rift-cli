@@ -438,7 +438,7 @@ fn only_three_places_in_this_module_write_a_record() {
 /// path, so neither shape survives on a tree the gate accepts.
 ///
 /// **Why lean rather than widen**, when the house fixed the matcher in the
-/// analogous case — `xtask/src/ci_meta.rs`,
+/// analogous case — `xtask/src/ci_meta/lints.rs`,
 /// `catches_whitespace_before_the_paren`, "`#![allow (clippy::all)]` is
 /// legal Rust and must not evade the gate". The precedent is *not* that
 /// fmt cannot see the shape: rustfmt normalises `#[allow (dead_code)]`
