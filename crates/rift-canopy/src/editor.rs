@@ -4,7 +4,7 @@
 //!
 //! Everything here is pure — a cursor over the model's units, a pickup flag, and
 //! functions that reorder/move/resize the columns. The reducer
-//! (`crate::input::on_key_editor`) drives these; the renderer draws grips over
+//! (`crate::input::panel_editor::on_key_editor`) drives these; the renderer draws grips over
 //! the cursor and the picked unit; a drop is a remove-then-insert that conserves
 //! the unit multiset, so the model stays valid (1..=N columns, the same
 //! `{Rail, cards, sections}` set) by construction.
