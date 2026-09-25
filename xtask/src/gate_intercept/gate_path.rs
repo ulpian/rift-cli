@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::ci_meta::production_half;
 
 use super::text::{calls_within, fn_bodies, mask_code, token_offsets, FnBody};
-use super::{rust_corpus, Leg};
+use super::{is_test_surface, rust_corpus, Leg};
 
 /// The entry points a decision about a tool call is made from, end to end:
 /// the guarded step the hook runs first, the gate inside it, the record kept
@@ -66,8 +66,9 @@ const GATE_CRATES: [&str; 2] = ["bins/rift/src/", "crates/rift-agent/src/"];
 /// **Nothing on the decision path opens a store or loads the tokenizer.**
 ///
 /// The walk: every function defined in the production half of `bins/rift/src/`
-/// and `crates/rift-agent/src/`, resolved by bare name; breadth-first from
-/// `GATE_ROOTS`; every reachable body screened for `FORBIDDEN_ON_GATE_PATH`.
+/// and `crates/rift-agent/src/` outside their test surface, resolved by bare
+/// name; breadth-first from `GATE_ROOTS`; every reachable body screened for
+/// `FORBIDDEN_ON_GATE_PATH`.
 ///
 /// **What this catches and what it cannot.** Names are resolved without types
 /// or modules, so two functions sharing a name are one node and the walk is
@@ -102,6 +103,14 @@ pub fn no_store_on_gate_path(root: &Path) -> Result<Leg, String> {
 fn screen_gate_path(corpus: &[(String, String)]) -> Result<(Leg, BTreeSet<String>), String> {
     let mut fns: Vec<FnBody> = Vec::new();
     for (rel, text) in corpus {
+        // A `tests/` directory under `src/` is compiled only through its
+        // parent's `#[cfg(test)] mod tests;`, so its files carry no marker of
+        // their own for the production cut to find. Walking them would put
+        // test helpers on the decision path by bare name, and keeping them
+        // off it would rest on naming discipline alone.
+        if is_test_surface(rel) {
+            continue;
+        }
         fns.extend(fn_bodies(rel, &mask_code(&production_half(text))));
     }
     let defined: BTreeSet<String> = fns.iter().map(|f| f.name.clone()).collect();
@@ -312,6 +321,44 @@ mod tests {
             leg.violations
                 .iter()
                 .any(|f| f.contains("read_gate") && f.contains("open_migrated")),
+            "{:#?}",
+            leg.violations
+        );
+    }
+
+    /// ★ A `tests/` directory under `src/`, compiled only through its
+    /// parent's `mod tests;`, is not on any decision path: a helper there that
+    /// a root names by accident and that opens a store is not a finding, while
+    /// the same function in a production file is.
+    #[test]
+    fn a_test_directory_gated_by_its_parent_module_is_not_walked() {
+        let roots = "fn window_journal_step() { helper(); }\nfn read_gate() {}\n\
+                     fn edit_record() {}\nfn gate_policy() {}\nfn gate_step() {}\n\
+                     fn edit_step() {}\nfn gate() {}\nfn respond_with_decision() {}\n\
+                     fn doc_gate() {}\nfn doc_gate_in() {}\nfn document_verify() {}\n";
+        let helper = "fn helper() { open_migrated(); }\n";
+        let in_tests = vec![
+            ("bins/rift/src/hooks/x/mod.rs".to_owned(), roots.to_owned()),
+            (
+                "bins/rift/src/hooks/x/tests/helper.rs".to_owned(),
+                helper.to_owned(),
+            ),
+        ];
+        let (leg, reached) = screen_gate_path(&in_tests).expect("the walk runs");
+        assert!(leg.violations.is_empty(), "{:#?}", leg.violations);
+        assert!(!reached.contains("helper"), "{reached:?}");
+
+        let in_production = vec![
+            ("bins/rift/src/hooks/x/mod.rs".to_owned(), roots.to_owned()),
+            (
+                "bins/rift/src/hooks/x/helper.rs".to_owned(),
+                helper.to_owned(),
+            ),
+        ];
+        let (leg, _) = screen_gate_path(&in_production).expect("the walk runs");
+        assert_eq!(leg.violations.len(), 1, "{:#?}", leg.violations);
+        assert!(
+            leg.violations[0].contains("`helper` reaches `open_migrated`"),
             "{:#?}",
             leg.violations
         );
