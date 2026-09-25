@@ -55,6 +55,7 @@ use crate::{
     leg::LegStatus,
     provenance::{self, GitProvenance},
     report::{LegOutcome, Report},
+    report_facts::{ReportFacts, REPORT_SCHEMA, REPORT_TAG},
 };
 
 /// The scenarios that are owed a floor row, verbatim.
@@ -455,8 +456,17 @@ fn check_enumeration(floors: &Floors, out: &mut Audit) {
     }
 }
 
-/// Arms (i) and (ii) for one binding floor.
+/// Arms (i) and (ii) for one binding floor: the runs it names first, then
+/// every measurement of its scenario, so a floor with bad evidence reports
+/// that before any value is judged against it.
 fn check_floor(floor: &Floor, inputs: &Inputs, out: &mut Audit) {
+    check_derivation(floor, inputs, out);
+    check_measurements(floor, inputs, out);
+}
+
+/// Every run a floor derives from exists here, is not a record and did not
+/// run over the load ceiling.
+fn check_derivation(floor: &Floor, inputs: &Inputs, out: &mut Audit) {
     // "No artifact without provenance may derive a floor", made
     // mechanical: the row names the runs its medians came from, and each one
     // must exist here and must not be a record.
@@ -488,9 +498,14 @@ fn check_floor(floor: &Floor, inputs: &Inputs, out: &mut Audit) {
                     floor.scenario
                 ),
             )),
-            Some(_) => {}
+            Some(_) => (),
         }
     }
+}
+
+/// Judge every measurement of the floor's scenario, and red a binding floor
+/// that nothing measures.
+fn check_measurements(floor: &Floor, inputs: &Inputs, out: &mut Audit) {
     let mut measured = 0usize;
     for (stem, artifact) in &inputs.artifacts {
         for m in artifact.measurements() {
@@ -498,35 +513,7 @@ fn check_floor(floor: &Floor, inputs: &Inputs, out: &mut Audit) {
                 continue;
             }
             measured += 1;
-            match (
-                floor.kind,
-                m.units_per_s,
-                m.millis,
-                floor.min_units_per_s,
-                floor.budget_ms,
-            ) {
-                (FloorKind::Throughput, Some(rate), _, Some(min), _) if rate < min => {
-                    out.findings.push(Finding::new(
-                        Arm::Violation,
-                        format!(
-                            "`{stem}` measured {rate:.2} {}/s for `{}` ({}), under the floor of \
-                             {min} {}/s",
-                            floor.work_unit, floor.scenario, m.label, floor.work_unit
-                        ),
-                    ));
-                }
-                (FloorKind::Latency, _, Some(ms), _, Some(budget)) if ms > budget => {
-                    out.findings.push(Finding::new(
-                        Arm::Violation,
-                        format!(
-                            "`{stem}` measured {ms:.2} ms for `{}` ({}), over the {budget} ms \
-                             budget",
-                            floor.scenario, m.label
-                        ),
-                    ));
-                }
-                _ => {}
-            }
+            judge_measurement(floor, stem, &m, out);
         }
     }
     if measured == 0 {
@@ -538,6 +525,40 @@ fn check_floor(floor: &Floor, inputs: &Inputs, out: &mut Audit) {
                 floor.scenario
             ),
         ));
+    }
+}
+
+/// One measurement against its floor: a throughput under the minimum or a
+/// latency over the budget is a violation; anything else says nothing.
+fn judge_measurement(floor: &Floor, stem: &str, m: &Measurement, out: &mut Audit) {
+    match (
+        floor.kind,
+        m.units_per_s,
+        m.millis,
+        floor.min_units_per_s,
+        floor.budget_ms,
+    ) {
+        (FloorKind::Throughput, Some(rate), _, Some(min), _) if rate < min => {
+            out.findings.push(Finding::new(
+                Arm::Violation,
+                format!(
+                    "`{stem}` measured {rate:.2} {}/s for `{}` ({}), under the floor of \
+                     {min} {}/s",
+                    floor.work_unit, floor.scenario, m.label, floor.work_unit
+                ),
+            ));
+        }
+        (FloorKind::Latency, _, Some(ms), _, Some(budget)) if ms > budget => {
+            out.findings.push(Finding::new(
+                Arm::Violation,
+                format!(
+                    "`{stem}` measured {ms:.2} ms for `{}` ({}), over the {budget} ms \
+                     budget",
+                    floor.scenario, m.label
+                ),
+            ));
+        }
+        _ => (),
     }
 }
 
@@ -688,77 +709,26 @@ fn check_fences(inputs: &Inputs, out: &mut Audit) {
 /// artifacts its families name, over the tracked floors file, and every
 /// floors scenario must have a row.
 fn check_report_fences(inputs: &Inputs, floors: &Floors, out: &mut Audit) {
-    use crate::report_facts::{ReportFacts, REPORT_SCHEMA, REPORT_TAG};
-
     for (path, body) in &inputs.reports {
-        let fence: ReportFacts = match facts::extract_tagged(body, REPORT_TAG) {
-            Ok(None) => continue,
-            Ok(Some(_)) => match facts::parse_tagged(body, REPORT_TAG, REPORT_SCHEMA) {
-                Ok(f) => f,
-                Err(e) => {
-                    out.findings.push(Finding::new(
-                        Arm::FenceDisagreement,
-                        format!("`{path}`: {e}"),
-                    ));
-                    continue;
-                }
-            },
-            Err(e) => {
+        let Some(fence) = parse_report_fence(path, body, out) else {
+            continue;
+        };
+        // Exactly the artifacts the fence names, so it is self-describing.
+        let named = match named_inputs(&fence, inputs, floors) {
+            Ok(named) => named,
+            Err(missing) => {
                 out.findings.push(Finding::new(
                     Arm::FenceDisagreement,
-                    format!("`{path}`: {e}"),
+                    format!(
+                        "`{path}` names {} artifact(s) that are not under benchmarks/: {}",
+                        missing.len(),
+                        missing.join(", ")
+                    ),
                 ));
                 continue;
             }
         };
-        // Exactly the artifacts the fence names, so it is self-describing.
-        let mut named: Inputs = Inputs {
-            floors: Some(floors.clone()),
-            ..Inputs::default()
-        };
-        let mut missing: Vec<String> = Vec::new();
-        for family in &fence.families {
-            for stamp in &family.artifacts {
-                let stem = facts::stem_of(&family.family, *stamp);
-                match inputs.artifacts.get(&stem) {
-                    Some(a) => {
-                        named.artifacts.insert(stem, a.clone());
-                    }
-                    None => missing.push(stem),
-                }
-            }
-        }
-        if !missing.is_empty() {
-            out.findings.push(Finding::new(
-                Arm::FenceDisagreement,
-                format!(
-                    "`{path}` names {} artifact(s) that are not under benchmarks/: {}",
-                    missing.len(),
-                    missing.join(", ")
-                ),
-            ));
-            continue;
-        }
-        for floor in &floors.floors {
-            let present = match floor.kind {
-                FloorKind::Throughput => fence
-                    .throughput
-                    .iter()
-                    .any(|t| t.scenario == floor.scenario),
-                FloorKind::Latency => floor.scenario == "enable-displacement",
-            };
-            if !present {
-                out.findings.push(Finding::new(
-                    Arm::FenceDisagreement,
-                    format!(
-                        "`{path}`'s fence carries no row for `{}`, which benchmarks/floors.toml \
-                         declares: a floor dropped from the aggregate must not leave a green \
-                         gate behind it",
-                        floor.scenario
-                    ),
-                ));
-            }
-        }
+        check_report_rows(path, &fence, floors, out);
         let recomputed = ReportFacts::of(&named, Some(floors));
         if recomputed != fence {
             out.findings.push(Finding::new(
@@ -766,6 +736,82 @@ fn check_report_fences(inputs: &Inputs, floors: &Floors, out: &mut Audit) {
                 format!(
                     "`{path}`'s bench-report fence does not match the artifacts it names — {}",
                     first_report_difference(&fence, &recomputed)
+                ),
+            ));
+        }
+    }
+}
+
+/// The report's bench-report fence, if it has one. `None` both for a report
+/// without the fence and for one whose fence does not parse; the second has
+/// already been recorded as a finding.
+fn parse_report_fence(path: &str, body: &str, out: &mut Audit) -> Option<ReportFacts> {
+    let parsed = match facts::extract_tagged(body, REPORT_TAG) {
+        Ok(None) => return None,
+        Ok(Some(_)) => facts::parse_tagged(body, REPORT_TAG, REPORT_SCHEMA),
+        Err(e) => Err(e),
+    };
+    match parsed {
+        Ok(fence) => Some(fence),
+        Err(e) => {
+            out.findings.push(Finding::new(
+                Arm::FenceDisagreement,
+                format!("`{path}`: {e}"),
+            ));
+            None
+        }
+    }
+}
+
+/// The inputs a fence names, over the tracked floors file; `Err` carries
+/// every named stem that is not under benchmarks/, in fence order.
+fn named_inputs(
+    fence: &ReportFacts,
+    inputs: &Inputs,
+    floors: &Floors,
+) -> std::result::Result<Inputs, Vec<String>> {
+    let mut named: Inputs = Inputs {
+        floors: Some(floors.clone()),
+        ..Inputs::default()
+    };
+    let mut missing: Vec<String> = Vec::new();
+    for family in &fence.families {
+        for stamp in &family.artifacts {
+            let stem = facts::stem_of(&family.family, *stamp);
+            match inputs.artifacts.get(&stem) {
+                Some(a) => {
+                    named.artifacts.insert(stem, a.clone());
+                }
+                None => missing.push(stem),
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(missing);
+    }
+    Ok(named)
+}
+
+/// Every scenario the floors file declares has a row in the fence: a
+/// throughput floor by its scenario, the one latency floor by the
+/// displacement row.
+fn check_report_rows(path: &str, fence: &ReportFacts, floors: &Floors, out: &mut Audit) {
+    for floor in &floors.floors {
+        let present = match floor.kind {
+            FloorKind::Throughput => fence
+                .throughput
+                .iter()
+                .any(|t| t.scenario == floor.scenario),
+            FloorKind::Latency => floor.scenario == "enable-displacement",
+        };
+        if !present {
+            out.findings.push(Finding::new(
+                Arm::FenceDisagreement,
+                format!(
+                    "`{path}`'s fence carries no row for `{}`, which benchmarks/floors.toml \
+                     declares: a floor dropped from the aggregate must not leave a green \
+                     gate behind it",
+                    floor.scenario
                 ),
             ));
         }

@@ -20,7 +20,7 @@ use crate::{
     fixture::{FixtureManifest, FixtureSet, FixtureSpec},
     hermetic::Hermetic,
     leg::{LegId, LegResolver, LegStatus},
-    measure::{measure, run_once, Invocation, Protocol, Stats},
+    measure::{measure, run_once, Invocation, Protocol, Sample, Stats},
     report::{
         now_unix, Comparison, Host, IngestCheck, LegOutcome, LegSummary, Report, ScenarioReport,
         SpawnCount, REPORT_SCHEMA,
@@ -81,6 +81,28 @@ pub struct Driver {
     /// never compared, and held here so the rows that need it can say why it is
     /// missing instead of quietly measuring something else.
     vogon: LegStatus,
+}
+
+/// Everything one leg of one scenario runs against, resolved once before
+/// its first iteration.
+struct LegCtx<'a> {
+    spec: &'a ScenarioSpec,
+    leg: LegId,
+    binary: &'a Path,
+    sandbox: &'a Path,
+    fixture_repo: &'a Path,
+    protocol: Protocol,
+    env: &'a [(String, String)],
+}
+
+/// What the measured window leaves behind: its samples, the command line
+/// the artifact records, the last invocation the untimed passes re-read,
+/// and the event count taken once the warmup was behind it.
+struct Window {
+    samples: Vec<Sample>,
+    command: String,
+    last: Option<Invocation>,
+    events_before: Option<u64>,
 }
 
 impl Driver {
@@ -157,86 +179,8 @@ impl Driver {
         let legs = self.legs();
         let mut fixtures: Vec<FixtureManifest> = Vec::new();
         let mut scenarios = Vec::new();
-
         for id in &opts.scenarios {
-            let spec = scenario::spec(*id);
-            // A scenario that is not wired builds nothing: no fixture, no sandbox,
-            // no binary needed. Declaring future work must stay free.
-            if let Availability::Planned(note) = spec.availability {
-                scenarios.push(planned_report(&spec, &opts.legs, note));
-                continue;
-            }
-            // Decide what *cannot* run before building anything: with no leg left
-            // to measure there is no reason to spend minutes generating a fixture.
-            let preflight: Vec<(LegId, Option<LegOutcome>)> = opts
-                .legs
-                .iter()
-                .map(|leg| {
-                    let status = legs.iter().find(|l| l.id == *leg).map(|l| &l.status);
-                    (*leg, preflight(&spec, *leg, status, self.vogon.binary()))
-                })
-                .collect();
-
-            let protocol = opts.protocol.unwrap_or(spec.protocol);
-            let mut outcomes = BTreeMap::new();
-            if preflight.iter().all(|(_, skip)| skip.is_some()) {
-                for (leg, skip) in preflight {
-                    if let Some(outcome) = skip {
-                        outcomes.insert(leg.as_str().to_owned(), outcome);
-                    }
-                }
-            } else {
-                let fixture_spec = FixtureSpec::preset(spec.fixture).ok_or_else(|| {
-                    BenchError::Spec(format!("scenario {} names no known fixture", id.as_str()))
-                })?;
-                let fixture = self.fixtures.materialize(&fixture_spec)?;
-                if !fixtures
-                    .iter()
-                    .any(|m| m.spec_digest == fixture.manifest.spec_digest)
-                {
-                    fixtures.push(fixture.manifest.clone());
-                }
-                for (leg, skip) in preflight {
-                    let outcome = if let Some(outcome) = skip {
-                        outcome
-                    } else {
-                        let status = legs.iter().find(|l| l.id == leg).map(|l| &l.status);
-                        self.measure_leg(
-                            &spec,
-                            leg,
-                            status,
-                            &fixture.repo,
-                            protocol,
-                            Probes {
-                                rss: opts.probe_rss,
-                                spawns: opts.probe_spawns,
-                            },
-                        )
-                    };
-                    outcomes.insert(leg.as_str().to_owned(), outcome);
-                }
-            }
-            let comparison = match (
-                outcomes.get(LegId::Rift.as_str()),
-                outcomes.get(LegId::Reference.as_str()),
-            ) {
-                (Some(rift), Some(reference)) => Comparison::of(rift, reference),
-                _ => None,
-            };
-
-            scenarios.push(ScenarioReport {
-                id: *id,
-                title: spec.title.to_owned(),
-                fixture: spec.fixture.to_owned(),
-                headline: spec.headline,
-                wired: spec.is_wired(),
-                protocol,
-                budget: spec.budget,
-                work_unit: spec.work_unit.map(str::to_owned),
-                caveat: spec.caveat.map(str::to_owned),
-                legs: outcomes,
-                comparison,
-            });
+            scenarios.push(self.scenario_report(*id, &legs, opts, &mut fixtures)?);
         }
 
         Ok(Report {
@@ -247,19 +191,116 @@ impl Driver {
             source_clock: self.resolver.source_clock.clone(),
             attestation: Some(crate::attest::Attestation::take()),
             legs: reported_legs(legs),
-            // Recorded whenever a driven row was asked for, present or not: an
-            // absent driver is why a row was skipped, which is exactly the sort
-            // of thing a report must not leave to inference.
-            driver: opts
-                .scenarios
-                .iter()
-                .any(|id| scenario::spec(*id).needs_driver())
-                .then(|| {
-                    crate::leg::reported(self.vogon.clone(), &crate::leg::default_repo_root())
-                }),
+            driver: self.reported_driver(opts),
             fixtures,
             scenarios,
         })
+    }
+
+    /// One scenario's row: every leg's outcome and, when both legs measured,
+    /// their comparison. A fixture it builds joins `fixtures` once.
+    fn scenario_report(
+        &self,
+        id: ScenarioId,
+        legs: &[LegSummary],
+        opts: &RunOptions,
+        fixtures: &mut Vec<FixtureManifest>,
+    ) -> Result<ScenarioReport> {
+        let spec = scenario::spec(id);
+        // A scenario that is not wired builds nothing: no fixture, no sandbox,
+        // no binary needed. Declaring future work must stay free.
+        if let Availability::Planned(note) = spec.availability {
+            return Ok(planned_report(&spec, &opts.legs, note));
+        }
+        // Decide what *cannot* run before building anything: with no leg left
+        // to measure there is no reason to spend minutes generating a fixture.
+        let preflight: Vec<(LegId, Option<LegOutcome>)> = opts
+            .legs
+            .iter()
+            .map(|leg| {
+                let status = status_of(legs, *leg);
+                (*leg, preflight(&spec, *leg, status, self.vogon.binary()))
+            })
+            .collect();
+
+        let protocol = opts.protocol.unwrap_or(spec.protocol);
+        let outcomes = if preflight.iter().all(|(_, skip)| skip.is_some()) {
+            skipped_outcomes(preflight)
+        } else {
+            self.measured_outcomes(&spec, legs, preflight, protocol, opts, fixtures)?
+        };
+        let comparison = match (
+            outcomes.get(LegId::Rift.as_str()),
+            outcomes.get(LegId::Reference.as_str()),
+        ) {
+            (Some(rift), Some(reference)) => Comparison::of(rift, reference),
+            _ => None,
+        };
+
+        Ok(ScenarioReport {
+            id,
+            title: spec.title.to_owned(),
+            fixture: spec.fixture.to_owned(),
+            headline: spec.headline,
+            wired: spec.is_wired(),
+            protocol,
+            budget: spec.budget,
+            work_unit: spec.work_unit.map(str::to_owned),
+            caveat: spec.caveat.map(str::to_owned),
+            legs: outcomes,
+            comparison,
+        })
+    }
+
+    /// Build the scenario's fixture once, then measure every leg preflight
+    /// left to run; a leg it skipped keeps its recorded reason.
+    fn measured_outcomes(
+        &self,
+        spec: &ScenarioSpec,
+        legs: &[LegSummary],
+        preflight: Vec<(LegId, Option<LegOutcome>)>,
+        protocol: Protocol,
+        opts: &RunOptions,
+        fixtures: &mut Vec<FixtureManifest>,
+    ) -> Result<BTreeMap<String, LegOutcome>> {
+        let fixture_spec = FixtureSpec::preset(spec.fixture).ok_or_else(|| {
+            BenchError::Spec(format!(
+                "scenario {} names no known fixture",
+                spec.id.as_str()
+            ))
+        })?;
+        let fixture = self.fixtures.materialize(&fixture_spec)?;
+        if !fixtures
+            .iter()
+            .any(|m| m.spec_digest == fixture.manifest.spec_digest)
+        {
+            fixtures.push(fixture.manifest.clone());
+        }
+        let probes = Probes {
+            rss: opts.probe_rss,
+            spawns: opts.probe_spawns,
+        };
+        let mut outcomes = BTreeMap::new();
+        for (leg, skip) in preflight {
+            let outcome = skip.unwrap_or_else(|| {
+                let status = status_of(legs, leg);
+                self.measure_leg(spec, leg, status, &fixture.repo, protocol, probes)
+            });
+            outcomes.insert(leg.as_str().to_owned(), outcome);
+        }
+        Ok(outcomes)
+    }
+
+    /// The scripted-session driver as the report records it.
+    ///
+    /// Recorded whenever a driven row was asked for, present or not: an
+    /// absent driver is why a row was skipped, which is exactly the sort of
+    /// thing a report must not leave to inference.
+    fn reported_driver(&self, opts: &RunOptions) -> Option<LegStatus> {
+        opts.scenarios
+            .iter()
+            .any(|id| scenario::spec(*id).needs_driver())
+            .then(|| crate::leg::reported(self.vogon.clone(), &crate::leg::default_repo_root()))
     }
 
     /// Drive one leg of one scenario. Never returns an error: every failure mode
@@ -279,108 +320,52 @@ impl Driver {
         let Some(LegStatus::Present { binary, .. }) = leg_status else {
             return skipped(format!("leg `{}` was not resolved", leg.as_str()));
         };
-        let binary = binary.clone();
 
         let sandbox = self.run_root.join(spec.id.as_str()).join(leg.as_str());
         if let Err(e) = reset_dir(&sandbox) {
             return failed(e.to_string(), None);
         }
         let env = scenario::leg_env(leg, &sandbox);
-        let shared = spec.isolation == Isolation::Shared;
-        let mut command = String::new();
-        let mut last: Option<Invocation> = None;
-        let owes_proof = self.owes_ingest_proof(spec, leg, &binary);
-        // Read once the warmup is behind us, so the proof covers exactly the
-        // published samples.
-        let mut events_before: Option<u64> = None;
+        let ctx = LegCtx {
+            spec,
+            leg,
+            binary,
+            sandbox: &sandbox,
+            fixture_repo,
+            protocol,
+            env: &env,
+        };
+        let owes_proof = self.owes_ingest_proof(spec, leg, binary);
 
-        let samples = measure(&self.hermetic, protocol, |i| {
-            let repo = repo_path(&sandbox, shared, i);
-            self.ensure_repo(leg, &binary, fixture_repo, &repo, &env)?;
-            let ctx = PlanCtx {
-                leg,
-                binary: &binary,
-                repo: &repo,
-                sandbox: &sandbox,
-                iteration: i,
-                tool: self.vogon.binary(),
-            };
-            // The previous iteration's detached work settles HERE, untimed,
-            // before this iteration's prelude and verb.
-            settle_detached(spec.id, &ctx)?;
-            if i == protocol.warmup && owes_proof {
-                events_before = self.count_events(&ctx, &env);
-            }
-            self.run_prelude(spec.id, &ctx, &env)?;
-            let Plan::Run(inv) = scenario::plan(spec.id, &ctx) else {
-                return Err(BenchError::Spec("no analogue".to_owned()));
-            };
-            let inv = with_env(*inv, &env);
-            command = sanitize_command(&inv.command_line(), &sandbox);
-            last = Some(inv.clone());
-            Ok(inv)
-        });
-
-        let samples = match samples {
-            Ok(s) => s,
+        let window = match self.timed_window(&ctx, owes_proof) {
+            Ok(window) => window,
             Err(e) => return failed(e.to_string(), None),
         };
-        let Some(stats) = Stats::of(&samples) else {
+        let Some(stats) = Stats::of(&window.samples) else {
             return failed("no samples were collected".to_owned(), None);
         };
         if !stats.clean() {
-            return failed(self.failure_reason(last.as_ref(), &stats), Some(stats));
+            return failed(
+                self.failure_reason(window.last.as_ref(), &stats),
+                Some(stats),
+            );
         }
         // What the timing was a timing *of*, and whether the verb answered.
         // Untimed, and after the samples, so it observes the same repository
         // state they ran against.
-        let stats = match self.after_window(
-            spec.id,
-            stats,
-            last.as_ref(),
-            leg,
-            &binary,
-            &sandbox,
-            protocol,
-            &env,
-        ) {
+        let stats = match self.after_window(&ctx, stats, window.last.as_ref()) {
             Ok(stats) => stats,
             Err(reason) => return failed(reason, Some(stats)),
         };
-
-        let ingest = if owes_proof {
-            let ctx = last.as_ref().map(|inv| PlanCtx {
-                leg,
-                binary: &binary,
-                repo: &inv.cwd,
-                sandbox: &sandbox,
-                iteration: protocol.warmup + protocol.iterations,
-                tool: self.vogon.binary(),
-            });
-            let per_iteration = scenario::durable_events_per_iteration(spec.id);
-            match self.prove_ingest(ctx.as_ref(), events_before, &stats, per_iteration, &env) {
-                Ok(check) => Some(check),
-                Err(reason) => return failed(reason, Some(stats)),
-            }
-        } else {
-            // Nothing to prove, or no leg-side counter to prove it with — said
-            // out loud in the report rather than assumed.
-            None
+        let ingest = match self.ingest_of(&ctx, owes_proof, &window, &stats) {
+            Ok(ingest) => ingest,
+            Err(reason) => return failed(reason, Some(stats)),
         };
 
-        let (peak_rss_bytes, child_spawns) = self.untimed_probes(
-            spec,
-            leg,
-            &binary,
-            &sandbox,
-            fixture_repo,
-            protocol,
-            &env,
-            probes,
-            last.as_ref(),
-        );
+        let (peak_rss_bytes, child_spawns) =
+            self.untimed_probes(&ctx, probes, window.last.as_ref());
         LegOutcome::Measured {
-            command,
+            command: window.command,
             stats,
             peak_rss_bytes,
             ingest,
@@ -388,20 +373,92 @@ impl Driver {
         }
     }
 
+    /// The measured window. Everything per iteration except the verb itself —
+    /// the repository copy, the previous iteration's detached work, the
+    /// event count and the prelude — happens inside `prepare`, which
+    /// `measure` runs outside the timer.
+    fn timed_window(&self, ctx: &LegCtx<'_>, owes_proof: bool) -> Result<Window> {
+        let shared = ctx.spec.isolation == Isolation::Shared;
+        let mut command = String::new();
+        let mut last: Option<Invocation> = None;
+        // Read once the warmup is behind us, so the proof covers exactly the
+        // published samples.
+        let mut events_before: Option<u64> = None;
+
+        let samples = measure(&self.hermetic, ctx.protocol, |i| {
+            let repo = repo_path(ctx.sandbox, shared, i);
+            self.ensure_repo(ctx.leg, ctx.binary, ctx.fixture_repo, &repo, ctx.env)?;
+            let plan = PlanCtx {
+                leg: ctx.leg,
+                binary: ctx.binary,
+                repo: &repo,
+                sandbox: ctx.sandbox,
+                iteration: i,
+                tool: self.vogon.binary(),
+            };
+            // The previous iteration's detached work settles HERE, untimed,
+            // before this iteration's prelude and verb.
+            settle_detached(ctx.spec.id, &plan)?;
+            if i == ctx.protocol.warmup && owes_proof {
+                events_before = self.count_events(&plan, ctx.env);
+            }
+            self.run_prelude(ctx.spec.id, &plan, ctx.env)?;
+            let Plan::Run(inv) = scenario::plan(ctx.spec.id, &plan) else {
+                return Err(BenchError::Spec("no analogue".to_owned()));
+            };
+            let inv = with_env(*inv, ctx.env);
+            command = sanitize_command(&inv.command_line(), ctx.sandbox);
+            last = Some(inv.clone());
+            Ok(inv)
+        })?;
+        Ok(Window {
+            samples,
+            command,
+            last,
+            events_before,
+        })
+    }
+
+    /// The ingest proof this leg owes, over the window's last invocation;
+    /// `Err` is the reason the measure is failed.
+    fn ingest_of(
+        &self,
+        ctx: &LegCtx<'_>,
+        owes_proof: bool,
+        window: &Window,
+        stats: &Stats,
+    ) -> std::result::Result<Option<IngestCheck>, String> {
+        if !owes_proof {
+            // Nothing to prove, or no leg-side counter to prove it with — said
+            // out loud in the report rather than assumed.
+            return Ok(None);
+        }
+        let plan = window.last.as_ref().map(|inv| PlanCtx {
+            leg: ctx.leg,
+            binary: ctx.binary,
+            repo: &inv.cwd,
+            sandbox: ctx.sandbox,
+            iteration: ctx.protocol.warmup + ctx.protocol.iterations,
+            tool: self.vogon.binary(),
+        });
+        let per_iteration = scenario::durable_events_per_iteration(ctx.spec.id);
+        let check = self.prove_ingest(
+            plan.as_ref(),
+            window.events_before,
+            stats,
+            per_iteration,
+            ctx.env,
+        )?;
+        Ok(Some(check))
+    }
+
     /// The two optional untimed passes: peak RSS of the last measured
     /// invocation, and — for the rows that ask — the child processes one
     /// invocation launches. Each is `None` when not asked for or not
     /// measurable, never zero.
-    #[allow(clippy::too_many_arguments)] // one call site; every argument is context the probes need
     fn untimed_probes(
         &self,
-        spec: &ScenarioSpec,
-        leg: LegId,
-        binary: &Path,
-        sandbox: &Path,
-        fixture_repo: &Path,
-        protocol: Protocol,
-        env: &[(String, String)],
+        ctx: &LegCtx<'_>,
         probes: Probes,
         last: Option<&Invocation>,
     ) -> (Option<u64>, Option<SpawnCount>) {
@@ -410,8 +467,8 @@ impl Driver {
         } else {
             None
         };
-        let child_spawns = (probes.spawns && spec.spawn_probe)
-            .then(|| self.count_spawns(spec, leg, binary, sandbox, fixture_repo, protocol, env))
+        let child_spawns = (probes.spawns && ctx.spec.spawn_probe)
+            .then(|| self.count_spawns(ctx))
             .flatten();
         (peak_rss_bytes, child_spawns)
     }
@@ -425,34 +482,26 @@ impl Driver {
     /// probe exists for that is fatal: `identity-attribution` binds a *new*
     /// session's identity, and a session that is already bound spawns nothing
     /// at all. The count would be a beautiful, meaningless zero.
-    fn count_spawns(
-        &self,
-        spec: &ScenarioSpec,
-        leg: LegId,
-        binary: &Path,
-        sandbox: &Path,
-        fixture_repo: &Path,
-        protocol: Protocol,
-        env: &[(String, String)],
-    ) -> Option<SpawnCount> {
+    fn count_spawns(&self, ctx: &LegCtx<'_>) -> Option<SpawnCount> {
         let probe = self.spawns.as_ref()?;
-        let iteration = protocol.warmup + protocol.iterations;
-        let repo = repo_path(sandbox, spec.isolation == Isolation::Shared, iteration);
-        self.ensure_repo(leg, binary, fixture_repo, &repo, env)
+        let iteration = ctx.protocol.warmup + ctx.protocol.iterations;
+        let shared = ctx.spec.isolation == Isolation::Shared;
+        let repo = repo_path(ctx.sandbox, shared, iteration);
+        self.ensure_repo(ctx.leg, ctx.binary, ctx.fixture_repo, &repo, ctx.env)
             .ok()?;
-        let ctx = PlanCtx {
-            leg,
-            binary,
+        let plan = PlanCtx {
+            leg: ctx.leg,
+            binary: ctx.binary,
             repo: &repo,
-            sandbox,
+            sandbox: ctx.sandbox,
             iteration,
             tool: self.vogon.binary(),
         };
-        self.run_prelude(spec.id, &ctx, env).ok()?;
-        let Plan::Run(inv) = scenario::plan(spec.id, &ctx) else {
+        self.run_prelude(ctx.spec.id, &plan, ctx.env).ok()?;
+        let Plan::Run(inv) = scenario::plan(ctx.spec.id, &plan) else {
             return None;
         };
-        probe.count(&self.hermetic, &with_env(*inv, env))
+        probe.count(&self.hermetic, &with_env(*inv, ctx.env))
     }
 
     /// Why a dirty measure failed, with the leg's own last words: the invocation
@@ -597,26 +646,21 @@ impl Driver {
     /// reason the measure is failed, with its timings inside the failure. An
     /// unrunnable or unparsable probe is a failed answer, not an absent one —
     /// silence is how a refusal would publish as a latency.
-    #[allow(clippy::too_many_arguments)] // one call site; every argument is context the probes need
     fn after_window(
         &self,
-        id: ScenarioId,
+        leg_ctx: &LegCtx<'_>,
         stats: Stats,
         last: Option<&Invocation>,
-        leg: LegId,
-        binary: &Path,
-        sandbox: &Path,
-        protocol: Protocol,
-        env: &[(String, String)],
     ) -> std::result::Result<Stats, String> {
         let Some(last) = last else {
             return Ok(stats);
         };
+        let (id, protocol, env) = (leg_ctx.spec.id, leg_ctx.protocol, leg_ctx.env);
         let ctx = PlanCtx {
-            leg,
-            binary,
+            leg: leg_ctx.leg,
+            binary: leg_ctx.binary,
             repo: &last.cwd,
-            sandbox,
+            sandbox: leg_ctx.sandbox,
             iteration: protocol.warmup + protocol.iterations,
             tool: self.vogon.binary(),
         };
@@ -768,6 +812,22 @@ fn preflight(
         Plan::NoAnalogue(note) => Some(skipped(note.to_owned())),
         Plan::Run(_) => None,
     }
+}
+
+/// The resolved status of `leg`, if the resolver listed it.
+fn status_of(legs: &[LegSummary], leg: LegId) -> Option<&LegStatus> {
+    legs.iter().find(|l| l.id == leg).map(|l| &l.status)
+}
+
+/// The outcomes of a scenario whose every leg preflight skipped.
+fn skipped_outcomes(preflight: Vec<(LegId, Option<LegOutcome>)>) -> BTreeMap<String, LegOutcome> {
+    let mut outcomes = BTreeMap::new();
+    for (leg, skip) in preflight {
+        if let Some(outcome) = skip {
+            outcomes.insert(leg.as_str().to_owned(), outcome);
+        }
+    }
+    outcomes
 }
 
 /// The report row for a declared-but-not-wired scenario.

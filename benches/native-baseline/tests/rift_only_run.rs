@@ -99,59 +99,78 @@ fn assert_measured_leg(report: &Report, id: ScenarioId) {
     }
 }
 
+/// The four rows the rift-only run drives, in report order.
+#[cfg(unix)]
+const RIFT_ONLY_ROWS: [ScenarioId; 4] = [
+    ScenarioId::ColdStatus,
+    ScenarioId::HookRoundTrip,
+    ScenarioId::ResumeRestore,
+    ScenarioId::BlameWhy,
+];
+
 #[cfg(unix)]
 #[test]
 fn a_rift_only_run_measures_one_leg_and_records_the_other_as_absent() {
     let tmp = tempfile::tempdir().unwrap();
     let log = tmp.path().join("calls.log");
     let binary = stand_in(tmp.path(), &log);
+    let report = rift_only_report(tmp.path(), binary);
 
+    // --- the measured leg -------------------------------------------------
+    for id in RIFT_ONLY_ROWS {
+        assert_measured_leg(&report, id);
+    }
+    assert_resolver_rows_were_asked_their_answer(&log);
+
+    // --- the absent leg ---------------------------------------------------
+    assert_backend_leg_absent(&report);
+
+    // --- what the leg actually saw ---------------------------------------
+    assert_capture_enabled_outside_the_timed_region(&log);
+
+    // --- the artifact -----------------------------------------------------
+    assert_artifact_round_trips(&report, &tmp.path().join("out"));
+}
+
+/// Both legs asked for over the four rows, two measured iterations each, no
+/// untimed probes: only the stand-in plays a leg, so the backend is absent.
+#[cfg(unix)]
+fn rift_only_report(root: &Path, binary: PathBuf) -> Report {
     let resolver = LegResolver {
         rift_override: Some(binary),
         reference_override: None,
         vogon_override: None,
-        repo_root: tmp.path().join("repo-root"),
+        repo_root: root.join("repo-root"),
         path_var: None,
-        install_root: Some(tmp.path().join("install")),
+        install_root: Some(root.join("install")),
         allow_debug: false,
         source_clock: None,
         allow_stale: false,
         git_provenance: None,
     };
     let driver = Driver::new(
-        tmp.path().join("runs"),
-        FixtureSet::new(tmp.path().join("fixtures")),
+        root.join("runs"),
+        FixtureSet::new(root.join("fixtures")),
         resolver,
     )
     .unwrap();
 
-    let report = driver
+    driver
         .run(&RunOptions {
-            scenarios: vec![
-                ScenarioId::ColdStatus,
-                ScenarioId::HookRoundTrip,
-                ScenarioId::ResumeRestore,
-                ScenarioId::BlameWhy,
-            ],
+            scenarios: RIFT_ONLY_ROWS.to_vec(),
             legs: LegId::all().to_vec(),
             protocol: Some(Protocol::new(0, 2)),
             probe_rss: false,
             probe_spawns: false,
         })
-        .unwrap();
+        .unwrap()
+}
 
-    // --- the measured leg -------------------------------------------------
-    for id in [
-        ScenarioId::ColdStatus,
-        ScenarioId::HookRoundTrip,
-        ScenarioId::ResumeRestore,
-        ScenarioId::BlameWhy,
-    ] {
-        assert_measured_leg(&report, id);
-    }
-    // The two resolver rows ran their preludes — a session on a session id
-    // of its own, a file, a commit — and were asked their answer once more.
-    let calls = fs::read_to_string(&log).unwrap();
+/// The two resolver rows ran their preludes — a session on a session id
+/// of its own, a file, a commit — and were asked their answer once more.
+#[cfg(unix)]
+fn assert_resolver_rows_were_asked_their_answer(log: &Path) {
+    let calls = fs::read_to_string(log).unwrap();
     assert!(
         calls.contains("argv: --json session resume main --force"),
         "the resume verb was timed: {calls}"
@@ -165,8 +184,12 @@ fn a_rift_only_run_measures_one_leg_and_records_the_other_as_absent() {
         why_probe, 2,
         "timed once, then asked its answer once: {calls}"
     );
+}
 
-    // --- the absent leg ---------------------------------------------------
+/// Every row skips the backend with a reason, the leg list still names it,
+/// and only the fixture this run asked for was built.
+#[cfg(unix)]
+fn assert_backend_leg_absent(report: &Report) {
     for scenario in &report.scenarios {
         let LegOutcome::Skipped { reason } = &scenario.legs["reference"] else {
             panic!("the backend is not installed; it cannot be measured");
@@ -184,9 +207,13 @@ fn a_rift_only_run_measures_one_leg_and_records_the_other_as_absent() {
     // Only the `small` fixture was built: nothing in this run asked for more.
     assert_eq!(report.fixtures.len(), 1);
     assert_eq!(report.fixtures[0].spec.name, "small");
+}
 
-    // --- what the leg actually saw ---------------------------------------
-    let calls = fs::read_to_string(&log).unwrap();
+/// Capture was enabled before the timed verbs, and the hook payload reached
+/// the leg on stdin.
+#[cfg(unix)]
+fn assert_capture_enabled_outside_the_timed_region(log: &Path) {
+    let calls = fs::read_to_string(log).unwrap();
     assert!(
         calls.contains("argv: init --no-recall"),
         "capture is enabled outside the timed region: {calls}"
@@ -197,13 +224,16 @@ fn a_rift_only_run_measures_one_leg_and_records_the_other_as_absent() {
         calls.contains("\"hook_event_name\":\"PreToolUse\""),
         "the hook payload reaches the leg on stdin: {calls}"
     );
+}
 
-    // --- the artifact -----------------------------------------------------
-    let out = tmp.path().join("out");
-    let json = report.write_json(&out).unwrap();
-    let md = report.write_markdown(&out).unwrap();
+/// The JSON artifact reads back as the report it was written from, and the
+/// Markdown one says the backend is absent.
+#[cfg(unix)]
+fn assert_artifact_round_trips(report: &Report, out: &Path) {
+    let json = report.write_json(out).unwrap();
+    let md = report.write_markdown(out).unwrap();
     let round_tripped: Report = serde_json::from_slice(&fs::read(&json).unwrap()).unwrap();
-    assert_eq!(round_tripped, report);
+    assert_eq!(&round_tripped, report);
     assert_eq!(round_tripped.schema_version, REPORT_SCHEMA);
     let rendered = fs::read_to_string(&md).unwrap();
     assert!(rendered.contains("**absent**"));
