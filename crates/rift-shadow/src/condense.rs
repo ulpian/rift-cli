@@ -213,9 +213,7 @@ pub fn predicted_checkpoint_id_from(
         RedactionReportView::from_redact(&out.report),
         read_facts.to_vec(),
     );
-    archive
-        .derived_checkpoint_id()
-        .ok_or_else(|| rift_core::RiftError::validity("a checkpoint id needs 1+ NUL-free sessions"))
+    derived_id(&archive)
 }
 
 /// A [`CheckpointArchive`] carrying exactly the artifacts that decide an id, with
@@ -331,35 +329,65 @@ pub async fn condense(
         // Single-session by construction on this path; see the field's doc.
         session_worktrees: std::collections::BTreeMap::new(),
     };
-    archive.checkpoint_id = archive.derived_checkpoint_id().ok_or_else(|| {
-        rift_core::RiftError::validity("a checkpoint id needs 1+ NUL-free sessions")
-    })?;
+    archive.checkpoint_id = derived_id(&archive)?;
     let checkpoint_id = archive.checkpoint_id.clone();
-    if let Err(e) = backend.archive_checkpoint(&archive) {
-        // A default-deny refusal is an audited fact, not just an error:
-        // the archive root verb is the refused token. Audit best-effort — the
-        // refusal itself must still surface even if the audit insert fails.
-        if matches!(e, rift_core::RiftError::PolicyDenied(_)) {
-            let _ = record_block(store, "checkpoint", "screen-refused", now_ms).await;
-        }
-        return Err(e);
-    }
+    archive_or_audit_refusal(backend, store, &archive, now_ms).await?;
+    record_archived_decision(store, session, strategy, reason, now_ms, &checkpoint_id).await?;
+    Ok(checkpoint_id)
+}
 
+/// Hand the archive to the backend. A default-deny refusal is an audited fact,
+/// not just an error: the archive root verb is the refused token. Audit
+/// best-effort — the refusal itself must still surface even if the audit insert
+/// fails.
+async fn archive_or_audit_refusal(
+    backend: &impl ShadowBackend,
+    store: &impl CanonicalStore,
+    archive: &CheckpointArchive,
+    now_ms: i64,
+) -> Result<()> {
+    let Err(e) = backend.archive_checkpoint(archive) else {
+        return Ok(());
+    };
+    if matches!(e, rift_core::RiftError::PolicyDenied(_)) {
+        let _ = record_block(store, "checkpoint", "screen-refused", now_ms).await;
+    }
+    Err(e)
+}
+
+/// The id an assembled archive derives from its own artifacts; a capture that
+/// names no NUL-free session has none, and that is a validity error.
+fn derived_id(archive: &CheckpointArchive) -> Result<CheckpointId> {
+    archive
+        .derived_checkpoint_id()
+        .ok_or_else(|| rift_core::RiftError::validity("a checkpoint id needs 1+ NUL-free sessions"))
+}
+
+/// The `archived=1` decision row — written only after the substrate write
+/// landed, so the audit never claims an archive that does not exist.
+async fn record_archived_decision(
+    store: &impl CanonicalStore,
+    session: &str,
+    strategy: StrategyKind,
+    reason: ArchiveReason,
+    now_ms: i64,
+    checkpoint_id: &str,
+) -> Result<()> {
     record_archive_decision(
         store,
         &ArchiveDecisionRow {
-            decision_id: decision_id(session, strategy, reason, now_ms, Some(&checkpoint_id)),
+            decision_id: decision_id(session, strategy, reason, now_ms, Some(checkpoint_id)),
             session_id: Some(session.to_owned()),
             strategy: strategy.as_str().to_owned(),
             reason: reason.as_str().to_owned(),
             archived: true,
-            checkpoint_id: Some(checkpoint_id.clone()),
+            checkpoint_id: Some(checkpoint_id.to_owned()),
             decided_at: now_ms,
             schema_version: 1,
         },
     )
     .await?;
-    Ok(checkpoint_id)
+    Ok(())
 }
 
 /// Record a default-deny refusal of an archive as an append-only
@@ -582,14 +610,11 @@ mod tests {
         );
     }
 
-    /// The writer's id is a function of the bytes the writer archived — asserted
-    /// through the archive's own artifact renderers, which is the pair `rift
-    /// verify` re-derives from. If the id ever stops addressing the shard it
-    /// sits in, the shard path stops being a binding and the last thing a
-    /// tamperer cannot recompute is gone.
-    #[test]
-    fn the_archived_id_is_derivable_from_the_artifacts_the_archive_writes() {
-        use crate::backend::{ArchivedReadFact, CheckpointArchive, RedactionReportView};
+    /// A hand-built archive with its id derived from its own artifacts, and
+    /// that id. Each test below changes one thing about it; the root is the
+    /// archive's own, so the leaf tests are not restatements of one hash call.
+    fn archive_with_id() -> (CheckpointArchive, String) {
+        use crate::backend::{ArchivedReadFact, RedactionReportView};
 
         let facts = vec![ArchivedReadFact {
             tool_use_id: "t1".into(),
@@ -630,16 +655,31 @@ mod tests {
         };
         archive.checkpoint_id = archive.derived_checkpoint_id().unwrap();
         let id = archive.checkpoint_id.clone();
+        (archive, id)
+    }
+
+    /// The writer's id is a function of the bytes the writer archived — asserted
+    /// through the archive's own artifact renderers, which is the pair `rift
+    /// verify` re-derives from. If the id ever stops addressing the shard it
+    /// sits in, the shard path stops being a binding and the last thing a
+    /// tamperer cannot recompute is gone.
+    #[test]
+    fn the_archived_id_is_derivable_from_the_artifacts_the_archive_writes() {
+        let (archive, id) = archive_with_id();
         assert_eq!(
             derive_checkpoint_id(&archive.sessions[0], archive.merkle_root()),
             id,
             "the id must address the root over the artifacts the shard carries"
         );
+    }
 
-        // …and every leaf artifact moves it, which is the property that makes
-        // the shard TREE a function of the shard PATH. Each arm below is a
-        // separate artifact; the root is the archive's own, so these are not
-        // three restatements of one hash call.
+    // Every leaf artifact moves the id, which is the property that makes the
+    // shard TREE a function of the shard PATH. Each test below is a separate
+    // artifact.
+
+    #[test]
+    fn another_session_moves_the_archived_id() {
+        let (archive, id) = archive_with_id();
         let mut other_session = archive.clone();
         other_session.sessions = vec!["01JOTHERSESSION".to_owned()];
         assert_ne!(
@@ -647,7 +687,11 @@ mod tests {
             id,
             "session"
         );
+    }
 
+    #[test]
+    fn edited_content_moves_the_archived_id() {
+        let (archive, id) = archive_with_id();
         let mut edited = archive.clone();
         edited.content = rift_shadow_redact::redact(&SecretBytes::new(b"edited".to_vec()))
             .unwrap()
@@ -657,7 +701,11 @@ mod tests {
             id,
             "content.redacted"
         );
+    }
 
+    #[test]
+    fn dropped_read_facts_move_the_archived_id() {
+        let (archive, id) = archive_with_id();
         let mut no_facts = archive.clone();
         no_facts.read_facts = Vec::new();
         assert_ne!(
@@ -665,7 +713,11 @@ mod tests {
             id,
             "tool_calls.jsonl"
         );
+    }
 
+    #[test]
+    fn a_changed_redaction_report_moves_the_archived_id() {
+        let (archive, id) = archive_with_id();
         let mut with_report = archive.clone();
         with_report.report.total_spans += 1;
         assert_ne!(
@@ -673,9 +725,14 @@ mod tests {
             id,
             "redaction_report.json — a leaf the pre-root derivation did NOT bind"
         );
+    }
 
-        // …and the anchoring commit does NOT, or a second commit in one session
-        // would mint a new shard for unchanged capture and idempotence would go.
+    /// The anchoring commit does NOT move the id, or a second commit in one
+    /// session would mint a new shard for unchanged capture and idempotence
+    /// would go.
+    #[test]
+    fn anchor_drift_leaves_the_archived_id_alone() {
+        let (archive, id) = archive_with_id();
         let mut later = archive.clone();
         later.commit = "def456".to_owned();
         later.created_at_ms = later.created_at_ms.map(|ms| ms + 60_000);
@@ -684,16 +741,25 @@ mod tests {
             id,
             "anchor drift is not capture drift"
         );
+    }
 
-        // N ≥ 2 is DEFINED — and it is a different
-        // identity from any single session's, because cardinality and order
-        // are part of the full form. (This assertion used to be `is_none()`:
-        // the writer refused to guess until the rule existed.)
+    /// N ≥ 2 is DEFINED — and it is a different identity from any single
+    /// session's, because cardinality and order are part of the full form.
+    /// (This assertion used to be `is_none()`: the writer refused to guess
+    /// until the rule existed.)
+    #[test]
+    fn a_second_session_is_a_different_identity() {
+        let (archive, id) = archive_with_id();
         let mut two = archive.clone();
         two.sessions.push("01JSECOND".to_owned());
         let two_id = two.derived_checkpoint_id().expect("N >= 2 is defined now");
         assert_ne!(two_id, id, "a second session is a different identity");
-        // …and a session id carrying the frame byte is refused, not framed.
+    }
+
+    /// A session id carrying the frame byte is refused, not framed.
+    #[test]
+    fn a_session_id_carrying_the_frame_byte_is_refused() {
+        let (archive, _) = archive_with_id();
         let mut nul = archive.clone();
         nul.sessions = vec!["bad\0session".to_owned()];
         assert!(nul.derived_checkpoint_id().is_none(), "NUL is refused");
@@ -969,61 +1035,65 @@ mod tests {
             "seeded secret must not survive"
         );
     }
-    /// The label is derived from **the worktree the condense ran
-    /// in** — `repo`, the checkout the caller is archiving from — and not
-    /// handed in by a caller who could get it wrong. A condense outside any
-    /// repository (which every hand-built fixture is) carries no member at all,
-    /// which is what keeps the frozen anchors and goldens frozen.
-    #[tokio::test]
-    async fn a_condense_labels_the_shard_with_the_worktree_it_ran_in() {
-        /// A backend that keeps the whole archive, so the member can be read.
-        #[derive(Default)]
-        struct KeepingBackend {
-            last: std::cell::RefCell<Option<CheckpointArchive>>,
-        }
-        impl ShadowBackend for KeepingBackend {
-            fn archive_checkpoint(&self, archive: &CheckpointArchive) -> Result<()> {
-                *self.last.borrow_mut() = Some(archive.clone());
-                Ok(())
-            }
-        }
 
+    /// A backend that keeps the whole archive, so the member can be read.
+    #[derive(Default)]
+    struct KeepingBackend {
+        last: std::cell::RefCell<Option<CheckpointArchive>>,
+    }
+    impl ShadowBackend for KeepingBackend {
+        fn archive_checkpoint(&self, archive: &CheckpointArchive) -> Result<()> {
+            *self.last.borrow_mut() = Some(archive.clone());
+            Ok(())
+        }
+    }
+
+    /// A repository with a main tree at `main` and a linked member at `member`
+    /// (admin name `swt-a`, on `swt/a-foundations`); `nowhere` is in neither.
+    fn repo_with_a_member() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let main_git = rift_git::test_support::fake_repo(&tmp.path().join("main")).unwrap();
         let member_tree = tmp.path().join("member");
         let admin =
             rift_git::test_support::fake_worktree(&main_git, &member_tree, "swt-a").unwrap();
         std::fs::write(admin.join("HEAD"), "ref: refs/heads/swt/a-foundations\n").unwrap();
+        tmp
+    }
 
-        let run_in = |repo: &std::path::Path| {
-            let backend = KeepingBackend::default();
-            let s = store();
-            let raw = SecretBytes::new(Vec::new());
-            let repo = repo.to_path_buf();
-            async move {
-                condense(
-                    &backend,
-                    &s,
-                    &repo,
-                    "01JSESSION",
-                    &raw,
-                    StrategyKind::ManualCommit,
-                    ArchiveReason::Commit,
-                    "abc123",
-                    1,
-                    Vec::new(),
-                    &RulePackSet::builtin(),
-                    None,
-                    Vec::new(),
-                )
-                .await
-                .unwrap();
-                let kept = backend.last.borrow().clone().unwrap();
-                kept
-            }
-        };
+    /// The archive one condense of an empty capture hands its backend when run
+    /// from `repo` — a fresh store and backend each time.
+    async fn archive_condensed_in(repo: &std::path::Path) -> CheckpointArchive {
+        let backend = KeepingBackend::default();
+        let s = store();
+        let raw = SecretBytes::new(Vec::new());
+        condense(
+            &backend,
+            &s,
+            repo,
+            "01JSESSION",
+            &raw,
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            1,
+            Vec::new(),
+            &RulePackSet::builtin(),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let kept = backend.last.borrow().clone().unwrap();
+        kept
+    }
 
-        let from_member = run_in(&member_tree).await;
+    /// The label is derived from **the worktree the condense ran
+    /// in** — `repo`, the checkout the caller is archiving from — and not
+    /// handed in by a caller who could get it wrong.
+    #[tokio::test]
+    async fn a_condense_labels_the_shard_with_the_worktree_it_ran_in() {
+        let tmp = repo_with_a_member();
+        let from_member = archive_condensed_in(&tmp.path().join("member")).await;
         let label = from_member.worktree.clone().expect("a member is labelled");
         assert_eq!(label.name, "swt-a", "the ADMIN name, not the checkout's");
         assert!(label.linked);
@@ -1033,8 +1103,14 @@ mod tests {
             from_member.session_worktrees.is_empty(),
             "one session, no map"
         );
+    }
 
-        let from_main = run_in(&tmp.path().join("main")).await;
+    #[tokio::test]
+    async fn a_condense_in_the_main_tree_labels_it_main_with_its_own_token() {
+        let tmp = repo_with_a_member();
+        let from_member = archive_condensed_in(&tmp.path().join("member")).await;
+        let label = from_member.worktree.clone().expect("a member is labelled");
+        let from_main = archive_condensed_in(&tmp.path().join("main")).await;
         let main_label = from_main
             .worktree
             .clone()
@@ -1042,10 +1118,15 @@ mod tests {
         assert_eq!(main_label.name, "main");
         assert!(!main_label.linked);
         assert_ne!(main_label.token, label.token, "two members, two tokens");
+    }
 
-        // Outside any repository the member is ABSENT — unknown, never `main`
-        // — and the metadata bytes are what they always were.
-        let nowhere = run_in(&tmp.path().join("nowhere")).await;
+    /// A condense outside any repository (which every hand-built fixture is)
+    /// carries no member at all — unknown, never `main` — which is what keeps
+    /// the frozen anchors and goldens frozen.
+    #[tokio::test]
+    async fn a_condense_outside_any_repository_writes_no_worktree_member() {
+        let tmp = repo_with_a_member();
+        let nowhere = archive_condensed_in(&tmp.path().join("nowhere")).await;
         assert_eq!(nowhere.worktree, None);
         assert!(
             !String::from_utf8(nowhere.metadata_json())
@@ -1053,9 +1134,16 @@ mod tests {
                 .contains("worktree"),
             "a label-less condense writes the bytes it always wrote"
         );
+    }
 
-        // And the label moves no id: the same capture, two worktrees, one
-        // checkpoint id.
+    /// The label moves no id: the same capture, two worktrees, one checkpoint
+    /// id.
+    #[tokio::test]
+    async fn the_worktree_label_moves_no_checkpoint_id() {
+        let tmp = repo_with_a_member();
+        let from_member = archive_condensed_in(&tmp.path().join("member")).await;
+        let from_main = archive_condensed_in(&tmp.path().join("main")).await;
+        let nowhere = archive_condensed_in(&tmp.path().join("nowhere")).await;
         assert_eq!(from_member.checkpoint_id, from_main.checkpoint_id);
         assert_eq!(from_member.checkpoint_id, nowhere.checkpoint_id);
     }
