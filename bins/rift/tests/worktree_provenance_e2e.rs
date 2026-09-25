@@ -306,96 +306,123 @@ fn hex_id(c: char) -> String {
 /// shape back-filling is forbidden for, and therefore the one every `unknown` in
 /// this test is an honest answer about.
 fn plant_without_worktree_provenance(f: &Family, at: i64) -> (String, String) {
-    use rift_core::Sha256Id;
     let (store, rt) = family_projection(f);
     let checkpoint = hex_id('c');
     let session = hex_id('5');
     let revision = hex_id('7');
     rt.block_on(async {
-        rift_store::record_checkpoint(
-            &store,
-            &rift_store::CheckpointRecord {
-                checkpoint_id: Sha256Id::parse_hex(&checkpoint.clone()).unwrap(),
-                strategy: "manual-commit".to_owned(),
-                created_at: at,
-                merkle_root: Sha256Id::parse_hex(&hex_id('9')).unwrap(),
-                prev: None,
-                schema_version: 1,
-            },
-        )
-        .await
-        .unwrap();
-        rift_store::record_session(
-            &store,
-            &rift_store::SessionRow {
-                session_id: session.clone(),
-                agent: "claude-code".to_owned(),
-                model_primary: "claude-sonnet-4-5".to_owned(),
-                repo_id: rift_git::repo_id_for(&f.main).unwrap().as_str().to_owned(),
-                started_at: at,
-                schema_version: 1,
-            },
-        )
-        .await
-        .unwrap();
-        rift_store::record_session_in_checkpoint(
-            &store,
-            &rift_store::SessionInCheckpointRow {
-                checkpoint_id: checkpoint.clone(),
-                session_id: session.clone(),
-                ordinal: 0,
-                schema_version: 1,
-            },
-        )
-        .await
-        .unwrap();
-        rift_store::record_captured_event(
-            &store,
-            &rift_store::CapturedEventRow {
-                idempotency_key: hex_id('e'),
-                session_id: session.clone(),
-                turn_ordinal: 0,
-                event_ordinal: 0,
-                kind: "user_prompt".to_owned(),
-                trust: "trusted".to_owned(),
-                payload_sha256: hex_id('a'),
-                occurred_at_ms: at,
-                schema_version: 1,
-            },
-        )
-        .await
-        .unwrap();
-        rift_store::record_file_revision(
-            &store,
-            &rift_store::FileRevisionRow {
-                file_revision_id: revision.clone(),
-                path: "f.rs".to_owned(),
-                blob_oid: hex_id('b'),
-                content_sha256: hex_id('d'),
-                schema_version: 1,
-            },
-        )
-        .await
-        .unwrap();
-        rift_store::record_attribution(
-            &store,
-            &rift_store::AttributionRow {
-                checkpoint_id: checkpoint.clone(),
-                file_revision_id: revision,
-                agent_added: 2,
-                human_added: 1,
-                human_modified_agent: 0,
-                agent_removed_by_human: 0,
-                confidence_milli: 850,
-                method_version: "v1".to_owned(),
-                supersedes_pk: None,
-                schema_version: 1,
-            },
-        )
-        .await
-        .unwrap();
+        plant_the_checkpoint(&store, &checkpoint, at).await;
+        plant_a_session_in_it(&store, &f.main, &checkpoint, &session, at).await;
+        plant_a_revision_attributed_to_it(&store, &checkpoint, &revision).await;
     });
     (checkpoint, session)
+}
+
+/// The checkpoint row, with a fixed merkle root and no predecessor.
+async fn plant_the_checkpoint(store: &rift_store::SqliteStore, checkpoint: &str, at: i64) {
+    use rift_core::Sha256Id;
+    rift_store::record_checkpoint(
+        store,
+        &rift_store::CheckpointRecord {
+            checkpoint_id: Sha256Id::parse_hex(checkpoint).unwrap(),
+            strategy: "manual-commit".to_owned(),
+            created_at: at,
+            merkle_root: Sha256Id::parse_hex(&hex_id('9')).unwrap(),
+            prev: None,
+            schema_version: 1,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// A session bound to the family, its membership in the checkpoint, and one
+/// captured event of it.
+async fn plant_a_session_in_it(
+    store: &rift_store::SqliteStore,
+    main: &Path,
+    checkpoint: &str,
+    session: &str,
+    at: i64,
+) {
+    rift_store::record_session(
+        store,
+        &rift_store::SessionRow {
+            session_id: session.to_owned(),
+            agent: "claude-code".to_owned(),
+            model_primary: "claude-sonnet-4-5".to_owned(),
+            repo_id: rift_git::repo_id_for(main).unwrap().as_str().to_owned(),
+            started_at: at,
+            schema_version: 1,
+        },
+    )
+    .await
+    .unwrap();
+    rift_store::record_session_in_checkpoint(
+        store,
+        &rift_store::SessionInCheckpointRow {
+            checkpoint_id: checkpoint.to_owned(),
+            session_id: session.to_owned(),
+            ordinal: 0,
+            schema_version: 1,
+        },
+    )
+    .await
+    .unwrap();
+    rift_store::record_captured_event(
+        store,
+        &rift_store::CapturedEventRow {
+            idempotency_key: hex_id('e'),
+            session_id: session.to_owned(),
+            turn_ordinal: 0,
+            event_ordinal: 0,
+            kind: "user_prompt".to_owned(),
+            trust: "trusted".to_owned(),
+            payload_sha256: hex_id('a'),
+            occurred_at_ms: at,
+            schema_version: 1,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// A file revision and the checkpoint's attribution over it, so `blame`-shaped
+/// readers have a row to join.
+async fn plant_a_revision_attributed_to_it(
+    store: &rift_store::SqliteStore,
+    checkpoint: &str,
+    revision: &str,
+) {
+    rift_store::record_file_revision(
+        store,
+        &rift_store::FileRevisionRow {
+            file_revision_id: revision.to_owned(),
+            path: "f.rs".to_owned(),
+            blob_oid: hex_id('b'),
+            content_sha256: hex_id('d'),
+            schema_version: 1,
+        },
+    )
+    .await
+    .unwrap();
+    rift_store::record_attribution(
+        store,
+        &rift_store::AttributionRow {
+            checkpoint_id: checkpoint.to_owned(),
+            file_revision_id: revision.to_owned(),
+            agent_added: 2,
+            human_added: 1,
+            human_modified_agent: 0,
+            agent_removed_by_human: 0,
+            confidence_milli: 850,
+            method_version: "v1".to_owned(),
+            supersedes_pk: None,
+            schema_version: 1,
+        },
+    )
+    .await
+    .unwrap();
 }
 
 /// ★ The RENDERING clause, at every surface it covers: the seven
@@ -417,17 +444,29 @@ fn plant_without_worktree_provenance(f: &Family, at: i64) -> (String, String) {
 fn every_provenance_verb_carries_worktree_or_unknown() {
     let f = family();
 
-    // The NAMED arm: a real archive from the linked member.
-    plant_transcript(&transcript_dir(&f, &f.member), "oob-1");
+    let named_checkpoint = attach_and_claim_in_the_member(&f);
+    let named_session = "oob-1";
+
+    // The UNKNOWN arm, planted in the same projection.
+    let (old_checkpoint, old_session) = plant_without_worktree_provenance(&f, 1_700_000_000_000);
+
+    checkpoint_verbs_label_both_arms(&f, &named_checkpoint, &old_checkpoint);
+    blame_and_why_label_the_claimed_checkpoint(&f);
+    window_verbs_spread_over_both_arms(&f);
+    session_verbs_label_both_arms(&f, named_session, &old_session);
+}
+
+/// The NAMED arm: a real archive from the linked member, and a commit in the
+/// member that CLAIMS it, so `blame`/`why` resolve. Returns the checkpoint id.
+fn attach_and_claim_in_the_member(f: &Family) -> String {
+    plant_transcript(&transcript_dir(f, &f.member), "oob-1");
     let attached = rift_json(
-        &f,
+        f,
         &f.member,
         &["session", "attach", "oob-1", "--agent", "claude-code"],
     );
     let named_checkpoint = attached["checkpoint_id"].as_str().unwrap().to_owned();
-    let named_session = "oob-1";
 
-    // A commit in the member that CLAIMS it, so `blame`/`why` resolve.
     std::fs::write(f.member.join("f.rs"), "one\ntwo\nthree\n").unwrap();
     git_in(&f.member, &["add", "f.rs"]);
     git_in(
@@ -439,45 +478,49 @@ fn every_provenance_verb_carries_worktree_or_unknown() {
             &format!("work\n\nRift-Checkpoint: {named_checkpoint}"),
         ],
     );
+    named_checkpoint
+}
 
-    // The UNKNOWN arm, planted in the same projection.
-    let (old_checkpoint, old_session) = plant_without_worktree_provenance(&f, 1_700_000_000_000);
-
-    // 1-2. `rift checkpoint explain` and `rift checkpoint show`, both arms
-    // wherever each verb can reach them. `explain` resolves its target through
-    // the SHARD catalogue, and every shard this capture path writes carries the
-    // member, so its unknown arm is unreachable from a live archive and is
-    // pinned instead where the shape exists: the frozen `explain.golden` (built
-    // from hand-made memberless archives) and
-    // `the_explain_header_names_the_member_or_says_it_is_unknown`. Stated here
-    // rather than left as a gap in the table.
+/// Verbs 1-2, `rift checkpoint explain` and `rift checkpoint show`, both arms
+/// wherever each verb can reach them. `explain` resolves its target through the
+/// SHARD catalogue, and every shard this capture path writes carries the
+/// member, so its unknown arm is unreachable from a live archive and is pinned
+/// instead where the shape exists: the frozen `explain.golden` (built from
+/// hand-made memberless archives) and
+/// `the_explain_header_names_the_member_or_says_it_is_unknown`. Stated here
+/// rather than left as a gap in the table.
+fn checkpoint_verbs_label_both_arms(f: &Family, named_checkpoint: &str, old_checkpoint: &str) {
     for verb in [vec!["checkpoint", "explain"], vec!["checkpoint", "show"]] {
         let mut named = verb.clone();
-        named.push(&named_checkpoint);
-        let (code, out, err) = rift(&f, &f.member, &named);
+        named.push(named_checkpoint);
+        let (code, out, err) = rift(f, &f.member, &named);
         assert_eq!(code, 0, "{verb:?}: {out}{err}");
         assert!(out.contains("archived_in: member"), "{verb:?}: {out}");
     }
-    let (code, out, err) = rift(&f, &f.member, &["checkpoint", "show", &old_checkpoint]);
+    let (code, out, err) = rift(f, &f.member, &["checkpoint", "show", old_checkpoint]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains("archived_in: unknown"), "{out}");
     assert!(!out.contains("archived_in: main"), "{out}");
+}
 
-    // 3-4. `rift blame` and `rift why` — the checkpoint the commit claims.
+/// Verbs 3-4, `rift blame` and `rift why` — the checkpoint the commit claims.
+fn blame_and_why_label_the_claimed_checkpoint(f: &Family) {
     for verb in [vec!["blame", "f.rs"], vec!["why", "f.rs:2"]] {
-        let (code, out, err) = rift(&f, &f.member, &verb);
+        let (code, out, err) = rift(f, &f.member, &verb);
         assert_eq!(code, 0, "{verb:?}: {out}{err}");
         assert!(out.contains("archived_in: member"), "{verb:?}: {out}");
     }
+}
 
-    // 5-7. The three window verbs: the spread names BOTH arms at once, which
-    // is the shape a real repository is in during the upgrade.
+/// Verbs 5-7, the three window verbs: the spread names BOTH arms at once, which is
+/// the shape a real repository is in during the upgrade.
+fn window_verbs_spread_over_both_arms(f: &Family) {
     for verb in [
         vec!["dispatch", "--for-agent"],
         vec!["recap"],
         vec!["review"],
     ] {
-        let doc = rift_json(&f, &f.member, &verb);
+        let doc = rift_json(f, &f.member, &verb);
         let spread: Vec<&str> = doc["worktrees"]
             .as_array()
             .unwrap_or_else(|| panic!("{verb:?} carries no worktrees: {doc}"))
@@ -493,35 +536,37 @@ fn every_provenance_verb_carries_worktree_or_unknown() {
     }
     // …and the human twin says the same thing, in the two verbs that render one.
     for verb in [vec!["dispatch"], vec!["recap"]] {
-        let (code, out, err) = rift(&f, &f.member, &verb);
+        let (code, out, err) = rift(f, &f.member, &verb);
         assert_eq!(code, 0, "{verb:?}: {out}{err}");
         assert!(
             out.contains("worktrees   member, unknown"),
             "{verb:?}: {out}"
         );
     }
+}
 
-    // 8. `rift session list|info|show` — the observation side of D4.
-    let (code, out, err) = rift(&f, &f.member, &["session", "list"]);
+/// Verb 8, `rift session list|info|show` — the observation side of D4, with
+/// the `--json` twin of the two session shapes so the surfaces cannot drift.
+fn session_verbs_label_both_arms(f: &Family, named_session: &str, old_session: &str) {
+    let (code, out, err) = rift(f, &f.member, &["session", "list"]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains("worktree=member"), "{out}");
     assert!(out.contains("worktree=unknown"), "{out}");
 
-    let (code, out, err) = rift(&f, &f.member, &["session", "info", named_session]);
+    let (code, out, err) = rift(f, &f.member, &["session", "info", named_session]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains("worktree: member"), "{out}");
     assert!(out.contains("observed in member"), "{out}");
     assert!(out.contains("basis attach"), "{out}");
 
-    let (code, out, err) = rift(&f, &f.member, &["session", "show", &old_session]);
+    let (code, out, err) = rift(f, &f.member, &["session", "show", old_session]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains("worktree: unknown"), "{out}");
     assert!(!out.contains("worktree: main"), "{out}");
 
-    // The `--json` twin of the two session shapes, so the surfaces cannot drift.
-    let info = rift_json(&f, &f.member, &["session", "info", named_session]);
+    let info = rift_json(f, &f.member, &["session", "info", named_session]);
     assert_eq!(info["worktree"], "member", "{info}");
     assert_eq!(info["worktree_history"][0]["basis"], "attach", "{info}");
-    let show = rift_json(&f, &f.member, &["session", "show", &old_session]);
+    let show = rift_json(f, &f.member, &["session", "show", old_session]);
     assert_eq!(show["worktree"], serde_json::Value::Null, "{show}");
 }

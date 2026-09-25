@@ -43,6 +43,9 @@ struct Fixture {
     cache: PathBuf,
 }
 
+/// One capture-projection insert, unwrapped: the seeders' only write.
+type Insert<'a> = dyn Fn(&str, &[&str], &[Value]) + 'a;
+
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -207,6 +210,13 @@ fn seed_reads(cache: &Path, family: &impl FamilyIds) {
     let insert = |table: &str, cols: &[&str], vals: &[Value]| {
         rt.block_on(capture.insert(table, cols, vals)).unwrap();
     };
+    seed_the_reading_call(&insert, family);
+    seed_the_revision_it_read(&insert);
+}
+
+/// The call that read: its session (bound to the family), its turn, and the
+/// `Read` tool call itself.
+fn seed_the_reading_call(insert: &Insert<'_>, family: &impl FamilyIds) {
     insert(
         "session",
         &[
@@ -260,6 +270,11 @@ fn seed_reads(cache: &Path, family: &impl FamilyIds) {
             Value::Int(1),
         ],
     );
+}
+
+/// The revision the call read, the edge joining them, and the read's token
+/// count: the figure the report classifies.
+fn seed_the_revision_it_read(insert: &Insert<'_>) {
     insert(
         "file_revision",
         &[

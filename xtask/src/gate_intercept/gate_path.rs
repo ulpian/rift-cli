@@ -66,9 +66,9 @@ const GATE_CRATES: [&str; 2] = ["bins/rift/src/", "crates/rift-agent/src/"];
 /// **Nothing on the decision path opens a store or loads the tokenizer.**
 ///
 /// The walk: every function defined in the production half of `bins/rift/src/`
-/// and `crates/rift-agent/src/` outside their test surface, resolved by bare
-/// name; breadth-first from `GATE_ROOTS`; every reachable body screened for
-/// `FORBIDDEN_ON_GATE_PATH`.
+/// and `crates/rift-agent/src/` outside their test surface and outside every
+/// module declared for tests, resolved by bare name; breadth-first from
+/// `GATE_ROOTS`; every reachable body screened for `FORBIDDEN_ON_GATE_PATH`.
 ///
 /// **What this catches and what it cannot.** Names are resolved without types
 /// or modules, so two functions sharing a name are one node and the walk is
@@ -101,18 +101,7 @@ pub fn no_store_on_gate_path(root: &Path) -> Result<Leg, String> {
 /// quietly empties the walk is a green gate that guards nothing, so the
 /// waypoints are asserted rather than assumed.
 fn screen_gate_path(corpus: &[(String, String)]) -> Result<(Leg, BTreeSet<String>), String> {
-    let mut fns: Vec<FnBody> = Vec::new();
-    for (rel, text) in corpus {
-        // A `tests/` directory under `src/` is compiled only through its
-        // parent's `#[cfg(test)] mod tests;`, so its files carry no marker of
-        // their own for the production cut to find. Walking them would put
-        // test helpers on the decision path by bare name, and keeping them
-        // off it would rest on naming discipline alone.
-        if is_test_surface(rel) {
-            continue;
-        }
-        fns.extend(fn_bodies(rel, &mask_code(&production_half(text))));
-    }
+    let fns = production_fns(corpus);
     let defined: BTreeSet<String> = fns.iter().map(|f| f.name.clone()).collect();
     for root_fn in GATE_ROOTS {
         if !defined.contains(root_fn) {
@@ -172,6 +161,148 @@ fn screen_gate_path(corpus: &[(String, String)]) -> Result<(Leg, BTreeSet<String
         ),
         seen.iter().map(|n| (*n).to_owned()).collect(),
     ))
+}
+
+/// Every function the walk may reach: the production half of each file that
+/// is neither on the test surface nor built only for tests.
+///
+/// A file under `src/` is compiled only through its parent's `mod` line, so a
+/// module its parent declares under `#[cfg(test)]` carries no marker of its
+/// own for the production cut to find. That declaration is what makes the file
+/// test code to the compiler, and it is what is read here: a file's name says
+/// only what its author meant, and a seeder called something other than
+/// `tests` or `fixtures` would otherwise put test helpers on the decision path
+/// by bare name.
+fn production_fns(corpus: &[(String, String)]) -> Vec<FnBody> {
+    let for_tests = declared_for_tests(corpus);
+    let mut fns = Vec::new();
+    for (rel, text) in corpus {
+        if is_test_surface(rel) || for_tests.contains(rel.as_str()) {
+            continue;
+        }
+        fns.extend(fn_bodies(rel, &mask_code(&production_half(text))));
+    }
+    fns
+}
+
+/// The files in `corpus` the compiler builds only for tests: each one whose
+/// module, or any module above it, is declared under `#[cfg(test)]` in its
+/// parent.
+///
+/// Read from the whole parent, not its production half: the declaration is
+/// itself the column-zero marker the production cut stops at. A parent that
+/// is not in the corpus ends the climb, and the file is walked.
+fn declared_for_tests(corpus: &[(String, String)]) -> BTreeSet<&str> {
+    let masked: BTreeMap<&str, String> = corpus
+        .iter()
+        .map(|(rel, text)| (rel.as_str(), mask_code(text)))
+        .collect();
+    let mut out = BTreeSet::new();
+    for (rel, _) in corpus {
+        let mut module = rel.as_str();
+        while let Some((parent, name)) = parent_declaration(&masked, module) {
+            let parent_text = masked.get(parent).map_or("", String::as_str);
+            if declared_under_cfg_test(parent_text, name) {
+                out.insert(rel.as_str());
+                break;
+            }
+            module = parent;
+        }
+    }
+    out
+}
+
+/// The file that declares the module `rel` defines, and the module's name.
+///
+/// The parent of `a/b/x.rs` or `a/b/x/mod.rs` is `a/b/mod.rs` or `a/b.rs`,
+/// or the crate root `lib.rs`/`main.rs` when `a/b` is a `src` directory. No
+/// `#[path]` attribute appears in the crates this leg walks, so a module is
+/// found only where the compiler looks by default.
+fn parent_declaration<'a>(
+    masked: &BTreeMap<&'a str, String>,
+    rel: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    let module = rel.strip_suffix(".rs")?;
+    let module = module.strip_suffix("/mod").unwrap_or(module);
+    let (dir, name) = module.rsplit_once('/')?;
+    let in_src = dir.ends_with("/src") || dir == "src";
+    if in_src && (name == "lib" || name == "main") {
+        return None;
+    }
+    let mut candidates = vec![format!("{dir}/mod.rs"), format!("{dir}.rs")];
+    if in_src {
+        candidates.extend([format!("{dir}/lib.rs"), format!("{dir}/main.rs")]);
+    }
+    let parent = candidates
+        .iter()
+        .find_map(|candidate| masked.get_key_value(candidate.as_str()))?;
+    Some((*parent.0, name))
+}
+
+/// True when `masked` declares `mod <name>;` and every declaration of it
+/// carries `#[cfg(test)]`.
+///
+/// A declaration's attributes are those on its own line and the unbroken run
+/// of lines directly above it that hold only attributes or nothing (a comment
+/// is already blank in masked text), which is the run Rust attaches to the
+/// item. Any other line ends the run, so a `#[cfg(test)]` on an item above
+/// does not reach the declaration, and neither does an attribute this reading
+/// cannot follow (one spread over several lines): the file is then walked,
+/// which is the direction a gate should err in.
+fn declared_under_cfg_test(masked: &str, name: &str) -> bool {
+    let lines: Vec<&str> = masked.lines().collect();
+    let mut declared = false;
+    for (idx, line) in lines.iter().enumerate() {
+        let Some(mut attributes) = module_declaration(line, name) else {
+            continue;
+        };
+        declared = true;
+        for above in lines.get(..idx).unwrap_or_default().iter().rev() {
+            let (line_attributes, rest) = split_attributes(above);
+            if !rest.is_empty() {
+                break;
+            }
+            attributes.extend(line_attributes);
+        }
+        let gated = attributes
+            .iter()
+            .any(|attr| attr.split_whitespace().collect::<String>() == "#[cfg(test)]");
+        if !gated {
+            return false;
+        }
+    }
+    declared
+}
+
+/// The attributes written on `line` when the line declares `mod <name>;`,
+/// with or without a visibility.
+fn module_declaration<'a>(line: &'a str, name: &str) -> Option<Vec<&'a str>> {
+    let (attributes, rest) = split_attributes(line);
+    let rest = match rest.strip_prefix("pub") {
+        Some(after) => match after.strip_prefix('(') {
+            Some(inner) => inner.split_once(')')?.1.trim_start(),
+            None => after.trim_start(),
+        },
+        None => rest,
+    };
+    let declared = rest.strip_prefix("mod ")?.strip_suffix(';')?.trim();
+    if declared != name {
+        return None;
+    }
+    Some(attributes)
+}
+
+/// The outer attributes that open `line`, and what follows them.
+fn split_attributes(line: &str) -> (Vec<&str>, &str) {
+    let mut attributes = Vec::new();
+    let mut rest = line.trim();
+    while rest.starts_with("#[") {
+        let Some(end) = rest.find(']') else { break };
+        let (attribute, tail) = rest.split_at(end + 1);
+        attributes.push(attribute);
+        rest = tail.trim_start();
+    }
+    (attributes, rest)
 }
 
 #[cfg(test)]
@@ -362,6 +493,95 @@ mod tests {
             "{:#?}",
             leg.violations
         );
+    }
+
+    /// The roots of a synthetic walk, with `window_journal_step` calling
+    /// `helper`, followed by `declaration` as the file's last lines.
+    fn roots_declaring(declaration: &str) -> String {
+        format!(
+            "fn window_journal_step() {{ helper(); }}\nfn read_gate() {{}}\n\
+             fn edit_record() {{}}\nfn gate_policy() {{}}\nfn gate_step() {{}}\n\
+             fn edit_step() {{}}\nfn gate() {{}}\nfn respond_with_decision() {{}}\n\
+             fn doc_gate() {{}}\nfn doc_gate_in() {{}}\nfn document_verify() {{}}\n\
+             {declaration}\n"
+        )
+    }
+
+    /// ★ A file is test code because its parent declares it under
+    /// `#[cfg(test)]`, whatever it is called: a store-opening helper in such a
+    /// module is not on the decision path, nor is one in a module beneath it,
+    /// while the same helper in a module declared plainly is a finding.
+    #[test]
+    fn a_module_its_parent_declares_for_tests_is_not_walked() {
+        let helper = "fn helper() { open_migrated(); }\n";
+        for (declaration, child, gated) in [
+            ("#[cfg(test)]\nmod fixtures;", "fixtures.rs", true),
+            ("mod fixtures;", "fixtures.rs", false),
+            ("#[cfg(test)]\nmod seeds;", "seeds/deep.rs", true),
+            ("mod seeds;", "seeds/deep.rs", false),
+        ] {
+            let mut corpus = vec![
+                (
+                    "bins/rift/src/hooks/x/mod.rs".to_owned(),
+                    roots_declaring(declaration),
+                ),
+                (format!("bins/rift/src/hooks/x/{child}"), helper.to_owned()),
+            ];
+            if child.starts_with("seeds/") {
+                corpus.push((
+                    "bins/rift/src/hooks/x/seeds.rs".to_owned(),
+                    "mod deep;\n".to_owned(),
+                ));
+            }
+            let (leg, reached) = screen_gate_path(&corpus).expect("the walk runs");
+            if gated {
+                assert!(leg.violations.is_empty(), "{child}: {:#?}", leg.violations);
+                assert!(!reached.contains("helper"), "{child}: {reached:?}");
+            } else {
+                assert_eq!(leg.violations.len(), 1, "{child}: {:#?}", leg.violations);
+                assert!(
+                    leg.violations[0].contains("`helper` reaches `open_migrated`"),
+                    "{child}: {:#?}",
+                    leg.violations
+                );
+            }
+        }
+    }
+
+    /// ★ The attributes a declaration carries are the run of attribute,
+    /// comment and blank lines directly above it, plus any on its own line; a
+    /// `#[cfg(test)]` that belongs to some other item above does not reach it.
+    #[test]
+    fn a_declaration_is_gated_only_by_the_attributes_directly_above_it() {
+        let helper = "fn helper() { open_migrated(); }\n";
+        for (declaration, gated) in [
+            ("#[cfg(test)]\n#[allow(dead_code)]\nmod fixtures;", true),
+            ("#[cfg(test)]\n/// The seeders.\nmod fixtures;", true),
+            ("#[cfg(test)]\n\n// Why it is here.\n\nmod fixtures;", true),
+            ("#[cfg(test)] pub(crate) mod fixtures;", true),
+            ("#[cfg(test)]\nfn seed() {}\nmod fixtures;", false),
+            ("#[cfg(test)]\nuse std::fs;\n\nmod fixtures;", false),
+            ("#[cfg(all(test, unix))]\nmod fixtures;", false),
+            ("// #[cfg(test)]\nmod fixtures;", false),
+        ] {
+            let corpus = vec![
+                (
+                    "bins/rift/src/hooks/x/mod.rs".to_owned(),
+                    roots_declaring(declaration),
+                ),
+                (
+                    "bins/rift/src/hooks/x/fixtures.rs".to_owned(),
+                    helper.to_owned(),
+                ),
+            ];
+            let (leg, _) = screen_gate_path(&corpus).expect("the walk runs");
+            assert_eq!(
+                leg.violations.is_empty(),
+                gated,
+                "{declaration:?}: {:#?}",
+                leg.violations
+            );
+        }
     }
 
     /// The walk over the real tree still arrives at the decision's own

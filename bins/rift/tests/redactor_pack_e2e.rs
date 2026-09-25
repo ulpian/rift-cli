@@ -126,21 +126,39 @@ struct Sealed {
     report: serde_json::Value,
 }
 
-/// Run one arm end to end through the real binary and read the shard back.
-fn run_arm(tmp: &Path, write_pack: bool) -> Sealed {
+/// The pack-present arm: the pack is written where a user puts one, then the
+/// capture is sealed.
+fn seal_with_pack(tmp: &Path) -> Sealed {
     let repo = seed_repo(tmp);
+    write_the_pack(&repo);
+    capture_and_read_back(tmp, &repo)
+}
 
-    if write_pack {
-        // Exactly where a user puts one, spelled the way the product documents
-        // it rather than through a helper that could drift from the product.
-        let dir = repo.join(".rift").join("policies").join("redactors");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("acme.toml"), PACK).unwrap();
-    }
+/// The pack-absent arm: the same repository and capture, and no pack.
+fn seal_without_pack(tmp: &Path) -> Sealed {
+    let repo = seed_repo(tmp);
+    capture_and_read_back(tmp, &repo)
+}
 
-    // A file the capture path includes, carrying the marker and one ordinary
-    // line beside it. The ordinary line is the proof that capture happened and
-    // that redaction masked rather than dropped.
+/// Exactly where a user puts one, spelled the way the product documents it
+/// rather than through a helper that could drift from the product.
+fn write_the_pack(repo: &Path) {
+    let dir = repo.join(".rift").join("policies").join("redactors");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("acme.toml"), PACK).unwrap();
+}
+
+/// Run one arm end to end through the real binary and read the shard back.
+fn capture_and_read_back(tmp: &Path, repo: &Path) -> Sealed {
+    include_the_marker_file(repo);
+    run_the_post_commit_hook(tmp, repo);
+    read_the_sealed_shard(repo)
+}
+
+/// A file the capture path includes, carrying the marker and one ordinary line
+/// beside it. The ordinary line is the proof that capture happened and that
+/// redaction masked rather than dropped.
+fn include_the_marker_file(repo: &Path) {
     std::fs::write(repo.join(".gitignore"), "notes.txt\n").unwrap();
     std::fs::write(
         repo.join("notes.txt"),
@@ -148,10 +166,13 @@ fn run_arm(tmp: &Path, write_pack: bool) -> Sealed {
     )
     .unwrap();
     std::fs::write(repo.join(".worktreeinclude"), "notes.txt\n").unwrap();
+}
 
+/// `rift hooks git post-commit`, draining inline into a hermetic cache.
+fn run_the_post_commit_hook(tmp: &Path, repo: &Path) {
     let cache = tmp.join("cache");
     let data = tmp.join("data");
-    let mut cmd = rift_cmd(&repo);
+    let mut cmd = rift_cmd(repo);
     cmd.args([
         "hooks",
         "git",
@@ -175,9 +196,13 @@ fn run_arm(tmp: &Path, write_pack: bool) -> Sealed {
         0,
         "the hook never fails the git operation; stderr: {stderr}"
     );
+}
 
+/// The one checkpoint shard git stores: its sealed capture document and the
+/// redaction report beside it.
+fn read_the_sealed_shard(repo: &Path) -> Sealed {
     let listing = git_out(
-        &repo,
+        repo,
         &[
             "ls-tree",
             "-r",
@@ -195,14 +220,14 @@ fn run_arm(tmp: &Path, write_pack: bool) -> Sealed {
     let shard = shards[0];
 
     let blob = git_out(
-        &repo,
+        repo,
         &[
             "show",
             &format!("refs/heads/rift/checkpoints/v1:{shard}/content.redacted"),
         ],
     );
     let report = git_out(
-        &repo,
+        repo,
         &[
             "show",
             &format!("refs/heads/rift/checkpoints/v1:{shard}/redaction_report.json"),
@@ -218,7 +243,7 @@ fn run_arm(tmp: &Path, write_pack: bool) -> Sealed {
 #[test]
 fn a_pack_in_the_repository_masks_the_bytes_the_binary_seals() {
     let tmp = tempfile::tempdir().unwrap();
-    let sealed = run_arm(tmp.path(), true);
+    let sealed = seal_with_pack(tmp.path());
 
     // The capture is real and the file is in it: without this the next
     // assertion passes on an empty document.
@@ -266,7 +291,7 @@ fn a_pack_in_the_repository_masks_the_bytes_the_binary_seals() {
 #[test]
 fn without_a_pack_the_same_marker_survives_into_the_shard() {
     let tmp = tempfile::tempdir().unwrap();
-    let sealed = run_arm(tmp.path(), false);
+    let sealed = seal_without_pack(tmp.path());
 
     assert!(
         sealed.blob.contains("build is green"),

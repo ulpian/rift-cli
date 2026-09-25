@@ -207,16 +207,7 @@ fn remint(args: &RemintArgs, root: &Path) -> Result<Outcome> {
         ));
     }
     let Ok(paths) = rift_git::discover(root) else {
-        let message = format!(
-            "not inside a git repository: {} — a family identity belongs to a \
-             repository, so there is nothing here to remint",
-            root.display()
-        );
-        return Ok(Outcome::coded(
-            exit::PRECONDITION,
-            message.clone(),
-            serde_json::json!({ "ok": false, "error": message }),
-        ));
+        return Ok(not_a_repository(root));
     };
 
     // What the record said before, so the report can name what is being
@@ -231,18 +222,37 @@ fn remint(args: &RemintArgs, root: &Path) -> Result<Outcome> {
     // The record just changed; anything this process memoized is now the
     // previous identity.
     forget_family(&after);
+    Ok(reminted(before, &after, reason))
+}
 
+/// The precondition refusal for a `root` outside any git repository.
+fn not_a_repository(root: &Path) -> Outcome {
+    let message = format!(
+        "not inside a git repository: {} — a family identity belongs to a \
+         repository, so there is nothing here to remint",
+        root.display()
+    );
+    Outcome::coded(
+        exit::PRECONDITION,
+        message.clone(),
+        serde_json::json!({ "ok": false, "error": message }),
+    )
+}
+
+/// The report of one remint: what the record said before, what it says now,
+/// and — when the ids moved — that the data filed under the old ones stays
+/// where it is.
+fn reminted(before: Option<Family>, after: &Family, reason: &str) -> Outcome {
     let changed = before
         .as_ref()
         .is_none_or(|b| b.family_id != after.family_id || b.recall_id != after.recall_id);
     let mut human = String::new();
-    if let Some(b) = &before {
-        human.push_str(&format!(
+    match &before {
+        Some(b) => human.push_str(&format!(
             "was  projection {}  recall {}  ({})\n",
             b.family_id, b.recall_id, b.minted_from
-        ));
-    } else {
-        human.push_str("was  no readable record\n");
+        )),
+        None => human.push_str("was  no readable record\n"),
     }
     human.push_str(&format!(
         "now  projection {}  recall {}  ({})\n",
@@ -257,7 +267,7 @@ fn remint(args: &RemintArgs, root: &Path) -> Result<Outcome> {
         );
     }
 
-    Ok(Outcome::ok(
+    Outcome::ok(
         human,
         serde_json::json!({
             "ok": true,
@@ -279,7 +289,7 @@ fn remint(args: &RemintArgs, root: &Path) -> Result<Outcome> {
             "manifest": after.manifest_path.to_string_lossy(),
             "history": after.history_path().to_string_lossy(),
         }),
-    ))
+    )
 }
 
 #[cfg(test)]

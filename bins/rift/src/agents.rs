@@ -17,6 +17,19 @@ use rift_store::{record_agent_enablement, AgentEnablementRow, SqliteStore};
 
 use crate::cli::{exit, Outcome};
 
+/// What one successful enable did, gathered for its report.
+struct Enabled<'a> {
+    root: &'a std::path::Path,
+    agent_token: &'a str,
+    verbs: &'a [&'a str],
+    notes: &'a rift_agent::CompatNotes,
+    rift_bin: &'a std::path::Path,
+    path: &'a std::path::Path,
+    wired_hash: &'a str,
+    changed_files: &'a [std::path::PathBuf],
+    members: &'a [MemberOutcome],
+}
+
 /// Hex content fingerprint over `bytes` (domain-separated leaf hash, hex).
 fn fingerprint(bytes: &[u8]) -> String {
     leaf_hash(bytes).to_hex()
@@ -57,24 +70,61 @@ pub(crate) async fn enable(
     }
     let reg = AdapterRegistry::with_builtin();
     let Some(adapter) = reg.get(&agent) else {
-        let known: Vec<String> = reg.agents().iter().map(|a| a.as_str().to_owned()).collect();
-        // A precondition, not a generic failure: the command is well-formed but
-        // no built-in adapter exists for this agent (the exit contract).
-        return Ok(Outcome::coded(
-            exit::PRECONDITION,
-            format!(
-                "no adapter for agent {agent_token:?}; known: {}",
-                known.join(", ")
-            ),
-            serde_json::json!({ "error": "unknown_agent", "known": known }),
-        ));
+        return Ok(unknown_agent(&reg, agent_token));
     };
-    let verbs: Vec<&str> = adapter.verbs().to_vec();
-    let notes = adapter.compat_notes();
     let rift_bin = std::env::current_exe()?;
+    let changed_files = wire(root, &rift_bin, agent_token)?;
+    let path = root
+        .join(".rift")
+        .join("agents")
+        .join(format!("{agent_token}.json"));
+    let wired_hash =
+        std::fs::read(&path).map_or_else(|_| fingerprint(b"enabled"), |bytes| fingerprint(&bytes));
 
+    record_event(store, agent_token, "enable", now_ms, &wired_hash).await?;
+    let members = fan_out(root, agent_token, true);
+    let enabled = Enabled {
+        root,
+        agent_token,
+        verbs: adapter.verbs(),
+        notes: &adapter.compat_notes(),
+        rift_bin: &rift_bin,
+        path: &path,
+        wired_hash: &wired_hash,
+        changed_files: &changed_files,
+        members: &members,
+    };
+    Ok(enabled_outcome(&enabled))
+}
+
+/// The refusal for a well-formed token no built-in adapter answers to.
+///
+/// A precondition, not a generic failure: the command is well-formed but no
+/// built-in adapter exists for this agent (the exit contract).
+fn unknown_agent(reg: &AdapterRegistry, agent_token: &str) -> Outcome {
+    let known: Vec<String> = reg.agents().iter().map(|a| a.as_str().to_owned()).collect();
+    Outcome::coded(
+        exit::PRECONDITION,
+        format!(
+            "no adapter for agent {agent_token:?}; known: {}",
+            known.join(", ")
+        ),
+        serde_json::json!({ "error": "unknown_agent", "known": known }),
+    )
+}
+
+/// Wire this checkout through the native installer, and install the recall
+/// skill beside it when the repository's policy has recall on.
+///
+/// Returns every file either step changed, sorted and deduplicated, because
+/// the two installers can name the same file and the report lists each once.
+fn wire(
+    root: &std::path::Path,
+    rift_bin: &std::path::Path,
+    agent_token: &str,
+) -> Result<Vec<std::path::PathBuf>> {
     let mut report =
-        rift_agent_install::native::enable(root, &rift_bin, agent_token).map_err(install_error)?;
+        rift_agent_install::native::enable(root, rift_bin, agent_token).map_err(install_error)?;
     let recall_on = rift_config::EffectiveConfig::load(&root.join(".rift"))
         .is_ok_and(|config| config.recall_enabled());
     if recall_on {
@@ -90,18 +140,14 @@ pub(crate) async fn enable(
         report.changed_files.sort();
         report.changed_files.dedup();
     }
-    let path = root
-        .join(".rift")
-        .join("agents")
-        .join(format!("{agent_token}.json"));
-    let wired_hash =
-        std::fs::read(&path).map_or_else(|_| fingerprint(b"enabled"), |bytes| fingerprint(&bytes));
+    Ok(report.changed_files)
+}
 
-    record_event(store, agent_token, "enable", now_ms, &wired_hash).await?;
-    let members = fan_out(root, agent_token, true);
-
-    let note_line = if notes.best_effort {
-        format!("\n  note: best-effort capture ({})", notes.note)
+/// The human line and the JSON document for one successful enable.
+fn enabled_outcome(enabled: &Enabled<'_>) -> Outcome {
+    let agent_token = enabled.agent_token;
+    let note_line = if enabled.notes.best_effort {
+        format!("\n  note: best-effort capture ({})", enabled.notes.note)
     } else {
         String::new()
     };
@@ -109,27 +155,30 @@ pub(crate) async fn enable(
     // installer's table rather than from a `== "codex"` test: now that
     // Claude Code has one as well, and an enable that wires a file without
     // saying so is how D12 stayed invisible for nineteen days.
-    let native_hook_line = rift_agent_install::native::hook_file(agent_token)
-        .map_or_else(String::new, |relative| {
-            format!("\n  native hooks: {}", root.join(relative).display())
+    let native_hook_line =
+        rift_agent_install::native::hook_file(agent_token).map_or_else(String::new, |relative| {
+            format!(
+                "\n  native hooks: {}",
+                enabled.root.join(relative).display()
+            )
         });
     let human = format!(
         "enabled {agent_token}: wired {} hook(s) via {}\n  config: {}{native_hook_line}{note_line}{}",
-        verbs.len(),
-        rift_bin.display(),
-        path.display(),
-        member_lines(&members),
+        enabled.verbs.len(),
+        enabled.rift_bin.display(),
+        enabled.path.display(),
+        member_lines(enabled.members),
     );
     let json = serde_json::json!({
         "agent": agent_token,
-        "wired_hooks": verbs,
-        "config": path.display().to_string(),
-        "wired_hooks_hash": wired_hash,
-        "best_effort": notes.best_effort,
-        "changed_files": report.changed_files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
-        "members": member_json(&members),
+        "wired_hooks": enabled.verbs,
+        "config": enabled.path.display().to_string(),
+        "wired_hooks_hash": enabled.wired_hash,
+        "best_effort": enabled.notes.best_effort,
+        "changed_files": enabled.changed_files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+        "members": member_json(enabled.members),
     });
-    Ok(Outcome::ok(human, json))
+    Outcome::ok(human, json)
 }
 
 /// `rift disable --agent <x>`: remove the wiring descriptor (full round-trip).

@@ -58,16 +58,57 @@ fn rt() -> tokio::runtime::Runtime {
         .expect("runtime")
 }
 
-/// The seeded capture projection.
-// One linear seeding cascade. Splitting it into nine one-caller helpers would
-// scatter the fixture whose whole value is that it can be read top to bottom
-// against the paragraph in the module docs.
-#[allow(clippy::too_many_lines)]
+/// The seeded capture projection, one relation group at a time in the order
+/// the fixture paragraph in the module docs names them.
 async fn capture() -> SqliteStore {
+    let s = migrated_projection();
+    seed_sessions(&s).await;
+    // --- checkpoints: recorded / derivable / unresolvable --------------------
+    for (id, created) in [("c1", 2_000), ("c2", UNKNOWN), ("c3", UNKNOWN)] {
+        seed_checkpoint(&s, id, created).await;
+    }
+    seed_session_links(&s).await;
+    seed_files(&s).await;
+    seed_model_calls(&s).await;
+    seed_tool_calls(&s).await;
+    s
+}
+
+/// An empty in-memory capture projection at the current schema.
+fn migrated_projection() -> SqliteStore {
     let s = SqliteStore::open_in_memory().expect("store");
     rift_store::apply_migrations(&s, &rift_store::default_migrations()).expect("migrations");
+    s
+}
 
-    // --- sessions: two agents, two models, one of them ended ----------------
+/// A projection holding exactly `checkpoints`, each `(id, created_at)`.
+async fn checkpoint_projection(checkpoints: &[(&str, i64)]) -> SqliteStore {
+    let s = migrated_projection();
+    for (id, created) in checkpoints {
+        seed_checkpoint(&s, id, *created).await;
+    }
+    s
+}
+
+/// One `checkpoint` row with the fixture's fixed strategy and root.
+async fn seed_checkpoint(s: &SqliteStore, id: &str, created: i64) {
+    s.insert(
+        "checkpoint",
+        &[
+            "checkpoint_id",
+            "strategy",
+            "created_at",
+            "merkle_root",
+            "schema_version",
+        ],
+        &[t(id), t("manual-commit"), i(created), t("00"), i(V)],
+    )
+    .await
+    .expect("checkpoint");
+}
+
+/// Sessions: two agents, two models, one of them ended.
+async fn seed_sessions(s: &SqliteStore) {
     for (id, agent, model, started) in [
         ("s1", "claude-code", "opus", 1_000),
         ("s2", "codex", "sonnet", 5_000),
@@ -101,26 +142,14 @@ async fn capture() -> SqliteStore {
     )
     .await
     .expect("session_event");
+}
 
-    // --- checkpoints: recorded / derivable / unresolvable --------------------
-    for (id, created) in [("c1", 2_000), ("c2", UNKNOWN), ("c3", UNKNOWN)] {
-        s.insert(
-            "checkpoint",
-            &[
-                "checkpoint_id",
-                "strategy",
-                "created_at",
-                "merkle_root",
-                "schema_version",
-            ],
-            &[t(id), t("manual-commit"), i(created), t("00"), i(V)],
-        )
-        .await
-        .expect("checkpoint");
-    }
-    // c1 -> s1 (started 1_000; c1 records 2_000 and the record wins)
-    // c2 -> s2 (started 5_000; c2 records nothing, so 5_000 is its time)
-    // c3 -> nothing: no time exists for it anywhere.
+/// Which session each checkpoint archives.
+///
+/// c1 -> s1 (started 1_000; c1 records 2_000 and the record wins);
+/// c2 -> s2 (started 5_000; c2 records nothing, so 5_000 is its time);
+/// c3 -> nothing: no time exists for it anywhere.
+async fn seed_session_links(s: &SqliteStore) {
     for (cp, sess, ord) in [("c1", "s1", 0), ("c2", "s2", 0)] {
         s.insert(
             "session_in_checkpoint",
@@ -130,8 +159,10 @@ async fn capture() -> SqliteStore {
         .await
         .expect("session_in_checkpoint");
     }
+}
 
-    // --- files and their attribution ----------------------------------------
+/// Files and their attribution.
+async fn seed_files(s: &SqliteStore) {
     for (id, path) in [("fr1", "src/a.rs"), ("fr2", ".env")] {
         s.insert(
             "file_revision",
@@ -185,8 +216,10 @@ async fn capture() -> SqliteStore {
         .await
         .expect("attribution");
     }
+}
 
-    // --- model calls, tokens, and four cost facts ---------------------------
+/// Model calls, their tokens, and four cost facts.
+async fn seed_model_calls(s: &SqliteStore) {
     for (call, model, started) in [("mc1", "opus", 1_500), ("mc2", "sonnet", 6_000)] {
         s.insert(
             "model_call",
@@ -219,8 +252,12 @@ async fn capture() -> SqliteStore {
         .await
         .expect("token_usage");
     }
-    // `cf_old` is superseded, `cf_closed` is no longer believed: the two halves
-    // of the bitemporal predicate, each with a row that only IT rejects.
+    seed_cost_facts(s).await;
+}
+
+/// `cf_old` is superseded, `cf_closed` is no longer believed: the two halves
+/// of the bitemporal predicate, each with a row that only IT rejects.
+async fn seed_cost_facts(s: &SqliteStore) {
     for (id, call, micros, valid_to, supersedes) in [
         ("cf_old", "mc1", 5_000, None, None),
         ("cf_new", "mc1", 1_000, None, Some("cf_old")),
@@ -253,8 +290,10 @@ async fn capture() -> SqliteStore {
         .await
         .expect("cost_fact");
     }
+}
 
-    // --- tool calls: three names, six calls ---------------------------------
+/// Tool calls: three names, six calls.
+async fn seed_tool_calls(s: &SqliteStore) {
     for (id, name, started) in [
         ("t1", "Read", 1_200),
         ("t2", "Read", 1_300),
@@ -277,7 +316,6 @@ async fn capture() -> SqliteStore {
         .await
         .expect("tool_call");
     }
-    s
 }
 
 /// The seeded recall ledger, written to `dir/recall.db`.
@@ -682,19 +720,9 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// **`dispatch --branch`, against the facts that exist.** This flag refused for
-/// a release on the premise that no per-checkpoint commit fact was stored. The
-/// premise was false: `Rift-Checkpoint:` trailers name checkpoints from the
-/// commit side, and every shard records its anchoring commit. This test drives
-/// the trailer route end to end on a two-branch repository, and asserts the
-/// anchor route degrades honestly when no shard is present locally.
-#[test]
-fn a_branch_scopes_the_report_to_the_checkpoints_its_commits_claim() {
-    let rt = rt();
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    let (main_cp, feature_cp) = (hex_id("a"), hex_id("b"));
-
+/// A repository with a `main` commit claiming `main_cp` by trailer and a
+/// `feature` branch adding a commit claiming `feature_cp`.
+fn two_branch_repo(root: &Path, main_cp: &str, feature_cp: &str) {
     git(root, &["init", "-q", "-b", "main", "."]);
     git(root, &["config", "user.email", "fixture@example.invalid"]);
     git(root, &["config", "user.name", "Fixture"]);
@@ -721,75 +749,84 @@ fn a_branch_scopes_the_report_to_the_checkpoints_its_commits_claim() {
             &format!("second\n\nRift-Checkpoint: {feature_cp}"),
         ],
     );
+}
 
-    // A projection holding exactly those two checkpoints, both datable.
-    let store = rt.block_on(async {
-        let s = SqliteStore::open_in_memory().expect("store");
-        rift_store::apply_migrations(&s, &rift_store::default_migrations()).expect("migrations");
-        for (id, at) in [(&main_cp, 1_000), (&feature_cp, 2_000)] {
-            s.insert(
-                "checkpoint",
-                &[
-                    "checkpoint_id",
-                    "strategy",
-                    "created_at",
-                    "merkle_root",
-                    "schema_version",
-                ],
-                &[t(id), t("manual-commit"), i(at), t("00"), i(V)],
-            )
-            .await
-            .expect("checkpoint");
-        }
-        s
-    });
+/// Run `body` over the two-branch repository and a projection holding exactly
+/// its two checkpoints, both datable; `body` gets the two checkpoint ids.
+fn with_two_branches(body: impl FnOnce(&tokio::runtime::Runtime, &Planes<'_>, &str, &str)) {
+    let rt = rt();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let (main_cp, feature_cp) = (hex_id("a"), hex_id("b"));
+    two_branch_repo(root, &main_cp, &feature_cp);
+    let store = rt.block_on(checkpoint_projection(&[
+        (&main_cp, 1_000),
+        (&feature_cp, 2_000),
+    ]));
     let planes = Planes {
         capture: &store,
         root,
         recall_db: None,
     };
+    body(&rt, &planes, &main_cp, &feature_cp);
+}
 
-    let scope_of = |branch: &str| {
-        let out = rt
-            .block_on(dispatch_in(&planes, None, None, Some(branch), false, false))
-            .unwrap();
-        assert_eq!(out.code, 0, "got: {}", out.human);
-        out.json
-    };
+/// **`dispatch --branch`, against the facts that exist.** This flag refused for
+/// a release on the premise that no per-checkpoint commit fact was stored. The
+/// premise was false: `Rift-Checkpoint:` trailers name checkpoints from the
+/// commit side, and every shard records its anchoring commit. This test drives
+/// the trailer route end to end on a two-branch repository, and asserts the
+/// anchor route degrades honestly when no shard is present locally.
+#[test]
+fn a_branch_scopes_the_report_to_the_checkpoints_its_commits_claim() {
+    with_two_branches(|rt, planes, main_cp, _| {
+        let scope_of = |branch: &str| {
+            let out = rt
+                .block_on(dispatch_in(planes, None, None, Some(branch), false, false))
+                .unwrap();
+            assert_eq!(out.code, 0, "got: {}", out.human);
+            out.json
+        };
 
-    // `main` holds one commit and claims one checkpoint.
-    let m = scope_of("main");
-    assert_eq!(m["branch"]["commits_walked"], 1);
-    assert_eq!(m["branch"]["found_by_trailer"], 1);
-    assert_eq!(m["checkpoints"]["count"], 1);
-    assert_eq!(m["checkpoints"]["ids"][0], serde_json::json!(main_cp));
+        // `main` holds one commit and claims one checkpoint.
+        let m = scope_of("main");
+        assert_eq!(m["branch"]["commits_walked"], 1);
+        assert_eq!(m["branch"]["found_by_trailer"], 1);
+        assert_eq!(m["checkpoints"]["count"], 1);
+        assert_eq!(m["checkpoints"]["ids"][0], serde_json::json!(main_cp));
 
-    // `feature` contains both commits, so both checkpoints are in scope — and
-    // the report says which half a branch scoped.
-    let f = scope_of("feature");
-    assert_eq!(f["branch"]["commits_walked"], 2);
-    assert_eq!(f["branch"]["found_by_trailer"], 2);
-    assert_eq!(f["checkpoints"]["count"], 2);
-    assert_eq!(f["branch"]["scopes"][0], "checkpoints");
-    // No shard exists locally for either candidate, so the anchor route found
-    // nothing and SAID so rather than silently contributing zero.
-    assert_eq!(f["branch"]["found_by_shard_anchor"], 0);
-    assert_eq!(f["branch"]["shards_not_present_locally"], 2);
+        // `feature` contains both commits, so both checkpoints are in scope — and
+        // the report says which half a branch scoped.
+        let f = scope_of("feature");
+        assert_eq!(f["branch"]["commits_walked"], 2);
+        assert_eq!(f["branch"]["found_by_trailer"], 2);
+        assert_eq!(f["checkpoints"]["count"], 2);
+        assert_eq!(f["branch"]["scopes"][0], "checkpoints");
+        // No shard exists locally for either candidate, so the anchor route found
+        // nothing and SAID so rather than silently contributing zero.
+        assert_eq!(f["branch"]["found_by_shard_anchor"], 0);
+        assert_eq!(f["branch"]["shards_not_present_locally"], 2);
+    });
+}
 
-    // The refusals that remain are refusals about the REF, not about the
-    // schema, and none of them echoes what the caller typed.
-    for (arg, error) in [
-        ("no-such-branch", "unknown_branch"),
-        ("\u{1b}[2J;rm -rf /", "bad_branch_name"),
-    ] {
-        let out = rt
-            .block_on(dispatch_in(&planes, None, None, Some(arg), false, false))
-            .unwrap();
-        assert_ne!(out.code, 0);
-        assert_eq!(out.json["error"], error);
-        assert!(!out.human.contains('\u{1b}'), "got: {}", out.human);
-        assert!(!out.human.contains("no-such-branch"), "got: {}", out.human);
-    }
+/// The refusals that remain are refusals about the REF, not about the
+/// schema, and none of them echoes what the caller typed.
+#[test]
+fn a_branch_refusal_names_the_ref_problem_and_never_echoes_the_argument() {
+    with_two_branches(|rt, planes, _, _| {
+        for (arg, error) in [
+            ("no-such-branch", "unknown_branch"),
+            ("\u{1b}[2J;rm -rf /", "bad_branch_name"),
+        ] {
+            let out = rt
+                .block_on(dispatch_in(planes, None, None, Some(arg), false, false))
+                .unwrap();
+            assert_ne!(out.code, 0);
+            assert_eq!(out.json["error"], error);
+            assert!(!out.human.contains('\u{1b}'), "got: {}", out.human);
+            assert!(!out.human.contains("no-such-branch"), "got: {}", out.human);
+        }
+    });
 }
 
 /// Run git in `dir` with extra environment, returning trimmed stdout.
@@ -813,33 +850,16 @@ fn git_out(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-/// **The anchor route, exercised positively — the half no fixture reached.**
+/// A one-branch repository whose first commit (A) carries NO trailer and whose
+/// second (B) names `both` and `trailer_only` by trailer; returns `(A, B)`.
 ///
-/// `--branch` unions two routes, and the trailer route is easy to test because
-/// a trailer is just text in a commit message. The ANCHOR route needs a shard
-/// on the checkpoint branch carrying `metadata.json`'s `commit`, so the earlier
-/// fixture could only assert it degraded honestly (`shards_not_present_locally`)
-/// — which is a test of the absence, not of the route. This one writes real
-/// shards with git plumbing and pins all three cases: reachable ONLY by
-/// trailer, ONLY by anchor, and by BOTH (counted once).
-// The git plumbing that writes real shards is the point of this test; extracting
-// it would hide what makes the fixture a fixture.
-#[allow(clippy::too_many_lines)]
-#[test]
-fn the_anchor_route_finds_a_checkpoint_no_trailer_names_and_the_union_counts_once() {
-    let rt = rt();
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    let (both, trailer_only, anchor_only, neither) =
-        (hex_id("a"), hex_id("b"), hex_id("c"), hex_id("d"));
-
+/// Commit A is the one whose checkpoint only the shard anchor can reach.
+fn trailer_and_bare_commits(root: &Path, both: &str, trailer_only: &str) -> (String, String) {
     git(root, &["init", "-q", "-b", "main", "."]);
     git(root, &["config", "user.email", "fixture@example.invalid"]);
     git(root, &["config", "user.name", "Fixture"]);
     std::fs::write(root.join("a.txt"), "a").expect("write");
     git(root, &["add", "a.txt"]);
-    // Commit A carries NO trailer: the only way to reach a checkpoint through
-    // it is the shard anchor.
     git(root, &["commit", "-q", "-m", "first"]);
     let commit_a = git_out(root, &["rev-parse", "HEAD"], &[]);
     std::fs::write(root.join("b.txt"), "b").expect("write");
@@ -854,12 +874,16 @@ fn the_anchor_route_finds_a_checkpoint_no_trailer_names_and_the_union_counts_onc
         ],
     );
     let commit_b = git_out(root, &["rev-parse", "HEAD"], &[]);
+    (commit_a, commit_b)
+}
 
-    // Two shards on the native checkpoint branch: `both` anchored to B (which
-    // also names it by trailer), `anchor_only` anchored to A (which names
-    // nothing). `neither` gets no shard and no trailer.
+/// Write one shard per `(checkpoint id, anchoring commit)` onto the native
+/// checkpoint branch, each carrying only the `metadata.json` whose `commit`
+/// the anchor route reads — written with git plumbing, so the shard is a real
+/// one rather than a stand-in.
+fn write_anchor_shards(root: &Path, shards: &[(&str, &str)]) {
     let index = root.join("shard-index");
-    for (id, anchor) in [(&both, &commit_b), (&anchor_only, &commit_a)] {
+    for (id, anchor) in shards {
         let meta = root.join("meta.json");
         std::fs::write(
             &meta,
@@ -894,36 +918,35 @@ fn the_anchor_route_finds_a_checkpoint_no_trailer_names_and_the_union_counts_onc
             &shard_commit,
         ],
     );
+}
 
-    let store = rt.block_on(async {
-        let s = SqliteStore::open_in_memory().expect("store");
-        rift_store::apply_migrations(&s, &rift_store::default_migrations()).expect("migrations");
-        for (n, id) in [&both, &trailer_only, &anchor_only, &neither]
-            .into_iter()
-            .enumerate()
-        {
-            s.insert(
-                "checkpoint",
-                &[
-                    "checkpoint_id",
-                    "strategy",
-                    "created_at",
-                    "merkle_root",
-                    "schema_version",
-                ],
-                &[
-                    t(id),
-                    t("manual-commit"),
-                    i(1_000 + i64::try_from(n).unwrap_or(0)),
-                    t("00"),
-                    i(V),
-                ],
-            )
-            .await
-            .expect("checkpoint");
-        }
-        s
-    });
+/// **The anchor route, exercised positively — the half no fixture reached.**
+///
+/// `--branch` unions two routes, and the trailer route is easy to test because
+/// a trailer is just text in a commit message. The ANCHOR route needs a shard
+/// on the checkpoint branch carrying `metadata.json`'s `commit`, so the earlier
+/// fixture could only assert it degraded honestly (`shards_not_present_locally`)
+/// — which is a test of the absence, not of the route. This one writes real
+/// shards with git plumbing and pins all three cases: reachable ONLY by
+/// trailer, ONLY by anchor, and by BOTH (counted once).
+#[test]
+fn the_anchor_route_finds_a_checkpoint_no_trailer_names_and_the_union_counts_once() {
+    let rt = rt();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let (both, trailer_only, anchor_only, neither) =
+        (hex_id("a"), hex_id("b"), hex_id("c"), hex_id("d"));
+    let (commit_a, commit_b) = trailer_and_bare_commits(root, &both, &trailer_only);
+    // Two shards on the native checkpoint branch: `both` anchored to B (which
+    // also names it by trailer), `anchor_only` anchored to A (which names
+    // nothing). `neither` gets no shard and no trailer.
+    write_anchor_shards(root, &[(&both, &commit_b), (&anchor_only, &commit_a)]);
+    let store = rt.block_on(checkpoint_projection(&[
+        (&both, 1_000),
+        (&trailer_only, 1_001),
+        (&anchor_only, 1_002),
+        (&neither, 1_003),
+    ]));
     let planes = Planes {
         capture: &store,
         root,
@@ -993,24 +1016,7 @@ fn a_trailer_claiming_an_unknown_checkpoint_is_counted_apart_from_the_scope() {
         ],
     );
 
-    let store = rt.block_on(async {
-        let s = SqliteStore::open_in_memory().expect("store");
-        rift_store::apply_migrations(&s, &rift_store::default_migrations()).expect("migrations");
-        s.insert(
-            "checkpoint",
-            &[
-                "checkpoint_id",
-                "strategy",
-                "created_at",
-                "merkle_root",
-                "schema_version",
-            ],
-            &[t(&known), t("manual-commit"), i(1_000), t("00"), i(V)],
-        )
-        .await
-        .expect("checkpoint");
-        s
-    });
+    let store = rt.block_on(checkpoint_projection(&[(&known, 1_000)]));
     let planes = Planes {
         capture: &store,
         root,
@@ -1108,28 +1114,34 @@ fn card_facts(rt: &tokio::runtime::Runtime, planes: &Planes<'_>, w: &Window) -> 
     facts
 }
 
-#[test]
-fn a_dispatch_card_and_the_dispatch_verb_agree_on_a_seeded_projection() {
-    with_planes(|rt, planes| {
-        // The card gathers the UNBOUNDED window, so the verb is asked the same
-        // question. Anything else would compare two different reports.
-        let w = Window::resolve(None, None).unwrap();
-        let out = rt
-            .block_on(dispatch_in(planes, None, None, None, false, false))
-            .unwrap();
-        let doc = &out.json;
-        let facts = card_facts(rt, planes, &w);
-        let rift_canopy::DispatchView::Data(card) =
-            rift_canopy_data::workflows::dispatch_view(&facts)
-        else {
-            panic!("the seeded projection must produce a card");
-        };
+/// The dispatch verb's JSON and the dispatch card, both over the UNBOUNDED
+/// window: the card gathers that window, so the verb is asked the same
+/// question. Anything else would compare two different reports.
+fn dispatch_doc_and_card(
+    rt: &tokio::runtime::Runtime,
+    planes: &Planes<'_>,
+) -> (serde_json::Value, rift_canopy::DispatchData) {
+    let w = Window::resolve(None, None).unwrap();
+    let out = rt
+        .block_on(dispatch_in(planes, None, None, None, false, false))
+        .unwrap();
+    let facts = card_facts(rt, planes, &w);
+    let rift_canopy::DispatchView::Data(card) = rift_canopy_data::workflows::dispatch_view(&facts)
+    else {
+        panic!("the seeded projection must produce a card");
+    };
+    (out.json, card)
+}
 
-        // **Non-vacuity, by exact value.** A pin over two empty windows proves
-        // nothing, and an agreement on zeros proves less. Every number below is
-        // derivable by hand from the fixture paragraph in this module's docs,
-        // over the UNBOUNDED window — so c3, the checkpoint no bounded window
-        // can hold, and its 9,999 agent lines are all in scope here.
+/// **Non-vacuity, by exact value.** A pin over two empty windows proves
+/// nothing, and an agreement on zeros proves less. Every number below is
+/// derivable by hand from the fixture paragraph in this module's docs, over
+/// the UNBOUNDED window — so c3, the checkpoint no bounded window can hold,
+/// and its 9,999 agent lines are all in scope here.
+#[test]
+fn a_dispatch_card_over_the_seeded_projection_carries_the_hand_derived_numbers() {
+    with_planes(|rt, planes| {
+        let (_, card) = dispatch_doc_and_card(rt, planes);
         assert_eq!(card.checkpoints, 3);
         assert_eq!(card.derived, 1, "c2, placed by the session it archives");
         assert_eq!(card.unresolved, 1, "c3, placed by nothing");
@@ -1150,7 +1162,13 @@ fn a_dispatch_card_and_the_dispatch_verb_agree_on_a_seeded_projection() {
         assert!(card.files[0].sensitive);
         assert_eq!(card.files[1].label, "\"src/a.rs\"");
         assert!(!card.files[1].sensitive);
+    });
+}
 
+#[test]
+fn a_dispatch_card_and_the_dispatch_verb_agree_on_a_seeded_projection() {
+    with_planes(|rt, planes| {
+        let (doc, card) = dispatch_doc_and_card(rt, planes);
         assert_eq!(json_u64(&doc["checkpoints"]["count"]), card.checkpoints);
         assert_eq!(json_u64(&doc["checkpoints"]["derived_time"]), card.derived);
         assert_eq!(

@@ -231,28 +231,7 @@ fn initialize(
     progress: &mut dyn FnMut(SetupProgress),
 ) -> Result<(), String> {
     let selected: BTreeSet<String> = plan.integrations.iter().cloned().collect();
-    let known: BTreeSet<String> = rift_agent_install::native::diagnose_all(repo)
-        .into_iter()
-        .map(|row| row.agent)
-        .collect();
-    if let Some(agent) = selected.iter().find(|agent| !known.contains(*agent)) {
-        return Err(format!("unknown native adapter {agent:?}"));
-    }
-    // Beside the unknown-adapter check, and for the same reason: a selection
-    // that will be refused is refused before the plan is persisted. The
-    // reconcile loop at the bottom of this function calls `set_integration` for
-    // every selected row, so without this an unsupported agent errored there —
-    // after the plan file, the `.rift/` scaffold and the git hooks were on disk
-    // Every offender is named at once.
-    let unsupported =
-        rift_agent_install::native::unsupported_alpha_agents(selected.iter().map(String::as_str));
-    if !unsupported.is_empty() {
-        return Err(format!(
-            "capture for {} is not supported yet — this alpha captures {}",
-            unsupported.join(", "),
-            rift_agent_install::native::ALPHA_AGENTS.join(", ")
-        ));
-    }
+    refuse_unrunnable_selection(repo, &selected)?;
 
     // Read BEFORE init scaffolds anything: a `.rift/config.toml` that is
     // already here arrived with the clone, and it is the repository's to
@@ -276,53 +255,8 @@ fn initialize(
         SetupStep::Projection,
         crate::open_projection(repo).map_err(|error| error.to_string()),
     )?;
-    if let Ok(paths) = rift_git::discover(repo) {
-        let rift_bin = std::env::current_exe().map_err(|error| error.to_string())?;
-        // Project Settings provisions the project, which is `init`'s act
-        // through another surface — so it records `init` and, like `init`,
-        // never re-points a family whose hooks already work. A
-        // refused binary is not a setup failure: it leaves the working hooks
-        // alone, and `rift doctor`'s `hooks-target` leg is where it is named.
-        or_fail(
-            progress,
-            SetupStep::GitHooks,
-            crate::hooks::install_family_hooks(
-                &paths.common_dir,
-                repo,
-                None,
-                rift_bin,
-                rift_shadow::hooks::HookInstallPolicy::KeepIfHealthy {
-                    allow_transient: false,
-                },
-                rift_shadow::hooks::RecordedBy::Init,
-            )
-            .map_err(|error| format!("git hook setup failed: {error}")),
-        )?;
-    }
-
-    // Reconcile revised selections on every attempt. Unselected managed
-    // artifacts are removed; conflicts are left untouched. A selected row
-    // was wired (or refused, and said) by `init` above, so only a failure
-    // is news here; a removal is a step of its own.
-    for row in rift_agent_install::native::diagnose_all(repo) {
-        if selected.contains(&row.agent) {
-            or_fail(
-                progress,
-                SetupStep::Agent(row.display_name.clone()),
-                set_integration(repo, &row.agent, true),
-            )?;
-        } else if row.enabled() {
-            or_fail(
-                progress,
-                SetupStep::Agent(row.display_name.clone()),
-                set_integration(repo, &row.agent, false),
-            )?;
-            progress(SetupProgress::done(
-                SetupStep::Agent(row.display_name.clone()),
-                "removed — not selected",
-            ));
-        }
-    }
+    install_git_hooks(repo, progress)?;
+    reconcile_integrations(repo, &selected, progress)?;
 
     if committed_config {
         // The committed policy is authoritative. The plan carried its values
@@ -347,6 +281,96 @@ fn initialize(
     write_plan_policy(repo, plan, progress)?;
     provision_recall(repo, plan.total_recall, true, "off in the plan", progress)?;
     remove_setup_plan(repo)?;
+    Ok(())
+}
+
+/// Refuse a selection naming an adapter this build does not know, or one the
+/// alpha does not capture, before anything is written.
+///
+/// A selection that will be refused is refused before the plan is persisted.
+/// The reconcile step calls `set_integration` for every selected row, so
+/// without this an unsupported agent errored there — after the plan file, the
+/// `.rift/` scaffold and the git hooks were on disk. Every offender is named
+/// at once.
+fn refuse_unrunnable_selection(repo: &Path, selected: &BTreeSet<String>) -> Result<(), String> {
+    let known: BTreeSet<String> = rift_agent_install::native::diagnose_all(repo)
+        .into_iter()
+        .map(|row| row.agent)
+        .collect();
+    if let Some(agent) = selected.iter().find(|agent| !known.contains(*agent)) {
+        return Err(format!("unknown native adapter {agent:?}"));
+    }
+    let unsupported =
+        rift_agent_install::native::unsupported_alpha_agents(selected.iter().map(String::as_str));
+    if !unsupported.is_empty() {
+        return Err(format!(
+            "capture for {} is not supported yet — this alpha captures {}",
+            unsupported.join(", "),
+            rift_agent_install::native::ALPHA_AGENTS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The GitHooks step, inside a repository only.
+///
+/// Project Settings provisions the project, which is `init`'s act through
+/// another surface — so it records `init` and, like `init`, never re-points a
+/// family whose hooks already work. A refused binary is not a setup failure:
+/// it leaves the working hooks alone, and `rift doctor`'s `hooks-target` leg
+/// is where it is named.
+fn install_git_hooks(repo: &Path, progress: &mut dyn FnMut(SetupProgress)) -> Result<(), String> {
+    let Ok(paths) = rift_git::discover(repo) else {
+        return Ok(());
+    };
+    let rift_bin = std::env::current_exe().map_err(|error| error.to_string())?;
+    or_fail(
+        progress,
+        SetupStep::GitHooks,
+        crate::hooks::install_family_hooks(
+            &paths.common_dir,
+            repo,
+            None,
+            rift_bin,
+            rift_shadow::hooks::HookInstallPolicy::KeepIfHealthy {
+                allow_transient: false,
+            },
+            rift_shadow::hooks::RecordedBy::Init,
+        )
+        .map_err(|error| format!("git hook setup failed: {error}")),
+    )?;
+    Ok(())
+}
+
+/// Reconcile revised selections on every attempt.
+///
+/// Unselected managed artifacts are removed; conflicts are left untouched. A
+/// selected row was wired (or refused, and said) by `init` before this runs,
+/// so only a failure is news here; a removal is a step of its own.
+fn reconcile_integrations(
+    repo: &Path,
+    selected: &BTreeSet<String>,
+    progress: &mut dyn FnMut(SetupProgress),
+) -> Result<(), String> {
+    for row in rift_agent_install::native::diagnose_all(repo) {
+        if selected.contains(&row.agent) {
+            or_fail(
+                progress,
+                SetupStep::Agent(row.display_name.clone()),
+                set_integration(repo, &row.agent, true),
+            )?;
+        } else if row.enabled() {
+            or_fail(
+                progress,
+                SetupStep::Agent(row.display_name.clone()),
+                set_integration(repo, &row.agent, false),
+            )?;
+            progress(SetupProgress::done(
+                SetupStep::Agent(row.display_name.clone()),
+                "removed — not selected",
+            ));
+        }
+    }
     Ok(())
 }
 

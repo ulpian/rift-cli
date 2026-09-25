@@ -203,32 +203,9 @@ pub(crate) fn compile_review(
     profile: ReviewProfile,
 ) -> Result<(String, serde_json::Value)> {
     let mut req = PackRequest::for_kind(PackKind::Review, profile.budget());
-
     if profile.wants_criticals() {
-        // By ordinal, never by path — and selected by walking the
-        // ordinal pass, so the citation is the position rather than a lookup
-        // that could miss. `--profile risk` compiles a quarter of the budget of
-        // `--profile full`, which is exactly why the number cannot come from
-        // the finished pack: degradation drops entries, and the same file must
-        // be `evidence:3` under both.
-        for f in facts.evidence().iter().filter(|f| f.sensitive) {
-            req.push_critical(SectionEntry::critical(
-                &CriticalFact::SensitivePathTouched {
-                    evidence: EvidenceRef::at(f.ordinal),
-                },
-            ))?;
-        }
-        if let Some(milli) = facts.attribution.confidence_milli {
-            if milli < 700 {
-                req.push_critical(SectionEntry::critical(
-                    &CriticalFact::LowAttributionConfidence {
-                        percent: u8::try_from(milli / 10).unwrap_or(100),
-                    },
-                ))?;
-            }
-        }
+        push_criticals(&mut req, facts)?;
     }
-
     // The scope rides in EVERY profile: a pack whose reader cannot tell what it
     // covers is worse than no pack.
     req.push_review_scope(SectionEntry::review_scope(&ReviewScopeFact::Volume {
@@ -236,39 +213,8 @@ pub(crate) fn compile_review(
         sessions: clamp(facts.sessions.len()),
         files: clamp(facts.files.len()),
     }))?;
-
     if profile.wants_signals() {
-        let a = &facts.attribution;
-        req.push_review_signal(SectionEntry::review_signal(
-            ReviewSignal::AttributionSplit {
-                ai_lines: clamp_i64(a.agent_lines),
-                mixed_lines: clamp_i64(a.mixed_lines),
-                human_lines: clamp_i64(a.human_lines),
-            },
-        ))?;
-        if let Some(milli) = a.confidence_milli {
-            req.push_review_signal(SectionEntry::review_signal(
-                ReviewSignal::AttributionConfidence {
-                    percent: u8::try_from(milli / 10).unwrap_or(100),
-                },
-            ))?;
-        }
-        // NOT clamped. `clamp_i64` saturates at `u32::MAX`, and on the
-        // reference repository that understated `cache_read` by 1,082,729,615
-        // tokens (20.1%) while presenting it as exact — a wrong number with no
-        // ceiling marker is worse than a missing one. The signal is `u64`.
-        req.push_review_signal(SectionEntry::review_signal(ReviewSignal::TokenSpend {
-            input: widen(facts.tokens.uncached_input),
-            output: widen(facts.tokens.output),
-            cache_read: widen(facts.tokens.cached_input),
-            cache_write: widen(facts.tokens.cache_creation),
-        }))?;
-        if let Some(s) = facts.savings {
-            req.push_review_signal(SectionEntry::review_signal(ReviewSignal::RecallSavings {
-                tokens_avoided: clamp_i64(s.avoided_upper_bound),
-                tokens_injected: clamp_i64(s.injected),
-            }))?;
-        }
+        push_signals(&mut req, facts)?;
     }
 
     let pack = compile(&req, MAX_PACK_TOKENS).map_err(RiftError::from)?;
@@ -287,6 +233,72 @@ pub(crate) fn compile_review(
     let evidence = pack.to_evidence(&inputs);
     let json = serde_json::to_value(&evidence).map_err(|e| RiftError::Serde(e.to_string()))?;
     Ok((pack.render(), json))
+}
+
+/// The critical section: every sensitive path the window touched, and a low
+/// attribution confidence.
+///
+/// Sensitive paths are cited by ordinal, never by path — and selected by
+/// walking the ordinal pass, so the citation is the position rather than a
+/// lookup that could miss. `--profile risk` compiles a quarter of the budget
+/// of `--profile full`, which is exactly why the number cannot come from the
+/// finished pack: degradation drops entries, and the same file must be
+/// `evidence:3` under both.
+fn push_criticals(req: &mut PackRequest, facts: &WindowFacts) -> Result<()> {
+    for f in facts.evidence().iter().filter(|f| f.sensitive) {
+        req.push_critical(SectionEntry::critical(
+            &CriticalFact::SensitivePathTouched {
+                evidence: EvidenceRef::at(f.ordinal),
+            },
+        ))?;
+    }
+    if let Some(milli) = facts.attribution.confidence_milli {
+        if milli < 700 {
+            req.push_critical(SectionEntry::critical(
+                &CriticalFact::LowAttributionConfidence {
+                    percent: u8::try_from(milli / 10).unwrap_or(100),
+                },
+            ))?;
+        }
+    }
+    Ok(())
+}
+
+/// The signal section: the attribution split and its confidence, the token
+/// spend, and the recall savings when the window has any.
+fn push_signals(req: &mut PackRequest, facts: &WindowFacts) -> Result<()> {
+    let a = &facts.attribution;
+    req.push_review_signal(SectionEntry::review_signal(
+        ReviewSignal::AttributionSplit {
+            ai_lines: clamp_i64(a.agent_lines),
+            mixed_lines: clamp_i64(a.mixed_lines),
+            human_lines: clamp_i64(a.human_lines),
+        },
+    ))?;
+    if let Some(milli) = a.confidence_milli {
+        req.push_review_signal(SectionEntry::review_signal(
+            ReviewSignal::AttributionConfidence {
+                percent: u8::try_from(milli / 10).unwrap_or(100),
+            },
+        ))?;
+    }
+    // NOT clamped. `clamp_i64` saturates at `u32::MAX`, and on the
+    // reference repository that understated `cache_read` by 1,082,729,615
+    // tokens (20.1%) while presenting it as exact — a wrong number with no
+    // ceiling marker is worse than a missing one. The signal is `u64`.
+    req.push_review_signal(SectionEntry::review_signal(ReviewSignal::TokenSpend {
+        input: widen(facts.tokens.uncached_input),
+        output: widen(facts.tokens.output),
+        cache_read: widen(facts.tokens.cached_input),
+        cache_write: widen(facts.tokens.cache_creation),
+    }))?;
+    if let Some(s) = facts.savings {
+        req.push_review_signal(SectionEntry::review_signal(ReviewSignal::RecallSavings {
+            tokens_avoided: clamp_i64(s.avoided_upper_bound),
+            tokens_injected: clamp_i64(s.injected),
+        }))?;
+    }
+    Ok(())
 }
 
 /// Counts cross the seam as `u32`; saturating so "very many" never wraps to a

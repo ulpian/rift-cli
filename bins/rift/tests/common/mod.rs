@@ -81,7 +81,7 @@ pub(crate) fn assert_hermetic_cwd(cwd: &Path) {
 
 /// The binary's path, for assertions on shim CONTENT (never for spawning —
 /// spawns go through [`rift_cmd`], which the lexical guard enforces).
-#[allow(dead_code)] // used by hooks_e2e only; this module is shared by three crates
+#[allow(dead_code)] // used by doc_helper_seam, hooks_e2e and post_checkout_e2e only; every suite that includes this module is its own crate
 pub(crate) fn rift_bin() -> &'static str {
     RIFT
 }

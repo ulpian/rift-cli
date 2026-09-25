@@ -182,7 +182,6 @@ fn twenty_real_condensations_soak_the_gate_and_a_divergence_vetoes_it() {
     std::fs::create_dir_all(&repo).unwrap();
     let cache = tmp.path().join("cache");
     let config = tmp.path().join("config");
-    let git_dir = repo.join(".git");
     let env: Vec<(&str, &str)> = vec![
         ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
         ("RIFT_CONFIG_DIR", config.to_str().unwrap()),
@@ -192,18 +191,29 @@ fn twenty_real_condensations_soak_the_gate_and_a_divergence_vetoes_it() {
     ];
 
     git(&repo, BASE_EPOCH, &["init", "-q"]);
+    condense_target_cycles(&repo, &env);
+    the_gate_clears_on_real_accrual(&repo, &cache, &env);
 
+    // ---- the other arm: one real divergence, and the gate refuses again ----
+    rewind_the_checkpoint_branch_and_verify(&repo, &env);
+    one_divergence_vetoes_the_gate(&repo, &env);
+}
+
+/// `TARGET` ordinary developer commits, each with a live agent session and the
+/// post-commit hook run the way git would.
+fn condense_target_cycles(repo: &Path, env: &[(&str, &str)]) {
+    let git_dir = repo.join(".git");
     for i in 0..TARGET {
         let epoch = BASE_EPOCH + i;
         let name = format!("f{i}.txt");
         std::fs::write(repo.join(&name), format!("cycle {i}\n")).unwrap();
         // The session is live BEFORE the commit, as an agent's would be, and is
         // distinct per cycle so the condensation covers a distinct session set.
-        seed_session(&repo, &format!("soak-{i}"), SESSION_MS + i);
-        git(&repo, epoch, &["add", &name]);
-        git(&repo, epoch, &["commit", "-q", "-m", &format!("cycle {i}")]);
+        seed_session(repo, &format!("soak-{i}"), SESSION_MS + i);
+        git(repo, epoch, &["add", &name]);
+        git(repo, epoch, &["commit", "-q", "-m", &format!("cycle {i}")]);
         let (code, out) = rift(
-            &repo,
+            repo,
             &[
                 "hooks",
                 "git",
@@ -211,15 +221,19 @@ fn twenty_real_condensations_soak_the_gate_and_a_divergence_vetoes_it() {
                 "--git-dir",
                 git_dir.to_str().unwrap(),
             ],
-            &env,
+            env,
         );
         assert_eq!(
             code, 0,
             "the hook never fails the git op (cycle {i}): {out}"
         );
     }
+}
 
-    let ev = soak(&repo, &env);
+/// After the cycles the soak reads `TARGET` consecutive clean runs over as many
+/// distinct checkpoints, in a projection under the sandbox, and clears.
+fn the_gate_clears_on_real_accrual(repo: &Path, cache: &Path, env: &[(&str, &str)]) {
+    let ev = soak(repo, env);
     // Printed, not merely asserted: a driver that says what it measured lets a
     // ledger quote real numbers instead of the assertion's lower bound
     // (`cargo test … -- --nocapture`).
@@ -231,7 +245,7 @@ fn twenty_real_condensations_soak_the_gate_and_a_divergence_vetoes_it() {
         serde_json::json!(1),
         "structurally one since the family store: {ev}"
     );
-    assert_sandbox_holds_the_projection(&cache);
+    assert_sandbox_holds_the_projection(cache);
     assert_eq!(
         ev["total_divergences"],
         serde_json::json!(0),
@@ -253,17 +267,17 @@ fn twenty_real_condensations_soak_the_gate_and_a_divergence_vetoes_it() {
         serde_json::json!(true),
         "the soak clears on real accrual: {ev}"
     );
+}
 
-    // ---- the other arm: one real divergence, and the gate refuses again ----
-    //
-    // Rewinding the canonical checkpoint branch by one shard leaves the
-    // projection holding a checkpoint the source no longer has. That is a
-    // genuine `ProjectionVsSource` finding, recorded by the same `rift verify`
-    // an operator runs — not a row poked into a table.
-    let head = git_out(&repo, &["rev-parse", "refs/heads/rift/checkpoints/v1"]);
+/// Rewinding the canonical checkpoint branch by one shard leaves the
+/// projection holding a checkpoint the source no longer has. That is a genuine
+/// `ProjectionVsSource` finding, recorded by the same `rift verify` an operator
+/// runs — not a row poked into a table.
+fn rewind_the_checkpoint_branch_and_verify(repo: &Path, env: &[(&str, &str)]) {
+    let head = git_out(repo, &["rev-parse", "refs/heads/rift/checkpoints/v1"]);
     assert!(!head.is_empty(), "the cycles archived a real branch");
     git(
-        &repo,
+        repo,
         BASE_EPOCH,
         &[
             "update-ref",
@@ -271,9 +285,12 @@ fn twenty_real_condensations_soak_the_gate_and_a_divergence_vetoes_it() {
             &format!("{head}^"),
         ],
     );
-    let (_code, _out) = rift(&repo, &["verify"], &env);
+    let (_code, _out) = rift(repo, &["verify"], env);
+}
 
-    let ev = soak(&repo, &env);
+/// The rewind is found, reported as a veto, and unsoaks the gate for good.
+fn one_divergence_vetoes_the_gate(repo: &Path, env: &[(&str, &str)]) {
+    let ev = soak(repo, env);
     eprintln!("SOAK AFTER THE PLANTED DIVERGENCE: {ev}");
     assert!(
         ev["total_divergences"].as_i64().unwrap_or(0) >= 1,
