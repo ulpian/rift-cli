@@ -276,31 +276,9 @@ impl Family {
 fn family() -> Family {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
-    let main = root.join("main");
     let home = root.join("home");
-    std::fs::create_dir_all(&main).unwrap();
     std::fs::create_dir_all(&home).unwrap();
-
-    git_in(&main, &["init", "-q", "-b", "main"]);
-    // An empty hooks dir: this suite drives `post-commit` itself, and an
-    // installed hook firing on `git worktree add` would adopt a member the
-    // assertions have not asked about yet.
-    let nohooks = root.join("nohooks");
-    std::fs::create_dir_all(&nohooks).unwrap();
-    git_in(
-        &main,
-        &["config", "core.hooksPath", nohooks.to_str().unwrap()],
-    );
-
-    // C0: the two files a session will read, and the policy every member
-    // inherits by checking it out.
-    std::fs::write(main.join(ALPHA), source(ALPHA)).unwrap();
-    std::fs::write(main.join(BETA), source(BETA)).unwrap();
-    std::fs::create_dir_all(main.join(".rift")).unwrap();
-    std::fs::write(main.join(".rift/config.toml"), POLICY).unwrap();
-    std::fs::create_dir_all(main.join("notes")).unwrap();
-    git_in(&main, &["add", "-A"]);
-    git_in(&main, &["commit", "-q", "-m", "seed"]);
+    let main = seed_main_work_tree(&root);
 
     let fixture = Family {
         _tmp: tmp,
@@ -318,9 +296,51 @@ fn family() -> Family {
     commit(&fixture, "notes/one.txt", "one\n", "work one");
 
     // The fork is cut HERE, so k1's anchor is on its line and k2's is not.
-    let c1 = git_in(&main, &["rev-parse", "HEAD"]).trim().to_owned();
+    fork_the_divergent_member(&fixture);
+
+    // Session two reads BETA; C2 condenses it into k2.
+    std::fs::write(sessions.join("swt-two.json"), journal("swt-two")).unwrap();
+    fixture.agent_read(&main, "swt-two", BETA);
+    commit(&fixture, "notes/two.txt", "two\n", "work two");
+
+    cut_the_ancestry_member(&fixture);
+    fixture
+}
+
+/// C0 in a fresh main work tree under `root`: the two files a session will
+/// read, and the policy every member inherits by checking it out.
+fn seed_main_work_tree(root: &Path) -> PathBuf {
+    let main = root.join("main");
+    std::fs::create_dir_all(&main).unwrap();
+
+    git_in(&main, &["init", "-q", "-b", "main"]);
+    // An empty hooks dir: this suite drives `post-commit` itself, and an
+    // installed hook firing on `git worktree add` would adopt a member the
+    // assertions have not asked about yet.
+    let nohooks = root.join("nohooks");
+    std::fs::create_dir_all(&nohooks).unwrap();
     git_in(
         &main,
+        &["config", "core.hooksPath", nohooks.to_str().unwrap()],
+    );
+
+    std::fs::write(main.join(ALPHA), source(ALPHA)).unwrap();
+    std::fs::write(main.join(BETA), source(BETA)).unwrap();
+    std::fs::create_dir_all(main.join(".rift")).unwrap();
+    std::fs::write(main.join(".rift/config.toml"), POLICY).unwrap();
+    std::fs::create_dir_all(main.join("notes")).unwrap();
+    git_in(&main, &["add", "-A"]);
+    git_in(&main, &["commit", "-q", "-m", "seed"]);
+    main
+}
+
+/// The divergent member, cut from C1 and given a commit of its own, so the
+/// anchor of anything condensed after C1 is off its line.
+fn fork_the_divergent_member(fixture: &Family) {
+    let main = &fixture.main;
+    let c1 = git_in(main, &["rev-parse", "HEAD"]).trim().to_owned();
+    git_in(
+        main,
         &[
             "worktree",
             "add",
@@ -334,15 +354,12 @@ fn family() -> Family {
     std::fs::write(fixture.divergent.join("notes/apart.txt"), "apart\n").unwrap();
     git_in(&fixture.divergent, &["add", "-A"]);
     git_in(&fixture.divergent, &["commit", "-q", "-m", "a fork"]);
+}
 
-    // Session two reads BETA; C2 condenses it into k2.
-    std::fs::write(sessions.join("swt-two.json"), journal("swt-two")).unwrap();
-    fixture.agent_read(&main, "swt-two", BETA);
-    commit(&fixture, "notes/two.txt", "two\n", "work two");
-
-    // The member on the family's own line, cut from the tip.
+/// The member on the family's own line, cut from the tip.
+fn cut_the_ancestry_member(fixture: &Family) {
     git_in(
-        &main,
+        &fixture.main,
         &[
             "worktree",
             "add",
@@ -353,7 +370,6 @@ fn family() -> Family {
             "main",
         ],
     );
-    fixture
 }
 
 /// Commit `rel` in the main work tree and archive the live session against it,

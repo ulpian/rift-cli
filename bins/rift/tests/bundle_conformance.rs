@@ -676,39 +676,32 @@ fn foreign_gitbundle_under_full(full: &[u8], foreign: &[u8]) -> Vec<u8> {
     p.assemble()
 }
 
-// One table, one row per documented rule: its length is the matrix's.
-#[allow(clippy::too_many_lines)]
+/// The matrix: one row per documented rule, in the order the agreement test
+/// runs them, built family by family so each family reads beside the step of
+/// the entry it tests.
 fn cases() -> Vec<Case> {
     let f = fixtures();
+    [
+        real_bundle_cases(f),
+        framing_cases(&f.full),
+        digest_cases(&f.full),
+        segment_cases(&f.full),
+        window_cases(f),
+        manifest_shape_cases(&f.full),
+        ref_cases(&f.full),
+        provenance_cases(&f.full),
+        foreign_history_cases(f),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The real bundles, where they attach: the recipe's bundles accepted into
+/// the targets they were exported for.
+fn real_bundle_cases(f: &Fixtures) -> Vec<Case> {
     let full = f.full.as_slice();
-    let pos1 = f.chain.cursor_at(1);
-    let refuse = |name: &'static str, bundle: Vec<u8>| Case {
-        name,
-        bundle,
-        target: Target::Fresh,
-        expect_pure: Verdict::Refuse,
-        expect: Verdict::Refuse,
-        never_echoed: None,
-    };
-    let accept = |name: &'static str, bundle: Vec<u8>, target: Target| Case {
-        name,
-        bundle,
-        target,
-        expect_pure: Verdict::Accept,
-        expect: Verdict::Accept,
-        never_echoed: None,
-    };
-    let pure_ok_git_refuses = |name: &'static str, bundle: Vec<u8>| Case {
-        name,
-        bundle,
-        target: Target::Fresh,
-        expect_pure: Verdict::Accept,
-        expect: Verdict::Refuse,
-        never_echoed: None,
-    };
-    let manifest_len = format!("manifest {}", parts_of(full).manifest_len());
     vec![
-        // --- the real bundles, where they attach
         accept("full.into_fresh", full.to_vec(), Target::Fresh),
         accept(
             "full.into_holding_full_is_already_present",
@@ -725,7 +718,14 @@ fn cases() -> Vec<Case> {
             f.empty.clone(),
             Target::HoldingFull,
         ),
-        // --- step 1: framing
+    ]
+}
+
+/// Step 1, framing: the container version, the part lengths and the part
+/// order, each refused.
+fn framing_cases(full: &[u8]) -> Vec<Case> {
+    let manifest_len = format!("manifest {}", parts_of(full).manifest_len());
+    vec![
         refuse(
             "frame.container_version_2",
             with_raw(full, "rift-bundle/1\n", "rift-bundle/2\n"),
@@ -760,7 +760,14 @@ fn cases() -> Vec<Case> {
         ),
         refuse("frame.trailing_byte", [full, b"\n"].concat()),
         refuse("frame.truncated", full[..full.len() - 1].to_vec()),
-        // --- step 3: digests
+    ]
+}
+
+/// Step 3, digests: a byte flipped under an unchanged digest is refused, while
+/// a root flipped with the digests re-derived is accepted, because the segment
+/// binds order and membership, not roots.
+fn digest_cases(full: &[u8]) -> Vec<Case> {
+    vec![
         refuse(
             "digest.segment_byte_flipped_without_redigest",
             flip_segment_byte(full),
@@ -778,7 +785,13 @@ fn cases() -> Vec<Case> {
             flip_root_with_redigest(full),
             Target::Fresh,
         ),
-        // --- step 4: segment canonicity and verification
+    ]
+}
+
+/// Step 4, segment canonicity and verification: every non-canonical spelling
+/// and every reordered or dropped link is refused.
+fn segment_cases(full: &[u8]) -> Vec<Case> {
+    vec![
         refuse(
             "segment.crlf",
             with_segment(full, true, |t| t.replace('\n', "\r\n")),
@@ -819,7 +832,14 @@ fn cases() -> Vec<Case> {
             "segment.blank_line",
             with_segment(full, true, |t| t.replacen('\n', "\n\n", 1)),
         ),
-        // --- step 5: the manifest disagrees with the segment
+    ]
+}
+
+/// Step 5, the manifest disagrees with the segment it carries.
+fn window_cases(f: &Fixtures) -> Vec<Case> {
+    let full = f.full.as_slice();
+    let pos1 = f.chain.cursor_at(1);
+    vec![
         refuse(
             "window.manifest_from_differs",
             with_manifest(full, true, |m| m.from_cursor.clone_from(&pos1)),
@@ -836,7 +856,14 @@ fn cases() -> Vec<Case> {
             expect: Verdict::Refuse,
             never_echoed: None,
         },
-        // --- step 2: manifest shape (writer rules are not reader rules)
+    ]
+}
+
+/// Step 2, manifest shape: writer rules are not reader rules, so order and
+/// whitespace are accepted while a missing, unknown or mistyped member is
+/// refused.
+fn manifest_shape_cases(full: &[u8]) -> Vec<Case> {
+    vec![
         accept(
             "manifest.reordered",
             reordered_manifest(full),
@@ -860,7 +887,13 @@ fn cases() -> Vec<Case> {
             "manifest.schema_version_string",
             manifest_with_string_version(full),
         ),
-        // --- step 6: refs
+    ]
+}
+
+/// Step 6, refs: every illegal name and oid the entry enumerates, plus the
+/// two that pass step 6 and fall to step 7's set equality.
+fn ref_cases(full: &[u8]) -> Vec<Case> {
+    vec![
         refuse(
             "refs.not_a_ref",
             with_manifest(full, true, |m| {
@@ -906,18 +939,28 @@ fn cases() -> Vec<Case> {
             "refs.empty_ref_list",
             with_manifest(full, true, |m| m.ref_list.clear()),
         ),
-        // --- repo_id is provenance: accepted, never echoed raw
-        Case {
-            name: "repo_id.junk_is_provenance_only",
-            bundle: with_manifest(full, true, |m| {
-                "\u{1b}[31mjunk\nline2".clone_into(&mut m.repo_id);
-            }),
-            target: Target::Fresh,
-            expect_pure: Verdict::Accept,
-            expect: Verdict::Accept,
-            never_echoed: Some("\u{1b}[31mjunk\nline2"),
-        },
-        // --- git-side: foreign history and non-fast-forward
+    ]
+}
+
+/// `repo_id` is provenance: accepted, and never echoed raw.
+fn provenance_cases(full: &[u8]) -> Vec<Case> {
+    vec![Case {
+        name: "repo_id.junk_is_provenance_only",
+        bundle: with_manifest(full, true, |m| {
+            "\u{1b}[31mjunk\nline2".clone_into(&mut m.repo_id);
+        }),
+        target: Target::Fresh,
+        expect_pure: Verdict::Accept,
+        expect: Verdict::Accept,
+        never_echoed: Some("\u{1b}[31mjunk\nline2"),
+    }]
+}
+
+/// Git-side: a foreign history and a non-fast-forward, both refused only
+/// once git sees them.
+fn foreign_history_cases(f: &Fixtures) -> Vec<Case> {
+    let full = f.full.as_slice();
+    vec![
         Case {
             name: "foreign.gitbundle_under_full_into_holding_full",
             bundle: foreign_gitbundle_under_full(full, &f.foreign),
@@ -935,6 +978,43 @@ fn cases() -> Vec<Case> {
             never_echoed: None,
         },
     ]
+}
+
+/// A row both readers refuse, into a fresh target.
+fn refuse(name: &'static str, bundle: Vec<u8>) -> Case {
+    Case {
+        name,
+        bundle,
+        target: Target::Fresh,
+        expect_pure: Verdict::Refuse,
+        expect: Verdict::Refuse,
+        never_echoed: None,
+    }
+}
+
+/// A row both readers accept, into the target it names.
+fn accept(name: &'static str, bundle: Vec<u8>, target: Target) -> Case {
+    Case {
+        name,
+        bundle,
+        target,
+        expect_pure: Verdict::Accept,
+        expect: Verdict::Accept,
+        never_echoed: None,
+    }
+}
+
+/// A row the pure steps accept and the git side refuses, into a fresh
+/// target.
+fn pure_ok_git_refuses(name: &'static str, bundle: Vec<u8>) -> Case {
+    Case {
+        name,
+        bundle,
+        target: Target::Fresh,
+        expect_pure: Verdict::Accept,
+        expect: Verdict::Refuse,
+        never_echoed: None,
+    }
 }
 
 impl Parts {

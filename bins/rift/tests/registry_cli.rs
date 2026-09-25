@@ -9,6 +9,12 @@ use std::process::Output;
 
 mod common;
 
+/// The two hermetic roots every invocation of the prune test runs under.
+struct Roots<'a> {
+    cfg: &'a Path,
+    cache: &'a Path,
+}
+
 fn rift(config_dir: &Path, cache_dir: &Path, cwd: &Path, args: &[&str]) -> Output {
     common::rift_cmd(cwd)
         .args(args)
@@ -96,6 +102,10 @@ fn setup_registers_cwd_and_dashboard_lists_it() {
 fn projects_list_and_prune_sweep_only_missing_paths() {
     let cfg = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
+    let roots = Roots {
+        cfg: cfg.path(),
+        cache: cache.path(),
+    };
 
     // Three registered rows: a live repo, a soon-dead tempdir, a plain dir.
     let live = tempfile::tempdir().unwrap();
@@ -103,17 +113,25 @@ fn projects_list_and_prune_sweep_only_missing_paths() {
     let plain = tempfile::tempdir().unwrap(); // present, but never a git repo
 
     for dir in [live.path(), dead.path(), plain.path()] {
-        let out = rift(cfg.path(), cache.path(), dir, &["setup", "--no-recall"]);
+        let out = rift(roots.cfg, roots.cache, dir, &["setup", "--no-recall"]);
         assert!(out.status.success(), "setup failed: {out:?}");
     }
     let dead_path = dead.path().to_path_buf();
     let dead_canon = dead_path.canonicalize().unwrap_or(dead_path.clone());
     drop(dead); // the registered path no longer exists as a directory
 
+    the_list_marks_only_the_dead_row_absent(&roots, live.path());
+    a_dry_run_names_the_dead_row_and_writes_nothing(&roots, live.path(), &dead_canon);
+    the_prune_removes_exactly_the_dead_row(&roots, live.path());
+    a_second_prune_sweeps_nothing(&roots, live.path());
+}
+
+/// All three rows are listed, and exactly the dead one is absent.
+fn the_list_marks_only_the_dead_row_absent(roots: &Roots<'_>, live: &Path) {
     let list = rift(
-        cfg.path(),
-        cache.path(),
-        live.path(),
+        roots.cfg,
+        roots.cache,
+        live,
         &["projects", "list", "--json"],
     );
     assert!(list.status.success());
@@ -127,12 +145,18 @@ fn projects_list_and_prune_sweep_only_missing_paths() {
         .map(|r| r["path"].as_str().unwrap())
         .collect();
     assert_eq!(missing.len(), 1, "exactly the dead row is absent: {doc}");
+}
 
-    // Dry-run names exactly the dead row and writes nothing.
+/// Dry-run names exactly the dead row and writes nothing.
+fn a_dry_run_names_the_dead_row_and_writes_nothing(
+    roots: &Roots<'_>,
+    live: &Path,
+    dead_canon: &Path,
+) {
     let dry = rift(
-        cfg.path(),
-        cache.path(),
-        live.path(),
+        roots.cfg,
+        roots.cache,
+        live,
         &["projects", "prune", "--dry-run", "--json"],
     );
     assert!(dry.status.success());
@@ -150,9 +174,9 @@ fn projects_list_and_prune_sweep_only_missing_paths() {
         "the victim is the dead row: {victims:?}"
     );
     let after_dry = rift(
-        cfg.path(),
-        cache.path(),
-        live.path(),
+        roots.cfg,
+        roots.cache,
+        live,
         &["projects", "list", "--json"],
     );
     let after_dry_doc: serde_json::Value = serde_json::from_slice(&after_dry.stdout).unwrap();
@@ -161,19 +185,16 @@ fn projects_list_and_prune_sweep_only_missing_paths() {
         3,
         "dry-run wrote nothing"
     );
+}
 
-    // The real prune removes exactly the victim; the plain dir stays.
-    let prune = rift(
-        cfg.path(),
-        cache.path(),
-        live.path(),
-        &["projects", "prune"],
-    );
+/// The real prune removes exactly the victim; the plain dir stays.
+fn the_prune_removes_exactly_the_dead_row(roots: &Roots<'_>, live: &Path) {
+    let prune = rift(roots.cfg, roots.cache, live, &["projects", "prune"]);
     assert!(prune.status.success());
     let after = rift(
-        cfg.path(),
-        cache.path(),
-        live.path(),
+        roots.cfg,
+        roots.cache,
+        live,
         &["projects", "list", "--json"],
     );
     let after_doc: serde_json::Value = serde_json::from_slice(&after.stdout).unwrap();
@@ -183,12 +204,14 @@ fn projects_list_and_prune_sweep_only_missing_paths() {
         left.iter().all(|r| r["present"].as_bool().unwrap()),
         "every remaining row is present: {after_doc}"
     );
+}
 
-    // Prune again: nothing left to sweep (idempotent surface).
+/// Prune again: nothing left to sweep (idempotent surface).
+fn a_second_prune_sweeps_nothing(roots: &Roots<'_>, live: &Path) {
     let again = rift(
-        cfg.path(),
-        cache.path(),
-        live.path(),
+        roots.cfg,
+        roots.cache,
+        live,
         &["projects", "prune", "--json"],
     );
     let again_doc: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();

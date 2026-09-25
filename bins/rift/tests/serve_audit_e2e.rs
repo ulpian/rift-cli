@@ -22,7 +22,7 @@ use std::process::{Command, Stdio};
 mod common;
 use common::rift_cmd;
 
-use rift_store::CanonicalStore;
+use rift_store::{CanonicalStore, SqliteStore};
 
 /// Run `rift <args>` from `cwd`; return the exit code and captured stdout.
 /// Mirrors `common/hooks_fixture.rs`'s `run_rift_stdout` — each `tests/*.rs` file is its
@@ -92,28 +92,7 @@ async fn real_process_serve_calls_persist_serve_events_with_distinct_ids_and_no_
         ("RIFT_NO_KEYCHAIN", "1"),
     ];
 
-    // Two real process invocations of the surviving skill-CLI serve path,
-    // each carrying a sentinel in exactly the argument shape the retired
-    // test planted (a free-text task description and a file path) — the
-    // half of the surface a hostile-argument leak would show up on.
-    for _ in 0..2 {
-        let (code, out) = run_rift_stdout(
-            &repo,
-            &[
-                "recall",
-                "known-state",
-                "--task",
-                "PRIVATE_ARGUMENT_SENTINEL",
-                "--file",
-                "PRIVATE_ARGUMENT_SENTINEL.rs",
-            ],
-            &env,
-        );
-        assert_eq!(
-            code, 0,
-            "known-state must succeed on an enabled repo: {out}"
-        );
-    }
+    serve_twice_with_a_sentinel_argument(&repo, &env);
 
     // No detached audit subprocess here (unlike the retired daemon, whose
     // audit handoff was a sibling process race the old test polled for): the
@@ -125,6 +104,39 @@ async fn real_process_serve_calls_persist_serve_events_with_distinct_ids_and_no_
     assert!(db.is_file(), "the process must have created recall.db");
     let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
 
+    two_serve_calls_are_distinct_and_carry_no_argument(&store).await;
+    one_session_row_per_channel(&store).await;
+    the_plain_audit_twin_carries_no_argument(&store).await;
+}
+
+/// Two real process invocations of the surviving skill-CLI serve path, each
+/// carrying a sentinel in exactly the argument shape the retired test planted
+/// (a free-text task description and a file path) — the half of the surface a
+/// hostile-argument leak would show up on.
+fn serve_twice_with_a_sentinel_argument(repo: &Path, env: &[(&str, &str)]) {
+    for _ in 0..2 {
+        let (code, out) = run_rift_stdout(
+            repo,
+            &[
+                "recall",
+                "known-state",
+                "--task",
+                "PRIVATE_ARGUMENT_SENTINEL",
+                "--file",
+                "PRIVATE_ARGUMENT_SENTINEL.rs",
+            ],
+            env,
+        );
+        assert_eq!(
+            code, 0,
+            "known-state must succeed on an enabled repo: {out}"
+        );
+    }
+}
+
+/// Exactly two `serve_call_event` rows, with distinct call ids, the channel
+/// and verb the CLI serves under, and the sentinel in no persisted column.
+async fn two_serve_calls_are_distinct_and_carry_no_argument(store: &SqliteStore) {
     let rows = store
         .query(
             "SELECT call_id, channel, tool_name, terminal_verb, tokens_returned, tokens_avoided \
@@ -160,9 +172,11 @@ async fn real_process_serve_calls_persist_serve_events_with_distinct_ids_and_no_
             );
         }
     }
+}
 
-    // First-observed-per-channel: two real serves over the `skill_cli`
-    // channel still leave exactly one `serve_session_event` row.
+/// First-observed-per-channel: two real serves over the `skill_cli` channel
+/// still leave exactly one `serve_session_event` row.
+async fn one_session_row_per_channel(store: &SqliteStore) {
     let sessions = store
         .query("SELECT channel FROM serve_session_event", &[])
         .await
@@ -174,10 +188,12 @@ async fn real_process_serve_calls_persist_serve_events_with_distinct_ids_and_no_
         );
     };
     assert_eq!(session.get_text(0).unwrap(), "skill_cli");
+}
 
-    // The plain audit twin (schema 1, `memd_audit_event`) is the same real
-    // call landing in the pre-existing audit relation `record_serve` also
-    // writes from every serve, verb column checked for the same leak shape.
+/// The plain audit twin (schema 1, `memd_audit_event`) is the same real call
+/// landing in the pre-existing audit relation `record_serve` also writes from
+/// every serve, verb column checked for the same leak shape.
+async fn the_plain_audit_twin_carries_no_argument(store: &SqliteStore) {
     let audit_rows = store
         .query("SELECT verb FROM memd_audit_event", &[])
         .await

@@ -119,7 +119,6 @@ fn source_file(first: &str) -> String {
 /// (the ingest bridges it), and the CLI has to be answering over the real
 /// repository rather than an empty substrate.
 #[test]
-#[allow(clippy::too_many_lines)] // one linear walk: repository, session, edit, pull
 fn the_pull_verb_serves_hunks_from_the_cli_on_a_live_projection() {
     let tmp = tempfile::tempdir().unwrap();
     // Canonical from the start. A read fact is recorded against the path the
@@ -133,30 +132,50 @@ fn the_pull_verb_serves_hunks_from_the_cli_on_a_live_projection() {
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
 
-    git(&repo, &home, &["init", "-q", "-b", "main"]);
+    let held_hash = seed_and_initialise(&repo, &home);
+    let session = "01PULLVERBE2ESESSIONAAAAAA";
+    a_session_reads_the_committed_file(&repo, &home, session);
+    seal_the_read_then_edit_the_file(&repo, &home);
+
+    let doc = pull_as_the_hint_spells_it(&repo, &home, &held_hash);
+    the_changed_lines_are_served(&doc, &held_hash);
+    the_provenance_rides_with_the_delta(&doc, session);
+    the_answer_is_a_saving(&doc);
+}
+
+/// Commit the held revision of `src/a.rs`, then `rift init` and
+/// `rift recall init`; returns the held revision's sha256.
+fn seed_and_initialise(repo: &Path, home: &Path) -> String {
+    git(repo, home, &["init", "-q", "-b", "main"]);
     let held_text = source_file("1");
     std::fs::write(repo.join("src/a.rs"), &held_text).unwrap();
-    git(&repo, &home, &["add", "-A"]);
-    git(&repo, &home, &["commit", "-qm", "seed"]);
-    let held_hash = {
-        use core::fmt::Write as _;
-        use sha2::{Digest as _, Sha256};
-        let d = Sha256::digest(held_text.as_bytes());
-        d.iter().fold(String::with_capacity(64), |mut acc, b| {
-            let _ = write!(acc, "{b:02x}");
-            acc
-        })
-    };
+    git(repo, home, &["add", "-A"]);
+    git(repo, home, &["commit", "-qm", "seed"]);
+    let held_hash = sha256_hex(&held_text);
 
-    assert_eq!(rift(&repo, &home, &["init"], "").0, 0, "rift init");
+    assert_eq!(rift(repo, home, &["init"], "").0, 0, "rift init");
     assert_eq!(
-        rift(&repo, &home, &["recall", "init"], "").0,
+        rift(repo, home, &["recall", "init"], "").0,
         0,
         "rift recall init"
     );
+    held_hash
+}
 
-    // A session reads the committed file, then the turn ends.
-    let session = "01PULLVERBE2ESESSIONAAAAAA";
+/// Lowercase hex sha256 of `text`: the revision a caller holds.
+fn sha256_hex(text: &str) -> String {
+    use core::fmt::Write as _;
+    use sha2::{Digest as _, Sha256};
+    let d = Sha256::digest(text.as_bytes());
+    d.iter().fold(String::with_capacity(64), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
+
+/// A session reads the committed file, then the turn ends: one process per
+/// hook event.
+fn a_session_reads_the_committed_file(repo: &Path, home: &Path, session: &str) {
     let read = format!(
         r#"{{"schema":1,"session":"{session}","turn":1,"payload":{{"tool_name":"Read","tool_input":{{"file_path":{}}}}}}}"#,
         serde_json::Value::String(repo.join("src/a.rs").display().to_string())
@@ -174,12 +193,14 @@ fn the_pull_verb_serves_hunks_from_the_cli_on_a_live_projection() {
             format!(r#"{{"session_id":"{session}","hook_event_name":"Stop"}}"#),
         ),
     ] {
-        assert_eq!(rift(&repo, &home, &args, &body).0, 0, "{args:?}");
+        assert_eq!(rift(repo, home, &args, &body).0, 0, "{args:?}");
     }
+}
 
-    // A commit seals the read facts into a checkpoint, the file is edited, and
-    // a second commit puts the revision the session holds into history — which
-    // is the only place a basis it never kept a copy of can come from.
+/// A commit seals the read facts into a checkpoint, the file is edited, and a
+/// second commit puts the revision the session holds into history — which is
+/// the only place a basis it never kept a copy of can come from.
+fn seal_the_read_then_edit_the_file(repo: &Path, home: &Path) {
     let git_dir = repo.join(".git");
     let post_commit = vec![
         "hooks",
@@ -188,22 +209,20 @@ fn the_pull_verb_serves_hunks_from_the_cli_on_a_live_projection() {
         "--git-dir",
         git_dir.to_str().unwrap(),
     ];
-    git(
-        &repo,
-        &home,
-        &["commit", "-q", "--allow-empty", "-m", "seal"],
-    );
-    assert_eq!(rift(&repo, &home, &post_commit, "").0, 0, "post-commit");
+    git(repo, home, &["commit", "-q", "--allow-empty", "-m", "seal"]);
+    assert_eq!(rift(repo, home, &post_commit, "").0, 0, "post-commit");
     std::fs::write(repo.join("src/a.rs"), source_file("91")).unwrap();
-    git(&repo, &home, &["add", "-A"]);
-    git(&repo, &home, &["commit", "-qm", "edit"]);
-    assert_eq!(rift(&repo, &home, &post_commit, "").0, 0, "post-commit");
+    git(repo, home, &["add", "-A"]);
+    git(repo, home, &["commit", "-qm", "edit"]);
+    assert_eq!(rift(repo, home, &post_commit, "").0, 0, "post-commit");
+}
 
-    // The pull, spelled as the manifest's hint spells it: the path and sixteen
-    // hex of the revision the caller holds.
+/// The pull, spelled as the manifest's hint spells it: the path and sixteen
+/// hex of the revision the caller holds.
+fn pull_as_the_hint_spells_it(repo: &Path, home: &Path, held_hash: &str) -> serde_json::Value {
     let (code, stdout) = rift(
-        &repo,
-        &home,
+        repo,
+        home,
         &[
             "recall",
             "changed-hunks",
@@ -215,7 +234,12 @@ fn the_pull_verb_serves_hunks_from_the_cli_on_a_live_projection() {
         "",
     );
     assert_eq!(code, 0, "the pull runs: {stdout}");
-    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    serde_json::from_str(&stdout).expect("json")
+}
+
+/// The changed lines are served in the numbering a reader sees now, with the
+/// rest of the file counted rather than sent.
+fn the_changed_lines_are_served(doc: &serde_json::Value, held_hash: &str) {
     let result = &doc["result"];
     assert_eq!(
         result["state"], "exact_included",
@@ -227,8 +251,6 @@ fn the_pull_verb_serves_hunks_from_the_cli_on_a_live_projection() {
         "the file moved, so the current revision is not the held one"
     );
 
-    // The content is the changed place in the numbering a reader sees now,
-    // with the rest of the file counted rather than sent.
     let content = result["content"].as_str().expect("the changed lines");
     assert!(content.contains("let x0_1 = 91;"), "{content}");
     assert!(content.contains("unchanged lines"), "{content}");
@@ -236,13 +258,15 @@ fn the_pull_verb_serves_hunks_from_the_cli_on_a_live_projection() {
     let hunks = result["hunks"].as_array().expect("hunks");
     assert_eq!(hunks.len(), 1, "one changed place: {hunks:?}");
     assert!(hunks[0]["lo"].as_u64().unwrap() >= 1);
+}
 
-    // The story rides with the delta, joined across both projections by the
-    // process that owns them. What is asserted is the SHAPE and the source of
-    // each fact, never a wall-clock instant or a token figure: a suite that
-    // pinned those would be pinning this machine's clock and this tokenizer's
-    // table rather than the channel.
-    let p = &result["provenance"];
+/// The story rides with the delta, joined across both projections by the
+/// process that owns them. What is asserted is the SHAPE and the source of
+/// each fact, never a wall-clock instant or a token figure: a suite that
+/// pinned those would be pinning this machine's clock and this tokenizer's
+/// table rather than the channel.
+fn the_provenance_rides_with_the_delta(doc: &serde_json::Value, session: &str) {
+    let p = &doc["result"]["provenance"];
     assert!(p.is_object(), "a delta carries where it came from: {doc:#}");
     // The bracket's `from` end is the checkpoint that recorded the revision
     // this caller holds. There is no `to`: nobody has read the edited file, so
@@ -289,9 +313,11 @@ fn the_pull_verb_serves_hunks_from_the_cli_on_a_live_projection() {
         Some("seal"),
         "the commit subject rides as a git fact — the commit whose archive \n         recorded the revision the caller holds: {p:#}"
     );
+}
 
-    // The saving, which is the reason the verb exists: what the caller did not
-    // have to re-read, minus what it was sent, and it is a saving.
+/// The saving, which is the reason the verb exists: what the caller did not
+/// have to re-read, minus what it was sent, and it is a saving.
+fn the_answer_is_a_saving(doc: &serde_json::Value) {
     let avoided = doc["estimated_tokens_avoided"].as_u64().expect("avoided");
     let returned = doc["estimated_tokens_returned"].as_u64().expect("returned");
     assert!(avoided > 0, "tokens_avoided > 0: {doc:#}");

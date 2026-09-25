@@ -177,7 +177,16 @@ fn a_glob_through_the_real_binary_is_answered_once_and_the_repeat_runs() {
         "the worker built the index this answer is read from"
     );
 
-    let answered = hook(&repo, "PreToolUse", &glob("**/*.rs"), &cache);
+    the_first_search_is_answered_by_its_ranked_head(&repo, &cache);
+    the_identical_repeat_runs_as_written(&repo, &cache);
+    a_listing_the_answer_cannot_beat_is_not_answered(&repo, &cache);
+    the_answer_owes_one_row_priced_by_the_worker(&repo, &cache);
+}
+
+/// The first search is denied with the ranked head of the listing as its
+/// reason: names only, the total it is a head of, and the escape hatch.
+fn the_first_search_is_answered_by_its_ranked_head(repo: &Path, cache: &Path) {
+    let answered = hook(repo, "PreToolUse", &glob("**/*.rs"), cache);
     let reason = answered
         .pointer("/hookSpecificOutput/permissionDecisionReason")
         .and_then(serde_json::Value::as_str)
@@ -212,28 +221,34 @@ fn a_glob_through_the_real_binary_is_answered_once_and_the_repeat_runs() {
         reason.contains("Repeat this exact call for the full list."),
         "the escape hatch the one-answer rule makes true: {reason}"
     );
+}
 
-    // The identical call, in the same window: it runs, exactly as written.
-    let again = hook(&repo, "PreToolUse", &glob("**/*.rs"), &cache);
+/// The identical call, in the same window: it runs, exactly as written.
+fn the_identical_repeat_runs_as_written(repo: &Path, cache: &Path) {
+    let again = hook(repo, "PreToolUse", &glob("**/*.rs"), cache);
     assert!(
         again
             .pointer("/hookSpecificOutput/permissionDecision")
             .is_none(),
         "the repeat runs the search in full: {again}"
     );
+}
 
-    // A listing the answer could not beat is not answered at all.
-    let small = hook(&repo, "PreToolUse", &glob("*.md"), &cache);
+/// A listing the answer could not beat is not answered at all.
+fn a_listing_the_answer_cannot_beat_is_not_answered(repo: &Path, cache: &Path) {
+    let small = hook(repo, "PreToolUse", &glob("*.md"), cache);
     assert!(
         small
             .pointer("/hookSpecificOutput/permissionDecision")
             .is_none(),
         "one path is cheaper listed than framed: {small}"
     );
+}
 
-    // The row, written by a worker this test did not stub: what the frame cost
-    // and what the listing it stood in for would have.
-    let rows = audit_rows(&repo, &cache);
+/// The row, written by a worker this test did not stub: what the frame cost
+/// and what the listing it stood in for would have.
+fn the_answer_owes_one_row_priced_by_the_worker(repo: &Path, cache: &Path) {
+    let rows = audit_rows(repo, cache);
     let answers: Vec<&(String, i64, i64)> = rows
         .iter()
         .filter(|(verb, _, _)| verb == "memd.search_answered")

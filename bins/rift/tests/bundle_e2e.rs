@@ -170,9 +170,25 @@ fn a_bundle_round_trips_into_a_fresh_repository_and_re_imports_idempotently() {
     let src_chain = ref_oid(&repo, CHAIN_REF).expect("the fixture recorded a chain entry");
 
     let out = tmp.path().join("x.riftbundle");
+    export_whole_chain(&repo, &cache, &out);
+
+    let target = empty_target(tmp.path(), "fresh");
+    let tcache = tmp.path().join("tcache");
+    assert!(ref_oid(&target, CHECKPOINTS_REF).is_none());
+    assert!(ref_oid(&target, CHAIN_REF).is_none());
+
+    first_import_carries_both_refs(&target, &tcache, &out, &src_ck, &src_chain);
+    re_import_applies_nothing(&target, &tcache, &out, &src_ck);
+    imported_repository_verifies(&target, &tcache);
+    rebuild_alone_writes_the_checkpoint_strategy(&target, &tcache);
+}
+
+/// Export the whole chain from the origin, asserting the document names the
+/// origin cursor and carries the fixture's chain link.
+fn export_whole_chain(repo: &Path, cache: &Path, out: &Path) {
     let (code, stdout, err) = rift(
-        &repo,
-        &cache,
+        repo,
+        cache,
         &["--json", "bundle", "export", "--out", out.to_str().unwrap()],
     );
     assert_eq!(code, 0, "export failed: {stdout}{err}");
@@ -184,15 +200,20 @@ fn a_bundle_round_trips_into_a_fresh_repository_and_re_imports_idempotently() {
         "the exported segment must carry the fixture's chain link: {doc}"
     );
     assert!(out.exists());
+}
 
-    let target = empty_target(tmp.path(), "fresh");
-    let tcache = tmp.path().join("tcache");
-    assert!(ref_oid(&target, CHECKPOINTS_REF).is_none());
-    assert!(ref_oid(&target, CHAIN_REF).is_none());
-
+/// The first import into a repository holding neither ref applies both, and
+/// each comes out identical to the source's.
+fn first_import_carries_both_refs(
+    target: &Path,
+    tcache: &Path,
+    out: &Path,
+    src_ck: &str,
+    src_chain: &str,
+) {
     let (code, stdout, err) = rift(
-        &target,
-        &tcache,
+        target,
+        tcache,
         &["--json", "bundle", "import", out.to_str().unwrap()],
     );
     assert_eq!(code, 0, "import failed: {stdout}{err}");
@@ -201,53 +222,55 @@ fn a_bundle_round_trips_into_a_fresh_repository_and_re_imports_idempotently() {
     assert_eq!(doc["already_present"], 0);
 
     assert_eq!(
-        ref_oid(&target, CHECKPOINTS_REF).as_deref(),
-        Some(src_ck.as_str()),
+        ref_oid(target, CHECKPOINTS_REF).as_deref(),
+        Some(src_ck),
         "the checkpoint ref must be identical after a round trip"
     );
     assert_eq!(
-        ref_oid(&target, CHAIN_REF).as_deref(),
-        Some(src_chain.as_str()),
+        ref_oid(target, CHAIN_REF).as_deref(),
+        Some(src_chain),
         "the chain ref must be identical after a round trip"
     );
+}
 
-    // Set-union: a second import of the same bundle applies nothing.
+/// Set-union: a second import of the same bundle applies nothing.
+fn re_import_applies_nothing(target: &Path, tcache: &Path, out: &Path, src_ck: &str) {
     let (code, stdout, err) = rift(
-        &target,
-        &tcache,
+        target,
+        tcache,
         &["--json", "bundle", "import", out.to_str().unwrap()],
     );
     assert_eq!(code, 0, "re-import failed: {stdout}{err}");
     let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(doc["applied"].as_array().unwrap().len(), 0);
     assert_eq!(doc["already_present"], 2);
-    assert_eq!(
-        ref_oid(&target, CHECKPOINTS_REF).as_deref(),
-        Some(src_ck.as_str())
-    );
+    assert_eq!(ref_oid(target, CHECKPOINTS_REF).as_deref(), Some(src_ck));
+}
 
-    // And the imported repository verifies: rebuild projects what the bundle
-    // brought in, and `rift verify` re-derives the roots from it.
-    let (code, stdout, err) = rift(&target, &tcache, &["--json", "rebuild"]);
+/// The imported repository verifies: rebuild projects what the bundle brought
+/// in, and `rift verify` re-derives the roots from it.
+fn imported_repository_verifies(target: &Path, tcache: &Path) {
+    let (code, stdout, err) = rift(target, tcache, &["--json", "rebuild"]);
     assert_eq!(code, 0, "rebuild after import failed: {stdout}{err}");
-    let (code, stdout, err) = rift(&target, &tcache, &["--json", "verify"]);
+    let (code, stdout, err) = rift(target, tcache, &["--json", "verify"]);
     assert_eq!(code, 0, "verify after import must be green: {stdout}{err}");
+}
 
-    // REGRESSION PIN (a gap a review caught in this claim's first form): `rift
-    // rebuild`'s substrate walk must be the ONLY writer of a checkpoint's
-    // `strategy`, because it is the only place that reads the checkpoint's
-    // own `metadata.json` to recover the real value. `cmd_import` is
-    // refs-only by design (see its doc comment in bins/rift/src/bundle.rs) —
-    // it never calls `rift_store::import_segment`, which would otherwise
-    // write a placeholder strategy FIRST. `record_checkpoint_if_new` is
-    // insert-or-ignore and canonical tables have no `UPDATE`, so a
-    // placeholder landing first would PERMANENTLY shadow rebuild's real
-    // value the very next time rebuild runs — silently, with no error and
-    // no red anywhere else. This assertion is the one place in the tree that
-    // reads the row back through the shipped binary and can catch that:
-    // wiring `import_segment` into `cmd_import` reds it (verified by hand;
-    // see the commit message this test landed in).
-    let (code, stdout, err) = rift(&target, &tcache, &["--json", "checkpoint", "list"]);
+/// REGRESSION PIN (a gap a review caught in this claim's first form): `rift
+/// rebuild`'s substrate walk must be the ONLY writer of a checkpoint's
+/// `strategy`, because it is the only place that reads the checkpoint's own
+/// `metadata.json` to recover the real value. `cmd_import` is refs-only by
+/// design (see its doc comment in bins/rift/src/bundle.rs) — it never calls
+/// `rift_store::import_segment`, which would otherwise write a placeholder
+/// strategy FIRST. `record_checkpoint_if_new` is insert-or-ignore and
+/// canonical tables have no `UPDATE`, so a placeholder landing first would
+/// PERMANENTLY shadow rebuild's real value the very next time rebuild runs —
+/// silently, with no error and no red anywhere else. This assertion is the
+/// one place in the tree that reads the row back through the shipped binary
+/// and can catch that: wiring `import_segment` into `cmd_import` reds it
+/// (verified by hand; see the commit message this test landed in).
+fn rebuild_alone_writes_the_checkpoint_strategy(target: &Path, tcache: &Path) {
+    let (code, stdout, err) = rift(target, tcache, &["--json", "checkpoint", "list"]);
     assert_eq!(
         code, 0,
         "checkpoint list after rebuild failed: {stdout}{err}"
@@ -384,9 +407,22 @@ fn an_incremental_bundle_is_refused_by_a_repository_with_no_chain() {
     let (repo, cache) = seeded_repo(tmp.path());
 
     let origin = tmp.path().join("origin.riftbundle");
+    let held = export_origin_and_hold_its_head(&repo, &cache, &origin);
+    let incremental = tmp.path().join("incremental.riftbundle");
+    export_incremental_from(&repo, &cache, &held, &incremental);
+
+    let target = empty_target(tmp.path(), "fresh");
+    let tcache = tmp.path().join("tcache");
+    an_empty_target_refuses_the_incremental(&target, &tcache, &incremental);
+    the_incremental_attaches_after_its_origin(&target, &tcache, &origin, &incremental, &held);
+}
+
+/// Export the origin bundle and return its `to_cursor`: the held position an
+/// incremental window resumes from.
+fn export_origin_and_hold_its_head(repo: &Path, cache: &Path, origin: &Path) -> String {
     let (code, stdout, err) = rift(
-        &repo,
-        &cache,
+        repo,
+        cache,
         &[
             "--json",
             "bundle",
@@ -402,17 +438,20 @@ fn an_incremental_bundle_is_refused_by_a_repository_with_no_chain() {
         !held.ends_with(':'),
         "the fixture's head cursor must not be the origin: {held}"
     );
+    held
+}
 
-    let incremental = tmp.path().join("incremental.riftbundle");
+/// Export the window that resumes from `held`, asserting it does.
+fn export_incremental_from(repo: &Path, cache: &Path, held: &str, incremental: &Path) {
     let (code, stdout, err) = rift(
-        &repo,
-        &cache,
+        repo,
+        cache,
         &[
             "--json",
             "bundle",
             "export",
             "--since",
-            &held,
+            held,
             "--out",
             incremental.to_str().unwrap(),
         ],
@@ -423,12 +462,14 @@ fn an_incremental_bundle_is_refused_by_a_repository_with_no_chain() {
         doc["from_cursor"], held,
         "the window must resume from the held cursor"
     );
+}
 
-    let target = empty_target(tmp.path(), "fresh");
-    let tcache = tmp.path().join("tcache");
+/// Into a target with no chain the incremental bundle is refused by the attach
+/// rule, and both refs stay absent.
+fn an_empty_target_refuses_the_incremental(target: &Path, tcache: &Path, incremental: &Path) {
     let (code, stdout, err) = rift(
-        &target,
-        &tcache,
+        target,
+        tcache,
         &["--json", "bundle", "import", incremental.to_str().unwrap()],
     );
     assert_ne!(
@@ -440,25 +481,33 @@ fn an_incremental_bundle_is_refused_by_a_repository_with_no_chain() {
         "the refusal must name the attach rule: {stdout}{err}"
     );
     assert!(
-        ref_oid(&target, CHECKPOINTS_REF).is_none(),
+        ref_oid(target, CHECKPOINTS_REF).is_none(),
         "a refusal moves no ref"
     );
     assert!(
-        ref_oid(&target, CHAIN_REF).is_none(),
+        ref_oid(target, CHAIN_REF).is_none(),
         "a refusal moves no ref"
     );
+}
 
-    // Positive control: origin first, then the same incremental file attaches.
+/// Positive control: origin first, then the same incremental file attaches.
+fn the_incremental_attaches_after_its_origin(
+    target: &Path,
+    tcache: &Path,
+    origin: &Path,
+    incremental: &Path,
+    held: &str,
+) {
     let (code, stdout, err) = rift(
-        &target,
-        &tcache,
+        target,
+        tcache,
         &["--json", "bundle", "import", origin.to_str().unwrap()],
     );
     assert_eq!(code, 0, "origin import failed: {stdout}{err}");
-    assert!(ref_oid(&target, CHAIN_REF).is_some());
+    assert!(ref_oid(target, CHAIN_REF).is_some());
     let (code, stdout, err) = rift(
-        &target,
-        &tcache,
+        target,
+        tcache,
         &["--json", "bundle", "import", incremental.to_str().unwrap()],
     );
     assert_eq!(
