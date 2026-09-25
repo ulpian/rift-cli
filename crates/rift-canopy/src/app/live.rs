@@ -193,11 +193,7 @@ where
         mut list_dir,
     } = deps;
     let caps = crate::render::caps::detect(opts.ascii);
-    let probe = xre_term::Capabilities::probe();
-    let size = Size::new(
-        u16::try_from(probe.size.x).unwrap_or(80),
-        u16::try_from(probe.size.y).unwrap_or(24),
-    );
+    let size = probe_size();
 
     let prefs = crate::splash::prefs::load();
     let mouse = mouse_enabled(prefs.mouse);
@@ -206,6 +202,55 @@ where
     // than no dashboard. Held for the whole loop; dropped on return.
     let (_term, capture_refused) = enter_with_fallback(mouse, Terminal::enter)?;
     let mut backend = crate::render::select_backend(caps, opts.ascii);
+    let mut state = startup_state(&opts, initial, size, &prefs, capture_refused);
+    open_viewer_launch(&mut state, &opts, &req_tx);
+
+    // Play the splash on the raw terminal source, so bus updates that arrive
+    // meanwhile stay queued (they are drained on the first main-loop poll).
+    let mut live = LiveEvents::new();
+    if !opts.skip_splash {
+        crate::splash::play_live(backend.as_mut(), &mut live, caps, size);
+    }
+    state.app.splash.skip();
+
+    let mut src = MergedEvents { live, data_rx };
+    let mut req_sink = move |req: DataRequest| {
+        let _ = req_tx.send(req); // a closed bus is non-fatal; the UI just goes static
+    };
+    event_loop(
+        backend.as_mut(),
+        &mut src,
+        &mut state,
+        &mut on_persist,
+        &mut req_sink,
+        settings_manager,
+        dispatcher,
+        &mut reload,
+        profile_loader,
+        &mut list_dir,
+    )
+}
+
+/// The terminal's size in cells, 80x24 when the probe reports one that does
+/// not fit.
+fn probe_size() -> Size {
+    let probe = xre_term::Capabilities::probe();
+    Size::new(
+        u16::try_from(probe.size.x).unwrap_or(80),
+        u16::try_from(probe.size.y).unwrap_or(24),
+    )
+}
+
+/// The dashboard state before the first frame: the refused-capture notice,
+/// the motion preference, the version, the startup sweep and the launch
+/// directory — everything the launch decides, and nothing the terminal does.
+fn startup_state(
+    opts: &CanopyOpts,
+    initial: Vec<Project>,
+    size: Size,
+    prefs: &crate::splash::prefs::CanopyPrefs,
+    capture_refused: bool,
+) -> AppState {
     let mut state = AppState::new(initial, size);
     if capture_refused {
         state.open_notice(crate::dispatch::Message::info(
@@ -236,43 +281,22 @@ where
         opts.launch_cwd.as_deref(),
         opts.launch_cwd_is_repo,
     );
+    state
+}
 
-    // A direct `rift viewer` launch enters through the same reducer action as
-    // the Repository button and slash command, but before the first frame. Its
-    // host injects the dedicated read-only bus; no dashboard prime request that
-    // follows can make that bus run feeds, migrations, or ingest.
-    if let Some(launch) = &opts.viewer_launch {
-        state.app.select_path(&launch.repo);
-        let effects = state.open_recall_viewer(launch.target.clone());
-        for request in effects.data_requests {
-            let _ = req_tx.send(request);
-        }
-    }
-
-    // Play the splash on the raw terminal source, so bus updates that arrive
-    // meanwhile stay queued (they are drained on the first main-loop poll).
-    let mut live = LiveEvents::new();
-    if !opts.skip_splash {
-        crate::splash::play_live(backend.as_mut(), &mut live, caps, size);
-    }
-    state.app.splash.skip();
-
-    let mut src = MergedEvents { live, data_rx };
-    let mut req_sink = move |req: DataRequest| {
-        let _ = req_tx.send(req); // a closed bus is non-fatal; the UI just goes static
+/// A direct `rift viewer` launch enters through the same reducer action as
+/// the Repository button and slash command, but before the first frame. Its
+/// host injects the dedicated read-only bus; no dashboard prime request that
+/// follows can make that bus run feeds, migrations, or ingest.
+fn open_viewer_launch(state: &mut AppState, opts: &CanopyOpts, req_tx: &Sender<DataRequest>) {
+    let Some(launch) = &opts.viewer_launch else {
+        return;
     };
-    event_loop(
-        backend.as_mut(),
-        &mut src,
-        &mut state,
-        &mut on_persist,
-        &mut req_sink,
-        settings_manager,
-        dispatcher,
-        &mut reload,
-        profile_loader,
-        &mut list_dir,
-    )
+    state.app.select_path(&launch.repo);
+    let effects = state.open_recall_viewer(launch.target.clone());
+    for request in effects.data_requests {
+        let _ = req_tx.send(request);
+    }
 }
 
 /// Translate an xre input event into a terminal-agnostic [`CanopyKey`], or `None`

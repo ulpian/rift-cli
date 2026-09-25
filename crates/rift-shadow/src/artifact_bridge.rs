@@ -172,6 +172,24 @@ pub struct BridgeReport {
 /// only the naming is capped, and the cap says so in its own line.
 pub const MAX_PARSE_NOTES: usize = 8;
 
+/// What one ingest run holds fixed across every shard it walks.
+struct IngestCtx<'a, S, R> {
+    store: &'a S,
+    sub: &'a R,
+    repo_id: &'a str,
+    default_agent: &'a str,
+    now_ms: i64,
+    registry: &'a AdapterRegistry,
+}
+
+/// One addressable shard's header: the checkpoint it names and what it claims.
+struct ShardHeader<'a> {
+    id: &'a str,
+    ckpt_id: Sha256Id,
+    metadata: &'a CheckpointMetadata,
+    metadata_bytes: Option<&'a [u8]>,
+}
+
 impl BridgeReport {
     /// Render the report as the stable, human-readable summary (snapshot-locked
     /// in tests; brand-free).
@@ -337,7 +355,7 @@ pub async fn ingest_from_substrate(
 /// `rift import --from-legacy` needs exactly this and nothing more. **Measured
 /// before it was written** — the standing measure-first rule — because the
 /// finding it answers is narrower than "import writes nothing": the
-/// event-projection half of the loop below is NOT inside the
+/// event-projection half of the shard walk below is NOT inside the
 /// `Sha256Id::parse_hex(id)` guard, so `rift rebuild` has always projected a
 /// pre-Rift shard's events — the same rows an import would write — while
 /// `rift import --from-legacy` reported and wrote nothing.
@@ -360,7 +378,6 @@ pub async fn ingest_from_substrate(
 /// # Errors
 /// [`rift_core::RiftError`] on a reader or storage failure. A malformed shard
 /// is **not** an error — it is refused and reported.
-#[allow(clippy::too_many_lines)] // one linear shard-walk; splitting would obscure the strict gate
 pub async fn ingest_dialect(
     store: &impl CanonicalStore,
     sub: &impl SubstrateReader,
@@ -383,332 +400,434 @@ pub async fn ingest_dialect(
             .cmp(&b.ordinal)
             .then(a.checkpoint_id.cmp(&b.checkpoint_id))
     });
-
     let mut report = BridgeReport {
         branch: CHECKPOINT_BRANCH.to_owned(),
         shards_seen: shards.len(),
         ..BridgeReport::default()
     };
     let registry = AdapterRegistry::with_builtin();
+    let ctx = IngestCtx {
+        store,
+        sub,
+        repo_id,
+        default_agent,
+        now_ms,
+        registry: &registry,
+    };
 
     // The nearest preceding shard whose id is a SHA-256 — the one derivation of
-    // `prev` (see the block below), advanced before any `continue` so a shard
-    // this loop refuses still occupies its place in the linkage. Refusal is a
-    // fact about a shard's report, not about where it sits in the walk, and the
-    // checker's own re-derivation does not consult the report at all: if the
-    // two advanced on different conditions they would disagree the moment a
-    // shard was refused.
+    // `prev` (see `record_chain_facts`), advanced before the shard is judged so
+    // a shard this walk refuses still occupies its place in the linkage.
+    // Refusal is a fact about a shard's report, not about where it sits in the
+    // walk, and the checker's own re-derivation does not consult the report at
+    // all: if the two advanced on different conditions they would disagree the
+    // moment a shard was refused.
     let mut last_parseable: Option<Sha256Id> = None;
-
     for shard in &shards {
         let id = shard.checkpoint_id.as_str();
         let parsed_id = Sha256Id::parse_hex(id).ok();
         let prev = last_parseable;
-        if let Some(p) = parsed_id {
-            last_parseable = Some(p);
-        }
-
-        // STRICT LAYER: a shard without a valid redaction report is
-        // never projected. The lenient parser enumerates; we judge.
-        let Some(report_bytes) = sub.read_artifact(id, "redaction_report.json")? else {
-            report.refused.push(RefusedShard {
-                checkpoint_id: id.to_owned(),
-                reason: "missing redaction report".into(),
-            });
-            continue;
-        };
-        let parsed_report = parse::parse_redaction_report(&report_bytes, id);
-        report.parse_issues += parsed_report.issues.len();
-        if !parsed_report.value.is_valid() {
-            report.refused.push(RefusedShard {
-                checkpoint_id: id.to_owned(),
-                reason: "invalid redaction report".into(),
-            });
-            continue;
-        }
-
-        // Checkpoint header → chain row + session links (idempotent). The
-        // BYTES are kept beside the parsed view: the worktree member below is
-        // read from them directly rather than through the recall plane's
-        // lenient `CheckpointMetadata`, which belongs to another crate and
-        // another projection (`recall.db` keeps its own twin).
-        let metadata_bytes = sub.read_artifact(id, "metadata.json")?;
-        let metadata = match &metadata_bytes {
-            Some(bytes) => {
-                let out = parse::parse_metadata(bytes, id);
-                report.parse_issues += out.issues.len();
-                out.value
-            }
-            None => CheckpointMetadata::default(),
-        };
-        let merkle_root = metadata
-            .merkle_root
-            .as_deref()
-            .and_then(|h| Sha256Id::parse_hex(h).ok());
-        if let (Some(ckpt_id), Some(root)) = (parsed_id, merkle_root) {
-            // THE CHAIN COMES FROM THE WALK, NOT FROM THE HEADER.
-            //
-            // This used to read `metadata.prev_hash` — a field the native writer
-            // has never populated (`condense` builds every archive with
-            // `prev_hash: None`, and `metadata_json` omits the key when it is
-            // `None`, so not one shard in a real repository carries it). So the
-            // bridge recorded `prev = None` for every checkpoint it ingested,
-            // while `GitCheckpointSource` — the source `verify` compares
-            // against — derives `prev` from the substrate WALK. Two writers, two
-            // notions of the chain, and the disagreement only surfaced when a
-            // rebuild inserted a row into a projection that already held a
-            // walk-derived chain: a SECOND GENESIS, and `verify` rightly called
-            // it tamper.
-            //
-            // One derivation now, and it is **the nearest preceding shard whose
-            // id is a SHA-256** rather than `shard.prev` verbatim. `shard.prev`
-            // is the previous element of the walk whatever its id looks like, so
-            // on a repository holding pre-Rift shards it named a predecessor
-            // that cannot BE a chain position — and `Sha256Id::parse_hex(p)?`
-            // here turned `rift rebuild` (and the `doctor --fix` that drives it)
-            // into an internal error on exactly those repositories, the same
-            // abort `GitCheckpointSource` used to raise for `rift verify`. Both
-            // sides skip an unaddressable id and keep the linkage continuous
-            // across it; when every id parses the two rules coincide, because
-            // the walk sets `prev` to the previous element.
-            //
-            // The header's own claim is not the chain, but it is not nothing
-            // either: a shard that claims a DIFFERENT predecessor is a fact
-            // worth surfacing rather than silently discarding. Reported, never
-            // acted on — acting on it is what created the fork. Compared
-            // against the predecessor actually RECORDED, not against
-            // `shard.prev`: on a mixed repository those differ, and a
-            // disagreement report about a value no row holds says nothing.
-            if let Some(claimed) = metadata.prev_hash.as_deref() {
-                let recorded = prev.map(|p| p.to_hex());
-                let agrees = recorded.as_deref() == Some(claimed);
-                if !agrees {
-                    report.parse_issues += 1;
-                }
-            }
-            record_checkpoint_if_new(
-                store,
-                &CheckpointRecord {
-                    checkpoint_id: ckpt_id,
-                    strategy: metadata
-                        .strategy
-                        .clone()
-                        .unwrap_or_else(|| "manual-commit".into()),
-                    // NOT `now_ms`: that is when the rebuild ran, not when the
-                    // checkpoint happened, and stamping ingest time onto a
-                    // historical row is how a projection comes to disagree with
-                    // its own git. See `created_at_for`.
-                    created_at: created_at_for(&metadata),
-                    merkle_root: root,
-                    prev,
-                    schema_version: 1,
-                },
-            )
-            .await?;
-
-            // THE ANCHOR COMMIT, which was in scope here all along.
-            //
-            // Every shard the native writer produces records the commit it
-            // captured (`metadata.json`'s `commit`), and this block — which
-            // already reads `strategy`, `prev_hash`, `created_at` and
-            // `sessions` off the same header — dropped it. So "which commit is
-            // this checkpoint about" was answerable only by re-reading git,
-            // and the outcome-label deriver's own doc comment ("absent ⇒ no
-            // outcome label") described a value the projection never held.
-            //
-            // A projection, not a new fact: it is re-derived from the shard on
-            // every rebuild, so the write is idempotent and nothing here can
-            // outlive the archive it came from.
-            //
-            // ★ WHAT THE ROW DOES AND DOES NOT PROMISE. It records the commit
-            // the shard NAMED, screened to be shaped like an object id — never
-            // that the object is still reachable. Measured on this repository's
-            // own chain at the commit that added the table: 104 shards name 76
-            // distinct commits, of which **43 still exist as objects (42 of
-            // them ancestors of HEAD) and 33 are gone fully** — rebased,
-            // amended or collected away, which is ordinary in a program that
-            // rebases branches. A consumer must therefore treat a
-            // non-resolving oid as "the commit this checkpoint named has left
-            // this repository", not as a corrupt row; and this side must not
-            // "fix" it by substituting a commit that does still resolve, which
-            // would be inventing an anchor.
-            match commit_oid_from_metadata(metadata.commit.as_deref()) {
-                Some(oid) => {
-                    record_checkpoint_commit_if_new(store, &ckpt_id, &oid).await?;
-                }
-                None => {
-                    // A shard that claims a commit we cannot believe is a fact
-                    // worth naming, not a silent skip — the counter-with-no-name
-                    // is what once hid a whole archived dialect.
-                    if metadata.commit.is_some() {
-                        report.parse_issues += 1;
-                        note(
-                            &mut report,
-                            format!(
-                                "{id}: header claims a commit that is not an object id {:?} \
-                                 — no checkpoint↔commit link recorded",
-                                truncate_token(metadata.commit.as_deref().unwrap_or_default())
-                            ),
-                        );
-                    }
-                }
-            }
-
-            // THE ARCHIVING WORKTREE, projected from the shard's
-            // own `worktree` member. A PROJECTION, like the commit above: it is
-            // re-derived from the shard on every rebuild, so the write is
-            // idempotent and nothing here outlives the archive it came from.
-            //
-            // **A shard WITHOUT the member projects NO ROW.** That is the
-            // whole rebuild-parity claim: every shard written before worktree
-            // members existed is memberless, and a row invented for one would
-            // be a fact the projection may not mint about a sealed shard.
-            // Readers render the absence as `unknown`, never as `main`.
-            match worktree_member(metadata_bytes.as_deref()) {
-                Some(label) => {
-                    record_checkpoint_worktree_if_new(
-                        store,
-                        &ckpt_id.to_hex(),
-                        &label.token,
-                        &label.name,
-                        label.linked,
-                        label.branch.as_deref(),
-                    )
-                    .await?;
-                }
-                None => {
-                    // A member this side will not believe is NAMED, not
-                    // silently skipped — the anonymous-counter arm is what once
-                    // hid a whole archived dialect. Absence itself is not a
-                    // note: every shard written before the member existed is
-                    // memberless and that is ordinary.
-                    if claims_a_worktree(metadata_bytes.as_deref()) {
-                        report.parse_issues += 1;
-                        note(
-                            &mut report,
-                            format!(
-                                "{id}: header carries a worktree member this reader will not \
-                                 believe — no checkpoint↔worktree row recorded"
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-        for (ordinal, session) in metadata.sessions.iter().enumerate() {
-            record_session_in_checkpoint(
-                store,
-                &SessionInCheckpointRow {
-                    checkpoint_id: id.to_owned(),
-                    session_id: ids::session_row_id(default_agent, session),
-                    ordinal: i64::try_from(ordinal).unwrap_or(i64::MAX),
-                    schema_version: 1,
-                },
-            )
-            .await?;
-        }
-
-        // The archived canonical-event stream → the SAME projector the live
-        // hook path runs (identical ids ⇒ the union is a set-union no-op).
-        let Some(full_bytes) = sub.read_artifact(id, "full.jsonl")? else {
-            report.shards_projected += 1;
-            continue; // header-only shard: chain facts landed, no events
-        };
-        let full = parse::parse_full_events(&full_bytes, id);
-        report.parse_issues += full.issues.len();
-        for rec in &full.value {
-            let Some(ev) = event_from_record(rec) else {
-                // A dropped record says WHY it was dropped, and says it with
-                // the token that caused it. This arm used to bump an anonymous
-                // counter, which is how the dot-spelled dialect vanished
-                // without a word: the number went up and nothing named a kind.
-                report.parse_issues += 1;
-                note(
-                    &mut report,
-                    format!(
-                        "{id}: dropped a record with an unrecognised kind {:?} \
-                         (session {}, turn {}, event {})",
-                        truncate_token(&rec.kind),
-                        truncate_token(&rec.session),
-                        rec.turn_ordinal,
-                        rec.event_ordinal
-                    ),
-                );
-                continue;
-            };
-            report.events_derived += 1;
-            let agent_token = rec
-                .agent
-                .clone()
-                .unwrap_or_else(|| default_agent.to_owned());
-            let agent_id = AgentId::new(&agent_token);
-
-            let key = idempotency_key(
-                &agent_id,
-                &ev.session,
-                &rec.verb,
-                ev.turn_ordinal,
-                ev.event_ordinal,
-                &ev.payload_sha256,
-            );
-            let inserted = record_captured_event(
-                store,
-                &CapturedEventRow {
-                    idempotency_key: key.to_hex(),
-                    session_id: ev.session.clone(),
-                    turn_ordinal: i64::from(ev.turn_ordinal),
-                    event_ordinal: i64::from(ev.event_ordinal),
-                    kind: ev.kind.as_str().to_owned(),
-                    trust: ev.trust.as_str().to_owned(),
-                    payload_sha256: ev.payload_sha256.to_hex(),
-                    occurred_at_ms: ev.occurred_at_ms,
-                    schema_version: i64::from(ev.schema_version),
-                },
-            )
-            .await?;
-            if inserted {
-                report.events_inserted += 1;
-            }
-
-            let facts = payload_facts(&rec.payload);
-            let ctx = ProjectionCtx {
-                agent: &agent_token,
-                repo_id,
-            };
-            project_event(store, &ev, &facts, ctx).await?;
-            if let Some(usage) = registry
-                .get(&agent_id)
-                .and_then(|a| a.usage(&rec.verb, &rec.payload))
-            {
-                project_usage(store, &ev, &facts, ctx, &usage, now_ms).await?;
-            }
-            if let Some(usage) = registry
-                .get(&agent_id)
-                .and_then(|a| a.main_context_usage(&rec.verb, &rec.payload))
-            {
-                project_main_context(store, &ev, &rec.verb, &facts, ctx, &usage).await?;
-            }
-        }
-        report.shards_projected += 1;
+        last_parseable = parsed_id.or(last_parseable);
+        ingest_shard(&ctx, &mut report, id, parsed_id, prev).await?;
     }
 
-    // Advance the append-only watermark to the branch's high-water shard.
-    // Written LAST: a crash before this line re-runs as a pure no-op.
-    if let Some(tip) = shards.last().map(|s| s.checkpoint_id.clone()) {
-        record_ingest_watermark(
-            store,
-            &IngestWatermarkRow {
-                watermark_id: ids::watermark_id(CHECKPOINT_BRANCH, &tip),
-                branch: CHECKPOINT_BRANCH.to_owned(),
-                branch_tip: tip.clone(),
-                ingested_at: now_ms,
+    advance_watermark(&ctx, &mut report, &shards).await?;
+    Ok(report)
+}
+
+/// Judge one shard, then project what it carries: the chain facts from its
+/// header, its session links, and its archived event stream. `parsed_id` is the
+/// shard's id when it is a SHA-256; `prev` is the nearest preceding shard whose
+/// id is one.
+async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
+    ctx: &IngestCtx<'_, S, R>,
+    report: &mut BridgeReport,
+    id: &str,
+    parsed_id: Option<Sha256Id>,
+    prev: Option<Sha256Id>,
+) -> Result<()> {
+    if let Some(reason) = redaction_refusal(ctx.sub, report, id)? {
+        report.refused.push(RefusedShard {
+            checkpoint_id: id.to_owned(),
+            reason: reason.into(),
+        });
+        return Ok(());
+    }
+
+    // The BYTES are kept beside the parsed view: the worktree member is read
+    // from them directly rather than through the recall plane's lenient
+    // `CheckpointMetadata`, which belongs to another crate and another
+    // projection (`recall.db` keeps its own twin).
+    let metadata_bytes = ctx.sub.read_artifact(id, "metadata.json")?;
+    let metadata = match &metadata_bytes {
+        Some(bytes) => {
+            let out = parse::parse_metadata(bytes, id);
+            report.parse_issues += out.issues.len();
+            out.value
+        }
+        None => CheckpointMetadata::default(),
+    };
+    let merkle_root = metadata
+        .merkle_root
+        .as_deref()
+        .and_then(|h| Sha256Id::parse_hex(h).ok());
+    if let (Some(ckpt_id), Some(root)) = (parsed_id, merkle_root) {
+        let header = ShardHeader {
+            id,
+            ckpt_id,
+            metadata: &metadata,
+            metadata_bytes: metadata_bytes.as_deref(),
+        };
+        record_chain_facts(ctx.store, report, &header, root, prev).await?;
+    }
+    record_sessions(ctx, id, &metadata).await?;
+    project_full_events(ctx, report, id).await?;
+    report.shards_projected += 1;
+    Ok(())
+}
+
+/// STRICT LAYER: a shard without a valid redaction report is never projected.
+/// The lenient parser enumerates; this judges — `Some` is the refusal reason.
+fn redaction_refusal(
+    sub: &impl SubstrateReader,
+    report: &mut BridgeReport,
+    id: &str,
+) -> Result<Option<&'static str>> {
+    let Some(report_bytes) = sub.read_artifact(id, "redaction_report.json")? else {
+        return Ok(Some("missing redaction report"));
+    };
+    let parsed_report = parse::parse_redaction_report(&report_bytes, id);
+    report.parse_issues += parsed_report.issues.len();
+    if !parsed_report.value.is_valid() {
+        return Ok(Some("invalid redaction report"));
+    }
+    Ok(None)
+}
+
+/// Checkpoint header → chain row, anchor commit and archiving worktree
+/// (idempotent), for a shard whose id is a SHA-256 and whose header carries a
+/// Merkle root.
+///
+/// THE CHAIN COMES FROM THE WALK, NOT FROM THE HEADER.
+///
+/// This used to read `metadata.prev_hash` — a field the native writer has never
+/// populated (`condense` builds every archive with `prev_hash: None`, and
+/// `metadata_json` omits the key when it is `None`, so not one shard in a real
+/// repository carries it). So the bridge recorded `prev = None` for every
+/// checkpoint it ingested, while `GitCheckpointSource` — the source `verify`
+/// compares against — derives `prev` from the substrate WALK. Two writers, two
+/// notions of the chain, and the disagreement only surfaced when a rebuild
+/// inserted a row into a projection that already held a walk-derived chain: a
+/// SECOND GENESIS, and `verify` rightly called it tamper.
+///
+/// One derivation now, and it is **the nearest preceding shard whose id is a
+/// SHA-256** rather than `shard.prev` verbatim. `shard.prev` is the previous
+/// element of the walk whatever its id looks like, so on a repository holding
+/// pre-Rift shards it named a predecessor that cannot BE a chain position — and
+/// `Sha256Id::parse_hex(p)?` here turned `rift rebuild` (and the `doctor --fix`
+/// that drives it) into an internal error on exactly those repositories, the
+/// same abort `GitCheckpointSource` used to raise for `rift verify`. Both sides
+/// skip an unaddressable id and keep the linkage continuous across it; when
+/// every id parses the two rules coincide, because the walk sets `prev` to the
+/// previous element.
+async fn record_chain_facts(
+    store: &impl CanonicalStore,
+    report: &mut BridgeReport,
+    header: &ShardHeader<'_>,
+    root: Sha256Id,
+    prev: Option<Sha256Id>,
+) -> Result<()> {
+    // The header's own claim is not the chain, but it is not nothing either: a
+    // shard that claims a DIFFERENT predecessor is a fact worth surfacing
+    // rather than silently discarding. Reported, never acted on — acting on it
+    // is what created the fork. Compared against the predecessor actually
+    // RECORDED, not against `shard.prev`: on a mixed repository those differ,
+    // and a disagreement report about a value no row holds says nothing.
+    if let Some(claimed) = header.metadata.prev_hash.as_deref() {
+        let recorded = prev.map(|p| p.to_hex());
+        let agrees = recorded.as_deref() == Some(claimed);
+        if !agrees {
+            report.parse_issues += 1;
+        }
+    }
+    record_checkpoint_if_new(
+        store,
+        &CheckpointRecord {
+            checkpoint_id: header.ckpt_id,
+            strategy: header
+                .metadata
+                .strategy
+                .clone()
+                .unwrap_or_else(|| "manual-commit".into()),
+            // NOT `now_ms`: that is when the rebuild ran, not when the
+            // checkpoint happened, and stamping ingest time onto a historical
+            // row is how a projection comes to disagree with its own git. See
+            // `created_at_for`.
+            created_at: created_at_for(header.metadata),
+            merkle_root: root,
+            prev,
+            schema_version: 1,
+        },
+    )
+    .await?;
+    record_anchor_commit(store, report, header).await?;
+    record_archiving_worktree(store, report, header).await
+}
+
+/// THE ANCHOR COMMIT, which was in scope here all along.
+///
+/// Every shard the native writer produces records the commit it captured
+/// (`metadata.json`'s `commit`), and the chain-facts step — which already reads
+/// `strategy`, `prev_hash`, `created_at` and `sessions` off the same header —
+/// dropped it. So "which commit is this checkpoint about" was answerable only
+/// by re-reading git, and the outcome-label deriver's own doc comment ("absent
+/// ⇒ no outcome label") described a value the projection never held.
+///
+/// A projection, not a new fact: it is re-derived from the shard on every
+/// rebuild, so the write is idempotent and nothing here can outlive the archive
+/// it came from.
+///
+/// ★ WHAT THE ROW DOES AND DOES NOT PROMISE. It records the commit the shard
+/// NAMED, screened to be shaped like an object id — never that the object is
+/// still reachable. Measured on this repository's own chain at the commit that
+/// added the table: 104 shards name 76 distinct commits, of which **43 still
+/// exist as objects (42 of them ancestors of HEAD) and 33 are gone fully** —
+/// rebased, amended or collected away, which is ordinary in a program that
+/// rebases branches. A consumer must therefore treat a non-resolving oid as
+/// "the commit this checkpoint named has left this repository", not as a
+/// corrupt row; and this side must not "fix" it by substituting a commit that
+/// does still resolve, which would be inventing an anchor.
+async fn record_anchor_commit(
+    store: &impl CanonicalStore,
+    report: &mut BridgeReport,
+    header: &ShardHeader<'_>,
+) -> Result<()> {
+    let id = header.id;
+    let claim = header.metadata.commit.as_deref();
+    match commit_oid_from_metadata(claim) {
+        Some(oid) => {
+            record_checkpoint_commit_if_new(store, &header.ckpt_id, &oid).await?;
+        }
+        None => {
+            // A shard that claims a commit we cannot believe is a fact worth
+            // naming, not a silent skip — the counter-with-no-name is what once
+            // hid a whole archived dialect.
+            if claim.is_some() {
+                report.parse_issues += 1;
+                note(
+                    report,
+                    format!(
+                        "{id}: header claims a commit that is not an object id {:?} \
+                         — no checkpoint↔commit link recorded",
+                        truncate_token(claim.unwrap_or_default())
+                    ),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// THE ARCHIVING WORKTREE, projected from the shard's own `worktree` member. A
+/// PROJECTION, like the anchor commit: it is re-derived from the shard on every
+/// rebuild, so the write is idempotent and nothing here outlives the archive it
+/// came from.
+///
+/// **A shard WITHOUT the member projects NO ROW.** That is the whole
+/// rebuild-parity claim: every shard written before worktree members existed is
+/// memberless, and a row invented for one would be a fact the projection may
+/// not mint about a sealed shard. Readers render the absence as `unknown`,
+/// never as `main`.
+async fn record_archiving_worktree(
+    store: &impl CanonicalStore,
+    report: &mut BridgeReport,
+    header: &ShardHeader<'_>,
+) -> Result<()> {
+    let id = header.id;
+    match worktree_member(header.metadata_bytes) {
+        Some(label) => {
+            record_checkpoint_worktree_if_new(
+                store,
+                &header.ckpt_id.to_hex(),
+                &label.token,
+                &label.name,
+                label.linked,
+                label.branch.as_deref(),
+            )
+            .await?;
+        }
+        None => {
+            // A member this side will not believe is NAMED, not silently
+            // skipped — the anonymous-counter arm is what once hid a whole
+            // archived dialect. Absence itself is not a note: every shard
+            // written before the member existed is memberless and that is
+            // ordinary.
+            if claims_a_worktree(header.metadata_bytes) {
+                report.parse_issues += 1;
+                note(
+                    report,
+                    format!(
+                        "{id}: header carries a worktree member this reader will not \
+                         believe — no checkpoint↔worktree row recorded"
+                    ),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Link every session the header names to this checkpoint, in header order.
+async fn record_sessions<S: CanonicalStore, R>(
+    ctx: &IngestCtx<'_, S, R>,
+    id: &str,
+    metadata: &CheckpointMetadata,
+) -> Result<()> {
+    for (ordinal, session) in metadata.sessions.iter().enumerate() {
+        record_session_in_checkpoint(
+            ctx.store,
+            &SessionInCheckpointRow {
+                checkpoint_id: id.to_owned(),
+                session_id: ids::session_row_id(ctx.default_agent, session),
+                ordinal: i64::try_from(ordinal).unwrap_or(i64::MAX),
                 schema_version: 1,
             },
         )
         .await?;
-        report.tip = Some(tip);
     }
-    Ok(report)
+    Ok(())
+}
+
+/// The archived canonical-event stream → the SAME projector the live hook path
+/// runs (identical ids ⇒ the union is a set-union no-op). A header-only shard
+/// has no `full.jsonl`: its chain facts landed, and it has no events.
+async fn project_full_events<S: CanonicalStore, R: SubstrateReader>(
+    ctx: &IngestCtx<'_, S, R>,
+    report: &mut BridgeReport,
+    id: &str,
+) -> Result<()> {
+    let Some(full_bytes) = ctx.sub.read_artifact(id, "full.jsonl")? else {
+        return Ok(());
+    };
+    let full = parse::parse_full_events(&full_bytes, id);
+    report.parse_issues += full.issues.len();
+    for rec in &full.value {
+        let Some(ev) = event_from_record(rec) else {
+            note_dropped_record(report, id, rec);
+            continue;
+        };
+        report.events_derived += 1;
+        project_record(ctx, report, rec, &ev).await?;
+    }
+    Ok(())
+}
+
+/// A dropped record says WHY it was dropped, and says it with the token that
+/// caused it. This arm used to bump an anonymous counter, which is how the
+/// dot-spelled dialect vanished without a word: the number went up and nothing
+/// named a kind.
+fn note_dropped_record(report: &mut BridgeReport, id: &str, rec: &FullEventRecord) {
+    report.parse_issues += 1;
+    note(
+        report,
+        format!(
+            "{id}: dropped a record with an unrecognised kind {:?} \
+             (session {}, turn {}, event {})",
+            truncate_token(&rec.kind),
+            truncate_token(&rec.session),
+            rec.turn_ordinal,
+            rec.event_ordinal
+        ),
+    );
+}
+
+/// Write one re-derived event: its `captured_event` row (keyed by the same
+/// idempotency key the live hook path derives), then its projection, its usage
+/// and its main-context usage when the record's adapter reads them.
+async fn project_record<S: CanonicalStore, R>(
+    ctx: &IngestCtx<'_, S, R>,
+    report: &mut BridgeReport,
+    rec: &FullEventRecord,
+    ev: &CanonicalEvent,
+) -> Result<()> {
+    let agent_token = rec
+        .agent
+        .clone()
+        .unwrap_or_else(|| ctx.default_agent.to_owned());
+    let agent_id = AgentId::new(&agent_token);
+    let key = idempotency_key(
+        &agent_id,
+        &ev.session,
+        &rec.verb,
+        ev.turn_ordinal,
+        ev.event_ordinal,
+        &ev.payload_sha256,
+    );
+    let inserted = record_captured_event(
+        ctx.store,
+        &CapturedEventRow {
+            idempotency_key: key.to_hex(),
+            session_id: ev.session.clone(),
+            turn_ordinal: i64::from(ev.turn_ordinal),
+            event_ordinal: i64::from(ev.event_ordinal),
+            kind: ev.kind.as_str().to_owned(),
+            trust: ev.trust.as_str().to_owned(),
+            payload_sha256: ev.payload_sha256.to_hex(),
+            occurred_at_ms: ev.occurred_at_ms,
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    if inserted {
+        report.events_inserted += 1;
+    }
+
+    let facts = payload_facts(&rec.payload);
+    let pctx = ProjectionCtx {
+        agent: &agent_token,
+        repo_id: ctx.repo_id,
+    };
+    project_event(ctx.store, ev, &facts, pctx).await?;
+    if let Some(usage) = ctx
+        .registry
+        .get(&agent_id)
+        .and_then(|a| a.usage(&rec.verb, &rec.payload))
+    {
+        project_usage(ctx.store, ev, &facts, pctx, &usage, ctx.now_ms).await?;
+    }
+    if let Some(usage) = ctx
+        .registry
+        .get(&agent_id)
+        .and_then(|a| a.main_context_usage(&rec.verb, &rec.payload))
+    {
+        project_main_context(ctx.store, ev, &rec.verb, &facts, pctx, &usage).await?;
+    }
+    Ok(())
+}
+
+/// Advance the append-only watermark to the branch's high-water shard.
+/// Written LAST: a crash before this step re-runs as a pure no-op.
+async fn advance_watermark<S: CanonicalStore, R>(
+    ctx: &IngestCtx<'_, S, R>,
+    report: &mut BridgeReport,
+    shards: &[CheckpointShard],
+) -> Result<()> {
+    let Some(tip) = shards.last().map(|s| s.checkpoint_id.clone()) else {
+        return Ok(());
+    };
+    record_ingest_watermark(
+        ctx.store,
+        &IngestWatermarkRow {
+            watermark_id: ids::watermark_id(CHECKPOINT_BRANCH, &tip),
+            branch: CHECKPOINT_BRANCH.to_owned(),
+            branch_tip: tip.clone(),
+            ingested_at: ctx.now_ms,
+            schema_version: 1,
+        },
+    )
+    .await?;
+    report.tip = Some(tip);
+    Ok(())
 }
 
 #[cfg(test)]

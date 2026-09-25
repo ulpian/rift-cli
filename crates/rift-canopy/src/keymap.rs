@@ -336,12 +336,46 @@ mod tests {
 
     /// A mid-state app for `ctx`: three projects with the middle one selected,
     /// cursors off their rails' edges — so every direction key has room to
-    /// move and every action key has a live target.
-    #[allow(clippy::too_many_lines)] // one arm per hint context — fixture assembly
+    /// move and every action key has a live target. Each family of contexts
+    /// plants its state in its own helper below.
     fn app_in(ctx: HintContext) -> App {
         let mut app = App::new(vec![project("a"), project("b"), project("c")]);
         app.splash.skip();
         app.selected = 1;
+        match ctx {
+            HintContext::Rail
+            | HintContext::Detail
+            | HintContext::DetailNotAdopted
+            | HintContext::Graphs
+            | HintContext::CommandIdle
+            | HintContext::CommandEditing => focus_panel(&mut app, ctx),
+            HintContext::AddProject
+            | HintContext::PanelEditor
+            | HintContext::ColourPicker
+            | HintContext::Explorer => enter_mode(&mut app, ctx),
+            HintContext::ProfileMenu
+            | HintContext::ProfileSettings
+            | HintContext::ProfileNaming
+            | HintContext::ProfileConfirm => open_profile_menu(&mut app, ctx),
+            HintContext::ProfileMembers | HintContext::ProfileMembersAdd => {
+                open_profile_members(&mut app, ctx);
+            }
+            HintContext::ProjectSettings => open_project_settings(&mut app),
+            HintContext::ProjectSettingsRunning => {
+                let mut running = app_in(HintContext::ProjectSettings);
+                running.project_settings.running = true;
+                app = running;
+            }
+            HintContext::OverlayResults
+            | HintContext::OverlayConfirm
+            | HintContext::OverlayMessage
+            | HintContext::OverlayRunning => open_overlay(&mut app, ctx),
+        }
+        app
+    }
+
+    /// Normal-mode focus contexts: the panel focused, its scroll off the edge.
+    fn focus_panel(app: &mut App, ctx: HintContext) {
         match ctx {
             HintContext::Rail => app.set_focus(Panel::Projects),
             HintContext::Detail => {
@@ -367,6 +401,14 @@ mod tests {
                 app.mode = Mode::Command;
                 app.suggest_highlight = 1;
             }
+            _ => (),
+        }
+    }
+
+    /// Mode contexts with no profile plane: add-project, the panel editor, the
+    /// colour picker and the destination explorer.
+    fn enter_mode(app: &mut App, ctx: HintContext) {
+        match ctx {
             HintContext::AddProject => {
                 app.mode = Mode::AddProject;
                 app.command_line = "/tmp/x".into();
@@ -377,67 +419,6 @@ mod tests {
                 // the cursor mid-grid (a right neighbor for resize / column move).
                 app.layout.columns.swap(0, 1);
                 app.editor.cursor = crate::editor::Cursor { col: 1, unit: 0 };
-            }
-            HintContext::ProfileMenu => {
-                // Three live profiles, active first, cursor mid-list on a
-                // NON-active row — so `d` can open the confirm, `s` its
-                // settings, `Enter` can switch, and `j`/`k` have room.
-                profiles_fixture(&mut app);
-                app.mode = Mode::ProfileMenu;
-                app.profile_menu.cursor = 1;
-            }
-            HintContext::ProfileSettings => {
-                // The settings page for a NON-active profile, cursor mid-list
-                // — `j`/`k` have room, `Enter` opens the cursor row, `Esc`
-                // steps back to Browse.
-                profiles_fixture(&mut app);
-                app.mode = Mode::ProfileMenu;
-                app.profile_menu.stage = crate::profile_menu::MenuStage::Settings {
-                    profile: "pf1".into(),
-                };
-                app.profile_menu.settings_cursor = 1;
-            }
-            HintContext::ProfileMembers => {
-                // A two-member view mid-cursor: every hinted act has a target
-                // (remove/reorder act on the cursor row; `a` has candidates).
-                profiles_fixture(&mut app);
-                app.mode = Mode::ProfileMenu;
-                app.profile_menu.stage = crate::profile_menu::MenuStage::Members {
-                    profile: "pf1".into(),
-                };
-                app.profile_menu.members = vec![project("a"), project("b"), project("c")];
-                app.profile_menu.catalogue =
-                    vec![project("a"), project("b"), project("c"), project("x")];
-                app.profile_menu.member_cursor = 1;
-            }
-            HintContext::ProfileMembersAdd => {
-                profiles_fixture(&mut app);
-                app.mode = Mode::ProfileMenu;
-                app.profile_menu.stage = crate::profile_menu::MenuStage::MembersAdd {
-                    profile: "pf1".into(),
-                };
-                app.profile_menu.members = vec![project("a")];
-                app.profile_menu.catalogue =
-                    vec![project("a"), project("b"), project("c"), project("x")];
-                app.profile_menu.add_cursor = 1;
-            }
-            HintContext::ProfileNaming => {
-                // A naming input holding a VALID name, so `Enter` emits the
-                // typed action and `Esc` observably steps back.
-                profiles_fixture(&mut app);
-                app.mode = Mode::ProfileMenu;
-                app.profile_menu.stage = crate::profile_menu::MenuStage::NamingCreate;
-                app.command_line = "qa".into();
-            }
-            HintContext::ProfileConfirm => {
-                // The inline confirm on a NON-active profile — `Enter` lands
-                // the delete (a typed action), `Esc` cancels (a stage move).
-                profiles_fixture(&mut app);
-                app.mode = Mode::ProfileMenu;
-                app.profile_menu.stage = crate::profile_menu::MenuStage::ConfirmDelete {
-                    profile: "pf1".into(),
-                    back_to_settings: false,
-                };
             }
             HintContext::ColourPicker => {
                 // The preset stage mid-list: `j`/`k` have room, `Enter`
@@ -483,31 +464,110 @@ mod tests {
                 ];
                 app.explorer.cursor = 1;
             }
-            HintContext::ProjectSettings => {
-                app.mode = Mode::ProjectSettings;
-                app.project_settings.open(crate::ProjectSettingsView {
-                    path: "/r/b".into(),
-                    project_name: "b".into(),
-                    initialization: crate::ProjectInitialization::Initialized,
-                    settings: crate::ProjectSettingId::ALL
-                        .iter()
-                        .map(|id| crate::ProjectSettingRow {
-                            id: *id,
-                            enabled: false,
-                            actionable: true,
-                            detail: None,
-                        })
-                        .collect(),
-                    policy: crate::ProjectPolicySummary::default(),
-                    integrations: Vec::new(),
-                });
-                app.project_settings.cursor = 1;
+            _ => (),
+        }
+    }
+
+    /// Profile-menu stages that act on the profile list itself.
+    fn open_profile_menu(app: &mut App, ctx: HintContext) {
+        match ctx {
+            HintContext::ProfileMenu => {
+                // Three live profiles, active first, cursor mid-list on a
+                // NON-active row — so `d` can open the confirm, `s` its
+                // settings, `Enter` can switch, and `j`/`k` have room.
+                profiles_fixture(app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.cursor = 1;
             }
-            HintContext::ProjectSettingsRunning => {
-                let mut running = app_in(HintContext::ProjectSettings);
-                running.project_settings.running = true;
-                app = running;
+            HintContext::ProfileSettings => {
+                // The settings page for a NON-active profile, cursor mid-list
+                // — `j`/`k` have room, `Enter` opens the cursor row, `Esc`
+                // steps back to Browse.
+                profiles_fixture(app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::Settings {
+                    profile: "pf1".into(),
+                };
+                app.profile_menu.settings_cursor = 1;
             }
+            HintContext::ProfileNaming => {
+                // A naming input holding a VALID name, so `Enter` emits the
+                // typed action and `Esc` observably steps back.
+                profiles_fixture(app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::NamingCreate;
+                app.command_line = "qa".into();
+            }
+            HintContext::ProfileConfirm => {
+                // The inline confirm on a NON-active profile — `Enter` lands
+                // the delete (a typed action), `Esc` cancels (a stage move).
+                profiles_fixture(app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::ConfirmDelete {
+                    profile: "pf1".into(),
+                    back_to_settings: false,
+                };
+            }
+            _ => (),
+        }
+    }
+
+    /// Profile-menu stages that edit one profile's member projects.
+    fn open_profile_members(app: &mut App, ctx: HintContext) {
+        match ctx {
+            HintContext::ProfileMembers => {
+                // A two-member view mid-cursor: every hinted act has a target
+                // (remove/reorder act on the cursor row; `a` has candidates).
+                profiles_fixture(app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::Members {
+                    profile: "pf1".into(),
+                };
+                app.profile_menu.members = vec![project("a"), project("b"), project("c")];
+                app.profile_menu.catalogue =
+                    vec![project("a"), project("b"), project("c"), project("x")];
+                app.profile_menu.member_cursor = 1;
+            }
+            HintContext::ProfileMembersAdd => {
+                profiles_fixture(app);
+                app.mode = Mode::ProfileMenu;
+                app.profile_menu.stage = crate::profile_menu::MenuStage::MembersAdd {
+                    profile: "pf1".into(),
+                };
+                app.profile_menu.members = vec![project("a")];
+                app.profile_menu.catalogue =
+                    vec![project("a"), project("b"), project("c"), project("x")];
+                app.profile_menu.add_cursor = 1;
+            }
+            _ => (),
+        }
+    }
+
+    /// Project Settings open on an initialized repository, cursor mid-list.
+    fn open_project_settings(app: &mut App) {
+        app.mode = Mode::ProjectSettings;
+        app.project_settings.open(crate::ProjectSettingsView {
+            path: "/r/b".into(),
+            project_name: "b".into(),
+            initialization: crate::ProjectInitialization::Initialized,
+            settings: crate::ProjectSettingId::ALL
+                .iter()
+                .map(|id| crate::ProjectSettingRow {
+                    id: *id,
+                    enabled: false,
+                    actionable: true,
+                    detail: None,
+                })
+                .collect(),
+            policy: crate::ProjectPolicySummary::default(),
+            integrations: Vec::new(),
+        });
+        app.project_settings.cursor = 1;
+    }
+
+    /// Overlay contexts: an open overlay owns the keys whatever the mode.
+    fn open_overlay(app: &mut App, ctx: HintContext) {
+        match ctx {
             HintContext::OverlayResults => {
                 app.overlay = Some(Overlay::Results {
                     title: "t".into(),
@@ -531,8 +591,8 @@ mod tests {
             HintContext::OverlayRunning => {
                 app.overlay = Some(Overlay::running("x"));
             }
+            _ => (),
         }
-        app
     }
 
     /// The observable fingerprint a "handled" key must move (or it must return
@@ -609,6 +669,19 @@ mod tests {
         }
     }
 
+    /// `context` on the profile menu's browse stage with nothing running and
+    /// the selection adopted — the premise every dispatch-order row shares.
+    fn browse_context(mode: Mode, focus: Panel, overlay: Option<&Overlay>) -> HintContext {
+        context(
+            mode,
+            focus,
+            overlay,
+            &crate::profile_menu::MenuStage::Browse,
+            false,
+            false,
+        )
+    }
+
     #[test]
     fn context_follows_the_reducer_dispatch_order() {
         // Overlay kind outranks mode and focus (an open overlay owns the keys).
@@ -620,82 +693,33 @@ mod tests {
             truncated: false,
         };
         assert_eq!(
-            context(
-                Mode::Command,
-                Panel::Projects,
-                Some(&results),
-                &crate::profile_menu::MenuStage::Browse,
-                false,
-                false,
-            ),
+            browse_context(Mode::Command, Panel::Projects, Some(&results)),
             HintContext::OverlayResults
         );
         // Mode outranks focus.
         assert_eq!(
-            context(
-                Mode::Command,
-                Panel::Projects,
-                None,
-                &crate::profile_menu::MenuStage::Browse,
-                false,
-                false,
-            ),
+            browse_context(Mode::Command, Panel::Projects, None),
             HintContext::CommandEditing
         );
         assert_eq!(
-            context(
-                Mode::AddProject,
-                Panel::Graphs,
-                None,
-                &crate::profile_menu::MenuStage::Browse,
-                false,
-                false,
-            ),
+            browse_context(Mode::AddProject, Panel::Graphs, None),
             HintContext::AddProject
         );
         // Focus routes Normal mode.
         assert_eq!(
-            context(
-                Mode::Normal,
-                Panel::Projects,
-                None,
-                &crate::profile_menu::MenuStage::Browse,
-                false,
-                false,
-            ),
+            browse_context(Mode::Normal, Panel::Projects, None),
             HintContext::Rail
         );
         assert_eq!(
-            context(
-                Mode::Normal,
-                Panel::Detail,
-                None,
-                &crate::profile_menu::MenuStage::Browse,
-                false,
-                false,
-            ),
+            browse_context(Mode::Normal, Panel::Detail, None),
             HintContext::Detail
         );
         assert_eq!(
-            context(
-                Mode::Normal,
-                Panel::Graphs,
-                None,
-                &crate::profile_menu::MenuStage::Browse,
-                false,
-                false,
-            ),
+            browse_context(Mode::Normal, Panel::Graphs, None),
             HintContext::Graphs
         );
         assert_eq!(
-            context(
-                Mode::Normal,
-                Panel::Command,
-                None,
-                &crate::profile_menu::MenuStage::Browse,
-                false,
-                false,
-            ),
+            browse_context(Mode::Normal, Panel::Command, None),
             HintContext::CommandIdle
         );
     }

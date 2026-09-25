@@ -39,7 +39,7 @@
 
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -216,6 +216,22 @@ pub struct DisplacementReport {
     pub budget_ms: u64,
     /// Results, control first.
     pub arms: Vec<ArmResult>,
+}
+
+/// What every iteration of one arm shares.
+struct ArmCtx<'a> {
+    hermetic: &'a Hermetic,
+    binary: &'a Path,
+    arm: &'a Arm,
+    root: &'a Path,
+}
+
+/// One finished iteration: its sample, and the repository and environment
+/// the hook-path oracle reads afterwards.
+struct Iteration {
+    sample: Sample,
+    repo: PathBuf,
+    env: Vec<(String, String)>,
 }
 
 impl DisplacementReport {
@@ -400,81 +416,108 @@ fn drive(
     protocol: Protocol,
 ) -> Result<ArmResult> {
     let attestation = Some(crate::attest::Attestation::take());
-    let mut last_repo = None;
-    let mut env_of_last = Vec::new();
-    let mut iteration = |i| -> Result<Sample> {
-        // A fresh repository per iteration, sandbox included: "first commit"
-        // and "not yet initialized" are both once-in-a-lifetime states, and a
-        // shared cache root would leak one iteration's projection into the
-        // next one's answer.
-        let sandbox = root.join(&arm.id).join(format!("iter-{i}"));
-        let repo = sandbox.join("repo");
-        fs::create_dir_all(&repo).map_err(|e| BenchError::io("create arm repo", e))?;
-        let env = scenario::leg_env(LegId::Rift, &sandbox);
-        seed_repo(hermetic, &repo, &env)?;
-
-        let inv = match arm.act {
-            Act::BareCommit => commit_invocation(&repo, &env),
-            Act::Enable => with_env(scenario::setup_plan(LegId::Rift, binary, &repo), &env),
-            Act::FirstCommitAfterEnable => {
-                enable(hermetic, binary, &repo, &env)?;
-                commit_invocation(&repo, &env)
-            }
-            Act::FirstCommitWithoutPriorEnable => {
-                enable(hermetic, binary, &repo, &env)?;
-                // The counterfactual: the hooks stay installed, the projection
-                // state the hook path would find does not. See `SIMULATION_NOTE`.
-                let cache = sandbox.join("rift-cache");
-                if cache.exists() {
-                    fs::remove_dir_all(&cache)
-                        .map_err(|e| BenchError::io("clear projection state", e))?;
-                }
-                commit_invocation(&repo, &env)
-            }
-        };
-        let sample = run_once(hermetic, &inv)?.sample;
-
-        // `post-commit` writes the queue entry before it spawns its detached
-        // worker, so observing the queue become empty is a race-free completion
-        // oracle. Waiting here is deliberately outside `sample`: the product's
-        // contract moved condense/verify off git's critical path, and allowing
-        // fourteen workers to overlap would make the harness charge that
-        // excluded work to the next repository's commit.
-        if matches!(
-            arm.act,
-            Act::FirstCommitAfterEnable | Act::FirstCommitWithoutPriorEnable
-        ) {
-            wait_for_detached_capture(&repo, WORKER_QUIESCE_TIMEOUT)?;
-        }
-
-        last_repo = Some(repo);
-        env_of_last.clone_from(&env);
-        Ok(sample)
+    let ctx = ArmCtx {
+        hermetic,
+        binary,
+        arm,
+        root,
     };
+    let mut last = None;
     for i in 0..protocol.warmup {
-        let _ = iteration(i)?;
+        last = Some(iteration(&ctx, i)?);
     }
     let mut samples = Vec::with_capacity(protocol.iterations);
     for i in 0..protocol.iterations {
-        samples.push(iteration(protocol.warmup + i)?);
+        let done = iteration(&ctx, protocol.warmup + i)?;
+        samples.push(done.sample);
+        last = Some(done);
     }
-
-    // The oracle, from the last iteration's own repository: did the hook path
-    // run at all? A commit that got fast by not firing its hooks would be
-    // indistinguishable in the timing alone.
-    let trailer_present = match (&last_repo, arm.act.is_control()) {
-        (Some(repo), false) => git(hermetic, repo, &["log", "-1", "--format=%B"], &env_of_last)
-            .ok()
-            .map(|m| crate::hooklat::has_trailer(&m)),
-        _ => None,
-    };
     Ok(ArmResult {
         arm: arm.clone(),
         stats: Stats::of(&samples),
         error: None,
         attestation,
-        trailer_present,
+        trailer_present: trailer_present(hermetic, arm, last.as_ref()),
     })
+}
+
+/// One iteration on a fresh repository: seed and prepare untimed, time the
+/// arm's act, then wait for its detached capture outside the sample.
+fn iteration(ctx: &ArmCtx<'_>, i: usize) -> Result<Iteration> {
+    // A fresh repository per iteration, sandbox included: "first commit"
+    // and "not yet initialized" are both once-in-a-lifetime states, and a
+    // shared cache root would leak one iteration's projection into the
+    // next one's answer.
+    let sandbox = ctx.root.join(&ctx.arm.id).join(format!("iter-{i}"));
+    let repo = sandbox.join("repo");
+    fs::create_dir_all(&repo).map_err(|e| BenchError::io("create arm repo", e))?;
+    let env = scenario::leg_env(LegId::Rift, &sandbox);
+    seed_repo(ctx.hermetic, &repo, &env)?;
+
+    let inv = act_invocation(ctx, &sandbox, &repo, &env)?;
+    let sample = run_once(ctx.hermetic, &inv)?.sample;
+
+    // `post-commit` writes the queue entry before it spawns its detached
+    // worker, so observing the queue become empty is a race-free completion
+    // oracle. Waiting here is deliberately outside `sample`: the product's
+    // contract moved condense/verify off git's critical path, and allowing
+    // fourteen workers to overlap would make the harness charge that
+    // excluded work to the next repository's commit.
+    if matches!(
+        ctx.arm.act,
+        Act::FirstCommitAfterEnable | Act::FirstCommitWithoutPriorEnable
+    ) {
+        wait_for_detached_capture(&repo, WORKER_QUIESCE_TIMEOUT)?;
+    }
+    Ok(Iteration { sample, repo, env })
+}
+
+/// Bring the fresh repository to the arm's starting state (untimed) and
+/// return the one invocation the arm times.
+fn act_invocation(
+    ctx: &ArmCtx<'_>,
+    sandbox: &Path,
+    repo: &Path,
+    env: &[(String, String)],
+) -> Result<Invocation> {
+    let inv = match ctx.arm.act {
+        Act::BareCommit => commit_invocation(repo, env),
+        Act::Enable => with_env(scenario::setup_plan(LegId::Rift, ctx.binary, repo), env),
+        Act::FirstCommitAfterEnable => {
+            enable(ctx.hermetic, ctx.binary, repo, env)?;
+            commit_invocation(repo, env)
+        }
+        Act::FirstCommitWithoutPriorEnable => {
+            enable(ctx.hermetic, ctx.binary, repo, env)?;
+            // The counterfactual: the hooks stay installed, the projection
+            // state the hook path would find does not. See `SIMULATION_NOTE`.
+            let cache = sandbox.join("rift-cache");
+            if cache.exists() {
+                fs::remove_dir_all(&cache)
+                    .map_err(|e| BenchError::io("clear projection state", e))?;
+            }
+            commit_invocation(repo, env)
+        }
+    };
+    Ok(inv)
+}
+
+/// The oracle, from the last iteration's own repository: did the hook path
+/// run at all? A commit that got fast by not firing its hooks would be
+/// indistinguishable in the timing alone. A control arm has no hook path to
+/// ask about.
+fn trailer_present(hermetic: &Hermetic, arm: &Arm, last: Option<&Iteration>) -> Option<bool> {
+    match (last, arm.act.is_control()) {
+        (Some(last), false) => git(
+            hermetic,
+            &last.repo,
+            &["log", "-1", "--format=%B"],
+            &last.env,
+        )
+        .ok()
+        .map(|m| crate::hooklat::has_trailer(&m)),
+        _ => None,
+    }
 }
 
 /// Wait until one fresh repository's detached capture worker has finished.

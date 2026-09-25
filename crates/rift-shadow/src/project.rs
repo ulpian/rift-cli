@@ -127,7 +127,6 @@ pub struct ProjectionCtx<'a> {
 /// # Errors
 /// [`rift_core::RiftError::Storage`] on an insert failure (callers at the hook
 /// boundary swallow it — capture never blocks the agent).
-#[allow(clippy::too_many_lines)] // one linear kind→relation mapping; a match arm per kind
 pub async fn project_event(
     store: &impl CanonicalStore,
     ev: &CanonicalEvent,
@@ -135,14 +134,56 @@ pub async fn project_event(
     ctx: ProjectionCtx<'_>,
 ) -> Result<()> {
     let session_row = ids::session_row_id(ctx.agent, &ev.session);
+    record_session_and_turn(store, ev, facts, ctx, &session_row).await?;
+    record_named_model(store, ev, facts, &session_row).await?;
 
-    // Every event implies its session and turn exist. First writer wins on
-    // `started_at`/`model_primary`; a later SessionStart never rewrites them —
-    // corrections are the bridge's job, as superseding rows.
+    match ev.kind {
+        EventKind::SessionStart | EventKind::SessionEnd | EventKind::SessionCompaction => {
+            project_session_event(store, ev, session_row).await?;
+        }
+        EventKind::PromptResponse => {
+            project_prompt_response(store, ev, facts, &session_row).await?;
+        }
+        EventKind::ToolCall => {
+            project_tool_call(store, ev, facts, &session_row).await?;
+        }
+        EventKind::SubagentStart => {
+            project_subagent_start(store, ev, facts, &session_row).await?;
+        }
+        // A completed read-shaped tool call (PostToolUse fan-out) is the one
+        // durable "the agent read path P at content H" fact the recall plane
+        // ingests — without it memory is empty by construction.
+        EventKind::ToolResult => {
+            if let Some(rc) = &facts.read_content {
+                project_read(store, ev, facts, &session_row, rc).await?;
+            }
+        }
+        // Turn boundaries drive the state machine and the boundary snapshotter;
+        // prompt-submit / file-edit facts are event-grain only at this layer
+        // (file links land with revisions at boundaries/commit).
+        EventKind::TurnStart
+        | EventKind::TurnEnd
+        | EventKind::PromptSubmit
+        | EventKind::FileEdit
+        | EventKind::SubagentEnd => {}
+    }
+    Ok(())
+}
+
+/// Every event implies its session and turn exist. First writer wins on
+/// `started_at`/`model_primary`; a later SessionStart never rewrites them —
+/// corrections are the bridge's job, as superseding rows.
+async fn record_session_and_turn(
+    store: &impl CanonicalStore,
+    ev: &CanonicalEvent,
+    facts: &PayloadFacts,
+    ctx: ProjectionCtx<'_>,
+    session_row: &str,
+) -> Result<()> {
     record_session(
         store,
         &SessionRow {
-            session_id: session_row.clone(),
+            session_id: session_row.to_owned(),
             agent: ctx.agent.to_owned(),
             model_primary: facts.model.clone().unwrap_or_default(),
             repo_id: ctx.repo_id.to_owned(),
@@ -154,7 +195,7 @@ pub async fn project_event(
     record_capture_session_identity(
         store,
         &CaptureSessionIdentityRow {
-            session_id: session_row.clone(),
+            session_id: session_row.to_owned(),
             agent: ctx.agent.to_owned(),
             native_session_id: ev.session.clone(),
             schema_version: i64::from(ev.schema_version),
@@ -164,173 +205,200 @@ pub async fn project_event(
     record_turn(
         store,
         &TurnRow {
-            turn_id: ids::turn_row_id(&session_row, ev.turn_ordinal),
-            session_id: session_row.clone(),
+            turn_id: ids::turn_row_id(session_row, ev.turn_ordinal),
+            session_id: session_row.to_owned(),
             ordinal: i64::from(ev.turn_ordinal),
             started_at: ev.occurred_at_ms,
             schema_version: i64::from(ev.schema_version),
         },
     )
     .await?;
+    Ok(())
+}
 
-    if let Some(model) = facts.model.as_deref().filter(|model| !model.is_empty()) {
-        let source = facts.model_source.as_deref().unwrap_or("runtime_hook");
-        record_model_observation(
+/// A non-empty model the payload names is observed, with its provenance, on
+/// every event that carries it — not only on the one that opened the session.
+async fn record_named_model(
+    store: &impl CanonicalStore,
+    ev: &CanonicalEvent,
+    facts: &PayloadFacts,
+    session_row: &str,
+) -> Result<()> {
+    let Some(model) = facts.model.as_deref().filter(|model| !model.is_empty()) else {
+        return Ok(());
+    };
+    let source = facts.model_source.as_deref().unwrap_or("runtime_hook");
+    record_model_observation(
+        store,
+        &ModelObservationRow {
+            observation_id: crate::sha256_hex(&[
+                b"rift.model-observation.v1\0",
+                session_row.as_bytes(),
+                b"\0",
+                model.as_bytes(),
+                b"\0",
+                source.as_bytes(),
+                b"\0",
+                ev.occurred_at_ms.to_string().as_bytes(),
+            ]),
+            session_id: session_row.to_owned(),
+            model: model.to_owned(),
+            source: source.to_owned(),
+            observed_at: ev.occurred_at_ms,
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// A session lifecycle event (start, end, compaction) as a `session_event` row.
+async fn project_session_event(
+    store: &impl CanonicalStore,
+    ev: &CanonicalEvent,
+    session_row: String,
+) -> Result<()> {
+    let kind = match ev.kind {
+        EventKind::SessionStart => "start",
+        EventKind::SessionEnd => "end",
+        _ => "compaction",
+    };
+    record_session_event(
+        store,
+        &SessionEventRow {
+            event_id: ids::session_event_id(&session_row, kind, ev.turn_ordinal, ev.event_ordinal),
+            session_id: session_row,
+            kind: kind.to_owned(),
+            occurred_at: ev.occurred_at_ms,
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// A prompt response anchors one `model_call` in its turn.
+async fn project_prompt_response(
+    store: &impl CanonicalStore,
+    ev: &CanonicalEvent,
+    facts: &PayloadFacts,
+    session_row: &str,
+) -> Result<()> {
+    record_model_call(
+        store,
+        &ModelCallRow {
+            call_id: ids::model_call_id(session_row, ev.turn_ordinal, ev.event_ordinal),
+            turn_id: ids::turn_row_id(session_row, ev.turn_ordinal),
+            model: facts.model.clone().unwrap_or_default(),
+            started_at: ev.occurred_at_ms,
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// A tool call anchors one `tool_call` row in its turn.
+async fn project_tool_call(
+    store: &impl CanonicalStore,
+    ev: &CanonicalEvent,
+    facts: &PayloadFacts,
+    session_row: &str,
+) -> Result<()> {
+    rift_store::record_tool_call(
+        store,
+        &ToolCallRow {
+            tool_call_id: ids::tool_call_row_id(session_row, ev.turn_ordinal, ev.event_ordinal),
+            turn_id: ids::turn_row_id(session_row, ev.turn_ordinal),
+            tool_name: facts.tool_name.clone().unwrap_or_default(),
+            started_at: ev.occurred_at_ms,
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// A subagent start links the child session to the parent turn; a payload that
+/// names no child gets the derived child id, so the link is never lost.
+async fn project_subagent_start(
+    store: &impl CanonicalStore,
+    ev: &CanonicalEvent,
+    facts: &PayloadFacts,
+    session_row: &str,
+) -> Result<()> {
+    let child = facts
+        .child_session
+        .clone()
+        .unwrap_or_else(|| ids::subagent_child_id(session_row, ev.turn_ordinal, ev.event_ordinal));
+    record_subagent_session(
+        store,
+        &SubagentSessionRow {
+            child_session_id: child,
+            parent_turn_id: ids::turn_row_id(session_row, ev.turn_ordinal),
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// A completed read: its own idempotent `tool_call` row, the file revision it
+/// read (content-addressed like the commit-capture writer's), the link between
+/// the two, and the read-time token measurement when the caller took one.
+async fn project_read(
+    store: &impl CanonicalStore,
+    ev: &CanonicalEvent,
+    facts: &PayloadFacts,
+    session_row: &str,
+    rc: &ReadContent,
+) -> Result<()> {
+    // The read's OWN row id (see `ids::read_call_row_id`).
+    let call_id = ids::read_call_row_id(
+        session_row,
+        ev.turn_ordinal,
+        &rc.rel_path,
+        &rc.content_sha256,
+    );
+    rift_store::record_tool_call(
+        store,
+        &ToolCallRow {
+            tool_call_id: call_id.clone(),
+            turn_id: ids::turn_row_id(session_row, ev.turn_ordinal),
+            tool_name: facts.tool_name.clone().unwrap_or_default(),
+            started_at: ev.occurred_at_ms,
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    let revision_id =
+        rift_shadow_attribution::file_revision_id(&rc.rel_path, rc.blob_oid.as_bytes())
+            .sha256()
+            .to_hex();
+    rift_store::record_file_revision(
+        store,
+        &rift_store::FileRevisionRow {
+            file_revision_id: revision_id.clone(),
+            path: rc.rel_path.clone(),
+            blob_oid: rc.blob_oid.clone(),
+            content_sha256: rc.content_sha256.clone(),
+            schema_version: i64::from(ev.schema_version),
+        },
+    )
+    .await?;
+    rift_store::record_tool_reads_file(store, &call_id, &revision_id).await?;
+    // The read-time token measurement, keyed by this read's own call so fact
+    // and figure land together — a later session measuring the same revision
+    // can never mutate this session's archived lines.
+    if let Some(te) = &rc.tokens {
+        rift_store::record_file_read_tokens(
             store,
-            &ModelObservationRow {
-                observation_id: crate::sha256_hex(&[
-                    b"rift.model-observation.v1\0",
-                    session_row.as_bytes(),
-                    b"\0",
-                    model.as_bytes(),
-                    b"\0",
-                    source.as_bytes(),
-                    b"\0",
-                    ev.occurred_at_ms.to_string().as_bytes(),
-                ]),
-                session_id: session_row.clone(),
-                model: model.to_owned(),
-                source: source.to_owned(),
-                observed_at: ev.occurred_at_ms,
-                schema_version: i64::from(ev.schema_version),
-            },
+            &call_id,
+            te.input_tokens,
+            &te.tokenizer,
+            i64::from(ev.schema_version),
         )
         .await?;
-    }
-
-    match ev.kind {
-        EventKind::SessionStart | EventKind::SessionEnd | EventKind::SessionCompaction => {
-            let kind = match ev.kind {
-                EventKind::SessionStart => "start",
-                EventKind::SessionEnd => "end",
-                _ => "compaction",
-            };
-            record_session_event(
-                store,
-                &SessionEventRow {
-                    event_id: ids::session_event_id(
-                        &session_row,
-                        kind,
-                        ev.turn_ordinal,
-                        ev.event_ordinal,
-                    ),
-                    session_id: session_row,
-                    kind: kind.to_owned(),
-                    occurred_at: ev.occurred_at_ms,
-                    schema_version: i64::from(ev.schema_version),
-                },
-            )
-            .await?;
-        }
-        EventKind::PromptResponse => {
-            record_model_call(
-                store,
-                &ModelCallRow {
-                    call_id: ids::model_call_id(&session_row, ev.turn_ordinal, ev.event_ordinal),
-                    turn_id: ids::turn_row_id(&session_row, ev.turn_ordinal),
-                    model: facts.model.clone().unwrap_or_default(),
-                    started_at: ev.occurred_at_ms,
-                    schema_version: i64::from(ev.schema_version),
-                },
-            )
-            .await?;
-        }
-        EventKind::ToolCall => {
-            rift_store::record_tool_call(
-                store,
-                &ToolCallRow {
-                    tool_call_id: ids::tool_call_row_id(
-                        &session_row,
-                        ev.turn_ordinal,
-                        ev.event_ordinal,
-                    ),
-                    turn_id: ids::turn_row_id(&session_row, ev.turn_ordinal),
-                    tool_name: facts.tool_name.clone().unwrap_or_default(),
-                    started_at: ev.occurred_at_ms,
-                    schema_version: i64::from(ev.schema_version),
-                },
-            )
-            .await?;
-        }
-        EventKind::SubagentStart => {
-            let child = facts.child_session.clone().unwrap_or_else(|| {
-                ids::subagent_child_id(&session_row, ev.turn_ordinal, ev.event_ordinal)
-            });
-            record_subagent_session(
-                store,
-                &SubagentSessionRow {
-                    child_session_id: child,
-                    parent_turn_id: ids::turn_row_id(&session_row, ev.turn_ordinal),
-                    schema_version: i64::from(ev.schema_version),
-                },
-            )
-            .await?;
-        }
-        // A completed read-shaped tool call (PostToolUse fan-out) is the one
-        // durable "the agent read path P at content H" fact the recall plane
-        // ingests — without it memory is empty by construction. The
-        // read anchors to its own idempotent tool_call row; the revision id is
-        // content-addressed like the commit-capture writer's.
-        EventKind::ToolResult => {
-            if let Some(rc) = &facts.read_content {
-                // The read's OWN row id (see `ids::read_call_row_id`).
-                let call_id = ids::read_call_row_id(
-                    &session_row,
-                    ev.turn_ordinal,
-                    &rc.rel_path,
-                    &rc.content_sha256,
-                );
-                rift_store::record_tool_call(
-                    store,
-                    &ToolCallRow {
-                        tool_call_id: call_id.clone(),
-                        turn_id: ids::turn_row_id(&session_row, ev.turn_ordinal),
-                        tool_name: facts.tool_name.clone().unwrap_or_default(),
-                        started_at: ev.occurred_at_ms,
-                        schema_version: i64::from(ev.schema_version),
-                    },
-                )
-                .await?;
-                let revision_id =
-                    rift_shadow_attribution::file_revision_id(&rc.rel_path, rc.blob_oid.as_bytes())
-                        .sha256()
-                        .to_hex();
-                rift_store::record_file_revision(
-                    store,
-                    &rift_store::FileRevisionRow {
-                        file_revision_id: revision_id.clone(),
-                        path: rc.rel_path.clone(),
-                        blob_oid: rc.blob_oid.clone(),
-                        content_sha256: rc.content_sha256.clone(),
-                        schema_version: i64::from(ev.schema_version),
-                    },
-                )
-                .await?;
-                rift_store::record_tool_reads_file(store, &call_id, &revision_id).await?;
-                // The read-time token measurement, keyed by this
-                // read's own call so fact and figure land together — a later
-                // session measuring the same revision can never mutate this
-                // session's archived lines.
-                if let Some(te) = &rc.tokens {
-                    rift_store::record_file_read_tokens(
-                        store,
-                        &call_id,
-                        te.input_tokens,
-                        &te.tokenizer,
-                        i64::from(ev.schema_version),
-                    )
-                    .await?;
-                }
-            }
-        }
-        // Turn boundaries drive the state machine and the boundary snapshotter;
-        // prompt-submit / file-edit facts are event-grain only at this layer
-        // (file links land with revisions at boundaries/commit).
-        EventKind::TurnStart
-        | EventKind::TurnEnd
-        | EventKind::PromptSubmit
-        | EventKind::FileEdit
-        | EventKind::SubagentEnd => {}
     }
     Ok(())
 }
@@ -394,44 +462,56 @@ pub async fn project_usage(
     )
     .await?;
 
-    // Cost, only against a complete price row set (honest absence otherwise).
-    // Cost facts are strict-append (bitemporal): an identical recomputation
-    // records nothing; a changed belief appends a superseding fact.
-    if let Some(p) = effective_prices(store, &model, ev.occurred_at_ms, now_ms).await? {
-        let amount = call_cost_micros(
-            &usage,
-            &ClassPrices {
-                uncached_input_per_mtok: p.uncached_input,
-                cached_input_per_mtok: p.cached_input,
-                cache_write_per_mtok: p.cache_creation,
-                output_per_mtok: p.output,
+    record_call_cost(store, ev, &model, call_id, &usage, now_ms).await
+}
+
+/// Cost, only against a complete price row set (honest absence otherwise).
+/// Cost facts are strict-append (bitemporal): an identical recomputation
+/// records nothing; a changed belief appends a superseding fact.
+async fn record_call_cost(
+    store: &impl CanonicalStore,
+    ev: &CanonicalEvent,
+    model: &str,
+    call_id: String,
+    usage: &TokenUsage,
+    now_ms: i64,
+) -> Result<()> {
+    let Some(p) = effective_prices(store, model, ev.occurred_at_ms, now_ms).await? else {
+        return Ok(());
+    };
+    let amount = call_cost_micros(
+        usage,
+        &ClassPrices {
+            uncached_input_per_mtok: p.uncached_input,
+            cached_input_per_mtok: p.cached_input,
+            cache_write_per_mtok: p.cache_creation,
+            output_per_mtok: p.output,
+        },
+        0,
+    );
+    if rift_store::current_cost_micros(store, &call_id).await? != Some(amount) {
+        record_cost_fact(
+            store,
+            &CostFact {
+                cost_fact_id: crate::sha256_hex(&[
+                    b"cost_fact",
+                    b"\0",
+                    call_id.as_bytes(),
+                    b"\0",
+                    amount.to_string().as_bytes(),
+                    b"\0",
+                    now_ms.to_string().as_bytes(),
+                ]),
+                call_id,
+                amount_micros: amount,
+                valid_from: ev.occurred_at_ms,
+                valid_to: None,
+                recorded_at: now_ms,
+                supersedes_id: None,
+                schema_version: 1,
             },
-            0,
-        );
-        if rift_store::current_cost_micros(store, &call_id).await? != Some(amount) {
-            record_cost_fact(
-                store,
-                &CostFact {
-                    cost_fact_id: crate::sha256_hex(&[
-                        b"cost_fact",
-                        b"\0",
-                        call_id.as_bytes(),
-                        b"\0",
-                        amount.to_string().as_bytes(),
-                        b"\0",
-                        now_ms.to_string().as_bytes(),
-                    ]),
-                    call_id,
-                    amount_micros: amount,
-                    valid_from: ev.occurred_at_ms,
-                    valid_to: None,
-                    recorded_at: now_ms,
-                    supersedes_id: None,
-                    schema_version: 1,
-                },
-            )
-            .await?;
-        }
+        )
+        .await?;
     }
     Ok(())
 }

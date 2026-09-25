@@ -341,7 +341,51 @@ fn suggest_args(verb_word: &str, partial: &str, ctx: &SuggestContext) -> Vec<Sug
     else {
         return Vec::new();
     };
-    let candidates: Vec<String> = match entry.arg {
+    if entry.arg == ArgKind::ConfigureSub {
+        if let Some(mode_part) = partial.strip_prefix("splash") {
+            return suggest_splash_modes(verb_word, mode_part, entry);
+        }
+    }
+    let needle = partial.to_ascii_lowercase();
+    arg_candidates(entry.arg, partial, ctx)
+        .into_iter()
+        // A candidate that cannot be TYPED is not a completion. Project names
+        // come from the registry, i.e. from directory names, and a control
+        // character in one used to be copied verbatim into `insert` — which
+        // `input::insert_suggestion` clones into the command buffer, whose
+        // grammar cannot spell one. Dropped rather than sanitized on purpose:
+        // a stripped name is a DIFFERENT name, so completing it would offer a
+        // command that selects nothing, or something else. Such a project is
+        // still reachable by index (`/select 3`).
+        .filter(|c| !c.chars().any(char::is_control))
+        .filter(|c| c.to_ascii_lowercase().starts_with(&needle))
+        .map(|c| Suggestion {
+            insert: format!("{verb_word} {c}"),
+            usage: entry.usage,
+            description: entry.description,
+        })
+        .collect()
+}
+
+/// The second argument of `configure splash`: the splash modes matching what
+/// follows the subcommand, each completed as the whole command.
+fn suggest_splash_modes(verb_word: &str, mode_part: &str, entry: &CatalogEntry) -> Vec<Suggestion> {
+    let mode_needle = mode_part.trim_start().to_ascii_lowercase();
+    ["always", "first-run", "never"]
+        .iter()
+        .filter(|m| m.starts_with(&mode_needle))
+        .map(|m| Suggestion {
+            insert: format!("{verb_word} splash {m}"),
+            usage: entry.usage,
+            description: entry.description,
+        })
+        .collect()
+}
+
+/// Every candidate for the first argument of a verb taking `arg`, before the
+/// typed prefix narrows them.
+fn arg_candidates(arg: ArgKind, partial: &str, ctx: &SuggestContext) -> Vec<String> {
+    match arg {
         ArgKind::None | ArgKind::Id => Vec::new(),
         ArgKind::Project => ctx.projects.clone(),
         ArgKind::Panel => [
@@ -379,43 +423,12 @@ fn suggest_args(verb_word: &str, partial: &str, ctx: &SuggestContext) -> Vec<Sug
             .iter()
             .map(|s| (*s).to_owned())
             .collect(),
-        ArgKind::ConfigureSub => {
-            if let Some(mode_part) = partial.strip_prefix("splash") {
-                let mode_needle = mode_part.trim_start().to_ascii_lowercase();
-                return ["always", "first-run", "never"]
-                    .iter()
-                    .filter(|m| m.starts_with(&mode_needle))
-                    .map(|m| Suggestion {
-                        insert: format!("{verb_word} splash {m}"),
-                        usage: entry.usage,
-                        description: entry.description,
-                    })
-                    .collect();
-            }
-            vec!["splash".to_owned()]
-        }
+        // The splash modes after `splash` are completed whole by
+        // `suggest_splash_modes`; here only the subcommand is offered.
+        ArgKind::ConfigureSub => vec!["splash".to_owned()],
         ArgKind::GcFlag => vec!["--dry-run".to_owned()],
         ArgKind::Agent => vec!["claude-code".to_owned()],
-    };
-    let needle = partial.to_ascii_lowercase();
-    candidates
-        .into_iter()
-        // A candidate that cannot be TYPED is not a completion. Project names
-        // come from the registry, i.e. from directory names, and a control
-        // character in one used to be copied verbatim into `insert` — which
-        // `input::insert_suggestion` clones into the command buffer, whose
-        // grammar cannot spell one. Dropped rather than sanitized on purpose:
-        // a stripped name is a DIFFERENT name, so completing it would offer a
-        // command that selects nothing, or something else. Such a project is
-        // still reachable by index (`/select 3`).
-        .filter(|c| !c.chars().any(char::is_control))
-        .filter(|c| c.to_ascii_lowercase().starts_with(&needle))
-        .map(|c| Suggestion {
-            insert: format!("{verb_word} {c}"),
-            usage: entry.usage,
-            description: entry.description,
-        })
-        .collect()
+    }
 }
 
 #[cfg(test)]

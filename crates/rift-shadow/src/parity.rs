@@ -299,31 +299,8 @@ pub fn run_behavior(
 ) -> ParityResult {
     use ParityBehavior as B;
     match behavior {
-        B::ShadowBranchNaming => {
-            if NATIVE_CHECKPOINT_REF == anchors.ref_name {
-                ParityResult::Match
-            } else {
-                ParityResult::Diff(format!(
-                    "branch ref native={NATIVE_CHECKPOINT_REF} anchor={}",
-                    anchors.ref_name
-                ))
-            }
-        }
-        B::ShardPathLayout => {
-            let sp = archive.shard_path();
-            // Structure: <2-hex>/<rest>, and equal to the anchor's recorded path.
-            let structural = sp
-                .split_once('/')
-                .is_some_and(|(hi, rest)| hi.len() == 2 && !rest.is_empty());
-            if structural && sp == anchors.shard_path {
-                ParityResult::Match
-            } else {
-                ParityResult::Diff(format!(
-                    "shard path native={sp} anchor={}",
-                    anchors.shard_path
-                ))
-            }
-        }
+        B::ShadowBranchNaming => branch_naming(anchors),
+        B::ShardPathLayout => shard_path_layout(archive, anchors),
         B::CanonicalEventJson => byte_compare("full.jsonl", archive.full_jsonl(), anchors),
         B::MetadataJson => byte_compare("metadata.json", Some(archive.metadata_json()), anchors),
         B::ContentHash => byte_compare(
@@ -331,27 +308,7 @@ pub fn run_behavior(
             Some(archive.content_hash_txt()),
             anchors,
         ),
-        B::CheckpointRoot => {
-            // The Merkle root is embedded in metadata.json; byte parity of that
-            // artifact already pins it, but assert the value explicitly too.
-            let anchor_ok = anchors
-                .artifacts
-                .get("metadata.json")
-                .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
-                .and_then(|v| {
-                    v.get("merkle_root")
-                        .and_then(|m| m.as_str().map(str::to_owned))
-                })
-                .is_some_and(|root| root == archive.merkle_root().to_hex());
-            if anchor_ok {
-                ParityResult::Match
-            } else {
-                ParityResult::Diff(format!(
-                    "checkpoint root native={} not matched in anchor metadata",
-                    archive.merkle_root().to_hex()
-                ))
-            }
-        }
+        B::CheckpointRoot => checkpoint_root(archive, anchors),
         B::RedactionReport => byte_compare(
             "redaction_report.json",
             Some(archive.redaction_report_json()),
@@ -363,28 +320,83 @@ pub fn run_behavior(
             // already pin the encoding, so at this fidelity presence is the check.
             ParityResult::Match
         }
-        B::ManualCommitNonPollution => {
-            // The archive targets the orphan checkpoint branch, never a working ref.
-            if NATIVE_CHECKPOINT_REF.starts_with("refs/heads/rift/checkpoints/") {
-                ParityResult::Match
-            } else {
-                ParityResult::Diff("archive ref is not the orphan checkpoint branch".into())
-            }
-        }
+        B::ManualCommitNonPollution => manual_commit_non_pollution(),
         B::GitMutationsAdditive => {
             // The native write path is object/ref-additive only (blobs, trees, a
             // commit, an update-ref) — no reset/checkout. Structurally guaranteed
             // by the `NativeGitWrite` surface; this row records that invariant.
             ParityResult::Match
         }
-        B::BrandAbsent => {
-            // Brand parity: the wrapped brand never appears in any native artifact.
-            if brand_free(archive) {
-                ParityResult::Match
-            } else {
-                ParityResult::Diff("the wrapped brand leaked into a native artifact".into())
-            }
-        }
+        B::BrandAbsent => brand_absence(archive),
+    }
+}
+
+/// The native checkpoint ref is the ref the anchor's shard landed on.
+fn branch_naming(anchors: &GoldenAnchors) -> ParityResult {
+    if NATIVE_CHECKPOINT_REF == anchors.ref_name {
+        ParityResult::Match
+    } else {
+        ParityResult::Diff(format!(
+            "branch ref native={NATIVE_CHECKPOINT_REF} anchor={}",
+            anchors.ref_name
+        ))
+    }
+}
+
+/// The shard path has the structure `<2-hex>/<rest>` and equals the anchor's
+/// recorded path.
+fn shard_path_layout(archive: &CheckpointArchive, anchors: &GoldenAnchors) -> ParityResult {
+    let sp = archive.shard_path();
+    let structural = sp
+        .split_once('/')
+        .is_some_and(|(hi, rest)| hi.len() == 2 && !rest.is_empty());
+    if structural && sp == anchors.shard_path {
+        ParityResult::Match
+    } else {
+        ParityResult::Diff(format!(
+            "shard path native={sp} anchor={}",
+            anchors.shard_path
+        ))
+    }
+}
+
+/// The Merkle root is embedded in metadata.json; byte parity of that artifact
+/// already pins it, but the value is asserted explicitly too.
+fn checkpoint_root(archive: &CheckpointArchive, anchors: &GoldenAnchors) -> ParityResult {
+    let anchor_ok = anchors
+        .artifacts
+        .get("metadata.json")
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        .and_then(|v| {
+            v.get("merkle_root")
+                .and_then(|m| m.as_str().map(str::to_owned))
+        })
+        .is_some_and(|root| root == archive.merkle_root().to_hex());
+    if anchor_ok {
+        ParityResult::Match
+    } else {
+        ParityResult::Diff(format!(
+            "checkpoint root native={} not matched in anchor metadata",
+            archive.merkle_root().to_hex()
+        ))
+    }
+}
+
+/// The archive targets the orphan checkpoint branch, never a working ref.
+fn manual_commit_non_pollution() -> ParityResult {
+    if NATIVE_CHECKPOINT_REF.starts_with("refs/heads/rift/checkpoints/") {
+        ParityResult::Match
+    } else {
+        ParityResult::Diff("archive ref is not the orphan checkpoint branch".into())
+    }
+}
+
+/// Brand parity: the wrapped brand never appears in any native artifact.
+fn brand_absence(archive: &CheckpointArchive) -> ParityResult {
+    if brand_free(archive) {
+        ParityResult::Match
+    } else {
+        ParityResult::Diff("the wrapped brand leaked into a native artifact".into())
     }
 }
 

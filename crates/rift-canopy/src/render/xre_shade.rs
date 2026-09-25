@@ -146,11 +146,41 @@ mod tests {
         assert_ne!(ramp.get(0, 0).map(|cell| cell.ch), Some(' '));
     }
 
+    /// One scratch buffer and resolve vector serve every draw below: the
+    /// braille cell then the larger ramp block prove the scratch resizes on
+    /// reuse, and the chart goldens reuse it again.
     #[test]
     fn xre_cell_shader_golden_and_reusable_scratch_resize() {
         let mut buffer = SampleBuffer::new(UVec2::new(0, 0), SX, SY);
         let mut resolved = Vec::new();
 
+        let braille = braille_cell(&mut buffer, &mut resolved);
+        assert_eq!((buffer.width(), buffer.height()), (2, 4));
+        assert_eq!(resolved.len(), 1);
+
+        let ramp = ramp_block(&mut buffer, &mut resolved);
+        assert_eq!((buffer.width(), buffer.height()), (4, 8));
+        assert_eq!(resolved.len(), 4);
+
+        let mut golden = describe("braille", &braille);
+        golden.push_str(&describe("ramp", &ramp));
+        golden.push_str(&chart_goldens(&mut buffer, &mut resolved));
+
+        let treemap_area = Rect {
+            x: 0,
+            y: 0,
+            w: 12,
+            h: 4,
+        };
+        let zero_leaves = crate::charts::treemap_layout(&[0.0; 4]);
+        let zero_samples =
+            crate::charts::treemap_samples(&zero_leaves, treemap_area, &crate::theme::BREAKDOWN);
+        assert!(zero_samples.is_empty());
+        insta::assert_snapshot!("xre_cell_shaders", golden);
+    }
+
+    /// One lit braille dot in a single cell.
+    fn braille_cell(buffer: &mut SampleBuffer, resolved: &mut Vec<Option<XCell>>) -> Frame {
         let mut braille = Frame::new(Size::new(1, 1));
         draw(
             &[ShadeSample {
@@ -161,13 +191,16 @@ mod tests {
             }],
             braille.rect(),
             &Braille::default(),
-            &mut buffer,
-            &mut resolved,
+            buffer,
+            resolved,
             &mut braille,
         );
-        assert_eq!((buffer.width(), buffer.height()), (2, 4));
-        assert_eq!(resolved.len(), 1);
+        braille
+    }
 
+    /// A 2x2-cell block, every sample lit, red on the left half and blue on
+    /// the right, through the luminance ramp.
+    fn ramp_block(buffer: &mut SampleBuffer, resolved: &mut Vec<Option<XCell>>) -> Frame {
         let mut ramp_samples = Vec::new();
         for sy in 0..8u32 {
             for sx in 0..4u32 {
@@ -188,16 +221,16 @@ mod tests {
             &ramp_samples,
             ramp.rect(),
             &LuminanceRamp::default(),
-            &mut buffer,
-            &mut resolved,
+            buffer,
+            resolved,
             &mut ramp,
         );
-        assert_eq!((buffer.width(), buffer.height()), (4, 8));
-        assert_eq!(resolved.len(), 4);
+        ramp
+    }
 
-        let mut golden = describe("braille", &braille);
-        golden.push_str(&describe("ramp", &ramp));
-
+    /// The activity heat strip, then the token and model treemaps, in the
+    /// golden's order.
+    fn chart_goldens(buffer: &mut SampleBuffer, resolved: &mut Vec<Option<XCell>>) -> String {
         let heat_area = Rect {
             x: 0,
             y: 0,
@@ -207,14 +240,13 @@ mod tests {
         let heat_values: Vec<u64> = (0..30u64)
             .map(|day| if day == 9 { 100 } else { day * 2 })
             .collect();
-        golden.push_str(&heat_golden(
+        let mut golden = heat_golden(
             &heat_values,
             heat_area,
             crate::theme::Section::Activity.accent(),
-            &mut buffer,
-            &mut resolved,
-        ));
-
+            buffer,
+            resolved,
+        );
         let treemap_area = Rect {
             x: 0,
             y: 0,
@@ -226,10 +258,9 @@ mod tests {
             &[8.0, 4.0, 2.0, 1.0],
             treemap_area,
             &crate::theme::BREAKDOWN,
-            &mut buffer,
-            &mut resolved,
+            buffer,
+            resolved,
         ));
-
         let model_area = Rect {
             x: 0,
             y: 0,
@@ -241,15 +272,10 @@ mod tests {
             &[21.0, 13.0, 8.0, 5.0, 3.0, 2.0],
             model_area,
             &crate::theme::MODEL_USAGE,
-            &mut buffer,
-            &mut resolved,
+            buffer,
+            resolved,
         ));
-
-        let zero_leaves = crate::charts::treemap_layout(&[0.0; 4]);
-        let zero_samples =
-            crate::charts::treemap_samples(&zero_leaves, treemap_area, &crate::theme::BREAKDOWN);
-        assert!(zero_samples.is_empty());
-        insta::assert_snapshot!("xre_cell_shaders", golden);
+        golden
     }
 
     fn heat_golden(

@@ -105,7 +105,7 @@ the seam — but "one counter everywhere" is the design, not yet the code.
 **The capture path counts nothing**, which is the other half of the same
 discipline. It records what the provider reported and, where an adapter reports
 nothing, records no count rather than an estimated one
-(`crates/rift-shadow/src/project.rs:376-394`). The cost crate keeps a heuristic
+(`crates/rift-shadow/src/project.rs:444-463`). The cost crate keeps a heuristic
 for sizing decisions and no token counter of its own, because a second way of
 producing a number that reaches a bill is a second authority for that number.
 
