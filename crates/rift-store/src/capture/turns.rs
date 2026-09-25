@@ -263,7 +263,7 @@ pub async fn record_turn_diff_hunk(
 /// `(session_id, turn_ordinal, boundary)` makes unreachable anyway.
 ///
 /// This exists as a function because the rule used to be written out twice —
-/// here and in `rift-shadow`'s `turn_boundary.rs` — in two `ORDER BY` clauses
+/// here and in `rift-shadow`'s `turn_boundary` module — in two `ORDER BY` clauses
 /// differing only by a table alias, across a crate boundary. The property that
 /// matters is that the WINDOW'S ACTOR and the ANCHOR BYTES come from the same
 /// snapshot, and while the duplicate clauses agreed they made that property a
