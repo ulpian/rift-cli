@@ -10,6 +10,49 @@ use rift_core::Result;
 
 use super::now_ms;
 
+/// What a serve decision's own payload says, for its row in the legacy
+/// `memd_audit_event` relation.
+struct DecisionPayload {
+    /// The address served: `handle` on content events, `target` on refusals.
+    handle: Option<String>,
+    /// Why, when the decision carries a reason.
+    reason: Option<String>,
+    /// The payload's estimate of what was returned; the figure a v1 row books.
+    tokens_returned: i64,
+    /// The payload's estimate of what was avoided; the figure a v1 row books.
+    tokens_avoided: i64,
+}
+
+impl DecisionPayload {
+    /// Read the payload out of an envelope. An absent payload reads as empty,
+    /// so a decision that carries none still books its row.
+    fn of(env: &serde_json::Value) -> Self {
+        let payload = env
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let str_field = |k: &str| {
+            payload
+                .get(k)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let i64_field = |k: &str| {
+            payload
+                .get(k)
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0)
+        };
+        Self {
+            // `handle` on content events; `target` on refusals.
+            handle: str_field("handle").or_else(|| str_field("target")),
+            reason: str_field("reason"),
+            tokens_returned: i64_field("estimated_tokens_returned"),
+            tokens_avoided: i64_field("estimated_tokens_avoided"),
+        }
+    }
+}
+
 /// The deferred accounting of one hook decision: count what it avoided and
 /// what it cost, and append the row to **both** serving relations.
 ///
@@ -411,16 +454,8 @@ async fn append_memd_call(
     if call_id != audit_id {
         return Ok(None);
     }
-    let returned = call
-        .get("tokens_returned")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0)
-        .max(0);
-    let avoided = call
-        .get("tokens_avoided")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0)
-        .max(0);
+    let returned = token_count(call, "tokens_returned");
+    let avoided = token_count(call, "tokens_avoided");
     store
         .insert_or_ignore(
             "memd_call_event",
@@ -592,10 +627,29 @@ async fn append_serve_call(
             ],
         )
         .await?;
-    // First-observed-per-channel, EVER: `INSERT OR IGNORE` on the channel PK
-    // means every call after the first is silently a no-op here, which is
-    // exactly right — `first_served_at` names when the channel was FIRST
-    // seen, not when it was last used.
+    record_first_served(store, channel, recorded_at).await
+}
+
+/// A call's token figure: absent reads as none, and a negative one — which no
+/// count can be — is clamped to none rather than booked.
+fn token_count(call: &serde_json::Value, key: &str) -> i64 {
+    call.get(key)
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        .max(0)
+}
+
+/// First-observed-per-channel, EVER: `INSERT OR IGNORE` on the channel PK
+/// means every call after the first is silently a no-op here, which is
+/// exactly right — `first_served_at` names when the channel was FIRST seen,
+/// not when it was last used.
+async fn record_first_served(
+    store: &impl rift_store::CanonicalStore,
+    channel: rift_recall_serve::ServeChannel,
+    recorded_at: i64,
+) -> Result<()> {
+    use rift_store::Value;
+
     store
         .insert_or_ignore(
             "serve_session_event",
@@ -619,8 +673,6 @@ pub(crate) async fn append_memd_audit(
     envelope: &[u8],
     now: i64,
 ) -> Result<()> {
-    use rift_store::Value;
-
     let Ok(env) = serde_json::from_slice::<serde_json::Value>(envelope) else {
         return Ok(()); // malformed envelope → deferred (no write)
     };
@@ -635,39 +687,32 @@ pub(crate) async fn append_memd_audit(
         .get("schema")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
-    if schema == 3 {
-        return append_connection_lifecycle(store, &env, audit_id).await;
+    match schema {
+        3 => append_connection_lifecycle(store, &env, audit_id).await,
+        4 => append_serve_call(store, &env, audit_id).await,
+        1 | 2 => append_serve_decision(store, &env, audit_id, verb, schema, now).await,
+        _ => Ok(()),
     }
-    if schema == 4 {
-        return append_serve_call(store, &env, audit_id).await;
-    }
-    if schema != 1 && schema != 2 {
-        return Ok(());
-    }
-    let payload = env
-        .get("payload")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let str_field = |k: &str| {
-        payload
-            .get(k)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-    };
-    // `handle` on content events; `target` on refusals.
-    let handle = str_field("handle").or_else(|| str_field("target"));
-    let reason = str_field("reason");
-    let i64_field = |k: &str| {
-        payload
-            .get(k)
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0)
-    };
+}
 
+/// Schemas v1 and v2: the serve decision's row in the legacy
+/// `memd_audit_event` relation, preceded on v2 by the invocation-addressed
+/// `memd_call_event` whose figures and clock the decision row then carries.
+async fn append_serve_decision(
+    store: &impl rift_store::CanonicalStore,
+    env: &serde_json::Value,
+    audit_id: &str,
+    verb: &str,
+    schema: u64,
+    now: i64,
+) -> Result<()> {
+    use rift_store::Value;
+
+    let payload = DecisionPayload::of(env);
     // V2 is the per-invocation contract. All fields are neutral and required;
     // a partial envelope is deferred rather than inventing attribution.
     let call_fields = if schema == 2 {
-        let Some(fields) = append_memd_call(store, &env, audit_id, verb).await? else {
+        let Some(fields) = append_memd_call(store, env, audit_id, verb).await? else {
             return Ok(());
         };
         Some(fields)
@@ -680,13 +725,8 @@ pub(crate) async fn append_memd_audit(
     if verb == "memd.internal_error" {
         return Ok(());
     }
-    let (recorded_at, tokens_returned, tokens_avoided) = call_fields.unwrap_or_else(|| {
-        (
-            now,
-            i64_field("estimated_tokens_returned"),
-            i64_field("estimated_tokens_avoided"),
-        )
-    });
+    let (recorded_at, tokens_returned, tokens_avoided) =
+        call_fields.unwrap_or((now, payload.tokens_returned, payload.tokens_avoided));
 
     store
         .insert_or_ignore(
@@ -704,8 +744,8 @@ pub(crate) async fn append_memd_audit(
             &[
                 Value::text(audit_id),
                 Value::text(verb),
-                handle.as_deref().map_or(Value::Null, Value::text),
-                reason.as_deref().map_or(Value::Null, Value::text),
+                payload.handle.as_deref().map_or(Value::Null, Value::text),
+                payload.reason.as_deref().map_or(Value::Null, Value::text),
                 Value::Int(tokens_returned),
                 Value::Int(tokens_avoided),
                 Value::Int(recorded_at),
@@ -717,7 +757,7 @@ pub(crate) async fn append_memd_audit(
     // Two proper columns beside the composed string, derived from
     // it exactly once — at this, the one place a `memd_audit_event` row is
     // ever written — rather than re-parsed by every future query.
-    record_audit_citation_if_any(store, audit_id, handle.as_deref()).await
+    record_audit_citation_if_any(store, audit_id, payload.handle.as_deref()).await
 }
 
 /// The companion write for those columns: a row lands ONLY when `handle` is a

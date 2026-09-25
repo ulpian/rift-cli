@@ -893,17 +893,46 @@ mod tests {
         }
     }
 
-    #[test]
-    fn memd_audit_events_land_in_recall_db_idempotently() {
-        use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore};
-        let s = SqliteStore::open_in_memory().unwrap();
-        apply_migrations(&s, &recall_migrations()).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
+    /// An in-memory recall store with its migrations applied, and a runtime to
+    /// drive the audit appender on: the whole world the audit tests need, and
+    /// the only way they reach it.
+    struct AuditStore {
+        store: rift_store::SqliteStore,
+        rt: tokio::runtime::Runtime,
+    }
 
-        // An ExactRetrieved-shaped envelope, exactly as rift-memd emits it.
-        let exact = serde_json::json!({
+    impl AuditStore {
+        fn new() -> Self {
+            use rift_store::{apply_migrations, recall_migrations, SqliteStore};
+            let store = SqliteStore::open_in_memory().unwrap();
+            apply_migrations(&store, &recall_migrations()).unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            Self { store, rt }
+        }
+
+        /// Deliver one envelope to the appender, as the hook does.
+        fn append(&self, envelope: &[u8], now: i64) {
+            self.rt
+                .block_on(append_memd_audit(&self.store, envelope, now))
+                .unwrap();
+        }
+
+        fn count(&self, relation: &str) -> i64 {
+            use rift_store::CanonicalStore as _;
+            self.rt.block_on(self.store.count(relation)).unwrap()
+        }
+
+        fn query(&self, sql: &str) -> Vec<rift_store::Row> {
+            use rift_store::CanonicalStore as _;
+            self.rt.block_on(self.store.query(sql, &[])).unwrap()
+        }
+    }
+
+    /// An ExactRetrieved-shaped envelope, exactly as rift-memd emits it.
+    fn exact_retrieved_envelope() -> String {
+        serde_json::json!({
             "schema": 1,
             "verb": "memd.exact_retrieved",
             "idempotency_key": "k1",
@@ -914,92 +943,114 @@ mod tests {
                 "estimated_tokens_returned": 12
             }
         })
-        .to_string();
-        rt.block_on(append_memd_audit(&s, exact.as_bytes(), 100))
-            .unwrap();
+        .to_string()
+    }
+
+    /// A refusal envelope carries `target` (not `handle`).
+    fn refused_envelope() -> String {
+        serde_json::json!({
+            "verb": "memd.refused",
+            "idempotency_key": "k2",
+            "payload": { "kind": "refused", "target": "secrets/.env", "reason": "policy_denied_exact" }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn memd_audit_events_land_in_recall_db_idempotently() {
+        let audit = AuditStore::new();
+        audit.append(exact_retrieved_envelope().as_bytes(), 100);
         // Re-delivery of the same event is a no-op (content-addressed idempotency).
-        rt.block_on(append_memd_audit(&s, exact.as_bytes(), 200))
-            .unwrap();
-        let rows = rt
-            .block_on(s.query(
-                "SELECT verb, handle, reason, tokens_returned FROM memd_audit_event",
-                &[],
-            ))
-            .unwrap();
+        audit.append(exact_retrieved_envelope().as_bytes(), 200);
+        let rows =
+            audit.query("SELECT verb, handle, reason, tokens_returned FROM memd_audit_event");
         assert_eq!(rows.len(), 1, "duplicate handoff must not double-count");
         assert_eq!(rows[0].get_text(0).unwrap(), "memd.exact_retrieved");
         assert_eq!(rows[0].get_text(1).unwrap(), "file:a.rs@sha256:x");
         assert_eq!(rows[0].get_i64(3).unwrap(), 12);
 
-        // A refusal envelope carries `target` (not `handle`); still audited.
-        let refused = serde_json::json!({
-            "verb": "memd.refused",
-            "idempotency_key": "k2",
-            "payload": { "kind": "refused", "target": "secrets/.env", "reason": "policy_denied_exact" }
-        })
-        .to_string();
-        rt.block_on(append_memd_audit(&s, refused.as_bytes(), 300))
-            .unwrap();
-        assert_eq!(rt.block_on(s.count("memd_audit_event")).unwrap(), 2);
+        // A refusal is still audited.
+        audit.append(refused_envelope().as_bytes(), 300);
+        assert_eq!(audit.count("memd_audit_event"), 2);
 
         // A malformed envelope defers (no write, no panic).
-        rt.block_on(append_memd_audit(&s, b"{ not json", 400))
-            .unwrap();
-        assert_eq!(rt.block_on(s.count("memd_audit_event")).unwrap(), 2);
+        audit.append(b"{ not json", 400);
+        assert_eq!(audit.count("memd_audit_event"), 2);
         assert_eq!(
-            rt.block_on(s.count("memd_call_event")).unwrap(),
+            audit.count("memd_call_event"),
             0,
             "legacy envelopes are savings-only"
         );
+    }
 
-        // V2 is invocation-addressed: two identical outcomes with different
-        // call ids are two calls, while replaying one envelope is a no-op.
-        let v2 = |call_id: &str, verb: &str| {
-            serde_json::json!({
-                "schema": 2,
-                "verb": verb,
-                "idempotency_key": call_id,
-                "call": {
-                    "call_id": call_id,
-                    "thread_id": "thread-neutral",
-                    "tool_name": "rift_read_summary",
-                    "recorded_at": 500,
-                    "tokens_returned": 10,
-                    "tokens_avoided": 90
-                },
-                "payload": {
-                    "kind": "summary_served",
-                    "handle": "summary:neutral",
-                    "estimated_tokens_returned": 10,
-                    "estimated_tokens_avoided": 90
-                }
-            })
-            .to_string()
-        };
-        let c1 = v2("call-1", "memd.summary_served");
-        let c2 = v2("call-2", "memd.summary_served");
-        rt.block_on(append_memd_audit(&s, c1.as_bytes(), 999))
-            .unwrap();
-        rt.block_on(append_memd_audit(&s, c1.as_bytes(), 999))
-            .unwrap();
-        rt.block_on(append_memd_audit(&s, c2.as_bytes(), 999))
-            .unwrap();
-        assert_eq!(rt.block_on(s.count("memd_call_event")).unwrap(), 2);
-        assert_eq!(rt.block_on(s.count("memd_audit_event")).unwrap(), 4);
+    /// The legacy trail the test above leaves, delivered in the same order at
+    /// the same clocks — the state the schema-2 envelopes below arrive in.
+    fn legacy_audit_trail() -> AuditStore {
+        let audit = AuditStore::new();
+        audit.append(exact_retrieved_envelope().as_bytes(), 100);
+        audit.append(exact_retrieved_envelope().as_bytes(), 200);
+        audit.append(refused_envelope().as_bytes(), 300);
+        audit.append(b"{ not json", 400);
+        audit
+    }
 
-        // A post-decode internal failure counts as a call but never as savings.
-        let internal = v2("call-3", "memd.internal_error");
-        rt.block_on(append_memd_audit(&s, internal.as_bytes(), 999))
-            .unwrap();
-        assert_eq!(rt.block_on(s.count("memd_call_event")).unwrap(), 3);
-        assert_eq!(rt.block_on(s.count("memd_audit_event")).unwrap(), 4);
-        let row = rt
-            .block_on(s.query(
-                "SELECT terminal_verb, recorded_at FROM memd_call_event \
-                 WHERE call_id = 'call-3'",
-                &[],
-            ))
-            .unwrap();
+    /// A schema-2 envelope for one call of `verb`.
+    fn v2_envelope(call_id: &str, verb: &str) -> String {
+        serde_json::json!({
+            "schema": 2,
+            "verb": verb,
+            "idempotency_key": call_id,
+            "call": {
+                "call_id": call_id,
+                "thread_id": "thread-neutral",
+                "tool_name": "rift_read_summary",
+                "recorded_at": 500,
+                "tokens_returned": 10,
+                "tokens_avoided": 90
+            },
+            "payload": {
+                "kind": "summary_served",
+                "handle": "summary:neutral",
+                "estimated_tokens_returned": 10,
+                "estimated_tokens_avoided": 90
+            }
+        })
+        .to_string()
+    }
+
+    /// V2 is invocation-addressed: two identical outcomes with different call
+    /// ids are two calls, while replaying one envelope is a no-op.
+    #[test]
+    fn schema_2_calls_are_invocation_addressed_beside_the_legacy_trail() {
+        let audit = two_schema_2_calls();
+        assert_eq!(audit.count("memd_call_event"), 2);
+        assert_eq!(audit.count("memd_audit_event"), 4);
+    }
+
+    /// The legacy trail, then two calls of one outcome — the first delivered
+    /// twice — in the order the test above asserts over.
+    fn two_schema_2_calls() -> AuditStore {
+        let audit = legacy_audit_trail();
+        let c1 = v2_envelope("call-1", "memd.summary_served");
+        let c2 = v2_envelope("call-2", "memd.summary_served");
+        audit.append(c1.as_bytes(), 999);
+        audit.append(c1.as_bytes(), 999);
+        audit.append(c2.as_bytes(), 999);
+        audit
+    }
+
+    /// A post-decode internal failure counts as a call but never as savings.
+    #[test]
+    fn a_schema_2_internal_error_is_a_call_and_never_a_saving() {
+        let audit = two_schema_2_calls();
+        let internal = v2_envelope("call-3", "memd.internal_error");
+        audit.append(internal.as_bytes(), 999);
+        assert_eq!(audit.count("memd_call_event"), 3);
+        assert_eq!(audit.count("memd_audit_event"), 4);
+        let row = audit.query(
+            "SELECT terminal_verb, recorded_at FROM memd_call_event \
+             WHERE call_id = 'call-3'",
+        );
         assert_eq!(row[0].get_text(0).unwrap(), "memd.internal_error");
         assert_eq!(row[0].get_i64(1).unwrap(), 500);
     }
@@ -1041,12 +1092,7 @@ mod tests {
     /// exactly once, here, never at query time.
     #[test]
     fn a_citation_resolution_gets_a_memd_audit_citation_row() {
-        use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore};
-        let s = SqliteStore::open_in_memory().unwrap();
-        apply_migrations(&s, &recall_migrations()).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
+        let audit = AuditStore::new();
         let key = "a".repeat(64);
         let sha = "b".repeat(64);
 
@@ -1065,14 +1111,9 @@ mod tests {
             }
         })
         .to_string();
-        rt.block_on(append_memd_audit(&s, resolved.as_bytes(), 100))
-            .unwrap();
-        let rows = rt
-            .block_on(s.query(
-                "SELECT pack_key, ordinal FROM memd_audit_citation WHERE audit_id = 'cite-1'",
-                &[],
-            ))
-            .unwrap();
+        audit.append(resolved.as_bytes(), 100);
+        let rows = audit
+            .query("SELECT pack_key, ordinal FROM memd_audit_citation WHERE audit_id = 'cite-1'");
         assert_eq!(rows.len(), 1, "a resolved citation gets exactly one row");
         assert_eq!(rows[0].get_text(0).unwrap(), key);
         assert_eq!(rows[0].get_i64(1).unwrap(), 3);
@@ -1089,14 +1130,9 @@ mod tests {
             }
         })
         .to_string();
-        rt.block_on(append_memd_audit(&s, unresolved.as_bytes(), 200))
-            .unwrap();
-        let rows = rt
-            .block_on(s.query(
-                "SELECT pack_key, ordinal FROM memd_audit_citation WHERE audit_id = 'cite-2'",
-                &[],
-            ))
-            .unwrap();
+        audit.append(unresolved.as_bytes(), 200);
+        let rows = audit
+            .query("SELECT pack_key, ordinal FROM memd_audit_citation WHERE audit_id = 'cite-2'");
         assert_eq!(rows.len(), 1, "an unresolved refusal is still a citation");
         assert_eq!(rows[0].get_i64(1).unwrap(), 99);
 
@@ -1114,19 +1150,17 @@ mod tests {
             }
         })
         .to_string();
-        rt.block_on(append_memd_audit(&s, plain.as_bytes(), 300))
-            .unwrap();
+        audit.append(plain.as_bytes(), 300);
         assert_eq!(
-            rt.block_on(s.count("memd_audit_citation")).unwrap(),
+            audit.count("memd_audit_citation"),
             2,
             "a non-citation handle must not grow the companion relation"
         );
 
         // Re-delivering the SAME resolved citation is a no-op (the append-only
         // set-union posture every other audit relation holds).
-        rt.block_on(append_memd_audit(&s, resolved.as_bytes(), 400))
-            .unwrap();
-        assert_eq!(rt.block_on(s.count("memd_audit_citation")).unwrap(), 2);
+        audit.append(resolved.as_bytes(), 400);
+        assert_eq!(audit.count("memd_audit_citation"), 2);
     }
 
     /// A schema-4 envelope writes BOTH the per-call row and
@@ -1134,12 +1168,7 @@ mod tests {
     /// `memd_call_event`/`mcp_connection_event` relations it supersedes.
     #[test]
     fn schema_4_writes_the_serve_channel_relations_and_nothing_mcp_era() {
-        use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore};
-        let s = SqliteStore::open_in_memory().unwrap();
-        apply_migrations(&s, &recall_migrations()).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
+        let audit = AuditStore::new();
 
         let event = rift_recall_events::MemdEvent::SummaryServed {
             handle: "summary:neutral".into(),
@@ -1152,16 +1181,12 @@ mod tests {
             "rift_read_summary",
             rift_core::Timestamp::from_millis(123),
         );
-        rt.block_on(append_memd_audit(&s, envelope.as_bytes(), 999))
-            .unwrap();
+        audit.append(envelope.as_bytes(), 999);
 
-        let rows = rt
-            .block_on(s.query(
-                "SELECT channel, tool_name, terminal_verb, tokens_returned, tokens_avoided \
-                 FROM serve_call_event WHERE call_id = 'call-1'",
-                &[],
-            ))
-            .unwrap();
+        let rows = audit.query(
+            "SELECT channel, tool_name, terminal_verb, tokens_returned, tokens_avoided \
+             FROM serve_call_event WHERE call_id = 'call-1'",
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get_text(0).unwrap(), "skill_cli");
         assert_eq!(rows[0].get_text(1).unwrap(), "rift_read_summary");
@@ -1169,12 +1194,8 @@ mod tests {
         assert_eq!(rows[0].get_i64(3).unwrap(), 12);
         assert_eq!(rows[0].get_i64(4).unwrap(), 90);
 
-        let session_rows = rt
-            .block_on(s.query(
-                "SELECT first_served_at FROM serve_session_event WHERE channel = 'skill_cli'",
-                &[],
-            ))
-            .unwrap();
+        let session_rows = audit
+            .query("SELECT first_served_at FROM serve_session_event WHERE channel = 'skill_cli'");
         assert_eq!(session_rows.len(), 1);
         assert_eq!(session_rows[0].get_i64(0).unwrap(), 123);
 
@@ -1191,16 +1212,11 @@ mod tests {
             "rift_known_state",
             rift_core::Timestamp::from_millis(456),
         );
-        rt.block_on(append_memd_audit(&s, envelope2.as_bytes(), 999))
-            .unwrap();
-        assert_eq!(rt.block_on(s.count("serve_call_event")).unwrap(), 2);
-        assert_eq!(rt.block_on(s.count("serve_session_event")).unwrap(), 1);
-        let still_first = rt
-            .block_on(s.query(
-                "SELECT first_served_at FROM serve_session_event WHERE channel = 'skill_cli'",
-                &[],
-            ))
-            .unwrap();
+        audit.append(envelope2.as_bytes(), 999);
+        assert_eq!(audit.count("serve_call_event"), 2);
+        assert_eq!(audit.count("serve_session_event"), 1);
+        let still_first = audit
+            .query("SELECT first_served_at FROM serve_session_event WHERE channel = 'skill_cli'");
         assert_eq!(
             still_first[0].get_i64(0).unwrap(),
             123,
@@ -1215,19 +1231,17 @@ mod tests {
             "hook-pointer",
             rift_core::Timestamp::from_millis(789),
         );
-        rt.block_on(append_memd_audit(&s, envelope3.as_bytes(), 999))
-            .unwrap();
-        assert_eq!(rt.block_on(s.count("serve_session_event")).unwrap(), 2);
+        audit.append(envelope3.as_bytes(), 999);
+        assert_eq!(audit.count("serve_session_event"), 2);
 
         // Nothing here ever touches the historical relations it supersedes.
-        assert_eq!(rt.block_on(s.count("memd_call_event")).unwrap(), 0);
-        assert_eq!(rt.block_on(s.count("mcp_connection_event")).unwrap(), 0);
+        assert_eq!(audit.count("memd_call_event"), 0);
+        assert_eq!(audit.count("mcp_connection_event"), 0);
 
         // Replaying the exact same envelope is a no-op on both relations.
-        rt.block_on(append_memd_audit(&s, envelope.as_bytes(), 999))
-            .unwrap();
-        assert_eq!(rt.block_on(s.count("serve_call_event")).unwrap(), 3);
-        assert_eq!(rt.block_on(s.count("serve_session_event")).unwrap(), 2);
+        audit.append(envelope.as_bytes(), 999);
+        assert_eq!(audit.count("serve_call_event"), 3);
+        assert_eq!(audit.count("serve_session_event"), 2);
     }
 
     /// A REAL `PackBuilt` event — built by the events
@@ -1240,12 +1254,7 @@ mod tests {
         use rift_recall_events::{
             MemdEvent, Schema2CallContext, Schema2CallId, Schema2Terminal, Schema2ThreadId,
         };
-        use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore};
-        let s = SqliteStore::open_in_memory().unwrap();
-        apply_migrations(&s, &recall_migrations()).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
+        let audit = AuditStore::new();
 
         let pack = MemdEvent::PackBuilt {
             sections: 4,
@@ -1254,15 +1263,11 @@ mod tests {
             estimated_tokens_avoided: 2_551_121,
         };
         // v1 path: the content-addressed envelope.
-        rt.block_on(append_memd_audit(&s, pack.to_hook_json().as_bytes(), 100))
-            .unwrap();
-        let rows = rt
-            .block_on(s.query(
-                "SELECT tokens_returned, tokens_avoided FROM memd_audit_event \
-                 WHERE verb = 'memd.pack_built'",
-                &[],
-            ))
-            .unwrap();
+        audit.append(pack.to_hook_json().as_bytes(), 100);
+        let rows = audit.query(
+            "SELECT tokens_returned, tokens_avoided FROM memd_audit_event \
+             WHERE verb = 'memd.pack_built'",
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].get_i64(0).unwrap(),
@@ -1281,19 +1286,15 @@ mod tests {
         };
         let v2 = Schema2Terminal::Event(&pack)
             .to_hook_json(&call, rift_core::Timestamp::from_millis(500));
-        rt.block_on(append_memd_audit(&s, v2.as_bytes(), 999))
-            .unwrap();
-        let calls = rt
-            .block_on(s.query(
-                "SELECT tokens_returned FROM memd_call_event \
-                 WHERE terminal_verb = 'memd.pack_built'",
-                &[],
-            ))
-            .unwrap();
+        audit.append(v2.as_bytes(), 999);
+        let calls = audit.query(
+            "SELECT tokens_returned FROM memd_call_event \
+             WHERE terminal_verb = 'memd.pack_built'",
+        );
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].get_i64(0).unwrap(), 648);
         assert_eq!(
-            rt.block_on(s.count("memd_audit_event")).unwrap(),
+            audit.count("memd_audit_event"),
             2,
             "the v2 decision also retains a legacy savings row"
         );
@@ -1305,18 +1306,9 @@ mod tests {
             reason: "policy_denied_exact".into(),
             estimated_tokens_returned: 91,
         };
-        rt.block_on(append_memd_audit(
-            &s,
-            refused.to_hook_json().as_bytes(),
-            200,
-        ))
-        .unwrap();
-        let refusal = rt
-            .block_on(s.query(
-                "SELECT tokens_returned FROM memd_audit_event WHERE verb = 'memd.refused'",
-                &[],
-            ))
-            .unwrap();
+        audit.append(refused.to_hook_json().as_bytes(), 200);
+        let refusal =
+            audit.query("SELECT tokens_returned FROM memd_audit_event WHERE verb = 'memd.refused'");
         assert_eq!(refusal[0].get_i64(0).unwrap(), 91);
     }
 

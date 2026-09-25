@@ -10,6 +10,31 @@ use rift_core::Result;
 use super::git::{effective_config, session_raw_capture, state_from_token, strategy_kind};
 use super::{now_ms, projection_db_at};
 
+/// One archive of one commit, with what its caller opened for it: every step
+/// after the open reads these rather than reopening them.
+///
+/// Shared by the worker's condense and the attach verb, which archive through
+/// the same [`run_archive`] and differ only in where the commit and the clock
+/// come from — the worker's clock is the entry's queue time, so a deferred run
+/// neither backdates nor advances the archive decision.
+#[derive(Clone, Copy)]
+struct ArchiveCtx<'a> {
+    /// The caller's phase timer.
+    t: &'a crate::hooktime::HookTimer,
+    /// The runtime every store call is driven on.
+    rt: &'a tokio::runtime::Runtime,
+    /// The member's capture projection.
+    store: &'a rift_store::SqliteStore,
+    /// The member the commit was made in.
+    repo: &'a rift_git::RepoPaths,
+    /// The member's object database, for the diff and the replay.
+    reader: &'a rift_git::GixBlobReader,
+    /// The commit the checkpoint anchors to.
+    commit: &'a str,
+    /// The clock the decision and the archive read.
+    now: i64,
+}
+
 /// Run one live archive. Capture never blocks the git op.
 ///
 /// There is one archive path: the native one, which writes the shard itself.
@@ -72,15 +97,7 @@ pub(super) fn archive_now(
         Vec::new(),
     ));
     if let (Ok(Some(_)), Some(lines)) = (&archived, transcript_raw_lines) {
-        let progress = rift_shadow::hooks::TranscriptProgress {
-            schema: rift_shadow::hooks::session_cache::SCHEMA,
-            session_id: session.to_owned(),
-            raw_lines: lines,
-            updated_at_ms: now,
-        };
-        if let Err(e) = rift_shadow::hooks::write_transcript_progress(&repo.git_dir, &progress) {
-            tracing::warn!(error = %e, "transcript progress not recorded");
-        }
+        record_transcript_progress(&repo.git_dir, session, lines, now);
     }
     // The shard is in git; its POSITION is not, until this runs — the same
     // discipline the post-commit worker keeps. Before this call existed the two
@@ -129,8 +146,6 @@ pub(super) fn condense_queued(
     entry: &crate::capture_queue::QueueEntry,
     path: &Path,
 ) -> Result<()> {
-    use rift_shadow::hooks::strategy::{decide, GitEvent, TriggerCtx};
-
     // The checkout this commit was made in is gone: a subagent's
     // temporary worktree removed before the detached worker ran, or a
     // `git worktree remove` between the commit and the drain. The commit is
@@ -150,7 +165,15 @@ pub(super) fn condense_queued(
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
-    let now = entry.queued_at_ms;
+    let ctx = ArchiveCtx {
+        t,
+        rt: &rt,
+        store: &store,
+        repo: &repo,
+        reader: &reader,
+        commit: &entry.commit,
+        now: entry.queued_at_ms,
+    };
 
     // Bind any unbound sessions to the local developer identity (best-effort).
     let _ = t.phase("bind_sessions", || {
@@ -158,7 +181,7 @@ pub(super) fn condense_queued(
             &store,
             &repo.work_tree,
             crate::identity::install_salt,
-            now,
+            ctx.now,
         ))
     });
 
@@ -171,63 +194,17 @@ pub(super) fn condense_queued(
     let sensitive_path_touched = capture.files.iter().any(|f| cfg.is_sensitive_path(&f.path));
 
     if let (Some(session_id), Some(agent)) = (&entry.session_id, &entry.agent) {
-        // Turn-boundary attribution: replay the session's H_i/A_i edit
-        // stack through the LIFO engine so committed lines resolve to
-        // agent/human instead of all-unknown. Best-effort — a replay failure
-        // leaves the honest unknown counts.
-        let _ = t.phase("enrich_attribution", || {
-            rt.block_on(rift_shadow::enrich_attribution(
-                &store,
-                &reader,
-                agent,
-                session_id,
-                &mut capture,
-            ))
-        });
-        let last = rt.block_on(rift_store::latest_archive_ms(&store, session_id))?;
-        let decision = decide(
-            strategy_kind(cfg.checkpoint_strategy()),
-            &TriggerCtx {
-                git_event: Some(GitEvent::PostCommit),
-                session_state: state_from_token(entry.session_state.as_deref().unwrap_or("")),
-                sensitive_path_touched,
-                clock_ms: now,
-                last_archive_ms: last,
-                schedule_interval_ms: cfg.schedule_interval_ms(),
-            },
-        );
+        let decision = session_archive_decision(
+            &ctx,
+            &cfg,
+            &mut capture,
+            sensitive_path_touched,
+            entry.session_state.as_deref().unwrap_or(""),
+            session_id,
+            agent,
+        )?;
         if decision.archive {
-            let checkpoint = run_archive(
-                t,
-                &rt,
-                &store,
-                &repo,
-                &capture,
-                &entry.commit,
-                session_id,
-                agent,
-                decision,
-                now,
-            )?;
-            // The shard is in git; its POSITION is not, until this runs. Same
-            // worker op as the archive, and before the soak's verify — which now
-            // refuses a checkpoint that has no entry, so recording it later
-            // would mean a red run in between.
-            record_chain_entry(t, &repo, checkpoint.as_deref(), now);
-            // The soak accrues against the checkpoint that was just written, and
-            // there is no arm here that accrues without one. `run_archive`
-            // inside `decision.archive` returns `Ok(Some(_))` or `Err`, so this
-            // is the type's shape being consumed, not a case being guarded —
-            // said plainly because the mechanism this replaced was an
-            // `Option` gate at this very call whose `None` arm could not fire.
-            if let Some(id) = checkpoint.as_deref() {
-                if let Some(reason) =
-                    accrue_soak(t, &repo.work_tree, &crate::verify::Witness::of(id))
-                {
-                    crate::capture_queue::mark_error(path, &reason);
-                }
-            }
-            return Ok(());
+            return archive_queued_session(&ctx, &capture, session_id, agent, decision, path);
         }
     }
 
@@ -236,6 +213,77 @@ pub(super) fn condense_queued(
     t.phase("persist_capture", || {
         rt.block_on(rift_shadow::persist_commit_capture(&store, &capture, None))
     })?;
+    Ok(())
+}
+
+/// Replay the session's turns over the commit, then ask the configured
+/// strategy whether this commit archives.
+///
+/// Turn-boundary attribution first: the session's H_i/A_i edit stack goes
+/// through the LIFO engine so committed lines resolve to agent/human instead of
+/// all-unknown. Best-effort — a replay failure leaves the honest unknown
+/// counts, and the decision is still made.
+fn session_archive_decision(
+    ctx: &ArchiveCtx<'_>,
+    cfg: &rift_config::EffectiveConfig,
+    capture: &mut rift_shadow::attribution::CommitCapture,
+    sensitive_path_touched: bool,
+    session_state: &str,
+    session_id: &str,
+    agent: &str,
+) -> Result<rift_shadow::hooks::strategy::ArchiveDecision> {
+    use rift_shadow::hooks::strategy::{decide, GitEvent, TriggerCtx};
+
+    let _ = ctx.t.phase("enrich_attribution", || {
+        ctx.rt.block_on(rift_shadow::enrich_attribution(
+            ctx.store, ctx.reader, agent, session_id, capture,
+        ))
+    });
+    let last = ctx
+        .rt
+        .block_on(rift_store::latest_archive_ms(ctx.store, session_id))?;
+    Ok(decide(
+        strategy_kind(cfg.checkpoint_strategy()),
+        &TriggerCtx {
+            git_event: Some(GitEvent::PostCommit),
+            session_state: state_from_token(session_state),
+            sensitive_path_touched,
+            clock_ms: ctx.now,
+            last_archive_ms: last,
+            schedule_interval_ms: cfg.schedule_interval_ms(),
+        },
+    ))
+}
+
+/// Archive the session's checkpoint, give it its place in the chain, and
+/// accrue the soak against it.
+fn archive_queued_session(
+    ctx: &ArchiveCtx<'_>,
+    capture: &rift_shadow::attribution::CommitCapture,
+    session_id: &str,
+    agent: &str,
+    decision: rift_shadow::hooks::strategy::ArchiveDecision,
+    path: &Path,
+) -> Result<()> {
+    let checkpoint = run_archive(ctx, capture, session_id, agent, decision)?;
+    // The shard is in git; its POSITION is not, until this runs. Same
+    // worker op as the archive, and before the soak's verify — which now
+    // refuses a checkpoint that has no entry, so recording it later
+    // would mean a red run in between.
+    record_chain_entry(ctx.t, ctx.repo, checkpoint.as_deref(), ctx.now);
+    // The soak accrues against the checkpoint that was just written, and
+    // there is no arm here that accrues without one. `run_archive`
+    // inside `decision.archive` returns `Ok(Some(_))` or `Err`, so this
+    // is the type's shape being consumed, not a case being guarded —
+    // said plainly because the mechanism this replaced was an
+    // `Option` gate at this very call whose `None` arm could not fire.
+    if let Some(id) = checkpoint.as_deref() {
+        if let Some(reason) =
+            accrue_soak(ctx.t, &ctx.repo.work_tree, &crate::verify::Witness::of(id))
+        {
+            crate::capture_queue::mark_error(path, &reason);
+        }
+    }
     Ok(())
 }
 
@@ -459,9 +507,16 @@ pub(crate) fn attach_archive(
         reason: ArchiveReason::Commit,
         strategy: StrategyKind::ManualCommit,
     };
-    let checkpoint = run_archive(
-        &t, rt, store, repo, &capture, commit, session_id, agent, decision, now,
-    )?;
+    let ctx = ArchiveCtx {
+        t: &t,
+        rt,
+        store,
+        repo,
+        reader: &reader,
+        commit,
+        now,
+    };
+    let checkpoint = run_archive(&ctx, &capture, session_id, agent, decision)?;
     record_chain_entry(&t, repo, checkpoint.as_deref(), now);
     if let Some(id) = checkpoint.as_deref() {
         // The explicit `level_projection` that used to stand here is GONE, not
@@ -723,21 +778,24 @@ pub(crate) fn accrue_soak(
 /// writes it beside the queue entry, and the next commit's hook says it out
 /// loud. The C-diff facts are durable either way: `archive_and_capture_with`
 /// persists them before it surfaces the archive error.
-#[allow(clippy::too_many_arguments)]
 fn run_archive(
-    t: &crate::hooktime::HookTimer,
-    rt: &tokio::runtime::Runtime,
-    store: &rift_store::SqliteStore,
-    repo: &rift_git::RepoPaths,
+    ctx: &ArchiveCtx<'_>,
     capture: &rift_shadow::attribution::CommitCapture,
-    commit: &str,
     session_id: &str,
     agent: &str,
     decision: rift_shadow::hooks::strategy::ArchiveDecision,
-    now: i64,
 ) -> Result<Option<String>> {
     use rift_shadow::backend::NativeBackend;
 
+    let ArchiveCtx {
+        t,
+        rt,
+        store,
+        repo,
+        commit,
+        now,
+        ..
+    } = *ctx;
     let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
     let raw = t.phase("archive_raw_capture", || {
         session_raw_capture(&repo.work_tree)
@@ -784,27 +842,33 @@ fn run_archive(
             Vec::new(),
         ))
     });
-    // Record how far the archived transcript reached (non-empty RAW lines, the
-    // compactor's own count) so the NEXT checkpoint's compaction starts at the
-    // boundary this one ended at. Worker-owned sidecar, written only after the
-    // archive landed — a failed archive leaves the old boundary so nothing is
-    // skipped on retry.
     if let (Ok(Some(_)), Some(lines)) = (&archived, transcript_raw_lines) {
-        let progress = rift_shadow::hooks::TranscriptProgress {
-            schema: rift_shadow::hooks::session_cache::SCHEMA,
-            session_id: session_id.to_owned(),
-            raw_lines: lines,
-            updated_at_ms: now,
-        };
-        if let Err(e) = rift_shadow::hooks::write_transcript_progress(&repo.git_dir, &progress) {
-            tracing::warn!(error = %e, "transcript progress not recorded");
-        }
+        record_transcript_progress(&repo.git_dir, session_id, lines, now);
     }
     // The pack notes are owed whether or not the archive landed: a pack that
     // would not compile degraded THIS commit's coverage, and the archive error
     // below must not swallow the reason.
     record_pack_notes(&repo.git_dir, &notes);
     archived
+}
+
+/// Record how far the archived transcript reached (non-empty RAW lines, the
+/// compactor's own count) so the NEXT checkpoint's compaction starts at the
+/// boundary this one ended at.
+///
+/// Worker-owned sidecar, called only after the archive landed — a failed
+/// archive leaves the old boundary so nothing is skipped on retry — and
+/// best-effort: a boundary not recorded re-covers the session next time.
+fn record_transcript_progress(git_dir: &Path, session_id: &str, raw_lines: u64, now: i64) {
+    let progress = rift_shadow::hooks::TranscriptProgress {
+        schema: rift_shadow::hooks::session_cache::SCHEMA,
+        session_id: session_id.to_owned(),
+        raw_lines,
+        updated_at_ms: now,
+    };
+    if let Err(e) = rift_shadow::hooks::write_transcript_progress(git_dir, &progress) {
+        tracing::warn!(error = %e, "transcript progress not recorded");
+    }
 }
 
 /// Read, compact and seal the session's transcript for the archive, or `None`

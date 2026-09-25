@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use rift_core::Result;
+use rift_shadow::hooks::session_cache::SessionCache;
 
 use super::archive::archive_now;
 use super::git::{effective_config, strategy_kind};
@@ -36,6 +37,25 @@ pub(crate) struct SessionSweep {
     /// `archive_now`'s own doc records as how the silent-loss defect was
     /// written.
     pub(crate) condensed_checkpoints: Vec<String>,
+}
+
+/// What every session of one sweep is finalized against, opened once by
+/// [`open_sweep`] so the per-session steps read it rather than reopen it.
+struct SweepCtx<'a> {
+    /// The member being swept.
+    repo: &'a rift_git::RepoPaths,
+    /// Its capture projection.
+    store: rift_store::SqliteStore,
+    /// The runtime every bridge call is driven on.
+    rt: tokio::runtime::Runtime,
+    /// The commit every condense anchors to; `None` on an unborn HEAD.
+    head: Option<String>,
+    /// The configured checkpoint strategy, recorded on each decision.
+    strategy: rift_shadow::hooks::strategy::StrategyKind,
+    /// The family id the last turn's usage is settled under.
+    repo_id: String,
+    /// The sweep's clock.
+    now: i64,
 }
 
 /// The crashed-session sweep, and the **driver** the
@@ -96,7 +116,6 @@ pub(crate) fn sweep_stale_sessions(
     only: Option<&str>,
 ) -> Result<SessionSweep> {
     use rift_shadow::hooks::session_cache::{is_idle_past, live_sessions_for};
-    use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason};
     use rift_shadow::hooks::{Effect, SessionState};
 
     let repo = rift_git::discover(root)?;
@@ -111,19 +130,7 @@ pub(crate) fn sweep_stale_sessions(
     if sessions.is_empty() {
         return Ok(sweep);
     }
-    let store = rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .map_err(rift_core::RiftError::from)?;
-    // Resolved once: every finalized session condenses against the current
-    // HEAD, exactly as a session-end hook would.
-    let head = rift_git::GixBlobReader::open(&repo.work_tree)
-        .ok()
-        .and_then(|r| r.head_hex().ok().flatten());
-    let strategy = strategy_kind(effective_config(&repo.work_tree).checkpoint_strategy());
-    let repo_id = crate::family::try_at(&repo.work_tree)
-        .map(|f| f.family_id.to_string())
-        .unwrap_or_default();
+    let ctx = open_sweep(&repo, now)?;
 
     for cache in sessions {
         let id = cache.session_id.clone();
@@ -139,9 +146,9 @@ pub(crate) fn sweep_stale_sessions(
         // the condense is re-attempted directly instead: the transition it needs
         // has already happened, only the effect is outstanding.
         if cache.state != SessionState::Ending.as_str() {
-            let timed_out = rt.block_on(rift_shadow::bridge::timeout_idle_session(
-                &store,
-                &repo.git_dir,
+            let timed_out = ctx.rt.block_on(rift_shadow::bridge::timeout_idle_session(
+                &ctx.store,
+                &ctx.repo.git_dir,
                 &id,
                 now,
             ));
@@ -157,55 +164,13 @@ pub(crate) fn sweep_stale_sessions(
                 continue;
             }
         }
-        // The session's last turn is one no hook will ever settle — this pass
-        // is the backstop (Decision 1): record it on its last event before
-        // the condense reads the projection. Best-effort, like everything
-        // else in the sweep.
-        let _ = rt.block_on(rift_shadow::bridge::settle_closed_turn_usage(
-            &store,
-            &repo.git_dir,
-            &id,
-            &cache.agent,
-            &repo_id,
-            rift_shadow::bridge::SettleMode::Final,
-            now,
-        ));
-        let minted = head.as_ref().and_then(|commit| {
-            archive_now(
-                &rt,
-                &store,
-                &repo.work_tree,
-                commit,
-                &id,
-                &cache.agent,
-                ArchiveDecision {
-                    archive: true,
-                    reason: ArchiveReason::SessionEnd,
-                    strategy,
-                },
-                now,
-            )
-            // An archive that was skipped for want of a backend is not a
-            // condense, however successfully it returned: only a minted
-            // checkpoint id counts.
-            .ok()
-            .flatten()
-        });
+        settle_last_turn(&ctx, &cache);
+        let minted = condense_swept_session(&ctx, &cache);
         let condensed = minted.is_some();
         if let Some(checkpoint) = minted {
             sweep.condensed_checkpoints.push(checkpoint);
         }
-        if condensed
-            && rt
-                .block_on(rift_shadow::bridge::mark_condense_done(
-                    &store,
-                    &repo.git_dir,
-                    &id,
-                    &cache.agent,
-                    now,
-                ))
-                .is_ok()
-        {
+        if condensed && mark_swept_condensed(&ctx, &cache) {
             sweep.finalized.push(id);
         } else {
             sweep.condense_deferred.push(id);
@@ -230,4 +195,98 @@ fn rescue_agent_jobs(git_dir: &Path, only: Option<&str>, sweep: &mut SessionSwee
             sweep.condensed_checkpoints.push(checkpoint);
         }
     }
+}
+
+/// Open what every session of one sweep is finalized against, once: the
+/// projection, a runtime to drive it, and the three facts a session-end
+/// condense reads.
+///
+/// `head` is resolved here rather than per session because every finalized
+/// session condenses against the current HEAD, exactly as a session-end hook
+/// would.
+fn open_sweep(repo: &rift_git::RepoPaths, now: i64) -> Result<SweepCtx<'_>> {
+    let store = rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    let head = rift_git::GixBlobReader::open(&repo.work_tree)
+        .ok()
+        .and_then(|r| r.head_hex().ok().flatten());
+    let strategy = strategy_kind(effective_config(&repo.work_tree).checkpoint_strategy());
+    let repo_id = crate::family::try_at(&repo.work_tree)
+        .map(|f| f.family_id.to_string())
+        .unwrap_or_default();
+    Ok(SweepCtx {
+        repo,
+        store,
+        rt,
+        head,
+        strategy,
+        repo_id,
+        now,
+    })
+}
+
+/// Settle the session's last turn, which no hook will ever settle — this pass
+/// is the backstop (Decision 1): record it on its last event before the
+/// condense reads the projection. Best-effort, like everything else in the
+/// sweep.
+fn settle_last_turn(ctx: &SweepCtx<'_>, cache: &SessionCache) {
+    let _ = ctx
+        .rt
+        .block_on(rift_shadow::bridge::settle_closed_turn_usage(
+            &ctx.store,
+            &ctx.repo.git_dir,
+            &cache.session_id,
+            &cache.agent,
+            &ctx.repo_id,
+            rift_shadow::bridge::SettleMode::Final,
+            ctx.now,
+        ));
+}
+
+/// The ordinary session-end condense, against HEAD, and the checkpoint it
+/// minted.
+///
+/// An archive that was skipped for want of a backend is not a condense,
+/// however successfully it returned: only a minted checkpoint id counts, so a
+/// repository with no commit to anchor to, or no backend to write with,
+/// answers `None`.
+fn condense_swept_session(
+    ctx: &SweepCtx<'_>,
+    cache: &SessionCache,
+) -> Option<rift_shadow::CheckpointId> {
+    use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason};
+
+    let commit = ctx.head.as_ref()?;
+    archive_now(
+        &ctx.rt,
+        &ctx.store,
+        &ctx.repo.work_tree,
+        commit,
+        &cache.session_id,
+        &cache.agent,
+        ArchiveDecision {
+            archive: true,
+            reason: ArchiveReason::SessionEnd,
+            strategy: ctx.strategy,
+        },
+        ctx.now,
+    )
+    .ok()
+    .flatten()
+}
+
+/// Tell the machine the condense landed, closing the session; `false` leaves
+/// it for the next sweep to retry.
+fn mark_swept_condensed(ctx: &SweepCtx<'_>, cache: &SessionCache) -> bool {
+    ctx.rt
+        .block_on(rift_shadow::bridge::mark_condense_done(
+            &ctx.store,
+            &ctx.repo.git_dir,
+            &cache.session_id,
+            &cache.agent,
+            ctx.now,
+        ))
+        .is_ok()
 }
