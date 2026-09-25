@@ -669,7 +669,7 @@ fn a_dropped_directive_is_reported_as_a_count_rather_than_vanishing() {
 /// that inserts `file_revision` alone would flatter the code exactly as the
 /// worktree-existence check once did.
 ///
-/// **The free-text columns were added after the 2026-08-24 assessment drove one
+/// **The free-text columns were added after an assessment drove one
 /// real hook payload end to end.** The path census closed nine *path-bearing*
 /// renderers and never looked at the columns beside them, so `session.agent`,
 /// `session.model_primary` and `tool_call.tool_name` — every one of them
@@ -677,134 +677,25 @@ fn a_dropped_directive_is_reported_as_a_count_rather_than_vanishing() {
 /// `rift --json dispatch` and `rift --json recap` with nothing in between.
 /// Planting them here is what makes the two doors below assertions rather than
 /// hopes.
-// One linear seeding cascade over five tables. Splitting it would scatter the
-// fixture whose whole value is that a reader can check, top to bottom, that
-// every column the doors below assert about was actually planted.
-#[allow(clippy::too_many_lines)]
+///
+/// The seeding reads top to bottom as the relations it plants: the checkpoint,
+/// then one session and one tool call per shape, then one file revision and
+/// its attribution per shape.
 fn with_hostile_window<T>(body: impl FnOnce(&tokio::runtime::Runtime, &Planes<'_>) -> T) -> T {
     let rt = fixture::rt();
     let dir = tempfile::tempdir().expect("tempdir");
     let cap = fixture::capture(&rt);
     rt.block_on(async {
-        cap.insert(
-            "checkpoint",
-            &[
-                "checkpoint_id",
-                "strategy",
-                "created_at",
-                "merkle_root",
-                "schema_version",
-            ],
-            &[
-                Value::Text("cp1".to_owned()),
-                Value::Text("manual-commit".to_owned()),
-                Value::Int(1_000),
-                Value::Text("00".to_owned()),
-                Value::Int(1),
-            ],
-        )
-        .await
-        .expect("checkpoint");
+        seed_hostile_checkpoint(&cap).await;
         // THE FREE-TEXT COLUMNS. One row per shape in each, so a screen that
         // covers `agent` and forgets `model` cannot pass.
         for (n, h) in CORPUS.iter().enumerate() {
-            cap.insert(
-                "session",
-                &[
-                    "session_id",
-                    "agent",
-                    "model_primary",
-                    "repo_id",
-                    "started_at",
-                    "schema_version",
-                ],
-                &[
-                    Value::Text(format!("sess-{n}-{}", h.text)),
-                    Value::Text(h.text.to_owned()),
-                    Value::Text(h.text.to_owned()),
-                    Value::Text("repo".to_owned()),
-                    Value::Int(1_000),
-                    Value::Int(1),
-                ],
-            )
-            .await
-            .expect("session");
-            cap.insert(
-                "tool_call",
-                &[
-                    "tool_call_id",
-                    "turn_id",
-                    "tool_name",
-                    "started_at",
-                    "schema_version",
-                ],
-                &[
-                    Value::Text(format!("tc-{n}")),
-                    Value::Text("turn".to_owned()),
-                    Value::Text(h.text.to_owned()),
-                    Value::Int(1_000),
-                    Value::Int(1),
-                ],
-            )
-            .await
-            .expect("tool_call");
+            seed_hostile_session(&cap, n, h).await;
+            seed_hostile_tool_call(&cap, n, h).await;
         }
         for (n, h) in CORPUS.iter().enumerate() {
-            // Half plain, half matching a built-in sensitive glob (`**/*.key`),
-            // so the sensitive-path CRITICAL is reached rather than assumed.
-            let path = if n % 2 == 0 {
-                format!("src/{}.rs", h.text)
-            } else {
-                format!("src/{}.key", h.text)
-            };
-            let id = format!("fr-h{n}");
-            cap.insert(
-                "file_revision",
-                &[
-                    "file_revision_id",
-                    "path",
-                    "blob_oid",
-                    "content_sha256",
-                    "schema_version",
-                ],
-                &[
-                    Value::Text(id.clone()),
-                    Value::Text(path),
-                    Value::Text(id.clone()),
-                    Value::Text(CAPTURED_SHA.to_owned()),
-                    Value::Int(1),
-                ],
-            )
-            .await
-            .expect("file_revision");
-            cap.insert(
-                "attribution",
-                &[
-                    "checkpoint_id",
-                    "file_revision_id",
-                    "agent_added",
-                    "human_added",
-                    "human_modified_agent",
-                    "agent_removed_by_human",
-                    "confidence_milli",
-                    "method_version",
-                    "schema_version",
-                ],
-                &[
-                    Value::Text("cp1".to_owned()),
-                    Value::Text(id),
-                    Value::Int(3),
-                    Value::Int(1),
-                    Value::Int(0),
-                    Value::Int(0),
-                    // Under 700, so the low-confidence CRITICAL fires too.
-                    Value::Int(400),
-                    Value::Text("v1".to_owned()),
-                    Value::Int(1),
-                ],
-            )
-            .await
-            .expect("attribution");
+            let id = seed_hostile_file_revision(&cap, n, h).await;
+            seed_hostile_attribution(&cap, id).await;
         }
     });
     let planes = Planes {
@@ -813,6 +704,144 @@ fn with_hostile_window<T>(body: impl FnOnce(&tokio::runtime::Runtime, &Planes<'_
         recall_db: None,
     };
     body(&rt, &planes)
+}
+
+/// The one checkpoint every hostile file revision is attributed to, with a
+/// recorded time so a window reaches it.
+async fn seed_hostile_checkpoint(cap: &SqliteStore) {
+    cap.insert(
+        "checkpoint",
+        &[
+            "checkpoint_id",
+            "strategy",
+            "created_at",
+            "merkle_root",
+            "schema_version",
+        ],
+        &[
+            Value::Text("cp1".to_owned()),
+            Value::Text("manual-commit".to_owned()),
+            Value::Int(1_000),
+            Value::Text("00".to_owned()),
+            Value::Int(1),
+        ],
+    )
+    .await
+    .expect("checkpoint");
+}
+
+/// A session whose agent, model and id all carry the hostile shape.
+async fn seed_hostile_session(cap: &SqliteStore, n: usize, h: &Hostile) {
+    cap.insert(
+        "session",
+        &[
+            "session_id",
+            "agent",
+            "model_primary",
+            "repo_id",
+            "started_at",
+            "schema_version",
+        ],
+        &[
+            Value::Text(format!("sess-{n}-{}", h.text)),
+            Value::Text(h.text.to_owned()),
+            Value::Text(h.text.to_owned()),
+            Value::Text("repo".to_owned()),
+            Value::Int(1_000),
+            Value::Int(1),
+        ],
+    )
+    .await
+    .expect("session");
+}
+
+/// A tool call whose tool name is the hostile shape.
+async fn seed_hostile_tool_call(cap: &SqliteStore, n: usize, h: &Hostile) {
+    cap.insert(
+        "tool_call",
+        &[
+            "tool_call_id",
+            "turn_id",
+            "tool_name",
+            "started_at",
+            "schema_version",
+        ],
+        &[
+            Value::Text(format!("tc-{n}")),
+            Value::Text("turn".to_owned()),
+            Value::Text(h.text.to_owned()),
+            Value::Int(1_000),
+            Value::Int(1),
+        ],
+    )
+    .await
+    .expect("tool_call");
+}
+
+/// A file revision whose path carries the hostile shape; returns its id.
+///
+/// Half plain, half matching a built-in sensitive glob (`**/*.key`), so the
+/// sensitive-path CRITICAL is reached rather than assumed.
+async fn seed_hostile_file_revision(cap: &SqliteStore, n: usize, h: &Hostile) -> String {
+    let path = if n.is_multiple_of(2) {
+        format!("src/{}.rs", h.text)
+    } else {
+        format!("src/{}.key", h.text)
+    };
+    let id = format!("fr-h{n}");
+    cap.insert(
+        "file_revision",
+        &[
+            "file_revision_id",
+            "path",
+            "blob_oid",
+            "content_sha256",
+            "schema_version",
+        ],
+        &[
+            Value::Text(id.clone()),
+            Value::Text(path),
+            Value::Text(id.clone()),
+            Value::Text(CAPTURED_SHA.to_owned()),
+            Value::Int(1),
+        ],
+    )
+    .await
+    .expect("file_revision");
+    id
+}
+
+/// The attribution row joining a hostile file revision to the checkpoint —
+/// `gather` reaches paths only through this join.
+async fn seed_hostile_attribution(cap: &SqliteStore, file_revision_id: String) {
+    cap.insert(
+        "attribution",
+        &[
+            "checkpoint_id",
+            "file_revision_id",
+            "agent_added",
+            "human_added",
+            "human_modified_agent",
+            "agent_removed_by_human",
+            "confidence_milli",
+            "method_version",
+            "schema_version",
+        ],
+        &[
+            Value::Text("cp1".to_owned()),
+            Value::Text(file_revision_id),
+            Value::Int(3),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(0),
+            // Under 700, so the low-confidence CRITICAL fires too.
+            Value::Int(400),
+            Value::Text("v1".to_owned()),
+            Value::Int(1),
+        ],
+    )
+    .await
+    .expect("attribution");
 }
 
 /// **Door four: `rift dispatch --for-agent`.** Its human arm IS the pack

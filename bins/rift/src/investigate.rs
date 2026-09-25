@@ -108,6 +108,12 @@ enum Seed {
     Untrusted,
 }
 
+/// How many offered findings entered the pack, and how many were refused.
+struct FindingCounts {
+    accepted: usize,
+    refused: usize,
+}
+
 /// Classify `seed`.
 ///
 /// * 64 lowercase hex → a checkpoint id;
@@ -186,68 +192,23 @@ pub(crate) async fn investigate(
     };
 
     let mut req = PackRequest::for_kind(PackKind::Investigation, DEFAULT_INVESTIGATION_PACK_TOKENS);
-    let seed_kind = match classify(seed_text, planes).await {
-        Seed::Identifier(d) => {
-            let tag = match &d {
-                SeedDescriptor::Path => "path",
-                SeedDescriptor::Checkpoint { .. } => "checkpoint",
-                SeedDescriptor::ErrorSignature { .. } => "error_signature",
-            };
-            req.push_seed(SectionEntry::seed(&d))?;
-            tag
-        }
-        Seed::Untrusted if !allow_untrusted => {
-            // The refusal names the ACCEPTED shapes and the flag. It does not
-            // quote the seed: a seed that reached this arm is, by definition,
-            // text nobody validated, and this message is printed to a terminal.
-            return Ok(Outcome::coded(
-                exit::PRECONDITION,
-                "investigate: that seed is not an identifier (path, checkpoint id, or \
-                 sha256:<hex>); pass --allow-untrusted-seed to admit it as a neutral digest",
-                json!({
-                    "schema_version": INVESTIGATE_SCHEMA_VERSION,
-                    "error": "untrusted_seed_not_allowed",
-                }),
-            ));
-        }
-        Seed::Untrusted => {
-            // THE ONE DOOR. The seed's bytes go to the chokepoint and the
-            // chokepoint's digest — counts and a handle, never a span — is what
-            // enters the pack.
-            let digest = serialize_untrusted("tool_output", seed_text.as_bytes(), "seed:untrusted");
-            req.push_seed(SectionEntry::from_neutral(&digest))?;
-            "untrusted_digest"
-        }
+    let Some(seed_kind) = push_seed(&mut req, planes, seed_text, allow_untrusted).await? else {
+        // The refusal names the ACCEPTED shapes and the flag. It does not
+        // quote the seed: a seed that reached this arm is, by definition,
+        // text nobody validated, and this message is printed to a terminal.
+        return Ok(Outcome::coded(
+            exit::PRECONDITION,
+            "investigate: that seed is not an identifier (path, checkpoint id, or \
+             sha256:<hex>); pass --allow-untrusted-seed to admit it as a neutral digest",
+            json!({
+                "schema_version": INVESTIGATE_SCHEMA_VERSION,
+                "error": "untrusted_seed_not_allowed",
+            }),
+        ));
     };
 
-    // Findings arrive from the `investigate` skill as `<kind>:<handle>:<text>`.
-    // The text never renders; only its digest does.
-    let mut accepted = 0usize;
-    let mut refused = 0usize;
-    // **THE EVIDENCE ORDINAL PASS** for this verb: the fact set is
-    // the findings as the skill offered them, and the ordinal is the position
-    // in THAT list — assigned before the pack is compiled, so a finding the
-    // budget later drops does not renumber the ones that survive. A REFUSED
-    // finding leaves a gap, deliberately: the numbers a reader sees then match
-    // the numbers the caller sent, and `findings.refused` says how many are
-    // missing.
-    for (offered, f) in findings.iter().enumerate() {
-        let ordinal = u32::try_from(offered).unwrap_or(u32::MAX).saturating_add(1);
-        let admitted = match parse_finding(f) {
-            Some((shape, body)) if resolve_handle(planes, &shape.evidence).await => {
-                let digest = serialize_untrusted("tool_output", body.as_bytes(), "finding");
-                let evidence = EvidenceRef::cite(ordinal, &shape.evidence);
-                req.push_finding(SectionEntry::unverified_finding(&shape, &evidence, &digest))?;
-                true
-            }
-            _ => false,
-        };
-        if admitted {
-            accepted += 1;
-        } else {
-            refused += 1;
-        }
-    }
+    let counts = push_findings(&mut req, planes, findings).await?;
+    let (accepted, refused) = (counts.accepted, counts.refused);
     // A REFUSAL MUST BE AUDIBLE. On the default surface stdout is the pack
     // alone, so a silently dropped finding looked exactly like an accepted one:
     // an agent that cited a handle Rift could not resolve got a pack back and no
@@ -263,25 +224,7 @@ pub(crate) async fn investigate(
     }
 
     let pack = compile(&req, MAX_PACK_TOKENS).map_err(RiftError::from)?;
-    let inputs = PackKeyInputs {
-        // **The seed's HASH, not its text.** Keying on the raw bytes would be
-        // the only place in this verb that kept them; keying on neither made
-        // every investigation of the same KIND share one `pack_key` — and the
-        // pack key IS the identity of the inputs, so a cache keyed on it
-        // would have served one seed's pack for another's. The hash is the
-        // same trade `SeedDescriptor::ErrorSignature` already makes ("the
-        // signature TEXT is untrusted tool output; its hash is not, so the hash
-        // is what rides"), and it renders nowhere: `PackKeyInputs::query` is
-        // fed to `pack_key_for` and is not a field of the serialized pack.
-        query: format!(
-            "investigate:{seed_kind}:{}:{accepted}",
-            rift_hashchain::leaf_hash(seed_text.as_bytes())
-        ),
-        ranked: Vec::new(),
-        policy_version: 1,
-        token_budget: DEFAULT_INVESTIGATION_PACK_TOKENS,
-    };
-    let evidence = pack.to_evidence(&inputs);
+    let evidence = pack.to_evidence(&pack_key_inputs(seed_kind, seed_text, accepted));
     let pack_json = serde_json::to_value(&evidence).map_err(|e| RiftError::Serde(e.to_string()))?;
 
     let scaffold = write_scaffold(root, seed_kind, &pack.render())?;
@@ -301,6 +244,101 @@ pub(crate) async fn investigate(
             "pack": pack_json,
         }),
     ))
+}
+
+/// Classify the seed and push it into the pack, returning the kind tag the
+/// pack key and the scaffold carry; `None` when the seed is untrusted text and
+/// `--allow-untrusted-seed` was not passed, with nothing pushed.
+async fn push_seed(
+    req: &mut PackRequest,
+    planes: &Planes<'_>,
+    seed_text: &str,
+    allow_untrusted: bool,
+) -> Result<Option<&'static str>> {
+    match classify(seed_text, planes).await {
+        Seed::Identifier(d) => {
+            let tag = match &d {
+                SeedDescriptor::Path => "path",
+                SeedDescriptor::Checkpoint { .. } => "checkpoint",
+                SeedDescriptor::ErrorSignature { .. } => "error_signature",
+            };
+            req.push_seed(SectionEntry::seed(&d))?;
+            Ok(Some(tag))
+        }
+        Seed::Untrusted if !allow_untrusted => Ok(None),
+        Seed::Untrusted => {
+            // THE ONE DOOR. The seed's bytes go to the chokepoint and the
+            // chokepoint's digest — counts and a handle, never a span — is what
+            // enters the pack.
+            let digest = serialize_untrusted("tool_output", seed_text.as_bytes(), "seed:untrusted");
+            req.push_seed(SectionEntry::from_neutral(&digest))?;
+            Ok(Some("untrusted_digest"))
+        }
+    }
+}
+
+/// Push every finding whose evidence handle resolves, counting the rest.
+///
+/// Findings arrive from the `investigate` skill as `<kind>:<handle>:<text>`.
+/// The text never renders; only its digest does.
+///
+/// **THE EVIDENCE ORDINAL PASS** for this verb: the fact set is
+/// the findings as the skill offered them, and the ordinal is the position
+/// in THAT list — assigned before the pack is compiled, so a finding the
+/// budget later drops does not renumber the ones that survive. A REFUSED
+/// finding leaves a gap, deliberately: the numbers a reader sees then match
+/// the numbers the caller sent, and `findings.refused` says how many are
+/// missing.
+async fn push_findings(
+    req: &mut PackRequest,
+    planes: &Planes<'_>,
+    findings: &[&str],
+) -> Result<FindingCounts> {
+    let mut counts = FindingCounts {
+        accepted: 0,
+        refused: 0,
+    };
+    for (offered, f) in findings.iter().enumerate() {
+        let ordinal = u32::try_from(offered).unwrap_or(u32::MAX).saturating_add(1);
+        let admitted = match parse_finding(f) {
+            Some((shape, body)) if resolve_handle(planes, &shape.evidence).await => {
+                let digest = serialize_untrusted("tool_output", body.as_bytes(), "finding");
+                let evidence = EvidenceRef::cite(ordinal, &shape.evidence);
+                req.push_finding(SectionEntry::unverified_finding(&shape, &evidence, &digest))?;
+                true
+            }
+            _ => false,
+        };
+        if admitted {
+            counts.accepted += 1;
+        } else {
+            counts.refused += 1;
+        }
+    }
+    Ok(counts)
+}
+
+/// The pack key's inputs for one investigation.
+///
+/// **The seed's HASH, not its text.** Keying on the raw bytes would be
+/// the only place in this verb that kept them; keying on neither made
+/// every investigation of the same KIND share one `pack_key` — and the
+/// pack key IS the identity of the inputs, so a cache keyed on it
+/// would have served one seed's pack for another's. The hash is the
+/// same trade `SeedDescriptor::ErrorSignature` already makes ("the
+/// signature TEXT is untrusted tool output; its hash is not, so the hash
+/// is what rides"), and it renders nowhere: `PackKeyInputs::query` is
+/// fed to `pack_key_for` and is not a field of the serialized pack.
+fn pack_key_inputs(seed_kind: &str, seed_text: &str, accepted: usize) -> PackKeyInputs {
+    PackKeyInputs {
+        query: format!(
+            "investigate:{seed_kind}:{}:{accepted}",
+            rift_hashchain::leaf_hash(seed_text.as_bytes())
+        ),
+        ranked: Vec::new(),
+        policy_version: 1,
+        token_budget: DEFAULT_INVESTIGATION_PACK_TOKENS,
+    }
 }
 
 /// Cheap well-formedness, BEFORE any store is touched: no ASCII control byte

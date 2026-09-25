@@ -173,20 +173,58 @@ pub(crate) async fn checkpoint_explain(
         .as_ref()
         .and_then(|w| w.read_artifact_any(&id, "metadata.json").ok().flatten())
         .and_then(|b| serde_json::from_slice(&b).ok());
-    let created_at = store
-        .query_opt_i64(
-            "SELECT created_at FROM checkpoint WHERE checkpoint_id = ?",
-            &[Value::text(id.clone())],
-        )
-        .await?
-        // The pre-fix sentinel (`-1`) is "no recorded time", classified here
-        // exactly as `provenance::checkpoint_facts` classifies it — the JSON
-        // answers null and the human header answers `?`, never an instant
-        // that does not exist.
-        .filter(|&ms| ms != rift_shadow::CREATED_AT_UNKNOWN);
+    let created_at = recorded_created_at(store, &id).await?;
     let sessions = session_rows(store, &id).await?;
     let worktree = checkpoint_worktree(store, &id).await;
-    let digests: Vec<(&str, Option<serde_json::Value>)> = walker.as_ref().map_or_else(
+    let digests = digests_of(walker.as_ref(), &id);
+    let prompt = match depth {
+        Depth::Short => None,
+        _ => Some(prompt_from_shard(root, &id)),
+    };
+    let attribution = attribution_rows(store, &id).await?;
+    let costs = session_costs(store, &sessions).await?;
+    let transcript = match depth {
+        Depth::Full => walker.as_ref().and_then(|w| transcript_of(w, &id)),
+        _ => None,
+    };
+    Ok(render(&View {
+        id,
+        depth,
+        meta,
+        created_at,
+        sessions,
+        digests,
+        prompt,
+        attribution,
+        costs,
+        transcript,
+        worktree,
+    }))
+}
+
+/// The checkpoint's recorded creation time, `None` when none was recorded.
+///
+/// The pre-fix sentinel (`-1`) is "no recorded time", classified here exactly
+/// as `provenance::checkpoint_facts` classifies it — the JSON answers null and
+/// the human header answers `?`, never an instant that does not exist.
+async fn recorded_created_at(store: &SqliteStore, id: &str) -> Result<Option<i64>> {
+    Ok(store
+        .query_opt_i64(
+            "SELECT created_at FROM checkpoint WHERE checkpoint_id = ?",
+            &[Value::text(id.to_owned())],
+        )
+        .await?
+        .filter(|&ms| ms != rift_shadow::CREATED_AT_UNKNOWN))
+}
+
+/// Every digest family in its fixed order, each parsed when the shard is here;
+/// without a shard walker every family is listed as absent rather than
+/// dropped, so the view always names all four.
+fn digests_of(
+    walker: Option<&ShardWalker>,
+    id: &str,
+) -> Vec<(&'static str, Option<serde_json::Value>)> {
+    walker.map_or_else(
         || {
             vec![
                 ("digest.failures.json", None),
@@ -203,49 +241,39 @@ pub(crate) async fn checkpoint_explain(
                 "digest.shape.json",
             ]
             .into_iter()
-            .map(|n| (n, digest(w, &id, n)))
+            .map(|n| (n, digest(w, id, n)))
             .collect()
         },
-    );
-    let prompt = match depth {
-        Depth::Short => None,
-        _ => Some(prompt_from_shard(root, &id)),
-    };
-    let attribution = attribution_rows(store, &id).await?;
+    )
+}
+
+/// The cost of the first four sessions the checkpoint recorded, skipping any
+/// session without a cost row.
+async fn session_costs(store: &SqliteStore, sessions: &[SessionRow]) -> Result<Vec<CostView>> {
     let mut costs = Vec::new();
     for s in sessions.iter().take(4) {
         if let Some(c) = session_cost(store, &s.session_id).await? {
             costs.push(c);
         }
     }
-    let transcript = match depth {
-        Depth::Full => walker.as_ref().and_then(|w| {
-            w.read_artifact_any(&id, "transcript.compact.jsonl")
+    Ok(costs)
+}
+
+/// The shard's transcript for `--full`: the compact form when the shard has
+/// one, the full log otherwise.
+fn transcript_of(walker: &ShardWalker, id: &str) -> Option<(&'static str, Vec<u8>)> {
+    walker
+        .read_artifact_any(id, "transcript.compact.jsonl")
+        .ok()
+        .flatten()
+        .map(|b| ("transcript.compact.jsonl", b))
+        .or_else(|| {
+            walker
+                .read_artifact_any(id, "full.jsonl")
                 .ok()
                 .flatten()
-                .map(|b| ("transcript.compact.jsonl", b))
-                .or_else(|| {
-                    w.read_artifact_any(&id, "full.jsonl")
-                        .ok()
-                        .flatten()
-                        .map(|b| ("full.jsonl", b))
-                })
-        }),
-        _ => None,
-    };
-    Ok(render(&View {
-        id,
-        depth,
-        meta,
-        created_at,
-        sessions,
-        digests,
-        prompt,
-        attribution,
-        costs,
-        transcript,
-        worktree,
-    }))
+                .map(|b| ("full.jsonl", b))
+        })
 }
 
 /// One session the checkpoint recorded, label-filtered for the terminal.

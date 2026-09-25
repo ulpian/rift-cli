@@ -309,18 +309,7 @@ pub(crate) fn cmd_export(
     };
     let segment = rt.block_on(rift_store::export_segment(store, &from))?;
 
-    // Which of the two refs this repository actually has. A repository with no
-    // chain ref yet exports a bundle carrying only the checkpoint branch, which
-    // is honest rather than an error.
-    let mut ref_list: Vec<BundledRef> = Vec::new();
-    for name in BUNDLED_REFS {
-        if let Some(oid) = rift_git::resolve_commit(&repo, name)? {
-            ref_list.push(BundledRef {
-                name: name.to_owned(),
-                target: oid,
-            });
-        }
-    }
+    let ref_list = present_refs(&repo)?;
     if ref_list.is_empty() {
         return Ok(Outcome::coded(
             exit::PRECONDITION,
@@ -330,25 +319,7 @@ pub(crate) fn cmd_export(
     }
 
     let path = out.map_or_else(|| root.join("rift-bundle.riftbundle"), Path::to_path_buf);
-    let tmp = path.with_extension("gitbundle.tmp");
-    let _ = std::fs::remove_file(&tmp);
-    let mut args = vec![
-        "bundle".to_owned(),
-        "create".to_owned(),
-        "--quiet".to_owned(),
-        tmp.display().to_string(),
-    ];
-    for r in &ref_list {
-        args.push(r.name.clone());
-    }
-    let (ok, _) = rift_git::run_git_status(&repo, &args, &[], &[])?;
-    if !ok {
-        return Err(RiftError::storage(
-            "bundle export: git could not write a bundle",
-        ));
-    }
-    let gitbundle = std::fs::read(&tmp)?;
-    let _ = std::fs::remove_file(&tmp);
+    let gitbundle = create_git_bundle(&repo, &path, &ref_list)?;
 
     let segment_bytes = segment.encode().into_bytes();
     let manifest = BundleManifest {
@@ -356,7 +327,7 @@ pub(crate) fn cmd_export(
         repo_id: rift_git::repo_id_for(&repo.work_tree)?.as_str().to_owned(),
         from_cursor: segment.from_cursor().to_string(),
         to_cursor: segment.to_cursor().to_string(),
-        ref_list: ref_list.clone(),
+        ref_list,
         chain_head: segment.to_cursor().checkpoint_id().to_owned(),
         segment_sha256: sha256_hex(&segment_bytes),
         gitbundle_sha256: sha256_hex(&gitbundle),
@@ -367,14 +338,67 @@ pub(crate) fn cmd_export(
         &path,
         encode_container(&manifest_bytes, &segment_bytes, &gitbundle),
     )?;
+    Ok(exported_outcome(&manifest, segment.links().len(), &path))
+}
 
-    Ok(Outcome::ok(
+/// Which of the two bundled refs this repository actually has.
+///
+/// A repository with no chain ref yet exports a bundle carrying only the
+/// checkpoint branch, which is honest rather than an error.
+fn present_refs(repo: &rift_git::RepoPaths) -> Result<Vec<BundledRef>> {
+    let mut ref_list: Vec<BundledRef> = Vec::new();
+    for name in BUNDLED_REFS {
+        if let Some(oid) = rift_git::resolve_commit(repo, name)? {
+            ref_list.push(BundledRef {
+                name: name.to_owned(),
+                target: oid,
+            });
+        }
+    }
+    Ok(ref_list)
+}
+
+/// Have git write the git-bundle part for `ref_list`, and read its bytes back.
+///
+/// Git writes to a scratch file beside the container's destination, which is
+/// removed before and after, so a stale scratch file from an interrupted run
+/// never becomes a part.
+fn create_git_bundle(
+    repo: &rift_git::RepoPaths,
+    path: &Path,
+    ref_list: &[BundledRef],
+) -> Result<Vec<u8>> {
+    let tmp = path.with_extension("gitbundle.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut args = vec![
+        "bundle".to_owned(),
+        "create".to_owned(),
+        "--quiet".to_owned(),
+        tmp.display().to_string(),
+    ];
+    for r in ref_list {
+        args.push(r.name.clone());
+    }
+    let (ok, _) = rift_git::run_git_status(repo, &args, &[], &[])?;
+    if !ok {
+        return Err(RiftError::storage(
+            "bundle export: git could not write a bundle",
+        ));
+    }
+    let gitbundle = std::fs::read(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    Ok(gitbundle)
+}
+
+/// The human line and the JSON document for one written bundle.
+fn exported_outcome(manifest: &BundleManifest, links: usize, path: &Path) -> Outcome {
+    Outcome::ok(
         format!(
             "bundle export: {} -> {} ({} ref(s), {} link(s)) -> {}",
             manifest.from_cursor,
             manifest.to_cursor,
-            ref_list.len(),
-            segment.links().len(),
+            manifest.ref_list.len(),
+            links,
             path.display()
         ),
         serde_json::json!({
@@ -383,10 +407,10 @@ pub(crate) fn cmd_export(
             "from_cursor": manifest.from_cursor,
             "to_cursor": manifest.to_cursor,
             "chain_head": manifest.chain_head,
-            "refs": ref_list.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
-            "links": segment.links().len(),
+            "refs": manifest.ref_list.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            "links": links,
         }),
-    ))
+    )
 }
 
 /// Everything a bundle claims, checked without touching the object store.
@@ -398,6 +422,22 @@ struct Verified {
     /// attaches to THIS repository's chain (step 6b), which the offline half
     /// cannot know.
     segment: ChainSegment,
+}
+
+/// One ref move: the ref, the oid it moves to, and the oid it must be at now
+/// ([`ZERO_OID`] when it must not exist yet).
+struct RefUpdate {
+    name: String,
+    new: String,
+    old: String,
+}
+
+/// What applying a verified bundle will do to this repository's refs.
+struct UpdatePlan {
+    /// The refs that move, every one a fast-forward or a creation.
+    updates: Vec<RefUpdate>,
+    /// The refs already at the bundled target.
+    already: usize,
 }
 
 /// The offline half of import: frame, digests, segment, and agreement between
@@ -510,7 +550,7 @@ fn verify_offline(bytes: &[u8]) -> Result<Verified> {
 /// object or ref moves; only the *durable projection* of what it attests is
 /// left to `rebuild`, which has the real data to write.
 ///
-/// **Step 6b — the segment attaches to this repository's chain (2026-08-29).**
+/// **Step 6b — the segment attaches to this repository's chain.**
 /// Refs-only does not mean attach-blind: the chain ref's checkpoint ids
 /// (oldest first, [`rift_git::chain::read_order`]) are the local chain, and
 /// [`rift_store::attaches_by`] — the SAME predicate `import_segment` runs
@@ -524,7 +564,6 @@ fn verify_offline(bytes: &[u8]) -> Result<Verified> {
 /// # Errors
 /// [`RiftError`] on any verification failure — with nothing applied — or when
 /// git fails.
-#[allow(clippy::too_many_lines)] // one linear verify -> apply flow; the ORDER is the contract
 pub(crate) fn cmd_import(root: &Path, file: &Path) -> Result<Outcome> {
     let repo = rift_git::discover(root)?;
     let bytes = std::fs::read(file)?;
@@ -549,43 +588,78 @@ pub(crate) fn cmd_import(root: &Path, file: &Path) -> Result<Outcome> {
     // move any local ref.
     let tmp = repo.git_dir.join("rift-import.gitbundle.tmp");
     std::fs::write(&tmp, &verified.gitbundle)?;
+    verify_git_bundle(&repo, &tmp)?;
+    check_heads(&repo, &tmp, &verified.manifest.ref_list)?;
+    unbundle(&repo, &tmp)?;
+
+    let plan = plan_updates(&repo, &verified.manifest.ref_list)?;
+    apply_updates(&repo, &plan.updates)?;
+    Ok(imported_outcome(&verified, &plan))
+}
+
+/// Ask git whether the written git-bundle part is whole; the scratch file is
+/// removed on a refusal.
+fn verify_git_bundle(repo: &rift_git::RepoPaths, tmp: &Path) -> Result<()> {
     let verify_args = vec![
         "bundle".to_owned(),
         "verify".to_owned(),
         "--quiet".to_owned(),
         tmp.display().to_string(),
     ];
-    let (ok, _) = rift_git::run_git_status(&repo, &verify_args, &[], &[])?;
+    let (ok, _) = rift_git::run_git_status(repo, &verify_args, &[], &[])?;
     if !ok {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(tmp);
         return Err(RiftError::Integrity(
             "bundle: git refused the bundle as damaged or incomplete".to_owned(),
         ));
     }
+    Ok(())
+}
 
-    // From the blind review of this format: the field table asserts `ref_list` IS
-    // "every ref the gitbundle part carries", but nothing checked that claim
-    // before this — steps 1-6 read `ref_list` from the manifest's own JSON,
-    // and steps 8-9 below only ever WALK the declared list, never cross-check
-    // it against what the bundle itself contains. Demonstrated: an empty
-    // `ref_list` accompanying a git-bundle part that actually carries two
-    // heads was ACCEPTED. `git bundle list-heads` reads the same plaintext
-    // header `bundle verify` just accepted; comparing its output to
-    // `ref_list` as a set costs one more git invocation and closes the gap
-    // between what the manifest claims and what the bundle carries.
+/// The manifest's `ref_list` must be exactly the heads the git bundle carries.
+///
+/// From the blind review of this format: the field table asserts `ref_list` IS
+/// "every ref the gitbundle part carries", but nothing checked that claim
+/// before this — steps 1-6 read `ref_list` from the manifest's own JSON,
+/// and steps 8-9 only ever WALK the declared list, never cross-check
+/// it against what the bundle itself contains. Demonstrated: an empty
+/// `ref_list` accompanying a git-bundle part that actually carries two
+/// heads was ACCEPTED. `git bundle list-heads` reads the same plaintext
+/// header `bundle verify` just accepted; comparing its output to
+/// `ref_list` as a set costs one more git invocation and closes the gap
+/// between what the manifest claims and what the bundle carries.
+fn check_heads(repo: &rift_git::RepoPaths, tmp: &Path, ref_list: &[BundledRef]) -> Result<()> {
     let heads_args = vec![
         "bundle".to_owned(),
         "list-heads".to_owned(),
         tmp.display().to_string(),
     ];
-    let (ok, out) = rift_git::run_git_status(&repo, &heads_args, &[], &[])?;
+    let (ok, out) = rift_git::run_git_status(repo, &heads_args, &[], &[])?;
     if !ok {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(tmp);
         return Err(RiftError::Integrity(
             "bundle: git could not list the git bundle's heads".to_owned(),
         ));
     }
-    let text = std::str::from_utf8(&out)
+    let actual_heads = parse_heads(&out)?;
+    let claimed_heads: BTreeSet<(String, String)> = ref_list
+        .iter()
+        .map(|r| (r.name.clone(), r.target.clone()))
+        .collect();
+    if actual_heads != claimed_heads {
+        let _ = std::fs::remove_file(tmp);
+        return Err(RiftError::Integrity(
+            "bundle: the manifest's ref_list does not match the heads the git bundle \
+             actually carries"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// `git bundle list-heads` output as a set of `(name, oid)` pairs.
+fn parse_heads(out: &[u8]) -> Result<BTreeSet<(String, String)>> {
+    let text = std::str::from_utf8(out)
         .map_err(|_| RiftError::Integrity("bundle: git bundle heads are not UTF-8".to_owned()))?;
     let mut actual_heads = BTreeSet::new();
     for line in text.lines() {
@@ -596,43 +670,40 @@ pub(crate) fn cmd_import(root: &Path, file: &Path) -> Result<Outcome> {
         })?;
         actual_heads.insert((name.to_owned(), oid.to_owned()));
     }
-    let claimed_heads: BTreeSet<(String, String)> = verified
-        .manifest
-        .ref_list
-        .iter()
-        .map(|r| (r.name.clone(), r.target.clone()))
-        .collect();
-    if actual_heads != claimed_heads {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(RiftError::Integrity(
-            "bundle: the manifest's ref_list does not match the heads the git bundle \
-             actually carries"
-                .to_owned(),
-        ));
-    }
+    Ok(actual_heads)
+}
 
+/// Write the bundle's objects into this repository; the scratch file is
+/// removed whether git succeeds or not.
+fn unbundle(repo: &rift_git::RepoPaths, tmp: &Path) -> Result<()> {
     let unbundle_args = vec![
         "bundle".to_owned(),
         "unbundle".to_owned(),
         tmp.display().to_string(),
     ];
-    let (ok, _) = rift_git::run_git_status(&repo, &unbundle_args, &[], &[])?;
-    let _ = std::fs::remove_file(&tmp);
+    let (ok, _) = rift_git::run_git_status(repo, &unbundle_args, &[], &[])?;
+    let _ = std::fs::remove_file(tmp);
     if !ok {
         return Err(RiftError::Integrity(
             "bundle: git could not read the bundle's objects".to_owned(),
         ));
     }
+    Ok(())
+}
 
-    // Every ref must be a fast-forward before ANY of them moves. A bundle whose
-    // history diverges from this repository's is refused whole: these refs are
-    // append-only, so a non-fast-forward is a disagreement about what happened,
-    // not an update.
-    let mut updates: Vec<(String, String, String)> = Vec::new();
-    let mut already = 0usize;
-    for r in &verified.manifest.ref_list {
+/// Every ref must be a fast-forward before ANY of them moves.
+///
+/// A bundle whose history diverges from this repository's is refused whole:
+/// these refs are append-only, so a non-fast-forward is a disagreement about
+/// what happened, not an update.
+fn plan_updates(repo: &rift_git::RepoPaths, ref_list: &[BundledRef]) -> Result<UpdatePlan> {
+    let mut plan = UpdatePlan {
+        updates: Vec::new(),
+        already: 0,
+    };
+    for r in ref_list {
         let (present, _) = rift_git::run_git_status(
-            &repo,
+            repo,
             &["cat-file".to_owned(), "-e".to_owned(), r.target.clone()],
             &[],
             &[],
@@ -643,74 +714,93 @@ pub(crate) fn cmd_import(root: &Path, file: &Path) -> Result<Outcome> {
                 r.name
             )));
         }
-        let local = rift_git::resolve_commit(&repo, &r.name)?;
-        match local {
-            None => updates.push((r.name.clone(), r.target.clone(), ZERO_OID.to_owned())),
-            Some(cur) if cur == r.target => already += 1,
-            Some(cur) => {
-                let (ff, _) = rift_git::run_git_status(
-                    &repo,
-                    &[
-                        "merge-base".to_owned(),
-                        "--is-ancestor".to_owned(),
-                        cur.clone(),
-                        r.target.clone(),
-                    ],
-                    &[],
-                    &[],
-                )?;
-                if !ff {
-                    return Err(RiftError::Integrity(format!(
-                        "bundle: {} would not fast-forward — the bundle's history and this \
-                         repository's disagree, so nothing was applied",
-                        r.name
-                    )));
-                }
-                updates.push((r.name.clone(), r.target.clone(), cur));
+        let old = match rift_git::resolve_commit(repo, &r.name)? {
+            None => ZERO_OID.to_owned(),
+            Some(cur) if cur == r.target => {
+                plan.already += 1;
+                continue;
             }
-        }
+            Some(cur) => fast_forward_from(repo, r, cur)?,
+        };
+        plan.updates.push(RefUpdate {
+            name: r.name.clone(),
+            new: r.target.clone(),
+            old,
+        });
     }
+    Ok(plan)
+}
 
-    // One transaction: `update-ref --stdin` applies every line or none, so a
-    // concurrent writer cannot leave half a bundle applied.
-    if !updates.is_empty() {
-        let mut stdin = String::new();
-        for (name, new, old) in &updates {
-            stdin.push_str(&format!("update {name} {new} {old}\n"));
-        }
-        let (ok, _) = rift_git::run_git_status(
-            &repo,
-            &["update-ref".to_owned(), "--stdin".to_owned()],
-            stdin.as_bytes(),
-            &[],
-        )?;
-        if !ok {
-            return Err(RiftError::Integrity(
-                "bundle: the ref transaction was refused; nothing was applied".to_owned(),
-            ));
-        }
+/// `cur`, when the bundled target descends from it; a refusal otherwise.
+fn fast_forward_from(repo: &rift_git::RepoPaths, r: &BundledRef, cur: String) -> Result<String> {
+    let (ff, _) = rift_git::run_git_status(
+        repo,
+        &[
+            "merge-base".to_owned(),
+            "--is-ancestor".to_owned(),
+            cur.clone(),
+            r.target.clone(),
+        ],
+        &[],
+        &[],
+    )?;
+    if !ff {
+        return Err(RiftError::Integrity(format!(
+            "bundle: {} would not fast-forward — the bundle's history and this \
+             repository's disagree, so nothing was applied",
+            r.name
+        )));
     }
+    Ok(cur)
+}
 
-    Ok(Outcome::ok(
+/// Move every planned ref in one transaction: `update-ref --stdin` applies
+/// every line or none, so a concurrent writer cannot leave half a bundle
+/// applied.
+fn apply_updates(repo: &rift_git::RepoPaths, updates: &[RefUpdate]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut stdin = String::new();
+    for RefUpdate { name, new, old } in updates {
+        stdin.push_str(&format!("update {name} {new} {old}\n"));
+    }
+    let (ok, _) = rift_git::run_git_status(
+        repo,
+        &["update-ref".to_owned(), "--stdin".to_owned()],
+        stdin.as_bytes(),
+        &[],
+    )?;
+    if !ok {
+        return Err(RiftError::Integrity(
+            "bundle: the ref transaction was refused; nothing was applied".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// The human line and the JSON document for one applied bundle.
+fn imported_outcome(verified: &Verified, plan: &UpdatePlan) -> Outcome {
+    Outcome::ok(
         format!(
             "bundle import: {} ref(s) applied, {} already present ({} link(s) verified, \
              window {} -> {})",
-            updates.len(),
-            already,
+            plan.updates.len(),
+            plan.already,
             verified.segment.links().len(),
             verified.manifest.from_cursor,
             verified.manifest.to_cursor
         ),
         serde_json::json!({
-            "applied": updates.iter().map(|(n, _, _)| n.clone()).collect::<Vec<_>>(),
-            "already_present": already,
+            "applied": plan.updates.iter().map(|update| update.name.clone()).collect::<Vec<_>>(),
+            "already_present": plan.already,
             "links": verified.segment.links().len(),
             "from_cursor": verified.manifest.from_cursor,
             "to_cursor": verified.manifest.to_cursor,
             "chain_head": verified.manifest.chain_head,
             "repo_id": verified.manifest.repo_id,
         }),
-    ))
+    )
 }
 
 #[cfg(test)]

@@ -258,91 +258,108 @@ pub(crate) fn cmd_init(root: &Path, now_ms: i64) -> Result<Outcome> {
     // repeated over the same branch produces byte-identical entries.
     let date = now_ms / 1000;
     match chain::init_from_branch(&git_dir, CHECKPOINT_BRANCH, date) {
-        Ok(0) => Ok(Outcome::ok(
-            format!(
-                "chain init: no checkpoints on {CHECKPOINT_BRANCH} — nothing to record.\n  \
-                 The chain begins with the first archived checkpoint."
-            ),
-            serde_json::json!({
-                "ref": chain::CHAIN_REF,
-                "branch": CHECKPOINT_BRANCH,
-                "entries": 0,
-                "head_entry": serde_json::Value::Null,
-                "head_checkpoint": serde_json::Value::Null,
-            }),
-        )),
-        Ok(n) => {
-            let (entry, checkpoint) = head(&git_dir)?;
-            // The follow-up is named, because init alone is not the end of the
-            // repair. `rift verify` compares the projection against the order
-            // this just wrote; a projection that is BEHIND the branch reads as
-            // TAMPER, not as "incomplete" — so an operator who runs init on a
-            // repository whose projection was levelled, and stops there, is
-            // handed a tamper verdict for a repository that is fine.
-            let human = format!(
-                "chain init: {n} entries written to {}\n  head entry:      {}\n  head checkpoint: \
-                 {}\n  Next: run `rift rebuild`. Until the projection is caught up with the \
-                 branch, `rift verify` reports TAMPER — a projection behind its git is not \
-                 distinguishable from a rewritten one.",
-                chain::CHAIN_REF,
-                entry.clone().unwrap_or_else(|| "(unreadable)".into()),
-                checkpoint.clone().unwrap_or_else(|| "(unreadable)".into()),
-            );
-            Ok(Outcome::ok(
-                human,
-                serde_json::json!({
-                    "ref": chain::CHAIN_REF,
-                    "branch": CHECKPOINT_BRANCH,
-                    "entries": n,
-                    "head_entry": entry,
-                    "head_checkpoint": checkpoint,
-                }),
-            ))
-        }
+        Ok(0) => Ok(nothing_to_record()),
+        Ok(n) => recorded(&git_dir, n),
         // The ref is already there. Say what that means rather than echoing an
         // error type: a second init would have to move entries that are already
         // published, which is a rewrite wearing an initializer's name.
-        Err(RiftError::Immutability(_)) => {
-            let order = chain::read_order(&git_dir)?;
-            let (entry, checkpoint) = head(&git_dir)?;
-            let human = format!(
-                "chain init: refused — the chain ref already exists; a second init is a rewrite \
-                 wearing an initializer's name.\n  {} already records {} position(s); head \
-                 checkpoint {}.\n  Nothing was written. Newly archived checkpoints extend it on \
-                 their own; `rift chain status` shows where it stands.",
-                chain::CHAIN_REF,
-                order.len(),
-                checkpoint.clone().unwrap_or_else(|| "(unreadable)".into()),
-            );
-            Ok(Outcome::coded(
-                exit::INTEGRITY,
-                human,
-                serde_json::json!({
-                    "error": "chain_exists",
-                    "ref": chain::CHAIN_REF,
-                    "positions": order.len(),
-                    "head_entry": entry,
-                    "head_checkpoint": checkpoint,
-                }),
-            ))
-        }
+        Err(RiftError::Immutability(_)) => chain_exists(&git_dir),
         // A non-linear graph is reported, never linearized around.
-        Err(RiftError::Integrity(detail)) => Ok(Outcome::coded(
-            exit::INTEGRITY,
-            format!(
-                "chain init: refused — {detail}.\n  The checkpoint branch's first-parent history \
-                 is the only witness to the write order, and a branch that forked and merged has \
-                 no single one. Nothing was written."
-            ),
-            serde_json::json!({
-                "error": "branch_not_linear",
-                "ref": chain::CHAIN_REF,
-                "branch": CHECKPOINT_BRANCH,
-                "detail": detail,
-            }),
-        )),
+        Err(RiftError::Integrity(detail)) => Ok(branch_not_linear(&detail)),
         Err(e) => Err(e),
     }
+}
+
+/// `chain init` over a checkpoint branch with no checkpoints: nothing written.
+fn nothing_to_record() -> Outcome {
+    Outcome::ok(
+        format!(
+            "chain init: no checkpoints on {CHECKPOINT_BRANCH} — nothing to record.\n  \
+             The chain begins with the first archived checkpoint."
+        ),
+        serde_json::json!({
+            "ref": chain::CHAIN_REF,
+            "branch": CHECKPOINT_BRANCH,
+            "entries": 0,
+            "head_entry": serde_json::Value::Null,
+            "head_checkpoint": serde_json::Value::Null,
+        }),
+    )
+}
+
+/// `chain init` wrote `n` entries: report the head it now records.
+///
+/// The follow-up is named, because init alone is not the end of the repair.
+/// `rift verify` compares the projection against the order this just wrote; a
+/// projection that is BEHIND the branch reads as TAMPER, not as "incomplete" —
+/// so an operator who runs init on a repository whose projection was levelled,
+/// and stops there, is handed a tamper verdict for a repository that is fine.
+fn recorded(git_dir: &Path, n: usize) -> Result<Outcome> {
+    let (entry, checkpoint) = head(git_dir)?;
+    let human = format!(
+        "chain init: {n} entries written to {}\n  head entry:      {}\n  head checkpoint: \
+         {}\n  Next: run `rift rebuild`. Until the projection is caught up with the \
+         branch, `rift verify` reports TAMPER — a projection behind its git is not \
+         distinguishable from a rewritten one.",
+        chain::CHAIN_REF,
+        entry.clone().unwrap_or_else(|| "(unreadable)".into()),
+        checkpoint.clone().unwrap_or_else(|| "(unreadable)".into()),
+    );
+    Ok(Outcome::ok(
+        human,
+        serde_json::json!({
+            "ref": chain::CHAIN_REF,
+            "branch": CHECKPOINT_BRANCH,
+            "entries": n,
+            "head_entry": entry,
+            "head_checkpoint": checkpoint,
+        }),
+    ))
+}
+
+/// `chain init` refused because the chain ref already exists; nothing was
+/// written, and the report says where the existing chain stands.
+fn chain_exists(git_dir: &Path) -> Result<Outcome> {
+    let order = chain::read_order(git_dir)?;
+    let (entry, checkpoint) = head(git_dir)?;
+    let human = format!(
+        "chain init: refused — the chain ref already exists; a second init is a rewrite \
+         wearing an initializer's name.\n  {} already records {} position(s); head \
+         checkpoint {}.\n  Nothing was written. Newly archived checkpoints extend it on \
+         their own; `rift chain status` shows where it stands.",
+        chain::CHAIN_REF,
+        order.len(),
+        checkpoint.clone().unwrap_or_else(|| "(unreadable)".into()),
+    );
+    Ok(Outcome::coded(
+        exit::INTEGRITY,
+        human,
+        serde_json::json!({
+            "error": "chain_exists",
+            "ref": chain::CHAIN_REF,
+            "positions": order.len(),
+            "head_entry": entry,
+            "head_checkpoint": checkpoint,
+        }),
+    ))
+}
+
+/// `chain init` refused a checkpoint branch that forked and merged.
+fn branch_not_linear(detail: &str) -> Outcome {
+    Outcome::coded(
+        exit::INTEGRITY,
+        format!(
+            "chain init: refused — {detail}.\n  The checkpoint branch's first-parent history \
+             is the only witness to the write order, and a branch that forked and merged has \
+             no single one. Nothing was written."
+        ),
+        serde_json::json!({
+            "error": "branch_not_linear",
+            "ref": chain::CHAIN_REF,
+            "branch": CHECKPOINT_BRANCH,
+            "detail": detail,
+        }),
+    )
 }
 
 /// `rift chain status` — read-only: how many positions the order records, and
