@@ -144,4 +144,17 @@ mod tests {
         }
         assert_eq!(legs.len(), 7, "every leg reports, built or not");
     }
+
+    /// The decision-path walk is dispatched by the runner, not only callable:
+    /// its planting tests call the walk directly, so they would stay green
+    /// with the leg dropped from the command.
+    #[test]
+    fn the_runner_dispatches_the_decision_path_walk() {
+        let legs = run_all(&crate::workspace_root()).expect("every leg runs");
+        assert!(
+            legs.iter().any(|leg| leg.name == "no-store-on-gate-path"),
+            "{:?}",
+            legs.iter().map(|leg| leg.name).collect::<Vec<_>>()
+        );
+    }
 }

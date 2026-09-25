@@ -95,36 +95,8 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
     // One object on stdout, composed in the one place a decision about a tool
     // call becomes JSON. A family without a confirmed reason channel answers
     // its neutral response there and the call runs, whatever this decided.
-    // A document read is answered about the call the agent is making; a
-    // decline of an unchanged re-read is about lines of a file that can be
-    // read as lines. Only one of the two can ever be about the same call, and
-    // the document answer is the one that knows the bytes are a container.
     let decision = if failure.is_none() {
-        match document_decision(&document) {
-            Some(answered) => answered,
-            // A declined call has no input to amend, so the decline outranks
-            // the bound — and the two can never be about one call anyway: a
-            // content search delivers no lines of a file to hold.
-            None => match (decline.as_deref(), &search) {
-                (Some(reason), _) => rift_agent::respond::GateDecision::Deny { reason },
-                // A name search is answered instead of run; a content search
-                // runs with a bound it lacked. One call is never both, and
-                // neither is ever the other kind of thing: an answered listing
-                // carries no amendment, and a bounded search declines nothing.
-                (None, Some(crate::search_gate::SearchAnswer::Listing(reason))) => {
-                    rift_agent::respond::GateDecision::Deny { reason }
-                }
-                (None, Some(crate::search_gate::SearchAnswer::Cap(cap))) => {
-                    rift_agent::respond::GateDecision::Rewrite(
-                        rift_agent::respond::Rewrite::GrepHeadLimit {
-                            tool_input: &cap.tool_input,
-                            head_limit: cap.head_limit,
-                        },
-                    )
-                }
-                (None, None) => rift_agent::respond::GateDecision::Allow,
-            },
-        }
+        tool_call_decision(&document, decline.as_deref(), search.as_ref())
     } else {
         rift_agent::respond::GateDecision::Allow
     };
@@ -138,15 +110,8 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
         // `process::exit` below does not run destructors. Flush the native
         // response before best-effort bookkeeping so the client receives it
         // even when that bookkeeping fails.
-        {
-            use std::io::Write as _;
-            let mut stdout = std::io::stdout().lock();
-            if writeln!(stdout, "{response}")
-                .and_then(|()| stdout.flush())
-                .is_err()
-            {
-                failure = Some("hook response write failed");
-            }
+        if write_response(&response).is_err() {
+            failure = Some("hook response write failed");
         }
         let replacement_delivered = context.kind()
             == Some(rift_recall_types::ContextKind::ReadReplacement)
@@ -163,6 +128,54 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
     }
     record_hook_health(agent, failure);
     std::process::exit(0);
+}
+
+/// What the gates decided about this tool call, in the one shape the
+/// response is composed from.
+///
+/// A document read is answered about the call the agent is making; a decline
+/// of an unchanged re-read is about lines of a file that can be read as lines.
+/// Only one of the two can ever be about the same call, and the document
+/// answer is the one that knows the bytes are a container.
+fn tool_call_decision<'a>(
+    document: &'a Option<DocAnswer>,
+    decline: Option<&'a str>,
+    search: Option<&'a crate::search_gate::SearchAnswer>,
+) -> rift_agent::respond::GateDecision<'a> {
+    use crate::search_gate::SearchAnswer;
+    use rift_agent::respond::{GateDecision, Rewrite};
+
+    if let Some(answered) = document_decision(document) {
+        return answered;
+    }
+    // A declined call has no input to amend, so the decline outranks the
+    // bound — and the two can never be about one call anyway: a content
+    // search delivers no lines of a file to hold.
+    match (decline, search) {
+        (Some(reason), _) => GateDecision::Deny { reason },
+        // A name search is answered instead of run; a content search runs
+        // with a bound it lacked. One call is never both, and neither is ever
+        // the other kind of thing: an answered listing carries no amendment,
+        // and a bounded search declines nothing.
+        (None, Some(SearchAnswer::Listing(reason))) => GateDecision::Deny { reason },
+        (None, Some(SearchAnswer::Cap(cap))) => GateDecision::Rewrite(Rewrite::GrepHeadLimit {
+            tool_input: &cap.tool_input,
+            head_limit: cap.head_limit,
+        }),
+        (None, None) => GateDecision::Allow,
+    }
+}
+
+/// Write the native response and flush it.
+///
+/// `process::exit` does not run destructors, so the flush is explicit: the
+/// response reaches the client before the best-effort bookkeeping that follows
+/// it, even when that bookkeeping fails.
+fn write_response(response: &serde_json::Value) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{response}")?;
+    stdout.flush()
 }
 
 pub(super) fn hook_health_path(repo: &Path, agent: &str) -> PathBuf {
@@ -826,6 +839,36 @@ mod injection_tests {
         }
     }
 
+    /// A Recall-enabled repository set up on this machine, and the path of
+    /// its family's recall store.
+    ///
+    /// A real gitdir, because injection books its spend in the FAMILY's recall
+    /// store and a family belongs to a repository. The projection lives in the
+    /// machine cache, keyed by this temp repo's family (which adopts the main
+    /// work tree's legacy ids, so it is this path's) — so it is the test's to
+    /// create and, through [`drop_recall_repo`], the test's to remove.
+    fn recall_repo() -> (tempfile::TempDir, PathBuf) {
+        let repo = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(repo.path()).unwrap();
+        std::fs::create_dir_all(repo.path().join(".rift")).unwrap();
+        std::fs::write(
+            repo.path().join(".rift").join("config.toml"),
+            "schema_version = 1\n[project]\nname = \"t\"\n[features]\ntotal_recall = true\n",
+        )
+        .unwrap();
+        let db = rift_store::recall_db_for_repo(repo.path()).unwrap();
+        set_up_here(repo.path());
+        (repo, db)
+    }
+
+    /// Remove what [`recall_repo`] created under the machine cache.
+    fn drop_recall_repo(repo: &tempfile::TempDir, db: &Path) {
+        if let Some(dir) = db.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        drop_projection_store(repo.as_root());
+    }
+
     /// The fixture's root for a cleanup, whether the test holds its `repo`
     /// as a `TempDir` or as a path — the tests spell it both ways.
     pub(in crate::hooks) trait AsRoot {
@@ -852,6 +895,8 @@ mod injection_tests {
     /// prompt is the one every turn has.
     const CC: rift_core::AgentId = rift_core::AgentId::CLAUDE_CODE;
     const PROMPT: &str = "UserPromptSubmit";
+    /// The prompt body the positive path is driven with.
+    const FIRST_PROMPT: &[u8] = br#"{"session_id":"s-1"}"#;
 
     /// The dedup property this surface guarantees: **at most one pointer per
     /// context window**, whatever the ids look like and however many times a
@@ -1073,19 +1118,10 @@ mod injection_tests {
     /// every later run of this test pass for the wrong reason.
     #[test]
     fn only_the_verified_channel_and_verb_can_inject() {
-        let repo = tempfile::tempdir().unwrap();
-        rift_git::test_support::fake_repo(repo.path()).unwrap();
-        std::fs::create_dir_all(repo.path().join(".rift")).unwrap();
-        std::fs::write(
-            repo.path().join(".rift").join("config.toml"),
-            "schema_version = 1\n[project]\nname = \"t\"\n[features]\ntotal_recall = true\n",
-        )
-        .unwrap();
         // Recall on and a projection of its own, so a refusal below is a fact
         // about the family and the verb — never about a repository that could
         // not have answered anyway.
-        let db = rift_store::recall_db_for_repo(repo.path()).unwrap();
-        set_up_here(repo.path());
+        let (repo, db) = recall_repo();
 
         for (agent, verb) in [
             ("claude-code", "PostToolUse"),
@@ -1138,10 +1174,7 @@ mod injection_tests {
             );
         }
 
-        if let Some(dir) = db.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-        drop_projection_store(repo.as_root());
+        drop_recall_repo(&repo, &db);
     }
 
     /// The positive path, end to end: on a Recall-enabled repository the first
@@ -1149,53 +1182,31 @@ mod injection_tests {
     /// silence, and the tokens the first one cost are booked as spend. Stated
     /// over the whole chain (config gate → claim → tokenizer → audit row)
     /// because the primitives were already green while the chain was what a
-    /// caller actually gets.
+    /// caller actually gets; the two booking tests below drive the same chain
+    /// through [`delivered_first_pointer`].
     #[test]
-    fn the_first_prompt_of_a_session_injects_once_and_books_the_spend() {
-        use rift_store::CanonicalStore as _;
-
-        let repo = tempfile::tempdir().unwrap();
-        // A real gitdir: injection books its spend in the FAMILY's recall
-        // store, and a family belongs to a repository.
-        rift_git::test_support::fake_repo(repo.path()).unwrap();
-        std::fs::create_dir_all(repo.path().join(".rift")).unwrap();
-        std::fs::write(
-            repo.path().join(".rift").join("config.toml"),
-            "schema_version = 1\n[project]\nname = \"t\"\n[features]\ntotal_recall = true\n",
-        )
-        .unwrap();
-        // The projection lives in the machine cache, keyed by this temp repo's
-        // family (which adopts the main work tree's legacy ids, so it is this
-        // path's) — so it is this test's to create and this test's to remove.
-        let db = rift_store::recall_db_for_repo(repo.path()).unwrap();
-        set_up_here(repo.path());
-
-        let body = br#"{"session_id":"s-1"}"#;
-        let pointer =
-            session_pointer_in(repo.path(), &CC, PROMPT, body).expect("the first prompt injects");
+    fn the_first_prompt_of_a_session_injects_once() {
+        let (repo, db) = recall_repo();
+        let pointer = session_pointer_in(repo.path(), &CC, PROMPT, FIRST_PROMPT)
+            .expect("the first prompt injects");
         assert!(
             pointer.contains("rift recall"),
             "the pointer must teach the skill surface: {pointer}"
         );
         assert_eq!(
-            session_pointer_in(repo.path(), &CC, PROMPT, body),
+            session_pointer_in(repo.path(), &CC, PROMPT, FIRST_PROMPT),
             None,
             "the same session's next prompt is silent"
         );
-        let plan = rift_recall_serve::ServeDispatcher::plan_context([
-            rift_recall_types::ContextCandidate {
-                kind: rift_recall_types::ContextKind::SessionPointer,
-                text: pointer.clone(),
-                avoided_tokens: 0,
-                fallback: false,
-            },
-        ]);
-        record_context_delivery_in(repo.path(), CC.as_str(), &plan);
+        drop_recall_repo(&repo, &db);
+    }
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+    #[test]
+    fn a_delivered_pointer_books_its_tokens_as_spend_and_claims_no_savings() {
+        use rift_store::CanonicalStore as _;
+
+        let (repo, db) = recall_repo();
+        let (pointer, rt, store) = delivered_first_pointer(repo.path(), &db);
         let rows = rt
             .block_on(store.query(
                 "SELECT tokens_returned, tokens_avoided FROM memd_audit_event \
@@ -1210,6 +1221,26 @@ mod injection_tests {
             "and the injection is the only row: it is audited under its own \
              verb, never doubled into the pull side's"
         );
+        assert_eq!(
+            u32::try_from(rows[0].get_i64(0).unwrap()).unwrap(),
+            rift_tokens::count(&pointer),
+            "spend is the real tokenizer's count of the injected text"
+        );
+        assert_eq!(
+            rows[0].get_i64(1).unwrap(),
+            0,
+            "injection claims no savings"
+        );
+        drop(store);
+        drop_recall_repo(&repo, &db);
+    }
+
+    #[test]
+    fn a_delivered_pointer_leaves_one_hook_channel_receipt() {
+        use rift_store::CanonicalStore as _;
+
+        let (repo, db) = recall_repo();
+        let (pointer, rt, store) = delivered_first_pointer(repo.path(), &db);
         let calls = rt
             .block_on(store.query(
                 "SELECT channel, tool_name, tokens_returned FROM serve_call_event",
@@ -1223,22 +1254,38 @@ mod injection_tests {
             u32::try_from(calls[0].get_i64(2).unwrap()).unwrap(),
             rift_tokens::count(&pointer)
         );
-        assert_eq!(
-            u32::try_from(rows[0].get_i64(0).unwrap()).unwrap(),
-            rift_tokens::count(&pointer),
-            "spend is the real tokenizer's count of the injected text"
-        );
-        assert_eq!(
-            rows[0].get_i64(1).unwrap(),
-            0,
-            "injection claims no savings"
-        );
-
         drop(store);
-        if let Some(dir) = db.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-        drop_projection_store(repo.as_root());
+        drop_recall_repo(&repo, &db);
+    }
+
+    /// The first prompt's pointer injected, the next prompt's silence met, and
+    /// the pointer delivered — then the family's recall store opened over what
+    /// the delivery booked, with the runtime to read it on.
+    fn delivered_first_pointer(
+        repo: &Path,
+        db: &Path,
+    ) -> (String, tokio::runtime::Runtime, rift_store::SqliteStore) {
+        let pointer =
+            session_pointer_in(repo, &CC, PROMPT, FIRST_PROMPT).expect("the first prompt injects");
+        assert_eq!(
+            session_pointer_in(repo, &CC, PROMPT, FIRST_PROMPT),
+            None,
+            "the same session's next prompt is silent"
+        );
+        let plan = rift_recall_serve::ServeDispatcher::plan_context([
+            rift_recall_types::ContextCandidate {
+                kind: rift_recall_types::ContextKind::SessionPointer,
+                text: pointer.clone(),
+                avoided_tokens: 0,
+                fallback: false,
+            },
+        ]);
+        record_context_delivery_in(repo, CC.as_str(), &plan);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let store = rift_store::open_migrated(db, &rift_store::recall_migrations()).unwrap();
+        (pointer, rt, store)
     }
 
     /// The window a subagent gets, through the same chain: the verb that opens
@@ -1251,16 +1298,7 @@ mod injection_tests {
     /// order they happened to arrive.
     #[test]
     fn a_subagents_window_is_introduced_at_the_verb_that_opens_it() {
-        let repo = tempfile::tempdir().unwrap();
-        rift_git::test_support::fake_repo(repo.path()).unwrap();
-        std::fs::create_dir_all(repo.path().join(".rift")).unwrap();
-        std::fs::write(
-            repo.path().join(".rift").join("config.toml"),
-            "schema_version = 1\n[project]\nname = \"t\"\n[features]\ntotal_recall = true\n",
-        )
-        .unwrap();
-        let db = rift_store::recall_db_for_repo(repo.path()).unwrap();
-        set_up_here(repo.path());
+        let (repo, db) = recall_repo();
 
         let started = serde_json::json!({
             "session_id": "s-sub",
@@ -1298,9 +1336,6 @@ mod injection_tests {
             "the main thread's own introduction is still owed"
         );
 
-        if let Some(dir) = db.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-        drop_projection_store(repo.as_root());
+        drop_recall_repo(&repo, &db);
     }
 }

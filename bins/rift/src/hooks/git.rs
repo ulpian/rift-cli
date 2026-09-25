@@ -255,7 +255,6 @@ pub(crate) fn effective_config(work_tree: &Path) -> rift_config::EffectiveConfig
 /// preview. Never rejects — any failure leaves the message untouched.
 fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
     use rift_shadow::hooks::session_cache::live_sessions_for;
-    use rift_shadow::hooks::trailers::{self, Trailers};
 
     let t = crate::hooktime::HookTimer::from_env("prepare-commit-msg");
     let Some(msg_file) = fwd.first() else {
@@ -266,12 +265,7 @@ fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
     if fwd.len() > 1 && fwd.get(1).is_some_and(|s| s == "merge" || s == "squash") {
         return Ok(());
     }
-    let start = match git_dir
-        .and_then(|gd| rift_shadow::hooks::session_cache::work_tree_of(Path::new(gd)))
-    {
-        Some(work_tree) => work_tree,
-        None => std::env::current_dir()?,
-    };
+    let start = hook_work_tree(git_dir)?;
     let repo = t.phase("discover", || rift_git::discover(&start))?;
     let Some(sess) = t
         .phase("live_sessions", || {
@@ -282,7 +276,26 @@ fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
     else {
         return Ok(());
     };
+    let predicted = predicted_trailers(&t, &repo, &sess)?;
 
+    let message = std::fs::read_to_string(msg_file)?;
+    let injected = rift_shadow::hooks::trailers::inject(&message, &predicted);
+    if injected != message {
+        std::fs::write(msg_file, injected)?;
+    }
+    Ok(())
+}
+
+/// The trailers the live session's next checkpoint will carry: the predicted
+/// condense id and the live turn-boundary attribution preview.
+///
+/// The prediction folds in the read facts captured so far, exactly as the
+/// post-commit archive will — same query, same digest.
+fn predicted_trailers(
+    t: &crate::hooktime::HookTimer,
+    repo: &rift_git::RepoPaths,
+    sess: &rift_shadow::hooks::session_cache::SessionCache,
+) -> Result<rift_shadow::hooks::trailers::Trailers> {
     let store = t.phase("open_projection", || {
         rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
     })?;
@@ -291,8 +304,6 @@ fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
             .build()
             .map_err(rift_core::RiftError::from)
     })?;
-    // The prediction folds in the read facts captured so far, exactly as the
-    // post-commit archive will — same query, same digest.
     let facts = t.phase("read_facts", || {
         read_facts_for_archive(&rt, &store, &sess.agent, &sess.session_id)
     });
@@ -331,19 +342,10 @@ fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
             &sess.session_id,
         ))
     })?;
-
-    let message = std::fs::read_to_string(msg_file)?;
-    let injected = trailers::inject(
-        &message,
-        &Trailers {
-            checkpoint_id: Some(checkpoint_id),
-            attribution,
-        },
-    );
-    if injected != message {
-        std::fs::write(msg_file, injected)?;
-    }
-    Ok(())
+    Ok(rift_shadow::hooks::trailers::Trailers {
+        checkpoint_id: Some(checkpoint_id),
+        attribution,
+    })
 }
 
 /// `commit-msg`: normalize Rift trailers idempotently (dedup, canonical order).
@@ -421,12 +423,7 @@ fn on_pr_archive(git_dir: Option<&str>) -> Result<()> {
     use rift_shadow::hooks::session_cache::live_sessions_for;
     use rift_shadow::hooks::strategy::{decide, GitEvent, TriggerCtx};
 
-    let start = match git_dir
-        .and_then(|gd| rift_shadow::hooks::session_cache::work_tree_of(Path::new(gd)))
-    {
-        Some(work_tree) => work_tree,
-        None => std::env::current_dir()?,
-    };
+    let start = hook_work_tree(git_dir)?;
     let repo = rift_git::discover(&start)?;
     let cfg = effective_config(&repo.work_tree);
     if cfg.checkpoint_strategy() != "on-pr" {
@@ -498,15 +495,8 @@ pub(super) fn state_from_token(token: &str) -> rift_shadow::hooks::SessionState 
 fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
     use rift_shadow::hooks::session_cache::live_sessions_for;
 
-    // Resolve the target work tree from the hook's `--git-dir` (linked-worktree
-    // aware), else cwd. Worktree-safe `discover` then handles the `.git`-file case.
     let t = crate::hooktime::HookTimer::from_env("post-commit");
-    let start = match git_dir
-        .and_then(|gd| rift_shadow::hooks::session_cache::work_tree_of(Path::new(gd)))
-    {
-        Some(work_tree) => work_tree,
-        None => std::env::current_dir()?,
-    };
+    let start = hook_work_tree(git_dir)?;
     let repo = t.phase("discover", || rift_git::discover(&start))?;
     // The just-created commit is HEAD. An unborn HEAD (no commit yet) means there is
     // nothing to capture — return before queueing anything.
@@ -529,16 +519,7 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
     // the strategy decision, the condense and the nine `git` child processes the
     // archive spawns — is deferred, because it measured 103-204 ms and the
     // budget is 100 ms of git latency for all three of a commit's hooks.
-    let entry = crate::capture_queue::QueueEntry {
-        schema_version: 1,
-        commit,
-        work_tree: repo.work_tree.clone(),
-        session_id: sess.as_ref().map(|s| s.session_id.clone()),
-        agent: sess.as_ref().map(|s| s.agent.clone()),
-        session_state: sess.as_ref().map(|s| s.state.clone()),
-        queued_at_ms: now_ms(),
-        attempts: 0,
-    };
+    let entry = capture_queue_entry(&repo, commit, sess.as_ref());
     t.phase("enqueue", || {
         crate::capture_queue::enqueue(&repo.git_dir, &entry)
     })?;
@@ -576,6 +557,36 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
         }
     });
     Ok(())
+}
+
+/// The queue entry `post-commit` hands the worker: the commit that anchored
+/// the hook and the session live at the instant it ran, stamped with the
+/// hook's clock so the deferred decision reads the time of the commit.
+fn capture_queue_entry(
+    repo: &rift_git::RepoPaths,
+    commit: String,
+    sess: Option<&rift_shadow::hooks::session_cache::SessionCache>,
+) -> crate::capture_queue::QueueEntry {
+    crate::capture_queue::QueueEntry {
+        schema_version: 1,
+        commit,
+        work_tree: repo.work_tree.clone(),
+        session_id: sess.map(|s| s.session_id.clone()),
+        agent: sess.map(|s| s.agent.clone()),
+        session_state: sess.map(|s| s.state.clone()),
+        queued_at_ms: now_ms(),
+        attempts: 0,
+    }
+}
+
+/// The work tree a git hook acts for: the one its `--git-dir` names
+/// (linked-worktree aware), else the current directory — whose `.git`-file
+/// case the worktree-safe `discover` then handles.
+fn hook_work_tree(git_dir: Option<&str>) -> Result<std::path::PathBuf> {
+    match git_dir.and_then(|gd| rift_shadow::hooks::session_cache::work_tree_of(Path::new(gd))) {
+        Some(work_tree) => Ok(work_tree),
+        None => Ok(std::env::current_dir()?),
+    }
 }
 
 /// Set (to any value) to run the condense **inline** in `post-commit` instead

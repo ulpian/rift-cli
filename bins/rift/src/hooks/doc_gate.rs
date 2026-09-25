@@ -99,6 +99,23 @@ pub(super) struct DocOutcome {
     pub(super) answer: Option<DocAnswer>,
 }
 
+/// The hook a document decision is made for, and the repository's policy as
+/// it stands for this call: what every step past the gate's own preconditions
+/// reads, and everything the journal a decision owes is written under.
+#[cfg(feature = "doc")]
+struct DocCtx<'a> {
+    /// Where the detached worker's jobs are journaled.
+    git_dir: &'a Path,
+    /// The checkout the call was made in.
+    work_tree: &'a Path,
+    /// The hook itself: its agent, session, clock and payload.
+    raw: &'a rift_shadow::hooks::RawHook,
+    /// The repository's serving policy, which scopes what may be converted.
+    policy: &'a rift_recall_policy::ServePolicy,
+    /// The two levers and the channel, resolved for this family.
+    effective: &'a rift_recall_policy::Effective,
+}
+
 /// **A read of a document is answered with the Markdown Rift already holds.**
 ///
 /// Runs before [`read_gate`](super::gate::read_gate) and under the same rules: it opens no store and
@@ -208,6 +225,13 @@ pub(super) fn doc_gate_in(
     let Some(step) = gate_step(&raw.agent, &raw.verb, &raw.payload) else {
         return quiet;
     };
+    let ctx = DocCtx {
+        git_dir,
+        work_tree,
+        raw,
+        policy,
+        effective,
+    };
     match step {
         GateStep::Decide => {}
         // A read's own result, which is where a substitution is verified —
@@ -215,22 +239,45 @@ pub(super) fn doc_gate_in(
         // the path a verified result carries is the sidecar, and a sidecar is
         // Markdown rather than a document.
         GateStep::CrossCheck => {
-            return document_verify(git_dir, work_tree, raw, &facts, &window);
+            return document_verify(&ctx, &facts, &window);
         }
         GateStep::Evict(_) => return quiet,
     }
     let Some(call) = document_call(&raw.agent, &raw.payload, &facts, work_tree) else {
         return quiet;
     };
+    answer_document_read(&ctx, t, &call, &window, store, converter)
+}
+
+/// Answer one read that is a document read: refuse what the repository never
+/// serves, key the document's bytes, find or make its sidecar under the gate's
+/// budget, and choose the channel the answer goes out on.
+///
+/// Every check keeps its place in that order, because an earlier refusal must
+/// win: nothing is hashed for a path the repository declined, and nothing is
+/// converted for a document the family already decided against.
+#[cfg(feature = "doc")]
+fn answer_document_read(
+    ctx: &DocCtx<'_>,
+    t: &crate::hooktime::HookTimer,
+    call: &DocumentCall,
+    window: &crate::doc_store::DocWindow,
+    store: &crate::doc_store::DocStore,
+    converter: Option<&dyn rift_recall_doc::DocConverter>,
+) -> DocOutcome {
+    let quiet = DocOutcome::default();
     // The repository's own two refusals, made before a byte is read: a path it
     // declared sensitive, and a path its serving policy never serves. A
     // sidecar is durable text derived from the file, so a file that must not
     // be served must not be re-encoded beside the checkout either.
-    if !crate::doc_store::is_convertible_path(&effective_config(work_tree), policy, &call.rel_path)
-    {
+    if !crate::doc_store::is_convertible_path(
+        &effective_config(ctx.work_tree),
+        ctx.policy,
+        &call.rel_path,
+    ) {
         return quiet;
     }
-    let (key, sha) = match document_key(&call.absolute, policy, effective) {
+    let (key, sha) = match document_key(&call.absolute, ctx.policy, ctx.effective) {
         Ok(keyed) => keyed,
         // Too large to hash while the agent waits. The answer is still worth
         // having, so the bounded pass is asked for — it runs where nobody is
@@ -238,7 +285,7 @@ pub(super) fn doc_gate_in(
         // than about latency — and this read runs exactly as it was written.
         Err(OVER_HASH_CEILING) => {
             return DocOutcome {
-                journaled: owe_document_sweep(git_dir, work_tree),
+                journaled: owe_document_sweep(ctx.git_dir, ctx.work_tree),
                 answer: None,
             };
         }
@@ -250,42 +297,42 @@ pub(super) fn doc_gate_in(
     if store.is_skipped(&key) {
         return quiet;
     }
-    let sidecar = match document_sidecar(t, store, converter, &call, &key, &sha, policy) {
+    let sidecar = match document_sidecar(t, store, converter, call, &key, &sha, ctx.policy) {
         Ok(path) => path,
         // A fault of the document itself, remembered for the whole family by
         // the conversion that found it: nothing is owed, because nothing will
         // ever convert it.
         Err("") => return quiet,
-        // Not now, and nothing about the document says never — a deadline, a
-        // helper this installation does not have, a link that would not be
-        // made. The read runs as it was written and the conversion becomes the
-        // detached worker's, which is the whole of what a deadline on an
-        // agent's critical path may mean.
-        Err(tag) => {
-            let owed = journal_document_conversion(git_dir, work_tree, raw, &call.rel_path, &sha);
-            let booked = journal_document_decision(
-                git_dir,
-                work_tree,
-                raw,
-                crate::agent_queue::ServeAuditKind::DocDeferred,
-                &call.rel_path,
-                &sha,
-                "",
-                tag,
-                Some(0),
-            );
-            return DocOutcome {
-                journaled: owed || booked,
-                answer: None,
-            };
-        }
+        Err(tag) => return defer_document_conversion(ctx, &call.rel_path, &sha, tag),
     };
     let Some(named) = sidecar.to_str() else {
         return quiet;
     };
-    document_answer(
-        git_dir, work_tree, raw, &call, &sha, &key, named, &window, effective, false,
-    )
+    document_answer(ctx, call, &sha, &key, named, window)
+}
+
+/// Leave the conversion to the detached worker, and book the deferral.
+///
+/// Not now, and nothing about the document says never — a deadline, a helper
+/// this installation does not have, a link that would not be made. The read
+/// runs as it was written and the conversion becomes the detached worker's,
+/// which is the whole of what a deadline on an agent's critical path may mean.
+#[cfg(feature = "doc")]
+fn defer_document_conversion(ctx: &DocCtx<'_>, rel_path: &str, sha: &str, tag: &str) -> DocOutcome {
+    let owed = journal_document_conversion(ctx, rel_path, sha);
+    let booked = journal_document_decision(
+        ctx,
+        crate::agent_queue::ServeAuditKind::DocDeferred,
+        rel_path,
+        sha,
+        "",
+        tag,
+        Some(0),
+    );
+    DocOutcome {
+        journaled: owed || booked,
+        answer: None,
+    }
 }
 
 /// The read of a document this call is, or `None` when it is not one.
@@ -546,82 +593,34 @@ fn gate_document_converter(
 /// family, already resolved into the lever this reads — and only once per
 /// sidecar, so the sentence's own escape hatch is true.
 #[cfg(feature = "doc")]
-#[allow(clippy::too_many_arguments)]
 fn document_answer(
-    git_dir: &Path,
-    work_tree: &Path,
-    raw: &rift_shadow::hooks::RawHook,
+    ctx: &DocCtx<'_>,
     call: &DocumentCall,
     sha: &str,
     key: &str,
     sidecar: &str,
     window: &crate::doc_store::DocWindow,
-    effective: &rift_recall_policy::Effective,
-    journaled: bool,
 ) -> DocOutcome {
-    use crate::agent_queue::ServeAuditKind;
     use rift_recall_policy::{DocChannel, Mode};
-    let ran = DocOutcome {
-        journaled,
-        answer: None,
-    };
+    let ran = DocOutcome::default();
     // A call no client would amend, a repository that asked to be told rather
     // than amended, or a window whose substitution was verified to have been
     // dropped: each of the three stands the amendment down and leaves the
     // decline as this window's channel.
     let redirecting = call.amendable.is_none()
-        || effective.doc_channel == DocChannel::Redirect
+        || ctx.effective.doc_channel == DocChannel::Redirect
         || window.is_redirecting();
     if !redirecting {
-        let (Some(tool_input), Mode::Enforce) = (call.amendable.as_ref(), effective.doc_rewrite)
-        else {
-            return ran;
-        };
-        // Remembered before the answer is given, so the result of this very
-        // call can be checked against it — and **nothing is booked here**. An
-        // amendment is a request to the client, not an outcome: the client
-        // applies the last one it is handed for an event, so a sibling hook
-        // amending the same call wins and the agent reads the document in
-        // full. A row written now would claim a saving that the result may
-        // contradict, in a relation nothing rewrites; the claim is made where
-        // the executed call proves it, and a turn that never comes back books
-        // nothing at all.
-        window.arm_rewrite(&call.rel_path, key, sha);
-        return DocOutcome {
-            journaled,
-            answer: Some(DocAnswer::Rewrite {
-                tool_input: tool_input.clone(),
-                sidecar: sidecar.to_owned(),
-            }),
-        };
+        return document_rewrite(ctx.effective, call, sha, key, sidecar, window);
     }
-    if effective.doc_redirect == Mode::Off {
+    if ctx.effective.doc_redirect == Mode::Off {
         // No lever is being held: a repository that shut the table decides
         // nothing here and records nothing either.
         return ran;
     }
-    // Both paths in the sentence are named the way this checkout names them,
-    // which is also the way every other frame names a file: a span inside a
-    // pushed frame is bounded, and an absolute path to a 64-character sidecar
-    // name is long enough to reach that bound in an ordinary checkout.
-    let Some(here) =
-        rift_recall_substrate::worktree::repo_relative_slash(work_tree, Path::new(sidecar))
-    else {
+    let Some(reason) = redirect_frame(ctx.work_tree, &call.rel_path, sidecar) else {
         return ran;
     };
-    let here = here.as_str();
-    // The sentence is written by the one renderer allowed to write one; this
-    // function chooses the channel and supplies the two paths. A frame that
-    // cannot name the sidecar — withheld, or cut short by the span bound — is
-    // not a frame at all, because where to read instead is the whole of what
-    // it says; and a decline with no frame is an unexplained tool failure, so
-    // the read runs instead.
-    let Some(reason) = rift_recall_serve::render_redirect_frame(&call.rel_path, here) else {
-        return ran;
-    };
-    if !reason.contains(here) {
-        return ran;
-    }
     // One decline per sidecar, which is what makes the frame's own escape
     // hatch true: the repeated call succeeds. Taken in both modes, so that
     // what `observe` records is the decision `enforce` would have made and
@@ -629,7 +628,72 @@ fn document_answer(
     if !window.redirect_once(key) {
         return ran;
     }
-    if effective.doc_redirect != Mode::Enforce {
+    book_redirect(ctx, call, sha, reason)
+}
+
+/// The substitution: amend the call's path to the sidecar, when the lever is
+/// enforced and the call is one a client would amend.
+///
+/// Remembered before the answer is given, so the result of this very call can
+/// be checked against it — and **nothing is booked here**. An amendment is a
+/// request to the client, not an outcome: the client applies the last one it
+/// is handed for an event, so a sibling hook amending the same call wins and
+/// the agent reads the document in full. A row written now would claim a
+/// saving that the result may contradict, in a relation nothing rewrites; the
+/// claim is made where the executed call proves it, and a turn that never
+/// comes back books nothing at all.
+#[cfg(feature = "doc")]
+fn document_rewrite(
+    effective: &rift_recall_policy::Effective,
+    call: &DocumentCall,
+    sha: &str,
+    key: &str,
+    sidecar: &str,
+    window: &crate::doc_store::DocWindow,
+) -> DocOutcome {
+    let (Some(tool_input), rift_recall_policy::Mode::Enforce) =
+        (call.amendable.as_ref(), effective.doc_rewrite)
+    else {
+        return DocOutcome::default();
+    };
+    window.arm_rewrite(&call.rel_path, key, sha);
+    DocOutcome {
+        journaled: false,
+        answer: Some(DocAnswer::Rewrite {
+            tool_input: tool_input.clone(),
+            sidecar: sidecar.to_owned(),
+        }),
+    }
+}
+
+/// The decline's sentence, naming the sidecar, or `None` when no sentence can.
+///
+/// Both paths in the sentence are named the way this checkout names them,
+/// which is also the way every other frame names a file: a span inside a
+/// pushed frame is bounded, and an absolute path to a 64-character sidecar
+/// name is long enough to reach that bound in an ordinary checkout.
+///
+/// The sentence is written by the one renderer allowed to write one; this
+/// function supplies the two paths. A frame that cannot name the sidecar —
+/// withheld, or cut short by the span bound — is not a frame at all, because
+/// where to read instead is the whole of what it says; and a decline with no
+/// frame is an unexplained tool failure, so the read runs instead.
+#[cfg(feature = "doc")]
+fn redirect_frame(work_tree: &Path, rel_path: &str, sidecar: &str) -> Option<String> {
+    let here = rift_recall_substrate::worktree::repo_relative_slash(work_tree, Path::new(sidecar))?;
+    let here = here.as_str();
+    let reason = rift_recall_serve::render_redirect_frame(rel_path, here)?;
+    if !reason.contains(here) {
+        return None;
+    }
+    Some(reason)
+}
+
+/// Book the decline, and give it when the lever is enforced.
+#[cfg(feature = "doc")]
+fn book_redirect(ctx: &DocCtx<'_>, call: &DocumentCall, sha: &str, reason: String) -> DocOutcome {
+    use crate::agent_queue::ServeAuditKind;
+    if ctx.effective.doc_redirect != rift_recall_policy::Mode::Enforce {
         // Reached, decided, and not acted on: a lever ships in `observe` so
         // that what it would be worth is measured before it speaks to a
         // model, and a mode that recorded nothing would leave that question
@@ -638,9 +702,7 @@ fn document_answer(
         // in front of a model, and a sentence nobody read is not a cost this
         // row may book against itself.
         let booked = journal_document_decision(
-            git_dir,
-            work_tree,
-            raw,
+            ctx,
             ServeAuditKind::DocRewritten,
             &call.rel_path,
             sha,
@@ -649,14 +711,12 @@ fn document_answer(
             Some(0),
         );
         return DocOutcome {
-            journaled: journaled || booked,
+            journaled: booked,
             answer: None,
         };
     }
     let booked = journal_document_decision(
-        git_dir,
-        work_tree,
-        raw,
+        ctx,
         ServeAuditKind::DocRewritten,
         &call.rel_path,
         sha,
@@ -665,7 +725,7 @@ fn document_answer(
         Some(0),
     );
     DocOutcome {
-        journaled: journaled || booked,
+        journaled: booked,
         answer: Some(DocAnswer::Redirect { reason }),
     }
 }
@@ -693,12 +753,11 @@ fn document_answer(
 /// it and counts no tokens — which is what `None` asks the worker for.
 #[cfg(feature = "doc")]
 fn document_verify(
-    git_dir: &Path,
-    work_tree: &Path,
-    raw: &rift_shadow::hooks::RawHook,
+    ctx: &DocCtx<'_>,
     facts: &rift_agent::HookFacts,
     window: &crate::doc_store::DocWindow,
 ) -> DocOutcome {
+    let DocCtx { work_tree, raw, .. } = *ctx;
     let quiet = DocOutcome::default();
     if let Some(key) = executed_sidecar_key(&raw.agent, &raw.payload, facts, work_tree) {
         // A sidecar this window never armed is an agent reading Rift's own
@@ -709,9 +768,7 @@ fn document_verify(
         };
         return DocOutcome {
             journaled: journal_document_decision(
-                git_dir,
-                work_tree,
-                raw,
+                ctx,
                 crate::agent_queue::ServeAuditKind::DocRewritten,
                 &armed.rel_path,
                 &armed.content_sha256,
@@ -737,9 +794,7 @@ fn document_verify(
     }
     DocOutcome {
         journaled: journal_document_decision(
-            git_dir,
-            work_tree,
-            raw,
+            ctx,
             crate::agent_queue::ServeAuditKind::DocDeferred,
             &call.rel_path,
             &sha,
@@ -784,19 +839,13 @@ fn executed_sidecar_key(
 /// written costs a conversion the proactive pass will make anyway, and never
 /// the agent's call.
 #[cfg(feature = "doc")]
-fn journal_document_conversion(
-    git_dir: &Path,
-    work_tree: &Path,
-    raw: &rift_shadow::hooks::RawHook,
-    rel_path: &str,
-    sha: &str,
-) -> bool {
+fn journal_document_conversion(ctx: &DocCtx<'_>, rel_path: &str, sha: &str) -> bool {
     crate::agent_queue::enqueue(
-        git_dir,
+        ctx.git_dir,
         &crate::agent_queue::AgentJob {
             schema_version: 1,
-            work_tree: work_tree.to_path_buf(),
-            queued_at_ms: raw.occurred_at_ms,
+            work_tree: ctx.work_tree.to_path_buf(),
+            queued_at_ms: ctx.raw.occurred_at_ms,
             attempts: 0,
             kind: crate::agent_queue::JobKind::DocConvert {
                 rel_path: rel_path.to_owned(),
@@ -820,11 +869,8 @@ fn journal_document_conversion(
 /// working file's own bytes under the hash recorded here, and a document that
 /// no longer hashes to it is one nothing may be declared about.
 #[cfg(feature = "doc")]
-#[allow(clippy::too_many_arguments)]
 fn journal_document_decision(
-    git_dir: &Path,
-    work_tree: &Path,
-    raw: &rift_shadow::hooks::RawHook,
+    ctx: &DocCtx<'_>,
     decision: crate::agent_queue::ServeAuditKind,
     rel_path: &str,
     sha: &str,
@@ -836,11 +882,11 @@ fn journal_document_decision(
         return false;
     }
     crate::agent_queue::enqueue(
-        git_dir,
+        ctx.git_dir,
         &crate::agent_queue::AgentJob {
             schema_version: 1,
-            work_tree: work_tree.to_path_buf(),
-            queued_at_ms: raw.occurred_at_ms,
+            work_tree: ctx.work_tree.to_path_buf(),
+            queued_at_ms: ctx.raw.occurred_at_ms,
             attempts: 0,
             kind: crate::agent_queue::JobKind::ServeAudit(crate::agent_queue::ServeAudit {
                 call_id: {
@@ -848,7 +894,7 @@ fn journal_document_decision(
                     AUDIT_IDS.next_ulid().to_hex()
                 },
                 decision,
-                agent: raw.agent.as_str().to_owned(),
+                agent: ctx.raw.agent.as_str().to_owned(),
                 basis: Some(crate::agent_queue::AuditBasis {
                     rel_path: rel_path.to_owned(),
                     content_sha256: sha.to_owned(),
