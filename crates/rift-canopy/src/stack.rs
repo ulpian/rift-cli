@@ -49,23 +49,39 @@ pub struct Slot {
     pub collapsed: bool,
 }
 
+/// The collapse tiers, strongest first: each names the priorities that stay
+/// expanded, and the last collapses everything.
+const TIERS: [&[Priority]; 4] = [
+    &[Priority::High, Priority::Medium, Priority::Low], // all expanded
+    &[Priority::High, Priority::Medium],
+    &[Priority::High],
+    &[],
+];
+
 /// Distribute `height` rows across `specs`. See the module docs for the tiers.
+///
+/// The one solver both drawing and hit-testing call, so a click always lands
+/// on the rectangle that was drawn.
 #[must_use]
-#[allow(clippy::too_many_lines)] // one pass per tier + the exact-tiling spread
 pub fn solve(specs: &[Spec], height: u16) -> Vec<Slot> {
     let n = u16::try_from(specs.len()).unwrap_or(u16::MAX);
     if height == 0 || specs.is_empty() {
         return Vec::new();
     }
-    // Choose which priorities stay expanded: strongest set that fits.
-    let tiers: [&[Priority]; 4] = [
-        &[Priority::High, Priority::Medium, Priority::Low], // all expanded
-        &[Priority::High, Priority::Medium],
-        &[Priority::High],
-        &[],
-    ];
-    let mut chosen: &[Priority] = &[];
-    for tier in tiers {
+    let chosen = expanded_priorities(specs, height);
+    // Below N rows even the all-collapsed tier fails: first `height` only.
+    let all_collapsed_fit = height >= n;
+    if chosen.is_empty() && !all_collapsed_fit {
+        return first_rows_collapsed(specs, height);
+    }
+    let rows = weighted_rows(specs, chosen, height);
+    place_slots(specs, chosen, &rows, height)
+}
+
+/// Choose which priorities stay expanded: the strongest tier whose minimums
+/// (one line per collapsed item) fit `height`, or none.
+fn expanded_priorities(specs: &[Spec], height: u16) -> &'static [Priority] {
+    for tier in TIERS {
         let need: u16 = specs
             .iter()
             .map(|s| {
@@ -77,27 +93,30 @@ pub fn solve(specs: &[Spec], height: u16) -> Vec<Slot> {
             })
             .fold(0, u16::saturating_add);
         if need <= height {
-            chosen = tier;
-            break;
+            return tier;
         }
     }
-    // Below N rows even the all-collapsed tier fails: first `height` only.
-    let all_collapsed_fit = height >= n;
-    if chosen.is_empty() && !all_collapsed_fit {
-        return specs
-            .iter()
-            .take(usize::from(height))
-            .enumerate()
-            .map(|(i, _)| Slot {
-                index: i,
-                y: u16::try_from(i).unwrap_or(0),
-                rows: 1,
-                collapsed: true,
-            })
-            .collect();
-    }
+    &[]
+}
 
-    // Base allocation: minimums for expanded, one line for collapsed.
+/// The lossy tier: the first `height` items, one collapsed line each.
+fn first_rows_collapsed(specs: &[Spec], height: u16) -> Vec<Slot> {
+    specs
+        .iter()
+        .take(usize::from(height))
+        .enumerate()
+        .map(|(i, _)| Slot {
+            index: i,
+            y: u16::try_from(i).unwrap_or(0),
+            rows: 1,
+            collapsed: true,
+        })
+        .collect()
+}
+
+/// Each item's row count: minimums for expanded, one line for collapsed, and
+/// the surplus spread over the expanded items by weight.
+fn weighted_rows(specs: &[Spec], chosen: &[Priority], height: u16) -> Vec<u16> {
     let mut rows: Vec<u16> = specs
         .iter()
         .map(|s| {
@@ -110,8 +129,6 @@ pub fn solve(specs: &[Spec], height: u16) -> Vec<Slot> {
         .collect();
     let used: u16 = rows.iter().copied().fold(0, u16::saturating_add);
     let surplus = height.saturating_sub(used);
-    // Spread surplus over the expanded items by weight, round-robin so the split
-    // is exact (no fractional rows, no gap at the bottom).
     let weights: Vec<u16> = specs
         .iter()
         .map(|s| {
@@ -122,28 +139,40 @@ pub fn solve(specs: &[Spec], height: u16) -> Vec<Slot> {
             }
         })
         .collect();
+    spread_surplus(&mut rows, &weights, surplus, height);
+    rows
+}
+
+/// Spread `surplus` over the weighted items, then hand the rounding leftover
+/// out one row at a time, heaviest first, so the split is exact (no
+/// fractional rows, no gap at the bottom).
+fn spread_surplus(rows: &mut [u16], weights: &[u16], surplus: u16, height: u16) {
     let total_weight: u16 = weights.iter().copied().fold(0, u16::saturating_add);
-    if total_weight > 0 {
-        for (r, w) in rows.iter_mut().zip(&weights) {
-            let share = u32::from(surplus) * u32::from(*w) / u32::from(total_weight);
-            *r = r.saturating_add(u16::try_from(share).unwrap_or(0));
+    if total_weight == 0 {
+        return;
+    }
+    for (r, w) in rows.iter_mut().zip(weights) {
+        let share = u32::from(surplus) * u32::from(*w) / u32::from(total_weight);
+        *r = r.saturating_add(u16::try_from(share).unwrap_or(0));
+    }
+    let mut leftover = height.saturating_sub(rows.iter().copied().fold(0, u16::saturating_add));
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(weights.get(i).copied().unwrap_or(0)));
+    for i in order {
+        if leftover == 0 {
+            break;
         }
-        let mut leftover = height.saturating_sub(rows.iter().copied().fold(0, u16::saturating_add));
-        let mut order: Vec<usize> = (0..rows.len()).collect();
-        order.sort_by_key(|&i| std::cmp::Reverse(weights.get(i).copied().unwrap_or(0)));
-        for i in order {
-            if leftover == 0 {
-                break;
-            }
-            if weights.get(i).copied().unwrap_or(0) > 0 {
-                if let Some(r) = rows.get_mut(i) {
-                    *r = r.saturating_add(1);
-                    leftover -= 1;
-                }
+        if weights.get(i).copied().unwrap_or(0) > 0 {
+            if let Some(r) = rows.get_mut(i) {
+                *r = r.saturating_add(1);
+                leftover -= 1;
             }
         }
     }
+}
 
+/// Stack the solved rows top-down into slots, clipping at `height`.
+fn place_slots(specs: &[Spec], chosen: &[Priority], rows: &[u16], height: u16) -> Vec<Slot> {
     let mut out = Vec::with_capacity(specs.len());
     let mut y = 0u16;
     for (i, spec) in specs.iter().enumerate() {

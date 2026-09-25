@@ -494,26 +494,97 @@ fn missing(after: &Token, what: &str, usage: &str) -> ParseError {
 /// every failure is a span-carrying error, never a panic. A leading `/` is
 /// optional; the buffer is capped at [`MAX_INPUT_LEN`].
 ///
+/// The match below is the verb table: a bare verb is spelled inline, and a
+/// verb that takes arguments hands them to its own parser, so the table reads
+/// as the grammar's word list in [`VERB_WORDS`] order.
+///
 /// # Errors
 /// [`ParseError`] with the offending span, a reason, and (for an unknown
 /// verb) the nearest-verb hint.
-#[allow(clippy::too_many_lines)] // one linear verb table; a match arm per verb
 pub fn parse(input: &str) -> Result<Verb, ParseError> {
-    if input.len() > MAX_INPUT_LEN {
-        // A span must name a SLICE of the input it describes. `MAX_INPUT_LEN`
-        // is a BYTE count, so it can land inside a multi-byte character, and
-        // anything that slices the input at the span to draw a caret would
-        // panic there. Walk down to the nearest boundary — `input.len()` is
-        // always one, so the end needs no adjustment.
-        let mut start = MAX_INPUT_LEN;
-        while start > 0 && !input.is_char_boundary(start) {
-            start = start.saturating_sub(1);
-        }
-        return Err(ParseError::at(
-            (start, input.len()),
-            format!("input is longer than {MAX_INPUT_LEN} bytes — trim it"),
-        ));
+    refuse_oversized(input)?;
+    let tokens = tokenize_input(input)?;
+    let Some((verb_tok, rest)) = tokens.split_first() else {
+        return Err(ParseError::at((0, input.len()), "type a verb — try /help"));
+    };
+    let word = verb_tok.text.to_ascii_lowercase();
+    match word.as_str() {
+        "select" => Ok(Verb::Select(project_ref(rest.first()))),
+        "add" => Ok(Verb::Add),
+        "remove" => Ok(Verb::Remove(project_ref(rest.first()))),
+        "relabel" => parse_relabel(verb_tok, rest),
+        "settings" => Ok(Verb::Settings),
+        "viewer" => parse_viewer(rest),
+        "focus" => parse_focus(verb_tok, rest),
+        "profile" => parse_profile(verb_tok, rest),
+        "help" => Ok(Verb::Help),
+        "quit" | "q" => Ok(Verb::Quit),
+        "status" => Ok(Verb::Status),
+        "memory" => parse_memory(verb_tok, rest),
+        "checkpoint" => parse_checkpoint(verb_tok, rest),
+        "session" => parse_session(verb_tok, rest),
+        "explain" => required_arg(
+            verb_tok,
+            rest,
+            "a checkpoint reference",
+            "/explain <checkpoint>",
+        )
+        .map(Verb::Explain),
+        "doctor" => Ok(Verb::Doctor),
+        "verify" => Ok(Verb::Verify),
+        "gc" => parse_gc(rest),
+        "projects" => parse_projects(rest),
+        // Read-only and in-process; the mutating twin below confirms first.
+        // Both are BARE verbs on purpose: the palette acts on the selected
+        // project, so a path argument would be a second way to name a target
+        // and the two could disagree.
+        "worktrees" => Ok(Verb::Worktrees),
+        "adopt" => Ok(Verb::Adopt),
+        "init" | "setup" => Ok(Verb::Init),
+        "enable" => required_arg(
+            verb_tok,
+            rest,
+            "an agent (e.g. claude-code)",
+            "/enable <agent>",
+        )
+        .map(Verb::EnableAgent),
+        "disable" => required_arg(
+            verb_tok,
+            rest,
+            "an agent (e.g. claude-code)",
+            "/disable <agent>",
+        )
+        .map(Verb::DisableAgent),
+        "configure" => parse_configure(verb_tok, rest),
+        "rebuild" => Ok(Verb::Rebuild),
+        _ => Err(unknown_verb(verb_tok, &word)),
     }
+}
+
+/// Refuse a buffer past [`MAX_INPUT_LEN`] before tokenizing, so a paste bomb
+/// costs one length check.
+fn refuse_oversized(input: &str) -> Result<(), ParseError> {
+    if input.len() <= MAX_INPUT_LEN {
+        return Ok(());
+    }
+    // A span must name a SLICE of the input it describes. `MAX_INPUT_LEN`
+    // is a BYTE count, so it can land inside a multi-byte character, and
+    // anything that slices the input at the span to draw a caret would
+    // panic there. Walk down to the nearest boundary — `input.len()` is
+    // always one, so the end needs no adjustment.
+    let mut start = MAX_INPUT_LEN;
+    while start > 0 && !input.is_char_boundary(start) {
+        start = start.saturating_sub(1);
+    }
+    Err(ParseError::at(
+        (start, input.len()),
+        format!("input is longer than {MAX_INPUT_LEN} bytes — trim it"),
+    ))
+}
+
+/// Tokenize the buffer past one optional leading slash, with every span —
+/// token and error alike — shifted back onto the original input.
+fn tokenize_input(input: &str) -> Result<Vec<Token>, ParseError> {
     // Strip one leading slash (its span offset is preserved by tokenizing the
     // original string and skipping the slash character positionally).
     let body_off = usize::from(input.starts_with('/'));
@@ -535,84 +606,104 @@ pub fn parse(input: &str) -> Result<Verb, ParseError> {
         t.start += body_off;
         t.end += body_off;
     }
-    let Some(verb_tok) = tokens.first() else {
-        return Err(ParseError::at((0, input.len()), "type a verb — try /help"));
-    };
-    let rest = tokens.get(1..).unwrap_or_default();
-    let arg = |i: usize| rest.get(i);
-    let word = verb_tok.text.to_ascii_lowercase();
+    Ok(tokens)
+}
 
-    let verb = match word.as_str() {
-        "select" => Verb::Select(project_ref(arg(0))),
-        "add" => Verb::Add,
-        "remove" => Verb::Remove(project_ref(arg(0))),
-        "relabel" => {
-            // /relabel [project] <new label…> — the LAST token(s) form the
-            // label; with 1 arg the selection is relabeled.
-            match rest.len() {
-                0 => {
-                    return Err(missing(
-                        verb_tok,
-                        "the new label",
-                        "/relabel [project] <label>",
-                    ))
-                }
-                1 => Verb::Relabel(
-                    ProjectRef::Selected,
-                    rest.first().map(|t| t.text.clone()).unwrap_or_default(),
-                ),
-                _ => {
-                    let label = rest
-                        .get(1..)
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|t| t.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    Verb::Relabel(project_ref(arg(0)), label)
-                }
-            }
+/// The unknown-verb error, carrying the nearest known verb as its hint.
+fn unknown_verb(verb_tok: &Token, word: &str) -> ParseError {
+    let mut err = ParseError::at(verb_tok.span(), format!("unknown verb `{}`", verb_tok.text));
+    err.hint = nearest_verb(word);
+    err
+}
+
+/// The one required argument of a single-argument verb (`explain`, `enable`,
+/// `disable`); its absence is reported at the end of the verb.
+fn required_arg(
+    verb_tok: &Token,
+    rest: &[Token],
+    what: &str,
+    usage: &str,
+) -> Result<String, ParseError> {
+    match rest.first() {
+        Some(t) => Ok(t.text.clone()),
+        None => Err(missing(verb_tok, what, usage)),
+    }
+}
+
+/// `/relabel [project] <new label…>`.
+fn parse_relabel(verb_tok: &Token, rest: &[Token]) -> Result<Verb, ParseError> {
+    // The LAST token(s) form the label; with 1 arg the selection is relabeled.
+    let verb = match rest.len() {
+        0 => {
+            return Err(missing(
+                verb_tok,
+                "the new label",
+                "/relabel [project] <label>",
+            ))
         }
-        "settings" => Verb::Settings,
-        "viewer" => {
-            let mut target = None;
-            let mut repo = None;
-            let mut i = 0;
-            while let Some(token) = rest.get(i) {
-                if token.text == "--repo" {
-                    let Some(path) = rest.get(i + 1) else {
-                        return Err(missing(
-                            token,
-                            "a repository path",
-                            "/viewer [target] --repo <path>",
-                        ));
-                    };
-                    if repo.replace(path.text.clone()).is_some() {
-                        return Err(ParseError::at(
-                            token.span(),
-                            "--repo may be supplied only once",
-                        ));
-                    }
-                    i += 2;
-                    continue;
-                }
-                if token.text.starts_with('-') {
-                    return Err(ParseError::at(
-                        token.span(),
-                        "unknown viewer option — only --repo <path>",
-                    ));
-                }
-                if target.replace(token.text.clone()).is_some() {
-                    return Err(ParseError::at(
-                        token.span(),
-                        "viewer accepts at most one target",
-                    ));
-                }
-                i += 1;
-            }
-            Verb::Viewer(ViewerArgs { target, repo })
+        1 => Verb::Relabel(
+            ProjectRef::Selected,
+            rest.first().map(|t| t.text.clone()).unwrap_or_default(),
+        ),
+        _ => {
+            let label = rest
+                .get(1..)
+                .unwrap_or_default()
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            Verb::Relabel(project_ref(rest.first()), label)
         }
-        "focus" => match arg(0).map(|t| t.text.to_ascii_lowercase()) {
+    };
+    Ok(verb)
+}
+
+/// `/viewer [target] [--repo <path>]`, the options in any order.
+fn parse_viewer(rest: &[Token]) -> Result<Verb, ParseError> {
+    let mut target = None;
+    let mut repo = None;
+    let mut i = 0;
+    while let Some(token) = rest.get(i) {
+        if token.text == "--repo" {
+            let Some(path) = rest.get(i + 1) else {
+                return Err(missing(
+                    token,
+                    "a repository path",
+                    "/viewer [target] --repo <path>",
+                ));
+            };
+            if repo.replace(path.text.clone()).is_some() {
+                return Err(ParseError::at(
+                    token.span(),
+                    "--repo may be supplied only once",
+                ));
+            }
+            i += 2;
+            continue;
+        }
+        if token.text.starts_with('-') {
+            return Err(ParseError::at(
+                token.span(),
+                "unknown viewer option — only --repo <path>",
+            ));
+        }
+        if target.replace(token.text.clone()).is_some() {
+            return Err(ParseError::at(
+                token.span(),
+                "viewer accepts at most one target",
+            ));
+        }
+        i += 1;
+    }
+    Ok(Verb::Viewer(ViewerArgs { target, repo }))
+}
+
+/// `/focus <panel>`.
+fn parse_focus(verb_tok: &Token, rest: &[Token]) -> Result<Verb, ParseError> {
+    let arg = |i: usize| rest.get(i);
+    let verb =
+        match arg(0).map(|t| t.text.to_ascii_lowercase()) {
             Some(p) => match p.as_str() {
                 "projects" => Verb::Focus(PanelName::Projects),
                 "detail" => Verb::Focus(PanelName::Detail),
@@ -632,241 +723,229 @@ pub fn parse(input: &str) -> Result<Verb, ParseError> {
                     "/focus <projects|detail|graphs|checkpoints|timeline|command>",
                 ))
             }
-        },
-        "profile" => match arg(0).map(|t| t.text.to_ascii_lowercase()) {
-            Some(sub) => {
-                let name = |usage: &str| match arg(1) {
-                    Some(t) => Ok(t.text.clone()),
-                    None => Err(missing(arg(0).unwrap_or(verb_tok), "a profile name", usage)),
-                };
-                match sub.as_str() {
-                    "new" => Verb::Profile(ProfileVerb::New(name("/profile new <name>")?)),
-                    "rename" => Verb::Profile(ProfileVerb::Rename(name("/profile rename <name>")?)),
-                    "switch" => Verb::Profile(ProfileVerb::Switch(name("/profile switch <name>")?)),
-                    "delete" => Verb::Profile(ProfileVerb::Delete(name("/profile delete <name>")?)),
-                    "duplicate" => Verb::Profile(ProfileVerb::Duplicate(name(
-                        "/profile duplicate <new-name>",
-                    )?)),
-                    // Bare `/profile startup` is the unpin — the one
-                    // no-argument profile verb.
-                    "startup" => Verb::Profile(ProfileVerb::Startup(
-                        arg(1).map(|t| t.text.clone()),
-                    )),
-                    _ => {
-                        return Err(ParseError::at(
-                            arg(0).map_or((0, 0), Token::span),
-                            "unknown profile verb — new | rename | switch | delete | duplicate | startup",
-                        ))
-                    }
-                }
+        };
+    Ok(verb)
+}
+
+/// `/profile <sub> [name]` — the profile menu's grammar as slash verbs.
+fn parse_profile(verb_tok: &Token, rest: &[Token]) -> Result<Verb, ParseError> {
+    let arg = |i: usize| rest.get(i);
+    let verb = match arg(0).map(|t| t.text.to_ascii_lowercase()) {
+        Some(sub) => {
+            let name = |usage: &str| match arg(1) {
+                Some(t) => Ok(t.text.clone()),
+                None => Err(missing(arg(0).unwrap_or(verb_tok), "a profile name", usage)),
+            };
+            match sub.as_str() {
+                "new" => Verb::Profile(ProfileVerb::New(name("/profile new <name>")?)),
+                "rename" => Verb::Profile(ProfileVerb::Rename(name("/profile rename <name>")?)),
+                "switch" => Verb::Profile(ProfileVerb::Switch(name("/profile switch <name>")?)),
+                "delete" => Verb::Profile(ProfileVerb::Delete(name("/profile delete <name>")?)),
+                "duplicate" => Verb::Profile(ProfileVerb::Duplicate(name(
+                    "/profile duplicate <new-name>",
+                )?)),
+                // Bare `/profile startup` is the unpin — the one
+                // no-argument profile verb.
+                "startup" => Verb::Profile(ProfileVerb::Startup(arg(1).map(|t| t.text.clone()))),
+                _ => return Err(ParseError::at(
+                    arg(0).map_or((0, 0), Token::span),
+                    "unknown profile verb — new | rename | switch | delete | duplicate | startup",
+                )),
             }
-            None => {
-                return Err(missing(
-                    verb_tok,
-                    "a profile verb",
-                    "/profile <new|rename|switch|delete|duplicate|startup> [name]",
-                ))
-            }
-        },
-        "help" => Verb::Help,
-        "quit" | "q" => Verb::Quit,
-        "status" => Verb::Status,
-        "memory" => match arg(0).map(|t| t.text.to_ascii_lowercase()) {
-            Some(sub) => match sub.as_str() {
-                "diff-since" => match arg(1) {
-                    Some(t) => Verb::Memory(MemoryVerb::DiffSince(t.text.clone())),
-                    None => {
-                        return Err(missing(
-                            arg(0).unwrap_or(verb_tok),
-                            "a checkpoint id",
-                            "/memory diff-since <checkpoint>",
-                        ))
-                    }
-                },
-                "file-if-changed" => match arg(1) {
-                    Some(t) => Verb::Memory(MemoryVerb::FileIfChanged(t.text.clone())),
-                    None => {
-                        return Err(missing(
-                            arg(0).unwrap_or(verb_tok),
-                            "a file path",
-                            "/memory file-if-changed <path>",
-                        ))
-                    }
-                },
-                "cost-hotspots" => {
-                    let top = arg(1).and_then(|t| t.text.parse::<u32>().ok());
-                    Verb::Memory(MemoryVerb::CostHotspots(top))
-                }
-                "reread-report" => Verb::Memory(MemoryVerb::RereadReport),
-                _ => {
-                    return Err(ParseError::at(
-                        arg(0).map_or((0, 0), Token::span),
-                        "unknown memory verb — diff-since | file-if-changed | \
-                         cost-hotspots | reread-report",
+        }
+        None => {
+            return Err(missing(
+                verb_tok,
+                "a profile verb",
+                "/profile <new|rename|switch|delete|duplicate|startup> [name]",
+            ))
+        }
+    };
+    Ok(verb)
+}
+
+/// `/memory <sub> [arg]` — the recall plane's read-only CLI verbs.
+fn parse_memory(verb_tok: &Token, rest: &[Token]) -> Result<Verb, ParseError> {
+    let arg = |i: usize| rest.get(i);
+    let verb = match arg(0).map(|t| t.text.to_ascii_lowercase()) {
+        Some(sub) => match sub.as_str() {
+            "diff-since" => match arg(1) {
+                Some(t) => Verb::Memory(MemoryVerb::DiffSince(t.text.clone())),
+                None => {
+                    return Err(missing(
+                        arg(0).unwrap_or(verb_tok),
+                        "a checkpoint id",
+                        "/memory diff-since <checkpoint>",
                     ))
                 }
             },
-            None => {
-                return Err(missing(
-                    verb_tok,
-                    "a memory verb",
-                    "/memory <diff-since|file-if-changed|cost-hotspots|reread-report>",
-                ))
-            }
-        },
-        "checkpoint" => match arg(0).map(|t| t.text.to_ascii_lowercase()) {
-            Some(sub) => match sub.as_str() {
-                "list" => Verb::Checkpoint(CheckpointVerb::List),
-                "show" => match arg(1) {
-                    Some(t) => Verb::Checkpoint(CheckpointVerb::Show(t.text.clone())),
-                    None => {
-                        return Err(missing(
-                            arg(0).unwrap_or(verb_tok),
-                            "a checkpoint id",
-                            "/checkpoint show <id>",
-                        ))
-                    }
-                },
-                _ => {
-                    return Err(ParseError::at(
-                        arg(0).map_or((0, 0), Token::span),
-                        "unknown checkpoint verb — list | show",
+            "file-if-changed" => match arg(1) {
+                Some(t) => Verb::Memory(MemoryVerb::FileIfChanged(t.text.clone())),
+                None => {
+                    return Err(missing(
+                        arg(0).unwrap_or(verb_tok),
+                        "a file path",
+                        "/memory file-if-changed <path>",
                     ))
                 }
             },
-            None => Verb::Checkpoint(CheckpointVerb::List),
-        },
-        "session" => match arg(0).map(|t| t.text.to_ascii_lowercase()) {
-            Some(sub) => match sub.as_str() {
-                "list" => Verb::Session(SessionVerb::List),
-                "show" => match arg(1) {
-                    Some(t) => Verb::Session(SessionVerb::Show(t.text.clone())),
-                    None => {
-                        return Err(missing(
-                            arg(0).unwrap_or(verb_tok),
-                            "a session id",
-                            "/session show <id>",
-                        ))
-                    }
-                },
-                _ => {
-                    return Err(ParseError::at(
-                        arg(0).map_or((0, 0), Token::span),
-                        "unknown session verb — list | show",
-                    ))
-                }
-            },
-            None => Verb::Session(SessionVerb::List),
-        },
-        "explain" => match arg(0) {
-            Some(t) => Verb::Explain(t.text.clone()),
-            None => {
-                return Err(missing(
-                    verb_tok,
-                    "a checkpoint reference",
-                    "/explain <checkpoint>",
-                ))
+            "cost-hotspots" => {
+                let top = arg(1).and_then(|t| t.text.parse::<u32>().ok());
+                Verb::Memory(MemoryVerb::CostHotspots(top))
             }
-        },
-        "doctor" => Verb::Doctor,
-        "verify" => Verb::Verify,
-        "gc" => match arg(0).map(|t| t.text.as_str()) {
-            Some("--dry-run") => Verb::GcDryRun,
-            Some(_) => {
+            "reread-report" => Verb::Memory(MemoryVerb::RereadReport),
+            _ => {
                 return Err(ParseError::at(
                     arg(0).map_or((0, 0), Token::span),
-                    "unknown gc argument — only --dry-run",
+                    "unknown memory verb — diff-since | file-if-changed | \
+                     cost-hotspots | reread-report",
                 ))
             }
-            None => Verb::Gc,
         },
-        "projects" => match arg(0).map(|t| t.text.to_ascii_lowercase()) {
-            Some(sub) => match sub.as_str() {
-                "list" => Verb::ProjectsList,
-                "prune" => match arg(1).map(|t| t.text.as_str()) {
-                    Some("--dry-run") => Verb::ProjectsPruneDryRun,
-                    Some(_) => {
+        None => {
+            return Err(missing(
+                verb_tok,
+                "a memory verb",
+                "/memory <diff-since|file-if-changed|cost-hotspots|reread-report>",
+            ))
+        }
+    };
+    Ok(verb)
+}
+
+/// `/checkpoint [list|show <id>]`; the bare verb lists.
+fn parse_checkpoint(verb_tok: &Token, rest: &[Token]) -> Result<Verb, ParseError> {
+    let arg = |i: usize| rest.get(i);
+    let verb = match arg(0).map(|t| t.text.to_ascii_lowercase()) {
+        Some(sub) => match sub.as_str() {
+            "list" => Verb::Checkpoint(CheckpointVerb::List),
+            "show" => match arg(1) {
+                Some(t) => Verb::Checkpoint(CheckpointVerb::Show(t.text.clone())),
+                None => {
+                    return Err(missing(
+                        arg(0).unwrap_or(verb_tok),
+                        "a checkpoint id",
+                        "/checkpoint show <id>",
+                    ))
+                }
+            },
+            _ => {
+                return Err(ParseError::at(
+                    arg(0).map_or((0, 0), Token::span),
+                    "unknown checkpoint verb — list | show",
+                ))
+            }
+        },
+        None => Verb::Checkpoint(CheckpointVerb::List),
+    };
+    Ok(verb)
+}
+
+/// `/session [list|show <id>]`; the bare verb lists.
+fn parse_session(verb_tok: &Token, rest: &[Token]) -> Result<Verb, ParseError> {
+    let arg = |i: usize| rest.get(i);
+    let verb = match arg(0).map(|t| t.text.to_ascii_lowercase()) {
+        Some(sub) => match sub.as_str() {
+            "list" => Verb::Session(SessionVerb::List),
+            "show" => match arg(1) {
+                Some(t) => Verb::Session(SessionVerb::Show(t.text.clone())),
+                None => {
+                    return Err(missing(
+                        arg(0).unwrap_or(verb_tok),
+                        "a session id",
+                        "/session show <id>",
+                    ))
+                }
+            },
+            _ => {
+                return Err(ParseError::at(
+                    arg(0).map_or((0, 0), Token::span),
+                    "unknown session verb — list | show",
+                ))
+            }
+        },
+        None => Verb::Session(SessionVerb::List),
+    };
+    Ok(verb)
+}
+
+/// `/gc [--dry-run]`.
+fn parse_gc(rest: &[Token]) -> Result<Verb, ParseError> {
+    let arg = |i: usize| rest.get(i);
+    let verb = match arg(0).map(|t| t.text.as_str()) {
+        Some("--dry-run") => Verb::GcDryRun,
+        Some(_) => {
+            return Err(ParseError::at(
+                arg(0).map_or((0, 0), Token::span),
+                "unknown gc argument — only --dry-run",
+            ))
+        }
+        None => Verb::Gc,
+    };
+    Ok(verb)
+}
+
+/// `/projects [list|prune [--dry-run]]`; the bare verb lists.
+fn parse_projects(rest: &[Token]) -> Result<Verb, ParseError> {
+    let arg = |i: usize| rest.get(i);
+    let verb = match arg(0).map(|t| t.text.to_ascii_lowercase()) {
+        Some(sub) => match sub.as_str() {
+            "list" => Verb::ProjectsList,
+            "prune" => match arg(1).map(|t| t.text.as_str()) {
+                Some("--dry-run") => Verb::ProjectsPruneDryRun,
+                Some(_) => {
+                    return Err(ParseError::at(
+                        arg(1).map_or((0, 0), Token::span),
+                        "unknown prune argument — only --dry-run",
+                    ))
+                }
+                None => Verb::ProjectsPrune,
+            },
+            _ => {
+                return Err(ParseError::at(
+                    arg(0).map_or((0, 0), Token::span),
+                    "unknown projects verb — list | prune",
+                ))
+            }
+        },
+        None => Verb::ProjectsList,
+    };
+    Ok(verb)
+}
+
+/// `/configure [splash <mode>]`; the bare verb shows the current config.
+fn parse_configure(verb_tok: &Token, rest: &[Token]) -> Result<Verb, ParseError> {
+    let arg = |i: usize| rest.get(i);
+    let verb = match arg(0).map(|t| t.text.to_ascii_lowercase()) {
+        Some(sub) => match sub.as_str() {
+            "splash" => match arg(1).map(|t| t.text.to_ascii_lowercase()) {
+                Some(m) => match m.as_str() {
+                    "always" => Verb::Configure(ConfigureVerb::Splash(SplashMode::Always)),
+                    "first-run" => Verb::Configure(ConfigureVerb::Splash(SplashMode::FirstRun)),
+                    "never" => Verb::Configure(ConfigureVerb::Splash(SplashMode::Never)),
+                    _ => {
                         return Err(ParseError::at(
                             arg(1).map_or((0, 0), Token::span),
-                            "unknown prune argument — only --dry-run",
-                        ))
-                    }
-                    None => Verb::ProjectsPrune,
-                },
-                _ => {
-                    return Err(ParseError::at(
-                        arg(0).map_or((0, 0), Token::span),
-                        "unknown projects verb — list | prune",
-                    ))
-                }
-            },
-            None => Verb::ProjectsList,
-        },
-        // Read-only and in-process; the mutating twin below confirms first.
-        // Both are BARE verbs on purpose: the palette acts on the selected
-        // project, so a path argument would be a second way to name a target
-        // and the two could disagree.
-        "worktrees" => Verb::Worktrees,
-        "adopt" => Verb::Adopt,
-        "init" | "setup" => Verb::Init,
-        "enable" => match arg(0) {
-            Some(t) => Verb::EnableAgent(t.text.clone()),
-            None => {
-                return Err(missing(
-                    verb_tok,
-                    "an agent (e.g. claude-code)",
-                    "/enable <agent>",
-                ))
-            }
-        },
-        "disable" => match arg(0) {
-            Some(t) => Verb::DisableAgent(t.text.clone()),
-            None => {
-                return Err(missing(
-                    verb_tok,
-                    "an agent (e.g. claude-code)",
-                    "/disable <agent>",
-                ))
-            }
-        },
-        "configure" => match arg(0).map(|t| t.text.to_ascii_lowercase()) {
-            Some(sub) => match sub.as_str() {
-                "splash" => match arg(1).map(|t| t.text.to_ascii_lowercase()) {
-                    Some(m) => match m.as_str() {
-                        "always" => Verb::Configure(ConfigureVerb::Splash(SplashMode::Always)),
-                        "first-run" => Verb::Configure(ConfigureVerb::Splash(SplashMode::FirstRun)),
-                        "never" => Verb::Configure(ConfigureVerb::Splash(SplashMode::Never)),
-                        _ => {
-                            return Err(ParseError::at(
-                                arg(1).map_or((0, 0), Token::span),
-                                "unknown splash mode — always | first-run | never",
-                            ))
-                        }
-                    },
-                    None => {
-                        return Err(missing(
-                            arg(0).unwrap_or(verb_tok),
-                            "a splash mode",
-                            "/configure splash <always|first-run|never>",
+                            "unknown splash mode — always | first-run | never",
                         ))
                     }
                 },
-                _ => {
-                    return Err(ParseError::at(
-                        arg(0).map_or((0, 0), Token::span),
-                        "unknown configure verb — splash",
+                None => {
+                    return Err(missing(
+                        arg(0).unwrap_or(verb_tok),
+                        "a splash mode",
+                        "/configure splash <always|first-run|never>",
                     ))
                 }
             },
-            None => Verb::Configure(ConfigureVerb::Show),
+            _ => {
+                return Err(ParseError::at(
+                    arg(0).map_or((0, 0), Token::span),
+                    "unknown configure verb — splash",
+                ))
+            }
         },
-        "rebuild" => Verb::Rebuild,
-        _ => {
-            let mut err =
-                ParseError::at(verb_tok.span(), format!("unknown verb `{}`", verb_tok.text));
-            err.hint = nearest_verb(&word);
-            return Err(err);
-        }
+        None => Verb::Configure(ConfigureVerb::Show),
     };
     Ok(verb)
 }
