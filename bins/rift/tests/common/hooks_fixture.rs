@@ -759,6 +759,77 @@ pub(crate) fn window_key(session: &str, agent_id: &str) -> String {
     rift_hashchain::leaf_hash(&bytes).to_hex()
 }
 
+/// The family's capture projection under `cache`, once a hook has minted the
+/// family: the database every hook and worker of this repository writes.
+pub(crate) fn family_projection_db(repo: &Path, cache: &Path) -> PathBuf {
+    let paths = rift_git::discover(repo).unwrap();
+    let cache_dir = cache.display().to_string();
+    let lookup = |key: &str| (key == "RIFT_CACHE_DIR").then(|| cache_dir.clone());
+    let rift_git::FamilyState::Minted(family) =
+        rift_git::family::resolve_family_under(lookup, &paths, rift_git::MintPolicy::Never)
+            .unwrap()
+    else {
+        panic!("a hook should have minted the family");
+    };
+    rift_store::projection_db_for_family_under(cache, &family)
+}
+
+/// The reason of every archive decision that minted a checkpoint for
+/// `session`, oldest first: what the audit row says each checkpoint was for.
+pub(crate) fn archived_reasons(repo: &Path, cache: &Path, session: &str) -> Vec<String> {
+    use rift_store::CanonicalStore as _;
+
+    let store = rift_store::open_capture_projection(family_projection_db(repo, cache)).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let rows = rt
+        .block_on(store.query(
+            "SELECT reason FROM archive_decision WHERE session_id = ? AND archived = 1 \
+             ORDER BY decided_at, rowid",
+            &[rift_store::Value::text(session)],
+        ))
+        .unwrap();
+    rows.iter().map(|r| r.get_text(0).unwrap()).collect()
+}
+
+/// The job files in this checkout's agent-hook journal whose names start
+/// with `prefix`, by name.
+pub(crate) fn agent_jobs_named(repo: &Path, prefix: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(repo.join(".git").join("rift-agent-queue"))
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|x| x == "json"))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Hold the queue's drain lock, stamped now, so no worker can drain until
+/// the returned guard is dropped: how a fixture sees what a hook left for
+/// the worker before any worker has taken it.
+pub(crate) fn hold_drain_lock(repo: &Path) -> DrainLock {
+    let dir = repo.join(".git").join("rift-capture-queue");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(".lock");
+    std::fs::write(&path, now_ms().to_string()).unwrap();
+    DrainLock { path }
+}
+
+/// The drain lock a fixture holds; dropping it releases the lock.
+pub(crate) struct DrainLock {
+    path: PathBuf,
+}
+
+impl Drop for DrainLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// The one spawn every wrapper above goes through: stdin written, the kept
 /// channel piped, the other discarded, `-1` for a signal death.
 fn spawn_rift(

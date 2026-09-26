@@ -390,7 +390,7 @@ inputs:
 |---|---|
 | `manual-commit` (default) | a session is live and you make a commit |
 | `on-pr` | the work leaves the machine — a push |
-| `scheduled` | a configured interval has elapsed, driven by agent activity as well as commits, so a long session without commits still checkpoints |
+| `scheduled` | a configured interval has elapsed, driven by agent activity as well as commits, so a long session without commits still checkpoints; the agent hook that finds the interval due journals the archive, and the detached worker writes it one pass later (§3.10) |
 | `policy-driven` | only on the sensitive-path overlay below |
 
 Over all of them sits one overlay: **a touched sensitive path always archives
@@ -515,14 +515,18 @@ the chain — measured about 648 ms at the median with a real transcript. And
 roughly 234 ms to initialise before it sees its first byte. **No size cap keeps a hook inside
 a 100 ms budget when the first count alone exceeds it.**
 
-Neither fits, and there is no daemon to hand them to, so the answer reuses the
+The `scheduled` strategy's interval archive is the third.
+It redacts the session's whole transcript, which on a long session is megabytes, and performed on the hook it outlasted the agent client's own hook timeout: the hook was killed inside it, nothing after it ran, and the next hook began it again, so the interval checkpoint never landed.
+The hook only decides, and journals one archive per session however many hooks find the same interval due.
+
+None of them fits, and there is no daemon to hand them to, so the answer reuses the
 shape the commit path already had. The hook writes down what is owed in a job
 journal under the git directory — identifier-only jobs, written atomically,
 the file name being the job's identity, so a redelivered hook overwrites its
 own job rather than queueing a second — then spawns one detached, one-shot
 child and does not wait; the child's standard streams go nowhere, so it can
 never write over the terminal git is using, and it drains everything under one
-lock in order (token counts, condenses, queued commits) until a pass finds
+lock in order (token counts, then condenses and interval archives, then queued commits) until a pass finds
 nothing new. **`rift doctor` is the backstop**: its sweep drains the journal
 *first*, before any idle-window logic, because a session whose end journaled a
 condense that no worker finished is exactly what the sweep exists to rescue and
@@ -538,6 +542,8 @@ work migrates to the worker without anything waiting on it.
 A job carries **identifiers only**, never capture bytes: a condense job names
 the session, a token job names the read's row and the content identity of the
 bytes to count, so the worker re-reads *those* bytes or none.
+An interval archive job names the session and why it was due.
+The worker asks the strategy again under its lock, on the job's clock, and archives only if the interval is still owed, so a commit that archived the session in the meantime is not followed by a second checkpoint for the same interval.
 
 Three properties hold this together. The journal entry is **durable before the
 spawn**, written unconditionally above every branch, so a worker that never

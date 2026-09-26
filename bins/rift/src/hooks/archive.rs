@@ -686,8 +686,8 @@ fn record_chain_entry(
 ///   `hook_body` — the `on-pr` checkpoint strategy;
 /// * `drive_post_ingest`'s SessionEnd condense (the `Effect::RequestCondense`
 ///   arm), reached from `ingest_agent_hook`;
-/// * `drive_post_ingest`'s scheduled-interval condense (the `decision.archive`
-///   arm below it), same caller.
+/// * the worker's `interval_archive_job`, journaled by `drive_post_ingest`
+///   when the `scheduled` strategy finds an interval due.
 ///
 /// Cited by NAME and not by line: the first version of this list gave line
 /// numbers that were ~32 lines stale by the time it was read. Names survive an

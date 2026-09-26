@@ -2,15 +2,15 @@
 //! boundaries imply, and the archive work the state machine asked for.
 //!
 //! Separate because both steps are best-effort and neither may fail the
-//! agent's hook — and because the expensive half of each is journaled for the
-//! detached worker rather than performed here.
+//! agent's hook — and because every archive is journaled for the detached
+//! worker rather than performed here.
 
 use std::path::Path;
 
 use rift_core::Result;
 
 use super::{dispatch_agent_worker, CapturedHook};
-use crate::hooks::archive::archive_now;
+use crate::agent_queue::{AgentJob, IntervalArchive, IntervalReason, JobKind};
 use crate::hooks::git::{effective_config, strategy_kind};
 use crate::hooks::now_ms;
 
@@ -71,11 +71,11 @@ fn note_boundary_failure(git_dir: &Path, session: &str, e: &rift_core::RiftError
     );
 }
 
-/// Run the archive work an agent hook may have triggered: the state machine's
-/// `RequestCondense` effect (session end — journaled for the detached worker),
-/// and the `scheduled` strategy's interval check. A missing repo/HEAD/backend
-/// defers silently. Returns whether a condense was journaled — its worker is
-/// then already dispatched, so the caller need not spawn a second.
+/// Journal the archive work an agent hook may have triggered for the detached
+/// worker: the state machine's `RequestCondense` effect (session end) and the
+/// `scheduled` strategy's interval archive. Returns whether either was
+/// journaled — its worker is then already dispatched, so the caller need not
+/// spawn a second.
 pub(super) fn drive_post_ingest(
     run: &CapturedHook<'_>,
     agent: &str,
@@ -128,8 +128,17 @@ fn queue_session_condense(git_dir: &Path, repo_id: &str, session: &str, agent: &
 }
 
 /// Ask the `scheduled` strategy whether this hook's activity has earned a
-/// checkpoint, and take one if it has. A missing repo, HEAD or backend defers
-/// silently.
+/// checkpoint, and journal the archive for the worker if it has. Returns
+/// whether a job was journaled — its worker is then already dispatched.
+///
+/// The archive redacts the session's whole transcript, which on a long
+/// session is megabytes: performed here, it outlasted the client's hook
+/// timeout, the hook was killed inside it, nothing after it ran, and the next
+/// hook began it again, so an interval checkpoint was never minted at all.
+/// The hook therefore decides and the worker archives (`interval_archive_job`),
+/// as with the session-end condense. The decision reads the store this hook
+/// already holds; the commit the checkpoint anchors to is the worker's to
+/// read, at drain time, and a missing one defers silently there.
 fn drive_scheduled_archive(
     run: &CapturedHook<'_>,
     agent: &str,
@@ -138,45 +147,68 @@ fn drive_scheduled_archive(
     use rift_shadow::hooks::strategy::{decide, TriggerCtx};
 
     let session = run.raw.session.as_str();
-    let cwd = std::env::current_dir()?;
-    let repo = rift_git::discover(&cwd)?;
-    let reader = rift_git::GixBlobReader::open(&repo.work_tree)?;
-    let Some(commit) = reader.head_hex()? else {
-        return Ok(false);
-    };
-    let cfg = effective_config(&repo.work_tree);
-    let base = strategy_kind(cfg.checkpoint_strategy());
+    let cfg = effective_config(&run.repo.work_tree);
     let now = now_ms();
-
     // The scheduled strategy fires from agent activity too — a long session
     // without commits still checkpoints on its interval.
     let last = run
         .rt
         .block_on(rift_store::latest_archive_ms(run.store, session))?;
     let decision = decide(
-        base,
+        strategy_kind(cfg.checkpoint_strategy()),
         &TriggerCtx {
             git_event: None,
             session_state: state,
+            // The sensitive-path overlay is decided where a change is known
+            // whole: the worker's condense of a queued commit, from its diff.
             sensitive_path_touched: false,
             clock_ms: now,
             last_archive_ms: last,
             schedule_interval_ms: cfg.schedule_interval_ms(),
         },
     );
-    if decision.archive {
-        // A deferred interval archive changes no lifecycle: the session stays
-        // live and the next activity asks again.
-        let _checkpoint = archive_now(
-            run.rt,
-            run.store,
-            &repo.work_tree,
-            &commit,
-            session,
-            agent,
-            decision,
-            now,
+    if !decision.archive {
+        return Ok(false);
+    }
+    let Some(reason) = IntervalReason::of(decision.reason) else {
+        return Ok(false);
+    };
+    queue_interval_archive(run.repo, session, agent, reason, now)?;
+    Ok(true)
+}
+
+/// Journal one interval archive and hand it over.
+///
+/// One archive is owed per session at a time: a job already pending is left
+/// as it is, so every hook inside one due interval asks for the same
+/// checkpoint on the clock of the hook that first found it due. The worker is
+/// dispatched either way, because the one a pending job's hook started may
+/// have gone. A deferred interval archive changes no lifecycle: the session
+/// stays live and the next activity asks again.
+fn queue_interval_archive(
+    repo: &rift_git::RepoPaths,
+    session: &str,
+    agent: &str,
+    reason: IntervalReason,
+    now: i64,
+) -> Result<()> {
+    let kind = JobKind::Archive(IntervalArchive {
+        session_id: session.to_owned(),
+        agent: agent.to_owned(),
+        reason,
+    });
+    if !crate::agent_queue::is_queued(&repo.git_dir, &kind) {
+        crate::agent_queue::enqueue(
+            &repo.git_dir,
+            &AgentJob {
+                schema_version: 1,
+                work_tree: repo.work_tree.clone(),
+                queued_at_ms: now,
+                attempts: 0,
+                kind,
+            },
         )?;
     }
-    Ok(false)
+    dispatch_agent_worker(&repo.git_dir);
+    Ok(())
 }
