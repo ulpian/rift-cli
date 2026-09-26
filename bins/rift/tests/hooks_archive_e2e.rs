@@ -18,7 +18,7 @@ mod common;
 mod hooks_fixture;
 use hooks_fixture::{
     agent_read_hook, archive_head, checkpoint_ref_exists, checkpoint_shards,
-    commit_carrying_trailer, doctor_json, git_in, json_str, only_checkpoint_id,
+    commit_carrying_trailer, doctor_json, git_in, json_str, now_ms, only_checkpoint_id,
     prepare_commit_msg_hook, rev_parse, rift_json, run_rift, run_rift_capture, run_rift_capture_in,
     run_rift_stdout, seed_live_session_repo, session_phase, shard_blob, shard_path_of,
     shard_tree_names, sync_env, sync_env_with_data, write_agent_transcript, LIVE_SESSION,
@@ -43,11 +43,12 @@ impl ArchivedTranscript {
         // the archive must read the ADDRESS, not assume a location).
         let transcript = write_agent_transcript(tmp, LIVE_SESSION, TWO_LINE_TRANSCRIPT);
         // The cache carries the path the way a hook payload would have left it,
-        // the turn still open.
+        // the turn still open, touched now so the idle sweep sees it live.
         std::fs::write(
             repo.join(".git").join("rift-sessions").join("e2e-live-1.json"),
             format!(
-                r#"{{"schema":1,"session_id":"e2e-live-1","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":1783000000000,"native_id_map":{{}},"transcript_path":{}}}"#,
+                r#"{{"schema":1,"session_id":"e2e-live-1","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":{},"native_id_map":{{}},"transcript_path":{}}}"#,
+                now_ms(),
                 json_str(&transcript)
             ),
         )

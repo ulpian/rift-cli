@@ -104,9 +104,11 @@ pub(super) fn drive_post_ingest(
 /// Everything the old inline branch said about closure still holds in the
 /// worker: `ended` is claimed only by a checkpoint that exists, and a skipped
 /// or failed archive leaves the session `ending` for `sweep_stale_sessions` to
-/// retry.
+/// retry. The done-marker an earlier end left is cleared first: this is a new
+/// end of a session that re-opened, and it owes its own condense.
 fn queue_session_condense(git_dir: &Path, repo_id: &str, session: &str, agent: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
+    crate::agent_queue::clear_condensed(git_dir, session);
     crate::agent_queue::enqueue(
         git_dir,
         &crate::agent_queue::AgentJob {

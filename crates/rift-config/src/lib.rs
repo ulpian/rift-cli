@@ -38,7 +38,7 @@ pub use edit::{
     load_project_policy, patch_project_policy, set_checkpoint_remote, PolicyEditError,
     PolicyRevision, ProjectPolicyPatch, ProjectPolicySnapshot,
 };
-pub use effective::{EffectiveConfig, BUILTIN_SENSITIVE_PATHS};
+pub use effective::{idle_sweep_ms, EffectiveConfig, BUILTIN_SENSITIVE_PATHS};
 pub use glob::{glob_match, wildcard_count, MAX_PATTERN_LEN, MAX_WILDCARDS};
 pub use redactor_packs::{
     load_redactor_packs, redactor_pack_dir, LoadedPacks, PackDiagnostic, RedactorPack,
@@ -560,6 +560,36 @@ mod tests {
     /// for it would be accepting policy for something that cannot exist. The
     /// error names the offending key, which is what makes "delete the line" a
     /// fix a reader can perform without this crate's source.
+    /// The idle sweep's floor: five minutes when absent, what the file says
+    /// when present, and zero refused at load, because a zero floor would end
+    /// every session between two of its own hooks. It leaves the policy hash
+    /// alone: it moves when a session is finalized, never what is captured.
+    #[test]
+    fn the_idle_sweep_floor_defaults_to_five_minutes_and_refuses_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            idle_sweep_ms(tmp.path()),
+            5 * 60_000,
+            "no file: the default"
+        );
+        let head = "schema_version = 1\n[project]\nname = \"x\"\n";
+        let one = format!("{head}[capture]\nidle_sweep_minutes = 1\n");
+        std::fs::write(tmp.path().join("config.toml"), &one).unwrap();
+        assert_eq!(idle_sweep_ms(tmp.path()), 60_000);
+        assert_eq!(
+            parse(&one).unwrap().policy_hash(),
+            parse(head).unwrap().policy_hash()
+        );
+        let zero = format!("{head}[capture]\nidle_sweep_minutes = 0\n");
+        assert!(matches!(parse(&zero), Err(RiftError::Config(_))));
+        std::fs::write(tmp.path().join("config.toml"), &zero).unwrap();
+        assert_eq!(
+            idle_sweep_ms(tmp.path()),
+            5 * 60_000,
+            "a refused file: the default"
+        );
+    }
+
     #[test]
     fn the_deleted_graph_feature_key_no_longer_parses() {
         let err = parse("schema_version=1\n[project]\nname=\"x\"\n[features]\ncodegraph=true\n")

@@ -218,6 +218,11 @@ pub struct CapturePolicy {
     /// The `scheduled` strategy's interval, in minutes (≥ 1).
     #[serde(default = "default_schedule_interval_minutes")]
     pub schedule_interval_minutes: u32,
+    /// How long a session may go without a hook before the idle sweep
+    /// condenses and ends it, in minutes. Zero is refused where the file is
+    /// read: a floor of zero would end every session between two hooks.
+    #[serde(default = "default_idle_sweep_minutes")]
+    pub idle_sweep_minutes: std::num::NonZeroU32,
 }
 
 /// The four checkpoint-strategy tokens (GLOSSARY "Checkpoint strategy").
@@ -237,6 +242,21 @@ fn default_schedule_interval_minutes() -> u32 {
     30
 }
 
+/// Five minutes: long enough that a developer reading a diff between two
+/// prompts keeps their session, short enough that a session whose agent
+/// went away without saying so is condensed while its work is still news.
+fn default_idle_sweep_minutes() -> std::num::NonZeroU32 {
+    std::num::NonZeroU32::MIN.saturating_add(4)
+}
+
+impl CapturePolicy {
+    /// The idle sweep's floor in milliseconds.
+    #[must_use]
+    pub fn idle_sweep_ms(&self) -> i64 {
+        i64::from(self.idle_sweep_minutes.get()) * 60_000
+    }
+}
+
 impl Default for CapturePolicy {
     fn default() -> Self {
         Self {
@@ -246,6 +266,7 @@ impl Default for CapturePolicy {
             token_usage: true,
             checkpoint_strategy: default_checkpoint_strategy(),
             schedule_interval_minutes: default_schedule_interval_minutes(),
+            idle_sweep_minutes: default_idle_sweep_minutes(),
         }
     }
 }

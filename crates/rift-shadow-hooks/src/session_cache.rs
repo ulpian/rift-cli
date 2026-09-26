@@ -90,6 +90,14 @@ pub struct SessionCache {
     /// runs them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_worktree: Option<WorktreeObservation>,
+    /// The agent's own name for the current turn, as the last hook that
+    /// carried one spelled it (Codex's `turn_id`). A different name on a
+    /// later hook is a new turn even when no prompt hook announced it, which
+    /// is how a client that skips the prompt hook still gets its turns
+    /// counted. An id, never content; absent for every agent that names no
+    /// turn and in every cache file written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_turn: Option<String>,
 }
 
 /// One observed worktree state, as the hook path last saw it.
@@ -187,6 +195,7 @@ impl SessionCache {
             // Unknown until the first observation, and unknown is the honest
             // answer for a session that has not been seen anywhere yet.
             last_worktree: None,
+            native_turn: None,
         }
     }
 }
@@ -363,24 +372,17 @@ pub fn read_transcript_progress(
     }
 }
 
-/// How long a session whose cache still says *live* may go untouched before a
-/// sweep is allowed to finalize it (24 h).
+/// How long a session whose cache still says *live* may go untouched before
+/// `rift doctor` calls it STUCK (24 h): the alarm, not the sweep.
 ///
-/// A running session touches this file on every prompt, tool call and turn end,
-/// so a full day of silence means the agent is gone — the process was killed,
-/// the machine rebooted, the terminal was closed — and the cache is the only
-/// thing still claiming otherwise. The window is deliberately generous because
-/// the two errors are not symmetric: finalizing a crashed session late costs
-/// nothing but a stale row in `rift doctor`, while finalizing a session the
-/// developer is about to resume moves it to `ending` in the middle of the work
-/// — and `Ending` has no edge back, so the phase reads `ending` for the rest of
-/// that session's life. Nothing is lost when that happens: the resumed agent's
-/// hooks are captured in full and re-stamp the last-touch time, so the session
-/// is no longer idle, and the first sweep after the developer stops condenses it
-/// (the sweep retries a `RequestCondense` left outstanding — see
-/// `sweep_stale_sessions`). The cost is a phase that under-describes a live
-/// session, which is why the window is a day and not an hour. Narrowing it is a
-/// policy decision, not a sweep detail.
+/// The automatic idle sweep finalizes a quiet session at the family's own,
+/// much shorter floor (`[capture] idle_sweep_minutes`, five minutes by
+/// default), at every session start and every worker pass. Sweeping early is
+/// safe because no phase is a trap: a session swept while its developer was
+/// only reading returns to `active` on its next hook and condenses again at
+/// its next end. So a session still live after a full day means the sweep is
+/// not reaching it, and this constant is the line past which doctor says so.
+/// The two floors are two named values with two meanings.
 ///
 /// The legacy backend has no equivalent: its `IDLE` phase is the gap *between turns*, not a
 /// timeout, so this threshold is Rift's own and is stated rather than ported.

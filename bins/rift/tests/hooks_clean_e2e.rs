@@ -16,8 +16,8 @@ mod common;
 mod hooks_fixture;
 use hooks_fixture::{
     archive_head, checkpoint_shards, doctor_fix_json, doctor_json, git_in, json_str, rev_parse,
-    rift_json, run_rift_capture_in, run_rift_stdout, seed_live_session_repo, sync_env,
-    RETIRED_BRAND,
+    rift_json, run_rift_capture_in, run_rift_stdout, seed_live_session_repo, seed_session,
+    sync_env, RETIRED_BRAND,
 };
 
 const RETIRED_SHADOW_PREFIX: &str = concat!("refs/", "ent", "ire", "/shadow/");
@@ -181,6 +181,9 @@ fn plant_every_finding(repo: &Path, cache: &Path) {
     // PLANT a queue entry: a commit awaiting condense that no worker drained.
     let head = rev_parse(repo, "HEAD");
     plant_queue_entry(repo, &head, 1_783_000_000_000);
+    // PLANT a stuck session: the seeded one, untouched since the epoch, which
+    // no sweep has reached because no worker has run since.
+    seed_session(repo, "e2e-live-1", 0);
 }
 
 /// PLANT chain tail gap: rewind the chain ref by one entry (throwaway repo;

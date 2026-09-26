@@ -122,6 +122,7 @@ deleting the line is the whole fix.
 | `acknowledge_risk` | bool | `false` | Required `true` companion to `raw_transcripts`. |
 | `checkpoint_strategy` | string | `"manual-commit"` | Base archiving strategy. |
 | `schedule_interval_minutes` | integer ≥ 1 | `30` | Interval for the `scheduled` strategy. |
+| `idle_sweep_minutes` | integer ≥ 1 | `5` | How long a live session may go without a hook before the idle sweep condenses and ends it. |
 
 **The two-key raw-transcript rule.** `raw_transcripts = true` without
 `acknowledge_risk = true` is a validation error, not a warning. Raw transcripts
@@ -142,6 +143,13 @@ never whether the security-relevant case is recorded. A fifth ledger token, the
 marker stamped on read-only checkpoints landed by an import, is deliberately
 **not** configurable: a repository cannot declare its own commits to be
 imports.
+
+**The idle sweep's floor.** `idle_sweep_minutes` is read at the family's main
+checkout, so every member sweeps at one floor. Zero is refused at load, because
+a floor of zero would end a session between two of its own hooks. It is not in
+the policy hash: it moves *when* a quiet session is condensed, never what is
+captured, redacted or served. `rift doctor`'s 24-hour STUCK alarm is a separate
+value and is not configured here ([03-capture.md](03-capture.md) §3.6).
 
 ### `[redaction]`
 

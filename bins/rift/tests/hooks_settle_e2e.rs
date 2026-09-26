@@ -443,9 +443,9 @@ fn doctor_drains_a_killed_workers_session_end_job() {
 }
 
 /// A second `SessionEnd` for the same session — the agent redelivering, or a
-/// job found again after the work landed — condenses nothing twice: the
-/// machine has no edge out of `ended`, and the journal's done-marker refuses
-/// even a job planted by hand.
+/// job found again after the work landed — condenses nothing twice: an end
+/// redelivered to an ended session asks the machine nothing, and the
+/// journal's done-marker refuses even a job planted by hand.
 #[test]
 fn a_redelivered_session_end_never_condenses_twice() {
     let tmp = tempfile::tempdir().unwrap();

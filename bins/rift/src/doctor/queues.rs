@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use rift_shadow::hooks::session_cache::IDLE_TIMEOUT_MS;
+use rift_shadow::hooks::session_cache::{SessionCache, IDLE_TIMEOUT_MS};
 
 use crate::{agent_queue, capture_queue, hooks, hooktime, push_queue, session_verbs, verify};
 
@@ -273,88 +273,218 @@ fn vantage_git_dir(paths: &rift_git::RepoPaths) -> std::path::PathBuf {
     std::fs::canonicalize(&paths.git_dir).unwrap_or_else(|_| paths.git_dir.clone())
 }
 
-/// The report-only half of the session leg: what every member's journal
-/// holds, and which of it is stuck. Nothing is finalized and nothing is
-/// opened for writing — this is the half a developer runs to look first.
-fn doctor_session_report(paths: &rift_git::RepoPaths) -> (String, serde_json::Value) {
-    use rift_shadow::hooks::session_cache::is_idle_past;
+/// The two floors the session leg reads, which mean two different things.
+#[derive(Clone, Copy)]
+struct SessionFloors {
+    /// The family's idle-sweep floor (`[capture] idle_sweep_minutes`): past
+    /// it, the next session start or worker pass condenses the session.
+    sweep_ms: i64,
+    /// The alarm: a session idle this long means the automatic sweep is not
+    /// reaching it.
+    alarm_ms: i64,
+}
 
+/// What the session leg counts, in one member or across the family.
+#[derive(Default)]
+struct SessionTally {
+    live: usize,
+    sweepable: Vec<String>,
+    stuck: Vec<String>,
+}
+
+impl SessionTally {
+    /// Count one member's sessions. Live is the machine's live set (active,
+    /// compacting, ending), the same one the sweep and the trailer read; an
+    /// `idle` cache is not a live session.
+    fn of(sessions: &[SessionCache], now: i64, floors: SessionFloors) -> Self {
+        use rift_shadow::hooks::session_cache::is_idle_past;
+
+        let mut tally = Self::default();
+        for s in sessions.iter().filter(|s| is_live_phase(&s.state)) {
+            tally.live += 1;
+            if is_idle_past(s, now, floors.alarm_ms) {
+                tally.stuck.push(s.session_id.clone());
+            } else if is_idle_past(s, now, floors.sweep_ms) {
+                tally.sweepable.push(s.session_id.clone());
+            }
+        }
+        tally
+    }
+
+    fn absorb(&mut self, other: Self) {
+        self.live += other.live;
+        self.sweepable.extend(other.sweepable);
+        self.stuck.extend(other.stuck);
+    }
+}
+
+/// The report-only half of the session leg: what every member's journal
+/// holds, which of it the automatic sweep is about to condense, and which
+/// of it is stuck. Nothing is finalized and nothing is opened for writing —
+/// this is the half a developer runs to look first.
+fn doctor_session_report(paths: &rift_git::RepoPaths) -> (String, serde_json::Value) {
     let now = hooks::now_ms();
     let here = vantage_git_dir(paths);
-    let mut live_count = 0_usize;
-    let mut stuck: Vec<String> = Vec::new();
+    let journal = session_verbs::family_journal(paths);
+    let floors = SessionFloors {
+        sweep_ms: hooks::family_sweep_floor(&journal, paths),
+        alarm_ms: IDLE_TIMEOUT_MS,
+    };
+    let mut total = SessionTally::default();
     let mut stranded = 0_usize;
     let mut members = Vec::new();
     let mut elsewhere = String::new();
-    for journal in session_verbs::family_journal(paths) {
-        let mut member_live = 0_usize;
-        let mut member_stuck = 0_usize;
-        for s in journal.sessions.iter().filter(|s| s.state != "ended") {
-            member_live += 1;
-            if is_idle_past(s, now, IDLE_TIMEOUT_MS) {
-                member_stuck += 1;
-                stuck.push(s.session_id.clone());
-            }
-        }
-        if journal.member.prunable {
+    for member_journal in &journal {
+        let member = &member_journal.member;
+        let tally = SessionTally::of(&member_journal.sessions, now, floors);
+        if member.prunable {
             // Counted apart, and said apart below. The sweep condenses a
             // session against the tree it was worked in, and this one has no
             // tree left — a subagent's worktree, removed when it finished,
             // whose journal outlived it. Folding these into the headline would
             // have `--fix` promise a repair it will not perform.
-            stranded += member_stuck;
+            stranded += tally.stuck.len();
         }
-        live_count += member_live;
         // Which member holds them, but only where it is news: the vantage's
         // own count is already the headline, and a line per member would
         // turn a healthy seven-worktree family into seven lines of zero.
-        if member_live > 0 && journal.member.git_dir != here {
+        if tally.live > 0 && member.git_dir != here {
             elsewhere.push_str(&format!(
-                "\n    in \'{}\':  {member_live} live, {member_stuck} stuck",
-                journal.member.name
+                "\n    in \'{}\':  {} live, {} stuck",
+                member.name,
+                tally.live,
+                tally.stuck.len()
             ));
         }
         members.push(serde_json::json!({
-            "name": journal.member.name,
-            "live": member_live,
-            "stuck": member_stuck,
-            "prunable": journal.member.prunable,
+            "name": member.name,
+            "live": tally.live,
+            "sweepable": tally.sweepable.len(),
+            "stuck": tally.stuck.len(),
+            "prunable": member.prunable,
         }));
+        total.absorb(tally);
     }
-    let mut report = if stuck.is_empty() {
-        format!("\n  sessions:       {live_count} live, none stuck")
-    } else {
-        format!(
-            "\n  sessions:       {live_count} live, {} STUCK past {}h \
-             (safe --fix finalizes those whose checkout still exists, in \
-             whichever member they are)",
-            stuck.len(),
-            IDLE_TIMEOUT_MS / 3_600_000
-        )
-    };
+    let behind = sessions_behind_their_events(paths, &journal);
+    let mut report = session_headline(&total, floors);
     report.push_str(&elsewhere);
+    report.push_str(&stranded_and_behind_lines(stranded, &behind));
+    let json = serde_json::json!({
+        "live": total.live,
+        "sweepable": total.sweepable,
+        "stuck": total.stuck,
+        "stranded": stranded,
+        "members": members,
+        "idle_sweep_ms": floors.sweep_ms,
+        "idle_timeout_ms": floors.alarm_ms,
+        "behind_events": behind,
+    });
+    (report, json)
+}
+
+/// Whether a cached phase is one the machine counts as a live session.
+fn is_live_phase(state: &str) -> bool {
+    matches!(state, "active" | "compacting" | "ending")
+}
+
+/// The leg's headline: both floors, named, whenever anything is past either.
+fn session_headline(total: &SessionTally, floors: SessionFloors) -> String {
+    if total.sweepable.is_empty() && total.stuck.is_empty() {
+        return format!("\n  sessions:       {} live, none stuck", total.live);
+    }
+    format!(
+        "\n  sessions:       {} live, {} sweepable (idle past {} min; the next session \
+         start or worker pass condenses them), {} STUCK past {}h (the automatic \
+         sweep is not reaching them; safe --fix finalizes those whose checkout \
+         still exists, in whichever member they are)",
+        total.live,
+        total.sweepable.len(),
+        floors.sweep_ms / 60_000,
+        total.stuck.len(),
+        floors.alarm_ms / 3_600_000
+    )
+}
+
+/// The two lines that follow the headline only when they are non-zero.
+fn stranded_and_behind_lines(stranded: usize, behind: &[String]) -> String {
+    let mut lines = String::new();
     if stranded > 0 {
-        report.push_str(&format!(
+        lines.push_str(&format!(
             "\n    stranded:     {stranded} of them in a member whose checkout is gone \
              — nothing can condense them; `git worktree prune` retires the entry \
              (the capture-queue leg above says what it still owes)"
         ));
     }
-    (
-        report,
-        serde_json::json!({
-            "live": live_count,
-            "stuck": stuck,
-            "stranded": stranded,
-            "members": members,
-        }),
-    )
+    if !behind.is_empty() {
+        lines.push_str(&format!(
+            "\n    rift defect:  {} session(s) recorded ended or idle while their own \
+             events kept arriving — Rift's own state error, not yours; nothing to \
+             do, the session's next hook repairs it",
+            behind.len()
+        ));
+    }
+    lines
 }
 
-/// The crashed-session leg. Doctor is where an abandoned
-/// session gets finalized, because it is the only pass that runs without an
-/// agent: a crashed session fires no more hooks, so nothing else would ever
-/// reach it. A session inside its idle window is only reported.
+/// The sessions whose recorded phase is behind their own events: cached
+/// `ended` or `idle`, with a captured event other than their own end that
+/// arrived after the session's last recorded transition.
+///
+/// Every event returns a session to work, so this should never be found; it
+/// is the alarm if it ever is, and it is Rift's defect rather than a thing
+/// the developer did, which is how the line says it. Read-only: the
+/// projection is opened read-only, and only when some session could qualify.
+fn sessions_behind_their_events(
+    paths: &rift_git::RepoPaths,
+    journal: &[session_verbs::MemberJournal],
+) -> Vec<String> {
+    let candidates: Vec<&str> = journal
+        .iter()
+        .flat_map(|j| &j.sessions)
+        .filter(|s| matches!(s.state.as_str(), "ended" | "idle"))
+        .map(|s| s.session_id.as_str())
+        .collect();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let opened = crate::projection::open_projection_read_only(&paths.work_tree)
+        .and_then(|store| Ok((store, crate::projection::runtime()?)));
+    let Ok((store, rt)) = opened else {
+        return Vec::new();
+    };
+    candidates
+        .into_iter()
+        .filter(|id| rt.block_on(events_after_last_transition(&store, id)) > 0)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// How many of `session`'s own events, its end excepted, postdate its last
+/// recorded transition. A session with no transition at all has every such
+/// event after it.
+async fn events_after_last_transition(store: &rift_store::SqliteStore, session: &str) -> i64 {
+    use rift_store::{CanonicalStore as _, Value};
+
+    store
+        .query_opt_i64(
+            "SELECT count(*) FROM captured_event WHERE session_id = ? AND kind != 'session_end' \
+             AND occurred_at_ms > (SELECT coalesce(max(occurred_at), 0) \
+             FROM session_transition WHERE session_id = ?)",
+            &[Value::text(session), Value::text(session)],
+        )
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+}
+
+/// The crashed-session leg. The automatic idle sweep (every session start,
+/// every worker pass) is what finalizes an abandoned session; this leg is its
+/// alarm and its manual arm. It reports the sessions past the sweep's floor,
+/// which the next automatic pass will condense, and those past the 24-hour
+/// alarm, which it evidently is not reaching; `--fix` sweeps at the sweep's
+/// own floor, because that is what the automatic path would have done. A
+/// session inside its idle window is only reported.
 ///
 /// **Every member of the family, from any member.** Session
 /// caches stay per gitdir, so this leg read exactly one of them:
@@ -370,9 +500,8 @@ fn doctor_session_report(paths: &rift_git::RepoPaths) -> (String, serde_json::Va
 /// finalizing them is the fix, and a diagnosis command that repairs on sight
 /// leaves the operator no way to look first.
 ///
-/// A session it could not condense is reported as still owed, and this pass is
-/// what will owe it again: re-running doctor retries. Nothing else can — see
-/// `hooks::sweep_stale_sessions`.
+/// A session it could not condense is reported as still owed, and this pass
+/// or the next automatic sweep retries it — see `hooks::sweep_stale_sessions`.
 ///
 /// Best-effort by construction — outside a repository, or with no projection
 /// yet, this leg reports nothing rather than failing the diagnosis. A member
@@ -402,6 +531,7 @@ pub(super) fn doctor_session_sweep(repo: &Path, fix: bool) -> (String, serde_jso
         "finalized": family.sweep.finalized,
         "condense_deferred": family.sweep.condense_deferred,
         "idle_timeout_ms": IDLE_TIMEOUT_MS,
+        "idle_sweep_ms": family.floor_ms,
         "members_swept": family.swept,
         "members_unswept": family.unswept,
     });
@@ -423,6 +553,9 @@ struct FamilySweep {
     sweep: hooks::SessionSweep,
     swept: usize,
     unswept: usize,
+    /// The floor this pass swept at: the family's idle-sweep floor, the one
+    /// the automatic path would have used.
+    floor_ms: i64,
 }
 
 /// Sweep each member from its own checkout, folding the results into one.
@@ -433,17 +566,20 @@ struct FamilySweep {
 fn sweep_family(paths: &rift_git::RepoPaths) -> Option<FamilySweep> {
     let now = hooks::now_ms();
     let vantage = vantage_git_dir(paths);
+    let journals = session_verbs::family_journal(paths);
+    let floor = hooks::family_sweep_floor(&journals, paths);
     let mut family = FamilySweep {
         sweep: hooks::SessionSweep::default(),
         swept: 0,
         unswept: 0,
+        floor_ms: floor,
     };
-    for journal in session_verbs::family_journal(paths) {
+    for journal in journals {
         if journal.member.prunable {
             continue;
         }
         let here = journal.member.git_dir == vantage;
-        match hooks::sweep_stale_sessions(&journal.member.work_tree, now, IDLE_TIMEOUT_MS, None) {
+        match hooks::sweep_stale_sessions(&journal.member.work_tree, now, floor, None) {
             Ok(one) => {
                 family.swept += 1;
                 family.sweep.live.extend(one.live);
@@ -476,9 +612,9 @@ fn sweep_lines(family: &FamilySweep) -> String {
     }
     if !family.sweep.finalized.is_empty() {
         human.push_str(&format!(
-            "\n    finalized:    {} idle past {}h — condensed and closed",
+            "\n    finalized:    {} idle past {} min — condensed and closed",
             family.sweep.finalized.len(),
-            IDLE_TIMEOUT_MS / 3_600_000
+            family.floor_ms / 60_000
         ));
     }
     human

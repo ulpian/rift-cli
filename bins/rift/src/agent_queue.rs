@@ -164,6 +164,18 @@ pub(crate) enum JobKind {
     /// waiting on an answer. The walk itself is bounded and lives in the
     /// worker; this is only the request.
     DocSweep,
+    /// Sweep the family's idle sessions: condense and end every live session
+    /// untouched for longer than `floor_ms`.
+    ///
+    /// Asked for at every session start, because that is the moment another
+    /// agent's abandoned session is most likely to be sitting there, and the
+    /// worker a start dispatches has nothing else to wait for. Every worker
+    /// pass also sweeps at its tail; the job is what keeps the request when
+    /// the worker that was dispatched could not take the lock.
+    SweepIdle {
+        /// The idle floor the requesting hook read from the family's config.
+        floor_ms: i64,
+    },
 }
 
 /// The decision one journaled accounting row is about.
@@ -356,11 +368,17 @@ impl JobKind {
             // One pass is owed at a time, as with the index: three hooks that
             // fire while the worker is busy have asked for the same walk.
             Self::DocSweep => Some("doc-sweep".to_owned()),
+            // One sweep is owed at a time: every start while one is pending
+            // asks for the same pass, so the name (and the note a failure
+            // leaves) is constant.
+            Self::SweepIdle { .. } => Some("sweep-idle".to_owned()),
         }
     }
 
     /// Token jobs drain before condense jobs, so the shard a condense writes
-    /// carries every count the session's reads were owed.
+    /// carries every count the session's reads were owed; the sweep drains
+    /// last, so a session whose own end is queued is condensed by that end
+    /// rather than timed out beside it.
     fn rank(&self) -> u8 {
         match self {
             Self::ReadTokens { .. }
@@ -371,6 +389,7 @@ impl JobKind {
             | Self::ToolResultTokens { .. }
             | Self::DocSweep => 0,
             Self::Condense { .. } => 1,
+            Self::SweepIdle { .. } => 2,
         }
     }
 }
@@ -467,6 +486,15 @@ pub(crate) fn mark_condensed(git_dir: &Path, session_id: &str) {
     if std::fs::create_dir_all(&dir).is_ok() {
         let _ = std::fs::write(done_marker(git_dir, session_id), b"");
     }
+}
+
+/// Forget that `session_id`'s condense landed, because a new end asked for
+/// another. A session re-opened after its end condenses again at its next
+/// end, and the marker the first condense left answers for that end only;
+/// a redelivered end asks for nothing (the state machine ignores an end for
+/// a session already ending or ended), so it never reaches here.
+pub(crate) fn clear_condensed(git_dir: &Path, session_id: &str) {
+    let _ = std::fs::remove_file(done_marker(git_dir, session_id));
 }
 
 /// Whether `session_id`'s condense already landed.
@@ -720,6 +748,31 @@ mod tests {
         assert_eq!(ranks, vec![0, 0, 1]);
     }
 
+    /// A sweep request round-trips through the journal with its floor, drains
+    /// after the condenses, and has one name however often it is asked for,
+    /// so a failure note about it is one note.
+    #[test]
+    fn a_sweep_request_round_trips_drains_last_and_has_one_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweep = |at: i64| AgentJob {
+            kind: JobKind::SweepIdle { floor_ms: 300_000 },
+            ..condense("s", at)
+        };
+        let a = enqueue(tmp.path(), &sweep(3)).unwrap();
+        let b = enqueue(tmp.path(), &sweep(9)).unwrap();
+        assert_eq!(a, b, "a second request is the same request");
+        enqueue(tmp.path(), &condense("s", 1)).unwrap();
+        let drained = jobs(tmp.path());
+        assert_eq!(drained.len(), 2);
+        assert_eq!(
+            drained[1].1,
+            sweep(9),
+            "the sweep drains last, floor intact"
+        );
+        assert_eq!(note_key(&sweep(3)), note_key(&sweep(4)));
+        assert_eq!(note_key(&sweep(3)), "agent-sweep-idle");
+    }
+
     /// The done-marker is what makes a redelivered or re-found condense a
     /// no-op.
     #[test]
@@ -729,6 +782,11 @@ mod tests {
         mark_condensed(tmp.path(), "a");
         assert!(is_condensed(tmp.path(), "a"));
         assert!(!is_condensed(tmp.path(), "b"));
+        clear_condensed(tmp.path(), "a");
+        assert!(
+            !is_condensed(tmp.path(), "a"),
+            "a new end owes a new condense"
+        );
     }
 
     /// Unknown fields are ignored on read: a newer writer's job still drains.

@@ -5,9 +5,9 @@
 //! machine ([`step`](rift_shadow_hooks::step)) one transition per state-changing
 //! event, persists each transition as an append-only `session_transition` row
 //! (the source of truth), and refreshes the out-of-tree transient cache. Effects
-//! (`RequestCondense`, …) are returned for the caller's executor to run. Illegal
-//! transitions are swallowed (the caller logs them) — never panic, never fail the
-//! agent.
+//! (`RequestCondense`, …) are returned for the caller's executor to run. An
+//! illegal transition is recorded as a refusal row and returned for the caller
+//! to log — never a panic, never a failed agent hook.
 //!
 //! The ingest is one linear pass whose every write is one appended fact, in
 //! the order the chain hashes: the receipt, the per-event idempotency index,
@@ -18,6 +18,8 @@
 
 #[cfg(test)]
 mod fixtures;
+#[cfg(test)]
+mod liveness_tests;
 mod reads;
 mod session;
 #[cfg(test)]
@@ -42,7 +44,7 @@ use crate::project::{PayloadFacts, ProjectionCtx};
 use crate::sha256_hex;
 
 pub use reads::RecordedRead;
-pub use session::{mark_condense_done, timeout_idle_session, trigger_for};
+pub use session::{mark_condense_done, timeout_idle_session, trigger_for, SYNTHESIZED_START};
 pub use turns::{settle_closed_turn_usage, SettleMode, Settled, SETTLE_WINDOW_BYTES};
 
 /// The injected worktree read-hasher: a read-shaped payload path in,
@@ -125,6 +127,10 @@ pub struct IngestOutcome {
     /// by the `tool_call` row each landed on — so the caller can owe the
     /// read's token count to a later, off-path writer at the same identity.
     pub read_calls: Vec<RecordedRead>,
+    /// The lifecycle triggers the state machine refused for this hook. Each
+    /// is already recorded as a `refused-<trigger>` transition row; the list
+    /// is here so the caller can say so in its log as well.
+    pub refused: Vec<rift_shadow_hooks::Trigger>,
 }
 
 /// What every step of one ingest addresses its rows by.
@@ -199,15 +205,16 @@ pub async fn ingest_hook(
     let receipt = record_receipt(store, &ctx, stamp.ordinal, &events).await?;
     record_captured_events(store, &ctx, &events).await?;
     let read_calls = project_hook(store, &ctx, &events, read_hasher).await?;
-    let (state, effects) = session::advance(store, &ctx, existing.as_ref(), &events).await?;
-    session::refresh_cache(&ctx, existing, state, &stamp)?;
+    let advanced = session::advance(store, &ctx, existing.as_ref(), &events).await?;
+    session::refresh_cache(&ctx, existing, advanced.state, &stamp)?;
     Ok(IngestOutcome {
-        state,
-        effects,
+        state: advanced.state,
+        effects: advanced.effects,
         boundaries: turns::closed_boundaries(&events, &stamp),
         owner_agent: ctx.owner.to_owned(),
         receipt,
         read_calls,
+        refused: advanced.refused,
     })
 }
 
@@ -247,6 +254,7 @@ async fn defer_without_session(
         owner_agent: agent_label.to_owned(),
         receipt: HookReceipt::DeferredNoSession,
         read_calls: Vec::new(),
+        refused: Vec::new(),
     })
 }
 

@@ -168,6 +168,7 @@ mod tests {
             // which is what a cache file written before worktree provenance
             // existed reads as too.
             last_worktree: None,
+            native_turn: None,
         };
         std::fs::write(
             dir.join(format!("{id}.json")),

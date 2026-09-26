@@ -310,7 +310,9 @@ of Rift's own said so. By default that act is a commit; under the other
 configured strategies it is a push, an elapsed interval driven by your session
 activity, or a touched sensitive path — which always archives immediately
 whatever the base strategy. The end of a session always requests one, and
-`rift doctor` sweeps sessions that went idle and were never closed.
+the idle sweep, which runs at a session start and after each worker pass
+rather than on a clock, condenses sessions that went quiet and were never
+closed.
 
 **Why.** Capture on an independent schedule produces records nobody can place
 in a story; anchoring every archive to an act gives each checkpoint something
@@ -321,7 +323,7 @@ never count it", since a recovery path nobody trusts is unused.
 
 **Enforced by** the entry points rather than a dedicated check — the commit-
 path hooks, the session-end job the state machine journals and the worker
-drains, and the doctor sweep. This one is **structural, not guarded**.
+drains, and the idle sweep. This one is **structural, not guarded**.
 
 **Read more.** [03](03-capture.md) §3.7 for the strategy table.
 

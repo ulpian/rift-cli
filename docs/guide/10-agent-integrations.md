@@ -264,6 +264,17 @@ the honest one.
 > [09-worktrees-and-families.md](09-worktrees-and-families.md) covers the rest
 > of the member lifecycle.
 
+**When a Codex hook is skipped, the session and its turns still open.** Codex
+drops a hook it no longer trusts without an error and runs the rest, and it runs
+its `SessionStart` hook only once a turn starts, so a session can reach Rift as
+tool events alone, or as a lone `SessionEnd`. The session opens on its first
+captured event (the transition is recorded as a `synthesized-start`), and a turn
+opens on first activity when no prompt hook opened one: a tool call or a turn
+end at turn 0 opens turn 1. After that, Codex's own `turn_id` on each hook is
+the turn's identity — a new `turn_id` opens the next turn with no prompt hook in
+sight — so its turns are counted and closed like any other agent's. A lone `SessionEnd` opens and ends the session in one pass.
+[03-capture.md](03-capture.md) §3.6 has the state machine this rests on.
+
 ---
 
 ## 10.6 The six that are refused, and exactly why

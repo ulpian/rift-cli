@@ -23,7 +23,7 @@ use crate::cli::Outcome;
 
 pub(crate) use inspect::{info, list};
 pub(crate) use intake::{attach, import};
-pub(crate) use journals::family_journal;
+pub(crate) use journals::{family_journal, MemberJournal};
 pub(crate) use restore::resume;
 pub(crate) use sweep::{clean, document_store, shadow_refs, stop};
 
