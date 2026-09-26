@@ -44,10 +44,10 @@ use hooks_fixture::{
 fn a_condensed_commit_accrues_one_clean_verify_and_doctor_reports_it() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
-    // Re-stamp the session as FRESH. The seeder's fixed timestamp is idle past
-    // the sweep threshold, so the `doctor` call below would finalize it, condense
-    // it, and accrue a row of its own — and this test would pass with the drain
-    // accrual deleted. It did: that is how this line came to exist.
+    // Stamp the session FRESH, here and not only in the seeder: a session idle
+    // past the sweep threshold would be finalized by the `doctor` call below,
+    // condensed, and accrue a row of its own — and this test would pass with
+    // the drain accrual deleted. It did: that is how this line came to exist.
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -179,6 +179,8 @@ fn five_bare_verifies_are_not_soak_evidence() {
 fn doctors_own_sweep_accrues_a_verify_instead_of_swallowing_one() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
+    // Idle since the epoch: the session this doctor pass is there to sweep.
+    seed_session(&repo, "e2e-live-1", 0);
     let cache = tmp.path().join("cache");
     let env = [
         ("RIFT_CACHE_DIR", cache.to_str().unwrap()),

@@ -143,6 +143,14 @@ fn capture_into_projection(
             Some(&read_hasher),
         ))
     })?;
+    for trigger in &outcome.refused {
+        // Recorded already as a `refused-*` transition row; said here too.
+        tracing::warn!(
+            session = %raw.session,
+            trigger = trigger.as_str(),
+            "session state machine refused a trigger"
+        );
+    }
     let owed = owe_deferred_measurement(t, git_dir, work_tree, registry, raw, &outcome);
     let sweep_owed = owe_session_start_passes(t, raw, git_dir, work_tree);
     // Bind any newly-appeared sessions to the local developer identity

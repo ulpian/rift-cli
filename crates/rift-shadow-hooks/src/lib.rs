@@ -11,7 +11,8 @@
 //! The [`step`] function is a **pure** session state machine: `(state, trigger)
 //! → (next, effects)`. Effects are *requests* (archive/condense) handed to the
 //! checkpoint strategy, never side effects inside the transition. Illegal
-//! transitions are refused (logged, swallowed at the hook boundary), never panic.
+//! transitions are refused, never panic; the hook boundary records a refusal
+//! as its own audit row, so a refused trigger is never silent.
 #![forbid(unsafe_code)]
 #![cfg_attr(
     test,
@@ -287,6 +288,10 @@ impl SessionState {
 pub enum Trigger {
     /// A session began (`rift_core::EventKind::SessionStart`, `session_start`).
     Start,
+    /// A captured hook arrived that is none of the other triggers: a prompt,
+    /// a tool call, a turn end. It is what proves an agent is working in a
+    /// session whose recorded phase says otherwise.
+    Activity,
     /// A context compaction began (`session_compaction`).
     Compaction,
     /// Compaction finished.
@@ -306,6 +311,7 @@ impl Trigger {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Start => "start",
+            Self::Activity => "activity",
             Self::Compaction => "compaction",
             Self::CompactionDone => "compaction-done",
             Self::End => "end",
@@ -341,20 +347,38 @@ pub struct Transition {
 
 /// The pure session state machine: `(state, trigger) → (next, effects)`.
 ///
+/// **No state is a trap.** `Idle`, `Ending` and `Ended` are all left by the
+/// next sign of life: a `Start` or an `Activity` returns the session to
+/// `Active`. An agent resumes a session id it already ended (an editor
+/// restart ends every tab and resumes each under the same id), launches
+/// before capture existed, or has its start hook skipped by the client, and
+/// in every one of those cases the events keep arriving. A phase that refused
+/// them would describe a busy session as over, and everything derived from
+/// the phase (the dashboard, the trailer's session pick, the condense) would
+/// be wrong for as long as the agent kept working. `Ended` is therefore not
+/// terminal: a session id can outlive its first checkpoint, and a re-opened
+/// session condenses again at its next end. A `Start`, or the first activity
+/// of a session never opened, asks for the state file; activity that merely
+/// returns an ending or ended session to work asks for nothing.
+///
+/// `(Ending, IdleTimeout)` stays illegal, which is what keeps a repeated sweep
+/// from asking for a second condense, and nothing but `CondenseDone` leads
+/// into `Ended`, so a session claims to be ended only once a checkpoint exists.
+///
 /// # Errors
-/// [`RiftError::Validity`] for an illegal transition (logged + swallowed at the
-/// hook boundary; never panics, never aborts the agent).
+/// [`RiftError::Validity`] for an illegal transition (recorded as a refusal at
+/// the hook boundary; never panics, never aborts the agent).
 pub fn step(state: SessionState, trigger: Trigger) -> Result<Transition> {
     use SessionState::{Active, Compacting, Ended, Ending, Idle};
-    use Trigger::{Compaction, CompactionDone, CondenseDone, End, IdleTimeout, Start};
+    use Trigger::{Activity, Compaction, CompactionDone, CondenseDone, End, IdleTimeout, Start};
     let t = |next, effects: &[Effect]| Transition {
         next,
         effects: effects.to_vec(),
     };
     Ok(match (state, trigger) {
-        (Idle, Start) => t(Active, &[Effect::OpenStateFile]),
+        (Idle | Ending | Ended, Start) | (Idle, Activity) => t(Active, &[Effect::OpenStateFile]),
+        (Ending | Ended, Activity) | (Compacting, CompactionDone) => t(Active, &[]),
         (Active, Compaction) => t(Compacting, &[Effect::MarkCompactionBoundary]),
-        (Compacting, CompactionDone) => t(Active, &[]),
         // A crash does not wait for a compaction to finish. `IdleTimeout` means
         // the agent is gone, which is exactly as true mid-compaction as it is
         // mid-turn — and without the `Compacting` arm a session whose agent
@@ -369,9 +393,9 @@ pub fn step(state: SessionState, trigger: Trigger) -> Result<Transition> {
             t(Ending, &[Effect::RequestCondense])
         }
         (Ending, CondenseDone) => t(Ended, &[Effect::CloseStateFile]),
-        (s, _) => {
+        (s, trigger) => {
             return Err(RiftError::validity(format!(
-                "illegal session transition from {s:?}"
+                "illegal session transition from {s:?} on {trigger:?}"
             )))
         }
     })
@@ -584,9 +608,103 @@ mod tests {
             Err(RiftError::Validity(_))
         ));
         assert!(matches!(
-            step(SessionState::Ended, Trigger::Start),
+            step(SessionState::Ended, Trigger::CondenseDone),
             Err(RiftError::Validity(_))
         ));
+    }
+
+    const STATES: [SessionState; 5] = [
+        SessionState::Idle,
+        SessionState::Active,
+        SessionState::Compacting,
+        SessionState::Ending,
+        SessionState::Ended,
+    ];
+
+    const TRIGGERS: [Trigger; 7] = [
+        Trigger::Start,
+        Trigger::Activity,
+        Trigger::Compaction,
+        Trigger::CompactionDone,
+        Trigger::End,
+        Trigger::IdleTimeout,
+        Trigger::CondenseDone,
+    ];
+
+    /// Every one of the 35 pairs, spelled out: the twelve legal ones with their
+    /// exact target and effects, and every other pair refused. A new edge has
+    /// to be written here to exist, so the table is the machine's whole
+    /// contract. Three of the refusals carry weight elsewhere and are named:
+    /// `(Ending, IdleTimeout)` keeps a repeated sweep from a second condense,
+    /// `(Compacting, End)` makes a compaction that never reports done look like
+    /// the defect it is, and nothing but a condense leads into `Ended`.
+    #[test]
+    fn every_state_and_trigger_pair_is_either_a_listed_edge_or_refused() {
+        use Effect::{CloseStateFile, MarkCompactionBoundary, OpenStateFile, RequestCondense};
+        use SessionState::{Active, Compacting, Ended, Ending, Idle};
+        use Trigger::{
+            Activity, Compaction, CompactionDone, CondenseDone, End, IdleTimeout, Start,
+        };
+        let legal: [(SessionState, Trigger, SessionState, &[Effect]); 12] = [
+            (Idle, Start, Active, &[OpenStateFile]),
+            (Idle, Activity, Active, &[OpenStateFile]),
+            (Active, Compaction, Compacting, &[MarkCompactionBoundary]),
+            (Active, End, Ending, &[RequestCondense]),
+            (Active, IdleTimeout, Ending, &[RequestCondense]),
+            (Compacting, CompactionDone, Active, &[]),
+            (Compacting, IdleTimeout, Ending, &[RequestCondense]),
+            (Ending, Start, Active, &[OpenStateFile]),
+            (Ending, Activity, Active, &[]),
+            (Ending, CondenseDone, Ended, &[CloseStateFile]),
+            (Ended, Start, Active, &[OpenStateFile]),
+            (Ended, Activity, Active, &[]),
+        ];
+        for state in STATES {
+            for trigger in TRIGGERS {
+                let listed = legal
+                    .iter()
+                    .find(|(s, t, _, _)| *s == state && *t == trigger);
+                match (listed, step(state, trigger)) {
+                    (Some((_, _, next, effects)), Ok(tr)) => {
+                        assert_eq!(tr.next, *next, "{state:?} on {trigger:?}");
+                        assert_eq!(tr.effects, effects.to_vec(), "{state:?} on {trigger:?}");
+                    }
+                    (None, Err(RiftError::Validity(_))) => (),
+                    (listed, got) => {
+                        panic!("{state:?} on {trigger:?}: listed {listed:?}, got {got:?}")
+                    }
+                }
+            }
+        }
+        for (state, trigger) in [
+            (Ending, IdleTimeout),
+            (Compacting, End),
+            (Ended, CondenseDone),
+        ] {
+            assert!(step(state, trigger).is_err(), "{state:?} on {trigger:?}");
+        }
+        let into_ended = legal.iter().filter(|(_, _, next, _)| *next == Ended);
+        assert!(into_ended.map(|(_, t, _, _)| *t).eq([CondenseDone]));
+    }
+
+    /// From every state, the triggers a hook can produce reach `ended` through
+    /// a condense: no phase is a trap the agent's own `SessionEnd` cannot leave.
+    #[test]
+    fn ended_is_reachable_from_every_state() {
+        for state in STATES {
+            let mut at = state;
+            for trigger in [
+                Trigger::CompactionDone,
+                Trigger::Activity,
+                Trigger::End,
+                Trigger::CondenseDone,
+            ] {
+                if let Ok(tr) = step(at, trigger) {
+                    at = tr.next;
+                }
+            }
+            assert_eq!(at, SessionState::Ended, "from {state:?}");
+        }
     }
 
     /// An agent that died mid-compaction is exactly as dead as one that died
@@ -617,15 +735,14 @@ mod tests {
         assert_eq!(SessionState::Ended.as_str(), "ended");
         assert_eq!(Trigger::CondenseDone.as_str(), "condense-done");
         assert_eq!(Trigger::Start.as_str(), "start");
+        assert_eq!(Trigger::Activity.as_str(), "activity");
     }
 
     proptest::proptest! {
         /// Illegal transitions never panic and always return an error.
         #[test]
-        fn step_never_panics(si in 0usize..5, ti in 0usize..6) {
-            let states = [SessionState::Idle, SessionState::Active, SessionState::Compacting, SessionState::Ending, SessionState::Ended];
-            let triggers = [Trigger::Start, Trigger::Compaction, Trigger::CompactionDone, Trigger::End, Trigger::IdleTimeout, Trigger::CondenseDone];
-            let _ = step(states[si], triggers[ti]); // must not panic
+        fn step_never_panics(si in 0usize..5, ti in 0usize..7) {
+            let _ = step(STATES[si], TRIGGERS[ti]); // must not panic
         }
     }
 }

@@ -51,7 +51,7 @@ pub(crate) use install::{
 };
 pub(crate) use manifest::seed_manifest_baseline;
 pub(crate) use recovery::basis_snapshots_at;
-pub(crate) use sweep::{sweep_stale_sessions, SessionSweep};
+pub(crate) use sweep::{family_sweep_floor, sweep_stale_sessions, SessionSweep};
 pub(crate) use worker::drain_capture_queue;
 #[cfg(feature = "search")]
 pub(crate) use worker::owe_search_index;

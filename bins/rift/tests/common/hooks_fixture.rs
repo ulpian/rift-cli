@@ -174,8 +174,8 @@ pub(crate) fn json_str(path: &Path) -> String {
 }
 
 /// Milliseconds since the epoch. Read only where the subject under test is a
-/// wall-clock threshold inside the binary — the 24 h idle window — so "now"
-/// and "the epoch" are unambiguous whenever the test runs.
+/// wall-clock threshold inside the binary — the idle sweep's floor, the 24 h
+/// alarm — so "now" and "the epoch" are unambiguous whenever the test runs.
 pub(crate) fn now_ms() -> i64 {
     i64::try_from(
         std::time::SystemTime::now()
@@ -318,9 +318,15 @@ pub(crate) fn seed_live_session_repo_unborn(tmp: &Path) -> PathBuf {
     git(&["add", "a.txt"]);
     let sessions = repo.join(".git").join("rift-sessions");
     std::fs::create_dir_all(&sessions).unwrap();
+    // Stamped NOW: a live session is one touched inside the idle sweep's
+    // floor, and every worker pass sweeps past it, so a seed stamped in the
+    // past would be condensed and ended by the first drain it met.
     std::fs::write(
         sessions.join("e2e-live-1.json"),
-        r#"{"schema":1,"session_id":"e2e-live-1","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":1783000000000,"native_id_map":{}}"#,
+        format!(
+            r#"{{"schema":1,"session_id":"e2e-live-1","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":{},"native_id_map":{{}}}}"#,
+            now_ms()
+        ),
     )
     .unwrap();
     repo
@@ -328,7 +334,8 @@ pub(crate) fn seed_live_session_repo_unborn(tmp: &Path) -> PathBuf {
 
 /// Seed a hermetic git repo with one commit and a **live** native-hook session
 /// cache file, so the post-commit leg sees an archivable session. Returns the
-/// work-tree path. Fixed timestamps only — the test never reads the clock.
+/// work-tree path. The session is stamped now, which is what live means to the
+/// idle sweep; a test that wants it stale ages it explicitly.
 pub(crate) fn seed_live_session_repo(tmp: &Path) -> PathBuf {
     let repo = seed_live_session_repo_unborn(tmp);
     git_in(&repo, &["commit", "-q", "-m", "seed"]);
@@ -371,7 +378,8 @@ pub(crate) fn seed_session_with_transcript(repo: &Path, id: &str, transcript: &P
     std::fs::write(
         sessions.join(format!("{id}.json")),
         format!(
-            r#"{{"schema":1,"session_id":"{id}","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":false,"compaction_boundary":null,"updated_at_ms":1783000000000,"native_id_map":{{}},"transcript_path":{}}}"#,
+            r#"{{"schema":1,"session_id":"{id}","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":false,"compaction_boundary":null,"updated_at_ms":{},"native_id_map":{{}},"transcript_path":{}}}"#,
+            now_ms(),
             json_str(transcript)
         ),
     )

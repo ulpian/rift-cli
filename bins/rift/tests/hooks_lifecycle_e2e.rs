@@ -221,9 +221,10 @@ fn walkdir_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 ///
 /// The hole this closes was the worst kind — ordinary inputs, no error, total
 /// loss. When the archive could not run, the hook path used to close the session
-/// anyway. `Ended` has no outgoing edges, so that session's work could never be
-/// condensed by anything afterwards: not the sweep, not doctor, not a later
-/// hook. Everything the agent did in it was captured and then orphaned.
+/// anyway. `Ended` is left only by the session's own next hook, and an agent
+/// that is gone sends none, so that session's work could never be condensed by
+/// anything afterwards: not the sweep, not doctor. Everything the agent did in
+/// it was captured and then orphaned.
 ///
 /// The rescue is the other half of the rule and is what makes deferral honest
 /// rather than merely cautious: the session is still `ending`, so the moment the

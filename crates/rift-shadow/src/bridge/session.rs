@@ -17,8 +17,23 @@ use super::turns::TurnStamp;
 use super::IngestCtx;
 use crate::sha256_hex;
 
-/// Map a canonical event to the state-machine trigger it drives, if any. Turn /
-/// tool / file / prompt events keep the session ACTIVE (no transition).
+/// The `trigger_kind` of a transition that opened a session no `SessionStart`
+/// opened.
+pub const SYNTHESIZED_START: &str = "synthesized-start";
+
+/// What [`advance`] left: the phase, the effects owed, and the triggers the
+/// machine refused.
+#[derive(Debug)]
+pub(super) struct Advanced {
+    pub(super) state: SessionState,
+    pub(super) effects: Vec<Effect>,
+    pub(super) refused: Vec<Trigger>,
+}
+
+/// Map a canonical event to the lifecycle trigger its hook names, if any.
+///
+/// Turn, tool, file and prompt events name none; what they drive depends on
+/// the phase they arrive in, which `plan_triggers` decides.
 #[must_use]
 pub fn trigger_for(kind: EventKind) -> Option<Trigger> {
     match kind {
@@ -67,9 +82,9 @@ pub async fn mark_condense_done(
 /// `session_cache::is_idle_past`) and runs the condense the returned effects
 /// ask for; this function owns only the transition.
 ///
-/// An illegal transition — a session already `ending` or `ended` — is swallowed
-/// by `apply_trigger`, so a repeated sweep is a no-op rather than a second
-/// condense.
+/// A session already `ending` or `ended`, or never opened, is not asked at
+/// all, so a repeated sweep is a no-op rather than a second condense, and it
+/// leaves no refusal row behind.
 ///
 /// Only the phase is written back. `updated_at_ms` keeps meaning *when the
 /// agent last touched this session*, which is why it survives: see the comment
@@ -87,6 +102,12 @@ pub async fn timeout_idle_session(
     let from = session_cache::read_cache(git_dir, session)?
         .and_then(|c| state_from_token(&c.state))
         .unwrap_or(SessionState::Idle);
+    // Only a working phase can time out. Asking from any other would be
+    // refused, and a refusal is recorded; a sweep that re-finds a session it
+    // already moved to `ending` owes nothing new and records nothing.
+    if !matches!(from, SessionState::Active | SessionState::Compacting) {
+        return Ok((from, Vec::new()));
+    }
     let (state, effects) =
         apply_trigger(store, session, from, Trigger::IdleTimeout, now_ms).await?;
     if state != from {
@@ -112,14 +133,24 @@ pub async fn timeout_idle_session(
     Ok((state, effects))
 }
 
-/// The session start an adapter without a start contract cannot send.
+/// The canonical session start an adapter without a start contract cannot
+/// send.
 ///
 /// Antigravity exposes no explicit SessionStart contract. The first known
 /// hook for a conversation therefore gains one deterministic synthetic
-/// start. Canonical history is queried rather than the transient cache
+/// start event. Canonical history is queried rather than the transient cache
 /// (which may be deleted), and MAX is reserved as its ordinal so
 /// retransmitting the native hook keeps every native event's idempotency key
-/// unchanged.
+/// unchanged. The check and the write agree: both address the owner's
+/// session row and the `start` kind, and a start row exists for every
+/// native start too (Antigravity's zeroth invocation of each prompt maps to
+/// one), which is why a session carries one start row per prompt.
+///
+/// This is the only agent whose start is written into canonical history.
+/// For every other agent a missing start is not invented as an event: the
+/// state machine opens the session on its first captured activity and the
+/// transition row says the start was synthesized (see [`plan_triggers`]), so
+/// the event stream holds only what the agent sent.
 pub(super) async fn synthesize_missing_start(
     store: &impl CanonicalStore,
     ctx: &IngestCtx<'_>,
@@ -152,36 +183,97 @@ pub(super) async fn synthesize_missing_start(
     Ok(())
 }
 
-/// Advance the machine one trigger per state-changing event, from the cached
-/// phase (Idle if no cache yet), collecting the effects for the caller's
-/// executor.
+/// Advance the machine through every trigger each event drives, from the
+/// cached phase (Idle if no cache yet), collecting the effects for the
+/// caller's executor.
+///
+/// The steps come from [`plan_triggers`], so after any event but a
+/// `SessionEnd` the phase is `active` or `compacting`, whatever it was
+/// before. A trigger the machine still refuses is recorded as a refusal and
+/// returned for the caller to log.
 pub(super) async fn advance(
     store: &impl CanonicalStore,
     ctx: &IngestCtx<'_>,
     existing: Option<&SessionCache>,
     events: &[CanonicalEvent],
-) -> Result<(SessionState, Vec<Effect>)> {
+) -> Result<Advanced> {
     let session = &ctx.raw.session;
-    let mut state = existing
-        .and_then(|c| state_from_token(&c.state))
-        .unwrap_or(SessionState::Idle);
-    let mut effects = Vec::new();
+    let mut advanced = Advanced {
+        state: existing
+            .and_then(|c| state_from_token(&c.state))
+            .unwrap_or(SessionState::Idle),
+        effects: Vec::new(),
+        refused: Vec::new(),
+    };
     for ev in events {
-        let trig = trigger_for(ev.kind);
-        // A non-compaction event arriving mid-compaction means compaction is done.
-        if state == SessionState::Compacting && trig != Some(Trigger::Compaction) {
-            let (next, fx) =
-                apply_trigger(store, session, state, Trigger::CompactionDone, ctx.now_ms).await?;
-            state = next;
-            effects.extend(fx);
-        }
-        if let Some(trigger) = trig {
-            let (next, fx) = apply_trigger(store, session, state, trigger, ctx.now_ms).await?;
-            state = next;
-            effects.extend(fx);
+        // Antigravity's canonical start (ordinal MAX) was synthesized, not sent.
+        let synthesized = ev.kind == EventKind::SessionStart && ev.event_ordinal == u32::MAX;
+        for trigger in plan_triggers(advanced.state, ev.kind) {
+            let from = advanced.state;
+            let kind = audit_kind(from, trigger, synthesized);
+            let (next, fx) = apply_as(store, session, from, trigger, kind, ctx.now_ms).await?;
+            // The machine has no self-loop, so a phase that did not move is a
+            // trigger it refused.
+            if next == from {
+                advanced.refused.push(trigger);
+            }
+            advanced.state = next;
+            advanced.effects.extend(fx);
         }
     }
-    Ok((state, effects))
+    Ok(advanced)
+}
+
+/// The triggers one event drives from `state`, in order.
+///
+/// A `Compacting` session that sees anything but another compaction has
+/// finished compacting. A session that is not working (`idle`, `ending`,
+/// `ended`) is returned to work first, by the event's own `Start` or by
+/// `Activity`, and then the event's lifecycle trigger applies: a `SessionEnd`
+/// to a session never opened opens and ends it in one pass. A `Start` for a
+/// session already working, a compaction for one already compacting, and an
+/// end for one already ending or ended change nothing and ask the machine
+/// nothing: the last is a redelivered `SessionEnd`, whose condense is owed or
+/// done already, and re-opening the session for it would ask for a second.
+/// Every pair this returns is legal, which the liveness property test holds
+/// it to.
+#[must_use]
+pub(super) fn plan_triggers(state: SessionState, kind: EventKind) -> Vec<Trigger> {
+    let hook = trigger_for(kind);
+    let mut plan = Vec::new();
+    let mut at = state;
+    if at == SessionState::Compacting && hook != Some(Trigger::Compaction) {
+        plan.push(Trigger::CompactionDone);
+        at = SessionState::Active;
+    }
+    let working = matches!(at, SessionState::Active | SessionState::Compacting);
+    let already = match hook {
+        Some(Trigger::Start) => working,
+        Some(Trigger::Compaction) => at == SessionState::Compacting,
+        Some(Trigger::End) => matches!(at, SessionState::Ending | SessionState::Ended),
+        _ => false,
+    };
+    if already {
+        return plan;
+    }
+    if !working && hook != Some(Trigger::Start) {
+        plan.push(Trigger::Activity);
+    }
+    plan.extend(hook);
+    plan
+}
+
+/// The token a transition row is filed under.
+///
+/// A session opened without a `SessionStart` from its agent is filed as
+/// `synthesized-start`, never as `start` or `activity`: the machine opened it
+/// exactly as a start would, and the audit says no start arrived.
+fn audit_kind(from: SessionState, trigger: Trigger, synthesized: bool) -> &'static str {
+    match (from, trigger) {
+        (SessionState::Idle, Trigger::Activity) => SYNTHESIZED_START,
+        (_, Trigger::Start) if synthesized => SYNTHESIZED_START,
+        _ => trigger.as_str(),
+    }
 }
 
 /// Refresh the transient cache (structural only; last-write-wins).
@@ -203,6 +295,9 @@ pub(super) fn refresh_cache(
     cache.agent = String::from(ctx.owner);
     cache.current_turn_ordinal = stamp.ordinal;
     cache.turn_open = stamp.open;
+    if let Some(name) = &stamp.native_turn {
+        cache.native_turn = Some(name.clone());
+    }
     cache.updated_at_ms = ctx.now_ms;
     // The transcript's ADDRESS, when this hook's payload names one — the
     // post-commit archive has no payload and reads it from here. Last
@@ -232,8 +327,8 @@ pub(super) fn state_from_token(s: &str) -> Option<SessionState> {
     })
 }
 
-/// Apply one trigger to the state machine, persisting the transition on success.
-/// An illegal transition returns the unchanged state with no effects (swallowed).
+/// Apply one trigger to the state machine and persist what happened: the
+/// transition, or the refusal.
 pub(super) async fn apply_trigger(
     store: &impl CanonicalStore,
     session: &str,
@@ -241,8 +336,28 @@ pub(super) async fn apply_trigger(
     trigger: Trigger,
     now_ms: i64,
 ) -> Result<(SessionState, Vec<Effect>)> {
-    let Ok(Transition { next, effects }) = step(from, trigger) else {
-        return Ok((from, Vec::new()));
+    apply_as(store, session, from, trigger, trigger.as_str(), now_ms).await
+}
+
+/// [`apply_trigger`], filing the row under `kind`.
+///
+/// **A refused trigger leaves a row.** It used to be swallowed with nothing
+/// written, after the hook's receipt had already been recorded as captured,
+/// so a refusal that hid a working session for days left no trace anywhere.
+/// Now it is a row of its own, `refused-<trigger>`, whose from and to phases
+/// are the phase that refused it: appended like every transition, never an
+/// update, and the caller still carries on unchanged.
+async fn apply_as(
+    store: &impl CanonicalStore,
+    session: &str,
+    from: SessionState,
+    trigger: Trigger,
+    kind: &str,
+    now_ms: i64,
+) -> Result<(SessionState, Vec<Effect>)> {
+    let (next, effects, kind) = match step(from, trigger) {
+        Ok(Transition { next, effects }) => (next, effects, kind.to_owned()),
+        Err(_) => (from, Vec::new(), format!("refused-{}", trigger.as_str())),
     };
     let row = SessionTransitionRow {
         transition_id: sha256_hex(&[
@@ -252,14 +367,14 @@ pub(super) async fn apply_trigger(
             b"\0",
             next.as_str().as_bytes(),
             b"\0",
-            trigger.as_str().as_bytes(),
+            kind.as_bytes(),
             b"\0",
             now_ms.to_string().as_bytes(),
         ]),
         session_id: session.to_owned(),
         from_state: from.as_str().to_owned(),
         to_state: next.as_str().to_owned(),
-        trigger_kind: trigger.as_str().to_owned(),
+        trigger_kind: kind,
         occurred_at: now_ms,
         schema_version: 1,
     };
@@ -388,7 +503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compaction_round_trip_and_illegal_is_swallowed() {
+    async fn compaction_round_trips_and_an_illegal_trigger_leaves_a_refusal_row() {
         let s = store();
         let (st1, _) = apply_trigger(&s, "sess", SessionState::Active, Trigger::Compaction, 1)
             .await
@@ -404,16 +519,67 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(st2, SessionState::Active);
-        // an illegal transition is swallowed: state unchanged, no row, no effects
+        // An illegal transition changes nothing and asks for nothing, and it
+        // is never silent: it is a row of its own, appended like any other.
         let (st3, fx3) = apply_trigger(&s, "sess", SessionState::Idle, Trigger::End, 3)
             .await
             .unwrap();
         assert_eq!(st3, SessionState::Idle);
         assert!(fx3.is_empty());
+        let rows = s
+            .query(
+                "SELECT from_state, to_state FROM session_transition \
+                 WHERE trigger_kind = 'refused-end'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "the refusal is recorded");
+        assert_eq!(s.count("session_transition").await.unwrap(), 3);
+    }
+
+    /// Every state meets every event kind, and the plan is always legal and
+    /// always leaves the session working, unless the event was the session's
+    /// own end, which leaves it `ending` with a condense owed (or, redelivered
+    /// to a session already ending or ended, where it was).
+    #[test]
+    fn every_planned_step_is_legal_and_leaves_the_session_working() {
+        use SessionState::{Active, Compacting, Ended, Ending, Idle};
+        for state in [Idle, Active, Compacting, Ending, Ended] {
+            for kind in EventKind::ALL {
+                let mut at = state;
+                let mut effects = Vec::new();
+                for trigger in plan_triggers(state, *kind) {
+                    let tr = step(at, trigger).unwrap_or_else(|e| {
+                        panic!("{state:?} + {kind:?}: {trigger:?} refused: {e}")
+                    });
+                    at = tr.next;
+                    effects.extend(tr.effects);
+                }
+                if *kind == EventKind::SessionEnd && matches!(state, Ending | Ended) {
+                    assert_eq!(at, state, "a redelivered end changes nothing");
+                    assert!(effects.is_empty());
+                } else if *kind == EventKind::SessionEnd {
+                    assert_eq!(at, Ending, "{state:?} + {kind:?}");
+                    assert!(effects.contains(&Effect::RequestCondense));
+                } else {
+                    assert!(matches!(at, Active | Compacting), "{state:?} + {kind:?}");
+                }
+            }
+        }
+    }
+
+    /// A session opened by activity is filed as a synthesized start, a real
+    /// start as a start, and a return from `ended` as activity.
+    #[test]
+    fn the_audit_names_a_synthesized_start_as_such() {
+        use SessionState::{Ended, Idle};
         assert_eq!(
-            s.count("session_transition").await.unwrap(),
-            2,
-            "illegal transition records nothing"
+            audit_kind(Idle, Trigger::Activity, false),
+            SYNTHESIZED_START
         );
+        assert_eq!(audit_kind(Idle, Trigger::Start, true), SYNTHESIZED_START);
+        assert_eq!(audit_kind(Idle, Trigger::Start, false), "start");
+        assert_eq!(audit_kind(Ended, Trigger::Activity, false), "activity");
     }
 }

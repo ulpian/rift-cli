@@ -49,27 +49,54 @@ pub(crate) fn drain_capture_queue(git_dir: Option<&str>) -> Result<()> {
 }
 
 /// Drain **both** journals under the one lock: the agent-hook jobs (token
-/// counts, then session-end condenses) first, then the queued commits.
+/// counts, then session-end condenses) first, then the queued commits, and
+/// then sweep the family's idle sessions.
 ///
 /// One worker, two queues, and the order is load-bearing: a token count that
 /// drained after the commit that archived its session's reads would be a
 /// count the shard never carries. A pass that drained nothing new ends the
 /// loop; a job that arrived during a pass is taken by the next.
 ///
-/// Returns the `(session_id, checkpoint_id)` pairs the condense jobs landed,
-/// so a caller that must witness them (the doctor sweep, which counts the
-/// soak by condensations) can.
+/// The sweep at the tail is the placement that needs no trigger: a worker
+/// already runs after every commit and every session end, so a session whose
+/// agent went away without ending it is condensed at the family's idle
+/// floor by whichever pass comes next, under the lock this pass holds.
 pub(super) fn drain_queues(git_dir: Option<&str>, wait: LockWait) -> Result<Vec<(String, String)>> {
-    let mut condensed = Vec::new();
     let Some(git_dir) = git_dir else {
-        return Ok(condensed);
+        return Ok(Vec::new());
     };
     let git_dir = Path::new(git_dir);
     // Another worker is already draining: it will take these entries too, so a
     // second drain would only duplicate idempotent work and its git writes.
     let Some(_lock) = acquire_queue_lock(git_dir, wait) else {
-        return Ok(condensed);
+        return Ok(Vec::new());
     };
+    let condensed = drain_locked(git_dir);
+    let _ = super::sweep::sweep_idle_family(git_dir, now_ms(), None);
+    Ok(condensed)
+}
+
+/// [`drain_queues`] without the idle sweep at its tail: the drain the
+/// session sweep itself runs first, whose caller then sweeps exactly the
+/// sessions it was asked to (a targeted `rift session stop` must never
+/// finalize a neighbour).
+///
+/// Returns the `(session_id, checkpoint_id)` pairs the condense jobs landed,
+/// so a caller that must witness them (the doctor sweep, which counts the
+/// soak by condensations) can.
+pub(super) fn drain_jobs(git_dir: Option<&str>, wait: LockWait) -> Vec<(String, String)> {
+    let Some(git_dir) = git_dir.map(Path::new) else {
+        return Vec::new();
+    };
+    match acquire_queue_lock(git_dir, wait) {
+        Some(_lock) => drain_locked(git_dir),
+        None => Vec::new(),
+    }
+}
+
+/// Every job and queued commit, drained under the lock the caller holds.
+fn drain_locked(git_dir: &Path) -> Vec<(String, String)> {
+    let mut condensed = Vec::new();
     let now = now_ms();
     // Under the lock, on the same clock reading the lock decision used: a temp
     // file older than the lock-steal age is the corpse of a write that died
@@ -95,7 +122,7 @@ pub(super) fn drain_queues(git_dir: Option<&str>, wait: LockWait) -> Result<Vec<
             .filter(|(path, _)| attempted.insert(path.clone()))
             .collect();
         if agent_jobs.is_empty() && commits.is_empty() {
-            return Ok(condensed);
+            return condensed;
         }
         for (path, job) in agent_jobs {
             condensed.extend(run_agent_job(&t, git_dir, &path, &job));
@@ -170,6 +197,9 @@ fn run_agent_job(
             content_sha256,
         } => convert_document_job(t, job, rel_path, content_sha256).map(|()| None),
         crate::agent_queue::JobKind::DocSweep => sweep_documents_job(t, job).map(|()| None),
+        crate::agent_queue::JobKind::SweepIdle { floor_ms } => {
+            Ok(sweep_idle_job(t, git_dir, job, *floor_ms))
+        }
         crate::agent_queue::JobKind::BasisSnapshot {
             rel_path,
             content_sha256,
@@ -204,6 +234,21 @@ fn run_agent_job(
             None
         }
     }
+}
+
+/// The sweep a session start asked for, on the requesting hook's clock and
+/// floor. Never a failure: a member that cannot be swept is left for the
+/// next pass, which is what the tail sweep of every drain is.
+fn sweep_idle_job(
+    t: &crate::hooktime::HookTimer,
+    git_dir: &Path,
+    job: &crate::agent_queue::AgentJob,
+    floor_ms: i64,
+) -> Option<(String, String)> {
+    t.phase("sweep_idle", || {
+        super::sweep::sweep_idle_family(git_dir, job.queued_at_ms, Some(floor_ms))
+    });
+    None
 }
 
 /// The conversion budget one document gets in the detached worker.
@@ -454,7 +499,8 @@ pub(super) fn owe_session_start_passes(
     }
     let documents = t.phase("owe_doc_sweep", || owe_document_sweep(git_dir, work_tree));
     let index = t.phase("owe_search_index", || owe_search_index(git_dir, work_tree));
-    documents || index
+    let sweep = t.phase("owe_idle_sweep", || owe_idle_sweep(git_dir, work_tree));
+    documents || index || sweep
 }
 
 /// Whether this hook is the family's "a session is beginning" boundary.
@@ -473,6 +519,26 @@ pub(super) fn session_start_hook(
         return verb == "PreInvocation" && hook_number(payload, "invocationNum") == Some(0);
     }
     verb == "SessionStart"
+}
+
+/// Ask for the idle sweep at the family's floor.
+///
+/// A session starting is when another agent's abandoned session is most
+/// likely to be found, and the worker this hook dispatches has nothing else
+/// to wait for: the hook pays one journal write, the worker pays the sweep.
+fn owe_idle_sweep(git_dir: &Path, work_tree: &Path) -> bool {
+    let floor_ms = rift_config::idle_sweep_ms(&work_tree.join(".rift"));
+    crate::agent_queue::enqueue(
+        git_dir,
+        &crate::agent_queue::AgentJob {
+            schema_version: 1,
+            work_tree: work_tree.to_path_buf(),
+            queued_at_ms: now_ms(),
+            attempts: 0,
+            kind: crate::agent_queue::JobKind::SweepIdle { floor_ms },
+        },
+    )
+    .is_ok()
 }
 
 /// The deferred half of `SessionEnd`: settle the session's last turn (no

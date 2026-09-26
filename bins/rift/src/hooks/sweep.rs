@@ -11,7 +11,7 @@ use rift_shadow::hooks::session_cache::SessionCache;
 use super::archive::archive_now;
 use super::git::{effective_config, strategy_kind};
 use super::projection_db_at;
-use super::worker::{drain_queues, LockWait};
+use super::worker::{drain_jobs, LockWait};
 
 /// What one crashed-session sweep found and did.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -87,21 +87,18 @@ struct SweepCtx<'a> {
 /// not idle and this pass does not see it.
 ///
 /// A session is only ever closed on an archive that actually ran. A
-/// `Wrapper`-routed repository with no provisioned backend archives nothing, and
-/// closing the session there would spend the one chance it had — `Ended` has no
-/// outgoing edges — so that case defers instead. The hook path holds the same
+/// repository with nothing to archive against closes nothing, because
+/// `Ended` is left only by the session's own next hook, and an agent that is
+/// gone sends none: closing there would spend the one condense it had, so
+/// that case defers instead. The hook path holds the same
 /// line at `SessionEnd` (see the note at `drive_post_ingest`), which is why this
 /// pass finds `ending` sessions no agent will ever speak for again.
 ///
-/// **A swept session that is then resumed stays `ending` for the rest of its
-/// life, and that is not a defect.** The machine has no edge out of `Ending`
-/// except `CondenseDone`, so a returning agent's hooks — which are legal, and
-/// captured in full: receipts, read facts, turn boundaries — leave the phase
-/// where it is while re-stamping the last-touch time. The session is therefore
-/// no longer idle, so this pass leaves it alone while the developer works, and
-/// condenses it on the first sweep after they stop. Nothing is lost and nothing
-/// double-condenses; the only cost is that the phase reads `ending` during a
-/// resumed session's second life, which is why it is written down here.
+/// **A swept session that is then resumed is working again.** Its next hook
+/// returns it to `active` (the machine's `Activity` and `Start` edges out of
+/// `ending` and `ended`), and its next end, or the next sweep after it goes
+/// quiet, condenses the bytes since the last checkpoint. Nothing is lost and
+/// nothing double-condenses: an unchanged session re-condenses to a no-op.
 ///
 /// One session's failure never stops the sweep: each is finalized on its own
 /// and a failure leaves that session live for the next pass.
@@ -115,68 +112,138 @@ pub(crate) fn sweep_stale_sessions(
     timeout_ms: i64,
     only: Option<&str>,
 ) -> Result<SessionSweep> {
-    use rift_shadow::hooks::session_cache::{is_idle_past, live_sessions_for};
-    use rift_shadow::hooks::{Effect, SessionState};
-
     let repo = rift_git::discover(root)?;
     let mut sweep = SessionSweep::default();
     rescue_agent_jobs(&repo.git_dir, only, &mut sweep);
+    sweep_member(&repo, now, timeout_ms, only, &mut sweep)?;
+    Ok(sweep)
+}
+
+/// The automatic idle sweep: every member of the family `git_dir` belongs
+/// to, at the family's floor (`[capture] idle_sweep_minutes`, read at the
+/// main checkout) unless `floor_ms` names one.
+///
+/// This is what ends a session whose agent went away without a
+/// `SessionEnd` — an editor panel closed, a process killed, an agent that
+/// publishes no end at all — minutes after it went quiet rather than on the
+/// next `rift doctor --fix`. It runs where work already runs, at every
+/// `SessionStart` and at the tail of every worker pass, never on a timer: the
+/// caller holds the queue lock, so it never races a condense of the same
+/// session. A member whose checkout is gone is skipped, as doctor's sweep
+/// skips it, and one member that cannot be swept never stops the others.
+/// Unlike [`sweep_stale_sessions`] it rescues no queued jobs: its caller is
+/// the worker that is draining them.
+pub(crate) fn sweep_idle_family(git_dir: &Path, now: i64, floor_ms: Option<i64>) -> SessionSweep {
+    let mut sweep = SessionSweep::default();
+    let Some(work_tree) = rift_shadow::hooks::session_cache::work_tree_of(git_dir) else {
+        return sweep;
+    };
+    let Ok(paths) = rift_git::discover(&work_tree) else {
+        return sweep;
+    };
+    let journal = crate::session_verbs::family_journal(&paths);
+    let floor = floor_ms.unwrap_or_else(|| family_sweep_floor(&journal, &paths));
+    for member in journal.iter().map(|j| &j.member) {
+        if member.prunable {
+            continue;
+        }
+        if let Ok(repo) = rift_git::discover(&member.work_tree) {
+            let _ = sweep_member(&repo, now, floor, None, &mut sweep);
+        }
+    }
+    sweep
+}
+
+/// The family's sweep floor, read at its main checkout: one family, one
+/// floor, whichever member's worker happens to run the pass.
+pub(crate) fn family_sweep_floor(
+    journal: &[crate::session_verbs::MemberJournal],
+    paths: &rift_git::RepoPaths,
+) -> i64 {
+    let main = journal
+        .iter()
+        .find(|j| j.member.is_main)
+        .map_or(paths.work_tree.as_path(), |j| j.member.work_tree.as_path());
+    rift_config::idle_sweep_ms(&main.join(".rift"))
+}
+
+/// Sweep one member's live sessions: those inside the idle window are
+/// reported live, the rest are finalized. Nothing is opened unless some
+/// session is idle, because this runs on every worker pass.
+fn sweep_member(
+    repo: &rift_git::RepoPaths,
+    now: i64,
+    timeout_ms: i64,
+    only: Option<&str>,
+    sweep: &mut SessionSweep,
+) -> Result<()> {
+    use rift_shadow::hooks::session_cache::{is_idle_past, live_sessions_for};
+
     let mut sessions = live_sessions_for(&repo.git_dir, &repo.common_dir, &repo.work_tree)?;
     // `rift session stop ID` finalizes one session; the others are not even
     // looked at, so a targeted stop can never sweep a neighbour.
     if let Some(target) = only {
         sessions.retain(|s| s.session_id == target);
     }
-    if sessions.is_empty() {
-        return Ok(sweep);
+    let (idle, live): (Vec<_>, Vec<_>) = sessions
+        .into_iter()
+        .partition(|cache| is_idle_past(cache, now, timeout_ms));
+    sweep
+        .live
+        .extend(live.into_iter().map(|cache| cache.session_id));
+    if idle.is_empty() {
+        return Ok(());
     }
-    let ctx = open_sweep(&repo, now)?;
+    let ctx = open_sweep(repo, now)?;
+    for cache in idle {
+        finalize_idle_session(&ctx, &cache, sweep);
+    }
+    Ok(())
+}
 
-    for cache in sessions {
-        let id = cache.session_id.clone();
-        if !is_idle_past(&cache, now, timeout_ms) {
+/// Time one idle session out, condense it, and close it; what happened is
+/// recorded on `sweep`.
+fn finalize_idle_session(ctx: &SweepCtx<'_>, cache: &SessionCache, sweep: &mut SessionSweep) {
+    use rift_shadow::hooks::{Effect, SessionState};
+
+    let id = cache.session_id.clone();
+    // A session already in `ending` owes a condense from an earlier pass (or
+    // from a hook that could not reach the archive), and asking the machine
+    // again would answer nothing — `Ending` has no `IdleTimeout` edge. That
+    // refusal is what makes a repeated sweep idempotent, and it is also what
+    // would strand the session forever if this pass simply reported it. So
+    // the condense is re-attempted directly instead: the transition it needs
+    // has already happened, only the effect is outstanding.
+    if cache.state != SessionState::Ending.as_str() {
+        let timed_out = ctx.rt.block_on(rift_shadow::bridge::timeout_idle_session(
+            &ctx.store,
+            &ctx.repo.git_dir,
+            &id,
+            ctx.now,
+        ));
+        let Ok((_, effects)) = timed_out else {
             sweep.live.push(id);
-            continue;
-        }
-        // A session already in `ending` owes a condense from an earlier pass (or
-        // from a hook that could not reach the archive), and asking the machine
-        // again would answer nothing — `Ending` has no `IdleTimeout` edge. That
-        // refusal is what makes a repeated sweep idempotent, and it is also what
-        // would strand the session forever if this pass simply reported it. So
-        // the condense is re-attempted directly instead: the transition it needs
-        // has already happened, only the effect is outstanding.
-        if cache.state != SessionState::Ending.as_str() {
-            let timed_out = ctx.rt.block_on(rift_shadow::bridge::timeout_idle_session(
-                &ctx.store,
-                &ctx.repo.git_dir,
-                &id,
-                now,
-            ));
-            let Ok((_, effects)) = timed_out else {
-                sweep.live.push(id);
-                continue;
-            };
-            if !effects.contains(&Effect::RequestCondense) {
-                // The machine refused a state with no idle edge. Unreachable
-                // through `live_sessions` today (it yields only active /
-                // compacting / ending), so nothing is owed and nothing is done.
-                sweep.condense_deferred.push(id);
-                continue;
-            }
-        }
-        settle_last_turn(&ctx, &cache);
-        let minted = condense_swept_session(&ctx, &cache);
-        let condensed = minted.is_some();
-        if let Some(checkpoint) = minted {
-            sweep.condensed_checkpoints.push(checkpoint);
-        }
-        if condensed && mark_swept_condensed(&ctx, &cache) {
-            sweep.finalized.push(id);
-        } else {
+            return;
+        };
+        if !effects.contains(&Effect::RequestCondense) {
+            // The machine refused a state with no idle edge. Unreachable
+            // through `live_sessions` today (it yields only active /
+            // compacting / ending), so nothing is owed and nothing is done.
             sweep.condense_deferred.push(id);
+            return;
         }
     }
-    Ok(sweep)
+    settle_last_turn(ctx, cache);
+    let minted = condense_swept_session(ctx, cache);
+    let condensed = minted.is_some();
+    if let Some(checkpoint) = minted {
+        sweep.condensed_checkpoints.push(checkpoint);
+    }
+    if condensed && mark_swept_condensed(ctx, cache) {
+        sweep.finalized.push(id);
+    } else {
+        sweep.condense_deferred.push(id);
+    }
 }
 
 /// The first thing the sweep does: drain the jobs a detached agent-hook
@@ -188,8 +255,7 @@ pub(crate) fn sweep_stale_sessions(
 /// waiting: a worker that holds the lock is doing this work already. The
 /// condenses that landed are witnessed on the sweep like its own.
 fn rescue_agent_jobs(git_dir: &Path, only: Option<&str>, sweep: &mut SessionSweep) {
-    for (session, checkpoint) in drain_queues(git_dir.to_str(), LockWait::None).unwrap_or_default()
-    {
+    for (session, checkpoint) in drain_jobs(git_dir.to_str(), LockWait::None) {
         if only.is_none_or(|t| t == session) {
             sweep.finalized.push(session);
             sweep.condensed_checkpoints.push(checkpoint);

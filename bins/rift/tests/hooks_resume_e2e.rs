@@ -17,8 +17,8 @@ mod common;
 mod hooks_fixture;
 use hooks_fixture::{
     archive_head, checkpoint_shards, clone_of, commit_carrying_trailer, current_branch, git_in,
-    has_local_checkpoints_ref, json_str, only_checkpoint_id, query_env, rev_parse, rift_json,
-    run_rift, run_rift_stdout, seed_live_session_repo, seed_session_with_transcript,
+    has_local_checkpoints_ref, json_str, now_ms, only_checkpoint_id, query_env, rev_parse,
+    rift_json, run_rift, run_rift_stdout, seed_live_session_repo, seed_session_with_transcript,
     shard_blob_bytes, sync_env, sync_env_with_data, window_key, write_agent_transcript,
     LIVE_SESSION, TWO_LINE_TRANSCRIPT,
 };
@@ -334,7 +334,8 @@ fn land_server_checkpoint(repo: &Path, tmp: &Path, n: u32, env: &[(&str, &str)])
     std::fs::write(
         sessions.join(format!("{sid}.json")),
         format!(
-            r#"{{"schema":1,"session_id":"{sid}","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":false,"compaction_boundary":null,"updated_at_ms":1783000000000,"native_id_map":{{}},"transcript_path":{}}}"#,
+            r#"{{"schema":1,"session_id":"{sid}","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":false,"compaction_boundary":null,"updated_at_ms":{},"native_id_map":{{}},"transcript_path":{}}}"#,
+            now_ms(),
             json_str(&transcript)
         ),
     )

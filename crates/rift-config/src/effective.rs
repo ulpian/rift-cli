@@ -62,15 +62,7 @@ impl EffectiveConfig {
     /// [`RiftError::Config`] (aggregating all problems) on parse or validation
     /// failure, or [`RiftError::Io`] if the file cannot be read.
     pub fn load(rift_dir: &Path) -> Result<Self> {
-        let path = rift_dir.join("config.toml");
-        let source = classify_policy_source(rift_dir, &path);
-        let raw = if source.is_declared_policy_applied() {
-            let text = std::fs::read_to_string(&path)?;
-            toml::from_str::<RiftConfig>(&text)
-                .map_err(|e| RiftError::config(format!("{}: {e}", path.display())))?
-        } else {
-            RiftConfig::secure_default()
-        };
+        let (raw, source) = load_raw(rift_dir)?;
         let mut effective = Self::from_config(raw)?;
         effective.policy_source = source;
         Ok(effective)
@@ -420,4 +412,36 @@ impl EffectiveConfig {
     pub fn policy_hash(&self) -> Blake3Id {
         self.policy_hash
     }
+}
+
+/// The idle sweep's floor for the repository whose policy lives in
+/// `rift_dir`, in milliseconds: a live session untouched for longer is
+/// condensed and ended by the next sweep.
+///
+/// Read beside the effective policy rather than folded into it. It is not
+/// policy: it moves *when* a quiet session is finalized, never what is
+/// captured, redacted or served, so it stays out of the policy hash and out
+/// of [`EffectiveConfig`]. A file that cannot be read, or does not load,
+/// answers the default, exactly as the effective policy falls back to its
+/// secure default.
+#[must_use]
+pub fn idle_sweep_ms(rift_dir: &Path) -> i64 {
+    match load_raw(rift_dir) {
+        Ok((raw, _)) => raw.capture.idle_sweep_ms(),
+        Err(_) => RiftConfig::secure_default().capture.idle_sweep_ms(),
+    }
+}
+
+/// The raw policy file and where it came from: the declared file when the
+/// work tree owns one, the secure default otherwise.
+fn load_raw(rift_dir: &Path) -> Result<(RiftConfig, PolicySource)> {
+    let path = rift_dir.join("config.toml");
+    let source = classify_policy_source(rift_dir, &path);
+    if !source.is_declared_policy_applied() {
+        return Ok((RiftConfig::secure_default(), source));
+    }
+    let text = std::fs::read_to_string(&path)?;
+    let raw = toml::from_str::<RiftConfig>(&text)
+        .map_err(|e| RiftError::config(format!("{}: {e}", path.display())))?;
+    Ok((raw, source))
 }

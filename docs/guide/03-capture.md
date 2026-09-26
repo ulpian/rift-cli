@@ -294,13 +294,52 @@ never be finalized — it would read as live forever. **`end` is deliberately
 *not* admitted from `Compacting`**: that trigger comes from a real hook, and a
 compaction that never reports completion is a different defect which should
 look like one. **Idle timeout from `Ending` stays illegal**, which is what
-makes a repeated sweep a no-op instead of a second condense. And **an illegal
-transition is refused, logged and swallowed** at the hook boundary: it never
-panics and never aborts your agent.
+makes a repeated sweep a no-op instead of a second condense.
 
-The idle threshold is **24 hours** and the driver is `rift doctor`, the one
-pass that runs without an agent present: a long-abandoned session is finalized
-there rather than by a timer nobody installed.
+**No phase is a trap.** A session that sends events is working, whatever its
+recorded phase said a moment before. `idle`, `ending` and `ended` are all left
+by the next sign of life: a `start` or an `activity` (any captured hook that
+names no lifecycle trigger — a prompt, a tool call, a turn end) returns the
+session to `active`. Three things in the field made this the rule. An editor
+that restarts itself for an update ends every agent tab at once and then
+resumes each one under the same id, so an `ended` that refused the resume
+recorded the busiest session on the machine as over while thousands of its
+hooks arrived. A session launched before capture was set up, or whose client
+skipped its start hook, sent tool events to an `idle` that accepted only a
+start. And an agent that publishes no session end left its sessions `active`
+for days. So `ended` is not terminal: a session id can outlive its first
+checkpoint, and a re-opened session condenses again at its next end, carrying
+the bytes written since. What still holds is the claim that matters: nothing
+but a finished condense leads into `ended`.
+
+The bridge asks the machine only for legal steps. A compaction that sees any
+other event is done; a session not working is returned to work first, and then
+the event's own trigger applies, so a lone `SessionEnd` to a session never
+opened opens and ends it in one pass. A start for a session already working,
+and an end redelivered to one already ending or ended, change nothing. A
+session opened without its agent's start is recorded as a
+**`synthesized-start`** transition, never as a `start`, so the audit says what
+arrived. And the arm that remains for a trigger the machine refuses is not
+silent: **a refusal is its own append-only row**, `refused-<trigger>`, whose
+from and to are the phase that refused it. A refusal once hid a working
+session for two days because it left no trace, and the hook's receipt already
+read "recorded".
+
+**The idle sweep** ends a session whose agent went away without saying so. A
+live session untouched for longer than the family's floor —
+`[capture] idle_sweep_minutes`, five minutes by default — is timed out,
+condensed against `HEAD` and closed. It runs where work already runs, never on
+a timer: at every session start (the hook journals one small request for the
+worker it was dispatching anyway) and at the tail of every worker pass, under
+the queue lock, across every member of the family whose checkout still
+exists. Sweeping that early is safe precisely because no phase is a trap: a
+developer who was only reading gets the session back on their next prompt,
+and a pause with no new bytes re-condenses to nothing. `rift doctor` is the
+alarm and the manual arm: it reports sessions past the sweep's floor as
+*sweepable*, sessions past **24 hours** as **STUCK** (the sweep is not reaching
+them), and a session recorded `ended` or `idle` while its own events kept
+arriving as Rift's own defect, with nothing asked of you; `--fix` sweeps at the
+sweep's floor.
 
 ---
 
@@ -439,12 +478,12 @@ byte offset in a hook-owned sidecar beside the session cache
 so successive windows tile the transcript exactly and a late settle can never
 fold turn N+1 into turn N. The rows keep the identities the old synchronous
 path minted, and because those identities are content-addressed, a redelivered
-hook, a second settle and the doctor sweep are all idempotent. The last turn is
-settled by the session-end path, or by `rift doctor`'s stale-session sweep
-before the session is condensed.
+hook, a second settle and the idle sweep are all idempotent. The last turn is
+settled by the session-end path, or by the idle sweep before the session is
+condensed.
 
 Two honest consequences. **Spend appears one hook later** — invisible in
-practice, and at worst bounded by session end or the doctor sweep. And **a
+practice, and at worst bounded by session end or the idle sweep. And **a
 session Rift joins midway counts from the join point**: first contact seeds the
 offset at the file's current length, with no backfill; an offset past the
 file's length (a restored or relocated transcript) resets to the length and
