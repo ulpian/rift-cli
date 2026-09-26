@@ -1,6 +1,7 @@
 //! The native project-hook file of the standard families: which token has one,
-//! how its Rift groups are inspected, planned and proved owned, and the two
-//! read-only questions adoption asks of it.
+//! how its Rift groups are inspected, planned and proved owned, and the
+//! read-only question adoption asks of it (which binary it invokes). Codex's
+//! trust in the file is its own module, `codex_trust`.
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +17,7 @@ use super::antigravity::{
 use super::descriptor::descriptor_rift_bin;
 use super::legacy::legacy_owned_hook_fragment;
 use super::manifest::{read_manifest, OwnershipManifest};
-use super::{CodexTrust, NativeHookWiring, NativeWiring};
+use super::{NativeHookWiring, NativeWiring};
 
 /// One client's hook-file write, planned before anything is touched: the
 /// path, the merged bytes and the fingerprint the ownership manifest records.
@@ -37,61 +38,6 @@ pub(super) struct PlannedHook {
 #[must_use]
 pub fn hook_file(agent_token: &str) -> Option<&'static str> {
     hook_family(agent_token).map(ClientFamily::hook_path)
-}
-
-/// Whether Codex has recorded trust for a project's hook file.
-///
-/// Codex trusts hooks **per absolute path and hash**, in
-/// `~/.codex/config.toml`'s `[hooks.state."<abs>/.codex/hooks.json:<event>:i:j"]`
-/// tables (verified 2026-08-30: nine entries for this repository's file). A
-/// linked worktree's `.codex/hooks.json` is a NEW path, so it is untrusted
-/// until the user approves it inside Codex — which is a fact adoption has to
-/// report, because a fragment Rift wrote correctly still will not run.
-///
-/// Rift never writes `~/.codex/config.toml` or any other global client
-/// configuration, so this is a read and only a read: no `codex_home`
-/// means no read at all.
-///
-/// "Approved" means Codex has recorded trust for this path at least once. It
-/// deliberately does not compare `trusted_hash`: what that hash covers is
-/// Codex's business, and inventing an answer would be worse than the honest
-/// one, which is why the pending wording tells the user where to go rather
-/// than promising the hooks will fire.
-#[must_use]
-pub fn codex_hook_trust(hooks_json: &Path, codex_home: Option<&Path>) -> CodexTrust {
-    let Some(home) = codex_home else {
-        return CodexTrust::Pending;
-    };
-    let Ok(text) = std::fs::read_to_string(home.join("config.toml")) else {
-        return CodexTrust::Pending;
-    };
-    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
-        return CodexTrust::Pending;
-    };
-    let Some(state) = doc
-        .get("hooks")
-        .and_then(toml_edit::Item::as_table)
-        .and_then(|hooks| hooks.get("state"))
-        .and_then(toml_edit::Item::as_table)
-    else {
-        return CodexTrust::Pending;
-    };
-    // Both spellings of the member's path: Codex recorded whatever it resolved,
-    // and on this machine `/var` and `/private/var` are the same directory.
-    let mut prefixes = vec![format!("{}:", hooks_json.display())];
-    if let Ok(canonical) = std::fs::canonicalize(hooks_json) {
-        prefixes.push(format!("{}:", canonical.display()));
-    }
-    let recorded = state.iter().any(|(key, _)| {
-        prefixes
-            .iter()
-            .any(|prefix| key.starts_with(prefix.as_str()))
-    });
-    if recorded {
-        CodexTrust::Approved
-    } else {
-        CodexTrust::Pending
-    }
 }
 
 /// The absolute `rift` binary an agent's INSTALLED hook fragment invokes, read
@@ -553,64 +499,6 @@ mod tests {
         assert_eq!(
             row_for(dir.path(), "claude-code").hook_wiring,
             Some(NativeHookWiring::Conflict)
-        );
-    }
-
-    /// **Codex's trust is Codex's to give.** Rift reads
-    /// `[hooks.state]` to say whether a member's hook file has been approved,
-    /// and the file it reads comes back byte-identical — a fresh worktree's
-    /// `.codex/hooks.json` is a NEW absolute path, so it is untrusted no matter
-    /// how correctly Rift wrote it, and the only honest thing to do is say so.
-    ///
-    /// The second fixture is a macOS hazard, not a hypothetical: a temp path is
-    /// `/var/folders/…` and its canonical form is `/private/var/folders/…`, and
-    /// Codex records whichever it resolved.
-    #[test]
-    fn codex_trust_is_read_from_codex_state_and_never_written() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("codex-home");
-        std::fs::create_dir_all(&home).unwrap();
-        let member = dir.path().join("member");
-        let hooks = member.join(".codex/hooks.json");
-        std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
-        std::fs::write(&hooks, "{}").unwrap();
-        let canonical = std::fs::canonicalize(&hooks).unwrap();
-
-        let config = home.join("config.toml");
-        let unapproved = dir.path().join("other/.codex/hooks.json");
-        for (recorded, label) in [(&hooks, "as given"), (&canonical, "canonicalized")] {
-            // A TOML basic string escapes its backslashes, as Codex does when
-            // it records a Windows path.
-            let bytes = format!(
-                "[hooks.state.\"{}:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:abc\"\n",
-                recorded.display().to_string().replace('\\', "\\\\")
-            );
-            std::fs::write(&config, &bytes).unwrap();
-            assert_eq!(
-                codex_hook_trust(&hooks, Some(&home)),
-                CodexTrust::Approved,
-                "{label}: a recorded path is approved"
-            );
-            assert_eq!(
-                codex_hook_trust(&unapproved, Some(&home)),
-                CodexTrust::Pending,
-                "{label}: another member's path is not"
-            );
-            assert_eq!(
-                std::fs::read_to_string(&config).unwrap(),
-                bytes,
-                "{label}: Rift never writes global client configuration"
-            );
-        }
-
-        assert_eq!(
-            codex_hook_trust(&hooks, None),
-            CodexTrust::Pending,
-            "no Codex home means no read at all"
-        );
-        assert_eq!(
-            CodexTrust::Pending.message(),
-            "pending (approve once in Codex)"
         );
     }
 

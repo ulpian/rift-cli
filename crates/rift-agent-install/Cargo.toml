@@ -17,6 +17,7 @@ rift-shadow-hooks = { version = "0.0.1", path = "../rift-shadow-hooks" }
 blake3 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 toml_edit = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

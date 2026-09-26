@@ -197,7 +197,8 @@ fn route(_cli: &Cli, cmd: &Command, root: &Path) -> rift_core::Result<Outcome> {
         Command::Enable(a) => enable_agent(root, &a.agent),
         Command::Disable(a) => disable_agent(root, &a.agent),
         // Read-only projection queries — guard on init state first.
-        Command::Status => projection_read(root, |s, rt| rt.block_on(query::status(s))),
+        Command::Status => projection_read(root, |s, rt| rt.block_on(query::status(s)))
+            .map(|outcome| agents::with_codex_trust(root, outcome)),
         Command::Viewer(_) => Err(rift_core::RiftError::Other(
             "viewer launch was routed through the command dispatcher".to_owned(),
         )),

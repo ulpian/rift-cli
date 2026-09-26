@@ -389,6 +389,108 @@ fn enable_then_disable_round_trips() {
     assert!(!desc.exists(), "disable removes the wiring descriptor");
 }
 
+/// The write is where a changed hook is said. Codex skips a hook whose
+/// recorded trust no longer matches it, silently, so `rift enable` compares
+/// what it just wrote against Codex's own record and prints the remedy —
+/// naming VS Code because the recorded session ran there — and returns it in
+/// `--json`, without touching Codex's configuration.
+#[test]
+fn enabling_codex_over_a_changed_trusted_hook_says_so_at_the_write() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = repo_dir();
+    record_vscode_codex_session(home.path(), repo.path());
+    let codex_home = home.path().join("codex-home");
+    let config = trust_a_different_session_start(&codex_home, repo.path());
+
+    let out = rift(home.path(), repo.path(), &["enable", "--agent", "codex"]);
+    assert_eq!(code(&out), 0, "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("codex trust: error — Codex is skipping 10 of 10 Rift hooks"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Codex is skipping 10 of Rift's hooks because they are new or changed after you \
+             approved them"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Then reload the VS Code window and start a new Codex conversation."),
+        "{stdout}"
+    );
+
+    let out = rift(
+        home.path(),
+        repo.path(),
+        &["enable", "--agent", "codex", "--json"],
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(json["codex_trust_remedy"]
+        .as_str()
+        .unwrap()
+        .starts_with("Codex is skipping 10 of Rift's hooks"));
+    let verdicts: Vec<(&str, &str)> = json["codex_trust"]["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hook| {
+            (
+                hook["event"].as_str().unwrap(),
+                hook["verdict"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        verdicts.contains(&("SessionStart", "modified")),
+        "{verdicts:?}"
+    );
+    assert!(verdicts.contains(&("Stop", "untrusted")), "{verdicts:?}");
+    assert_eq!(
+        std::fs::read_to_string(codex_home.join("config.toml")).unwrap(),
+        config,
+        "Rift never writes Codex's configuration"
+    );
+}
+
+/// A Codex session recorded in `repo`, run by the VS Code extension at a
+/// version the trust check is proven against.
+fn record_vscode_codex_session(home: &Path, repo: &Path) {
+    let rollout = home.join("rollout.jsonl");
+    std::fs::write(
+        &rollout,
+        "{\"type\":\"session_meta\",\"payload\":{\"originator\":\"codex_vscode\",\
+         \"source\":\"vscode\",\"cli_version\":\"0.155.0-alpha.16.3\"}}\n",
+    )
+    .unwrap();
+    let sessions = repo.join(".git/rift-sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let cache = serde_json::json!({
+        "schema": 1, "session_id": "s1", "state": "ended", "agent": "codex",
+        "current_turn_ordinal": 0, "compaction_boundary": null, "updated_at_ms": 1,
+        "transcript_path": rollout.display().to_string(),
+    });
+    std::fs::write(sessions.join("s1.json"), cache.to_string()).unwrap();
+}
+
+/// Codex's record of a `SessionStart` hook trusted as something other than
+/// what Rift writes, keyed by the path Codex resolves (the canonical one).
+/// Returns the configuration's text.
+fn trust_a_different_session_start(codex_home: &Path, repo: &Path) -> String {
+    std::fs::create_dir_all(codex_home).unwrap();
+    let hooks_json = std::fs::canonicalize(repo)
+        .unwrap()
+        .join(".codex/hooks.json");
+    let config = format!(
+        "[hooks.state.\"{}:session_start:0:0\"]\ntrusted_hash = \"sha256:{}\"\n",
+        hooks_json.display().to_string().replace('\\', "\\\\"),
+        "0".repeat(64)
+    );
+    std::fs::write(codex_home.join("config.toml"), &config).unwrap();
+    config
+}
+
 #[test]
 fn enable_unknown_agent_fails_cleanly() {
     let home = tempfile::tempdir().unwrap();

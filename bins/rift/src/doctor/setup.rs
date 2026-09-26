@@ -253,7 +253,9 @@ fn recall_ingest_line(recall_enabled: bool, ingested: Option<i64>) -> String {
 
 /// Leg 3: every first-class agent's native hook configuration. Hooks are
 /// the only wiring Rift writes or inspects, so this leg gates on and prints
-/// exactly that one state. The install evidence is spelled by the installer's
+/// exactly that one state — for Codex, including whether Codex still trusts
+/// each hook as written: a hook Codex skips reads `error`, never
+/// `configured`, and its action is the remedy. The install evidence is spelled by the installer's
 /// one sentence (`present via …`), so doctor, `rift recall status` and
 /// Project Settings cannot name different reasons for the same row.
 fn integrations_lines(clients: &[rift_agent_install::ClientStatus]) -> String {
@@ -279,6 +281,9 @@ fn integrations_lines(clients: &[rift_agent_install::ClientStatus]) -> String {
             token(serde_json::to_value(status.connection).unwrap_or_default()),
             rift_agent_install::describe_installations(&status.installations),
         ));
+        if let Some(trust) = &status.codex_trust {
+            human.push_str(&format!("\n        codex trust: {}", trust.summary()));
+        }
         if let Some(action) = &status.action {
             human.push_str(&format!("\n        action: {action}"));
         }

@@ -63,6 +63,10 @@ pub use wire::{
 // enrichment step reaches it through the existing hooks surface (no new
 // bin→adapter crate-graph edge; this crate already depends on the adapter).
 pub use rift_agent_claude_code::transcript;
+// Codex's session-record reader, re-exported on the same terms: the installer
+// reads which client ran a Codex session, and which version, through the
+// crate it already depends on rather than a new edge to the adapter.
+pub use rift_agent_codex::rollout as codex_rollout;
 // Re-exported so the bridge (`rift-shadow`) reads an adapter's declared turn
 // signals through this crate rather than growing a `rift-shadow → rift-agent`
 // edge (the crate-graph snapshot stays still). The trait itself needs no

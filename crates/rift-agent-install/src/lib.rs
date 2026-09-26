@@ -110,6 +110,9 @@ pub enum WiringState {
     Invalid,
     /// The files are correct but the client still requires trust/restart/auth.
     ActionRequired,
+    /// Rift's hooks are written and the client is skipping at least one of
+    /// them: Codex, for a hook changed after, or never, trusted.
+    Error,
 }
 
 /// Whether Rift's own stdio handshake probe has verified the generated server.
@@ -197,6 +200,9 @@ pub struct ClientStatus {
     pub model: ModelStatus,
     /// One concise, actionable explanation when degraded.
     pub action: Option<String>,
+    /// Codex's trust in each hook Rift wrote: present for Codex when its hook
+    /// file holds a Rift hook, `None` for every other client.
+    pub codex_trust: Option<native::CodexTrust>,
 }
 
 /// Installation/configuration failure. Never carries config or transcript bytes.
@@ -281,11 +287,19 @@ fn diagnose_client_with_environment(
     } else {
         DetectionState::Supported
     };
-    let hooks = inspect_hooks(repo, client);
+    let codex_trust = (client == ClientFamily::Codex)
+        .then(|| native::codex_trust(repo, env.codex_home.as_deref()))
+        .flatten();
+    let remedy = codex_trust.as_ref().and_then(native::CodexTrust::remedy);
+    let hooks = match (inspect_hooks(repo, client), &remedy) {
+        (WiringState::Configured, Some(_)) => WiringState::Error,
+        (hooks, _) => hooks,
+    };
     let (connection, last_seen_at_ms) = read_connection_lease(repo, client);
     let (last_hook_at_ms, model) = read_capture_facts(repo, client);
     let last_call_at_ms = read_last_call(repo, client);
-    let action = readiness_action(client, detection, hooks, connection, version.as_deref());
+    let action = remedy
+        .or_else(|| readiness_action(client, detection, hooks, connection, version.as_deref()));
     ClientStatus {
         client,
         detection,
@@ -300,6 +314,7 @@ fn diagnose_client_with_environment(
         last_call_at_ms,
         model,
         action,
+        codex_trust,
     }
 }
 

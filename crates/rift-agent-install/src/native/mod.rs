@@ -10,6 +10,9 @@
 //! every surface reads and the read-only diagnosis over the whole registry.
 
 mod antigravity;
+mod codex_client;
+mod codex_identity;
+mod codex_trust;
 mod descriptor;
 #[cfg(test)]
 mod fixtures;
@@ -31,7 +34,11 @@ use descriptor::{descriptor_path, rift_owns_descriptor};
 use hooks::{hook_family, inspect_client_hooks};
 use manifest::read_manifest;
 
-pub use hooks::{codex_hook_trust, hook_file, installed_hook_binary};
+pub use codex_trust::{
+    codex_home_from_process, codex_hook_trust, codex_trust, CodexClient, CodexHookTrust,
+    CodexHookVerdict, CodexSurface, CodexTrust,
+};
+pub use hooks::{hook_file, installed_hook_binary};
 pub use lifecycle::{disable, disable_for_adoption, enable, enable_for_adoption};
 pub use skill::{install_recall_skill, recall_skill_present, remove_recall_skill};
 
@@ -92,31 +99,6 @@ pub enum NativeHookWiring {
     Invalid,
 }
 
-/// Whether Codex has recorded trust for a project's `.codex/hooks.json`.
-///
-/// Codex's own state, read and never written. A member's fresh hook
-/// file is a new absolute path, hence untrusted until the user approves it once
-/// inside Codex.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CodexTrust {
-    /// Codex has recorded trust for this exact path.
-    Approved,
-    /// Codex has no record of this path; the user approves it once, in Codex.
-    Pending,
-}
-
-impl CodexTrust {
-    /// The line adoption and `rift worktree status` print.
-    #[must_use]
-    pub const fn message(self) -> &'static str {
-        match self {
-            Self::Approved => "approved",
-            Self::Pending => "pending (approve once in Codex)",
-        }
-    }
-}
-
 /// Truthful read-only state for one adapter.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeIntegrationStatus {
@@ -138,6 +120,10 @@ pub struct NativeIntegrationStatus {
     /// hook surface: present for the three supported alpha families whose hook
     /// file explicit [`enable`] writes, `None` for every other adapter.
     pub hook_wiring: Option<NativeHookWiring>,
+    /// Codex's trust in each hook Rift wrote into `.codex/hooks.json`: present
+    /// for Codex when the file holds a Rift hook, `None` for every other row.
+    /// Read at diagnosis time only, never on a hook's decision path.
+    pub codex_trust: Option<CodexTrust>,
 }
 
 impl NativeIntegrationStatus {
@@ -256,6 +242,9 @@ fn diagnose_one(
         executable,
         installations,
         hook_wiring: hook_family(token).map(|family| inspect_client_hooks(repo, family, wiring)),
+        codex_trust: (token == AgentId::CODEX.as_str())
+            .then(|| codex_trust(repo, env.codex_home.as_deref()))
+            .flatten(),
     }
 }
 

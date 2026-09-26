@@ -14,6 +14,8 @@
     )
 )]
 
+pub mod rollout;
+
 use rift_agent::{
     event, shell_read, AdapterError, AgentAdapter, CompatNotes, EditKind, EditRequest, HookFacts,
     ModelFact, ModelSource, ReadRequest, SearchRequest, TokenUsage,

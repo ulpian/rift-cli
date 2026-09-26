@@ -46,6 +46,9 @@ pub(crate) fn rift_with_detected_agents(
         .env("RIFT_CONFIG_DIR", home.join("config"))
         .env("RIFT_CACHE_DIR", home.join("cache"))
         .env("RIFT_HEADLESS", "1")
+        // Codex's trust record is read at every write of its hook file and
+        // every status read; a fixture must never read the developer's own.
+        .env("CODEX_HOME", home.join("codex-home"))
         .env("PATH", path)
         .output()
         .expect("spawn rift")

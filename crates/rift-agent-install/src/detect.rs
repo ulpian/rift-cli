@@ -140,6 +140,9 @@ pub struct DetectionEnvironment {
     /// on macOS, `%LOCALAPPDATA%\Programs` on Windows, `/usr/share` and `/opt`
     /// on Linux — in probe order.
     pub app_roots: Vec<PathBuf>,
+    /// Codex's home, where it records which project hooks the user trusted.
+    /// Read, never written; `None` means Codex's trust is not read at all.
+    pub codex_home: Option<PathBuf>,
 }
 
 impl DetectionEnvironment {
@@ -176,6 +179,7 @@ impl DetectionEnvironment {
             search_path: std::env::var_os("PATH"),
             home,
             app_roots,
+            codex_home: crate::native::codex_home_from_process(),
         }
     }
 }
@@ -596,6 +600,7 @@ mod tests {
             search_path: path_dir.map(|dir| dir.as_os_str().to_os_string()),
             home: Some(home.to_path_buf()),
             app_roots: vec![app_root.to_path_buf()],
+            codex_home: None,
         }
     }
 
