@@ -376,11 +376,12 @@ fn is_wellformed_handle(h: &Handle) -> bool {
 /// it is written HERE rather than left to be re-derived a fourth time. There
 /// are exactly **two** production writers of [`rift_store::record_file_revision`]:
 ///
-/// 1. `crates/rift-shadow/src/commit_capture.rs:51` — the commit path, one row
-///    per changed file at a commit boundary;
-/// 2. `crates/rift-shadow/src/project.rs:305` — the `EventKind::ToolResult`
-///    arm, reached whenever a **read-shaped tool call** is captured
-///    (`crates/rift-agent/src/lib.rs:199` maps `tool_name == "read"` to
+/// 1. `persist_commit_capture` in `crates/rift-shadow/src/commit_capture.rs` —
+///    the commit path, one row per changed file at a commit boundary;
+/// 2. `project_read` in `crates/rift-shadow/src/project.rs`, behind the
+///    `EventKind::ToolResult` arm of `project_event` — reached whenever a
+///    **read-shaped tool call** is captured (`default_facts` in
+///    `crates/rift-agent/src/lib.rs` maps `tool_name == "read"` to
 ///    `tool_input.file_path`).
 ///
 /// **So the earlier premise "a `touch`ed file was never captured" is FALSE.**

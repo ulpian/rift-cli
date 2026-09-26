@@ -773,7 +773,7 @@ fn keying_window(visit: &str) -> Vec<&str> {
 /// *in this module* by that spelling.
 ///
 /// **The site outside this module is not the only one, and it is the only
-/// durable one.** `parity.rs:399` —
+/// durable one.** `brand_free` in `parity.rs` —
 /// a case-insensitive search for the retired token (assembled from pieces) —
 /// is the same spelling in the benign class: it feeds a boolean predicate
 /// and never a record, exactly like the [`resolve`] survivor above, so an
