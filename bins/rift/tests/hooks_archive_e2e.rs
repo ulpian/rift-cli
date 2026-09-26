@@ -1,7 +1,8 @@
 //! End-to-end: the native archive through the real post-commit hook — the
 //! shard and its four artifacts, the transcript pair, the read facts, the
-//! opted-in ignored file, the trailer that names the shard that lands, and the
-//! files under `.rift/` that decide nothing any more.
+//! opted-in ignored file, the trailer that names the shard that lands, the
+//! files under `.rift/` that decide nothing any more, and the `scheduled`
+//! strategy's interval archive, which a hook journals and a worker mints.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -17,12 +18,12 @@ mod common;
 #[path = "common/hooks_fixture.rs"]
 mod hooks_fixture;
 use hooks_fixture::{
-    agent_read_hook, archive_head, checkpoint_ref_exists, checkpoint_shards,
-    commit_carrying_trailer, doctor_json, git_in, json_str, now_ms, only_checkpoint_id,
-    prepare_commit_msg_hook, rev_parse, rift_json, run_rift, run_rift_capture, run_rift_capture_in,
-    run_rift_stdout, seed_live_session_repo, session_phase, shard_blob, shard_path_of,
-    shard_tree_names, sync_env, sync_env_with_data, write_agent_transcript, LIVE_SESSION,
-    TWO_LINE_TRANSCRIPT,
+    agent_jobs_named, agent_read_hook, archive_head, archived_reasons, capture_queue_leg,
+    checkpoint_ref_exists, checkpoint_shards, commit_carrying_trailer, doctor_json, git_in,
+    hold_drain_lock, json_str, now_ms, only_checkpoint_id, prepare_commit_msg_hook, rev_parse,
+    rift_json, run_rift, run_rift_capture, run_rift_capture_in, run_rift_stdout,
+    seed_live_session_repo, session_phase, shard_blob, shard_path_of, shard_tree_names, sync_env,
+    sync_env_with_data, write_agent_transcript, LIVE_SESSION, TWO_LINE_TRANSCRIPT,
 };
 
 /// A repository whose live session remembers the agent transcript's ADDRESS,
@@ -792,4 +793,201 @@ fn a_stale_rewrite_toml_is_named_once_and_changes_nothing() {
         checkpoint_ref_exists(&repo),
         "the checkpoint landed regardless of the stale file"
     );
+}
+
+/// The `scheduled` strategy's policy: an interval no walk here outlives, so
+/// the second archive of a session can only come from something else, and a
+/// sensitive path a commit can touch.
+const SCHEDULED_POLICY: &str = "schema_version = 1\n\
+     [project]\nname = \"fixture\"\n\
+     [capture]\ncheckpoint_strategy = \"scheduled\"\nschedule_interval_minutes = 30\n\
+     [paths]\nsensitive_paths = [\"secrets/**\"]\n";
+
+/// A repository that runs the `scheduled` strategy, its live session whose
+/// cache is stamped now and whose transcript the agent keeps outside the
+/// repository, and the private roots its hooks write under.
+///
+/// The binary reads the wall clock, so the clock this walk controls is the
+/// one stamped on disk: the session cache (live because it was touched now),
+/// the drain lock (held because it was taken now), and an interval long
+/// enough that nothing but the first hook is ever due.
+struct Scheduled {
+    _tmp: tempfile::TempDir,
+    repo: PathBuf,
+    cache: PathBuf,
+    data: PathBuf,
+    transcript: PathBuf,
+}
+
+impl Scheduled {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = seed_live_session_repo(tmp.path());
+        std::fs::create_dir_all(repo.join(".rift")).unwrap();
+        std::fs::write(repo.join(".rift").join("config.toml"), SCHEDULED_POLICY).unwrap();
+        let transcript = write_agent_transcript(tmp.path(), LIVE_SESSION, TWO_LINE_TRANSCRIPT);
+        let cache = tmp.path().join("cache");
+        let data = tmp.path().join("data");
+        Self {
+            _tmp: tmp,
+            repo,
+            cache,
+            data,
+            transcript,
+        }
+    }
+
+    /// The shipped environment: the hook hands its journal to a detached
+    /// worker and returns.
+    fn detached_env(&self) -> [(&'static str, &str); 4] {
+        [
+            ("RIFT_CACHE_DIR", self.cache.to_str().unwrap()),
+            ("XDG_DATA_HOME", self.data.to_str().unwrap()),
+            ("LOCALAPPDATA", self.data.to_str().unwrap()),
+            ("RIFT_NO_KEYCHAIN", "1"),
+        ]
+    }
+
+    /// The inline arm: the hook drains its own journal before it returns.
+    fn inline_env(&self) -> [(&'static str, &str); 5] {
+        sync_env_with_data(&self.cache, &self.data)
+    }
+
+    /// One Claude Code `PostToolUse` for the live session, as the client
+    /// sends it, under `env` and nothing inherited that could choose the arm.
+    fn tool_call(&self, env: &[(&str, &str)]) {
+        use std::io::Write as _;
+
+        let body = serde_json::json!({
+            "session_id": LIVE_SESSION,
+            "transcript_path": self.transcript.display().to_string(),
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+        });
+        let mut child = common::rift_cmd(&self.repo)
+            .args(["hooks", "claude-code", "PostToolUse"])
+            .env_remove("RIFT_CAPTURE_SYNC")
+            .envs(env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(body.to_string().as_bytes()).unwrap();
+        drop(stdin);
+        assert!(child.wait().unwrap().success(), "agent hook never fails");
+    }
+
+    /// One worker pass, as a hook would start it, and then the wait for any
+    /// worker a hook started while the lock was held: whichever of them takes
+    /// the lock drains the journal, and the walk reads the result after both
+    /// queues are empty rather than after a guessed duration.
+    fn drain_once(&self) {
+        let git_dir = self.repo.join(".git");
+        let args = ["hooks", "worker", "--git-dir", git_dir.to_str().unwrap()];
+        assert_eq!(run_rift(&self.repo, &args, None, &self.detached_env()), 0);
+        let drained = || {
+            agent_jobs_named(&self.repo, "archive-").is_empty()
+                && std::fs::read_dir(git_dir.join("rift-capture-queue"))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .all(|e| e.path().extension().is_none_or(|x| x != "json"))
+                && !git_dir.join("rift-capture-queue").join(".lock").exists()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        while std::time::Instant::now() < deadline && !drained() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(drained(), "a worker drained the journal");
+    }
+
+    fn archived_reasons(&self) -> Vec<String> {
+        archived_reasons(&self.repo, &self.cache, LIVE_SESSION)
+    }
+}
+
+/// A `scheduled` repository's due interval archive leaves the hook: the hook
+/// journals one archive for the worker and returns, however many hooks
+/// arrive inside the same due interval, and the doctor counts the job while
+/// it waits. One worker pass then mints exactly one checkpoint for the
+/// interval, and the next hook inside the interval asks for nothing.
+#[test]
+fn a_due_interval_archive_is_journaled_and_one_worker_pass_mints_exactly_one() {
+    let fx = Scheduled::new();
+    let lock = hold_drain_lock(&fx.repo);
+    fx.tool_call(&fx.detached_env());
+    fx.tool_call(&fx.detached_env());
+    assert!(
+        !checkpoint_ref_exists(&fx.repo),
+        "the hook archived nothing itself"
+    );
+    assert_eq!(
+        agent_jobs_named(&fx.repo, "archive-").len(),
+        1,
+        "two due hooks owe one archive"
+    );
+    let doc = doctor_json(&fx.repo, &fx.detached_env());
+    let pending = capture_queue_leg(&doc)["agent_jobs"]["pending"]
+        .as_u64()
+        .unwrap();
+    let files = agent_jobs_named(&fx.repo, "").len() as u64;
+    assert_eq!(pending, files, "the doctor counts the archive job: {doc}");
+
+    drop(lock);
+    fx.drain_once();
+    assert_eq!(checkpoint_shards(&fx.repo).len(), 1, "one checkpoint");
+    assert_eq!(fx.archived_reasons(), vec!["schedule"]);
+
+    fx.tool_call(&fx.inline_env());
+    assert_eq!(
+        checkpoint_shards(&fx.repo).len(),
+        1,
+        "the rest of the interval is quiet"
+    );
+    assert!(agent_jobs_named(&fx.repo, "archive-").is_empty());
+}
+
+/// Under `RIFT_CAPTURE_SYNC` the journaled archive drains inside the hook, so
+/// a caller that must see the checkpoint when the hook returns still does.
+#[test]
+fn under_capture_sync_the_interval_archive_lands_before_the_hook_returns() {
+    let fx = Scheduled::new();
+    fx.tool_call(&fx.inline_env());
+    assert_eq!(checkpoint_shards(&fx.repo).len(), 1, "one checkpoint");
+    assert_eq!(fx.archived_reasons(), vec!["schedule"]);
+    assert!(
+        agent_jobs_named(&fx.repo, "archive-").is_empty(),
+        "drained before the hook returned"
+    );
+}
+
+/// The sensitive-path overlay is decided where the committed diff is known,
+/// in the worker's condense of a queued commit, and it still forces its
+/// checkpoint there: a commit touching a sensitive path inside an interval
+/// that owes nothing leaves the hook with no checkpoint, and one worker pass
+/// mints the one the overlay asked for.
+#[test]
+fn a_sensitive_commit_inside_the_interval_checkpoints_after_one_worker_pass() {
+    let fx = Scheduled::new();
+    fx.tool_call(&fx.inline_env());
+    assert_eq!(fx.archived_reasons(), vec!["schedule"]);
+
+    std::fs::create_dir_all(fx.repo.join("secrets")).unwrap();
+    std::fs::write(fx.repo.join("secrets").join("token.txt"), "rotated\n").unwrap();
+    git_in(&fx.repo, &["add", "secrets/token.txt"]);
+    git_in(&fx.repo, &["commit", "-q", "-m", "touch a sensitive path"]);
+    let lock = hold_drain_lock(&fx.repo);
+    archive_head(&fx.repo, &fx.detached_env());
+    assert_eq!(
+        checkpoint_shards(&fx.repo).len(),
+        1,
+        "the hook archived nothing itself"
+    );
+
+    drop(lock);
+    fx.drain_once();
+    assert_eq!(checkpoint_shards(&fx.repo).len(), 2);
+    assert_eq!(fx.archived_reasons(), vec!["schedule", "sensitive-path"]);
 }

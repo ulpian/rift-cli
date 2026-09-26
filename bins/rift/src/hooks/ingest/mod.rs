@@ -168,8 +168,9 @@ fn capture_into_projection(
     };
     let condense_queued = settle_after_ingest(&run, &outcome);
     // One worker for everything this hook journaled: the condense (if the
-    // session ended) and the token counts. A condense that was enqueued
-    // already dispatched; otherwise the owed counts dispatch here.
+    // session ended) or the interval archive, and the token counts. An
+    // archive job that was enqueued already dispatched; otherwise the owed
+    // counts dispatch here.
     if (owed > 0 || gate_journaled || sweep_owed) && !matches!(condense_queued, Ok(true)) {
         t.phase("spawn_worker", || dispatch_agent_worker(git_dir));
     }
@@ -236,8 +237,8 @@ fn family_projection(
 /// fired this hook: when two agents drive one session id, rows written under
 /// the firing agent would belong to a session row that does not exist.
 ///
-/// Returns whether a condense was journaled — its worker is then already
-/// dispatched.
+/// Returns whether a condense or an interval archive was journaled — its
+/// worker is then already dispatched.
 fn settle_after_ingest(
     run: &CapturedHook<'_>,
     outcome: &rift_shadow::IngestOutcome,
@@ -273,8 +274,8 @@ fn settle_after_ingest(
     let _ = run.t.phase("snapshot_boundaries", || {
         snapshot_boundaries(run, owner, &outcome.boundaries)
     });
-    // Post-ingest strategy drivers: the session-end condense effect
-    // (journaled for the detached worker) and the scheduled interval.
+    // Post-ingest strategy drivers: the session-end condense effect and the
+    // scheduled interval, both journaled for the detached worker.
     // Best-effort — never fails the agent's hook.
     run.t.phase("post_ingest", || {
         drive_post_ingest(run, owner, outcome.state, &outcome.effects)

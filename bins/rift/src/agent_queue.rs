@@ -64,6 +64,11 @@ pub(crate) enum JobKind {
         /// The repository id the settle records cost under.
         repo_id: String,
     },
+    /// The interval archive an agent hook's strategy decision asked for:
+    /// redact the session's transcript, write the shard, append to the chain,
+    /// and change no lifecycle. Journaled because the redaction alone outlasts
+    /// a client's hook timeout on a multi-megabyte transcript.
+    Archive(IntervalArchive),
     /// The BPE token count of one read, recorded as a late `file_read_tokens`
     /// row at the read's own `tool_call` id (insert-or-ignore: idempotent).
     ReadTokens {
@@ -176,6 +181,47 @@ pub(crate) enum JobKind {
         /// The idle floor the requesting hook read from the family's config.
         floor_ms: i64,
     },
+}
+
+/// One interval archive a hook decided and the worker owes.
+///
+/// It names the session and why, never the transcript: the worker reads the
+/// transcript at drain time through the address the session cache keeps, as
+/// the session-end condense does, and asks the strategy again under the lock.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct IntervalArchive {
+    /// The agent-supplied session id.
+    pub session_id: String,
+    /// The session's *owner* agent, not the hook's.
+    pub agent: String,
+    /// Why the hook decided the session had earned a checkpoint.
+    pub reason: IntervalReason,
+}
+
+/// Why an agent hook archives a live session between its commits: the two
+/// reasons a decision with no git event can carry, spelled as the audit row
+/// spells them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum IntervalReason {
+    /// The configured interval elapsed.
+    Schedule,
+    /// A sensitive path was touched: the overlay that archives under any base.
+    SensitivePath,
+}
+
+impl IntervalReason {
+    /// The journal's reason for a decision's, or `None` for a reason only a
+    /// git event or a session end can produce.
+    pub(crate) fn of(reason: rift_shadow::hooks::strategy::ArchiveReason) -> Option<Self> {
+        use rift_shadow::hooks::strategy::ArchiveReason;
+
+        match reason {
+            ArchiveReason::Schedule => Some(Self::Schedule),
+            ArchiveReason::SensitivePath => Some(Self::SensitivePath),
+            ArchiveReason::Commit | ArchiveReason::Pr | ArchiveReason::SessionEnd => None,
+        }
+    }
 }
 
 /// The decision one journaled accounting row is about.
@@ -337,6 +383,10 @@ impl JobKind {
             Self::Condense { session_id, .. } => {
                 Some(format!("condense-{}", session_key(session_id)))
             }
+            // One archive is owed per session at a time: every hook inside
+            // one due interval asks for the same checkpoint, and the note a
+            // failure leaves is one note per session.
+            Self::Archive(archive) => Some(format!("archive-{}", session_key(&archive.session_id))),
             Self::ReadTokens { tool_call_id, .. } => {
                 is_lower_hex(tool_call_id, 64).then(|| format!("tokens-{tool_call_id}"))
             }
@@ -375,8 +425,8 @@ impl JobKind {
         }
     }
 
-    /// Token jobs drain before condense jobs, so the shard a condense writes
-    /// carries every count the session's reads were owed; the sweep drains
+    /// Token jobs drain before condense and archive jobs, so the shard either
+    /// writes carries every count the session's reads were owed; the sweep drains
     /// last, so a session whose own end is queued is condensed by that end
     /// rather than timed out beside it.
     fn rank(&self) -> u8 {
@@ -388,7 +438,7 @@ impl JobKind {
             | Self::BasisSnapshot { .. }
             | Self::ToolResultTokens { .. }
             | Self::DocSweep => 0,
-            Self::Condense { .. } => 1,
+            Self::Condense { .. } | Self::Archive(_) => 1,
             Self::SweepIdle { .. } => 2,
         }
     }
@@ -416,6 +466,16 @@ pub(crate) fn enqueue(git_dir: &Path, job: &AgentJob) -> Result<PathBuf> {
     restrict(&tmp)?;
     std::fs::rename(&tmp, &path)?;
     Ok(path)
+}
+
+/// Whether a job of this identity is already journaled.
+///
+/// A hook that owes the same work again leaves the pending job as it is, so
+/// its clock stays the moment the work was first owed and its attempt count
+/// keeps counting toward the bound instead of starting over at every hook.
+pub(crate) fn is_queued(git_dir: &Path, kind: &JobKind) -> bool {
+    kind.stem()
+        .is_some_and(|stem| queue_dir(git_dir).join(format!("{stem}.json")).exists())
 }
 
 /// Owner-only permissions on a journal file (unix).
@@ -771,6 +831,38 @@ mod tests {
         );
         assert_eq!(note_key(&sweep(3)), note_key(&sweep(4)));
         assert_eq!(note_key(&sweep(3)), "agent-sweep-idle");
+    }
+
+    /// An interval archive has one name per session, so every hook inside one
+    /// due interval owes the same job; it is found pending by that name, drains
+    /// with the condenses after the token counts, and keeps the reason the
+    /// audit row spells.
+    #[test]
+    fn an_interval_archive_is_one_job_per_session_ranked_with_the_condenses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = |session: &str, at: i64| AgentJob {
+            kind: JobKind::Archive(IntervalArchive {
+                session_id: session.to_owned(),
+                agent: "claude-code".into(),
+                reason: IntervalReason::SensitivePath,
+            }),
+            ..condense(session, at)
+        };
+        assert!(!is_queued(tmp.path(), &archive("s", 1).kind));
+        let a = enqueue(tmp.path(), &archive("s", 1)).unwrap();
+        assert_eq!(a, enqueue(tmp.path(), &archive("s", 2)).unwrap());
+        assert!(is_queued(tmp.path(), &archive("s", 3).kind));
+        assert!(!is_queued(tmp.path(), &archive("t", 3).kind));
+        assert_eq!(note_key(&archive("s", 1)), note_key(&archive("s", 9)));
+        assert_ne!(note_key(&archive("s", 1)), note_key(&archive("t", 1)));
+        enqueue(tmp.path(), &tokens(CALL, 5)).unwrap();
+        let ranks: Vec<u8> = jobs(tmp.path())
+            .iter()
+            .map(|(_, j)| j.kind.rank())
+            .collect();
+        assert_eq!(ranks, vec![0, 1]);
+        let body = std::fs::read_to_string(&a).unwrap();
+        assert!(body.contains(r#""reason":"sensitive-path""#), "{body}");
     }
 
     /// The done-marker is what makes a redelivered or re-found condense a

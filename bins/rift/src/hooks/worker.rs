@@ -10,7 +10,7 @@ use rift_core::Result;
 
 use super::archive::{archive_now, condense_queued};
 use super::audit::{read_identified_bytes, serve_audit_job};
-use super::git::{capture_guarded, effective_config, strategy_kind};
+use super::git::{capture_guarded, effective_config, state_from_token, strategy_kind};
 use super::recovery::hook_number;
 use super::{flag, now_ms, projection_db_at};
 
@@ -164,13 +164,16 @@ fn run_agent_job(
     path: &Path,
     job: &crate::agent_queue::AgentJob,
 ) -> Option<(String, String)> {
+    use crate::agent_queue::JobKind;
+
     let outcome = match &job.kind {
-        crate::agent_queue::JobKind::Condense {
+        JobKind::Condense {
             session_id,
             agent,
             repo_id,
         } => condense_agent_job(t, job, session_id, agent, repo_id),
-        crate::agent_queue::JobKind::ReadTokens {
+        JobKind::Archive(archive) => interval_archive_job(t, job, archive).map(|()| None),
+        JobKind::ReadTokens {
             tool_call_id,
             rel_path,
             content_sha256,
@@ -188,24 +191,20 @@ fn run_agent_job(
             *schema_version,
         )
         .map(|()| None),
-        crate::agent_queue::JobKind::ServeAudit(audit) => {
-            serve_audit_job(t, job, audit).map(|()| None)
-        }
-        crate::agent_queue::JobKind::SearchIndex => rebuild_search_index_job(t, job).map(|()| None),
-        crate::agent_queue::JobKind::DocConvert {
+        JobKind::ServeAudit(audit) => serve_audit_job(t, job, audit).map(|()| None),
+        JobKind::SearchIndex => rebuild_search_index_job(t, job).map(|()| None),
+        JobKind::DocConvert {
             rel_path,
             content_sha256,
         } => convert_document_job(t, job, rel_path, content_sha256).map(|()| None),
-        crate::agent_queue::JobKind::DocSweep => sweep_documents_job(t, job).map(|()| None),
-        crate::agent_queue::JobKind::SweepIdle { floor_ms } => {
-            Ok(sweep_idle_job(t, git_dir, job, *floor_ms))
-        }
-        crate::agent_queue::JobKind::BasisSnapshot {
+        JobKind::DocSweep => sweep_documents_job(t, job).map(|()| None),
+        JobKind::SweepIdle { floor_ms } => Ok(sweep_idle_job(t, git_dir, job, *floor_ms)),
+        JobKind::BasisSnapshot {
             rel_path,
             content_sha256,
             blob_oid,
         } => snapshot_basis_job(t, job, rel_path, content_sha256, blob_oid).map(|()| None),
-        crate::agent_queue::JobKind::ToolResultTokens {
+        JobKind::ToolResultTokens {
             tool_result_id,
             session_id,
             tool_name,
@@ -633,6 +632,108 @@ fn condense_agent_job(
     Ok(Some((session.to_owned(), checkpoint.as_str().to_owned())))
 }
 
+/// The interval archive a hook journaled: asked again under the lock, and
+/// archived if it is still owed.
+///
+/// Asked again because the hook's answer can be overtaken while the job
+/// waits: a commit's condense, or a job an earlier hook left, may have
+/// archived the session since, and a second checkpoint for one interval is a
+/// checkpoint the strategy never asked for. The clock is the job's, as every
+/// deferred archive's is, so a late drain neither backdates nor advances the
+/// decision. A failure names the session, so the note a kept job leaves says
+/// whose interval archive it was.
+fn interval_archive_job(
+    t: &crate::hooktime::HookTimer,
+    job: &crate::agent_queue::AgentJob,
+    archive: &crate::agent_queue::IntervalArchive,
+) -> Result<()> {
+    archive_if_still_owed(t, job, archive).map_err(|e| {
+        rift_core::RiftError::Other(format!(
+            "interval archive of session {}: {e}",
+            archive.session_id
+        ))
+    })
+}
+
+/// [`interval_archive_job`]'s work: the commit to anchor to, the decision, and
+/// the archive the session-end condense and the sweep also run.
+fn archive_if_still_owed(
+    t: &crate::hooktime::HookTimer,
+    job: &crate::agent_queue::AgentJob,
+    archive: &crate::agent_queue::IntervalArchive,
+) -> Result<()> {
+    let repo = rift_git::discover(&job.work_tree)?;
+    let reader = t.phase("gix_open", || {
+        rift_git::GixBlobReader::open(&repo.work_tree)
+    })?;
+    // No commit to anchor a checkpoint to defers silently, as the hook always
+    // did: the next due hook asks again.
+    let Some(commit) = t.phase("head_hex", || reader.head_hex())? else {
+        return Ok(());
+    };
+    let store = t.phase("open_projection", || {
+        rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
+    })?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    let Some(decision) = owed_interval_decision(&rt, &store, &repo, job, archive)? else {
+        return Ok(());
+    };
+    // A deferred interval archive changes no lifecycle: the session stays
+    // live, and the checkpoint moves the next interval's start.
+    let _checkpoint = t.phase("archive", || {
+        archive_now(
+            &rt,
+            &store,
+            &repo.work_tree,
+            &commit,
+            &archive.session_id,
+            &archive.agent,
+            decision,
+            job.queued_at_ms,
+        )
+    })?;
+    Ok(())
+}
+
+/// The strategy's decision for a journaled interval archive, on the job's
+/// clock and the archive history as it stands under the lock; `None` when the
+/// archive is no longer owed — another road archived the interval, the
+/// session is no longer live, or the repository stopped running `scheduled`.
+fn owed_interval_decision(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    repo: &rift_git::RepoPaths,
+    job: &crate::agent_queue::AgentJob,
+    archive: &crate::agent_queue::IntervalArchive,
+) -> Result<Option<rift_shadow::hooks::strategy::ArchiveDecision>> {
+    use rift_shadow::hooks::session_cache::read_cache;
+    use rift_shadow::hooks::strategy::{decide, TriggerCtx};
+
+    let Some(cache) = read_cache(&repo.git_dir, &archive.session_id)? else {
+        return Ok(None);
+    };
+    let cfg = effective_config(&repo.work_tree);
+    let last = rt.block_on(rift_store::latest_archive_ms(store, &archive.session_id))?;
+    let decision = decide(
+        strategy_kind(cfg.checkpoint_strategy()),
+        &TriggerCtx {
+            git_event: None,
+            session_state: state_from_token(&cache.state),
+            sensitive_path_touched: archive.reason
+                == crate::agent_queue::IntervalReason::SensitivePath,
+            clock_ms: job.queued_at_ms,
+            last_archive_ms: last,
+            schedule_interval_ms: cfg.schedule_interval_ms(),
+        },
+    );
+    if !decision.archive {
+        return Ok(None);
+    }
+    Ok(Some(decision))
+}
+
 /// The 1-based inclusive line range `lo..=hi` of `text`, as the file itself
 /// spells it.
 ///
@@ -913,4 +1014,41 @@ fn masked_line_runs(raw: &[u8], redacted: &[u8]) -> Vec<(u32, u32)> {
         }
     }
     runs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_queue::{AgentJob, IntervalArchive, IntervalReason, JobKind};
+
+    /// An interval archive that cannot run is kept for the next worker with
+    /// its attempt counted, and the note it leaves for the doctor names whose
+    /// interval archive it was.
+    #[test]
+    fn a_failed_interval_archive_is_kept_and_its_note_names_the_session() {
+        let git_dir = tempfile::tempdir().unwrap();
+        let job = AgentJob {
+            schema_version: 1,
+            work_tree: git_dir.path().join("gone"),
+            queued_at_ms: 1,
+            attempts: 0,
+            kind: JobKind::Archive(IntervalArchive {
+                session_id: "s-1".into(),
+                agent: "claude-code".into(),
+                reason: IntervalReason::Schedule,
+            }),
+        };
+        let path = crate::agent_queue::enqueue(git_dir.path(), &job).unwrap();
+        let t = crate::hooktime::HookTimer::new("test", false);
+        assert_eq!(run_agent_job(&t, git_dir.path(), &path, &job), None);
+        let (_, kept) = crate::agent_queue::jobs(git_dir.path()).pop().unwrap();
+        assert_eq!(kept.attempts, 1, "kept, with the attempt counted");
+        let notes = crate::capture_queue::peek_errors(git_dir.path());
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("interval archive of session s-1")),
+            "{notes:?}"
+        );
+    }
 }

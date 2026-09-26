@@ -154,9 +154,10 @@ fn queue_headline(drainable: usize, unreadable: usize) -> String {
     }
 }
 
-/// The agent-hook journal (the session-end condense and the read token counts
-/// a hook handed to the detached worker): a job still here is one no worker
-/// finished, and `--fix`'s sweep drains it.
+/// The agent-hook journal (the session-end condense, the `scheduled`
+/// strategy's interval archive and the read token counts a hook handed to the
+/// detached worker): a job still here is one no worker finished, and
+/// `--fix`'s sweep drains it.
 struct AgentJobs {
     files: usize,
     pending: usize,
