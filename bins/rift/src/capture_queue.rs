@@ -32,8 +32,10 @@ const LOCK_FILE: &str = ".lock";
 /// How long a lock may live before a later worker steals it. A worker killed
 /// mid-drain must not wedge the queue forever; the work is idempotent, so the
 /// cost of stealing too early is duplicated effort, never a lost or double
-/// checkpoint.
-const LOCK_STALE_MS: i64 = 10 * 60 * 1000;
+/// checkpoint. The age is the session cache's stale-writer age, read from the
+/// crate below this one, so the lock and the cache's temp sweep keep one
+/// number with one meaning.
+const LOCK_STALE_MS: i64 = rift_shadow::hooks::STALE_WRITER_MS;
 
 /// One queued commit: what the worker needs to condense it later.
 ///

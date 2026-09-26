@@ -13,9 +13,23 @@ use std::path::{Path, PathBuf};
 pub(super) fn journal_sessions(
     git_dir: &Path,
 ) -> Vec<rift_shadow::hooks::session_cache::SessionCache> {
+    read_journal(git_dir).0
+}
+
+/// Every cache file in one worktree's journal: the ones that read, and the
+/// session ids of the ones that exist and do not. Reading moves nothing — the
+/// session's own next hook moves an unreadable cache aside — so a surface
+/// can say which caches are unreadable rather than silently leave them out.
+fn read_journal(
+    git_dir: &Path,
+) -> (
+    Vec<rift_shadow::hooks::session_cache::SessionCache>,
+    Vec<String>,
+) {
     use rift_shadow::hooks::session_cache::read_cache;
     let dir = git_dir.join("rift-sessions");
-    let mut out = Vec::new();
+    let mut sessions = Vec::new();
+    let mut unreadable = Vec::new();
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = entry.file_name();
         let Some(stem) = name
@@ -25,11 +39,14 @@ pub(super) fn journal_sessions(
         else {
             continue;
         };
-        if let Ok(Some(cache)) = read_cache(git_dir, &stem) {
-            out.push(cache);
+        match read_cache(git_dir, &stem) {
+            Ok(Some(cache)) => sessions.push(cache),
+            Ok(None) => (),
+            Err(_) => unreadable.push(stem),
         }
     }
-    out
+    unreadable.sort();
+    (sessions, unreadable)
 }
 
 /// One family member and the sessions its journal is credited with.
@@ -39,6 +56,10 @@ pub(crate) struct MemberJournal {
     pub(crate) member: rift_git::FamilyMember,
     /// The caches credited to this member, deduplicated family-wide.
     pub(crate) sessions: Vec<rift_shadow::hooks::session_cache::SessionCache>,
+    /// The session ids whose cache file sits in this member's own registry
+    /// and does not parse. Credited to the registry it sits in, because an
+    /// unreadable file names no work tree.
+    pub(crate) unreadable: Vec<String>,
 }
 
 /// Every member of the family `paths` belongs to, with the sessions its
@@ -76,11 +97,16 @@ pub(crate) fn family_journal(paths: &rift_git::RepoPaths) -> Vec<MemberJournal> 
         .map(|member| MemberJournal {
             member,
             sessions: Vec::new(),
+            unreadable: Vec::new(),
         })
         .collect();
     let mut seen = std::collections::BTreeSet::new();
     for (index, m) in members.iter().enumerate() {
-        for s in journal_sessions(&m.git_dir) {
+        let (sessions, unreadable) = read_journal(&m.git_dir);
+        if let Some(journal) = out.get_mut(index) {
+            journal.unreadable = unreadable;
+        }
+        for s in sessions {
             if !seen.insert(s.session_id.clone()) {
                 continue; // one credit per session, family-wide
             }

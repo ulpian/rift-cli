@@ -143,14 +143,7 @@ fn capture_into_projection(
             Some(&read_hasher),
         ))
     })?;
-    for trigger in &outcome.refused {
-        // Recorded already as a `refused-*` transition row; said here too.
-        tracing::warn!(
-            session = %raw.session,
-            trigger = trigger.as_str(),
-            "session state machine refused a trigger"
-        );
-    }
+    log_what_the_ingest_repaired_or_refused(raw, &outcome);
     let owed = owe_deferred_measurement(t, git_dir, work_tree, registry, raw, &outcome);
     let sweep_owed = owe_session_start_passes(t, raw, git_dir, work_tree);
     // Bind any newly-appeared sessions to the local developer identity
@@ -181,6 +174,30 @@ fn capture_into_projection(
         t.phase("spawn_worker", || dispatch_agent_worker(git_dir));
     }
     Ok(())
+}
+
+/// Say in the log what the ingest already recorded in its rows: each trigger
+/// the state machine refused (a `refused-*` transition row), and a session
+/// cache it could not read and moved aside (the session re-opened as a
+/// `synthesized-start`, the file kept beside the cache as the trace).
+fn log_what_the_ingest_repaired_or_refused(
+    raw: &rift_shadow::hooks::RawHook,
+    outcome: &rift_shadow::IngestOutcome,
+) {
+    if let Some(aside) = &outcome.cache_moved_aside {
+        tracing::warn!(
+            session = %raw.session,
+            moved_to = %aside.display(),
+            "session cache unreadable, moved aside, session re-opened"
+        );
+    }
+    for trigger in &outcome.refused {
+        tracing::warn!(
+            session = %raw.session,
+            trigger = trigger.as_str(),
+            "session state machine refused a trigger"
+        );
+    }
 }
 
 /// The projection this hook writes into, and the id every row it writes

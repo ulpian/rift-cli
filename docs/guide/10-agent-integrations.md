@@ -403,6 +403,12 @@ installed only there. What those runs settled:
   the prompt-submission hook fired for that window at all. Which is why the
   pointer's claim, the manifest baseline and the window journal are all keyed by
   the same (session, agent) pair rather than by the session.
+  The same sharing means a subagent's hooks write the parent session's cache
+  and sidecars at the same moment as the parent's own.
+  That is safe because every writer renames a temp file of its own, so the
+  last rename publishes one whole file, and a cache that is torn anyway is
+  moved aside by the next hook rather than failing it (see
+  [03-capture.md](03-capture.md) §3.6).
 - **An injected step's kind decides whether it survives.** On the
   per-invocation channel, an ephemeral message reaches the model at the
   invocation it is injected into and is gone by later ones, while a user

@@ -98,6 +98,58 @@ impl Fixture {
             .collect()
     }
 
+    /// One native hook with the binary's log on, returning what it logged.
+    fn hook_logged(&self, agent: &str, verb: &str, body: &serde_json::Value) -> String {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let env = sync_env_with_data(&self.cache, &self.data);
+        let mut child = common::rift_cmd(&self.repo)
+            .args(["hooks", agent, verb])
+            .envs(env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())))
+            .env("RIFT_LOG", "warn")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(body.to_string().as_bytes()).unwrap();
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "agent hook never fails");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    fn sessions_dir(&self) -> PathBuf {
+        self.repo.join(".git").join("rift-sessions")
+    }
+
+    /// The file names in the sessions directory that a hook moved aside.
+    fn moved_aside(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.sessions_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".json.torn-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// How many of `session`'s events the projection captured.
+    fn captured_events(&self, session: &str) -> i64 {
+        let store = rift_store::open_capture_projection(self.projection_db()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(store.query_opt_i64(
+            "SELECT count(*) FROM captured_event WHERE session_id = ?",
+            &[rift_store::Value::text(session)],
+        ))
+        .unwrap()
+        .unwrap_or(0)
+    }
+
     fn projection_db(&self) -> PathBuf {
         let paths = rift_git::discover(&self.repo).unwrap();
         let cache_dir = self.cache.display().to_string();
@@ -406,4 +458,130 @@ fn doctor_reports_sweepable_and_stuck_sessions_and_a_phase_behind_its_events() {
     finalized.sort();
     assert_eq!(finalized, ["age-six-min", "age-two-days"], "{fixed}");
     assert_eq!(session_phase(&fx.repo, "age-fresh"), "active");
+}
+
+/// The cache a race published on a real machine: one whole object, then the
+/// 37-byte tail of a longer one a concurrent writer of the same session had
+/// written into the same temp file. Byte for byte but for the transcript's
+/// file name, which spelled the session id beside the path and is shortened
+/// here so the fixture adds no high-entropy token to the repository's text.
+const TORN_CACHE: &str = r#"{
+  "schema": 1,
+  "session_id": "6455cff9-8e83-44ea-96d9-ddfc9922c065",
+  "state": "active",
+  "agent": "claude-code",
+  "current_turn_ordinal": 2,
+  "turn_open": false,
+  "compaction_boundary": null,
+  "updated_at_ms": 1790405788184,
+  "native_id_map": {},
+  "transcript_path": "/Users/ulpian/.claude/projects/-Users-ulpian-Documents-codebase-rift-rift-cli/transcript.jsonl",
+  "work_tree": "/Users/ulpian/Documents/codebase/rift/rift-cli",
+  "last_worktree": {
+    "token": "94b3809e5b05",
+    "name": "main",
+    "linked": false,
+    "branch": "main",
+    "head": "6e8ac49e8247056a2efcbc4d89d0c5f0c010a796"
+  }
+}"subagent": "affb8b381701b8ee6"
+  }
+}"#;
+
+/// The session the torn cache belongs to.
+const TORN_SESSION: &str = "6455cff9-8e83-44ea-96d9-ddfc9922c065";
+
+/// **A torn cache no longer stops capture.** Every hook after the tear used
+/// to fail its ingest on the parse, so the session captured nothing until a
+/// person edited the file. Now the next hook moves the file aside whole,
+/// re-opens the session as a synthesized start, captures its event, writes
+/// the cache whole and says so in its log; doctor reports the moved-aside
+/// file as Rift's own defect.
+#[test]
+fn a_torn_session_cache_is_moved_aside_and_the_next_hook_captures() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.sessions_dir()).unwrap();
+    let cache_file = fx.sessions_dir().join(format!("{TORN_SESSION}.json"));
+    std::fs::write(&cache_file, TORN_CACHE).unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(TORN_CACHE).is_err());
+
+    let body = serde_json::json!({
+        "session_id": TORN_SESSION,
+        "tool_name": "Bash",
+        "tool_input": {"command": "true"},
+        "tool_response": {"stdout": ""},
+    });
+    let log = fx.hook_logged("claude-code", "PostToolUse", &body);
+
+    assert!(
+        log.contains("session cache unreadable, moved aside, session re-opened"),
+        "{log}"
+    );
+    assert_eq!(session_phase(&fx.repo, TORN_SESSION), "active");
+    assert_eq!(fx.cache_of(TORN_SESSION)["session_id"], TORN_SESSION);
+    assert!(
+        fx.captured_events(TORN_SESSION) > 0,
+        "the event is captured"
+    );
+    let aside = fx.moved_aside();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    let kept = std::fs::read_to_string(fx.sessions_dir().join(&aside[0])).unwrap();
+    assert_eq!(kept, TORN_CACHE, "moved aside whole, nothing deleted");
+    assert_eq!(
+        fx.transitions(TORN_SESSION),
+        [("idle".into(), "active".into(), "synthesized-start".into())]
+    );
+
+    let env = sync_env_with_data(&fx.cache, &fx.data);
+    let leg = sessions_leg(&doctor_json(&fx.repo, &env)).clone();
+    assert_eq!(leg["torn_caches"], serde_json::json!(aside), "{leg}");
+    assert_eq!(leg["unreadable_caches"], serde_json::json!([]), "{leg}");
+    let (_, human) = run_rift_stdout(&fx.repo, &["doctor"], &env);
+    assert!(
+        human.contains("1 session cache(s) found unreadable and moved aside"),
+        "{human}"
+    );
+    assert!(
+        human.contains("Rift's own write error, not yours"),
+        "{human}"
+    );
+}
+
+/// Before any hook repairs it, a cache that does not parse is named for what
+/// it is: `rift session list` prints `cache unreadable` where it printed
+/// `archived`, and doctor counts it as Rift's defect with nothing to do.
+#[test]
+fn an_unreadable_cache_is_listed_as_unreadable_and_reported_by_doctor() {
+    let fx = Fixture::new();
+    let body = serde_json::json!({"session_id": TORN_SESSION, "tool_name": "Bash"});
+    fx.hook("claude-code", "SessionStart", &body);
+    fx.hook("claude-code", "PreToolUse", &body);
+    let cache_file = fx.sessions_dir().join(format!("{TORN_SESSION}.json"));
+    std::fs::write(&cache_file, TORN_CACHE).unwrap();
+
+    let env = sync_env_with_data(&fx.cache, &fx.data);
+    let (_, listed) = run_rift_stdout(&fx.repo, &["session", "list"], &env);
+    let line = listed
+        .lines()
+        .find(|l| l.contains(TORN_SESSION))
+        .unwrap_or_else(|| panic!("the session is listed: {listed}"));
+    assert!(line.contains("cache unreadable"), "{line}");
+    assert!(!line.contains("archived"), "{line}");
+
+    let leg = sessions_leg(&doctor_json(&fx.repo, &env)).clone();
+    assert_eq!(
+        leg["unreadable_caches"],
+        serde_json::json!([TORN_SESSION]),
+        "{leg}"
+    );
+    let (_, human) = run_rift_stdout(&fx.repo, &["doctor"], &env);
+    assert!(
+        human.contains("1 session cache(s) unreadable — Rift's own write error"),
+        "{human}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cache_file).unwrap(),
+        TORN_CACHE,
+        "reading moves nothing"
+    );
 }
