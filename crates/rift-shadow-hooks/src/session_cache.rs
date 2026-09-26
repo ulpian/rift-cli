@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rift_core::{Result, RiftError};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,20 @@ use crate::session_id::is_safe_session_id;
 const SESSIONS_DIR: &str = "rift-sessions";
 /// Cache file schema version.
 pub const SCHEMA: u32 = 1;
+/// How long a writer may leave its work unfinished before a later writer
+/// presumes it dead (ten minutes).
+///
+/// Two readers share the one meaning: the capture queue steals a drain lock
+/// this old, and the next hook of a session removes a temp file this old that
+/// one of the session's writers left behind. It lives here, below both,
+/// because the bin can read a constant from this crate and this crate cannot
+/// read one from the bin. Too early costs a writer in flight its rename, which
+/// is why the age is long; too late costs one small file on disk.
+pub const STALE_WRITER_MS: i64 = 10 * 60 * 1000;
+/// What a cache moved aside is renamed to after its session id:
+/// `<session_id>.json.torn-<now_ms>`. Not a `.json` name, so no reader of the
+/// sessions directory takes it for a cache again.
+const TORN_MARKER: &str = ".json.torn-";
 
 /// The transient per-session state. Structural only — no transcript/tool
 /// BYTES: ids, the phase, ordinals, the id map, and a *path* to where the
@@ -127,6 +142,17 @@ pub struct WorktreeObservation {
     pub subagent: Option<String>,
 }
 
+/// What [`read_cache_or_repair`] found where a session's cache belongs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CacheRead {
+    /// No cache file: a session this git dir has not seen yet.
+    Absent,
+    /// The cache, whole.
+    Read(Box<SessionCache>),
+    /// A cache that did not parse, now at this path in the same directory.
+    MovedAside(PathBuf),
+}
+
 /// Resolve a worktree root from a hook's `--git-dir`, handling linked worktrees.
 ///
 /// For a linked worktree git sets `GIT_DIR=<repo>/.git/worktrees/<name>`, which
@@ -167,6 +193,18 @@ pub fn work_tree_of(git_dir: &Path) -> Option<PathBuf> {
     // the comparison in [`live_sessions_for`], and this function stays byte-for-
     // byte the resolution the hooks have always done.
     Some(raw)
+}
+
+impl CacheRead {
+    /// The cache, when one was read whole. A cache moved aside reads as no
+    /// cache at all, which is what lets the hook re-open its session.
+    #[must_use]
+    pub fn into_cache(self) -> Option<SessionCache> {
+        match self {
+            Self::Read(cache) => Some(*cache),
+            Self::Absent | Self::MovedAside(_) => None,
+        }
+    }
 }
 
 impl SessionCache {
@@ -242,22 +280,6 @@ fn sidecar_path(git_dir: &Path, session_id: &str, suffix: &str) -> Result<PathBu
     Ok(sessions_dir(git_dir).join(format!("{session_id}.{suffix}")))
 }
 
-/// Atomically write a sidecar (temp file + rename).
-fn write_sidecar(
-    git_dir: &Path,
-    path: &Path,
-    session_id: &str,
-    suffix: &str,
-    json: &[u8],
-) -> Result<()> {
-    let dir = sessions_dir(git_dir);
-    std::fs::create_dir_all(&dir)?;
-    let tmp = dir.join(format!(".{session_id}.{suffix}.tmp"));
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
 /// The transcript-progress sidecar path for `session_id`.
 ///
 /// # Errors
@@ -319,7 +341,7 @@ pub fn write_usage_progress(git_dir: &Path, p: &UsageProgress) -> Result<()> {
     let path = usage_progress_path(git_dir, &p.session_id)?;
     let json = serde_json::to_vec_pretty(p)
         .map_err(|e| RiftError::validity(format!("usage progress serialize: {e}")))?;
-    write_sidecar(git_dir, &path, &p.session_id, "usage", &json)
+    publish(&path, &json)
 }
 
 /// Read the usage progress for `session_id`, `None` before the first settle.
@@ -348,7 +370,7 @@ pub fn write_transcript_progress(git_dir: &Path, p: &TranscriptProgress) -> Resu
     let path = transcript_progress_path(git_dir, &p.session_id)?;
     let json = serde_json::to_vec_pretty(p)
         .map_err(|e| RiftError::validity(format!("transcript progress serialize: {e}")))?;
-    write_sidecar(git_dir, &path, &p.session_id, "transcript", &json)
+    publish(&path, &json)
 }
 
 /// Read the worker's transcript progress for `session_id`, `None` before the
@@ -422,8 +444,8 @@ pub fn cache_path(git_dir: &Path, session_id: &str) -> Result<PathBuf> {
     Ok(sessions_dir(git_dir).join(format!("{session_id}.json")))
 }
 
-/// Atomically write the cache (temp file + rename) so a reader never sees a torn
-/// write.
+/// Atomically write the cache (a temp file of this writer's own, then a rename)
+/// so a reader never sees a torn write, however many writers race.
 ///
 /// # Errors
 /// [`RiftError::Io`] on a filesystem failure, [`RiftError::Validity`] if the
@@ -443,14 +465,9 @@ pub fn write_cache(git_dir: &Path, c: &SessionCache) -> Result<()> {
         owned
     };
     let path = cache_path(git_dir, &c.session_id)?;
-    let dir = sessions_dir(git_dir);
-    std::fs::create_dir_all(&dir)?;
     let json = serde_json::to_vec_pretty(c)
         .map_err(|e| RiftError::validity(format!("session cache serialize: {e}")))?;
-    let tmp = dir.join(format!(".{}.tmp", c.session_id));
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    publish(&path, &json)
 }
 
 /// Read the cache for `session_id`, or `None` if there is no file yet.
@@ -470,6 +487,69 @@ pub fn read_cache(git_dir: &Path, session_id: &str) -> Result<Option<SessionCach
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Read the cache for `session_id` the way the hook that is about to rewrite
+/// it must: a cache that does not parse is moved aside, and the read answers
+/// as if there were none.
+///
+/// **A torn cache is transient; a failed hook is not.** The cache is a mirror
+/// of the append-only transitions, rewritten whole by every hook, so a file
+/// that does not parse has lost nothing the session's rows do not hold. Failing
+/// on it instead failed every later hook of the session, and a transient file
+/// became a capture outage that lasted until a person edited it. Moved aside to
+/// `<session_id>.json.torn-<now_ms>` in the same directory — one rename,
+/// nothing deleted, and the file is the trace doctor counts — the session reads
+/// as unseen, the liveness rules open it again as a synthesized start, and the
+/// caller writes the cache whole.
+///
+/// Read-only surfaces keep [`read_cache`], which moves nothing: `rift session
+/// list` must be able to say a cache is unreadable, and a reader that
+/// repaired would erase what it reports.
+///
+/// This caller is the session's next writer, so it also removes the temp files
+/// a dead writer of this session left, once they are older than
+/// [`STALE_WRITER_MS`]; `now_ms` is its clock for that and for the name.
+///
+/// # Errors
+/// [`RiftError::Validity`] if the session id is not filename-safe — the caller
+/// must defer the hook, exactly as with [`read_cache`]. [`RiftError::Io`] on a
+/// filesystem failure other than the file being absent.
+pub fn read_cache_or_repair(git_dir: &Path, session_id: &str, now_ms: i64) -> Result<CacheRead> {
+    let path = cache_path(git_dir, session_id)?;
+    sweep_dead_writer_temps(&sessions_dir(git_dir), session_id, now_ms);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(CacheRead::Absent),
+        Err(e) => return Err(e.into()),
+    };
+    if let Ok(cache) = serde_json::from_slice(&bytes) {
+        return Ok(CacheRead::Read(Box::new(cache)));
+    }
+    let aside = path.with_file_name(format!("{session_id}{TORN_MARKER}{now_ms}"));
+    match std::fs::rename(&path, &aside) {
+        Ok(()) => Ok(CacheRead::MovedAside(aside)),
+        // Another hook of this session moved it first; this one sees no cache.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CacheRead::Absent),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The file names of every cache moved aside under `git_dir`, sorted: the
+/// trace [`read_cache_or_repair`] leaves, which doctor reports as Rift's own
+/// defect. Empty when the directory is absent or unlistable.
+#[must_use]
+pub fn torn_caches(git_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(sessions_dir(git_dir)) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(TORN_MARKER))
+        .collect();
+    names.sort();
+    names
 }
 
 /// The live sessions THIS working tree may act on, consulting both its own
@@ -606,6 +686,94 @@ pub fn live_sessions(git_dir: &Path) -> Result<Vec<SessionCache>> {
     Ok(out)
 }
 
+/// Publish `json` at `path` whole: written to a temp file of this writer's
+/// own in the same directory, then renamed over `path`.
+///
+/// **The temp name is per writer, not per file.** A subagent shares its
+/// parent's session id and its hooks run beside the parent's, so two processes
+/// write one session's files at once. With one temp name per file, the later
+/// writer truncated the temp under the earlier one and wrote its shorter object
+/// from offset zero, and whichever renamed published one object followed by
+/// the other's tail. With a name of its own each writer renames a complete
+/// file, and the last rename wins whole. A write that fails removes its temp.
+fn publish(path: &Path, json: &[u8]) -> Result<()> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(RiftError::validity("session cache: path names no file"));
+    };
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(writer_temp_name(&name.to_string_lossy()));
+    let written = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// A temp name no other writer holds: `.<target>.<pid>-<seq>.tmp`. The
+/// process id separates processes and the sequence, which never repeats
+/// within a process, separates its threads; no clock is read.
+fn writer_temp_name(target: &str) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+    format!(".{target}.{}-{seq}.tmp", std::process::id())
+}
+
+/// Whether `name` is exactly a writer temp of `target`. Session ids may carry
+/// dots, so a prefix match could take another session's temp for this one's;
+/// the `<pid>-<seq>` tail carries none, which makes the split exact.
+fn is_writer_temp_of(name: &str, target: &str) -> bool {
+    let tail = name
+        .strip_prefix('.')
+        .and_then(|n| n.strip_prefix(target))
+        .and_then(|n| n.strip_prefix('.'))
+        .and_then(|n| n.strip_suffix(".tmp"));
+    let Some((pid, seq)) = tail.and_then(|t| t.split_once('-')) else {
+        return false;
+    };
+    let is_number = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    is_number(pid) && is_number(seq)
+}
+
+/// Remove the temp files a dead writer of `session_id` left in `dir` — its
+/// cache's and its sidecars', and only those older than
+/// [`STALE_WRITER_MS`] by their own mtime. A younger temp is far more likely a
+/// write in flight than a corpse, and removing one would fail that writer's
+/// rename. Returns how many were removed.
+fn sweep_dead_writer_temps(dir: &Path, session_id: &str, now_ms: i64) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let targets = ["json", "usage", "transcript"].map(|suffix| format!("{session_id}.{suffix}"));
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !targets
+            .iter()
+            .any(|target| is_writer_temp_of(&name, target))
+        {
+            continue;
+        }
+        // An unknown age is not an old age.
+        let Some(written_ms) = modified_ms(&entry.path()) else {
+            continue;
+        };
+        let dead = now_ms.saturating_sub(written_ms) >= STALE_WRITER_MS;
+        if dead && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// A file's mtime as epoch ms, or `None` if the filesystem will not say.
+fn modified_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(since.as_millis()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,6 +891,222 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "temp file must be renamed away");
+    }
+
+    /// Run `writers` concurrently for `rounds` rounds, all released at once,
+    /// and after each round compare what `published` reads against `whole`.
+    /// Returns how many rounds published something that is not one whole
+    /// object, and how many writes failed.
+    fn race_rounds(
+        writers: &[Box<dyn Fn() -> Result<()> + Sync + '_>],
+        published: &dyn Fn() -> Vec<u8>,
+        whole: &[Vec<u8>],
+        rounds: usize,
+    ) -> (usize, usize) {
+        let barrier = std::sync::Barrier::new(writers.len() + 1);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = writers
+                .iter()
+                .map(|write| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let mut failed = 0;
+                        for _ in 0..rounds {
+                            barrier.wait();
+                            failed += usize::from(write().is_err());
+                            barrier.wait();
+                        }
+                        failed
+                    })
+                })
+                .collect();
+            let mut torn = 0;
+            for _ in 0..rounds {
+                barrier.wait();
+                barrier.wait();
+                torn += usize::from(!whole.contains(&published()));
+            }
+            let failed = handles.into_iter().map(|h| h.join().unwrap()).sum();
+            (torn, failed)
+        })
+    }
+
+    /// Eight caches of one session, each a different length: what one
+    /// session's parent and subagents write when their hooks run at once.
+    fn caches_of_different_lengths(session: &str) -> Vec<SessionCache> {
+        (0..8)
+            .map(|i| {
+                let mut c = SessionCache::new(session, "claude-code", "active", 1);
+                c.work_tree = Some("/w".to_owned());
+                for n in 0..i * 3 {
+                    c.native_id_map
+                        .insert(format!("subagent-{n}"), format!("rift-{n}"));
+                }
+                c
+            })
+            .collect()
+    }
+
+    fn temps_left(git_dir: &Path) -> Vec<String> {
+        std::fs::read_dir(sessions_dir(git_dir))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| Path::new(n).extension().is_some_and(|e| e == "tmp"))
+            .collect()
+    }
+
+    /// **Concurrent writers of one session each publish a whole cache.** A
+    /// subagent shares its parent's session id and its hooks run beside the
+    /// parent's, so two processes write one cache at once. With one temp name
+    /// per session, the later writer truncated and rewrote the earlier one's
+    /// longer bytes, and the rename published one object with the other's
+    /// tail. After every round the file must be, byte for byte, one of the
+    /// objects written, and no write may fail.
+    #[test]
+    fn concurrent_writers_of_one_session_never_publish_a_torn_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gd = tmp.path();
+        let caches = caches_of_different_lengths("shared");
+        let whole: Vec<Vec<u8>> = caches
+            .iter()
+            .map(|c| serde_json::to_vec_pretty(c).unwrap())
+            .collect();
+        let writers: Vec<Box<dyn Fn() -> Result<()> + Sync>> = caches
+            .iter()
+            .map(|c| Box::new(move || write_cache(gd, c)) as Box<dyn Fn() -> Result<()> + Sync>)
+            .collect();
+        let published = || std::fs::read(cache_path(gd, "shared").unwrap()).unwrap();
+        let (torn, failed) = race_rounds(&writers, &published, &whole, 300);
+        assert_eq!((torn, failed), (0, 0), "(torn rounds, failed writes)");
+        assert!(read_cache(gd, "shared").unwrap().is_some());
+        assert_eq!(temps_left(gd), Vec::<String>::new(), "every temp renamed");
+    }
+
+    /// The same race over a sidecar: the hook-owned `.usage` file is written
+    /// by every hook of the session too, parent and subagent alike.
+    #[test]
+    fn concurrent_writers_of_one_sidecar_never_publish_a_torn_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gd = tmp.path();
+        let progress: Vec<UsageProgress> = (0..8_u32)
+            .map(|i| UsageProgress {
+                schema: SCHEMA,
+                session_id: "shared".into(),
+                byte_offset: 10_u64.pow(i * 2),
+                settled_turn: i,
+                updated_at_ms: 1,
+            })
+            .collect();
+        let whole: Vec<Vec<u8>> = progress
+            .iter()
+            .map(|p| serde_json::to_vec_pretty(p).unwrap())
+            .collect();
+        let writers: Vec<Box<dyn Fn() -> Result<()> + Sync>> = progress
+            .iter()
+            .map(|p| {
+                Box::new(move || write_usage_progress(gd, p)) as Box<dyn Fn() -> Result<()> + Sync>
+            })
+            .collect();
+        let path = usage_progress_path(gd, "shared").unwrap();
+        let published = || std::fs::read(&path).unwrap();
+        let (torn, failed) = race_rounds(&writers, &published, &whole, 300);
+        assert_eq!((torn, failed), (0, 0), "(torn rounds, failed writes)");
+        assert_eq!(temps_left(gd), Vec::<String>::new(), "every temp renamed");
+    }
+
+    /// **A cache that does not parse is moved aside, not fatal.** The shape a
+    /// race published on a real machine: one whole object, then the tail of a
+    /// longer one. The plain read still refuses it; the repairing read renames
+    /// it to `<id>.json.torn-<now_ms>` with its bytes intact, answers as if no
+    /// cache existed, and the session enumeration no longer sees it.
+    #[test]
+    fn a_torn_cache_is_moved_aside_whole_and_reads_as_no_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gd = tmp.path();
+        let mut whole =
+            serde_json::to_vec_pretty(&SessionCache::new("torn", "claude-code", "active", 1))
+                .unwrap();
+        whole.extend_from_slice(b"\"subagent\": \"affb8b381701b8ee6\"\n  }\n}");
+        std::fs::create_dir_all(sessions_dir(gd)).unwrap();
+        std::fs::write(cache_path(gd, "torn").unwrap(), &whole).unwrap();
+        assert!(read_cache(gd, "torn").is_err(), "the plain read reports it");
+
+        let read = read_cache_or_repair(gd, "torn", 1_790_416_696_000).unwrap();
+        let aside = sessions_dir(gd).join("torn.json.torn-1790416696000");
+        assert_eq!(read, CacheRead::MovedAside(aside.clone()));
+        assert_eq!(std::fs::read(&aside).unwrap(), whole, "nothing is lost");
+        assert!(!cache_path(gd, "torn").unwrap().exists());
+        assert_eq!(
+            read_cache_or_repair(gd, "torn", 2).unwrap(),
+            CacheRead::Absent
+        );
+        assert_eq!(torn_caches(gd), ["torn.json.torn-1790416696000"]);
+        assert!(
+            live_sessions(gd).unwrap().is_empty(),
+            "not a cache any more"
+        );
+
+        write_cache(gd, &SessionCache::new("torn", "claude-code", "active", 3)).unwrap();
+        let reread = read_cache_or_repair(gd, "torn", 4).unwrap().into_cache();
+        assert_eq!(reread.map(|c| c.updated_at_ms), Some(3));
+    }
+
+    /// An unsafe id is still an error for the repairing read, so the hook
+    /// defers rather than moving anything, and a missing cache is absent.
+    #[test]
+    fn the_repairing_read_refuses_an_unsafe_id_and_answers_absent_for_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_cache_or_repair(tmp.path(), "../../evil", 1).is_err());
+        assert_eq!(
+            read_cache_or_repair(tmp.path(), "nope", 1).unwrap(),
+            CacheRead::Absent
+        );
+        assert!(torn_caches(tmp.path()).is_empty(), "no directory, no trace");
+    }
+
+    /// A writer that died between its write and its rename leaves its temp.
+    /// The session's next repairing read removes it once it is older than
+    /// the stale-writer age by its own mtime, and never touches a younger
+    /// one, another session's, or anything that is not a temp.
+    #[test]
+    fn a_dead_writers_temp_is_removed_once_stale_and_only_for_its_own_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gd = tmp.path();
+        let dir = sessions_dir(gd);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = [".s.json.41-0.tmp", ".s.usage.41-1.tmp"];
+        let kept = [
+            ".s.x.json.41-2.tmp",
+            ".s.json.tmp",
+            "s.json",
+            ".s.json.41-.tmp",
+        ];
+        for name in ours.iter().chain(&kept) {
+            std::fs::write(dir.join(name), b"{").unwrap();
+        }
+        let mtimes: Vec<i64> = ours
+            .iter()
+            .map(|n| modified_ms(&dir.join(n)).unwrap())
+            .collect();
+        let oldest = mtimes.iter().copied().min().unwrap();
+        let newest = mtimes.iter().copied().max().unwrap();
+
+        assert_eq!(
+            sweep_dead_writer_temps(&dir, "s", oldest + STALE_WRITER_MS - 1),
+            0
+        );
+        assert_eq!(
+            sweep_dead_writer_temps(&dir, "s", newest + STALE_WRITER_MS),
+            2
+        );
+        for name in kept {
+            assert!(
+                dir.join(name).exists(),
+                "{name} is not a dead writer's temp of s"
+            );
+        }
+        assert_eq!(STALE_WRITER_MS, 600_000, "the capture queue's ten minutes");
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //!
 //! A session id arrives on hook stdin, written by the agent, and Rift turns it
 //! into filenames: `<git_dir>/rift-sessions/<id>.json` for the transient
-//! session cache, `.<id>.tmp` for its atomic write, and the
+//! session cache, `.<id>.json.<pid>-<seq>.tmp` for each writer's atomic write,
+//! and the
 //! first-writer-wins claim markers beside them. Nothing validated the string,
 //! so an id of `../../../../etc/cron.d/evil` escaped the directory and gave a
 //! hostile payload an arbitrary-file-write primitive with the developer's own
@@ -32,7 +33,7 @@ pub const MAX_SESSION_ID_BYTES: usize = 200;
 ///
 /// - `/` and `\` — no traversal and no absolute path, on any platform;
 /// - `.` and `..` and every id that starts with one (a leading dot also keeps
-///   an id out of the `.<id>.tmp` namespace the atomic write owns, and out of
+///   an id out of the `.<id>.…tmp` namespace the atomic writes own, and out of
 ///   the hidden-file namespace generally);
 /// - NUL and every other control byte, which truncate paths in C APIs;
 /// - non-ASCII, which normalizes differently across filesystems (two distinct

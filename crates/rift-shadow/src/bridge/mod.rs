@@ -131,6 +131,11 @@ pub struct IngestOutcome {
     /// is already recorded as a `refused-<trigger>` transition row; the list
     /// is here so the caller can say so in its log as well.
     pub refused: Vec<rift_shadow_hooks::Trigger>,
+    /// Where this hook moved the session's cache aside because it did not
+    /// parse, when it did. The session was re-opened from no cache, which the
+    /// transition row already says (`synthesized-start`); this is here so the
+    /// caller can say why in its log.
+    pub cache_moved_aside: Option<std::path::PathBuf>,
 }
 
 /// What every step of one ingest addresses its rows by.
@@ -197,8 +202,15 @@ pub async fn ingest_hook(
     };
 
     // The current cache, read once: it feeds both turn derivation and the
-    // state machine's starting phase.
-    let existing = session_cache::read_cache(git_dir, &raw.session)?;
+    // state machine's starting phase. A cache that does not parse is moved
+    // aside and read as none, so this hook re-opens the session and writes
+    // the cache whole instead of failing like every hook after it would.
+    let read = session_cache::read_cache_or_repair(git_dir, &raw.session, now_ms)?;
+    let cache_moved_aside = match &read {
+        session_cache::CacheRead::MovedAside(path) => Some(path.clone()),
+        session_cache::CacheRead::Absent | session_cache::CacheRead::Read(_) => None,
+    };
+    let existing = read.into_cache();
     session::synthesize_missing_start(store, &ctx, &mut events).await?;
     let stamp = turns::stamp_turn(&ctx, &mut events, existing.as_ref());
 
@@ -215,6 +227,7 @@ pub async fn ingest_hook(
         receipt,
         read_calls,
         refused: advanced.refused,
+        cache_moved_aside,
     })
 }
 
@@ -255,6 +268,7 @@ async fn defer_without_session(
         receipt: HookReceipt::DeferredNoSession,
         read_calls: Vec::new(),
         refused: Vec::new(),
+        cache_moved_aside: None,
     })
 }
 

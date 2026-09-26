@@ -366,9 +366,11 @@ fn doctor_session_report(paths: &rift_git::RepoPaths) -> (String, serde_json::Va
         total.absorb(tally);
     }
     let behind = sessions_behind_their_events(paths, &journal);
+    let (torn, unreadable) = cache_defects(&journal);
     let mut report = session_headline(&total, floors);
     report.push_str(&elsewhere);
     report.push_str(&stranded_and_behind_lines(stranded, &behind));
+    report.push_str(&cache_defect_lines(&torn, &unreadable));
     let json = serde_json::json!({
         "live": total.live,
         "sweepable": total.sweepable,
@@ -378,6 +380,8 @@ fn doctor_session_report(paths: &rift_git::RepoPaths) -> (String, serde_json::Va
         "idle_sweep_ms": floors.sweep_ms,
         "idle_timeout_ms": floors.alarm_ms,
         "behind_events": behind,
+        "torn_caches": torn,
+        "unreadable_caches": unreadable,
     });
     (report, json)
 }
@@ -421,6 +425,49 @@ fn stranded_and_behind_lines(stranded: usize, behind: &[String]) -> String {
              events kept arriving — Rift's own state error, not yours; nothing to \
              do, the session's next hook repairs it",
             behind.len()
+        ));
+    }
+    lines
+}
+
+/// The session caches that did not parse, across every member: the ones a
+/// hook has already moved aside (`<id>.json.torn-<ms>`, by file name), and the
+/// ones still in place (by session id) that the session's next hook will move.
+fn cache_defects(journal: &[session_verbs::MemberJournal]) -> (Vec<String>, Vec<String>) {
+    let torn = journal
+        .iter()
+        .flat_map(|j| rift_shadow::hooks::torn_caches(&j.member.git_dir))
+        .collect();
+    let unreadable = journal
+        .iter()
+        .flat_map(|j| j.unreadable.iter().cloned())
+        .collect();
+    (torn, unreadable)
+}
+
+/// The lines for session caches that did not parse, only when there are any.
+///
+/// Both are Rift's own write error and never the developer's: a torn cache is
+/// what two of one session's hooks writing at once used to publish. Neither
+/// stops capture — the hook that meets one moves it aside and re-opens the
+/// session — so the lines ask nothing; the moved-aside files are kept as the
+/// trace and are safe to delete.
+fn cache_defect_lines(torn: &[String], unreadable: &[String]) -> String {
+    let mut lines = String::new();
+    if !torn.is_empty() {
+        lines.push_str(&format!(
+            "\n    rift defect:  {} session cache(s) found unreadable and moved aside \
+             (rift-sessions/*.json.torn-*) — Rift's own write error, not yours; each \
+             session was re-opened and capture continued",
+            torn.len()
+        ));
+    }
+    if !unreadable.is_empty() {
+        lines.push_str(&format!(
+            "\n    rift defect:  {} session cache(s) unreadable — Rift's own write \
+             error, not yours; nothing to do, the session's next hook moves it aside \
+             and re-opens the session",
+            unreadable.len()
         ));
     }
     lines

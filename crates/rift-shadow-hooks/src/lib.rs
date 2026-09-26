@@ -47,9 +47,9 @@ pub use install::{
 };
 pub use push::{screen_push, PushDecision, PushRef};
 pub use session_cache::{
-    cache_path, read_cache, read_transcript_progress, read_usage_progress, write_cache,
-    write_transcript_progress, write_usage_progress, SessionCache, TranscriptProgress,
-    UsageProgress, WorktreeObservation,
+    cache_path, read_cache, read_cache_or_repair, read_transcript_progress, read_usage_progress,
+    torn_caches, write_cache, write_transcript_progress, write_usage_progress, CacheRead,
+    SessionCache, TranscriptProgress, UsageProgress, WorktreeObservation, STALE_WRITER_MS,
 };
 pub use session_id::{is_safe_session_id, MAX_SESSION_ID_BYTES};
 pub use strategy::{decide, ArchiveDecision, ArchiveReason, GitEvent, StrategyKind, TriggerCtx};

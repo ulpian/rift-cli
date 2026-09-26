@@ -325,6 +325,15 @@ from and to are the phase that refused it. A refusal once hid a working
 session for two days because it left no trace, and the hook's receipt already
 read "recorded".
 
+**The session cache is transient, and a torn one is moved aside.**
+The phase a session is in is mirrored into a small file under the git dir, `rift-sessions/<id>.json`, rewritten whole by every hook; the transition rows are the truth and the file is only their mirror.
+Every write goes to a temp file of the writer's own, named by its process and a sequence number, and is renamed over the cache in the same directory.
+The temp name is per writer because a subagent shares its parent's session id and its hooks run beside the parent's: with one temp name per session, two hooks truncated and rewrote the same temp, and the rename published one object followed by the tail of the other.
+A cache that still does not parse is never fatal.
+The next hook of that session renames it to `<id>.json.torn-<ms>` beside where it was, reads the session as unseen, re-opens it as a `synthesized-start`, captures its event and writes the cache whole, and its log says `session cache unreadable, moved aside, session re-opened`.
+Nothing is deleted: the moved-aside file is the trace, and `rift doctor` counts those files as Rift's own defect, while `rift session list` prints `cache unreadable` for a cache no hook has reached yet.
+The same hook removes a temp file a dead writer of the session left, once it is older than ten minutes — the age at which the capture queue steals a dead worker's lock.
+
 **The idle sweep** ends a session whose agent went away without saying so. A
 live session untouched for longer than the family's floor —
 `[capture] idle_sweep_minutes`, five minutes by default — is timed out,

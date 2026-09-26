@@ -6,9 +6,14 @@ use std::path::Path;
 use rift_core::Result;
 use rift_store::CanonicalStore as _;
 
-use super::journals::family_journal;
+use super::journals::{family_journal, MemberJournal};
 use super::{exit, safe, Outcome};
 use crate::provenance::Label;
+
+/// The state `session list` and `session info` print for a session whose
+/// cache file exists and does not parse — never `archived`, which would say
+/// the session is over when it is Rift's own file that is broken.
+const CACHE_UNREADABLE: &str = "cache unreadable";
 
 /// `rift session list`: the session-STATE surface. The
 /// journal (live and ended sessions across **every member of the repository
@@ -23,8 +28,13 @@ use crate::provenance::Label;
 pub(crate) async fn list(store: &rift_store::SqliteStore, root: &Path) -> Result<Outcome> {
     let repo = rift_git::discover(root)?;
     let now = crate::hooks::now_ms();
-    let (mut rows, journalled) = journalled_rows(store, &repo, now).await;
-    rows.extend(archived_rows(store, &journalled).await?);
+    let journal = family_journal(&repo);
+    let unreadable: std::collections::BTreeSet<String> = journal
+        .iter()
+        .flat_map(|member| member.unreadable.iter().cloned())
+        .collect();
+    let (mut rows, journalled) = journalled_rows(store, journal, now).await;
+    rows.extend(archived_rows(store, &journalled, &unreadable).await?);
     rows.sort_by_key(|r| {
         std::cmp::Reverse(
             r.get("last_at_ms")
@@ -42,12 +52,12 @@ pub(crate) async fn list(store: &rift_store::SqliteStore, root: &Path) -> Result
 /// cover — the set the projection pass must not list a second time.
 async fn journalled_rows(
     store: &rift_store::SqliteStore,
-    repo: &rift_git::RepoPaths,
+    journal: Vec<MemberJournal>,
     now: i64,
 ) -> (Vec<serde_json::Value>, std::collections::BTreeSet<String>) {
     let mut rows = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    for member in family_journal(repo) {
+    for member in journal {
         for s in member.sessions {
             seen.insert(s.session_id.clone());
             let row_id = rift_core::capture_session_row_id(&s.agent, &s.session_id);
@@ -71,9 +81,14 @@ async fn journalled_rows(
 /// Projection-only sessions (their journal entry is gone, or they were
 /// imported): the identity map recovers the native id the operator knows them
 /// by; a session it never bound falls back to its row id.
+///
+/// A session whose cache file exists but does not parse is not archived, and
+/// is not printed as one: its state reads `cache unreadable` until the
+/// session's next hook moves the file aside and writes the cache whole.
 async fn archived_rows(
     store: &rift_store::SqliteStore,
     journalled: &std::collections::BTreeSet<String>,
+    unreadable: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<serde_json::Value>> {
     let projected = store
         .query(
@@ -94,17 +109,13 @@ async fn archived_rows(
             continue;
         }
         let started = r.get_i64(3).unwrap_or(0);
+        let state = if unreadable.contains(&native) {
+            CACHE_UNREADABLE
+        } else {
+            "archived"
+        };
         rows.push(
-            session_row_json(
-                store,
-                &native,
-                &row_id,
-                Some(&agent),
-                "archived",
-                None,
-                started,
-            )
-            .await,
+            session_row_json(store, &native, &row_id, Some(&agent), state, None, started).await,
         );
     }
     Ok(rows)
@@ -221,10 +232,17 @@ pub(crate) async fn info(
     root: &Path,
     reference: &str,
 ) -> Result<Outcome> {
-    use rift_shadow::hooks::session_cache::read_cache;
+    use rift_shadow::hooks::session_cache::{cache_path, read_cache};
     let repo = rift_git::discover(root)?;
     let now = crate::hooks::now_ms();
-    let journal = read_cache(&repo.git_dir, reference).ok().flatten();
+    let read = read_cache(&repo.git_dir, reference);
+    let fallback =
+        if read.is_err() && cache_path(&repo.git_dir, reference).is_ok_and(|p| p.exists()) {
+            CACHE_UNREADABLE
+        } else {
+            "archived"
+        };
+    let journal = read.ok().flatten();
     let Some(row_id) = projection_row_id(store, journal.as_ref(), reference).await? else {
         return Ok(Outcome::coded(
             exit::PRECONDITION,
@@ -235,7 +253,7 @@ pub(crate) async fn info(
             serde_json::json!({ "error": "unknown_session", "session_id": reference }),
         ));
     };
-    let state = journal.as_ref().map_or("archived", |c| c.state.as_str());
+    let state = journal.as_ref().map_or(fallback, |c| c.state.as_str());
     let age_ms = journal
         .as_ref()
         .map(|c| now.saturating_sub(c.updated_at_ms));
