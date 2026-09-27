@@ -28,12 +28,14 @@
 
 use rift_core::{Result, RiftError, Timestamp};
 use rift_recall_policy::{PolicyEngine, TurnBudget};
-use rift_recall_serve::{RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest};
+use rift_recall_serve::{
+    RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse,
+};
 use rift_recall_substrate::MemorySubstrate;
 use rift_recall_types::{NoAncestry, NoProvenance, Scope};
 use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore, Value};
 
-use crate::{replay, PairedRun, ReplayMode, RunMetrics, Scenario};
+use crate::{replay, PairedRun, ReplayMode, RunMetrics, Scenario, ScenarioFile};
 
 /// The manifest budget the scripted agent requests for its anchoring
 /// `known_state` call: compact on purpose (the anchor is an index, not
@@ -44,13 +46,6 @@ const MANIFEST_PROBE_TOKENS: u32 = 150;
 /// The injected clock (no wall time enters the harness).
 pub(crate) const EVAL_NOW_MS: i64 = 1_000_000_000;
 
-pub(crate) fn block_on<F: std::future::Future>(f: F) -> Result<F::Output> {
-    Ok(tokio::runtime::Builder::new_current_thread()
-        .build()
-        .map_err(|e| RiftError::substrate(format!("eval runtime: {e}")))?
-        .block_on(f))
-}
-
 /// The fixture world one scenario seeds: the recall projection + substrate a
 /// real serve reads.
 struct Fixture {
@@ -60,113 +55,60 @@ struct Fixture {
     files: Vec<(String, String)>,
 }
 
-/// Seed the fixture store from the scenario: one checkpoint; per file a
-/// revision + a captured read whose `input_tokens` is the honest tokenizer
-/// count times `est_multiplier` (1 = honest capture; >1 plants a real
-/// capture-side over-estimate). Changed files also persist their changed
-/// hunks (old = the content minus the decisive-fact lines), so the pack can
-/// inline the decisive hunk TEXT exactly as production does; every blob is
-/// seeded into the substrate so exact retrieval serves real bytes.
-async fn seed(scenario: &Scenario, est_multiplier: u32) -> Result<Fixture> {
-    let store = SqliteStore::open_in_memory()?;
-    apply_migrations(&store, &recall_migrations())?;
-    store
-        .insert_or_ignore(
-            "n_checkpoint",
-            &[
-                "node_id",
-                "dialect",
-                "ordinal",
-                "prev_checkpoint",
-                "strategy",
-                "merkle_root",
-                "developer",
-            ],
-            &[
-                Value::text("c1"),
-                Value::text("rift"),
-                Value::Int(1),
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-            ],
-        )
-        .await?;
-    let mut reader = MemorySubstrate::local();
-    let mut files = Vec::new();
-    for (i, f) in scenario.files.iter().enumerate() {
-        let sha = rift_recall_substrate::worktree::sha256_hex(f.content.as_bytes());
-        let rev = format!("rev_{i:03}");
-        let est = rift_tokens::count(&f.content).saturating_mul(est_multiplier);
-        store
-            .insert_or_ignore(
-                "n_file_revision",
-                &["node_id", "path", "blob_oid", "content_sha256", "size"],
-                &[
-                    Value::text(&rev),
-                    Value::text(&f.path),
-                    Value::text(&sha),
-                    Value::text(&sha),
-                    Value::Int(i64::try_from(f.content.len()).unwrap_or(i64::MAX)),
-                ],
-            )
-            .await?;
-        store
-            .insert_or_ignore(
-                "n_file_read",
-                &[
-                    "node_id",
-                    "checkpoint_id",
-                    "tool_call_id",
-                    "file_revision",
-                    "input_tokens",
-                    "read_ordinal",
-                    "byte_range_lo",
-                    "byte_range_hi",
-                ],
-                &[
-                    Value::text(format!("read_{rev}")),
-                    Value::text("c1"),
-                    Value::text(format!("tc_{rev}")),
-                    Value::text(&rev),
-                    Value::Int(i64::from(est)),
-                    Value::Int(1),
-                    Value::Null,
-                    Value::Null,
-                ],
-            )
-            .await?;
-        if f.changed {
-            // The pre-change content: everything except the decisive-fact
-            // lines, so the persisted hunks cover exactly the new material.
-            let old: String = f
-                .content
-                .lines()
-                .filter(|l| !l.contains(&scenario.decisive_fact))
-                .fold(String::new(), |mut acc, l| {
-                    acc.push_str(l);
-                    acc.push('\n');
-                    acc
-                });
-            rift_recall_ledger::hunks::persist_hunks(
-                &store,
-                "c1",
-                &format!("rev_old_{i:03}"),
-                &rev,
-                old.as_bytes(),
-                f.content.as_bytes(),
-            )
-            .await?;
-        }
-        reader = reader.with_blob(&sha, f.content.as_bytes());
-        files.push((f.path.clone(), sha));
+/// One scripted turn against the real dispatcher: every serve of the turn
+/// draws down the same budget over the same context.
+struct ServedTurn<'a> {
+    server: ServeDispatcher<'a>,
+    ctx: RecallContext<'a, SqliteStore, MemorySubstrate>,
+    budget: TurnBudget,
+}
+
+impl ServedTurn<'_> {
+    /// One real serve; a tool error becomes a substrate error naming it.
+    fn dispatch(&mut self, req: &ToolRequest, tool: ToolName) -> Result<ToolResponse> {
+        block_on(self.server.dispatch(tool, req, &self.ctx, &mut self.budget))?
+            .map_err(|e: ToolError| RiftError::substrate(format!("eval dispatch: {e:?}")))
     }
-    Ok(Fixture {
-        store,
-        reader,
-        files,
-    })
+
+    /// Steps 3… — the retrieval ladder: follow handles (changed files first,
+    /// the rank order the plane recommends) until the decisive fact turns up.
+    /// Returns whether it did.
+    fn follow_handles(
+        &mut self,
+        scenario: &Scenario,
+        fixture: &Fixture,
+        tokens: &mut u64,
+        steps: &mut u32,
+    ) -> Result<bool> {
+        let ordered = scenario
+            .files
+            .iter()
+            .zip(&fixture.files)
+            .filter(|(f, _)| f.changed)
+            .chain(
+                scenario
+                    .files
+                    .iter()
+                    .zip(&fixture.files)
+                    .filter(|(f, _)| !f.changed),
+            );
+        for (_, (path, sha)) in ordered {
+            let resp = self.dispatch(
+                &ToolRequest {
+                    target: Some(format!("file:{path}@sha256:{sha}")),
+                    reason: Some("eval: locating the decisive fact".to_string()),
+                    ..Default::default()
+                },
+                ToolName::RetrieveExact,
+            )?;
+            *steps = steps.saturating_add(1);
+            *tokens = tokens.saturating_add(u64::from(resp.estimated_tokens_returned));
+            if resp.payload.to_string().contains(&scenario.decisive_fact) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 /// Replay the scenario against the REAL serve path with honest capture.
@@ -190,77 +132,32 @@ pub fn replay_served(scenario: &Scenario) -> Result<PairedRun> {
 ///
 /// # Errors
 /// A fixture-store or dispatch failure (identifier/reason only).
-#[allow(clippy::too_many_lines)] // one cohesive scripted task: seed, anchor, pack, retrieve
 pub fn replay_served_with_capture(scenario: &Scenario, est_multiplier: u32) -> Result<PairedRun> {
     let cfg = rift_config::EffectiveConfig::secure_default()?;
     let fixture = block_on(seed(scenario, est_multiplier))??;
-    let server = ServeDispatcher::new(PolicyEngine::new(&cfg));
-    let ctx = RecallContext {
-        store: &fixture.store,
-        reader: &fixture.reader,
-        snapshots: None,
-        // The harness computes a family fact over a synthetic fixture (eval is
-        // one of the accounting callers): there is no repository
-        // to walk and nothing to contain, and a serving scope here would make
-        // every replay serve nothing.
-        scope: Scope::unbounded("eval"),
-        ancestry: &NoAncestry,
-        // The harness measures the delta, not its story: a synthetic fixture has
-        // no capture projection behind it, so provenance is honestly unknown.
-        provenance: &NoProvenance,
-        now: Timestamp::from_millis(EVAL_NOW_MS),
+    let mut turn = ServedTurn {
+        server: ServeDispatcher::new(PolicyEngine::new(&cfg)),
+        ctx: eval_context(&fixture),
+        budget: roomy_budget(scenario),
     };
-    // Roomy ceilings (see the module doc): enough calls for the anchor, the
-    // pack, and one retrieval per file; a token ceiling no serve clamps on.
-    let calls = u32::try_from(scenario.files.len())
-        .unwrap_or(u32::MAX)
-        .saturating_add(2);
-    let mut budget = TurnBudget::new(calls, u32::MAX);
-
-    let known_hashes: Vec<String> = fixture
-        .files
-        .iter()
-        .zip(&scenario.files)
-        .filter(|(_, f)| !f.changed)
-        .map(|((_, sha), _)| sha.clone())
-        .collect();
-    let focus = scenario
-        .files
-        .iter()
-        .find(|f| f.changed)
-        .or_else(|| scenario.files.first())
-        .map(|f| f.path.clone())
-        .unwrap_or_default();
-    let base_req = ToolRequest {
-        task: Some(format!("locate: {}", scenario.decisive_fact)),
-        files_in_focus: vec![focus],
-        known_hashes,
-        ..Default::default()
-    };
-
-    let dispatch = |req: &ToolRequest, tool: ToolName, budget: &mut TurnBudget| {
-        block_on(server.dispatch(tool, req, &ctx, budget))?
-            .map_err(|e: ToolError| RiftError::substrate(format!("eval dispatch: {e:?}")))
-    };
+    let base_req = base_request(scenario, &fixture);
 
     // First, the anchor: a compact known_state manifest (the turn's index).
-    let ks = dispatch(
+    let ks = turn.dispatch(
         &ToolRequest {
             token_budget: MANIFEST_PROBE_TOKENS,
             ..base_req.clone()
         },
         ToolName::KnownState,
-        &mut budget,
     )?;
     // Then the content serve: a real compiled pack under the scenario
     // budget. Its event carries THE claim under reconciliation.
-    let pack = dispatch(
+    let pack = turn.dispatch(
         &ToolRequest {
             token_budget: scenario.token_budget,
             ..base_req.clone()
         },
         ToolName::ContextPack,
-        &mut budget,
     )?;
     let emitted = u64::from(pack.event.tokens_avoided());
 
@@ -268,39 +165,8 @@ pub fn replay_served_with_capture(scenario: &Scenario, est_multiplier: u32) -> R
         .saturating_add(u64::from(pack.estimated_tokens_returned));
     let mut steps = 2u32;
     let mut success = pack.payload.to_string().contains(&scenario.decisive_fact);
-
-    // Steps 3… — the retrieval ladder: follow handles (changed files first,
-    // the rank order the plane recommends) until the decisive fact turns up.
     if !success {
-        let ordered = scenario
-            .files
-            .iter()
-            .zip(&fixture.files)
-            .filter(|(f, _)| f.changed)
-            .chain(
-                scenario
-                    .files
-                    .iter()
-                    .zip(&fixture.files)
-                    .filter(|(f, _)| !f.changed),
-            );
-        for (_, (path, sha)) in ordered {
-            let resp = dispatch(
-                &ToolRequest {
-                    target: Some(format!("file:{path}@sha256:{sha}")),
-                    reason: Some("eval: locating the decisive fact".to_string()),
-                    ..Default::default()
-                },
-                ToolName::RetrieveExact,
-                &mut budget,
-            )?;
-            steps = steps.saturating_add(1);
-            tokens = tokens.saturating_add(u64::from(resp.estimated_tokens_returned));
-            if resp.payload.to_string().contains(&scenario.decisive_fact) {
-                success = true;
-                break;
-            }
-        }
+        success = turn.follow_handles(scenario, &fixture, &mut tokens, &mut steps)?;
     }
 
     let baseline = replay(scenario, ReplayMode::FullRead);
@@ -317,6 +183,213 @@ pub fn replay_served_with_capture(scenario: &Scenario, est_multiplier: u32) -> R
         },
         emitted_tokens_avoided: emitted,
     })
+}
+
+/// The serve context over the fixture: unbounded scope, no ancestry, no
+/// provenance, the injected clock.
+fn eval_context(fixture: &Fixture) -> RecallContext<'_, SqliteStore, MemorySubstrate> {
+    RecallContext {
+        store: &fixture.store,
+        reader: &fixture.reader,
+        snapshots: None,
+        // The harness computes a family fact over a synthetic fixture (eval is
+        // one of the accounting callers): there is no repository
+        // to walk and nothing to contain, and a serving scope here would make
+        // every replay serve nothing.
+        scope: Scope::unbounded("eval"),
+        ancestry: &NoAncestry,
+        // The harness measures the delta, not its story: a synthetic fixture has
+        // no capture projection behind it, so provenance is honestly unknown.
+        provenance: &NoProvenance,
+        now: Timestamp::from_millis(EVAL_NOW_MS),
+    }
+}
+
+/// Roomy ceilings (see the module doc): enough calls for the anchor, the
+/// pack, and one retrieval per file; a token ceiling no serve clamps on.
+fn roomy_budget(scenario: &Scenario) -> TurnBudget {
+    let calls = u32::try_from(scenario.files.len())
+        .unwrap_or(u32::MAX)
+        .saturating_add(2);
+    TurnBudget::new(calls, u32::MAX)
+}
+
+/// The request the anchor and the pack share: the task names the decisive
+/// fact, the focus is the first changed file (else the first file), and every
+/// unchanged file's hash is already known.
+fn base_request(scenario: &Scenario, fixture: &Fixture) -> ToolRequest {
+    let known_hashes: Vec<String> = fixture
+        .files
+        .iter()
+        .zip(&scenario.files)
+        .filter(|(_, f)| !f.changed)
+        .map(|((_, sha), _)| sha.clone())
+        .collect();
+    let focus = scenario
+        .files
+        .iter()
+        .find(|f| f.changed)
+        .or_else(|| scenario.files.first())
+        .map(|f| f.path.clone())
+        .unwrap_or_default();
+    ToolRequest {
+        task: Some(format!("locate: {}", scenario.decisive_fact)),
+        files_in_focus: vec![focus],
+        known_hashes,
+        ..Default::default()
+    }
+}
+
+pub(crate) fn block_on<F: std::future::Future>(f: F) -> Result<F::Output> {
+    Ok(tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|e| RiftError::substrate(format!("eval runtime: {e}")))?
+        .block_on(f))
+}
+
+/// Seed the fixture store from the scenario: one checkpoint; per file a
+/// revision + a captured read whose `input_tokens` is the honest tokenizer
+/// count times `est_multiplier` (1 = honest capture; >1 plants a real
+/// capture-side over-estimate). Changed files also persist their changed
+/// hunks (old = the content minus the decisive-fact lines), so the pack can
+/// inline the decisive hunk TEXT exactly as production does; every blob is
+/// seeded into the substrate so exact retrieval serves real bytes.
+async fn seed(scenario: &Scenario, est_multiplier: u32) -> Result<Fixture> {
+    let store = SqliteStore::open_in_memory()?;
+    apply_migrations(&store, &recall_migrations())?;
+    seed_checkpoint(&store).await?;
+    let mut reader = MemorySubstrate::local();
+    let mut files = Vec::new();
+    for (i, f) in scenario.files.iter().enumerate() {
+        let sha = rift_recall_substrate::worktree::sha256_hex(f.content.as_bytes());
+        let rev = format!("rev_{i:03}");
+        let est = rift_tokens::count(&f.content).saturating_mul(est_multiplier);
+        seed_file_revision(&store, f, &rev, &sha).await?;
+        seed_file_read(&store, &rev, est).await?;
+        if f.changed {
+            seed_changed_hunks(&store, scenario, f, i, &rev).await?;
+        }
+        reader = reader.with_blob(&sha, f.content.as_bytes());
+        files.push((f.path.clone(), sha));
+    }
+    Ok(Fixture {
+        store,
+        reader,
+        files,
+    })
+}
+
+/// The scenario's one checkpoint, `c1`, every read and hunk hangs off.
+async fn seed_checkpoint(store: &SqliteStore) -> Result<()> {
+    store
+        .insert_or_ignore(
+            "n_checkpoint",
+            &[
+                "node_id",
+                "dialect",
+                "ordinal",
+                "prev_checkpoint",
+                "strategy",
+                "merkle_root",
+                "developer",
+            ],
+            &[
+                Value::text("c1"),
+                Value::text("rift"),
+                Value::Int(1),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+/// One file's revision row, keyed `rev` and addressed by its content hash.
+async fn seed_file_revision(
+    store: &SqliteStore,
+    f: &ScenarioFile,
+    rev: &str,
+    sha: &str,
+) -> Result<()> {
+    store
+        .insert_or_ignore(
+            "n_file_revision",
+            &["node_id", "path", "blob_oid", "content_sha256", "size"],
+            &[
+                Value::text(rev),
+                Value::text(&f.path),
+                Value::text(sha),
+                Value::text(sha),
+                Value::Int(i64::try_from(f.content.len()).unwrap_or(i64::MAX)),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+/// The captured read of revision `rev`, carrying the (possibly inflated)
+/// capture-side `input_tokens` estimate every serve's claim is built from.
+async fn seed_file_read(store: &SqliteStore, rev: &str, est: u32) -> Result<()> {
+    store
+        .insert_or_ignore(
+            "n_file_read",
+            &[
+                "node_id",
+                "checkpoint_id",
+                "tool_call_id",
+                "file_revision",
+                "input_tokens",
+                "read_ordinal",
+                "byte_range_lo",
+                "byte_range_hi",
+            ],
+            &[
+                Value::text(format!("read_{rev}")),
+                Value::text("c1"),
+                Value::text(format!("tc_{rev}")),
+                Value::text(rev),
+                Value::Int(i64::from(est)),
+                Value::Int(1),
+                Value::Null,
+                Value::Null,
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+/// A changed file's hunks against its pre-change content: everything except
+/// the decisive-fact lines, so the persisted hunks cover exactly the new
+/// material.
+async fn seed_changed_hunks(
+    store: &SqliteStore,
+    scenario: &Scenario,
+    f: &ScenarioFile,
+    i: usize,
+    rev: &str,
+) -> Result<()> {
+    let old: String = f
+        .content
+        .lines()
+        .filter(|l| !l.contains(&scenario.decisive_fact))
+        .fold(String::new(), |mut acc, l| {
+            acc.push_str(l);
+            acc.push('\n');
+            acc
+        });
+    rift_recall_ledger::hunks::persist_hunks(
+        store,
+        "c1",
+        &format!("rev_old_{i:03}"),
+        rev,
+        old.as_bytes(),
+        f.content.as_bytes(),
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

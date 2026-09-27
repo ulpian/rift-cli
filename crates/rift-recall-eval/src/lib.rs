@@ -34,6 +34,7 @@
 )]
 
 use rift_recall_pack::{compile, EvidenceRef, PackRequest, SectionEntry, Sensitivity};
+use rift_recall_types::{ArtifactState, Envelope, Handle, Trust};
 
 mod intercepted;
 mod record;
@@ -375,82 +376,7 @@ pub fn replay(scenario: &Scenario, mode: ReplayMode) -> RunMetrics {
 /// early, unchanged as summaries-by-handle, retrievals recommended in rank
 /// order), then follow handles until the decisive fact turns up.
 fn replay_delta(scenario: &Scenario) -> RunMetrics {
-    use rift_recall_types::{ArtifactState, Envelope, Handle, Trust};
-    // Fixture envelopes stand in for `envelope_for` outputs (the harness IS
-    // the replay of a serve, not a serve path); the entries still go through
-    // the sealed pack constructors, so the compiled shape matches production.
-    let sha = |f: &ScenarioFile| format!("{:0>64}", f.path.len());
-    let handle = |f: &ScenarioFile| Handle::File {
-        path: f.path.clone(),
-        sha256: sha(f),
-        range: None,
-    };
-    let mut preq = PackRequest::new(scenario.token_budget);
-    // The evidence-ordinal pass over the scenario's own file
-    // order — the same discipline as the serve path this harness replays,
-    // assigned before compile and not by position in the finished pack.
-    let ordinal = |f: &ScenarioFile| {
-        scenario
-            .files
-            .iter()
-            .position(|c| c.path == f.path)
-            .and_then(|i| u32::try_from(i).ok())
-            .unwrap_or(0)
-            .saturating_add(1)
-    };
-    for f in scenario.files.iter().filter(|f| f.changed) {
-        let env = Envelope {
-            path: f.path.clone(),
-            trust: Trust::CodeFact,
-            state: ArtifactState::AvailableByHandle {
-                handle: handle(f).to_string(),
-                basis_sha256: Some(sha(f)),
-                reason: rift_recall_types::OmitReason::NotRequested,
-            },
-            estimated_tokens_returned: 0,
-        };
-        let _ = preq.push_changed(SectionEntry::from_envelope(
-            &env,
-            Sensitivity::Normal,
-            &EvidenceRef::at(ordinal(f)),
-        ));
-    }
-    for f in scenario.files.iter().filter(|f| !f.changed) {
-        let env = Envelope {
-            path: f.path.clone(),
-            trust: Trust::CodeFact,
-            state: ArtifactState::KnownUnchanged {
-                handle: handle(f).to_string(),
-                basis_sha256: sha(f),
-                last_seen_turn: None,
-            },
-            estimated_tokens_returned: 0,
-        };
-        let _ = preq.push_unchanged(SectionEntry::from_envelope(
-            &env,
-            Sensitivity::Normal,
-            &EvidenceRef::at(ordinal(f)),
-        ));
-    }
-    let recommended: Vec<String> = scenario
-        .files
-        .iter()
-        // changed files outrank unchanged ones in the retrieval ladder
-        .filter(|f| f.changed)
-        .chain(scenario.files.iter().filter(|f| !f.changed))
-        .map(|f| format!("file:{}", f.path))
-        .collect();
-    for f in scenario
-        .files
-        .iter()
-        .filter(|f| f.changed)
-        .chain(scenario.files.iter().filter(|f| !f.changed))
-    {
-        // The recommendation cites the same ordinal the file's own
-        // entry carries, so the replayed ladder follows numbers exactly as a
-        // real agent now does.
-        let _ = preq.push_recommended(SectionEntry::from_handle(&handle(f), ordinal(f)));
-    }
+    let preq = delta_pack_request(scenario);
     // Replay has no per-turn ceiling; the scenario budget alone governs. A
     // budget too small for any pack falls back to the full-read shape (the
     // caller's documented fallback), so tiny-budget scenarios stay runnable.
@@ -461,25 +387,9 @@ fn replay_delta(scenario: &Scenario) -> RunMetrics {
     let mut tokens = count_tokens(&rendered);
     let mut steps = 1u32; // reading the pack is a step
 
-    // Follow the recommended handles in order; each retrieval inlines that
-    // file's bytes (a step + its token cost) until the fact is found.
     let mut success = rendered.contains(&scenario.decisive_fact);
     if !success {
-        for handle in &recommended {
-            let Some(file) = scenario
-                .files
-                .iter()
-                .find(|f| format!("file:{}", f.path) == *handle)
-            else {
-                continue;
-            };
-            steps = steps.saturating_add(1);
-            tokens += count_tokens(&file.content);
-            if file.content.contains(&scenario.decisive_fact) {
-                success = true;
-                break;
-            }
-        }
+        success = follow_recommended(scenario, &mut tokens, &mut steps);
     }
     RunMetrics {
         tokens,
@@ -489,6 +399,130 @@ fn replay_delta(scenario: &Scenario) -> RunMetrics {
         human_mod_ok: true,
         latency_steps: steps,
     }
+}
+
+/// The pack request the delta leg compiles: every changed file as a
+/// by-handle entry, every unchanged file as known-unchanged, then one
+/// recommendation per file in ladder order.
+///
+/// Fixture envelopes stand in for `envelope_for` outputs (the harness IS
+/// the replay of a serve, not a serve path); the entries still go through
+/// the sealed pack constructors, so the compiled shape matches production.
+fn delta_pack_request(scenario: &Scenario) -> PackRequest {
+    let mut preq = PackRequest::new(scenario.token_budget);
+    for f in scenario.files.iter().filter(|f| f.changed) {
+        let _ = preq.push_changed(changed_entry(scenario, f));
+    }
+    for f in scenario.files.iter().filter(|f| !f.changed) {
+        let _ = preq.push_unchanged(unchanged_entry(scenario, f));
+    }
+    for f in ladder_order(scenario) {
+        // The recommendation cites the same ordinal the file's own
+        // entry carries, so the replayed ladder follows numbers exactly as a
+        // real agent now does.
+        let _ = preq.push_recommended(SectionEntry::from_handle(
+            &file_handle(f),
+            evidence_ordinal(scenario, f),
+        ));
+    }
+    preq
+}
+
+/// A changed file's pack entry: available by handle, content not inlined.
+fn changed_entry(scenario: &Scenario, f: &ScenarioFile) -> SectionEntry {
+    let env = Envelope {
+        path: f.path.clone(),
+        trust: Trust::CodeFact,
+        state: ArtifactState::AvailableByHandle {
+            handle: file_handle(f).to_string(),
+            basis_sha256: Some(fixture_sha(f)),
+            reason: rift_recall_types::OmitReason::NotRequested,
+        },
+        estimated_tokens_returned: 0,
+    };
+    SectionEntry::from_envelope(
+        &env,
+        Sensitivity::Normal,
+        &EvidenceRef::at(evidence_ordinal(scenario, f)),
+    )
+}
+
+/// An unchanged file's pack entry: known-unchanged, the delta plane's saving.
+fn unchanged_entry(scenario: &Scenario, f: &ScenarioFile) -> SectionEntry {
+    let env = Envelope {
+        path: f.path.clone(),
+        trust: Trust::CodeFact,
+        state: ArtifactState::KnownUnchanged {
+            handle: file_handle(f).to_string(),
+            basis_sha256: fixture_sha(f),
+            last_seen_turn: None,
+        },
+        estimated_tokens_returned: 0,
+    };
+    SectionEntry::from_envelope(
+        &env,
+        Sensitivity::Normal,
+        &EvidenceRef::at(evidence_ordinal(scenario, f)),
+    )
+}
+
+/// The retrieval ladder's order: changed files outrank unchanged ones.
+fn ladder_order(scenario: &Scenario) -> impl Iterator<Item = &ScenarioFile> + '_ {
+    scenario
+        .files
+        .iter()
+        .filter(|f| f.changed)
+        .chain(scenario.files.iter().filter(|f| !f.changed))
+}
+
+/// The fixture's stand-in content hash: deterministic, not a real digest.
+fn fixture_sha(f: &ScenarioFile) -> String {
+    format!("{:0>64}", f.path.len())
+}
+
+fn file_handle(f: &ScenarioFile) -> Handle {
+    Handle::File {
+        path: f.path.clone(),
+        sha256: fixture_sha(f),
+        range: None,
+    }
+}
+
+/// The evidence-ordinal pass over the scenario's own file order — the same
+/// discipline as the serve path this harness replays, assigned before
+/// compile and not by position in the finished pack.
+fn evidence_ordinal(scenario: &Scenario, f: &ScenarioFile) -> u32 {
+    scenario
+        .files
+        .iter()
+        .position(|c| c.path == f.path)
+        .and_then(|i| u32::try_from(i).ok())
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+/// Follow the recommended handles in order; each retrieval inlines that
+/// file's bytes (a step + its token cost) until the fact is found. Returns
+/// whether it was.
+fn follow_recommended(scenario: &Scenario, tokens: &mut u64, steps: &mut u32) -> bool {
+    let recommended: Vec<String> = ladder_order(scenario)
+        .map(|f| format!("file:{}", f.path))
+        .collect();
+    for handle in &recommended {
+        let Some(file) = scenario
+            .files
+            .iter()
+            .find(|f| format!("file:{}", f.path) == *handle)
+        else {
+            continue;
+        };
+        *steps = steps.saturating_add(1);
+        *tokens += count_tokens(&file.content);
+        if file.content.contains(&scenario.decisive_fact) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Replay a scenario both ways into a [`PairedRun`], stamping the serving
