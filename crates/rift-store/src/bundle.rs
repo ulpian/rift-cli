@@ -499,8 +499,12 @@ pub async fn import_segment(
 
 #[cfg(test)]
 mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
-    use crate::SqliteStore;
+    use crate::store::{Store, StoreConn, StoreDescriptor, StoreTx};
+    use crate::{Row, SqliteStore, TxMode, Value};
 
     fn id_of(i: u8, tag: u8) -> Sha256Id {
         let mut b = [tag; 32];
@@ -873,6 +877,67 @@ mod tests {
         assert!(tampered.verify().is_ok());
     }
 
+    /// A store double whose checkpoint INSERTs fail once `budget` of them have
+    /// run; every other call rides through to the real store.
+    struct FailingStore {
+        inner: SqliteStore,
+        budget: usize,
+        seen: Arc<AtomicUsize>,
+    }
+    /// The double's connection, sharing the store's insert counter.
+    struct FailingConn {
+        inner: Box<dyn StoreConn>,
+        budget: usize,
+        seen: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Store for FailingStore {
+        async fn conn(&self) -> rift_core::Result<Box<dyn StoreConn>> {
+            Ok(Box::new(FailingConn {
+                inner: self.inner.conn().await?,
+                budget: self.budget,
+                seen: Arc::clone(&self.seen),
+            }))
+        }
+        fn descriptor(&self) -> &StoreDescriptor {
+            self.inner.descriptor()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoreConn for FailingConn {
+        async fn execute(&self, sql: &str, params: &[Value]) -> rift_core::Result<u64> {
+            if sql.starts_with("INSERT OR IGNORE INTO checkpoint") {
+                let n = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
+                if n > self.budget {
+                    return Err(RiftError::storage("planted mid-loop write failure"));
+                }
+            }
+            self.inner.execute(sql, params).await
+        }
+        async fn execute_batch(&self, sql: &str) -> rift_core::Result<()> {
+            self.inner.execute_batch(sql).await
+        }
+        async fn query(&self, sql: &str, params: &[Value]) -> rift_core::Result<Vec<Row>> {
+            self.inner.query(sql, params).await
+        }
+        async fn begin(&self, mode: TxMode) -> rift_core::Result<Box<dyn StoreTx + '_>> {
+            self.inner.begin(mode).await
+        }
+    }
+
+    /// A fresh canonical projection behind the double.
+    fn fixture_failing_store(budget: usize) -> FailingStore {
+        let inner = SqliteStore::open_in_memory().unwrap();
+        inner.create_canonical_schema().unwrap();
+        FailingStore {
+            inner,
+            budget,
+            seen: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
     /// **Defect (d) of the blind bundle review, planted rather than argued:**
     /// the write loop is ONE transaction, so a failure at link k leaves ZERO
     /// rows — not k-1 of them. Before the fix this test reddens with exactly
@@ -885,70 +950,11 @@ mod tests {
     /// what is measured afterwards is the real store's row count.
     #[test]
     fn a_mid_loop_write_failure_leaves_zero_rows() {
-        use core::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        use crate::store::{Store, StoreConn, StoreDescriptor, StoreTx};
-        use crate::{Row, TxMode, Value};
-
-        struct FailingStore {
-            inner: SqliteStore,
-            budget: usize,
-            seen: Arc<AtomicUsize>,
-        }
-        struct FailingConn {
-            inner: Box<dyn StoreConn>,
-            budget: usize,
-            seen: Arc<AtomicUsize>,
-        }
-
-        #[async_trait::async_trait]
-        impl Store for FailingStore {
-            async fn conn(&self) -> rift_core::Result<Box<dyn StoreConn>> {
-                Ok(Box::new(FailingConn {
-                    inner: self.inner.conn().await?,
-                    budget: self.budget,
-                    seen: Arc::clone(&self.seen),
-                }))
-            }
-            fn descriptor(&self) -> &StoreDescriptor {
-                self.inner.descriptor()
-            }
-        }
-
-        #[async_trait::async_trait]
-        impl StoreConn for FailingConn {
-            async fn execute(&self, sql: &str, params: &[Value]) -> rift_core::Result<u64> {
-                if sql.starts_with("INSERT OR IGNORE INTO checkpoint") {
-                    let n = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
-                    if n > self.budget {
-                        return Err(RiftError::storage("planted mid-loop write failure"));
-                    }
-                }
-                self.inner.execute(sql, params).await
-            }
-            async fn execute_batch(&self, sql: &str) -> rift_core::Result<()> {
-                self.inner.execute_batch(sql).await
-            }
-            async fn query(&self, sql: &str, params: &[Value]) -> rift_core::Result<Vec<Row>> {
-                self.inner.query(sql, params).await
-            }
-            async fn begin(&self, mode: TxMode) -> rift_core::Result<Box<dyn StoreTx + '_>> {
-                self.inner.begin(mode).await
-            }
-        }
-
         let source = seeded(&chain(3, 7));
         let seg = block(export_segment(&source, &StreamCursor::origin())).unwrap();
 
         // The plant: the first checkpoint insert succeeds, the second fails.
-        let inner = SqliteStore::open_in_memory().unwrap();
-        inner.create_canonical_schema().unwrap();
-        let failing = FailingStore {
-            inner,
-            budget: 1,
-            seen: Arc::new(AtomicUsize::new(0)),
-        };
+        let failing = fixture_failing_store(1);
         let err = block(import_segment(&failing, &seg, "bundle-import", 1))
             .expect_err("the planted failure must refuse the import")
             .to_string();
@@ -968,13 +974,7 @@ mod tests {
 
         // The control on the same double: an unreachable budget imports whole,
         // so the refusal above is the plant's and not the double's.
-        let inner = SqliteStore::open_in_memory().unwrap();
-        inner.create_canonical_schema().unwrap();
-        let healthy = FailingStore {
-            inner,
-            budget: usize::MAX,
-            seen: Arc::new(AtomicUsize::new(0)),
-        };
+        let healthy = fixture_failing_store(usize::MAX);
         let report = block(import_segment(&healthy, &seg, "bundle-import", 1)).unwrap();
         assert_eq!((report.applied, report.head), (3, 3));
         assert_eq!(block(read_stored_links(&healthy.inner)).unwrap().len(), 3);

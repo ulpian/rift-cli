@@ -627,21 +627,34 @@ pub struct SessionFact {
 /// # Errors
 /// Propagates projection read errors. A missing optional source (recall's
 /// ledger) is an absent fact, not an error.
-// One linear cascade of independent fact queries. Splitting it into eight
-// one-caller helpers would hide the thing that matters here — that the report's
-// facts are gathered in one place, from one window, with no ordering between
-// them — behind eight signatures.
-#[allow(clippy::too_many_lines)]
 pub async fn gather(
     capture: &SqliteStore,
     recall_db: Option<&Path>,
     window: &Window,
 ) -> Result<WindowFacts> {
-    let store = capture;
-    let b = window.bounds();
-    let cb = window.checkpoint_binds();
-    let mut facts = WindowFacts::default();
+    let bounds = window.bounds();
+    let checkpoint_binds = window.checkpoint_binds();
+    // Field order is query order: the facts are gathered one after another
+    // from one window, exactly as the report lists them.
+    let mut facts = WindowFacts {
+        checkpoints: window_checkpoints(capture, &checkpoint_binds).await?,
+        unresolved_checkpoints: unresolved_checkpoint_count(capture).await?,
+        sessions: window_sessions(capture, &bounds).await?,
+        open_sessions: open_session_ids(capture, &bounds).await?,
+        attributed: window_attribution(capture, &checkpoint_binds).await?,
+        tokens: window_tokens(capture, &bounds).await?,
+        cost_micros: window_cost_micros(capture, &bounds).await?,
+        savings: read_savings(recall_db, window).await?,
+        ..WindowFacts::default()
+    };
+    facts.aggregate();
+    Ok(facts)
+}
 
+/// The window's checkpoints in time order, each marked `derived` when its time
+/// came from its session rather than from the shard's own record.
+async fn window_checkpoints(store: &SqliteStore, cb: &[Value; 4]) -> Result<Vec<CheckpointFact>> {
+    let mut out = Vec::new();
     for r in store
         .query(
             &format!(
@@ -650,47 +663,60 @@ pub async fn gather(
                  WHERE {IN_WINDOW} \
                  ORDER BY COALESCE(ct.effective_at, ?1), ct.checkpoint_id"
             ),
-            &cb,
+            cb,
         )
         .await?
     {
         let at = r.get_opt_i64(1)?;
-        facts.checkpoints.push(CheckpointFact {
+        out.push(CheckpointFact {
             checkpoint_id: r.get_text(0)?,
             at,
             derived: at.is_some() && r.get_i64(2)? == CREATED_AT_UNKNOWN,
         });
     }
+    Ok(out)
+}
 
-    facts.unresolved_checkpoints = store
+/// Repository-wide, not windowed: a checkpoint of unresolved time belongs to no
+/// bounded window, so the count is the one place it still shows up.
+async fn unresolved_checkpoint_count(store: &SqliteStore) -> Result<i64> {
+    Ok(store
         .query_opt_i64(
             &format!("{CHECKPOINT_TIME_CTE}SELECT COUNT(*) FROM ct WHERE ct.effective_at IS NULL"),
             &[sentinel_bind()],
         )
         .await?
-        .unwrap_or(0);
+        .unwrap_or(0))
+}
 
+/// The sessions that started inside the window, in start order.
+async fn window_sessions(store: &SqliteStore, b: &[Value; 2]) -> Result<Vec<SessionFact>> {
+    let mut out = Vec::new();
     for r in store
         .query(
             "SELECT session_id, agent, model_primary, started_at FROM session \
              WHERE started_at >= ?1 AND started_at <= ?2 \
              ORDER BY started_at, session_id",
-            &b,
+            b,
         )
         .await?
     {
-        facts.sessions.push(SessionFact {
+        out.push(SessionFact {
             session_id: r.get_text(0)?,
             agent: r.get_text(1)?,
             model: r.get_text(2)?,
             started_at: r.get_i64(3)?,
         });
     }
+    Ok(out)
+}
 
-    // Open = started in the window with no 'end' event ever recorded. A session
-    // that ended outside the window is still ended; "open" is a property of the
-    // session, not of the window, and conflating them would report every old
-    // session as live.
+/// Open = started in the window with no 'end' event ever recorded. A session
+/// that ended outside the window is still ended; "open" is a property of the
+/// session, not of the window, and conflating them would report every old
+/// session as live.
+async fn open_session_ids(store: &SqliteStore, b: &[Value; 2]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
     for r in store
         .query(
             "SELECT s.session_id FROM session s \
@@ -698,15 +724,19 @@ pub async fn gather(
              AND NOT EXISTS (SELECT 1 FROM session_event e \
                              WHERE e.session_id = s.session_id AND e.kind = 'end') \
              ORDER BY s.session_id",
-            &b,
+            b,
         )
         .await?
     {
-        facts.open_sessions.push(r.get_text(0)?);
+        out.push(r.get_text(0)?);
     }
+    Ok(out)
+}
 
-    // ONE query for every per-file fact, aggregated in Rust — see
-    // [`WindowFacts::aggregate`] for why the rollup is not two `GROUP BY`s.
+/// ONE query for every per-file fact, aggregated in Rust — see
+/// [`WindowFacts::aggregate`] for why the rollup is not two `GROUP BY`s.
+async fn window_attribution(store: &SqliteStore, cb: &[Value; 4]) -> Result<Vec<AttributedFile>> {
+    let mut out = Vec::new();
     for r in store
         .query(
             &format!(
@@ -719,11 +749,11 @@ pub async fn gather(
                  WHERE {IN_WINDOW} \
                  ORDER BY a.checkpoint_id, fr.path, a.file_revision_id"
             ),
-            &cb,
+            cb,
         )
         .await?
     {
-        facts.attributed.push(AttributedFile {
+        out.push(AttributedFile {
             checkpoint_id: r.get_text(0)?,
             path: r.get_text(1)?,
             agent_added: r.get_i64(2)?,
@@ -733,29 +763,36 @@ pub async fn gather(
             confidence_milli: r.get_i64(6)?,
         });
     }
+    Ok(out)
+}
 
-    if let Some(r) = store
+/// The four token classes summed over the model calls that started in the
+/// window; an aggregate always yields one row, so zeros are measured zeros.
+async fn window_tokens(store: &SqliteStore, b: &[Value; 2]) -> Result<TokenClasses> {
+    let rows = store
         .query(
             "SELECT COALESCE(SUM(tu.uncached_input), 0), COALESCE(SUM(tu.cached_input), 0), \
              COALESCE(SUM(tu.cache_creation), 0), COALESCE(SUM(tu.output), 0) \
              FROM token_usage tu JOIN model_call mc ON mc.call_id = tu.call_id \
              WHERE mc.started_at >= ?1 AND mc.started_at <= ?2",
-            &b,
+            b,
         )
-        .await?
-        .first()
-    {
-        facts.tokens = TokenClasses {
-            uncached_input: r.get_i64(0)?,
-            cached_input: r.get_i64(1)?,
-            cache_creation: r.get_i64(2)?,
-            output: r.get_i64(3)?,
-        };
-    }
+        .await?;
+    let Some(r) = rows.first() else {
+        return Ok(TokenClasses::default());
+    };
+    Ok(TokenClasses {
+        uncached_input: r.get_i64(0)?,
+        cached_input: r.get_i64(1)?,
+        cache_creation: r.get_i64(2)?,
+        output: r.get_i64(3)?,
+    })
+}
 
-    // Bitemporal: only facts still believed, and only the ones nothing
-    // supersedes. Dropping either half double-counts a re-priced call.
-    facts.cost_micros = store
+/// Bitemporal: only facts still believed, and only the ones nothing
+/// supersedes. Dropping either half double-counts a re-priced call.
+async fn window_cost_micros(store: &SqliteStore, b: &[Value; 2]) -> Result<i64> {
+    Ok(store
         .query_opt_i64(
             "SELECT COALESCE(SUM(cf.amount_micros), 0) FROM cost_fact cf \
              JOIN model_call mc ON mc.call_id = cf.call_id \
@@ -763,15 +800,12 @@ pub async fn gather(
              AND cf.valid_to IS NULL \
              AND NOT EXISTS (SELECT 1 FROM cost_fact s \
                              WHERE s.supersedes_id = cf.cost_fact_id)",
-            &b,
+            b,
         )
         .await?
-        .unwrap_or(0);
-
-    facts.savings = read_savings(recall_db, window).await?;
-    facts.aggregate();
-    Ok(facts)
+        .unwrap_or(0))
 }
+
 /// Recall's ledger arithmetic, or `None` when this repository has no `recall.db`.
 ///
 /// **Deliberately does not create the database.** `open_migrated` would, and a
@@ -830,7 +864,16 @@ mod tests {
     async fn seeded() -> SqliteStore {
         let s = SqliteStore::open_in_memory().expect("store");
         apply_migrations(&s, &default_migrations()).expect("migrations");
+        fixture_sessions(&s).await;
+        fixture_checkpoints(&s).await;
+        fixture_session_links(&s).await;
+        fixture_file_revisions(&s).await;
+        fixture_attribution(&s).await;
+        s
+    }
 
+    /// Two sessions, `s1` at 1_000 and `s2` at 5_000.
+    async fn fixture_sessions(s: &SqliteStore) {
         for (id, started) in [("s1", 1_000), ("s2", 5_000)] {
             s.insert(
                 "session",
@@ -854,7 +897,10 @@ mod tests {
             .await
             .expect("session");
         }
-        // c1 records 2_000; c2 records nothing and derives 5_000 from s2.
+    }
+
+    /// `c1` records 2_000; `c2` records nothing and derives 5_000 from `s2`.
+    async fn fixture_checkpoints(s: &SqliteStore) {
         for (id, created) in [("c1", 2_000), ("c2", CREATED_AT_UNKNOWN)] {
             s.insert(
                 "checkpoint",
@@ -870,6 +916,10 @@ mod tests {
             .await
             .expect("checkpoint");
         }
+    }
+
+    /// Each checkpoint's session, which is where `c2` derives its time.
+    async fn fixture_session_links(s: &SqliteStore) {
         for (cp, sess) in [("c1", "s1"), ("c2", "s2")] {
             s.insert(
                 "session_in_checkpoint",
@@ -879,6 +929,10 @@ mod tests {
             .await
             .expect("session_in_checkpoint");
         }
+    }
+
+    /// The touched files: `.env` (the sensitive one) and `src/main.rs`.
+    async fn fixture_file_revisions(s: &SqliteStore) {
         for (id, path) in [("f1", ".env"), ("f2", "src/main.rs")] {
             s.insert(
                 "file_revision",
@@ -894,8 +948,11 @@ mod tests {
             .await
             .expect("file_revision");
         }
-        // `.env` is touched by both checkpoints, `src/main.rs` by one — so the
-        // aggregate's sort order is deterministic and asserted below.
+    }
+
+    /// `.env` is touched by both checkpoints, `src/main.rs` by one — so the
+    /// aggregate's sort order is deterministic and asserted below.
+    async fn fixture_attribution(s: &SqliteStore) {
         for (cp, fr) in [("c1", "f1"), ("c2", "f1"), ("c1", "f2")] {
             s.insert(
                 "attribution",
@@ -915,7 +972,6 @@ mod tests {
             .await
             .expect("attribution");
         }
-        s
     }
 
     /// **THE PIN.** `rift-store` gathers a window that contains `.env` — a path
