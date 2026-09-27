@@ -198,14 +198,7 @@ pub async fn derive_labels(
 ) -> Result<DeriveReport> {
     let tips = reader.integration_tips()?;
     let integ = collect_history(reader, &tips, MAX_REACHABILITY_WALK)?;
-
-    // Per-branch reachable histories (for the dangling/idle abandoned signal).
-    let mut branches: Vec<BranchHistory> = Vec::new();
-    for (_, tip) in reader.branch_tips()? {
-        let reach = collect_history(reader, std::slice::from_ref(&tip), MAX_REACHABILITY_WALK)?;
-        let tip_ms = reach.get(&tip).map_or(0, |m| m.committed_ms);
-        branches.push(BranchHistory { tip_ms, reach });
-    }
+    let branches = branch_histories(reader)?;
 
     let mut report = DeriveReport::default();
     for shard in reader.checkpoints()? {
@@ -220,58 +213,19 @@ pub async fn derive_labels(
 
         if integ.contains_key(&commit) {
             let evidence = tips.first().map_or(commit.as_str(), String::as_str);
-            let merged_id = put_label(
+            derive_merge_labels(store, &integ, &meta, &subject, evidence, now, &mut report).await?;
+        } else if is_abandoned(&branches, &commit, now) {
+            put_label(
                 store,
                 &subject,
-                OutcomeKind::Merged,
+                OutcomeKind::Abandoned,
                 valid_from,
                 now,
-                evidence,
+                &commit,
                 None,
             )
             .await?;
-            report.merged += 1;
-
-            if let Some(rev) = find_revert(&integ, &meta) {
-                if rev.committed_ms - meta.committed_ms <= REVERT_WINDOW_MS {
-                    put_label(
-                        store,
-                        &subject,
-                        OutcomeKind::Reverted,
-                        Timestamp::from_millis(rev.committed_ms),
-                        now,
-                        &rev.oid,
-                        Some(&merged_id),
-                    )
-                    .await?;
-                    report.reverted += 1;
-                }
-            }
-        } else {
-            // Not merged: abandoned if the commit is dangling (no branch reaches
-            // it) or its owning branch(es) have all gone idle.
-            let reaching_tip_ms: Vec<i64> = branches
-                .iter()
-                .filter(|b| b.reach.contains_key(&commit))
-                .map(|b| b.tip_ms)
-                .collect();
-            let abandoned = match reaching_tip_ms.iter().copied().max() {
-                None => true,                                               // dangling: branch deleted
-                Some(latest) => now.as_millis() - latest > ABANDON_IDLE_MS, // idle
-            };
-            if abandoned {
-                put_label(
-                    store,
-                    &subject,
-                    OutcomeKind::Abandoned,
-                    valid_from,
-                    now,
-                    &commit,
-                    None,
-                )
-                .await?;
-                report.abandoned += 1;
-            }
+            report.abandoned += 1;
         }
 
         // Artifact-derived labels, independent of merge state.
@@ -287,6 +241,78 @@ pub async fn derive_labels(
         .await?;
     }
     Ok(report)
+}
+
+/// Every branch's reachable history plus its tip time — the evidence the
+/// dangling/idle `Abandoned` signal reads.
+fn branch_histories(reader: &impl SubstrateReader) -> Result<Vec<BranchHistory>> {
+    let mut branches: Vec<BranchHistory> = Vec::new();
+    for (_, tip) in reader.branch_tips()? {
+        let reach = collect_history(reader, std::slice::from_ref(&tip), MAX_REACHABILITY_WALK)?;
+        let tip_ms = reach.get(&tip).map_or(0, |m| m.committed_ms);
+        branches.push(BranchHistory { tip_ms, reach });
+    }
+    Ok(branches)
+}
+
+/// Append the `Merged` belief for a commit reachable from an integration tip,
+/// then — when a `git revert` of it lands within [`REVERT_WINDOW_MS`] — the
+/// `Reverted` row that supersedes it. The merged row is written first because
+/// the reverted one names it.
+async fn derive_merge_labels(
+    store: &impl CanonicalStore,
+    integ: &BTreeMap<String, CommitMeta>,
+    meta: &CommitMeta,
+    subject: &LabelSubject,
+    evidence: &str,
+    now: Timestamp,
+    report: &mut DeriveReport,
+) -> Result<()> {
+    let merged_id = put_label(
+        store,
+        subject,
+        OutcomeKind::Merged,
+        Timestamp::from_millis(meta.committed_ms),
+        now,
+        evidence,
+        None,
+    )
+    .await?;
+    report.merged += 1;
+
+    let Some(rev) = find_revert(integ, meta) else {
+        return Ok(());
+    };
+    if rev.committed_ms - meta.committed_ms > REVERT_WINDOW_MS {
+        return Ok(());
+    }
+    put_label(
+        store,
+        subject,
+        OutcomeKind::Reverted,
+        Timestamp::from_millis(rev.committed_ms),
+        now,
+        &rev.oid,
+        Some(&merged_id),
+    )
+    .await?;
+    report.reverted += 1;
+    Ok(())
+}
+
+/// Whether an unmerged commit is abandoned: dangling (no branch reaches it —
+/// the branch was deleted) or every branch that reaches it has gone idle past
+/// [`ABANDON_IDLE_MS`], judged by the freshest of their tips.
+fn is_abandoned(branches: &[BranchHistory], commit: &str, now: Timestamp) -> bool {
+    let reaching_tip_ms: Vec<i64> = branches
+        .iter()
+        .filter(|b| b.reach.contains_key(commit))
+        .map(|b| b.tip_ms)
+        .collect();
+    match reaching_tip_ms.iter().copied().max() {
+        None => true,                                               // dangling: branch deleted
+        Some(latest) => now.as_millis() - latest > ABANDON_IDLE_MS, // idle
+    }
 }
 
 /// Derive the captured-artifact label kinds for one checkpoint: `TestsPassed`

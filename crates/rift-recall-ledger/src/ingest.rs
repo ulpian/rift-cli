@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rift_core::Result;
 use rift_recall_substrate::parse::{self, ParseIssue};
 use rift_recall_substrate::{CheckpointShard, SubstrateReader};
-use rift_recall_types::checkpoint::CheckpointMetadata;
+use rift_recall_types::checkpoint::{CheckpointMetadata, CostEstimate, ToolCallRecord};
 use rift_store::{CanonicalStore, Value};
 
 use crate::graph::{file_read_id, file_revision_id, sha256_id, Built, INGEST_TS};
@@ -156,6 +156,18 @@ pub struct IngestOptions {
     pub token_estimate_by_hash: BTreeMap<String, u32>,
 }
 
+/// What every read row of one checkpoint shares: the shard, whose ordinal
+/// orders its reads; the primary session, which made the calls; and the two
+/// token sources a read falls back to when it carries no inline figure.
+struct ReadContext<'a> {
+    shard: &'a CheckpointShard,
+    primary: &'a str,
+    /// The shard's `token_estimates.json`, keyed by `tool_use_id`.
+    tok_by_id: BTreeMap<&'a str, u32>,
+    /// The caller's resolved-bytes fallback, keyed by `content_sha256`.
+    token_estimate_by_hash: &'a BTreeMap<String, u32>,
+}
+
 impl IngestOptions {
     /// The hashed developer id for a checkpoint: an explicit id captured in its
     /// metadata wins, then the primary session's binding, then the fallback.
@@ -173,6 +185,29 @@ impl IngestOptions {
                     .map(String::as_str)
             })
             .or(self.default_developer.as_deref())
+    }
+}
+
+impl ReadContext<'_> {
+    /// Token precedence: the fact's inline figure, then the shard's
+    /// `token_estimates.json`, then the caller's resolved-bytes fallback.
+    /// Still nothing ⇒ `None`, which the read ingests as 0 and counts.
+    fn resolved_tokens(&self, tc: &ToolCallRecord, hash: &str) -> Option<u32> {
+        tc.input_tokens
+            .or_else(|| self.tok_by_id.get(tc.tool_use_id.as_str()).copied())
+            .or_else(|| self.token_estimate_by_hash.get(hash).copied())
+    }
+
+    /// The read's position across the whole walk: the shard's ordinal, then
+    /// the call's index within the shard — saturating, never wrapping.
+    fn read_ordinal(&self, read_idx: usize) -> i64 {
+        i64::try_from(
+            self.shard
+                .ordinal
+                .saturating_mul(1_000_000)
+                .saturating_add(read_idx as u64),
+        )
+        .unwrap_or(i64::MAX)
     }
 }
 
@@ -205,8 +240,9 @@ fn push_containment_rows(b: &mut Built, cid: &str, meta: &CheckpointMetadata) {
 
 /// Build the graph rows for one checkpoint — **pure** (reads artifacts, no DB
 /// writes). The cascade: Checkpoint → Sessions → ToolCalls → **FileRead
-/// extraction** → TokenUsage, with the typed edges.
-#[allow(clippy::too_many_lines)] // one cohesive cascade; splitting hurts readability
+/// extraction** → TokenUsage, with the typed edges. Each step below pushes its
+/// rows in cascade order, and the artifacts are read in the order their parse
+/// issues are reported.
 fn build_rows(
     reader: &impl SubstrateReader,
     shard: &CheckpointShard,
@@ -215,25 +251,101 @@ fn build_rows(
     let mut b = Built::default();
     let cid = shard.checkpoint_id.as_str();
 
-    let meta = match reader.read_artifact(cid, "metadata.json")? {
-        Some(bytes) => {
-            let o = parse::parse_metadata(&bytes, cid);
-            b.issues.extend(o.issues);
-            o.value
-        }
-        None => CheckpointMetadata::default(),
-    };
+    let meta = read_parsed(
+        reader,
+        cid,
+        "metadata.json",
+        parse::parse_metadata,
+        &mut b.issues,
+    )?
+    .unwrap_or_default();
+    let sessions = checkpoint_sessions(cid, &meta);
+    let primary = sessions.first().cloned().unwrap_or_else(|| cid.to_string());
+    let developer = opts.developer_for(&meta, &sessions);
+    push_checkpoint_rows(&mut b, shard, &meta, developer);
+    push_session_rows(&mut b, cid, &sessions, opts, developer);
 
-    // --- Sessions (synthesize one keyed to the checkpoint if none) ---
-    let sessions: Vec<String> = if meta.sessions.is_empty() {
+    // --- Tool calls → FileRead extraction (the keystone) ---
+    let tool_calls = read_parsed(
+        reader,
+        cid,
+        "tool_calls.jsonl",
+        parse::parse_tool_calls,
+        &mut b.issues,
+    )?
+    .unwrap_or_default();
+    let tokens = read_parsed(
+        reader,
+        cid,
+        "token_estimates.json",
+        parse::parse_token_estimates,
+        &mut b.issues,
+    )?
+    .unwrap_or_default();
+    let ctx = ReadContext {
+        shard,
+        primary: &primary,
+        tok_by_id: tokens
+            .iter()
+            .map(|t| (t.tool_use_id.as_str(), t.input_tokens))
+            .collect(),
+        token_estimate_by_hash: &opts.token_estimate_by_hash,
+    };
+    let unresolved_tokens = push_tool_call_rows(&mut b, &ctx, &tool_calls);
+    push_unresolved_tokens_issue(&mut b, cid, unresolved_tokens);
+
+    // --- TokenUsage from the per-checkpoint cost estimate ---
+    let cost = read_parsed(
+        reader,
+        cid,
+        "cost_estimate.json",
+        parse::parse_cost_estimate,
+        &mut b.issues,
+    )?;
+    if let Some(cost) = cost {
+        push_token_usage_rows(&mut b, cid, &primary, &cost);
+    }
+    Ok(b)
+}
+
+/// Read one artifact of a checkpoint and parse it, appending its parse issues
+/// to `issues`. An absent artifact is `None` — absence is not an issue, and
+/// the caller decides whether it means "empty" or "no rows at all".
+fn read_parsed<T>(
+    reader: &impl SubstrateReader,
+    cid: &str,
+    artifact: &str,
+    parser: fn(&[u8], &str) -> parse::Outcome<T>,
+    issues: &mut Vec<ParseIssue>,
+) -> Result<Option<T>> {
+    let Some(bytes) = reader.read_artifact(cid, artifact)? else {
+        return Ok(None);
+    };
+    let outcome = parser(&bytes, cid);
+    issues.extend(outcome.issues);
+    Ok(Some(outcome.value))
+}
+
+/// The checkpoint's sessions, or one synthesized session keyed to the
+/// checkpoint when its header names none — every tool call needs a session to
+/// hang from.
+fn checkpoint_sessions(cid: &str, meta: &CheckpointMetadata) -> Vec<String> {
+    if meta.sessions.is_empty() {
         vec![cid.to_string()]
     } else {
         meta.sessions.clone()
-    };
-    let primary = sessions.first().cloned().unwrap_or_else(|| cid.to_string());
+    }
+}
 
-    // --- Checkpoint node + payload (developer axis populated) ---
-    let developer = opts.developer_for(&meta, &sessions);
+/// Push the Checkpoint node, its payload (developer axis populated) and its
+/// containment rows.
+fn push_checkpoint_rows(
+    b: &mut Built,
+    shard: &CheckpointShard,
+    meta: &CheckpointMetadata,
+    developer: Option<&str>,
+) {
+    let cid = shard.checkpoint_id.as_str();
     b.node(cid, "Checkpoint", cid);
     b.checkpoint(
         cid,
@@ -248,9 +360,20 @@ fn build_rows(
     // joins a capture table): the anchor commit, and the member the shard was
     // archived in. Both absent-when-unknown, both screened before they enter a
     // relation nothing can correct.
-    push_containment_rows(&mut b, cid, &meta);
+    push_containment_rows(b, cid, meta);
+}
 
-    for sid in &sessions {
+/// Push one Session node per session, each carrying its own developer binding
+/// (the checkpoint's developer when it has none), and its
+/// Session→created→Checkpoint edge.
+fn push_session_rows(
+    b: &mut Built,
+    cid: &str,
+    sessions: &[String],
+    opts: &IngestOptions,
+    developer: Option<&str>,
+) {
+    for sid in sessions {
         b.node(sid, "Session", sid);
         b.session(
             sid,
@@ -261,29 +384,17 @@ fn build_rows(
         );
         b.edge(sid, cid, "created"); // Session→created→Checkpoint
     }
+}
 
-    // --- Tool calls → FileRead extraction (the keystone) ---
-    let tool_calls = match reader.read_artifact(cid, "tool_calls.jsonl")? {
-        Some(bytes) => {
-            let o = parse::parse_tool_calls(&bytes, cid);
-            b.issues.extend(o.issues);
-            o.value
-        }
-        None => Vec::new(),
-    };
-    let tokens = match reader.read_artifact(cid, "token_estimates.json")? {
-        Some(bytes) => {
-            let o = parse::parse_token_estimates(&bytes, cid);
-            b.issues.extend(o.issues);
-            o.value
-        }
-        None => Vec::new(),
-    };
-    let tok_by_id: BTreeMap<&str, u32> = tokens
-        .iter()
-        .map(|t| (t.tool_use_id.as_str(), t.input_tokens))
-        .collect();
-
+/// Push a ToolCall node, payload and Session→called→ToolCall edge for every
+/// tool call with an identity, in capture order, and the FileRead rows of each
+/// read among them. Returns how many reads resolved no token figure.
+fn push_tool_call_rows(
+    b: &mut Built,
+    ctx: &ReadContext<'_>,
+    tool_calls: &[ToolCallRecord],
+) -> usize {
+    let cid = ctx.shard.checkpoint_id.as_str();
     let mut unresolved_tokens = 0usize;
     for (i, tc) in tool_calls.iter().enumerate() {
         if tc.tool_use_id.is_empty() {
@@ -292,7 +403,7 @@ fn build_rows(
         let tc_id = tc.tool_use_id.as_str();
         b.node(tc_id, "ToolCall", tc_id);
         b.tool_call(tc_id, cid, tc_id, tc.tool_name.as_deref());
-        b.edge(&primary, tc_id, "called"); // Session→called→ToolCall
+        b.edge(ctx.primary, tc_id, "called"); // Session→called→ToolCall
 
         if !tc.is_read() {
             continue;
@@ -300,77 +411,81 @@ fn build_rows(
         let (Some(path), Some(hash)) = (tc.path.as_ref(), tc.content_sha256.as_ref()) else {
             continue;
         };
-        // FileRevision: path@hash captured AT READ TIME (not the worktree's).
-        let fr = file_revision_id(path, hash);
-        b.node(&fr, "FileRevision", &fr);
-        b.file_revision(&fr, path, hash, hash, 0);
-        // FileRead: the irreducible (tool_call, revision, range) triple.
-        // Token precedence: the fact's inline figure, then the shard's
-        // `token_estimates.json`, then the caller's resolved-bytes fallback.
-        // Still nothing ⇒ 0, counted into ONE summarized issue per
-        // checkpoint below — never a guess, and never an issue flood that
-        // drowns real corruption on a healthy substrate that simply predates token capture.
-        let resolved = tc
-            .input_tokens
-            .or_else(|| tok_by_id.get(tc_id).copied())
-            .or_else(|| opts.token_estimate_by_hash.get(hash.as_str()).copied());
-        if resolved.is_none() {
+        if push_file_read_rows(b, ctx, i, tc, path, hash).is_none() {
             unresolved_tokens += 1;
         }
-        let input_tokens = i64::from(resolved.unwrap_or(0));
-        let read_ordinal = i64::try_from(
-            shard
-                .ordinal
-                .saturating_mul(1_000_000)
-                .saturating_add(i as u64),
-        )
-        .unwrap_or(i64::MAX);
-        let rid = file_read_id(tc_id, &fr);
-        b.node(&rid, "FileRead", &rid);
-        b.file_read(
-            &rid,
-            cid,
-            tc_id,
-            &fr,
-            input_tokens,
-            read_ordinal,
-            None,
-            None,
-        );
-        b.edge(tc_id, &fr, "read"); // ToolCall→read→FileRevision
-        b.lineage(&fr, "tool_calls.jsonl", "mechanical", None);
     }
+    unresolved_tokens
+}
 
-    if unresolved_tokens > 0 {
-        b.issues.push(ParseIssue {
-            checkpoint_id: cid.to_owned(),
-            artifact: "tool_calls.jsonl",
-            locator: parse::Locator::WholeFile,
-            kind: parse::IssueKind::TokenUnresolved,
-            detail: format!("{unresolved_tokens} read(s) with no resolvable token estimate"),
-        });
+/// Push the FileRevision and FileRead rows of one read — the keystone — and
+/// return the token figure it resolved, `None` when no source had one.
+fn push_file_read_rows(
+    b: &mut Built,
+    ctx: &ReadContext<'_>,
+    read_idx: usize,
+    tc: &ToolCallRecord,
+    path: &str,
+    hash: &str,
+) -> Option<u32> {
+    let cid = ctx.shard.checkpoint_id.as_str();
+    let tc_id = tc.tool_use_id.as_str();
+    // FileRevision: path@hash captured AT READ TIME (not the worktree's).
+    let fr = file_revision_id(path, hash);
+    b.node(&fr, "FileRevision", &fr);
+    b.file_revision(&fr, path, hash, hash, 0);
+    // FileRead: the irreducible (tool_call, revision, range) triple.
+    let resolved = ctx.resolved_tokens(tc, hash);
+    let input_tokens = i64::from(resolved.unwrap_or(0));
+    let read_ordinal = ctx.read_ordinal(read_idx);
+    let rid = file_read_id(tc_id, &fr);
+    b.node(&rid, "FileRead", &rid);
+    b.file_read(
+        &rid,
+        cid,
+        tc_id,
+        &fr,
+        input_tokens,
+        read_ordinal,
+        None,
+        None,
+    );
+    b.edge(tc_id, &fr, "read"); // ToolCall→read→FileRevision
+    b.lineage(&fr, "tool_calls.jsonl", "mechanical", None);
+    resolved
+}
+
+/// Summarize a checkpoint's token-less reads into ONE issue — never a guess,
+/// and never an issue flood that drowns real corruption on a healthy substrate
+/// that simply predates token capture.
+fn push_unresolved_tokens_issue(b: &mut Built, cid: &str, unresolved_tokens: usize) {
+    if unresolved_tokens == 0 {
+        return;
     }
+    b.issues.push(ParseIssue {
+        checkpoint_id: cid.to_owned(),
+        artifact: "tool_calls.jsonl",
+        locator: parse::Locator::WholeFile,
+        kind: parse::IssueKind::TokenUnresolved,
+        detail: format!("{unresolved_tokens} read(s) with no resolvable token estimate"),
+    });
+}
 
-    // --- TokenUsage from the per-checkpoint cost estimate ---
-    if let Some(bytes) = reader.read_artifact(cid, "cost_estimate.json")? {
-        let o = parse::parse_cost_estimate(&bytes, cid);
-        b.issues.extend(o.issues);
-        let c = o.value;
-        let tu = sha256_id("rift.tu.v1", &[cid.as_bytes()]);
-        b.node(&tu, "TokenUsage", &tu);
-        b.token_usage(
-            &tu,
-            cid,
-            cid,
-            i64::try_from(c.uncached_input_tokens).unwrap_or(i64::MAX),
-            i64::try_from(c.cached_input_tokens).unwrap_or(i64::MAX),
-            i64::try_from(c.cache_write_tokens).unwrap_or(i64::MAX),
-            i64::try_from(c.output_tokens).unwrap_or(i64::MAX),
-        );
-        b.edge(&primary, &tu, "spent"); // Session→spent→TokenUsage
-    }
-
-    Ok(b)
+/// Push the TokenUsage node for the checkpoint's four-class cost estimate and
+/// its Session→spent→TokenUsage edge from the primary session.
+fn push_token_usage_rows(b: &mut Built, cid: &str, primary: &str, cost: &CostEstimate) {
+    let tu = sha256_id("rift.tu.v1", &[cid.as_bytes()]);
+    b.node(&tu, "TokenUsage", &tu);
+    b.token_usage(
+        &tu,
+        cid,
+        cid,
+        i64::try_from(cost.uncached_input_tokens).unwrap_or(i64::MAX),
+        i64::try_from(cost.cached_input_tokens).unwrap_or(i64::MAX),
+        i64::try_from(cost.cache_write_tokens).unwrap_or(i64::MAX),
+        i64::try_from(cost.output_tokens).unwrap_or(i64::MAX),
+    );
+    b.edge(primary, &tu, "spent"); // Session→spent→TokenUsage
 }
 
 /// Apply built rows through the append-only DAO. The ONLY DB writer: every row
