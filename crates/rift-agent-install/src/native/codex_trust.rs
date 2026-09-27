@@ -391,6 +391,8 @@ mod tests {
 
     const FIXTURE_HOOKS: &str = include_str!("../../fixtures/codex-trust/hooks.json");
     const FIXTURE_CONFIG: &str = include_str!("../../fixtures/codex-trust/config.toml");
+    const FIXTURE_CONFIG_0157: &str =
+        include_str!("../../fixtures/codex-trust/config-0.157.0.toml");
     const FIXTURE_HASHES: &str = include_str!("../../fixtures/codex-trust/expected-hashes.txt");
 
     /// A checkout holding the fixture hook file, and a Codex home beside it.
@@ -507,6 +509,32 @@ mod tests {
         }
     }
 
+    /// The record Codex 0.157.0 wrote after the user re-trusted both
+    /// modified handlers: all ten current. The older versions hash alike, so
+    /// the same record judged as one of them is trusted too.
+    #[test]
+    fn a_codex_0157_record_taken_after_re_trust_reads_all_ten_hooks_trusted() {
+        let machine = machine(FIXTURE_HOOKS);
+        record(&machine, FIXTURE_CONFIG_0157, &machine.hooks_json);
+        for version in ["0.157.0", "0.155.0-alpha.16.3"] {
+            let trust = codex_hook_trust(
+                &machine.hooks_json,
+                Some(&machine.home),
+                client(CodexSurface::Terminal, version),
+            );
+            assert_eq!(trust.state(), "trusted", "{version}");
+            assert_eq!(trust.summary(), "trusted (10 of 10 hooks)", "{version}");
+            assert_eq!(trust.hooks.len(), 10, "{version}");
+            assert!(
+                trust
+                    .hooks
+                    .iter()
+                    .all(|hook| hook.verdict == CodexHookVerdict::Trusted),
+                "{version}"
+            );
+        }
+    }
+
     #[test]
     fn editing_a_trusted_handler_flips_it_to_modified() {
         let machine = machine(FIXTURE_HOOKS);
@@ -540,7 +568,7 @@ mod tests {
         let trust = codex_hook_trust(
             &machine.hooks_json,
             Some(&machine.home),
-            client(CodexSurface::Terminal, "0.157.0"),
+            client(CodexSurface::Terminal, "0.158.0"),
         );
         assert!(trust
             .hooks
@@ -550,7 +578,7 @@ mod tests {
         assert_eq!(trust.remedy(), None);
         assert_eq!(
             trust.summary(),
-            "unverifiable — Codex 0.157.0 is not a version Rift's hook-trust check is proven against"
+            "unverifiable — Codex 0.158.0 is not a version Rift's hook-trust check is proven against"
         );
 
         let unseen = codex_hook_trust(&machine.hooks_json, Some(&machine.home), None);

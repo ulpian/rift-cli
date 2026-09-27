@@ -21,7 +21,12 @@ use sha2::{Digest as _, Sha256};
 /// The Codex versions whose hook hashing the fixtures were recorded against.
 /// A version outside this list may hash differently, so a hash computed for
 /// it proves nothing and the trust verdict is "unverifiable" instead.
-pub(super) const PROVEN_CODEX_VERSIONS: [&str; 2] = ["0.153.1", "0.155.0-alpha.16.3"];
+///
+/// `fixtures/codex-trust/config.toml` pins 0.153.1 and 0.155.0-alpha.16.3:
+/// a record taken before the user re-trusted two modified handlers, so it
+/// carries two mismatches. `fixtures/codex-trust/config-0.157.0.toml` pins
+/// 0.157.0: the record taken after that re-trust, all ten hashes current.
+pub(super) const PROVEN_CODEX_VERSIONS: [&str; 3] = ["0.153.1", "0.155.0-alpha.16.3", "0.157.0"];
 
 /// The context limit Codex applies when a handler declares none; a handler
 /// that declares exactly this hashes as if it declared nothing.
