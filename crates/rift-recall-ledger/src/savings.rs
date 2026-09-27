@@ -866,9 +866,27 @@ mod tests {
     /// One session, one turn and two reads of two files — with a frozen token
     /// count on the **first only**, which is the case the figure exists for.
     async fn seed_two_reads_one_unmeasured(projection: &rift_store::SqliteStore) {
-        let put = |table: &'static str, cols: &'static [&'static str], vals: Vec<Value>| async move {
-            projection.insert(table, cols, &vals).await.unwrap();
-        };
+        fixture_session_and_turn(projection).await;
+        for (i, path) in ["src/a.rs", "src/b.rs"].iter().enumerate() {
+            fixture_read(projection, i, path).await;
+        }
+        // Only the FIRST read carries a frozen count.
+        fixture_frozen_count(projection).await;
+    }
+
+    /// Insert one capture-projection row: the seeders' only write.
+    async fn fixture_put(
+        projection: &rift_store::SqliteStore,
+        table: &str,
+        cols: &[&str],
+        vals: Vec<Value>,
+    ) {
+        projection.insert(table, cols, &vals).await.unwrap();
+    }
+
+    /// The one session (agent `claude-code`) and the one turn every read of
+    /// the seeder hangs from.
+    async fn fixture_session_and_turn(projection: &rift_store::SqliteStore) {
         const SESSION: [&str; 6] = [
             "session_id",
             "agent",
@@ -884,6 +902,28 @@ mod tests {
             "started_at",
             "schema_version",
         ];
+        let session = vec![
+            Value::text("s1"),
+            Value::text("claude-code"),
+            Value::text("m"),
+            Value::text("r"),
+            Value::Int(1),
+            Value::Int(1),
+        ];
+        fixture_put(projection, "session", &SESSION, session).await;
+        let turn = vec![
+            Value::text("t1"),
+            Value::text("s1"),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(1),
+        ];
+        fixture_put(projection, "turn", &TURN, turn).await;
+    }
+
+    /// One read of `path`: the call `tc{i}`, the revision `fr{i}` it read,
+    /// and the link between them — and no token count.
+    async fn fixture_read(projection: &rift_store::SqliteStore, i: usize, path: &str) {
         const CALL: [&str; 5] = [
             "tool_call_id",
             "turn_id",
@@ -898,61 +938,43 @@ mod tests {
             "content_sha256",
             "schema_version",
         ];
+        const READS: [&str; 2] = ["tool_call_id", "file_revision_id"];
+        let (call, revision) = (format!("tc{i}"), format!("fr{i}"));
+        let row = vec![
+            Value::text(call.as_str()),
+            Value::text("t1"),
+            Value::text("Read"),
+            Value::Int(10),
+            Value::Int(1),
+        ];
+        fixture_put(projection, "tool_call", &CALL, row).await;
+        let row = vec![
+            Value::text(revision.as_str()),
+            Value::text(path),
+            Value::text("b"),
+            Value::text("c".repeat(64)),
+            Value::Int(1),
+        ];
+        fixture_put(projection, "file_revision", &REVISION, row).await;
+        let link = vec![Value::text(call.as_str()), Value::text(revision.as_str())];
+        fixture_put(projection, "tool_reads_file", &READS, link).await;
+    }
+
+    /// The frozen token count of the first read, `tc0`: 9,000 tokens.
+    async fn fixture_frozen_count(projection: &rift_store::SqliteStore) {
         const TOKENS: [&str; 4] = [
             "tool_call_id",
             "input_tokens",
             "tokenizer",
             "schema_version",
         ];
-        const READS: [&str; 2] = ["tool_call_id", "file_revision_id"];
-        let text = |s: &str| Value::text(s.to_owned());
-        let one = Value::Int(1);
-        let session = vec![
-            text("s1"),
-            text("claude-code"),
-            text("m"),
-            text("r"),
-            one.clone(),
-            one.clone(),
-        ];
-        put("session", &SESSION, session).await;
-        let turn = vec![
-            text("t1"),
-            text("s1"),
-            Value::Int(0),
-            one.clone(),
-            one.clone(),
-        ];
-        put("turn", &TURN, turn).await;
-        for (i, path) in ["src/a.rs", "src/b.rs"].iter().enumerate() {
-            let (call, revision) = (format!("tc{i}"), format!("fr{i}"));
-            let row = vec![
-                text(&call),
-                text("t1"),
-                text("Read"),
-                Value::Int(10),
-                one.clone(),
-            ];
-            put("tool_call", &CALL, row).await;
-            let row = vec![
-                text(&revision),
-                text(path),
-                text("b"),
-                Value::text("c".repeat(64)),
-                one.clone(),
-            ];
-            put("file_revision", &REVISION, row).await;
-            let link = vec![text(&call), text(&revision)];
-            put("tool_reads_file", &READS, link).await;
-        }
-        // Only the FIRST read carries a frozen count.
         let frozen = vec![
-            text("tc0"),
+            Value::text("tc0"),
             Value::Int(9_000),
-            text("cl100k_base"),
-            one.clone(),
+            Value::text("cl100k_base"),
+            Value::Int(1),
         ];
-        put("file_read_tokens", &TOKENS, frozen).await;
+        fixture_put(projection, "file_read_tokens", &TOKENS, frozen).await;
     }
 
     /// A read whose token count was never frozen is a denominator row of
@@ -1007,6 +1029,43 @@ mod tests {
     /// way about) would publish a share of two different periods.
     #[tokio::test]
     async fn the_boundary_cuts_the_numerator_and_the_denominator_alike() {
+        let recall = fixture_decisions_either_side_of_2_000().await;
+        assert_eq!(audit_totals(&recall, None).await.unwrap(), (200, 2, 0));
+        assert_eq!(
+            audit_totals(&recall, Some(2_000)).await.unwrap(),
+            (100, 1, 0)
+        );
+        assert_eq!(audit_totals(&recall, Some(9_000)).await.unwrap(), (0, 0, 0));
+        let whole = decisions_by_family(&recall, None).await.unwrap();
+        assert_eq!(
+            whole.get("claude-code"),
+            Some(&FamilyDecisions {
+                avoided: 200,
+                returned: 2,
+                rows: 2,
+                prevented: 0,
+            })
+        );
+        let cut = decisions_by_family(&recall, Some(2_000)).await.unwrap();
+        assert_eq!(
+            cut.get("claude-code"),
+            Some(&FamilyDecisions {
+                avoided: 100,
+                returned: 1,
+                rows: 1,
+                prevented: 0,
+            })
+        );
+        assert!(decisions_by_family(&recall, Some(9_000))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A recall store holding two read-gate decisions of 100 avoided tokens,
+    /// one recorded at 1,000 and one at 3,000, each written to both relations
+    /// the figure reads — the audit trail and the serve-call log.
+    async fn fixture_decisions_either_side_of_2_000() -> rift_store::SqliteStore {
         let recall = rift_store::SqliteStore::open_in_memory().unwrap();
         rift_store::apply_migrations(&recall, &rift_store::recall_migrations()).unwrap();
         for (i, at) in [(0usize, 1_000i64), (1, 3_000)] {
@@ -1062,36 +1121,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        assert_eq!(audit_totals(&recall, None).await.unwrap(), (200, 2, 0));
-        assert_eq!(
-            audit_totals(&recall, Some(2_000)).await.unwrap(),
-            (100, 1, 0)
-        );
-        assert_eq!(audit_totals(&recall, Some(9_000)).await.unwrap(), (0, 0, 0));
-        let whole = decisions_by_family(&recall, None).await.unwrap();
-        assert_eq!(
-            whole.get("claude-code"),
-            Some(&FamilyDecisions {
-                avoided: 200,
-                returned: 2,
-                rows: 2,
-                prevented: 0,
-            })
-        );
-        let cut = decisions_by_family(&recall, Some(2_000)).await.unwrap();
-        assert_eq!(
-            cut.get("claude-code"),
-            Some(&FamilyDecisions {
-                avoided: 100,
-                returned: 1,
-                rows: 1,
-                prevented: 0,
-            })
-        );
-        assert!(decisions_by_family(&recall, Some(9_000))
-            .await
-            .unwrap()
-            .is_empty());
+        recall
     }
 
     /// **A prevented read enters the avoided total under its own verb.** Both
