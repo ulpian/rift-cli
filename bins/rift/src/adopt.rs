@@ -304,11 +304,10 @@ fn verify_only_notes(member: &Path, machine: &Machine, agent: &str, notes: &mut 
         }
     }
     if agent == "codex" {
-        let trust = native::codex_hook_trust(
-            &member.join(".codex/hooks.json"),
-            machine.codex_home.as_deref(),
-        );
-        notes.push(format!("codex trust: {}", trust.message()));
+        if let Some(trust) = native::codex_trust(member, machine.codex_home.as_deref()) {
+            notes.push(format!("codex trust: {}", trust.summary()));
+            notes.extend(trust.remedy());
+        }
     }
     if native::recall_skill_present(member, agent) == Some(false) {
         notes.push(format!(
@@ -364,16 +363,8 @@ pub(crate) fn machine_for(paths: &rift_git::RepoPaths) -> Result<Machine> {
         .map_or_else(std::env::current_exe, Ok)?;
     Ok(Machine {
         rift_bin,
-        codex_home: codex_home(),
+        codex_home: native::codex_home_from_process(),
     })
-}
-
-/// Codex's home: `$CODEX_HOME`, else `$HOME/.codex`. Read-only, always.
-fn codex_home() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("CODEX_HOME") {
-        return Some(PathBuf::from(explicit));
-    }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
 }
 
 /// `rift worktree adopt [PATH]` — routed here by [`crate::worktree::run`],
@@ -549,10 +540,9 @@ mod tests {
             "a disabled agent is not wired"
         );
         assert!(
-            report
-                .notes
-                .iter()
-                .any(|note| note == "codex trust: pending (approve once in Codex)"),
+            report.notes.iter().any(|note| note
+                == "codex trust: unverifiable — no Codex session has been recorded in \
+                        this checkout yet"),
             "the fragment Rift can write is not the trust only Codex can grant: {:?}",
             report.notes
         );

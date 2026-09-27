@@ -30,12 +30,43 @@ pub(super) fn render_status(
             "  {:<16} {:<12} {:<12} {}",
             status.display_name,
             state_name(&status.wiring),
-            status
-                .hook_wiring
-                .as_ref()
-                .map_or_else(|| "-".to_owned(), state_name),
+            hooks_word(status),
             status.availability(),
         );
+    }
+    render_codex_trust(out, statuses);
+}
+
+/// The hooks column: the installer's state, except that a Codex hook file
+/// whose hooks Codex is skipping reads `error` — written correctly and still
+/// not running is not `managed` in any sense a reader can use.
+fn hooks_word(status: &rift_agent_install::native::NativeIntegrationStatus) -> String {
+    let skipped = status
+        .codex_trust
+        .as_ref()
+        .is_some_and(|trust| trust.remedy().is_some());
+    if skipped {
+        return "error".to_owned();
+    }
+    status
+        .hook_wiring
+        .as_ref()
+        .map_or_else(|| "-".to_owned(), state_name)
+}
+
+/// Codex's per-hook trust under the table, and the remedy when it is needed.
+fn render_codex_trust(
+    out: &mut String,
+    statuses: &[rift_agent_install::native::NativeIntegrationStatus],
+) {
+    for trust in statuses
+        .iter()
+        .filter_map(|status| status.codex_trust.as_ref())
+    {
+        let _ = writeln!(out, "  codex trust: {}", trust.summary());
+        if let Some(remedy) = trust.remedy() {
+            let _ = writeln!(out, "  {remedy}");
+        }
     }
 }
 
@@ -77,7 +108,7 @@ struct SupportFacts {
 }
 
 fn derive_support(facts: SupportFacts) -> (Support, Option<String>) {
-    use rift_agent_install::native::{CodexTrust, NativeHookWiring, NativeWiring};
+    use rift_agent_install::native::{NativeHookWiring, NativeWiring};
 
     if !facts.alpha {
         return (Support::ComingSoon, None);
@@ -104,11 +135,12 @@ fn derive_support(facts: SupportFacts) -> (Support, Option<String>) {
     if let Some(reason) = facts.hook_failure {
         return (Support::Degraded, Some(reason));
     }
-    if facts.codex_trust == Some(CodexTrust::Pending) {
-        return (
-            Support::ConfiguredUnverified,
-            Some("Codex hook trust is pending for this path".to_owned()),
-        );
+    if let Some(trust) = &facts.codex_trust {
+        match trust.state() {
+            "error" => return (Support::Degraded, Some(trust.summary())),
+            "unverifiable" => return (Support::ConfiguredUnverified, Some(trust.summary())),
+            _ => (),
+        }
     }
     if !facts.runtime_receipt {
         return (
@@ -136,22 +168,10 @@ pub(super) fn support_assessments(
         .iter()
         .map(|client| (client.client.token(), client.last_hook_at_ms.is_some()))
         .collect();
-    let codex_home = std::env::var_os("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".codex"))
-        });
-
     statuses
         .iter()
         .map(|status| {
             let alpha = rift_agent_install::native::is_alpha_supported(&status.agent);
-            let codex_trust = (status.agent == rift_core::AgentId::CODEX.as_str()).then(|| {
-                rift_agent_install::native::codex_hook_trust(
-                    &repo.join(".codex/hooks.json"),
-                    codex_home.as_deref(),
-                )
-            });
             let runtime_receipt = receipts
                 .get(status.agent.as_str())
                 .copied()
@@ -163,7 +183,7 @@ pub(super) fn support_assessments(
                 hooks: status.hook_wiring,
                 runtime_receipt,
                 boundary_response,
-                codex_trust,
+                codex_trust: status.codex_trust.clone(),
                 hook_failure: crate::hooks::hook_degradation(repo, &status.agent),
             };
             let (support, degraded_reason) = derive_support(facts);
@@ -369,19 +389,43 @@ mod tests {
         }
     }
 
+    fn codex_trust(
+        verdict: rift_agent_install::native::CodexHookVerdict,
+    ) -> rift_agent_install::native::CodexTrust {
+        rift_agent_install::native::CodexTrust {
+            hooks: vec![rift_agent_install::native::CodexHookTrust {
+                event: "SessionStart".to_owned(),
+                verdict,
+            }],
+            client: None,
+        }
+    }
+
+    /// A Codex hook Codex is skipping degrades the row however much else was
+    /// observed; one Rift cannot judge keeps it short of full.
     #[test]
-    fn codex_pending_trust_prevents_full() {
-        let (support, reason) = derive_support(SupportFacts {
-            runtime_receipt: true,
-            boundary_response: true,
-            codex_trust: Some(rift_agent_install::native::CodexTrust::Pending),
-            ..managed_facts()
-        });
-        assert_eq!(support, Support::ConfiguredUnverified);
+    fn codex_trust_that_skips_a_hook_degrades_and_an_unverifiable_one_prevents_full() {
+        use rift_agent_install::native::CodexHookVerdict;
+        let judged = |verdict| {
+            derive_support(SupportFacts {
+                runtime_receipt: true,
+                boundary_response: true,
+                codex_trust: Some(codex_trust(verdict)),
+                ..managed_facts()
+            })
+        };
+        let (support, reason) = judged(CodexHookVerdict::Modified);
+        assert_eq!(support, Support::Degraded);
         assert_eq!(
             reason.as_deref(),
-            Some("Codex hook trust is pending for this path")
+            Some("error — Codex is skipping 1 of 1 Rift hooks: SessionStart modified")
         );
+        assert_eq!(judged(CodexHookVerdict::Untrusted).0, Support::Degraded);
+        assert_eq!(
+            judged(CodexHookVerdict::Unverifiable).0,
+            Support::ConfiguredUnverified
+        );
+        assert_eq!(judged(CodexHookVerdict::Trusted).0, Support::Full);
     }
 
     #[test]
@@ -436,6 +480,7 @@ mod tests {
                 path: std::path::PathBuf::from("/opt/claude"),
             }],
             hook_wiring: Some(rift_agent_install::native::NativeHookWiring::Managed),
+            codex_trust: None,
         };
         let assessment = SupportAssessment {
             agent: native.agent.clone(),
@@ -509,6 +554,7 @@ mod tests {
                     },
                 ],
                 hook_wiring: Some(rift_agent_install::native::NativeHookWiring::Managed),
+                codex_trust: None,
             }],
         );
         assert!(out.contains("present via PATH command + VS Code extension 26.803.61601"));

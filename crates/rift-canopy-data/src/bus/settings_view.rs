@@ -561,6 +561,7 @@ mod tests {
                 executable: None,
                 installations,
                 hook_wiring: None,
+                codex_trust: None,
             };
         let install = |source, version: Option<&str>| NativeInstallation {
             source,

@@ -28,6 +28,7 @@ struct Enabled<'a> {
     wired_hash: &'a str,
     changed_files: &'a [std::path::PathBuf],
     members: &'a [MemberOutcome],
+    codex_trust: Option<&'a rift_agent_install::native::CodexTrust>,
 }
 
 /// Hex content fingerprint over `bytes` (domain-separated leaf hash, hex).
@@ -83,6 +84,7 @@ pub(crate) async fn enable(
 
     record_event(store, agent_token, "enable", now_ms, &wired_hash).await?;
     let members = fan_out(root, agent_token, true);
+    let codex_trust = written_codex_trust(root, agent_token);
     let enabled = Enabled {
         root,
         agent_token,
@@ -93,8 +95,24 @@ pub(crate) async fn enable(
         wired_hash: &wired_hash,
         changed_files: &changed_files,
         members: &members,
+        codex_trust: codex_trust.as_ref(),
     };
     Ok(enabled_outcome(&enabled))
+}
+
+/// Codex's trust in the hook file this enable just wrote, compared at the
+/// write so a handler Codex will now skip is said here rather than found
+/// weeks later in an idle session. Rift cannot re-trust on the user's
+/// behalf and never writes Codex's configuration; it can only say so.
+pub(crate) fn written_codex_trust(
+    root: &std::path::Path,
+    agent_token: &str,
+) -> Option<rift_agent_install::native::CodexTrust> {
+    if agent_token != AgentId::CODEX.as_str() {
+        return None;
+    }
+    let home = rift_agent_install::native::codex_home_from_process();
+    rift_agent_install::native::codex_trust(root, home.as_deref())
 }
 
 /// The refusal for a well-formed token no built-in adapter answers to.
@@ -163,11 +181,12 @@ fn enabled_outcome(enabled: &Enabled<'_>) -> Outcome {
             )
         });
     let human = format!(
-        "enabled {agent_token}: wired {} hook(s) via {}\n  config: {}{native_hook_line}{note_line}{}",
+        "enabled {agent_token}: wired {} hook(s) via {}\n  config: {}{native_hook_line}{note_line}{}{}",
         enabled.verbs.len(),
         enabled.rift_bin.display(),
         enabled.path.display(),
         member_lines(enabled.members),
+        codex_trust_lines(enabled.codex_trust),
     );
     let json = serde_json::json!({
         "agent": agent_token,
@@ -177,8 +196,41 @@ fn enabled_outcome(enabled: &Enabled<'_>) -> Outcome {
         "best_effort": enabled.notes.best_effort,
         "changed_files": enabled.changed_files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
         "members": member_json(enabled.members),
+        "codex_trust": enabled.codex_trust,
+        "codex_trust_remedy": enabled.codex_trust.and_then(rift_agent_install::native::CodexTrust::remedy),
     });
     Outcome::ok(human, json)
+}
+
+/// `outcome` with Codex's per-hook trust appended, for a status read: the
+/// line and remedy in the human text, the verdicts and remedy in the JSON.
+/// Unchanged when the checkout's Codex hook file holds no Rift hook.
+pub(crate) fn with_codex_trust(root: &std::path::Path, mut outcome: Outcome) -> Outcome {
+    let Some(trust) = written_codex_trust(root, AgentId::CODEX.as_str()) else {
+        return outcome;
+    };
+    outcome.human.push_str(&codex_trust_lines(Some(&trust)));
+    if let Some(json) = outcome.json.as_object_mut() {
+        json.insert("codex_trust_remedy".to_owned(), trust.remedy().into());
+        json.insert(
+            "codex_trust".to_owned(),
+            serde_json::to_value(&trust).unwrap_or_default(),
+        );
+    }
+    outcome
+}
+
+/// The trust line an enable or a status read prints for Codex, and the
+/// remedy under it when Codex will skip any of Rift's hooks.
+fn codex_trust_lines(trust: Option<&rift_agent_install::native::CodexTrust>) -> String {
+    let Some(trust) = trust else {
+        return String::new();
+    };
+    let mut lines = format!("\n  codex trust: {}", trust.summary());
+    if let Some(remedy) = trust.remedy() {
+        lines.push_str(&format!("\n  {remedy}"));
+    }
+    lines
 }
 
 /// `rift disable --agent <x>`: remove the wiring descriptor (full round-trip).

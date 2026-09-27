@@ -248,15 +248,24 @@ screen, in the same words, wherever you look. Availability is all it claims:
 nothing here says the agent is in use, and detection is still not
 eligibility — a detected coming-soon agent is named and left alone (§10.1).
 
-**Codex's third fact: hook trust.** Codex trusts a project's hooks **per absolute path
-and hash**, recorded in its own home-directory configuration, so a correct hook
-file is not sufficient: until you approve it once inside Codex, the hooks Rift
-wrote will not run. Rift reads that record and reports it (`codex trust:
-approved`, or `pending (approve once in Codex)`); it does not write it. The
-read is deliberately shallow — only whether Codex ever recorded trust for this
-exact path, never a comparison of the stored hash, because what that hash
-covers is Codex's business and a confident invented answer would be worse than
-the honest one.
+**Codex's third fact: hook trust.** Codex trusts a project's hooks **per absolute path, per hook and per hash**, recorded in its own home-directory configuration (`[hooks.state]` in `~/.codex/config.toml`, or under `$CODEX_HOME`).
+A correct hook file is therefore not sufficient: Codex runs a hook only while the hash it recorded when you trusted it equals the hash of the hook as it now stands, and it skips any other hook without a message.
+A hook Rift rewrites — a new field, a new binary path — is skipped from that moment until you trust it again.
+
+Rift reproduces Codex's hash for every hook it wrote into `.codex/hooks.json` and compares it, read-only, against Codex's record.
+Each hook gets one of four verdicts: **trusted** (the hashes match), **modified** (a hash is recorded and differs), **untrusted** (no hash is recorded), or **unverifiable**.
+The hash is Codex's normalised identity of the hook — the timeout it would apply, the context limit only where the event can return context and only when it differs from Codex's default, the matcher only where the event dispatches on one — and Rift reproduces it only for the Codex versions its fixtures were recorded against.
+Which version runs here, and whether it runs in a terminal or in the VS Code extension, is read from the newest Codex session Rift has recorded in the checkout: the session file Codex names on its hook payloads opens with Codex's own record of both.
+For any other version, or before any Codex session has been recorded, every hook is unverifiable, and Rift says so in those words rather than guessing.
+
+The comparison runs at the two moments you are looking: every write of the hook file (`rift init`, `rift enable`, `rift recall init`, Project Settings' setup dialog, worktree adoption) and every status read (`rift status`, `rift doctor`, `rift recall status`, `rift worktree status`).
+It never runs on a hook's decision path.
+When any of Rift's hooks is modified or untrusted, the Codex row reads `error` rather than `configured`, and one remedy sentence is printed (and returned in `--json` as `codex_trust_remedy`):
+
+> Codex is skipping 2 of Rift's hooks because they changed after you approved them, so Rift cannot see your Codex sessions start. In a terminal in this repository run `codex`, type `/hooks`, and trust the hooks marked 'Modified since last trusted'.
+
+When the recorded session ran in the VS Code extension, the sentence adds: *Then reload the VS Code window and start a new Codex conversation.*
+Rift cannot trust a hook on your behalf and never writes Codex's configuration; the sentence is how the write tells you, at the write.
 
 > Tip: this is what surprises people in linked worktrees. A new worktree's
 > `.codex/hooks.json` is a **new absolute path**, so it starts untrusted even

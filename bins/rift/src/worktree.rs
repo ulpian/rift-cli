@@ -329,18 +329,13 @@ fn wiring_notes(member: &Path) -> Vec<String> {
             }
         }
     }
-    // Codex trusts hooks per absolute path: a member's fresh `.codex/hooks.json`
-    // is untrusted until the user approves it IN Codex, and Rift never writes
-    // that file. Reported, never granted.
-    let hooks_json = member.join(".codex").join("hooks.json");
-    if hooks_json.is_file() {
-        let home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")));
-        out.push(format!(
-            "codex: trust {}",
-            rift_agent_install::native::codex_hook_trust(&hooks_json, home.as_deref()).message()
-        ));
+    // Codex trusts hooks per absolute path and per hook: a member's fresh
+    // `.codex/hooks.json` is untrusted until the user approves it IN Codex,
+    // and Rift never writes that file. Reported, never granted.
+    let home = rift_agent_install::native::codex_home_from_process();
+    if let Some(trust) = rift_agent_install::native::codex_trust(member, home.as_deref()) {
+        out.push(format!("codex: trust {}", trust.summary()));
+        out.extend(trust.remedy());
     }
     out
 }

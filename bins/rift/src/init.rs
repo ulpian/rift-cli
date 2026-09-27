@@ -250,6 +250,8 @@ pub(crate) fn cmd_init_with_integrations(
         "refused": refused,
         "config": cfg.display().to_string(),
         "recall": recall_json,
+        "codex_trust_remedy": agents::written_codex_trust(&canon, "codex")
+            .and_then(|trust| trust.remedy()),
     });
     let code = if refused.is_empty() {
         exit::OK
@@ -367,13 +369,20 @@ fn init_wire_integrations(
     let rt = runtime()?;
     let mut wired = 0_usize;
     let mut refused: Vec<String> = Vec::new();
+    let mut remedies: Vec<String> = Vec::new();
     for (agent, name) in &integrations {
         match wire_agent(&store, &rt, canon, agent, name, progress)? {
-            Wiring::Wired => wired += 1,
+            Wiring::Wired(remedy) => {
+                wired += 1;
+                remedies.extend(remedy);
+            }
             Wiring::Refused(refusal) => refused.push(refusal),
         }
     }
     human.push_str(&format!("enabled {wired} native integration(s)\n"));
+    for remedy in &remedies {
+        human.push_str(&format!("{remedy}\n"));
+    }
     for refusal in &refused {
         human.push_str(&format!("not wired — {refusal}\n"));
     }
@@ -400,7 +409,8 @@ fn coming_soon_lines(coming_soon: &[String], progress: &mut dyn FnMut(SetupProgr
 
 /// What wiring one agent came to.
 enum Wiring {
-    Wired,
+    /// Wired, with the remedy when the client will skip a hook just written.
+    Wired(Option<String>),
     /// The refusal, as `init` prints it.
     Refused(String),
 }
@@ -432,11 +442,20 @@ fn wire_agent(
     ));
     match rt.block_on(agents::enable(store, canon, agent, hooks::now_ms())) {
         Ok(outcome) if outcome.code == exit::OK => {
+            let remedy = outcome
+                .json
+                .get("codex_trust_remedy")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let detail = wired_detail(agent, &outcome.human);
             progress(SetupProgress::done(
                 SetupStep::Agent(name.to_owned()),
-                wired_detail(agent, &outcome.human),
+                match &remedy {
+                    Some(remedy) => format!("{detail} — {remedy}"),
+                    None => detail,
+                },
             ));
-            Ok(Wiring::Wired)
+            Ok(Wiring::Wired(remedy))
         }
         Ok(outcome) => {
             progress(SetupProgress::failed(

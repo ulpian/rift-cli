@@ -92,6 +92,11 @@ impl Client {
             // for this invocation and persists nothing; the approvals-and-
             // sandbox bypass is deliberately NOT used, because that one writes
             // a trust row into the developer's global client configuration.
+            // The bypass is also why no dogfood run ever sees a hook Codex
+            // stopped trusting: a handler Rift rewrote runs here and is skipped
+            // in a real session. The per-hook trust check at every write and
+            // status read (`rift_agent_install::native::codex_trust`) is what
+            // covers that case.
             Self::Codex => vec![
                 "exec".to_owned(),
                 "--skip-git-repo-check".to_owned(),

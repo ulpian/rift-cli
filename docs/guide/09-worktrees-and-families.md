@@ -240,7 +240,8 @@ Almost every other rule is a refusal:
   you just created is not a repair.
 - **Global client configuration is read, never written**: a member's fresh
   `.codex/hooks.json` is untrusted until you approve it *in Codex*, and adoption
-  reports `codex trust: approved` or `pending`
+  reports Codex's trust hook by hook (`codex trust: trusted`, `error` with the
+  remedy, or `unverifiable`)
   ([10-agent-integrations.md](10-agent-integrations.md)).
 
 Adoption never touches the git hooks and never registers the member as a project
@@ -537,7 +538,7 @@ a fabricated instant.
 
 **`rift worktree status [PATH]`** shows one member in full: its row, the client
 wiring Rift can verify *without writing anything* (per agent: where its hooks
-point, whether a recall skill is present, `codex: trust approved` or `pending`),
+point, whether a recall skill is present, and Codex's per-hook trust: `codex: trust trusted`, `error` with the remedy, or `unverifiable`),
 and its observations. An agent with no hook fragment produces no line, because
 the row's `not adopted` already says the member is unwired.
 
