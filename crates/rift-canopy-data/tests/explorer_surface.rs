@@ -56,26 +56,9 @@ fn render(state: &mut AppState, caps: Capabilities) -> String {
 
 #[test]
 fn the_real_walk_lands_on_the_drawn_surface_on_both_backends() {
-    // A directory with one of everything the surface distinguishes.
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = fixture_directory_with_one_of_everything();
     let root = tmp.path();
-    std::fs::create_dir(root.join("alpha")).unwrap();
-    std::fs::create_dir(root.join("Beta")).unwrap();
-    std::fs::create_dir(root.join(".hidden")).unwrap();
-    std::fs::write(root.join("notes.md"), b"x").unwrap();
-
-    let mut state = AppState::new(
-        vec![Project {
-            name: "a".into(),
-            path: "/r/a".into(),
-            status: ProjectStatus::Idle,
-            kind: EntryKind::Repo,
-        }],
-        Size::new(100, 30),
-    );
-    state.app.splash.skip();
-    state.app.overlay = None;
-    state.app.home_dir = Some(root.to_string_lossy().into_owned());
+    let mut state = fixture_state_homed_at(root);
 
     // Entry requests the start directory; the loop's job — performed here by
     // the real walker — is to answer it.
@@ -96,22 +79,7 @@ fn the_real_walk_lands_on_the_drawn_surface_on_both_backends() {
     ] {
         let text = render(&mut state, caps);
         println!("\n===== destination explorer ({label}) =====\n{text}");
-        assert!(text.contains("add project"), "{label}: framed as the act");
-        // Directories the walker found are enterable rows, in ITS order.
-        let alpha = text.find("alpha/").expect("alpha renders as a directory");
-        let beta = text.find("Beta/").expect("Beta renders as a directory");
-        let notes = text.find("notes.md").expect("the file is listed");
-        assert!(alpha < beta, "{label}: the one comparator's order survives");
-        assert!(beta < notes, "{label}: directories precede files");
-        assert!(
-            !text.contains(".hidden"),
-            "{label}: dot-entries are filtered at read time"
-        );
-        // Both acts and both toggles are on the surface (modal-surface parity).
-        assert!(text.contains("[ select destination ]"), "{label}");
-        assert!(text.contains("[ input as path ]"), "{label}");
-        assert!(text.contains("[.dotfiles]"), "{label}");
-        assert!(text.contains("[x]"), "{label}: the shared close X");
+        assert_the_listing_surface(&text, label);
     }
 
     // The dot-toggle reveals what the walker really returned.
@@ -144,4 +112,57 @@ fn the_real_walk_lands_on_the_drawn_surface_on_both_backends() {
         rift_canopy::Action::AddProject(child.to_string_lossy().into_owned()),
         "select registers the folder that is OPEN, through the typed flow's action"
     );
+}
+
+/// A directory with one of everything the surface distinguishes: two
+/// directories whose order only the walker's comparator decides, a dot-entry
+/// the surface filters, and a file that must sort after the directories.
+fn fixture_directory_with_one_of_everything() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir(root.join("alpha")).unwrap();
+    std::fs::create_dir(root.join("Beta")).unwrap();
+    std::fs::create_dir(root.join(".hidden")).unwrap();
+    std::fs::write(root.join("notes.md"), b"x").unwrap();
+    tmp
+}
+
+/// A dashboard past its splash with no overlay, whose home directory is
+/// `root` — so entering the explorer asks the walker for exactly that tree.
+fn fixture_state_homed_at(root: &std::path::Path) -> AppState {
+    let mut state = AppState::new(
+        vec![Project {
+            name: "a".into(),
+            path: "/r/a".into(),
+            status: ProjectStatus::Idle,
+            kind: EntryKind::Repo,
+        }],
+        Size::new(100, 30),
+    );
+    state.app.splash.skip();
+    state.app.overlay = None;
+    state.app.home_dir = Some(root.to_string_lossy().into_owned());
+    state
+}
+
+/// What one backend must draw for the walked start directory: the act's
+/// framing, the walker's rows in its own order with dot-entries filtered, and
+/// every act and toggle the surface teaches (modal-surface parity).
+fn assert_the_listing_surface(text: &str, label: &str) {
+    assert!(text.contains("add project"), "{label}: framed as the act");
+    // Directories the walker found are enterable rows, in ITS order.
+    let alpha = text.find("alpha/").expect("alpha renders as a directory");
+    let beta = text.find("Beta/").expect("Beta renders as a directory");
+    let notes = text.find("notes.md").expect("the file is listed");
+    assert!(alpha < beta, "{label}: the one comparator's order survives");
+    assert!(beta < notes, "{label}: directories precede files");
+    assert!(
+        !text.contains(".hidden"),
+        "{label}: dot-entries are filtered at read time"
+    );
+    // Both acts and both toggles are on the surface (modal-surface parity).
+    assert!(text.contains("[ select destination ]"), "{label}");
+    assert!(text.contains("[ input as path ]"), "{label}");
+    assert!(text.contains("[.dotfiles]"), "{label}");
+    assert!(text.contains("[x]"), "{label}: the shared close X");
 }

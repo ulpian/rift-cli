@@ -11,7 +11,7 @@
 )]
 
 use std::path::Path;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use rift_canopy::app::{event_loop, EventSource};
@@ -19,7 +19,7 @@ use rift_canopy::render::frame::{Frame, Size};
 use rift_canopy::render::{AsciiBackend, Capabilities, RenderBackend};
 use rift_canopy::{
     AppState, BreakdownView, CanopyKey, DataRequest, EntryKind, Event, PersistOp, Project,
-    ProjectStatus, TokensView,
+    ProjectStatus, TokensView, ViewModel,
 };
 use rift_canopy_data::{runtime, spawn_poll_only_with_root};
 use rift_core::Result as RiftResult;
@@ -302,21 +302,50 @@ fn token_and_model_sections_render_live_from_a_seeded_projection() {
     // must go live on its own — req_sink is wired to the real bus, exactly as
     // the interactive launch wires it.
 
+    let mut state = fixture_dashboard_selecting(&path);
+    let mut src = bus_source_until_tokens_and_models(bus.evt_rx);
+    run_the_interactive_loop(&mut state, &mut src, bus.req_tx.clone());
+
+    // The reducer applied the live feed…
+    let vm = state.snapshot();
+    assert_the_reducer_applied_both_feeds(&vm);
+    // …and the real renderer draws both live sections, placeholders gone.
+    assert_both_live_sections_render(&vm);
+    // The read fraction (read/(input+read) = 6000/6800 ≈ 88%) also remains an
+    // exact reducer fact, independent of responsive geometry.
+    match &vm.col3.breakdown {
+        BreakdownView::Data(d) => assert!(
+            (d.read_fraction - 0.882).abs() < 0.01,
+            "live read fraction: {}",
+            d.read_fraction
+        ),
+        BreakdownView::NoActivity => panic!("the breakdown feed never arrived"),
+    }
+}
+
+/// A dashboard past its splash whose one project is `path`, so the loop's
+/// startup prime selects it and asks the bus for its feeds.
+fn fixture_dashboard_selecting(path: &str) -> AppState {
     let mut state = AppState::new(
         vec![Project {
             name: "seeded".into(),
-            path: path.clone(),
+            path: path.to_owned(),
             status: ProjectStatus::Idle,
             kind: EntryKind::Repo,
         }],
         Size::new(100, 40),
     );
     state.app.splash.skip();
+    state
+}
 
+/// The loop quits once both live facts have crossed the bus: a Tokens feed
+/// carrying data, and project detail naming both seeded models once each.
+fn bus_source_until_tokens_and_models(evt_rx: Receiver<Event>) -> BusSource {
     let mut saw_tokens = false;
     let mut saw_models = false;
-    let mut src = BusSource {
-        evt_rx: bus.evt_rx,
+    BusSource {
+        evt_rx,
         polls_left: 50,
         done: Box::new(move |ev| {
             if matches!(ev, Event::Feed(f) if matches!(
@@ -335,13 +364,21 @@ fn token_and_model_sections_render_live_from_a_seeded_projection() {
             saw_tokens && saw_models
         }),
         satisfied: false,
-    };
+    }
+}
+
+/// Run the real event loop with its data requests wired to the real bus and
+/// every other seam nulled, exactly as the interactive launch wires `req_sink`.
+fn run_the_interactive_loop(
+    state: &mut AppState,
+    src: &mut BusSource,
+    req_tx: Sender<DataRequest>,
+) {
     let mut backend = MockBackend;
-    let req_tx = bus.req_tx.clone();
     event_loop(
         &mut backend,
-        &mut src,
-        &mut state,
+        src,
+        state,
         &mut |_op: &PersistOp| Ok(vec![]),
         &mut move |req: DataRequest| {
             let _ = req_tx.send(req);
@@ -354,9 +391,11 @@ fn token_and_model_sections_render_live_from_a_seeded_projection() {
         &mut rift_canopy_data::list_dir,
     )
     .unwrap();
+}
 
-    // The reducer applied the live feed…
-    let vm = state.snapshot();
+/// The reducer holds the live Tokens total (800 input + 6.0k read + 1.2k
+/// output + 100 cache-write) and both models, in seeded order, once each.
+fn assert_the_reducer_applied_both_feeds(vm: &ViewModel) {
     match &vm.col3.tokens {
         TokensView::Data(d) => assert!((d.total - 8_100.0).abs() < f64::EPSILON),
         TokensView::NoActivity => panic!("the Tokens feed never arrived"),
@@ -367,10 +406,14 @@ fn token_and_model_sections_render_live_from_a_seeded_projection() {
     assert_eq!(detail.models[0].calls, 1);
     assert_eq!(detail.models[1].model, "claude-opus-5");
     assert_eq!(detail.models[1].calls, 1);
-    // …and the real renderer draws both live sections, placeholders gone.
+}
+
+/// The ASCII renderer draws the token and model sections from live data:
+/// the placeholder is gone and every compact readout carries the seeded sums.
+fn assert_both_live_sections_render(vm: &ViewModel) {
     let mut frame = Frame::new(vm.size);
     let mut ascii = AsciiBackend::new(Capabilities::empty());
-    rift_canopy::view::draw(&vm, &mut ascii, &mut frame);
+    rift_canopy::view::draw(vm, &mut ascii, &mut frame);
     let text = frame_text(&frame);
     assert!(text.contains("token usage  Σ 8.1k"), "live total:\n{text}");
     assert!(!text.contains("no token activity yet"));
@@ -392,16 +435,6 @@ fn token_and_model_sections_render_live_from_a_seeded_projection() {
             && text.matches("×1 · runtime").count() == 2,
         "the model treemap keeps exact keyed readouts for every used model:\n{text}"
     );
-    // The read fraction (read/(input+read) = 6000/6800 ≈ 88%) also remains an
-    // exact reducer fact, independent of responsive geometry.
-    match &vm.col3.breakdown {
-        BreakdownView::Data(d) => assert!(
-            (d.read_fraction - 0.882).abs() < 0.01,
-            "live read fraction: {}",
-            d.read_fraction
-        ),
-        BreakdownView::NoActivity => panic!("the breakdown feed never arrived"),
-    }
 }
 
 #[test]
