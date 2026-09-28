@@ -274,8 +274,31 @@ pub fn resolve_explicit_target(
     if target.is_empty() {
         return Ok(ResolvedTarget::missing());
     }
+    if let Some(resolved) = checkpoint_identity_target(catalogue, target) {
+        return Ok(resolved);
+    }
+    if target.starts_with('-') {
+        return Ok(ResolvedTarget::missing());
+    }
+    let Some(commit_oid) = reader.resolve_commitish(target)? else {
+        return Ok(ResolvedTarget::missing());
+    };
+    let claims = match reader.commit_message(&commit_oid)? {
+        Some(message) => checkpoint_trailers(&message),
+        None => TrailerScan::default(),
+    };
+    Ok(git_commit_target(catalogue, commit_oid, claims))
+}
+
+/// The checkpoint-first half of resolution: an exact durable id wins, then a
+/// unique prefix, then an ambiguous one. `None` hands the target on to Git
+/// revision parsing, which a checkpoint id must always shadow.
+fn checkpoint_identity_target(
+    catalogue: &[CheckpointCatalogueEntry],
+    target: &str,
+) -> Option<ResolvedTarget> {
     if let Some(exact) = catalogue.iter().find(|entry| entry.checkpoint_id == target) {
-        return Ok(ResolvedTarget::checkpoint(
+        return Some(ResolvedTarget::checkpoint(
             ResolutionKind::ExactCheckpoint,
             [exact.checkpoint_id.clone()],
         ));
@@ -286,34 +309,53 @@ pub fn resolve_explicit_target(
         .map(|entry| entry.checkpoint_id.clone())
         .collect();
     match prefixes.as_slice() {
-        [one] => {
-            return Ok(ResolvedTarget::checkpoint(
-                ResolutionKind::CheckpointPrefix,
-                [one.clone()],
-            ));
-        }
-        [_, _, ..] => {
-            return Ok(ResolvedTarget::checkpoint(
-                ResolutionKind::AmbiguousCheckpointPrefix,
-                prefixes,
-            ));
-        }
-        [] => {}
+        [one] => Some(ResolvedTarget::checkpoint(
+            ResolutionKind::CheckpointPrefix,
+            [one.clone()],
+        )),
+        [_, _, ..] => Some(ResolvedTarget::checkpoint(
+            ResolutionKind::AmbiguousCheckpointPrefix,
+            prefixes,
+        )),
+        [] => None,
     }
-    if target.starts_with('-') {
-        return Ok(ResolvedTarget::missing());
-    }
-    let Some(commit_oid) = reader.resolve_commitish(target)? else {
-        return Ok(ResolvedTarget::missing());
-    };
+}
 
-    let known: BTreeSet<&str> = catalogue
-        .iter()
-        .map(|entry| entry.checkpoint_id.as_str())
-        .collect();
+/// The Git half of resolution, over facts the reader already produced: every
+/// checkpoint anchored at the commit, joined with every known checkpoint its
+/// trailers claim, cut to the candidate bound. Kept free of the reader so the
+/// only repository reads stay in [`resolve_explicit_target`].
+fn git_commit_target(
+    catalogue: &[CheckpointCatalogueEntry],
+    commit_oid: String,
+    claims: TrailerScan,
+) -> ResolvedTarget {
+    let mut matches = anchor_matches(catalogue, &commit_oid);
+    add_trailer_matches(&mut matches, catalogue, claims.ids);
+    let mut truncated = claims.truncated;
+    let mut candidates: Vec<TargetCandidate> = matches.into_values().collect();
+    if candidates.len() > MAX_TARGET_CANDIDATES {
+        candidates.truncate(MAX_TARGET_CANDIDATES);
+        truncated = true;
+    }
+    ResolvedTarget {
+        kind: ResolutionKind::GitCommit,
+        candidates,
+        commit_oid: Some(commit_oid),
+        rejected_trailers: claims.rejected,
+        truncated,
+    }
+}
+
+/// Checkpoints whose metadata anchor is the resolved commit, keyed by id so
+/// trailer claims can join them.
+fn anchor_matches(
+    catalogue: &[CheckpointCatalogueEntry],
+    commit_oid: &str,
+) -> BTreeMap<String, TargetCandidate> {
     let mut matches: BTreeMap<String, TargetCandidate> = BTreeMap::new();
     for entry in catalogue {
-        if entry.anchor_commit.as_deref() == Some(commit_oid.as_str()) {
+        if entry.anchor_commit.as_deref() == Some(commit_oid) {
             matches.insert(
                 entry.checkpoint_id.clone(),
                 TargetCandidate {
@@ -324,42 +366,37 @@ pub fn resolve_explicit_target(
             );
         }
     }
-
-    let mut rejected = 0usize;
-    let mut truncated = false;
-    if let Some(message) = reader.commit_message(&commit_oid)? {
-        let claims = checkpoint_trailers(&message);
-        rejected = claims.rejected;
-        truncated = claims.truncated;
-        for id in claims.ids {
-            if !known.contains(id.as_str()) {
-                continue;
-            }
-            matches
-                .entry(id.clone())
-                .and_modify(|candidate| candidate.trailer = true)
-                .or_insert(TargetCandidate {
-                    checkpoint_id: id,
-                    metadata_anchor: false,
-                    trailer: true,
-                });
-        }
-    }
-
-    let mut candidates: Vec<TargetCandidate> = matches.into_values().collect();
-    if candidates.len() > MAX_TARGET_CANDIDATES {
-        candidates.truncate(MAX_TARGET_CANDIDATES);
-        truncated = true;
-    }
-    Ok(ResolvedTarget {
-        kind: ResolutionKind::GitCommit,
-        candidates,
-        commit_oid: Some(commit_oid),
-        rejected_trailers: rejected,
-        truncated,
-    })
+    matches
 }
 
+/// Join the commit's trailer claims into the anchor matches. A claim naming a
+/// checkpoint the catalogue does not hold is dropped: a commit message cannot
+/// conjure a checkpoint into existence.
+fn add_trailer_matches(
+    matches: &mut BTreeMap<String, TargetCandidate>,
+    catalogue: &[CheckpointCatalogueEntry],
+    claimed_ids: Vec<String>,
+) {
+    let known: BTreeSet<&str> = catalogue
+        .iter()
+        .map(|entry| entry.checkpoint_id.as_str())
+        .collect();
+    for id in claimed_ids {
+        if !known.contains(id.as_str()) {
+            continue;
+        }
+        matches
+            .entry(id.clone())
+            .and_modify(|candidate| candidate.trailer = true)
+            .or_insert(TargetCandidate {
+                checkpoint_id: id,
+                metadata_anchor: false,
+                trailer: true,
+            });
+    }
+}
+
+#[derive(Default)]
 struct TrailerScan {
     ids: Vec<String>,
     rejected: usize,

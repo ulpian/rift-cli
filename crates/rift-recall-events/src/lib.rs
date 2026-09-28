@@ -789,6 +789,118 @@ mod keyed_tests {
 mod tests {
     use super::*;
 
+    /// One value of every kind, with the same figures throughout so the table
+    /// below reads as a table: 1 returned and 2 avoided wherever the kind can
+    /// carry them. Built in three groups, by the path that books each kind, so
+    /// every group stays short enough to check against the table by eye.
+    fn one_of_every_kind() -> Vec<MemdEvent> {
+        let sha = "ab".repeat(32);
+        let handle = read_handle("src/a.rs", &sha, 1, 40);
+        let mut all = fixture_serving_kinds(&handle);
+        all.extend(fixture_read_hook_kinds(&handle));
+        all.extend(fixture_search_and_document_kinds(&handle));
+        all
+    }
+
+    /// The kinds the serving path books: manifests, summaries, exact reads,
+    /// packs, invalidations and refusals.
+    fn fixture_serving_kinds(handle: &str) -> Vec<MemdEvent> {
+        vec![
+            MemdEvent::ManifestServed {
+                estimated_tokens_returned: 1,
+                estimated_tokens_avoided: 2,
+            },
+            MemdEvent::ManifestInjected {
+                estimated_tokens_returned: 1,
+            },
+            MemdEvent::SummaryServed {
+                handle: handle.to_owned(),
+                estimated_tokens_returned: 1,
+                estimated_tokens_avoided: 2,
+            },
+            MemdEvent::ExactRetrieved {
+                handle: handle.to_owned(),
+                reason: "debugging".into(),
+                estimated_tokens_returned: 1,
+            },
+            MemdEvent::PackBuilt {
+                sections: 1,
+                total_tokens: 1,
+                estimated_tokens_returned: 1,
+                estimated_tokens_avoided: 2,
+            },
+            MemdEvent::Invalidated {
+                handle: handle.to_owned(),
+                estimated_tokens_returned: 1,
+            },
+            MemdEvent::Refused {
+                target: handle.to_owned(),
+                reason: "policy_denied_exact".into(),
+                estimated_tokens_returned: 1,
+            },
+        ]
+    }
+
+    /// The kinds the read hook books after a decision, and the recovery
+    /// injection that follows a compaction.
+    fn fixture_read_hook_kinds(handle: &str) -> Vec<MemdEvent> {
+        vec![
+            MemdEvent::ReadIntercepted {
+                handle: handle.to_owned(),
+                reason: TAG_ALREADY_HELD.into(),
+                estimated_tokens_returned: 1,
+                estimated_tokens_avoided: 2,
+            },
+            MemdEvent::ReadRepeatObserved {
+                handle: handle.to_owned(),
+                reason: TAG_ALREADY_HELD.into(),
+            },
+            MemdEvent::ReadPrevented {
+                handle: handle.to_owned(),
+                reason: TAG_PREVENTED.into(),
+                estimated_tokens_avoided: 2,
+            },
+            MemdEvent::RecoveryInjected {
+                estimated_tokens_returned: 1,
+            },
+        ]
+    }
+
+    /// The kinds the search and document paths book.
+    fn fixture_search_and_document_kinds(handle: &str) -> Vec<MemdEvent> {
+        vec![
+            MemdEvent::SearchAnswered {
+                reason: TAG_DECLARED_BASELINE.into(),
+                estimated_tokens_returned: 1,
+                estimated_tokens_avoided: 2,
+            },
+            MemdEvent::GrepCapped {
+                handle: grep_cap_handle(40),
+            },
+            MemdEvent::DocRewritten {
+                handle: handle.to_owned(),
+                reason: TAG_DECLARED_BASELINE.into(),
+                estimated_tokens_returned: 1,
+                estimated_tokens_avoided: 2,
+            },
+            MemdEvent::DocDeferred {
+                handle: handle.to_owned(),
+                reason: TAG_CONVERT_DEADLINE.into(),
+                estimated_tokens_returned: 1,
+            },
+            MemdEvent::SearchServed {
+                estimated_tokens_returned: 1,
+                estimated_tokens_avoided: 2,
+            },
+            MemdEvent::DocServed {
+                handle: handle.to_owned(),
+                reason: TAG_DECLARED_BASELINE.into(),
+                estimated_tokens_returned: 1,
+                estimated_tokens_avoided: 2,
+            },
+        ]
+    }
+
     /// Every kind's verb, in one table, and the figures each kind is
     /// **structurally** able to carry.
     ///
@@ -800,95 +912,6 @@ mod tests {
     /// has no field for that number at all, which is what makes "an observed
     /// repeat claims nothing" and "a cap avoids nothing" facts rather than
     /// conventions.
-    /// One value of every kind, with the same figures throughout so the table
-    /// below reads as a table: 1 returned and 2 avoided wherever the kind can
-    /// carry them.
-    fn one_of_every_kind() -> Vec<MemdEvent> {
-        let sha = "ab".repeat(32);
-        let handle = read_handle("src/a.rs", &sha, 1, 40);
-        vec![
-            MemdEvent::ManifestServed {
-                estimated_tokens_returned: 1,
-                estimated_tokens_avoided: 2,
-            },
-            MemdEvent::ManifestInjected {
-                estimated_tokens_returned: 1,
-            },
-            MemdEvent::SummaryServed {
-                handle: handle.clone(),
-                estimated_tokens_returned: 1,
-                estimated_tokens_avoided: 2,
-            },
-            MemdEvent::ExactRetrieved {
-                handle: handle.clone(),
-                reason: "debugging".into(),
-                estimated_tokens_returned: 1,
-            },
-            MemdEvent::PackBuilt {
-                sections: 1,
-                total_tokens: 1,
-                estimated_tokens_returned: 1,
-                estimated_tokens_avoided: 2,
-            },
-            MemdEvent::Invalidated {
-                handle: handle.clone(),
-                estimated_tokens_returned: 1,
-            },
-            MemdEvent::Refused {
-                target: handle.clone(),
-                reason: "policy_denied_exact".into(),
-                estimated_tokens_returned: 1,
-            },
-            MemdEvent::ReadIntercepted {
-                handle: handle.clone(),
-                reason: TAG_ALREADY_HELD.into(),
-                estimated_tokens_returned: 1,
-                estimated_tokens_avoided: 2,
-            },
-            MemdEvent::ReadRepeatObserved {
-                handle: handle.clone(),
-                reason: TAG_ALREADY_HELD.into(),
-            },
-            MemdEvent::ReadPrevented {
-                handle: handle.clone(),
-                reason: TAG_PREVENTED.into(),
-                estimated_tokens_avoided: 2,
-            },
-            MemdEvent::RecoveryInjected {
-                estimated_tokens_returned: 1,
-            },
-            MemdEvent::SearchAnswered {
-                reason: TAG_DECLARED_BASELINE.into(),
-                estimated_tokens_returned: 1,
-                estimated_tokens_avoided: 2,
-            },
-            MemdEvent::GrepCapped {
-                handle: grep_cap_handle(40),
-            },
-            MemdEvent::DocRewritten {
-                handle: handle.clone(),
-                reason: TAG_DECLARED_BASELINE.into(),
-                estimated_tokens_returned: 1,
-                estimated_tokens_avoided: 2,
-            },
-            MemdEvent::DocDeferred {
-                handle: handle.clone(),
-                reason: TAG_CONVERT_DEADLINE.into(),
-                estimated_tokens_returned: 1,
-            },
-            MemdEvent::SearchServed {
-                estimated_tokens_returned: 1,
-                estimated_tokens_avoided: 2,
-            },
-            MemdEvent::DocServed {
-                handle,
-                reason: TAG_DECLARED_BASELINE.into(),
-                estimated_tokens_returned: 1,
-                estimated_tokens_avoided: 2,
-            },
-        ]
-    }
-
     #[test]
     fn every_kind_has_a_stable_verb_and_only_the_figures_it_may_carry() {
         let all = one_of_every_kind();

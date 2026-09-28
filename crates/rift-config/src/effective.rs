@@ -111,123 +111,38 @@ impl EffectiveConfig {
 
     /// Validate a raw config and produce the effective config.
     ///
+    /// Validation runs to the end before anything is derived, so one error
+    /// names every problem in the file rather than the first; the order the
+    /// checks run in is the order the report lists them.
+    ///
     /// # Errors
     /// [`RiftError::Config`] aggregating every validation problem.
-    #[allow(clippy::too_many_lines)] // one linear validation pass; splitting would obscure it
     pub fn from_config(cfg: RiftConfig) -> Result<Self> {
-        let mut errors: Vec<String> = Vec::new();
+        let repo_id = validate_config(&cfg)?;
+        let mut effective = Self::from_validated(cfg, repo_id);
+        effective.policy_hash = effective.compute_policy_hash();
+        Ok(effective)
+    }
 
-        if !SUPPORTED_SCHEMA_VERSIONS.contains(&cfg.schema_version) {
-            errors.push(format!(
-                "unsupported schema_version {} (supported: {SUPPORTED_SCHEMA_VERSIONS:?})",
-                cfg.schema_version
-            ));
-        }
-
-        for m in &cfg.models.allow {
-            if cfg.models.deny.contains(m) {
-                errors.push(format!("model {m:?} appears in both allow and deny"));
-            }
-        }
-
-        let mut check_glob = |g: &str, where_: &str| {
-            if g.is_empty() {
-                errors.push(format!("empty glob in {where_}"));
-            } else if g.contains('\0') {
-                errors.push(format!("glob in {where_} contains NUL"));
-            } else if g.len() > glob::MAX_PATTERN_LEN {
-                errors.push(format!(
-                    "glob in {where_} exceeds {} bytes (got {})",
-                    glob::MAX_PATTERN_LEN,
-                    g.len()
-                ));
-            } else if glob::wildcard_count(g) > glob::MAX_WILDCARDS {
-                errors.push(format!(
-                    "glob in {where_} has more than {} wildcards",
-                    glob::MAX_WILDCARDS
-                ));
-            }
-        };
-        for g in &cfg.paths.sensitive_paths {
-            check_glob(g, "paths.sensitive_paths");
-        }
-        for g in &cfg.models.allow {
-            check_glob(g, "models.allow");
-        }
-        for g in &cfg.models.deny {
-            check_glob(g, "models.deny");
-        }
-
-        if cfg.capture.raw_transcripts && !cfg.capture.acknowledge_risk {
-            errors.push(
-                "capture.raw_transcripts requires capture.acknowledge_risk = true".to_string(),
-            );
-        }
-
-        if !CHECKPOINT_STRATEGIES.contains(&cfg.capture.checkpoint_strategy.as_str()) {
-            errors.push(format!(
-                "capture.checkpoint_strategy {:?} is not one of {CHECKPOINT_STRATEGIES:?}",
-                cfg.capture.checkpoint_strategy
-            ));
-        }
-        if cfg.capture.schedule_interval_minutes == 0 {
-            errors.push("capture.schedule_interval_minutes must be >= 1".to_string());
-        }
-
-        if cfg.retention.default_class.is_empty() {
-            errors.push("retention.default_class must not be empty".to_string());
-        } else if !cfg.retention.classes.is_empty()
-            && !cfg.retention.classes.contains(&cfg.retention.default_class)
-        {
-            errors.push(format!(
-                "retention.default_class {:?} is not in retention.classes",
-                cfg.retention.default_class
-            ));
-        }
-
-        let repo_id = match &cfg.project.repo_id {
-            Some(s) => match RepoId::new(s.clone()) {
-                Ok(id) => Some(id),
-                Err(e) => {
-                    errors.push(format!("project.repo_id invalid: {e}"));
-                    None
-                }
-            },
-            None => None,
-        };
-
-        if !errors.is_empty() {
-            return Err(RiftError::config(errors.join("; ")));
-        }
-
+    /// Derive the effective fields from a config that has passed validation:
+    /// every list sorted and deduplicated so the policy hash is
+    /// order-independent, and the built-in sensitive paths unioned in. The
+    /// hash is left zeroed for the caller to stamp once the fields are final.
+    fn from_validated(cfg: RiftConfig, repo_id: Option<RepoId>) -> Self {
         // Built-in sensitive paths are unioned in and cannot be dropped.
-        let mut sensitive: Vec<String> = BUILTIN_SENSITIVE_PATHS
-            .iter()
-            .map(|s| (*s).to_string())
-            .chain(cfg.paths.sensitive_paths.iter().cloned())
-            .collect();
-        sensitive.sort();
-        sensitive.dedup();
-
-        let mut allow = cfg.models.allow.clone();
-        allow.sort();
-        allow.dedup();
-        let mut deny = cfg.models.deny.clone();
-        deny.sort();
-        deny.dedup();
-        let mut extra = cfg.redaction.extra_patterns.clone();
-        extra.sort();
-        extra.dedup();
-        let mut classes = cfg.retention.classes.clone();
-        classes.sort();
-        classes.dedup();
-
-        let mut effective = Self {
+        let sensitive = sorted_unique(
+            BUILTIN_SENSITIVE_PATHS
+                .iter()
+                .map(|s| (*s).to_string())
+                .chain(cfg.paths.sensitive_paths.iter().cloned())
+                .collect(),
+        );
+        Self {
             schema_version: cfg.schema_version,
             project_name: cfg.project.name,
             repo_id,
-            allow_models: allow,
-            deny_models: deny,
+            allow_models: sorted_unique(cfg.models.allow.clone()),
+            deny_models: sorted_unique(cfg.models.deny.clone()),
             sensitive_paths: sensitive,
             raw_transcripts: cfg.capture.raw_transcripts,
             capture_tool_calls: cfg.capture.tool_calls,
@@ -235,18 +150,16 @@ impl EffectiveConfig {
             checkpoint_strategy: cfg.capture.checkpoint_strategy,
             schedule_interval_minutes: cfg.capture.schedule_interval_minutes,
             entropy_threshold: cfg.redaction.entropy_threshold,
-            extra_patterns: extra,
+            extra_patterns: sorted_unique(cfg.redaction.extra_patterns.clone()),
             default_retention_class: cfg.retention.default_class,
-            retention_classes: classes,
+            retention_classes: sorted_unique(cfg.retention.classes.clone()),
             feature_total_recall: cfg.features.total_recall,
             legacy_search_key: cfg.features.legacy_search.is_some(),
             policy_hash: Blake3Id::from_bytes([0; 32]),
             // `load` overwrites this; every other constructor is handed its
             // policy directly, so the declared policy is what applied.
             policy_source: PolicySource::Declared,
-        };
-        effective.policy_hash = effective.compute_policy_hash();
-        Ok(effective)
+        }
     }
 
     fn compute_policy_hash(&self) -> Blake3Id {
@@ -444,4 +357,136 @@ fn load_raw(rift_dir: &Path) -> Result<(RiftConfig, PolicySource)> {
     let raw = toml::from_str::<RiftConfig>(&text)
         .map_err(|e| RiftError::config(format!("{}: {e}", path.display())))?;
     Ok((raw, source))
+}
+
+/// The one linear validation pass: every check runs, in this order, and the
+/// problems are joined into one error. The explicit repo id is parsed here
+/// because an unparseable one is itself a validation problem.
+fn validate_config(cfg: &RiftConfig) -> Result<Option<RepoId>> {
+    let mut errors: Vec<String> = Vec::new();
+    check_schema_version(cfg, &mut errors);
+    check_model_overlap(cfg, &mut errors);
+    check_globs(cfg, &mut errors);
+    check_capture(cfg, &mut errors);
+    check_retention(cfg, &mut errors);
+    let repo_id = parse_repo_id(cfg, &mut errors);
+    if !errors.is_empty() {
+        return Err(RiftError::config(errors.join("; ")));
+    }
+    Ok(repo_id)
+}
+
+/// A schema version this build does not understand is refused rather than
+/// read under the wrong meaning.
+fn check_schema_version(cfg: &RiftConfig, errors: &mut Vec<String>) {
+    if !SUPPORTED_SCHEMA_VERSIONS.contains(&cfg.schema_version) {
+        errors.push(format!(
+            "unsupported schema_version {} (supported: {SUPPORTED_SCHEMA_VERSIONS:?})",
+            cfg.schema_version
+        ));
+    }
+}
+
+/// A model both allowed and denied is a contradiction the author must settle;
+/// deny would silently win otherwise.
+fn check_model_overlap(cfg: &RiftConfig, errors: &mut Vec<String>) {
+    for m in &cfg.models.allow {
+        if cfg.models.deny.contains(m) {
+            errors.push(format!("model {m:?} appears in both allow and deny"));
+        }
+    }
+}
+
+/// Every glob the config declares, in the order sensitive paths, allowed
+/// models, denied models, held to the matcher's bounds.
+fn check_globs(cfg: &RiftConfig, errors: &mut Vec<String>) {
+    let lists = [
+        (&cfg.paths.sensitive_paths, "paths.sensitive_paths"),
+        (&cfg.models.allow, "models.allow"),
+        (&cfg.models.deny, "models.deny"),
+    ];
+    for (globs, where_) in lists {
+        errors.extend(globs.iter().filter_map(|g| glob_problem(g, where_)));
+    }
+}
+
+/// The first bound one glob breaks, if any: the matcher refuses empty,
+/// NUL-bearing, over-long and over-wild patterns, so they are refused here
+/// where the author can see which key holds them.
+fn glob_problem(g: &str, where_: &str) -> Option<String> {
+    if g.is_empty() {
+        return Some(format!("empty glob in {where_}"));
+    }
+    if g.contains('\0') {
+        return Some(format!("glob in {where_} contains NUL"));
+    }
+    if g.len() > glob::MAX_PATTERN_LEN {
+        return Some(format!(
+            "glob in {where_} exceeds {} bytes (got {})",
+            glob::MAX_PATTERN_LEN,
+            g.len()
+        ));
+    }
+    if glob::wildcard_count(g) > glob::MAX_WILDCARDS {
+        return Some(format!(
+            "glob in {where_} has more than {} wildcards",
+            glob::MAX_WILDCARDS
+        ));
+    }
+    None
+}
+
+/// The capture section: raw transcripts only with the risk acknowledged, a
+/// known checkpoint strategy, and a schedule interval of at least a minute.
+fn check_capture(cfg: &RiftConfig, errors: &mut Vec<String>) {
+    if cfg.capture.raw_transcripts && !cfg.capture.acknowledge_risk {
+        errors.push("capture.raw_transcripts requires capture.acknowledge_risk = true".to_string());
+    }
+    if !CHECKPOINT_STRATEGIES.contains(&cfg.capture.checkpoint_strategy.as_str()) {
+        errors.push(format!(
+            "capture.checkpoint_strategy {:?} is not one of {CHECKPOINT_STRATEGIES:?}",
+            cfg.capture.checkpoint_strategy
+        ));
+    }
+    if cfg.capture.schedule_interval_minutes == 0 {
+        errors.push("capture.schedule_interval_minutes must be >= 1".to_string());
+    }
+}
+
+/// The default retention class must be named, and must be one of the declared
+/// classes when any are declared.
+fn check_retention(cfg: &RiftConfig, errors: &mut Vec<String>) {
+    if cfg.retention.default_class.is_empty() {
+        errors.push("retention.default_class must not be empty".to_string());
+    } else if !cfg.retention.classes.is_empty()
+        && !cfg.retention.classes.contains(&cfg.retention.default_class)
+    {
+        errors.push(format!(
+            "retention.default_class {:?} is not in retention.classes",
+            cfg.retention.default_class
+        ));
+    }
+}
+
+/// The explicit repo id, when one is declared and parses; an unparseable one
+/// is recorded as a problem and answers `None`.
+fn parse_repo_id(cfg: &RiftConfig, errors: &mut Vec<String>) -> Option<RepoId> {
+    let Some(s) = &cfg.project.repo_id else {
+        return None;
+    };
+    match RepoId::new(s.clone()) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            errors.push(format!("project.repo_id invalid: {e}"));
+            None
+        }
+    }
+}
+
+/// A list in canonical order with duplicates dropped, so the policy hash does
+/// not depend on how the author ordered or repeated entries.
+fn sorted_unique(mut items: Vec<String>) -> Vec<String> {
+    items.sort();
+    items.dedup();
+    items
 }
