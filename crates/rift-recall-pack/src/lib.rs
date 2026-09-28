@@ -607,28 +607,9 @@ pub fn compile(req: &PackRequest, turn_remaining: u32) -> core::result::Result<P
         .min(turn_remaining);
 
     // Fail-loud floor: the cheapest thing this request wants to say must fit.
-    // (An fully empty request compiles to an empty pack — nothing to hold.)
-    let cheapest = req
-        .critical
-        .first()
-        .map(SectionEntry::est_tokens)
-        .into_iter()
-        .chain(
-            req.body
-                .iter()
-                .flat_map(|(_, v)| v.iter().map(SectionEntry::est_tokens)),
-        )
-        .min();
-    match cheapest {
-        None => {
-            return Ok(Pack {
-                kind: req.kind,
-                sections: Vec::new(),
-                total_tokens: 0,
-                tokenizer: rift_tokens::provenance(),
-                citations: req.citations.clone(),
-            })
-        }
+    // (A fully empty request compiles to an empty pack — nothing to hold.)
+    match cheapest_entry_tokens(req) {
+        None => return Ok(empty_pack(req)),
         Some(needed) if needed > cap => {
             return Err(PackError::BudgetTooSmall { needed, cap });
         }
@@ -636,15 +617,7 @@ pub fn compile(req: &PackRequest, turn_remaining: u32) -> core::result::Result<P
     }
 
     // 1) Top anchor: critical facts in order, within the anchor band and cap.
-    let anchor_band = ANCHOR_TOP_CAP.min(cap);
-    let mut top: Vec<SectionEntry> = Vec::new();
-    let mut top_cost = 0u32;
-    for fact in &req.critical {
-        if top_cost + fact.est_tokens() <= anchor_band {
-            top_cost += fact.est_tokens();
-            top.push(fact.clone());
-        }
-    }
+    let (top, top_cost) = anchor_top(&req.critical, ANCHOR_TOP_CAP.min(cap));
 
     // 2) Tail reserve: the top anchors repeat within the 100–250 band.
     let tail_full: u32 = top.iter().map(SectionEntry::est_tokens).sum();
@@ -654,57 +627,119 @@ pub fn compile(req: &PackRequest, turn_remaining: u32) -> core::result::Result<P
 
     // 3) Fill the kind's body sections, in layout order, within the estimate
     //    budget, spilling to handles — and counting what neither form could fit.
-    let est_room = cap.saturating_sub(top_cost + reserve_tail);
-    let mut body = fill_body(req, est_room);
-
-    // If anything was dropped, the pack owes the reader a line saying so — and
-    // the fill is greedy, so it leaves no room to say it in. Re-fill with the
-    // announcement's own cost reserved, exactly as the tail is reserved. The
-    // reserve comes out of the SLACK the first pass left in the usual case; it
-    // costs an entry only when there was no slack, and that entry is then
-    // counted by the very line it paid for.
-    let dropped = total_dropped(&body);
-    if dropped > 0 {
-        let reserve = est_tokens(&drop_marker(dropped));
-        body = fill_body(req, est_room.saturating_sub(reserve));
-    }
+    let body = fill_body_announced(req, cap.saturating_sub(top_cost + reserve_tail));
 
     // 4) Tail: the longest top-prefix within the reserve; a CUT tail below
     //    the floor is dropped whole (deterministic graceful degradation).
-    let mut tail = materialize_tail(&top, reserve_tail);
+    let tail = materialize_tail(&top, reserve_tail);
 
     // 5) Post-render re-measure (over the serialized text, never estimate
     //    sums) + reverse-rank degrade until the measurement fits the cap.
-    let mut announce = true;
-    let mut measured;
+    let placed = Placed {
+        top,
+        body,
+        tail,
+        announce: true,
+    };
+    measure_and_degrade(req, cap, placed)
+}
+
+/// The estimate of the cheapest entry the request wants to say — its first
+/// critical fact or any body entry — which is the floor a cap must clear
+/// before compiling is worth attempting. `None` for a request with nothing in
+/// it.
+fn cheapest_entry_tokens(req: &PackRequest) -> Option<u32> {
+    req.critical
+        .first()
+        .map(SectionEntry::est_tokens)
+        .into_iter()
+        .chain(
+            req.body
+                .iter()
+                .flat_map(|(_, v)| v.iter().map(SectionEntry::est_tokens)),
+        )
+        .min()
+}
+
+/// The pack an empty request compiles to: no sections, nothing measured, and
+/// the request's citation table handed through as it came.
+fn empty_pack(req: &PackRequest) -> Pack {
+    Pack {
+        kind: req.kind,
+        sections: Vec::new(),
+        total_tokens: 0,
+        tokenizer: rift_tokens::provenance(),
+        citations: req.citations.clone(),
+    }
+}
+
+/// The top anchor: the critical facts in their given order whose estimates
+/// fit `band`, skipping any single fact too large for what remains, with the
+/// estimate they spend.
+fn anchor_top(critical: &[SectionEntry], band: u32) -> (Vec<SectionEntry>, u32) {
+    let mut top: Vec<SectionEntry> = Vec::new();
+    let mut top_cost = 0u32;
+    for fact in critical {
+        if top_cost + fact.est_tokens() <= band {
+            top_cost += fact.est_tokens();
+            top.push(fact.clone());
+        }
+    }
+    (top, top_cost)
+}
+
+/// Fill the body within `est_room`, and when that fill dropped anything,
+/// fill it again with the drop announcement's own cost reserved.
+///
+/// If anything was dropped, the pack owes the reader a line saying so — and
+/// the fill is greedy, so it leaves no room to say it in. Re-fill with the
+/// announcement's own cost reserved, exactly as the tail is reserved. The
+/// reserve comes out of the SLACK the first pass left in the usual case; it
+/// costs an entry only when there was no slack, and that entry is then
+/// counted by the very line it paid for.
+fn fill_body_announced(req: &PackRequest, est_room: u32) -> Vec<Slot> {
+    let body = fill_body(req, est_room);
+    let dropped = total_dropped(&body);
+    if dropped == 0 {
+        return body;
+    }
+    let reserve = est_tokens(&drop_marker(dropped));
+    fill_body(req, est_room.saturating_sub(reserve))
+}
+
+/// Measure the assembled pack over its rendered text and degrade it one step
+/// at a time until the measurement fits `cap` — a strictly shrinking,
+/// terminating loop, because every step removes something or reports that
+/// nothing is left to remove.
+///
+/// # Errors
+/// [`PackError::BudgetTooSmall`] when nothing is left to degrade and the
+/// minimal anchor still measures over the cap.
+fn measure_and_degrade(
+    req: &PackRequest,
+    cap: u32,
+    mut placed: Placed,
+) -> core::result::Result<Pack, PackError> {
     loop {
-        let pack = assemble(req.kind, &top, &body, &tail, announce);
-        measured = rift_tokens::count(&pack.render());
+        let pack = assemble(
+            req.kind,
+            &placed.top,
+            &placed.body,
+            &placed.tail,
+            placed.announce,
+        );
+        let measured = rift_tokens::count(&pack.render());
         if measured <= cap {
             return Ok(Pack {
                 total_tokens: measured,
                 // The table is the request's, handed through untouched. The
-                // degrade loop above may have dropped entries; it may not have
-                // renumbered any, and it cannot renumber what it never holds.
+                // degrade steps may have dropped entries; they may not have
+                // renumbered any, and they cannot renumber what they never hold.
                 citations: req.citations.clone(),
                 ..pack
             });
         }
-        // Reverse-rank, from the kind's degrade order: lowest-priority section
-        // first, last entry first; spill an inline entry if that shrinks it,
-        // else drop it outright. The announcement was already paid for above,
-        // so it is given up only after the whole body is gone — i.e. for a pack
-        // that is nothing but its anchors, where there is no content left to
-        // annotate and the reader can see there is none. Only then does the
-        // tail shrink, and the top anchor truncates last of all.
-        let degraded = degrade_order(req.kind).iter().any(|section| {
-            body.iter_mut()
-                .find(|s| s.kind == *section)
-                .is_some_and(Slot::degrade_last)
-        }) || silence(&mut announce)
-            || shrink_tail(&mut tail)
-            || (top.len() > 1 && top.pop().is_some());
-        if !degraded {
+        if !placed.degrade_step(req.kind) {
             // Nothing left but the minimal anchor and it still measures over
             // the cap (estimate/measure divergence corner): fail loud.
             return Err(PackError::BudgetTooSmall {
@@ -785,6 +820,40 @@ struct Slot {
     kind: SectionKind,
     entries: Vec<SectionEntry>,
     dropped: u32,
+}
+
+/// The pack's placed parts between filling and the final measurement: the
+/// state the degrade loop shrinks one step at a time.
+struct Placed {
+    top: Vec<SectionEntry>,
+    body: Vec<Slot>,
+    tail: Vec<SectionEntry>,
+    /// Whether the drop announcement still renders; given up only after the
+    /// whole body is gone.
+    announce: bool,
+}
+
+impl Placed {
+    /// Take one degrade step, in the pack's fixed order. `true` if anything
+    /// changed.
+    ///
+    /// Reverse-rank, from the kind's degrade order: lowest-priority section
+    /// first, last entry first; spill an inline entry if that shrinks it,
+    /// else drop it outright. The announcement was already paid for when the
+    /// body was filled, so it is given up only after the whole body is gone —
+    /// i.e. for a pack that is nothing but its anchors, where there is no
+    /// content left to annotate and the reader can see there is none. Only
+    /// then does the tail shrink, and the top anchor truncates last of all.
+    fn degrade_step(&mut self, kind: PackKind) -> bool {
+        degrade_order(kind).iter().any(|section| {
+            self.body
+                .iter_mut()
+                .find(|s| s.kind == *section)
+                .is_some_and(Slot::degrade_last)
+        }) || silence(&mut self.announce)
+            || shrink_tail(&mut self.tail)
+            || (self.top.len() > 1 && self.top.pop().is_some())
+    }
 }
 
 impl Slot {

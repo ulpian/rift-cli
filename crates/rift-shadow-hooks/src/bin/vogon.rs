@@ -290,102 +290,146 @@ fn script(spec: &Spec) -> Result<Vec<Step>, Fail> {
             ),
         ));
     }
-    let mut steps = vec![Step {
+    let mut steps = vec![session_start_step(spec)];
+    for turn in 1..=spec.turns {
+        steps.extend(turn_steps(spec, turn));
+    }
+    steps.push(session_end_step(spec));
+    Ok(steps)
+}
+
+/// The session opens once, before the first turn.
+fn session_start_step(spec: &Spec) -> Step {
+    Step {
         verb: "SessionStart",
         payload: base(spec, serde_json::json!({"source": "startup"})),
         kinds: &[EventKind::SessionStart],
-    }];
-    for turn in 1..=spec.turns {
-        let file = turn_file(spec, turn);
-        steps.push(Step {
-            verb: "UserPromptSubmit",
+    }
+}
+
+/// One turn, in fire order: the prompt, a `Read` and an `Edit` of the turn's
+/// file, the subagent beat on its turn, `Stop`, then the compaction beat on
+/// its turn. A beat whose turn is `0` never fires, which is how the flags
+/// disable it.
+fn turn_steps(spec: &Spec, turn: u32) -> Vec<Step> {
+    let file = turn_file(spec, turn);
+    let mut steps = vec![prompt_step(spec, turn)];
+    steps.extend(tool(spec, "Read", &file, &[EventKind::ToolCall]));
+    steps.extend(tool(
+        spec,
+        "Edit",
+        &file,
+        &[EventKind::ToolCall, EventKind::FileEdit],
+    ));
+    if turn == spec.subagent_turn {
+        steps.extend(subagent_steps(spec));
+    }
+    steps.push(turn_end_step(spec));
+    if turn == spec.compact_turn {
+        steps.push(compaction_step(spec));
+    }
+    steps
+}
+
+/// The prompt that opens a turn; its text names the ordinal so every turn's
+/// prompt is distinct and still a pure function of the spec.
+fn prompt_step(spec: &Spec, turn: u32) -> Step {
+    Step {
+        verb: "UserPromptSubmit",
+        payload: base(
+            spec,
+            serde_json::json!({"prompt": format!("vogon turn {turn}")}),
+        ),
+        kinds: &[EventKind::PromptSubmit],
+    }
+}
+
+/// The subagent beat: the parent's subagent tool call, the subagent's own
+/// start and stop, then the parent's tool result — the order a real parent
+/// session observes a delegated task in.
+fn subagent_steps(spec: &Spec) -> Vec<Step> {
+    // The pinned shape, not an invented one: this family's
+    // `SubagentStartHookInput`/`SubagentStopHookInput` carry the
+    // parent's session id plus a REQUIRED `agent_id`/`agent_type`, and
+    // that pair is what keys the window a subagent's pointer, baseline
+    // and window journal all live under. Scripting the parent's session
+    // with a `-sub` suffix instead produced one window where the drive
+    // should produce two, so the boundary this walk exists to exercise
+    // was never crossed.
+    let agent_id = format!("{}-agent", spec.session);
+    vec![
+        Step {
+            verb: "PreToolUse",
             payload: base(
                 spec,
-                serde_json::json!({"prompt": format!("vogon turn {turn}")}),
+                serde_json::json!({
+                    "tool_name": rift_agent_claude_code::SUBAGENT_TOOL,
+                    "tool_input": {"description": "vogon subagent"},
+                }),
             ),
-            kinds: &[EventKind::PromptSubmit],
-        });
-        steps.extend(tool(spec, "Read", &file, &[EventKind::ToolCall]));
-        steps.extend(tool(
-            spec,
-            "Edit",
-            &file,
-            &[EventKind::ToolCall, EventKind::FileEdit],
-        ));
-        if turn == spec.subagent_turn {
-            steps.push(Step {
-                verb: "PreToolUse",
-                payload: base(
-                    spec,
-                    serde_json::json!({
-                        "tool_name": rift_agent_claude_code::SUBAGENT_TOOL,
-                        "tool_input": {"description": "vogon subagent"},
-                    }),
-                ),
-                kinds: &[EventKind::ToolCall],
-            });
-            // The pinned shape, not an invented one: this family's
-            // `SubagentStartHookInput`/`SubagentStopHookInput` carry the
-            // parent's session id plus a REQUIRED `agent_id`/`agent_type`, and
-            // that pair is what keys the window a subagent's pointer, baseline
-            // and window journal all live under. Scripting the parent's session
-            // with a `-sub` suffix instead produced one window where the drive
-            // should produce two, so the boundary this walk exists to exercise
-            // was never crossed.
-            let agent_id = format!("{}-agent", spec.session);
-            steps.push(Step {
-                verb: "SubagentStart",
-                payload: base(
-                    spec,
-                    serde_json::json!({
-                        "agent_id": agent_id,
-                        "agent_type": "general-purpose",
-                    }),
-                ),
-                kinds: &[EventKind::SubagentStart],
-            });
-            steps.push(Step {
-                verb: "SubagentStop",
-                payload: base(
-                    spec,
-                    serde_json::json!({
-                        "agent_id": agent_id,
-                        "agent_type": "general-purpose",
-                    }),
-                ),
-                kinds: &[EventKind::SubagentEnd],
-            });
-            steps.push(Step {
-                verb: "PostToolUse",
-                payload: base(
-                    spec,
-                    serde_json::json!({
-                        "tool_name": rift_agent_claude_code::SUBAGENT_TOOL,
-                        "tool_response": {"ok": true},
-                    }),
-                ),
-                kinds: &[EventKind::ToolResult],
-            });
-        }
-        steps.push(Step {
-            verb: "Stop",
-            payload: base(spec, serde_json::json!({"stop_hook_active": false})),
-            kinds: &[EventKind::TurnEnd],
-        });
-        if turn == spec.compact_turn {
-            steps.push(Step {
-                verb: "PreCompact",
-                payload: base(spec, serde_json::json!({"trigger": "auto"})),
-                kinds: &[EventKind::SessionCompaction],
-            });
-        }
+            kinds: &[EventKind::ToolCall],
+        },
+        Step {
+            verb: "SubagentStart",
+            payload: base(
+                spec,
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "agent_type": "general-purpose",
+                }),
+            ),
+            kinds: &[EventKind::SubagentStart],
+        },
+        Step {
+            verb: "SubagentStop",
+            payload: base(
+                spec,
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "agent_type": "general-purpose",
+                }),
+            ),
+            kinds: &[EventKind::SubagentEnd],
+        },
+        Step {
+            verb: "PostToolUse",
+            payload: base(
+                spec,
+                serde_json::json!({
+                    "tool_name": rift_agent_claude_code::SUBAGENT_TOOL,
+                    "tool_response": {"ok": true},
+                }),
+            ),
+            kinds: &[EventKind::ToolResult],
+        },
+    ]
+}
+
+/// The `Stop` that closes a turn.
+fn turn_end_step(spec: &Spec) -> Step {
+    Step {
+        verb: "Stop",
+        payload: base(spec, serde_json::json!({"stop_hook_active": false})),
+        kinds: &[EventKind::TurnEnd],
     }
-    steps.push(Step {
+}
+
+/// The compaction beat, fired after its turn's `Stop`.
+fn compaction_step(spec: &Spec) -> Step {
+    Step {
+        verb: "PreCompact",
+        payload: base(spec, serde_json::json!({"trigger": "auto"})),
+        kinds: &[EventKind::SessionCompaction],
+    }
+}
+
+/// The session closes once, after the last turn.
+fn session_end_step(spec: &Spec) -> Step {
+    Step {
         verb: "SessionEnd",
         payload: base(spec, serde_json::json!({"reason": "exit"})),
         kinds: &[EventKind::SessionEnd],
-    });
-    Ok(steps)
+    }
 }
 
 /// The `PreToolUse` → `PostToolUse` pair for one tool. `PreToolUse` is the
