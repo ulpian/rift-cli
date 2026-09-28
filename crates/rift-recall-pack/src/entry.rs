@@ -703,61 +703,13 @@ impl SectionEntry {
         let cite = |basis: Option<&str>| format!("{FILE_TAG}{}", evidence.with_basis(basis));
         match &e.state {
             ArtifactState::KnownUnchanged { basis_sha256, .. } => {
-                let cited = evidence.with_basis(Some(basis_sha256));
-                Self::new(
-                    if cited.is_addressed() {
-                        format!("{FILE_TAG}{cited} unchanged (known_unchanged; not re-inlined)")
-                    } else {
-                        // The hash IS the claim in this state, so a missing one
-                        // is said out loud rather than left as an absence a
-                        // reader has to notice.
-                        //
-                        // Keyed on the CITATION and not on `basis_sha256`,
-                        // because those are different questions the moment a
-                        // caller supplies its own address: a malformed basis
-                        // beside a valid caller address would otherwise render
-                        // a line that carries `@sha256:…` and says the address
-                        // is unavailable in the same breath. No such caller
-                        // exists today; the contradiction is unrepresentable
-                        // rather than merely unreached.
-                        format!(
-                            "{FILE_TAG}{cited} unchanged \
-                             (known_unchanged; content address unavailable)"
-                        )
-                    },
-                    EntryClass::KnownUnchanged,
-                )
+                Self::known_unchanged_entry(evidence, basis_sha256)
             }
             ArtifactState::SummaryIncluded {
                 basis_sha256,
                 summary,
                 ..
-            } => {
-                let cite = cite(Some(basis_sha256));
-                match sensitivity {
-                    Sensitivity::Sensitive => Self::new(
-                        format!("{cite} available (sensitive; summary withheld)"),
-                        EntryClass::Handle,
-                    ),
-                    // **A DECLARED, DORMANT GAP — NOT CLOSED.** This is
-                    // the one remaining field on an artifact line that renders
-                    // caller TEXT, and this file's own note above says why it
-                    // matters: a summary is a digest whose text can echo spans
-                    // of its source (the failure extractor stabilizes log
-                    // lines, the diff extractor names paths out of the diff).
-                    // It is unreachable on the shipped serve path only because
-                    // `SummaryStore::new()` is always empty there, so `resolve`
-                    // verdicts `Degraded` and this arm is never taken —
-                    // dormant, which is not the same as closed. When summaries
-                    // are persisted, this arm needs the name-by-ordinal treatment
-                    // (or a chokepoint) BEFORE it goes live.
-                    Sensitivity::Normal => Self::with_spill(
-                        format!("{cite} summary: {}", sanitize_field(summary)),
-                        EntryClass::SummaryBound,
-                        Some(format!("{cite} available (budget_exhausted)")),
-                    ),
-                }
-            }
+            } => Self::summary_entry(&cite(Some(basis_sha256)), summary, sensitivity),
             ArtifactState::ExactIncluded {
                 basis_sha256,
                 content,
@@ -781,6 +733,60 @@ impl SectionEntry {
                     EntryClass::Handle,
                 )
             }
+        }
+    }
+
+    /// The known-unchanged line: the hash IS the claim in this state, so a
+    /// missing one is said out loud rather than left as an absence a reader
+    /// has to notice.
+    ///
+    /// Keyed on the CITATION and not on `basis_sha256`, because those are
+    /// different questions the moment a caller supplies its own address: a
+    /// malformed basis beside a valid caller address would otherwise render a
+    /// line that carries `@sha256:…` and says the address is unavailable in
+    /// the same breath. No such caller exists; the contradiction is
+    /// unrepresentable rather than merely unreached.
+    fn known_unchanged_entry(evidence: &EvidenceRef, basis_sha256: &str) -> Self {
+        let cited = evidence.with_basis(Some(basis_sha256));
+        Self::new(
+            if cited.is_addressed() {
+                format!("{FILE_TAG}{cited} unchanged (known_unchanged; not re-inlined)")
+            } else {
+                format!(
+                    "{FILE_TAG}{cited} unchanged \
+                     (known_unchanged; content address unavailable)"
+                )
+            },
+            EntryClass::KnownUnchanged,
+        )
+    }
+
+    /// The summary line under `sensitivity`: a sensitive summary downgrades to
+    /// its handle (exact-or-handle, never a lossy summary), a normal one
+    /// renders its sanitized digest and spills to its handle.
+    fn summary_entry(cite: &str, summary: &str, sensitivity: Sensitivity) -> Self {
+        match sensitivity {
+            Sensitivity::Sensitive => Self::new(
+                format!("{cite} available (sensitive; summary withheld)"),
+                EntryClass::Handle,
+            ),
+            // **A DECLARED, DORMANT GAP — NOT CLOSED.** This is
+            // the one remaining field on an artifact line that renders
+            // caller TEXT, and this file's own note above says why it
+            // matters: a summary is a digest whose text can echo spans
+            // of its source (the failure extractor stabilizes log
+            // lines, the diff extractor names paths out of the diff).
+            // It is unreachable on the shipped serve path only because
+            // `SummaryStore::new()` is always empty there, so `resolve`
+            // verdicts `Degraded` and this arm is never taken —
+            // dormant, which is not the same as closed. When summaries
+            // are persisted, this arm needs the name-by-ordinal treatment
+            // (or a chokepoint) BEFORE it goes live.
+            Sensitivity::Normal => Self::with_spill(
+                format!("{cite} summary: {}", sanitize_field(summary)),
+                EntryClass::SummaryBound,
+                Some(format!("{cite} available (budget_exhausted)")),
+            ),
         }
     }
 
