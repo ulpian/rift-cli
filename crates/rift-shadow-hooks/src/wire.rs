@@ -247,6 +247,10 @@ pub fn schema_json() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// One row of the session-key sweep: the agent token, the native verb,
+    /// and the payload exactly as that agent sends it.
+    type SpellingCase = (&'static str, &'static str, serde_json::Value);
+
     #[test]
     fn parse_bounded_rejects_oversize_and_garbage_without_panic() {
         assert!(parse_bounded(&vec![b'x'; MAX_STDIN_BYTES + 1]).is_err());
@@ -359,7 +363,33 @@ mod tests {
     /// a receipt until the deferred-no-session receipt landed.
     #[test]
     fn every_verified_agent_session_spelling_binds_its_own_id() {
-        let cases: &[(&str, &str, serde_json::Value)] = &[
+        let snake_case = fixture_snake_case_session_spellings();
+        let other = fixture_other_session_spellings();
+        for (agent, verb, payload) in snake_case.iter().chain(&other) {
+            let body = serde_json::to_vec(payload).unwrap();
+            let raw = build_raw_hook(agent, verb, &body, 0)
+                .unwrap_or_else(|e| panic!("{agent}/{verb} must build: {e}"));
+            assert!(
+                !raw.session.is_empty(),
+                "{agent}/{verb}: the wire did not find this agent's session id — \
+                 every hook it fires would be captured under no session at all"
+            );
+            assert!(
+                crate::session_id::is_safe_session_id(&raw.session),
+                "{agent}/{verb}: the bound id must be usable as a name"
+            );
+            // The whole native object is the payload, so the adapter still
+            // sees every field it needs.
+            assert_eq!(
+                raw.payload, *payload,
+                "{agent}/{verb}: payload ingested whole"
+            );
+        }
+    }
+
+    /// The agents that name their session `session_id`.
+    fn fixture_snake_case_session_spellings() -> Vec<SpellingCase> {
+        vec![
             (
                 "claude-code",
                 "Stop",
@@ -396,6 +426,24 @@ mod tests {
                 serde_json::json!({"session_id": "ses_7Kq2"}),
             ),
             (
+                // Copilot under the VS Code host, whose payloads use the
+                // snake_case alternate compat.go:74 also accepts; the CLI's
+                // own `sessionId` spelling is in the other table.
+                "copilot-cli",
+                "prompt",
+                serde_json::json!({
+                    "session_id": "b0ff98c0-8e01-4b73-bf92-9649b139931b",
+                    "hookEventName": "userPromptSubmitted",
+                    "transcript_path": "/t.jsonl"
+                }),
+            ),
+        ]
+    }
+
+    /// The agents that spell their session key some other way.
+    fn fixture_other_session_spellings() -> Vec<SpellingCase> {
+        vec![
+            (
                 "cursor",
                 "stop",
                 serde_json::json!({
@@ -427,38 +475,7 @@ mod tests {
                     "stopReason": "end_turn"
                 }),
             ),
-            (
-                // The same agent under the VS Code host, whose payloads use the
-                // snake_case alternate compat.go:74 also accepts.
-                "copilot-cli",
-                "prompt",
-                serde_json::json!({
-                    "session_id": "b0ff98c0-8e01-4b73-bf92-9649b139931b",
-                    "hookEventName": "userPromptSubmitted",
-                    "transcript_path": "/t.jsonl"
-                }),
-            ),
-        ];
-        for (agent, verb, payload) in cases {
-            let body = serde_json::to_vec(payload).unwrap();
-            let raw = build_raw_hook(agent, verb, &body, 0)
-                .unwrap_or_else(|e| panic!("{agent}/{verb} must build: {e}"));
-            assert!(
-                !raw.session.is_empty(),
-                "{agent}/{verb}: the wire did not find this agent's session id — \
-                 every hook it fires would be captured under no session at all"
-            );
-            assert!(
-                crate::session_id::is_safe_session_id(&raw.session),
-                "{agent}/{verb}: the bound id must be usable as a name"
-            );
-            // The whole native object is the payload, so the adapter still
-            // sees every field it needs.
-            assert_eq!(
-                raw.payload, *payload,
-                "{agent}/{verb}: payload ingested whole"
-            );
-        }
+        ]
     }
 
     /// The other half of the Copilot pair. Copilot fires its *session*
