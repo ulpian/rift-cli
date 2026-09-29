@@ -140,14 +140,9 @@ fn a_task_subtree_roundtrips_and_the_root_rederives_from_read_back_bytes() {
     }];
     let derived = shard_merkle_root(&ShardLeafBytes {
         content_redacted: &content,
-        full_jsonl: None,
         redaction_report: &report,
-        tool_calls: None,
-        transcript_compact: None,
-        transcript_full: None,
         tasks: &task_leaves,
-        session_metas: &[],
-        digests: DigestLeafBytes::default(),
+        ..ShardLeafBytes::default()
     });
     assert_eq!(
         meta.get("merkle_root").and_then(serde_json::Value::as_str),
@@ -186,12 +181,14 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
     let report = read("redaction_report.json").expect("redaction_report.json is always written");
     let full = read("full.jsonl");
     let tool_calls = read("tool_calls.jsonl");
+    let serve_audit = read("serve_audit.jsonl");
     let transcript_compact = read("transcript.compact.jsonl");
     let transcript_full = read("transcript.jsonl");
     let derived = shard_merkle_root(&ShardLeafBytes {
         content_redacted: &content,
         full_jsonl: full.as_deref(),
         redaction_report: &report,
+        serve_audit: serve_audit.as_deref(),
         tool_calls: tool_calls.as_deref(),
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
@@ -221,6 +218,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
         content_redacted: &tampered,
         full_jsonl: full.as_deref(),
         redaction_report: &report,
+        serve_audit: serve_audit.as_deref(),
         tool_calls: tool_calls.as_deref(),
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
@@ -312,6 +310,7 @@ fn a_seeded_secret_never_reaches_any_native_artifact() {
         prev_hash: None,
         events: Vec::new(),
         read_facts: Vec::new(),
+        serve_audit: None,
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript: None,
@@ -373,6 +372,7 @@ fn archive_with_transcript(
         prev_hash: None,
         events: Vec::new(),
         read_facts: Vec::new(),
+        serve_audit: None,
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript,
@@ -385,6 +385,37 @@ fn archive_with_transcript(
     };
     archive.checkpoint_id = archive.derived_checkpoint_id().unwrap();
     archive
+}
+
+/// **The frozen serve envelopes survive the trip through git byte for byte**,
+/// and they are a leaf: the root the shard records re-derives from the bytes
+/// read back, and the same archive without them addresses a different shard.
+#[test]
+fn a_frozen_serve_audit_reads_back_byte_for_byte_and_is_bound_by_the_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let lines = b"{\"idempotency_key\":\"k1\",\"schema\":1,\"verb\":\"memd.grep_capped\"}\n";
+    let mut archive = archive_with_transcript(tmp.path(), b"the capture", None);
+    let bare_id = archive.checkpoint_id.clone();
+    archive.serve_audit = Some(lines.to_vec());
+    archive.checkpoint_id = archive.derived_checkpoint_id().unwrap();
+    assert_ne!(
+        archive.checkpoint_id, bare_id,
+        "the artifact is bound by the id"
+    );
+    native_backend(tmp.path())
+        .archive_checkpoint(&archive)
+        .unwrap();
+
+    let sub = GixSubstrate::open(tmp.path()).unwrap();
+    let read = |name: &str| sub.read_artifact(&archive.checkpoint_id, name).unwrap();
+    assert_eq!(read("serve_audit.jsonl").as_deref(), Some(lines.as_slice()));
+    let meta: serde_json::Value = serde_json::from_slice(&read("metadata.json").unwrap()).unwrap();
+    assert_eq!(
+        meta.get("merkle_root").and_then(serde_json::Value::as_str),
+        Some(archive.merkle_root().to_hex().as_str()),
+        "the recorded root is the one over the artifact as written"
+    );
 }
 
 /// Half one: **re-condense of an unchanged session is a no-op

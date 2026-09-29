@@ -757,6 +757,7 @@ fn record_injection_spend(repo: &std::path::Path, tokens: u32, occurrence: &str)
             .map_err(rift_core::RiftError::from)?;
         rt.block_on(append_memd_audit(&store, envelope.as_bytes(), now_ms()))
     })();
+    super::audit::journal_serve_in(repo, None, envelope.as_bytes());
 }
 
 /// Append the channel-attributed half of a boundary delivery after a native
@@ -814,7 +815,9 @@ fn record_context_delivery_in(repo: &Path, agent: &str, plan: &rift_recall_types
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(rift_core::RiftError::from)?;
-        rt.block_on(append_memd_audit(&store, called.as_bytes(), at))
+        let booked = rt.block_on(append_memd_audit(&store, called.as_bytes(), at));
+        super::audit::journal_serve_in(repo, None, called.as_bytes());
+        booked
     })();
 }
 

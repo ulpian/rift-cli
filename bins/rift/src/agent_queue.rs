@@ -274,6 +274,12 @@ pub(crate) struct ServeAudit {
     /// of the two ceilings rather than guessing the larger one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<rift_recall_serve::ListingShape>,
+    /// The session whose hook decided, so the worker can journal the
+    /// decision's envelopes beside that session's checkpoint. `None` on a job
+    /// an older binary left behind, which journals as unattributed and is
+    /// folded into the next checkpoint of any session in the family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 /// Which accounting row a [`ServeAudit`] becomes. One variant per hook-side
@@ -727,6 +733,7 @@ mod tests {
                 total: None,
                 declared_avoided: None,
                 shape: None,
+                session: None,
             }),
         }
     }

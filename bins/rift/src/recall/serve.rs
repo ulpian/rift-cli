@@ -237,7 +237,8 @@ async fn book_the_serve_and_act_on_its_decision(
     req: &rift_recall_serve::ToolRequest,
     resp: &ToolResponse,
 ) -> Outcome {
-    let _ = record_serve(store, verb, scope, resp).await;
+    let common_dir = rift_git::discover(repo).ok().map(|paths| paths.common_dir);
+    let _ = record_serve(store, common_dir.as_deref(), verb, scope, resp).await;
     // The dispatcher decided; this acts on the decision. A conversion is owed
     // only where the surface actually answered that one is — so a denied
     // document never queues work, and a document the family has already
@@ -277,6 +278,7 @@ static SERVE_IDS: std::sync::LazyLock<rift_core::MonotonicUlidSource> =
 /// legacy one on the new one succeeding or vice versa.
 async fn record_serve(
     store: &SqliteStore,
+    journal: Option<&Path>,
     verb: &str,
     scope: &rift_recall_types::Scope,
     resp: &ToolResponse,
@@ -295,7 +297,9 @@ async fn record_serve(
         resp.event.to_hook_json_keyed(&call_id)
     };
     let now = crate::hooks::now_ms();
-    crate::hooks::append_memd_audit(store, envelope.as_bytes(), now).await?;
+    let booked = crate::hooks::append_memd_audit(store, envelope.as_bytes(), now).await;
+    journal_serve(journal, &envelope);
+    booked?;
     if granted {
         if let (Some(audit_id), Some(reason)) = (audit_id_of(&envelope), scope.cross.reason()) {
             rift_recall_ledger::grants::record_serve_grant(
@@ -315,12 +319,23 @@ async fn record_serve(
         verb,
         rift_core::Timestamp::from_millis(crate::hooks::now_ms()),
     );
-    crate::hooks::append_memd_audit(
+    let booked = crate::hooks::append_memd_audit(
         store,
         serve_call_envelope.as_bytes(),
         crate::hooks::now_ms(),
     )
-    .await
+    .await;
+    journal_serve(journal, &serve_call_envelope);
+    booked
+}
+
+/// Journal one of the serve's envelopes as unattributed — a skill-CLI serve
+/// belongs to no session, and the family's next checkpoint folds it. `None`
+/// is a serve made where no repository could be found to journal under.
+fn journal_serve(common_dir: Option<&Path>, envelope: &str) {
+    if let Some(common_dir) = common_dir {
+        crate::hooks::journal_serve_envelope(common_dir, None, envelope.as_bytes());
+    }
 }
 
 /// The `memd_audit_event.audit_id` an envelope will land under — its own
@@ -420,10 +435,10 @@ mod tests {
             },
         };
         let ungranted = rift_recall_types::Scope::unbounded("fam");
-        record_serve(&store, "known-state", &ungranted, &resp)
+        record_serve(&store, None, "known-state", &ungranted, &resp)
             .await
             .expect("first serve audits");
-        record_serve(&store, "known-state", &ungranted, &resp)
+        record_serve(&store, None, "known-state", &ungranted, &resp)
             .await
             .expect("second serve audits");
 
@@ -535,7 +550,7 @@ mod tests {
         let reason = "reviewing the sibling worktree before the merge";
         scope.cross = rift_recall_types::CrossScopeGrant::grant(reason, true, false, false);
 
-        record_serve(&store, "known-state", &scope, &resp)
+        record_serve(&store, None, "known-state", &scope, &resp)
             .await
             .expect("the widened serve audits");
 
@@ -594,6 +609,7 @@ mod tests {
         };
         record_serve(
             &store,
+            None,
             "known-state",
             &rift_recall_types::Scope::unbounded("fam"),
             &resp,

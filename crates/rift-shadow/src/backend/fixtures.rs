@@ -45,6 +45,7 @@ pub(super) fn archive() -> CheckpointArchive {
         prev_hash: None,
         events: Vec::new(),
         read_facts: Vec::new(),
+        serve_audit: None,
         content: redacted(),
         report: RedactionReportView {
             total_spans: 0,

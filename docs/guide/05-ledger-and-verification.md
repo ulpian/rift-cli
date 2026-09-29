@@ -83,7 +83,7 @@ checkpoint branch under a path derived from its own id:
 ```
 <id[:2]>/<id[2:]>/
     content.redacted   content_hash.txt   full.jsonl   metadata.json
-    redaction_report.json   tool_calls.jsonl
+    redaction_report.json   serve_audit.jsonl   tool_calls.jsonl
     digest.failures.json  digest.intent.json  digest.log.json  digest.shape.json
     transcript.jsonl   transcript.compact.jsonl
     sessions/<index>/metadata.json      (per-session header; only when the checkpoint covers 2+ sessions)
@@ -103,6 +103,7 @@ and a version field nothing binds documents nothing.
 | `full.jsonl` | one line per archived canonical event |
 | `metadata.json` | the header: sessions covered, recorded Merkle root, canonicalization era, task list, token rollups |
 | `redaction_report.json` | counts only — what redaction removed, never what it removed |
+| `serve_audit.jsonl` | the serves Rift made in the session, one canonical envelope per line; absent when there were none |
 | `tool_calls.jsonl` | the tool calls, reduced to identifiers |
 | `transcript.*.jsonl` | the transcript: a full copy and a deterministic compact one |
 
@@ -114,6 +115,26 @@ is what a verifier can re-derive. The redaction report is re-verified on every
 `rift verify`, and the artifact bridge refuses to project a checkpoint whose
 report is missing or invalid, so "this checkpoint went through the gate" is
 checkable rather than hopeful.
+
+The serve audit is the recall plane's record of what it served, frozen where a
+rebuild cannot reach it.
+Every line is a serve envelope in canonical form: the declared members only,
+keys sorted, and every member that could hold text a person or a model typed
+replaced by the placeholder `withheld`.
+The reason a caller gives for an exact retrieval is one such member, and so is
+the target of a refusal unless it is a citation.
+Each line keeps its idempotency key, and every line carries its own envelope
+`schema`, so the artifact has no single version of its own.
+Serves are journaled per session under the family's git common dir, beside the
+push queue, and a serve that belongs to no session (a skill-CLI call) is folded
+into the next checkpoint any session of the family condenses.
+The artifact is cumulative, like the read facts beside it: every checkpoint of a
+session carries every serve the session has frozen so far, so a second commit
+with nothing served since derives the same id and stays a no-op.
+The trailer's prediction folds the same journal through the same function, so
+a session with serves predicts its checkpoint as exactly as it predicts its
+read facts: a serve journaled between the trailer and the condense lands in the
+archive and not in the trailer, and the archive keeps its true id.
 
 `rift checkpoint explain` renders a shard for a human — metadata, digests, the
 redacted prompt, files touched, tokens and cost, attribution — and with no
@@ -156,7 +177,7 @@ artifact and a short path prove membership without handing over the checkpoint.
 A checkpoint's leaves are its content artifacts **in bytewise full-path order**,
 exactly the order git sorts the tree into: `content.redacted`, the four
 `digest.*.json`, each line of `full.jsonl` as its own leaf,
-`redaction_report.json`, `sessions/<index>/metadata.json` (bytewise by index
+`redaction_report.json`, `serve_audit.jsonl`, `sessions/<index>/metadata.json` (bytewise by index
 name, so "10" precedes "2"), `tasks/<id>/…` (bytewise by tool-use id),
 `tool_calls.jsonl`, then `transcript.compact.jsonl` and `transcript.jsonl`.
 
@@ -164,7 +185,10 @@ name, so "10" precedes "2"), `tasks/<id>/…` (bytewise by tool-use id),
 derives, leaf for leaf, the sequence it would have derived before that artifact
 existed — so the transcript pair (sorting last) and the subagent subtrees
 (sorting *between* `redaction_report.json` and `tool_calls.jsonl`, because
-`ta` < `to`) were both addable without changing any existing root. A future
+`ta` < `to`) were both addable without changing any existing root.
+So was `serve_audit.jsonl`, which lands right after `redaction_report.json`
+and before `sessions/`: `r` < `s` at the first byte, and again at the third.
+A future
 artifact must respect that rule: pick the name knowing where it lands.
 
 Two artifacts are excluded from the leaves. `metadata.json` carries the root

@@ -206,6 +206,7 @@ fn journal_prevented(
                 total: None,
                 declared_avoided: None,
                 shape: None,
+                session: Some(raw.session.clone()),
             }),
         },
     )

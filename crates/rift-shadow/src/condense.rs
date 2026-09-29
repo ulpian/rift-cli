@@ -24,6 +24,24 @@ use crate::sha256_hex;
 /// A content-addressed checkpoint id (lowercase hex).
 pub type CheckpointId = String;
 
+/// What a session captured beside its capture document, handed to the archive
+/// as one value: the read facts that become `tool_calls.jsonl` and the frozen
+/// serve envelopes that become `serve_audit.jsonl`.
+///
+/// One struct rather than one parameter per artifact, because the prediction
+/// and the archive must fold exactly the same facts, and every new fact
+/// threaded as its own parameter was another signature on every path between
+/// the hook and the shard. A new fact is a field here and nowhere else.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionFacts {
+    /// The session's captured read facts (`tool_calls.jsonl`).
+    pub read_facts: Vec<crate::backend::ArchivedReadFact>,
+    /// The session's frozen serve envelopes, already canonical, validated,
+    /// de-duplicated and sorted (`serve_audit.jsonl`); `None` when it froze
+    /// none.
+    pub serve_audit: Option<Vec<u8>>,
+}
+
 /// **The one derivation of a new checkpoint id**: `sha256(session ‖ \0 ‖
 /// sha256_hex(shard Merkle root))`, where the root is
 /// [`shard_merkle_root`](crate::backend::shard_merkle_root) over the shard's
@@ -154,10 +172,10 @@ pub fn checkpoint_ids_for_shard(
 pub fn predicted_checkpoint_id(
     session: &str,
     raw_capture: &SecretBytes,
-    read_facts: &[crate::backend::ArchivedReadFact],
+    facts: &SessionFacts,
     packs: &RulePackSet,
 ) -> Result<CheckpointId> {
-    predicted_checkpoint_id_from(session, predict_redaction(raw_capture, packs)?, read_facts)
+    predicted_checkpoint_id_from(session, predict_redaction(raw_capture, packs)?, facts)
 }
 
 /// The REDACTION half of [`predicted_checkpoint_id`], separable so the
@@ -205,13 +223,13 @@ pub fn predict_redaction(
 pub fn predicted_checkpoint_id_from(
     session: &str,
     out: rift_shadow_redact::RedactionOutput,
-    read_facts: &[crate::backend::ArchivedReadFact],
+    facts: &SessionFacts,
 ) -> Result<CheckpointId> {
     let archive = archive_for_id(
         session,
         out.redacted,
         RedactionReportView::from_redact(&out.report),
-        read_facts.to_vec(),
+        facts.clone(),
     );
     derived_id(&archive)
 }
@@ -222,7 +240,7 @@ fn archive_for_id(
     session: &str,
     content: rift_core::RedactedBytes,
     report: RedactionReportView,
-    read_facts: Vec<crate::backend::ArchivedReadFact>,
+    facts: SessionFacts,
 ) -> CheckpointArchive {
     CheckpointArchive {
         repo: std::path::PathBuf::new(),
@@ -232,7 +250,8 @@ fn archive_for_id(
         strategy: String::new(),
         prev_hash: None,
         events: Vec::new(),
-        read_facts,
+        read_facts: facts.read_facts,
+        serve_audit: facts.serve_audit,
         content,
         report,
         transcript: None,
@@ -266,7 +285,7 @@ pub async fn condense(
     reason: ArchiveReason,
     commit_oid: &str,
     now_ms: i64,
-    read_facts: Vec<crate::backend::ArchivedReadFact>,
+    facts: SessionFacts,
     packs: &RulePackSet,
     transcript: Option<crate::backend::ArchivedTranscript>,
     tasks: Vec<crate::backend::ArchivedTask>,
@@ -298,7 +317,8 @@ pub async fn condense(
         strategy: strategy.as_str().to_owned(),
         prev_hash: None,
         events: Vec::new(),
-        read_facts,
+        read_facts: facts.read_facts,
+        serve_audit: facts.serve_audit,
         content: out.redacted,
         report,
         // Already through the gate: `ArchivedTranscript` is constructible only
@@ -504,7 +524,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
-            Vec::new(),
+            SessionFacts::default(),
             &RulePackSet::builtin(),
             None,
             Vec::new(),
@@ -539,7 +559,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
-            Vec::new(),
+            SessionFacts::default(),
             &RulePackSet::builtin(),
             None,
             Vec::new(),
@@ -557,7 +577,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
-            Vec::new(),
+            SessionFacts::default(),
             &RulePackSet::builtin(),
             None,
             Vec::new(),
@@ -596,7 +616,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
-            Vec::new(),
+            SessionFacts::default(),
             &RulePackSet::builtin(),
             None,
             Vec::new(),
@@ -635,6 +655,7 @@ mod tests {
             prev_hash: None,
             events: Vec::new(),
             read_facts: facts,
+            serve_audit: None,
             content,
             report: RedactionReportView {
                 total_spans: 0,
@@ -838,7 +859,8 @@ mod tests {
         let backend = crate::backend::NativeBackend::in_memory();
         let raw = SecretBytes::new(b"capture".to_vec());
         let packs = RulePackSet::builtin();
-        let predicted = predicted_checkpoint_id(SESSION, &raw, &[], &packs).unwrap();
+        let predicted =
+            predicted_checkpoint_id(SESSION, &raw, &SessionFacts::default(), &packs).unwrap();
 
         let (pair, raw_lines) = crate::transcript::archived_transcript(
             &SecretBytes::new(br#"{"type":"user","message":"hi"}"#.to_vec()),
@@ -857,7 +879,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
-            Vec::new(),
+            SessionFacts::default(),
             &packs,
             Some(pair),
             Vec::new(),
@@ -882,7 +904,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             2,
-            Vec::new(),
+            SessionFacts::default(),
             &packs,
             None,
             Vec::new(),
@@ -908,13 +930,16 @@ mod tests {
         let backend = crate::backend::NativeBackend::in_memory();
         let raw = SecretBytes::new(b"capture".to_vec());
         let packs = RulePackSet::builtin();
-        let facts = vec![crate::backend::ArchivedReadFact {
-            tool_use_id: "t1".into(),
-            tool_name: "Read".into(),
-            path: "src/a.rs".into(),
-            content_sha256: "aa".into(),
-            input_tokens: None,
-        }];
+        let facts = SessionFacts {
+            read_facts: vec![crate::backend::ArchivedReadFact {
+                tool_use_id: "t1".into(),
+                tool_name: "Read".into(),
+                path: "src/a.rs".into(),
+                content_sha256: "aa".into(),
+                input_tokens: None,
+            }],
+            serve_audit: None,
+        };
         let predicted = predicted_checkpoint_id(SESSION, &raw, &facts, &packs).unwrap();
         let archived = condense(
             &backend,
@@ -936,6 +961,88 @@ mod tests {
         assert_eq!(
             archived, predicted,
             "the shape digest derives from facts both hooks share"
+        );
+    }
+
+    /// The facts a session with frozen serves hands both hooks: one schema-1
+    /// line and one schema-4 line, the shape the one writer freezes.
+    fn facts_with_serves(extra: bool) -> SessionFacts {
+        let mut lines = String::from(concat!(
+            r#"{"idempotency_key":"01JCALLA","schema":4,"verb":"memd.grep_capped"}"#,
+            "\n",
+            r#"{"idempotency_key":"aaaa","schema":1,"verb":"memd.grep_capped"}"#,
+            "\n",
+        ));
+        if extra {
+            lines.push_str(r#"{"idempotency_key":"bbbb","schema":1,"verb":"memd.grep_capped"}"#);
+            lines.push('\n');
+        }
+        SessionFacts {
+            read_facts: Vec::new(),
+            serve_audit: Some(lines.into_bytes()),
+        }
+    }
+
+    /// Condense `facts` for [`SESSION`] over a fresh in-memory backend.
+    async fn condensed_with(facts: SessionFacts, now_ms: i64) -> CheckpointId {
+        condense(
+            &crate::backend::NativeBackend::in_memory(),
+            &store(),
+            std::path::Path::new("/r"),
+            SESSION,
+            &SecretBytes::new(b"capture".to_vec()),
+            StrategyKind::ManualCommit,
+            ArchiveReason::Commit,
+            "abc123",
+            now_ms,
+            facts,
+            &RulePackSet::builtin(),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// **One id for the prediction and the archive of a session with serves.**
+    /// The trailer hook and the worker fold the same frozen envelopes through
+    /// the same assembly, so the prediction stays exact once serves are
+    /// frozen — and a session that froze none predicts and archives the id it
+    /// always did.
+    #[tokio::test]
+    async fn the_trailer_prediction_and_the_archive_mint_one_id_with_and_without_serves() {
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let packs = RulePackSet::builtin();
+        let with = facts_with_serves(false);
+        let predicted = predicted_checkpoint_id(SESSION, &raw, &with, &packs).unwrap();
+        assert_eq!(condensed_with(with, 1).await, predicted);
+
+        let bare =
+            predicted_checkpoint_id(SESSION, &raw, &SessionFacts::default(), &packs).unwrap();
+        assert_eq!(condensed_with(SessionFacts::default(), 1).await, bare);
+        assert_ne!(bare, predicted, "the frozen serves are a leaf of the id");
+    }
+
+    /// Re-archiving an unchanged session is the same checkpoint, clock and all;
+    /// one more frozen serve is a new one.
+    #[tokio::test]
+    async fn an_unchanged_serve_audit_re_archives_to_the_same_id_and_one_more_serve_moves_it() {
+        let first = condensed_with(facts_with_serves(false), 1).await;
+        assert_eq!(condensed_with(facts_with_serves(false), 2).await, first);
+        assert_ne!(condensed_with(facts_with_serves(true), 1).await, first);
+    }
+
+    /// An empty buffer is absence, not an empty artifact: the id is the one a
+    /// session that froze nothing derives.
+    #[tokio::test]
+    async fn an_empty_serve_audit_is_the_same_as_none() {
+        let empty = SessionFacts {
+            read_facts: Vec::new(),
+            serve_audit: Some(Vec::new()),
+        };
+        assert_eq!(
+            condensed_with(empty, 1).await,
+            condensed_with(SessionFacts::default(), 1).await
         );
     }
 
@@ -987,7 +1094,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1_000,
-            Vec::new(),
+            SessionFacts::default(),
             &packs,
             Some(pair.clone()),
             vec![before_boundary_task.clone()],
@@ -1002,7 +1109,7 @@ mod tests {
             SESSION,
             out.redacted,
             RedactionReportView::from_redact(&out.report),
-            Vec::new(),
+            SessionFacts::default(),
         );
         twin.transcript = Some(pair);
         twin.tasks = vec![before_boundary_task];
@@ -1076,7 +1183,7 @@ mod tests {
             ArchiveReason::Commit,
             "abc123",
             1,
-            Vec::new(),
+            SessionFacts::default(),
             &RulePackSet::builtin(),
             None,
             Vec::new(),

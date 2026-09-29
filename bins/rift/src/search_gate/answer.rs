@@ -432,6 +432,7 @@ fn journal_answer(
                 total: None,
                 declared_avoided: declared,
                 shape: Some(shape),
+                session: Some(call.raw.session.clone()),
             }),
         },
     )

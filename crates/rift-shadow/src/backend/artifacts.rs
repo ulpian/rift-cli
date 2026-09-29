@@ -16,6 +16,11 @@ use super::{
 };
 use crate::sha256_hex;
 
+/// The shard name of the frozen serve envelopes. It sorts after
+/// `redaction_report.json` (`r` < `s`) and before `sessions/` (`r` < `s` at the
+/// third byte), which is where its leaf sits.
+pub(super) const SERVE_AUDIT_NAME: &str = "serve_audit.jsonl";
+
 impl CheckpointArchive {
     /// This shard's Merkle root — **derived from the bytes, never supplied.**
     ///
@@ -62,6 +67,7 @@ impl CheckpointArchive {
             content_redacted: self.content.as_slice(),
             full_jsonl: full.as_deref(),
             redaction_report: &report,
+            serve_audit: self.serve_audit_jsonl(),
             tool_calls: tool_calls.as_deref(),
             transcript_compact: self.transcript.as_ref().map(|t| t.compact.as_slice()),
             transcript_full: self.transcript.as_ref().map(|t| t.full.as_slice()),
@@ -213,6 +219,18 @@ impl CheckpointArchive {
         tool_calls_jsonl_bytes(&self.read_facts)
     }
 
+    /// `serve_audit.jsonl` — the session's frozen serve envelopes, or `None`
+    /// when it froze none. An empty buffer reads as absent, so the artifact
+    /// is never written empty and a serve-less shard keeps the leaf sequence
+    /// it had before the artifact existed.
+    #[must_use]
+    pub fn serve_audit_jsonl(&self) -> Option<&[u8]> {
+        match self.serve_audit.as_deref() {
+            Some(bytes) if !bytes.is_empty() => Some(bytes),
+            _ => None,
+        }
+    }
+
     /// The `full.jsonl` bytes (one canonical event per line), or `None` if empty.
     #[must_use]
     pub fn full_jsonl(&self) -> Option<Vec<u8>> {
@@ -317,6 +335,9 @@ impl CheckpointArchive {
         }
         if let Some(tool_calls) = self.tool_calls_jsonl() {
             out.insert("tool_calls.jsonl".to_owned(), tool_calls);
+        }
+        if let Some(serve_audit) = self.serve_audit_jsonl() {
+            out.insert(SERVE_AUDIT_NAME.to_owned(), serve_audit.to_vec());
         }
         if let Some(t) = &self.transcript {
             out.insert(
@@ -981,6 +1002,7 @@ mod tests {
             content_redacted: a.content.as_slice(),
             full_jsonl: Some(&full),
             redaction_report: &report,
+            serve_audit: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -1011,6 +1033,7 @@ mod tests {
                 content_redacted: a.content.as_slice(),
                 full_jsonl: Some(&terminated),
                 redaction_report: &report,
+                serve_audit: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,
@@ -1086,6 +1109,7 @@ mod tests {
                 content_redacted: a.content.as_slice(),
                 full_jsonl: None,
                 redaction_report: &a.redaction_report_json(),
+                serve_audit: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,

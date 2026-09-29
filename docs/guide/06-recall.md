@@ -401,6 +401,12 @@ split explains what is safe to throw away:
   outcome labels, metric snapshots, evaluation runs, key metadata. *Not*
   derivable from git: they record what was served, to whom, and what was
   measured, which is why the store exists at all rather than being in-memory.
+  The serves themselves are no longer only here: every serve envelope is also
+  frozen, canonicalised, into the `serve_audit.jsonl` of the checkpoint its
+  session condenses next ([Chapter 5](05-ledger-and-verification.md)), where
+  a rebuild cannot erase it; the caller's own words in an exact retrieval's
+  reason are frozen as the placeholder `withheld`, so the only copy of them
+  stays in this store.
 
 Node and edge kinds are `CHECK`-constrained to a declared mechanical set that is
 deliberately *narrow*: semantic kinds — "similar to", "touches" — are absent, so

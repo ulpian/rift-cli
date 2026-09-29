@@ -157,7 +157,7 @@ pub async fn archive_and_capture(
         raw_capture,
         decision,
         now_ms,
-        Vec::new(),
+        crate::condense::SessionFacts::default(),
         packs,
         // This convenience wrapper's callers carry no session cache to find a
         // transcript through; the worker path (`run_archive`) threads one —
@@ -185,7 +185,7 @@ pub async fn archive_and_capture_with(
     raw_capture: &SecretBytes,
     decision: ArchiveDecision,
     now_ms: i64,
-    read_facts: Vec<crate::backend::ArchivedReadFact>,
+    facts: crate::condense::SessionFacts,
     packs: &rift_shadow_redact::RulePackSet,
     transcript: Option<crate::backend::ArchivedTranscript>,
     tasks: Vec<crate::backend::ArchivedTask>,
@@ -199,7 +199,7 @@ pub async fn archive_and_capture_with(
         decision,
         commit_hex,
         now_ms,
-        read_facts,
+        facts,
         packs,
         transcript,
         tasks,

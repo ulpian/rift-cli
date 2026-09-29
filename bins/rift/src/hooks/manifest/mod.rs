@@ -293,7 +293,7 @@ fn act_on(
             absorb,
             named,
         } => {
-            audit_one_turn(open, &text);
+            audit_one_turn(repo, open, &text);
             write_baseline(repo, key, &merged_baseline(known, &absorb));
             // Recorded even though the audit row above has already moved the
             // projection, so this stamp is stale the moment it is written and
@@ -314,7 +314,7 @@ fn act_on(
 /// Book what this turn spent, keyed per **turn**: one hook invocation is one
 /// turn, and the envelope is keyed by a fresh id so two turns are two rows
 /// even when their figures match.
-fn audit_one_turn(open: &OpenProjection, text: &str) {
+fn audit_one_turn(repo: &std::path::Path, open: &OpenProjection, text: &str) {
     use rift_core::UlidSource as _;
 
     let envelope = rift_recall_serve::injection_audit_envelope(
@@ -326,6 +326,7 @@ fn audit_one_turn(open: &OpenProjection, text: &str) {
         envelope.as_bytes(),
         now_ms(),
     ));
+    super::audit::journal_serve_in(repo, None, envelope.as_bytes());
 }
 
 #[cfg(test)]

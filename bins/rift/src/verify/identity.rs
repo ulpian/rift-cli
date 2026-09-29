@@ -165,6 +165,7 @@ mod tests {
                 &NativeArtifacts {
                     content: sub.read_artifact(&id, "content.redacted").unwrap(),
                     tool_calls: None,
+                    serve_audit: None,
                     full: None,
                     transcript_compact: None,
                     transcript_full: None,
@@ -275,6 +276,7 @@ mod tests {
             content_redacted: content,
             full_jsonl: Some(full),
             redaction_report: report.as_bytes(),
+            serve_audit: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -404,6 +406,7 @@ mod tests {
             content_redacted: content,
             full_jsonl: None,
             redaction_report: report.as_bytes(),
+            serve_audit: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -506,6 +509,7 @@ mod tests {
                 content_redacted: content,
                 full_jsonl: None,
                 redaction_report: report.as_bytes(),
+                serve_audit: None,
                 tool_calls: Some(&tool_calls),
                 transcript_compact: None,
                 transcript_full: None,
@@ -562,6 +566,7 @@ mod tests {
                 content_redacted: self.content,
                 full_jsonl: None,
                 redaction_report: self.report.as_bytes(),
+                serve_audit: None,
                 tool_calls: Some(&self.tool_calls),
                 transcript_compact: None,
                 transcript_full: None,
@@ -661,6 +666,7 @@ mod tests {
                 content_redacted: content,
                 full_jsonl: Some(edited),
                 redaction_report: report.as_bytes(),
+                serve_audit: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,
@@ -689,6 +695,7 @@ mod tests {
                 &NativeArtifacts {
                     content: forged.read_artifact(&id, "content.redacted").unwrap(),
                     tool_calls: None,
+                    serve_audit: None,
                     full: forged.read_artifact(&id, "full.jsonl").unwrap(),
                     transcript_compact: None,
                     transcript_full: None,
@@ -735,6 +742,7 @@ mod tests {
             content_redacted: content,
             full_jsonl: None,
             redaction_report: report.as_bytes(),
+            serve_audit: None,
             tool_calls: None,
             transcript_compact: Some(compact),
             transcript_full: Some(tfull),
@@ -816,6 +824,7 @@ mod tests {
                 content_redacted: content,
                 full_jsonl: Some(edited),
                 redaction_report: report.as_bytes(),
+                serve_audit: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,
@@ -875,6 +884,7 @@ mod tests {
             content_redacted: content,
             full_jsonl: None,
             redaction_report: report.as_bytes(),
+            serve_audit: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -991,6 +1001,61 @@ mod tests {
             matches!(&out.worst, Verdict::Tamper(m) if m.contains("does not address")),
             "a session-less native shard cannot address its path: {:?}",
             out.worst
+        );
+    }
+
+    /// An epoch-3 shard carrying `serve_audit.jsonl`, at the id its own
+    /// artifacts address.
+    fn serve_bound_shard(content: &[u8], serves: &[u8]) -> (MemorySubstrate, String) {
+        use rift_shadow::backend::ROOT_BOUND_ID_MIN_CANON_VERSION as EPOCH;
+        use rift_shadow::backend::{shard_merkle_root, ShardLeafBytes};
+        let report = fixture_report();
+        let leaves = ShardLeafBytes {
+            content_redacted: content,
+            redaction_report: report.as_bytes(),
+            serve_audit: Some(serves),
+            ..ShardLeafBytes::default()
+        };
+        let root = shard_merkle_root(&leaves).to_hex();
+        let id = rift_shadow::condense::checkpoint_ids_for_shard(
+            &[FIXTURE_SESSION.to_owned()],
+            EPOCH,
+            &leaves,
+        )
+        .remove(0);
+        let meta = format!(
+            r#"{{"canon_version":{EPOCH},"strategy":"manual-commit","merkle_root":"{root}","sessions":["{FIXTURE_SESSION}"]}}"#
+        );
+        let sub = MemorySubstrate::local()
+            .with_shard(shard(&id, None, 1))
+            .with_artifact(&id, "redaction_report.json", report.as_bytes())
+            .with_artifact(&id, "content.redacted", content)
+            .with_artifact(&id, "serve_audit.jsonl", serves)
+            .with_artifact(&id, "metadata.json", meta.as_bytes());
+        (sub, id)
+    }
+
+    /// **The frozen serves are read back and bound like every leaf.** A shard
+    /// carrying them verifies, one without them verifies as it always did, and
+    /// editing a frozen line is tamper: the root the shard records was taken
+    /// over the lines as written.
+    #[test]
+    fn a_frozen_serve_audit_is_read_back_and_the_root_holds_with_and_without_it() {
+        let content = b"the redacted capture".as_slice();
+        let (without, _) = root_bound_shard(content, br#"{"kind":"session_start","turn":0}"#);
+        assert!(matches!(shard_passes(&without).unwrap().worst, Verdict::Ok));
+
+        let serves = b"{\"idempotency_key\":\"k\",\"schema\":1}\n".as_slice();
+        let (with, id) = serve_bound_shard(content, serves);
+        let out = shard_passes(&with).unwrap();
+        assert!(matches!(out.worst, Verdict::Ok), "honest: {:?}", out.worst);
+        assert_eq!(out.checked, 1);
+
+        let edited =
+            with.with_artifact(&id, "serve_audit.jsonl", b"{\"idempotency_key\":\"k2\"}\n");
+        assert!(
+            matches!(shard_passes(&edited).unwrap().worst, Verdict::Tamper(_)),
+            "an edited frozen serve must not verify"
         );
     }
 }

@@ -193,6 +193,12 @@ pub struct CheckpointArchive {
     /// The session's captured read facts (empty ⇒ no `tool_calls.jsonl`) —
     /// what the recall plane ingests as `n_file_read`.
     pub read_facts: Vec<ArchivedReadFact>,
+    /// The session's frozen serve envelopes, the bytes of `serve_audit.jsonl`
+    /// (`None` ⇒ the artifact is not written). The caller hands them over
+    /// already canonical, validated, de-duplicated and sorted, because the
+    /// prediction and the archive must fold the same bytes and only one
+    /// function may decide what those bytes are.
+    pub serve_audit: Option<Vec<u8>>,
     /// The redacted raw capture (durable-blob proof of the gate).
     pub content: RedactedBytes,
     /// The redaction report for `redaction_report.json` (must be valid).

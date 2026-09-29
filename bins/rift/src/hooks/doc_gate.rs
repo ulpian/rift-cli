@@ -907,6 +907,7 @@ fn journal_document_decision(
                 declared_avoided: declared,
                 // Not a name search: nothing here stood in for a listing.
                 shape: None,
+                session: Some(ctx.raw.session.clone()),
             }),
         },
     )

@@ -52,6 +52,12 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         if let Some(tool_calls) = archive.tool_calls_jsonl() {
             entries.push(self.structural_entry("tool_calls.jsonl", &tool_calls)?);
         }
+        // The frozen serve envelopes: verbs, closed tags, handles, counts, ids
+        // and timestamps, canonicalised by the one writer before they reach
+        // here — structural, like the read facts beside them.
+        if let Some(serve_audit) = archive.serve_audit_jsonl() {
+            entries.push(self.structural_entry(super::artifacts::SERVE_AUDIT_NAME, serve_audit)?);
+        }
         if let Some(transcript) = &archive.transcript {
             self.push_transcript_pair(transcript, &mut entries)?;
         }

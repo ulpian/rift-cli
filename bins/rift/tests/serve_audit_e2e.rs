@@ -14,13 +14,37 @@
 //! and reads the REAL `recall.db` projection back — same coverage class as
 //! the test it replaces: real process, real audit write, a leak check over
 //! every persisted column.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+//!
+//! The same serves are also frozen into the checkpoint shard, and the tests
+//! at the foot of this file drive that through the shipped binary: a decision
+//! journaled under its session and frozen by the session's end, a skill-CLI
+//! serve journaled as unattributed and folded into the next condense, and the
+//! trailer's predicted checkpoint id equal to the committed one with and
+//! without frozen serves.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 mod common;
 use common::rift_cmd;
+
+#[allow(dead_code)] // The hooks suites share these builders; each file uses a subset.
+#[path = "common/hooks_fixture.rs"]
+mod hooks_fixture;
+#[allow(dead_code)] // The read-gate suites share these builders; each file uses a subset.
+#[path = "common/read_gate_fixture.rs"]
+mod read_gate_fixture;
+
+use hooks_fixture::{
+    checkpoint_shards, git_in, hook_pair_commit, rift_json, seed_live_session_repo,
+    shard_blob_bytes, sync_env, LIVE_SESSION,
+};
 
 use rift_store::{CanonicalStore, SqliteStore};
 
@@ -208,4 +232,163 @@ async fn the_plain_audit_twin_carries_no_argument(store: &SqliteStore) {
             .unwrap()
             .contains("PRIVATE_ARGUMENT_SENTINEL"));
     }
+}
+
+/// The family's serve journal for `name` (a session, or `unattributed`), as
+/// the lines it holds now; none when the file is gone.
+fn journal_lines(repo: &Path, name: &str) -> Vec<String> {
+    let path = repo
+        .join(".git")
+        .join("rift-serve-audit")
+        .join(format!("{name}.jsonl"));
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A line the journal or the shard holds is canonical: re-serialising it
+/// changes nothing, so its keys are sorted and nothing but JSON is in it.
+fn assert_canonical(line: &str) -> serde_json::Value {
+    let value: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(serde_json::to_string(&value).unwrap(), line, "keys sorted");
+    value
+}
+
+/// One read declined in `LIVE_SESSION`: the file is read, then read again.
+fn decline_a_repeat_read(repo: &Path, env: &[(&str, &str)]) {
+    let env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    let file = repo.join("booked.txt");
+    std::fs::write(&file, read_gate_fixture::numbered(40, None)).unwrap();
+    let read = read_gate_fixture::read_of(&file, 1, 40);
+    let hook = |turn| {
+        read_gate_fixture::hook(
+            repo,
+            "claude-code",
+            "PreToolUse",
+            LIVE_SESSION,
+            turn,
+            &read,
+            &env,
+        )
+    };
+    hook(1);
+    assert!(
+        read_gate_fixture::declined_with(&hook(2)).is_some(),
+        "the repeat is declined"
+    );
+}
+
+/// The bytes of `serve_audit.jsonl` in the shard `checkpoint` names, if any.
+fn frozen_serves(repo: &Path, checkpoint: &str) -> Option<String> {
+    let dir = format!("{}/{}", &checkpoint[..2], &checkpoint[2..]);
+    checkpoint_shards(repo).contains(&dir).then(|| {
+        String::from_utf8(shard_blob_bytes(repo, &format!("{dir}/serve_audit.jsonl"))).unwrap()
+    })
+}
+
+/// ★ A decision's two envelopes are journaled under its session, canonical;
+/// the session's end freezes them into its checkpoint as `serve_audit.jsonl`;
+/// and the journal is left empty.
+#[test]
+fn a_decline_is_frozen_into_the_session_end_checkpoint_and_leaves_its_journal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    read_gate_fixture::enforce_for(&repo, &["claude-code"]);
+    let cache = tmp.path().join("cache");
+    let env = sync_env(&cache);
+
+    decline_a_repeat_read(&repo, &env);
+    let journal = journal_lines(&repo, LIVE_SESSION);
+    let schemas: Vec<u64> = journal
+        .iter()
+        .map(|line| assert_canonical(line)["schema"].as_u64().unwrap())
+        .collect();
+    assert_eq!(schemas.len(), 2, "one decision, two envelopes: {journal:?}");
+    assert!(schemas.contains(&1) && schemas.contains(&4), "{journal:?}");
+
+    let stopped = rift_json(&repo, &["session", "stop", LIVE_SESSION, "--json"], &env);
+    assert_eq!(stopped["finalized"][0], LIVE_SESSION, "{stopped}");
+    let [checkpoint] = checkpoint_shards(&repo).try_into().unwrap();
+    let frozen = frozen_serves(&repo, &checkpoint.replace('/', "")).unwrap();
+    let mut expected = journal.clone();
+    expected.sort_by_key(|line| assert_canonical(line)["idempotency_key"].to_string());
+    assert_eq!(frozen.lines().collect::<Vec<_>>(), expected);
+    assert!(
+        journal_lines(&repo, LIVE_SESSION).is_empty(),
+        "the journal was folded"
+    );
+}
+
+/// ★ A skill-CLI serve belongs to no session: it is journaled as
+/// unattributed and folded into the next checkpoint the family condenses.
+#[test]
+fn a_skill_serve_is_journaled_unattributed_and_folded_into_the_next_condense() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    enable_recall(&repo);
+    let cache = tmp.path().join("cache");
+    common::provision_here(&repo, &cache);
+    let env = sync_env(&cache);
+
+    let (code, out) = run_rift_stdout(
+        &repo,
+        &["recall", "known-state", "--task", "t", "--file", "a.txt"],
+        &env,
+    );
+    assert_eq!(code, 0, "{out}");
+    let journal = journal_lines(&repo, "unattributed");
+    assert_eq!(journal.len(), 2, "the audit twin and the call: {journal:?}");
+    for line in &journal {
+        assert_canonical(line);
+    }
+
+    rift_json(&repo, &["session", "stop", LIVE_SESSION, "--json"], &env);
+    let [checkpoint] = checkpoint_shards(&repo).try_into().unwrap();
+    let frozen = frozen_serves(&repo, &checkpoint.replace('/', "")).unwrap();
+    for line in &journal {
+        assert!(frozen.lines().any(|f| f == line), "{line} was not frozen");
+    }
+    assert!(journal_lines(&repo, "unattributed").is_empty());
+}
+
+/// ★ **The riskiest line: one id, predicted and committed.** The trailer
+/// `prepare-commit-msg` writes names the checkpoint the worker's condense of
+/// that very commit archives — for a commit whose session froze no serve, and
+/// for one whose session froze a decision's two envelopes, which the shard
+/// then carries.
+#[test]
+fn the_trailer_names_the_checkpoint_the_commit_archives_with_and_without_frozen_serves() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    read_gate_fixture::enforce_for(&repo, &["claude-code"]);
+    let cache = tmp.path().join("cache");
+    let env = sync_env(&cache);
+
+    std::fs::write(repo.join("w1.txt"), "one\n").unwrap();
+    git_in(&repo, &["add", "w1.txt"]);
+    let bare = hook_pair_commit(&repo, tmp.path(), "bare", &env);
+    let names = hooks_fixture::shard_tree_names(&repo);
+    assert!(
+        names.contains(&format!("{}/{}/metadata.json", &bare[..2], &bare[2..])),
+        "{names}"
+    );
+    assert!(
+        !names.contains("serve_audit.jsonl"),
+        "no serve, no artifact: {names}"
+    );
+
+    decline_a_repeat_read(&repo, &env);
+    assert_eq!(journal_lines(&repo, LIVE_SESSION).len(), 2);
+    std::fs::write(repo.join("w2.txt"), "two\n").unwrap();
+    git_in(&repo, &["add", "w2.txt"]);
+    let served = hook_pair_commit(&repo, tmp.path(), "served", &env);
+    let frozen = frozen_serves(&repo, &served)
+        .unwrap_or_else(|| panic!("no shard at the trailer's id {served}"));
+    assert_eq!(frozen.lines().count(), 2, "{frozen}");
+    assert!(journal_lines(&repo, LIVE_SESSION).is_empty());
 }

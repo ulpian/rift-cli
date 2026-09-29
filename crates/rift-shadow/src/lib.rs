@@ -56,7 +56,7 @@ pub use bridge::{ingest_hook, trigger_for, HookReceipt, IngestOutcome, RecordedR
 pub use commit_capture::{archive_and_capture, archive_and_capture_with, persist_commit_capture};
 pub use condense::{
     condense, predict_redaction, predicted_checkpoint_id, predicted_checkpoint_id_from,
-    CheckpointId,
+    CheckpointId, SessionFacts,
 };
 pub use executor::{run_decision, RepoSerializer};
 pub use parity::{

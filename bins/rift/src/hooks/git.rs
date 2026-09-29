@@ -10,7 +10,7 @@ use std::path::Path;
 use rift_core::Result;
 use rift_shadow::hooks::{screen_push, PushDecision, PushRef};
 
-use super::archive::{archive_now, read_facts_for_archive, record_pack_notes};
+use super::archive::{archive_now, record_pack_notes, session_facts_for_archive};
 use super::worker::{drain_capture_queue, owe_document_sweep, owe_search_index};
 use super::{current_dir_or_dot, flag, now_ms, projection_db_at};
 
@@ -289,8 +289,9 @@ fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
 /// The trailers the live session's next checkpoint will carry: the predicted
 /// condense id and the live turn-boundary attribution preview.
 ///
-/// The prediction folds in the read facts captured so far, exactly as the
-/// post-commit archive will — same query, same digest.
+/// The prediction folds in the read facts captured so far and the serves
+/// frozen so far, exactly as the post-commit archive will — the same function
+/// reads both, so the two derive one id from the same bytes.
 fn predicted_trailers(
     t: &crate::hooktime::HookTimer,
     repo: &rift_git::RepoPaths,
@@ -305,7 +306,7 @@ fn predicted_trailers(
             .map_err(rift_core::RiftError::from)
     })?;
     let facts = t.phase("read_facts", || {
-        read_facts_for_archive(&rt, &store, &sess.agent, &sess.session_id)
+        session_facts_for_archive(&rt, &store, &repo.common_dir, &sess.agent, &sess.session_id)
     });
     let raw = t.phase("raw_capture", || session_raw_capture(&repo.work_tree));
     let (packs, notes) = t.phase("rule_packs", || {

@@ -33,7 +33,7 @@ fn shard_id(work_tree: &std::path::Path) -> String {
     rift_shadow::predicted_checkpoint_id(
         "session-under-test",
         &capture_document(work_tree),
-        &[],
+        &rift_shadow::SessionFacts::default(),
         &rift_shadow::redact::RulePackSet::builtin(),
     )
     .unwrap()
