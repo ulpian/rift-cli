@@ -18,6 +18,7 @@ mod behind;
 mod binary;
 mod codex;
 mod lifecycle;
+mod surface;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,9 @@ use serde::{Deserialize, Serialize};
 use crate::native::{codex_trust, hook_file, installed_hook_binary, CodexTrust};
 
 pub use behind::{is_behind_candidate, sessions_behind_events};
+pub use surface::{client_surface, Surface, SurfaceEvidence};
+
+pub(crate) use surface::{first_in_head, newest_transcript};
 
 /// Why an integration is unhealthy. Closed: a new reason is a new variant, and
 /// the stable strings are the `--json` contract.
