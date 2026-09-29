@@ -19,18 +19,23 @@
 //! * `network` — neither shipped binary reaches an HTTP client, in the
 //!   workspace manifests or in the default-resolved graph.
 //! * `fuzzy_matcher` — the matcher's pin still keeps its reads in bounds.
+//! * `ceilings` — no tracked `.rs` file over 1,500 lines and no function over
+//!   80, read by a lexer that masks comments and strings first.
+//! * `ignores` — every `#[ignore]` carries its reason.
 //!
 //! This file holds what the screens share — the file read, the two walkers
 //! that define "every first-party source file" and "every tracked path", the
 //! two-way list comparison — and [`run_all`], which is the order the
-//! `ci-meta` command runs them in.
+//! `ci-meta` command runs them in, with the [`MetaReport`] it returns.
 //!
 //! `REQUIRED_JOBS` is why a job cannot be quietly dropped from the workflow:
 //! the jobs enforce the invariants, and this list enforces the jobs.
 
+mod ceilings;
 mod deleted_paths;
 mod fuzz;
 mod fuzzy_matcher;
+mod ignores;
 mod lints;
 mod network;
 mod proptest_newlines;
@@ -40,9 +45,11 @@ mod workflow;
 
 use std::path::Path;
 
+pub use ceilings::{ceilings_hold, Measured};
 pub use deleted_paths::deleted_paths_stay_deleted;
 pub use fuzz::fuzz_targets_all_run_in_ci;
 pub use fuzzy_matcher::fuzzy_matcher_reads_within_bounds;
+pub use ignores::every_ignore_carries_a_reason;
 pub use lints::{
     lint_table_matches_baseline, no_blanket_allow_at_crate_root, unsafe_only_in_sanctioned_modules,
 };
@@ -54,6 +61,25 @@ pub(crate) use schema::production_half;
 pub use workflow::{
     dialect_conformance_job_runs_every_suite, required_jobs_present, workflow_permissions_read_only,
 };
+
+/// What [`run_all`] found: every violation, and how much each counting
+/// screen examined.
+///
+/// The counts travel with the result so the caller can print them: a screen
+/// over an empty corpus is a screen that guards nothing, and the numbers on
+/// the ok line are what make that visible without reading this code. They
+/// are also how a test sees that the runner dispatched a screen at all.
+#[derive(Debug, Default)]
+pub struct MetaReport {
+    /// Tracked files the retired-vocabulary screen read.
+    pub vocabulary_files: usize,
+    /// `.rs` files and functions the ceiling screen measured.
+    pub ceilings: Measured,
+    /// `#[ignore]` attributes the reason screen read.
+    pub ignores: usize,
+    /// Everything any screen objects to. Empty means `ci-meta` passes.
+    pub violations: Vec<String>,
+}
 
 fn read(root: &Path, rel: &str) -> Result<String, String> {
     std::fs::read_to_string(root.join(rel)).map_err(|e| format!("read {rel}: {e}"))
@@ -140,16 +166,12 @@ fn list_violations(label: &str, on_disk: &[String], listed: &[String]) -> Vec<St
     v
 }
 
-/// Run every meta-check, returning the retired-vocabulary screen's scanned
-/// count and all violations.
-///
-/// The count travels with the result so the caller can print it: a screen
-/// over an empty corpus is a screen that guards nothing, and the number on
-/// the ok line is what makes that visible without reading this code.
+/// Run every meta-check, returning each counting screen's count and all
+/// violations.
 ///
 /// # Errors
 /// If any input file cannot be read.
-pub fn run_all(root: &Path) -> Result<(usize, Vec<String>), String> {
+pub fn run_all(root: &Path) -> Result<MetaReport, String> {
     let mut v = Vec::new();
     v.extend(required_jobs_present(root)?);
     v.extend(workflow_permissions_read_only(root)?);
@@ -164,9 +186,18 @@ pub fn run_all(root: &Path) -> Result<(usize, Vec<String>), String> {
     v.extend(fuzzy_matcher_reads_within_bounds(root)?);
     v.extend(no_network_crate_in_the_resolved_graph(root)?);
     v.extend(deleted_paths_stay_deleted(root)?.1);
-    let (scanned, retired) = retired_vocabulary_screen(root)?;
+    let (vocabulary_files, retired) = retired_vocabulary_screen(root)?;
     v.extend(retired);
-    Ok((scanned, v))
+    let (ceilings, oversized) = ceilings_hold(root)?;
+    v.extend(oversized);
+    let (ignores, bare) = every_ignore_carries_a_reason(root)?;
+    v.extend(bare);
+    Ok(MetaReport {
+        vocabulary_files,
+        ceilings,
+        ignores,
+        violations: v,
+    })
 }
 
 #[cfg(test)]
@@ -191,12 +222,37 @@ mod tests {
     /// run both here (cargo test -p xtask) and by the `ci-meta` CI job.
     #[test]
     fn repository_passes_all_meta_checks() {
-        let (scanned, violations) = run_all(&workspace_root()).expect("meta checks run");
+        let report = run_all(&workspace_root()).expect("meta checks run");
         assert!(
-            violations.is_empty(),
+            report.violations.is_empty(),
             "ci-meta violations:\n{}",
-            violations.join("\n")
+            report.violations.join("\n")
         );
-        assert!(scanned > 400, "the screen examined only {scanned} files");
+        assert!(
+            report.vocabulary_files > 400,
+            "the screen examined only {} files",
+            report.vocabulary_files
+        );
+    }
+
+    /// The runner dispatches the ceiling and ignore screens, not only their
+    /// functions: their planting tests call the screens directly, so they
+    /// would stay green with either dropped from `run_all`. The runner cannot
+    /// run over a synthetic root — it resolves the real workspace's
+    /// dependency graph and reads its workflow and lock files — so it runs
+    /// over this tree, and each screen's count is the proof it ran.
+    #[test]
+    fn the_runner_dispatches_the_ceiling_and_ignore_screens() {
+        let report = run_all(&workspace_root()).expect("meta checks run");
+        assert!(
+            report.ceilings.files > 500 && report.ceilings.functions > 10_000,
+            "the ceiling screen measured {:?}",
+            report.ceilings
+        );
+        assert!(
+            report.ignores >= 4,
+            "the ignore screen read {} attributes",
+            report.ignores
+        );
     }
 }

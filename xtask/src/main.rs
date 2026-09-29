@@ -9,7 +9,8 @@
 //!   no schema fast-path in bins, the dialect-conformance job's suite set,
 //!   deleted paths staying deleted, no retired program vocabulary in any
 //!   tracked path or byte, no network crate in the binaries' default-resolved
-//!   graph).
+//!   graph, no `.rs` file over 1,500 lines or function over 80, no bare
+//!   `#[ignore]`).
 //! * `gate-intercept` — the read-only guard on the read-interception surface;
 //!   one leg per property, each named on its own output line.
 //! * `dogfood` — the scripted-session savings reading, played through the
@@ -64,9 +65,16 @@ fn main() -> Result<(), String> {
             Ok(())
         }
         Some("ci-meta") => {
-            let (scanned, violations) = xtask::ci_meta::run_all(&workspace_root())?;
-            fail_with(&violations, "ci-meta")?;
-            println!("ci-meta: all checks pass ({scanned} tracked files screened for retired vocabulary)");
+            let report = xtask::ci_meta::run_all(&workspace_root())?;
+            fail_with(&report.violations, "ci-meta")?;
+            println!(
+                "ci-meta: all checks pass ({} tracked files screened for retired vocabulary; \
+                 {} .rs files and {} functions under the ceilings; {} #[ignore]s with a reason)",
+                report.vocabulary_files,
+                report.ceilings.files,
+                report.ceilings.functions,
+                report.ignores
+            );
             Ok(())
         }
         Some("gate-intercept") => {

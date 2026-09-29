@@ -158,7 +158,7 @@ usage: xtask <check-coverage <cov.json> | ci-meta | rustdoc-baseline>
 `cargo run -p xtask -- ci-meta` is the check that watches the other checks. It
 reads the repository — source files, the git index, the resolved dependency
 tree — and runs no test suite, opens no database, reaches no network. Each of
-its fourteen sub-checks returns violations, and the command fails if any list
+its sixteen sub-checks returns violations, and the command fails if any list
 is non-empty:
 
 | # | Check | What it refuses |
@@ -177,6 +177,8 @@ is non-empty:
 | 12 | The fuzzy matcher reads inside its bounds | The workspace pin for the search matcher without the feature that keeps its vectorised backends inside the bytes they were handed. It is a dependency's compile-time setting, so nothing in this repository's own source would notice it going missing |
 | 13 | Deleted paths stay deleted | A deliberately removed path — a retired kill-switch file, two reversed crate directories, a retired server entry point — back on disk, in the index, or (where naming it in `.gitignore` is safe) unignored, so a bulk `git add -A` cannot resurrect one. It reports how many paths it examined |
 | 14 | The retired-vocabulary screen | Retired planning shorthand in any tracked file's path or content bytes. No exclusions — lockfiles, snapshots, fixtures and this guide are in the corpus; symlinks are read as link text, never followed; a scan of nothing is itself a failure |
+| 15 | The size ceilings | A tracked `.rs` file over 1,500 lines, or a function over 80 lines from its `fn` line to its closing brace. Tests, benches, fuzz targets and `xtask` are in the corpus. The screen parses item spans, masking comments and strings first, so a comment or a string cannot shrink a function; it reports how many files and functions it measured |
+| 16 | An `#[ignore]` carries its reason | A bare `#[ignore]`: an ignored test says why in `#[ignore = "…"]` — a generator that writes committed files, a measurement instrument, or a test that needs something a CI runner cannot provide. A doc comment or a string spelling the attribute is not one |
 
 The newline check matters because the capture document, the pack lines, the
 commit trailers and the config format are all line-oriented. The schema and

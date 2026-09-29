@@ -943,9 +943,12 @@ mod pinned_tool_field_surface {
             ReadSpan::lines(41, HiKind::Explicit(90)),
             "one past the start, under either reading"
         );
+    }
 
-        // A view with no range starts at the file's first line under either
-        // reading, and stops nowhere anyone published.
+    /// A view with no range starts at the file's first line under either
+    /// reading, and stops nowhere anyone published.
+    #[test]
+    fn a_view_with_no_range_has_no_span() {
         let rangeless = call(
             "view_file",
             serde_json::json!({pinned("view_file", "path"): "/repo/src/lib.rs"}),
@@ -955,12 +958,15 @@ mod pinned_tool_field_surface {
             .expect("a bare view is still a read");
         assert_eq!(request.span, ReadSpan::Unknown);
         assert_eq!(request.conservative_lines(), None);
+    }
 
-        // A documented argument that says nothing about the range leaves the
-        // call read-shaped; an argument the pin does not carry does not. The
-        // envelope keys are here because a recorded run put them on every
-        // real call — a rule that refused them would refuse this family
-        // outright, which is how a whole plane goes quiet without a failure.
+    /// A documented argument that says nothing about the range leaves the
+    /// call read-shaped. The envelope keys are here because a recorded run
+    /// put them on every real call — a rule that refused them would refuse
+    /// this family outright, which is how a whole plane goes quiet without a
+    /// failure.
+    #[test]
+    fn the_recorded_envelope_arguments_leave_a_view_read_shaped() {
         assert_eq!(
             pinned("view_file", "envelope"),
             "toolAction,toolSummary",
@@ -979,7 +985,12 @@ mod pinned_tool_field_surface {
             .expect("the shape a recorded run actually carries is read-shaped");
         assert_eq!(request.path, "/repo/src/lib.rs");
         assert_eq!(request.span, ReadSpan::Unknown);
+    }
 
+    /// The pinned flag is a documented argument, so it leaves the call
+    /// read-shaped.
+    #[test]
+    fn the_pinned_flag_leaves_a_view_read_shaped() {
         let with_flag = call(
             "view_file",
             serde_json::json!({
@@ -991,6 +1002,11 @@ mod pinned_tool_field_surface {
         assert!(AntigravityAdapter
             .read_request("PreToolUse", &with_flag)
             .is_some());
+    }
+
+    /// An argument the pin does not carry takes the call out of read shape.
+    #[test]
+    fn an_unpinned_argument_is_not_read_shaped() {
         let with_an_unpinned_argument = call(
             "view_file",
             serde_json::json!({
@@ -1002,8 +1018,11 @@ mod pinned_tool_field_surface {
         assert!(AntigravityAdapter
             .read_request("PreToolUse", &with_an_unpinned_argument)
             .is_none());
+    }
 
-        // A range the two readings agree on nothing about is no range.
+    /// A range the two readings agree on nothing about is no range.
+    #[test]
+    fn an_empty_range_is_no_range() {
         let inverted = call(
             "view_file",
             serde_json::json!({

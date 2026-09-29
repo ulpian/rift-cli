@@ -525,22 +525,10 @@ fn the_fixture_environment_pins_every_git_override_this_module_knows_of() {
 #[cfg(unix)]
 #[test]
 fn a_hostile_inherited_environment_cannot_reach_inside_a_fixture() {
-    use std::{fs, os::unix::fs::PermissionsExt as _, path::Path, process::Command};
-
-    const MARKER: &str = "Injected-By-A-Hostile-Hook";
+    use std::path::Path;
 
     let evil = tempfile::tempdir().expect("evil root");
-    let hooks = evil.path().join("hooks");
-    fs::create_dir_all(&hooks).expect("evil hooks dir");
-    let hook = hooks.join("commit-msg");
-    fs::write(
-        &hook,
-        format!("#!/bin/sh\nprintf '%s\\n' '{MARKER}' >> \"$1\"\n"),
-    )
-    .expect("write hook");
-    let mut perms = fs::metadata(&hook).expect("hook meta").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&hook, perms).expect("chmod hook");
+    let hooks = fixture_hostile_hooks_dir(evil.path());
 
     let by_config: [(&str, &str); 3] = [
         ("GIT_CONFIG_COUNT", "1"),
@@ -549,58 +537,6 @@ fn a_hostile_inherited_environment_cannot_reach_inside_a_fixture() {
     ];
     let by_template: [(&str, &str); 1] =
         [("GIT_TEMPLATE_DIR", evil.path().to_str().expect("evil path"))];
-
-    // The arm that shows each vector working. What stays *legacy* about it is
-    // the stub config file — the protection this fixture used to have, which is
-    // exactly what these two vectors walk past.
-    //
-    // It gets the fixture's isolation as well, with the vector planted back on
-    // top afterwards. Without that it was the **second** git in this file
-    // running with the ambient environment (the first being the one in
-    // `a_hostile_default_hash_cannot_change_what_a_fixture_builds`, isolated one
-    // commit earlier): a developer — or another agent's hook — carrying a
-    // hostile `GIT_TEMPLATE_DIR` would have had hooks executed by its `init` and
-    // `commit` too, in the file whose whole subject is that vector. The
-    // `contains(MARKER)` assertions below are what keep the isolation honest:
-    // if the scrub swallowed the planted vector, they go red rather than quiet.
-    let legacy_commit = |poison: &[(&str, &str)]| -> String {
-        let home = tempfile::tempdir().expect("legacy root");
-        let stub = home.path().join("gitconfig");
-        fs::write(&stub, "[core]\n\tautocrlf = false\n").expect("stub config");
-        let work = home.path().join("repo");
-        fs::create_dir_all(&work).expect("legacy repo dir");
-        let run = |args: &[&str]| {
-            let mut c = Command::new("git");
-            c.current_dir(&work);
-            support::hermetic_env(&mut c, home.path());
-            for (k, v) in [
-                ("GIT_CONFIG_GLOBAL", stub.to_str().expect("stub path")),
-                ("GIT_CONFIG_SYSTEM", stub.to_str().expect("stub path")),
-                ("GIT_AUTHOR_NAME", "Legacy"),
-                ("GIT_AUTHOR_EMAIL", "legacy@rift.invalid"),
-                ("GIT_COMMITTER_NAME", "Legacy"),
-                ("GIT_COMMITTER_EMAIL", "legacy@rift.invalid"),
-                ("GIT_AUTHOR_DATE", "1735689600 +0000"),
-                ("GIT_COMMITTER_DATE", "1735689600 +0000"),
-            ] {
-                c.env(k, v);
-            }
-            // The vector, planted back after the scrub that removes it — so
-            // this arm demonstrates the poison it was handed and nothing else.
-            for (k, v) in poison {
-                c.env(k, v);
-            }
-            c.args(args).output().expect("spawn git")
-        };
-        assert!(run(&["init", "-q"]).status.success(), "legacy init");
-        fs::write(work.join("a.txt"), "x\n").expect("legacy file");
-        assert!(run(&["add", "-A"]).status.success(), "legacy add");
-        assert!(
-            run(&["commit", "-q", "-m", "subject"]).status.success(),
-            "legacy commit"
-        );
-        String::from_utf8_lossy(&run(&["log", "-1", "--format=%B"]).stdout).into_owned()
-    };
 
     for (what, poison) in [
         ("GIT_CONFIG_COUNT", &by_config[..]),
@@ -640,6 +576,86 @@ fn a_hostile_inherited_environment_cannot_reach_inside_a_fixture() {
     assert_eq!(with_poison.message, without.message);
 }
 
+/// The marker the hostile hook appends to every commit message it sees.
+#[cfg(unix)]
+const MARKER: &str = "Injected-By-A-Hostile-Hook";
+
+/// A `hooks/` directory under `evil` holding an executable `commit-msg` hook
+/// that appends [`MARKER`] — the payload both vectors try to smuggle in, one
+/// as `core.hooksPath` and one as the `hooks/` of a template directory.
+#[cfg(unix)]
+fn fixture_hostile_hooks_dir(evil: &std::path::Path) -> std::path::PathBuf {
+    use std::{fs, os::unix::fs::PermissionsExt as _};
+
+    let hooks = evil.join("hooks");
+    fs::create_dir_all(&hooks).expect("evil hooks dir");
+    let hook = hooks.join("commit-msg");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\nprintf '%s\\n' '{MARKER}' >> \"$1\"\n"),
+    )
+    .expect("write hook");
+    let mut perms = fs::metadata(&hook).expect("hook meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&hook, perms).expect("chmod hook");
+    hooks
+}
+
+/// The arm that shows each vector working. What stays *legacy* about it is
+/// the stub config file — the protection this fixture used to have, which is
+/// exactly what these two vectors walk past.
+///
+/// It gets the fixture's isolation as well, with the vector planted back on
+/// top afterwards. Without that it was the **second** git in this file
+/// running with the ambient environment (the first being the one in
+/// `a_hostile_default_hash_cannot_change_what_a_fixture_builds`, isolated one
+/// commit earlier): a developer — or another agent's hook — carrying a
+/// hostile `GIT_TEMPLATE_DIR` would have had hooks executed by its `init` and
+/// `commit` too, in the file whose whole subject is that vector. The
+/// `contains(MARKER)` assertion in the test is what keeps the isolation honest:
+/// if the scrub swallowed the planted vector, they go red rather than quiet.
+#[cfg(unix)]
+fn legacy_commit(poison: &[(&str, &str)]) -> String {
+    use std::{fs, process::Command};
+
+    let home = tempfile::tempdir().expect("legacy root");
+    let stub = home.path().join("gitconfig");
+    fs::write(&stub, "[core]\n\tautocrlf = false\n").expect("stub config");
+    let work = home.path().join("repo");
+    fs::create_dir_all(&work).expect("legacy repo dir");
+    let run = |args: &[&str]| {
+        let mut c = Command::new("git");
+        c.current_dir(&work);
+        support::hermetic_env(&mut c, home.path());
+        for (k, v) in [
+            ("GIT_CONFIG_GLOBAL", stub.to_str().expect("stub path")),
+            ("GIT_CONFIG_SYSTEM", stub.to_str().expect("stub path")),
+            ("GIT_AUTHOR_NAME", "Legacy"),
+            ("GIT_AUTHOR_EMAIL", "legacy@rift.invalid"),
+            ("GIT_COMMITTER_NAME", "Legacy"),
+            ("GIT_COMMITTER_EMAIL", "legacy@rift.invalid"),
+            ("GIT_AUTHOR_DATE", "1735689600 +0000"),
+            ("GIT_COMMITTER_DATE", "1735689600 +0000"),
+        ] {
+            c.env(k, v);
+        }
+        // The vector, planted back after the scrub that removes it — so
+        // this arm demonstrates the poison it was handed and nothing else.
+        for (k, v) in poison {
+            c.env(k, v);
+        }
+        c.args(args).output().expect("spawn git")
+    };
+    assert!(run(&["init", "-q"]).status.success(), "legacy init");
+    fs::write(work.join("a.txt"), "x\n").expect("legacy file");
+    assert!(run(&["add", "-A"]).status.success(), "legacy add");
+    assert!(
+        run(&["commit", "-q", "-m", "subject"]).status.success(),
+        "legacy commit"
+    );
+    String::from_utf8_lossy(&run(&["log", "-1", "--format=%B"]).stdout).into_owned()
+}
+
 /// `GIT_DEFAULT_HASH` is the vector a config scrub cannot reach: it is not
 /// config at all, and it changes the repository's **format** rather than its
 /// content, so every oid a fixture records becomes 64 characters instead of 40.
@@ -665,7 +681,7 @@ fn a_hostile_default_hash_cannot_change_what_a_fixture_builds() {
     // This repository is built outside a fixture, on purpose — it is the arm
     // that shows the vector working. That made it **one of two** gits in this
     // file running with the ambient environment — the other is the
-    // `legacy_commit` closure in
+    // `legacy_commit` helper of
     // `a_hostile_inherited_environment_cannot_reach_inside_a_fixture`, which
     // redirected the two config *files* and scrubbed nothing, and is isolated
     // the same way as of the commit that corrected this sentence. In the file
