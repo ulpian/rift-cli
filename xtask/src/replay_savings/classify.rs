@@ -12,6 +12,9 @@ use rift_agent::window_journal::{
 use rift_agent::ReadRequest;
 
 use super::bucket::Bucket;
+use super::census::{
+    count_first_sight_size, count_machine_format, count_machine_format_first_sight, MachineFormat,
+};
 use super::delivery::{stated_delivery, PERSISTED_OUTPUT};
 use super::replay::{revision_hash, Ctx, Replay};
 use super::report::{land, Report};
@@ -37,6 +40,8 @@ struct Resolved {
     read: ResolvedRead,
     /// How many bytes the run of lines it asked for holds.
     slice_bytes: usize,
+    /// How many bytes the whole file holds, as the replay resolved it.
+    file_bytes: u64,
     /// What the pre-call step credited before any result arrived.
     recorded: Interval,
 }
@@ -117,6 +122,11 @@ pub(super) fn classify_reads(
         return;
     }
     count_the_members(ctx, call, requests, tokens);
+    let format = count_machine_format(
+        ctx.report,
+        in_tree_paths(call, requests).iter().map(String::as_str),
+        tokens,
+    );
     if call.result.is_none() {
         land(ctx.report, Bucket::NoResultRecorded, tokens);
         return;
@@ -161,9 +171,45 @@ pub(super) fn classify_reads(
         ctx.report.declinable.add(tokens);
     }
     if matches!(bucket, Bucket::FirstSight | Bucket::CreditedFromStatement) {
-        note_a_first_sight(ctx, blocker, tokens);
+        note_a_first_sight(ctx, blocker, text, tokens);
+    }
+    if bucket == Bucket::FirstSight {
+        note_what_a_first_sight_was_of(ctx.report, format, blocker, tokens);
     }
     land(ctx.report, bucket, tokens);
+}
+
+/// The paths of a call's reads that name something inside the work tree, in
+/// the one spelling coverage is keyed by.
+fn in_tree_paths(call: &Call, requests: &[ReadRequest]) -> Vec<String> {
+    requests
+        .iter()
+        .filter_map(|request| path_key(&request.path, call.cwd.as_deref()))
+        .collect()
+}
+
+/// Count a first sight in its machine-format class and by the size of the
+/// file it read — the file of the member that made the call a first sight.
+fn note_what_a_first_sight_was_of(
+    report: &mut Report,
+    format: Option<MachineFormat>,
+    blocker: Option<&Slot>,
+    tokens: u64,
+) {
+    if let Some(format) = format {
+        count_machine_format_first_sight(report, format, tokens);
+    }
+    let Some(Slot::Member(member)) = blocker else {
+        return;
+    };
+    let resolved = &member.resolved;
+    count_first_sight_size(
+        &mut report.first_sight_sizes,
+        &resolved.key,
+        u64::from(resolved.read.total_lines),
+        resolved.file_bytes,
+        tokens,
+    );
 }
 
 /// Count what the call is made of, and whether it is the read that follows an
@@ -310,14 +356,25 @@ fn charge_the_reason_frames(report: &mut Report, slots: &[Slot]) {
 /// A first read is a first read whichever ceiling it arrived past: both buckets
 /// are reads nothing could have declined, and both are what a sibling window
 /// then reads again.
-fn note_a_first_sight(ctx: &mut Ctx<'_>, blocker: Option<&Slot>, tokens: u64) {
+///
+/// A spawning window's first read also keeps the text it returned, which is
+/// what a paste into the prompt it spawned a sibling with is compared against.
+fn note_a_first_sight(ctx: &mut Ctx<'_>, blocker: Option<&Slot>, text: &str, tokens: u64) {
     ctx.report.first_read_floor.add(tokens);
     let Some(Slot::Member(member)) = blocker else {
         return;
     };
+    let key = member.resolved.key.clone();
+    let revision = member.resolved.revision;
+    if ctx.tree.spawners.contains(&ctx.window) {
+        ctx.tree
+            .first_texts
+            .entry((key.clone(), revision, ctx.window))
+            .or_insert_with(|| text.to_owned());
+    }
     ctx.tree
         .seen
-        .entry((member.resolved.key.clone(), member.resolved.revision))
+        .entry((key, revision))
         .or_default()
         .push((ctx.window, tokens));
 }
@@ -343,7 +400,7 @@ fn resolve_member(ctx: &mut Ctx<'_>, call: &Call, request: &ReadRequest, text: &
     };
     let revision = ctx.tree.revisions.get(&key).copied().unwrap_or_default();
     let hash = revision_hash(&key, revision);
-    let facts = ctx.worktree.facts(&key).cloned();
+    let facts = ctx.worktree.facts_at(ctx.state.commit, &key).cloned();
     let total_lines = ctx
         .tree
         .written_lines
@@ -371,11 +428,16 @@ fn resolve_member(ctx: &mut Ctx<'_>, call: &Call, request: &ReadRequest, text: &
         .map_or(0, |facts| facts.slice_bytes(read.range))
         .max(text.len());
     let recorded = read.range_delivered(slice_bytes, ctx.replay.limits);
+    let file_bytes = match ctx.tree.written_bytes.get(&key) {
+        Some(bytes) => *bytes,
+        None => facts.as_ref().map_or(0, FileFacts::total_bytes),
+    };
     let resolved = Resolved {
         key,
         revision,
         read,
         slice_bytes,
+        file_bytes,
         recorded,
     };
     // Past the size a delivery can be vouched for: the gate reaches no

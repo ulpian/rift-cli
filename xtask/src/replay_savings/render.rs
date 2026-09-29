@@ -9,6 +9,10 @@ use serde_json::{json, Map, Value};
 
 use super::bucket::Bucket;
 use super::report::{share_percent, Report, Tally};
+use super::sections::{
+    declined_by_the_client, extend_document, facts_header, first_sight_sizes, history_lines,
+    later_first_reads, machine_formats, sibling_classes,
+};
 use super::worktree::MAX_INLINE_HASH_BYTES;
 
 /// The version of the machine-readable document this command writes. A later
@@ -17,7 +21,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 
 /// A number with thousands separators, so a seven-figure token count can be
 /// read at a glance.
-fn commas(n: u64) -> String {
+pub(super) fn commas(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (at, ch) in digits.chars().enumerate() {
@@ -30,7 +34,7 @@ fn commas(n: u64) -> String {
 }
 
 /// One line of the table: a label, a call count, a token count and a share.
-fn row(label: &str, tally: Tally, denominator: u64) -> String {
+pub(super) fn row(label: &str, tally: Tally, denominator: u64) -> String {
     format!(
         "  {label:<48}{:>9}{:>15}{:>11.2} %\n",
         commas(tally.calls),
@@ -52,6 +56,8 @@ pub fn render_table(report: &Report) -> String {
     out.push_str(&what_the_share_is(report, denominator));
     out.push_str(&the_two_levers(report));
     out.push_str(&what_is_left(report, denominator));
+    out.push_str(&machine_formats(report, denominator));
+    out.push_str(&first_sight_sizes(report, denominator));
     out.push_str(&the_constants(report));
     out.push_str(READING_IT);
     out
@@ -70,9 +76,11 @@ fn the_corpus(report: &Report) -> String {
     let mut out = String::new();
     out.push_str("replay-savings — what this build's read gate would have decided\n");
     out.push_str(&format!(
-        "  schema {SCHEMA_VERSION} · tokenizer {} · aggregates only\n\n",
+        "  schema {SCHEMA_VERSION} · tokenizer {} · aggregates only\n",
         report.tokenizer
     ));
+    out.push_str(&facts_header(report));
+    out.push('\n');
     out.push_str(&format!(
         "  {:<48}{:>9}\n",
         "session trees",
@@ -100,6 +108,7 @@ fn the_corpus(report: &Report) -> String {
         commas(report.edits),
         commas(report.evictions)
     ));
+    out.push_str(&history_lines(report));
     out
 }
 
@@ -142,6 +151,7 @@ fn what_the_share_is(report: &Report, denominator: u64) -> String {
         denominator,
     ));
     out.push_str(&row("declined by this build", report.declined, denominator));
+    out.push_str(&declined_by_the_client(report, denominator));
     out.push_str(&format!(
         "  {:<48}{:>9}{:>15}{:>11.2} %\n",
         "declined, net of the reason frames",
@@ -215,6 +225,8 @@ fn what_is_left(report: &Report, denominator: u64) -> String {
         commas(report.cross_window.tokens),
         share_percent(report.cross_window.tokens, denominator)
     ));
+    out.push_str(&later_first_reads(report, denominator));
+    out.push_str(&sibling_classes(report, denominator));
     out.push_str(&row(
         "reads after a non-write edit (not modelled)",
         report.verification_after_edit,
@@ -361,8 +373,14 @@ fn shares_json(report: &Report, denominator: u64) -> Value {
 /// the corpus anywhere in it.
 #[must_use]
 pub fn render_json(report: &Report) -> String {
+    serde_json::to_string_pretty(&document(report)).unwrap_or_else(|_| "{}".to_owned())
+}
+
+/// The machine-readable document as a value, so a caller can add its own
+/// provenance before writing it.
+pub(super) fn document(report: &Report) -> Value {
     let denominator = report.repo_content.tokens;
-    let document = json!({
+    let mut document = json!({
         "buckets": buckets_json(report, denominator),
         "constants": constants_json(),
         "corpus": {
@@ -413,7 +431,8 @@ pub fn render_json(report: &Report) -> String {
         "tool_results_all": tally_json(report.all_results),
         "unmeasured_remainder_tokens": report.remainder_tokens(),
     });
-    serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_owned())
+    extend_document(&mut document, report);
+    document
 }
 
 #[cfg(test)]
@@ -462,6 +481,28 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted, "top-level keys are sorted");
+    }
+
+    #[test]
+    fn the_sibling_routes_sit_under_the_later_windows_reads_they_split() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = replay(&fixture(tmp.path())).unwrap();
+        let table = render_table(&report);
+        let lines: Vec<&str> = table.lines().collect();
+        let at = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
+        let pairs = at("of it, read again by a sibling window");
+        let reads = at("later windows' first reads of them");
+        assert_eq!(reads, pairs + 1, "directly under the pairs");
+        assert!(lines[reads].starts_with("    later"), "four spaces in");
+        assert!(
+            lines[reads + 1].starts_with("      fork:"),
+            "the routes, six in"
+        );
+        let document: Value = serde_json::from_str(&render_json(&report)).unwrap();
+        let cross = &document["cross_window_repeats"];
+        assert_eq!(cross["reads"], json!(report.cross_window.calls));
+        assert_eq!(cross["tokens"], json!(report.cross_window.tokens));
+        assert_eq!(cross["pairs"], json!(report.cross_window_pairs));
     }
 
     #[test]

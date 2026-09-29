@@ -38,9 +38,16 @@
 //!    the journal asks of a hash.
 //! 2. **Line counts come from the worktree**, or from a whole-file write's own
 //!    payload when the window created the file. A path with neither is left
-//!    undecided rather than guessed at.
-//! 3. **A slice is measured at the larger** of what the current worktree holds
-//!    for those lines and what the result actually returned. Both readings are
+//!    undecided rather than guessed at. Given `--history <git-dir>`, the
+//!    worktree's place is taken by the newest commit, across the first-parent
+//!    chains of the `--history-ref`s (`HEAD` when none is named), whose
+//!    committer time is at or before the window's first event; the worktree
+//!    answers only for a path that commit does not have and the worktree does,
+//!    and for a window older than every commit. Both are counted and printed,
+//!    and the header names which mode ran.
+//! 3. **A slice is measured at the larger** of what the worktree (or the
+//!    window's commit) holds for those lines and what the result actually
+//!    returned. Both readings are
 //!    imperfect — the worktree has moved on, the result carries the read tool's
 //!    line-number decoration — and the larger of the two is the one that
 //!    pushes a call over a ceiling rather than under it. Past that ceiling the
@@ -88,22 +95,45 @@
 //! buckets are what the share is computed over. Reads of files outside the
 //! work tree are out of scope and leave the denominator altogether, the way
 //! scope containment takes them out of every other figure.
+//!
+//! ## What it sizes beyond this build
+//!
+//! Four sections measure the pools later levers would work on rather than
+//! anything this build decides: the client's own declines beside this
+//! build's; the sibling re-reads split by the route a window could have
+//! inherited the bytes through ([`Inheritance`]), one count per later
+//! window's first read of a revision a sibling had read first; the reads of machine-written
+//! files by path shape ([`MachineFormat`]); and the first sights by the size of
+//! the file read, with the first-contact floor of 400 lines or 16,384 bytes.
+//! `--artifact <dir>` writes the table and the document with the build, the
+//! facts mode, the corpus and the run's times attached.
 
+mod artifact;
 mod bucket;
+mod census;
+#[cfg(test)]
+mod census_fixture;
 mod classify;
 mod delivery;
+mod history;
+mod inheritance;
 mod options;
 mod render;
 mod replay;
 mod report;
+mod sections;
 mod transcript;
 mod worktree;
 
+pub use artifact::{write_artifact, Provenance};
 pub use bucket::Bucket;
+pub use census::{CensusRow, FirstSightSizes, MachineFormat};
+pub use inheritance::Inheritance;
 pub use options::{parse_args, run, Options};
 pub use render::{render_json, render_table, SCHEMA_VERSION};
 pub use replay::replay;
 pub use report::{share_percent, Report, Tally};
+pub use worktree::FactsSource;
 
 #[cfg(test)]
 pub(super) mod tests {
@@ -143,6 +173,9 @@ pub(super) mod tests {
                 .join("replay-savings"),
             repo,
             json: false,
+            history: None,
+            history_refs: vec!["HEAD".to_owned()],
+            artifact: None,
         }
     }
 

@@ -831,6 +831,11 @@ shapes the grammar refuses. That table, not the harness's median, is where the
 distance to the target is measured, and [§18](18-known-gaps.md) carries what
 each of those buckets would take.
 
+The replay also sizes the pools later levers would work on, which it prints beside the buckets rather than inside them.
+It sets the client's own declines beside this build's, splits the sibling re-reads by whether the second window was forked from the first, was handed the lines in its spawning prompt, was handed only the path, or was handed nothing — one count per later window's first read of a revision a sibling read first, so the routes sum to those reads rather than to the pairs — counts the reads of machine-written files by path shape, and sorts the first sights by the size of the file against a first-contact floor of 400 lines or 16,384 bytes.
+Given `--history <git-dir>`, each window's paths are resolved at the newest commit at or before the window began, so a file deleted or split since is measured as the session saw it, and the worktree answers only for a path that commit does not have.
+`--artifact <dir>` writes the table and its JSON twin with the build, the facts mode, the corpus and the run's times attached, and the tracked runs live in `benchmarks/replay-savings/`.
+
 Serving deltas instead of full re-reads is only a win if it saves tokens
 *without making the agent worse*, so the harness replays each scenario twice: a full-read baseline, and a delta-served run where the agent
 receives a compiled pack and retrieves by handle until it finds the decisive

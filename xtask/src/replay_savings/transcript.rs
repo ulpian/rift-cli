@@ -12,6 +12,8 @@ use serde_json::Value;
 pub(super) struct Call {
     /// The tool's own name, as the client spelled it.
     pub(super) name: String,
+    /// The id the client gave the call, which a spawned window's sidecar names.
+    pub(super) id: String,
     /// The tool's arguments.
     pub(super) input: Value,
     /// The working directory the record states, which a relative path is
@@ -40,7 +42,30 @@ pub(super) enum Event {
 pub(super) struct Window {
     /// The window's own events.
     pub(super) events: Vec<(String, usize, Event)>,
+    /// How the window's transcript begins.
+    pub(super) lead: Lead,
+    /// The id of the tool call that spawned this window, from the sidecar the
+    /// client writes beside a subagent's transcript.
+    pub(super) spawning_call: Option<String>,
 }
+
+/// How a window's transcript begins, and every record identity it holds —
+/// what tells a window that starts from another's history from one that
+/// starts afresh.
+#[derive(Default)]
+pub(super) struct Lead {
+    /// The first record's own identity.
+    pub(super) uuid: Option<String>,
+    /// The identity the first record says it follows, where it says one.
+    pub(super) parent_uuid: Option<String>,
+    /// The text of the window's first prompt.
+    pub(super) prompt: Option<String>,
+    /// Every record identity in the window.
+    pub(super) uuids: BTreeSet<String>,
+}
+
+/// The field a subagent's sidecar names its spawning call in.
+const SIDECAR_TOOL_USE_ID: &str = "toolUseId";
 
 /// The text of one `tool_result` block's content, which is a string or a list
 /// of typed parts.
@@ -110,29 +135,7 @@ pub(super) fn load_window(path: &Path) -> Result<Window, String> {
         }
         records.push((last_stamp.clone(), at, record));
     }
-    let mut results: BTreeMap<String, String> = BTreeMap::new();
-    // The client's own object for the same call, off the record the result
-    // block arrived on. It is the transcript's spelling of the field the
-    // result hook reads, and it is the only place a delivery larger than
-    // density can vouch for is ever stated.
-    let mut responses: BTreeMap<String, Value> = BTreeMap::new();
-    for (_, _, record) in &records {
-        for block in blocks(record) {
-            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                continue;
-            }
-            let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if let Some(response) = record.get("toolUseResult") {
-                responses.insert(id.to_owned(), response.clone());
-            }
-            let Some(content) = block.get("content") else {
-                continue;
-            };
-            results.insert(id.to_owned(), result_text(content));
-        }
-    }
+    let (results, responses) = collect_results(&records);
     let mut events = Vec::new();
     for (stamp, at, record) in &records {
         if is_eviction(record) {
@@ -159,6 +162,7 @@ pub(super) fn load_window(path: &Path) -> Result<Window, String> {
                 *at,
                 Event::Call(Box::new(Call {
                     name: name.to_owned(),
+                    id: id.to_owned(),
                     input: block.get("input").cloned().unwrap_or(Value::Null),
                     cwd: cwd.clone(),
                     result: results.get(id).cloned(),
@@ -167,7 +171,77 @@ pub(super) fn load_window(path: &Path) -> Result<Window, String> {
             ));
         }
     }
-    Ok(Window { events })
+    Ok(Window {
+        events,
+        lead: lead_of(&records),
+        spawning_call: spawning_call(path),
+    })
+}
+
+/// Every result text and every result object in a window, by the id of the
+/// call they answer.
+fn collect_results(
+    records: &[(String, usize, Value)],
+) -> (BTreeMap<String, String>, BTreeMap<String, Value>) {
+    let mut results: BTreeMap<String, String> = BTreeMap::new();
+    // The client's own object for the same call, off the record the result
+    // block arrived on. It is the transcript's spelling of the field the
+    // result hook reads, and it is the only place a delivery larger than
+    // density can vouch for is ever stated.
+    let mut responses: BTreeMap<String, Value> = BTreeMap::new();
+    for (_, _, record) in records {
+        for block in blocks(record) {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(response) = record.get("toolUseResult") {
+                responses.insert(id.to_owned(), response.clone());
+            }
+            let Some(content) = block.get("content") else {
+                continue;
+            };
+            results.insert(id.to_owned(), result_text(content));
+        }
+    }
+    (results, responses)
+}
+
+/// How a window's records begin, and every identity they carry.
+fn lead_of(records: &[(String, usize, Value)]) -> Lead {
+    let text =
+        |record: &Value, key: &str| record.get(key).and_then(Value::as_str).map(str::to_owned);
+    let mut lead = Lead::default();
+    let first = records
+        .iter()
+        .map(|(_, _, record)| record)
+        .find(|record| record.get("uuid").is_some());
+    if let Some(first) = first {
+        lead.uuid = text(first, "uuid");
+        lead.parent_uuid = text(first, "parentUuid");
+    }
+    lead.prompt = records
+        .iter()
+        .map(|(_, _, record)| record)
+        .find(|record| is_prompt(record))
+        .and_then(|record| record.get("message")?.get("content"))
+        .map(result_text);
+    lead.uuids = records
+        .iter()
+        .filter_map(|(_, _, record)| text(record, "uuid"))
+        .collect();
+    lead
+}
+
+/// The id of the call that spawned a subagent window, read from the sidecar
+/// the client writes beside its transcript.
+fn spawning_call(path: &Path) -> Option<String> {
+    let sidecar = path.with_extension("meta.json");
+    let text = std::fs::read_to_string(sidecar).ok()?;
+    let meta: Value = serde_json::from_str(&text).ok()?;
+    meta.get(SIDECAR_TOOL_USE_ID)?.as_str().map(str::to_owned)
 }
 
 /// The window files of one session tree: the main session, then each subagent.
