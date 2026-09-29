@@ -115,36 +115,11 @@ impl CodexTrust {
     /// the sentence is written; every surface prints this.
     #[must_use]
     pub fn remedy(&self) -> Option<String> {
-        let modified = self.count(CodexHookVerdict::Modified);
-        let untrusted = self.count(CodexHookVerdict::Untrusted);
-        let skipped = modified + untrusted;
-        if skipped == 0 {
-            return None;
-        }
-        let (why, which) = match (modified, untrusted) {
-            (_, 0) => (
-                "they changed after you approved them",
-                "the hooks marked 'Modified since last trusted'",
-            ),
-            (0, _) => (
-                "you have not approved them yet",
-                "Rift's hooks it lists as untrusted",
-            ),
-            _ => (
-                "they are new or changed after you approved them",
-                "Rift's hooks it lists as untrusted or 'Modified since last trusted'",
-            ),
-        };
-        let mut sentence = format!(
-            "Codex is skipping {skipped} of Rift's hooks because {why}, so Rift cannot see \
-             your Codex sessions start. In a terminal in this repository run `codex`, type \
-             `/hooks`, and trust {which}."
-        );
-        if self.surface() == CodexSurface::VsCode {
-            sentence
-                .push_str(" Then reload the VS Code window and start a new Codex conversation.");
-        }
-        Some(sentence)
+        crate::health::remedy::codex_skipped_sentence(
+            self.count(CodexHookVerdict::Modified),
+            self.count(CodexHookVerdict::Untrusted),
+            self.surface(),
+        )
     }
 
     /// One line for a status row: the state and, when it is not `trusted`,

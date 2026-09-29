@@ -340,6 +340,14 @@ embodies the term, so you can grep for the real thing.
 
 ## I
 
+- **Integration health** — whether each wired agent's capture is actually
+  arriving, as findings with a closed set of reason codes: `codex-hooks-skipped`,
+  `lifecycle-hooks-missing`, `hook-binary-missing` and `session-behind-events`
+  are errors; `codex-trust-unverifiable` and `hook-binary-disagrees` are
+  warnings, printed while nothing is being lost. Computed when asked, never
+  stored; `rift status` and `rift doctor` print the same sentence for each.
+  `health::Reason`. → [10 · Agent integrations](10-agent-integrations.md)
+
 - **Injection budget** — the token ceiling one turn's pushed manifest may cost,
   set per repository in the serving overlay. The default is small on purpose; `0`
   turns per-turn injection off outright, and absence means the default rather

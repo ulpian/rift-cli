@@ -579,6 +579,36 @@ failure makes it `degraded`. The six placeholder adapters report
 signal is the per-client follow-up line (`action: repair Codex hook
 configuration`).
 
+**Integration health** is the question the wiring columns cannot answer: is
+what Rift wrote being run, and does what runs reach the ledger?
+`rift status` prints it after the Codex trust line, and `rift doctor` prints it
+as its `integration_health` leg, after the binary of record.
+Both read the same facts through one function and print the same block: a
+headline per finding, the remedy sentence under it, or `integration health:
+none`.
+`--json` carries the same array on both, under `health` and
+`integration_health`: one element per finding with `reason`, `severity`,
+`agent`, `session`, `surface`, `headline`, `sentence` and `detail`.
+The leg only reads; `rift doctor --fix` repairs nothing here.
+
+| Reason | Severity | What it means | What the remedy asks |
+|---|---|---|---|
+| `codex-hooks-skipped` | error | Codex skips at least one of Rift's hooks: modified or untrusted. | Trust them in Codex's `/hooks`; in VS Code, reload the window after. `rift status` points at the trust line instead of printing the sentence twice. |
+| `codex-trust-unverifiable` | warning | Rift cannot reproduce Codex's answer: an unproven version, or no recorded session. | Nothing is being lost that Rift can see; check `/hooks` in Codex to be sure. |
+| `lifecycle-hooks-missing` | error | The agent's newest recent session sent tool calls but no session start and no prompt. | Restart the client where it runs; if the next session is the same, `rift enable --agent <agent>`. |
+| `hook-binary-missing` | error | The binary the agent's hook file runs is gone or not executable. | `rift enable --agent <agent>` with the build the hooks should run, then restart the client. |
+| `hook-binary-disagrees` | warning | The agent's hooks run a build other than the binary of record; both run. | Nothing is being lost; settle on one build with `rift enable --agent <agent>` or `rift hooks install --repoint`. |
+| `session-behind-events` | error | A session recorded ended or idle while its own events kept arriving. | Nothing: it is Rift's own defect, and the session's next hook repairs it. |
+
+The sentence names where to act — VS Code (or Cursor, Windsurf), a terminal,
+a JetBrains IDE, or neutrally when the surface is unknown — from the session
+record the agent wrote, or from what is installed when no record says.
+`rift enable` is the only command that re-points an agent's hook file at a
+build: `rift init` keeps wiring that exists, and `rift hooks install --repoint`
+moves the git hooks and the binary of record, not the agents' files.
+No sentence has Rift change another client's trust or configuration; the ones
+that need it send you into the client.
+
 **`rift worktree status`** reports the same wiring per member, read-only: where
 each agent's hooks point, whether a recall skill is present, and whether Codex
 trust is approved or pending
