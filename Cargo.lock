@@ -3224,6 +3224,8 @@ dependencies = [
  "imara-diff",
  "proptest",
  "rift-core",
+ "rift-recall-events",
+ "rift-recall-pack",
  "rift-recall-rank",
  "rift-recall-substrate",
  "rift-recall-types",

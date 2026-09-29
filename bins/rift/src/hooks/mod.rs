@@ -235,7 +235,7 @@ pub(crate) fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::audit::{citation_identity_of, read_identified_bytes};
+    use crate::hooks::audit::read_identified_bytes;
     use crate::hooks::git::{capture_sync_note, CAPTURE_SYNC_ENV};
     use crate::hooks::ingest::enrich_native_context;
     use crate::hooks::ingest::worktree::{observe_worktree, worktree_read_hasher};
@@ -1053,38 +1053,6 @@ mod tests {
         );
         assert_eq!(row[0].get_text(0).unwrap(), "memd.internal_error");
         assert_eq!(row[0].get_i64(1).unwrap(), 500);
-    }
-
-    #[test]
-    fn citation_identity_of_parses_both_shapes_and_refuses_everything_else() {
-        let key = "a".repeat(64);
-        let sha = "b".repeat(64);
-        assert_eq!(
-            citation_identity_of(&format!("pack:{key}/evidence:3")),
-            Some((key.clone(), 3))
-        );
-        assert_eq!(
-            citation_identity_of(&format!("pack:{key}/evidence:3=file:src/a.rs@sha256:{sha}")),
-            Some((key.clone(), 3)),
-            "the resolved-address suffix must not stop the head from parsing"
-        );
-        assert_eq!(
-            citation_identity_of(&format!("pack:{key}/evidence:3@sha256:{sha}")),
-            Some((key, 3)),
-            "a caller-restated address (no `=`) is still the same head"
-        );
-        for not_a_citation in [
-            "file:src/a.rs@sha256:deadbeef",
-            "summary:some/path",
-            "log:tool-use-1",
-            "",
-        ] {
-            assert_eq!(
-                citation_identity_of(not_a_citation),
-                None,
-                "{not_a_citation} is not a citation"
-            );
-        }
     }
 
     /// The two proper citation columns, populated from the SAME composed

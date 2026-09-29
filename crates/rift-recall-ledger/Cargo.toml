@@ -26,6 +26,12 @@ rift-recall-validity = { version = "0.0.1", path = "../rift-recall-validity" }
 # Task-aware ranking: the ledger builds scope-contained `rank::Candidate`s from
 # the graph (it owns the store queries + outcome labels). Acyclic: rank → core/types.
 rift-recall-rank = { version = "0.0.1", path = "../rift-recall-rank" }
+# The serve envelope's closed channel vocabulary (`ServeChannel`), read by the
+# one writer of the serve relations in `audit`.
+rift-recall-events = { version = "0.0.1", path = "../rift-recall-events" }
+# The strict citation grammar (`CitationTarget::parse`) the same writer uses to
+# split a citation handle into its two columns, rather than a second copy.
+rift-recall-pack = { version = "0.0.1", path = "../rift-recall-pack" }
 serde = { workspace = true }
 # The savings-window marker is one small JSON file in the family's common dir
 # (never a table): read and written here so every surface that publishes the

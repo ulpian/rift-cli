@@ -263,8 +263,8 @@ const MEMD_AUDIT_EVENT_COLUMNS: &[Column] = &[
 // `pack_key` is a content address (`is_content_address`-checked at parse by
 // `rift_recall_pack::CitationTarget`); `ordinal` is the pack-local number a
 // caller sent back. Both are populated from the EXISTING `handle`/`target`
-// string at write time (`bins/rift/src/hooks.rs::append_memd_audit`, via
-// `rift_recall_serve::pack::CitationTarget::parse`) — the composed string
+// string at write time (`rift_recall_ledger::audit::append_memd_audit`, via
+// `rift_recall_pack::CitationTarget::parse`) — the composed string
 // itself is UNCHANGED (the citation tests that assert its exact shape keep
 // passing), and parsing happens exactly once, at the one place a row is
 // ever written, never at query time.

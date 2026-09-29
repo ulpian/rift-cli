@@ -26,7 +26,7 @@ rift-nic-gauge -> rift-core
 rift-recall-doc -> rift-core
 rift-recall-eval -> rift-config, rift-core, rift-recall-events, rift-recall-ledger, rift-recall-pack, rift-recall-policy, rift-recall-serve, rift-recall-substrate, rift-recall-types, rift-store, rift-tokens
 rift-recall-events -> rift-core
-rift-recall-ledger -> rift-core, rift-recall-rank, rift-recall-substrate, rift-recall-types, rift-recall-validity, rift-store, rift-tokens
+rift-recall-ledger -> rift-core, rift-recall-events, rift-recall-pack, rift-recall-rank, rift-recall-substrate, rift-recall-types, rift-recall-validity, rift-store, rift-tokens
 rift-recall-pack -> rift-core, rift-recall-types, rift-recall-validity, rift-tokens
 rift-recall-policy -> rift-config, rift-core, rift-recall-types
 rift-recall-rank -> rift-core, rift-recall-types
