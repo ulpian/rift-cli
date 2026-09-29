@@ -221,6 +221,36 @@ reviewable adjacency list.
   Hints derive per stage so they never advertise a dead key. One solver feeds
   draw + hit-test; a new modal surface joins the parity fixtures or CI goes red.
 
+## Style
+
+Code follows the rust-analyzer style guide
+(<https://rust-analyzer.github.io/book/contributing/style.html>). What
+reviewers enforce:
+
+- **Ceilings, enforced by `xtask ci-meta`:** no `.rs` file over 1,500 lines
+  and no function over 80 lines, tests, benches and `tests/` files included.
+  The screen parses item spans, so a comment or a string cannot shrink a
+  function. Split a file by concern before it nears the line; name a helper
+  before a function nears its.
+- **Control flow:** guard clauses and early returns first, the happy path
+  unindented; `let … else` for a precondition whose failure leaves the
+  function; `match` over `if let … else`.
+- **Functions:** small, named after the step they perform; many parameters
+  become one context struct passed first; a `bool` every caller passes as a
+  literal becomes two functions.
+- **Visibility:** private by default, `pub(super)` inside a module tree,
+  `pub(crate)` for a sibling, `pub` only for a crate's real API; re-exports
+  only where a split keeps callers unchanged.
+- **Errors:** no `unwrap`, `expect`, `panic!` or indexing outside test code;
+  variants carry identifiers and reasons, never key or transcript bytes.
+- **Order within a file:** module docs, `mod` and `use`, types, constructors,
+  methods, free functions, then `#[cfg(test)] mod tests` last at column zero.
+- **Comments say why:** the decision, the invariant, the alternative rejected;
+  a doc comment never restates the signature. An `#[ignore]` carries its
+  reason.
+- **Tests** are held to every rule above, inject the clock, RNG and identity,
+  and are named as a sentence about the behaviour.
+
 ## Lints & tests
 
 - Workspace `#![forbid(unsafe_code)]`; CI denies warnings (`clippy -D warnings`,
