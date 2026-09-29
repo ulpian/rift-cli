@@ -10,7 +10,7 @@
 //! every surface reads and the read-only diagnosis over the whole registry.
 
 mod antigravity;
-mod codex_client;
+pub(crate) mod codex_client;
 mod codex_identity;
 mod codex_trust;
 mod descriptor;

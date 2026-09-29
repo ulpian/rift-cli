@@ -1,0 +1,6 @@
+{"type":"bridge-session","sessionId":"0b9c1d2e-3f40-4a51-8b62-7c83d94ea5f6","bridgeSessionId":"session_01AbCdEfGhIjKlMnOpQrStUv","lastSequenceNum":0,"ownerAccountUuid":"11111111-2222-4333-8444-555555555555","ownerOrganizationUuid":"66666666-7777-4888-9999-aaaaaaaaaaaa"}
+{"type":"ai-title","sessionId":"0b9c1d2e-3f40-4a51-8b62-7c83d94ea5f6","aiTitle":""}
+{"type":"queue-operation","sessionId":"0b9c1d2e-3f40-4a51-8b62-7c83d94ea5f6","operation":"enqueue","timestamp":"2026-09-29T08:00:00.000Z"}
+{"type":"queue-operation","sessionId":"0b9c1d2e-3f40-4a51-8b62-7c83d94ea5f6","operation":"dequeue","timestamp":"2026-09-29T08:00:00.001Z"}
+{"type":"attachment","sessionId":"0b9c1d2e-3f40-4a51-8b62-7c83d94ea5f6","uuid":"c0ffee00-0000-4000-8000-000000000001","parentUuid":null,"isSidechain":false,"userType":"external","entrypoint":"claude-vscode","cwd":"/repo","gitBranch":"main","version":"2.1.267","timestamp":"2026-09-29T08:00:00.002Z"}
+{"type":"user","sessionId":"0b9c1d2e-3f40-4a51-8b62-7c83d94ea5f6","uuid":"c0ffee00-0000-4000-8000-000000000002","parentUuid":"c0ffee00-0000-4000-8000-000000000001","isSidechain":false,"userType":"external","entrypoint":"claude-vscode","cwd":"/repo","gitBranch":"main","version":"2.1.267","timestamp":"2026-09-29T08:00:00.003Z"}
