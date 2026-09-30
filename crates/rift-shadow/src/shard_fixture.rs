@@ -37,13 +37,16 @@
 //! schema-4 line and one schema-1 line, in the canonical shape the one writer
 //! freezes from the recall rows (keys sorted, typed text already withheld,
 //! the session and window that made them named), sorted by idempotency key.
+//! So are the settled usage facts: two calls of the first session on two
+//! models, in two turns, which `usage.jsonl` freezes one line each.
 
 use std::path::PathBuf;
 
 use rift_core::{Result, SecretBytes};
 
 use crate::backend::{
-    ArchivedEvent, ArchivedReadFact, ArchivedTask, CheckpointArchive, RedactionReportView,
+    ArchivedEvent, ArchivedReadFact, ArchivedTask, ArchivedUsageFact, CheckpointArchive,
+    RedactionReportView,
 };
 
 /// The fixture's capture time — a literal, so no artifact moves with the clock.
@@ -115,6 +118,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
         events: fixture_events(),
         read_facts: fixture_read_facts(),
         serve_audit: Some(fixture_serve_audit()),
+        usage: fixture_usage(),
         content: redacted.redacted,
         report: RedactionReportView::from_redact(&redacted.report),
         transcript: Some(transcript),
@@ -258,4 +262,26 @@ fn fixture_serve_audit() -> Vec<u8> {
         out.push(b'\n');
     }
     out
+}
+
+/// The settled usage the fixture archives as `usage.jsonl`: one call per
+/// turn of the first session, on two different models, so the lines differ
+/// in every member a rebuild keys on.
+fn fixture_usage() -> Vec<ArchivedUsageFact> {
+    let call = |turn: i64, model: &str, at: i64, call_id: char| ArchivedUsageFact {
+        session: FIXTURE_SESSIONS[0].to_owned(),
+        turn,
+        call_id: call_id.to_string().repeat(64),
+        model: model.to_owned(),
+        at,
+        uncached_input: 1_200 * turn,
+        cached_input: 30_000,
+        cache_creation: 512,
+        output: 90 * turn,
+        method: "provider_reported".to_owned(),
+    };
+    vec![
+        call(1, "claude-sonnet-4-5", FIXTURE_CREATED_AT_MS - 7_500, '5'),
+        call(2, "claude-opus-4-1", FIXTURE_CREATED_AT_MS - 1_500, '6'),
+    ]
 }

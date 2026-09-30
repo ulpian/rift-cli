@@ -1,0 +1,2 @@
+{"at":1755999992500,"cache_creation":512,"cached_input":30000,"call_id":"5555555555555555555555555555555555555555555555555555555555555555","method":"provider_reported","model":"claude-sonnet-4-5","output":90,"schema_version":1,"session":"01JSHARDGOLDENA","turn":1,"uncached_input":1200}
+{"at":1755999998500,"cache_creation":512,"cached_input":30000,"call_id":"6666666666666666666666666666666666666666666666666666666666666666","method":"provider_reported","model":"claude-opus-4-1","output":180,"schema_version":1,"session":"01JSHARDGOLDENA","turn":2,"uncached_input":2400}

@@ -76,6 +76,8 @@ pub struct AgentHookEventRow {
     /// `skipped-unknown-verb`). `deferred-no-session` is the visible receipt
     /// for a hook carrying no usable session id: the payload is
     /// not ingested, but the loss is counted rather than silent.
+    /// `recorded-no-event` is a verb the adapter knows that carries nothing
+    /// to capture, recorded so the hook still counts as having arrived.
     pub outcome: String,
     /// Row schema version.
     pub schema_version: i64,

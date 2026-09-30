@@ -9,7 +9,7 @@ use std::path::Path;
 use rift_core::Result;
 
 use super::archive::{archive_now, condense_queued};
-use super::audit::{read_identified_bytes, serve_audit_job};
+use super::audit::{attribute_serve_job, read_identified_bytes, serve_audit_job};
 use super::git::{capture_guarded, effective_config, state_from_token, strategy_kind};
 use super::recovery::hook_number;
 use super::{flag, now_ms, projection_db_at};
@@ -192,6 +192,7 @@ fn run_agent_job(
         )
         .map(|()| None),
         JobKind::ServeAudit(audit) => serve_audit_job(t, job, audit).map(|()| None),
+        JobKind::AttributeServe(claim) => attribute_serve_job(t, job, claim).map(|()| None),
         JobKind::SearchIndex => rebuild_search_index_job(t, job).map(|()| None),
         JobKind::DocConvert {
             rel_path,

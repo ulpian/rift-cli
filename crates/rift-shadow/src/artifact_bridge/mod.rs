@@ -11,8 +11,8 @@
 //! opens only the checkpoint ref, and a non-local reader is refused outright.
 //!
 //! The walk lives here; the report it fills, the per-shard fact recording, the
-//! event projection and the shard's own clock each live in a module of their
-//! own so a new shard artifact lands beside the concern it feeds.
+//! event projection, the settled usage and the shard's own clock each live in a
+//! module of their own so a new shard artifact lands beside the concern it feeds.
 
 mod created_at;
 mod events;
@@ -20,6 +20,9 @@ mod facts;
 mod report;
 #[cfg(test)]
 mod tests;
+mod usage;
+#[cfg(test)]
+mod usage_tests;
 
 use rift_core::{Result, RiftError, Sha256Id};
 use rift_recall_substrate::parse;
@@ -33,6 +36,7 @@ use crate::ids;
 use events::project_full_events;
 use facts::{record_chain_facts, record_sessions};
 pub use report::{BridgeReport, RefusedShard, MAX_PARSE_NOTES};
+use usage::project_usage_lines;
 
 /// The checkpoint branch the bridge ingests.
 pub const CHECKPOINT_BRANCH: &str = "rift/checkpoints/v1";
@@ -171,7 +175,7 @@ pub async fn ingest_dialect(
 }
 
 /// Judge one shard, then project what it carries: the chain facts from its
-/// header, its session links, and its archived event stream. `parsed_id` is the
+/// header, its session links, its archived event stream and its settled usage. `parsed_id` is the
 /// shard's id when it is a SHA-256; `prev` is the nearest preceding shard whose
 /// id is one.
 async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
@@ -217,6 +221,9 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
     }
     record_sessions(ctx, id, &metadata).await?;
     project_full_events(ctx, report, id).await?;
+    // After the events, so a session or turn an archived event opened keeps
+    // the live row's start and model; the usage rows only fill what is absent.
+    project_usage_lines(ctx, report, id).await?;
     report.shards_projected += 1;
     Ok(())
 }

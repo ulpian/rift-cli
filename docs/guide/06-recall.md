@@ -414,8 +414,13 @@ split explains what is safe to throw away:
   rows name, canonicalised, into its `serve_audit.jsonl`
   ([Chapter 5](05-ledger-and-verification.md)), where a rebuild cannot erase
   them, and a rebuild reads them back from there, attribution included
-  ([§13.12](13-storage-and-schema.md)). A serve no session made is in no
-  shard. The caller's own words in an exact retrieval's reason are frozen as
+  ([§13.12](13-storage-and-schema.md)).
+  A skill-CLI serve made from inside an agent session is attributed when the
+  agent's tool result comes back: the answer prints its two keys on a
+  `serve:` line, and the hook that ingests the result queues the row for the
+  worker, which writes it only for a key its relation holds.
+  One a person makes in a terminal belongs to no session and is frozen into
+  no shard. The caller's own words in an exact retrieval's reason are frozen as
   the placeholder `withheld`, so a rebuilt exact-retrieval row carries
   `withheld` as its reason and the only copy of them stays in this store.
 

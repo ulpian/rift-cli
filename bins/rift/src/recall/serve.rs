@@ -237,7 +237,7 @@ async fn book_the_serve_and_act_on_its_decision(
     req: &rift_recall_serve::ToolRequest,
     resp: &ToolResponse,
 ) -> Outcome {
-    let _ = record_serve(store, verb, scope, resp).await;
+    let keys = record_serve(store, verb, scope, resp).await.ok().flatten();
     // The dispatcher decided; this acts on the decision. A conversion is owed
     // only where the surface actually answered that one is — so a denied
     // document never queues work, and a document the family has already
@@ -247,7 +247,21 @@ async fn book_the_serve_and_act_on_its_decision(
     {
         owe_document_conversion(repo, req);
     }
-    rendered(verb, resp)
+    rendered(verb, resp, keys.as_ref())
+}
+
+/// The two keys one serve was booked under, as the answer prints them.
+///
+/// A serve made inside an agent session is attributed by the hook that
+/// ingests this answer, and that hook opens no store, so the answer itself is
+/// where the keys travel. Both are printed because the schema-1 key is a
+/// salted hash of the payload and nothing recomputes a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServeKeys {
+    /// The schema-4 key, `serve_call_event.call_id`.
+    call_id: String,
+    /// The schema-1 key, `memd_audit_event.audit_id`.
+    audit_id: String,
 }
 
 /// A source of per-invocation serve ids. Process-wide rather than per-call:
@@ -275,12 +289,15 @@ static SERVE_IDS: std::sync::LazyLock<rift_core::MonotonicUlidSource> =
 /// this is where that write is real rather than aspirational. Best-effort,
 /// same as the legacy write beside it: this ADDS a row, it never gates the
 /// legacy one on the new one succeeding or vice versa.
+///
+/// Returns the keys both rows were booked under, or `None` where the audit
+/// envelope named no key of its own.
 async fn record_serve(
     store: &SqliteStore,
     verb: &str,
     scope: &rift_recall_types::Scope,
     resp: &ToolResponse,
-) -> Result<()> {
+) -> Result<Option<ServeKeys>> {
     use rift_core::UlidSource as _;
     let call_id = SERVE_IDS.next_ulid().to_hex();
     // A serve a cross-branch grant widened is audited as a FIXED
@@ -296,11 +313,12 @@ async fn record_serve(
     };
     let now = crate::hooks::now_ms();
     crate::hooks::append_memd_audit(store, envelope.as_bytes(), now).await?;
+    let audit_id = audit_id_of(&envelope);
     if granted {
-        if let (Some(audit_id), Some(reason)) = (audit_id_of(&envelope), scope.cross.reason()) {
+        if let (Some(audit_id), Some(reason)) = (audit_id.as_deref(), scope.cross.reason()) {
             rift_recall_ledger::grants::record_serve_grant(
                 store,
-                &audit_id,
+                audit_id,
                 rift_recall_ledger::grants::GRANT_KIND_BRANCHES,
                 reason,
                 now,
@@ -320,7 +338,8 @@ async fn record_serve(
         serve_call_envelope.as_bytes(),
         crate::hooks::now_ms(),
     )
-    .await
+    .await?;
+    Ok(audit_id.map(|audit_id| ServeKeys { call_id, audit_id }))
 }
 
 /// The `memd_audit_event.audit_id` an envelope will land under — its own
@@ -336,17 +355,30 @@ fn audit_id_of(envelope: &str) -> Option<String> {
 
 /// The success document: the payload plus the accounting seam's own figures and
 /// the tokenizer that produced them (a claim about savings always ships with
-/// its provenance).
-fn rendered(verb: &str, resp: &ToolResponse) -> Outcome {
-    let doc = json!({
+/// its provenance), and the keys the serve was booked under.
+///
+/// The keys are one line of their own, `serve: <call_id> <audit_id>`, second
+/// in the text so a client that keeps only the head of a long answer still
+/// hands them to the hook; they name rows and carry nothing of the answer.
+fn rendered(verb: &str, resp: &ToolResponse, keys: Option<&ServeKeys>) -> Outcome {
+    let mut doc = json!({
         "verb": verb,
         "tokenizer": resp.tokenizer,
         "estimated_tokens_returned": resp.estimated_tokens_returned,
         "estimated_tokens_avoided": resp.estimated_tokens_avoided,
         "result": resp.payload,
     });
+    if let (Some(keys), Some(fields)) = (keys, doc.as_object_mut()) {
+        fields.insert(
+            "serve".to_owned(),
+            json!({ "call_id": keys.call_id, "audit_id": keys.audit_id }),
+        );
+    }
+    let key_line = keys.map_or_else(String::new, |keys| {
+        format!("serve: {} {}\n", keys.call_id, keys.audit_id)
+    });
     let human = format!(
-        "{verb}: {} tokens returned, ~{} avoided ({})\n{}",
+        "{verb}: {} tokens returned, ~{} avoided ({})\n{key_line}{}",
         resp.estimated_tokens_returned,
         resp.estimated_tokens_avoided,
         resp.tokenizer,
@@ -476,6 +508,56 @@ mod tests {
             3,
             "a re-delivered handoff must still collapse"
         );
+    }
+
+    /// The answer names the keys its serve was booked under, on one line of
+    /// its own and in the document, and those are the keys the rows carry.
+    #[tokio::test]
+    async fn the_answer_names_the_two_keys_its_serve_was_booked_under() {
+        use rift_recall_events::MemdEvent;
+        use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore};
+
+        let store = SqliteStore::open_in_memory().expect("in-memory store");
+        apply_migrations(&store, &recall_migrations()).expect("recall migrations");
+        let resp = ToolResponse {
+            tool: ToolName::KnownState,
+            estimated_tokens_returned: 3,
+            estimated_tokens_avoided: 4,
+            tokenizer: "cl100k_base",
+            payload: json!({ "state": "known" }),
+            event: MemdEvent::ManifestServed {
+                estimated_tokens_returned: 3,
+                estimated_tokens_avoided: 4,
+            },
+        };
+        let keys = record_serve(
+            &store,
+            "known-state",
+            &rift_recall_types::Scope::unbounded("fam"),
+            &resp,
+        )
+        .await
+        .unwrap()
+        .expect("the audit envelope names its key");
+        let answer = rendered("known-state", &resp, Some(&keys));
+        let line = answer.human.lines().nth(1).unwrap();
+        assert_eq!(line, format!("serve: {} {}", keys.call_id, keys.audit_id));
+        assert_eq!(answer.json["serve"]["call_id"], keys.call_id.as_str());
+        assert_eq!(answer.json["serve"]["audit_id"], keys.audit_id.as_str());
+        let audit = store
+            .query("SELECT audit_id FROM memd_audit_event", &[])
+            .await
+            .unwrap();
+        assert_eq!(audit[0].get_text(0).unwrap(), keys.audit_id);
+        let call = store
+            .query("SELECT call_id FROM serve_call_event", &[])
+            .await
+            .unwrap();
+        assert_eq!(call[0].get_text(0).unwrap(), keys.call_id);
+
+        let unkeyed = rendered("known-state", &resp, None);
+        assert!(!unkeyed.human.contains("serve: "));
+        assert!(unkeyed.json.get("serve").is_none());
     }
 
     /// Refusals are neutral tags with an honest exit class: "you asked wrong"

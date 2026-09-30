@@ -184,11 +184,13 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
     let serve_audit = read("serve_audit.jsonl");
     let transcript_compact = read("transcript.compact.jsonl");
     let transcript_full = read("transcript.jsonl");
+    let usage = read("usage.jsonl");
     let derived = shard_merkle_root(&ShardLeafBytes {
         content_redacted: &content,
         full_jsonl: full.as_deref(),
         redaction_report: &report,
         serve_audit: serve_audit.as_deref(),
+        usage: usage.as_deref(),
         tool_calls: tool_calls.as_deref(),
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
@@ -219,6 +221,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
         full_jsonl: full.as_deref(),
         redaction_report: &report,
         serve_audit: serve_audit.as_deref(),
+        usage: usage.as_deref(),
         tool_calls: tool_calls.as_deref(),
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
@@ -311,6 +314,7 @@ fn a_seeded_secret_never_reaches_any_native_artifact() {
         events: Vec::new(),
         read_facts: Vec::new(),
         serve_audit: None,
+        usage: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript: None,
@@ -373,6 +377,7 @@ fn archive_with_transcript(
         events: Vec::new(),
         read_facts: Vec::new(),
         serve_audit: None,
+        usage: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript,
@@ -410,6 +415,47 @@ fn a_frozen_serve_audit_reads_back_byte_for_byte_and_is_bound_by_the_id() {
     let sub = GixSubstrate::open(tmp.path()).unwrap();
     let read = |name: &str| sub.read_artifact(&archive.checkpoint_id, name).unwrap();
     assert_eq!(read("serve_audit.jsonl").as_deref(), Some(lines.as_slice()));
+    let meta: serde_json::Value = serde_json::from_slice(&read("metadata.json").unwrap()).unwrap();
+    assert_eq!(
+        meta.get("merkle_root").and_then(serde_json::Value::as_str),
+        Some(archive.merkle_root().to_hex().as_str()),
+        "the recorded root is the one over the artifact as written"
+    );
+}
+
+/// **The settled usage survives the trip through git byte for byte**, and it
+/// is a leaf: the root the shard records re-derives from the bytes read
+/// back, and the same archive without it addresses a different shard.
+#[test]
+fn settled_usage_reads_back_byte_for_byte_and_is_bound_by_the_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let mut archive = archive_with_transcript(tmp.path(), b"the capture", None);
+    let bare_id = archive.checkpoint_id.clone();
+    archive.usage = vec![rift_shadow::backend::ArchivedUsageFact {
+        session: archive.sessions[0].clone(),
+        turn: 1,
+        call_id: "c".repeat(64),
+        model: "claude-fable-5".to_owned(),
+        at: 1_000,
+        uncached_input: 20,
+        cached_input: 30,
+        cache_creation: 0,
+        output: 2,
+        method: "provider_reported".to_owned(),
+    }];
+    archive.checkpoint_id = archive.derived_checkpoint_id().unwrap();
+    assert_ne!(
+        archive.checkpoint_id, bare_id,
+        "the artifact is bound by the id"
+    );
+    native_backend(tmp.path())
+        .archive_checkpoint(&archive)
+        .unwrap();
+
+    let sub = GixSubstrate::open(tmp.path()).unwrap();
+    let read = |name: &str| sub.read_artifact(&archive.checkpoint_id, name).unwrap();
+    assert_eq!(read("usage.jsonl"), archive.usage_jsonl());
     let meta: serde_json::Value = serde_json::from_slice(&read("metadata.json").unwrap()).unwrap();
     assert_eq!(
         meta.get("merkle_root").and_then(serde_json::Value::as_str),

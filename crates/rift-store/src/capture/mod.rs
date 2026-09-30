@@ -35,8 +35,8 @@ pub use attribution::{
     AttributionRow,
 };
 pub use cost::{
-    effective_prices, record_price, record_token_usage, EffectivePrices, PriceTableRow,
-    TokenUsageRow,
+    effective_prices, record_price, record_token_usage, session_usage_facts, EffectivePrices,
+    PriceTableRow, SessionUsageFact, TokenUsageRow,
 };
 pub use enablement::{
     latest_archive_ms, record_agent_enablement, record_agent_hook_event, record_archive_decision,

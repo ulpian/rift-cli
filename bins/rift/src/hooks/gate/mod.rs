@@ -208,10 +208,12 @@ pub(in crate::hooks) fn read_gate(
     if requests.is_empty() {
         return quiet;
     }
+    let window_key = crate::window_journal::key(&raw.session, facts.child_session.as_deref());
     let pass = GatePass {
         step,
         held: &held,
         journal: &journal,
+        window_key: &window_key,
         stated,
         limits: gate_limits(effective),
         turn,

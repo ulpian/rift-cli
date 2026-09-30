@@ -151,6 +151,7 @@ pub(super) fn journal_decision(
     decision: &rift_agent::window_journal::Decision,
     frame: &str,
     booked: bool,
+    window_key: &str,
 ) -> bool {
     let Some(audit) = read_decision_audit(&raw.agent, read, blob_oid, decision, frame, booked, {
         use rift_core::UlidSource as _;
@@ -167,7 +168,7 @@ pub(super) fn journal_decision(
             attempts: 0,
             kind: crate::agent_queue::JobKind::ServeAudit(crate::agent_queue::ServeAudit {
                 session: Some(raw.session.clone()),
-                window: None,
+                window: Some(window_key.to_owned()),
                 ..audit
             }),
         },

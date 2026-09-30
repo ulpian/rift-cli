@@ -4,7 +4,9 @@
 //! A module of its own because it is the one place that names a serve's
 //! session. Every live writer that knows the session, and the rebuild that
 //! reads it back off a frozen line, write the row through
-//! [`append_attributed_serve`]; the archive reads the rows back through
+//! [`append_attributed_serve`], and a serve booked before its session was
+//! known is attributed by its keys through [`attribute_booked_serve`]; the
+//! archive reads the rows back through
 //! [`session_serves`]. So a serve's shard is decided by the row, never by
 //! which checkpoint happened to run next, and nothing but the store holds it.
 
@@ -126,6 +128,27 @@ pub async fn append_attributed_serve(
     record_serve_session(store, envelope, attribution).await
 }
 
+/// Attribute a serve some other process already booked, by its two keys.
+///
+/// The skill CLI books its serve with no session in hand, and names both keys
+/// in its answer; the agent hook that ingests that answer is where the session
+/// is known. A key that names no row writes nothing, so a spoofed or stale
+/// line attributes nothing, and the row is insert-or-ignore on the key, so the
+/// first attribution a serve receives is the one it keeps.
+///
+/// # Errors
+///
+/// The store's own error when the existence check or the insert fails.
+pub async fn attribute_booked_serve(
+    store: &impl CanonicalStore,
+    audit_id: &str,
+    call_id: &str,
+    attribution: &ServeAttribution,
+) -> Result<()> {
+    attribute_key(store, audit_id, Relation::Decision, attribution).await?;
+    attribute_key(store, call_id, Relation::Call, attribution).await
+}
+
 /// Every serve `session_id` made, from both relations, each ordered by key.
 ///
 /// # Errors
@@ -204,8 +227,19 @@ async fn record_serve_session(
     let Some((key, relation)) = serve_key_of(envelope) else {
         return Ok(());
     };
+    attribute_key(store, &key, relation, attribution).await
+}
+
+/// Write the attribution row of the serve `key` addresses in `relation`, when
+/// that relation holds it.
+async fn attribute_key(
+    store: &impl CanonicalStore,
+    key: &str,
+    relation: Relation,
+    attribution: &ServeAttribution,
+) -> Result<()> {
     let held = store
-        .query_opt_i64(relation.holds_sql(), &[Value::text(&key)])
+        .query_opt_i64(relation.holds_sql(), &[Value::text(key)])
         .await?;
     if held.unwrap_or(0) == 0 {
         return Ok(());
@@ -221,7 +255,7 @@ async fn record_serve_session(
                 "schema_version",
             ],
             &[
-                Value::text(&key),
+                Value::text(key),
                 Value::text(relation.token()),
                 Value::text(&attribution.session_id),
                 attribution
@@ -372,5 +406,57 @@ mod tests {
         book(&store, &capped(4), "call-4", &session);
         book(&store, &capped(4), "call-4", &session);
         assert_eq!(block(store.count("memd_audit_session")).unwrap(), 2);
+    }
+
+    /// A serve booked with no session is attributed by its two keys to the
+    /// session that names them first; a later claim moves nothing, and a key
+    /// that names no row writes nothing.
+    #[test]
+    fn a_booked_serve_keeps_its_first_attribution_and_a_missing_key_attributes_nothing() {
+        let store = recall_store();
+        let event = capped(5);
+        let audited = event.to_hook_json_keyed("call-5");
+        let called = event.to_serve_call_json(
+            ServeChannel::SkillCli,
+            "call-5",
+            "known-state",
+            rift_core::Timestamp::from_millis(1_700_000_000_000),
+        );
+        for envelope in [&audited, &called] {
+            block(append_attributed_serve(
+                &store,
+                envelope.as_bytes(),
+                1,
+                None,
+            ))
+            .unwrap();
+        }
+        let audit_id = serve_key_of(audited.as_bytes()).unwrap().0;
+        let first = attributed("s-a", Some(&"a".repeat(64)));
+        block(attribute_booked_serve(
+            &store,
+            &"f".repeat(64),
+            "call-none",
+            &first,
+        ))
+        .unwrap();
+        assert_eq!(block(store.count("memd_audit_session")).unwrap(), 0);
+
+        block(attribute_booked_serve(&store, &audit_id, "call-5", &first)).unwrap();
+        block(attribute_booked_serve(
+            &store,
+            &audit_id,
+            "call-5",
+            &attributed("s-b", None),
+        ))
+        .unwrap();
+        let mine = block(session_serves(&store, "s-a")).unwrap();
+        assert_eq!(mine.decisions.len(), 1);
+        assert_eq!(mine.calls.len(), 1);
+        assert_eq!(mine.calls[0].window_key.as_deref(), Some(&*"a".repeat(64)));
+        assert_eq!(
+            block(session_serves(&store, "s-b")).unwrap(),
+            SessionServes::default()
+        );
     }
 }

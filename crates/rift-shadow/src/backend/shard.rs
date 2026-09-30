@@ -61,6 +61,12 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         if let Some(transcript) = &archive.transcript {
             self.push_transcript_pair(transcript, &mut entries)?;
         }
+        // The settled usage: token counts, a counting method, a model id,
+        // a call key and a time, each identifier screened by the one writer —
+        // structural, like the read facts.
+        if let Some(usage) = archive.usage_jsonl() {
+            entries.push(self.structural_entry(super::artifacts::USAGE_NAME, &usage)?);
+        }
         self.push_digest_entries(archive, &mut entries)?;
         Ok(entries)
     }

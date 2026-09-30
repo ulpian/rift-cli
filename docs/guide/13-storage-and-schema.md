@@ -480,11 +480,16 @@ walks the redacted checkpoint branch through the ordinary append-only path, and
 because rows are content-addressed and written with `INSERT OR IGNORE`, running
 it over a healthy projection inserts nothing. It is a repair, not a reset.
 
-Some capture facts a rebuild cannot derive — per-commit diff facts from git
-history rather than a shard, and session or cost rows only a set-aside
-projection holds. Those have their own verb, `rift backfill`, which is why
-§13.11's read-only open exists: the set-aside file must be readable without
-being created, migrated or modified.
+Usage and cost are on the restorable side for every shard that carries the usage artifact.
+A checkpoint's `usage.jsonl` freezes each settled model call of its session: the call's own key, its turn, its model, when it happened, the four token classes and how they were counted.
+The rebuild writes the session, the turn, the model call and its token usage back from each line under the live keys, and a row the live path already wrote wins.
+The call's cost is priced again from the catalog as of the rebuild, because the shard carries no dollar figure; a model the catalog does not price gets its usage and no cost, exactly as it did live.
+What a line cannot say is when its session and turn opened: a session the projection has never seen is dated by its first recorded call.
+
+Some capture facts a rebuild still cannot derive.
+Per-commit diff facts come from git history rather than from a shard.
+Sessions whose shards were written before the usage artifact existed carry no usage, so their session, usage and cost rows live only in a projection that holds them.
+Those have their own verb, `rift backfill`, which is why §13.11's read-only open exists: the set-aside file must be readable without being created, migrated or modified.
 
 And the standing exception: **governance records are not rebuildable.** Serve
 audit rows, outcome labels, evaluation runs and key metadata record what this

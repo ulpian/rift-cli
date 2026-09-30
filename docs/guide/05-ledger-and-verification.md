@@ -85,7 +85,7 @@ checkpoint branch under a path derived from its own id:
     content.redacted   content_hash.txt   full.jsonl   metadata.json
     redaction_report.json   serve_audit.jsonl   tool_calls.jsonl
     digest.failures.json  digest.intent.json  digest.log.json  digest.shape.json
-    transcript.jsonl   transcript.compact.jsonl
+    transcript.jsonl   transcript.compact.jsonl   usage.jsonl
     sessions/<index>/metadata.json      (per-session header; only when the checkpoint covers 2+ sessions)
     tasks/<tool-use-id>/{metadata.json, transcript.jsonl, transcript.compact.jsonl}   (one subtree per subagent: its own header and transcript pair)
 ```
@@ -106,6 +106,7 @@ and a version field nothing binds documents nothing.
 | `serve_audit.jsonl` | the serves the recall projection attributes to the session, one canonical envelope per line; absent when there were none |
 | `tool_calls.jsonl` | the tool calls, reduced to identifiers |
 | `transcript.*.jsonl` | the transcript: a full copy and a deterministic compact one |
+| `usage.jsonl` | the session's settled model calls, one line each: the four token classes, how they were counted, the model and the call's key; absent when none has settled |
 
 The compact transcript is not a summary but the output of a deterministic
 compactor: tool calls reduced to bare identifiers, file reads elided to handles,
@@ -135,6 +136,16 @@ Which shard holds a serve is therefore decided by the row that names its session
 A call row holds no handle and no reason, so a schema-4 line's payload names only its kind; a pack's section counts are in no row and are in no line.
 The artifact is cumulative by construction: every checkpoint of a session carries every serve the session has made so far, so a second commit with nothing served since derives the same id and stays a no-op.
 The trailer's prediction runs the same query through the same function, opening the projection read-only, so a session with serves predicts its checkpoint as exactly as it predicts its read facts: a serve booked between the trailer and the condense lands in the archive and not in the trailer, and the archive keeps its true id.
+
+The usage artifact is the provider-reported spend of every model call the session has settled, frozen so a rebuild of the projection does not report zero.
+It is a query too: the session's `model_call` rows joined to their `token_usage`, ordered by start time and then by call key.
+Each line names the session, the turn, the call's own key, the model, the instant, the four token classes, the counting method and a `schema_version`.
+The call's key travels as written rather than the coordinates it was minted from, because the projection keeps the key and not the event ordinal inside it; a rebuild re-inserts under that key.
+There is no price and no dollar figure in it: dollars are derived when read, from the price catalog, which moves on its own.
+The model, the method and the key come from provider fields and projection rows rather than from Rift's own grammar, so each is frozen only when it reads as an identifier, and anything else is `withheld`.
+Like the serve audit it is cumulative per session, and the trailer's prediction reads it through the same function as the archive, so the usage never makes the trailer miss; a turn settled between the trailer and the condense lands in the archive and not in the trailer.
+A session whose transcript reaches the archive misses all the same, usage or none, because the prediction never reads the transcript the archive binds into the id; the read side resolves such a commit through the shard's own commit anchor.
+Spend settles one hook after its turn (see [03-capture.md](03-capture.md) §3.9), so it reaches the shard one hook later too.
 
 `rift checkpoint explain` renders a shard for a human — metadata, digests, the
 redacted prompt, files touched, tokens and cost, attribution — and with no
@@ -179,7 +190,8 @@ exactly the order git sorts the tree into: `content.redacted`, the four
 `digest.*.json`, each line of `full.jsonl` as its own leaf,
 `redaction_report.json`, `serve_audit.jsonl`, `sessions/<index>/metadata.json` (bytewise by index
 name, so "10" precedes "2"), `tasks/<id>/…` (bytewise by tool-use id),
-`tool_calls.jsonl`, then `transcript.compact.jsonl` and `transcript.jsonl`.
+`tool_calls.jsonl`, then `transcript.compact.jsonl` and `transcript.jsonl`, and
+last `usage.jsonl`.
 
 **Absence is the compatibility contract.** A checkpoint lacking an artifact
 derives, leaf for leaf, the sequence it would have derived before that artifact
@@ -188,6 +200,9 @@ existed — so the transcript pair (sorting last) and the subagent subtrees
 `ta` < `to`) were both addable without changing any existing root.
 So was `serve_audit.jsonl`, which lands right after `redaction_report.json`
 and before `sessions/`: `r` < `s` at the first byte, and again at the third.
+So was `usage.jsonl`, which sorts after every other name (`t` < `u`): its one
+leaf is appended to the sequence, never inserted into it, so no shard without
+it derives a different root.
 A future
 artifact must respect that rule: pick the name knowing where it lands.
 

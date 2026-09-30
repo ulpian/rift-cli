@@ -20,9 +20,13 @@
 //! decision attributed to its session in the recall projection and frozen by
 //! the session's end from those rows, two sessions' interleaved serves each
 //! frozen into their own session's shard only, a serve no session made left
-//! an unattributed row and frozen nowhere, and the trailer's predicted
+//! an unattributed row and frozen nowhere, a skill-CLI serve attributed by
+//! the tool result that carried its keys (and nothing attributed by a result
+//! that cannot vouch for a serve), and the trailer's predicted
 //! checkpoint id equal to the committed one with and without serves — with
-//! `rift verify` reading the leaf back.
+//! `rift verify` reading the leaf back. The last one closes the loop: a cold
+//! rebuild from the shards alone holds every serve row the session's live
+//! writers left, column for column, but the one reason a shard withholds.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -342,7 +346,8 @@ fn keys_of(frozen: &str) -> Vec<String> {
 /// ★ A decision's two rows are attributed to its session in the projection;
 /// the session's end freezes exactly those rows into its checkpoint as
 /// `serve_audit.jsonl`, each line naming the session and carrying the instant
-/// its row was written at; and `rift verify` reads the leaf back.
+/// its row was written at and the window it was made in; and `rift verify`
+/// reads the leaf back.
 #[test]
 fn a_decline_is_frozen_into_the_session_end_checkpoint_from_the_rows_that_name_its_session() {
     let tmp = tempfile::tempdir().unwrap();
@@ -367,9 +372,9 @@ fn a_decline_is_frozen_into_the_session_end_checkpoint_from_the_rows_that_name_i
         let value = assert_canonical(line);
         assert_eq!(value["session_id"], LIVE_SESSION, "{line}");
         assert_eq!(
-            value.get("window_key"),
-            None,
-            "the read gate names no window"
+            value["window_key"],
+            rift_hashchain::leaf_hash(format!("{LIVE_SESSION}\0").as_bytes()).to_hex(),
+            "the read gate names the window it declined in"
         );
         if value["schema"] == 1 {
             assert!(value["recorded_at"].is_i64(), "{line}");
@@ -443,6 +448,124 @@ fn a_person_made_serve_stays_an_unattributed_row_and_is_frozen_nowhere() {
     assert_no_serve_journal(&repo);
 }
 
+/// A repository with a live session, Recall on and set up on this machine,
+/// and the environment its hooks drain inline under.
+fn served_session_repo(tmp: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let repo = seed_live_session_repo(tmp);
+    enable_recall(&repo);
+    let cache = tmp.join("cache");
+    common::provision_here(&repo, &cache);
+    (repo, cache)
+}
+
+/// Serve `known-state` through the shipped CLI, as a skill call inside a
+/// session makes it, and hand back its answer and the two keys it printed.
+fn cli_serve(repo: &Path, env: &[(&str, &str)]) -> (String, String, String) {
+    let (code, out) = run_rift_stdout(
+        repo,
+        &["recall", "known-state", "--task", "t", "--file", "a.txt"],
+        env,
+    );
+    assert_eq!(code, 0, "{out}");
+    let line = out
+        .lines()
+        .find_map(|line| line.strip_prefix("serve: "))
+        .unwrap_or_else(|| panic!("the answer names its keys: {out}"));
+    let (call_id, audit_id) = line.split_once(' ').unwrap();
+    (out.clone(), call_id.to_owned(), audit_id.to_owned())
+}
+
+/// Claude Code's `PostToolUse` for one Bash call, in the shape the client
+/// records it, delivered to the shipped hook.
+fn bash_result(repo: &Path, command: &str, stdout: &str, env: &[(&str, &str)]) {
+    let payload = serde_json::json!({
+        "session_id": LIVE_SESSION,
+        "hook_event_name": "PostToolUse",
+        "cwd": repo,
+        "tool_name": "Bash",
+        "tool_input": { "command": command, "description": "Ask Rift what changed" },
+        "tool_response": { "stdout": stdout, "stderr": "", "interrupted": false, "isImage": false },
+        "tool_use_id": "toolu_e2e_bash_result",
+    });
+    hooks_fixture::agent_hook(
+        repo,
+        "PostToolUse",
+        LIVE_SESSION,
+        1,
+        &payload.to_string(),
+        env,
+    );
+}
+
+/// ★ A skill-CLI serve made inside a session is attributed when the agent's
+/// tool result comes back: both rows name the session and the window the
+/// call ran in, and the session's next checkpoint freezes both lines.
+#[test]
+fn a_cli_serve_is_attributed_by_its_tool_result_and_frozen_into_the_next_checkpoint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cache) = served_session_repo(tmp.path());
+    let env = sync_env(&cache);
+
+    let (out, call_id, audit_id) = cli_serve(&repo, &env);
+    bash_result(
+        &repo,
+        "rift recall known-state --task t --file a.txt",
+        &out,
+        &env,
+    );
+
+    let window = rift_hashchain::leaf_hash(format!("{LIVE_SESSION}\0").as_bytes()).to_hex();
+    let mut expected = vec![
+        (
+            audit_id,
+            "memd_audit_event".to_owned(),
+            Some(window.clone()),
+        ),
+        (call_id, "serve_call_event".to_owned(), Some(window.clone())),
+    ];
+    expected.sort();
+    assert_eq!(
+        attributed(&recall_store(&repo, &cache), LIVE_SESSION),
+        expected
+    );
+
+    rift_json(&repo, &["session", "stop", LIVE_SESSION, "--json"], &env);
+    let [checkpoint] = checkpoint_shards(&repo).try_into().unwrap();
+    let frozen = frozen_serves(&repo, &checkpoint.replace('/', "")).unwrap();
+    let keys: Vec<String> = expected.iter().map(|(key, _, _)| key.clone()).collect();
+    assert_eq!(keys_of(&frozen), keys);
+    for line in frozen.lines() {
+        let value = assert_canonical(line);
+        assert_eq!(value["session_id"], LIVE_SESSION, "{line}");
+        assert_eq!(value["window_key"], window.as_str(), "{line}");
+    }
+    assert_no_serve_journal(&repo);
+}
+
+/// ★ A result attributes nothing it cannot vouch for: keys in the right shape
+/// that name no serve, a key line out of shape, and the real line printed by a
+/// command that is not `rift recall`. The serve stays unattributed and no
+/// checkpoint freezes it.
+#[test]
+fn a_result_that_names_no_serve_or_is_not_a_recall_answer_attributes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cache) = served_session_repo(tmp.path());
+    let env = sync_env(&cache);
+    let (out, call_id, audit_id) = cli_serve(&repo, &env);
+    let recall = "rift recall known-state --task t --file a.txt";
+
+    let spoofed = format!("serve: {} {}\n", "0".repeat(32), "0".repeat(64));
+    bash_result(&repo, recall, &spoofed, &env);
+    let malformed = format!("serve: {call_id}  {audit_id}\n");
+    bash_result(&repo, recall, &malformed, &env);
+    bash_result(&repo, "cat saved-answer.txt", &out, &env);
+
+    assert_eq!(count(&recall_store(&repo, &cache), "memd_audit_session"), 0);
+    rift_json(&repo, &["session", "stop", LIVE_SESSION, "--json"], &env);
+    let names = hooks_fixture::shard_tree_names(&repo);
+    assert!(!names.contains("serve_audit.jsonl"), "{names}");
+}
+
 /// ★ **The riskiest line: one id, predicted and committed.** The trailer
 /// `prepare-commit-msg` writes names the checkpoint the worker's condense of
 /// that very commit archives — for a commit whose session made no serve, and
@@ -481,4 +604,221 @@ fn the_trailer_names_the_checkpoint_the_commit_archives_with_and_without_serves(
         .unwrap_or_else(|| panic!("no shard at the trailer's id {served}"));
     assert_eq!(frozen.lines().count(), 2, "{frozen}");
     assert_no_serve_journal(&repo);
+}
+
+/// The three serve relations and the column each is keyed by.
+const SERVE_RELATIONS: [(&str, &str); 3] = [
+    ("memd_audit_event", "audit_id"),
+    ("serve_call_event", "call_id"),
+    ("memd_audit_session", "serve_key"),
+];
+
+/// One row of a serve relation, keyed by `(relation, key)`, with every
+/// column the schema declares rendered by SQLite's `quote` beside its name.
+type ServeRows = std::collections::BTreeMap<(String, String), Vec<(String, String)>>;
+
+/// Every row of the three serve relations over every column, read off the
+/// schema so a column added later is compared without this file changing.
+fn every_serve_row(store: &SqliteStore) -> ServeRows {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let mut out = ServeRows::new();
+    for (relation, key) in SERVE_RELATIONS {
+        let columns: Vec<String> = rt
+            .block_on(store.query(
+                &format!("SELECT name FROM pragma_table_info('{relation}') ORDER BY cid"),
+                &[],
+            ))
+            .unwrap()
+            .iter()
+            .map(|row| row.get_text(0).unwrap())
+            .collect();
+        let quoted: Vec<String> = columns.iter().map(|c| format!("quote({c})")).collect();
+        let sql = format!("SELECT {key}, {} FROM {relation}", quoted.join(", "));
+        for row in rt.block_on(store.query(&sql, &[])).unwrap() {
+            let values = (1..=columns.len()).map(|i| row.get_text(i).unwrap());
+            let named = columns.iter().cloned().zip(values).collect();
+            out.insert((relation.to_owned(), row.get_text(0).unwrap()), named);
+        }
+    }
+    out
+}
+
+/// A cold recall rebuild: a fresh projection that has seen nothing but the
+/// checkpoint shards the repository holds, ingested by the ledger.
+fn cold_rebuild(repo: &Path) -> SqliteStore {
+    let fresh = SqliteStore::open_in_memory().unwrap();
+    rift_store::apply_migrations(&fresh, &rift_store::recall_migrations()).unwrap();
+    let substrate = rift_recall_substrate::GixSubstrate::open(repo).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let report = rt
+        .block_on(rift_recall_ledger::ingest::ingest(&fresh, &substrate))
+        .unwrap();
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    fresh
+}
+
+/// A file the session reads, committed so a checkpoint records its
+/// revision, then retrieved exact through the shipped CLI with `reason` and
+/// attributed to the session by the tool result that carried the answer.
+/// Hands back the retrieval's schema-1 key.
+fn retrieve_exact_in_session(
+    repo: &Path,
+    tmp: &Path,
+    reason: &str,
+    env: &[(&str, &str)],
+) -> String {
+    use sha2::Digest as _;
+    let body = "fn exact() {}\n";
+    let file = repo.join("exact.rs");
+    std::fs::write(&file, body).unwrap();
+    let read = format!(
+        r#"{{"tool_name":"Read","tool_input":{{"file_path":{}}}}}"#,
+        serde_json::to_string(&file.display().to_string()).unwrap()
+    );
+    hooks_fixture::agent_hook(repo, "PostToolUse", LIVE_SESSION, 1, &read, env);
+    git_in(repo, &["add", "exact.rs"]);
+    hook_pair_commit(repo, tmp, "read", env);
+
+    let sha = hex_of(&sha2::Sha256::digest(body.as_bytes()));
+    let handle = format!("file:exact.rs@sha256:{sha}");
+    let args = [
+        "recall",
+        "retrieve-exact",
+        handle.as_str(),
+        "--reason",
+        reason,
+    ];
+    let (code, out) = run_rift_stdout(repo, &args, env);
+    assert_eq!(code, 0, "{out}");
+    let (_, audit_id) = out
+        .lines()
+        .find_map(|line| line.strip_prefix("serve: "))
+        .and_then(|keys| keys.split_once(' '))
+        .unwrap_or_else(|| panic!("the answer names its keys: {out}"));
+    let command = format!("rift recall retrieve-exact {handle} --reason '{reason}'");
+    bash_result(repo, &command, &out, env);
+    audit_id.to_owned()
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    })
+}
+
+/// The value one column of one row holds.
+fn cell<'a>(rows: &'a ServeRows, relation: &str, key: &str, column: &str) -> &'a str {
+    rows[&(relation.to_owned(), key.to_owned())]
+        .iter()
+        .find(|(c, _)| c == column)
+        .map(|(_, v)| v.as_str())
+        .unwrap()
+}
+
+/// ★ **The live writers and the cold rebuild agree, column for column.** A
+/// session is handed its pointer (the spend is a schema-1 row alone, the
+/// delivery a schema-4 row alone), has a repeat read declined (the worker
+/// writes both halves), and retrieves one file exact. Its end freezes those
+/// serves; a fresh projection that has seen nothing but the shards then holds
+/// every row the live writers left for the session, every column equal, with
+/// one declared exception: the exact retrieval's reason, which is the caller's
+/// own words and is rebuilt as `withheld`.
+#[test]
+fn a_cold_rebuild_holds_every_serve_row_the_session_wrote_but_the_exact_reason() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cache) = served_session_repo(tmp.path());
+    read_gate_fixture::enforce_for(&repo, &["claude-code"]);
+    let env = sync_env(&cache);
+    let reason = "checking the signature before I edit it";
+
+    let pointer = hooks_fixture::agent_hook_out(
+        &repo,
+        "claude-code",
+        "UserPromptSubmit",
+        LIVE_SESSION,
+        1,
+        "{}",
+        &env,
+    );
+    assert!(pointer.contains("rift recall"), "{pointer}");
+    decline_a_repeat_read(&repo, LIVE_SESSION, "booked.txt", &env);
+    let exact = retrieve_exact_in_session(&repo, tmp.path(), reason, &env);
+    rift_json(&repo, &["session", "stop", LIVE_SESSION, "--json"], &env);
+
+    let live_store = recall_store(&repo, &cache);
+    let mine: Vec<String> = attributed(&live_store, LIVE_SESSION)
+        .into_iter()
+        .map(|(key, _, _)| key)
+        .collect();
+    let live: ServeRows = every_serve_row(&live_store)
+        .into_iter()
+        .filter(|((_, key), _)| mine.contains(key))
+        .collect();
+    let rebuilt = every_serve_row(&cold_rebuild(&repo));
+    assert_eq!(
+        rebuilt.keys().collect::<Vec<_>>(),
+        live.keys().collect::<Vec<_>>(),
+        "the same rows, keyed alike"
+    );
+    assert_the_writers_covered(&live, &exact);
+
+    let mut differing = Vec::new();
+    for (row, columns) in &live {
+        for ((column, value), (_, again)) in columns.iter().zip(&rebuilt[row]) {
+            if value != again {
+                differing.push((row.1.clone(), column.clone(), value.clone(), again.clone()));
+            }
+        }
+    }
+    let withheld = (
+        exact,
+        "reason".to_owned(),
+        format!("'{reason}'"),
+        "'withheld'".to_owned(),
+    );
+    assert_eq!(differing, [withheld], "the one declared exception");
+}
+
+/// Each writer the rebuild must agree with left its rows, and nothing else
+/// did: three decisions (the pointer's spend, the decline, the exact
+/// retrieval) and three calls (the pointer's delivery, the decline, the exact
+/// retrieval), so the spend is a schema-1 row with no call of its own and the
+/// delivery a call with no decision of its own.
+fn assert_the_writers_covered(live: &ServeRows, exact: &str) {
+    let named = |relation: &str, column: &str| -> Vec<String> {
+        let mut values: Vec<String> = live
+            .iter()
+            .filter(|((r, _), _)| r == relation)
+            .map(|((_, key), _)| cell(live, relation, key, column).to_owned())
+            .collect();
+        values.sort();
+        values
+    };
+    assert_eq!(
+        named("memd_audit_event", "verb"),
+        [
+            "'memd.exact_retrieved'",
+            "'memd.manifest_injected'",
+            "'memd.read_intercepted'"
+        ]
+    );
+    assert_eq!(
+        named("serve_call_event", "tool_name"),
+        [
+            "'claude-code:read-gate'",
+            "'claude-code:session-pointer'",
+            "'retrieve-exact'"
+        ]
+    );
+    assert_eq!(named("memd_audit_session", "session_id").len(), 6);
+    assert_eq!(
+        cell(live, "memd_audit_event", exact, "verb"),
+        "'memd.exact_retrieved'"
+    );
 }

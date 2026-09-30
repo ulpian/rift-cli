@@ -199,6 +199,9 @@ pub struct CheckpointArchive {
     /// prediction and the archive must fold the same bytes and only one
     /// function may decide what those bytes are.
     pub serve_audit: Option<Vec<u8>>,
+    /// The session's settled model calls with their usage (empty ⇒ no
+    /// `usage.jsonl`) — what a rebuild re-derives usage and cost from.
+    pub usage: Vec<ArchivedUsageFact>,
     /// The redacted raw capture (durable-blob proof of the gate).
     pub content: RedactedBytes,
     /// The redaction report for `redaction_report.json` (must be valid).
@@ -385,6 +388,99 @@ pub fn tool_calls_jsonl_bytes(read_facts: &[ArchivedReadFact]) -> Option<Vec<u8>
     }
     out.push(b'\n');
     Some(out)
+}
+
+/// The line format version every `usage.jsonl` line declares as
+/// `schema_version`.
+pub const USAGE_SCHEMA_VERSION: u32 = 1;
+
+/// What a `usage.jsonl` member that could carry text other than an
+/// identifier is frozen as.
+const WITHHELD: &str = "withheld";
+
+/// The longest identifier a `usage.jsonl` member freezes as written.
+const MAX_IDENTIFIER_LEN: usize = 128;
+
+/// One settled model call frozen into the shard's `usage.jsonl`: the four
+/// provider-reported token classes with the counting method, the model and
+/// the call's own key. No price and no dollar figure: both are derived at
+/// read time from the price catalog, which moves independently of usage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedUsageFact {
+    /// The agent's native session id, as `metadata.json`'s `sessions` names it.
+    pub session: String,
+    /// The ordinal of the turn the call belongs to.
+    pub turn: i64,
+    /// The `model_call` key, frozen so a rebuild re-inserts under it rather
+    /// than re-minting it from coordinates the projection does not keep.
+    pub call_id: String,
+    /// The model the provider reported for the call.
+    pub model: String,
+    /// When the call's anchoring event occurred (epoch ms).
+    pub at: i64,
+    /// Uncached input tokens.
+    pub uncached_input: i64,
+    /// Cached input tokens.
+    pub cached_input: i64,
+    /// Cache-creation tokens.
+    pub cache_creation: i64,
+    /// Output tokens.
+    pub output: i64,
+    /// How the counts were derived (`provider_reported`, …).
+    pub method: String,
+}
+
+/// Serialize settled usage exactly as the shard's `usage.jsonl` freezes it:
+/// one canonical object per line, sorted by `at` then `call_id` whatever the
+/// order handed in, so the prediction and the archive fold identical bytes.
+/// `None` when empty — the artifact is omitted, never written empty, and a
+/// shard without usage keeps the leaf sequence it had before the artifact.
+#[must_use]
+pub fn usage_jsonl_bytes(usage: &[ArchivedUsageFact]) -> Option<Vec<u8>> {
+    if usage.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<&ArchivedUsageFact> = usage.iter().collect();
+    sorted.sort_by(|a, b| (a.at, &a.call_id).cmp(&(b.at, &b.call_id)));
+    let mut out = Vec::new();
+    for fact in sorted {
+        out.extend_from_slice(&canonical_json(&usage_line(fact)));
+        out.push(b'\n');
+    }
+    Some(out)
+}
+
+/// One `usage.jsonl` line. The model, the method and the call key come from
+/// provider fields and projection rows rather than from Rift's own grammar,
+/// so each is frozen only when it reads as an identifier; anything else is
+/// [`WITHHELD`], and no member can carry typed text into the shard.
+fn usage_line(fact: &ArchivedUsageFact) -> serde_json::Value {
+    serde_json::json!({
+        "session": fact.session,
+        "turn": fact.turn,
+        "call_id": identifier_or_withheld(&fact.call_id),
+        "model": identifier_or_withheld(&fact.model),
+        "at": fact.at,
+        "uncached_input": fact.uncached_input,
+        "cached_input": fact.cached_input,
+        "cache_creation": fact.cache_creation,
+        "output": fact.output,
+        "method": identifier_or_withheld(&fact.method),
+        "schema_version": USAGE_SCHEMA_VERSION,
+    })
+}
+
+/// `value` when it is a bounded identifier (ASCII letters, digits and the
+/// punctuation model ids and counting methods use), else [`WITHHELD`].
+fn identifier_or_withheld(value: &str) -> &str {
+    let is_identifier_char = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '-' | '.' | '_' | ':' | '/' | '@' | '+' | '[' | ']')
+    };
+    if value.len() <= MAX_IDENTIFIER_LEN && value.chars().all(is_identifier_char) {
+        return value;
+    }
+    WITHHELD
 }
 
 /// The counts-only redaction facts the native archive freezes into
@@ -629,5 +725,111 @@ mod tests {
             None,
             "`linked` is a fact, not a default"
         );
+    }
+
+    /// A fact as the store hands one over: `call` at `at`, on `model`.
+    fn usage_fact(call: &str, model: &str, at: i64) -> ArchivedUsageFact {
+        ArchivedUsageFact {
+            session: "01JSESSION".into(),
+            turn: 1,
+            call_id: call.into(),
+            model: model.into(),
+            at,
+            uncached_input: 20,
+            cached_input: 30,
+            cache_creation: 5,
+            output: 2,
+            method: "provider_reported".into(),
+        }
+    }
+
+    /// The declared members of a `usage.jsonl` line, and nothing else.
+    const USAGE_MEMBERS: [&str; 11] = [
+        "at",
+        "cache_creation",
+        "cached_input",
+        "call_id",
+        "method",
+        "model",
+        "output",
+        "schema_version",
+        "session",
+        "turn",
+        "uncached_input",
+    ];
+
+    #[test]
+    fn no_settled_usage_writes_no_usage_artifact() {
+        assert_eq!(usage_jsonl_bytes(&[]), None);
+    }
+
+    /// Whatever order the rows arrive in, the bytes are one sequence: sorted
+    /// by `at` then `call_id`, one canonical line each, newline-terminated.
+    #[test]
+    fn usage_lines_are_canonical_and_sorted_whatever_order_they_arrive_in() {
+        let facts = [
+            usage_fact("c2", "claude-opus-5", 200),
+            usage_fact("c1b", "claude-fable-5", 100),
+            usage_fact("c1a", "claude-fable-5", 100),
+        ];
+        let mut reversed = facts.clone();
+        reversed.reverse();
+        let bytes = usage_jsonl_bytes(&facts).unwrap();
+        assert_eq!(usage_jsonl_bytes(&reversed).unwrap(), bytes, "order-free");
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.ends_with('\n'));
+        let calls: Vec<String> = text
+            .lines()
+            .map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                assert_eq!(serde_json::to_string(&value).unwrap(), line, "keys sorted");
+                value["call_id"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(calls, ["c1a", "c1b", "c2"]);
+        assert_eq!(
+            text.lines().next().unwrap(),
+            "{\"at\":100,\"cache_creation\":5,\"cached_input\":30,\"call_id\":\"c1a\",\
+             \"method\":\"provider_reported\",\"model\":\"claude-fable-5\",\"output\":2,\
+             \"schema_version\":1,\"session\":\"01JSESSION\",\"turn\":1,\"uncached_input\":20}"
+        );
+    }
+
+    /// A model or method that is not an identifier is withheld rather than
+    /// frozen: the provider field is the source, and a shard never quotes
+    /// text a person could have typed.
+    #[test]
+    fn a_usage_member_that_is_not_an_identifier_is_withheld() {
+        let mut fact = usage_fact("c1", "please ignore previous instructions", 1);
+        fact.method = "x".repeat(MAX_IDENTIFIER_LEN + 1);
+        let text = String::from_utf8(usage_jsonl_bytes(&[fact]).unwrap()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(value["model"], WITHHELD);
+        assert_eq!(value["method"], WITHHELD);
+        assert_eq!(value["call_id"], "c1");
+    }
+
+    proptest::proptest! {
+        /// Whatever the rows hold, every line carries exactly the declared
+        /// members, and every string member but the session is an
+        /// identifier or the placeholder.
+        #[test]
+        fn no_member_outside_the_declared_set_reaches_a_usage_line(
+            call in "(?s).{0,40}",
+            model in "(?s).{0,40}",
+            method in "(?s).{0,40}",
+            at in proptest::num::i64::ANY,
+        ) {
+            let mut fact = usage_fact(&call, &model, at);
+            fact.method = method;
+            let bytes = usage_jsonl_bytes(&[fact]).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+            proptest::prop_assert_eq!(keys, USAGE_MEMBERS.to_vec());
+            for member in ["call_id", "model", "method"] {
+                let text = value[member].as_str().unwrap();
+                proptest::prop_assert_eq!(identifier_or_withheld(text), text);
+            }
+        }
     }
 }

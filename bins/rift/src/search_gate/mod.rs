@@ -139,6 +139,9 @@ pub(super) struct SearchCall<'a> {
     work_tree: &'a Path,
     /// The levers, as they resolved for this family.
     effective: &'a rift_recall_policy::Effective,
+    /// The window journal's key of the context window that made the call,
+    /// which every accounting row this gate journals is attributed to.
+    window_key: String,
 }
 
 /// **The gate.** Runs beside the read and document gates and under the same
@@ -155,13 +158,6 @@ pub(crate) fn search_gate(
     policy: &rift_recall_policy::ServePolicy,
     effective: &rift_recall_policy::Effective,
 ) -> SearchOutcome {
-    let call = SearchCall {
-        t,
-        raw,
-        git_dir,
-        work_tree,
-        effective,
-    };
     let quiet = SearchOutcome::default();
     // Two shut tables and a hook that names no context window: three ways of
     // having nothing to decide, and none of them costs a file read.
@@ -174,6 +170,14 @@ pub(crate) fn search_gate(
         return quiet;
     };
     let facts = adapter.facts(&raw.verb, &raw.payload);
+    let call = SearchCall {
+        t,
+        raw,
+        git_dir,
+        work_tree,
+        effective,
+        window_key: crate::window_journal::key(&raw.session, facts.child_session.as_deref()),
+    };
     // A NAME search is decided before a content search is amended, and the two
     // arms never see the same call: what a family calls each of them is that
     // family's own pinned fact, read here through the adapter that holds it.

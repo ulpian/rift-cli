@@ -11,8 +11,8 @@ use rift_core::Sha256Id;
 
 use super::leaves::{DigestLeafBytes, SessionMetaLeaf, ShardLeafBytes, TaskLeafBytes};
 use super::{
-    shard_merkle_root, tool_calls_jsonl_bytes, ArchivedTask, ArchivedTranscript, CheckpointArchive,
-    NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
+    shard_merkle_root, tool_calls_jsonl_bytes, usage_jsonl_bytes, ArchivedTask, ArchivedTranscript,
+    CheckpointArchive, NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
 };
 use crate::sha256_hex;
 
@@ -20,6 +20,11 @@ use crate::sha256_hex;
 /// `redaction_report.json` (`r` < `s`) and before `sessions/` (`r` < `s` at the
 /// third byte), which is where its leaf sits.
 pub(super) const SERVE_AUDIT_NAME: &str = "serve_audit.jsonl";
+
+/// The shard name of the frozen settled usage. It sorts after
+/// `transcript.jsonl` (`t` < `u`), after every other top-level name, so its
+/// leaf trails the sequence.
+pub(super) const USAGE_NAME: &str = "usage.jsonl";
 
 impl CheckpointArchive {
     /// This shard's Merkle root — **derived from the bytes, never supplied.**
@@ -36,6 +41,7 @@ impl CheckpointArchive {
         let full = self.full_jsonl();
         let report = self.redaction_report_json();
         let tool_calls = self.tool_calls_jsonl();
+        let usage = self.usage_jsonl();
         let digest_failures = self.digest_failures_json();
         let digest_intent = self.digest_intent_json();
         let digest_log = self.digest_log_json();
@@ -71,6 +77,7 @@ impl CheckpointArchive {
             tool_calls: tool_calls.as_deref(),
             transcript_compact: self.transcript.as_ref().map(|t| t.compact.as_slice()),
             transcript_full: self.transcript.as_ref().map(|t| t.full.as_slice()),
+            usage: usage.as_deref(),
             tasks: &task_leaves,
             session_metas: &session_meta_leaves,
             digests: DigestLeafBytes {
@@ -219,6 +226,13 @@ impl CheckpointArchive {
         tool_calls_jsonl_bytes(&self.read_facts)
     }
 
+    /// Render `usage.jsonl` — one line per settled model call. `None` when
+    /// the session settled none (the artifact is omitted, never written empty).
+    #[must_use]
+    pub fn usage_jsonl(&self) -> Option<Vec<u8>> {
+        usage_jsonl_bytes(&self.usage)
+    }
+
     /// `serve_audit.jsonl` — the session's frozen serve envelopes, or `None`
     /// when it froze none. An empty buffer reads as absent, so the artifact
     /// is never written empty and a serve-less shard keeps the leaf sequence
@@ -345,6 +359,9 @@ impl CheckpointArchive {
                 t.compact.as_slice().to_vec(),
             );
             out.insert(TRANSCRIPT_FULL_NAME.to_owned(), t.full.as_slice().to_vec());
+        }
+        if let Some(usage) = self.usage_jsonl() {
+            out.insert(USAGE_NAME.to_owned(), usage);
         }
         for (name, bytes) in [
             (
@@ -1003,6 +1020,7 @@ mod tests {
             full_jsonl: Some(&full),
             redaction_report: &report,
             serve_audit: None,
+            usage: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -1034,6 +1052,7 @@ mod tests {
                 full_jsonl: Some(&terminated),
                 redaction_report: &report,
                 serve_audit: None,
+                usage: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,
@@ -1110,6 +1129,7 @@ mod tests {
                 full_jsonl: None,
                 redaction_report: &a.redaction_report_json(),
                 serve_audit: None,
+                usage: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,

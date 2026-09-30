@@ -27,6 +27,10 @@ pub(super) struct GatePass<'a> {
     pub(super) held: &'a rift_agent::window_journal::Journal,
     /// The journal those lines are appended to.
     pub(super) journal: &'a crate::window_journal::WindowJournal,
+    /// The window journal's key of that journal's window, which every
+    /// accounting row this call journals is attributed to. Computed only once
+    /// a call has reads to decide, so an idle hook pays nothing for it.
+    pub(super) window_key: &'a str,
     /// What the result said about its own delivery, on the step that has a
     /// result at all.
     pub(super) stated: Option<rift_agent::window_journal::StatedDelivery>,
@@ -243,6 +247,7 @@ pub(super) fn gate_record_members(
             &member.decision,
             member.frame.as_deref().unwrap_or_default(),
             booked,
+            pass.window_key,
         );
     }
     journaled

@@ -96,6 +96,11 @@ pub(crate) enum JobKind {
     /// and the worker counts the tokens and appends the row to **both**
     /// serving relations.
     ServeAudit(ServeAudit),
+    /// Attribute one serve the skill CLI already booked to the session whose
+    /// tool result named its keys. The CLI process is a person's or an
+    /// agent's, and only the hook that ingests its answer knows which; the
+    /// hook opens no store, so the row is the worker's to write.
+    AttributeServe(ServeClaim),
     /// Rebuild the file-search index for this work tree. The arm is a no-op
     /// until the search engine exists; the kind is declared now so the hook
     /// that wants the rebuild and the worker that performs it are written
@@ -287,6 +292,25 @@ pub(crate) struct ServeAudit {
     pub window: Option<String>,
 }
 
+/// The two keys one skill-CLI serve printed, and the window whose tool result
+/// carried them.
+///
+/// Both keys, because the schema-1 key is a salted hash the CLI computed and
+/// nothing recomputes it; the worker writes a row only for a key its relation
+/// already holds.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ServeClaim {
+    /// The agent's own session id.
+    pub session: String,
+    /// The window journal's key of the window that ran the command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    /// The schema-4 key (`serve_call_event.call_id`), 32 lowercase hex.
+    pub call_id: String,
+    /// The schema-1 key (`memd_audit_event.audit_id`), 64 lowercase hex.
+    pub audit_id: String,
+}
+
 /// Which accounting row a [`ServeAudit`] becomes. One variant per hook-side
 /// serving verb; the two pull-side verbs are written by the CLI, which has a
 /// store already and journals nothing.
@@ -406,6 +430,10 @@ impl JobKind {
             Self::ServeAudit(audit) => {
                 is_lower_hex(&audit.call_id, 32).then(|| format!("audit-{}", audit.call_id))
             }
+            // The serve's own call id: a result ingested twice owes one row.
+            Self::AttributeServe(claim) => (is_lower_hex(&claim.call_id, 32)
+                && is_lower_hex(&claim.audit_id, 64))
+            .then(|| format!("attribute-{}", claim.call_id)),
             // One rebuild is owed at a time: a second request while one is
             // pending is the same request.
             Self::SearchIndex => Some("search-index".to_owned()),
@@ -444,6 +472,7 @@ impl JobKind {
         match self {
             Self::ReadTokens { .. }
             | Self::ServeAudit(_)
+            | Self::AttributeServe(_)
             | Self::SearchIndex
             | Self::DocConvert { .. }
             | Self::BasisSnapshot { .. }
@@ -892,6 +921,45 @@ mod tests {
             !is_condensed(tmp.path(), "a"),
             "a new end owes a new condense"
         );
+    }
+
+    /// A serve's attribution is journaled under its call id, round-trips, and
+    /// drains before the checkpoint that freezes it; a job of a kind this
+    /// reader does not know is skipped and left for the binary that does.
+    #[test]
+    fn an_attribution_job_round_trips_and_an_unknown_kind_is_left_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claim = JobKind::AttributeServe(ServeClaim {
+            session: "s".to_owned(),
+            window: Some("a".repeat(64)),
+            call_id: "0".repeat(32),
+            audit_id: "b".repeat(64),
+        });
+        let job = AgentJob {
+            kind: claim,
+            ..condense("s", 2)
+        };
+        let path = enqueue(tmp.path(), &job).unwrap();
+        assert!(path.ends_with(format!("attribute-{}.json", "0".repeat(32))));
+        enqueue(tmp.path(), &condense("s", 1)).unwrap();
+        let drained: Vec<AgentJob> = jobs(tmp.path()).into_iter().map(|(_, j)| j).collect();
+        assert_eq!(drained.first(), Some(&job), "attribution drains first");
+
+        let unknown = queue_dir(tmp.path()).join("from-the-future.json");
+        std::fs::write(
+            &unknown,
+            r#"{"schema_version":1,"work_tree":"/w","queued_at_ms":1,"kind":{"kind":"from-the-future"}}"#,
+        )
+        .unwrap();
+        assert_eq!(jobs(tmp.path()).len(), 2);
+        assert!(unknown.exists());
+        let spoofed = JobKind::AttributeServe(ServeClaim {
+            session: "s".to_owned(),
+            window: None,
+            call_id: "../x".to_owned(),
+            audit_id: "b".repeat(64),
+        });
+        assert_eq!(spoofed.stem(), None);
     }
 
     /// Unknown fields are ignored on read: a newer writer's job still drains.

@@ -16,3 +16,4 @@ tasks/toolu_01TASKFIXTURE/transcript.jsonl
 tool_calls.jsonl
 transcript.compact.jsonl
 transcript.jsonl
+usage.jsonl

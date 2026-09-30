@@ -1,15 +1,16 @@
 //! What one hook's ingest leaves owed to the detached worker: the token count
-//! of a read, the bytes of the revision it named, and the measurement of a
-//! search.
+//! of a read, the bytes of the revision it named, the measurement of a
+//! search, and the attribution of a serve a `rift recall` command printed.
 //!
 //! Separate because every function here writes a journal entry of identifiers
 //! and nothing else. None of the work itself fits inside an agent's hook, and
-//! keeping the three debts together is what keeps that boundary visible.
+//! keeping the four debts together is what keeps that boundary visible.
 
 use std::path::Path;
 
 use rift_shadow::hooks::AdapterRegistry;
 
+use super::cli_serve::owe_cli_serve_attribution;
 use crate::hooks::gate::{gate_step, gate_turn, GateStep};
 use crate::hooks::now_ms;
 
@@ -84,11 +85,13 @@ pub(in crate::hooks) fn owe_basis_snapshots(
 /// Everything this hook's ingest owes a later, off-path writer, journaled in
 /// one place and counted as one number.
 ///
-/// Three debts, all of them identifiers only and all of them drained by the
+/// Four debts, all of them identifiers only and all of them drained by the
 /// same worker. **The token count** of each read fact, which needs the
 /// tokenizer. **The bytes** of each revision a read recorded, so the delta
 /// against it survives the edit that follows — which needs the redaction gate.
-/// And **the measurement of a search**, which needs a process. Not one of them
+/// **The measurement of a search**, which needs a process. And **the
+/// attribution of a serve** a `rift recall` command printed the keys of,
+/// which needs the recall projection. Not one of them
 /// fits inside a hook, and every one of them is best-effort: a journal that
 /// cannot be written leaves a figure unmeasured, never the hook failed.
 pub(super) fn owe_deferred_measurement(
@@ -117,6 +120,80 @@ pub(super) fn owe_deferred_measurement(
     reads.saturating_add(bases).saturating_add(results)
 }
 
+/// What one tool result owes: the attribution of the serve a `rift recall`
+/// command printed, and the measurement of a search.
+///
+/// The call is read off the payload once, through the family's own adapter,
+/// and both debts are decided from that one reading: the window a serve is
+/// attributed to comes off the same facts the search is classified from.
+fn owe_tool_result_tokens(
+    git_dir: &Path,
+    work_tree: &Path,
+    registry: &AdapterRegistry,
+    raw: &rift_shadow::hooks::RawHook,
+    owner_agent: &str,
+) -> usize {
+    let Some(call) = cross_checked_call(registry, raw) else {
+        return 0;
+    };
+    let attributed = match call.command() {
+        Some(command) => owe_cli_serve_attribution(git_dir, work_tree, raw, &call.facts, command),
+        None => 0,
+    };
+    attributed.saturating_add(owe_search_measurement(
+        git_dir,
+        work_tree,
+        raw,
+        owner_agent,
+        &call,
+    ))
+}
+
+/// One tool result, as the family's pinned row reads its call.
+struct CrossCheckedCall<'a> {
+    facts: rift_agent::HookFacts,
+    tool: String,
+    row: rift_agent::tool_fields::ToolFieldRow,
+    args: &'a serde_json::Map<String, serde_json::Value>,
+}
+
+impl CrossCheckedCall<'_> {
+    /// The command line, when the call is a shell call that names one.
+    fn command(&self) -> Option<&str> {
+        if self.row.shape != rift_agent::tool_fields::ToolShape::Shell {
+            return None;
+        }
+        self.args
+            .get(self.row.fact("command").unwrap_or("command"))
+            .and_then(serde_json::Value::as_str)
+    }
+}
+
+/// The call a tool result answers, read through the family's adapter and its
+/// pinned row; `None` for anything that is not a result, or a tool the row
+/// table does not name.
+fn cross_checked_call<'a>(
+    registry: &AdapterRegistry,
+    raw: &'a rift_shadow::hooks::RawHook,
+) -> Option<CrossCheckedCall<'a>> {
+    if !matches!(
+        gate_step(&raw.agent, &raw.verb, &raw.payload),
+        Some(GateStep::CrossCheck)
+    ) {
+        return None;
+    }
+    let facts = registry.get(&raw.agent)?.facts(&raw.verb, &raw.payload);
+    let tool = facts.tool_name.clone()?;
+    let row = rift_agent::tool_fields::tool_field_row(&raw.agent, &tool)?;
+    let args = search_result_args(row, &raw.payload)?;
+    Some(CrossCheckedCall {
+        facts,
+        tool,
+        row,
+        args,
+    })
+}
+
 /// Journal the measurement one **search result** owes, and say whether the
 /// worker was left anything.
 ///
@@ -136,32 +213,14 @@ pub(super) fn owe_deferred_measurement(
 /// it; the recogniser is asked, and a command line it reads as a read is left
 /// alone. And a command whose head word is not an allow-listed verb is not a
 /// search Rift can see at all, so nothing is claimed about it.
-fn owe_tool_result_tokens(
+fn owe_search_measurement(
     git_dir: &Path,
     work_tree: &Path,
-    registry: &AdapterRegistry,
     raw: &rift_shadow::hooks::RawHook,
     owner_agent: &str,
+    call: &CrossCheckedCall<'_>,
 ) -> usize {
-    if !matches!(
-        gate_step(&raw.agent, &raw.verb, &raw.payload),
-        Some(GateStep::CrossCheck)
-    ) {
-        return 0;
-    }
-    let Some(adapter) = registry.get(&raw.agent) else {
-        return 0;
-    };
-    let facts = adapter.facts(&raw.verb, &raw.payload);
-    let Some(tool) = facts.tool_name.as_deref() else {
-        return 0;
-    };
-    let Some(row) = rift_agent::tool_fields::tool_field_row(&raw.agent, tool) else {
-        return 0;
-    };
-    let Some(args) = search_result_args(row, &raw.payload) else {
-        return 0;
-    };
+    let (row, args) = (call.row, call.args);
     let (channel, search) = match row.shape {
         rift_agent::tool_fields::ToolShape::Search => (
             "search",
@@ -173,10 +232,7 @@ fn owe_tool_result_tokens(
             ),
         ),
         rift_agent::tool_fields::ToolShape::Shell => {
-            let command = args
-                .get(row.fact("command").unwrap_or("command"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
+            let command = call.command().unwrap_or_default();
             // A command line the read grammar reads as a READ is already in
             // the read denominator; measuring it here would count it twice.
             if matches!(
@@ -203,11 +259,11 @@ fn owe_tool_result_tokens(
             tool_result_id: rift_shadow::ids::tool_result_row_id(
                 &session_row,
                 gate_turn(raw, git_dir),
-                tool,
+                &call.tool,
                 &payload_sha256,
             ),
             session_id: session_row,
-            tool_name: tool.to_owned(),
+            tool_name: call.tool.clone(),
             channel: channel.to_owned(),
             search,
             tree_key: saved_tree_key(work_tree),

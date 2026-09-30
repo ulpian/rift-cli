@@ -45,6 +45,10 @@ pub(super) struct NativeArtifacts {
     /// on every shard written before the artifact existed, whose leaf
     /// sequence absence therefore re-derives unchanged.
     pub(super) serve_audit: Option<Vec<u8>>,
+    /// `usage.jsonl`, absent on every shard whose session settled no model
+    /// call and on every shard written before the artifact existed; its leaf
+    /// trails the sequence, so absence re-derives the old root.
+    pub(super) usage: Option<Vec<u8>>,
     pub(super) full: Option<Vec<u8>>,
     pub(super) transcript_compact: Option<Vec<u8>>,
     pub(super) transcript_full: Option<Vec<u8>>,
@@ -116,6 +120,7 @@ impl NativeArtifacts {
             content: reader.read_artifact(id, "content.redacted")?,
             tool_calls: reader.read_artifact(id, "tool_calls.jsonl")?,
             serve_audit: reader.read_artifact(id, "serve_audit.jsonl")?,
+            usage: reader.read_artifact(id, "usage.jsonl")?,
             full: reader.read_artifact(id, "full.jsonl")?,
             // The writer's own name constants, so the two sides cannot drift.
             transcript_compact: reader.read_artifact(id, TRANSCRIPT_COMPACT_NAME)?,
@@ -170,6 +175,7 @@ impl NativeArtifacts {
             tool_calls: self.tool_calls.as_deref(),
             transcript_compact: self.transcript_compact.as_deref(),
             transcript_full: self.transcript_full.as_deref(),
+            usage: self.usage.as_deref(),
             tasks,
             session_metas,
             digests: rift_shadow::backend::DigestLeafBytes {
