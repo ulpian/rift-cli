@@ -26,6 +26,7 @@ use rift_recall_validity::{
 use rift_store::{CanonicalStore, Row};
 use serde_json::{json, Value};
 
+use super::credit::{candidate_costs, Recorded};
 use super::{internal, HUNK_RANGES_SQL};
 use crate::envelope::{manifest_event, provenance_trust};
 use crate::{
@@ -98,10 +99,10 @@ impl ServeDispatcher<'_> {
                 cap,
             },
         )?;
-        let baseline = ranked
-            .iter()
-            .map(|l| l.candidate.est_tokens)
-            .fold(0u32, u32::saturating_add);
+        // Only the ranked files the caller held, unchanged, and recorded as
+        // read are re-reads this pack spared; the rest are a list.
+        let recorded = Recorded::of(ctx, &assembly.known).await;
+        let baseline = recorded.baseline(&assembly.known, candidate_costs(&ranked));
         let sections = u32::try_from(pack.sections.len()).unwrap_or(u32::MAX);
         let total_tokens = pack.total_tokens;
         let payload = json!({

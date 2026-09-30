@@ -480,9 +480,13 @@ fn token_accounting_is_non_negative_and_honest() {
     let reader = MemorySubstrate::local();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let mut budget = TurnBudget::default();
+    let holding_a = ToolRequest {
+        known_hashes: vec![SHA_A.to_owned()],
+        ..ranking_req()
+    };
     let resp = block(s.dispatch(
         ToolName::KnownState,
-        &ranking_req(),
+        &holding_a,
         &ctx(&store, &reader),
         &mut budget,
     ))
@@ -493,12 +497,13 @@ fn token_accounting_is_non_negative_and_honest() {
         resp.estimated_tokens_returned,
         rift_tokens::count(&resp.payload.to_string())
     );
-    // …and avoided is NET: the captured re-read baseline (400 + 50) minus the
-    // manifest's own cost, which still dominates for this corpus.
-    assert!(resp.estimated_tokens_avoided >= resp.estimated_tokens_returned);
+    // …and avoided is NET: the re-read the caller said it was spared (a.rs,
+    // 400, stated, unchanged and read) minus the manifest's own cost. The
+    // b.rs entry is listed and credits nothing, because nobody said it was
+    // held.
     assert!(resp.estimated_tokens_avoided > 0);
     assert_eq!(
         resp.estimated_tokens_avoided,
-        450_u32.saturating_sub(resp.estimated_tokens_returned)
+        400_u32.saturating_sub(resp.estimated_tokens_returned)
     );
 }

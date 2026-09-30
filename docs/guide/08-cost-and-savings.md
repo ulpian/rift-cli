@@ -193,18 +193,27 @@ verb:
 
 | Verb | Baseline it stands in for |
 |---|---|
-| `known-state` | ingest-time read cost summed over every ranked candidate |
+| `known-state` | ingest-time read cost summed over the ranked candidates the caller stated, that are unchanged, and that this family recorded reading |
 | `diff-since` | the same sum over the loaded candidate set |
-| `changed-hunks` | the ingest-time read cost of the focus file |
-| `file-if-changed` | the ingest-time read cost of that one file |
-| `read-summary` | the bound file's read cost when valid; zero when stale |
-| `context-pack` | the sum over the ranked candidates the pack drew from |
+| `changed-hunks` against a held revision | the current file's cost, only when this family recorded reading the revision the caller holds |
+| `changed-hunks`, ranked | zero — it answers about no file the caller said it held |
+| `file-if-changed` | that file's read cost when it is stated, unchanged and recorded as read; zero when it moved |
+| `read-summary` | the bound file's read cost when valid, stated and recorded as read; zero when stale |
+| `context-pack` | the sum over the ranked candidates the pack drew from, on the same stated-and-read rule |
 | `retrieve-exact` | zero — you asked for the bytes; nothing was displaced |
 | `doc-read` | the declared native cost of reading that document unconverted |
 | A declined read | the real token count of the slice the read would have delivered |
 | A **prevented** read | the real token count of the lines Rift announced, at the revision it announced them for |
 | A substituted document read | the declared native cost of the document, against the sidecar as returned |
 | Refusals and invalidations | zero |
+
+A pull that states no hash books **zero**.
+A manifest over two hundred candidates is a list, not two hundred spared reads: the only file a pull demonstrably spared is one the caller said it held, that Rift found unchanged, and that this family is recorded as having read.
+The caller's word alone is not enough, because a figure Rift publishes rests on what Rift recorded, not on text an agent wrote.
+The check is one query per call against the recall projection, in the process that serves the pull, never on a hook's path.
+A stated, unchanged file with no recorded read is still answered as unchanged, and its entry carries `"avoided_basis": "stated_unrecorded"` so the withheld credit is visible.
+Each response names the rule it was booked under — `stated_unchanged`, `none_stated`, `declared` (a document or a path listing), or `not_credited` (exact retrieval, the cost view, the ranked hunk shape) — as `avoided_basis` beside the figure.
+Audit rows written before this rule keep the figures they were booked with; the relation is append-only and nothing is re-booked.
 
 Two properties follow. **Avoided is net, not gross**: the figure subtracts what
 the response cost, since publishing the gross baseline would double-count

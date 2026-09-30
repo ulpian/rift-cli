@@ -12,7 +12,7 @@ use rift_config::EffectiveConfig;
 use rift_core::{Result, RiftError, Timestamp};
 use rift_recall_policy::{PolicyEngine, ServePolicy, TurnBudget};
 use rift_recall_serve::{
-    RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse,
+    AvoidedBasis, RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse,
 };
 use rift_recall_substrate::{worktree, GixSubstrate, MemorySubstrate, SubstrateReader};
 use rift_recall_types::{AncestryOracle, NoProvenance, ProvenanceOracle, Scope};
@@ -207,6 +207,21 @@ pub(super) async fn diff_since(
     let resp = tool_call(store, repo, scope, ancestry, ToolName::DiffSince, &req).await?;
     let changed = resp.payload.get("changed").cloned().unwrap_or_default();
     let unchanged = resp.payload.get("unchanged").cloned().unwrap_or_default();
+    let human = delta_listing(&ckpt, &changed, &unchanged);
+    Ok(Outcome::ok(
+        human,
+        serde_json::json!({
+            "since": ckpt,
+            "changed": changed,
+            "unchanged": unchanged,
+            "estimated_tokens_avoided": resp.estimated_tokens_avoided,
+            "avoided_basis": AvoidedBasis::of(ToolName::DiffSince, &req).as_str(),
+        }),
+    ))
+}
+
+/// The human half of `diff-since`: the counts, then up to fifty paths of each.
+fn delta_listing(ckpt: &str, changed: &serde_json::Value, unchanged: &serde_json::Value) -> String {
     let n_changed = changed.as_array().map_or(0, Vec::len);
     let n_unchanged = unchanged.as_array().map_or(0, Vec::len);
 
@@ -216,17 +231,14 @@ pub(super) async fn diff_since(
         human.push_str(&format!("  changed   {path}\n"));
     }
     for u in unchanged.as_array().into_iter().flatten().take(50) {
-        human.push_str(&format!("  unchanged {}\n", u.as_str().unwrap_or("?")));
+        // A held file this family never recorded reading is an object that
+        // carries its path beside the tag; every other one is its path.
+        let path = u
+            .as_str()
+            .or_else(|| u.get("path").and_then(|v| v.as_str()));
+        human.push_str(&format!("  unchanged {}\n", path.unwrap_or("?")));
     }
-    Ok(Outcome::ok(
-        human,
-        serde_json::json!({
-            "since": ckpt,
-            "changed": changed,
-            "unchanged": unchanged,
-            "estimated_tokens_avoided": resp.estimated_tokens_avoided,
-        }),
-    ))
+    human
 }
 
 /// `rift memory file-if-changed <path>`: does the worktree file differ from

@@ -452,6 +452,35 @@ pub struct ToolResponse {
     pub event: MemdEvent,
 }
 
+/// The rule a response's `estimated_tokens_avoided` was booked under — the
+/// word a surface prints beside the figure so a reader knows what it rests on.
+///
+/// A closed set of four, and it is decided by the verb and the request alone,
+/// before any store is read: it names the rule that applied, not how much it
+/// credited, so a stated-hash call that matched nothing still says
+/// `stated_unchanged` beside its zero. The per-entry case the rule withholds
+/// credit for — stated and unchanged, but never recorded as read — is tagged
+/// on the entry itself, where the caller can see which file it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AvoidedBasis {
+    /// `stated_unchanged`: the caller stated hashes, and only the files it
+    /// stated, that have not moved and that this family recorded reading are
+    /// credited. For a hunk pull against an older revision, the credit is the
+    /// current file's cost, and only when that older revision's read is on
+    /// record.
+    StatedUnchanged,
+    /// `none_stated`: a crediting verb called without a single stated hash; it
+    /// books zero, because a list is not a set of spared reads.
+    NoneStated,
+    /// `declared`: the baseline is the declared native cost of the read the
+    /// answer replaced — a document or a path listing.
+    Declared,
+    /// `not_credited`: the verb books zero by design — an exact retrieval, the
+    /// cost view, or the ranked hunk shape, which answers about no file the
+    /// caller said it held.
+    NotCredited,
+}
+
 /// A tool failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToolError {
@@ -638,6 +667,39 @@ impl ToolName {
     #[must_use]
     pub fn is_exact(self) -> bool {
         matches!(self, Self::RetrieveExact)
+    }
+}
+
+impl AvoidedBasis {
+    /// The basis a call of `tool` with `req` is booked under.
+    #[must_use]
+    pub fn of(tool: ToolName, req: &ToolRequest) -> Self {
+        let credits_stated = match tool {
+            ToolName::KnownState
+            | ToolName::DiffSince
+            | ToolName::FileIfChanged
+            | ToolName::ReadSummary
+            | ToolName::ContextPack => true,
+            ToolName::ChangedHunks => targeted_pull(tool, req),
+            ToolName::DocRead | ToolName::Search => return Self::Declared,
+            ToolName::RetrieveExact | ToolName::CostHotspots => false,
+        };
+        match (credits_stated, req.known_hashes.is_empty()) {
+            (false, _) => Self::NotCredited,
+            (true, true) => Self::NoneStated,
+            (true, false) => Self::StatedUnchanged,
+        }
+    }
+
+    /// The word the envelopes print.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StatedUnchanged => "stated_unchanged",
+            Self::NoneStated => "none_stated",
+            Self::Declared => "declared",
+            Self::NotCredited => "not_credited",
+        }
     }
 }
 

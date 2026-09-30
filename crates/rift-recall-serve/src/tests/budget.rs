@@ -174,10 +174,6 @@ struct Corpus<'a> {
 }
 
 impl Corpus<'_> {
-    fn sum_est(&self) -> u32 {
-        self.est.iter().fold(0u32, |a, &t| a.saturating_add(t))
-    }
-
     fn est_of(&self, path: &str) -> u32 {
         self.files
             .iter()
@@ -257,7 +253,7 @@ impl Shadow {
         let remaining_before = self.remaining();
         match block(s.dispatch(tool, &req, c, budget)) {
             Ok(resp) => {
-                check_figures(&resp, tool, corpus)?;
+                check_figures(&resp, tool, corpus, know_first)?;
                 if matches!(tool, ToolName::KnownState | ToolName::DiffSince) {
                     check_manifest_bounds(&resp, tool, req_budget, remaining_before, corpus)?;
                 }
@@ -326,12 +322,13 @@ fn check_figures(
     resp: &ToolResponse,
     tool: ToolName,
     corpus: &Corpus<'_>,
+    know_first: bool,
 ) -> Result<(), TestCaseError> {
     let measured = rift_tokens::count(&resp.payload.to_string());
     prop_assert_eq!(resp.estimated_tokens_returned, measured);
     prop_assert_eq!(resp.event.tokens_returned(), resp.estimated_tokens_returned);
     prop_assert_eq!(resp.event.tokens_avoided(), resp.estimated_tokens_avoided);
-    let baseline = expected_baseline(tool, corpus, resp);
+    let baseline = expected_baseline(tool, corpus, know_first);
     prop_assert_eq!(
         resp.estimated_tokens_avoided,
         baseline.saturating_sub(resp.estimated_tokens_returned)
@@ -339,12 +336,23 @@ fn check_figures(
     Ok(())
 }
 
-/// Net avoided is measured against the tool's gross baseline.
-fn expected_baseline(tool: ToolName, corpus: &Corpus<'_>, resp: &ToolResponse) -> u32 {
+/// Net avoided is measured against the tool's gross baseline: the one file a
+/// draw can state is the first, every file in the corpus is recorded as read,
+/// so a crediting verb's baseline is that file's cost when it was stated and
+/// nothing otherwise. The hunk pull that stated it finds the file unchanged;
+/// the ranked shape states nothing it can be credited for.
+fn expected_baseline(tool: ToolName, corpus: &Corpus<'_>, know_first: bool) -> u32 {
+    let stated = if know_first {
+        corpus.est_of(&corpus.first().0)
+    } else {
+        0
+    };
     match tool {
-        ToolName::KnownState | ToolName::DiffSince | ToolName::ContextPack => corpus.sum_est(),
-        ToolName::FileIfChanged => corpus.est_of(&corpus.first().0),
-        ToolName::ChangedHunks => corpus.est_of(resp.payload["path"].as_str().unwrap_or_default()),
+        ToolName::KnownState
+        | ToolName::DiffSince
+        | ToolName::ContextPack
+        | ToolName::FileIfChanged
+        | ToolName::ChangedHunks => stated,
         ToolName::ReadSummary | ToolName::RetrieveExact | ToolName::CostHotspots => 0,
         // Not drawn by this sequence (`projection_verbs`), and an arm that
         // guessed a figure for either would be a property this fixture cannot

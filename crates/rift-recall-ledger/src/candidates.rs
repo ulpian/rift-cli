@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rift_core::{Result, Timestamp};
 use rift_recall_rank::Candidate;
 use rift_recall_types::{AncestryOracle, LabelSubject, Scope};
-use rift_store::CanonicalStore;
+use rift_store::{CanonicalStore, Value};
 
 use crate::outcome::effective_labels;
 use crate::scope_query::{in_scope_nodes, ScopeSet};
@@ -26,6 +26,10 @@ use crate::scope_query::{in_scope_nodes, ScopeSet};
 /// One "day" of recency decay per checkpoint-ordinal step (the ordinal proxy for
 /// per-read capture time; see the module note).
 pub const RECENCY_STEP_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// How many content addresses one [`recorded_reads`] statement binds — well
+/// under the engine's variable limit, and far above what a caller states.
+pub const RECORDED_READS_CHUNK: usize = 500;
 
 /// A ranking candidate plus the serving metadata the serve handlers need (the
 /// content hash, for handles + known-hash comparison).
@@ -155,6 +159,42 @@ pub async fn load_candidates_with_scope(
     Ok((out, in_scope))
 }
 
+/// The subset of `hashes` this family is recorded as having read: a content
+/// address some read in the projection landed on.
+///
+/// This is the evidence a pull's avoided figure rests on. A caller's word that
+/// it holds some bytes is text an agent wrote; a read the capture recorded is a
+/// fact Rift saw, so a spared re-read is credited only where the two agree.
+/// Asked by content address, not by path, because what was handed to a window
+/// is the bytes, and bytes read under another name were still read.
+///
+/// One statement per [`RECORDED_READS_CHUNK`] hashes, so a caller that states
+/// thousands cannot push the statement past the engine's variable limit; a real
+/// call states a handful and costs one query.
+///
+/// # Errors
+/// Propagates store read errors.
+pub async fn recorded_reads(
+    store: &impl CanonicalStore,
+    hashes: &BTreeSet<&str>,
+) -> Result<BTreeSet<String>> {
+    let wanted: Vec<&str> = hashes.iter().copied().collect();
+    let mut out = BTreeSet::new();
+    for chunk in wanted.chunks(RECORDED_READS_CHUNK) {
+        let marks = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT DISTINCT r.content_sha256 FROM n_file_revision r \
+             JOIN n_file_read k ON k.file_revision = r.node_id \
+             WHERE r.content_sha256 IN ({marks})"
+        );
+        let params: Vec<Value> = chunk.iter().map(|h| Value::text(*h)).collect();
+        for row in store.query(&sql, &params).await? {
+            out.insert(row.get_text(0)?);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +319,52 @@ mod tests {
         );
         assert_eq!(by_path["src/a.rs"].candidate.est_tokens, 100);
         assert_eq!(by_path["src/a.rs"].content_sha256.len(), 64);
+    }
+
+    /// A read is what makes a hash recorded: a revision the projection holds
+    /// but nobody read is not evidence, and a hash nothing holds is not either.
+    #[test]
+    fn only_a_hash_some_read_landed_on_is_recorded() {
+        let store = recall_store();
+        put_checkpoint(&store, "c1", 1, None);
+        put_revision(&store, "rev_a", "src/a.rs");
+        put_read(&store, "r1", "c1", "rev_a", 1, 100);
+        block(store.insert_or_ignore(
+            "n_file_revision",
+            &["node_id", "path", "blob_oid", "content_sha256", "size"],
+            &[
+                Value::text("rev_b"),
+                Value::text("src/b.rs"),
+                Value::text("b".repeat(64)),
+                Value::text("b".repeat(64)),
+                Value::Int(10),
+            ],
+        ))
+        .unwrap();
+        let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let asked: BTreeSet<&str> = [a.as_str(), b.as_str(), c.as_str()].into();
+        let recorded = block(recorded_reads(&store, &asked)).unwrap();
+        assert_eq!(recorded, BTreeSet::from([a.clone()]));
+        assert!(block(recorded_reads(&store, &BTreeSet::new()))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A stated set larger than one statement binds is answered whole.
+    #[test]
+    fn a_stated_set_past_one_statement_is_answered_whole() {
+        let store = recall_store();
+        put_checkpoint(&store, "c1", 1, None);
+        put_revision(&store, "rev_a", "src/a.rs");
+        put_read(&store, "r1", "c1", "rev_a", 1, 100);
+        let noise: Vec<String> = (0..RECORDED_READS_CHUNK * 2)
+            .map(|i| format!("{i:064x}"))
+            .collect();
+        let a = "a".repeat(64);
+        let mut asked: BTreeSet<&str> = noise.iter().map(String::as_str).collect();
+        asked.insert(&a);
+        let recorded = block(recorded_reads(&store, &asked)).unwrap();
+        assert_eq!(recorded, BTreeSet::from([a.clone()]));
     }
 
     proptest::proptest! {

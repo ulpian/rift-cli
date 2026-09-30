@@ -80,7 +80,7 @@ fn the_hunk_verb_reports_what_containment_held_back() {
 /// at the current revision, the content→blob bridge for both, and a substrate
 /// holding both blobs. `path` is the candidate's path, so a caller can ask
 /// about it by name.
-fn two_revisions(
+pub(super) fn two_revisions(
     path: &str,
     old: &[u8],
     new: &[u8],
@@ -140,7 +140,7 @@ fn two_revisions_addressed(
 /// change inside one block has an edge to grow to, and the rest of the file is
 /// large enough that not sending it is worth more than the answer costs —
 /// which is the whole claim this verb makes.
-fn source_file(marker: &str) -> Vec<u8> {
+pub(super) fn source_file(marker: &str) -> Vec<u8> {
     let mut out = String::from("use std::io;\n\n");
     for b in 0..20 {
         out.push_str(&format!("fn f{b}() {{\n"));
@@ -153,7 +153,7 @@ fn source_file(marker: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
-fn pull(path: &str, basis: &str) -> ToolRequest {
+pub(super) fn pull(path: &str, basis: &str) -> ToolRequest {
     ToolRequest {
         target: Some(path.to_owned()),
         known_hashes: vec![basis.to_owned()],
@@ -310,14 +310,15 @@ fn changed_hunks_against_the_held_hash_serves_the_diff_content() {
     assert!(!content.contains("let x9_1"), "{content}");
 }
 
-/// ★ The figure is the point. A re-read of this file costs its full tokenizer
-/// count; this answer costs the payload; the difference is the saving, and it
-/// is measured at the seam over the exact bytes the transport ships rather
-/// than declared anywhere. The caller that already holds the current bytes is
-/// told so by the four-state constructor, and the whole file is what it did
-/// not re-read.
+/// ★ The figure is the point, and it rests on a read Rift recorded. The
+/// caller's basis here is a revision the bridge maps but no read landed on, so
+/// the changed lines are served and nothing is credited: the hash is the
+/// caller's word, not evidence the bytes were ever in a window. The caller
+/// that holds the current bytes — which this family did read — is told so by
+/// the four-state constructor, and the whole file is what it did not re-read,
+/// measured at the seam over the exact bytes the transport ships.
 #[test]
-fn changed_hunks_against_the_held_hash_books_full_minus_served() {
+fn changed_hunks_credits_only_a_basis_this_family_recorded_reading() {
     use rift_recall_substrate::worktree::sha256_hex;
     let HeldHashPull {
         store,
@@ -327,21 +328,16 @@ fn changed_hunks_against_the_held_hash_books_full_minus_served() {
         ..
     } = held_hash_pull();
 
-    // The accounting: baseline is THIS file by the real tokenizer, avoided is
-    // that minus the payload, and it is a saving rather than a cost.
-    let full = rift_tokens::count(&String::from_utf8_lossy(&new));
+    // The accounting: the payload is measured, and an unrecorded basis
+    // earns nothing — the answer says why.
     assert_eq!(
         resp.estimated_tokens_returned,
         rift_tokens::count(&resp.payload.to_string())
     );
+    assert_eq!(resp.estimated_tokens_avoided, 0);
     assert_eq!(
-        resp.estimated_tokens_avoided,
-        full.saturating_sub(resp.estimated_tokens_returned)
-    );
-    assert!(
-        resp.estimated_tokens_avoided > 0,
-        "served {} of a {full}-token file",
-        resp.estimated_tokens_returned
+        resp.payload["avoided_basis"],
+        serde_json::json!("stated_unrecorded")
     );
     assert_eq!(resp.event.tokens_avoided(), resp.estimated_tokens_avoided);
 
@@ -357,6 +353,15 @@ fn changed_hunks_against_the_held_hash_books_full_minus_served() {
     .unwrap();
     assert_eq!(same.payload["state"], serde_json::json!("known_unchanged"));
     assert!(same.payload["content"].is_null(), "{}", same.payload);
+    assert!(
+        same.payload.get("avoided_basis").is_none(),
+        "{}",
+        same.payload
+    );
+    assert_eq!(
+        same.estimated_tokens_avoided,
+        400u32.saturating_sub(same.estimated_tokens_returned)
+    );
     assert!(same.estimated_tokens_avoided > 0);
 }
 

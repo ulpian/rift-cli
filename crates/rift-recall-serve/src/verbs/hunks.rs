@@ -10,7 +10,7 @@
 //! revision's lines under another revision's numbers, so every non-answer is
 //! **named** and none is silence or a guess.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rift_recall_events::MemdEvent;
 use rift_recall_ledger::candidates::{load_candidates_with_scope, LoadedCandidate};
@@ -26,6 +26,7 @@ use rift_recall_validity::{
 use rift_store::{CanonicalStore, Row};
 use serde_json::{json, Value};
 
+use super::credit::{Recorded, STATED_UNRECORDED};
 use super::{fit_with_provenance, internal, manifest_cap, targeted_pull, HUNK_RANGES_SQL};
 use crate::envelope::{envelope_view, manifest_event, omit_tag, provenance_trust};
 use crate::held_diff::{self, Basis, HeldDiff, RedactedDiff};
@@ -91,6 +92,10 @@ struct Pull<'a> {
     validity: Validity,
     basis_hash: String,
     current_hash: String,
+    /// Whether this family recorded a read of the caller's basis. A hash the
+    /// caller could have found anywhere is not evidence that those bytes were
+    /// ever in a window; a recorded read is, and only it earns the credit.
+    basis_recorded: bool,
 }
 
 /// The changed places of the current file, laid out for a reader.
@@ -269,11 +274,12 @@ impl ServeDispatcher<'_> {
             }),
             containment.as_ref(),
         );
-        let baseline = top.candidate.est_tokens;
+        // The ranked shape answers about no file the caller said it held, so
+        // it spared no read anyone can point to.
         Ok(Self::respond(
             ToolName::ChangedHunks,
             payload,
-            baseline,
+            0,
             budget,
             manifest_event,
         ))
@@ -281,7 +287,7 @@ impl ServeDispatcher<'_> {
 }
 
 impl<'a> Pull<'a> {
-    fn new(gate: &'a PullGate<'a>, revisions: &Revisions<'_>) -> Self {
+    fn new(gate: &'a PullGate<'a>, revisions: &Revisions<'_>, basis_recorded: bool) -> Self {
         let handle = format!("file:{}@sha256:{}", gate.path, revisions.current_hash);
         let trust = provenance_trust(&handle);
         let validity = resolve(
@@ -297,6 +303,7 @@ impl<'a> Pull<'a> {
             validity,
             basis_hash: revisions.basis_hash.clone(),
             current_hash: revisions.current_hash.clone(),
+            basis_recorded,
         }
     }
 
@@ -306,6 +313,27 @@ impl<'a> Pull<'a> {
             doc: ServeDispatcher::with_containment(doc, self.gate.containment),
             baseline,
         }
+    }
+
+    /// What an answer that spared a re-read books: the whole of `baseline`
+    /// when the caller's basis is a recorded read, nothing when it is not.
+    fn credit(&self, baseline: u32) -> u32 {
+        if self.basis_recorded {
+            return baseline;
+        }
+        0
+    }
+
+    /// Say on the answer that its credit was withheld because the caller's
+    /// basis was never recorded as read; the answer itself stands.
+    fn attach_basis(&self, doc: &mut Value) {
+        if self.basis_recorded {
+            return;
+        }
+        let Some(obj) = doc.as_object_mut() else {
+            return;
+        };
+        obj.insert("avoided_basis".to_owned(), json!(STATED_UNRECORDED));
     }
 
     /// A named non-answer that carries both addresses and claims nothing.
@@ -353,7 +381,7 @@ impl<'a> Pull<'a> {
     /// have to read, and the sealed constructor is what says so — this handler
     /// never spells `known_unchanged` itself.
     fn unchanged(&self, est_tokens: u32) -> Answer {
-        let doc = json!({
+        let mut doc = json!({
             "tool": "changed_hunks",
             "path": self.gate.path,
             "state": self.constructor_state(SeenStatus::SeenSameHash, None, 0),
@@ -362,7 +390,8 @@ impl<'a> Pull<'a> {
             "omitted": 0,
             "truncated": false,
         });
-        self.answer(doc, est_tokens)
+        self.attach_basis(&mut doc);
+        self.answer(doc, self.credit(est_tokens))
     }
 
     /// More changed places than a windowed answer stays smaller than the file
@@ -443,8 +472,7 @@ impl<'a> Pull<'a> {
     /// Nothing fits, so nothing is claimed: an all-elision text would read as
     /// "this file did not change".
     fn omitted(&self, omitted: usize) -> Value {
-        ServeDispatcher::with_containment(
-            json!({
+        let mut doc = json!({
                 "tool": "changed_hunks",
                 "path": self.gate.path,
                 "state": "omitted",
@@ -454,9 +482,9 @@ impl<'a> Pull<'a> {
                 "hunks": [],
                 "omitted": omitted,
                 "truncated": true,
-            }),
-            self.gate.containment,
-        )
+        });
+        self.attach_basis(&mut doc);
+        ServeDispatcher::with_containment(doc, self.gate.containment)
     }
 
     /// The content answer, fitted to the cap with the story sacrificed before
@@ -508,12 +536,13 @@ impl<'a> Pull<'a> {
             });
             self.attach_story(&mut doc, detail, story);
             self.attach_gate(&mut doc);
+            self.attach_basis(&mut doc);
             ServeDispatcher::with_containment(doc, self.gate.containment)
         };
         let (doc, _kept) = fit_with_provenance(manifest_cap(req, budget), n, &build);
         Answer {
             doc,
-            baseline: shown.baseline,
+            baseline: self.credit(shown.baseline),
         }
     }
 
@@ -642,7 +671,11 @@ async fn pull<S: CanonicalStore, R: SubstrateReader>(
             doc: ServeDispatcher::with_containment(doc, gate.containment),
             baseline: 0,
         })?;
-    let pull = Pull::new(gate, &revisions);
+    // The one question the credit turns on, asked once: did this family
+    // record reading the revision the caller says it holds?
+    let basis = BTreeSet::from([revisions.basis_hash.as_str()]);
+    let recorded = Recorded::of(ctx, &basis).await.holds(&revisions.basis_hash);
+    let pull = Pull::new(gate, &revisions, recorded);
     let est_tokens = revisions.row.candidate.est_tokens;
     if revisions.basis_hash == revisions.current_hash {
         return Ok(pull.unchanged(est_tokens));

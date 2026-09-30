@@ -9,6 +9,7 @@
 //! counted and charged, and every verb reaches it as a private method of the
 //! same `impl`, so a second charge site cannot appear without appearing here.
 
+pub(crate) mod credit;
 mod doc;
 mod exact;
 mod hunks;

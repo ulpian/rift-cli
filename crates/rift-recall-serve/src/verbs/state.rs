@@ -15,9 +15,29 @@ use rift_recall_validity::{manifest_envelope, Budget, SeenStatus};
 use rift_store::CanonicalStore;
 use serde_json::{json, Value};
 
+use super::credit::{candidate_costs, Recorded};
 use super::{fit_with_provenance, manifest_cap, Story};
 use crate::envelope::{envelope_view, manifest_event};
 use crate::{RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse};
+
+/// The event a summary answer is sealed with, once the seam has its figures.
+type EventBuilder = Box<dyn FnOnce(u32, u32) -> MemdEvent + Send>;
+
+/// One `read_summary` call, as its answer is decided: the path asked about,
+/// the hashes the caller stated, and which of them this family read.
+struct SummaryCall<'a> {
+    path: &'a str,
+    known: &'a BTreeSet<&'a str>,
+    recorded: &'a Recorded,
+}
+
+/// The delta list's rows: the changed entries with their story and with it
+/// downgraded — the two the fitter chooses between — and the unchanged ones.
+struct Deltas {
+    changed: Vec<Value>,
+    changed_plain: Vec<Value>,
+    unchanged: Vec<Value>,
+}
 
 impl ServeDispatcher<'_> {
     pub(crate) async fn known_state<S: CanonicalStore, R: SubstrateReader>(
@@ -29,12 +49,14 @@ impl ServeDispatcher<'_> {
         let (ranked, in_scope) = Self::ranked_candidates(req, ctx).await?;
         let containment = Self::containment_view(&in_scope, ctx);
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
-        let (envelopes, baseline) = manifest_entries(&ranked, &known, budget);
+        let recorded = Recorded::of(ctx, &known).await;
+        let envelopes = manifest_entries(&ranked, &known, budget);
+        let baseline = recorded.baseline(&known, candidate_costs(&ranked));
         // The story behind each entry that moved. Anchors come from the rows
         // already loaded — the loader picked the checkpoint to decide recency —
         // so this costs one query for the commit mirror and nothing else.
         let story = Story::over(ctx, &ranked, &known).await;
-        let (telling, plain) = manifest_views(ctx, &envelopes, &ranked, &known, &story);
+        let (telling, plain) = manifest_views(ctx, &envelopes, &ranked, &known, &story, &recorded);
         // The manifest cap: known_state anchored before the trial,
         // so the trial sees the fresh allowance. Entries are already
         // in rank order — truncation keeps the highest-ranked prefix and says
@@ -75,24 +97,13 @@ impl ServeDispatcher<'_> {
         let containment = Self::containment_view(&in_scope, ctx);
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let story = Story::over(ctx, &loaded, &known).await;
-        let mut changed = Vec::new();
-        let mut changed_plain = Vec::new();
-        let mut unchanged = Vec::new();
-        let mut baseline = 0u32;
-        for lc in &loaded {
-            baseline = baseline.saturating_add(lc.candidate.est_tokens);
-            if known.contains(lc.content_sha256.as_str()) {
-                unchanged.push(json!(lc.candidate.path));
-            } else {
-                let mut entry =
-                    json!({ "path": lc.candidate.path, "new_sha256": lc.content_sha256 });
-                let mut bare = entry.clone();
-                story.attach(ctx.provenance, &mut entry, &loaded, lc, &known, None);
-                Story::attach_handle(&mut bare, &lc.candidate.path, None);
-                changed.push(entry);
-                changed_plain.push(bare);
-            }
-        }
+        let recorded = Recorded::of(ctx, &known).await;
+        let baseline = recorded.baseline(&known, candidate_costs(&loaded));
+        let Deltas {
+            changed,
+            changed_plain,
+            unchanged,
+        } = deltas(ctx, &loaded, &known, &story, &recorded);
         // The manifest cap bounds the delta list too. Droppable
         // order is the concatenation [changed…, unchanged…] with drops from
         // the tail: unchanged paths (cheap, least informative) go before
@@ -135,19 +146,26 @@ impl ServeDispatcher<'_> {
             .await
             .map_err(|e| ToolError::Internal(e.to_string()))?;
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
+        let recorded = Recorded::of(ctx, &known).await;
         let latest = loaded.iter().find(|l| l.candidate.path == path);
         let (state, baseline) = match latest {
             None => (
                 json!({ "state": "invalid", "path": path, "reason": "path_not_found" }),
                 0,
             ),
-            Some(lc) if known.contains(lc.content_sha256.as_str()) => (
-                json!({ "state": "unchanged", "path": path, "known_hash": lc.content_sha256 }),
-                lc.candidate.est_tokens,
-            ),
+            Some(lc) if known.contains(lc.content_sha256.as_str()) => {
+                let hash = lc.content_sha256.as_str();
+                let mut state = json!({ "state": "unchanged", "path": path, "known_hash": hash });
+                recorded.tag(&known, hash, &mut state);
+                (
+                    state,
+                    recorded.credit(&known, hash, lc.candidate.est_tokens),
+                )
+            }
+            // A file that moved spared no read of the bytes the caller holds.
             Some(lc) => (
                 json!({ "state": "changed", "path": path, "new_hash": lc.content_sha256 }),
-                lc.candidate.est_tokens,
+                0,
             ),
         };
         let payload = json!({ "tool": "file_if_changed", "result": state });
@@ -182,17 +200,50 @@ impl ServeDispatcher<'_> {
             .await
             .map_err(|e| ToolError::Internal(e.to_string()))?;
         let bound = rows.first().and_then(|r| r.get_text(0).ok());
-        // Each arm yields the result view, the gross baseline the response
-        // stands in for, and its event builder; the seam supplies the figures.
-        type EventBuilder = Box<dyn FnOnce(u32, u32) -> MemdEvent + Send>;
-        let (result, baseline, event): (Value, u32, EventBuilder) = match (bound, current) {
+        let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
+        let recorded = Recorded::of(ctx, &known).await;
+        let summary = SummaryCall {
+            path: &path,
+            known: &known,
+            recorded: &recorded,
+        };
+        let (result, baseline, event) = summary.answer(bound, current);
+        let payload = json!({ "tool": "read_summary", "result": result });
+        Ok(Self::respond(
+            ToolName::ReadSummary,
+            payload,
+            baseline,
+            budget,
+            event,
+        ))
+    }
+}
+
+impl SummaryCall<'_> {
+    /// The result view, the baseline it stands in for, and its event builder;
+    /// the seam supplies the figures.
+    ///
+    /// A valid binding is credited with the bound file's cost only when the
+    /// caller stated that file's hash and this family recorded reading it: a
+    /// summary served to a caller who never held the file spared no re-read.
+    fn answer(
+        &self,
+        bound: Option<String>,
+        current: Option<&LoadedCandidate>,
+    ) -> (Value, u32, EventBuilder) {
+        let path = self.path;
+        match (bound, current) {
             (Some(bound), Some(lc)) if bound == lc.content_sha256 => {
                 // valid: the bound source is still current.
                 let summary = format!("summary bound to {bound}");
                 let handle = format!("summary:{path}");
+                let mut result = json!({ "state": "summary", "path": path, "source_hash": bound, "summary": summary });
+                self.recorded
+                    .tag(self.known, &lc.content_sha256, &mut result);
                 (
-                    json!({ "state": "summary", "path": path, "source_hash": bound, "summary": summary }),
-                    lc.candidate.est_tokens,
+                    result,
+                    self.recorded
+                        .credit(self.known, &lc.content_sha256, lc.candidate.est_tokens),
                     Box::new(move |returned, avoided| MemdEvent::SummaryServed {
                         handle,
                         estimated_tokens_returned: returned,
@@ -216,20 +267,49 @@ impl ServeDispatcher<'_> {
                 0,
                 Box::new(manifest_event),
             ),
-        };
-        let payload = json!({ "tool": "read_summary", "result": result });
-        Ok(Self::respond(
-            ToolName::ReadSummary,
-            payload,
-            baseline,
-            budget,
-            event,
-        ))
+        }
     }
 }
 
-/// The sealed manifest entry for every ranked revision, and the gross
-/// baseline they stand in for.
+/// The delta list's rows, in the order the candidates loaded in: a moved
+/// file with its story, and a held one by path — or, when the caller stated
+/// it but this family never recorded reading it, by path and the tag that
+/// says why it earned nothing.
+fn deltas<S: CanonicalStore, R: SubstrateReader>(
+    ctx: &RecallContext<'_, S, R>,
+    loaded: &[LoadedCandidate],
+    known: &BTreeSet<&str>,
+    story: &Story,
+    recorded: &Recorded,
+) -> Deltas {
+    let mut rows = Deltas {
+        changed: Vec::new(),
+        changed_plain: Vec::new(),
+        unchanged: Vec::new(),
+    };
+    for lc in loaded {
+        let hash = lc.content_sha256.as_str();
+        if recorded.unrecorded(known, hash) {
+            let mut entry = json!({ "path": lc.candidate.path });
+            recorded.tag(known, hash, &mut entry);
+            rows.unchanged.push(entry);
+            continue;
+        }
+        if known.contains(hash) {
+            rows.unchanged.push(json!(lc.candidate.path));
+            continue;
+        }
+        let mut entry = json!({ "path": lc.candidate.path, "new_sha256": lc.content_sha256 });
+        let mut bare = entry.clone();
+        story.attach(ctx.provenance, &mut entry, loaded, lc, known, None);
+        Story::attach_handle(&mut bare, &lc.candidate.path, None);
+        rows.changed.push(entry);
+        rows.changed_plain.push(bare);
+    }
+    rows
+}
+
+/// The sealed manifest entry for every ranked revision.
 ///
 /// Every per-artifact result is built by the sealed `manifest_envelope`
 /// constructor — no `ArtifactState` is constructed in this handler. Inline
@@ -243,9 +323,8 @@ fn manifest_entries(
     ranked: &[LoadedCandidate],
     known: &BTreeSet<&str>,
     budget: &TurnBudget,
-) -> (Vec<Envelope>, u32) {
+) -> Vec<Envelope> {
     let mut envelopes: Vec<Envelope> = Vec::new();
-    let mut baseline = 0u32;
     let mut vbudget = Budget::new(budget.tokens_remaining());
     for lc in ranked {
         let c = &lc.candidate;
@@ -255,7 +334,6 @@ fn manifest_entries(
         } else {
             SeenStatus::NotSeenOrChanged
         };
-        baseline = baseline.saturating_add(c.est_tokens);
         envelopes.push(manifest_envelope(
             &c.path,
             Trust::CodeFact,
@@ -266,7 +344,7 @@ fn manifest_entries(
             &mut vbudget,
         ));
     }
-    (envelopes, baseline)
+    envelopes
 }
 
 /// Every entry's view twice over: telling its story, and with the story
@@ -278,12 +356,14 @@ fn manifest_views<S: CanonicalStore, R: SubstrateReader>(
     ranked: &[LoadedCandidate],
     known: &BTreeSet<&str>,
     story: &Story,
+    recorded: &Recorded,
 ) -> (Vec<Value>, Vec<Value>) {
     let telling: Vec<Value> = envelopes
         .iter()
         .zip(ranked)
         .map(|(e, lc)| {
             let mut view = envelope_view(e);
+            recorded.tag(known, &lc.content_sha256, &mut view);
             if !known.contains(lc.content_sha256.as_str()) {
                 story.attach(ctx.provenance, &mut view, ranked, lc, known, None);
             }
@@ -295,6 +375,7 @@ fn manifest_views<S: CanonicalStore, R: SubstrateReader>(
         .zip(ranked)
         .map(|(e, lc)| {
             let mut view = envelope_view(e);
+            recorded.tag(known, &lc.content_sha256, &mut view);
             if !known.contains(lc.content_sha256.as_str()) {
                 Story::attach_handle(&mut view, &lc.candidate.path, None);
             }
