@@ -13,7 +13,9 @@ use serde_json::Value;
 
 use super::policy::family_capability;
 
-pub(super) fn render_status(
+/// The table itself, which `rift doctor`'s integrations leg renders too, so
+/// the two surfaces cannot word a row differently.
+pub(crate) fn render_status(
     out: &mut String,
     statuses: &[rift_agent_install::native::NativeIntegrationStatus],
 ) {
@@ -35,6 +37,27 @@ pub(super) fn render_status(
         );
     }
     render_codex_trust(out, statuses);
+}
+
+/// Whether the row reads wired in the table: a managed descriptor, and hooks
+/// that read `managed` or do not apply. A Codex hook file Codex is skipping
+/// reads `error`, so it is written and still not counted.
+pub(crate) fn is_wired(status: &rift_agent_install::native::NativeIntegrationStatus) -> bool {
+    status.wiring == rift_agent_install::native::NativeWiring::Managed
+        && matches!(hooks_word(status).as_str(), "managed" | "-")
+}
+
+/// The rows `rift recall status --json` emits under `integrations`, for a
+/// caller that renders the table without the support block beside it.
+pub(crate) fn integration_rows(
+    repo: &Path,
+    statuses: &[rift_agent_install::native::NativeIntegrationStatus],
+) -> Vec<Value> {
+    let clients = rift_agent_install::diagnose(repo, false);
+    let boundary_responses = observed_boundary_responses(repo);
+    let policy = rift_recall_policy::load_serve_policy(&repo.join(".rift"));
+    let assessments = support_assessments(repo, statuses, &clients, &boundary_responses, &policy);
+    integration_status_json(statuses, &assessments)
 }
 
 /// The hooks column: the installer's state, except that a Codex hook file

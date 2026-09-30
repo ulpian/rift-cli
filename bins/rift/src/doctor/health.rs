@@ -32,19 +32,28 @@ pub(super) fn doctor_integration_health(root: &Path) -> (String, serde_json::Val
 
 /// `outcome` with the health block appended, for `rift status`: the lines
 /// after the Codex trust lines and the array under `health`.
+pub(crate) fn with_integration_health(root: &Path, mut outcome: Outcome) -> Outcome {
+    let (human, json) = status_health_block(root);
+    outcome.human.push_str(&human);
+    if let Some(object) = outcome.json.as_object_mut() {
+        object.insert("health".to_owned(), json);
+    }
+    outcome
+}
+
+/// The block a surface that already printed the Codex trust lines shows —
+/// `rift status` and `rift recall status` — and the array it carries under
+/// `health`, identical to the doctor's.
 ///
 /// Codex's skipped-hooks sentence is already printed with the trust lines
 /// above, so its entry here points at them rather than printing it twice; the
 /// `--json` element still carries the full sentence.
-pub(crate) fn with_integration_health(root: &Path, mut outcome: Outcome) -> Outcome {
+pub(crate) fn status_health_block(root: &Path) -> (String, serde_json::Value) {
     let remedies = integration_remedies(root).unwrap_or_default();
-    outcome
-        .human
-        .push_str(&health_lines(&remedies, status_sentence));
-    if let Some(json) = outcome.json.as_object_mut() {
-        json.insert("health".to_owned(), remedies_json(&remedies));
-    }
-    outcome
+    (
+        health_lines(&remedies, status_sentence),
+        remedies_json(&remedies),
+    )
 }
 
 /// Every finding for the repository at `root`, each with its remedy on the

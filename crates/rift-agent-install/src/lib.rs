@@ -91,10 +91,10 @@ impl ClientFamily {
 pub enum DetectionState {
     /// No install evidence was found (see [`detect::installations`]).
     NotDetected,
-    /// The client is installed and meets the known integration floor.
+    /// Install evidence was found. No version is too old to wire: the hooks
+    /// are the whole integration, and every release that reads a project hook
+    /// file reads Rift's.
     Supported,
-    /// The executable was found but is too old or otherwise incompatible.
-    Unsupported,
 }
 
 /// The state of one native configuration surface.
@@ -114,30 +114,6 @@ pub enum WiringState {
     /// Rift's hooks are written and the client is skipping at least one of
     /// them: Codex, for a hook changed after, or never, trusted.
     Error,
-}
-
-/// Whether Rift's own stdio handshake probe has verified the generated server.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServerProbeState {
-    /// No probe result is available.
-    Unverified,
-    /// A probe completed successfully.
-    Verified,
-    /// The last probe failed.
-    Failed,
-}
-
-/// Truthful live-client connection state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConnectionState {
-    /// No real client handshake has ever been observed.
-    NeverSeen,
-    /// A fresh real-client lease exists.
-    Connected,
-    /// A historical handshake exists but no fresh lease remains.
-    Disconnected,
 }
 
 /// Provenance of a model identifier in integration diagnostics.
@@ -180,15 +156,6 @@ pub struct ClientStatus {
     /// settings, and the server-entry half this used to be paired with is
     /// retired.
     pub hooks: WiringState,
-    /// Rift server probe state. Vestigial since the stdio transport was
-    /// retired (nothing verifies a handshake anymore); kept for its own read path
-    /// (`record_probe`/`read_probe_state`) rather than removed unasked.
-    pub server_probe: ServerProbeState,
-    /// Real client connection state. Vestigial for the same reason: the live-lease files `read_connection_lease` reads are no
-    /// longer written by anything, so this now permanently reads `NeverSeen`.
-    pub connection: ConnectionState,
-    /// Last connection/lease observation, if known.
-    pub last_seen_at_ms: Option<i64>,
     /// Most recent durable hook receipt for this client.
     pub last_hook_at_ms: Option<i64>,
     /// Most recent durable per-client tool call, read from the historical
@@ -227,7 +194,7 @@ pub enum InstallError {
     },
 }
 
-/// Diagnose native configuration, optional executables, and connection leases.
+/// Diagnose native configuration, optional executables and capture receipts.
 /// `probe_binaries=false` is appropriate for frequently refreshed UI reads.
 #[must_use]
 pub fn diagnose(repo: &Path, probe_binaries: bool) -> Vec<ClientStatus> {
@@ -235,23 +202,6 @@ pub fn diagnose(repo: &Path, probe_binaries: bool) -> Vec<ClientStatus> {
         .into_iter()
         .map(|client| diagnose_client(repo, client, probe_binaries))
         .collect()
-}
-
-/// Persist Rift's own server-probe result. This proves only that the generated
-/// stdio server is servable; it never marks a real client as connected.
-///
-/// # Errors
-/// Returns [`InstallError`] if the probe marker cannot be written.
-pub fn record_probe(repo: &Path, verified: bool) -> Result<(), InstallError> {
-    let path = repo.join(".rift/agents/recall-probe.json");
-    atomic_write(
-        &path,
-        &pretty_json(&serde_json::json!({
-            "schema_version": 1,
-            "verified": verified,
-            "observed_at_ms": unix_ms(),
-        })),
-    )
 }
 
 fn diagnose_client(repo: &Path, client: ClientFamily, probe_binaries: bool) -> ClientStatus {
@@ -272,19 +222,25 @@ fn diagnose_client_with_environment(
     // The same evidence the native diagnostic reads, so doctor and
     // `rift recall status` cannot disagree with `init` about what is installed.
     let installations = detect::installations(client.token(), env);
-    let executable = detect::first_executable(&installations);
     let version = probe_binaries
-        .then(|| executable.as_ref().and_then(|p| command_version(p)))
+        .then(|| detect::first_executable(&installations).and_then(|p| command_version(&p)))
         .flatten();
+    client_status(repo, client, env, installations, version)
+}
+
+/// The status over install evidence already found and the version the
+/// executable reported, if it was asked. The version is carried, never
+/// judged: no release is too old for a project hook file.
+fn client_status(
+    repo: &Path,
+    client: ClientFamily,
+    env: &detect::DetectionEnvironment,
+    installations: Vec<detect::NativeInstallation>,
+    version: Option<String>,
+) -> ClientStatus {
+    let executable = detect::first_executable(&installations);
     let detection = if installations.is_empty() {
         DetectionState::NotDetected
-    } else if client == ClientFamily::Codex
-        && version
-            .as_deref()
-            .and_then(parse_codex_minor)
-            .is_some_and(|minor| minor < 100)
-    {
-        DetectionState::Unsupported
     } else {
         DetectionState::Supported
     };
@@ -296,11 +252,9 @@ fn diagnose_client_with_environment(
         (WiringState::Configured, Some(_)) => WiringState::Error,
         (hooks, _) => hooks,
     };
-    let (connection, last_seen_at_ms) = read_connection_lease(repo, client);
     let (last_hook_at_ms, model) = read_capture_facts(repo, client);
     let last_call_at_ms = read_last_call(repo, client);
-    let action = remedy
-        .or_else(|| readiness_action(client, detection, hooks, connection, version.as_deref()));
+    let action = remedy.or_else(|| readiness_action(client, hooks));
     ClientStatus {
         client,
         detection,
@@ -308,9 +262,6 @@ fn diagnose_client_with_environment(
         version,
         installations,
         hooks,
-        server_probe: read_probe_state(repo),
-        connection,
-        last_seen_at_ms,
         last_hook_at_ms,
         last_call_at_ms,
         model,
@@ -319,30 +270,16 @@ fn diagnose_client_with_environment(
     }
 }
 
-fn readiness_action(
-    client: ClientFamily,
-    detection: DetectionState,
-    hooks: WiringState,
-    connection: ConnectionState,
-    version: Option<&str>,
-) -> Option<String> {
-    match (detection, hooks, connection) {
-        (DetectionState::Unsupported, _, _) => Some(format!(
-            "upgrade {}; detected {}",
-            client.display_name(),
-            version.unwrap_or("unknown version")
-        )),
-        (_, WiringState::Invalid | WiringState::Conflict, _) => Some(format!(
+/// The one action a hook file's own state calls for. Written hooks call for
+/// none: whether the client runs them is a runtime fact, which the health
+/// findings read from receipts instead of guessing here.
+fn readiness_action(client: ClientFamily, hooks: WiringState) -> Option<String> {
+    match hooks {
+        WiringState::Invalid | WiringState::Conflict => Some(format!(
             "repair {} hook configuration",
             client.display_name()
         )),
-        (_, WiringState::Missing, _) => Some("run `rift recall init`".to_owned()),
-        (DetectionState::Supported, WiringState::Configured, ConnectionState::NeverSeen) => {
-            Some(format!(
-                "restart/trust/authenticate {} and inspect its native hooks status",
-                client.display_name()
-            ))
-        }
+        WiringState::Missing => Some("run `rift recall init`".to_owned()),
         _ => None,
     }
 }
@@ -917,16 +854,6 @@ fn command_version(binary: &Path) -> Option<String> {
     (!line.is_empty()).then(|| line.to_owned())
 }
 
-fn parse_codex_minor(version: &str) -> Option<u64> {
-    let token = version
-        .split_whitespace()
-        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.'))?;
-    let mut parts = token.split('.');
-    let major = parts.next()?.parse::<u64>().ok()?;
-    let minor = parts.next()?.parse::<u64>().ok()?;
-    (major == 0).then_some(minor)
-}
-
 fn read_capture_facts(repo: &Path, client: ClientFamily) -> (Option<i64>, ModelStatus) {
     use rift_store::{CanonicalStore as _, Value};
 
@@ -1085,72 +1012,6 @@ fn read_last_call(repo: &Path, client: ClientFamily) -> Option<i64> {
         .flatten()
 }
 
-fn read_probe_state(repo: &Path) -> ServerProbeState {
-    let path = repo.join(".rift/agents/recall-probe.json");
-    let Ok(bytes) = std::fs::read(path) else {
-        return ServerProbeState::Unverified;
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return ServerProbeState::Unverified;
-    };
-    if value.get("verified").and_then(serde_json::Value::as_bool) == Some(true) {
-        ServerProbeState::Verified
-    } else {
-        ServerProbeState::Failed
-    }
-}
-
-fn read_connection_lease(repo: &Path, client: ClientFamily) -> (ConnectionState, Option<i64>) {
-    let Ok(state_dir) = rift_store::connection_state_dir_for_repo(repo) else {
-        return (ConnectionState::NeverSeen, None);
-    };
-    read_connection_lease_from(&state_dir, client)
-}
-
-fn read_connection_lease_from(
-    state_dir: &Path,
-    client: ClientFamily,
-) -> (ConnectionState, Option<i64>) {
-    let lease_dir = state_dir.join("live").join(client.token());
-    let history = state_dir
-        .join("last-seen")
-        .join(format!("{}.json", client.token()));
-    let lease_at = std::fs::read_dir(&lease_dir).ok().and_then(|entries| {
-        entries
-            .filter_map(std::result::Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-            .filter_map(|path| read_observed_at(&path))
-            .max()
-    });
-    let history_at = read_observed_at(&history);
-    let now = unix_ms();
-    if lease_at.is_some_and(|at| now.saturating_sub(at) <= 15_000) {
-        return (ConnectionState::Connected, lease_at);
-    }
-    if let Some(at) = history_at.or(lease_at) {
-        return (ConnectionState::Disconnected, Some(at));
-    }
-    (ConnectionState::NeverSeen, None)
-}
-
-fn read_observed_at(path: &Path) -> Option<i64> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()?
-        .get("observed_at_ms")?
-        .as_i64()
-}
-
-fn unix_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,42 +1064,6 @@ mod tests {
                 client.token()
             );
         }
-    }
-
-    #[test]
-    fn fresh_and_stale_connection_leases_are_distinct() {
-        let tmp = tempfile::tempdir().unwrap();
-        // The on-disk segment is frozen read-compat; see
-        // `rift_store::connection_state_dir_under`.
-        let state = tmp.path().join("mcp");
-        let live = state.join("live/codex");
-        let history = state.join("last-seen");
-        std::fs::create_dir_all(&live).unwrap();
-        std::fs::create_dir_all(&history).unwrap();
-        let now = unix_ms();
-        std::fs::write(
-            live.join("thread.json"),
-            serde_json::to_vec(&serde_json::json!({"observed_at_ms": now})).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            read_connection_lease_from(&state, ClientFamily::Codex).0,
-            ConnectionState::Connected
-        );
-        std::fs::write(
-            live.join("thread.json"),
-            serde_json::to_vec(&serde_json::json!({"observed_at_ms": now - 16_000})).unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
-            history.join("codex.json"),
-            serde_json::to_vec(&serde_json::json!({"observed_at_ms": now - 16_000})).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            read_connection_lease_from(&state, ClientFamily::Codex).0,
-            ConnectionState::Disconnected
-        );
     }
 
     #[test]
@@ -1359,27 +1184,46 @@ mod tests {
         }
     }
 
+    /// A Codex whose version the retired floor would have refused is wired
+    /// like any other: its detection is `supported` and nothing asks for an
+    /// upgrade, while the version it reports is still carried.
     #[test]
-    fn stale_codex_and_external_readiness_are_actionable() {
-        assert_eq!(parse_codex_minor("codex-cli 0.25.0"), Some(25));
-        let stale = readiness_action(
+    fn a_codex_below_the_old_version_floor_gets_no_upgrade_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path().join("bin").join("codex");
+        let installations = vec![detect::NativeInstallation {
+            source: detect::NativeInstallSource::PathCommand,
+            version: None,
+            executable: Some(codex.clone()),
+            path: codex,
+        }];
+        let env = detect::DetectionEnvironment {
+            search_path: None,
+            home: Some(tmp.path().join("home")),
+            app_roots: Vec::new(),
+            codex_home: None,
+        };
+        let version = Some("codex-cli 0.25.0".to_owned());
+        let status = client_status(
+            tmp.path(),
             ClientFamily::Codex,
-            DetectionState::Unsupported,
-            WiringState::Configured,
-            ConnectionState::NeverSeen,
-            Some("codex-cli 0.25.0"),
-        )
-        .unwrap();
-        assert!(stale.contains("upgrade Codex"));
+            &env,
+            installations,
+            version,
+        );
+        assert_eq!(status.version.as_deref(), Some("codex-cli 0.25.0"));
+        assert_eq!(status.detection, DetectionState::Supported);
+        let action = status.action.unwrap_or_default();
+        assert!(!action.contains("upgrade"), "{action}");
+    }
 
-        let blocked = readiness_action(
-            ClientFamily::Gemini,
-            DetectionState::Supported,
-            WiringState::Configured,
-            ConnectionState::NeverSeen,
-            Some("0.35.3"),
-        )
-        .unwrap();
-        assert!(blocked.contains("authenticate Gemini CLI"));
+    #[test]
+    fn written_hooks_ask_for_no_action_and_a_broken_file_asks_for_repair() {
+        assert_eq!(
+            readiness_action(ClientFamily::Gemini, WiringState::Configured),
+            None
+        );
+        let repair = readiness_action(ClientFamily::Codex, WiringState::Conflict).unwrap();
+        assert!(repair.contains("repair Codex"), "{repair}");
     }
 }
