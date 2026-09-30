@@ -9,9 +9,10 @@
 //!   diff is a pure function of the object store. A rebuild does not produce
 //!   them because it walks checkpoints, not history. [`derive_from_history`]
 //!   walks history.
-//! * **Not derivable at all.** What a session was, which model it ran, what a
-//!   call cost when it was priced: nothing in git recorded it, so nothing can
-//!   recompute it. The only copy is in a projection that was set aside.
+//! * **Not derivable from shards written before the usage artifact.** What
+//!   such a session was, which model it ran, what a call cost when it was
+//!   priced: nothing in git recorded it, so nothing can recompute it. The only
+//!   copy is in a projection that was set aside.
 //!   [`import_from`] copies those rows back, through the ordinary append-only
 //!   writers.
 //!
