@@ -491,6 +491,14 @@ audit rows, outcome labels, evaluation runs and key metadata record what this
 machine did, not what git contains, so deleting a recall projection discards
 them — the honest trade the split makes.
 
+The serves are the part of that exception a shard can carry.
+A checkpoint's `serve_audit.jsonl` holds serve envelopes of its session, and the recall ingest hands each line back to the one appender the live path writes through.
+The appender is keyed by the envelope's own idempotency key, so a rebuilt row lands on the row the live serve wrote, never beside it.
+A rebuilt row must carry the instant the live row carries, never the rebuild's clock.
+So the ingest reads every schema-4 line, whose instant is its `serve_call.recorded_at`, and a schema-1 line only when it carries a top-level `recorded_at`; a schema-1 line without one is reported as a parse issue and skipped.
+The incremental ingest reads the artifact the first time it projects a checkpoint, so a live projection and a rebuilt one converge on the same rows.
+What a rebuild cannot restore is a serve no shard carries in a form it reads, and the typed words of an exact retrieval's reason: the rebuilt row carries the placeholder `withheld` there.
+
 > **Tip:** when a projection looks wrong: rebuild the binaries, rebuild the
 > projection, run `rift verify`. If verify was already green, the projection was
 > the only thing at risk, and it is derived.

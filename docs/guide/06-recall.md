@@ -404,9 +404,11 @@ split explains what is safe to throw away:
   The serves themselves are no longer only here: every serve envelope is also
   frozen, canonicalised, into the `serve_audit.jsonl` of the checkpoint its
   session condenses next ([Chapter 5](05-ledger-and-verification.md)), where
-  a rebuild cannot erase it; the caller's own words in an exact retrieval's
-  reason are frozen as the placeholder `withheld`, so the only copy of them
-  stays in this store.
+  a rebuild cannot erase it, and a rebuild reads them back from there
+  ([§13.12](13-storage-and-schema.md)); the caller's own words in an exact
+  retrieval's reason are frozen as the placeholder `withheld`, so a rebuilt
+  exact-retrieval row carries `withheld` as its reason and the only copy of
+  them stays in this store.
 
 Node and edge kinds are `CHECK`-constrained to a declared mechanical set that is
 deliberately *narrow*: semantic kinds — "similar to", "touches" — are absent, so

@@ -10,6 +10,8 @@
 //!   call that read a file records the file's `path@hash` *as captured at read
 //!   time*, so a later turn can be told it is `known_unchanged`.
 
+mod serve_audit;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use rift_core::Result;
@@ -305,6 +307,7 @@ fn build_rows(
     if let Some(cost) = cost {
         push_token_usage_rows(&mut b, cid, &primary, &cost);
     }
+    b.serves = serve_audit::read_serves(reader, cid, &mut b.issues)?;
     Ok(b)
 }
 
@@ -490,7 +493,9 @@ fn push_token_usage_rows(b: &mut Built, cid: &str, primary: &str, cost: &CostEst
 
 /// Apply built rows through the append-only DAO. The ONLY DB writer: every row
 /// is `INSERT OR IGNORE`, so applying overlapping/duplicate `Built`s converges
-/// (set-union). FKs are comment-only, so insert order is irrelevant.
+/// (set-union). FKs are comment-only, so insert order is irrelevant. A
+/// checkpoint's frozen serves go last, through the serve relations' one
+/// appender, which is insert-or-ignore on their own keys.
 ///
 /// # Errors
 /// Propagates store errors (a duplicate primary key is **not** an error).
@@ -500,7 +505,7 @@ pub(crate) async fn apply_rows(store: &impl CanonicalStore, built: &Built) -> Re
             .insert_or_ignore(ins.table, &ins.columns, &ins.values)
             .await?;
     }
-    Ok(())
+    serve_audit::append_serves(store, &built.serves).await
 }
 
 /// Ingest every checkpoint of `reader` into the recall graph `store` with

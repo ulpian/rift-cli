@@ -242,6 +242,7 @@ fn fixture_serve_audit() -> Vec<u8> {
     let audit = serde_json::json!({
         "idempotency_key": "d".repeat(64),
         "payload": payload,
+        "recorded_at": FIXTURE_CREATED_AT_MS - 7_000,
         "schema": 1,
         "verb": "memd.read_intercepted",
     });

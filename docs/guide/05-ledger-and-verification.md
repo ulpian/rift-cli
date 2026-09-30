@@ -125,6 +125,7 @@ The reason a caller gives for an exact retrieval is one such member, and so is
 the target of a refusal unless it is a citation.
 Each line keeps its idempotency key, and every line carries its own envelope
 `schema`, so the artifact has no single version of its own.
+A schema-1 envelope holds no clock of its own, so the recall rebuild reads a schema-1 line only when it carries a top-level `recorded_at`, the instant its row was written at; a schema-4 line keeps its instant inside `serve_call`.
 Serves are journaled per session under the family's git common dir, beside the
 push queue, and a serve that belongs to no session (a skill-CLI call) is folded
 into the next checkpoint any session of the family condenses.
