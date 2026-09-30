@@ -3,8 +3,12 @@
 //! The argument vectors are the load-bearing part: they are the least
 //! permission that still lets a client read, edit, glob and grep in a scratch
 //! checkout, and each one asks for that client's own structured event stream.
+//! The shell arm's vector differs from the on arm's in the tools alone, and
+//! which clients play that arm is decided in one place, [`Client::shell_arm`].
 
 use std::path::Path;
+
+use crate::dogfood_compare::Arm;
 
 /// The three clients this harness can drive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -15,6 +19,16 @@ pub enum Client {
     Codex,
     /// Antigravity (`agy`).
     Antigravity,
+}
+
+/// Whether a client plays the shell arm, and why not when it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellArm {
+    /// The client has a read tool a pinned flag can withhold, so the arm
+    /// plays.
+    Plays,
+    /// The arm is not played, and the sentence the run prints says why.
+    Skipped(&'static str),
 }
 
 /// Every client, in the order the table prints them.
@@ -56,6 +70,47 @@ impl Client {
             .ok_or_else(|| {
                 format!("dogfood: unknown client `{value}` — one of claude-code, codex, antigravity, all")
             })
+    }
+
+    /// Whether this client plays the shell arm.
+    ///
+    /// This is the one place the per-client rule lives:
+    ///
+    /// * Claude Code has a read tool and a pinned flag that withholds it, so
+    ///   its shell arm is the on arm with `Read`, `Glob` and `Grep` withheld.
+    /// * Codex has no read tool: it already reads through its shell, so its
+    ///   on arm *is* the shell shape, and a third arm would play the same
+    ///   sessions twice for the same reading.
+    /// * Antigravity has a read tool but no pinned flag that withholds it. A
+    ///   guessed flag that the client ignored would leave the tool in place
+    ///   and print an on arm under the shell arm's name.
+    #[must_use]
+    pub const fn shell_arm(self) -> ShellArm {
+        match self {
+            Self::ClaudeCode => ShellArm::Plays,
+            Self::Codex => ShellArm::Skipped(
+                "codex plays no shell arm: it has no read tool and already reads through its \
+                 shell, so its on arm is the shell shape and a third arm would repeat it",
+            ),
+            Self::Antigravity => ShellArm::Skipped(
+                "antigravity plays no shell arm: no pinned flag withholds its read tool, and a \
+                 guessed one could leave the tool in place and measure nothing",
+            ),
+        }
+    }
+
+    /// The argument vector that plays one session of `arm`.
+    ///
+    /// Every arm but the shell arm plays [`Client::argv`] unchanged — the off
+    /// arm differs in its checkout's policy, not in how the client is driven.
+    /// The harness asks for the shell arm only of a client whose
+    /// [`Client::shell_arm`] plays, so no other client has a shell argv.
+    #[must_use]
+    pub fn argv_for(self, arm: Option<Arm>, prompt: &str, repo: &Path) -> Vec<String> {
+        match (self, arm) {
+            (Self::ClaudeCode, Some(Arm::Shell)) => claude_code_shell_argv(prompt),
+            _ => self.argv(prompt, repo),
+        }
     }
 
     /// The argument vector that plays one session headlessly.
@@ -125,6 +180,36 @@ impl Client {
     }
 }
 
+/// Claude Code's shell arm: `Bash` in, the read and search tools out.
+///
+/// Withholding is explicit (`--disallowedTools`) rather than left to the
+/// allow list, so a tool the settings allow elsewhere cannot come back. The
+/// settings-source confinement, the permission mode and the stream are the
+/// on arm's, so the tools are the one thing that differs.
+fn claude_code_shell_argv(prompt: &str) -> Vec<String> {
+    [
+        "-p",
+        prompt,
+        "--setting-sources",
+        "project,local",
+        "--allowedTools",
+        "Bash",
+        "Edit",
+        "--disallowedTools",
+        "Read",
+        "Glob",
+        "Grep",
+        "--permission-mode",
+        "acceptEdits",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +261,67 @@ mod tests {
         assert_eq!(Client::ClaudeCode.program(), "claude");
         assert_eq!(Client::Codex.program(), "codex");
         assert_eq!(Client::Antigravity.program(), "agy");
+    }
+
+    /// Claude Code's shell arm has its shell and withholds the read and search
+    /// tools, and keeps everything else the on arm is driven with.
+    #[test]
+    fn the_shell_arm_withholds_the_read_tools_from_claude_code() {
+        let repo = Path::new("/scratch/repo");
+        let shell = Client::ClaudeCode.argv_for(Some(Arm::Shell), "hello", repo);
+        let after = |flag: &str| -> Vec<&str> {
+            shell
+                .iter()
+                .skip_while(|a| *a != flag)
+                .skip(1)
+                .take_while(|a| !a.starts_with("--"))
+                .map(String::as_str)
+                .collect()
+        };
+        assert_eq!(after("--allowedTools"), ["Bash", "Edit"]);
+        assert_eq!(after("--disallowedTools"), ["Read", "Glob", "Grep"]);
+        assert_eq!(after("--setting-sources"), ["project,local"]);
+        assert_eq!(after("--permission-mode"), ["acceptEdits"]);
+        assert_eq!(after("--output-format"), ["stream-json"]);
+        assert!(shell.contains(&"hello".to_owned()));
+        assert!(!shell.contains(&"--dangerously-skip-permissions".to_owned()));
+    }
+
+    /// Every other arm is driven exactly as before, whatever the client.
+    #[test]
+    fn only_the_shell_arm_changes_how_a_client_is_driven() {
+        let repo = Path::new("/scratch/repo");
+        for client in crate::dogfood::ALL_CLIENTS {
+            let plain = client.argv("hello", repo);
+            assert_eq!(client.argv_for(None, "hello", repo), plain);
+            assert_eq!(client.argv_for(Some(Arm::Off), "hello", repo), plain);
+            assert_eq!(client.argv_for(Some(Arm::On), "hello", repo), plain);
+        }
+        let codex = Client::Codex.argv("hello", repo);
+        assert!(
+            !codex.contains(&"--dangerously-bypass-approvals-and-sandbox".to_owned()),
+            "the trust-writing flag stays out"
+        );
+    }
+
+    /// Claude Code plays the shell arm; Codex and Antigravity do not, and each
+    /// says why in a sentence of its own.
+    #[test]
+    fn the_shell_arm_is_played_where_a_flag_can_withhold_the_read_tool() {
+        assert_eq!(Client::ClaudeCode.shell_arm(), ShellArm::Plays);
+        let ShellArm::Skipped(codex) = Client::Codex.shell_arm() else {
+            panic!("codex already reads through its shell");
+        };
+        assert!(
+            codex.starts_with("codex ") && codex.contains("no read tool"),
+            "{codex}"
+        );
+        let ShellArm::Skipped(agy) = Client::Antigravity.shell_arm() else {
+            panic!("no pinned flag withholds antigravity's read tool");
+        };
+        assert!(
+            agy.starts_with("antigravity ") && agy.contains("no pinned flag"),
+            "{agy}"
+        );
     }
 }

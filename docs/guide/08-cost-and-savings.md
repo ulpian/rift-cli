@@ -538,6 +538,9 @@ as a sanity check on the booked figure's size, not as its replacement: the two
 arms are separate, non-deterministic model runs, so the difference between them
 carries the levers and the day's tool choices together, and a run where the
 lever arm read *more* is reported as the negative it is rather than clamped.
+Adding `--bypass-shell` plays a third arm beside the other two: the levers as they ship, with the client's own read and search tools withheld so every read goes through its shell.
+Most real traffic reads that way, and no scripted session otherwise does, so this arm gives shell reads a controlled corpus; it prints beside the on arm and leaves the calibration itself unchanged.
+Only Claude Code plays it: Codex has no read tool and already reads through its shell, and Antigravity has no pinned flag that withholds its read tool.
 It is a command a person types on their own machine
 ([§16.15](16-development.md#1615-a-savings-reading-through-the-real-clients)),
 never a claim the product makes and never a figure that promotes a rung.
