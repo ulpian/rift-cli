@@ -155,6 +155,10 @@ pub(crate) fn manifest_event(returned: u32, avoided: u32) -> MemdEvent {
 
 /// Render an [`Envelope`] to a JSON view (state tag + hash, never raw bytes for
 /// the manifest states).
+///
+/// A `known_unchanged` entry also names the turn the caller's window last read
+/// those bytes, when there is evidence of one; with none the key is absent
+/// rather than null, so a view without evidence is byte-for-byte what it was.
 pub(crate) fn envelope_view(e: &Envelope) -> Value {
     let (state, basis): (&str, Option<String>) = match &e.state {
         ArtifactState::KnownUnchanged { basis_sha256, .. } => {
@@ -170,5 +174,16 @@ pub(crate) fn envelope_view(e: &Envelope) -> Value {
             ("available_by_handle", basis_sha256.clone())
         }
     };
-    json!({ "path": e.path, "state": state, "basis_sha256": basis })
+    let mut view = json!({ "path": e.path, "state": state, "basis_sha256": basis });
+    if let (
+        ArtifactState::KnownUnchanged {
+            last_seen_turn: Some(turn),
+            ..
+        },
+        Some(fields),
+    ) = (&e.state, view.as_object_mut())
+    {
+        fields.insert("last_seen_turn".to_owned(), json!(turn));
+    }
+    view
 }

@@ -183,6 +183,13 @@ agent holds is `known_unchanged` with no summary in the picture — and what is
 The state carries zero tokens, and that is the whole saving: the agent learns
 "still what you have" for the cost of a path and a hash.
 
+A `known_unchanged` entry may also carry `last_seen_turn`: the turn in which the calling context window last read those exact bytes, taken from that window's own journal ([§6.12](#612-what-a-context-window-already-holds)).
+It is a citation, never a condition — the hash decides the state, and an absent turn changes nothing about it.
+The pull names the turn only where it can tell which window is asking.
+A Codex or Antigravity shell exports the id its hooks report as the session, so their pulls can cite one.
+Claude Code exports the session but not the agent inside it, so a subagent's pull and its parent's look the same, and neither cites a turn.
+Reads from before the window was last emptied do not count: those bytes are no longer in front of the model.
+
 On the pull surface the agent is still the only one who can say what it holds,
 and it says so with `--known-hash`. What changed is that Rift now keeps its own
 record of the ranges a context window was handed, so the push side and the read

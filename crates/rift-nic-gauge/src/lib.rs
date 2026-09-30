@@ -150,7 +150,7 @@ pub fn known_reading(used: u64, window: u64) -> KnownReading {
 ///   (`context-1m-2025-08-07`); the marker is how rift-shadow's capture spells
 ///   an enlarged-context session.
 /// * Fable 5 and 5.1, Opus 5, Opus 4.8, Opus 4.7 and Sonnet 5 carry a 1M
-///   window per Anthropic's model docs, 2026-09. They are matched as whole
+///   window per Anthropic's model documentation. They are matched as whole
 ///   family tokens, so `claude-fable-5` covers `claude-fable-5-1` and dated
 ///   ids but not a later `claude-fable-50`.
 /// * `claude*` — every other Claude model, Haiku 4.5 included, carries a 200k

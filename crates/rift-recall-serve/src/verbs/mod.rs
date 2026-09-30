@@ -25,6 +25,7 @@ use rift_recall_policy::TurnBudget;
 use rift_recall_rank::{rank, RankQuery, SignalWeights};
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_types::ProvenanceOracle;
+use rift_recall_validity::SeenStatus;
 use rift_store::CanonicalStore;
 use serde_json::{json, Value};
 
@@ -261,6 +262,28 @@ pub(crate) fn targeted_pull(tool: ToolName, req: &ToolRequest) -> bool {
     matches!(tool, ToolName::ChangedHunks)
         && req.target.as_deref().is_some_and(|t| !t.trim().is_empty())
         && !req.known_hashes.is_empty()
+}
+
+/// Whether the caller holds this revision, and — when it does — the turn its
+/// window last read it in, for the sealed constructors to cite.
+///
+/// The claim comes from `known` (the hashes the caller says it holds); the
+/// turn only from the binary's reading of the caller's own journal, keyed by
+/// path and hash, so a revision held under a path the window never read cites
+/// no turn.
+pub(crate) fn sighting(
+    known: &BTreeSet<&str>,
+    seen_turns: &BTreeMap<(String, String), u64>,
+    path: &str,
+    content_sha256: &str,
+) -> SeenStatus {
+    if !known.contains(content_sha256) {
+        return SeenStatus::NotSeenOrChanged;
+    }
+    let last_seen_turn = seen_turns
+        .get(&(path.to_owned(), content_sha256.to_owned()))
+        .copied();
+    SeenStatus::SeenSameHash { last_seen_turn }
 }
 
 /// The effective manifest cap: the pack-parity default/max

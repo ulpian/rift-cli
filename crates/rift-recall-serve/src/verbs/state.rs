@@ -2,7 +2,7 @@
 //! manifest, the delta list, one file's verdict, and a hash-bound summary.
 //! All four answer from the projection alone; none reaches for bytes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rift_recall_events::MemdEvent;
 use rift_recall_ledger::candidates::{
@@ -11,11 +11,11 @@ use rift_recall_ledger::candidates::{
 use rift_recall_policy::TurnBudget;
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_types::{Envelope, Trust};
-use rift_recall_validity::{manifest_envelope, Budget, SeenStatus};
+use rift_recall_validity::{manifest_envelope, Budget};
 use rift_store::CanonicalStore;
 use serde_json::{json, Value};
 
-use super::{fit_with_provenance, manifest_cap, Story};
+use super::{fit_with_provenance, manifest_cap, sighting, Story};
 use crate::envelope::{envelope_view, manifest_event};
 use crate::{RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse};
 
@@ -29,7 +29,7 @@ impl ServeDispatcher<'_> {
         let (ranked, in_scope) = Self::ranked_candidates(req, ctx).await?;
         let containment = Self::containment_view(&in_scope, ctx);
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
-        let (envelopes, baseline) = manifest_entries(&ranked, &known, budget);
+        let (envelopes, baseline) = manifest_entries(&ranked, &known, &req.seen_turns, budget);
         // The story behind each entry that moved. Anchors come from the rows
         // already loaded — the loader picked the checkpoint to decide recency —
         // so this costs one query for the commit mirror and nothing else.
@@ -242,6 +242,7 @@ impl ServeDispatcher<'_> {
 fn manifest_entries(
     ranked: &[LoadedCandidate],
     known: &BTreeSet<&str>,
+    seen_turns: &BTreeMap<(String, String), u64>,
     budget: &TurnBudget,
 ) -> (Vec<Envelope>, u32) {
     let mut envelopes: Vec<Envelope> = Vec::new();
@@ -250,11 +251,7 @@ fn manifest_entries(
     for lc in ranked {
         let c = &lc.candidate;
         let handle = format!("file:{}@sha256:{}", c.path, lc.content_sha256);
-        let seen = if known.contains(lc.content_sha256.as_str()) {
-            SeenStatus::SeenSameHash
-        } else {
-            SeenStatus::NotSeenOrChanged
-        };
+        let seen = sighting(known, seen_turns, &c.path, &lc.content_sha256);
         baseline = baseline.saturating_add(c.est_tokens);
         envelopes.push(manifest_envelope(
             &c.path,

@@ -69,6 +69,8 @@ mod verbs;
 /// parser.
 pub mod window;
 
+use std::collections::BTreeMap;
+
 use rift_core::Timestamp;
 // Re-exported so a caller building an envelope — a schema-4 channel, an
 // event, the neutral tags and identities an audit row carries —
@@ -324,6 +326,19 @@ pub struct ToolRequest {
     /// other verb, and on a search call that reached this crate through a
     /// decoder, which is answered as an internal error rather than served.
     pub search: Option<Search>,
+    /// What the **binary** read out of the calling context window's own
+    /// journal: for each revision, keyed `(path, content sha256)`, the turn the
+    /// window last read it in and still holds it from.
+    ///
+    /// A `known_unchanged` entry cites it as `last_seen_turn`; a revision with
+    /// no entry is cited with no turn, which is also what every entry gets when
+    /// the pull could not be attributed to a window. It never decides a state —
+    /// `known_hashes` does that — so a wrong map could mislabel a claim but
+    /// could not make one. Never decoded from params, like the two fields
+    /// above: a caller that could state it would be stating the evidence for
+    /// its own claim. Carried on the request rather than on [`RecallContext`]
+    /// because it belongs to one caller's pull, as `known_hashes` does.
+    pub seen_turns: BTreeMap<(String, String), u64>,
 }
 
 /// The document half of a [`ToolRequest`]: everything about one document that
@@ -847,6 +862,10 @@ pub fn decode_request(
         // carry it would let a caller state which paths matched and what the
         // lines in them say, which is the whole of what this verb answers.
         search: None,
+        // NOT DECODED: the turns are the binary's reading of the window's own
+        // journal, the evidence behind a claim the caller makes; letting the
+        // caller state them would let a claim vouch for itself.
+        seen_turns: BTreeMap::new(),
     };
     Ok((tool, req))
 }

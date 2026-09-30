@@ -9,9 +9,26 @@ use crate::summary::{ValidSummary, Validity};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SeenStatus {
     /// The agent has seen this exact hash this turn/session.
-    SeenSameHash,
+    SeenSameHash {
+        /// The turn the calling window last read this exact revision, when
+        /// its own journal records one; `None` when the pull could not be
+        /// attributed to a window or the window holds no such read. It rides
+        /// on the claim rather than beside it because it is evidence for the
+        /// claim, and a turn with no claim to support means nothing.
+        last_seen_turn: Option<u64>,
+    },
     /// Not seen, or seen at a different hash.
     NotSeenOrChanged,
+}
+
+impl SeenStatus {
+    /// The turn a known-unchanged claim may cite, which only a sighting has.
+    fn last_seen_turn(self) -> Option<u64> {
+        match self {
+            Self::SeenSameHash { last_seen_turn } => last_seen_turn,
+            Self::NotSeenOrChanged => None,
+        }
+    }
 }
 
 /// A shared token budget for a response/pack.
@@ -80,7 +97,7 @@ pub fn envelope_for(
             ArtifactState::KnownUnchanged {
                 handle: handle.to_string(),
                 basis_sha256: basis_sha256.to_string(),
-                last_seen_turn: None, // turn-aware seen-tracking is a follow-up
+                last_seen_turn: seen.last_seen_turn(),
             },
             0,
         );
@@ -128,8 +145,9 @@ pub fn envelope_for(
 /// `SourceDeletedOrRedacted`): a manifest entry for a live revision with no bound
 /// summary is `AvailableByHandle`/`NotRequested`, never "deleted".
 ///
-/// * `seen == SeenSameHash` (agent already holds this exact hash) → `KnownUnchanged`
-///   (zero bytes — the false-memory guard: hash-equality is the proof).
+/// * `seen` is `SeenSameHash` (agent already holds this exact hash) → `KnownUnchanged`
+///   (zero bytes — the false-memory guard: hash-equality is the proof), citing
+///   the turn the sighting carries.
 /// * a `Valid` summary in budget → `SummaryIncluded`; over budget → `AvailableByHandle`
 ///   (`BudgetExhausted`).
 /// * otherwise → `AvailableByHandle` (`NotRequested`).
@@ -154,12 +172,12 @@ pub fn manifest_envelope(
         estimated_tokens_returned: tokens,
     };
 
-    if seen == SeenStatus::SeenSameHash {
+    if let SeenStatus::SeenSameHash { last_seen_turn } = seen {
         return mk(
             ArtifactState::KnownUnchanged {
                 handle: handle.to_string(),
                 basis_sha256: basis_sha256.to_string(),
-                last_seen_turn: None,
+                last_seen_turn,
             },
             0,
         );
@@ -206,8 +224,11 @@ pub fn manifest_envelope(
 /// a `Valid` summary strengthens it but is not required (a plain file the agent
 /// already holds is `known_unchanged` even with no bound summary). An `Invalid`
 /// verdict — the bound source genuinely moved — is *never* known_unchanged.
+///
+/// The turn plays no part: it is evidence the claim may cite, so a missing turn
+/// can never turn the claim off and a present one can never turn it on.
 fn is_known_unchanged(seen: SeenStatus, validity: &Validity) -> bool {
-    seen == SeenStatus::SeenSameHash && !matches!(validity, Validity::Invalid { .. })
+    matches!(seen, SeenStatus::SeenSameHash { .. }) && !matches!(validity, Validity::Invalid { .. })
 }
 
 /// Charge the estimated cost of `text` when it fits and return that cost, so
@@ -299,7 +320,9 @@ mod tests {
             Trust::CodeFact,
             "summary:k",
             "basis",
-            SeenStatus::SeenSameHash,
+            SeenStatus::SeenSameHash {
+                last_seen_turn: None,
+            },
             &v,
             None,
             true,
@@ -320,7 +343,9 @@ mod tests {
             Trust::CodeFact,
             "file:a.rs@sha256:x",
             "basis",
-            SeenStatus::SeenSameHash,
+            SeenStatus::SeenSameHash {
+                last_seen_turn: None,
+            },
             &Validity::Degraded { key: "k".into() },
             None,
             false,
@@ -340,7 +365,9 @@ mod tests {
             Trust::CodeFact,
             "summary:k",
             "basis",
-            SeenStatus::SeenSameHash,
+            SeenStatus::SeenSameHash {
+                last_seen_turn: None,
+            },
             &Validity::Invalid {
                 key: "k".into(),
                 now: "new".into(),
@@ -371,7 +398,9 @@ mod tests {
             Trust::CodeFact,
             "file:a.rs@sha256:x",
             "x",
-            SeenStatus::SeenSameHash,
+            SeenStatus::SeenSameHash {
+                last_seen_turn: None,
+            },
             Some(vs),
             &mut b,
         );
@@ -535,5 +564,62 @@ mod tests {
         assert_eq!(basis_sha256.as_deref(), Some("basis"));
         assert_eq!(env.estimated_tokens_returned, 0);
         assert_eq!(budget.remaining(), 3, "nothing was charged");
+    }
+
+    #[test]
+    fn a_known_unchanged_entry_names_the_turn_the_window_last_read_it() {
+        let serve = |last_seen_turn| {
+            envelope_for(
+                "a.rs",
+                Trust::CodeFact,
+                "file:a.rs@sha256:x",
+                "basis",
+                SeenStatus::SeenSameHash { last_seen_turn },
+                &Validity::Degraded { key: "k".into() },
+                None,
+                false,
+                &mut Budget::new(1000),
+            )
+        };
+        let turn_of = |env: Envelope| match env.state {
+            ArtifactState::KnownUnchanged { last_seen_turn, .. } => last_seen_turn,
+            other => panic!("expected known_unchanged, got {other:?}"),
+        };
+        assert_eq!(turn_of(serve(Some(7))), Some(7));
+        assert_eq!(turn_of(serve(None)), None, "no evidence is no turn");
+    }
+
+    #[test]
+    fn a_manifest_entry_names_the_turn_the_window_last_read_it() {
+        let serve = |last_seen_turn| {
+            manifest_envelope(
+                "a.rs",
+                Trust::CodeFact,
+                "file:a.rs@sha256:x",
+                "x",
+                SeenStatus::SeenSameHash { last_seen_turn },
+                None,
+                &mut Budget::new(1000),
+            )
+        };
+        let with_turn = serve(Some(3));
+        assert_eq!(
+            with_turn.estimated_tokens_returned, 0,
+            "a turn costs nothing"
+        );
+        assert!(matches!(
+            with_turn.state,
+            ArtifactState::KnownUnchanged {
+                last_seen_turn: Some(3),
+                ..
+            }
+        ));
+        assert!(matches!(
+            serve(None).state,
+            ArtifactState::KnownUnchanged {
+                last_seen_turn: None,
+                ..
+            }
+        ));
     }
 }
