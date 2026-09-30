@@ -10,8 +10,8 @@ use rift_shadow::hooks::session_cache::SessionCache;
 
 use super::archive::archive_now;
 use super::git::{effective_config, strategy_kind};
-use super::projection_db_at;
 use super::worker::{drain_jobs, LockWait};
+use super::{now_ms, projection_db_at};
 
 /// What one crashed-session sweep found and did.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -103,6 +103,19 @@ struct SweepCtx<'a> {
 /// One session's failure never stops the sweep: each is finalized on its own
 /// and a failure leaves that session live for the next pass.
 ///
+/// **Every condense here runs under the member's capture-queue lock**, the
+/// one the detached worker drains under. A worker archiving a queued commit
+/// and this pass condensing a session against the same HEAD are two archivers
+/// of one commit, and two archivers of one commit can each read the chain
+/// before either appends. The lock is taken twice, never waited on across
+/// both: the rescue drain takes and releases it, then the member sweep takes
+/// it again. When a worker holds it, this pass condenses nothing and reports
+/// its idle sessions as `condense_deferred`, because that worker's own tail
+/// sweep condenses them under the lock it already holds. `rift doctor`
+/// therefore never waits; a targeted `rift session stop` waits briefly for
+/// the rescue, since the operator named that session and a worker is usually
+/// seconds from done.
+///
 /// # Errors
 /// [`rift_core::RiftError`] only if the repository, its projection, or the
 /// session directory cannot be opened at all.
@@ -114,8 +127,12 @@ pub(crate) fn sweep_stale_sessions(
 ) -> Result<SessionSweep> {
     let repo = rift_git::discover(root)?;
     let mut sweep = SessionSweep::default();
-    rescue_agent_jobs(&repo.git_dir, only, &mut sweep);
-    sweep_member(&repo, now, timeout_ms, only, &mut sweep)?;
+    let wait = match only {
+        Some(_) => LockWait::Brief,
+        None => LockWait::None,
+    };
+    rescue_agent_jobs(&repo.git_dir, only, wait, &mut sweep);
+    sweep_member_under_its_lock(&repo, now, timeout_ms, only, &mut sweep)?;
     Ok(sweep)
 }
 
@@ -127,12 +144,19 @@ pub(crate) fn sweep_stale_sessions(
 /// `SessionEnd` — an editor panel closed, a process killed, an agent that
 /// publishes no end at all — minutes after it went quiet rather than on the
 /// next `rift doctor --fix`. It runs where work already runs, at every
-/// `SessionStart` and at the tail of every worker pass, never on a timer: the
-/// caller holds the queue lock, so it never races a condense of the same
-/// session. A member whose checkout is gone is skipped, as doctor's sweep
-/// skips it, and one member that cannot be swept never stops the others.
+/// `SessionStart` and at the tail of every worker pass, never on a timer.
+/// A member whose checkout is gone is skipped, as doctor's sweep skips it,
+/// and one member that cannot be swept never stops the others.
 /// Unlike [`sweep_stale_sessions`] it rescues no queued jobs: its caller is
 /// the worker that is draining them.
+///
+/// The caller holds the queue lock of `git_dir`'s member only, and the locks
+/// are per member. So its own member is swept under that lock, never by
+/// taking it again (a second take would find it held and defer everything),
+/// and every other member is swept only under that member's own lock: a
+/// sibling whose worker holds it may be archiving the very commit this pass
+/// would condense against, and that worker's tail sweep reaches the
+/// sibling's idle sessions anyway, so the sibling is left to it.
 pub(crate) fn sweep_idle_family(git_dir: &Path, now: i64, floor_ms: Option<i64>) -> SessionSweep {
     let mut sweep = SessionSweep::default();
     let Some(work_tree) = rift_shadow::hooks::session_cache::work_tree_of(git_dir) else {
@@ -143,13 +167,19 @@ pub(crate) fn sweep_idle_family(git_dir: &Path, now: i64, floor_ms: Option<i64>)
     };
     let journal = crate::session_verbs::family_journal(&paths);
     let floor = floor_ms.unwrap_or_else(|| family_sweep_floor(&journal, &paths));
+    let held = canonical_git_dir(git_dir);
     for member in journal.iter().map(|j| &j.member) {
         if member.prunable {
             continue;
         }
-        if let Ok(repo) = rift_git::discover(&member.work_tree) {
-            let _ = sweep_member(&repo, now, floor, None, &mut sweep);
-        }
+        let Ok(repo) = rift_git::discover(&member.work_tree) else {
+            continue;
+        };
+        let _ = if canonical_git_dir(&repo.git_dir) == held {
+            sweep_member(&repo, now, floor, None, &mut sweep)
+        } else {
+            sweep_member_under_its_lock(&repo, now, floor, None, &mut sweep)
+        };
     }
     sweep
 }
@@ -167,9 +197,46 @@ pub(crate) fn family_sweep_floor(
     rift_config::idle_sweep_ms(&main.join(".rift"))
 }
 
-/// Sweep one member's live sessions: those inside the idle window are
-/// reported live, the rest are finalized. Nothing is opened unless some
-/// session is idle, because this runs on every worker pass.
+/// A git dir spelled one way whichever path reached it, so the caller's own
+/// member is recognised however its `--git-dir` was written.
+fn canonical_git_dir(git_dir: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(git_dir).unwrap_or_else(|_| git_dir.to_path_buf())
+}
+
+/// [`sweep_member`] for a caller that holds no lock: take the member's
+/// capture-queue lock first, and when a worker holds it, condense nothing
+/// and report the idle sessions deferred to that worker's tail sweep.
+///
+/// The lock is taken only once some session is idle, because the automatic
+/// sweep runs this for every sibling on every worker pass, and a held lock
+/// is a sibling's hook drain that finds the queue busy. The sessions are
+/// read again under the lock: the worker that held it may have ended them.
+fn sweep_member_under_its_lock(
+    repo: &rift_git::RepoPaths,
+    now: i64,
+    timeout_ms: i64,
+    only: Option<&str>,
+    sweep: &mut SessionSweep,
+) -> Result<()> {
+    let (idle, live) = idle_and_live(repo, now, timeout_ms, only)?;
+    if idle.is_empty() {
+        sweep.live.extend(live.into_iter().map(|c| c.session_id));
+        return Ok(());
+    }
+    let Some(_lock) = crate::capture_queue::acquire_lock(&repo.git_dir, now_ms()) else {
+        sweep.live.extend(live.into_iter().map(|c| c.session_id));
+        sweep
+            .condense_deferred
+            .extend(idle.into_iter().map(|c| c.session_id));
+        return Ok(());
+    };
+    sweep_member(repo, now, timeout_ms, only, sweep)
+}
+
+/// Sweep one member's live sessions under the member's capture-queue lock,
+/// which the caller holds: those inside the idle window are reported live,
+/// the rest are finalized. Nothing is opened unless some session is idle,
+/// because this runs on every worker pass.
 fn sweep_member(
     repo: &rift_git::RepoPaths,
     now: i64,
@@ -177,17 +244,7 @@ fn sweep_member(
     only: Option<&str>,
     sweep: &mut SessionSweep,
 ) -> Result<()> {
-    use rift_shadow::hooks::session_cache::{is_idle_past, live_sessions_for};
-
-    let mut sessions = live_sessions_for(&repo.git_dir, &repo.common_dir, &repo.work_tree)?;
-    // `rift session stop ID` finalizes one session; the others are not even
-    // looked at, so a targeted stop can never sweep a neighbour.
-    if let Some(target) = only {
-        sessions.retain(|s| s.session_id == target);
-    }
-    let (idle, live): (Vec<_>, Vec<_>) = sessions
-        .into_iter()
-        .partition(|cache| is_idle_past(cache, now, timeout_ms));
+    let (idle, live) = idle_and_live(repo, now, timeout_ms, only)?;
     sweep
         .live
         .extend(live.into_iter().map(|cache| cache.session_id));
@@ -199,6 +256,27 @@ fn sweep_member(
         finalize_idle_session(&ctx, &cache, sweep);
     }
     Ok(())
+}
+
+/// One member's live sessions, split into those idle past `timeout_ms` and
+/// those still inside it.
+fn idle_and_live(
+    repo: &rift_git::RepoPaths,
+    now: i64,
+    timeout_ms: i64,
+    only: Option<&str>,
+) -> Result<(Vec<SessionCache>, Vec<SessionCache>)> {
+    use rift_shadow::hooks::session_cache::{is_idle_past, live_sessions_for};
+
+    let mut sessions = live_sessions_for(&repo.git_dir, &repo.common_dir, &repo.work_tree)?;
+    // `rift session stop ID` finalizes one session; the others are not even
+    // looked at, so a targeted stop can never sweep a neighbour.
+    if let Some(target) = only {
+        sessions.retain(|s| s.session_id == target);
+    }
+    Ok(sessions
+        .into_iter()
+        .partition(|cache| is_idle_past(cache, now, timeout_ms)))
 }
 
 /// Time one idle session out, condense it, and close it; what happened is
@@ -251,11 +329,11 @@ fn finalize_idle_session(ctx: &SweepCtx<'_>, cache: &SessionCache, sweep: &mut S
 /// bounded retries — whatever the sessions' idle state. A session whose
 /// `SessionEnd` hook journaled a condense that no worker finished is exactly
 /// what the sweep exists to rescue, and it was touched seconds before the
-/// crash, so the idle window alone would never reach it. Inline and never
-/// waiting: a worker that holds the lock is doing this work already. The
-/// condenses that landed are witnessed on the sweep like its own.
-fn rescue_agent_jobs(git_dir: &Path, only: Option<&str>, sweep: &mut SessionSweep) {
-    for (session, checkpoint) in drain_jobs(git_dir.to_str(), LockWait::None) {
+/// crash, so the idle window alone would never reach it. Inline, and waiting
+/// at most `wait`: a worker that holds the lock is doing this work already.
+/// The condenses that landed are witnessed on the sweep like its own.
+fn rescue_agent_jobs(git_dir: &Path, only: Option<&str>, wait: LockWait, sweep: &mut SessionSweep) {
+    for (session, checkpoint) in drain_jobs(git_dir.to_str(), wait) {
         if only.is_none_or(|t| t == session) {
             sweep.finalized.push(session);
             sweep.condensed_checkpoints.push(checkpoint);

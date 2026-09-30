@@ -142,13 +142,17 @@ pub(crate) fn seeded_chain(tmp: &Path, name: &str, commits: usize) -> ChainFixtu
         std::fs::write(repo.join(format!("f{n}.txt")), format!("content {n}\n")).unwrap();
         git_in(&repo, &["add", "."]);
         // A distinct live session per commit, so each archive is a real,
-        // separately-attributed condensation.
+        // separately-attributed condensation. Stamped now, inside every idle
+        // floor, so the post-commit hook condenses it and the doctor's sweep
+        // after it finds nothing idle: the chain's order must not depend on
+        // the sweep. The clock is read for this input only, never for an
+        // assertion.
         let session = format!("chain-fixture-{n}");
         std::fs::write(
             sessions.join(format!("{session}.json")),
             format!(
                 r#"{{"schema":1,"session_id":"{session}","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":{},"native_id_map":{{}}}}"#,
-                1_783_000_000_000_u64 + n as u64
+                marker_stamp_now()
             ),
         )
         .unwrap();
@@ -178,6 +182,15 @@ pub(crate) fn seeded_chain(tmp: &Path, name: &str, commits: usize) -> ChainFixtu
         "the fixture's chain must hold exactly one position per commit"
     );
     fixture
+}
+
+/// Milliseconds since the epoch, for a session marker the idle sweep must
+/// read as live.
+fn marker_stamp_now() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
 }
 
 impl ChainFixture {

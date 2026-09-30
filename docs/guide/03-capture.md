@@ -340,16 +340,19 @@ live session untouched for longer than the family's floor —
 `[capture] idle_sweep_minutes`, five minutes by default — is timed out,
 condensed against `HEAD` and closed. It runs where work already runs, never on
 a timer: at every session start (the hook journals one small request for the
-worker it was dispatching anyway) and at the tail of every worker pass, under
-the queue lock, across every member of the family whose checkout still
-exists. Sweeping that early is safe precisely because no phase is a trap: a
+worker it was dispatching anyway) and at the tail of every worker pass,
+across every member of the family whose checkout still exists, each member
+under its own queue lock. A member whose lock another worker holds is left to
+that worker's own tail sweep: a sweep beside a worker would be a second
+archiver of the commit the worker is condensing. Sweeping that early is safe precisely because no phase is a trap: a
 developer who was only reading gets the session back on their next prompt,
 and a pause with no new bytes re-condenses to nothing. `rift doctor` is the
 alarm and the manual arm: it reports sessions past the sweep's floor as
 *sweepable*, sessions past **24 hours** as **STUCK** (the sweep is not reaching
 them), and a session recorded `ended` or `idle` while its own events kept
 arriving as Rift's own defect, with nothing asked of you; `--fix` sweeps at the
-sweep's floor.
+sweep's floor, under the same per-member lock, and reports a session whose
+member a worker is draining as *deferred* rather than waiting for it.
 
 ---
 
