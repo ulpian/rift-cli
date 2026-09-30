@@ -205,9 +205,7 @@ fn forward_requests(req_rx: Receiver<DataRequest>, msg_tx: Sender<WorkerMsg>) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use rift_canopy::ProjectStatus;
+    use rift_canopy::{ProjectStatus, ViewerErrorArea, ViewerEvent, ViewerRequest};
 
     use super::fixtures::{make_project, path_of, recv_project_data, spawn_for_test};
     use super::*;
@@ -218,20 +216,32 @@ mod tests {
         let not_a_repo = tempfile::tempdir().unwrap();
         assert_eq!(std::fs::read_dir(cache.path()).unwrap().count(), 0);
         let bus = spawn_read_only_viewer(cache.path().to_path_buf());
-        bus.req_tx
-            .send(DataRequest::Viewer(rift_canopy::ViewerRequest::Catalogue {
-                project: not_a_repo.path().to_string_lossy().into_owned(),
-                generation: 1,
-                target: None,
-                refresh: false,
-            }))
-            .unwrap();
+        let project = not_a_repo.path().to_string_lossy().into_owned();
+        // The viewer-only worker answers nothing but viewer requests, so its
+        // barrier is a second catalogue request: a path that sorts after the
+        // first, answered in the same cycle or a later one.
+        let barrier = format!("{project}/~barrier");
+        for project in [project.clone(), barrier.clone()] {
+            bus.req_tx
+                .send(DataRequest::Viewer(catalogue_of(project)))
+                .unwrap();
+        }
+        let mut seen = Vec::new();
+        loop {
+            match bus.evt_rx.recv() {
+                Ok(Event::Viewer(event)) if viewer_project(&event) == Some(&barrier) => break,
+                Ok(event) => seen.push(event),
+                Err(std::sync::mpsc::RecvError) => {
+                    panic!("the viewer worker stopped before answering: {seen:?}")
+                }
+            }
+        }
         assert!(matches!(
-            bus.evt_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
-            Event::Viewer(rift_canopy::ViewerEvent::Error {
-                area: rift_canopy::ViewerErrorArea::Catalogue,
+            seen.first(),
+            Some(Event::Viewer(ViewerEvent::Error {
+                area: ViewerErrorArea::Catalogue,
                 ..
-            })
+            }))
         ));
         drop(bus);
         assert_eq!(
@@ -249,14 +259,31 @@ mod tests {
         let bus = spawn_for_test(root.path().to_path_buf(), vec![path_of(&proj)]);
 
         // The seeded refresh yields one ProjectData update for the project.
-        // Generous deadline: the parallel suite drives real stores hard.
-        let ev = recv_project_data(&bus, Duration::from_secs(30));
+        let ev = recv_project_data(&bus, root.path());
         match ev {
             Event::ProjectData(pd) => {
                 assert_eq!(pd.project, path_of(&proj));
                 assert_eq!(pd.status, ProjectStatus::Idle);
             }
             other => panic!("expected ProjectData, got {other:?}"),
+        }
+    }
+
+    fn catalogue_of(project: String) -> ViewerRequest {
+        ViewerRequest::Catalogue {
+            project,
+            generation: 1,
+            target: None,
+            refresh: false,
+        }
+    }
+
+    fn viewer_project(event: &ViewerEvent) -> Option<&String> {
+        match event {
+            ViewerEvent::Error { project, .. } | ViewerEvent::Catalogue { project, .. } => {
+                Some(project)
+            }
+            _ => None,
         }
     }
 }

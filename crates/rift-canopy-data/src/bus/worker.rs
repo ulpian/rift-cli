@@ -493,10 +493,10 @@ mod tests {
     use rift_store::{CanonicalStore, Value};
 
     use super::super::fixtures::{
-        append_events, make_project, path_of, recv_project_data, runtime, spawn_for_test,
-        two_member_family,
+        append_events, events_until_barrier, make_project, path_of, recv_project_data, runtime,
+        spawn_for_test, spawn_probed, spawn_probed_poll_only, two_member_family, Probe,
     };
-    use super::super::spawn_with_watcher;
+    use super::super::Bus;
     use super::*;
 
     #[test]
@@ -537,7 +537,7 @@ mod tests {
         bus.req_tx
             .send(DataRequest::SetActive(Some(path_of(&proj))))
             .unwrap();
-        let ev = recv_project_data(&bus, Duration::from_secs(30));
+        let ev = recv_project_data(&bus, root.path());
         match ev {
             Event::ProjectData(pd) => {
                 assert_eq!(pd.project, path_of(&proj));
@@ -547,58 +547,33 @@ mod tests {
         }
     }
 
-    /// A watcher stub that hands the test its wake sender (no filesystem).
-    struct StubWatcher {
-        grabbed: std::sync::Arc<std::sync::Mutex<Option<Sender<WorkerMsg>>>>,
-    }
-
-    impl WakeWatcher for StubWatcher {
-        fn watch(&mut self, _root: &Path, wake: Sender<WorkerMsg>) -> Result<(), String> {
-            *self.grabbed.lock().unwrap() = Some(wake);
-            Ok(())
-        }
-    }
-
-    /// A watcher that always fails — the injected PollOnly degradation.
-    struct FailingWatcher;
-
-    impl WakeWatcher for FailingWatcher {
-        fn watch(&mut self, _root: &Path, _wake: Sender<WorkerMsg>) -> Result<(), String> {
-            Err("no watch backend on this filesystem".into())
-        }
-    }
-
     #[test]
     fn wake_triggers_a_fresh_poll_and_spurious_wakes_are_harmless() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "seed", 1);
-        let grabbed = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let bus = spawn_with_watcher(
-            root.path().to_path_buf(),
-            vec![path_of(&proj)],
-            Box::new(StubWatcher {
-                grabbed: std::sync::Arc::clone(&grabbed),
-            }),
-        );
+        let (bus, probe) = spawn_probed(root.path().to_path_buf(), vec![path_of(&proj)]);
         // Drain the seeded update; the observer baseline is now synced.
-        let first = recv_project_data(&bus, Duration::from_secs(5));
+        let first = recv_project_data(&bus, root.path());
         assert!(matches!(first, Event::ProjectData(_)));
-        let wake = grabbed.lock().unwrap().clone().expect("watcher installed");
+        let wake = probe.wake_sender();
 
         // Spurious + duplicated wakes with no underlying change: the fresh
         // poll reads quiet, so nothing is emitted (wake-only, no data path).
+        // The wakes are queued before the barrier, so the worker has handled
+        // them by the time it answers it.
         wake.send(WorkerMsg::Wake).unwrap();
         wake.send(WorkerMsg::Wake).unwrap();
+        let spurious = events_until_barrier(&bus, root.path());
         assert!(
-            bus.evt_rx.recv_timeout(Duration::from_millis(600)).is_err(),
-            "a spurious wake must not fabricate an update"
+            spurious.is_empty(),
+            "a spurious wake must not fabricate an update: {spurious:?}"
         );
 
-        // A real change + a wake: the update arrives promptly (well inside the
-        // idle cadence — the wake scheduled the poll, the poll found it).
+        // A real change + a wake: the update arrives in the wake's own cycle
+        // — the wake scheduled the poll, the poll found it; no request asked.
         append_events(root.path(), &proj, 1, 2);
         wake.send(WorkerMsg::Wake).unwrap();
-        let ev = recv_project_data(&bus, Duration::from_secs(5));
+        let ev = recv_project_data(&bus, root.path());
         assert!(matches!(ev, Event::ProjectData(_)));
     }
 
@@ -606,72 +581,53 @@ mod tests {
     fn injected_watch_failure_degrades_to_poll_only() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "seed", 1);
-        let bus = spawn_with_watcher(
-            root.path().to_path_buf(),
-            vec![path_of(&proj)],
-            Box::new(FailingWatcher),
-        );
+        let (bus, probe) = spawn_probed_poll_only(root.path().to_path_buf(), vec![path_of(&proj)]);
         // The FIRST event says how the bus is woken: the degrade is reported,
-        // never silent.
-        let mode = bus
-            .evt_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the wake mode is reported first");
+        // never silent. It is sent before the loop starts, so nothing else
+        // can come first.
+        let mode = bus.evt_rx.recv().expect("the wake mode is reported first");
         assert_eq!(mode, Event::WatchMode(WatchMode::PollOnly));
-        let first = recv_project_data(&bus, Duration::from_secs(5));
+        let first = recv_project_data(&bus, root.path());
         assert!(matches!(first, Event::ProjectData(_)));
 
         // No watcher — the adaptive poll cadence still surfaces the change.
-        append_events(root.path(), &proj, 1, 2);
-        let ev = bus
-            .evt_rx
-            .recv_timeout(Duration::from_secs(8))
-            .expect("poll-only still delivers");
+        let ev = probe.poll_for(
+            &bus,
+            || append_events(root.path(), &proj, 1, 2),
+            "poll-only still delivers",
+            |ev| matches!(ev, Event::ProjectData(_)),
+        );
         assert!(matches!(ev, Event::ProjectData(pd) if pd.project == path_of(&proj)));
     }
 
     // --- the rebuild-epoch rule amendment: the session-dir watch + wake-recompute-active --
 
-    /// A watcher recording every `set_active_session_dirs` call (the wiring
-    /// seam test — no filesystem).
-    struct RecordingWatcher {
-        calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<PathBuf>>>>,
+    /// What a watch-set test reads: the bus, its probe (every
+    /// `set_active_session_dirs` call — the wiring seam, no filesystem), the
+    /// root barriers live under, and every watch set recorded so far.
+    struct WatchLog<'a> {
+        bus: &'a Bus,
+        probe: &'a Probe,
+        root: &'a Path,
+        recorded: Vec<Vec<PathBuf>>,
     }
 
-    impl WakeWatcher for RecordingWatcher {
-        fn watch(&mut self, _root: &Path, _wake: Sender<WorkerMsg>) -> Result<(), String> {
-            Ok(())
-        }
-        fn set_active_session_dirs(&mut self, dirs: &[PathBuf]) {
-            self.calls.lock().unwrap().push(dirs.to_vec());
-        }
-    }
-
-    /// Spin until one of the recorded watch sets satisfies `want`, and return
-    /// its index — or fail with everything that was recorded, so a wiring bug
-    /// reads as the set that WAS asked for rather than a bare timeout.
+    /// The index of the first recorded watch set that satisfies `want`, once
+    /// the worker has answered a barrier sent after the request under test —
+    /// or fail with everything that was recorded, so a wiring bug reads as
+    /// the set that WAS asked for.
     fn wait_for_watch_set(
-        calls: &std::sync::Arc<std::sync::Mutex<Vec<Vec<PathBuf>>>>,
+        log: &mut WatchLog<'_>,
         what: &str,
         want: impl Fn(&[PathBuf]) -> bool,
     ) -> usize {
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(at) = calls
-                .lock()
-                .unwrap()
-                .iter()
-                .position(|set| want(set.as_slice()))
-            {
-                return at;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "{what}; recorded: {:?}",
-                calls.lock().unwrap()
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        log.probe
+            .record_watch_sets(log.bus, log.root, &mut log.recorded);
+        let found = log.recorded.iter().position(|set| want(set.as_slice()));
+        let Some(at) = found else {
+            panic!("{what}; recorded: {:?}", log.recorded);
+        };
+        at
     }
 
     #[test]
@@ -688,37 +644,27 @@ mod tests {
             .unwrap()
             .join("rift-sessions");
 
-        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let bus = spawn_with_watcher(
-            root.path().to_path_buf(),
-            vec![],
-            Box::new(RecordingWatcher {
-                calls: std::sync::Arc::clone(&calls),
-            }),
-        );
+        let (bus, probe) = spawn_probed(root.path().to_path_buf(), vec![]);
+        let mut log = WatchLog {
+            bus: &bus,
+            probe: &probe,
+            root: root.path(),
+            recorded: Vec::new(),
+        };
 
         bus.req_tx
             .send(DataRequest::SetActive(Some(path_of(&proj))))
             .unwrap();
         let attached_at = wait_for_watch_set(
-            &calls,
+            &mut log,
             "SetActive points the watch at the session dir",
             |set| set == [expected.clone()],
         );
 
         // Clearing the active project unwatches.
         bus.req_tx.send(DataRequest::SetActive(None)).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        let mut cleared = false;
-        while !cleared && std::time::Instant::now() < deadline {
-            cleared = calls
-                .lock()
-                .unwrap()
-                .iter()
-                .skip(attached_at + 1)
-                .any(Vec::is_empty);
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        probe.record_watch_sets(&bus, root.path(), &mut log.recorded);
+        let cleared = log.recorded.iter().skip(attached_at + 1).any(Vec::is_empty);
         assert!(cleared, "SetActive(None) clears the session-dir watch");
     }
 
@@ -742,40 +688,37 @@ mod tests {
         let member_sessions = main_git.join("worktrees/member/rift-sessions");
         let gone_sessions = main_git.join("worktrees/gone/rift-sessions");
 
-        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let bus = spawn_with_watcher(
-            root.path().to_path_buf(),
-            vec![],
-            Box::new(RecordingWatcher {
-                calls: std::sync::Arc::clone(&calls),
-            }),
-        );
+        let (bus, probe) = spawn_probed(root.path().to_path_buf(), vec![]);
+        let mut log = WatchLog {
+            bus: &bus,
+            probe: &probe,
+            root: root.path(),
+            recorded: Vec::new(),
+        };
 
         // Selecting the family row watches main AND the member.
         bus.req_tx
             .send(DataRequest::SetActive(Some(path_of(&main))))
             .unwrap();
-        wait_for_watch_set(&calls, "the family row watches every member", |set| {
+        wait_for_watch_set(&mut log, "the family row watches every member", |set| {
             set.contains(&main_sessions) && set.contains(&member_sessions)
         });
 
         // And a member whose checkout is gone is not watched: its registry can
         // never gain a session, so the stream would never fire.
         assert!(
-            !calls
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|set| set.contains(&gone_sessions)),
+            !log.recorded.iter().any(|set| set.contains(&gone_sessions)),
             "a prunable member is never given a watch"
         );
 
         // Selecting the MEMBER row watches the same set: the family is the
-        // unit, whichever of its checkouts the card is opened on.
+        // unit, whichever of its checkouts the card is opened on. Only the
+        // sets recorded after the member request count.
+        log.recorded.clear();
         bus.req_tx
             .send(DataRequest::SetActive(Some(path_of(&member))))
             .unwrap();
-        wait_for_watch_set(&calls, "a member vantage watches the family too", |set| {
+        wait_for_watch_set(&mut log, "a member vantage watches the family too", |set| {
             set.contains(&main_sessions) && set.contains(&member_sessions)
         });
     }
@@ -849,52 +792,39 @@ mod tests {
         // the panel promptly.
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "seed", 1);
-        let grabbed = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let bus = spawn_with_watcher(
-            root.path().to_path_buf(),
-            vec![],
-            Box::new(StubWatcher {
-                grabbed: std::sync::Arc::clone(&grabbed),
-            }),
-        );
+        let (bus, probe) = spawn_probed(root.path().to_path_buf(), vec![]);
         bus.req_tx
             .send(DataRequest::SetActive(Some(path_of(&proj))))
             .unwrap();
 
         // The SetActive recompute lands (any Feed) — baseline fully synced.
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        let mut primed = false;
-        while !primed && std::time::Instant::now() < deadline {
-            if let Ok(Event::Feed(_)) = bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
-                primed = true;
-            }
-        }
+        // The barrier also drains the burst: nothing of that cycle follows
+        // its answer.
+        let primed = events_until_barrier(&bus, root.path())
+            .iter()
+            .any(|ev| matches!(ev, Event::Feed(_)));
         assert!(primed, "the SetActive recompute never arrived");
-        // Drain the burst dry.
-        while bus.evt_rx.recv_timeout(Duration::from_millis(700)).is_ok() {}
 
         // Recall-only change: serves land, no projection write of any kind.
         seed_recall_serves(root.path(), &proj, &[(1_000, 500)]);
-        let wake = grabbed.lock().unwrap().clone().expect("watcher installed");
+        let wake = probe.wake_sender();
         wake.send(WorkerMsg::Wake).unwrap();
 
-        // The wake alone (no cursor move) surfaces the served data.
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        let mut saw_serves = false;
-        while !saw_serves && std::time::Instant::now() < deadline {
-            if let Ok(Event::Feed(f)) = bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
-                if matches!(
+        // The wake alone (no cursor move) surfaces the served data, in the
+        // wake's cycle — which the barrier queued behind it waits out.
+        let saw_serves = events_until_barrier(&bus, root.path()).iter().any(|ev| {
+            matches!(
+                ev,
+                Event::Feed(f) if matches!(
                     f.payload,
                     rift_canopy::FeedPayload::Recall {
                         savings: rift_canopy::RecallView::Data(_),
                         calls: rift_canopy::RecallView::Data(_),
                         ..
                     }
-                ) {
-                    saw_serves = true;
-                }
-            }
-        }
+                )
+            )
+        });
         assert!(
             saw_serves,
             "an fs wake must recompute the active project's feeds even when \
@@ -981,33 +911,19 @@ mod tests {
         let bus = spawn_for_test(root.path().to_path_buf(), vec![path_of(&proj)]);
 
         // Drain the seeded cycle: exactly one Health(Healthy) rides beside the
-        // ProjectData (emit-on-change: the first report is the change).
-        let mut healths = Vec::new();
-        let mut saw_data = false;
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while (!saw_data || healths.is_empty()) && std::time::Instant::now() < deadline {
-            match bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(Event::Health(h)) => healths.push(h),
-                Ok(Event::ProjectData(_)) => saw_data = true,
-                Ok(_) | Err(_) => {}
-            }
-        }
+        // ProjectData (emit-on-change: the first report is the change). The
+        // barrier's own read of a healthy plane adds none.
+        let seeded = events_until_barrier(&bus, root.path());
+        let healths: Vec<HealthEvent> = seeded.iter().filter_map(health_of).collect();
         assert_eq!(healths, vec![HealthEvent::Healthy]);
 
         // A second read of a healthy plane emits data but NO new health report.
         bus.req_tx
             .send(DataRequest::Refresh(path_of(&proj)))
             .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let mut extra_health = 0;
-        let mut saw_second = false;
-        while !saw_second && std::time::Instant::now() < deadline {
-            match bus.evt_rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(Event::Health(_)) => extra_health += 1,
-                Ok(Event::ProjectData(_)) => saw_second = true,
-                Ok(_) | Err(_) => {}
-            }
-        }
+        let second = events_until_barrier(&bus, root.path());
+        let saw_second = second.iter().any(|ev| matches!(ev, Event::ProjectData(_)));
+        let extra_health = second.iter().filter_map(health_of).count();
         assert!(saw_second, "the refresh delivered");
         assert_eq!(extra_health, 0, "an unchanged health is never re-sent");
     }
@@ -1016,22 +932,33 @@ mod tests {
     fn bus_delivers_live_update_via_poll() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "seed", 1);
-        let bus = spawn_for_test(root.path().to_path_buf(), vec![path_of(&proj)]);
+        let (bus, probe) = spawn_probed(root.path().to_path_buf(), vec![path_of(&proj)]);
 
         // Drain the initial request-driven update.
-        let first = recv_project_data(&bus, Duration::from_secs(15));
+        let first = recv_project_data(&bus, root.path());
         assert!(matches!(first, Event::ProjectData(_)));
 
         // A concurrent append must surface via the observer's poll — with no
         // further request sent, any subsequent update is poll-driven.
-        append_events(root.path(), &proj, 1, 2);
-        let second = recv_project_data(&bus, Duration::from_secs(15));
+        let second = probe.poll_for(
+            &bus,
+            || append_events(root.path(), &proj, 1, 2),
+            "the append surfaces through the poll",
+            |ev| matches!(ev, Event::ProjectData(_)),
+        );
         match second {
             Event::ProjectData(pd) => {
                 assert_eq!(pd.project, path_of(&proj));
                 assert_eq!(pd.status, ProjectStatus::Idle);
             }
             other => panic!("expected ProjectData, got {other:?}"),
+        }
+    }
+
+    fn health_of(ev: &Event) -> Option<HealthEvent> {
+        match ev {
+            Event::Health(health) => Some(*health),
+            _ => None,
         }
     }
 }
