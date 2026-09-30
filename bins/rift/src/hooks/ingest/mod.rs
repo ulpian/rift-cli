@@ -4,6 +4,7 @@
 //! because this is the capture side of the agent hook, after the gate has
 //! answered.
 
+mod cli_serve;
 mod edit;
 mod enrich;
 pub(in crate::hooks) mod owed;

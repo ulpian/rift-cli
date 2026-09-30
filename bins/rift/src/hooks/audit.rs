@@ -14,7 +14,9 @@ use std::io::Read as _;
 use std::path::Path;
 
 use rift_core::Result;
-use rift_recall_ledger::attribution::{append_attributed_serve, ServeAttribution};
+use rift_recall_ledger::attribution::{
+    append_attributed_serve, attribute_booked_serve, ServeAttribution,
+};
 
 use super::now_ms;
 
@@ -68,6 +70,39 @@ pub(super) fn serve_audit_job(
         }
         Ok(())
     })
+}
+
+/// Attribute one skill-CLI serve to the session whose tool result named its
+/// keys: one `memd_audit_session` row per key its relation holds.
+///
+/// A family with no `recall.db` holds no serve, so nothing is opened (and no
+/// projection is minted) for it; a session id the capture plane would refuse
+/// attributes nothing, for the reason [`serve_attribution`] gives.
+pub(super) fn attribute_serve_job(
+    t: &crate::hooktime::HookTimer,
+    job: &crate::agent_queue::AgentJob,
+    claim: &crate::agent_queue::ServeClaim,
+) -> Result<()> {
+    let Some(attribution) = serve_attribution(Some(&claim.session), claim.window.as_deref()) else {
+        return Ok(());
+    };
+    let repo = rift_git::discover(&job.work_tree)?;
+    let db = crate::family::recall_db(&repo.work_tree)?;
+    if !db.is_file() {
+        return Ok(());
+    }
+    let store = t.phase("open_recall", || {
+        rift_store::open_migrated(&db, &rift_store::recall_migrations())
+    })?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    rt.block_on(attribute_booked_serve(
+        &store,
+        &claim.audit_id,
+        &claim.call_id,
+        &attribution,
+    ))
 }
 
 /// The attribution a hook-side serve is written with: its session when the

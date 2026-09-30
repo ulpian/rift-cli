@@ -20,7 +20,9 @@
 //! decision attributed to its session in the recall projection and frozen by
 //! the session's end from those rows, two sessions' interleaved serves each
 //! frozen into their own session's shard only, a serve no session made left
-//! an unattributed row and frozen nowhere, and the trailer's predicted
+//! an unattributed row and frozen nowhere, a skill-CLI serve attributed by
+//! the tool result that carried its keys (and nothing attributed by a result
+//! that cannot vouch for a serve), and the trailer's predicted
 //! checkpoint id equal to the committed one with and without serves — with
 //! `rift verify` reading the leaf back.
 #![allow(
@@ -342,7 +344,8 @@ fn keys_of(frozen: &str) -> Vec<String> {
 /// ★ A decision's two rows are attributed to its session in the projection;
 /// the session's end freezes exactly those rows into its checkpoint as
 /// `serve_audit.jsonl`, each line naming the session and carrying the instant
-/// its row was written at; and `rift verify` reads the leaf back.
+/// its row was written at and the window it was made in; and `rift verify`
+/// reads the leaf back.
 #[test]
 fn a_decline_is_frozen_into_the_session_end_checkpoint_from_the_rows_that_name_its_session() {
     let tmp = tempfile::tempdir().unwrap();
@@ -367,9 +370,9 @@ fn a_decline_is_frozen_into_the_session_end_checkpoint_from_the_rows_that_name_i
         let value = assert_canonical(line);
         assert_eq!(value["session_id"], LIVE_SESSION, "{line}");
         assert_eq!(
-            value.get("window_key"),
-            None,
-            "the read gate names no window"
+            value["window_key"],
+            rift_hashchain::leaf_hash(format!("{LIVE_SESSION}\0").as_bytes()).to_hex(),
+            "the read gate names the window it declined in"
         );
         if value["schema"] == 1 {
             assert!(value["recorded_at"].is_i64(), "{line}");
@@ -441,6 +444,124 @@ fn a_person_made_serve_stays_an_unattributed_row_and_is_frozen_nowhere() {
     let names = hooks_fixture::shard_tree_names(&repo);
     assert!(!names.contains("serve_audit.jsonl"), "{names}");
     assert_no_serve_journal(&repo);
+}
+
+/// A repository with a live session, Recall on and set up on this machine,
+/// and the environment its hooks drain inline under.
+fn served_session_repo(tmp: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let repo = seed_live_session_repo(tmp);
+    enable_recall(&repo);
+    let cache = tmp.join("cache");
+    common::provision_here(&repo, &cache);
+    (repo, cache)
+}
+
+/// Serve `known-state` through the shipped CLI, as a skill call inside a
+/// session makes it, and hand back its answer and the two keys it printed.
+fn cli_serve(repo: &Path, env: &[(&str, &str)]) -> (String, String, String) {
+    let (code, out) = run_rift_stdout(
+        repo,
+        &["recall", "known-state", "--task", "t", "--file", "a.txt"],
+        env,
+    );
+    assert_eq!(code, 0, "{out}");
+    let line = out
+        .lines()
+        .find_map(|line| line.strip_prefix("serve: "))
+        .unwrap_or_else(|| panic!("the answer names its keys: {out}"));
+    let (call_id, audit_id) = line.split_once(' ').unwrap();
+    (out.clone(), call_id.to_owned(), audit_id.to_owned())
+}
+
+/// Claude Code's `PostToolUse` for one Bash call, in the shape the client
+/// records it, delivered to the shipped hook.
+fn bash_result(repo: &Path, command: &str, stdout: &str, env: &[(&str, &str)]) {
+    let payload = serde_json::json!({
+        "session_id": LIVE_SESSION,
+        "hook_event_name": "PostToolUse",
+        "cwd": repo,
+        "tool_name": "Bash",
+        "tool_input": { "command": command, "description": "Ask Rift what changed" },
+        "tool_response": { "stdout": stdout, "stderr": "", "interrupted": false, "isImage": false },
+        "tool_use_id": "toolu_e2e_bash_result",
+    });
+    hooks_fixture::agent_hook(
+        repo,
+        "PostToolUse",
+        LIVE_SESSION,
+        1,
+        &payload.to_string(),
+        env,
+    );
+}
+
+/// ★ A skill-CLI serve made inside a session is attributed when the agent's
+/// tool result comes back: both rows name the session and the window the
+/// call ran in, and the session's next checkpoint freezes both lines.
+#[test]
+fn a_cli_serve_is_attributed_by_its_tool_result_and_frozen_into_the_next_checkpoint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cache) = served_session_repo(tmp.path());
+    let env = sync_env(&cache);
+
+    let (out, call_id, audit_id) = cli_serve(&repo, &env);
+    bash_result(
+        &repo,
+        "rift recall known-state --task t --file a.txt",
+        &out,
+        &env,
+    );
+
+    let window = rift_hashchain::leaf_hash(format!("{LIVE_SESSION}\0").as_bytes()).to_hex();
+    let mut expected = vec![
+        (
+            audit_id,
+            "memd_audit_event".to_owned(),
+            Some(window.clone()),
+        ),
+        (call_id, "serve_call_event".to_owned(), Some(window.clone())),
+    ];
+    expected.sort();
+    assert_eq!(
+        attributed(&recall_store(&repo, &cache), LIVE_SESSION),
+        expected
+    );
+
+    rift_json(&repo, &["session", "stop", LIVE_SESSION, "--json"], &env);
+    let [checkpoint] = checkpoint_shards(&repo).try_into().unwrap();
+    let frozen = frozen_serves(&repo, &checkpoint.replace('/', "")).unwrap();
+    let keys: Vec<String> = expected.iter().map(|(key, _, _)| key.clone()).collect();
+    assert_eq!(keys_of(&frozen), keys);
+    for line in frozen.lines() {
+        let value = assert_canonical(line);
+        assert_eq!(value["session_id"], LIVE_SESSION, "{line}");
+        assert_eq!(value["window_key"], window.as_str(), "{line}");
+    }
+    assert_no_serve_journal(&repo);
+}
+
+/// ★ A result attributes nothing it cannot vouch for: keys in the right shape
+/// that name no serve, a key line out of shape, and the real line printed by a
+/// command that is not `rift recall`. The serve stays unattributed and no
+/// checkpoint freezes it.
+#[test]
+fn a_result_that_names_no_serve_or_is_not_a_recall_answer_attributes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cache) = served_session_repo(tmp.path());
+    let env = sync_env(&cache);
+    let (out, call_id, audit_id) = cli_serve(&repo, &env);
+    let recall = "rift recall known-state --task t --file a.txt";
+
+    let spoofed = format!("serve: {} {}\n", "0".repeat(32), "0".repeat(64));
+    bash_result(&repo, recall, &spoofed, &env);
+    let malformed = format!("serve: {call_id}  {audit_id}\n");
+    bash_result(&repo, recall, &malformed, &env);
+    bash_result(&repo, "cat saved-answer.txt", &out, &env);
+
+    assert_eq!(count(&recall_store(&repo, &cache), "memd_audit_session"), 0);
+    rift_json(&repo, &["session", "stop", LIVE_SESSION, "--json"], &env);
+    let names = hooks_fixture::shard_tree_names(&repo);
+    assert!(!names.contains("serve_audit.jsonl"), "{names}");
 }
 
 /// ★ **The riskiest line: one id, predicted and committed.** The trailer

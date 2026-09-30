@@ -238,7 +238,7 @@ fn journal_cap(call: &super::SearchCall<'_>) -> bool {
                 // A bounded content search stood in for no listing at all.
                 shape: None,
                 session: Some(call.raw.session.clone()),
-                window: None,
+                window: Some(call.window_key.clone()),
             }),
         },
     )
@@ -514,6 +514,36 @@ mod tests {
         let again = gate(&hook("PreToolUse", 1, grep(input)), tmp.path(), &observed);
         assert_eq!(again, SearchOutcome::default());
         assert_eq!(journaled(tmp.path()).len(), 1);
+    }
+
+    /// The row a search decision journals is attributed to the context window
+    /// that made it, under the window journal's own key: a subagent's
+    /// decision is its window's, not its parent's.
+    #[test]
+    fn a_search_decision_names_the_window_that_made_it() {
+        let observed = rift_recall_policy::Effective {
+            grep_cap: Mode::Observe,
+            ..levers()
+        };
+        let window_of = |payload: serde_json::Value| {
+            let tmp = tempfile::tempdir().expect("a work tree");
+            gate(&hook("PreToolUse", 1, payload), tmp.path(), &observed);
+            match journaled(tmp.path()).pop().map(|job| job.kind) {
+                Some(crate::agent_queue::JobKind::ServeAudit(audit)) => audit.window,
+                other => panic!("one search row: {other:?}"),
+            }
+        };
+        let input = json!({ "pattern": "needle", "path": "." });
+        assert_eq!(
+            window_of(grep(input.clone())),
+            Some(crate::window_journal::key("s-1", None))
+        );
+        let mut child = grep(input);
+        child["agent_id"] = json!("sub-1");
+        assert_eq!(
+            window_of(child),
+            Some(crate::window_journal::key("s-1", Some("sub-1")))
+        );
     }
 
     /// Every other tool, every other verb and a family whose pinned rows
