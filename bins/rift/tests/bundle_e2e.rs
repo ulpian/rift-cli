@@ -72,12 +72,19 @@ fn git_probe(dir: &Path, args: &[&str]) -> bool {
         .success()
 }
 
+/// The shipped binary in `cwd` with an isolated cache: `(exit, stdout, stderr)`.
+///
+/// `RIFT_CAPTURE_SYNC` on every spawn: the post-commit archive lands before
+/// the hook returns. Detached, it could still be running when `doctor --fix`
+/// looks, and `doctor --fix` does not wait for a worker that holds the drain
+/// lock — it would return with the checkpoint not yet written.
 fn rift(cwd: &Path, cache: &Path, args: &[&str]) -> (i32, String, String) {
     let out = rift_cmd(cwd)
         .args(args)
         .env("RIFT_CACHE_DIR", cache)
         .env("RIFT_CONFIG_DIR", cache.join("conf"))
         .env("RIFT_HEADLESS", "1")
+        .env("RIFT_CAPTURE_SYNC", "1")
         .output()
         .expect("rift runs");
     (
@@ -126,7 +133,8 @@ fn seeded_repo(tmp: &Path) -> (PathBuf, PathBuf) {
         ],
     );
     assert_eq!(code, 0, "post-commit must never fail: {err}");
-    // The archive is detached; drain it deterministically instead of sleeping.
+    // The hook drained inline; the doctor pass is the recipe's step and finds
+    // nothing left to drain.
     let (code, out, err) = rift(&repo, &cache, &["doctor", "--fix", "--json"]);
     assert_eq!(code, 0, "doctor --fix: {out}{err}");
     (repo, cache)
