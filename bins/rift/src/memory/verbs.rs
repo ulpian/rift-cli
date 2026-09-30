@@ -47,12 +47,26 @@ pub(crate) async fn tool_call_raw(
 ) -> std::result::Result<ToolResponse, ToolError> {
     let window = caller_window(tool, &|name| std::env::var(name).ok());
     let req = with_seen_turns(repo, window.as_deref(), req);
-    serve_raw(store, repo, scope, ancestry, provenance, tool, &req).await
+    let at = ServeIn {
+        store,
+        repo,
+        scope,
+        ancestry,
+        provenance,
+    };
+    serve_raw(&at, MemorySubstrate::local(), tool, &req).await
 }
 
-/// [`tool_call_raw`] once the request carries everything the binary resolves
-/// for it.
-async fn serve_raw(
+/// [`tool_call_raw`] for a person or an agent standing in the checkout: every
+/// verb is answered through a reader bound to it, so an answer that says a
+/// file is unchanged has checked the bytes on disk, and only such an answer
+/// is credited.
+///
+/// A separate entry rather than a flag on [`tool_call_raw`], because the two
+/// callers differ in kind: the push tier asks `diff_since` from a hook and
+/// reads no file, and its answer stays the projection's view; the command
+/// line answers a caller who will act on "unchanged" by skipping a read.
+pub(crate) async fn tool_call_at_checkout(
     store: &SqliteStore,
     repo: &Path,
     scope: &Scope,
@@ -61,6 +75,37 @@ async fn serve_raw(
     tool: ToolName,
     req: &ToolRequest,
 ) -> std::result::Result<ToolResponse, ToolError> {
+    let window = caller_window(tool, &|name| std::env::var(name).ok());
+    let req = with_seen_turns(repo, window.as_deref(), req);
+    let at = ServeIn {
+        store,
+        repo,
+        scope,
+        ancestry,
+        provenance,
+    };
+    let checkout = MemorySubstrate::local().with_worktree_root(repo);
+    serve_raw(&at, checkout, tool, &req).await
+}
+
+/// [`tool_call_raw`] once the request carries everything the binary resolves
+/// for it.
+///
+/// `local` is the reader a verb that needs no repository is answered through,
+/// and the one that stands in when the repository cannot be opened.
+async fn serve_raw(
+    at: &ServeIn<'_>,
+    local: MemorySubstrate,
+    tool: ToolName,
+    req: &ToolRequest,
+) -> std::result::Result<ToolResponse, ToolError> {
+    let ServeIn {
+        store,
+        repo,
+        scope,
+        ancestry,
+        provenance,
+    } = *at;
     let rift_dir = repo.join(".rift");
     let config = match EffectiveConfig::load(&rift_dir) {
         Ok(c) => c,
@@ -88,8 +133,19 @@ async fn serve_raw(
     };
     match repository_reader(tool, repo) {
         Some(reader) => dispatch_over(&server, &at, &reader, tool, req).await,
-        None => dispatch_over(&server, &at, &MemorySubstrate::local(), tool, req).await,
+        None => dispatch_over(&server, &at, &local, tool, req).await,
     }
+}
+
+/// Who is asking, and from where: the five borrows both entries hand
+/// [`serve_raw`].
+#[derive(Clone, Copy)]
+struct ServeIn<'a> {
+    store: &'a SqliteStore,
+    repo: &'a Path,
+    scope: &'a Scope,
+    ancestry: &'a dyn AncestryOracle,
+    provenance: &'a dyn ProvenanceOracle,
 }
 
 /// Everything one dispatch needs except the reader it reads bytes through.
@@ -235,7 +291,7 @@ async fn tool_call(
     tool: ToolName,
     req: &ToolRequest,
 ) -> Result<ToolResponse> {
-    tool_call_raw(store, repo, scope, ancestry, &NoProvenance, tool, req)
+    tool_call_at_checkout(store, repo, scope, ancestry, &NoProvenance, tool, req)
         .await
         .map_err(|e| RiftError::storage(format!("memory tool failed: {e:?}")))
 }
@@ -298,6 +354,21 @@ pub(super) async fn diff_since(
     let resp = tool_call(store, repo, scope, ancestry, ToolName::DiffSince, &req).await?;
     let changed = resp.payload.get("changed").cloned().unwrap_or_default();
     let unchanged = resp.payload.get("unchanged").cloned().unwrap_or_default();
+    let human = delta_listing(&ckpt, &changed, &unchanged);
+    Ok(Outcome::ok(
+        human,
+        serde_json::json!({
+            "since": ckpt,
+            "changed": changed,
+            "unchanged": unchanged,
+            "estimated_tokens_avoided": resp.estimated_tokens_avoided,
+            "avoided_basis": resp.avoided_basis.as_str(),
+        }),
+    ))
+}
+
+/// The human half of `diff-since`: the counts, then up to fifty paths of each.
+fn delta_listing(ckpt: &str, changed: &serde_json::Value, unchanged: &serde_json::Value) -> String {
     let n_changed = changed.as_array().map_or(0, Vec::len);
     let n_unchanged = unchanged.as_array().map_or(0, Vec::len);
 
@@ -307,17 +378,14 @@ pub(super) async fn diff_since(
         human.push_str(&format!("  changed   {path}\n"));
     }
     for u in unchanged.as_array().into_iter().flatten().take(50) {
-        human.push_str(&format!("  unchanged {}\n", u.as_str().unwrap_or("?")));
+        // A held file this family never recorded reading is an object that
+        // carries its path beside the tag; every other one is its path.
+        let path = u
+            .as_str()
+            .or_else(|| u.get("path").and_then(|v| v.as_str()));
+        human.push_str(&format!("  unchanged {}\n", path.unwrap_or("?")));
     }
-    Ok(Outcome::ok(
-        human,
-        serde_json::json!({
-            "since": ckpt,
-            "changed": changed,
-            "unchanged": unchanged,
-            "estimated_tokens_avoided": resp.estimated_tokens_avoided,
-        }),
-    ))
+    human
 }
 
 /// `rift memory file-if-changed <path>`: does the worktree file differ from
@@ -348,6 +416,13 @@ pub(super) async fn file_if_changed(
     let human = match state.as_str() {
         "unchanged" => format!("{path}: unchanged since last captured read (re-read avoidable)"),
         "changed" => format!("{path}: CHANGED since last captured read"),
+        "unavailable" => format!(
+            "{path}: the file as it is now could not be read ({}); read it directly",
+            result
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+        ),
         _ => format!("{path}: {state} (no captured read of this path)"),
     };
     Ok(Outcome::ok(
@@ -587,15 +662,14 @@ mod tests {
         };
         let req = with_seen_turns(repo, window, &req);
         let scope = Scope::unbounded("repo");
-        let pull = serve_raw(
-            &store,
+        let at = ServeIn {
+            store: &store,
             repo,
-            &scope,
-            &NoAncestry,
-            &NoProvenance,
-            ToolName::KnownState,
-            &req,
-        );
+            scope: &scope,
+            ancestry: &NoAncestry,
+            provenance: &NoProvenance,
+        };
+        let pull = serve_raw(&at, MemorySubstrate::local(), ToolName::KnownState, &req);
         let resp = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()

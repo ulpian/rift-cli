@@ -61,6 +61,67 @@ pub struct WorktreeBlob {
     pub blob_oid: String,
 }
 
+/// The file a caller named, as the checkout holds it now — or the reason it
+/// could not be read.
+///
+/// This is what every answer that says *current* or *unchanged* stands on: a
+/// projection records the revisions a checkpoint carried, and an edit made
+/// after the last checkpoint is not among them, so the projection's newest
+/// revision is a statement about the past. Only the bytes on disk say what
+/// the file is now, and when they cannot be read the honest answer is that
+/// nobody knows, never the projection's guess.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CurrentFile {
+    /// The bytes on disk and their plain SHA-256.
+    Present {
+        /// Plain SHA-256 of `bytes`, the same function capture records.
+        content_sha256: String,
+        /// The file's bytes, read once so hashing and use cannot disagree.
+        bytes: Vec<u8>,
+    },
+    /// Why the file as it stands now could not be read.
+    Refused(CurrentRefusal),
+}
+
+/// Why a path's current bytes could not be read: a closed set, each with the
+/// tag an answer carries so a caller knows to fall back to a plain read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurrentRefusal {
+    /// The reader is bound to no checkout.
+    NoWorktree,
+    /// The path is not a safe repository-relative name.
+    UnsafePath,
+    /// Nothing is at the path.
+    Missing,
+    /// The path is a symbolic link; what it points at is not this path.
+    Symlink,
+    /// The path is a directory or another non-file.
+    NotAFile,
+    /// The path resolves outside the checkout, through a linked directory.
+    OutsideRoot,
+    /// The file is larger than the caller will hash.
+    Oversize,
+    /// The file is there but could not be read.
+    Unreadable,
+}
+
+impl CurrentRefusal {
+    /// The tag an answer carries for this refusal.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::NoWorktree => "no_worktree",
+            Self::UnsafePath => "unsafe_path",
+            Self::Missing => "missing",
+            Self::Symlink => "symlink",
+            Self::NotAFile => "not_a_file",
+            Self::OutsideRoot => "outside_root",
+            Self::Oversize => "oversize",
+            Self::Unreadable => "unreadable",
+        }
+    }
+}
+
 /// Hash the current worktree content for `paths`, returning each existing file's
 /// (`content_sha256`, `blob_oid`) — the input to both the avoidable-context
 /// metric and the content→blob-oid map. Same skip rules as
@@ -98,6 +159,25 @@ pub fn hash_blob_bytes(repo_root: &Path, path: &str) -> Option<(WorktreeBlob, Ve
         blob_oid: git_blob_oid(&bytes),
     };
     Some((blob, bytes))
+}
+
+/// The file at `path` under `repo_root` as it stands now, refused rather than
+/// guessed: an unsafe name, nothing there, a symbolic link, a non-file, a path
+/// that leaves the checkout through a linked directory, or more than
+/// `max_bytes` each answer with the reason.
+///
+/// Separate from [`hash_blob_bytes`] on purpose: that one answers `None` for
+/// every refusal and sits on a hook's path, where the reason is not wanted
+/// and an extra `canonicalize` is latency nobody asked for.
+#[must_use]
+pub fn current_file(repo_root: &Path, path: &str, max_bytes: u64) -> CurrentFile {
+    match current_bytes(repo_root, path, max_bytes) {
+        Ok(bytes) => CurrentFile::Present {
+            content_sha256: sha256_hex(&bytes),
+            bytes,
+        },
+        Err(refusal) => CurrentFile::Refused(refusal),
+    }
 }
 
 /// A repo-relative path is safe to join under the repo root: non-empty, not
@@ -181,6 +261,49 @@ pub fn hash_paths(repo_root: &Path, paths: &BTreeSet<String>) -> BTreeMap<String
         .into_iter()
         .map(|b| (b.path, b.content_sha256))
         .collect()
+}
+
+/// The checks [`current_file`] makes, in the order that keeps each refusal
+/// honest: the name before the disk, the link before its target, and the size
+/// before the read.
+fn current_bytes(
+    repo_root: &Path,
+    path: &str,
+    max_bytes: u64,
+) -> std::result::Result<Vec<u8>, CurrentRefusal> {
+    if !path_is_safe(path) {
+        return Err(CurrentRefusal::UnsafePath);
+    }
+    let full = repo_root.join(path);
+    let meta = match std::fs::symlink_metadata(&full) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CurrentRefusal::Missing)
+        }
+        Err(_) => return Err(CurrentRefusal::Unreadable),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(CurrentRefusal::Symlink);
+    }
+    if !meta.is_file() {
+        return Err(CurrentRefusal::NotAFile);
+    }
+    if meta.len() > max_bytes {
+        return Err(CurrentRefusal::Oversize);
+    }
+    let (Ok(root), Ok(resolved)) = (repo_root.canonicalize(), full.canonicalize()) else {
+        return Err(CurrentRefusal::Unreadable);
+    };
+    if !resolved.starts_with(&root) {
+        return Err(CurrentRefusal::OutsideRoot);
+    }
+    let Ok(bytes) = std::fs::read(&full) else {
+        return Err(CurrentRefusal::Unreadable);
+    };
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(CurrentRefusal::Oversize);
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -326,5 +449,59 @@ mod tests {
         assert_eq!(blobs.len(), 1);
         assert_eq!(blobs[0].content_sha256, sha256_hex(b"hello\n"));
         assert_eq!(blobs[0].blob_oid, git_blob_oid(b"hello\n"));
+    }
+
+    /// A readable file inside the checkout answers its bytes and their hash.
+    #[test]
+    fn a_file_in_the_checkout_answers_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), b"fn a() {}\n").unwrap();
+        assert_eq!(
+            current_file(dir.path(), "src/a.rs", 1024),
+            CurrentFile::Present {
+                content_sha256: sha256_hex(b"fn a() {}\n"),
+                bytes: b"fn a() {}\n".to_vec(),
+            }
+        );
+    }
+
+    /// Each way the current bytes cannot be read is named, never guessed.
+    #[test]
+    fn every_unreadable_current_file_names_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("big.rs"), vec![b'x'; 64]).unwrap();
+        let refused = |path: &str, max: u64| match current_file(dir.path(), path, max) {
+            CurrentFile::Refused(why) => Some(why),
+            CurrentFile::Present { .. } => None,
+        };
+        assert_eq!(refused("../a.rs", 1024), Some(CurrentRefusal::UnsafePath));
+        assert_eq!(refused("gone.rs", 1024), Some(CurrentRefusal::Missing));
+        assert_eq!(refused("src", 1024), Some(CurrentRefusal::NotAFile));
+        assert_eq!(refused("big.rs", 63), Some(CurrentRefusal::Oversize));
+        assert_eq!(refused("big.rs", 64), None);
+        assert_eq!(CurrentRefusal::OutsideRoot.tag(), "outside_root");
+    }
+
+    /// A link is not the file it names, and a linked directory cannot carry a
+    /// read out of the checkout.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_or_a_path_through_a_linked_directory_is_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.rs"), b"s").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("real.rs"), b"r").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real.rs"), dir.path().join("link.rs")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("out")).unwrap();
+        assert_eq!(
+            current_file(dir.path(), "link.rs", 1024),
+            CurrentFile::Refused(CurrentRefusal::Symlink)
+        );
+        assert_eq!(
+            current_file(dir.path(), "out/secret.rs", 1024),
+            CurrentFile::Refused(CurrentRefusal::OutsideRoot)
+        );
     }
 }

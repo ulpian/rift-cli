@@ -40,7 +40,7 @@ use self::verbs::{cost_hotspots, diff_since, file_if_changed};
 
 pub(crate) use self::render::fmt_share;
 pub(crate) use self::savings::{savings, savings_json, savings_report, SavingsReport};
-pub(crate) use self::verbs::tool_call_raw;
+pub(crate) use self::verbs::{tool_call_at_checkout, tool_call_raw};
 
 /// Route one `rift memory` subcommand to its handler. Repo-scoped: the target
 /// is the WORKTREE ROOT discovered upward from `root` (a subdirectory

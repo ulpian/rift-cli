@@ -900,7 +900,11 @@ Every response, refusals included, leaves through one function, which:
 2. counts them with the real tokenizer;
 3. performs the **only** budget charge in the crate, clamped so the counter
    cannot breach its ceiling;
-4. computes `avoided = baseline − returned`, saturating;
+4. computes `avoided = baseline − returned`, saturating, where a pull's
+   baseline counts only files the caller stated, that the checkout still holds
+   or, on the answers that carry changed lines, whose older revision the caller
+   holds — each only where this family recorded reading the stated revision
+   ([§8.6](08-cost-and-savings.md#86-what-avoided-actually-measures));
 5. seals the audit event from those same two figures.
 
 Handlers never touch the budget: every shaping decision upstream — dropping a

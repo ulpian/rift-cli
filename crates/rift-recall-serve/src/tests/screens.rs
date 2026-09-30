@@ -31,6 +31,7 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
     ("pricing.rs", include_str!("../pricing.rs")),
     ("provenance.rs", include_str!("../provenance.rs")),
     ("verbs/mod.rs", include_str!("../verbs/mod.rs")),
+    ("verbs/credit.rs", include_str!("../verbs/credit.rs")),
     ("verbs/doc.rs", include_str!("../verbs/doc.rs")),
     ("verbs/exact.rs", include_str!("../verbs/exact.rs")),
     ("verbs/hunks.rs", include_str!("../verbs/hunks.rs")),

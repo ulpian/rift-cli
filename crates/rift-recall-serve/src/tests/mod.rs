@@ -6,6 +6,8 @@
 //! module holding the seeded projection and the request builders they share.
 
 mod budget;
+mod credit;
+mod current;
 mod doc;
 mod exact;
 mod fixtures;
