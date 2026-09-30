@@ -114,15 +114,8 @@ pub(super) fn prevented_record(
     {
         return false;
     }
-    journal_prevented(
-        git_dir,
-        work_tree,
-        raw,
-        &answered.rel_path,
-        &answered.blob_oid,
-        answered.hold,
-        effective,
-    )
+    let window = crate::window_journal::key(&raw.session, facts.child_session.as_deref());
+    journal_prevented(git_dir, work_tree, raw, &window, &answered, effective)
 }
 
 /// What this window was told it holds of the file an act just named, or
@@ -165,11 +158,15 @@ fn journal_prevented(
     git_dir: &Path,
     work_tree: &Path,
     raw: &rift_shadow::hooks::RawHook,
-    rel_path: &str,
-    blob_oid: &str,
-    hold: rift_agent::window_journal::StandingHold,
+    window: &str,
+    answered: &AnsweredHold,
     effective: &rift_recall_policy::Effective,
 ) -> bool {
+    let AnsweredHold {
+        rel_path,
+        blob_oid,
+        hold,
+    } = answered;
     use crate::agent_queue::{AuditBasis, AuditLines, ServeAudit, ServeAuditKind};
     let decision = if effective.read_deny == rift_recall_policy::Mode::Enforce {
         ServeAuditKind::ReadPrevented
@@ -191,9 +188,9 @@ fn journal_prevented(
                 decision,
                 agent: raw.agent.as_str().to_owned(),
                 basis: Some(AuditBasis {
-                    rel_path: rel_path.to_owned(),
+                    rel_path: rel_path.clone(),
                     content_sha256: hold.hash.to_hex(),
-                    blob_oid: blob_oid.to_owned(),
+                    blob_oid: blob_oid.clone(),
                     lines: (!hold.range.is_whole_file()).then_some(AuditLines {
                         lo: hold.range.lo,
                         hi: hold.range.hi,
@@ -207,6 +204,7 @@ fn journal_prevented(
                 declared_avoided: None,
                 shape: None,
                 session: Some(raw.session.clone()),
+                window: Some(window.to_owned()),
             }),
         },
     )

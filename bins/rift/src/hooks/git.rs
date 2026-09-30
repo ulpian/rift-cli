@@ -289,9 +289,10 @@ fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
 /// The trailers the live session's next checkpoint will carry: the predicted
 /// condense id and the live turn-boundary attribution preview.
 ///
-/// The prediction folds in the read facts captured so far and the serves
-/// frozen so far, exactly as the post-commit archive will — the same function
-/// reads both, so the two derive one id from the same bytes.
+/// The prediction folds in the read facts captured so far and the serves the
+/// recall projection attributes to the session so far, exactly as the
+/// post-commit archive will — the same function reads both, so the two derive
+/// one id from the same bytes.
 fn predicted_trailers(
     t: &crate::hooktime::HookTimer,
     repo: &rift_git::RepoPaths,
@@ -306,7 +307,7 @@ fn predicted_trailers(
             .map_err(rift_core::RiftError::from)
     })?;
     let facts = t.phase("read_facts", || {
-        session_facts_for_archive(&rt, &store, &repo.common_dir, &sess.agent, &sess.session_id)
+        session_facts_for_archive(&rt, &store, &repo.work_tree, &sess.agent, &sess.session_id)
     });
     let raw = t.phase("raw_capture", || session_raw_capture(&repo.work_tree));
     let (packs, notes) = t.phase("rule_packs", || {

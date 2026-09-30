@@ -3,32 +3,26 @@
 //! audit relation. Separate because the rows it writes are what the savings
 //! ledger, doctor and the dashboard read back; one module owns their shape.
 //!
-//! It also owns the family's serve journal: every envelope a row is written
-//! from is appended, canonicalised, to a per-session file under the git common
-//! dir, so the next checkpoint of that session can freeze it into its shard.
-//! The projection is rebuildable and a rebuild deletes it; the shard is not,
-//! so a serve that is only in the projection is a serve a rebuild erases.
+//! It also owns the frozen form of those rows. A serve made inside a session
+//! is written with the row that names the session, and the session's next
+//! checkpoint freezes every serve that row names into its shard, rebuilt from
+//! the rows by [`session_serve_lines`]: the projection is rebuildable and a
+//! rebuild deletes it, the shard is not, and the store is the one record the
+//! artifact is read from.
 
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rift_core::Result;
+use rift_recall_ledger::attribution::{append_attributed_serve, ServeAttribution};
 
 use super::now_ms;
 
+mod frozen;
+
 pub(crate) use rift_recall_ledger::audit::append_memd_audit;
 
-pub(crate) use frozen::{canonical_serve_line, serve_line_key};
-
-/// The family's serve journal directory under the git common dir, beside the
-/// push queue: keyed by the family and never by a checkout, because a
-/// session's serves and its condense can run in different members.
-const SERVE_JOURNAL_DIR: &str = "rift-serve-audit";
-
-/// The journal of serves no session made — the skill CLI's, and a queued job
-/// an older binary left without one. The next checkpoint of any session in
-/// the family folds it.
-const UNATTRIBUTED_JOURNAL: &str = "unattributed";
+pub(crate) use frozen::session_serve_lines;
 
 /// The deferred accounting of one hook decision: count what it avoided and
 /// what it cost, and append the row to **both** serving relations.
@@ -61,17 +55,39 @@ pub(super) fn serve_audit_job(
     // The decision's own clock, not the worker's: a row deferred by an hour
     // still records when the agent's turn spent (or saved) the tokens.
     let (audited, called) = serve_audit_envelopes(&event, audit, job.queued_at_ms);
-    let booked = rt.block_on(async {
-        append_memd_audit(&store, audited.as_bytes(), job.queued_at_ms).await?;
-        append_memd_audit(&store, called.as_bytes(), job.queued_at_ms).await
-    });
-    // Journaled whatever the row writes returned, and silently like them: the
-    // worker's error channel is the job's retry, and a retried job appends
-    // the same lines again, which the archive's de-duplication collapses.
-    let session = audit.session.as_deref();
-    journal_serve_envelope(&repo.common_dir, session, audited.as_bytes());
-    journal_serve_envelope(&repo.common_dir, session, called.as_bytes());
-    booked
+    let attribution = serve_attribution(audit.session.as_deref(), audit.window.as_deref());
+    rt.block_on(async {
+        for envelope in [audited, called] {
+            append_attributed_serve(
+                &store,
+                envelope.as_bytes(),
+                job.queued_at_ms,
+                attribution.as_ref(),
+            )
+            .await?;
+        }
+        Ok(())
+    })
+}
+
+/// The attribution a hook-side serve is written with: its session when the
+/// id is one the capture plane accepts, and the window key when it is one.
+///
+/// Screened here, at the writer, because a line that names an unsafe session
+/// is refused whole when it is frozen: a serve whose session cannot be named
+/// is written unattributed rather than attributed and then lost. A job an
+/// older binary queued names no session, and is unattributed too.
+pub(crate) fn serve_attribution(
+    session: Option<&str>,
+    window_key: Option<&str>,
+) -> Option<ServeAttribution> {
+    let session_id = session.filter(|id| rift_shadow::hooks::is_safe_session_id(id))?;
+    Some(ServeAttribution {
+        session_id: session_id.to_owned(),
+        window_key: window_key
+            .filter(|key| frozen::is_window_key(key))
+            .map(str::to_owned),
+    })
 }
 
 /// The two envelopes one decision becomes: the audit row addressed by the
@@ -401,7 +417,8 @@ pub(super) fn run_memd_hook(_args: &[String]) -> ! {
 /// audited from a subdirectory — or from a linked worktree — land in a
 /// different, empty database from the one `rift recall <verb>` serves out of.
 /// The cwd is now resolved to its work tree and that work tree to its family
-/// so writer and reader cannot disagree about the file.
+/// so writer and reader cannot disagree about the file. No envelope schema
+/// names a session, so the row is written unattributed.
 fn record_memd_event() -> Result<()> {
     let mut body = Vec::new();
     std::io::stdin().read_to_end(&mut body)?;
@@ -411,407 +428,7 @@ fn record_memd_event() -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
-    let booked = rt.block_on(append_memd_audit(&store, &body, now_ms()));
-    // No envelope schema names a session, so this journals as unattributed.
-    journal_serve_in(&cwd, None, &body);
-    booked
-}
-
-/// The journal a serve of `session` is appended to, or `None` when the id is
-/// not safe to name a file with — such a serve journals nothing, exactly as
-/// the session cache refuses to key a file by it.
-pub(crate) fn serve_journal_path(common_dir: &Path, session: Option<&str>) -> Option<PathBuf> {
-    let name = match session {
-        Some(id) if rift_shadow::hooks::is_safe_session_id(id) => id,
-        Some(_) => return None,
-        None => UNATTRIBUTED_JOURNAL,
-    };
-    Some(serve_journal_dir(common_dir).join(format!("{name}.jsonl")))
-}
-
-/// The family's serve journal directory. The common dir is canonicalised the
-/// way the push queue's is, so two members spelling it differently write one
-/// directory.
-pub(crate) fn serve_journal_dir(common_dir: &Path) -> PathBuf {
-    std::fs::canonicalize(common_dir)
-        .unwrap_or_else(|_| common_dir.to_path_buf())
-        .join(SERVE_JOURNAL_DIR)
-}
-
-/// Append one envelope's canonical line to the family's serve journal.
-///
-/// One `O_APPEND` write of the whole line, so two writers never interleave
-/// inside a line. Best-effort like the row write it follows: an envelope the
-/// canonicaliser refuses, an unsafe session id or an I/O error journals
-/// nothing and says nothing, because a hook or a serve never fails on its
-/// bookkeeping.
-pub(crate) fn journal_serve_envelope(common_dir: &Path, session: Option<&str>, envelope: &[u8]) {
-    use std::io::Write as _;
-    let (Some(path), Some(mut line)) = (
-        serve_journal_path(common_dir, session),
-        canonical_serve_line(envelope),
-    ) else {
-        return;
-    };
-    line.push(b'\n');
-    let Some(dir) = path.parent() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(dir);
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
-        return;
-    };
-    let _ = file.write_all(&line);
-}
-
-/// [`journal_serve_envelope`] for a caller that holds a checkout rather than
-/// its common dir.
-pub(crate) fn journal_serve_in(work_tree: &Path, session: Option<&str>, envelope: &[u8]) {
-    if let Ok(repo) = rift_git::discover(work_tree) {
-        journal_serve_envelope(&repo.common_dir, session, envelope);
-    }
-}
-
-mod frozen {
-    //! The canonical form of a serve envelope — the only form a line may take
-    //! in the serve journal and in a shard's `serve_audit.jsonl`.
-    //!
-    //! A shard artifact carries identifiers, hashes, paths, counts, timestamps
-    //! and Rift's closed vocabularies, and never a byte a person or a model
-    //! typed. A serve envelope is mostly that already; this module is where
-    //! "mostly" becomes "only", member by member.
-    //!
-    //! The canonical line keeps the declared members and nothing else, replaces
-    //! each member that can hold typed text with [`WITHHELD`], and is
-    //! serialised with sorted keys, so its bytes are a pure function of the
-    //! envelope and `git show` prints one object per line. A line with a member
-    //! the table does not declare is refused whole: an unknown member is one
-    //! nobody has audited.
-    //!
-    //! The idempotency key survives untouched. The appender reads it off the
-    //! envelope (`idempotency_key`) and never recomputes it from the payload, so
-    //! a frozen line appended again lands on the key of the row it was frozen
-    //! from, placeholder or not.
-    //!
-    //! # The audit
-    //!
-    //! Top level, schema 1: `schema`, `verb`, `idempotency_key`, `payload`.
-    //! Schema 4 adds `serve_call`: `call_id` (must equal the key), `channel`
-    //! (the closed pair), `tool_name` (Rift's `<family>:<step>` or the skill
-    //! verb; kept when it is in that grammar, [`WITHHELD`] otherwise),
-    //! `recorded_at`, `tokens_returned`, `tokens_avoided`. Schemas 2 and 3 are
-    //! refused: nothing produces them any more.
-    //!
-    //! | Payload member | Kinds | Frozen as |
-    //! |---|---|---|
-    //! | `kind` | every kind | kept; must name the verb's own kind |
-    //! | `estimated_tokens_*`, `sections`, `total_tokens` | every kind that has them | kept (counts) |
-    //! | `handle` | `read_*`, `doc_*` | kept when `file:<path>@sha256:<hash>[:L<lo>-<hi>]`, else withheld |
-    //! | `handle` | `summary_served`, `invalidated` | kept when `summary:<path>`, else withheld |
-    //! | `handle` | `exact_retrieved` | kept when a file, summary, `log:` or citation handle, else withheld |
-    //! | `handle` | `grep_capped` | kept when `grep:matches=<n>`, else withheld |
-    //! | `target` | `refused` | kept only when a citation; otherwise **withheld** |
-    //! | `reason` | `exact_retrieved` | **withheld** (the caller's own words), unless it is the grant tag |
-    //! | `reason` | every other kind that has one | kept when a closed tag (`[a-z0-9_-]`, at most 64 bytes), else withheld |
-    //! | `reason` | a kind that declares none | kept only when it is the grant tag |
-    //!
-    //! `ExactRetrieved.reason` is the reason the caller supplied, typed and
-    //! mandatory: a row rebuilt from a frozen line carries the placeholder,
-    //! and the caller's words stay where they were only ever meant to be. A
-    //! refusal's `target` is the string the caller asked for — a refusal is
-    //! exactly the case where nothing proved it names a real file, and a
-    //! fabricated target is text — so only a citation, a grammar the pack
-    //! compiler composes, is kept. Every other `handle` is composed by Rift
-    //! from a repository path and a content hash it computed.
-
-    use serde_json::{Map, Value};
-
-    /// What a frozen line carries where the envelope held typed text.
-    pub(crate) const WITHHELD: &str = "withheld";
-
-    /// How one payload member is frozen.
-    #[derive(Clone, Copy)]
-    enum Member {
-        /// A token or section count.
-        Count,
-        /// A neutral tag from a closed vocabulary.
-        Tag,
-        /// Text the caller typed.
-        Typed,
-        /// `file:<path>@sha256:<hash>[:L<lo>-<hi>]`.
-        FileHandle,
-        /// `summary:<path>`.
-        SummaryHandle,
-        /// Any handle an exact retrieval can have served.
-        ExactHandle,
-        /// `grep:matches=<n>`.
-        GrepHandle,
-        /// What a refusal refused.
-        RefusedTarget,
-        /// A `reason` on a kind that declares none: only the grant tag.
-        GrantTag,
-    }
-
-    const RETURNED: (&str, Member) = ("estimated_tokens_returned", Member::Count);
-    const AVOIDED: (&str, Member) = ("estimated_tokens_avoided", Member::Count);
-    const REASON: (&str, Member) = ("reason", Member::Tag);
-    const FILE: (&str, Member) = ("handle", Member::FileHandle);
-    const SUMMARY: (&str, Member) = ("handle", Member::SummaryHandle);
-
-    /// The canonical line of one envelope, or `None` when it is not one this
-    /// table declares.
-    pub(crate) fn canonical_serve_line(envelope: &[u8]) -> Option<Vec<u8>> {
-        let Ok(Value::Object(env)) = serde_json::from_slice::<Value>(envelope) else {
-            return None;
-        };
-        let schema = env.get("schema")?.as_u64()?;
-        let members: &[&str] = match schema {
-            1 => &["idempotency_key", "payload", "schema", "verb"],
-            4 => &["idempotency_key", "payload", "schema", "serve_call", "verb"],
-            _ => return None,
-        };
-        if env.keys().any(|k| !members.contains(&k.as_str())) {
-            return None;
-        }
-        let key = env.get("idempotency_key")?.as_str()?;
-        let verb = env.get("verb")?.as_str()?;
-        if !is_key(key) {
-            return None;
-        }
-        let mut out = Map::new();
-        out.insert("idempotency_key".into(), key.into());
-        out.insert(
-            "payload".into(),
-            canonical_payload(verb, env.get("payload")?)?,
-        );
-        out.insert("schema".into(), schema.into());
-        out.insert("verb".into(), verb.into());
-        if schema == 4 {
-            out.insert(
-                "serve_call".into(),
-                canonical_call(key, env.get("serve_call")?)?,
-            );
-        }
-        serde_json::to_vec(&Value::Object(out)).ok()
-    }
-
-    /// The idempotency key a canonical line is addressed by.
-    pub(crate) fn serve_line_key(line: &[u8]) -> Option<String> {
-        let value = serde_json::from_slice::<Value>(line).ok()?;
-        Some(value.get("idempotency_key")?.as_str()?.to_owned())
-    }
-
-    /// The declared members of one event kind's payload, as the audit table
-    /// in the module doc states them.
-    fn declared(kind: &str) -> Option<&'static [(&'static str, Member)]> {
-        use Member::{ExactHandle, GrepHandle, RefusedTarget, Typed};
-        Some(match kind {
-            "manifest_served" | "search_served" => &[RETURNED, AVOIDED],
-            "manifest_injected" | "recovery_injected" => &[RETURNED],
-            "summary_served" => &[SUMMARY, RETURNED, AVOIDED],
-            "exact_retrieved" => &[("handle", ExactHandle), ("reason", Typed), RETURNED],
-            "pack_built" => &[
-                ("sections", Member::Count),
-                ("total_tokens", Member::Count),
-                RETURNED,
-                AVOIDED,
-            ],
-            "invalidated" => &[SUMMARY, RETURNED],
-            "refused" => &[("target", RefusedTarget), REASON, RETURNED],
-            "read_intercepted" | "doc_rewritten" | "doc_served" => {
-                &[FILE, REASON, RETURNED, AVOIDED]
-            }
-            "read_repeat_observed" => &[FILE, REASON],
-            "read_prevented" => &[FILE, REASON, AVOIDED],
-            "search_answered" => &[REASON, RETURNED, AVOIDED],
-            "grep_capped" => &[("handle", GrepHandle)],
-            "doc_deferred" => &[FILE, REASON, RETURNED],
-            _ => return None,
-        })
-    }
-
-    /// The payload with every member frozen by its rule, or `None` when the
-    /// kind is unknown, disagrees with the verb, or carries an undeclared
-    /// member.
-    fn canonical_payload(verb: &str, payload: &Value) -> Option<Value> {
-        let kind = verb.strip_prefix("memd.")?;
-        let (Some(members), Value::Object(fields)) = (declared(kind), payload) else {
-            return None;
-        };
-        if fields.get("kind")?.as_str()? != kind {
-            return None;
-        }
-        let mut out = Map::new();
-        for (name, value) in fields {
-            let rule = match members.iter().find(|(declared, _)| declared == name) {
-                Some((_, rule)) => *rule,
-                None if name == "kind" => {
-                    out.insert(name.clone(), kind.into());
-                    continue;
-                }
-                None if name == "reason" => Member::GrantTag,
-                None => return None,
-            };
-            out.insert(name.clone(), frozen_member(rule, value)?);
-        }
-        Some(Value::Object(out))
-    }
-
-    /// The call record of a schema-4 line, or `None` when it is not the one
-    /// the appender would book.
-    fn canonical_call(key: &str, call: &Value) -> Option<Value> {
-        const MEMBERS: [&str; 6] = [
-            "call_id",
-            "channel",
-            "recorded_at",
-            "tokens_avoided",
-            "tokens_returned",
-            "tool_name",
-        ];
-        let Value::Object(fields) = call else {
-            return None;
-        };
-        if fields.keys().any(|k| !MEMBERS.contains(&k.as_str())) {
-            return None;
-        }
-        let channel = fields.get("channel")?.as_str()?;
-        let tool_name = fields.get("tool_name")?.as_str()?;
-        if fields.get("call_id")?.as_str()? != key
-            || rift_recall_serve::ServeChannel::parse(channel).is_none()
-        {
-            return None;
-        }
-        let mut out = Map::new();
-        out.insert("call_id".into(), key.into());
-        out.insert("channel".into(), channel.into());
-        out.insert(
-            "recorded_at".into(),
-            fields.get("recorded_at")?.as_i64()?.into(),
-        );
-        for count in ["tokens_avoided", "tokens_returned"] {
-            out.insert(count.into(), fields.get(count)?.as_u64()?.into());
-        }
-        let tool_name = if is_tool_name(tool_name) {
-            tool_name
-        } else {
-            WITHHELD
-        };
-        out.insert("tool_name".into(), tool_name.into());
-        Some(Value::Object(out))
-    }
-
-    /// One member frozen by its rule; `None` when its JSON type is not the
-    /// one the rule reads, which refuses the whole line.
-    fn frozen_member(rule: Member, value: &Value) -> Option<Value> {
-        if let Member::Count = rule {
-            return Some(value.as_u64()?.into());
-        }
-        let text = value.as_str()?;
-        Some(if is_kept(rule, text) { text } else { WITHHELD }.into())
-    }
-
-    /// Whether a text member's value is one its rule lets through.
-    fn is_kept(rule: Member, text: &str) -> bool {
-        let grant = text == rift_recall_serve::CROSS_BRANCH_GRANT_TAG;
-        match rule {
-            // A count that arrives as text is not a count.
-            Member::Count => false,
-            Member::Tag => is_tag(text),
-            Member::Typed | Member::GrantTag => grant,
-            Member::FileHandle => text.is_empty() || is_file_handle(text),
-            Member::SummaryHandle => text.strip_prefix("summary:").is_some_and(is_path),
-            Member::ExactHandle => is_exact_handle(text),
-            Member::GrepHandle => text.strip_prefix("grep:matches=").is_some_and(is_digits),
-            Member::RefusedTarget => is_citation(text),
-        }
-    }
-
-    /// A handle an exact retrieval can have served: a file, a summary, a log
-    /// entry or a citation.
-    fn is_exact_handle(text: &str) -> bool {
-        is_file_handle(text)
-            || text.strip_prefix("summary:").is_some_and(is_path)
-            || text.strip_prefix("log:").is_some_and(is_key)
-            || is_citation(text)
-    }
-
-    /// `pack:<key>/evidence:<n>[@sha256:<hash>]`, optionally followed by
-    /// `=file:…` — the address the pack compiler composed and, after the `=`,
-    /// the record it resolved to.
-    fn is_citation(text: &str) -> bool {
-        let (head, resolved) = match text.split_once('=') {
-            Some((head, tail)) => (head, Some(tail)),
-            None => (text, None),
-        };
-        rift_recall_serve::pack::CitationTarget::parse(head).is_some()
-            && resolved.is_none_or(is_file_handle)
-    }
-
-    /// `file:<path>@sha256:<64 hex>`, optionally `:L<lo>-<hi>`.
-    fn is_file_handle(text: &str) -> bool {
-        let Some((path, tail)) = text
-            .strip_prefix("file:")
-            .and_then(|rest| rest.rsplit_once("@sha256:"))
-        else {
-            return false;
-        };
-        let (hash, lines) = match tail.split_once(':') {
-            Some((hash, lines)) => (hash, Some(lines)),
-            None => (tail, None),
-        };
-        let range_ok = lines.is_none_or(|lines| {
-            lines
-                .strip_prefix('L')
-                .and_then(|range| range.split_once('-'))
-                .is_some_and(|(lo, hi)| is_digits(lo) && is_digits(hi))
-        });
-        is_path(path) && is_hex64(hash) && range_ok
-    }
-
-    /// A repository path as a handle carries it: non-empty, bounded, and free
-    /// of control characters.
-    fn is_path(path: &str) -> bool {
-        !path.is_empty() && path.len() <= 4096 && !path.chars().any(char::is_control)
-    }
-
-    fn is_hex64(text: &str) -> bool {
-        text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit())
-    }
-
-    fn is_digits(text: &str) -> bool {
-        !text.is_empty() && text.len() <= 10 && text.bytes().all(|b| b.is_ascii_digit())
-    }
-
-    /// A closed-vocabulary tag; the empty tag is what a decision without one
-    /// carries.
-    fn is_tag(text: &str) -> bool {
-        text.len() <= 64
-            && text
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-    }
-
-    /// An idempotency key or a log id: a hash, a ULID or a caller's call id.
-    fn is_key(text: &str) -> bool {
-        !text.is_empty()
-            && text.len() <= 128
-            && text
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    }
-
-    /// `<family>:<step>` or a skill verb.
-    fn is_tool_name(text: &str) -> bool {
-        !text.is_empty()
-            && text.len() <= 128
-            && text
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':' | b'.'))
-    }
+    rt.block_on(append_memd_audit(&store, &body, now_ms()))
 }
 
 /// The read gate: what a context window is handed, what it stops holding, and
@@ -859,6 +476,7 @@ mod serve_audit_tests {
             declared_avoided: None,
             shape: None,
             session: None,
+            window: None,
         }
     }
 
@@ -1193,289 +811,5 @@ mod serve_audit_tests {
         let (rows, _) = book(tmp.path(), &audit);
         assert_eq!(rows[0].2, rift_recall_serve::TAG_BASIS_UNAVAILABLE);
         assert_eq!(rows[0].4, 0);
-    }
-}
-
-/// What a serve envelope may carry into a shard, and where its line lands.
-#[cfg(test)]
-mod serve_journal_tests {
-    use proptest::prelude::*;
-    use rift_recall_serve::{MemdEvent, ServeChannel};
-    use serde_json::Value;
-
-    use super::frozen::WITHHELD;
-    use super::*;
-
-    /// Every event kind the type has, with `text` in every string member.
-    fn every_event(text: &str) -> Vec<MemdEvent> {
-        let mut events = counted_events();
-        events.extend(text_events(text));
-        events
-    }
-
-    /// The kinds that carry counts and nothing else.
-    fn counted_events() -> Vec<MemdEvent> {
-        vec![
-            MemdEvent::ManifestServed {
-                estimated_tokens_returned: 3,
-                estimated_tokens_avoided: 9,
-            },
-            MemdEvent::ManifestInjected {
-                estimated_tokens_returned: 3,
-            },
-            MemdEvent::PackBuilt {
-                sections: 2,
-                total_tokens: 7,
-                estimated_tokens_returned: 3,
-                estimated_tokens_avoided: 9,
-            },
-            MemdEvent::RecoveryInjected {
-                estimated_tokens_returned: 3,
-            },
-            MemdEvent::SearchServed {
-                estimated_tokens_returned: 3,
-                estimated_tokens_avoided: 9,
-            },
-        ]
-    }
-
-    /// The kinds that carry a string member, each holding `text`.
-    fn text_events(text: &str) -> Vec<MemdEvent> {
-        let s = || text.to_owned();
-        vec![
-            MemdEvent::SummaryServed {
-                handle: s(),
-                estimated_tokens_returned: 3,
-                estimated_tokens_avoided: 9,
-            },
-            MemdEvent::ExactRetrieved {
-                handle: s(),
-                reason: s(),
-                estimated_tokens_returned: 3,
-            },
-            MemdEvent::Invalidated {
-                handle: s(),
-                estimated_tokens_returned: 3,
-            },
-            MemdEvent::Refused {
-                target: s(),
-                reason: s(),
-                estimated_tokens_returned: 3,
-            },
-            MemdEvent::ReadIntercepted {
-                handle: s(),
-                reason: s(),
-                estimated_tokens_returned: 3,
-                estimated_tokens_avoided: 9,
-            },
-            MemdEvent::ReadRepeatObserved {
-                handle: s(),
-                reason: s(),
-            },
-            MemdEvent::ReadPrevented {
-                handle: s(),
-                reason: s(),
-                estimated_tokens_avoided: 9,
-            },
-            MemdEvent::SearchAnswered {
-                reason: s(),
-                estimated_tokens_returned: 3,
-                estimated_tokens_avoided: 9,
-            },
-            MemdEvent::GrepCapped { handle: s() },
-            MemdEvent::DocRewritten {
-                handle: s(),
-                reason: s(),
-                estimated_tokens_returned: 3,
-                estimated_tokens_avoided: 9,
-            },
-            MemdEvent::DocDeferred {
-                handle: s(),
-                reason: s(),
-                estimated_tokens_returned: 3,
-            },
-            MemdEvent::DocServed {
-                handle: s(),
-                reason: s(),
-                estimated_tokens_returned: 3,
-                estimated_tokens_avoided: 9,
-            },
-        ]
-    }
-
-    /// Both envelopes one event becomes, schema 1 then schema 4.
-    fn envelopes(event: &MemdEvent) -> [String; 2] {
-        let at = rift_core::Timestamp::from_millis(1_700_000_000_000);
-        [
-            event.to_hook_json_keyed("call-1"),
-            event.to_serve_call_json(
-                ServeChannel::HookInject,
-                "call-1",
-                "claude-code:read-gate",
-                at,
-            ),
-        ]
-    }
-
-    fn frozen(envelope: &str) -> Value {
-        let line = canonical_serve_line(envelope.as_bytes()).expect("a declared envelope freezes");
-        serde_json::from_slice(&line).unwrap()
-    }
-
-    /// Every kind, both schemas: one line, keys sorted (re-serialising it is
-    /// the identity), the key and the verb the envelope carried, and a line
-    /// that is its own canonical form.
-    #[test]
-    fn every_event_kind_freezes_to_a_sorted_line_that_keeps_its_key() {
-        let file = format!("file:src/a.rs@sha256:{}:L1-4", "a".repeat(64));
-        for event in every_event(&file) {
-            for envelope in envelopes(&event) {
-                let line = canonical_serve_line(envelope.as_bytes()).expect("freezes");
-                let value: Value = serde_json::from_slice(&line).unwrap();
-                assert_eq!(serde_json::to_vec(&value).unwrap(), line, "keys sorted");
-                let original: Value = serde_json::from_str(&envelope).unwrap();
-                assert_eq!(value["idempotency_key"], original["idempotency_key"]);
-                assert_eq!(value["verb"], original["verb"]);
-                assert_eq!(
-                    canonical_serve_line(&line),
-                    Some(line.clone()),
-                    "idempotent"
-                );
-                assert!(!line.contains(&b'\n'), "one line");
-            }
-        }
-    }
-
-    /// The caller's reason and a refusal's typed target are withheld; Rift's
-    /// own handles, tags and the grant tag are kept.
-    #[test]
-    fn typed_text_is_withheld_and_rifts_own_vocabulary_is_kept() {
-        let exact = MemdEvent::ExactRetrieved {
-            handle: format!("file:src/a.rs@sha256:{}", "b".repeat(64)),
-            reason: "because the customer password is hunter2".to_owned(),
-            estimated_tokens_returned: 1,
-        };
-        let line = frozen(&exact.to_hook_json_keyed("k"));
-        assert_eq!(line["payload"]["reason"], WITHHELD);
-        assert_eq!(line["payload"]["handle"], exact_handle(&exact));
-        let granted = rift_recall_serve::grant_tagged_envelope(&exact, "k");
-        assert_eq!(
-            frozen(&granted)["payload"]["reason"],
-            rift_recall_serve::CROSS_BRANCH_GRANT_TAG
-        );
-        let served = MemdEvent::ManifestServed {
-            estimated_tokens_returned: 1,
-            estimated_tokens_avoided: 2,
-        };
-        let granted = rift_recall_serve::grant_tagged_envelope(&served, "k");
-        assert_eq!(
-            frozen(&granted)["payload"]["reason"],
-            rift_recall_serve::CROSS_BRANCH_GRANT_TAG
-        );
-
-        let refused = |target: &str| MemdEvent::Refused {
-            target: target.to_owned(),
-            reason: "policy_denied_exact".to_owned(),
-            estimated_tokens_returned: 1,
-        };
-        let typed = frozen(&refused("secrets/prod.env please").to_hook_json_keyed("k"));
-        assert_eq!(typed["payload"]["target"], WITHHELD);
-        assert_eq!(typed["payload"]["reason"], "policy_denied_exact");
-        let citation = format!("pack:{}/evidence:3", "c".repeat(64));
-        assert_eq!(
-            frozen(&refused(&citation).to_hook_json_keyed("k"))["payload"]["target"],
-            citation.as_str()
-        );
-
-        let odd_tag = MemdEvent::SearchAnswered {
-            reason: "Not A Tag".to_owned(),
-            estimated_tokens_returned: 1,
-            estimated_tokens_avoided: 1,
-        };
-        assert_eq!(
-            frozen(&odd_tag.to_hook_json_keyed("k"))["payload"]["reason"],
-            WITHHELD
-        );
-    }
-
-    fn exact_handle(event: &MemdEvent) -> String {
-        match event {
-            MemdEvent::ExactRetrieved { handle, .. } => handle.clone(),
-            _ => String::new(),
-        }
-    }
-
-    /// A member nobody audited refuses the whole line, at every level, and so
-    /// do the retired schemas and a call record the appender would not book.
-    #[test]
-    fn a_line_with_a_member_nobody_audited_is_refused() {
-        let event = MemdEvent::GrepCapped {
-            handle: "grep:matches=4".to_owned(),
-        };
-        let [audited, called] = envelopes(&event);
-        let plant = |envelope: &str, pointer: &str| {
-            let mut value: Value = serde_json::from_str(envelope).unwrap();
-            value
-                .pointer_mut(pointer)
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .insert("note".into(), "hi".into());
-            value.to_string()
-        };
-        for planted in [
-            plant(&audited, ""),
-            plant(&audited, "/payload"),
-            plant(&called, "/serve_call"),
-        ] {
-            assert_eq!(canonical_serve_line(planted.as_bytes()), None, "{planted}");
-        }
-        let edit = |envelope: &str, pointer: &str, to: Value| {
-            let mut value: Value = serde_json::from_str(envelope).unwrap();
-            *value.pointer_mut(pointer).unwrap() = to;
-            value.to_string()
-        };
-        for refused in [
-            edit(&audited, "/schema", 2.into()),
-            edit(&audited, "/verb", "memd.refused".into()),
-            edit(&called, "/serve_call/call_id", "another".into()),
-            edit(&called, "/serve_call/channel", "mcp".into()),
-            edit(&audited, "/idempotency_key", "a key with spaces".into()),
-        ] {
-            assert_eq!(canonical_serve_line(refused.as_bytes()), None, "{refused}");
-        }
-        assert_eq!(canonical_serve_line(b"not json"), None);
-    }
-
-    /// Every string value in a parsed line, at any depth.
-    fn strings_in(value: &Value, out: &mut Vec<String>) {
-        match value {
-            Value::String(text) => out.push(text.clone()),
-            Value::Object(members) => members.values().for_each(|v| strings_in(v, out)),
-            Value::Array(items) => items.iter().for_each(|v| strings_in(v, out)),
-            _ => (),
-        }
-    }
-
-    proptest! {
-        /// Whatever text reaches a member that can hold it, no run of it longer
-        /// than a hash survives into the line: every string left is a declared
-        /// member's own value — a key, a verb, a tag, a handle Rift composed —
-        /// or the placeholder.
-        #[test]
-        fn no_typed_text_longer_than_a_hash_survives(
-            words in "[ -~]{0,20}",
-            run in "[!-~]{65,90}",
-        ) {
-            let text = format!("{words} {run}");
-            for event in every_event(&text) {
-                for envelope in envelopes(&event) {
-                    let line = canonical_serve_line(envelope.as_bytes()).expect("freezes");
-                    let mut strings = Vec::new();
-                    strings_in(&serde_json::from_slice(&line).unwrap(), &mut strings);
-                    prop_assert!(strings.iter().all(|s| !s.contains(&run)), "{strings:?}");
-                }
-            }
-        }
     }
 }

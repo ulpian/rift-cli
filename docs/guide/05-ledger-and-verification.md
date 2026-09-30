@@ -103,7 +103,7 @@ and a version field nothing binds documents nothing.
 | `full.jsonl` | one line per archived canonical event |
 | `metadata.json` | the header: sessions covered, recorded Merkle root, canonicalization era, task list, token rollups |
 | `redaction_report.json` | counts only — what redaction removed, never what it removed |
-| `serve_audit.jsonl` | the serves Rift made in the session, one canonical envelope per line; absent when there were none |
+| `serve_audit.jsonl` | the serves the recall projection attributes to the session, one canonical envelope per line; absent when there were none |
 | `tool_calls.jsonl` | the tool calls, reduced to identifiers |
 | `transcript.*.jsonl` | the transcript: a full copy and a deterministic compact one |
 
@@ -126,16 +126,15 @@ the target of a refusal unless it is a citation.
 Each line keeps its idempotency key, and every line carries its own envelope
 `schema`, so the artifact has no single version of its own.
 A schema-1 envelope holds no clock of its own, so the recall rebuild reads a schema-1 line only when it carries a top-level `recorded_at`, the instant its row was written at; a schema-4 line keeps its instant inside `serve_call`.
-Serves are journaled per session under the family's git common dir, beside the
-push queue, and a serve that belongs to no session (a skill-CLI call) is folded
-into the next checkpoint any session of the family condenses.
-The artifact is cumulative, like the read facts beside it: every checkpoint of a
-session carries every serve the session has frozen so far, so a second commit
-with nothing served since derives the same id and stays a no-op.
-The trailer's prediction folds the same journal through the same function, so
-a session with serves predicts its checkpoint as exactly as it predicts its
-read facts: a serve journaled between the trailer and the condense lands in the
-archive and not in the trailer, and the archive keeps its true id.
+Every line also names the session that made it, `session_id`, and where the writer knew it, `window_key`, the one-way key of the context window inside that session; both are identifiers, and a line whose attribution is not one is refused, never withheld.
+
+The artifact is a query, built at archive time the way the read facts beside it are.
+A serve made inside a session is written to the recall projection together with one row of `memd_audit_session`, which names its session and window.
+The archive joins the two serve relations to that relation for the session, rebuilds one line per row from the row's own columns, passes every line through the canonical table, and sorts the lines by key.
+Which shard holds a serve is therefore decided by the row that names its session, never by which checkpoint happened to run next, and a serve no session made — a person running `rift recall` in a terminal — stays an ordinary projection row that no shard freezes.
+A call row holds no handle and no reason, so a schema-4 line's payload names only its kind; a pack's section counts are in no row and are in no line.
+The artifact is cumulative by construction: every checkpoint of a session carries every serve the session has made so far, so a second commit with nothing served since derives the same id and stays a no-op.
+The trailer's prediction runs the same query through the same function, opening the projection read-only, so a session with serves predicts its checkpoint as exactly as it predicts its read facts: a serve booked between the trailer and the condense lands in the archive and not in the trailer, and the archive keeps its true id.
 
 `rift checkpoint explain` renders a shard for a human — metadata, digests, the
 redacted prompt, files touched, tokens and cost, attribution — and with no

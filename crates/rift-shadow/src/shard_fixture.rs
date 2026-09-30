@@ -35,8 +35,8 @@
 //!
 //! The frozen serve envelopes are literals rather than an input file: one
 //! schema-4 line and one schema-1 line, in the canonical shape the one writer
-//! freezes (keys sorted, typed text already withheld), sorted by idempotency
-//! key.
+//! freezes from the recall rows (keys sorted, typed text already withheld,
+//! the session and window that made them named), sorted by idempotency key.
 
 use std::path::PathBuf;
 
@@ -212,7 +212,8 @@ fn fixture_read_facts() -> Vec<ArchivedReadFact> {
 
 /// The frozen serve envelopes the fixture archives as `serve_audit.jsonl`: a
 /// read decline booked in both relations, its schema-4 call line first because
-/// its key sorts first.
+/// its key sorts first. A call row holds no handle and no reason, so its line's
+/// payload names only its kind.
 fn fixture_serve_audit() -> Vec<u8> {
     let handle = format!(
         "file:crates/rift-shadow/src/backend.rs@sha256:{}:L1-40",
@@ -225,9 +226,10 @@ fn fixture_serve_audit() -> Vec<u8> {
         "kind": "read_intercepted",
         "reason": "already_held",
     });
+    let window = "e".repeat(64);
     let call = serde_json::json!({
         "idempotency_key": "01JSERVEFIXTURE",
-        "payload": payload,
+        "payload": { "kind": "read_intercepted" },
         "schema": 4,
         "serve_call": {
             "call_id": "01JSERVEFIXTURE",
@@ -237,14 +239,18 @@ fn fixture_serve_audit() -> Vec<u8> {
             "tokens_returned": 40,
             "tool_name": "claude-code:read-gate",
         },
+        "session_id": FIXTURE_SESSIONS[0],
         "verb": "memd.read_intercepted",
+        "window_key": window,
     });
     let audit = serde_json::json!({
         "idempotency_key": "d".repeat(64),
         "payload": payload,
         "recorded_at": FIXTURE_CREATED_AT_MS - 7_000,
         "schema": 1,
+        "session_id": FIXTURE_SESSIONS[0],
         "verb": "memd.read_intercepted",
+        "window_key": window,
     });
     let mut out = Vec::new();
     for line in [call, audit] {

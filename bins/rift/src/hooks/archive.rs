@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use rift_core::Result;
 
-use super::audit::{canonical_serve_line, serve_journal_path, serve_line_key};
+use super::audit::session_serve_lines;
 use super::git::{effective_config, session_raw_capture, state_from_token, strategy_kind};
 use super::{now_ms, projection_db_at};
 
@@ -68,8 +68,7 @@ pub(super) fn archive_now(
     let repo = rift_git::discover(work_tree)?;
     let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
     let raw = session_raw_capture(&repo.work_tree);
-    let facts = session_facts_for_archive(rt, store, &repo.common_dir, agent, session);
-    let frozen = facts.serve_audit.clone();
+    let facts = session_facts_for_archive(rt, store, &repo.work_tree, agent, session);
     let (packs, notes) = crate::redactor_packs::capture_rule_packs(&repo.work_tree);
     report_pack_notes(&notes);
     // A session-end/sweep condense archives the transcript too — same source,
@@ -110,31 +109,28 @@ pub(super) fn archive_now(
     if let Ok(Some(id)) = &archived {
         let t = crate::hooktime::HookTimer::from_env("archive-now");
         record_chain_entry(&t, &repo, Some(id.as_str()), now);
-        fold_archived_serves(&repo.common_dir, session, frozen.as_deref(), id);
     }
     archived
 }
 
 /// What the session captured beside its capture document: its read facts and
-/// its frozen serves.
+/// its serves.
 ///
 /// The one reading both the trailer's prediction and the archive fold, so
 /// the two derive one checkpoint id from the same bytes. The prediction can
-/// still miss by one change, exactly as it can for a read fact: a serve
-/// journaled between `prepare-commit-msg` and the worker's condense lands in
-/// the archive and not in the trailer, and so does an unattributed serve
-/// another session's condense folds first. The archive keeps its true id
-/// either way.
+/// still miss by one change, exactly as it can for a read fact: a serve booked
+/// between `prepare-commit-msg` and the worker's condense lands in the archive
+/// and not in the trailer. The archive keeps its true id either way.
 pub(super) fn session_facts_for_archive(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
-    common_dir: &Path,
+    work_tree: &Path,
     agent: &str,
     session: &str,
 ) -> rift_shadow::SessionFacts {
     rift_shadow::SessionFacts {
         read_facts: read_facts_for_archive(rt, store, agent, session),
-        serve_audit: serve_audit_for_archive(common_dir, session),
+        serve_audit: serve_audit_for_archive(rt, work_tree, session),
     }
 }
 
@@ -161,46 +157,47 @@ fn read_facts_for_archive(
         .collect()
 }
 
-/// The bytes of the session's `serve_audit.jsonl`: what its earlier
-/// checkpoints froze, its own journal and the family's unattributed one, every
-/// line validated, de-duplicated by idempotency key and sorted by it, or
-/// `None` when nothing is left — the artifact is never written empty.
+/// The bytes of the session's `serve_audit.jsonl`: every serve the recall
+/// projection attributes to the session, one canonical line each, sorted by
+/// key, or `None` when there is none — the artifact is never written empty.
 ///
-/// Cumulative, like the read facts beside it: every checkpoint of a session
-/// carries every serve the session has frozen so far. A second commit in a
-/// session that served nothing since therefore derives the id the first one
-/// did, and the re-archive stays the no-op it always was; an artifact holding
-/// only the serves since the last checkpoint would mint a new shard for
-/// unchanged capture instead.
+/// A query, like the read facts beside it, and cumulative by construction:
+/// every checkpoint of a session carries every serve the session has made so
+/// far, so a second commit in a session that served nothing since derives
+/// the id the first one did and the re-archive stays a no-op. Which shard
+/// holds a serve is decided by the row that names its session, never by which
+/// checkpoint ran next, and a serve no session made is in no shard.
 ///
-/// A line is valid only when it is already its own canonical form, so a line
-/// planted into a journal by hand, or torn by a crash, is counted and never
-/// frozen. Two lines with one key are one serve (a redelivered job journals
-/// twice); the bytewise smaller is kept, so the choice is a function of the
-/// journals and not of the order they were read in.
-pub(super) fn serve_audit_for_archive(common_dir: &Path, session: &str) -> Option<Vec<u8>> {
-    let mut lines: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut dropped = 0usize;
-    let sources = [
-        frozen_record_path(common_dir, session),
-        serve_journal_path(common_dir, Some(session)),
-        serve_journal_path(common_dir, None),
-    ];
-    for path in sources.into_iter().flatten() {
-        let bytes = std::fs::read(&path).unwrap_or_default();
-        for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
-            match frozen_line_key(line) {
-                Some(key) => lines.push((key, line.to_vec())),
-                None => dropped += 1,
-            }
-        }
+/// The projection is opened read-only: this runs inside `prepare-commit-msg`
+/// as well as in the worker, and neither creates or migrates a store to read
+/// it. A family with no `recall.db`, or one no writer has migrated to hold
+/// attributions, has none to freeze; a query failure archives none rather
+/// than blocking the checkpoint. A row whose line the canonical table refuses
+/// is counted and left out.
+pub(super) fn serve_audit_for_archive(
+    rt: &tokio::runtime::Runtime,
+    work_tree: &Path,
+    session: &str,
+) -> Option<Vec<u8>> {
+    let db = crate::family::recall_db(work_tree).ok()?;
+    if !db.exists() {
+        return None;
     }
-    if dropped > 0 {
+    let store = rift_store::SqliteStore::open_read_only(&db).ok()?;
+    let serves = rt
+        .block_on(rift_recall_ledger::attribution::session_serves(
+            &store, session,
+        ))
+        .ok()?;
+    let rebuilt = session_serve_lines(&serves, session);
+    let refused = rebuilt.iter().filter(|line| line.is_none()).count();
+    if refused > 0 {
         tracing::warn!(
-            dropped,
-            "serve journal lines that are not canonical were not frozen"
+            refused,
+            "serve rows whose line is not canonical were not frozen"
         );
     }
+    let mut lines: Vec<(String, Vec<u8>)> = rebuilt.into_iter().flatten().collect();
     lines.sort();
     lines.dedup_by(|later, kept| later.0 == kept.0);
     if lines.is_empty() {
@@ -212,140 +209,6 @@ pub(super) fn serve_audit_for_archive(common_dir: &Path, session: &str) -> Optio
         out.push(b'\n');
     }
     Some(out)
-}
-
-/// Where the serves a session's checkpoints have frozen so far are kept, so
-/// the next checkpoint of the session carries them again: `frozen/<session>.jsonl`
-/// beside the journals. A directory of its own, so no session id can name a
-/// journal and a record at once.
-fn frozen_record_path(common_dir: &Path, session: &str) -> Option<PathBuf> {
-    let journal = serve_journal_path(common_dir, Some(session))?;
-    Some(journal.parent()?.join("frozen").join(journal.file_name()?))
-}
-
-/// The key of a journal line that is already canonical, or `None`.
-fn frozen_line_key(line: &[u8]) -> Option<String> {
-    if canonical_serve_line(line).as_deref() != Some(line) {
-        return None;
-    }
-    serve_line_key(line)
-}
-
-/// Take the serves a checkpoint froze out of the journals it read them from,
-/// without losing a line appended since, and keep them in the session's
-/// frozen record so its next checkpoint carries them again.
-///
-/// The record is written first, whole, through a temporary sibling and a
-/// rename; if that fails nothing is taken out of the journals, so the next
-/// checkpoint reads the same lines from where they still are.
-///
-/// Each journal is renamed to a `…folding-<checkpoint>` sibling, so a writer
-/// that opens the journal from here on starts a fresh file; the sibling is
-/// re-read, every line whose key the checkpoint did not freeze is appended
-/// back to the live journal, and the sibling is deleted. A sibling left by a
-/// crash mid-cleanup is folded back the same way by the next cleanup of that
-/// journal, so a line is never lost to one.
-///
-/// The window that stays open: a writer that opened the live journal before
-/// the rename and wrote after the sibling's last read. The sibling is re-read
-/// until it stops growing, so the window is the instant between that last
-/// read and the unlink, and a writer holds its file open for exactly one
-/// `write`. A line lost there is still in the projection; only its frozen
-/// copy is missed. Closing it would take a lock every hook-side writer waits
-/// on, which is the wrong trade for a copy.
-fn fold_archived_serves(
-    common_dir: &Path,
-    session: &str,
-    archived: Option<&[u8]>,
-    checkpoint: &str,
-) {
-    if let (Some(bytes), Some(record)) = (archived, frozen_record_path(common_dir, session)) {
-        if write_frozen_record(&record, bytes, checkpoint).is_err() {
-            return;
-        }
-    }
-    let keys: std::collections::BTreeSet<String> = archived
-        .unwrap_or_default()
-        .split(|b| *b == b'\n')
-        .filter_map(serve_line_key)
-        .collect();
-    for journal in [Some(session), None] {
-        if let Some(live) = serve_journal_path(common_dir, journal) {
-            fold_journal(&live, &keys, checkpoint);
-        }
-    }
-}
-
-/// Replace the session's frozen record with what its checkpoint froze — a
-/// superset of the record, which it was read from.
-fn write_frozen_record(record: &Path, bytes: &[u8], checkpoint: &str) -> std::io::Result<()> {
-    let Some(dir) = record.parent() else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(dir)?;
-    let staged = record.with_extension(format!("staged-{checkpoint}"));
-    std::fs::write(&staged, bytes)?;
-    std::fs::rename(&staged, record)
-}
-
-/// Fold one journal: rename it aside, then fold every sibling back.
-fn fold_journal(live: &Path, archived: &std::collections::BTreeSet<String>, checkpoint: &str) {
-    let Some(name) = live.file_name().and_then(std::ffi::OsStr::to_str) else {
-        return;
-    };
-    let prefix = format!("{name}.folding-");
-    // An absent journal has nothing to rename; its leftovers still fold.
-    let _ = std::fs::rename(live, live.with_file_name(format!("{prefix}{checkpoint}")));
-    let Some(Ok(entries)) = live.parent().map(std::fs::read_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        let is_sibling = file_name
-            .to_str()
-            .and_then(|n| n.strip_prefix(&prefix))
-            .is_some_and(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()));
-        if is_sibling {
-            refold(live, &entry.path(), archived);
-        }
-    }
-}
-
-/// Append back to `live` every line of `folding` the checkpoint did not
-/// freeze, re-reading until the sibling stops growing, then delete it.
-fn refold(live: &Path, folding: &Path, archived: &std::collections::BTreeSet<String>) {
-    use std::io::Write as _;
-    let mut consumed = 0usize;
-    loop {
-        let Ok(bytes) = std::fs::read(folding) else {
-            return;
-        };
-        let fresh = match bytes.get(consumed..) {
-            Some(fresh) if !fresh.is_empty() => fresh,
-            _ => break,
-        };
-        let kept: Vec<u8> = fresh
-            .split_inclusive(|b| *b == b'\n')
-            .filter(|line| {
-                serve_line_key(line.trim_ascii_end()).is_none_or(|key| !archived.contains(&key))
-            })
-            .flat_map(|line| line.iter().copied())
-            .collect();
-        consumed = bytes.len();
-        if kept.is_empty() {
-            continue;
-        }
-        let appended = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(live)
-            .and_then(|mut file| file.write_all(&kept));
-        if appended.is_err() {
-            // Keep the sibling: the next cleanup folds it back.
-            return;
-        }
-    }
-    let _ = std::fs::remove_file(folding);
 }
 
 /// The deferred half of `post-commit`: bind identities, diff the commit, replay
@@ -1014,9 +877,8 @@ fn run_archive(
         session_raw_capture(&repo.work_tree)
     });
     let facts = t.phase("archive_read_facts", || {
-        session_facts_for_archive(rt, store, &repo.common_dir, agent, session_id)
+        session_facts_for_archive(rt, store, &repo.work_tree, agent, session_id)
     });
-    let frozen = facts.serve_audit.clone();
     // The repository's own redactor packs, folded in beside the built-ins. Any
     // note is recorded as a queue marker rather than printed — the worker's
     // stderr is /dev/null, so the next hook is what says it. (This comment used
@@ -1058,9 +920,6 @@ fn run_archive(
     });
     if let (Ok(Some(_)), Some(lines)) = (&archived, transcript_raw_lines) {
         record_transcript_progress(&repo.git_dir, session_id, lines, now);
-    }
-    if let Ok(Some(id)) = &archived {
-        fold_archived_serves(&repo.common_dir, session_id, frozen.as_deref(), id);
     }
     // The pack notes are owed whether or not the archive landed: a pack that
     // would not compile degraded THIS commit's coverage, and the archive error
@@ -1172,269 +1031,5 @@ pub(super) fn record_pack_notes(git_dir: &Path, notes: &[String]) {
             "redactor-pack-more",
             &format!("and {extra} more redactor pack note(s)"),
         );
-    }
-}
-
-/// The serve journal the archive reads, and what the archive leaves of it.
-#[cfg(test)]
-mod serve_journal_tests {
-    use rift_recall_serve::{MemdEvent, ServeChannel};
-
-    use super::*;
-    use crate::hooks::audit::{journal_serve_envelope, serve_journal_dir};
-
-    /// Both envelopes one serve becomes, schema 1 then schema 4, under `call`.
-    fn envelopes(event: &MemdEvent, call: &str) -> [String; 2] {
-        let at = rift_core::Timestamp::from_millis(1_700_000_000_000);
-        [
-            event.to_hook_json_keyed(call),
-            event.to_serve_call_json(
-                ServeChannel::HookInject,
-                call,
-                "claude-code:search-gate",
-                at,
-            ),
-        ]
-    }
-
-    /// Journal one capped search's pair under `session`, keyed by `call`.
-    fn journal(common: &Path, session: Option<&str>, call: &str) -> [Vec<u8>; 2] {
-        let event = MemdEvent::GrepCapped {
-            handle: "grep:matches=4".to_owned(),
-        };
-        envelopes(&event, call).map(|envelope| {
-            journal_serve_envelope(common, session, envelope.as_bytes());
-            canonical_serve_line(envelope.as_bytes()).unwrap()
-        })
-    }
-
-    /// The artifact's lines, parsed back into their keys, in file order.
-    fn keys_of(artifact: &[u8]) -> Vec<String> {
-        artifact
-            .split(|b| *b == b'\n')
-            .filter_map(serve_line_key)
-            .collect()
-    }
-
-    /// **The key survives.** A frozen line handed back to the appender books
-    /// its row under the key the live envelope's row was booked under, so a
-    /// rebuild that re-appends it lands on the row, not beside it.
-    #[test]
-    fn a_frozen_line_books_the_row_its_envelope_booked() {
-        use rift_store::{apply_migrations, recall_migrations, CanonicalStore as _, SqliteStore};
-        let event = MemdEvent::ExactRetrieved {
-            handle: format!("file:src/a.rs@sha256:{}", "b".repeat(64)),
-            reason: "typed words".to_owned(),
-            estimated_tokens_returned: 5,
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let keys = |bodies: &[Vec<u8>]| {
-            let store = SqliteStore::open_in_memory().unwrap();
-            apply_migrations(&store, &recall_migrations()).unwrap();
-            rt.block_on(async {
-                for body in bodies {
-                    crate::hooks::append_memd_audit(&store, body, 1)
-                        .await
-                        .unwrap();
-                }
-                let audit = store
-                    .query("SELECT audit_id FROM memd_audit_event", &[])
-                    .await
-                    .unwrap();
-                let calls = store
-                    .query("SELECT call_id FROM serve_call_event", &[])
-                    .await
-                    .unwrap();
-                (audit[0].get_text(0).unwrap(), calls[0].get_text(0).unwrap())
-            })
-        };
-        let live: Vec<Vec<u8>> = envelopes(&event, "call-1")
-            .iter()
-            .map(|e| e.as_bytes().to_vec())
-            .collect();
-        let frozen: Vec<Vec<u8>> = live
-            .iter()
-            .map(|e| canonical_serve_line(e).unwrap())
-            .collect();
-        assert_eq!(keys(&frozen), keys(&live));
-    }
-
-    /// A serve journals its canonical line under its session, a serve with no
-    /// session under the family's unattributed journal, and a session id that
-    /// is not safe to name a file with journals nothing.
-    #[test]
-    fn a_serve_journals_one_canonical_line_where_its_session_says() {
-        let common = tempfile::tempdir().unwrap();
-        let event = MemdEvent::GrepCapped {
-            handle: "grep:matches=4".to_owned(),
-        };
-        let [audited, called] = envelopes(&event, "call-1");
-        journal_serve_envelope(common.path(), Some("s-1"), audited.as_bytes());
-        journal_serve_envelope(common.path(), Some("s-1"), called.as_bytes());
-        journal_serve_envelope(common.path(), None, audited.as_bytes());
-        journal_serve_envelope(common.path(), Some("../escape"), audited.as_bytes());
-        journal_serve_envelope(common.path(), Some("s-1"), b"not an envelope");
-
-        let dir = serve_journal_dir(common.path());
-        let session = std::fs::read(dir.join("s-1.jsonl")).unwrap();
-        let expected = [&audited, &called]
-            .iter()
-            .flat_map(|e| [canonical_serve_line(e.as_bytes()).unwrap(), b"\n".to_vec()])
-            .flatten()
-            .collect::<Vec<u8>>();
-        assert_eq!(session, expected);
-        assert_eq!(
-            std::fs::read(dir.join("unattributed.jsonl")).unwrap(),
-            [
-                canonical_serve_line(audited.as_bytes()).unwrap(),
-                b"\n".to_vec()
-            ]
-            .concat()
-        );
-        let names: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(names.len(), 2, "nothing else was written: {names:?}");
-        assert_eq!(
-            serve_line_key(&canonical_serve_line(called.as_bytes()).unwrap()).as_deref(),
-            Some("call-1")
-        );
-    }
-
-    /// Lines come out sorted by key, one per key however often a redelivered
-    /// job journaled it, each ending in a newline.
-    #[test]
-    fn the_archived_serves_are_sorted_by_key_and_one_per_key() {
-        let common = tempfile::tempdir().unwrap();
-        let second = journal(common.path(), Some("s"), "call-2");
-        let first = journal(common.path(), Some("s"), "call-1");
-        journal(common.path(), Some("s"), "call-2");
-
-        let artifact = serve_audit_for_archive(common.path(), "s").expect("serves were frozen");
-        let mut keys: Vec<String> = [&first, &second]
-            .iter()
-            .flat_map(|pair| pair.iter().filter_map(|line| serve_line_key(line)))
-            .collect();
-        keys.sort();
-        assert_eq!(keys_of(&artifact), keys);
-        assert_eq!(artifact.split_inclusive(|b| *b == b'\n').count(), 4);
-        assert!(artifact.ends_with(b"\n"));
-    }
-
-    /// No journal, an empty one, or one holding nothing canonical is no
-    /// artifact at all — never an empty one.
-    #[test]
-    fn nothing_canonical_to_freeze_is_no_artifact() {
-        let common = tempfile::tempdir().unwrap();
-        assert_eq!(serve_audit_for_archive(common.path(), "s"), None);
-        let dir = serve_journal_dir(common.path());
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("s.jsonl"), b"").unwrap();
-        assert_eq!(serve_audit_for_archive(common.path(), "s"), None);
-        std::fs::write(
-            dir.join("s.jsonl"),
-            b"not json\n{\"schema\":1,\"verb\":\"memd.grep_capped\",\"note\":\"planted\"}\n",
-        )
-        .unwrap();
-        assert_eq!(serve_audit_for_archive(common.path(), "s"), None);
-    }
-
-    /// A serve no session made is frozen into the next checkpoint of any
-    /// session in the family, beside that session's own.
-    #[test]
-    fn an_unattributed_serve_folds_into_the_next_sessions_artifact() {
-        let common = tempfile::tempdir().unwrap();
-        let own = journal(common.path(), Some("s"), "call-own");
-        let cli = journal(common.path(), None, "call-cli");
-        let artifact = serve_audit_for_archive(common.path(), "s").unwrap();
-        for line in own.iter().chain(&cli) {
-            assert!(keys_of(&artifact).contains(&serve_line_key(line).unwrap()));
-        }
-        assert_eq!(
-            serve_audit_for_archive(common.path(), "other").map(|a| keys_of(&a).len()),
-            Some(2)
-        );
-    }
-
-    /// The cleanup takes out exactly what the checkpoint froze: a serve
-    /// journaled between the archive's read and the cleanup stays, and the
-    /// renamed journal is gone.
-    #[test]
-    fn a_serve_journaled_after_the_archive_read_survives_the_cleanup() {
-        let common = tempfile::tempdir().unwrap();
-        journal(common.path(), Some("s"), "call-1");
-        journal(common.path(), None, "call-cli");
-        let archived = serve_audit_for_archive(common.path(), "s").unwrap();
-        let late = journal(common.path(), Some("s"), "call-late");
-
-        fold_archived_serves(common.path(), "s", Some(&archived), &"e".repeat(64));
-
-        let dir = serve_journal_dir(common.path());
-        let live = std::fs::read(dir.join("s.jsonl")).unwrap();
-        assert_eq!(
-            keys_of(&live),
-            late.iter()
-                .filter_map(|l| serve_line_key(l))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            !dir.join("unattributed.jsonl").exists(),
-            "the folded CLI serve left too"
-        );
-        let left: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(left.len(), 2, "the journal and the frozen record: {left:?}");
-        assert_eq!(
-            serve_audit_for_archive(common.path(), "s").map(|a| keys_of(&a).len()),
-            Some(keys_of(&archived).len() + 2),
-            "the next checkpoint carries what this one froze and the late pair"
-        );
-    }
-
-    /// **A session that served nothing since re-archives the same artifact**,
-    /// so a second commit of unchanged capture derives the id the first did:
-    /// the frozen record carries the serves the journal gave up.
-    #[test]
-    fn a_session_that_served_nothing_since_re_archives_the_same_artifact() {
-        let common = tempfile::tempdir().unwrap();
-        journal(common.path(), Some("s"), "call-1");
-        journal(common.path(), None, "call-cli");
-        let first = serve_audit_for_archive(common.path(), "s").unwrap();
-        fold_archived_serves(common.path(), "s", Some(&first), &"e".repeat(64));
-        assert_eq!(
-            serve_audit_for_archive(common.path(), "s"),
-            Some(first.clone())
-        );
-        assert_eq!(
-            serve_audit_for_archive(common.path(), "another").map(|a| keys_of(&a).len()),
-            None,
-            "the unattributed serve now belongs to the session that folded it"
-        );
-    }
-
-    /// A sibling a crash left mid-cleanup is folded back by the next cleanup:
-    /// what that crashed checkpoint had not frozen returns to the journal,
-    /// and nothing is lost to it.
-    #[test]
-    fn a_leftover_folding_journal_is_folded_back() {
-        let common = tempfile::tempdir().unwrap();
-        let unfrozen = journal(common.path(), Some("s"), "call-unfrozen");
-        let dir = serve_journal_dir(common.path());
-        let leftover = dir.join(format!("s.jsonl.folding-{}", "f".repeat(64)));
-        std::fs::rename(dir.join("s.jsonl"), &leftover).unwrap();
-        let frozen = journal(common.path(), Some("s"), "call-frozen");
-        let archived = [frozen[0].as_slice(), b"\n", frozen[1].as_slice(), b"\n"].concat();
-
-        fold_archived_serves(common.path(), "s", Some(&archived), &"e".repeat(64));
-
-        assert!(!leftover.exists());
-        let live = std::fs::read(dir.join("s.jsonl")).unwrap();
-        let want: Vec<String> = unfrozen.iter().filter_map(|l| serve_line_key(l)).collect();
-        assert_eq!(keys_of(&live), want);
     }
 }

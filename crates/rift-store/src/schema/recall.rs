@@ -569,6 +569,39 @@ const RECALL_TABLES: &[CanonicalTable] = &[
         primary_key: &["grant_id"],
         unique: NO_UNIQUE,
     },
+    // --- v13 additive (serve attribution): past RECALL_V12_TABLE_COUNT --------
+    CanonicalTable {
+        name: "memd_audit_session",
+        columns: MEMD_AUDIT_SESSION_COLUMNS,
+        primary_key: &["serve_key"],
+        unique: NO_UNIQUE,
+    },
+];
+
+/// The two relations a serve key can live in: a schema-1 decision row, or a
+/// schema-4 call row. Some producers write only one half of a decision, so
+/// the attribution names which half its key addresses.
+const SERVE_KEY_RELATIONS: &[&str] = &["memd_audit_event", "serve_call_event"];
+
+/// Columns for the v13 `memd_audit_session` relation: which session, and
+/// which context window inside it, made one serve.
+///
+/// A sparse companion on the serve's own key, for the reason
+/// `memd_audit_citation` is one: both serve relations are frozen, and
+/// widening either would move a checksum every deployed `recall.db` holds.
+/// No row is the fact "no session made this" — a person at a terminal — and
+/// it is never inferred from timing. One row per serve key rather than one
+/// per decision, because a decision's two halves carry two keys and three
+/// producers write only one of them; no foreign key is declared, since the
+/// key lives in whichever relation `relation` names. The session's
+/// checkpoint freezes its serves by joining here, and a rebuild writes the
+/// rows back from the frozen lines, which carry both identifiers.
+const MEMD_AUDIT_SESSION_COLUMNS: &[Column] = &[
+    Column::text("serve_key"), // memd_audit_event.audit_id or serve_call_event.call_id
+    Column::text_one_of("relation", SERVE_KEY_RELATIONS),
+    Column::text("session_id"),      // the agent's own session id
+    Column::text_null("window_key"), // the window journal's one-way key; NULL when unknown
+    Column::int("schema_version"),
 ];
 
 /// Columns for the v12 `n_checkpoint_commit` relation: the
@@ -647,8 +680,8 @@ pub(crate) const RECALL_V10_TABLE_COUNT: usize = 22;
 pub(crate) const RECALL_V11_TABLE_COUNT: usize = 24;
 
 /// One past the v12 `n_checkpoint_commit`/`n_checkpoint_worktree`/
-/// `serve_grant_event` relations — the current end of the recall registry.
-/// The next additive recall migration starts here.
+/// `serve_grant_event` relations. The v13 `memd_audit_session` relation
+/// starts here.
 pub(crate) const RECALL_V12_TABLE_COUNT: usize = 27;
 
 /// The v1 recall tables (the `recall_core` migration's source of truth).

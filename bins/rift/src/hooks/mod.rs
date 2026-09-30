@@ -40,7 +40,7 @@ pub(crate) use agent::hook_degradation;
 pub(crate) use archive::{
     accrue_soak, attach_archive, import_archive, level_projection, STALE_REWRITE_TOML,
 };
-pub(crate) use audit::{append_memd_audit, journal_serve_envelope};
+pub(crate) use audit::append_memd_audit;
 #[cfg(feature = "search")]
 pub(crate) use gate::payload_cwd;
 pub(crate) use gate::{gate_step, gate_turn, GateStep, AUDIT_IDS};

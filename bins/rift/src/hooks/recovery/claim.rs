@@ -83,7 +83,10 @@ pub(super) fn record_recovery_injection(
         declared_avoided: None,
         // Not a name search: nothing here stood in for a listing.
         shape: None,
+        // This writer is handed no session and no window, so the map's rows
+        // are written unattributed and frozen into no shard.
         session: None,
+        window: None,
     };
     let _ = (|| -> Result<()> {
         let db = crate::family::recall_db(repo)?;
@@ -94,12 +97,9 @@ pub(super) fn record_recovery_injection(
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(rift_core::RiftError::from)?;
-        let booked = rt.block_on(async {
+        rt.block_on(async {
             append_memd_audit(&store, audited.as_bytes(), at_ms).await?;
             append_memd_audit(&store, called.as_bytes(), at_ms).await
-        });
-        crate::hooks::audit::journal_serve_in(repo, None, audited.as_bytes());
-        crate::hooks::audit::journal_serve_in(repo, None, called.as_bytes());
-        booked
+        })
     })();
 }

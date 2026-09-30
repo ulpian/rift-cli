@@ -19,6 +19,8 @@ use rift_recall_substrate::parse::{self, ParseIssue, ServeAuditEnvelope};
 use rift_recall_substrate::SubstrateReader;
 use rift_store::CanonicalStore;
 
+use crate::attribution::{append_attributed_serve, ServeAttribution};
+
 /// The artifact the serves are frozen into.
 const ARTIFACT: &str = "serve_audit.jsonl";
 
@@ -37,11 +39,13 @@ pub(super) fn read_serves(
 }
 
 /// Hand every frozen envelope to the appender, at the instant its live row
-/// was written.
+/// was written, and write back the session and window the line names.
 ///
 /// The appender is insert-or-ignore on the key the envelope carries, so a
 /// serve the live worker already booked, or a line an earlier checkpoint of
-/// the same session froze too, is no new row.
+/// the same session froze too, is no new row; the attribution row is keyed the
+/// same way. A line without a session is a serve no session made, and gets
+/// no attribution row, exactly as its live row had none.
 ///
 /// # Errors
 /// Propagates store write errors.
@@ -50,7 +54,20 @@ pub(super) async fn append_serves(
     envelopes: &[ServeAuditEnvelope],
 ) -> Result<()> {
     for frozen in envelopes {
-        crate::audit::append_memd_audit(store, &frozen.envelope, frozen.recorded_at).await?;
+        let attribution = frozen
+            .session_id
+            .as_ref()
+            .map(|session_id| ServeAttribution {
+                session_id: session_id.clone(),
+                window_key: frozen.window_key.clone(),
+            });
+        append_attributed_serve(
+            store,
+            &frozen.envelope,
+            frozen.recorded_at,
+            attribution.as_ref(),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -235,6 +252,82 @@ mod tests {
 
         block(ingest(&store, &sub)).unwrap();
         assert_eq!(serve_rows(&store), rows, "a second pass books nothing");
+    }
+
+    /// Every attribution row of a store, sorted.
+    fn attribution_rows(store: &SqliteStore) -> Vec<(String, String, String, Option<String>)> {
+        block(store.query(
+            "SELECT serve_key, relation, session_id, window_key FROM memd_audit_session \
+             ORDER BY serve_key",
+            &[],
+        ))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.get_text(0).unwrap(),
+                row.get_text(1).unwrap(),
+                row.get_text(2).unwrap(),
+                row.get_opt_text(3).unwrap(),
+            )
+        })
+        .collect()
+    }
+
+    /// A line naming its session and window rebuilds the attribution row the
+    /// live writer left, window included and a missing window left missing;
+    /// a line naming none rebuilds none.
+    #[test]
+    fn a_rebuild_writes_back_the_attribution_rows_the_live_writer_left() {
+        use crate::attribution::{append_attributed_serve, ServeAttribution};
+        let window = "e".repeat(64);
+        let sessions = [
+            Some(ServeAttribution {
+                session_id: "s-a".to_owned(),
+                window_key: Some(window.clone()),
+            }),
+            Some(ServeAttribution {
+                session_id: "s-b".to_owned(),
+                window_key: None,
+            }),
+            None,
+        ];
+        let booked = recall_store();
+        let mut lines = Vec::new();
+        for (i, session) in sessions.iter().enumerate() {
+            let at = 1_750_000_000_000 + i64::try_from(i).unwrap();
+            for envelope in live_pair(&declined(10), &format!("call-{i}"), at) {
+                block(append_attributed_serve(
+                    &booked,
+                    envelope.as_bytes(),
+                    at,
+                    session.as_ref(),
+                ))
+                .unwrap();
+                let mut frozen: serde_json::Value =
+                    serde_json::from_str(&frozen_line(&envelope, at)).unwrap();
+                if let Some(session) = session {
+                    frozen["session_id"] = session.session_id.clone().into();
+                    if let Some(window) = &session.window_key {
+                        frozen["window_key"] = window.clone().into();
+                    }
+                }
+                lines.push(frozen.to_string());
+            }
+        }
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_artifact("c1", ARTIFACT, &artifact(&lines));
+        let rebuilt = recall_store();
+        let report = block(ingest(&rebuilt, &sub)).unwrap();
+        assert!(report.issues.is_empty(), "{:?}", report.issues);
+        assert_eq!(attribution_rows(&rebuilt), attribution_rows(&booked));
+        assert_eq!(
+            attribution_rows(&booked).len(),
+            4,
+            "two sessions, two halves each"
+        );
+        assert_eq!(serve_rows(&rebuilt), serve_rows(&booked));
     }
 
     /// A checkpoint without the artifact projects the rows it always did and

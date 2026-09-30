@@ -86,10 +86,17 @@ pub struct ServeAuditEnvelope {
     /// appender's clock for this envelope, so a rebuilt row never takes the
     /// rebuild's.
     pub recorded_at: i64,
-    /// The envelope as the appender takes it: a schema-4 line as frozen, a
-    /// schema-1 line less its `recorded_at`, which travels as the clock
+    /// The envelope as the appender takes it: the line less its attribution
+    /// and, on schema 1, less its `recorded_at`, which travels as the clock
     /// instead of as a member no live envelope carries.
     pub envelope: Vec<u8>,
+    /// The session the serve was made in, when one did: the line's own
+    /// `session_id`, which the rebuild writes back as the serve's attribution
+    /// row. `None` is a serve no session made.
+    pub session_id: Option<String>,
+    /// The context window inside that session, when the writer knew it: the
+    /// window journal's one-way key, never the ids it was hashed from.
+    pub window_key: Option<String>,
 }
 
 /// Position/category of a serde_json error — **never** the offending bytes.
@@ -430,8 +437,9 @@ pub fn parse_merkle_leaves(bytes: &[u8], checkpoint_id: &str) -> Outcome<Vec<Str
 /// A line is accepted only in the shape the canonical writer freezes — a
 /// JSON object of schema 1 or 4 with a `memd.` verb, a string key and a
 /// payload object; schema 1 also its integer `recorded_at`, schema 4 a
-/// `serve_call` whose `call_id` is the key — and with no other top-level
-/// member. Anything else is one issue for that line, and the walk goes on:
+/// `serve_call` whose `call_id` is the key; either may carry the session
+/// that made it and, beside that, the window inside it — and with no other
+/// top-level member. Anything else is one issue for that line, and the walk goes on:
 /// the appender would decline most of these anyway, but a schema-1 line
 /// without its instant it would book at the rebuild's clock, which is why the
 /// shape is checked here rather than left to it.
@@ -493,14 +501,25 @@ fn serve_audit_envelope(line: &[u8]) -> Result<ServeAuditEnvelope, String> {
             "payload",
             "recorded_at",
             "schema",
+            "session_id",
             "verb",
+            "window_key",
         ],
-        Some(4) => &["idempotency_key", "payload", "schema", "serve_call", "verb"],
+        Some(4) => &[
+            "idempotency_key",
+            "payload",
+            "schema",
+            "serve_call",
+            "session_id",
+            "verb",
+            "window_key",
+        ],
         _ => return Err("not a schema-1 or schema-4 serve envelope".to_owned()),
     };
     if env.keys().any(|member| !members.contains(&member.as_str())) {
         return Err("a top-level member the envelope does not declare".to_owned());
     }
+    let (session_id, window_key) = take_attribution(&mut env)?;
     let Some(key) = env.get("idempotency_key").and_then(Value::as_str) else {
         return Err("no string idempotency key".to_owned());
     };
@@ -512,23 +531,68 @@ fn serve_audit_envelope(line: &[u8]) -> Result<ServeAuditEnvelope, String> {
     if !is_memd_verb || !env.get("payload").is_some_and(Value::is_object) {
         return Err("no serve verb or no payload object".to_owned());
     }
-    if schema == Some(4) {
-        let recorded_at = serve_call_instant(&env, &key)?;
-        return Ok(ServeAuditEnvelope {
-            idempotency_key: key,
-            recorded_at,
-            envelope: line.to_vec(),
-        });
-    }
-    let Some(recorded_at) = env.remove("recorded_at").as_ref().and_then(Value::as_i64) else {
-        return Err("a schema-1 line without an integer recorded_at".to_owned());
+    let recorded_at = if schema == Some(4) {
+        serve_call_instant(&env, &key)?
+    } else {
+        match env.remove("recorded_at").as_ref().and_then(Value::as_i64) {
+            Some(recorded_at) => recorded_at,
+            None => return Err("a schema-1 line without an integer recorded_at".to_owned()),
+        }
     };
     let envelope = serde_json::to_vec(&env).map_err(|err| redact_err(&err))?;
     Ok(ServeAuditEnvelope {
         idempotency_key: key,
         recorded_at,
         envelope,
+        session_id,
+        window_key,
     })
+}
+
+/// Take a line's attribution out of it: the session that made the serve and
+/// the window inside that session, each checked against its own grammar.
+///
+/// A window without a session is refused rather than read as unattributed,
+/// because no writer produces one. The grammars are the ones the writer
+/// freezes under — a session id that is safe to name a file with, and a
+/// window key of 64 lowercase hex — restated here because this crate reads
+/// shards and depends on no capture crate.
+fn take_attribution(
+    env: &mut Map<String, Value>,
+) -> Result<(Option<String>, Option<String>), String> {
+    let session_id = match env.remove("session_id") {
+        None => None,
+        Some(Value::String(id)) if is_session_id(&id) => Some(id),
+        Some(_) => return Err("a session_id that is not a session id".to_owned()),
+    };
+    let window_key = match env.remove("window_key") {
+        None => None,
+        Some(Value::String(key)) if is_window_key(&key) => Some(key),
+        Some(_) => return Err("a window_key that is not a window key".to_owned()),
+    };
+    if session_id.is_none() && window_key.is_some() {
+        return Err("a window_key without a session_id".to_owned());
+    }
+    Ok((session_id, window_key))
+}
+
+/// A session id that may name a file: non-empty, at most 200 bytes of ASCII
+/// alphanumerics, `-`, `_` and `.`, not starting with `.`.
+fn is_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 200
+        && !id.starts_with('.')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// A window journal key: 64 lowercase hex.
+fn is_window_key(key: &str) -> bool {
+    key.len() == 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// A schema-4 line's own instant, once its call record is the one the
@@ -711,9 +775,10 @@ not json
     }
 
     /// The maximal fixture's two lines: a schema-4 call and its schema-1
-    /// audit twin, which carries the instant its live row was written at.
-    const FIXTURE_CALL: &str = r#"{"idempotency_key":"01JSERVEFIXTURE","payload":{"estimated_tokens_avoided":1200,"estimated_tokens_returned":40,"handle":"file:crates/rift-shadow/src/backend.rs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:L1-40","kind":"read_intercepted","reason":"already_held"},"schema":4,"serve_call":{"call_id":"01JSERVEFIXTURE","channel":"hook_inject","recorded_at":1755999993000,"tokens_avoided":1200,"tokens_returned":40,"tool_name":"claude-code:read-gate"},"verb":"memd.read_intercepted"}"#;
-    const FIXTURE_AUDIT: &str = r#"{"idempotency_key":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","payload":{"estimated_tokens_avoided":1200,"estimated_tokens_returned":40,"handle":"file:crates/rift-shadow/src/backend.rs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:L1-40","kind":"read_intercepted","reason":"already_held"},"recorded_at":1755999993000,"schema":1,"verb":"memd.read_intercepted"}"#;
+    /// audit twin, which carries the instant its live row was written at;
+    /// both name the session and the window that made them.
+    const FIXTURE_CALL: &str = r#"{"idempotency_key":"01JSERVEFIXTURE","payload":{"kind":"read_intercepted"},"schema":4,"serve_call":{"call_id":"01JSERVEFIXTURE","channel":"hook_inject","recorded_at":1755999993000,"tokens_avoided":1200,"tokens_returned":40,"tool_name":"claude-code:read-gate"},"session_id":"01JSHARDGOLDENA","verb":"memd.read_intercepted","window_key":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}"#;
+    const FIXTURE_AUDIT: &str = r#"{"idempotency_key":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","payload":{"estimated_tokens_avoided":1200,"estimated_tokens_returned":40,"handle":"file:crates/rift-shadow/src/backend.rs@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:L1-40","kind":"read_intercepted","reason":"already_held"},"recorded_at":1755999993000,"schema":1,"session_id":"01JSHARDGOLDENA","verb":"memd.read_intercepted","window_key":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}"#;
 
     #[test]
     fn both_frozen_schemas_parse_into_the_envelope_the_appender_takes() {
@@ -725,21 +790,46 @@ not json
         };
         assert_eq!(call.idempotency_key, "01JSERVEFIXTURE");
         assert_eq!(call.recorded_at, 1_755_999_993_000);
-        assert_eq!(
-            call.envelope,
-            FIXTURE_CALL.as_bytes(),
-            "a call line is handed on as frozen"
-        );
+        let window = Some("e".repeat(64));
+        for parsed in [call, audit] {
+            assert_eq!(parsed.session_id.as_deref(), Some("01JSHARDGOLDENA"));
+            assert_eq!(parsed.window_key, window);
+            let handed: serde_json::Value = serde_json::from_slice(&parsed.envelope).unwrap();
+            for member in ["session_id", "window_key", "recorded_at"] {
+                assert_eq!(handed.get(member), None, "{member} is not the appender's");
+            }
+        }
         assert_eq!(audit.idempotency_key, "d".repeat(64));
         assert_eq!(audit.recorded_at, 1_755_999_993_000);
         let handed: serde_json::Value = serde_json::from_slice(&audit.envelope).unwrap();
-        assert_eq!(
-            handed.get("recorded_at"),
-            None,
-            "the instant travels as the clock"
-        );
         assert_eq!(handed["idempotency_key"], "d".repeat(64));
         assert_eq!(handed["payload"]["reason"], "already_held");
+        let handed: serde_json::Value = serde_json::from_slice(&call.envelope).unwrap();
+        assert_eq!(handed["serve_call"]["call_id"], "01JSERVEFIXTURE");
+    }
+
+    /// A serve no session made is a line with neither member, and it parses
+    /// with no attribution rather than with an invented one.
+    #[test]
+    fn a_line_without_a_session_parses_unattributed() {
+        let mut bare: serde_json::Value = serde_json::from_str(FIXTURE_AUDIT).unwrap();
+        let members = bare.as_object_mut().unwrap();
+        members.remove("session_id");
+        members.remove("window_key");
+        let out = parse_serve_audit(bare.to_string().as_bytes(), "cp");
+        assert!(out.is_clean(), "{:?}", out.issues);
+        assert_eq!(out.value[0].session_id, None);
+        assert_eq!(out.value[0].window_key, None);
+
+        let mut sessioned: serde_json::Value = serde_json::from_str(FIXTURE_CALL).unwrap();
+        sessioned.as_object_mut().unwrap().remove("window_key");
+        let out = parse_serve_audit(sessioned.to_string().as_bytes(), "cp");
+        assert!(out.is_clean(), "{:?}", out.issues);
+        assert_eq!(out.value[0].session_id.as_deref(), Some("01JSHARDGOLDENA"));
+        assert_eq!(
+            out.value[0].window_key, None,
+            "a window the writer did not know"
+        );
     }
 
     /// Every refusal is one issue naming the checkpoint and the line, the
@@ -767,6 +857,10 @@ not json
             edit(FIXTURE_AUDIT, "/schema", 3.into()),
             clockless.to_string(),
             edit(FIXTURE_AUDIT, "/verb", "retrieve.zq".into()),
+            edit(FIXTURE_AUDIT, "/session_id", "../zq".into()),
+            edit(FIXTURE_CALL, "/session_id", 7.into()),
+            edit(FIXTURE_CALL, "/window_key", "zq-not-hex".into()),
+            windowless_session(),
             "not json at all zq".to_owned(),
         ];
         let mut blob = String::new();
@@ -786,6 +880,14 @@ not json
             assert!(!issue.detail.contains("zq"), "{}", issue.detail);
             assert!(!issue.detail.contains("memd"), "{}", issue.detail);
         }
+    }
+
+    /// The fixture's call line with its window and no session: a shape no
+    /// writer produces.
+    fn windowless_session() -> String {
+        let mut value: serde_json::Value = serde_json::from_str(FIXTURE_CALL).unwrap();
+        value.as_object_mut().unwrap().remove("session_id");
+        value.to_string()
     }
 
     proptest::proptest! {

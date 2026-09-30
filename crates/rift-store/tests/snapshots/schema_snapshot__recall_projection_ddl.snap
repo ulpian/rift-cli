@@ -20,6 +20,9 @@ CREATE INDEX idx_mcp_connection_client_time ON mcp_connection_event(client, occu
 -- index idx_memd_audit_citation_pack_ordinal
 CREATE INDEX idx_memd_audit_citation_pack_ordinal ON memd_audit_citation(pack_key, ordinal)
 
+-- index idx_memd_audit_session_session
+CREATE INDEX idx_memd_audit_session_session ON memd_audit_session(session_id)
+
 -- index idx_memd_call_recorded
 CREATE INDEX idx_memd_call_recorded ON memd_call_event(recorded_at)
 
@@ -164,6 +167,16 @@ CREATE TABLE memd_audit_event (
   recorded_at INTEGER NOT NULL,
   schema_version INTEGER NOT NULL,
   PRIMARY KEY (audit_id)
+) STRICT
+
+-- table memd_audit_session
+CREATE TABLE memd_audit_session (
+  serve_key TEXT NOT NULL,
+  relation TEXT NOT NULL CHECK (relation IN ('memd_audit_event', 'serve_call_event')),
+  session_id TEXT NOT NULL,
+  window_key TEXT,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (serve_key)
 ) STRICT
 
 -- table memd_call_event
@@ -417,6 +430,12 @@ CREATE TRIGGER memd_audit_event_no_delete BEFORE DELETE ON memd_audit_event BEGI
 
 -- trigger memd_audit_event_no_update
 CREATE TRIGGER memd_audit_event_no_update BEFORE UPDATE ON memd_audit_event BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_event is append-only (UPDATE forbidden)'); END
+
+-- trigger memd_audit_session_no_delete
+CREATE TRIGGER memd_audit_session_no_delete BEFORE DELETE ON memd_audit_session BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_session is append-only (DELETE forbidden)'); END
+
+-- trigger memd_audit_session_no_update
+CREATE TRIGGER memd_audit_session_no_update BEFORE UPDATE ON memd_audit_session BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_session is append-only (UPDATE forbidden)'); END
 
 -- trigger memd_call_event_no_delete
 CREATE TRIGGER memd_call_event_no_delete BEFORE DELETE ON memd_call_event BEGIN SELECT RAISE(ABORT, 'rift: memd_call_event is append-only (DELETE forbidden)'); END

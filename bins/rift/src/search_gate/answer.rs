@@ -433,6 +433,7 @@ fn journal_answer(
                 declared_avoided: declared,
                 shape: Some(shape),
                 session: Some(call.raw.session.clone()),
+                window: None,
             }),
         },
     )

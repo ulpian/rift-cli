@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use rift_core::Result;
 use rift_shadow::hooks::AdapterRegistry;
 
-use super::audit::append_memd_audit;
 use super::doc_gate::DocAnswer;
 use super::gate::{gate_file, AUDIT_IDS};
 use super::ingest::try_ingest_agent_hook;
@@ -118,7 +117,7 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
             && rift_agent::respond::delivers_read_replacement(&response);
         if matches!(decision, rift_agent::respond::GateDecision::Allow) || replacement_delivered {
             let bookkeeping = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                record_context_delivery(agent, verb, &context);
+                record_context_delivery(agent, verb, &body, &context);
                 complete_pending_replacement(agent, &body, &context);
             }));
             if bookkeeping.is_err() && failure.is_none() {
@@ -584,7 +583,16 @@ fn session_context_candidate_in(
         // it against the same savings ledger the serves land in, keyed by the
         // session that paid for it, so the estimate stays honest about what
         // injection costs: no token class is exempt from accounting.
-        record_injection_spend(repo, rift_tokens::count(&text), &claim);
+        let attribution = super::audit::serve_attribution(
+            Some(&session),
+            Some(&crate::window_journal::key(&session, window.as_deref())),
+        );
+        record_injection_spend(
+            repo,
+            rift_tokens::count(&text),
+            &claim,
+            attribution.as_ref(),
+        );
         return Some(ContextCandidate {
             kind: ContextKind::SessionPointer,
             text,
@@ -745,9 +753,15 @@ fn claim_injection(
     Some(name)
 }
 
-/// Append the injected pointer's cost to the serve-audit relation. Best-effort
-/// and never-block: an unavailable projection costs an audit row, not a turn.
-fn record_injection_spend(repo: &std::path::Path, tokens: u32, occurrence: &str) {
+/// Append the injected pointer's cost to the serve-audit relation, attributed
+/// to the session and window that were handed it. Best-effort and
+/// never-block: an unavailable projection costs an audit row, not a turn.
+fn record_injection_spend(
+    repo: &std::path::Path,
+    tokens: u32,
+    occurrence: &str,
+    attribution: Option<&rift_recall_ledger::attribution::ServeAttribution>,
+) {
     let envelope = rift_recall_serve::injection_audit_envelope(tokens, occurrence);
     let _ = (|| -> Result<()> {
         let db = crate::family::recall_db(repo)?;
@@ -755,9 +769,13 @@ fn record_injection_spend(repo: &std::path::Path, tokens: u32, occurrence: &str)
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(rift_core::RiftError::from)?;
-        rt.block_on(append_memd_audit(&store, envelope.as_bytes(), now_ms()))
+        rt.block_on(rift_recall_ledger::attribution::append_attributed_serve(
+            &store,
+            envelope.as_bytes(),
+            now_ms(),
+            attribution,
+        ))
     })();
-    super::audit::journal_serve_in(repo, None, envelope.as_bytes());
 }
 
 /// Append the channel-attributed half of a boundary delivery after a native
@@ -765,17 +783,39 @@ fn record_injection_spend(repo: &std::path::Path, tokens: u32, occurrence: &str)
 /// have their historical `memd.manifest_injected` row; this adds the existing
 /// `serve_call_event` sibling needed to prove which agent received them.
 /// Recovery maps already write both relations in `record_recovery_injection`.
-fn record_context_delivery(agent: &str, _verb: &str, plan: &rift_recall_types::ContextPlan) {
+///
+/// The row is attributed to the session the payload names and the window
+/// inside it. Read here, after the response is already on its way, because
+/// this is bookkeeping and never part of what the hook decided.
+fn record_context_delivery(
+    agent: &str,
+    verb: &str,
+    body: &[u8],
+    plan: &rift_recall_types::ContextPlan,
+) {
     let Some(repo) = std::env::current_dir()
         .ok()
         .map(|cwd| crate::worktree_root(&cwd))
     else {
         return;
     };
-    record_context_delivery_in(&repo, agent, plan);
+    if !matches!(plan, rift_recall_types::ContextPlan::Deliver { .. }) {
+        return;
+    }
+    let attribution = payload_session_id(body).and_then(|session| {
+        let window = context_window(&rift_core::AgentId::new(agent), verb, body);
+        let key = crate::window_journal::key(&session, window.as_deref());
+        super::audit::serve_attribution(Some(&session), Some(&key))
+    });
+    record_context_delivery_in(&repo, agent, plan, attribution.as_ref());
 }
 
-fn record_context_delivery_in(repo: &Path, agent: &str, plan: &rift_recall_types::ContextPlan) {
+fn record_context_delivery_in(
+    repo: &Path,
+    agent: &str,
+    plan: &rift_recall_types::ContextPlan,
+    attribution: Option<&rift_recall_ledger::attribution::ServeAttribution>,
+) {
     use rift_core::UlidSource as _;
     use rift_recall_types::{ContextKind, ContextPlan};
 
@@ -815,9 +855,12 @@ fn record_context_delivery_in(repo: &Path, agent: &str, plan: &rift_recall_types
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(rift_core::RiftError::from)?;
-        let booked = rt.block_on(append_memd_audit(&store, called.as_bytes(), at));
-        super::audit::journal_serve_in(repo, None, called.as_bytes());
-        booked
+        rt.block_on(rift_recall_ledger::attribution::append_attributed_serve(
+            &store,
+            called.as_bytes(),
+            at,
+            attribution,
+        ))
     })();
 }
 
@@ -1283,7 +1326,7 @@ mod injection_tests {
                 fallback: false,
             },
         ]);
-        record_context_delivery_in(repo, CC.as_str(), &plan);
+        record_context_delivery_in(repo, CC.as_str(), &plan, None);
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

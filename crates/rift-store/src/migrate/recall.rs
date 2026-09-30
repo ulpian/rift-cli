@@ -1,4 +1,4 @@
-//! The recall projection's migration set (`recall.db`): the twelve
+//! The recall projection's migration set (`recall.db`): the thirteen
 //! checksum-locked SQL builders over the recall registry slices and their
 //! secondary indexes.
 //!
@@ -18,7 +18,9 @@ use super::Migration;
 /// client connection lifecycle history; version 10 adds the
 /// `memd_audit_citation` companion relation; version 11 adds the
 /// `ServeChannel`-discriminated `serve_call_event`/
-/// `serve_session_event` relations.
+/// `serve_session_event` relations; version 12 adds the worktree-scope
+/// mirrors and the grant-reason store; version 13 adds the
+/// `memd_audit_session` serve attribution.
 #[must_use]
 pub fn recall_migrations() -> Vec<Migration> {
     vec![
@@ -81,6 +83,11 @@ pub fn recall_migrations() -> Vec<Migration> {
             version: 12,
             name: "recall_worktree_scope",
             sql: recall_worktree_scope_schema_sql(),
+        },
+        Migration {
+            version: 13,
+            name: "recall_serve_attribution",
+            sql: recall_serve_attribution_schema_sql(),
         },
     ]
 }
@@ -369,6 +376,38 @@ pub fn recall_worktree_scope_schema_sql() -> String {
     sql
 }
 
+/// The v13 additive recall migration: the `memd_audit_session` companion
+/// relation that names the session a serve was made in, and the index the
+/// archive's per-session query reads through.
+///
+/// The table is found by name in the registry rather than through a slice
+/// function, because it is the registry's last row and a name cannot drift
+/// the way a count can.
+fn recall_serve_attribution_schema_sql() -> String {
+    const INDEX_SQL: &str = "\
+CREATE INDEX IF NOT EXISTS idx_memd_audit_session_session ON memd_audit_session(session_id);\n";
+    let tables = || {
+        crate::schema::recall_canonical_tables()
+            .iter()
+            .filter(|table| table.name == "memd_audit_session")
+    };
+    let mut sql = String::new();
+    for table in tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    sql.push_str(INDEX_SQL);
+    for table in tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,7 +507,26 @@ mod tests {
                 "serve_session_event_no_update",
                 "idx_serve_call_channel_recorded",
             ],
-            &[],
+            &["n_checkpoint_commit"],
+        ),
+        (
+            "recall_worktree_scope",
+            &[
+                "CREATE TABLE IF NOT EXISTS n_checkpoint_commit",
+                "CREATE TABLE IF NOT EXISTS serve_grant_event",
+                "serve_grant_event_no_update",
+            ],
+            &["memd_audit_session"],
+        ),
+        (
+            "recall_serve_attribution",
+            &[
+                "CREATE TABLE IF NOT EXISTS memd_audit_session",
+                "memd_audit_session_no_update",
+                "memd_audit_session_no_delete",
+                "idx_memd_audit_session_session",
+            ],
+            &["serve_grant_event"],
         ),
     ];
 
@@ -479,7 +537,7 @@ mod tests {
     #[test]
     fn every_recall_version_creates_only_its_own_relations() {
         let migs = recall_migrations();
-        assert_eq!(migs.len(), 12);
+        assert_eq!(migs.len(), 13);
         for (version, (name, creates, excludes)) in VERSION_CONTENTS.iter().enumerate() {
             assert_eq!(migs[version].name, *name);
             let sql = &migs[version].sql;
@@ -501,10 +559,10 @@ mod tests {
     fn recall_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &recall_migrations()).unwrap();
-        assert_eq!(out.applied, 12);
-        assert_eq!(out.high_water, 12);
+        assert_eq!(out.applied, 13);
+        assert_eq!(out.high_water, 13);
         let again = apply_migrations(&s, &recall_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 12);
+        assert_eq!(again.skipped, 13);
     }
 }

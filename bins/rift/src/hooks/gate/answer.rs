@@ -167,6 +167,7 @@ pub(super) fn journal_decision(
             attempts: 0,
             kind: crate::agent_queue::JobKind::ServeAudit(crate::agent_queue::ServeAudit {
                 session: Some(raw.session.clone()),
+                window: None,
                 ..audit
             }),
         },
@@ -226,5 +227,6 @@ pub(super) fn read_decision_audit(
         // Not a name search: nothing here stood in for a listing.
         shape: None,
         session: None,
+        window: None,
     })
 }
