@@ -501,3 +501,140 @@ async fn a_refused_usage_line_is_named_and_the_walk_goes_on() {
     assert_eq!(rebuilt.count("token_usage").await.unwrap(), 1);
     assert_eq!(report.tip, Some(id));
 }
+
+/// The model of the second turn's call, which the catalog does not price.
+const UNPRICED: &str = "claude-unpriced-9";
+
+/// The columns the shard cannot carry, by relation: the session's opening
+/// instant and primary model, the turn's opening instant, and the cost fact's
+/// id and transaction time. Every other column of the five relations must
+/// come back as the live settle wrote it.
+const DECLARED_EXCEPTIONS: [(&str, &[&str]); 5] = [
+    ("session", &["started_at", "model_primary"]),
+    ("turn", &["started_at"]),
+    ("model_call", &[]),
+    ("token_usage", &[]),
+    ("cost_fact", &["cost_fact_id", "recorded_at"]),
+];
+
+/// One assistant line of a transcript: `model`'s call, spending `output`.
+fn assistant_line(model: &str, output: u32) -> String {
+    let usage = serde_json::json!({"input_tokens": 20, "output_tokens": output,
+        "cache_read_input_tokens": 300, "cache_creation_input_tokens": 40});
+    serde_json::json!({"type": "assistant", "message": {"model": model, "usage": usage}})
+        .to_string()
+}
+
+fn append_to(transcript: &Path, lines: &[String]) {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(transcript)
+        .unwrap();
+    for line in lines {
+        writeln!(file, "{line}").unwrap();
+    }
+}
+
+/// Two turns through the live path, each settled the way the hooks settle
+/// it: the first by the prompt that opens the second, the second by the
+/// session's end. The first call is [`PRICED`], the second [`UNPRICED`].
+async fn two_turn_session(s: &SqliteStore) {
+    let tmp = tempfile::tempdir().unwrap();
+    let git_dir = tmp.path().join("git");
+    let transcript = tmp.path().join("t.jsonl");
+    let path = transcript.display().to_string();
+    let open = serde_json::json!({"transcript_path": path});
+    let after = SettleMode::AfterHook {
+        turn_closed_here: false,
+    };
+    let prompt = || serde_json::json!({"prompt": "go"});
+    let stop = || serde_json::json!({"stop_hook_active": false});
+    let user = serde_json::json!({"type": "user", "message": {"content": "go"}}).to_string();
+    hook(s, &git_dir, "SessionStart", 100, open).await;
+    settle(s, &git_dir, after).await;
+    hook(s, &git_dir, "UserPromptSubmit", 200, prompt()).await;
+    hook(s, &git_dir, "Stop", 400, stop()).await;
+    append_to(&transcript, &[user.clone(), assistant_line(PRICED, 7)]);
+    hook(s, &git_dir, "UserPromptSubmit", 500, prompt()).await;
+    settle(s, &git_dir, after).await;
+    hook(s, &git_dir, "Stop", 700, stop()).await;
+    append_to(&transcript, &[user, assistant_line(UNPRICED, 11)]);
+    settle(s, &git_dir, SettleMode::Final).await;
+}
+
+/// Every column of `table`, in declaration order, read off the schema so a
+/// column added later is compared without this file changing.
+async fn columns_of(s: &SqliteStore, table: &str) -> Vec<String> {
+    let sql = format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid");
+    let found = s.query(&sql, &[]).await.unwrap();
+    found.iter().map(|r| r.get_text(0).unwrap()).collect()
+}
+
+/// Every row of `table` over every column; the turns only where a call
+/// hangs off them, since the session-start turn carries none and no line.
+async fn every_column(s: &SqliteStore, table: &str) -> Vec<Vec<(String, String)>> {
+    let columns = columns_of(s, table).await;
+    let names: Vec<&str> = columns.iter().map(String::as_str).collect();
+    let all = rows(s, table, &names).await;
+    if table != "turn" {
+        return all;
+    }
+    let called = column(&rows(s, "model_call", &["turn_id"]).await, "turn_id");
+    all.into_iter()
+        .filter(|row| {
+            row.iter()
+                .any(|(c, v)| c == "turn_id" && called.contains(v))
+        })
+        .collect()
+}
+
+/// ★ Two calls in two turns, on two models, one of them unpriced: every
+/// column of the session, its turns, its calls, their usage and the one cost
+/// fact comes back from the shard as the live settle wrote it, except the
+/// columns [`DECLARED_EXCEPTIONS`] names — so a column that starts to differ
+/// fails here rather than passing unseen.
+#[tokio::test]
+async fn every_column_the_live_settle_wrote_comes_back_but_the_declared_exceptions() {
+    let live = priced_store().await;
+    two_turn_session(&live).await;
+    let rebuilt = rebuild(&shard_of(&live).await, REBUILD_NOW).await;
+
+    let expected_rows = [
+        ("session", 1),
+        ("turn", 2),
+        ("model_call", 2),
+        ("token_usage", 2),
+        ("cost_fact", 1),
+    ];
+    for ((table, excepted), (counted, n)) in DECLARED_EXCEPTIONS.iter().zip(expected_rows) {
+        assert_eq!(*table, counted);
+        let live_rows = every_column(&live, table).await;
+        let rebuilt_rows = every_column(&rebuilt, table).await;
+        assert_eq!(live_rows.len(), n, "{table}: {live_rows:?}");
+        assert_eq!(
+            without(&rebuilt_rows, excepted),
+            without(&live_rows, excepted),
+            "{table}"
+        );
+    }
+    let calls = every_column(&rebuilt, "model_call").await;
+    let mut models = column(&calls, "model");
+    models.sort();
+    assert_eq!(models, [format!("'{PRICED}'"), format!("'{UNPRICED}'")]);
+    let cost = every_column(&live, "cost_fact").await;
+    let priced_call: Vec<String> = calls
+        .iter()
+        .filter(|row| {
+            row.iter()
+                .any(|(c, v)| c == "model" && *v == format!("'{PRICED}'"))
+        })
+        .flat_map(|row| column(std::slice::from_ref(row), "call_id"))
+        .collect();
+    assert_eq!(
+        column(&cost, "call_id"),
+        priced_call,
+        "only the priced call"
+    );
+}
