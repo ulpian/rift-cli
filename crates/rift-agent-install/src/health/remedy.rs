@@ -13,11 +13,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::detect::NativeIdeHost;
+use crate::detect::{DetectionEnvironment, NativeIdeHost};
 use crate::native::{CodexHookVerdict, CodexSurface, CodexTrust};
 use crate::ClientFamily;
 
-use super::{Finding, Reason, Severity, Surface};
+use super::{assess, client_surface, Facts, Finding, Reason, Severity, Surface};
 
 /// One finding as a front end prints it, and the element of the `--json`
 /// `health` array.
@@ -93,6 +93,23 @@ pub fn remedy(finding: &Finding, surface: Surface, codex_trust: Option<&CodexTru
         sentence,
         detail: finding.detail.clone(),
     }
+}
+
+/// Every finding over `facts` as of `now_ms`, each with its remedy on the
+/// surface its agent runs on, as `env` and the facts' sessions name it.
+///
+/// The one assessment every front end prints — `rift status`, `rift doctor`
+/// and the dashboard — so none can find something another misses or word it
+/// differently. Reads only what `facts` already holds and what `env` detects.
+#[must_use]
+pub fn remedies(facts: &Facts<'_>, env: &DetectionEnvironment, now_ms: i64) -> Vec<Remedy> {
+    assess(facts, now_ms)
+        .iter()
+        .map(|finding| {
+            let (surface, _) = client_surface(&finding.agent, facts.sessions, env);
+            remedy(finding, surface, facts.codex_trust.as_ref())
+        })
+        .collect()
 }
 
 /// The sentence for Codex skipping `modified + untrusted` of Rift's hooks,

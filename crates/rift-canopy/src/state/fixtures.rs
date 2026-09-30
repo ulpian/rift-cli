@@ -64,6 +64,7 @@ pub(super) fn project_settings_state(initialization: crate::ProjectInitializatio
             hook_wiring: None,
             alpha_supported: true,
             selected: false,
+            remedies: Vec::new(),
         })
         .collect();
     let mut detail = DetailView::thin("/r/a".into(), "a".into(), status);

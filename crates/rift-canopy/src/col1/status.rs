@@ -83,14 +83,29 @@ pub struct StatusInputs {
     /// `Some(false)` — a member of an initialized family that was never
     /// adopted, so nothing it does is captured — changes the derived status.
     pub provisioned: Option<bool>,
+    /// Whether an error-severity integration finding exists: a wired agent's
+    /// capture is being lost, or Rift's own session state is wrong.
+    ///
+    /// A `bool` rather than the reason: the truth table reads only whether
+    /// one exists, and the reasons with their remedies travel to Project
+    /// Settings in its adapter rows, so a payload here would be a second copy
+    /// that could disagree with them. Warnings never set it: nothing is lost
+    /// while they hold.
+    pub integration_failing: bool,
 }
 
 /// Derive a project's [`ProjectStatus`] from its read-only inputs. Total and
 /// deterministic; the precedence is: a missing repo, then an uninitialized or
 /// unreadable projection, then an **unadopted member**, then a corrupt session
-/// cache, then a still-building projection, and finally — for a ready
-/// projection — live sessions (`Running`), captured history (`Idle`), or
-/// nothing captured yet (`PickingUp`).
+/// cache, then an **error-severity integration finding**, then a
+/// still-building projection, and finally — for a ready projection — live
+/// sessions (`Running`), captured history (`Idle`), or nothing captured yet
+/// (`PickingUp`).
+///
+/// **Why an integration error outranks `Running` and `Idle`:** both would
+/// read as healthy while a wired agent's capture is being lost, which is the
+/// silent failure the finding exists to name. It stays below every state that
+/// makes capture meaningless here, because those states' acts come first.
 ///
 /// **Why `NotAdopted` outranks the session cache and the build state**
 /// (the family view places the rule immediately after `Uninitialized`/
@@ -122,6 +137,9 @@ pub fn derive(i: &StatusInputs) -> ProjectStatus {
     }
     if matches!(i.sessions, SessionsRead::Corrupt) {
         return ProjectStatus::Error(StatusError::CorruptSessionCache);
+    }
+    if i.integration_failing {
+        return ProjectStatus::Error(StatusError::Integration);
     }
     if matches!(i.projection, ProjectionState::Building) {
         return ProjectStatus::PickingUp;
@@ -163,6 +181,7 @@ mod tests {
             sessions: SessionsRead::Ok(None),
             has_captures: false,
             provisioned: None,
+            integration_failing: false,
         }
     }
 
@@ -271,6 +290,7 @@ mod tests {
             sessions: one_live_session(),
             has_captures: true,
             provisioned: Some(false),
+            integration_failing: false,
         };
         assert_eq!(derive(&i), ProjectStatus::NotAdopted);
     }
@@ -291,6 +311,7 @@ mod tests {
                     sessions,
                     has_captures,
                     provisioned: Some(true),
+                    integration_failing: false,
                 };
                 let not_a_member = StatusInputs {
                     provisioned: None,
@@ -313,6 +334,7 @@ mod tests {
             sessions: SessionsRead::Corrupt,
             has_captures: false,
             provisioned: Some(false),
+            integration_failing: false,
         };
         assert_eq!(derive(&corrupt), ProjectStatus::NotAdopted);
         let building = StatusInputs {
@@ -321,6 +343,7 @@ mod tests {
             sessions: one_live_session(),
             has_captures: false,
             provisioned: Some(false),
+            integration_failing: false,
         };
         assert_eq!(derive(&building), ProjectStatus::NotAdopted);
     }
@@ -337,6 +360,7 @@ mod tests {
             sessions: SessionsRead::Ok(None),
             has_captures: true,
             provisioned: Some(false),
+            integration_failing: false,
         };
         assert_eq!(derive(&i), ProjectStatus::Error(StatusError::RepoMissing));
     }
@@ -353,8 +377,118 @@ mod tests {
             sessions: one_live_session(),
             has_captures: true,
             provisioned: None,
+            integration_failing: false,
         };
         assert_eq!(derive(&i), ProjectStatus::PickingUp);
+    }
+
+    #[test]
+    fn case14_an_error_severity_finding_turns_an_idle_or_running_project_to_an_integration_error() {
+        for sessions in [SessionsRead::Ok(None), one_live_session()] {
+            let i = StatusInputs {
+                repo_present: true,
+                projection: ProjectionState::Ready,
+                sessions,
+                has_captures: true,
+                provisioned: None,
+                integration_failing: true,
+            };
+            assert_eq!(derive(&i), ProjectStatus::Error(StatusError::Integration));
+        }
+    }
+
+    #[test]
+    fn case15_a_project_with_no_error_severity_finding_stays_idle_or_running() {
+        // Warnings never reach the inputs: the data plane sets the field from
+        // error-severity findings only, so a warning-only project reads here
+        // exactly like a healthy one.
+        let idle = StatusInputs {
+            repo_present: true,
+            projection: ProjectionState::Ready,
+            sessions: SessionsRead::Ok(None),
+            has_captures: true,
+            provisioned: None,
+            integration_failing: false,
+        };
+        assert_eq!(derive(&idle), ProjectStatus::Idle);
+        let running = StatusInputs {
+            sessions: one_live_session(),
+            ..idle
+        };
+        assert!(matches!(derive(&running), ProjectStatus::Running { .. }));
+    }
+
+    #[test]
+    fn case16_every_state_above_an_integration_error_still_wins_over_it() {
+        let failing = StatusInputs {
+            integration_failing: true,
+            has_captures: true,
+            ..base()
+        };
+        let cases = [
+            (
+                StatusInputs {
+                    repo_present: false,
+                    ..failing
+                },
+                ProjectStatus::Error(StatusError::RepoMissing),
+            ),
+            (
+                StatusInputs {
+                    projection: ProjectionState::Uninitialized,
+                    ..failing
+                },
+                ProjectStatus::NotInitialized,
+            ),
+            (
+                StatusInputs {
+                    projection: ProjectionState::Configured,
+                    ..failing
+                },
+                ProjectStatus::NotProvisioned,
+            ),
+            (
+                StatusInputs {
+                    projection: ProjectionState::NotRepository,
+                    ..failing
+                },
+                ProjectStatus::NotRepository,
+            ),
+            (
+                StatusInputs {
+                    projection: ProjectionState::Unavailable,
+                    ..failing
+                },
+                ProjectStatus::Error(StatusError::ProjectionUnavailable),
+            ),
+            (
+                StatusInputs {
+                    provisioned: Some(false),
+                    ..failing
+                },
+                ProjectStatus::NotAdopted,
+            ),
+            (
+                StatusInputs {
+                    sessions: SessionsRead::Corrupt,
+                    ..failing
+                },
+                ProjectStatus::Error(StatusError::CorruptSessionCache),
+            ),
+        ];
+        for (inputs, expected) in cases {
+            assert_eq!(derive(&inputs), expected, "{inputs:?}");
+        }
+    }
+
+    #[test]
+    fn case17_an_integration_error_outranks_a_building_projection() {
+        let i = StatusInputs {
+            projection: ProjectionState::Building,
+            integration_failing: true,
+            ..base()
+        };
+        assert_eq!(derive(&i), ProjectStatus::Error(StatusError::Integration));
     }
 
     #[test]
@@ -443,6 +577,7 @@ mod tests {
             i.projection,
             i.provisioned,
             i.sessions,
+            i.integration_failing,
             i.has_captures,
         ) {
             (false, ..) => ProjectStatus::Error(StatusError::RepoMissing),
@@ -453,11 +588,12 @@ mod tests {
                 ProjectStatus::Error(StatusError::ProjectionUnavailable)
             }
             (true, _, Some(false), ..) => ProjectStatus::NotAdopted,
-            (true, _, _, SessionsRead::Corrupt, _) => {
+            (true, _, _, SessionsRead::Corrupt, ..) => {
                 ProjectStatus::Error(StatusError::CorruptSessionCache)
             }
+            (true, _, _, _, true, _) => ProjectStatus::Error(StatusError::Integration),
             (true, ProjectionState::Building, ..) => ProjectStatus::PickingUp,
-            (true, ProjectionState::Ready, _, SessionsRead::Ok(Some(s)), _)
+            (true, ProjectionState::Ready, _, SessionsRead::Ok(Some(s)), false, _)
                 if s.active_sessions > 0 =>
             {
                 ProjectStatus::Running {
@@ -465,8 +601,8 @@ mod tests {
                     active_sessions: s.active_sessions,
                 }
             }
-            (true, ProjectionState::Ready, _, _, true) => ProjectStatus::Idle,
-            (true, ProjectionState::Ready, _, _, false) => ProjectStatus::PickingUp,
+            (true, ProjectionState::Ready, _, _, false, true) => ProjectStatus::Idle,
+            (true, ProjectionState::Ready, _, _, false, false) => ProjectStatus::PickingUp,
         }
     }
 
@@ -495,8 +631,11 @@ mod tests {
             sessions in sessions_strategy(),
             has_captures in any::<bool>(),
             provisioned in provisioned_strategy(),
+            integration_failing in any::<bool>(),
         ) {
-            let i = StatusInputs { repo_present, projection, sessions, has_captures, provisioned };
+            let i = StatusInputs {
+                repo_present, projection, sessions, has_captures, provisioned, integration_failing,
+            };
             let s = derive(&i);
             prop_assert_eq!(s, expected(&i));
             // The glyph mapping is likewise total (never falls through).
@@ -516,12 +655,42 @@ mod tests {
             sessions in sessions_strategy(),
             has_captures in any::<bool>(),
             provisioned in provisioned_strategy(),
+            integration_failing in any::<bool>(),
         ) {
-            let i = StatusInputs { repo_present, projection, sessions, has_captures, provisioned };
+            let i = StatusInputs {
+                repo_present, projection, sessions, has_captures, provisioned, integration_failing,
+            };
             let premise = repo_present
                 && matches!(projection, ProjectionState::Ready | ProjectionState::Building)
                 && provisioned == Some(false);
             prop_assert_eq!(derive(&i) == ProjectStatus::NotAdopted, premise);
+        }
+
+        /// `Error(Integration)` is derived from exactly one premise, in both
+        /// directions: a present, adopted checkout over a readable or building
+        /// projection with a readable session cache, and an error-severity
+        /// finding. Every state above it in the chain still wins.
+        #[test]
+        fn an_integration_error_is_derived_from_exactly_one_premise(
+            repo_present in any::<bool>(),
+            projection in projection_strategy(),
+            sessions in sessions_strategy(),
+            has_captures in any::<bool>(),
+            provisioned in provisioned_strategy(),
+            integration_failing in any::<bool>(),
+        ) {
+            let i = StatusInputs {
+                repo_present, projection, sessions, has_captures, provisioned, integration_failing,
+            };
+            let premise = repo_present
+                && matches!(projection, ProjectionState::Ready | ProjectionState::Building)
+                && provisioned != Some(false)
+                && sessions != SessionsRead::Corrupt
+                && integration_failing;
+            prop_assert_eq!(
+                derive(&i) == ProjectStatus::Error(StatusError::Integration),
+                premise
+            );
         }
 
         /// `Running` never reports a count the session read did not contain,
@@ -533,6 +702,7 @@ mod tests {
             sessions in sessions_strategy(),
             has_captures in any::<bool>(),
             provisioned in provisioned_strategy(),
+            integration_failing in any::<bool>(),
         ) {
             let i = StatusInputs {
                 repo_present: true,
@@ -540,10 +710,12 @@ mod tests {
                 sessions,
                 has_captures,
                 provisioned,
+                integration_failing,
             };
             if let ProjectStatus::Running { since_ms, active_sessions } = derive(&i) {
                 prop_assert_eq!(projection, ProjectionState::Ready);
                 prop_assert_ne!(provisioned, Some(false));
+                prop_assert!(!integration_failing);
                 prop_assert_eq!(
                     sessions,
                     SessionsRead::Ok(Some(LiveSessions { active_sessions, since_ms }))

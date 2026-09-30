@@ -251,6 +251,7 @@ fn integration_rows(
                 // `crates/rift-shadow-hooks/src/lib.rs`).
                 alpha_supported: matches!(*agent, "claude-code" | "codex" | "antigravity"),
                 selected: index < 2,
+                remedies: Vec::new(),
             },
         )
         .collect()

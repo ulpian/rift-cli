@@ -601,6 +601,9 @@ none`.
 `integration_health`: one element per finding with `reason`, `severity`,
 `agent`, `session`, `surface`, `headline`, `sentence` and `detail`.
 The leg only reads; `rift doctor --fix` repairs nothing here.
+Canopy reads the same findings: an error-severity one turns the project's card
+to error, and Project Settings prints each finding's sentence under its
+adapter row ([11-canopy-tour.md](11-canopy-tour.md)).
 
 | Reason | Severity | What it means | What the remedy asks |
 |---|---|---|---|

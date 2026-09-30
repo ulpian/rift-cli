@@ -75,14 +75,7 @@ fn integration_remedies(root: &Path) -> Option<Vec<Remedy>> {
         projection.as_ref(),
     );
     let env = DetectionEnvironment::from_process();
-    let remedies = health::assess(&facts, hooks::now_ms())
-        .iter()
-        .map(|finding| {
-            let (surface, _) = health::client_surface(&finding.agent, &sessions, &env);
-            health::remedy(finding, surface, facts.codex_trust.as_ref())
-        })
-        .collect();
-    Some(remedies)
+    Some(health::remedies(&facts, &env, hooks::now_ms()))
 }
 
 /// The block: `none`, or a count and, per finding, its severity and headline

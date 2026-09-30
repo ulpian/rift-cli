@@ -3,9 +3,9 @@
 //!
 //! The writer is `rift-shadow-hooks` (`session_cache.rs`, SCHEMA 1: `schema`,
 //! `session_id`, `state`, `agent`, `current_turn_ordinal`, `turn_open`,
-//! `compaction_boundary`, `updated_at_ms`). The contract is **mirrored
-//! locally** — this crate deliberately takes no shadow-hooks dependency
-//! (the data-plane split's dependency list) — and read leniently: unknown fields are
+//! `compaction_boundary`, `updated_at_ms`). The live read **mirrors** the
+//! contract locally rather than parsing the writer's type, so it can be
+//! lenient where the writer is strict: unknown fields are
 //! ignored, unknown states degrade to "not live", and only the two fields the
 //! signal needs (`state`, `updated_at_ms`) are required. Parsing is **total**:
 //! corrupt bytes yield [`SessionsRead::Corrupt`] (a distinct error status),
@@ -32,20 +32,21 @@
 //! cache with no claim (every file written before the discriminator existed) belongs to the
 //! registry it was found in, which is where it has always been usable. It is
 //! the rule `bins/rift`'s `family_journal` applies to the same files; the two
-//! are separate spellings because this crate deliberately takes no
-//! `rift-shadow-hooks` dependency (the data-plane split) and `bins/rift` is a binary
-//! neither can import — so the cache contract is mirrored here, as it already
-//! was for `state`/`updated_at_ms`.
+//! are separate spellings because `bins/rift` is a binary this crate cannot
+//! import. `family_journal` is the one reader here that parses the writer's
+//! own type, through `rift-shadow-hooks`, because the integration-health
+//! detectors take that type.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use rift_canopy::{LiveSessions, SessionsRead};
 use rift_git::FamilyMember;
+use rift_shadow_hooks::session_cache::{read_cache, SessionCache};
 
 /// Directory (under the git dir) holding per-session cache files — the
 /// mirrored half of the writer's contract.
-const SESSIONS_DIR: &str = "rift-sessions";
+pub(crate) const SESSIONS_DIR: &str = "rift-sessions";
 
 /// A cache file larger than this is treated as corrupt (the writer emits
 /// hundreds of bytes; anything huge is not ours).
@@ -237,6 +238,42 @@ pub fn family_sessions(members: &[FamilyMember], now_ms: i64) -> FamilySessions 
         finish(&all)
     };
     FamilySessions { per_member, family }
+}
+
+/// Every session cache the family's members hold, each session once: the
+/// journal the health detectors read, live or not.
+///
+/// The same files `bins/rift`'s `family_journal` reads for the command line,
+/// through the writer's own reader: unlike the live read above, which mirrors
+/// the two fields it needs, this returns the writer's type, because the
+/// integration-health detectors take it.
+///
+/// An unreadable cache is skipped rather than failing the read: the live
+/// session reader above already reports it as a corrupt cache, which outranks
+/// every finding this feeds.
+pub(crate) fn family_journal(members: &[FamilyMember]) -> Vec<SessionCache> {
+    let mut seen = BTreeSet::new();
+    let mut sessions = Vec::new();
+    for member in members {
+        let dir = member.git_dir.join(SESSIONS_DIR);
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let Some(stem) = name
+                .to_string_lossy()
+                .strip_suffix(".json")
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let Ok(Some(cache)) = read_cache(&member.git_dir, &stem) else {
+                continue;
+            };
+            if seen.insert(cache.session_id.clone()) {
+                sessions.push(cache);
+            }
+        }
+    }
+    sessions
 }
 
 /// The index of the member a cache's claim names, or `None` when it claims
