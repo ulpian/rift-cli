@@ -77,6 +77,12 @@ pub enum HookReceipt {
     /// The adapter does not know this verb. Not an error (a new agent version
     /// may add verbs before Rift does), but recorded so the gap is countable.
     SkippedUnknownVerb,
+    /// The adapter knows the verb and it carries nothing to capture —
+    /// Antigravity's later invocations of a prompt are the case. Recorded so
+    /// the hook still counts as having arrived, and kept apart from
+    /// [`SkippedUnknownVerb`](Self::SkippedUnknownVerb) so a gap in the
+    /// adapter is not confused with a verb that has nothing to say.
+    RecordedNoEvent,
     /// The hook carried no session id Rift can attribute to (absent, or not
     /// usable as a name — see
     /// [`is_safe_session_id`](rift_shadow_hooks::is_safe_session_id)). Nothing
@@ -93,6 +99,7 @@ impl HookReceipt {
         match self {
             Self::Recorded => "recorded",
             Self::SkippedUnknownVerb => "skipped-unknown-verb",
+            Self::RecordedNoEvent => "recorded-no-event",
             Self::DeferredNoSession => "deferred-no-session",
         }
     }
@@ -273,17 +280,16 @@ async fn defer_without_session(
 }
 
 /// The append-only hook receipt, idempotent on its content address.
+///
+/// The outcome is not part of that address, so a redelivery collapses to one
+/// row whatever the receipt says.
 async fn record_receipt(
     store: &impl CanonicalStore,
     ctx: &IngestCtx<'_>,
     turn: u32,
     events: &[CanonicalEvent],
 ) -> Result<HookReceipt> {
-    let receipt = if events.is_empty() {
-        HookReceipt::SkippedUnknownVerb
-    } else {
-        HookReceipt::Recorded
-    };
+    let receipt = receipt_for(ctx, events);
     let row = AgentHookEventRow {
         hook_event_id: receipt_id(ctx.owner, ctx.raw, &turn.to_string(), &ctx.payload_hash),
         agent: ctx.owner.to_owned(),
@@ -295,6 +301,27 @@ async fn record_receipt(
     };
     record_agent_hook_event(store, &row).await?;
     Ok(receipt)
+}
+
+/// What the receipt says about a hook with a usable session.
+///
+/// No event means either a verb the adapter does not know or one it knows
+/// that carries nothing; the adapter's own verb list tells them apart. The
+/// adapter is the one [`dispatch`] mapped the payload with — the firing
+/// agent's — so the two answers cannot disagree about which table applies.
+fn receipt_for(ctx: &IngestCtx<'_>, events: &[CanonicalEvent]) -> HookReceipt {
+    if !events.is_empty() {
+        return HookReceipt::Recorded;
+    }
+    let known = ctx
+        .registry
+        .get(&ctx.raw.agent)
+        .is_some_and(|adapter| adapter.verbs().contains(&ctx.raw.verb.as_str()));
+    if known {
+        HookReceipt::RecordedNoEvent
+    } else {
+        HookReceipt::SkippedUnknownVerb
+    }
 }
 
 /// The receipt's content address: the agent it is filed under, the verb, the
@@ -879,7 +906,7 @@ mod tests {
         assert_eq!(out.receipt, HookReceipt::DeferredNoSession);
     }
 
-    /// The receipt's three outcomes are the whole vocabulary, and each ingest
+    /// The receipt's outcomes are a closed vocabulary, and each ingest
     /// reports the one it wrote.
     #[tokio::test]
     async fn every_ingest_reports_the_receipt_it_wrote() {
@@ -922,6 +949,75 @@ mod tests {
             .unwrap();
         let outcomes: Vec<String> = rows.iter().map(|r| r.get_text(0).unwrap()).collect();
         assert_eq!(outcomes, vec!["recorded", "skipped-unknown-verb"]);
+    }
+
+    fn antigravity_invocation(verb: &str, invocation: u64) -> RawHook {
+        RawHook {
+            agent: AgentId::ANTIGRAVITY,
+            verb: verb.into(),
+            session: "conversation-1".into(),
+            turn: None,
+            occurred_at_ms: 10,
+            payload: serde_json::json!({
+                "conversationId": "conversation-1",
+                "invocationNum": invocation,
+            }),
+        }
+    }
+
+    async fn ingest_antigravity(s: &SqliteStore, git_dir: &Path, hook: &RawHook) -> HookReceipt {
+        let reg = AdapterRegistry::with_builtin();
+        let out = ingest_hook(hook, &reg, s, git_dir, "antigravity", "repo-1", 10, None);
+        out.await.unwrap().receipt
+    }
+
+    async fn receipt_outcomes(s: &SqliteStore) -> Vec<String> {
+        let rows = s
+            .query("SELECT outcome FROM agent_hook_event", &[])
+            .await
+            .unwrap();
+        rows.iter().map(|r| r.get_text(0).unwrap()).collect()
+    }
+
+    /// Antigravity's later invocations are a verb the adapter knows and maps
+    /// to nothing by design, so the receipt must not read as a verb Rift has
+    /// never heard of.
+    #[tokio::test]
+    async fn a_known_verb_that_carries_no_event_is_receipted_as_recorded_with_no_event() {
+        let s = store();
+        let tmp = tempfile::tempdir().unwrap();
+        let later = antigravity_invocation("PreInvocation", 1);
+
+        let receipt = ingest_antigravity(&s, tmp.path(), &later).await;
+
+        assert_eq!(receipt, HookReceipt::RecordedNoEvent);
+        assert_eq!(receipt_outcomes(&s).await, vec!["recorded-no-event"]);
+        assert_eq!(s.count("captured_event").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_verb_outside_the_adapters_list_is_still_skipped_as_unknown() {
+        let s = store();
+        let tmp = tempfile::tempdir().unwrap();
+        let unknown = antigravity_invocation("NoSuchVerb", 1);
+
+        let receipt = ingest_antigravity(&s, tmp.path(), &unknown).await;
+
+        assert_eq!(receipt, HookReceipt::SkippedUnknownVerb);
+        assert_eq!(receipt_outcomes(&s).await, vec!["skipped-unknown-verb"]);
+    }
+
+    #[tokio::test]
+    async fn a_redelivered_known_verb_with_no_event_leaves_one_receipt() {
+        let s = store();
+        let tmp = tempfile::tempdir().unwrap();
+        let later = antigravity_invocation("PreInvocation", 1);
+
+        ingest_antigravity(&s, tmp.path(), &later).await;
+        let again = ingest_antigravity(&s, tmp.path(), &later).await;
+
+        assert_eq!(again, HookReceipt::RecordedNoEvent);
+        assert_eq!(receipt_outcomes(&s).await, vec!["recorded-no-event"]);
     }
 
     /// The Cursor double-config case: the IDE runs `cursor-agent` and

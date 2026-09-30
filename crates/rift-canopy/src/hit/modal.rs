@@ -291,6 +291,7 @@ mod tests {
                 hook_wiring: None,
                 alpha_supported: true,
                 selected: false,
+                remedies: Vec::new(),
             })
             .collect();
         s.app.project_settings.open(view);

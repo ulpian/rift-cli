@@ -267,6 +267,12 @@ impl ProjectSettingsModalState {
                 + view.integrations.len()
                 + usize::from(view.policy.detail.is_some())
                 + 2 * usize::from(view.initialization != ProjectInitialization::Initialized)
+                + crate::view::project_settings_display_rows(self)
+                    .iter()
+                    .filter(|row| {
+                        matches!(row, crate::view::ProjectSettingsDisplayRow::Remedy { .. })
+                    })
+                    .count()
         })
     }
 
@@ -394,6 +400,7 @@ mod tests {
                 hook_wiring: Some(crate::NativeAgentHookWiring::Missing),
                 alpha_supported: true,
                 selected: true,
+                remedies: Vec::new(),
             }],
         }
     }

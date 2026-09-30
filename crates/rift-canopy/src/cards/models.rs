@@ -131,7 +131,9 @@ fn model_projection_placeholder(status: ProjectStatus) -> Option<&'static str> {
         ProjectStatus::Running { .. }
         | ProjectStatus::Idle
         | ProjectStatus::NotAdopted
-        | ProjectStatus::Error(crate::StatusError::CorruptSessionCache) => None,
+        | ProjectStatus::Error(
+            crate::StatusError::CorruptSessionCache | crate::StatusError::Integration,
+        ) => None,
     }
 }
 

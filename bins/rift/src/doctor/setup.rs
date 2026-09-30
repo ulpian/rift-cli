@@ -191,15 +191,15 @@ pub(super) fn doctor_memory_chain(
         rift_config::EffectiveConfig::load(&repo.join(".rift")).is_ok_and(|c| c.recall_enabled());
     let ingested = ingested_reads(repo, strict_read_only);
     human.push_str(&recall_ingest_line(recall_enabled, ingested));
-    let clients = rift_agent_install::diagnose(repo, true);
-    human.push_str(&integrations_lines(&clients));
+    let statuses = rift_agent_install::native::diagnose_all(repo);
+    human.push_str(&integrations_lines(&statuses));
     let memd = resolve_memd_binary();
     human.push_str(&daemon_line(memd.as_deref()));
     let json = serde_json::json!({
         "checkpoints": checkpoints,
         "recall_enabled": recall_enabled,
         "ingested_reads": ingested,
-        "clients": clients,
+        "integrations": crate::recall::integration_rows(repo, &statuses),
         "memd": memd.map(|p| p.display().to_string()),
     });
     (human, json)
@@ -251,44 +251,47 @@ fn recall_ingest_line(recall_enabled: bool, ingested: Option<i64>) -> String {
     }
 }
 
-/// Leg 3: every first-class agent's native hook configuration. Hooks are
-/// the only wiring Rift writes or inspects, so this leg gates on and prints
-/// exactly that one state — for Codex, including whether Codex still trusts
-/// each hook as written: a hook Codex skips reads `error`, never
-/// `configured`, and its action is the remedy. The install evidence is spelled by the installer's
-/// one sentence (`present via …`), so doctor, `rift recall status` and
-/// Project Settings cannot name different reasons for the same row.
-fn integrations_lines(clients: &[rift_agent_install::ClientStatus]) -> String {
-    let configured = clients
+/// Leg 3: every adapter in registry order, rendered by the table
+/// `rift recall status` prints — wiring, the installer's one availability
+/// sentence (`present via …`) and Codex's trust with its remedy — so doctor,
+/// that table and Project Settings cannot name different reasons for the same
+/// row. An adapter that is merely not wired gets no line beyond its row; an
+/// action follows only a file Rift cannot manage as written.
+fn integrations_lines(statuses: &[rift_agent_install::native::NativeIntegrationStatus]) -> String {
+    let wired = statuses
         .iter()
-        .filter(|status| status.hooks == rift_agent_install::WiringState::Configured)
+        .filter(|status| crate::recall::is_wired(status))
         .count();
-    let mut human = format!(
-        "\n    integrations:   {configured}/{} configured",
-        clients.len()
-    );
-    let token = |value: serde_json::Value| {
-        value
-            .as_str()
-            .map_or_else(|| "unknown".to_owned(), str::to_owned)
-    };
-    for status in clients {
-        human.push_str(&format!(
-            "\n      {}: hooks {}, probe {}, connection {}, installed {}",
-            status.client.display_name(),
-            token(serde_json::to_value(status.hooks).unwrap_or_default()),
-            token(serde_json::to_value(status.server_probe).unwrap_or_default()),
-            token(serde_json::to_value(status.connection).unwrap_or_default()),
-            rift_agent_install::describe_installations(&status.installations),
-        ));
-        if let Some(trust) = &status.codex_trust {
-            human.push_str(&format!("\n        codex trust: {}", trust.summary()));
-        }
-        if let Some(action) = &status.action {
-            human.push_str(&format!("\n        action: {action}"));
-        }
+    let mut table = String::new();
+    crate::recall::render_status(&mut table, statuses);
+    let actions = statuses
+        .iter()
+        .filter_map(fault_action)
+        .map(|action| format!("  action: {action}"));
+    let mut human = format!("\n    integrations:   {wired}/{} wired", statuses.len());
+    for line in table.lines().map(str::to_owned).chain(actions) {
+        human.push_str("\n    ");
+        human.push_str(&line);
     }
     human
+}
+
+/// The repair a conflicting or malformed descriptor or hook file calls for.
+/// Codex's skipped hooks are not here: their remedy is already printed under
+/// the trust line the table ends with.
+fn fault_action(status: &rift_agent_install::native::NativeIntegrationStatus) -> Option<String> {
+    use rift_agent_install::native::{NativeHookWiring, NativeWiring};
+
+    let name = &status.display_name;
+    match (status.wiring, status.hook_wiring) {
+        (NativeWiring::Conflict | NativeWiring::Invalid, _) => {
+            Some(format!("repair {name} descriptor"))
+        }
+        (_, Some(NativeHookWiring::Conflict | NativeHookWiring::Invalid)) => {
+            Some(format!("repair {name} hook configuration"))
+        }
+        _ => None,
+    }
 }
 
 /// Leg 4: the daemon binary.
@@ -515,5 +518,44 @@ mod tests {
         let (human, json) = doctor_retired_config_keys(&broken);
         assert!(human.is_empty(), "{human}");
         assert_eq!(json["notice"], serde_json::Value::Null);
+    }
+
+    /// Only a file Rift cannot manage as written earns an action line; an
+    /// adapter that is merely not wired says nothing beyond its row.
+    #[test]
+    fn only_a_conflicting_or_malformed_file_earns_an_action() {
+        use rift_agent_install::native::{
+            NativeDetection, NativeHookWiring, NativeIntegrationStatus, NativeWiring,
+        };
+        let status = |wiring, hook_wiring| NativeIntegrationStatus {
+            agent: "cursor".to_owned(),
+            display_name: "Cursor".to_owned(),
+            detection: NativeDetection::NotDetected,
+            wiring,
+            executable: None,
+            installations: Vec::new(),
+            hook_wiring,
+            codex_trust: None,
+        };
+        assert_eq!(fault_action(&status(NativeWiring::Missing, None)), None);
+        assert_eq!(
+            fault_action(&status(
+                NativeWiring::Managed,
+                Some(NativeHookWiring::Stale)
+            )),
+            None
+        );
+        assert_eq!(
+            fault_action(&status(NativeWiring::Conflict, None)).as_deref(),
+            Some("repair Cursor descriptor")
+        );
+        assert_eq!(
+            fault_action(&status(
+                NativeWiring::Managed,
+                Some(NativeHookWiring::Invalid)
+            ))
+            .as_deref(),
+            Some("repair Cursor hook configuration")
+        );
     }
 }

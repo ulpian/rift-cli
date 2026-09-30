@@ -249,7 +249,9 @@ const AGENT_HOOK_EVENT_COLUMNS: &[Column] = &[
     Column::text("verb"),
     Column::text_null("session_id"), // may be NULL pre-session-start
     Column::int("received_at"),
-    Column::text("outcome"), // 'recorded' | 'deferred' | 'skipped-unknown-verb'
+    // 'recorded' | 'recorded-no-event' | 'deferred' | 'deferred-no-session'
+    // | 'skipped-unknown-verb'
+    Column::text("outcome"),
     Column::int("schema_version"),
 ];
 

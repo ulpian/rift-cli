@@ -8,17 +8,20 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use rift_agent_install::health::{Remedy, Severity};
 use rift_canopy::{
     NativeAgentDetection, NativeAgentHookWiring, NativeAgentIdeHost, NativeAgentInstallSource,
-    NativeAgentInstallation, NativeAgentIntegrationRow, NativeAgentWiring, ProjectInitialization,
-    ProjectPolicyState, ProjectPolicySummary, ProjectSettingId, ProjectSettingRow,
-    ProjectSettingsView,
+    NativeAgentInstallation, NativeAgentIntegrationRow, NativeAgentRemedy,
+    NativeAgentRemedySeverity, NativeAgentWiring, ProjectInitialization, ProjectPolicyState,
+    ProjectPolicySummary, ProjectSettingId, ProjectSettingRow, ProjectSettingsView,
 };
 use rift_config::{EffectiveConfig, PolicySource};
 use rift_recall_policy::{load_serve_policy, ServePolicySource};
 use rift_store::{projection_db_for_family_under, resolve_cache_root};
 
 use crate::feeds::project_family;
+
+use super::project_read::project_remedies;
 
 /// The repository's effective configuration as the settings page reads it.
 ///
@@ -106,7 +109,7 @@ pub fn project_settings_view_under(root: &Path, dir: &Path) -> ProjectSettingsVi
             search_mode: serve.policy.search.mode,
         },
     );
-    let mut integrations = native_settings_integrations(dir, initialization);
+    let mut integrations = native_settings_integrations(root, dir, initialization);
     if let Some(plan) = pending_setup_plan(dir) {
         restore_pending_choices(&plan, &mut settings, &mut integrations);
     }
@@ -136,8 +139,13 @@ pub fn project_settings_view_under(root: &Path, dir: &Path) -> ProjectSettingsVi
 /// so this is one small JSON file read during a status — never on a hook's
 /// path, which decides nothing from here.
 pub(super) fn hooks_installed_here(family: &rift_git::Family) -> bool {
-    let dir = rift_git::family::family_dir_under(|key| std::env::var(key).ok(), &family.common_dir);
-    rift_shadow_hooks::read_binary_of_record(&dir).is_some_and(|record| record.is_live())
+    rift_shadow_hooks::read_binary_of_record(&family_dir(family))
+        .is_some_and(|record| record.is_live())
+}
+
+/// Where `family` keeps its manifest and its binary of record.
+pub(super) fn family_dir(family: &rift_git::Family) -> std::path::PathBuf {
+    rift_git::family::family_dir_under(|key| std::env::var(key).ok(), &family.common_dir)
 }
 
 /// The serve overlay's source, in the settings page's vocabulary.
@@ -322,11 +330,13 @@ fn project_initialization(root: &Path, dir: &Path) -> ProjectInitialization {
 }
 
 fn native_settings_integrations(
+    root: &Path,
     dir: &Path,
     initialization: ProjectInitialization,
 ) -> Vec<NativeAgentIntegrationRow> {
     native_settings_rows(
         rift_agent_install::native::diagnose_all(dir),
+        &project_remedies(root, dir),
         initialization,
     )
 }
@@ -335,13 +345,15 @@ fn native_settings_integrations(
 /// [`native_settings_integrations`], so the projection of the installer's
 /// vocabulary (and the pre-selection rule it feeds) is testable without a
 /// machine's real `PATH`, home or application roots behind `diagnose_all`.
+///
+/// Each row carries the remedies whose finding names its agent, in the order
+/// the assessment sorted them.
 fn native_settings_rows(
     statuses: Vec<rift_agent_install::native::NativeIntegrationStatus>,
+    remedies: &[Remedy],
     initialization: ProjectInitialization,
 ) -> Vec<NativeAgentIntegrationRow> {
-    use rift_agent_install::native::{
-        NativeDetection, NativeHookWiring, NativeIdeHost, NativeInstallSource, NativeWiring,
-    };
+    use rift_agent_install::native::{NativeDetection, NativeHookWiring, NativeWiring};
 
     statuses
         .into_iter()
@@ -370,29 +382,11 @@ fn native_settings_rows(
             let installations = row
                 .installations
                 .into_iter()
-                .map(|installation| NativeAgentInstallation {
-                    source: match installation.source {
-                        NativeInstallSource::PathCommand => NativeAgentInstallSource::PathCommand,
-                        NativeInstallSource::VendorInstall => {
-                            NativeAgentInstallSource::VendorInstall
-                        }
-                        NativeInstallSource::IdeExtension(host) => {
-                            NativeAgentInstallSource::IdeExtension(match host {
-                                NativeIdeHost::VsCode => NativeAgentIdeHost::VsCode,
-                                NativeIdeHost::VsCodeInsiders => NativeAgentIdeHost::VsCodeInsiders,
-                                NativeIdeHost::Cursor => NativeAgentIdeHost::Cursor,
-                                NativeIdeHost::Windsurf => NativeAgentIdeHost::Windsurf,
-                            })
-                        }
-                        NativeInstallSource::JetBrainsPlugin => {
-                            NativeAgentInstallSource::JetBrainsPlugin
-                        }
-                    },
-                    version: installation.version,
-                })
+                .map(installation_row)
                 .collect::<Vec<_>>();
             let alpha_supported = rift_agent_install::native::is_alpha_supported(&row.agent);
             NativeAgentIntegrationRow {
+                remedies: agent_remedies(&row.agent, remedies),
                 agent: row.agent,
                 display_name: row.display_name,
                 detection,
@@ -406,6 +400,47 @@ fn native_settings_rows(
                 alpha_supported,
                 selected: default_selection(wiring, initialization, detected, alpha_supported),
             }
+        })
+        .collect()
+}
+
+/// One install as the dashboard names it.
+fn installation_row(
+    installation: rift_agent_install::native::NativeInstallation,
+) -> NativeAgentInstallation {
+    use rift_agent_install::native::{NativeIdeHost, NativeInstallSource};
+    let source = match installation.source {
+        NativeInstallSource::PathCommand => NativeAgentInstallSource::PathCommand,
+        NativeInstallSource::VendorInstall => NativeAgentInstallSource::VendorInstall,
+        NativeInstallSource::IdeExtension(host) => {
+            NativeAgentInstallSource::IdeExtension(match host {
+                NativeIdeHost::VsCode => NativeAgentIdeHost::VsCode,
+                NativeIdeHost::VsCodeInsiders => NativeAgentIdeHost::VsCodeInsiders,
+                NativeIdeHost::Cursor => NativeAgentIdeHost::Cursor,
+                NativeIdeHost::Windsurf => NativeAgentIdeHost::Windsurf,
+            })
+        }
+        NativeInstallSource::JetBrainsPlugin => NativeAgentInstallSource::JetBrainsPlugin,
+    };
+    NativeAgentInstallation {
+        source,
+        version: installation.version,
+    }
+}
+
+/// `agent`'s remedies, in the dashboard's words for them: the severity, the
+/// headline and the sentence the command line prints for the same finding.
+fn agent_remedies(agent: &str, remedies: &[Remedy]) -> Vec<NativeAgentRemedy> {
+    remedies
+        .iter()
+        .filter(|remedy| remedy.agent == agent)
+        .map(|remedy| NativeAgentRemedy {
+            severity: match remedy.severity {
+                Severity::Error => NativeAgentRemedySeverity::Error,
+                Severity::Warning => NativeAgentRemedySeverity::Warning,
+            },
+            headline: remedy.headline.clone(),
+            sentence: remedy.sentence.clone(),
         })
         .collect()
 }
@@ -608,7 +643,7 @@ mod tests {
             .iter()
             .map(NativeIntegrationStatus::availability)
             .collect();
-        let rows = native_settings_rows(statuses, ProjectInitialization::NotInitialized);
+        let rows = native_settings_rows(statuses, &[], ProjectInitialization::NotInitialized);
         let actual: Vec<String> = rows
             .iter()
             .map(NativeAgentIntegrationRow::availability)
@@ -628,7 +663,11 @@ mod tests {
     /// Every install source survives into the row with its host and version.
     #[test]
     fn an_install_source_survives_into_the_row_with_its_host() {
-        let rows = native_settings_rows(install_evidence(), ProjectInitialization::NotInitialized);
+        let rows = native_settings_rows(
+            install_evidence(),
+            &[],
+            ProjectInitialization::NotInitialized,
+        );
         assert_eq!(
             rows[1].installations[2].source,
             NativeAgentInstallSource::IdeExtension(NativeAgentIdeHost::Windsurf)
@@ -641,8 +680,58 @@ mod tests {
     /// offered Codex and `rift init` skipped it — and a detected coming-soon
     /// agent is never staged.
     #[test]
+    fn a_settings_row_carries_its_agents_remedy_and_a_healthy_agent_carries_none() {
+        use rift_agent_install::health::{remedy, Finding, Reason, Surface};
+        let findings = [
+            Finding::new(
+                Reason::HookBinaryMissing,
+                "codex",
+                None,
+                "/gone/rift".to_owned(),
+            ),
+            Finding::new(
+                Reason::HookBinaryDisagrees,
+                "codex",
+                None,
+                "a vs b".to_owned(),
+            ),
+        ];
+        let remedies: Vec<Remedy> = findings
+            .iter()
+            .map(|finding| remedy(finding, Surface::Terminal, None))
+            .collect();
+        let rows = native_settings_rows(
+            install_evidence(),
+            &remedies,
+            ProjectInitialization::Initialized,
+        );
+        let codex = rows.iter().find(|row| row.agent == "codex").unwrap();
+        let expected: Vec<NativeAgentRemedy> = remedies
+            .iter()
+            .zip([
+                NativeAgentRemedySeverity::Error,
+                NativeAgentRemedySeverity::Warning,
+            ])
+            .map(|(remedy, severity)| NativeAgentRemedy {
+                severity,
+                headline: remedy.headline.clone(),
+                sentence: remedy.sentence.clone(),
+            })
+            .collect();
+        assert_eq!(codex.remedies, expected);
+        assert!(rows
+            .iter()
+            .filter(|row| row.agent != "codex")
+            .all(|row| row.remedies.is_empty()));
+    }
+
+    #[test]
     fn install_evidence_pre_ticks_only_the_supported_detected_rows() {
-        let rows = native_settings_rows(install_evidence(), ProjectInitialization::NotInitialized);
+        let rows = native_settings_rows(
+            install_evidence(),
+            &[],
+            ProjectInitialization::NotInitialized,
+        );
         assert!(
             rows[0].detected() && rows[0].selected,
             "extension-only pre-ticks"

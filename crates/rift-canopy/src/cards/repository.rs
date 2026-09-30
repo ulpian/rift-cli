@@ -446,4 +446,17 @@ mod tests {
         assert_eq!(wide.settings.text, "[ Project Settings ]");
         assert_eq!(wide.recall.rect.y, wide.settings.rect.y);
     }
+
+    #[test]
+    fn the_status_line_of_a_failing_integration_reads_its_act() {
+        let detail = DetailView::thin(
+            "/r/demo".into(),
+            "demo".into(),
+            ProjectStatus::Error(crate::StatusError::Integration),
+        );
+        assert_eq!(
+            status_line(&detail),
+            "capture failing \u{2014} s / /settings"
+        );
+    }
 }

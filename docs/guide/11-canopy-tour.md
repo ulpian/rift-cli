@@ -126,7 +126,7 @@ The status glyph on the right:
 | `×` | `x` | Not inside a git repository, so there is nothing to set up |
 | `◒` | `~` | Setup is unfinished: a selected step is still pending, or the projection is here without the hook install; `s` opens the setup |
 | `◔` | `a` | A linked worktree of an initialized family that was never wired |
-| `!` | `!` | A read error — the row says what it was |
+| `!` | `!` | An error — the row says what it was: a read that failed, or a wired agent's capture failing |
 
 The second column is what a terminal without full Unicode gets: every glyph has
 a one-cell plain substitute, so the floor tier never renders a box of question
@@ -164,6 +164,15 @@ the status row is itself the act: drawn in the key-hint style, so the cells that
 answer a click are the cells that look clickable, and clicking it or pressing
 `A` adopts the member. `A` is bound *only* in that state, so it can never be
 advertised where it would do nothing.
+When an agent's integration has an error-severity finding (its hooks skipped,
+its hook binary gone, its lifecycle hooks silent, or a session left behind its
+own events), the status goes to `!` and the row reads `capture failing — s /
+/settings`.
+The finding outranks running and idle, because both would read as healthy
+while capture is lost; it stays below a missing repository, a missing or
+unreadable projection, an unadopted member and a corrupt session cache, whose
+acts come first.
+A warning never turns the card.
 
 **The models card** is a treemap of model calls, keyed by letter, with a legend
 underneath and a total (`Σ 700 calls`) in the title. Area is proportional to
@@ -430,6 +439,13 @@ sensitive paths are in effect, how many redactor packs loaded or failed
 **Integrations** lists every adapter in registry order with what was detected
 and what Rift manages for it
 ([10-agent-integrations.md](10-agent-integrations.md)).
+Under an adapter with an integration-health finding, each finding prints as
+`error: <headline>` or `warning: <headline>` in the matching colour, with the
+remedy sentence wrapped beneath it: the same sentence `rift status` and
+`rift doctor` print.
+The lines are not cursor stops and not click targets; the adapter row above
+them stays the act, and moving the cursor onto it scrolls its remedy into view.
+A healthy adapter prints nothing extra.
 
 ### The rules behind the surface
 

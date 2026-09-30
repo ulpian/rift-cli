@@ -1,7 +1,8 @@
-//! End-to-end of integration health on the command line: `rift status` and
-//! `rift doctor` print the same finding in the same words and carry the same
-//! `--json` array, a healthy repository says so on both, and neither command,
-//! `--fix` included, writes a byte of what the finding was read from.
+//! End-to-end of integration health on the command line: `rift status`,
+//! `rift recall status` and `rift doctor` print the same finding in the same
+//! words and carry the same `--json` array, a healthy repository says so on
+//! each, and no command, `--fix` included, writes a byte of what the finding
+//! was read from.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -185,6 +186,46 @@ fn a_healthy_repository_prints_none_and_an_empty_array() {
 }
 
 #[test]
+fn recall_status_and_doctor_print_the_same_health_sentence_and_array() {
+    let fixture = Fixture::wired();
+    fixture.break_the_hook_binary();
+
+    let recall = fixture.stdout(&["recall", "status"]);
+    let doctor = fixture.stdout(&["doctor"]);
+    let headline = "Claude Code: hook binary missing";
+    assert_eq!(
+        sentence_under(&recall, headline),
+        sentence_under(&doctor, headline)
+    );
+
+    let recall = fixture.json(&["recall", "status", "--json"]);
+    let doctor = fixture.json(&["doctor", "--json"]);
+    assert_eq!(recall["health"], doctor["integration_health"]);
+    assert!(
+        recall["health"]
+            .as_array()
+            .is_some_and(|health| !health.is_empty()),
+        "{recall}"
+    );
+}
+
+#[test]
+fn a_healthy_repository_reads_none_on_recall_status_between_support_and_policy() {
+    let fixture = Fixture::wired();
+    let text = fixture.stdout(&["recall", "status"]);
+    let line = |needle: &str| {
+        text.lines()
+            .position(|line| line.starts_with(needle))
+            .unwrap_or_else(|| panic!("no {needle:?} in {text}"))
+    };
+    let health = line("  integration health: none");
+    assert!(line("Support truth") < health, "{text}");
+    assert!(health < line("Serving policy"), "{text}");
+    let json = fixture.json(&["recall", "status", "--json"]);
+    assert_eq!(json["health"], serde_json::json!([]));
+}
+
+#[test]
 fn reading_health_writes_none_of_its_inputs_even_under_fix() {
     let fixture = Fixture::wired();
     fixture.break_the_hook_binary();
@@ -196,6 +237,7 @@ fn reading_health_writes_none_of_its_inputs_even_under_fix() {
     );
     for args in [
         &["status", "--json"][..],
+        &["recall", "status", "--json"][..],
         &["doctor", "--json"][..],
         &["doctor", "--fix", "--json"][..],
     ] {

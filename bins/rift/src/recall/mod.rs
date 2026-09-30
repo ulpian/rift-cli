@@ -37,10 +37,11 @@ use crate::cli::{Outcome, RecallCmd};
 pub(crate) use self::policy::family_capability;
 
 use self::policy::{policy_json, render_policy, render_savings_shares};
+pub(crate) use self::status::{integration_rows, is_wired, render_status};
+
 use self::serve::serve;
 use self::status::{
-    integration_status_json, observed_boundary_responses, render_status, render_support,
-    support_assessments,
+    integration_status_json, observed_boundary_responses, render_support, support_assessments,
 };
 
 pub(crate) fn run(cmd: &RecallCmd, repo: &Path) -> rift_core::Result<Outcome> {
@@ -74,6 +75,11 @@ pub(crate) fn run(cmd: &RecallCmd, repo: &Path) -> rift_core::Result<Outcome> {
             let assessments =
                 support_assessments(repo, &statuses, &clients, &boundary_responses, &policy);
             render_support(&mut human, &assessments);
+            // The same block `rift doctor` prints, between the tables it is
+            // about and the policy the repository asked for.
+            let (health, health_json) = crate::doctor::health::status_health_block(repo);
+            human.push_str(&health);
+            human.push('\n');
             render_policy(&mut human, &policy);
             // The figure this plane is judged by, on the table that says
             // whether it is switched on: a mode line with no measurement
@@ -84,6 +90,7 @@ pub(crate) fn run(cmd: &RecallCmd, repo: &Path) -> rift_core::Result<Outcome> {
                 human.trim_end().to_owned(),
                 serde_json::json!({
                     "integrations": integration_status_json(&statuses, &assessments),
+                    "health": health_json,
                     "policy": policy_json(&policy),
                     "savings": crate::memory::savings_json(&savings),
                 }),

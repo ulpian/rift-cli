@@ -8,11 +8,16 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
+use rift_agent_install::detect::DetectionEnvironment;
+use rift_agent_install::health::{self, Facts, Remedy, Severity};
 use rift_canopy::{
     derive_status, CaptureSummary, DetailView, EntryKind, ModelProvenance, ModelUsage,
     ProjectStatus, ProjectionState, SessionsRead, StatusInputs,
 };
+use rift_git::FamilyMember;
 use rift_store::{projection_db_for_family_under, CanonicalStore, SqliteStore};
 use tokio::runtime::Runtime;
 
@@ -20,7 +25,7 @@ use crate::feeds::project_family;
 use crate::store::runtime;
 
 use super::now_ms;
-use super::settings_view::{hooks_installed_here, project_settings_view_under};
+use super::settings_view::{family_dir, hooks_installed_here, project_settings_view_under};
 use super::watermark::Watermark;
 
 /// What one read of a project yields: its live status, its `{cursor, epoch}`
@@ -52,7 +57,60 @@ struct FamilyRead {
     sessions: SessionsRead,
     provisioned: Option<bool>,
     running_members: Vec<String>,
+    /// Every member, whose session journals the health read gathers.
+    members: Vec<FamilyMember>,
 }
+
+/// Where one family's integration-health facts are read from: every input
+/// [`Facts::gather`] takes but the sessions, which are read from `members`.
+///
+/// The Codex home is a field, not a process read inside the gather, so a test
+/// points it at a temporary directory and never at the machine's own.
+struct HealthSources<'a> {
+    /// The checkout whose hook files are read.
+    repo: &'a Path,
+    /// The family's manifest directory, which holds its binary of record.
+    family_dir: PathBuf,
+    /// The family's projection; opened read-only, and only when it exists.
+    projection_db: PathBuf,
+    /// Every member of the family, whose session journals are read.
+    members: &'a [FamilyMember],
+    /// Codex's home, when there is one to read Codex's trust from.
+    codex_home: Option<PathBuf>,
+}
+
+/// Every file whose change can move the health read's answer, stamped by
+/// modification time, and the refresh window the read falls in.
+///
+/// The detectors are functions of these files and a clock value: the hook
+/// files and the binary of record, Codex's trust record, every member's
+/// session journal, and the projection (whose file changes whenever its
+/// watermark does). The window bounds what no stamp sees — a wired binary
+/// deleted, or a session ageing out of the alarm window — to one refresh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HealthStamp {
+    files: Vec<Option<SystemTime>>,
+    journals: Vec<JournalStamp>,
+    window: i64,
+}
+
+/// One member's session journal: the directory's own stamp, how many caches
+/// it holds and the newest of them, so a cache rewritten in place moves it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JournalStamp {
+    dir: Option<SystemTime>,
+    caches: usize,
+    newest: Option<SystemTime>,
+}
+
+/// How long a cached health answer may stand with no stamped file moving.
+const HEALTH_REFRESH_MS: i64 = 30_000;
+
+/// The last health answer per checkout, with the stamp it was computed
+/// under. Keyed by checkout path and bounded by the registry's rows; a
+/// process-wide map because the status read is a free function the worker
+/// calls, and the answer is a pure function of the stamped files.
+static HEALTH_CACHE: Mutex<BTreeMap<PathBuf, (HealthStamp, bool)>> = Mutex::new(BTreeMap::new());
 
 impl FamilyRead {
     /// A path with no family at all — not a repository, or one whose common dir
@@ -64,6 +122,99 @@ impl FamilyRead {
             sessions: SessionsRead::Ok(None),
             provisioned: None,
             running_members: Vec::new(),
+            members: Vec::new(),
+        }
+    }
+
+    /// Whether `repo`'s family has an error-severity integration finding as
+    /// of `now_ms`; `false` for a path with no family.
+    fn integration_failing(
+        &self,
+        root: &Path,
+        repo: &Path,
+        family: Option<&rift_git::Family>,
+        now_ms: i64,
+    ) -> bool {
+        let Some(family) = family else {
+            return false;
+        };
+        let sources = HealthSources::from_process(root, repo, family, &self.members);
+        cached_integration_failing(&sources, now_ms)
+    }
+}
+
+impl<'a> HealthSources<'a> {
+    /// The sources for `repo`, a checkout of `family`, under the state root
+    /// `root`, with the process's own Codex home.
+    fn from_process(
+        root: &Path,
+        repo: &'a Path,
+        family: &rift_git::Family,
+        members: &'a [FamilyMember],
+    ) -> Self {
+        Self {
+            repo,
+            family_dir: family_dir(family),
+            projection_db: projection_db_for_family_under(root, family),
+            members,
+            codex_home: rift_agent_install::native::codex_home_from_process(),
+        }
+    }
+}
+
+impl HealthStamp {
+    /// Stamp every file `sources` reads, as of `now_ms`.
+    fn read(sources: &HealthSources<'_>, now_ms: i64) -> Self {
+        let hook_files = rift_shadow_hooks::AdapterRegistry::with_builtin()
+            .agents()
+            .iter()
+            .filter_map(|agent| rift_agent_install::native::hook_file(agent.as_str()))
+            .map(|file| sources.repo.join(file))
+            .collect::<Vec<_>>();
+        let projection = sources.projection_db.as_os_str();
+        let mut wal = projection.to_owned();
+        wal.push("-wal");
+        let others = [
+            rift_shadow_hooks::binary_of_record_path(&sources.family_dir),
+            sources.projection_db.clone(),
+            PathBuf::from(wal),
+        ];
+        let codex = sources
+            .codex_home
+            .iter()
+            .map(|home| home.join("config.toml"));
+        let files = hook_files
+            .into_iter()
+            .chain(others)
+            .chain(codex)
+            .map(|path| modified(&path))
+            .collect();
+        let journals = sources
+            .members
+            .iter()
+            .map(|member| JournalStamp::read(&member.git_dir.join(crate::session::SESSIONS_DIR)))
+            .collect();
+        Self {
+            files,
+            journals,
+            window: now_ms.div_euclid(HEALTH_REFRESH_MS),
+        }
+    }
+}
+
+impl JournalStamp {
+    fn read(dir: &Path) -> Self {
+        let mut caches = 0;
+        let mut newest = None;
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            caches += 1;
+            let stamp = entry.metadata().and_then(|meta| meta.modified()).ok();
+            newest = newest.max(stamp);
+        }
+        Self {
+            dir: modified(dir),
+            caches,
+            newest,
         }
     }
 }
@@ -142,7 +293,10 @@ pub(super) fn read_project(root: &Path, path: &str) -> ProjectRead {
     // first contact, so a family nothing was ever wired in carries a
     // projection; the card reads it the way the settings page does, and the
     // add flow's act is the one this status asks for.
-    if family.is_some_and(|family| !hooks_installed_here(&family)) {
+    if family
+        .as_ref()
+        .is_some_and(|family| !hooks_installed_here(family))
+    {
         return ProjectRead::plain(ProjectStatus::SetupIncomplete, None);
     }
     // The projection exists: open once, read the watermark + freshest event.
@@ -158,17 +312,35 @@ pub(super) fn read_project(root: &Path, path: &str) -> ProjectRead {
             None,
         );
     };
+    // Only a readable projection reaches the rows the finding outranks, so
+    // only here is the health read worth its cost.
+    let integration_failing = family_read.integration_failing(root, &dir, family.as_ref(), now_ms);
     ProjectRead {
-        status: status_of(
-            true,
-            ProjectionState::Ready,
+        status: derive_status(&StatusInputs {
+            repo_present: true,
+            projection: ProjectionState::Ready,
             sessions,
-            last_ts.is_some(),
+            has_captures: last_ts.is_some(),
             provisioned,
-        ),
+            integration_failing,
+        }),
         mark: Some(mark),
         running_members: family_read.running_members,
     }
+}
+
+/// Every integration-health remedy for the checkout at `dir`, for Project
+/// Settings to print under the adapter rows. Empty outside a repository.
+pub(super) fn project_remedies(root: &Path, dir: &Path) -> Vec<Remedy> {
+    let Ok(paths) = rift_git::discover(dir) else {
+        return Vec::new();
+    };
+    let Some(family) = project_family(dir) else {
+        return Vec::new();
+    };
+    let roster = crate::session::roster(&paths);
+    let sources = HealthSources::from_process(root, dir, &family, &roster.members);
+    integration_remedies(&sources, &DetectionEnvironment::from_process(), now_ms())
 }
 
 /// Build the rich column-2 [`DetailView`] for the active project: its effective
@@ -237,6 +409,7 @@ fn read_family(dir: &Path, now_ms: i64) -> FamilyRead {
             sessions,
             provisioned: Some(is_provisioned(&paths.work_tree)),
             running_members: Vec::new(),
+            members: roster.members,
         };
     }
     let running_members = roster
@@ -251,6 +424,7 @@ fn read_family(dir: &Path, now_ms: i64) -> FamilyRead {
         sessions: read.family.read,
         provisioned: None,
         running_members,
+        members: roster.members,
     }
 }
 
@@ -279,7 +453,9 @@ fn member_label(member: &rift_git::FamilyMember) -> String {
     }
 }
 
-/// Assemble the [`StatusInputs`] and run the pure truth table.
+/// Assemble the [`StatusInputs`] and run the pure truth table, for every read
+/// that stops before a readable projection: no integration finding is read
+/// there, because every such status outranks one.
 fn status_of(
     repo_present: bool,
     projection: ProjectionState,
@@ -293,6 +469,7 @@ fn status_of(
         sessions,
         has_captures,
         provisioned,
+        integration_failing: false,
     })
 }
 
@@ -448,6 +625,77 @@ fn read_capture_summary(store: &SqliteStore, rt: &Runtime) -> CaptureSummary {
             .ok()
             .flatten(),
     }
+}
+
+/// [`integration_failing`], recomputed only when its stamp moves: the poll
+/// reads a project far more often than any input to its findings changes,
+/// and the full read costs as much again as the rest of the status read.
+fn cached_integration_failing(sources: &HealthSources<'_>, now_ms: i64) -> bool {
+    let stamp = HealthStamp::read(sources, now_ms);
+    let cached = HEALTH_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(sources.repo).cloned());
+    match cached {
+        Some((cached_stamp, failing)) if cached_stamp == stamp => return failing,
+        _ => (),
+    }
+    let failing = integration_failing(sources, now_ms);
+    if let Ok(mut cache) = HEALTH_CACHE.lock() {
+        cache.insert(sources.repo.to_path_buf(), (stamp, failing));
+    }
+    failing
+}
+
+/// Whether any finding over the family's facts is an error. Warnings never
+/// count: nothing is being lost while they hold, so they do not turn the card.
+///
+/// Asks [`health::assess`] and not for remedies: the status needs no
+/// sentence, and naming a surface detects installs, which the poll must not
+/// pay for.
+fn integration_failing(sources: &HealthSources<'_>, now_ms: i64) -> bool {
+    with_health_facts(sources, |facts| {
+        health::assess(facts, now_ms)
+            .iter()
+            .any(|finding| finding.severity == Severity::Error)
+    })
+}
+
+/// Every finding over the family's facts with its remedy, the same list
+/// `rift status` and `rift doctor` print.
+fn integration_remedies(
+    sources: &HealthSources<'_>,
+    env: &DetectionEnvironment,
+    now_ms: i64,
+) -> Vec<Remedy> {
+    with_health_facts(sources, |facts| health::remedies(facts, env, now_ms))
+}
+
+/// Gather the family's health facts, read-only, and hand them to `use_facts`.
+///
+/// The projection is opened read-only, never through the status read's own
+/// open, so this read cannot create, migrate or lock anything; the hook files,
+/// `binary.json` and the session journals are parsed in place.
+fn with_health_facts<T>(sources: &HealthSources<'_>, use_facts: impl FnOnce(&Facts<'_>) -> T) -> T {
+    let sessions = crate::session::family_journal(sources.members);
+    // A read-only open creates nothing: an absent projection fails it.
+    let projection = SqliteStore::open_read_only(&sources.projection_db).ok();
+    let facts = Facts::gather(
+        sources.repo,
+        &sources.family_dir,
+        sources.codex_home.as_deref(),
+        &sessions,
+        projection.as_ref(),
+    );
+    use_facts(&facts)
+}
+
+/// A path's modification time; `None` when it is absent or unreadable, which
+/// is itself a stamp: a file appearing moves it.
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
 }
 
 #[cfg(test)]
@@ -1039,5 +1287,192 @@ mod tests {
             read_project(root.path(), &proj.to_string_lossy()).status,
             ProjectStatus::PickingUp
         );
+    }
+
+    /// A clock value for the health read's own tests.
+    const NOW: i64 = 1_800_000_000_000;
+
+    /// Wire Claude Code's project hook file to run `binary`, as `rift enable`
+    /// writes it.
+    fn wire_claude_hook(repo: &Path, binary: &Path) -> PathBuf {
+        let file = repo.join(".claude/settings.local.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let body = serde_json::json!({ "hooks": { "SessionStart": [{ "hooks": [{
+            "type": "command",
+            "command": format!("\"{}\" hooks claude-code SessionStart", binary.display()),
+        }]}]}});
+        std::fs::write(&file, body.to_string()).unwrap();
+        file
+    }
+
+    /// An executable file at `path` that is not the binary of record.
+    fn other_binary(path: &Path) -> PathBuf {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.to_path_buf()
+    }
+
+    /// The sources for `repo`'s family with a temporary Codex home.
+    fn sources_for<'a>(
+        root: &Path,
+        repo: &'a Path,
+        members: &'a [FamilyMember],
+    ) -> HealthSources<'a> {
+        let family = project_family(repo).unwrap();
+        HealthSources {
+            repo,
+            family_dir: family_dir(&family),
+            projection_db: projection_db_for_family_under(root, &family),
+            members,
+            codex_home: Some(root.join("codex-home")),
+        }
+    }
+
+    /// A detection environment over empty temporary directories.
+    fn empty_machine(root: &Path) -> DetectionEnvironment {
+        DetectionEnvironment {
+            search_path: Some(root.join("bin").into_os_string()),
+            home: Some(root.join("home")),
+            app_roots: vec![root.join("apps")],
+            codex_home: None,
+        }
+    }
+
+    fn members_of(repo: &Path) -> Vec<FamilyMember> {
+        crate::session::roster(&rift_git::discover(repo).unwrap()).members
+    }
+
+    #[test]
+    fn an_error_severity_finding_turns_an_idle_project_to_an_integration_error() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 3);
+        assert_eq!(status(root.path(), &path_of(&proj)), ProjectStatus::Idle);
+
+        wire_claude_hook(&proj, &root.path().join("gone/rift"));
+        assert_eq!(
+            status(root.path(), &path_of(&proj)),
+            ProjectStatus::Error(StatusError::Integration)
+        );
+    }
+
+    #[test]
+    fn an_error_severity_finding_turns_a_running_project_to_an_integration_error() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 3);
+        live_session(&proj.join(".git"), "s1", &proj, now_ms());
+        assert!(matches!(
+            status(root.path(), &path_of(&proj)),
+            ProjectStatus::Running { .. }
+        ));
+
+        wire_claude_hook(&proj, &root.path().join("gone/rift"));
+        assert_eq!(
+            status(root.path(), &path_of(&proj)),
+            ProjectStatus::Error(StatusError::Integration)
+        );
+    }
+
+    #[test]
+    fn a_warning_only_project_stays_idle() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 3);
+        wire_claude_hook(&proj, &other_binary(&root.path().join("other/rift")));
+
+        let members = members_of(&proj);
+        let sources = sources_for(root.path(), &proj, &members);
+        let remedies = integration_remedies(&sources, &empty_machine(root.path()), NOW);
+        let reasons: Vec<_> = remedies.iter().map(|remedy| remedy.reason).collect();
+        assert_eq!(reasons, [health::Reason::HookBinaryDisagrees]);
+        assert_eq!(status(root.path(), &path_of(&proj)), ProjectStatus::Idle);
+    }
+
+    #[test]
+    fn the_remedies_name_the_failing_agent_with_the_command_lines_sentence() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 3);
+        wire_claude_hook(&proj, &root.path().join("gone/rift"));
+
+        let members = members_of(&proj);
+        let sources = sources_for(root.path(), &proj, &members);
+        let remedies = integration_remedies(&sources, &empty_machine(root.path()), NOW);
+        assert_eq!(remedies.len(), 1, "{remedies:?}");
+        assert_eq!(remedies[0].agent, "claude-code");
+        assert_eq!(remedies[0].reason, health::Reason::HookBinaryMissing);
+        assert_eq!(remedies[0].headline, "Claude Code: hook binary missing");
+        assert!(integration_failing(&sources, NOW));
+    }
+
+    /// Every file under `dir`, with its bytes, in path order.
+    fn tree_bytes(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).unwrap();
+                    files.push((path, bytes));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn the_status_read_writes_nothing_the_health_read_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 3);
+        let hook = wire_claude_hook(&proj, &root.path().join("gone/rift"));
+        live_session(&proj.join(".git"), "s1", &proj, NOW);
+        let watched = [
+            proj.join(".claude"),
+            proj.join(".git/rift-sessions"),
+            family_dir_of(&proj),
+        ];
+        let before: Vec<_> = watched.iter().map(|dir| tree_bytes(dir)).collect();
+        assert!(before.iter().all(|files| !files.is_empty()));
+        assert!(before[0].iter().any(|(path, _)| *path == hook));
+
+        let read = read_project(root.path(), &path_of(&proj));
+        assert_eq!(read.status, ProjectStatus::Error(StatusError::Integration));
+        let _ = project_remedies(root.path(), &proj);
+        let after: Vec<_> = watched.iter().map(|dir| tree_bytes(dir)).collect();
+        assert_eq!(before, after);
+    }
+
+    /// The status read for one project, timed: the whole read and the
+    /// health read inside it, so the poll's cost of the finding is a number.
+    #[test]
+    #[ignore = "measurement instrument: prints the status read's cost"]
+    fn measure_the_status_read_and_its_health_share() {
+        const ROUNDS: u32 = 200;
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 200);
+        wire_claude_hook(&proj, &root.path().join("gone/rift"));
+        for index in 0..20 {
+            live_session(&proj.join(".git"), &format!("s{index}"), &proj, now_ms());
+        }
+        let path = path_of(&proj);
+        let started = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            let _ = read_project(root.path(), &path);
+        }
+        let whole = started.elapsed() / ROUNDS;
+        let members = members_of(&proj);
+        let sources = sources_for(root.path(), &proj, &members);
+        let started = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            let _ = integration_failing(&sources, NOW);
+        }
+        let health_share = started.elapsed() / ROUNDS;
+        println!("status read {whole:?} per project, health read {health_share:?} of it");
     }
 }

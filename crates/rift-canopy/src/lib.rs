@@ -56,6 +56,7 @@ pub use col1::{
     current_registry, derive_status, EntryKind, LiveSessions, ProjectEntry, ProjectEvent,
     ProjectOp, ProjectionState, SessionsRead, StatusInputs,
 };
+pub use col2::project_settings::{NativeAgentRemedy, NativeAgentRemedySeverity};
 pub use col2::{
     escape_for_terminal, sanitize_for_terminal, CaptureSummary, DetailView, ModelProvenance,
     ModelUsage, NativeAgentDetection, NativeAgentHookWiring, NativeAgentIdeHost,
@@ -188,6 +189,10 @@ pub enum StatusError {
     CorruptSessionCache,
     /// The registered repository path is gone.
     RepoMissing,
+    /// A wired agent's integration has an error-severity finding: its capture
+    /// is being lost, or Rift's own session state is wrong. The reasons and
+    /// their remedies are in Project Settings, under the adapter rows.
+    Integration,
 }
 
 impl ProjectStatus {
@@ -276,6 +281,9 @@ impl ProjectStatus {
             (Self::Error(StatusError::RepoMissing), EntryKind::Worktree) => {
                 Some("checkout gone — run: git worktree prune")
             }
+            // Project Settings prints each finding's remedy under its adapter
+            // row, and `s` and `/settings` open it on any card.
+            (Self::Error(StatusError::Integration), _) => Some("capture failing — s / /settings"),
             _ => None,
         }
     }
@@ -930,6 +938,16 @@ mod tests {
             ProjectStatus::SetupIncomplete.hint(EntryKind::Worktree),
             None
         );
+    }
+
+    #[test]
+    fn an_integration_error_asks_for_project_settings_on_every_row_kind() {
+        for kind in [EntryKind::Repo, EntryKind::Worktree] {
+            assert_eq!(
+                ProjectStatus::Error(StatusError::Integration).hint(kind),
+                Some("capture failing \u{2014} s / /settings")
+            );
+        }
     }
 
     #[test]

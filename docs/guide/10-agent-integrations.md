@@ -575,25 +575,39 @@ failure makes it `degraded`. The six placeholder adapters report
 `stale` is recoverable — an earlier Rift bundle a re-run refreshes safely;
 `conflict` needs you.
 
-**`rift doctor`**'s integrations leg is coarser and older (§10.11); its useful
-signal is the per-client follow-up line (`action: repair Codex hook
-configuration`).
+**`rift doctor`**'s integrations leg renders this same table, headed by
+`integrations: W/9 wired`.
+A row counts as wired when its descriptor reads `managed` and its hooks read
+`managed` or do not apply; a Codex hook file Codex is skipping reads `error`
+and does not count.
+An adapter that is merely not wired gets its row and nothing more.
+A follow-up line appears only for a file Rift cannot manage as written
+(`action: repair Cursor hook configuration`); Codex's skipped hooks carry
+their remedy under the trust line instead.
+Its `--json` carries, under `memory_chain.integrations`, the rows
+`rift recall status --json` emits.
+Rift wires Codex whatever version it reports: no release is too old for a
+project hook file.
 
 **Integration health** is the question the wiring columns cannot answer: is
 what Rift wrote being run, and does what runs reach the ledger?
-`rift status` prints it after the Codex trust line, and `rift doctor` prints it
-as its `integration_health` leg, after the binary of record.
-Both read the same facts through one function and print the same block: a
+`rift status` prints it after the Codex trust line, `rift recall status`
+between the support table and the serving policy, and `rift doctor` as its
+`integration_health` leg, after the binary of record.
+All three read the same facts through one function and print the same block: a
 headline per finding, the remedy sentence under it, or `integration health:
 none`.
-`--json` carries the same array on both, under `health` and
+`--json` carries the same array on each, under `health` and
 `integration_health`: one element per finding with `reason`, `severity`,
 `agent`, `session`, `surface`, `headline`, `sentence` and `detail`.
 The leg only reads; `rift doctor --fix` repairs nothing here.
+Canopy reads the same findings: an error-severity one turns the project's card
+to error, and Project Settings prints each finding's sentence under its
+adapter row ([11-canopy-tour.md](11-canopy-tour.md)).
 
 | Reason | Severity | What it means | What the remedy asks |
 |---|---|---|---|
-| `codex-hooks-skipped` | error | Codex skips at least one of Rift's hooks: modified or untrusted. | Trust them in Codex's `/hooks`; in VS Code, reload the window after. `rift status` points at the trust line instead of printing the sentence twice. |
+| `codex-hooks-skipped` | error | Codex skips at least one of Rift's hooks: modified or untrusted. | Trust them in Codex's `/hooks`; in VS Code, reload the window after. `rift status` and `rift recall status` point at the trust line instead of printing the sentence twice. |
 | `codex-trust-unverifiable` | warning | Rift cannot reproduce Codex's answer: an unproven version, or no recorded session. | Nothing is being lost that Rift can see; check `/hooks` in Codex to be sure. |
 | `lifecycle-hooks-missing` | error | The agent's newest recent session sent tool calls but no session start and no prompt. | Restart the client where it runs; if the next session is the same, `rift enable --agent <agent>`. |
 | `hook-binary-missing` | error | The binary the agent's hook file runs is gone or not executable. | `rift enable --agent <agent>` with the build the hooks should run, then restart the client. |
@@ -620,14 +634,6 @@ binary's own command tree, and is what the instructions block points agents at
 ---
 
 ## 10.11 Rough edges
-
-**`rift doctor`'s integrations leg reports four clients, not nine**, and is not
-the registry-driven view: its `probe` and `connection` columns are vestigial,
-describing a server handshake and a connection lease that no longer exist, so
-their values are whatever was last recorded or a permanent "never seen". It
-also asks Codex for a version at or above a floor today's releases do not
-reach. Neither gates anything — `rift recall status` is the real picture, and
-`rift enable` ignores the floor.
 
 Two artefacts of a retired four-client installer are still read as ownership
 proofs (§10.4) and written by nothing, because a machine that ran it still

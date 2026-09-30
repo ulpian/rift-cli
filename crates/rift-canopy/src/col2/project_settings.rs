@@ -318,6 +318,35 @@ pub struct NativeAgentIntegrationRow {
     pub alpha_supported: bool,
     /// Whether a staged initialization currently selects this integration.
     pub selected: bool,
+    /// Every integration-health finding about this agent, as its remedy.
+    /// Empty when the agent is healthy, and then the row draws nothing extra.
+    pub remedies: Vec<NativeAgentRemedy>,
+}
+
+/// One integration-health finding about one agent, as Project Settings prints
+/// it under the adapter row.
+///
+/// The data plane translates the installer's findings into this, so the
+/// dashboard never learns the installer's types; the sentence is the one the
+/// command line prints for the same finding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeAgentRemedy {
+    /// Whether capture is being lost (an error) or the fact is only worth
+    /// knowing (a warning), which decides the colour.
+    pub severity: NativeAgentRemedySeverity,
+    /// One short line: the agent's name and what is wrong.
+    pub headline: String,
+    /// What to do and where.
+    pub sentence: String,
+}
+
+/// How much an integration finding matters, as the row colours it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeAgentRemedySeverity {
+    /// Capture is being lost, or Rift's own state is wrong.
+    Error,
+    /// Worth knowing; nothing is being lost.
+    Warning,
 }
 
 impl NativeAgentIntegrationRow {
@@ -744,6 +773,7 @@ mod tests {
             hook_wiring: None,
             alpha_supported: true,
             selected,
+            remedies: Vec::new(),
         };
         view.integrations = vec![
             row("claude-code", true),
@@ -813,6 +843,7 @@ mod tests {
             hook_wiring: Some(NativeAgentHookWiring::Managed),
             alpha_supported: true,
             selected: true,
+            remedies: Vec::new(),
         };
         assert!(row.detected());
         assert!(row.enabled());

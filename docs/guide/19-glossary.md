@@ -332,9 +332,10 @@ embodies the term, so you can grep for the real thing.
   defended. → [08 · Cost and savings](08-cost-and-savings.md)
 
 - **Hook receipt** — the row every agent hook writes whatever happened, with one
-  of three outcomes: `recorded`, `skipped-unknown-verb` (counted, so the gap is
-  visible) or `deferred-no-session` (no usable session identifier). It exists so a
-  loss is countable instead of silent. → [03 · Capture](03-capture.md)
+  of four outcomes: `recorded`, `recorded-no-event` (a verb the adapter knows
+  that carries nothing to capture), `skipped-unknown-verb` (counted, so the gap
+  is visible) or `deferred-no-session` (no usable session identifier). It exists
+  so a loss is countable instead of silent. → [03 · Capture](03-capture.md)
 
 ---
 

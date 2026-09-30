@@ -262,6 +262,25 @@ fn golden_member_row_not_adopted_ascii() {
     insta::assert_snapshot!("member_row_not_adopted_ascii", frame_text(&frame));
 }
 
+/// A repository whose wired agent's capture is being lost, at the ASCII floor:
+/// the rail's dot degrades to `!`, and the Repository card's status row names
+/// the act — Project Settings, where the remedy is printed under the adapter.
+#[test]
+fn golden_repository_card_integration_error_ascii() {
+    let detail = member_row_detail(
+        "rift-cli",
+        "/r/rift-cli",
+        EntryKind::Repo,
+        ProjectStatus::Error(rift_canopy::StatusError::Integration),
+        Vec::new(),
+    );
+    let frame = member_row_frame(0, detail, Capabilities::empty());
+    insta::assert_snapshot!(
+        "repository_card_integration_error_ascii",
+        frame_text(&frame)
+    );
+}
+
 // --- column 3: the six-section stack ---------------------------------------
 
 #[test]

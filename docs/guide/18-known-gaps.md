@@ -644,29 +644,6 @@ stop being *used* but do not disappear from history.
 
 ## 18.9 Agent integrations
 
-### The doctor's integrations leg renders a retired view
-
-*Measured defect.* That leg still reports against an older four-family grouping
-and carries probe and connection fields that no longer mean what they say; on a
-healthy repository with three supported agents wired, it can report a fraction
-reading like a problem. The doctor is the first thing a confused user runs, and a
-leg reporting stale shapes teaches people to discount doctor output. Closing it
-means re-pointing the leg at the registry order the rest of the product uses and
-dropping the vestigial fields.
-
-**Read more.** [10](10-agent-integrations.md).
-
-### The Codex version floor is unreachable
-
-*Measured defect.* The Codex adapter carries a minimum-version comparison no
-released version can satisfy, so its action line asks for an upgrade that does
-not exist. The comparison gates nothing — not enabling, not capture, not serving
-— so its only effect is a permanent, unactionable instruction in otherwise-green
-output. Closing it means either a floor matching a shipping version, or removing
-the comparison and keeping the detection facts, which do the real work.
-
-**Read more.** [10](10-agent-integrations.md).
-
 ### Two refused adapters carry compatibility notes that are wrong
 
 *Measured defect.* Two adapters outside the supported set declare in their notes

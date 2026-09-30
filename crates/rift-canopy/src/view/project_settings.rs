@@ -32,9 +32,24 @@ pub enum ProjectSettingsDisplayRow {
         /// Right-aligned checkbox/action chip.
         chip: String,
     },
+    /// One line of an integration finding's remedy, under its adapter row:
+    /// the headline, or a wrapped line of the sentence. Not a cursor stop and
+    /// not a click target; the adapter row above it is the act.
+    Remedy {
+        /// The finding's severity, which picks the colour.
+        severity: crate::NativeAgentRemedySeverity,
+        /// The line, already wrapped to a fixed column.
+        text: String,
+    },
     /// Visual spacer.
     Spacer,
 }
+
+/// The column a remedy sentence wraps at. Fixed rather than the body's width,
+/// so the display rows stay a function of the state alone, as the hit-test
+/// and the scroll clamp need them to be; it fits the body of the modal an
+/// 80-column terminal draws, and a narrower modal clips.
+const REMEDY_WRAP_COLS: usize = 56;
 
 /// Project Settings rows in their required section order: Recall, Capture,
 /// Security / Policy, Integrations, and the initialize row while setup is on
@@ -83,6 +98,7 @@ pub fn project_settings_display_rows(
             continue;
         };
         rows.push(integration_row(index, integration, view.initialization));
+        push_remedy_lines(&mut rows, &integration.remedies);
     }
     if view.initialization.offers_setup() {
         rows.push(ProjectSettingsDisplayRow::Spacer);
@@ -349,6 +365,65 @@ fn hook_wiring_label(hooks: crate::NativeAgentHookWiring) -> &'static str {
     }
 }
 
+/// An adapter's remedies under its row: per finding, its severity and
+/// headline, then its sentence wrapped and indented under it — the shape the
+/// command line prints. Nothing for a healthy agent.
+fn push_remedy_lines(
+    rows: &mut Vec<ProjectSettingsDisplayRow>,
+    remedies: &[crate::NativeAgentRemedy],
+) {
+    use crate::NativeAgentRemedySeverity as Severity;
+    for remedy in remedies {
+        let word = match remedy.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        let headline = format!("{word}: {}", remedy.headline);
+        let sentence = wrap_words(&remedy.sentence, REMEDY_WRAP_COLS - 2)
+            .into_iter()
+            .map(|line| format!("  {line}"));
+        for text in std::iter::once(headline).chain(sentence) {
+            rows.push(ProjectSettingsDisplayRow::Remedy {
+                severity: remedy.severity,
+                text,
+            });
+        }
+    }
+}
+
+/// `text` broken at spaces into lines of at most `width` characters; a word
+/// longer than a line is cut, so no line ever exceeds it.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        while word.len() > width {
+            flush_line(&mut lines, &mut current);
+            let rest = word.split_off(width);
+            lines.push(word.into_iter().collect());
+            word = rest;
+        }
+        let needed = current.chars().count() + usize::from(!current.is_empty()) + word.len();
+        if needed > width {
+            flush_line(&mut lines, &mut current);
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.extend(word);
+    }
+    flush_line(&mut lines, &mut current);
+    lines
+}
+
+/// Push `current` as a line when it holds anything, and empty it.
+fn flush_line(lines: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() {
+        lines.push(std::mem::take(current));
+    }
+}
+
 /// The initialize row: what pressing it sets up on this machine.
 fn initialize_row(index: usize, initialization: Init) -> ProjectSettingsDisplayRow {
     let label = if initialization == Init::NotProvisioned {
@@ -379,14 +454,25 @@ fn project_settings_scroll(
     let mut scroll = state.scroll.min(max);
     if state.follow_cursor {
         if let Some(line) = selected_line {
+            // The selected row's remedies follow it into view, as far as the
+            // body holds them: they are what the row asks the reader to do.
+            let end = line + trailing_remedy_lines(rows, line);
             if line < scroll {
                 scroll = line;
-            } else if line >= scroll.saturating_add(visible) {
-                scroll = line.saturating_add(1).saturating_sub(visible);
+            } else if end >= scroll.saturating_add(visible) {
+                scroll = end.saturating_add(1).saturating_sub(visible).min(line);
             }
         }
     }
     scroll.min(max)
+}
+
+/// How many remedy lines directly follow the row at `line`.
+fn trailing_remedy_lines(rows: &[ProjectSettingsDisplayRow], line: usize) -> usize {
+    rows.iter()
+        .skip(line.saturating_add(1))
+        .take_while(|row| matches!(row, ProjectSettingsDisplayRow::Remedy { .. }))
+        .count()
 }
 
 /// The title names the project and, unless it is initialized, its stage.
@@ -461,8 +547,26 @@ fn draw_settings_row(
             let chip_x = body.x + body.w.saturating_sub(chip_w);
             clip_at(frame, chip_x, y, chip_w, chip, style);
         }
+        ProjectSettingsDisplayRow::Remedy { severity, text } => {
+            let text = sanitize_for_terminal(text);
+            let style = remedy_style(vm, *severity);
+            clip_at(frame, body.x + 4, y, body.w.saturating_sub(4), &text, style);
+        }
         ProjectSettingsDisplayRow::Spacer => {}
     }
+}
+
+/// The error or warning colour of the dashboard's health dot, so a remedy
+/// reads with the same weight as the status it explains.
+fn remedy_style(
+    vm: &ViewModel,
+    severity: crate::NativeAgentRemedySeverity,
+) -> crate::render::frame::Style {
+    let health = match severity {
+        crate::NativeAgentRemedySeverity::Error => crate::theme::Health::Down,
+        crate::NativeAgentRemedySeverity::Warning => crate::theme::Health::Warn,
+    };
+    vm.theme.health(health)
 }
 
 /// The three footer rows: the focused row's description, the inline result
@@ -524,6 +628,7 @@ mod tests {
             hook_wiring: None,
             alpha_supported,
             selected: false,
+            remedies: Vec::new(),
         };
         let mut state = crate::ProjectSettingsModalState::default();
         state.open(crate::ProjectSettingsView {
@@ -563,5 +668,148 @@ mod tests {
                 .any(|l| l.contains("cursor · PATH command · conflict · coming soon")),
             "{labels:?}"
         );
+    }
+
+    fn integrations_view(
+        integrations: Vec<crate::NativeAgentIntegrationRow>,
+    ) -> crate::ProjectSettingsModalState {
+        let mut state = crate::ProjectSettingsModalState::default();
+        state.open(crate::ProjectSettingsView {
+            path: "/r/demo".into(),
+            project_name: "demo".into(),
+            initialization: crate::ProjectInitialization::Initialized,
+            settings: Vec::new(),
+            policy: crate::ProjectPolicySummary::default(),
+            integrations,
+        });
+        state
+    }
+
+    fn adapter(
+        agent: &str,
+        remedies: Vec<crate::NativeAgentRemedy>,
+    ) -> crate::NativeAgentIntegrationRow {
+        crate::NativeAgentIntegrationRow {
+            agent: agent.to_owned(),
+            display_name: agent.to_owned(),
+            detection: crate::NativeAgentDetection::Detected,
+            executable_name: None,
+            installations: Vec::new(),
+            wiring: crate::NativeAgentWiring::Managed,
+            hook_wiring: None,
+            alpha_supported: true,
+            selected: true,
+            remedies,
+        }
+    }
+
+    fn missing_binary() -> crate::NativeAgentRemedy {
+        crate::NativeAgentRemedy {
+            severity: crate::NativeAgentRemedySeverity::Error,
+            headline: "Codex: hook binary missing".to_owned(),
+            sentence: "The hooks run a Rift binary that is no longer there; run `rift \
+                       integrations refresh` in this repository to point them at this one."
+                .to_owned(),
+        }
+    }
+
+    fn remedy_lines_after(rows: &[ProjectSettingsDisplayRow], agent: &str) -> Vec<String> {
+        let at = rows
+            .iter()
+            .position(|row| matches!(row, ProjectSettingsDisplayRow::Action { label, .. } if label.starts_with(agent)))
+            .unwrap();
+        rows[at + 1..]
+            .iter()
+            .map_while(|row| match row {
+                ProjectSettingsDisplayRow::Remedy { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_adapter_row_shows_its_agents_remedy_and_a_healthy_agent_shows_nothing_extra() {
+        let state = integrations_view(vec![
+            adapter("codex", vec![missing_binary()]),
+            adapter("claude-code", Vec::new()),
+        ]);
+        let rows = project_settings_display_rows(&state);
+        let codex = remedy_lines_after(&rows, "codex");
+        assert_eq!(codex[0], "error: Codex: hook binary missing");
+        assert!(codex.len() > 2, "the sentence wraps: {codex:?}");
+        assert!(codex[1..].iter().all(|line| line.starts_with("  ")));
+        assert!(codex
+            .iter()
+            .all(|line| line.chars().count() <= REMEDY_WRAP_COLS));
+        let joined: Vec<&str> = codex[1..].iter().map(|line| line.trim()).collect();
+        assert_eq!(joined.join(" "), missing_binary().sentence);
+        assert!(remedy_lines_after(&rows, "claude-code").is_empty());
+    }
+
+    #[test]
+    fn remedy_lines_add_no_click_target() {
+        let healthy = integrations_view(vec![adapter("codex", Vec::new())]);
+        let failing = integrations_view(vec![adapter("codex", vec![missing_binary()])]);
+        let modal = Rect {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 40,
+        };
+        let chips = |state| project_settings_action_rects(modal, state);
+        assert_eq!(chips(&healthy), chips(&failing));
+    }
+
+    #[test]
+    fn the_selected_rows_remedies_scroll_into_view_with_it() {
+        let integrations = (0..6)
+            .map(|index| adapter(&format!("agent-{index}"), vec![missing_binary()]))
+            .collect();
+        let mut state = integrations_view(integrations);
+        state.cursor = state.items().len() - 1;
+        state.follow_cursor = true;
+        let rows = project_settings_display_rows(&state);
+        let visible = 8;
+        let scroll = project_settings_scroll(&state, &rows, visible);
+        let last = rows.len() - 1;
+        assert!(matches!(
+            rows[last],
+            ProjectSettingsDisplayRow::Remedy { .. }
+        ));
+        assert!(
+            last < scroll + visible,
+            "scroll {scroll}, rows {}",
+            rows.len()
+        );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_far_enough_to_show_the_last_remedy_line_of_the_last_adapter() {
+        let integrations = (0..6)
+            .map(|index| adapter(&format!("agent-{index}"), vec![missing_binary()]))
+            .collect();
+        let mut state = integrations_view(integrations);
+        let visible = 8;
+        // The wheel's own clamp: it scrolls no further than this.
+        state.scroll = state.display_line_count().saturating_sub(visible);
+        state.follow_cursor = false;
+        let rows = project_settings_display_rows(&state);
+        let scroll = project_settings_scroll(&state, &rows, visible);
+        assert!(matches!(
+            rows.last(),
+            Some(ProjectSettingsDisplayRow::Remedy { .. })
+        ));
+        assert!(
+            rows.len() <= scroll + visible,
+            "scroll {scroll}, rows {}",
+            rows.len()
+        );
+    }
+
+    #[test]
+    fn a_word_longer_than_the_line_is_cut_and_nothing_is_lost() {
+        let lines = wrap_words("ab abcdefgh c", 4);
+        assert_eq!(lines, ["ab", "abcd", "efgh", "c"]);
+        assert!(wrap_words("   ", 4).is_empty());
     }
 }
