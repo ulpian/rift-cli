@@ -689,7 +689,7 @@ mod tests {
         else {
             panic!("expected atomic System reading");
         };
-        assert_eq!(reading.pct, 25, "50k / 200k, never the 1M turn aggregate");
+        assert_eq!(reading.pct, 5, "50k / 1M, never the 1M turn aggregate");
         assert_eq!(reading.band, "Clear");
         assert_eq!(metrics.context_used, Some(50_000));
         assert_eq!(metrics.tokens_5m, Some(1_000_000));
