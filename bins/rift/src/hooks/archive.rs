@@ -113,14 +113,15 @@ pub(super) fn archive_now(
     archived
 }
 
-/// What the session captured beside its capture document: its read facts and
-/// its serves.
+/// What the session captured beside its capture document: its read facts, its
+/// serves and its settled usage.
 ///
 /// The one reading both the trailer's prediction and the archive fold, so
 /// the two derive one checkpoint id from the same bytes. The prediction can
 /// still miss by one change, exactly as it can for a read fact: a serve booked
-/// between `prepare-commit-msg` and the worker's condense lands in the archive
-/// and not in the trailer. The archive keeps its true id either way.
+/// or a turn settled between `prepare-commit-msg` and the worker's condense
+/// lands in the archive and not in the trailer. The archive keeps its true id
+/// either way.
 pub(super) fn session_facts_for_archive(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
@@ -131,6 +132,7 @@ pub(super) fn session_facts_for_archive(
     rift_shadow::SessionFacts {
         read_facts: read_facts_for_archive(rt, store, agent, session),
         serve_audit: serve_audit_for_archive(rt, work_tree, session),
+        usage: usage_facts_for_archive(rt, store, agent, session),
     }
 }
 
@@ -153,6 +155,37 @@ fn read_facts_for_archive(
             path: f.path,
             content_sha256: f.content_sha256,
             input_tokens: f.input_tokens,
+        })
+        .collect()
+}
+
+/// The session's settled model calls with their usage, mapped for the shard's
+/// `usage.jsonl`: a query over the rows the deferred settle wrote, so the
+/// shard holds what the projection holds and no second record exists.
+/// Cumulative like the read facts, so a commit with nothing settled since
+/// re-derives the id the last one did. Best-effort: a query failure archives
+/// none rather than blocking the checkpoint.
+fn usage_facts_for_archive(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    agent: &str,
+    session: &str,
+) -> Vec<rift_shadow::backend::ArchivedUsageFact> {
+    let row_id = rift_shadow::ids::session_row_id(agent, session);
+    rt.block_on(rift_store::capture::session_usage_facts(store, &row_id))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| rift_shadow::backend::ArchivedUsageFact {
+            session: session.to_owned(),
+            turn: f.turn_ordinal,
+            call_id: f.call_id,
+            model: f.model,
+            at: f.started_at,
+            uncached_input: f.uncached_input,
+            cached_input: f.cached_input,
+            cache_creation: f.cache_creation,
+            output: f.output,
+            method: f.counter_method,
         })
         .collect()
 }

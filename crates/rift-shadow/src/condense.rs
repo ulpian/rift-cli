@@ -25,8 +25,9 @@ use crate::sha256_hex;
 pub type CheckpointId = String;
 
 /// What a session captured beside its capture document, handed to the archive
-/// as one value: the read facts that become `tool_calls.jsonl` and the frozen
-/// serve envelopes that become `serve_audit.jsonl`.
+/// as one value: the read facts that become `tool_calls.jsonl`, the frozen
+/// serve envelopes that become `serve_audit.jsonl` and the settled usage that
+/// becomes `usage.jsonl`.
 ///
 /// One struct rather than one parameter per artifact, because the prediction
 /// and the archive must fold exactly the same facts, and every new fact
@@ -40,6 +41,8 @@ pub struct SessionFacts {
     /// de-duplicated and sorted (`serve_audit.jsonl`); `None` when it froze
     /// none.
     pub serve_audit: Option<Vec<u8>>,
+    /// The session's settled model calls with their usage (`usage.jsonl`).
+    pub usage: Vec<crate::backend::ArchivedUsageFact>,
 }
 
 /// **The one derivation of a new checkpoint id**: `sha256(session ‖ \0 ‖
@@ -235,7 +238,9 @@ pub fn predicted_checkpoint_id_from(
 }
 
 /// A [`CheckpointArchive`] carrying exactly the artifacts that decide an id, with
-/// placeholders for the anchoring fields the derivation excludes.
+/// placeholders for the anchoring fields the derivation excludes. [`condense`]
+/// writes its anchoring fields over this same assembly, so the prediction and
+/// the archive cannot fold two different sets of facts.
 fn archive_for_id(
     session: &str,
     content: rift_core::RedactedBytes,
@@ -252,6 +257,7 @@ fn archive_for_id(
         events: Vec::new(),
         read_facts: facts.read_facts,
         serve_audit: facts.serve_audit,
+        usage: facts.usage,
         content,
         report,
         transcript: None,
@@ -313,14 +319,7 @@ pub async fn condense(
         // it addresses them is to ask the assembled archive rather than to
         // compute an id beside it and hope the two agree.
         checkpoint_id: String::new(),
-        sessions: vec![session.to_owned()],
         strategy: strategy.as_str().to_owned(),
-        prev_hash: None,
-        events: Vec::new(),
-        read_facts: facts.read_facts,
-        serve_audit: facts.serve_audit,
-        content: out.redacted,
-        report,
         // Already through the gate: `ArchivedTranscript` is constructible only
         // from `RedactedBytes` (`archived_transcript` is the one writer of the
         // raw→artifact flow, and it redacts each artifact before this sees it).
@@ -348,6 +347,10 @@ pub async fn condense(
         worktree: crate::backend::WorktreeLabel::of(repo),
         // Single-session by construction on this path; see the field's doc.
         session_worktrees: std::collections::BTreeMap::new(),
+        // The session, the redacted capture, its report and the session's facts
+        // come from the one assembly the trailer's prediction folds, so a fact
+        // added to `SessionFacts` reaches both archives through one function.
+        ..archive_for_id(session, out.redacted, report, facts)
     };
     archive.checkpoint_id = derived_id(&archive)?;
     let checkpoint_id = archive.checkpoint_id.clone();
@@ -656,6 +659,7 @@ mod tests {
             events: Vec::new(),
             read_facts: facts,
             serve_audit: None,
+            usage: Vec::new(),
             content,
             report: RedactionReportView {
                 total_spans: 0,
@@ -939,6 +943,7 @@ mod tests {
                 input_tokens: None,
             }],
             serve_audit: None,
+            usage: Vec::new(),
         };
         let predicted = predicted_checkpoint_id(SESSION, &raw, &facts, &packs).unwrap();
         let archived = condense(
@@ -980,6 +985,7 @@ mod tests {
         SessionFacts {
             read_facts: Vec::new(),
             serve_audit: Some(lines.into_bytes()),
+            usage: Vec::new(),
         }
     }
 
@@ -1039,11 +1045,66 @@ mod tests {
         let empty = SessionFacts {
             read_facts: Vec::new(),
             serve_audit: Some(Vec::new()),
+            usage: Vec::new(),
         };
         assert_eq!(
             condensed_with(empty, 1).await,
             condensed_with(SessionFacts::default(), 1).await
         );
+    }
+
+    /// The facts a session with `calls` settled model calls hands both hooks,
+    /// one per turn, alternating between two models.
+    fn facts_with_usage(calls: i64) -> SessionFacts {
+        let usage = (1..=calls)
+            .map(|turn| crate::backend::ArchivedUsageFact {
+                session: SESSION.to_owned(),
+                turn,
+                call_id: format!("call-{turn}"),
+                model: if turn % 2 == 0 {
+                    "claude-opus-5"
+                } else {
+                    "claude-fable-5"
+                }
+                .to_owned(),
+                at: 100 * turn,
+                uncached_input: 20,
+                cached_input: 30,
+                cache_creation: 0,
+                output: 2,
+                method: "provider_reported".to_owned(),
+            })
+            .collect();
+        SessionFacts {
+            usage,
+            ..SessionFacts::default()
+        }
+    }
+
+    /// **One id for the prediction and the archive of a session with settled
+    /// usage**, and the id a session with none always derived: the usage is a
+    /// leaf of the id, folded identically by both hooks.
+    #[tokio::test]
+    async fn the_trailer_prediction_and_the_archive_mint_one_id_with_and_without_usage() {
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let packs = RulePackSet::builtin();
+        let with = facts_with_usage(2);
+        let predicted = predicted_checkpoint_id(SESSION, &raw, &with, &packs).unwrap();
+        assert_eq!(condensed_with(with, 1).await, predicted);
+
+        let bare =
+            predicted_checkpoint_id(SESSION, &raw, &SessionFacts::default(), &packs).unwrap();
+        assert_eq!(condensed_with(SessionFacts::default(), 1).await, bare);
+        assert_ne!(bare, predicted, "the settled usage is a leaf of the id");
+    }
+
+    /// Re-archiving a session whose usage is unchanged is the same checkpoint,
+    /// clock and all; one more settled call is a new one.
+    #[tokio::test]
+    async fn unchanged_usage_re_archives_to_the_same_id_and_one_more_settled_call_moves_it() {
+        let first = condensed_with(facts_with_usage(2), 1).await;
+        assert_eq!(condensed_with(facts_with_usage(2), 2).await, first);
+        assert_ne!(condensed_with(facts_with_usage(3), 1).await, first);
     }
 
     /// **The rollup rule, pinned at the assembly.** A

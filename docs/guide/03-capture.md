@@ -492,7 +492,11 @@ settled by the session-end path, or by the idle sweep before the session is
 condensed.
 
 Two honest consequences. **Spend appears one hook later** — invisible in
-practice, and at worst bounded by session end or the idle sweep. And **a
+practice, and at worst bounded by session end or the idle sweep. The same is
+true of the checkpoint: the settled spend is frozen into the shard's
+`usage.jsonl` (see [05-ledger-and-verification.md](05-ledger-and-verification.md)
+§5.3), so a commit made before a turn settles carries that turn's spend only
+from the next checkpoint on. And **a
 session Rift joins midway counts from the join point**: first contact seeds the
 offset at the file's current length, with no backfill; an offset past the
 file's length (a restored or relocated transcript) resets to the length and

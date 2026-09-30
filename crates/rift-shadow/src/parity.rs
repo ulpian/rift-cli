@@ -514,6 +514,7 @@ fn empty_archive() -> CheckpointArchive {
         events: Vec::new(),
         read_facts: Vec::new(),
         serve_audit: None,
+        usage: Vec::new(),
         content,
         report,
         transcript: None,
@@ -581,6 +582,7 @@ fn two_turn_archive() -> CheckpointArchive {
         events,
         read_facts: Vec::new(),
         serve_audit: None,
+        usage: Vec::new(),
         content,
         report: RedactionReportView {
             total_spans: 0,
@@ -803,6 +805,7 @@ mod tests {
             events,
             read_facts: Vec::new(),
             serve_audit: None,
+            usage: Vec::new(),
             content: empty_content(),
             report: empty_report(),
             transcript: None,

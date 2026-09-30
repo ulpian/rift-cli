@@ -54,6 +54,11 @@ pub enum VersionField {
     /// [`Self::PerLineV`], whose member is `v` and whose value is one number
     /// for the whole stream.
     PerLineSchema,
+    /// A per-line `schema_version` integer in a JSONL stream, one number for
+    /// every line: the line format of a stream Rift composes from projection
+    /// rows. Its own variant because [`Self::SchemaVersion`] is one member of
+    /// one JSON document and [`Self::PerLineV`] names its member `v`.
+    PerLineSchemaVersion(u32),
     /// No version of its own. Capture bytes, a hex digest, or a stream whose
     /// records are versioned by the shard header — recorded explicitly so
     /// "this artifact has no version" is a decision in the table rather than an
@@ -169,6 +174,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         path: "transcript.jsonl",
         version: VersionField::None,
         sync_format_row: "Capture document (`content.redacted`)",
+    },
+    ShardArtifact {
+        path: "usage.jsonl",
+        version: VersionField::PerLineSchemaVersion(crate::backend::USAGE_SCHEMA_VERSION),
+        sync_format_row: "Usage (`usage.jsonl`)",
     },
 ];
 
@@ -307,7 +317,8 @@ mod tests {
                 }
                 VersionField::CanonVersion(_)
                 | VersionField::None
-                | VersionField::PerLineSchema => {
+                | VersionField::PerLineSchema
+                | VersionField::PerLineSchemaVersion(_) => {
                     unreachable!("{path} is not versioned that way")
                 }
             }
@@ -346,6 +357,25 @@ mod tests {
             vec![1, 4],
             "one schema-1 line and one schema-4 line"
         );
+    }
+
+    /// Every frozen usage line declares the line format the registry names,
+    /// read off the maximal fixture, whose lines the one writer rendered.
+    #[test]
+    fn every_frozen_usage_line_declares_the_registered_schema_version() {
+        let Some(VersionField::PerLineSchemaVersion(want)) =
+            is_declared("usage.jsonl").map(|a| a.version)
+        else {
+            panic!("usage.jsonl is declared with a per-line schema_version");
+        };
+        let archive = crate::shard_fixture::every_artifact_archive().unwrap();
+        let bytes = archive.usage_jsonl().expect("the fixture freezes usage");
+        let versions: Vec<u64> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| json_version(line, "schema_version").expect("every line declares one"))
+            .collect();
+        assert_eq!(versions, vec![u64::from(want); 2], "two lines, one version");
     }
 
     /// A task metadata document from the real writer.
