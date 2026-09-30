@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 pub mod detect;
+pub mod health;
 pub mod native;
 
 /// The first-class clients configured by `rift recall init`.

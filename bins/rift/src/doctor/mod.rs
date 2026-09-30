@@ -4,12 +4,14 @@
 //! The legs are grouped by what they read: `setup` the repository's own
 //! configuration and the memory chain, `capture` the checkpoint record
 //! against its projection, `stores` the caches beside the projection,
-//! `git_hooks` the hooks git runs and the binary they name, `worktrees` the
-//! family's members, `queues` the work each member still owes. This file
-//! assembles the report in the order the legs print.
+//! `git_hooks` the hooks git runs and the binary they name, `health` whether
+//! each wired agent's capture is arriving, `worktrees` the family's members,
+//! `queues` the work each member still owes. This file assembles the report
+//! in the order the legs print.
 
 mod capture;
 mod git_hooks;
+pub(crate) mod health;
 mod queues;
 mod setup;
 mod stores;
@@ -25,6 +27,7 @@ use capture::{
     doctor_turn_boundaries, doctor_watermark,
 };
 use git_hooks::{doctor_binary_of_record, doctor_hooks_target};
+use health::doctor_integration_health;
 use queues::{doctor_capture_queue, doctor_push_queue, doctor_session_sweep};
 use setup::{doctor_memory_chain, doctor_retired_config_keys, doctor_sibling_tool_hooks};
 use stores::{doctor_basis_store, doctor_document_store, doctor_window_journals};
@@ -90,6 +93,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     );
     report.leg("hooks_target", doctor_hooks_target(root, repair));
     report.leg("binary_of_record", doctor_binary_of_record(root));
+    report.leg("integration_health", doctor_integration_health(root));
     report.leg("worktree_wiring", doctor_worktree_wiring(root, repair));
     report.leg("window_journals", doctor_window_journals(root));
     report.leg("retired_config_keys", doctor_retired_config_keys(root));

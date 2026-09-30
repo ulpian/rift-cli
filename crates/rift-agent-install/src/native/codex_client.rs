@@ -12,19 +12,14 @@
 //! git dir, because the Codex installed on the machine is the same for every
 //! member and a fresh member has no session of its own yet.
 
-use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 
 use rift_shadow_hooks::{codex_rollout, session_cache};
 
+use crate::health::surface::{first_in_head, newest_transcript};
 use crate::ClientFamily;
 
 use super::codex_trust::{CodexClient, CodexSurface};
-
-/// How much of a session file is read to find its first line. Codex's
-/// `session_meta` line carries the session's base instructions and runs to
-/// tens of kilobytes; a line longer than this is not read at all.
-const MAX_FIRST_LINE_BYTES: u64 = 1024 * 1024;
 
 /// The client the checkout's newest recorded Codex session names, or `None`
 /// when there is no such session or its record cannot be read.
@@ -37,8 +32,15 @@ pub(super) fn observed_codex_client(repo: &Path) -> Option<CodexClient> {
         candidates.extend(newest_codex_session(&common));
     }
     let (_, transcript) = candidates.into_iter().max_by_key(|(updated, _)| *updated)?;
-    let line = first_line(&transcript)?;
-    let client = codex_rollout::session_client(&line)?;
+    codex_client_at(&transcript)
+}
+
+/// The client a Codex session file's first line names, read through the
+/// health module's bounded head reader so both surface readers share one
+/// bound and one error rule: a first line that is not whole within the bound
+/// names no client.
+pub(crate) fn codex_client_at(transcript: &Path) -> Option<CodexClient> {
+    let client = first_in_head(transcript, 1, codex_rollout::session_client)?;
     let surface = if client.is_vscode() {
         CodexSurface::VsCode
     } else {
@@ -54,7 +56,7 @@ pub(super) fn observed_codex_client(repo: &Path) -> Option<CodexClient> {
 /// file: `(updated_at_ms, file)`.
 fn newest_codex_session(git_dir: &Path) -> Option<(i64, PathBuf)> {
     let entries = std::fs::read_dir(session_cache::sessions_dir(git_dir)).ok()?;
-    entries
+    let caches: Vec<_> = entries
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -63,23 +65,8 @@ fn newest_codex_session(git_dir: &Path) -> Option<(i64, PathBuf)> {
                 .ok()
                 .flatten()
         })
-        .filter(|cache| cache.agent == ClientFamily::Codex.token())
-        .filter_map(|cache| {
-            let transcript = cache.transcript_path?;
-            Some((cache.updated_at_ms, PathBuf::from(transcript)))
-        })
-        .max_by_key(|(updated, _)| *updated)
-}
-
-fn first_line(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file.take(MAX_FIRST_LINE_BYTES));
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    if !line.ends_with('\n') {
-        return None;
-    }
-    Some(line)
+        .collect();
+    newest_transcript(&caches, ClientFamily::Codex.token())
 }
 
 /// The git dir of the checkout at `repo`: `.git` itself, or the directory a

@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use rift_agent_install::health;
 use rift_shadow::hooks::session_cache::{SessionCache, IDLE_TIMEOUT_MS};
 
 use crate::{agent_queue, capture_queue, hooks, hooktime, push_queue, session_verbs, verify};
@@ -366,7 +367,7 @@ fn doctor_session_report(paths: &rift_git::RepoPaths) -> (String, serde_json::Va
         }));
         total.absorb(tally);
     }
-    let behind = sessions_behind_their_events(paths, &journal);
+    let behind = sessions_behind_their_events(paths, &journal, now);
     let (torn, unreadable) = cache_defects(&journal);
     let mut report = session_headline(&total, floors);
     report.push_str(&elsewhere);
@@ -474,56 +475,31 @@ fn cache_defect_lines(torn: &[String], unreadable: &[String]) -> String {
     lines
 }
 
-/// The sessions whose recorded phase is behind their own events: cached
-/// `ended` or `idle`, with a captured event other than their own end that
-/// arrived after the session's last recorded transition.
+/// The sessions whose recorded phase is behind their own events, in journal
+/// order: the health module's detector, so this leg and every other surface
+/// count the same sessions.
 ///
-/// Every event returns a session to work, so this should never be found; it
-/// is the alarm if it ever is, and it is Rift's defect rather than a thing
-/// the developer did, which is how the line says it. Read-only: the
-/// projection is opened read-only, and only when some session could qualify.
+/// Read-only: the projection is opened read-only, and only when some session
+/// could qualify.
 fn sessions_behind_their_events(
     paths: &rift_git::RepoPaths,
     journal: &[session_verbs::MemberJournal],
+    now: i64,
 ) -> Vec<String> {
-    let candidates: Vec<&str> = journal
+    let sessions: Vec<SessionCache> = journal
         .iter()
-        .flat_map(|j| &j.sessions)
-        .filter(|s| matches!(s.state.as_str(), "ended" | "idle"))
-        .map(|s| s.session_id.as_str())
+        .flat_map(|j| j.sessions.iter().cloned())
         .collect();
-    if candidates.is_empty() {
+    if !sessions.iter().any(health::is_behind_candidate) {
         return Vec::new();
     }
-    let opened = crate::projection::open_projection_read_only(&paths.work_tree)
-        .and_then(|store| Ok((store, crate::projection::runtime()?)));
-    let Ok((store, rt)) = opened else {
+    let Ok(store) = crate::projection::open_projection_read_only(&paths.work_tree) else {
         return Vec::new();
     };
-    candidates
+    health::sessions_behind_events(&store, &sessions, now)
         .into_iter()
-        .filter(|id| rt.block_on(events_after_last_transition(&store, id)) > 0)
-        .map(str::to_owned)
+        .filter_map(|finding| finding.session)
         .collect()
-}
-
-/// How many of `session`'s own events, its end excepted, postdate its last
-/// recorded transition. A session with no transition at all has every such
-/// event after it.
-async fn events_after_last_transition(store: &rift_store::SqliteStore, session: &str) -> i64 {
-    use rift_store::{CanonicalStore as _, Value};
-
-    store
-        .query_opt_i64(
-            "SELECT count(*) FROM captured_event WHERE session_id = ? AND kind != 'session_end' \
-             AND occurred_at_ms > (SELECT coalesce(max(occurred_at), 0) \
-             FROM session_transition WHERE session_id = ?)",
-            &[Value::text(session), Value::text(session)],
-        )
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(0)
 }
 
 /// The crashed-session leg. The automatic idle sweep (every session start,
