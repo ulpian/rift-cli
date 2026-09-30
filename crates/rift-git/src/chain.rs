@@ -174,15 +174,43 @@ fn trailer_of(body: &str) -> Option<String> {
 /// [`RiftError::Validity`] if `checkpoint_id` is not a checkpoint id;
 /// [`RiftError::Substrate`] on a git failure or a lost compare-and-set.
 pub fn append(git_dir: &Path, checkpoint_id: &str, date_epoch: i64) -> Result<String> {
+    let parent = tip(git_dir)?;
+    append_onto(git_dir, parent.as_deref(), checkpoint_id, date_epoch)
+}
+
+/// Append one checkpoint on top of `expected_tip` — the tip the caller read
+/// when it decided this entry was owed — returning the new entry's oid.
+///
+/// [`append`] guards only the instant between its own tip read and its ref
+/// update. A caller that reads the order, decides what is missing, and only
+/// then appends has a much wider window, and two such callers in two processes
+/// would each append the same checkpoint: a fork is impossible, a duplicate
+/// position is not. Pinning the parent to the tip the decision was made
+/// against closes that window — a chain that moved since is refused, never
+/// appended to.
+///
+/// # Errors
+/// [`RiftError::Validity`] if `checkpoint_id` is not a checkpoint id or
+/// `expected_tip` is not an object id; [`RiftError::Substrate`] on a git
+/// failure or when the tip is no longer `expected_tip`.
+pub fn append_onto(
+    git_dir: &Path,
+    expected_tip: Option<&str>,
+    checkpoint_id: &str,
+    date_epoch: i64,
+) -> Result<String> {
     if !is_checkpoint_id(checkpoint_id) {
         return Err(RiftError::validity("not a checkpoint id"));
+    }
+    if let Some(oid) = expected_tip {
+        crate::command::validate_oid(oid)?;
     }
     // `commit-tree` needs the empty tree to EXIST as an object. A repository
     // that has never written an empty tree does not have it, and the failure is
     // an opaque "commit failed" — found by the bottle, on the first append into
     // a fresh repo. `mktree` with empty input writes it and is idempotent.
     write_empty_tree(git_dir)?;
-    let parent = tip(git_dir)?;
+    let parent = expected_tip.map(str::to_owned);
     let message = format!("{ENTRY_SUBJECT}\n\n{CHECKPOINT_TRAILER}: {checkpoint_id}\n");
 
     // Fixed identity + caller-supplied date: entries are byte-reproducible, so a
@@ -385,6 +413,41 @@ mod tests {
         assert_eq!(
             trailer_of(&format!("x\n\n{CHECKPOINT_TRAILER}: not-an-id\n")),
             None
+        );
+    }
+
+    /// The window `append_onto` exists to close: a writer that decided what
+    /// was owed at one tip must not land on a chain another writer has moved.
+    #[test]
+    fn an_append_onto_a_tip_that_moved_is_refused_and_leaves_the_chain_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(d.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let git_dir = d.path().join(".git");
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let first = append(&git_dir, &a, 1_700_000_000).unwrap();
+
+        let stale = append_onto(&git_dir, None, &b, 1_700_000_000);
+
+        assert!(stale.is_err(), "a genesis over an existing chain landed");
+        assert_eq!(tip(&git_dir).unwrap().as_deref(), Some(first.as_str()));
+        assert_eq!(read_order(&git_dir).unwrap(), vec![a.clone()]);
+        append_onto(&git_dir, Some(&first), &b, 1_700_000_000).unwrap();
+        assert_eq!(read_order(&git_dir).unwrap(), vec![a, b]);
+    }
+
+    #[test]
+    fn an_expected_tip_that_is_not_an_object_id_never_reaches_git() {
+        let d = tempfile::tempdir().unwrap();
+        let refused = append_onto(d.path(), Some("--upload-pack=x"), &"a".repeat(64), 1);
+        assert!(
+            matches!(refused, Err(RiftError::Validity(_))),
+            "{refused:?}"
         );
     }
 

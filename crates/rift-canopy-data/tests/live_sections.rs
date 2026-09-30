@@ -1,8 +1,12 @@
 //! End-to-end headless dashboard: a seeded tempdir projection feeds
 //! the real bus; the real event loop reduces the updates; the real renderer
 //! draws the token and model sections live — no binary in the loop, no
-//! terminal, no wall-clock assertions beyond generous
-//! delivery timeouts.
+//! terminal, no wall-clock assertions.
+//!
+//! A wait for what a request produces ends on a barrier: a refresh of a path
+//! no project uses, which the worker answers after everything asked before
+//! it. A wait for what only the observer's poll can see keeps a delivery
+//! deadline, because the public bus reports no cycle a test could count.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -214,11 +218,18 @@ fn seed_checkpoint(root: &Path, path: &str, id: &str, t: i64) {
     .unwrap();
 }
 
-/// An event source bridging the bus into the loop: drains bus updates each
-/// poll, and quits once the given predicate over the drained history holds
-/// (or after `max_polls`, whichever comes first).
+/// An event source bridging the bus into the loop: each poll hands the loop
+/// every update the worker emitted before answering a fresh barrier, and it
+/// quits once the given predicate over the drained history holds (or after
+/// `polls_left` barriers, whichever comes first) — so the bound is the
+/// worker's answers, not the wall clock.
 struct BusSource {
     evt_rx: Receiver<Event>,
+    /// The bus's request side, for the barriers: the loop's own requests
+    /// travel the same channel, so a barrier sent from a poll follows them.
+    req_tx: Sender<DataRequest>,
+    /// The root the barrier paths are made under.
+    root: std::path::PathBuf,
     polls_left: u32,
     done: Box<dyn FnMut(&Event) -> bool>,
     satisfied: bool,
@@ -230,14 +241,12 @@ impl EventSource for BusSource {
             return Ok(vec![Event::Key(CanopyKey::Quit)]);
         }
         self.polls_left -= 1;
-        let mut out = Vec::new();
-        // Block briefly for the first update, then drain the burst.
-        if let Ok(ev) = self.evt_rx.recv_timeout(Duration::from_millis(400)) {
-            out.push(ev);
-        }
-        while let Ok(ev) = self.evt_rx.try_recv() {
-            out.push(ev);
-        }
+        let barrier = barrier_path(&self.root, self.polls_left);
+        // A dead worker ends the run with what it sent; the assertions after
+        // the loop then say which feed never arrived.
+        let Some(out) = events_until_barrier(&self.req_tx, &self.evt_rx, &barrier) else {
+            return Ok(vec![Event::Key(CanopyKey::Quit)]);
+        };
         for ev in &out {
             if (self.done)(ev) {
                 self.satisfied = true;
@@ -303,7 +312,7 @@ fn token_and_model_sections_render_live_from_a_seeded_projection() {
     // the interactive launch wires it.
 
     let mut state = fixture_dashboard_selecting(&path);
-    let mut src = bus_source_until_tokens_and_models(bus.evt_rx);
+    let mut src = bus_source_until_tokens_and_models(root.path(), bus.req_tx.clone(), bus.evt_rx);
     run_the_interactive_loop(&mut state, &mut src, bus.req_tx.clone());
 
     // The reducer applied the live feed…
@@ -341,11 +350,17 @@ fn fixture_dashboard_selecting(path: &str) -> AppState {
 
 /// The loop quits once both live facts have crossed the bus: a Tokens feed
 /// carrying data, and project detail naming both seeded models once each.
-fn bus_source_until_tokens_and_models(evt_rx: Receiver<Event>) -> BusSource {
+fn bus_source_until_tokens_and_models(
+    root: &Path,
+    req_tx: Sender<DataRequest>,
+    evt_rx: Receiver<Event>,
+) -> BusSource {
     let mut saw_tokens = false;
     let mut saw_models = false;
     BusSource {
         evt_rx,
+        req_tx,
+        root: root.to_path_buf(),
         polls_left: 50,
         done: Box::new(move |ev| {
             if matches!(ev, Event::Feed(f) if matches!(
@@ -516,23 +531,12 @@ fn a_mid_run_rebuild_drives_a_full_re_read() {
         .send(DataRequest::SetActive(Some(path.clone())))
         .unwrap();
 
-    // First live value arrives (total 100).
-    let mut saw_first = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        if let Ok(Event::Feed(f)) = bus.evt_rx.recv_timeout(Duration::from_millis(300)) {
-            if let rift_canopy::FeedPayload::Tokens {
-                tokens: TokensView::Data(d),
-                ..
-            } = &f.payload
-            {
-                if (d.total - 100.0).abs() < f64::EPSILON {
-                    saw_first = true;
-                    break;
-                }
-            }
-        }
-    }
+    // First live value arrives (total 100), in the SetActive's cycle.
+    let barrier = barrier_path(root.path(), 0);
+    let saw_first = events_until_barrier(&bus.req_tx, &bus.evt_rx, &barrier)
+        .unwrap_or_default()
+        .iter()
+        .any(|ev| tokens_total_is(ev, 100.0));
     assert!(saw_first, "the first Tokens feed never arrived");
 
     // Rebuild the projection mid-run (epoch bump) and land MORE facts than
@@ -543,19 +547,15 @@ fn a_mid_run_rebuild_drives_a_full_re_read() {
     seed_token_fact(root.path(), &path, "n1", 2_000, (300, 0, 0, 0));
     seed_token_fact(root.path(), &path, "n2", 3_000, (400, 0, 0, 0));
 
+    // Only the observer's poll sees a rebuild, and the public bus reports no
+    // cycle to count, so this wait keeps its delivery deadline.
     let mut saw_rebuilt = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while std::time::Instant::now() < deadline {
-        if let Ok(Event::Feed(f)) = bus.evt_rx.recv_timeout(Duration::from_millis(300)) {
-            if let rift_canopy::FeedPayload::Tokens {
-                tokens: TokensView::Data(d),
-                ..
-            } = &f.payload
-            {
-                if (d.total - 700.0).abs() < f64::EPSILON {
-                    saw_rebuilt = true;
-                    break;
-                }
+        if let Ok(ev) = bus.evt_rx.recv_timeout(Duration::from_millis(300)) {
+            if tokens_total_is(&ev, 700.0) {
+                saw_rebuilt = true;
+                break;
             }
         }
     }
@@ -578,7 +578,11 @@ fn system_counts_hold_while_idle_and_move_on_capture() {
         .send(DataRequest::SetActive(Some(path.clone())))
         .unwrap();
 
-    let held = wait_for_event_count(&bus.evt_rx, 1, Duration::from_secs(15))
+    let barrier = barrier_path(root.path(), 0);
+    let held = events_until_barrier(&bus.req_tx, &bus.evt_rx, &barrier)
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|ev| system_metrics_with_count(ev, 1))
         .expect("the first System feed never arrived");
 
     // IDLE: nothing captured. Wall-clock advances across several poll
@@ -594,6 +598,8 @@ fn system_counts_hold_while_idle_and_move_on_capture() {
         }
     }
 
+    // Only the observer's poll sees the capture, so this wait keeps its
+    // delivery deadline.
     seed_session_event(root.path(), &path, "e2", "s1", S0 + 4 * 60_000);
     let moved = wait_for_event_count(&bus.evt_rx, 2, Duration::from_secs(15))
         .expect("the re-anchored System feed never arrived");
@@ -614,13 +620,67 @@ fn wait_for_event_count(
 ) -> Option<rift_canopy::PanelMetrics> {
     let deadline = std::time::Instant::now() + total;
     while std::time::Instant::now() < deadline {
-        if let Ok(Event::Feed(f)) = rx.recv_timeout(Duration::from_millis(250)) {
-            if let rift_canopy::FeedPayload::System { metrics: m, .. } = f.payload {
-                if m.events_5m == Some(count) {
-                    return Some(m);
-                }
+        if let Ok(ev) = rx.recv_timeout(Duration::from_millis(250)) {
+            if let Some(metrics) = system_metrics_with_count(ev, count) {
+                return Some(metrics);
             }
         }
     }
     None
+}
+
+/// The System panel's metrics, when `ev` is a System feed with `count`
+/// events in its window.
+fn system_metrics_with_count(ev: Event, count: u64) -> Option<rift_canopy::PanelMetrics> {
+    let Event::Feed(f) = ev else {
+        return None;
+    };
+    match f.payload {
+        rift_canopy::FeedPayload::System { metrics, .. } if metrics.events_5m == Some(count) => {
+            Some(metrics)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `ev` is a Tokens feed carrying data that totals `total`.
+fn tokens_total_is(ev: &Event, total: f64) -> bool {
+    let Event::Feed(f) = ev else {
+        return false;
+    };
+    matches!(
+        &f.payload,
+        rift_canopy::FeedPayload::Tokens { tokens: TokensView::Data(d), .. }
+            if (d.total - total).abs() < f64::EPSILON
+    )
+}
+
+/// A barrier path: a child of the test's root that no project uses, whose
+/// `~` sorts after every fixture project's name. The worker flushes one
+/// cycle's updates sorted by project path, so the barrier's answer is the
+/// last thing its cycle sends. Unique per `n`: a rebuild re-reads every
+/// tracked path, and a reused barrier could then answer early.
+fn barrier_path(root: &Path, n: u32) -> String {
+    root.join(format!("~barrier-{n}"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Send a refresh of `barrier` and return every update the worker emitted
+/// before answering it — `None` when the worker stopped first. Requests
+/// reach the worker in order, so all asked before the barrier has been read
+/// by then; a live worker always answers a refresh, so no clock is needed.
+fn events_until_barrier(
+    req_tx: &Sender<DataRequest>,
+    evt_rx: &Receiver<Event>,
+    barrier: &str,
+) -> Option<Vec<Event>> {
+    req_tx.send(DataRequest::Refresh(barrier.to_owned())).ok()?;
+    let mut seen = Vec::new();
+    loop {
+        match evt_rx.recv().ok()? {
+            Event::ProjectData(data) if data.project == barrier => return Some(seen),
+            ev => seen.push(ev),
+        }
+    }
 }

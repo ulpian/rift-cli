@@ -687,7 +687,8 @@ fn accrue_sweep_soak(repo: &Path, condensed_checkpoints: &[String]) -> Option<St
 fn deferred_line(deferred: usize) -> String {
     format!(
         "\n    deferred:     {deferred} idle, condense still owed — nothing archived \
-         (no commit to anchor to, or the archive itself failed); re-run \
+         (no commit to anchor to, the archive itself failed, or a capture worker \
+         holds the member's queue lock and its own sweep condenses them); re-run \
          `rift doctor` to retry"
     )
 }

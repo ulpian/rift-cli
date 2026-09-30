@@ -2,7 +2,22 @@
 //! binary — the generalisation of `bundle_e2e::seeded_repo` (one commit) that
 //! the bundle-review README's recipe describes (three commits, each followed
 //! by the native post-commit hook under a distinct session marker, then
-//! `rift doctor --fix` to drain the detached archive).
+//! `rift doctor --fix`).
+//!
+//! Every spawn drains capture inline (`RIFT_CAPTURE_SYNC`), so each commit's
+//! archive and chain append have landed before the next step starts. The
+//! detached worker is not an option here: `doctor --fix` does not wait for a
+//! worker that holds the drain lock, so it could return with an archive still
+//! in flight, and its own idle-session sweep would archive beside it.
+//!
+//! **Bundle bytes are per run.** The wall clock reaches a bundle through the
+//! hook's clock — each chain entry and each archive commit is dated with it,
+//! and the archive's metadata records it — and no path through the shipped
+//! binary takes an injected clock.
+//! Checkpoint ids, cursors and bundle digests therefore differ between runs,
+//! and every assertion compares values produced inside one process — the
+//! chain's own trailers against what the exporter and the importers report —
+//! never against a value recorded from an earlier run.
 //!
 //! Everything is a filesystem path inside the caller's temp dir; the binary
 //! is spawned only through `common::rift_cmd`, so the fixture can never
@@ -60,12 +75,15 @@ pub(crate) fn git_raw(dir: &Path, args: &[&str]) -> std::process::Output {
 }
 
 /// The shipped binary in `cwd` with an isolated cache: `(exit, stdout, stderr)`.
+///
+/// Capture drains inline on every spawn (see the module docs for why).
 pub(crate) fn rift(cwd: &Path, cache: &Path, args: &[&str]) -> (i32, String, String) {
     let out = rift_cmd(cwd)
         .args(args)
         .env("RIFT_CACHE_DIR", cache)
         .env("RIFT_CONFIG_DIR", cache.join("conf"))
         .env("RIFT_HEADLESS", "1")
+        .env("RIFT_CAPTURE_SYNC", "1")
         .output()
         .expect("rift runs");
     (
@@ -100,8 +118,9 @@ pub(crate) fn empty_target(tmp: &Path, name: &str) -> PathBuf {
 
 /// Build a repository whose chain holds exactly `commits` positions: one
 /// commit per position, each archived through the native post-commit hook
-/// under its own live-session marker and drained with `rift doctor --fix`
-/// so the order is deterministic (no sleeping on the detached worker).
+/// under its own live-session marker. The hook drains inline, so the order
+/// is the commit order; the `rift doctor --fix` after it is the recipe's
+/// step and finds nothing left to drain.
 pub(crate) fn seeded_chain(tmp: &Path, name: &str, commits: usize) -> ChainFixture {
     assert!(commits >= 1, "a chain fixture needs at least one position");
     let repo = tmp.join(name);
@@ -123,13 +142,17 @@ pub(crate) fn seeded_chain(tmp: &Path, name: &str, commits: usize) -> ChainFixtu
         std::fs::write(repo.join(format!("f{n}.txt")), format!("content {n}\n")).unwrap();
         git_in(&repo, &["add", "."]);
         // A distinct live session per commit, so each archive is a real,
-        // separately-attributed condensation.
+        // separately-attributed condensation. Stamped now, inside every idle
+        // floor, so the post-commit hook condenses it and the doctor's sweep
+        // after it finds nothing idle: the chain's order must not depend on
+        // the sweep. The clock is read for this input only, never for an
+        // assertion.
         let session = format!("chain-fixture-{n}");
         std::fs::write(
             sessions.join(format!("{session}.json")),
             format!(
                 r#"{{"schema":1,"session_id":"{session}","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":{},"native_id_map":{{}}}}"#,
-                1_783_000_000_000_u64 + n as u64
+                marker_stamp_now()
             ),
         )
         .unwrap();
@@ -159,6 +182,15 @@ pub(crate) fn seeded_chain(tmp: &Path, name: &str, commits: usize) -> ChainFixtu
         "the fixture's chain must hold exactly one position per commit"
     );
     fixture
+}
+
+/// Milliseconds since the epoch, for a session marker the idle sweep must
+/// read as live.
+fn marker_stamp_now() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
 }
 
 impl ChainFixture {

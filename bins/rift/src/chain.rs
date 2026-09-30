@@ -159,41 +159,108 @@ pub(crate) fn record_archived(
     checkpoint_id: &str,
     now_ms: i64,
 ) -> Result<Step> {
+    match read_for_append(git_dir, checkpoint_id)? {
+        Reading::Settled(step) => Ok(step),
+        Reading::Owed(plan) => append_owed(git_dir, common_dir, checkpoint_id, plan, now_ms),
+    }
+}
+
+/// What one archiver's read of the chain found: either an answer that needs no
+/// write, or the positions it owes.
+enum Reading {
+    Settled(Step),
+    Owed(AppendPlan),
+}
+
+/// The positions an archiver owes, and the chain tip its read was taken at.
+///
+/// The read and the write are separate steps in separate processes' time: the
+/// detached worker and `rift doctor --fix` both archive, and each reads the
+/// chain before it appends. The tip travels with the plan so the write can
+/// refuse to land on a chain that moved under it.
+struct AppendPlan {
+    tip: Option<String>,
+    recorded: usize,
+    missing: Vec<String>,
+}
+
+/// Read the chain and the branch and decide what, if anything, is owed.
+fn read_for_append(git_dir: &Path, checkpoint_id: &str) -> Result<Reading> {
+    // The tip first: an order read after it can only be as new or newer, and
+    // a newer order is exactly what the compare-and-set below refuses.
+    let tip = chain::tip(git_dir)?;
     let order = chain::read_order(git_dir)?;
     if order.iter().any(|id| id == checkpoint_id) {
-        return Ok(Step::AlreadyRecorded);
+        return Ok(Reading::Settled(Step::AlreadyRecorded));
     }
     let branch = chain::branch_order(git_dir, CHECKPOINT_BRANCH)?;
     if let Some(d) = first_disagreement(&order, &branch) {
-        return Ok(Step::Diverged(d.to_string()));
+        return Ok(Reading::Settled(Step::Diverged(d.to_string())));
     }
     if order.len() > branch.len() {
-        return Ok(Step::Diverged(format!(
+        return Ok(Reading::Settled(Step::Diverged(format!(
             "the chain records {} position(s) and the branch carries {} checkpoint(s), so an \
              entry names a checkpoint the branch does not have",
             order.len(),
             branch.len()
-        )));
+        ))));
     }
     let missing: Vec<String> = branch.get(order.len()..).unwrap_or_default().to_vec();
     if !missing.iter().any(|id| id == checkpoint_id) {
-        return Ok(Step::Diverged(format!(
+        return Ok(Reading::Settled(Step::Diverged(format!(
             "the archived checkpoint {checkpoint_id} is not on {CHECKPOINT_BRANCH}"
-        )));
+        ))));
     }
     // No ref yet AND history behind it: that is a backfill, not a genesis.
     if order.is_empty() && missing.len() > 1 {
-        return Ok(Step::NeedsInit {
+        return Ok(Reading::Settled(Step::NeedsInit {
             checkpoints: branch.len(),
-        });
+        }));
     }
-    for id in &missing {
-        chain::append(git_dir, id, now_ms / 1000)?;
+    Ok(Reading::Owed(AppendPlan {
+        tip,
+        recorded: order.len(),
+        missing,
+    }))
+}
+
+/// Append the owed positions onto the tip the plan was read at, then enqueue
+/// the refs they moved.
+///
+/// Each entry is pinned to the one before it, so a chain another archiver
+/// moved since the read refuses the write instead of taking a second copy of
+/// the same checkpoint. A refused write is settled by reading again: when the
+/// other archiver recorded this checkpoint, that is this call's answer too;
+/// when it did not, the refusal is the caller's loud note, and the tail-gap
+/// heal of the next archive or `rift doctor --fix` appends what is left.
+fn append_owed(
+    git_dir: &Path,
+    common_dir: &Path,
+    checkpoint_id: &str,
+    plan: AppendPlan,
+    now_ms: i64,
+) -> Result<Step> {
+    let mut parent = plan.tip;
+    for id in &plan.missing {
+        match chain::append_onto(git_dir, parent.as_deref(), id, now_ms / 1000) {
+            Ok(entry) => parent = Some(entry),
+            Err(lost) => return settle_refused_append(git_dir, checkpoint_id, lost),
+        }
     }
-    enqueue_for_push(common_dir, order.len() + missing.len(), now_ms);
+    enqueue_for_push(common_dir, plan.recorded + plan.missing.len(), now_ms);
     Ok(Step::Appended {
-        entries: missing.len(),
+        entries: plan.missing.len(),
     })
+}
+
+/// The answer for an append the chain refused: already recorded when another
+/// archiver got there first, else the refusal itself.
+fn settle_refused_append(git_dir: &Path, checkpoint_id: &str, lost: RiftError) -> Result<Step> {
+    let order = chain::read_order(git_dir)?;
+    if order.iter().any(|id| id == checkpoint_id) {
+        return Ok(Step::AlreadyRecorded);
+    }
+    Err(lost)
 }
 
 /// Enqueue the two refs a checkpoint write moves, for a later shipper
@@ -608,6 +675,30 @@ mod tests {
         assert!(detail.contains(B), "what the branch claims: {detail}");
         assert!(step.marker().unwrap().contains("NOT recorded"));
         assert_eq!(chain::tip(&git_dir).unwrap(), tip_before, "the ref moved");
+    }
+
+    /// Two archivers — the detached worker and `rift doctor --fix` — can read
+    /// the chain before either appends. The one whose read went stale must
+    /// not record the checkpoint a second time: a duplicate position is a
+    /// chain longer than its branch, which nothing can ever remove.
+    #[test]
+    fn an_archiver_whose_read_went_stale_does_not_record_a_checkpoint_twice() {
+        let d = repo();
+        let git_dir = d.path().join(".git");
+        archive(d.path(), A);
+        let Reading::Owed(stale) = read_for_append(&git_dir, A).unwrap() else {
+            panic!("the first read of a fresh chain owes the genesis")
+        };
+        assert_eq!(
+            record_archived(&git_dir, &git_dir, A, T).unwrap(),
+            Step::Appended { entries: 1 },
+            "the other archiver lands first"
+        );
+
+        let step = append_owed(&git_dir, &git_dir, A, stale, T).unwrap();
+
+        assert_eq!(step, Step::AlreadyRecorded);
+        assert_eq!(chain::read_order(&git_dir).unwrap(), vec![A.to_string()]);
     }
 
     #[test]

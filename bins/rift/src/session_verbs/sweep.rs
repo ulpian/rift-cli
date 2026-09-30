@@ -59,8 +59,10 @@ pub(crate) fn stop(root: &Path, target: Option<&str>) -> Result<Outcome> {
     }
     for id in &sweep.condense_deferred {
         human.push_str(&format!(
-            "{}: stop deferred (no commit to anchor to yet — the next sweep retries)\n",
-            Label::of(id)
+            "{}: stop deferred (no commit to anchor to yet, or a capture worker is \
+             draining this checkout) — run `rift session stop {}` again\n",
+            Label::of(id),
+            safe(id)
         ));
     }
     for id in &closed_idle {
