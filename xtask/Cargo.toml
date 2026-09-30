@@ -33,4 +33,16 @@ insta = { workspace = true }
 # The off arm's policy is asserted through the loader that actually reads it,
 # rather than through the bytes the harness wrote (dev-only).
 rift-recall-policy = { version = "0.0.1", path = "../crates/rift-recall-policy" }
+# The structure share of the list-shaped pull answers is measured on the
+# answers the real dispatcher ships, over the eval harness's own corpus seeded
+# into an in-memory projection, so the figure moves when a payload's shape
+# does (dev-only: the crate graph counts normal dependencies).
+rift-config = { version = "0.0.1", path = "../crates/rift-config" }
+rift-recall-eval = { version = "0.0.1", path = "../crates/rift-recall-eval" }
+rift-recall-ledger = { version = "0.0.1", path = "../crates/rift-recall-ledger" }
+rift-recall-serve = { version = "0.0.1", path = "../crates/rift-recall-serve" }
+rift-recall-substrate = { version = "0.0.1", path = "../crates/rift-recall-substrate" }
+rift-recall-types = { version = "0.0.1", path = "../crates/rift-recall-types" }
+rift-store = { version = "0.0.1", path = "../crates/rift-store" }
 tempfile = { workspace = true }
+tokio = { workspace = true }
