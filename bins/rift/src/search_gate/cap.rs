@@ -237,6 +237,8 @@ fn journal_cap(call: &super::SearchCall<'_>) -> bool {
                 declared_avoided: None,
                 // A bounded content search stood in for no listing at all.
                 shape: None,
+                session: Some(call.raw.session.clone()),
+                window: None,
             }),
         },
     )

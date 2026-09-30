@@ -114,6 +114,9 @@ struct DocCtx<'a> {
     policy: &'a rift_recall_policy::ServePolicy,
     /// The two levers and the channel, resolved for this family.
     effective: &'a rift_recall_policy::Effective,
+    /// The window journal's key of the context window the call was made in,
+    /// which a decision's accounting row is attributed to.
+    window_key: &'a str,
 }
 
 /// **A read of a document is answered with the Markdown Rift already holds.**
@@ -225,12 +228,14 @@ pub(super) fn doc_gate_in(
     let Some(step) = gate_step(&raw.agent, &raw.verb, &raw.payload) else {
         return quiet;
     };
+    let window_key = crate::window_journal::key(&raw.session, facts.child_session.as_deref());
     let ctx = DocCtx {
         git_dir,
         work_tree,
         raw,
         policy,
         effective,
+        window_key: &window_key,
     };
     match step {
         GateStep::Decide => {}
@@ -907,6 +912,8 @@ fn journal_document_decision(
                 declared_avoided: declared,
                 // Not a name search: nothing here stood in for a listing.
                 shape: None,
+                session: Some(ctx.raw.session.clone()),
+                window: Some(ctx.window_key.to_owned()),
             }),
         },
     )

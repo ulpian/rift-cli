@@ -83,6 +83,10 @@ pub(super) fn record_recovery_injection(
         declared_avoided: None,
         // Not a name search: nothing here stood in for a listing.
         shape: None,
+        // This writer is handed no session and no window, so the map's rows
+        // are written unattributed and frozen into no shard.
+        session: None,
+        window: None,
     };
     let _ = (|| -> Result<()> {
         let db = crate::family::recall_db(repo)?;

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use rift_core::Result;
 
+use super::audit::session_serve_lines;
 use super::git::{effective_config, session_raw_capture, state_from_token, strategy_kind};
 use super::{now_ms, projection_db_at};
 
@@ -67,7 +68,7 @@ pub(super) fn archive_now(
     let repo = rift_git::discover(work_tree)?;
     let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
     let raw = session_raw_capture(&repo.work_tree);
-    let facts = read_facts_for_archive(rt, store, agent, session);
+    let facts = session_facts_for_archive(rt, store, &repo.work_tree, agent, session);
     let (packs, notes) = crate::redactor_packs::capture_rule_packs(&repo.work_tree);
     report_pack_notes(&notes);
     // A session-end/sweep condense archives the transcript too — same source,
@@ -112,10 +113,31 @@ pub(super) fn archive_now(
     archived
 }
 
+/// What the session captured beside its capture document: its read facts and
+/// its serves.
+///
+/// The one reading both the trailer's prediction and the archive fold, so
+/// the two derive one checkpoint id from the same bytes. The prediction can
+/// still miss by one change, exactly as it can for a read fact: a serve booked
+/// between `prepare-commit-msg` and the worker's condense lands in the archive
+/// and not in the trailer. The archive keeps its true id either way.
+pub(super) fn session_facts_for_archive(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    work_tree: &Path,
+    agent: &str,
+    session: &str,
+) -> rift_shadow::SessionFacts {
+    rift_shadow::SessionFacts {
+        read_facts: read_facts_for_archive(rt, store, agent, session),
+        serve_audit: serve_audit_for_archive(rt, work_tree, session),
+    }
+}
+
 /// The session's captured read facts, mapped for the shard's
 /// `tool_calls.jsonl`. Best-effort: a query failure archives an empty
 /// set rather than blocking the checkpoint.
-pub(super) fn read_facts_for_archive(
+fn read_facts_for_archive(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
     agent: &str,
@@ -133,6 +155,60 @@ pub(super) fn read_facts_for_archive(
             input_tokens: f.input_tokens,
         })
         .collect()
+}
+
+/// The bytes of the session's `serve_audit.jsonl`: every serve the recall
+/// projection attributes to the session, one canonical line each, sorted by
+/// key, or `None` when there is none — the artifact is never written empty.
+///
+/// A query, like the read facts beside it, and cumulative by construction:
+/// every checkpoint of a session carries every serve the session has made so
+/// far, so a second commit in a session that served nothing since derives
+/// the id the first one did and the re-archive stays a no-op. Which shard
+/// holds a serve is decided by the row that names its session, never by which
+/// checkpoint ran next, and a serve no session made is in no shard.
+///
+/// The projection is opened read-only: this runs inside `prepare-commit-msg`
+/// as well as in the worker, and neither creates or migrates a store to read
+/// it. A family with no `recall.db`, or one no writer has migrated to hold
+/// attributions, has none to freeze; a query failure archives none rather
+/// than blocking the checkpoint. A row whose line the canonical table refuses
+/// is counted and left out.
+pub(super) fn serve_audit_for_archive(
+    rt: &tokio::runtime::Runtime,
+    work_tree: &Path,
+    session: &str,
+) -> Option<Vec<u8>> {
+    let db = crate::family::recall_db(work_tree).ok()?;
+    if !db.exists() {
+        return None;
+    }
+    let store = rift_store::SqliteStore::open_read_only(&db).ok()?;
+    let serves = rt
+        .block_on(rift_recall_ledger::attribution::session_serves(
+            &store, session,
+        ))
+        .ok()?;
+    let rebuilt = session_serve_lines(&serves, session);
+    let refused = rebuilt.iter().filter(|line| line.is_none()).count();
+    if refused > 0 {
+        tracing::warn!(
+            refused,
+            "serve rows whose line is not canonical were not frozen"
+        );
+    }
+    let mut lines: Vec<(String, Vec<u8>)> = rebuilt.into_iter().flatten().collect();
+    lines.sort();
+    lines.dedup_by(|later, kept| later.0 == kept.0);
+    if lines.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (_, line) in lines {
+        out.extend_from_slice(&line);
+        out.push(b'\n');
+    }
+    Some(out)
 }
 
 /// The deferred half of `post-commit`: bind identities, diff the commit, replay
@@ -591,7 +667,7 @@ pub(crate) fn import_archive(
         &raw_doc,
         decision,
         now,
-        Vec::new(),
+        rift_shadow::SessionFacts::default(),
         &packs,
         Some(pair),
         Vec::new(),
@@ -801,7 +877,7 @@ fn run_archive(
         session_raw_capture(&repo.work_tree)
     });
     let facts = t.phase("archive_read_facts", || {
-        read_facts_for_archive(rt, store, agent, session_id)
+        session_facts_for_archive(rt, store, &repo.work_tree, agent, session_id)
     });
     // The repository's own redactor packs, folded in beside the built-ins. Any
     // note is recorded as a queue marker rather than printed — the worker's

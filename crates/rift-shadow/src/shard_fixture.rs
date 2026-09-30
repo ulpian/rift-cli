@@ -32,6 +32,11 @@
 //!   its `tasks/<tool-use-id>/` subtree.
 //! * `capture.txt` — the session capture document that becomes
 //!   `content.redacted`.
+//!
+//! The frozen serve envelopes are literals rather than an input file: one
+//! schema-4 line and one schema-1 line, in the canonical shape the one writer
+//! freezes from the recall rows (keys sorted, typed text already withheld,
+//! the session and window that made them named), sorted by idempotency key.
 
 use std::path::PathBuf;
 
@@ -109,6 +114,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
         prev_hash: None,
         events: fixture_events(),
         read_facts: fixture_read_facts(),
+        serve_audit: Some(fixture_serve_audit()),
         content: redacted.redacted,
         report: RedactionReportView::from_redact(&redacted.report),
         transcript: Some(transcript),
@@ -202,4 +208,54 @@ fn fixture_read_facts() -> Vec<ArchivedReadFact> {
             input_tokens: None,
         },
     ]
+}
+
+/// The frozen serve envelopes the fixture archives as `serve_audit.jsonl`: a
+/// read decline booked in both relations, its schema-4 call line first because
+/// its key sorts first. A call row holds no handle and no reason, so its line's
+/// payload names only its kind.
+fn fixture_serve_audit() -> Vec<u8> {
+    let handle = format!(
+        "file:crates/rift-shadow/src/backend.rs@sha256:{}:L1-40",
+        "a".repeat(64)
+    );
+    let payload = serde_json::json!({
+        "estimated_tokens_avoided": 1_200,
+        "estimated_tokens_returned": 40,
+        "handle": handle,
+        "kind": "read_intercepted",
+        "reason": "already_held",
+    });
+    let window = "e".repeat(64);
+    let call = serde_json::json!({
+        "idempotency_key": "01JSERVEFIXTURE",
+        "payload": { "kind": "read_intercepted" },
+        "schema": 4,
+        "serve_call": {
+            "call_id": "01JSERVEFIXTURE",
+            "channel": "hook_inject",
+            "recorded_at": FIXTURE_CREATED_AT_MS - 7_000,
+            "tokens_avoided": 1_200,
+            "tokens_returned": 40,
+            "tool_name": "claude-code:read-gate",
+        },
+        "session_id": FIXTURE_SESSIONS[0],
+        "verb": "memd.read_intercepted",
+        "window_key": window,
+    });
+    let audit = serde_json::json!({
+        "idempotency_key": "d".repeat(64),
+        "payload": payload,
+        "recorded_at": FIXTURE_CREATED_AT_MS - 7_000,
+        "schema": 1,
+        "session_id": FIXTURE_SESSIONS[0],
+        "verb": "memd.read_intercepted",
+        "window_key": window,
+    });
+    let mut out = Vec::new();
+    for line in [call, audit] {
+        out.extend_from_slice(&serde_json::to_vec(&line).unwrap_or_default());
+        out.push(b'\n');
+    }
+    out
 }

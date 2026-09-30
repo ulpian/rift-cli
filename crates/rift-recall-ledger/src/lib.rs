@@ -25,6 +25,8 @@
     )
 )]
 
+pub mod attribution;
+pub mod audit;
 pub mod blob_bridge;
 pub mod blob_map;
 pub mod candidates;

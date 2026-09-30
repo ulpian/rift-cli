@@ -7,7 +7,7 @@
 //! writes them through the append-only DAO with `INSERT OR IGNORE`, so re-ingest
 //! is a set-union no-op.
 
-use rift_recall_substrate::parse::ParseIssue;
+use rift_recall_substrate::parse::{ParseIssue, ServeAuditEnvelope};
 use rift_recall_types::checkpoint::CheckpointWorktree;
 use rift_store::Value;
 use sha2::{Digest, Sha256};
@@ -81,6 +81,9 @@ pub struct Built {
     pub edges: usize,
     /// Parse issues encountered (skip-and-report, bubble to `doctor`).
     pub issues: Vec<ParseIssue>,
+    /// The serves the checkpoint froze, handed to the one appender after the
+    /// rows; empty for rows that are not a checkpoint's own.
+    pub(crate) serves: Vec<ServeAuditEnvelope>,
 }
 
 fn opt(v: Option<&str>) -> Value {

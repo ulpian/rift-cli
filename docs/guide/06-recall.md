@@ -401,6 +401,16 @@ split explains what is safe to throw away:
   outcome labels, metric snapshots, evaluation runs, key metadata. *Not*
   derivable from git: they record what was served, to whom, and what was
   measured, which is why the store exists at all rather than being in-memory.
+  The serves themselves are no longer only here: a serve made inside a
+  session is written with a `memd_audit_session` row naming that session and
+  its window, and every checkpoint of the session freezes the serves those
+  rows name, canonicalised, into its `serve_audit.jsonl`
+  ([Chapter 5](05-ledger-and-verification.md)), where a rebuild cannot erase
+  them, and a rebuild reads them back from there, attribution included
+  ([§13.12](13-storage-and-schema.md)). A serve no session made is in no
+  shard. The caller's own words in an exact retrieval's reason are frozen as
+  the placeholder `withheld`, so a rebuilt exact-retrieval row carries
+  `withheld` as its reason and the only copy of them stays in this store.
 
 Node and edge kinds are `CHECK`-constrained to a declared mechanical set that is
 deliberately *narrow*: semantic kinds — "similar to", "touches" — are absent, so

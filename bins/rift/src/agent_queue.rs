@@ -274,6 +274,17 @@ pub(crate) struct ServeAudit {
     /// of the two ceilings rather than guessing the larger one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<rift_recall_serve::ListingShape>,
+    /// The session whose hook decided, so the worker can write the row that
+    /// attributes the decision to it and the session's checkpoint freezes it.
+    /// `None` on a job an older binary left behind, whose rows stay
+    /// unattributed and are frozen into no shard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The window journal's key of the context window that decided, where the
+    /// hook had it in hand without a second read of its payload; `None`
+    /// elsewhere, and the attribution then names the session alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
 }
 
 /// Which accounting row a [`ServeAudit`] becomes. One variant per hook-side
@@ -727,6 +738,8 @@ mod tests {
                 total: None,
                 declared_avoided: None,
                 shape: None,
+                session: None,
+                window: None,
             }),
         }
     }

@@ -48,6 +48,12 @@ pub enum VersionField {
     CanonVersion(u32),
     /// A per-line `v` integer in a JSONL stream (the compact transcript).
     PerLineV(u64),
+    /// A per-line `schema` integer that differs from line to line: each line
+    /// is a serve envelope and declares its own envelope schema (1 or 4), so no
+    /// single number describes the artifact. Its own variant rather than
+    /// [`Self::PerLineV`], whose member is `v` and whose value is one number
+    /// for the whole stream.
+    PerLineSchema,
     /// No version of its own. Capture bytes, a hex digest, or a stream whose
     /// records are versioned by the shard header — recorded explicitly so
     /// "this artifact has no version" is a decision in the table rather than an
@@ -123,6 +129,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         path: "redaction_report.json",
         version: VersionField::None,
         sync_format_row: "Checkpoint metadata (`metadata.json`)",
+    },
+    ShardArtifact {
+        path: "serve_audit.jsonl",
+        version: VersionField::PerLineSchema,
+        sync_format_row: "Serve audit (`serve_audit.jsonl`)",
     },
     ShardArtifact {
         path: "sessions/<index>/metadata.json",
@@ -294,7 +305,9 @@ mod tests {
                         "{path}: lines declare {seen:?}, the registry says {want}"
                     );
                 }
-                VersionField::CanonVersion(_) | VersionField::None => {
+                VersionField::CanonVersion(_)
+                | VersionField::None
+                | VersionField::PerLineSchema => {
                     unreachable!("{path} is not versioned that way")
                 }
             }
@@ -306,6 +319,32 @@ mod tests {
             row.version,
             VersionField::CanonVersion(NATIVE_CANON_VERSION),
             "the registry must move with the canonicalization epoch"
+        );
+    }
+
+    /// The serve audit's lines each declare their own envelope schema, one of
+    /// the two the one writer freezes — read off the maximal fixture, whose
+    /// lines are the shape the writer emits.
+    #[test]
+    fn every_frozen_serve_line_declares_its_own_envelope_schema() {
+        assert_eq!(
+            is_declared("serve_audit.jsonl").map(|a| a.version),
+            Some(VersionField::PerLineSchema)
+        );
+        let archive = crate::shard_fixture::every_artifact_archive().unwrap();
+        let bytes = archive
+            .serve_audit_jsonl()
+            .expect("the fixture freezes serves");
+        let mut schemas: Vec<u64> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| json_version(line, "schema").expect("every line declares one"))
+            .collect();
+        schemas.sort_unstable();
+        assert_eq!(
+            schemas,
+            vec![1, 4],
+            "one schema-1 line and one schema-4 line"
         );
     }
 

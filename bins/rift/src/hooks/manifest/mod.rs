@@ -15,7 +15,6 @@ mod stamps;
 mod fixtures;
 
 use super::agent::boundary_budget;
-use super::audit::append_memd_audit;
 use super::now_ms;
 use baseline::{merged_baseline, read_baseline, write_baseline};
 use decide::{changed_since, decide_turn, TurnDecision};
@@ -101,6 +100,7 @@ pub(super) fn turn_manifest(
     let decision = decide_turn(baseline.as_deref(), &rows, &bootstrap_absorb, budget);
     let session_state = SessionState {
         repo,
+        session,
         key: &key,
         known: &known,
         accounted: accounted_for(complete, projection.as_deref()),
@@ -246,6 +246,7 @@ fn accounted_for(complete: bool, projection: Option<&str>) -> Option<&str> {
 /// arms take one argument rather than five.
 struct SessionState<'a> {
     repo: &'a std::path::Path,
+    session: &'a str,
     key: &'a str,
     known: &'a [String],
     accounted: Option<&'a str>,
@@ -261,6 +262,7 @@ fn act_on(
 ) -> Option<String> {
     let SessionState {
         repo,
+        session,
         key,
         known,
         accounted,
@@ -293,7 +295,7 @@ fn act_on(
             absorb,
             named,
         } => {
-            audit_one_turn(open, &text);
+            audit_one_turn(open, session, key, &text);
             write_baseline(repo, key, &merged_baseline(known, &absorb));
             // Recorded even though the audit row above has already moved the
             // projection, so this stamp is stale the moment it is written and
@@ -313,19 +315,24 @@ fn act_on(
 
 /// Book what this turn spent, keyed per **turn**: one hook invocation is one
 /// turn, and the envelope is keyed by a fresh id so two turns are two rows
-/// even when their figures match.
-fn audit_one_turn(open: &OpenProjection, text: &str) {
+/// even when their figures match. The row is attributed to the session and
+/// the window (`key`) the turn was pushed into.
+fn audit_one_turn(open: &OpenProjection, session: &str, key: &str, text: &str) {
     use rift_core::UlidSource as _;
 
     let envelope = rift_recall_serve::injection_audit_envelope(
         rift_tokens::count(text),
         &TURN_IDS.next_ulid().to_hex(),
     );
-    let _ = open.rt.block_on(append_memd_audit(
-        &open.store,
-        envelope.as_bytes(),
-        now_ms(),
-    ));
+    let attribution = super::audit::serve_attribution(Some(session), Some(key));
+    let _ = open
+        .rt
+        .block_on(rift_recall_ledger::attribution::append_attributed_serve(
+            &open.store,
+            envelope.as_bytes(),
+            now_ms(),
+            attribution.as_ref(),
+        ));
 }
 
 #[cfg(test)]

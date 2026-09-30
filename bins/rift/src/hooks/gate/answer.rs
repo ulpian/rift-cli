@@ -165,7 +165,11 @@ pub(super) fn journal_decision(
             work_tree: work_tree.to_path_buf(),
             queued_at_ms: raw.occurred_at_ms,
             attempts: 0,
-            kind: crate::agent_queue::JobKind::ServeAudit(audit),
+            kind: crate::agent_queue::JobKind::ServeAudit(crate::agent_queue::ServeAudit {
+                session: Some(raw.session.clone()),
+                window: None,
+                ..audit
+            }),
         },
     )
     .is_ok()
@@ -222,5 +226,7 @@ pub(super) fn read_decision_audit(
         declared_avoided: twice.then_some(0),
         // Not a name search: nothing here stood in for a listing.
         shape: None,
+        session: None,
+        window: None,
     })
 }

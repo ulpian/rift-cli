@@ -141,6 +141,7 @@ fn archive_for(
         prev_hash: None,
         events: Vec::new(),
         read_facts: Vec::new(),
+        serve_audit: None,
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript: seed.transcript,

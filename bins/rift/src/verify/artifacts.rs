@@ -41,6 +41,10 @@ pub(super) struct ShardHeader {
 pub(super) struct NativeArtifacts {
     pub(super) content: Option<Vec<u8>>,
     pub(super) tool_calls: Option<Vec<u8>>,
+    /// `serve_audit.jsonl`, absent on every shard that froze no serve — and
+    /// on every shard written before the artifact existed, whose leaf
+    /// sequence absence therefore re-derives unchanged.
+    pub(super) serve_audit: Option<Vec<u8>>,
     pub(super) full: Option<Vec<u8>>,
     pub(super) transcript_compact: Option<Vec<u8>>,
     pub(super) transcript_full: Option<Vec<u8>>,
@@ -111,6 +115,7 @@ impl NativeArtifacts {
         Ok(Self {
             content: reader.read_artifact(id, "content.redacted")?,
             tool_calls: reader.read_artifact(id, "tool_calls.jsonl")?,
+            serve_audit: reader.read_artifact(id, "serve_audit.jsonl")?,
             full: reader.read_artifact(id, "full.jsonl")?,
             // The writer's own name constants, so the two sides cannot drift.
             transcript_compact: reader.read_artifact(id, TRANSCRIPT_COMPACT_NAME)?,
@@ -161,6 +166,7 @@ impl NativeArtifacts {
             content_redacted: content,
             full_jsonl: self.full.as_deref(),
             redaction_report: report,
+            serve_audit: self.serve_audit.as_deref(),
             tool_calls: self.tool_calls.as_deref(),
             transcript_compact: self.transcript_compact.as_deref(),
             transcript_full: self.transcript_full.as_deref(),

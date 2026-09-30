@@ -24,6 +24,9 @@ pub struct ShardLeafBytes<'a> {
     pub full_jsonl: Option<&'a [u8]>,
     /// `redaction_report.json` — the counts-only redaction facts. Always present.
     pub redaction_report: &'a [u8],
+    /// `serve_audit.jsonl` — the session's frozen serve envelopes, or `None`
+    /// when it froze none.
+    pub serve_audit: Option<&'a [u8]>,
     /// `tool_calls.jsonl` — the archived read facts, or `None` when the session
     /// captured none.
     pub tool_calls: Option<&'a [u8]>,
@@ -101,14 +104,17 @@ pub struct TaskLeafBytes<'a> {
 /// canonical (git-tree) name order, with `full.jsonl` expanded to one leaf per
 /// archived event line.**
 ///
-/// So the sequence is `content.redacted`, then each `full.jsonl` line, then
-/// `redaction_report.json`, then each `tasks/<tool-use-id>/` subtree's
-/// artifacts (`metadata.json`, then the transcript pair when present — the
-/// task dir's own bytewise name order — tasks ordered by tool-use id), then
-/// `tool_calls.jsonl`, then `transcript.compact.jsonl`, then
-/// `transcript.jsonl` — which is the artifacts' bytewise **full-path** order
-/// (`tasks/…` sits between `redaction_report.json` and `tool_calls.jsonl`
-/// because `'t','a' < 't','o'`), the same order
+/// So the sequence is `content.redacted`, then the `digest.*` documents, then
+/// each `full.jsonl` line, then `redaction_report.json`, then
+/// `serve_audit.jsonl`, then each `sessions/<index>/metadata.json`, then each
+/// `tasks/<tool-use-id>/` subtree's artifacts (`metadata.json`, then the
+/// transcript pair when present — the task dir's own bytewise name order —
+/// tasks ordered by tool-use id), then `tool_calls.jsonl`, then
+/// `transcript.compact.jsonl`, then `transcript.jsonl` — which is the
+/// artifacts' bytewise **full-path** order (`serve_audit.jsonl` sits between
+/// `redaction_report.json` and `sessions/` because `r` < `s` at the first
+/// byte and again at the third; `tasks/…` sits between `sessions/` and
+/// `tool_calls.jsonl` because `'t','a' < 't','o'`), the same order
 /// `NativeBackend::write_shard` sorts the tree into. One rule, and it makes
 /// "the checkpoint's event leaves" literally true the moment an event stream is
 /// threaded through condense: today a shard carries no events and the leaf set
@@ -170,6 +176,11 @@ pub fn shard_merkle_leaves(bytes: &ShardLeafBytes<'_>) -> Vec<Sha256Id> {
         );
     }
     leaves.push(rift_hashchain::leaf_hash(bytes.redaction_report));
+    // The frozen serve envelopes: `serve_audit.jsonl` sorts after
+    // `redaction_report.json` and before `sessions/`, so one leaf here.
+    if let Some(serve_audit) = bytes.serve_audit {
+        leaves.push(rift_hashchain::leaf_hash(serve_audit));
+    }
     // The per-session metadata of a multi-session checkpoint, in bytewise
     // index-name order (`sessions/` sorts between `redaction_report.json`
     // and `tasks/`; within it git orders decimal names bytewise — "10"
@@ -291,6 +302,7 @@ mod tests {
             content_redacted: b"capture",
             full_jsonl: Some(br#"{"e":0}"#),
             redaction_report: report,
+            serve_audit: None,
             tool_calls: Some(br#"{"id":"t1"}"#),
             transcript_compact: None,
             transcript_full: None,
@@ -319,6 +331,54 @@ mod tests {
             shard_merkle_root(&without),
             shard_merkle_root(&with),
             "…and the added leaves genuinely move the root"
+        );
+    }
+
+    /// **The serve audit's place in the sequence, and its absence contract.**
+    /// A shard without `serve_audit.jsonl` derives, leaf for leaf, what it
+    /// derived before the artifact existed; one that carries it gains exactly
+    /// one leaf, after `redaction_report.json` and before the `sessions/`
+    /// metadata, which is the name order the tree is written in.
+    #[test]
+    fn a_serve_audit_leaf_sits_between_the_report_and_the_sessions_and_absence_changes_nothing() {
+        use rift_hashchain::leaf_hash;
+
+        let (content, report, tool_calls) = (b"c".as_slice(), b"r".as_slice(), b"t".as_slice());
+        let sessions = [SessionMetaLeaf {
+            index_name: "0",
+            metadata: b"session zero",
+        }];
+        let without = ShardLeafBytes {
+            content_redacted: content,
+            redaction_report: report,
+            tool_calls: Some(tool_calls),
+            session_metas: &sessions,
+            ..ShardLeafBytes::default()
+        };
+        assert_eq!(
+            shard_merkle_leaves(&without),
+            vec![
+                leaf_hash(content),
+                leaf_hash(report),
+                leaf_hash(b"session zero"),
+                leaf_hash(tool_calls),
+            ],
+            "a shard without the artifact keeps its old sequence"
+        );
+        let with = ShardLeafBytes {
+            serve_audit: Some(b"serve line"),
+            ..without
+        };
+        assert_eq!(
+            shard_merkle_leaves(&with),
+            vec![
+                leaf_hash(content),
+                leaf_hash(report),
+                leaf_hash(b"serve line"),
+                leaf_hash(b"session zero"),
+                leaf_hash(tool_calls),
+            ],
+            "the serve audit's one leaf sits after the report and before sessions/"
         );
     }
 }
