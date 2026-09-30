@@ -18,7 +18,7 @@ use rift_store::{CanonicalStore, SqliteStore};
 use crate::cli::Outcome;
 
 use super::classes::{family_repeat_classes, render_repeat_classes};
-use super::journals::{member_window_journals, render_window_journals};
+use super::journals::{member_window_journals, render_compaction, render_window_journals};
 use super::levers::{family_levers, render_levers};
 use super::panes::{family_enforce_split, render_enforce_split};
 
@@ -147,7 +147,7 @@ pub(super) async fn reread_report(
     // as measured windows rather than as one blended total.
     let split = family_enforce_split(repo).await;
     let human = format!(
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}",
         render_reread_report(&report),
         render_repeat_classes(&classes),
         render_levers(&levers, classes.total_tokens()),
@@ -157,6 +157,9 @@ pub(super) async fn reread_report(
         // figure's name stand over two of them.
         family_window_note(repo),
         render_window_journals(&windows),
+        // Appended after the block's own eviction lines rather than inside
+        // it, so every line the block printed before is printed unchanged.
+        render_compaction(&windows.compaction, windows.note.as_deref()),
         render_enforce_split(&split)
     );
     let db_path = crate::family::recall_db(repo)?;
@@ -378,6 +381,7 @@ per session:
             adjacent_reads: 2,
             evictions: 1,
             post_compaction_tokens: 250,
+            compaction: super::super::journals::Compaction::default(),
         }
     }
 

@@ -574,6 +574,12 @@ holds. Compaction is not rare — measured here at about 0.85 per session with
 reads — and the two levers reinforce each other: every token kept out of
 context postpones the next compaction.
 
+`rift memory reread-report` and `rift savings --json` (its `compaction` key) publish both halves of that cost from this member's window journals.
+The rate is evictions per session, by reason, with a subagent's window counted under its parent's session.
+A journal's file name is a hash and cannot name its session, so the session is the one the window's injection marker names; a window without a marker is counted beside the rate, never guessed into it.
+The storm is the reading after each eviction, under the same three-turn rule as the post-compaction share: its count, median and largest size in tokens, its reads, and how many storms hold a read nobody could re-measure.
+Where two evictions' turns overlap, a read belongs to the later eviction only, so the storms add up exactly to the post-compaction total.
+
 ### Two processes, one window
 
 A client may run its hooks in parallel and a model may issue parallel tool
