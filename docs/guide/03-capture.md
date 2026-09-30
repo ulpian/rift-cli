@@ -194,12 +194,13 @@ fallback rule for a client whose payload carries none of the envelope keys.
 
 ### Receipts
 
-Every agent hook writes a receipt row, whatever happened, with one of three
+Every agent hook writes a receipt row, whatever happened, with one of four
 outcomes:
 
 | Outcome | Meaning |
 |---|---|
 | `recorded` | The adapter mapped the verb and the canonical events landed. |
+| `recorded-no-event` | The adapter knows the verb and it carries nothing to capture — Antigravity's later invocations of a prompt are the case. Recorded so the hook still counts as having arrived, and kept apart from an unknown verb so a gap in the adapter is not confused with a verb that has nothing to say. |
 | `skipped-unknown-verb` | The adapter does not know this verb. Not an error — a new agent version may add verbs before Rift does — but counted, so the gap is visible. |
 | `deferred-no-session` | The hook carried no usable session id. Nothing downstream can be written, because every durable row is addressed by its session. The receipt exists precisely so the loss is countable instead of silent. |
 

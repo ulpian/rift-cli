@@ -130,14 +130,18 @@ async fn hook_step(run: &Run<'_>, registry: &AdapterRegistry, verb: usize, varia
     )
     .await
     .unwrap();
-    if outcome.receipt == HookReceipt::SkippedUnknownVerb {
-        return; // Nothing was captured, so nothing is owed.
-    }
+    assert_ne!(outcome.receipt, HookReceipt::SkippedUnknownVerb, "{verb}");
     assert_eq!(
         phase(run),
         Some(outcome.state),
         "the cache mirrors the phase"
     );
+    if outcome.receipt == HookReceipt::RecordedNoEvent {
+        // It carried nothing, so nothing could move the phase.
+        let unmoved = before.unwrap_or(SessionState::Idle);
+        assert_eq!(outcome.state, unmoved, "{verb} moved the phase");
+        return;
+    }
     if verb == "SessionEnd" {
         // Its own end: `ending` with a condense owed, or where a redelivered
         // end found it.
