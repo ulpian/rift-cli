@@ -92,6 +92,39 @@ fn known_hash_yields_known_unchanged_no_bytes() {
     assert!(!json.contains("\"content\""));
 }
 
+/// The turn a known-unchanged entry cites is the one the binary read out of
+/// the caller's journal for that exact path and revision — and only that one:
+/// a held revision the journal names under no turn cites none, and the key is
+/// absent rather than null so a view without evidence is unchanged.
+#[test]
+fn a_known_unchanged_entry_cites_the_turn_its_window_last_read_it() {
+    let cfg = cfg();
+    let store = seeded_store();
+    let reader = MemorySubstrate::local();
+    let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
+    let req = ToolRequest {
+        known_hashes: vec![SHA_A.into(), SHA_B.into()],
+        seen_turns: [(("src/a.rs".to_owned(), SHA_A.to_owned()), 7)].into(),
+        ..ranking_req()
+    };
+    let resp = block(s.dispatch(
+        ToolName::KnownState,
+        &req,
+        &ctx(&store, &reader),
+        &mut TurnBudget::default(),
+    ))
+    .unwrap();
+    let envs = resp.payload["envelopes"].as_array().unwrap();
+    let entry = |path: &str| envs.iter().find(|e| e["path"] == path).unwrap();
+    assert_eq!(entry("src/a.rs")["state"], "known_unchanged");
+    assert_eq!(entry("src/a.rs")["last_seen_turn"], 7);
+    assert_eq!(entry("src/b.rs")["state"], "known_unchanged");
+    assert!(
+        entry("src/b.rs").get("last_seen_turn").is_none(),
+        "no evidence is no turn, not a null"
+    );
+}
+
 #[test]
 fn manifest_cap_composes_default_max_and_remaining() {
     // No request budget → the pack-parity default.

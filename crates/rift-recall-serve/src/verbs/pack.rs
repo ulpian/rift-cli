@@ -7,7 +7,7 @@
 //! handles for recommendations, and the closed critical/cost vocabularies. No
 //! inline strings enter a pack.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rift_recall_events::MemdEvent;
 use rift_recall_ledger::candidates::{load_candidates, LoadedCandidate};
@@ -26,7 +26,7 @@ use rift_recall_validity::{
 use rift_store::{CanonicalStore, Row};
 use serde_json::{json, Value};
 
-use super::{internal, HUNK_RANGES_SQL};
+use super::{internal, sighting, HUNK_RANGES_SQL};
 use crate::envelope::{manifest_event, provenance_trust};
 use crate::{
     RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse, COST_NOTE,
@@ -55,6 +55,8 @@ struct PackAssembly<'a> {
     /// numbers by construction rather than by two matching loops.
     table: Citations,
     known: BTreeSet<&'a str>,
+    /// The turn the caller's window last read each revision it holds.
+    seen_turns: &'a BTreeMap<(String, String), u64>,
     summaries: SummaryStore,
     digests: MemoryDigestStore,
     snapshot: WorktreeSnapshot,
@@ -197,11 +199,12 @@ impl ServeDispatcher<'_> {
         evidence: &EvidenceRef,
     ) -> Result<(), ToolError> {
         let c = &lc.candidate;
-        let seen = if assembly.known.contains(lc.content_sha256.as_str()) {
-            SeenStatus::SeenSameHash
-        } else {
-            SeenStatus::NotSeenOrChanged
-        };
+        let seen = sighting(
+            &assembly.known,
+            assembly.seen_turns,
+            &c.path,
+            &lc.content_sha256,
+        );
         let validity = resolve(
             &assembly.summaries,
             &assembly.digests,
@@ -312,6 +315,7 @@ impl<'a> PackAssembly<'a> {
             request,
             table,
             known: req.known_hashes.iter().map(String::as_str).collect(),
+            seen_turns: &req.seen_turns,
             summaries: SummaryStore::new(),
             digests: MemoryDigestStore::default(),
             snapshot: WorktreeSnapshot::new(),

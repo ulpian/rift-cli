@@ -5,6 +5,8 @@
 //! named. A read whose bytes have moved since is declared unmeasured, never
 //! imputed.
 
+mod compaction;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +14,9 @@ use rift_agent::window_journal::{Interval, Line as JournalLine};
 
 use super::panes::WindowPane;
 use super::render::pad;
+
+pub(super) use self::compaction::{render_compaction, Compaction};
+use self::compaction::{session_of, CompactionFold, Storm};
 
 /// How many turns after an eviction a read still counts as recovery.
 ///
@@ -83,7 +88,7 @@ pub(super) struct RetryAfterDeny {
 /// checkout's context windows did. Windows are not sessions — a subagent has
 /// its own journal under its parent's session id — so both are counted and
 /// neither is reported as the other.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(super) struct WindowJournals {
     /// The directory the rows came from.
     pub(super) dir: String,
@@ -123,6 +128,8 @@ pub(super) struct WindowJournals {
     pub(super) evictions: u64,
     /// Read tokens inside [`POST_COMPACTION_TURNS`] of one.
     pub(super) post_compaction_tokens: u64,
+    /// The same evictions per session, and the reading after each one.
+    pub(super) compaction: Compaction,
 }
 
 impl WindowJournals {
@@ -147,6 +154,7 @@ impl WindowJournals {
             adjacent_reads: 0,
             evictions: 0,
             post_compaction_tokens: 0,
+            compaction: Compaction::default(),
         }
     }
 }
@@ -253,10 +261,29 @@ struct Rolling {
     last_read: Option<(String, Interval)>,
     /// The turn the most recent eviction happened in.
     evicted_at: Option<u32>,
+    /// The storms of this window's evictions, the most recent last.
+    ///
+    /// A read inside the turns of two evictions is credited to the most recent
+    /// one only — the same eviction `evicted_at` names — so the storms
+    /// partition the post-compaction total rather than overlap it.
+    storms: Vec<Storm>,
 }
 
-/// Fold one window's lines into the running figures.
-fn fold_window(lines: &[JournalLine], meter: &mut SliceMeter, out: &mut WindowJournals) {
+impl Rolling {
+    /// Whether a read in `turn` is recovery from the most recent eviction.
+    fn recovering(&self, turn: u32) -> bool {
+        self.evicted_at
+            .is_some_and(|at| turn >= at && turn <= at.saturating_add(POST_COMPACTION_TURNS))
+    }
+}
+
+/// Fold one window's lines into the running figures, and hand back the storm
+/// of each of its evictions, in order.
+fn fold_window(
+    lines: &[JournalLine],
+    meter: &mut SliceMeter,
+    out: &mut WindowJournals,
+) -> Vec<Storm> {
     let mut retries: BTreeMap<&'static str, (u64, u64)> = BTreeMap::new();
     let mut rolling = Rolling::default();
     for (i, line) in lines.iter().enumerate() {
@@ -307,9 +334,13 @@ fn fold_window(lines: &[JournalLine], meter: &mut SliceMeter, out: &mut WindowJo
                     entry.1 = entry.1.saturating_add(1);
                 }
             }
-            JournalLine::Evict { turn, .. } => {
+            JournalLine::Evict { turn, reason, .. } => {
                 out.evictions = out.evictions.saturating_add(1);
                 rolling.evicted_at = Some(*turn);
+                rolling.storms.push(Storm {
+                    reason: reason.as_str(),
+                    ..Storm::default()
+                });
             }
             // None of these is a read, a decline or an emptying: an
             // announcement and its booking are counted where the savings are,
@@ -323,6 +354,7 @@ fn fold_window(lines: &[JournalLine], meter: &mut SliceMeter, out: &mut WindowJo
     for (frame, (denies, retried)) in retries {
         merge_retry(frame, denies, retried, &mut out.retries);
     }
+    rolling.storms
 }
 
 /// Count one read: its tokens, whether its slice was ever eligible for a
@@ -336,20 +368,24 @@ fn fold_read(
     out: &mut WindowJournals,
 ) {
     out.reads = out.reads.saturating_add(1);
-    match meter.measure(at) {
+    let measured = meter.measure(at);
+    match measured {
         Some((bytes, tokens)) => {
             out.read_tokens = out.read_tokens.saturating_add(tokens);
             if bytes > out.max_slice_bytes {
                 out.reads_over_cap = out.reads_over_cap.saturating_add(1);
             }
-            if rolling
-                .evicted_at
-                .is_some_and(|at| turn >= at && turn <= at + POST_COMPACTION_TURNS)
-            {
+            if rolling.recovering(turn) {
                 out.post_compaction_tokens = out.post_compaction_tokens.saturating_add(tokens);
             }
         }
         None => out.reads_unmeasured = out.reads_unmeasured.saturating_add(1),
+    }
+    if rolling.recovering(turn) {
+        credit_storm(
+            rolling.storms.last_mut(),
+            measured.map(|(_, tokens)| tokens),
+        );
     }
     if rolling
         .last_read
@@ -359,6 +395,19 @@ fn fold_read(
         out.adjacent_reads = out.adjacent_reads.saturating_add(1);
     }
     rolling.last_read = Some((at.path.to_owned(), at.range));
+}
+
+/// Credit one recovery read to the storm of the eviction it follows: its
+/// tokens when it was measured, an unmeasured read when it was not.
+fn credit_storm(storm: Option<&mut Storm>, tokens: Option<u64>) {
+    let Some(storm) = storm else {
+        return;
+    };
+    storm.reads = storm.reads.saturating_add(1);
+    match tokens {
+        Some(tokens) => storm.tokens = storm.tokens.saturating_add(tokens),
+        None => storm.unmeasured = storm.unmeasured.saturating_add(1),
+    }
 }
 
 /// Count one repeat the gate would have declined and did not, in the pool and
@@ -435,19 +484,23 @@ pub(super) fn window_journals(
     out.min_slice_lines = min_slice_lines;
     out.buckets = empty_buckets();
     let mut meter = SliceMeter::new(work_tree);
-    for lines in member_windows(&dir) {
+    let mut compaction = CompactionFold::default();
+    for (key, lines) in member_windows(&dir) {
         out.windows = out.windows.saturating_add(1);
-        fold_window(&lines, &mut meter, &mut out);
+        let storms = fold_window(&lines, &mut meter, &mut out);
+        compaction.add_window(session_of(work_tree, &key), storms);
     }
+    out.compaction = compaction.finish();
     out
 }
 
-/// Every context window this member holds, as its lines in file order.
+/// Every context window this member holds, as its key and its lines in file
+/// order.
 ///
 /// One window is one key however many files it has rolled through, and only
 /// the append files are read: a snapshot is a fold of rows this pass reads for
 /// itself, so a pass that read both would count them twice.
-fn member_windows(dir: &Path) -> Vec<Vec<JournalLine>> {
+fn member_windows(dir: &Path) -> Vec<(String, Vec<JournalLine>)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -463,7 +516,7 @@ fn member_windows(dir: &Path) -> Vec<Vec<JournalLine>> {
         keyed.entry(key.to_owned()).or_default().push(entry.path());
     }
     let mut out = Vec::with_capacity(keyed.len());
-    for (_, mut files) in keyed {
+    for (key, mut files) in keyed {
         files.sort();
         let mut lines: Vec<JournalLine> = Vec::new();
         for file in &files {
@@ -475,7 +528,7 @@ fn member_windows(dir: &Path) -> Vec<Vec<JournalLine>> {
                 );
             }
         }
-        out.push(lines);
+        out.push((key, lines));
     }
     out
 }
@@ -595,7 +648,7 @@ pub(super) fn fold_split_journals(
 ) {
     let cut = boundary_ms.unwrap_or(i64::MAX);
     let mut meter = SliceMeter::new(work_tree);
-    for lines in member_windows(&crate::window_journal::dir(work_tree)) {
+    for (_, lines) in member_windows(&crate::window_journal::dir(work_tree)) {
         let mut retries: BTreeMap<(bool, &'static str), (u64, u64)> = BTreeMap::new();
         let (mut in_observe, mut in_enforce) = (false, false);
         for (i, line) in lines.iter().enumerate() {
@@ -706,7 +759,7 @@ mod tests {
     use super::*;
 
     /// A work tree with one file of `lines` numbered lines, and its revision.
-    fn seeded_tree(lines: usize) -> (tempfile::TempDir, String) {
+    pub(super) fn seeded_tree(lines: usize) -> (tempfile::TempDir, String) {
         let tmp = tempfile::tempdir().unwrap();
         let body = (1..=lines).fold(String::new(), |mut acc, n| {
             use core::fmt::Write as _;
@@ -719,7 +772,7 @@ mod tests {
     }
 
     /// Write one window's journal file.
-    fn window_file(root: &Path, key: &str, lines: &[JournalLine]) {
+    pub(super) fn window_file(root: &Path, key: &str, lines: &[JournalLine]) {
         let dir = root.join(".rift").join("state").join("reads");
         std::fs::create_dir_all(&dir).unwrap();
         let body = lines.iter().fold(String::new(), |mut acc, l| {
@@ -730,11 +783,11 @@ mod tests {
         std::fs::write(dir.join(format!("{key}.jsonl")), body).unwrap();
     }
 
-    fn revision_id(hex: &str) -> rift_core::Sha256Id {
+    pub(super) fn revision_id(hex: &str) -> rift_core::Sha256Id {
         rift_core::Sha256Id::parse_hex(hex).unwrap()
     }
 
-    fn read_line(turn: u32, hash: &str, lo: u32, hi: u32) -> JournalLine {
+    pub(super) fn read_line(turn: u32, hash: &str, lo: u32, hi: u32) -> JournalLine {
         JournalLine::Read {
             turn,
             path: "a.txt".to_owned(),

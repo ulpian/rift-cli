@@ -356,7 +356,7 @@ impl<'a> Pull<'a> {
         let doc = json!({
             "tool": "changed_hunks",
             "path": self.gate.path,
-            "state": self.constructor_state(SeenStatus::SeenSameHash, None, 0),
+            "state": self.constructor_state(SeenStatus::SeenSameHash { last_seen_turn: None }, None, 0),
             "basis_sha256": self.basis_hash,
             "hunks": [],
             "omitted": 0,

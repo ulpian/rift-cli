@@ -15,6 +15,7 @@ use rift_store::SqliteStore;
 use crate::cli::{Outcome, SavingsArgs, SavingsCmd};
 
 use super::classes::is_shell_tool;
+use super::journals::{member_window_journals, Compaction};
 use super::panes::{family_enforce_split, WindowPane};
 use super::render::{fmt_share, pad};
 
@@ -391,6 +392,23 @@ pub(crate) fn savings_json(r: &SavingsReport) -> serde_json::Value {
     })
 }
 
+/// The savings document with this member's compaction account added under
+/// one new key.
+///
+/// Added by the verb rather than by [`savings_json`], which the status table
+/// shares: the table never reads the journals, and every key the document
+/// already had stays byte-identical beside the new one.
+fn with_compaction(mut json: serde_json::Value, compaction: &Compaction) -> serde_json::Value {
+    let Some(map) = json.as_object_mut() else {
+        return json;
+    };
+    map.insert(
+        "compaction".to_owned(),
+        serde_json::to_value(compaction).unwrap_or_default(),
+    );
+    json
+}
+
 /// The marker's own metadata, when the window came from one.
 fn marker_field<T>(window: &Boundary, field: impl Fn(&Marker) -> T) -> Option<T> {
     match window {
@@ -421,9 +439,12 @@ pub(crate) fn savings(root: &Path, args: &SavingsArgs) -> Result<Outcome> {
     }
     let request = window_request(args, crate::hooks::now_ms())?;
     let report = savings_report_for(root, request)?;
+    // The journals are this member's own run state, read through the same
+    // entry point the reread report reads them by.
+    let windows = member_window_journals(&crate::worktree_root(root));
     Ok(Outcome::ok(
         render_savings(&report).trim_end().to_owned(),
-        savings_json(&report),
+        with_compaction(savings_json(&report), &windows.compaction),
     ))
 }
 
@@ -788,6 +809,36 @@ per family (the relation that names one, joined to the projection by name):
             json["window"]["enforce_cut_source"],
             "first memd.read_intercepted row"
         );
+    }
+
+    /// ★ The compaction account is one additive key: with it the document is
+    /// the document without it plus that key, so no existing reader moves.
+    #[test]
+    fn the_compaction_account_is_one_additive_key() {
+        let without = savings_json(&locked_report());
+        assert!(
+            without.get("compaction").is_none(),
+            "the shared document has none"
+        );
+        let mut compaction = Compaction {
+            evictions: 3,
+            sessions: 2,
+            compactions_per_session: Some(1.5),
+            ..Default::default()
+        };
+        compaction.storms.count = 3;
+        compaction.storms.median_tokens = 40;
+        let with = with_compaction(without.clone(), &compaction);
+        let c = &with["compaction"];
+        assert_eq!(
+            (c["evictions"].as_u64(), c["sessions"].as_u64()),
+            (Some(3), Some(2))
+        );
+        assert_eq!(c["compactions_per_session"].as_f64(), Some(1.5));
+        assert_eq!(c["storms"]["median_tokens"], 40);
+        let mut rest = with.clone();
+        rest.as_object_mut().unwrap().remove("compaction");
+        assert_eq!(rest, without, "every other key is unchanged");
     }
 
     /// The denominator's own breakdown, in the keys a script reads: it sums to

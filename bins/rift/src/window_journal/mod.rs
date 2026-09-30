@@ -74,8 +74,10 @@
 //! respect. [`journal`] is the place on disk: the append, the fold and the
 //! walk that reads a history back. [`fold`] is the rows themselves, read and
 //! condensed, and never touches a path. [`denies`] and [`edits`] are the
-//! questions a decision asks of a journal already in memory. [`housekeeping`]
-//! counts a checkout's journals and sweeps the ones it has finished with.
+//! questions a decision asks of a journal already in memory. [`seen`] is the
+//! one question a pull asks of it: the turn each held revision was last read
+//! in. [`housekeeping`] counts a checkout's journals and sweeps the ones it has
+//! finished with.
 //!
 
 mod denies;
@@ -83,6 +85,7 @@ mod edits;
 mod fold;
 mod housekeeping;
 mod journal;
+mod seen;
 
 use std::path::{Path, PathBuf};
 
@@ -90,6 +93,7 @@ pub(crate) use denies::{deny_stands, ineffective_denies};
 pub(crate) use edits::{edit_facts, expected_write, prior_revision};
 pub(crate) use housekeeping::{survey, sweep_expired};
 pub(crate) use journal::WindowJournal;
+pub(crate) use seen::last_read_turns;
 
 /// The largest row this will write in one call.
 ///

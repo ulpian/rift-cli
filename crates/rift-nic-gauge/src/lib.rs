@@ -144,14 +144,18 @@ pub fn known_reading(used: u64, window: u64) -> KnownReading {
 /// The model→context-window reference table (tokens), matched on the
 /// lowercased model id. `None` means unknown — **never defaulted**.
 ///
-/// Provenance (vendor model documentation as of 2026-07; family rules cover the
-/// dated release ids these vendors emit):
+/// Provenance (vendor model documentation; family rules cover the dated
+/// release ids these vendors emit):
 /// * `[1m]` / `-1m` id markers — Anthropic's 1M-token context beta
 ///   (`context-1m-2025-08-07`); the marker is how rift-shadow's capture spells
 ///   an enlarged-context session.
-/// * `claude*` — every shipped Claude family model (Claude 3 through Claude 5:
-///   Haiku/Sonnet/Opus/Fable) carries a 200k standard window per Anthropic's
-///   model docs.
+/// * Fable 5 and 5.1, Opus 5, Opus 4.8, Opus 4.7 and Sonnet 5 carry a 1M
+///   window per Anthropic's model documentation. They are matched as whole
+///   family tokens, so `claude-fable-5` covers `claude-fable-5-1` and dated
+///   ids but not a later `claude-fable-50`.
+/// * `claude*` — every other Claude model, Haiku 4.5 included, carries a 200k
+///   window per the same docs. It stays after the 1M families (first match
+///   wins).
 /// * `gpt-4.1*` — OpenAI GPT-4.1 family: 1M. Listed before the `gpt-4` rule
 ///   (first match wins).
 /// * `gpt-4*` — OpenAI GPT-4o / GPT-4-turbo family: 128k.
@@ -164,10 +168,14 @@ pub fn known_reading(used: u64, window: u64) -> KnownReading {
 /// this table is never complete, and pretending otherwise would be the bug).
 #[must_use]
 pub fn window_for_model(model: &str) -> Option<u64> {
-    let m = model.to_ascii_lowercase();
-    if m.contains("[1m]") || m.contains("-1m") {
-        return Some(1_000_000);
-    }
+    // The Claude families with a 1M window, matched at an id boundary.
+    const CLAUDE_1M: &[&str] = &[
+        "claude-fable-5",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-sonnet-5",
+    ];
     // First match wins: more specific families precede their prefixes.
     const FAMILIES: &[(&str, u64)] = &[
         ("claude", 200_000),
@@ -179,10 +187,28 @@ pub fn window_for_model(model: &str) -> Option<u64> {
         ("gemini-1.5", 1_048_576),
         ("gemini-2", 1_048_576),
     ];
+    let m = model.to_ascii_lowercase();
+    if m.contains("[1m]") || m.contains("-1m") {
+        return Some(1_000_000);
+    }
+    if CLAUDE_1M.iter().any(|family| names_family(&m, family)) {
+        return Some(1_000_000);
+    }
     FAMILIES
         .iter()
         .find(|(family, _)| m.contains(family))
         .map(|&(_, window)| window)
+}
+
+/// Whether `id` names `family` as a whole token: an occurrence followed by the
+/// end of the id, a `-` (a point release or a date), a `[` (a context marker)
+/// or an `@` (a pinned version). A bare substring test would let
+/// `claude-fable-5` claim a later `claude-fable-50`.
+fn names_family(id: &str, family: &str) -> bool {
+    id.match_indices(family).any(|(start, _)| {
+        let rest = id.get(start + family.len()..).unwrap_or_default();
+        matches!(rest.chars().next(), None | Some('-' | '[' | '@'))
+    })
 }
 
 #[cfg(test)]
@@ -256,14 +282,55 @@ mod tests {
 
     #[test]
     fn window_table_families() {
-        assert_eq!(window_for_model("claude-opus-4-8"), Some(200_000));
-        assert_eq!(window_for_model("claude-fable-5"), Some(200_000));
+        for model in [
+            "claude-fable-5",
+            "claude-fable-5-1",
+            "claude-fable-5-20260801",
+            "claude-fable-5-1@20260901",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "Claude-Opus-4-8",
+        ] {
+            assert_eq!(window_for_model(model), Some(1_000_000), "{model}");
+        }
+        for model in [
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5",
+            "claude-opus-4-1",
+            "claude-opus-4-6",
+            "claude-3-5-sonnet-20241022",
+            "claude-fable-50",
+            "claude-opus-4-80",
+            "claude-sonnet-50",
+        ] {
+            assert_eq!(window_for_model(model), Some(200_000), "{model}");
+        }
         assert_eq!(window_for_model("claude-sonnet-4-5[1m]"), Some(1_000_000));
+        assert_eq!(window_for_model("claude-haiku-4-5[1m]"), Some(1_000_000));
         assert_eq!(window_for_model("gpt-4o"), Some(128_000));
         assert_eq!(window_for_model("gpt-4.1-mini"), Some(1_000_000));
         assert_eq!(window_for_model("o3"), Some(200_000));
         assert_eq!(window_for_model("gemini-1.5-pro-002"), Some(2_097_152));
         assert_eq!(window_for_model(""), None);
+    }
+
+    #[test]
+    fn a_family_token_matches_only_at_an_id_boundary() {
+        assert!(names_family("claude-fable-5", "claude-fable-5"));
+        assert!(names_family("claude-fable-5-1", "claude-fable-5"));
+        assert!(names_family("claude-fable-5[1m]", "claude-fable-5"));
+        assert!(names_family("claude-fable-5@20260801", "claude-fable-5"));
+        assert!(names_family("anthropic/claude-opus-5", "claude-opus-5"));
+        assert!(names_family(
+            "claude-opus-50 claude-opus-5",
+            "claude-opus-5"
+        ));
+        assert!(!names_family("claude-fable-50", "claude-fable-5"));
+        assert!(!names_family("claude-fable-5x", "claude-fable-5"));
+        assert!(!names_family("claude-fable", "claude-fable-5"));
     }
 
     #[test]

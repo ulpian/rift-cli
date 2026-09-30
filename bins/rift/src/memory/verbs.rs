@@ -5,6 +5,7 @@
 //! measurements live in the sibling modules, which read stores rather than
 //! serve them.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -29,7 +30,29 @@ use crate::cli::{exit, Outcome};
 /// The [`ToolError`] survives here: the skill surface reports the dispatcher's
 /// own refusal tag and exit class, and only this human-facing wrapper flattens
 /// it into a generic storage error.
+///
+/// Before dispatch, a verb whose answer can cite a turn is handed the turns the
+/// calling window's own journal records ([`caller_window`],
+/// [`with_seen_turns`]). The push tier's `changed_since` reaches this function
+/// from a hook, and asks `diff_since`, which cites none — so on that path no
+/// variable is read and no journal is opened.
 pub(crate) async fn tool_call_raw(
+    store: &SqliteStore,
+    repo: &Path,
+    scope: &Scope,
+    ancestry: &dyn AncestryOracle,
+    provenance: &dyn ProvenanceOracle,
+    tool: ToolName,
+    req: &ToolRequest,
+) -> std::result::Result<ToolResponse, ToolError> {
+    let window = caller_window(tool, &|name| std::env::var(name).ok());
+    let req = with_seen_turns(repo, window.as_deref(), req);
+    serve_raw(store, repo, scope, ancestry, provenance, tool, &req).await
+}
+
+/// [`tool_call_raw`] once the request carries everything the binary resolves
+/// for it.
+async fn serve_raw(
     store: &SqliteStore,
     repo: &Path,
     scope: &Scope,
@@ -132,6 +155,74 @@ async fn dispatch_over<R: SubstrateReader>(
     };
     let mut budget = TurnBudget::default();
     server.dispatch(tool, req, &ctx, &mut budget).await
+}
+
+/// The context window a pull comes from, spelled as the session of a window
+/// with no agent id — or `None` whenever the client's shell does not name the
+/// whole window, which is the only answer that is never a guess.
+///
+/// A window is a session **and** the agent inside it
+/// ([`crate::window_journal::key`]), and a client's hooks say both, but a
+/// pull is a shell command, and what a client exports to its shell is all
+/// this process can see:
+///
+/// * **Claude Code** exports `CLAUDE_CODE_SESSION_ID` and nothing naming the
+///   agent, and a subagent's shell carries its parent's session id. A pull from
+///   a subagent and one from the main thread look the same, so neither is
+///   attributed. Its markers are checked first because they are inherited: a
+///   client started from inside another would otherwise read as the outer one.
+/// * **Codex** exports `CODEX_THREAD_ID`, the thread running the command, and
+///   its main thread's hooks carry no agent id. Where that id is the session
+///   its hooks report, the main thread's journal is found; where it is not —
+///   a child thread, whose hooks name an agent — the key names no journal and
+///   the pull cites nothing. A mismatch lands on no turn, never on another
+///   window's.
+/// * **Antigravity** exports `ANTIGRAVITY_CONVERSATION_ID`, the id its hooks
+///   report as the session, and its hooks name no agent inside it.
+///
+/// Two named at once is an ambiguity, not a choice, and is answered with
+/// `None`. Asked only for a verb whose answer can cite a turn; every other
+/// verb — `diff_since`, the one a hook asks — returns before a variable is
+/// read.
+fn caller_window(tool: ToolName, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    if !matches!(tool, ToolName::KnownState | ToolName::ContextPack) {
+        return None;
+    }
+    let named = |name: &str| env(name).filter(|value| !value.is_empty());
+    if named("CLAUDECODE").is_some() || named("CLAUDE_CODE_SESSION_ID").is_some() {
+        return None;
+    }
+    match (
+        named("CODEX_THREAD_ID"),
+        named("ANTIGRAVITY_CONVERSATION_ID"),
+    ) {
+        (Some(session), None) | (None, Some(session)) => Some(session),
+        _ => None,
+    }
+}
+
+/// `req` with the turns the window's own journal records, read once per pull
+/// through the bounded journal walk and the pure fold; `req` unchanged when
+/// there is no window or the journal records no read it still holds.
+fn with_seen_turns<'a>(
+    repo: &Path,
+    window: Option<&str>,
+    req: &'a ToolRequest,
+) -> Cow<'a, ToolRequest> {
+    let Some(session) = window else {
+        return Cow::Borrowed(req);
+    };
+    let journal = crate::window_journal::WindowJournal::open(repo, session, None)
+        .load()
+        .journal;
+    let seen_turns = crate::window_journal::last_read_turns(&journal);
+    if seen_turns.is_empty() {
+        return Cow::Borrowed(req);
+    }
+    Cow::Owned(ToolRequest {
+        seen_turns,
+        ..req.clone()
+    })
 }
 
 /// [`tool_call_raw`] for the human surface: a dispatcher refusal becomes a
@@ -329,4 +420,220 @@ async fn empty_reads_diagnosis(repo: &Path, store: &SqliteStore) -> String {
         );
     }
     "(no reads in scope)".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use rift_agent::window_journal::{Interval, Line};
+    use rift_recall_types::{NoAncestry, NoProvenance};
+
+    use super::*;
+
+    /// A client's shell, as a table of the variables it exports.
+    fn shell<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    fn window_of(tool: ToolName, vars: &[(&str, &str)]) -> Option<String> {
+        caller_window(tool, &shell(vars))
+    }
+
+    #[test]
+    fn a_pull_is_attributed_only_where_the_shell_names_the_whole_window() {
+        let codex = [("CODEX_THREAD_ID", "thread-1")];
+        let antigravity = [("ANTIGRAVITY_CONVERSATION_ID", "conv-1")];
+        assert_eq!(
+            window_of(ToolName::KnownState, &codex).as_deref(),
+            Some("thread-1")
+        );
+        assert_eq!(
+            window_of(ToolName::ContextPack, &antigravity).as_deref(),
+            Some("conv-1")
+        );
+        // Claude Code names the session but not the agent inside it.
+        let claude = [("CLAUDECODE", "1"), ("CLAUDE_CODE_SESSION_ID", "s-1")];
+        assert_eq!(window_of(ToolName::KnownState, &claude), None);
+        // Inherited markers: a client started inside another is not the outer one.
+        let nested = [("CLAUDECODE", "1"), ("CODEX_THREAD_ID", "thread-1")];
+        assert_eq!(window_of(ToolName::KnownState, &nested), None);
+        let both = [
+            ("CODEX_THREAD_ID", "t"),
+            ("ANTIGRAVITY_CONVERSATION_ID", "c"),
+        ];
+        assert_eq!(window_of(ToolName::KnownState, &both), None);
+        assert_eq!(
+            window_of(ToolName::KnownState, &[("CODEX_THREAD_ID", "")]),
+            None
+        );
+        assert_eq!(window_of(ToolName::KnownState, &[]), None);
+    }
+
+    /// `diff_since` is the verb a hook asks through this function; it cites no
+    /// turn, so it never reads the environment, let alone a journal.
+    #[test]
+    fn a_verb_that_cites_no_turn_reads_no_variable() {
+        let read = std::cell::Cell::new(0usize);
+        let env = |_: &str| {
+            read.set(read.get() + 1);
+            Some("thread-1".to_owned())
+        };
+        assert_eq!(caller_window(ToolName::DiffSince, &env), None);
+        assert_eq!(read.get(), 0);
+    }
+
+    const PATH: &str = "src/a.rs";
+
+    fn revision() -> rift_core::Sha256Id {
+        rift_hashchain::leaf_hash(b"the bytes of src/a.rs")
+    }
+
+    /// A projection holding one read of [`PATH`] at [`revision`].
+    fn projection() -> SqliteStore {
+        let store = SqliteStore::open_in_memory().unwrap();
+        rift_store::apply_migrations(&store, &rift_store::recall_migrations()).unwrap();
+        let sha = revision().to_hex();
+        let rows: [(&str, &[&str], Vec<Value>); 3] = [
+            (
+                "n_checkpoint",
+                &[
+                    "node_id",
+                    "dialect",
+                    "ordinal",
+                    "prev_checkpoint",
+                    "strategy",
+                    "merkle_root",
+                    "developer",
+                ],
+                vec![
+                    Value::text("c1"),
+                    Value::text("rift"),
+                    Value::Int(1),
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                ],
+            ),
+            (
+                "n_file_revision",
+                &["node_id", "path", "blob_oid", "content_sha256", "size"],
+                vec![
+                    Value::text("rev_a"),
+                    Value::text(PATH),
+                    Value::text(&sha),
+                    Value::text(&sha),
+                    Value::Int(10),
+                ],
+            ),
+            (
+                "n_file_read",
+                &[
+                    "node_id",
+                    "checkpoint_id",
+                    "tool_call_id",
+                    "file_revision",
+                    "input_tokens",
+                    "read_ordinal",
+                    "byte_range_lo",
+                    "byte_range_hi",
+                ],
+                vec![
+                    Value::text("read_a"),
+                    Value::text("c1"),
+                    Value::text("tc_a"),
+                    Value::text("rev_a"),
+                    Value::Int(400),
+                    Value::Int(1),
+                    Value::Null,
+                    Value::Null,
+                ],
+            ),
+        ];
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for (table, columns, values) in rows {
+            rt.block_on(store.insert_or_ignore(table, columns, &values))
+                .unwrap();
+        }
+        store
+    }
+
+    fn journal_read(turn: u32) -> Line {
+        Line::Read {
+            turn,
+            path: PATH.to_owned(),
+            hash: revision(),
+            range: Interval::new(1, 40).unwrap(),
+            total_lines: 40,
+            at_ms: u64::from(turn),
+        }
+    }
+
+    /// The manifest entry the pull serves for [`PATH`], through the same path
+    /// `tool_call_raw` takes once the window is resolved.
+    fn pulled_entry(repo: &Path, window: Option<&str>) -> serde_json::Value {
+        let store = projection();
+        let req = ToolRequest {
+            task: Some("fix a.rs".into()),
+            files_in_focus: vec![PATH.into()],
+            known_hashes: vec![revision().to_hex()],
+            token_budget: 2000,
+            ..ToolRequest::default()
+        };
+        let req = with_seen_turns(repo, window, &req);
+        let scope = Scope::unbounded("repo");
+        let pull = serve_raw(
+            &store,
+            repo,
+            &scope,
+            &NoAncestry,
+            &NoProvenance,
+            ToolName::KnownState,
+            &req,
+        );
+        let resp = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(pull)
+            .unwrap();
+        resp.payload["envelopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["path"] == PATH)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_manifest_pull_cites_the_turn_its_window_last_read_the_revision() {
+        let repo = tempfile::tempdir().unwrap();
+        let journal = crate::window_journal::WindowJournal::open(repo.path(), "thread-1", None);
+        journal.append(&journal_read(3)).unwrap();
+        journal.append(&journal_read(7)).unwrap();
+        let entry = pulled_entry(repo.path(), Some("thread-1"));
+        assert_eq!(entry["state"], "known_unchanged");
+        assert_eq!(entry["last_seen_turn"], 7);
+    }
+
+    #[test]
+    fn a_pull_with_no_window_cites_no_turn() {
+        let repo = tempfile::tempdir().unwrap();
+        let journal = crate::window_journal::WindowJournal::open(repo.path(), "thread-1", None);
+        journal.append(&journal_read(3)).unwrap();
+        let entry = pulled_entry(repo.path(), None);
+        assert_eq!(
+            entry["state"], "known_unchanged",
+            "the claim does not depend on a turn"
+        );
+        assert!(entry.get("last_seen_turn").is_none());
+        // Another window's journal is not this one's evidence either.
+        let elsewhere = pulled_entry(repo.path(), Some("thread-2"));
+        assert!(elsewhere.get("last_seen_turn").is_none());
+    }
 }

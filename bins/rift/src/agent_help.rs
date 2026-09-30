@@ -1378,3 +1378,6 @@ so it always describes the version you are running.
         assert_eq!(render().unwrap(), GOLDEN);
     }
 }
+
+#[cfg(test)]
+mod goldens;
