@@ -113,7 +113,30 @@ pub fn fn_bodies(rel: &str, masked: &str) -> Vec<FnBody> {
 /// tightening loses no free call.
 #[must_use]
 pub fn calls_within(body: &str, defined: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
+    call_sites(body, defined)
+        .into_iter()
+        .map(|(_, word)| word.to_owned())
+        .collect()
+}
+
+/// Every call [`calls_within`] finds, each with the module segment that
+/// qualifies it: `Some("search_measure")` for `crate::search_measure::run(`,
+/// `None` for a bare `run(` or one qualified only by `crate`, `self` or
+/// `super`, which name no module a reader could narrow to.
+pub(super) fn qualified_calls_within<'b>(
+    body: &'b str,
+    defined: &BTreeSet<String>,
+) -> Vec<(&'b str, Option<&'b str>)> {
+    let bytes = body.as_bytes();
+    call_sites(body, defined)
+        .into_iter()
+        .map(|(start, word)| (word, module_qualifier(body, bytes, start)))
+        .collect()
+}
+
+/// The byte offset and name of every call of a function in `defined`.
+fn call_sites<'b>(body: &'b str, defined: &BTreeSet<String>) -> Vec<(usize, &'b str)> {
+    let mut out = Vec::new();
     let bytes = body.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -142,25 +165,48 @@ pub fn calls_within(body: &str, defined: &BTreeSet<String>) -> BTreeSet<String> 
         if is_associated_on_a_type(bytes, start) {
             continue;
         }
-        let mut at = i;
-        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
-            at += 1;
-        }
-        // A turbofish stands between the name and its argument list.
-        if bytes.get(at) == Some(&b':') && bytes.get(at + 1) == Some(&b':') {
-            at += 2;
-            while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
-                at += 1;
-            }
-            if bytes.get(at) == Some(&b'<') {
-                at = skip_balanced(bytes, at, b'<', b'>');
-            }
-        }
-        if bytes.get(at) == Some(&b'(') {
-            out.insert(word.to_owned());
+        if opens_an_argument_list(bytes, i) {
+            out.push((start, word));
         }
     }
     out
+}
+
+/// True when the name that ends at `at` is followed by its argument list,
+/// directly or through a turbofish.
+fn opens_an_argument_list(bytes: &[u8], at: usize) -> bool {
+    let mut at = at;
+    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    // A turbofish stands between the name and its argument list.
+    if bytes.get(at) == Some(&b':') && bytes.get(at + 1) == Some(&b':') {
+        at += 2;
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        if bytes.get(at) == Some(&b'<') {
+            at = skip_balanced(bytes, at, b'<', b'>');
+        }
+    }
+    bytes.get(at) == Some(&b'(')
+}
+
+/// The path segment directly before the name at `start`, when it names a
+/// module.
+fn module_qualifier<'b>(body: &'b str, bytes: &[u8], start: usize) -> Option<&'b str> {
+    let colons = start.checked_sub(2)?;
+    if bytes.get(colons..start) != Some(b"::".as_slice()) {
+        return None;
+    }
+    let mut begin = colons;
+    while begin > 0 && bytes.get(begin - 1).copied().is_some_and(is_ident_byte) {
+        begin -= 1;
+    }
+    match body.get(begin..colons)? {
+        "" | "crate" | "self" | "super" => None,
+        segment => Some(segment),
+    }
 }
 
 /// The shared scanner behind both maskings.

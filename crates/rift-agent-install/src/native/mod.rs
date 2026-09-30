@@ -40,7 +40,7 @@ pub use codex_trust::{
 };
 pub use hooks::{hook_file, installed_hook_binary};
 pub use lifecycle::{disable, disable_for_adoption, enable, enable_for_adoption};
-pub use skill::{install_recall_skill, recall_skill_present, remove_recall_skill};
+pub use skill::{install_recall_skill, recall_skill_present, remove_recall_skill, skill_region};
 
 /// The alpha's supported set and its predicate live beside the adapter
 /// registry in `rift-shadow-hooks`, and are re-exported here because this is

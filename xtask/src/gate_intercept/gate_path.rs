@@ -6,8 +6,25 @@ use std::path::Path;
 
 use crate::ci_meta::production_half;
 
-use super::text::{calls_within, fn_bodies, mask_code, token_offsets, FnBody};
+use super::text::{
+    calls_within, fn_bodies, mask_code, qualified_calls_within, token_offsets, FnBody,
+};
 use super::{is_test_surface, rust_corpus, Leg};
+
+/// What [`walk_by_name`] reached from its roots.
+pub(super) struct Walk<'a> {
+    /// Definitions visited, counting every definition of a shared name.
+    pub(super) reached: usize,
+    /// The names the walk arrived at, its roots included.
+    pub(super) names: BTreeSet<&'a str>,
+    /// Each reached definition that mentions a forbidden name, with the name.
+    pub(super) hits: Vec<(&'a FnBody, &'static str)>,
+}
+
+/// The crates a decision's call graph is walked through, and the crates the
+/// hook and worker entry points are walked through for the same reason: the
+/// hooks and the worker are defined there.
+pub(super) const GATE_CRATES: [&str; 2] = ["bins/rift/src/", "crates/rift-agent/src/"];
 
 /// The entry points a decision about a tool call is made from, end to end:
 /// the guarded step the hook runs first, the gate inside it, the record kept
@@ -60,9 +77,6 @@ const FORBIDDEN_ON_GATE_PATH: [&str; 9] = [
     "AnydocConverter",
 ];
 
-/// The crates a decision's call graph is walked through.
-const GATE_CRATES: [&str; 2] = ["bins/rift/src/", "crates/rift-agent/src/"];
-
 /// **Nothing on the decision path opens a store or loads the tokenizer.**
 ///
 /// The walk: every function defined in the production half of `bins/rift/src/`
@@ -102,65 +116,162 @@ pub fn no_store_on_gate_path(root: &Path) -> Result<Leg, String> {
 /// waypoints are asserted rather than assumed.
 fn screen_gate_path(corpus: &[(String, String)]) -> Result<(Leg, BTreeSet<String>), String> {
     let fns = production_fns(corpus);
-    let defined: BTreeSet<String> = fns.iter().map(|f| f.name.clone()).collect();
-    for root_fn in GATE_ROOTS {
-        if !defined.contains(root_fn) {
-            return Err(format!(
-                "gate-intercept: `{root_fn}` is named as a decision entry point and no longer \
-                 exists — re-read the hook and correct the list, never shrink the walk silently"
-            ));
-        }
+    if let Some(root_fn) = missing_root(&fns, &GATE_ROOTS) {
+        return Err(format!(
+            "gate-intercept: `{root_fn}` is named as a decision entry point and no longer \
+             exists — re-read the hook and correct the list, never shrink the walk silently"
+        ));
     }
-    // Breadth-first over bare names. One name can have several definitions;
-    // every one of them is walked, which is the wide direction.
-    let mut by_name: BTreeMap<&str, Vec<&FnBody>> = BTreeMap::new();
-    for f in &fns {
-        by_name.entry(f.name.as_str()).or_default().push(f);
-    }
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    let mut queue: VecDeque<&str> = VecDeque::new();
-    for root_fn in GATE_ROOTS {
-        if seen.insert(root_fn) {
-            queue.push_back(root_fn);
-        }
-    }
-    let mut v = Vec::new();
-    let mut reached = 0_usize;
-    while let Some(name) = queue.pop_front() {
-        for f in by_name.get(name).into_iter().flatten() {
-            reached += 1;
-            for needle in FORBIDDEN_ON_GATE_PATH {
-                if !token_offsets(&f.body, needle).is_empty() {
-                    v.push(format!(
-                        "{}: `{}` reaches `{needle}` — a decision runs inside a hook, with the \
-                         agent waiting on it; leave this to the worker that runs afterwards",
-                        f.site, f.name
-                    ));
-                }
-            }
-            for callee in calls_within(&f.body, &defined) {
-                if let Some(next) = by_name.keys().find(|k| ***k == *callee) {
-                    if seen.insert(next) {
-                        queue.push_back(next);
-                    }
-                }
-            }
-        }
-    }
+    let walk = walk_by_name(&fns, &GATE_ROOTS, &FORBIDDEN_ON_GATE_PATH);
+    let v = walk
+        .hits
+        .iter()
+        .map(|(f, needle)| {
+            format!(
+                "{}: `{}` reaches `{needle}` — a decision runs inside a hook, with the \
+                 agent waiting on it; leave this to the worker that runs afterwards",
+                f.site, f.name
+            )
+        })
+        .collect();
     Ok((
         Leg::new(
             "no-store-on-gate-path",
             format!(
                 "{} function(s) reachable from {} decision entry point(s), out of {} defined; \
                  none opens a store or loads the tokenizer",
-                reached,
+                walk.reached,
                 GATE_ROOTS.len(),
                 fns.len()
             ),
             v,
         ),
-        seen.iter().map(|n| (*n).to_owned()).collect(),
+        walk.names.iter().map(|n| (*n).to_owned()).collect(),
     ))
+}
+
+/// Breadth-first over bare names from `roots`, screening every reached body
+/// for a mention of each of `forbidden`.
+///
+/// One name can have several definitions; every one of them is walked, which
+/// is the wide direction.
+pub(super) fn walk_by_name<'a>(
+    fns: &'a [FnBody],
+    roots: &[&str],
+    forbidden: &[&'static str],
+) -> Walk<'a> {
+    let by_name = definitions_by_name(fns);
+    let defined: BTreeSet<String> = by_name.keys().map(|name| (*name).to_owned()).collect();
+    walk(fns, roots, forbidden, |caller| {
+        calls_within(&caller.body, &defined)
+            .iter()
+            .flat_map(|callee| by_name.get(callee.as_str()).into_iter().flatten().copied())
+            .collect()
+    })
+}
+
+/// [`walk_by_name`], except that a call qualified by a module
+/// (`crate::search_measure::run(`) reaches only the definitions filed under
+/// that module.
+///
+/// Every subcommand's entry point is called `run`, so a hook that runs one
+/// module's `run` would otherwise reach all of them, and with them every
+/// command the binary has. The narrowing errs wide wherever it cannot be
+/// sure: a bare or `crate::`/`super::`-qualified call reaches every
+/// definition of the name, and so does a qualifier no walked file is filed
+/// under (a re-export from elsewhere, or another crate).
+pub(super) fn walk_by_qualified_name<'a>(
+    fns: &'a [FnBody],
+    roots: &[&str],
+    forbidden: &[&'static str],
+) -> Walk<'a> {
+    let by_name = definitions_by_name(fns);
+    let defined: BTreeSet<String> = by_name.keys().map(|name| (*name).to_owned()).collect();
+    walk(fns, roots, forbidden, |caller| {
+        let mut callees = Vec::new();
+        for (callee, module) in qualified_calls_within(&caller.body, &defined) {
+            let all = by_name.get(callee).map_or(&[][..], Vec::as_slice);
+            let in_module: Vec<&FnBody> = module
+                .map(|module| {
+                    all.iter()
+                        .copied()
+                        .filter(|f| filed_under(&f.site, module))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if in_module.is_empty() {
+                callees.extend(all.iter().copied());
+            } else {
+                callees.extend(in_module);
+            }
+        }
+        callees
+    })
+}
+
+/// The first of `roots` that `fns` no longer defines.
+pub(super) fn missing_root<'r>(fns: &[FnBody], roots: &[&'r str]) -> Option<&'r str> {
+    let defined: BTreeSet<&str> = fns.iter().map(|f| f.name.as_str()).collect();
+    roots
+        .iter()
+        .copied()
+        .find(|root_fn| !defined.contains(root_fn))
+}
+
+/// Every definition, grouped under its bare name.
+fn definitions_by_name(fns: &[FnBody]) -> BTreeMap<&str, Vec<&FnBody>> {
+    let mut by_name: BTreeMap<&str, Vec<&FnBody>> = BTreeMap::new();
+    for f in fns {
+        by_name.entry(f.name.as_str()).or_default().push(f);
+    }
+    by_name
+}
+
+/// The breadth-first walk both resolutions share: every definition of every
+/// root first, then whatever `callees` says each reached definition calls,
+/// each definition visited once.
+fn walk<'a>(
+    fns: &'a [FnBody],
+    roots: &[&str],
+    forbidden: &[&'static str],
+    callees: impl Fn(&'a FnBody) -> Vec<&'a FnBody>,
+) -> Walk<'a> {
+    let mut walk = Walk {
+        reached: 0,
+        names: BTreeSet::new(),
+        hits: Vec::new(),
+    };
+    let mut visited: BTreeSet<&str> = BTreeSet::new();
+    let mut queue: VecDeque<&FnBody> = VecDeque::new();
+    for root_fn in roots {
+        for f in fns.iter().filter(|f| f.name == *root_fn) {
+            if visited.insert(&f.site) {
+                queue.push_back(f);
+            }
+        }
+    }
+    while let Some(f) = queue.pop_front() {
+        walk.reached += 1;
+        walk.names.insert(&f.name);
+        for needle in forbidden {
+            if !token_offsets(&f.body, needle).is_empty() {
+                walk.hits.push((f, needle));
+            }
+        }
+        for next in callees(f) {
+            if visited.insert(&next.site) {
+                queue.push_back(next);
+            }
+        }
+    }
+    walk
+}
+
+/// True when the definition at `site` (`path:line`) lives in the module
+/// `module`: its file is `module.rs` or sits below a `module/` directory.
+fn filed_under(site: &str, module: &str) -> bool {
+    let path = site.rsplit_once(':').map_or(site, |(path, _)| path);
+    path.ends_with(&format!("/{module}.rs")) || path.contains(&format!("/{module}/"))
 }
 
 /// Every function the walk may reach: the production half of each file that
@@ -173,7 +284,7 @@ fn screen_gate_path(corpus: &[(String, String)]) -> Result<(Leg, BTreeSet<String
 /// only what its author meant, and a seeder called something other than
 /// `tests` or `fixtures` would otherwise put test helpers on the decision path
 /// by bare name.
-fn production_fns(corpus: &[(String, String)]) -> Vec<FnBody> {
+pub(super) fn production_fns(corpus: &[(String, String)]) -> Vec<FnBody> {
     let for_tests = declared_for_tests(corpus);
     let mut fns = Vec::new();
     for (rel, text) in corpus {

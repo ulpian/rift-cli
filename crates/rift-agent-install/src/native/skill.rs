@@ -12,6 +12,16 @@ use super::{is_alpha_supported, remove_file, NativeIntegrationReport, ALPHA_AGEN
 /// instruction files keep user content around a token-specific managed fence;
 /// agent-specific files are never adopted when an unmarked file already exists.
 ///
+/// The region is written at a boundary and never mid-session: by `rift init`,
+/// `rift recall init` (and Project Settings, which calls the same service)
+/// and `rift enable --agent`, and removed by `rift recall disable` and
+/// `rift disable --agent` through [`remove_recall_skill`]. No hook, detached
+/// worker or other verb calls either one. An agent holds the region's bytes
+/// in a cached prompt prefix, so a rewrite while its session is live is a
+/// cache write paid on every later turn; adoption only reports a missing
+/// region ([`recall_skill_present`]) for the same reason. `gate-intercept`
+/// holds the hook and worker half of this by walking their call graph.
+///
 /// # Errors
 /// Refuses an unowned file at a Rift-specific path and reports I/O failures.
 pub fn install_recall_skill(
@@ -223,7 +233,14 @@ fn skill_frontmatter(token: &str) -> Option<&'static str> {
     }
 }
 
-fn skill_region(token: &str, body: &str) -> String {
+/// The managed region exactly as [`install_recall_skill`] writes it: the
+/// two fences and the body between them, trimmed at its end.
+///
+/// Public so the binary that owns the body can check the rendered region
+/// against its source constant through the writer's own rendering, rather
+/// than through a copy of the fence format that could drift from it.
+#[must_use]
+pub fn skill_region(token: &str, body: &str) -> String {
     format!(
         "<!-- RIFT-MANAGED:{token}:begin -->\n{}\n<!-- RIFT-MANAGED:{token}:end -->\n",
         body.trim_end()

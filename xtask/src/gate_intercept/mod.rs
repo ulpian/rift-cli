@@ -15,6 +15,8 @@
 //! * `closed-rewrite-forms` — every tool-call rewrite is one of three pinned forms.
 //! * `family-keyed-caches` — a cache is keyed by the repository family, never
 //!   by which checkout happened to be open.
+//! * `regions-at-boundaries` — no hook and no detached worker reaches the
+//!   writer of a Rift-managed region.
 //! * `load-bearing` — not built; see [`load_bearing`].
 //!
 //! Each leg reports its own violations; the command fails if any leg does.
@@ -33,6 +35,7 @@ mod channels;
 mod chokepoint;
 mod family_caches;
 mod gate_path;
+mod managed_regions;
 mod renderer;
 mod rewrites;
 mod text;
@@ -46,6 +49,7 @@ pub use channels::pinned_channels;
 pub use chokepoint::one_gate_chokepoint;
 pub use family_caches::family_keyed_caches;
 pub use gate_path::no_store_on_gate_path;
+pub use managed_regions::regions_at_boundaries;
 pub use renderer::one_reason_renderer;
 pub use rewrites::closed_rewrite_forms;
 pub use text::{calls_within, fn_bodies, mask_code, mask_comments, FnBody};
@@ -84,6 +88,7 @@ pub fn run_all(root: &Path) -> Result<Vec<Leg>, String> {
         one_reason_renderer(root)?,
         closed_rewrite_forms(root)?,
         family_keyed_caches(root)?,
+        regions_at_boundaries(root)?,
         load_bearing(),
     ])
 }
@@ -142,17 +147,22 @@ mod tests {
                 leg.violations
             );
         }
-        assert_eq!(legs.len(), 7, "every leg reports, built or not");
+        assert_eq!(legs.len(), 8, "every leg reports, built or not");
     }
 
-    /// The decision-path walk is dispatched by the runner, not only callable:
-    /// its planting tests call the walk directly, so they would stay green
-    /// with the leg dropped from the command.
+    /// The two call-graph walks are dispatched by the runner, not only
+    /// callable: their planting tests call the walks directly, so they would
+    /// stay green with a leg dropped from the command.
     #[test]
-    fn the_runner_dispatches_the_decision_path_walk() {
+    fn the_runner_dispatches_both_call_graph_walks() {
         let legs = run_all(&crate::workspace_root()).expect("every leg runs");
         assert!(
             legs.iter().any(|leg| leg.name == "no-store-on-gate-path"),
+            "{:?}",
+            legs.iter().map(|leg| leg.name).collect::<Vec<_>>()
+        );
+        assert!(
+            legs.iter().any(|leg| leg.name == "regions-at-boundaries"),
             "{:?}",
             legs.iter().map(|leg| leg.name).collect::<Vec<_>>()
         );
