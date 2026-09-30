@@ -23,21 +23,26 @@ pub struct Options {
     /// they ship — and print the calibration between the two arms. It doubles
     /// what the run spends.
     pub compare: bool,
+    /// With `compare`, play a third arm per client that reads only through the
+    /// client's shell, beside the on arm. Most of the field's traffic reads
+    /// that way and no scripted session otherwise does.
+    pub bypass_shell: bool,
 }
 
 /// Parse the argv after the `dogfood` token.
 ///
 /// # Errors
-/// A missing or unknown `--client`, a flag without its value, or an
-/// unrecognised flag.
+/// A missing or unknown `--client`, a flag without its value, an
+/// unrecognised flag, or `--bypass-shell` without `--compare`.
 pub fn parse_args(args: &[String]) -> Result<Options, String> {
     const USAGE: &str = "usage: xtask dogfood --client <claude-code|codex|antigravity|all> \
-                         [--sessions N] [--out DIR] [--keep] [--compare]";
+                         [--sessions N] [--out DIR] [--keep] [--compare [--bypass-shell]]";
     let mut clients = None;
     let mut sessions = 10usize;
     let mut out = None;
     let mut keep = false;
     let mut compare = false;
+    let mut bypass_shell = false;
     let mut at = 0usize;
     while let Some(arg) = args.get(at) {
         let value = |name: &str| -> Result<String, String> {
@@ -68,6 +73,10 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 compare = true;
                 at += 1;
             }
+            "--bypass-shell" => {
+                bypass_shell = true;
+                at += 1;
+            }
             other => return Err(format!("dogfood: unknown argument `{other}`\n{USAGE}")),
         }
     }
@@ -75,12 +84,20 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
     if sessions == 0 {
         return Err(format!("dogfood: --sessions must be at least 1\n{USAGE}"));
     }
+    // The shell arm is read beside the on arm, so without the calibration
+    // there is nothing to read it against.
+    if bypass_shell && !compare {
+        return Err(format!(
+            "dogfood: --bypass-shell is only valid together with --compare\n{USAGE}"
+        ));
+    }
     Ok(Options {
         clients,
         sessions,
         out,
         keep,
         compare,
+        bypass_shell,
     })
 }
 
@@ -137,5 +154,26 @@ mod tests {
             "0".to_owned()
         ])
         .is_err());
+    }
+
+    /// The shell arm is asked for only beside the calibration, and the line
+    /// that asks for it alone is refused with the usage it got wrong.
+    #[test]
+    fn bypass_shell_parses_only_with_compare() {
+        let line =
+            |words: &[&str]| -> Vec<String> { words.iter().map(|s| (*s).to_owned()).collect() };
+        let three = parse_args(&line(&["--client", "all", "--compare", "--bypass-shell"])).unwrap();
+        assert!(three.compare && three.bypass_shell);
+        let either_order =
+            parse_args(&line(&["--bypass-shell", "--client", "codex", "--compare"])).unwrap();
+        assert!(either_order.bypass_shell);
+        let two = parse_args(&line(&["--client", "codex", "--compare"])).unwrap();
+        assert!(
+            !two.bypass_shell,
+            "two arms unless the line asks for the third"
+        );
+        let err = parse_args(&line(&["--client", "codex", "--bypass-shell"])).unwrap_err();
+        assert!(err.contains("only valid together with --compare"), "{err}");
+        assert!(err.contains("usage: xtask dogfood"), "{err}");
     }
 }

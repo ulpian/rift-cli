@@ -26,7 +26,10 @@
 //! `--compare` plays the same sessions a second time in a second checkout with
 //! every read lever off, and prints the booked saving against the removal the
 //! two arms measure; [`crate::dogfood_compare`] holds that half. Without it
-//! the run is what it was, byte for byte.
+//! the run is what it was, byte for byte. `--bypass-shell`, beside
+//! `--compare`, adds a third arm that reads only through the client's shell —
+//! the shape most of the field's traffic has — and prints it beside the on
+//! arm; `shell` holds that arm, and the calibration is unchanged by it.
 
 mod client;
 mod harness;
@@ -36,8 +39,9 @@ mod process;
 mod report;
 mod scratch;
 mod sessions;
+mod shell;
 
-pub use client::{Client, ALL_CLIENTS};
+pub use client::{Client, ShellArm, ALL_CLIENTS};
 pub use harness::run;
 pub use measure::{
     classify_verb, parse_kinds, parse_savings, retries_after_deny, tally_kinds, unavailability,

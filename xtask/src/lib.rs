@@ -34,6 +34,9 @@ pub mod gate_intercept;
 pub mod replay_savings;
 pub mod rustdoc_baseline;
 
+#[cfg(test)]
+mod pull_overhead;
+
 /// A fallible meta-check: `Ok(violations)` (empty ⇒ healthy) or a hard `Err`
 /// (a manifest could not be read or parsed).
 pub type Check = Result<Vec<String>, String>;

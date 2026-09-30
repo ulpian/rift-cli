@@ -1,0 +1,29 @@
+---
+source: xtask/src/pull_overhead.rs
+expression: render(&rows)
+---
+verb | scenario | shipped | content | scaffolding | share | omitted
+known-state | served_n10_changed1_pos0 | 592 | 484 | 108 | 18.2% | 0
+diff-since | served_n10_changed1_pos0 | 137 | 102 | 35 | 25.5% | 0
+changed-hunks | served_n10_changed1_pos0 | 70 | 50 | 20 | 28.5% | 0
+context-pack | served_n10_changed1_pos0 | 446 | 409 | 37 | 8.2% | -
+known-state | served_n20_changed2_pos1 | 1179 | 980 | 199 | 16.8% | 0
+diff-since | served_n20_changed2_pos1 | 261 | 208 | 53 | 20.3% | 0
+changed-hunks | served_n20_changed2_pos1 | 66 | 50 | 16 | 24.2% | 0
+context-pack | served_n20_changed2_pos1 | 446 | 409 | 37 | 8.2% | -
+known-state | served_n40_changed2_pos0 | 1165 | 976 | 189 | 16.2% | 20
+diff-since | served_n40_changed2_pos0 | 355 | 302 | 53 | 14.9% | 0
+changed-hunks | served_n40_changed2_pos0 | 70 | 50 | 20 | 28.5% | 0
+context-pack | served_n40_changed2_pos0 | 493 | 451 | 42 | 8.5% | -
+known-state | served_n15_changed3_pos2 | 910 | 740 | 170 | 18.6% | 0
+diff-since | served_n15_changed3_pos2 | 298 | 227 | 71 | 23.8% | 0
+changed-hunks | served_n15_changed3_pos2 | 66 | 50 | 16 | 24.2% | 0
+context-pack | served_n15_changed3_pos2 | 494 | 452 | 42 | 8.5% | -
+
+verb | shipped | content | scaffolding | share | range
+known-state | 3846 | 3180 | 666 | 17.3% | 16.2%..18.6%
+diff-since | 1051 | 839 | 212 | 20.1% | 14.9%..25.5%
+changed-hunks | 272 | 200 | 72 | 26.4% | 24.2%..28.5%
+context-pack | 1879 | 1721 | 158 | 8.4% | 8.2%..8.5%
+
+saturated: 0 of 16

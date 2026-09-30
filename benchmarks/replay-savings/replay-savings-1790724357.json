@@ -1,0 +1,410 @@
+{
+  "buckets": {
+    "below_floor": {
+      "calls": 13,
+      "declinable": true,
+      "share_percent_of_repository_content": 0.1343263602708148,
+      "tokens": 6362
+    },
+    "client_dedup": {
+      "calls": 3,
+      "declinable": false,
+      "share_percent_of_repository_content": 0.1354453947087829,
+      "tokens": 6415
+    },
+    "credited_from_statement": {
+      "calls": 0,
+      "declinable": false,
+      "share_percent_of_repository_content": 0.0,
+      "tokens": 0
+    },
+    "declined": {
+      "calls": 20,
+      "declinable": true,
+      "share_percent_of_repository_content": 0.5822568433178653,
+      "tokens": 27577
+    },
+    "first_sight": {
+      "calls": 798,
+      "declinable": false,
+      "share_percent_of_repository_content": 28.539220890219344,
+      "tokens": 1351682
+    },
+    "no_honest_frame": {
+      "calls": 0,
+      "declinable": false,
+      "share_percent_of_repository_content": 0.0,
+      "tokens": 0
+    },
+    "no_line_count": {
+      "calls": 955,
+      "declinable": false,
+      "share_percent_of_repository_content": 55.00981160949667,
+      "tokens": 2605389
+    },
+    "no_result_recorded": {
+      "calls": 0,
+      "declinable": false,
+      "share_percent_of_repository_content": 0.0,
+      "tokens": 0
+    },
+    "not_read_shaped": {
+      "calls": 2,
+      "declinable": false,
+      "share_percent_of_repository_content": 0.2272484463368091,
+      "tokens": 10763
+    },
+    "observed_not_declined": {
+      "calls": 0,
+      "declinable": true,
+      "share_percent_of_repository_content": 0.0,
+      "tokens": 0
+    },
+    "over_credit_bound": {
+      "calls": 17,
+      "declinable": false,
+      "share_percent_of_repository_content": 3.8831339551786592,
+      "tokens": 183914
+    },
+    "repeat_after_decline": {
+      "calls": 0,
+      "declinable": false,
+      "share_percent_of_repository_content": 0.0,
+      "tokens": 0
+    },
+    "repeat_disjoint": {
+      "calls": 225,
+      "declinable": false,
+      "share_percent_of_repository_content": 6.141619931143489,
+      "tokens": 290881
+    },
+    "repeat_overlapping": {
+      "calls": 106,
+      "declinable": false,
+      "share_percent_of_repository_content": 3.950254907599426,
+      "tokens": 187093
+    },
+    "search": {
+      "calls": 4,
+      "declinable": false,
+      "share_percent_of_repository_content": 0.020037050596825406,
+      "tokens": 949
+    },
+    "spilled_to_a_file": {
+      "calls": 84,
+      "declinable": false,
+      "share_percent_of_repository_content": 1.2427827557215387,
+      "tokens": 58861
+    },
+    "unknown_span": {
+      "calls": 7,
+      "declinable": false,
+      "share_percent_of_repository_content": 0.1338618554097714,
+      "tokens": 6340
+    }
+  },
+  "constants": {
+    "context_lines_around_a_changed_site": "3",
+    "edit_echo": "pinned",
+    "max_delivered_bytes_read_tool": "47500",
+    "max_delivered_bytes_terminal": "30000",
+    "max_inline_hash_bytes": "1048576",
+    "max_slice_bytes_decline_ceiling": "98304",
+    "min_slice_lines_decline_floor": "28",
+    "mode": "enforce"
+  },
+  "corpus": {
+    "calls_performing_several_reads": 373,
+    "context_windows": 421,
+    "context_windows_read_members": 2755,
+    "revisions_advanced": 1233,
+    "session_trees": 23,
+    "shell_calls": 54278,
+    "shell_calls_the_grammar_recognised": 5417,
+    "tool_calls_replayed": 58942,
+    "windows_emptied": 12
+  },
+  "cross_window_repeats": {
+    "by_inheritance": {
+      "by_name": {
+        "calls": 100,
+        "tokens": 237940
+      },
+      "fork": {
+        "calls": 0,
+        "tokens": 0
+      },
+      "none": {
+        "calls": 185,
+        "tokens": 306681
+      },
+      "paste": {
+        "calls": 0,
+        "tokens": 0
+      }
+    },
+    "pairs": 141,
+    "reads": 285,
+    "tokens": 544621
+  },
+  "declinable": {
+    "calls": 33,
+    "tokens": 33939
+  },
+  "declined": {
+    "by_the_client": {
+      "calls": 3,
+      "tokens": 6415
+    },
+    "calls": 20,
+    "frame_tokens": 3246,
+    "lost_to_an_unheld_sibling": 10,
+    "net_tokens": 24331,
+    "resting_on_a_write": 5,
+    "tokens": 27577
+  },
+  "delivery_statement": {
+    "credited": 0,
+    "credited_tokens": 0,
+    "results_stating_a_delivery": 46,
+    "results_with_a_response_object": 259,
+    "taken_back": 1
+  },
+  "facts": {
+    "fell_back_to_the_worktree": 464,
+    "mode": "history",
+    "resolved_at_a_commit": 3494,
+    "windows_without_a_commit": 0
+  },
+  "first_read_floor": {
+    "calls": 798,
+    "tokens": 1351682
+  },
+  "first_sight_sizes": {
+    "by_bytes": {
+      "16_to_64_kib": {
+        "calls": 311,
+        "tokens": 646555
+      },
+      "4_to_16_kib": {
+        "calls": 215,
+        "tokens": 397224
+      },
+      "64_kib_and_over": {
+        "calls": 225,
+        "tokens": 268105
+      },
+      "under_4_kib": {
+        "calls": 47,
+        "tokens": 39798
+      }
+    },
+    "by_lines": {
+      "1000_to_1499": {
+        "calls": 57,
+        "tokens": 88930
+      },
+      "100_to_399": {
+        "calls": 159,
+        "tokens": 305003
+      },
+      "1500_and_over": {
+        "calls": 246,
+        "tokens": 299007
+      },
+      "400_to_999": {
+        "calls": 237,
+        "tokens": 525360
+      },
+      "under_100": {
+        "calls": 99,
+        "tokens": 133382
+      }
+    },
+    "first_contact_floor": {
+      "bytes": 16384,
+      "code": {
+        "calls": 451,
+        "tokens": 611089
+      },
+      "code_extensions": [
+        "bash",
+        "c",
+        "cc",
+        "cjs",
+        "cpp",
+        "cs",
+        "css",
+        "go",
+        "h",
+        "hpp",
+        "java",
+        "js",
+        "jsx",
+        "kt",
+        "lua",
+        "m",
+        "mjs",
+        "php",
+        "py",
+        "rb",
+        "rs",
+        "scala",
+        "scss",
+        "sh",
+        "sql",
+        "swift",
+        "ts",
+        "tsx",
+        "zig",
+        "zsh"
+      ],
+      "either_bound": {
+        "calls": 551,
+        "tokens": 946386
+      },
+      "lines": 400,
+      "markdown": {
+        "calls": 96,
+        "tokens": 331414
+      },
+      "toml": {
+        "calls": 0,
+        "tokens": 0
+      }
+    }
+  },
+  "invisible_shell_reads": {
+    "loose_bound": {
+      "calls": 41135,
+      "tokens": 15610553
+    },
+    "naming_a_work_tree_file": {
+      "calls": 12754,
+      "tokens": 7107308
+    }
+  },
+  "machine_format_reads": {
+    "lockfile": {
+      "all": {
+        "calls": 0,
+        "tokens": 0
+      },
+      "first_sight": {
+        "calls": 0,
+        "tokens": 0
+      }
+    },
+    "minified": {
+      "all": {
+        "calls": 0,
+        "tokens": 0
+      },
+      "first_sight": {
+        "calls": 0,
+        "tokens": 0
+      }
+    },
+    "notebook": {
+      "all": {
+        "calls": 0,
+        "tokens": 0
+      },
+      "first_sight": {
+        "calls": 0,
+        "tokens": 0
+      }
+    },
+    "svg": {
+      "all": {
+        "calls": 0,
+        "tokens": 0
+      },
+      "first_sight": {
+        "calls": 0,
+        "tokens": 0
+      }
+    },
+    "tabular": {
+      "all": {
+        "calls": 0,
+        "tokens": 0
+      },
+      "first_sight": {
+        "calls": 0,
+        "tokens": 0
+      }
+    }
+  },
+  "other_tools": {
+    "Agent": 404,
+    "AskUserQuestion": 53,
+    "Bash": 7726,
+    "ExitPlanMode": 3,
+    "ListAgents": 1,
+    "Monitor": 246,
+    "PushNotification": 4,
+    "ScheduleWakeup": 343,
+    "SendMessage": 194,
+    "Skill": 6,
+    "TaskOutput": 2,
+    "TaskStop": 96,
+    "TodoWrite": 13,
+    "ToolSearch": 299,
+    "WebFetch": 72,
+    "WebSearch": 19,
+    "Workflow": 1
+  },
+  "outside_the_work_tree": {
+    "calls": 4858,
+    "tokens": 7526614
+  },
+  "provenance": {
+    "build_describe": "2523c4e",
+    "build_head": "2523c4e",
+    "corpus": {
+      "context_windows": 421,
+      "session_trees": 23,
+      "tool_calls_replayed": 58942,
+      "transcript_files": 1416
+    },
+    "facts_from": "history",
+    "finished_unix_seconds": 1790725233,
+    "history_refs": [
+      "main",
+      "current",
+      "prepurge"
+    ],
+    "started_unix_seconds": 1790724357,
+    "tokenizer": "cl100k_base"
+  },
+  "reads_after_a_non_write_edit": {
+    "calls": 27,
+    "tokens": 28328
+  },
+  "repository_content": {
+    "calls": 2234,
+    "tokens": 4736226
+  },
+  "repository_content_reads": {
+    "calls": 2230,
+    "tokens": 4735277
+  },
+  "repository_content_searches": {
+    "calls": 4,
+    "tokens": 949
+  },
+  "schema_version": 2,
+  "share_estimated_upper_bound_percent": {
+    "declinable_of_repository_content": 0.7165832035886801,
+    "declined_net_of_frames_of_reads": 0.5138242176751223,
+    "declined_net_of_frames_of_repository_content": 0.513721262456648,
+    "declined_of_repository_content": 0.5822568433178653
+  },
+  "tokenizer": "cl100k_base",
+  "tool_results_all": {
+    "calls": 58934,
+    "tokens": 30488481
+  },
+  "unmeasured_remainder_tokens": 25752255
+}

@@ -6,6 +6,7 @@
 //! it belongs to.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use rift_agent::respond::Channel;
 use rift_agent::window_journal::{EvictReason, Interval, Journal, Limits, Line};
@@ -16,9 +17,11 @@ use serde_json::{json, Value};
 
 use super::bucket::Bucket;
 use super::classify::classify_reads;
+use super::history::History;
+use super::inheritance::{inheritance_of, leads, WindowLead};
 use super::options::Options;
 use super::report::{finish, land, Report};
-use super::transcript::{load_window, tree_stems, tree_windows, Call, Event};
+use super::transcript::{load_window, tree_stems, tree_windows, Call, Event, Window};
 use super::worktree::{path_key, FileFacts, Worktree};
 
 /// The command words that mean a shell call was probably reading a file.
@@ -51,9 +54,18 @@ pub(super) struct TreeState {
     pub(super) revisions: BTreeMap<String, u32>,
     /// The line count a whole-file write established, where one did.
     pub(super) written_lines: BTreeMap<String, u32>,
+    /// The byte count the same write established.
+    pub(super) written_bytes: BTreeMap<String, u64>,
     /// Which windows read each `(path, revision)` first, and what that first
     /// read cost them.
     pub(super) seen: BTreeMap<(String, u32), Vec<(usize, u64)>>,
+    /// What each window inherited from the one that started it.
+    pub(super) leads: Vec<WindowLead>,
+    /// The windows that spawned another: only their first reads' text is kept,
+    /// because only a spawning window's read can have been pasted onward.
+    pub(super) spawners: BTreeSet<usize>,
+    /// What a spawning window's first read of a `(path, revision)` returned.
+    pub(super) first_texts: BTreeMap<(String, u32, usize), String>,
 }
 
 /// The settings every call in one replay is decided under, spelled once.
@@ -73,6 +85,9 @@ pub(super) struct WindowState {
     /// Paths this window changed with something other than a whole-file write
     /// and has not read since.
     pub(super) awaiting_verification: BTreeSet<String>,
+    /// The commit this window's path facts come from, when the run was given
+    /// a history and the window began after one.
+    pub(super) commit: Option<usize>,
 }
 
 /// Everything one call is replayed against: the settings it is decided under,
@@ -98,7 +113,8 @@ pub(super) struct Ctx<'a> {
 /// Replay every transcript under `opts.transcripts`.
 ///
 /// # Errors
-/// If the transcripts directory cannot be read.
+/// If the transcripts directory cannot be read, or the history given cannot
+/// be opened or read.
 pub fn replay(opts: &Options) -> Result<Report, String> {
     let adapter = ClaudeCodeAdapter;
     let settings = Replay {
@@ -106,62 +122,104 @@ pub fn replay(opts: &Options) -> Result<Report, String> {
         limits: Limits::default(),
         channel: deny_channel(),
     };
-    let mut worktree = Worktree::new(&opts.repo);
+    let history = match &opts.history {
+        Some(git_dir) => Some(History::open(git_dir, &opts.history_refs)?),
+        None => None,
+    };
+    let mut worktree = Worktree::new(&opts.repo, history);
     let mut report = Report {
         tokenizer: rift_tokens::provenance(),
         ..Report::default()
     };
     for stem in tree_stems(&opts.transcripts)? {
-        let paths = tree_windows(&opts.transcripts, &stem);
-        if paths.is_empty() {
-            continue;
-        }
-        report.trees = report.trees.saturating_add(1);
-        let mut tree = TreeState::default();
-        let mut windows: Vec<WindowState> = Vec::new();
-        // One order over every window of the tree, so a revision advanced in
-        // one window is the revision the next window's read is keyed by.
-        let mut merged: Vec<(String, usize, usize, Event)> = Vec::new();
-        for (index, path) in paths.iter().enumerate() {
-            let window = load_window(path)?;
-            windows.push(WindowState::default());
-            report.windows = report.windows.saturating_add(1);
-            for (stamp, at, event) in window.events {
-                merged.push((stamp, index, at, event));
-            }
-        }
-        merged.sort_by(|a, b| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2)));
-        for (_, index, _, event) in merged {
-            let Some(state) = windows.get_mut(index) else {
-                continue;
-            };
-            match event {
-                Event::Turn => state.turn = state.turn.saturating_add(1),
-                Event::Evict => {
-                    report.evictions = report.evictions.saturating_add(1);
-                    state.journal.push(Line::Evict {
-                        turn: state.turn,
-                        reason: EvictReason::Compact,
-                        at_ms: 0,
-                    });
-                }
-                Event::Call(call) => replay_call(
-                    &mut Ctx {
-                        replay: &settings,
-                        window: index,
-                        state,
-                        tree: &mut tree,
-                        worktree: &mut worktree,
-                        report: &mut report,
-                    },
-                    &call,
-                ),
-            }
-        }
-        fold_cross_window(&tree, &mut report);
+        replay_tree(
+            &settings,
+            &mut worktree,
+            &mut report,
+            &opts.transcripts,
+            &stem,
+        )?;
     }
+    report.facts = worktree.source()?;
     finish(&mut report);
     Ok(report)
+}
+
+/// Replay one session tree: every window of it, in one order.
+fn replay_tree(
+    settings: &Replay<'_>,
+    worktree: &mut Worktree,
+    report: &mut Report,
+    dir: &Path,
+    stem: &str,
+) -> Result<(), String> {
+    let paths = tree_windows(dir, stem);
+    if paths.is_empty() {
+        return Ok(());
+    }
+    report.trees = report.trees.saturating_add(1);
+    let mut loaded: Vec<Window> = Vec::new();
+    for path in &paths {
+        loaded.push(load_window(path)?);
+        report.windows = report.windows.saturating_add(1);
+    }
+    let path_refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    let mut tree = TreeState {
+        leads: leads(&path_refs, &loaded),
+        ..TreeState::default()
+    };
+    tree.spawners = tree.leads.iter().filter_map(|lead| lead.parent).collect();
+    let mut windows: Vec<WindowState> = Vec::new();
+    // One order over every window of the tree, so a revision advanced in
+    // one window is the revision the next window's read is keyed by.
+    let mut merged: Vec<(String, usize, usize, Event)> = Vec::new();
+    for (index, window) in loaded.into_iter().enumerate() {
+        let first_stamp = window
+            .events
+            .iter()
+            .map(|(stamp, _, _)| stamp.as_str())
+            .find(|stamp| !stamp.is_empty());
+        windows.push(WindowState {
+            commit: worktree.commit_for(first_stamp),
+            ..WindowState::default()
+        });
+        for (stamp, at, event) in window.events {
+            merged.push((stamp, index, at, event));
+        }
+    }
+    merged.sort_by(|a, b| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2)));
+    for (_, index, _, event) in merged {
+        let Some(state) = windows.get_mut(index) else {
+            continue;
+        };
+        let ctx = &mut Ctx {
+            replay: settings,
+            window: index,
+            state,
+            tree: &mut tree,
+            worktree,
+            report,
+        };
+        replay_event(ctx, event);
+    }
+    fold_cross_window(&tree, settings.limits, report);
+    Ok(())
+}
+
+/// Fold one event of one window into the replay.
+fn replay_event(ctx: &mut Ctx<'_>, event: Event) {
+    match event {
+        Event::Turn => ctx.state.turn = ctx.state.turn.saturating_add(1),
+        Event::Evict => {
+            ctx.report.evictions = ctx.report.evictions.saturating_add(1);
+            ctx.state.journal.push(Line::Evict {
+                turn: ctx.state.turn,
+                reason: EvictReason::Compact,
+                at_ms: 0,
+            });
+        }
+        Event::Call(call) => replay_call(ctx, &call),
+    }
 }
 
 /// The channel a decline travels on for this family, read from the pinned
@@ -262,7 +320,10 @@ fn note_an_invisible_shell_read(ctx: &mut Ctx<'_>, call: &Call, tokens: u64) -> 
         return false;
     }
     ctx.report.invisible_shell.add(tokens);
-    if command.is_some_and(|command| names_a_work_tree_file(command, call, ctx.worktree)) {
+    let named = command.is_some_and(|command| {
+        names_a_work_tree_file(command, call, ctx.worktree, ctx.state.commit)
+    });
+    if named {
         ctx.report.invisible_shell_named_file.add(tokens);
     }
     true
@@ -281,12 +342,11 @@ fn apply_edit(ctx: &mut Ctx<'_>, edit: &rift_agent::EditRequest, call: &Call) {
     let Some(key) = path_key(&edit.path, call.cwd.as_deref()) else {
         return;
     };
-    let before = ctx
-        .tree
-        .written_lines
-        .get(&key)
-        .copied()
-        .or_else(|| ctx.worktree.facts(&key).map(FileFacts::total_lines));
+    let before = ctx.tree.written_lines.get(&key).copied().or_else(|| {
+        ctx.worktree
+            .facts_at(ctx.state.commit, &key)
+            .map(FileFacts::total_lines)
+    });
     let revision = ctx.tree.revisions.entry(key.clone()).or_default();
     let hash_old = revision_hash(&key, *revision);
     *revision = revision.saturating_add(1);
@@ -300,14 +360,7 @@ fn apply_edit(ctx: &mut Ctx<'_>, edit: &rift_agent::EditRequest, call: &Call) {
             .filter(|lines| *lines > 0),
         _ => None,
     };
-    match written {
-        Some(lines) => {
-            ctx.tree.written_lines.insert(key.clone(), lines);
-        }
-        None => {
-            ctx.tree.written_lines.remove(&key);
-        }
-    }
+    remember_the_write(ctx.tree, &key, written, call);
     let sites: Vec<Interval> = written
         .and_then(|lines| Interval::new(1, lines))
         .into_iter()
@@ -327,6 +380,24 @@ fn apply_edit(ctx: &mut Ctx<'_>, edit: &rift_agent::EditRequest, call: &Call) {
     } else {
         ctx.state.awaiting_verification.insert(key);
     }
+}
+
+/// What a whole-file write establishes about the file's shape — its line and
+/// byte counts — or, for any other change, the forgetting of both.
+fn remember_the_write(tree: &mut TreeState, key: &str, written: Option<u32>, call: &Call) {
+    tree.written_lines.remove(key);
+    tree.written_bytes.remove(key);
+    let Some(lines) = written else {
+        return;
+    };
+    let bytes = call
+        .input
+        .get("content")
+        .and_then(Value::as_str)
+        .map_or(0, str::len);
+    tree.written_lines.insert(key.to_owned(), lines);
+    tree.written_bytes
+        .insert(key.to_owned(), u64::try_from(bytes).unwrap_or(u64::MAX));
 }
 
 /// Whether a shell command line has a read word where a command goes.
@@ -350,18 +421,25 @@ fn looks_like_a_shell_read(input: &Value) -> bool {
 /// workspace and read no file; `grep -n fn xtask/src/lib.rs` names a file and
 /// printed part of it. The difference is the whole value of the tighter bound,
 /// so the looser reading is not allowed to creep into it.
-fn names_a_work_tree_file(command: &str, call: &Call, worktree: &mut Worktree) -> bool {
+fn names_a_work_tree_file(
+    command: &str,
+    call: &Call,
+    worktree: &mut Worktree,
+    commit: Option<usize>,
+) -> bool {
     command
         .split_whitespace()
         .map(|word| word.trim_matches(['\'', '"', '`', ',', ';']))
         .filter(|word| !word.is_empty() && !word.starts_with('-'))
         .filter_map(|word| path_key(word, call.cwd.as_deref()))
-        .any(|key| worktree.facts(&key).is_some())
+        .any(|key| worktree.facts_at(commit, &key).is_some())
 }
 
-/// What a session tree's windows read of each other.
-fn fold_cross_window(tree: &TreeState, report: &mut Report) {
-    for readers in tree.seen.values() {
+/// What a session tree's windows read of each other, and the route each
+/// later reader could have inherited the read through.
+fn fold_cross_window(tree: &TreeState, limits: Limits, report: &mut Report) {
+    let min_lines = usize::try_from(limits.min_slice_lines).unwrap_or(usize::MAX);
+    for ((key, revision), readers) in &tree.seen {
         let distinct: BTreeSet<usize> = readers.iter().map(|(window, _)| *window).collect();
         if distinct.len() < 2 {
             continue;
@@ -369,8 +447,21 @@ fn fold_cross_window(tree: &TreeState, report: &mut Report) {
         report.cross_window_pairs = report.cross_window_pairs.saturating_add(1);
         let mut first = BTreeSet::new();
         for (window, tokens) in readers {
-            if first.insert(*window) && first.len() > 1 {
-                report.cross_window.add(*tokens);
+            if !(first.insert(*window) && first.len() > 1) {
+                continue;
+            }
+            report.cross_window.add(*tokens);
+            let Some(lead) = tree.leads.get(*window) else {
+                continue;
+            };
+            let parent_text = lead.parent.and_then(|parent| {
+                tree.first_texts
+                    .get(&(key.clone(), *revision, parent))
+                    .map(String::as_str)
+            });
+            let class = inheritance_of(lead, parent_text, key, min_lines);
+            if let Some(tally) = report.sibling_by_inheritance.get_mut(class.index()) {
+                tally.add(*tokens);
             }
         }
     }
@@ -382,7 +473,9 @@ mod tests {
 
     use super::{looks_like_a_shell_read, replay, Report};
     use crate::replay_savings::bucket::Bucket;
+    use crate::replay_savings::inheritance::Inheritance;
     use crate::replay_savings::tests::fixture;
+    use crate::replay_savings::worktree::FactsSource;
 
     /// The committed corpus, replayed. Every test below pins its own subject
     /// against this one reading, so what the buckets separate is not a claim
@@ -501,6 +594,60 @@ mod tests {
         assert_eq!(
             report.first_read_floor.calls, 10,
             "the floor is every first sight, credited from the bytes or from the statement"
+        );
+    }
+
+    #[test]
+    fn the_fixture_pins_the_sibling_routes_and_where_its_facts_came_from() {
+        let report = replayed();
+        let class = |class: Inheritance| report.sibling_by_inheritance[class.index()].calls;
+        assert_eq!(
+            class(Inheritance::None),
+            1,
+            "a subagent whose prompt names nothing it read"
+        );
+        assert_eq!(
+            class(Inheritance::Fork),
+            0,
+            "no window starts from another's"
+        );
+        assert_eq!(class(Inheritance::Paste), 0, "no prompt carries lines");
+        assert_eq!(class(Inheritance::ByName), 0, "no prompt names the path");
+        let routes = report.sibling_by_inheritance;
+        assert_eq!(
+            routes.iter().map(|tally| tally.calls).sum::<u64>(),
+            report.cross_window.calls,
+            "the routes split the later windows' first reads, call for call"
+        );
+        assert_eq!(
+            routes.iter().map(|tally| tally.tokens).sum::<u64>(),
+            report.cross_window.tokens,
+            "and token for token"
+        );
+        assert_eq!(
+            report.facts,
+            FactsSource::default(),
+            "the worktree, no history"
+        );
+        assert!(
+            report.machine_formats.is_empty(),
+            "no machine-written file is read"
+        );
+        let bands: Vec<u64> = report
+            .first_sight_sizes
+            .by_lines
+            .iter()
+            .map(|tally| tally.calls)
+            .collect();
+        assert_eq!(
+            bands,
+            [6, 3, 0, 0, 0],
+            "three first sights of the hundred-line notes, none past four hundred"
+        );
+        assert_eq!(
+            bands.iter().sum::<u64>(),
+            report.bucket(Bucket::FirstSight).calls,
+            "every first sight is in one band"
         );
     }
 

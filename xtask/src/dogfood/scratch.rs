@@ -6,7 +6,6 @@ use std::process::Command;
 
 use crate::dogfood::measure::{parse_savings, SavingsSample};
 use crate::dogfood::process::{capture, must};
-use crate::dogfood::report::ClientRun;
 use crate::dogfood::Client;
 use crate::dogfood_compare::Arm;
 
@@ -177,6 +176,8 @@ pub(super) fn prepare(
     // Last, so that everything before it — the clone, the wiring, the primed
     // documents — is the same work in both arms and the levers are the only
     // thing that differs.
+    // The shell arm keeps the overlay as it ships: its one difference from
+    // the on arm is how the client is driven, not what the policy says.
     if arm == Some(Arm::Off) {
         let policy = crate::dogfood_compare::write_levers_off(scratch)?;
         println!("dogfood: every read lever off in {}", policy.display());
@@ -306,11 +307,11 @@ pub(super) fn codex_config() -> Option<PathBuf> {
 }
 
 /// Delete a client's scratch checkout and sweep the registry row it created.
-pub(super) fn tidy(rift: &Path, root: &Path, run: &ClientRun) {
-    if std::fs::remove_dir_all(&run.scratch).is_err() {
+pub(super) fn tidy(rift: &Path, root: &Path, scratch: &Path) {
+    if std::fs::remove_dir_all(scratch).is_err() {
         println!(
             "dogfood: could not remove {} — remove it by hand",
-            run.scratch.display()
+            scratch.display()
         );
         return;
     }

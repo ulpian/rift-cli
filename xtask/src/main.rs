@@ -18,7 +18,8 @@
 //!   run under CI, and is a reading rather than a gate. `--compare` plays
 //!   every session twice — once with every read lever off — and prints what
 //!   the booked saving is worth against the removal that measures, at twice
-//!   the spend.
+//!   the spend. `--bypass-shell` adds a third arm, read only through the
+//!   client's shell, printed beside the on arm.
 //! * `replay-savings` — an offline, model-free replay of recorded Claude Code
 //!   transcripts through this build's own read recogniser and window-journal
 //!   decision. It reads private transcripts and prints aggregates only; it is

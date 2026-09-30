@@ -23,6 +23,10 @@ pub enum Arm {
     Off,
     /// The levers as they ship, which is what the single-arm reading measures.
     On,
+    /// The levers as they ship, with the client's own read and search tools
+    /// withheld so every read goes through its shell — the shape most of the
+    /// field's traffic has. Played beside the calibration, never inside it.
+    Shell,
 }
 
 /// Every arm, in the order the calibration plays and prints them.
@@ -35,6 +39,19 @@ impl Arm {
         match self {
             Self::Off => "off",
             Self::On => "on",
+            Self::Shell => "shell",
+        }
+    }
+
+    /// The words a progress line puts after the client's name.
+    ///
+    /// The shell arm is not a lever setting — its levers are the on arm's —
+    /// so it is named for what it withholds instead.
+    #[must_use]
+    pub fn heading(self) -> String {
+        match self {
+            Self::Off | Self::On => format!(" ({} levers)", self.label()),
+            Self::Shell => " (on levers, shell reads only)".to_owned(),
         }
     }
 }
@@ -280,11 +297,11 @@ impl CompareRow {
 }
 
 /// The label a summed row carries in the session column.
-const SUMMED: &str = "(all sessions)";
+pub(crate) const SUMMED: &str = "(all sessions)";
 
 /// Add `b` into `a`, where an absent figure on either side stays absent — a
 /// sum that treated silence as zero would understate the total it reports.
-fn add_opt<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
+pub(crate) fn add_opt<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a + b),
         _ => None,
@@ -298,15 +315,7 @@ fn add_opt<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T
 /// different times.
 #[must_use]
 pub fn rows_for(run: &CompareRun) -> Vec<CompareRow> {
-    let mut numbers: Vec<u32> = run
-        .off
-        .sessions
-        .iter()
-        .chain(&run.on.sessions)
-        .map(|s| s.number)
-        .collect();
-    numbers.sort_unstable();
-    numbers.dedup();
+    let numbers = session_numbers(&run.off, &run.on);
     let mut rows = Vec::with_capacity(numbers.len() + 1);
     let find =
         |arm: &ClientRun, number: u32| arm.sessions.iter().find(|s| s.number == number).cloned();
@@ -335,6 +344,19 @@ pub fn rows_for(run: &CompareRun) -> Vec<CompareRow> {
     run.client.slug().clone_into(&mut total.client);
     rows.push(total);
     rows
+}
+
+/// Every session ordinal either arm played, in order and once each.
+pub(crate) fn session_numbers(a: &ClientRun, b: &ClientRun) -> Vec<u32> {
+    let mut numbers: Vec<u32> = a
+        .sessions
+        .iter()
+        .chain(&b.sessions)
+        .map(|s| s.number)
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers
 }
 
 /// Every client's rows, then one summed row over all of them.
@@ -391,7 +413,7 @@ pub fn fmt_calibration(v: Option<f64>) -> String {
 }
 
 /// Left-pad to `width` columns.
-fn pad(label: &str, width: usize) -> String {
+pub(crate) fn pad(label: &str, width: usize) -> String {
     let mut out = label.to_owned();
     for _ in label.chars().count()..width {
         out.push(' ');
@@ -460,7 +482,7 @@ pub fn render_compare_table(runs: &[CompareRun]) -> String {
 }
 
 /// The caveat, broken on spaces so a terminal does not have to.
-fn wrapped(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrapped(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {

@@ -538,6 +538,9 @@ as a sanity check on the booked figure's size, not as its replacement: the two
 arms are separate, non-deterministic model runs, so the difference between them
 carries the levers and the day's tool choices together, and a run where the
 lever arm read *more* is reported as the negative it is rather than clamped.
+Adding `--bypass-shell` plays a third arm beside the other two: the levers as they ship, with the client's own read and search tools withheld so every read goes through its shell.
+Most real traffic reads that way, and no scripted session otherwise does, so this arm gives shell reads a controlled corpus; it prints beside the on arm and leaves the calibration itself unchanged.
+Only Claude Code plays it: Codex has no read tool and already reads through its shell, and Antigravity has no pinned flag that withholds its read tool.
 It is a command a person types on their own machine
 ([§16.15](16-development.md#1615-a-savings-reading-through-the-real-clients)),
 never a claim the product makes and never a figure that promotes a rung.
@@ -830,6 +833,11 @@ holds part of, and 638 shell calls naming a file this checkout has are still
 shapes the grammar refuses. That table, not the harness's median, is where the
 distance to the target is measured, and [§18](18-known-gaps.md) carries what
 each of those buckets would take.
+
+The replay also sizes the pools later levers would work on, which it prints beside the buckets rather than inside them.
+It sets the client's own declines beside this build's, splits the sibling re-reads by whether the second window was forked from the first, was handed the lines in its spawning prompt, was handed only the path, or was handed nothing — one count per later window's first read of a revision a sibling read first, so the routes sum to those reads rather than to the pairs — counts the reads of machine-written files by path shape, and sorts the first sights by the size of the file against a first-contact floor of 400 lines or 16,384 bytes.
+Given `--history <git-dir>`, each window's paths are resolved at the newest commit at or before the window began, so a file deleted or split since is measured as the session saw it, and the worktree answers only for a path that commit does not have.
+`--artifact <dir>` writes the table and its JSON twin with the build, the facts mode, the corpus and the run's times attached, and the tracked runs live in `benchmarks/replay-savings/`.
 
 Serving deltas instead of full re-reads is only a win if it saves tokens
 *without making the agent worse*, so the harness replays each scenario twice: a full-read baseline, and a delta-served run where the agent

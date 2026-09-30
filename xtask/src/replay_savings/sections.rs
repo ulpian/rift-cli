@@ -1,0 +1,248 @@
+//! The sections that size the next levers rather than measure this build:
+//! where the facts came from, the client's own declines, the sibling re-reads
+//! by inheritance route, the machine-format census and the first-sight sizes.
+//!
+//! Kept apart from the table they extend so the table's existing lines — which
+//! two runs are compared by — are visibly untouched by them. Aggregates only,
+//! like every other surface of the command: class names and counts, never a
+//! path or a prompt.
+
+use serde_json::{json, Map, Value};
+
+use super::bucket::Bucket;
+use super::census::{
+    MachineFormat, BYTE_BANDS, CODE_EXTENSIONS, FIRST_CONTACT_BYTES, FIRST_CONTACT_LINES,
+    LINE_BANDS,
+};
+use super::inheritance::Inheritance;
+use super::render::{commas, row};
+use super::report::{Report, Tally};
+
+/// The header line naming where the path facts came from.
+pub(super) fn facts_header(report: &Report) -> String {
+    let mode = if report.facts.history {
+        "history at each window's commit"
+    } else {
+        "worktree"
+    };
+    format!("  facts from: {mode}\n")
+}
+
+/// The corpus lines only a history run has: what the commits answered, and
+/// what the worktree had to.
+pub(super) fn history_lines(report: &Report) -> String {
+    let facts = report.facts;
+    if !facts.history {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "  {:<48}{:>9}{:>15}\n",
+        "paths answered at a window's commit / worktree",
+        commas(facts.resolved_at_a_commit),
+        commas(facts.fell_back_to_the_worktree)
+    ));
+    out.push_str(&format!(
+        "  {:<48}{:>9}\n",
+        "windows with no commit at or before them",
+        commas(facts.windows_without_a_commit)
+    ));
+    out
+}
+
+/// The client's own declines, beside this build's.
+pub(super) fn declined_by_the_client(report: &Report, denominator: u64) -> String {
+    row(
+        "declined by the client's own repeat guard",
+        report.bucket(Bucket::ClientDedup),
+        denominator,
+    )
+}
+
+/// The unit the routes are counted in, under the pairs line it splits.
+///
+/// The pairs line counts distinct `(path, revision)` pairs; the routes count
+/// one per later window's first read of such a pair, so a pair five windows
+/// read is one pair and four reads. Without this line the routes would read
+/// as a split of a number smaller than their sum.
+pub(super) fn later_first_reads(report: &Report, denominator: u64) -> String {
+    row(
+        "  later windows' first reads of them",
+        report.cross_window,
+        denominator,
+    )
+}
+
+/// The sibling re-reads, one line per inheritance route.
+pub(super) fn sibling_classes(report: &Report, denominator: u64) -> String {
+    let mut out = String::new();
+    for class in Inheritance::ALL {
+        let tally = inheritance_tally(report, class);
+        out.push_str(&row(class.label(), tally, denominator));
+    }
+    out
+}
+
+/// The machine-format census: every class, and its first-sight part.
+pub(super) fn machine_formats(report: &Report, denominator: u64) -> String {
+    let mut out = String::new();
+    out.push_str("\n  machine-format reads, by path shape");
+    out.push_str(&format!(
+        "\n  {:<48}{:>9}{:>15}{:>13}\n",
+        "", "calls", "tokens", "of content"
+    ));
+    for format in MachineFormat::ALL {
+        let census = report
+            .machine_formats
+            .get(format.key())
+            .copied()
+            .unwrap_or_default();
+        out.push_str(&row(format.key(), census.all, denominator));
+        out.push_str(&row(
+            "  of it, first sight",
+            census.first_sight,
+            denominator,
+        ));
+    }
+    out
+}
+
+/// The first-sight calls by file size, and the first-contact floor.
+pub(super) fn first_sight_sizes(report: &Report, denominator: u64) -> String {
+    let sizes = &report.first_sight_sizes;
+    let mut out = String::new();
+    out.push_str("\n  first sight, by the size of the file read\n");
+    for ((_, label, _), tally) in LINE_BANDS.iter().zip(sizes.by_lines) {
+        out.push_str(&row(label, tally, denominator));
+    }
+    for ((_, label, _), tally) in BYTE_BANDS.iter().zip(sizes.by_bytes) {
+        out.push_str(&row(label, tally, denominator));
+    }
+    let floor = format!(
+        "≥ {} lines or ≥ {} bytes",
+        commas(FIRST_CONTACT_LINES),
+        commas(FIRST_CONTACT_BYTES)
+    );
+    out.push_str(&row(&floor, sizes.first_contact, denominator));
+    out.push_str(&row("  of it, code", sizes.first_contact_code, denominator));
+    out.push_str(&row(
+        "  of it, Markdown",
+        sizes.first_contact_markdown,
+        denominator,
+    ));
+    out.push_str(&row("  of it, TOML", sizes.first_contact_toml, denominator));
+    out
+}
+
+/// Add the new keys to the machine-readable document. Every one is new, so a
+/// reader of the previous shape reads this one unchanged.
+pub(super) fn extend_document(document: &mut Value, report: &Report) {
+    let Some(map) = document.as_object_mut() else {
+        return;
+    };
+    if let Some(declined) = map.get_mut("declined").and_then(Value::as_object_mut) {
+        declined.insert(
+            "by_the_client".to_owned(),
+            tally_json(report.bucket(Bucket::ClientDedup)),
+        );
+    }
+    if let Some(cross) = map
+        .get_mut("cross_window_repeats")
+        .and_then(Value::as_object_mut)
+    {
+        cross.insert("by_inheritance".to_owned(), inheritance_json(report));
+        cross.insert("reads".to_owned(), report.cross_window.calls.into());
+    }
+    map.insert("facts".to_owned(), facts_json(report));
+    map.insert(
+        "machine_format_reads".to_owned(),
+        machine_formats_json(report),
+    );
+    map.insert(
+        "first_sight_sizes".to_owned(),
+        first_sight_sizes_json(report),
+    );
+}
+
+/// One inheritance route's tally.
+fn inheritance_tally(report: &Report, class: Inheritance) -> Tally {
+    report
+        .sibling_by_inheritance
+        .get(class.index())
+        .copied()
+        .unwrap_or_default()
+}
+
+/// One tally as the document spells it.
+fn tally_json(tally: Tally) -> Value {
+    json!({ "calls": tally.calls, "tokens": tally.tokens })
+}
+
+/// The sibling re-reads by route.
+fn inheritance_json(report: &Report) -> Value {
+    let mut map = Map::new();
+    for class in Inheritance::ALL {
+        map.insert(
+            class.key().to_owned(),
+            tally_json(inheritance_tally(report, class)),
+        );
+    }
+    Value::Object(map)
+}
+
+/// Where the path facts came from.
+fn facts_json(report: &Report) -> Value {
+    let facts = report.facts;
+    json!({
+        "fell_back_to_the_worktree": facts.fell_back_to_the_worktree,
+        "mode": if facts.history { "history" } else { "worktree" },
+        "resolved_at_a_commit": facts.resolved_at_a_commit,
+        "windows_without_a_commit": facts.windows_without_a_commit,
+    })
+}
+
+/// The machine-format census, every class published whether or not a call
+/// landed in it.
+fn machine_formats_json(report: &Report) -> Value {
+    let mut map = Map::new();
+    for format in MachineFormat::ALL {
+        let census = report
+            .machine_formats
+            .get(format.key())
+            .copied()
+            .unwrap_or_default();
+        map.insert(
+            format.key().to_owned(),
+            json!({
+                "all": tally_json(census.all),
+                "first_sight": tally_json(census.first_sight),
+            }),
+        );
+    }
+    Value::Object(map)
+}
+
+/// The first-sight size histograms and the first-contact floor.
+fn first_sight_sizes_json(report: &Report) -> Value {
+    let sizes = &report.first_sight_sizes;
+    let bands = |bands: &[(&str, &str, u64)], tallies: &[Tally]| {
+        let mut map = Map::new();
+        for ((key, _, _), tally) in bands.iter().zip(tallies) {
+            map.insert((*key).to_owned(), tally_json(*tally));
+        }
+        Value::Object(map)
+    };
+    json!({
+        "by_bytes": bands(&BYTE_BANDS, &sizes.by_bytes),
+        "by_lines": bands(&LINE_BANDS, &sizes.by_lines),
+        "first_contact_floor": {
+            "bytes": FIRST_CONTACT_BYTES,
+            "code": tally_json(sizes.first_contact_code),
+            "code_extensions": CODE_EXTENSIONS,
+            "either_bound": tally_json(sizes.first_contact),
+            "lines": FIRST_CONTACT_LINES,
+            "markdown": tally_json(sizes.first_contact_markdown),
+            "toml": tally_json(sizes.first_contact_toml),
+        },
+    })
+}

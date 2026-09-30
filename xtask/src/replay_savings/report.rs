@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 
 use super::bucket::Bucket;
+use super::census::{CensusRow, FirstSightSizes};
+use super::worktree::FactsSource;
 
 /// How many calls landed somewhere, and the tokens their results returned.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,6 +67,17 @@ pub struct Report {
     pub cross_window_pairs: u64,
     /// What the second and later windows' first reads of those pairs cost.
     pub cross_window: Tally,
+    /// The same reads, split by the route each could have been inherited
+    /// through, in the order of
+    /// [`Inheritance::ALL`](super::inheritance::Inheritance::ALL).
+    pub sibling_by_inheritance: [Tally; 4],
+    /// Repository-content reads of machine-written files, keyed by
+    /// [`MachineFormat::key`](super::census::MachineFormat::key).
+    pub machine_formats: BTreeMap<&'static str, CensusRow>,
+    /// The first-sight calls, by the size of the file they read.
+    pub first_sight_sizes: FirstSightSizes,
+    /// Where the path facts came from.
+    pub facts: FactsSource,
     /// Shell calls that look like reads and that the grammar does not
     /// recognise: invisible to the gate, and outside every figure above.
     ///

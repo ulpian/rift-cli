@@ -14,8 +14,9 @@ use crate::dogfood::report::{
 };
 use crate::dogfood::scratch::{codex_config, ledger_lines, prepare, read_savings, tidy, Untouched};
 use crate::dogfood::sessions::{load_sessions, Session, SESSIONS_DIR};
-use crate::dogfood::Client;
-use crate::dogfood_compare::{compare_json, render_compare_table, Arm, CompareRun, ARMS};
+use crate::dogfood::shell::{arms_for, calibration, claude_code_transcript_dir, ShellRun};
+use crate::dogfood::{Client, ShellArm};
+use crate::dogfood_compare::{Arm, CompareRun};
 
 /// What one client's sessions are played against.
 ///
@@ -25,6 +26,8 @@ use crate::dogfood_compare::{compare_json, render_compare_table, Arm, CompareRun
 struct Playing<'a> {
     /// The client being driven.
     client: Client,
+    /// The arm the checkout plays, which decides how the client is driven.
+    arm: Option<Arm>,
     /// Its executable, as the machine resolved it.
     program: PathBuf,
     /// The release binary the scratch checkout's hooks were pointed at.
@@ -124,7 +127,10 @@ impl Playing<'_> {
             (SESSION_MINUTES * 60).to_string(),
             self.program.display().to_string(),
         ];
-        argv.extend(self.client.argv(&session.prompt, &self.scratch));
+        argv.extend(
+            self.client
+                .argv_for(self.arm, &session.prompt, &self.scratch),
+        );
         argv
     }
 
@@ -193,20 +199,55 @@ struct Played {
     readings: Vec<ClientRun>,
     /// The clients that played both arms.
     pairs: Vec<CompareRun>,
+    /// The clients that played the shell arm beside their on arm.
+    shells: Vec<ShellRun>,
     /// Checkouts that are neither: an arm whose twin never ran. It exists, so
     /// it is kept or swept with the rest — and it is deliberately **not** a
     /// reading, because half a calibration printed as one would be a share
     /// measured with the levers off.
     stray: Vec<ClientRun>,
+    /// Shell-arm checkouts whose preparation failed part way. They are never
+    /// read, but a clone and a registry row may already exist, so they are
+    /// kept or swept with the rest.
+    abandoned: Vec<PathBuf>,
 }
 
 impl Played {
     /// Every checkout this run made.
-    fn checkouts(&self) -> impl Iterator<Item = &ClientRun> {
+    fn checkouts(&self) -> impl Iterator<Item = &Path> {
         self.readings
             .iter()
             .chain(self.pairs.iter().map(|p| &p.off))
+            .chain(self.shells.iter().map(|s| &s.shell))
             .chain(&self.stray)
+            .map(|run| run.scratch.as_path())
+            .chain(self.abandoned.iter().map(PathBuf::as_path))
+    }
+
+    /// File the arms one client played: a reading, a calibration and a shell
+    /// reading, or a stray half of a set.
+    fn absorb(&mut self, compare: bool, client: Client, played: Vec<ClientRun>) {
+        match (compare, played.as_slice()) {
+            (true, [off, on, shell @ ..]) => {
+                self.readings.push(on.clone());
+                self.pairs.push(CompareRun {
+                    client,
+                    off: off.clone(),
+                    on: on.clone(),
+                });
+                if let [shell] = shell {
+                    self.shells.push(ShellRun {
+                        client,
+                        on: on.clone(),
+                        shell: shell.clone(),
+                        transcripts: transcript_dir(&shell.scratch),
+                    });
+                }
+            }
+            // Half a calibration is not a reading; it is a checkout to sweep.
+            (true, _) => self.stray.extend(played),
+            (false, _) => self.readings.extend(played),
+        }
     }
 }
 
@@ -243,21 +284,26 @@ pub fn run(root: &Path, opts: &Options) -> Result<(), String> {
     }
     write_report(&out, &played.readings, &stamp)?;
     if opts.compare {
-        write_calibration(&out, &played.pairs, &stamp)?;
+        let shells = if opts.bypass_shell {
+            Some(played.shells.as_slice())
+        } else {
+            None
+        };
+        write_calibration(&out, &played.pairs, shells, &stamp)?;
     }
     println!("dogfood: logs   {}", out.display());
     // Both arms are kept, or both are swept: an arm left behind would be a
     // registry row and a family nobody meant to keep.
     if opts.keep {
-        for run in played.checkouts() {
+        for scratch in played.checkouts() {
             println!(
                 "dogfood: kept {} (its registry row is still there)",
-                run.scratch.display()
+                scratch.display()
             );
         }
     } else {
-        for run in played.checkouts() {
-            tidy(&rift, root, run);
+        for scratch in played.checkouts() {
+            tidy(&rift, root, scratch);
         }
     }
     Ok(())
@@ -299,10 +345,10 @@ fn announce(opts: &Options, sessions: usize, out: &Path, mine: &SavingsSample) {
          The developer's own family ({}) is not touched.",
         opts.clients.len(),
         sessions,
-        if opts.compare {
-            " x 2 arms (levers off, then on)"
-        } else {
-            ""
+        match (opts.compare, opts.bypass_shell) {
+            (true, true) => " x 3 arms (levers off, then on, then on with shell reads only)",
+            (true, false) => " x 2 arms (levers off, then on)",
+            (false, _) => "",
         },
         out.display(),
         mine.recall_db
@@ -327,14 +373,15 @@ fn play_clients(
     let mut out_played = Played {
         readings: Vec::with_capacity(opts.clients.len()),
         pairs: Vec::new(),
+        shells: Vec::new(),
         stray: Vec::new(),
+        abandoned: Vec::new(),
     };
     for client in &opts.clients {
-        let arms: Vec<Option<Arm>> = if opts.compare {
-            ARMS.iter().map(|a| Some(*a)).collect()
-        } else {
-            vec![None]
-        };
+        if let (true, ShellArm::Skipped(why)) = (opts.bypass_shell, client.shell_arm()) {
+            println!("dogfood: {why}");
+        }
+        let arms = arms_for(opts, *client);
         let mut played: Vec<ClientRun> = Vec::with_capacity(arms.len());
         for arm in arms {
             match run_client(root, rift, *client, out, sessions, &seen, arm) {
@@ -346,27 +393,48 @@ fn play_clients(
                     println!(
                         "dogfood: {}{} could not be prepared — {e}",
                         client.slug(),
-                        arm.map_or_else(String::new, |a| format!(" ({} levers)", a.label()))
+                        arm.map_or_else(String::new, Arm::heading)
                     );
+                    abandon(&mut out_played, out, *client, arm);
                     break;
                 }
             }
         }
-        match (opts.compare, played.as_slice()) {
-            (true, [off, on]) => {
-                out_played.readings.push(on.clone());
-                out_played.pairs.push(CompareRun {
-                    client: *client,
-                    off: off.clone(),
-                    on: on.clone(),
-                });
-            }
-            // Half a calibration is not a reading; it is a checkout to sweep.
-            (true, _) => out_played.stray.extend(played),
-            (false, _) => out_played.readings.extend(played),
-        }
+        out_played.absorb(opts.compare, *client, played);
     }
     out_played
+}
+
+/// Keep a shell-arm checkout whose preparation failed on the sweep list.
+///
+/// Only the shell arm's: the two calibration arms keep the handling they have
+/// always had, and the shell arm is the one whose half set must never be left
+/// behind as a family nobody meant to keep.
+fn abandon(played: &mut Played, out: &Path, client: Client, arm: Option<Arm>) {
+    if arm != Some(Arm::Shell) {
+        return;
+    }
+    let scratch = arm_dir(out, client, arm).join("repo");
+    if scratch.exists() {
+        played.abandoned.push(scratch);
+    }
+}
+
+/// The directory one arm's checkout and logs sit under.
+///
+/// Without an arm the layout is what it has always been; each arm of a
+/// calibration gets a checkout and a log directory of its own beneath it.
+fn arm_dir(out: &Path, client: Client, arm: Option<Arm>) -> PathBuf {
+    arm.map_or_else(
+        || out.join(client.slug()),
+        |arm| out.join(client.slug()).join(arm.label()),
+    )
+}
+
+/// Where the client wrote a shell-arm checkout's transcripts, from `HOME`.
+fn transcript_dir(scratch: &Path) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(claude_code_transcript_dir(Path::new(&home), scratch))
 }
 
 /// Play every scripted session for one client.
@@ -379,12 +447,7 @@ fn run_client(
     seen: &[(String, String)],
     arm: Option<Arm>,
 ) -> Result<ClientRun, String> {
-    // Without an arm the layout is what it has always been; each arm of a
-    // calibration gets a checkout and a log directory of its own beneath it.
-    let base = arm.map_or_else(
-        || out.join(client.slug()),
-        |arm| out.join(client.slug()).join(arm.label()),
-    );
+    let base = arm_dir(out, client, arm);
     let scratch = base.join("repo");
     let log_dir = base.join("logs");
     std::fs::create_dir_all(&log_dir)
@@ -392,6 +455,7 @@ fn run_client(
     let prepared = prepare(root, rift, client, &scratch, seen, arm)?;
     let playing = Playing {
         client,
+        arm,
         program: resolve_program(client.program())?,
         rift,
         scratch,
@@ -400,11 +464,19 @@ fn run_client(
     println!(
         "dogfood: {}{} — {} via {}, scratch {}",
         client.slug(),
-        arm.map_or_else(String::new, |a| format!(" ({} levers)", a.label())),
+        arm.map_or_else(String::new, Arm::heading),
         sessions.len(),
         playing.program.display(),
         playing.scratch.display()
     );
+    if arm == Some(Arm::Shell) {
+        if let Some(dir) = transcript_dir(&playing.scratch) {
+            println!(
+                "dogfood: each session's transcript lands in {}",
+                dir.display()
+            );
+        }
+    }
     let played = playing.play_all(sessions, prepared.baseline());
     // A run where no session captured a document falls back to the reading the
     // preparation ended on, which is the family as the sessions found it.
@@ -449,13 +521,18 @@ fn write_report(out: &Path, runs: &[ClientRun], stamp: &str) -> Result<(), Strin
 ///
 /// # Errors
 /// The document or the table could not be written.
-fn write_calibration(out: &Path, pairs: &[CompareRun], stamp: &str) -> Result<(), String> {
-    let calibration = render_compare_table(pairs);
+fn write_calibration(
+    out: &Path,
+    pairs: &[CompareRun],
+    shells: Option<&[ShellRun]>,
+    stamp: &str,
+) -> Result<(), String> {
+    let (calibration, document) = calibration(pairs, shells, stamp);
     println!("\n{calibration}");
     let path = out.join("compare.json");
     std::fs::write(
         &path,
-        serde_json::to_string_pretty(&compare_json(pairs, stamp)).unwrap_or_default(),
+        serde_json::to_string_pretty(&document).unwrap_or_default(),
     )
     .map_err(|e| format!("dogfood: {}: {e}", path.display()))?;
     std::fs::write(out.join("compare.txt"), &calibration)
