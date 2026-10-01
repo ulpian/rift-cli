@@ -107,13 +107,20 @@ mod tests {
         }
 
         // Claude Code keys its per-project dir by the worktree path with `/`
-        // and `.` folded to `-`; the answer exists exactly when HOME does.
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        // and `.` folded to `-`; HOME wins, with USERPROFILE on Windows.
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                cfg!(windows)
+                    .then(|| std::env::var_os("USERPROFILE"))
+                    .flatten()
+            })
+            .map(PathBuf::from);
         let path = default_transcript_path("claude-code", work_tree, "sid");
         assert_eq!(
             path.is_some(),
             home.is_some(),
-            "the path is knowable exactly when HOME is"
+            "the path is knowable exactly when a supported home is"
         );
         if let (Some(home), Some(path)) = (home, path) {
             assert_eq!(

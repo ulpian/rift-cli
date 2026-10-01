@@ -275,6 +275,8 @@ mod tests {
     /// own edit is a pin, not an opinion.
     #[test]
     fn an_edit_echo_row_is_quoted_by_the_pinned_artifact_it_names() {
+        let claude_fields = CLAUDE_CODE_TOOL_FIELDS.replace("\r\n", "\n");
+        let antigravity_fields = ANTIGRAVITY_TOOL_FIELDS.replace("\r\n", "\n");
         assert_eq!(
             PINNED_EDIT_ECHO.len(),
             1,
@@ -283,7 +285,7 @@ mod tests {
         for (family, excerpt) in PINNED_EDIT_ECHO {
             assert_eq!(family, &rift_core::AgentId::CLAUDE_CODE);
             assert!(
-                CLAUDE_CODE_TOOL_FIELDS.contains(excerpt),
+                claude_fields.contains(excerpt),
                 "the pinned artifact does not contain {excerpt:?}"
             );
         }
@@ -293,7 +295,7 @@ mod tests {
             "the page says nothing about what this family's edit tools return"
         );
         assert!(
-            ANTIGRAVITY_TOOL_FIELDS.contains(
+            antigravity_fields.contains(
                 "Nothing on the page says what\n`replace_file_content` or `write_to_file` returns."
             ),
             "and its artifact is where that is written down"

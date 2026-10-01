@@ -695,7 +695,11 @@ fn a_codex_cat_of_a_docx_is_redirected_once_to_the_sidecar_when_confirmed() {
 
     let outcome = doc_gate_under(&call, &work_tree, &store, Some(&converter), &effective);
     let Some(DocAnswer::Redirect { reason }) = outcome.answer.clone() else {
-        panic!("a document read this family makes is declined: {outcome:?}");
+        let command = call.payload["tool_input"]["command"]
+            .as_str()
+            .expect("the fixture's actual command");
+        let diagnostics = absolute_shell_diagnostics(&work_tree, &document, command);
+        panic!("a document read this family makes is declined: {outcome:?}\n{diagnostics}");
     };
     assert_eq!(converter.calls(), 1, "converted once, for the family");
     let sidecar = std::fs::read_dir(work_tree.join(".rift/state/doc"))

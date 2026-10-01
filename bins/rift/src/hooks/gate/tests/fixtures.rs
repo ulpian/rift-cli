@@ -219,3 +219,45 @@ pub(super) fn shell_spelling(path: &Path) -> String {
     let plain = spelled.strip_prefix(r"\\?\").unwrap_or(&spelled);
     plain.replace('\\', "/")
 }
+
+/// Failure context for one absolute tempfile command, without document bytes.
+#[cfg(feature = "doc")]
+pub(super) fn absolute_shell_diagnostics(
+    work_tree: &Path,
+    document: &Path,
+    command: &str,
+) -> String {
+    let recognized = rift_agent::shell_read::recognise(command);
+    let canonical_root = std::fs::canonicalize(work_tree);
+    let canonical_document = std::fs::canonicalize(document);
+    let paths: Vec<_> = recognized
+        .as_ref()
+        .map(rift_agent::shell_read::ShellCall::read_requests)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|request| {
+            let path = Path::new(&request.path);
+            let resolved = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                work_tree.join(path)
+            };
+            let canonical = std::fs::canonicalize(&resolved);
+            let inside = canonical.as_ref().ok().zip(canonical_root.as_ref().ok())
+                .map(|(path, root)| path.strip_prefix(root));
+            format!(
+                "recognized_path={:?} absolute={} resolved={resolved:?} canonical={canonical:?} containment={inside:?}",
+                request.path,
+                path.is_absolute(),
+            )
+        })
+        .collect();
+    format!(
+        "TEMP={:?} TMP={:?} TMPDIR={:?} temp_dir={:?}\nwork_tree={work_tree:?} document={document:?}\ncanonical_root={canonical_root:?} canonical_document={canonical_document:?}\nshell_spelling={:?} command={command:?}\nrecognized={recognized:?}\npaths={paths:?}",
+        std::env::var_os("TEMP"),
+        std::env::var_os("TMP"),
+        std::env::var_os("TMPDIR"),
+        std::env::temp_dir(),
+        shell_spelling(document),
+    )
+}
