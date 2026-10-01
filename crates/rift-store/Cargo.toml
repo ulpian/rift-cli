@@ -37,6 +37,9 @@ sha2 = { workspace = true }
 async-trait = { workspace = true }
 keyring = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+
 [dev-dependencies]
 proptest = { workspace = true }
 # Committed DDL snapshot of all three projections (a schema change is reviewable).

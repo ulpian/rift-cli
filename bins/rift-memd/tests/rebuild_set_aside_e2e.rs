@@ -124,6 +124,17 @@ impl Fixture {
 
     /// `rift-memd rebuild --repo` over the fixture under `cache`: its stdout.
     fn memd_rebuild(&self, cache: &str) -> String {
+        let out = self.memd_rebuild_output(cache);
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "rift-memd rebuild: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout
+    }
+
+    fn memd_rebuild_output(&self, cache: &str) -> std::process::Output {
         let repo = self.repo.display().to_string();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rift-memd"));
         cmd.current_dir(&self.home)
@@ -132,14 +143,7 @@ impl Fixture {
         for key in RETARGETING_ENV {
             cmd.env_remove(key);
         }
-        let out = cmd.output().unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(
-            out.status.success(),
-            "rift-memd rebuild: {stdout}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        stdout
+        cmd.output().unwrap()
     }
 
     /// A session starts, and a person makes one serve at a terminal: the
@@ -201,7 +205,11 @@ fn each_rebuild_sets_aside_the_projection_before_it_and_prints_the_same_fingerpr
     let first = fx.memd_rebuild(CACHE);
     let first_aside = set_aside_named(&first);
     assert_eq!(sha256_of(&first_aside), live, "the bytes moved, unchanged");
-    assert_eq!(serve_rows(&first_aside, &serve), (1, 1), "kept aside");
+    assert_eq!(
+        historical_serve_rows(&first_aside, &serve),
+        (1, 1),
+        "kept aside"
+    );
     assert_eq!(serve_rows(&db, &serve), (0, 0), "no shard carries it");
 
     let rebuilt = sha256_of(&db);
@@ -213,7 +221,10 @@ fn each_rebuild_sets_aside_the_projection_before_it_and_prints_the_same_fingerpr
 
     assert_eq!(fingerprint(&first), fingerprint(&fresh));
     assert_eq!(fingerprint(&second), fingerprint(&fresh));
-    let mut found = set_asides_beside(&db);
+    let mut found: Vec<_> = set_asides_beside(&db)
+        .into_iter()
+        .map(|path| path.canonicalize().unwrap())
+        .collect();
     found.sort();
     let mut expected = vec![first_aside, second_aside];
     expected.sort();
@@ -383,6 +394,60 @@ fn inserted(doc: &serde_json::Value, table: &str) -> i64 {
 /// two keys in the projection at `db`, opened read-only.
 fn serve_rows(db: &Path, serve: &Serve) -> (i64, i64) {
     let store = SqliteStore::open_read_only(db).unwrap();
+    serve_rows_in(&store, serve)
+}
+
+#[test]
+fn a_binary_rebuild_refuses_a_retained_wal_writer_and_preserves_its_later_rows() {
+    let fx = Fixture::new();
+    let (_, db) = fx.session_and_a_person_made_serve();
+    let store = SqliteStore::open(&db).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let conn = rt.block_on(rift_store::Store::conn(&store)).unwrap();
+    rt.block_on(conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE writer_probe (n INTEGER); INSERT INTO writer_probe VALUES (7)")).unwrap();
+    drop(store);
+    for value in [8, 9] {
+        let refused = fx.memd_rebuild_output(CACHE);
+        assert!(!refused.status.success());
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("ProjectionBusy"), "{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "{:?}",
+                db.canonicalize().unwrap().display().to_string()
+            )),
+            "{stderr}"
+        );
+        assert!(stderr.contains("retry after it finishes"), "{stderr}");
+        assert!(!String::from_utf8_lossy(&refused.stdout).contains("set aside:"));
+        rt.block_on(conn.execute("INSERT INTO writer_probe VALUES (?)", &[Value::Int(value)]))
+            .unwrap();
+        let reader = SqliteStore::open_read_only(&db).unwrap();
+        let rows = rt
+            .block_on(reader.query("SELECT n FROM writer_probe ORDER BY n", &[]))
+            .unwrap();
+        assert_eq!(rows.last().unwrap().get_i64(0).unwrap(), value);
+    }
+    drop(conn);
+    let preserved = set_aside_named(&fx.memd_rebuild(CACHE));
+    let historical = rift_store::HistoricalProjectionSnapshot::user_selected(preserved).unwrap();
+    let reader = SqliteStore::open_historical_snapshot(historical).unwrap();
+    let rows = rt
+        .block_on(reader.query("SELECT n FROM writer_probe ORDER BY n", &[]))
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[2].get_i64(0).unwrap(), 9);
+}
+
+fn historical_serve_rows(db: &Path, serve: &Serve) -> (i64, i64) {
+    let selected = rift_store::HistoricalProjectionSnapshot::user_selected(db).unwrap();
+    let store = SqliteStore::open_historical_snapshot(selected).unwrap();
+    serve_rows_in(&store, serve)
+}
+
+fn serve_rows_in(store: &SqliteStore, serve: &Serve) -> (i64, i64) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

@@ -3476,6 +3476,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "winapi-util",
 ]
 
 [[package]]

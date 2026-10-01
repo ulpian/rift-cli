@@ -68,7 +68,7 @@ pub(super) fn archive_now(
     let repo = rift_git::discover(work_tree)?;
     let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
     let raw = session_raw_capture(&repo.work_tree);
-    let facts = session_facts_for_archive(rt, store, &repo.work_tree, agent, session);
+    let facts = session_facts_for_archive(rt, store, &repo.work_tree, agent, session)?;
     let (packs, notes) = crate::redactor_packs::capture_rule_packs(&repo.work_tree);
     report_pack_notes(&notes);
     // A session-end/sweep condense archives the transcript too — same source,
@@ -128,12 +128,12 @@ pub(super) fn session_facts_for_archive(
     work_tree: &Path,
     agent: &str,
     session: &str,
-) -> rift_shadow::SessionFacts {
-    rift_shadow::SessionFacts {
+) -> Result<rift_shadow::SessionFacts> {
+    Ok(rift_shadow::SessionFacts {
         read_facts: read_facts_for_archive(rt, store, agent, session),
-        serve_audit: serve_audit_for_archive(rt, work_tree, session),
+        serve_audit: serve_audit_for_archive(rt, work_tree, session)?,
         usage: usage_facts_for_archive(rt, store, agent, session),
-    }
+    })
 }
 
 /// The session's captured read facts, mapped for the shard's
@@ -211,17 +211,20 @@ pub(super) fn serve_audit_for_archive(
     rt: &tokio::runtime::Runtime,
     work_tree: &Path,
     session: &str,
-) -> Option<Vec<u8>> {
-    let db = crate::family::recall_db(work_tree).ok()?;
-    if !db.exists() {
-        return None;
-    }
-    let store = rift_store::SqliteStore::open_read_only(&db).ok()?;
-    let serves = rt
-        .block_on(rift_recall_ledger::attribution::session_serves(
-            &store, session,
-        ))
-        .ok()?;
+) -> Result<Option<Vec<u8>>> {
+    let Ok(db) = crate::family::recall_db(work_tree) else {
+        return Ok(None);
+    };
+    let store = match rift_store::SqliteStore::open_read_only(&db) {
+        Ok(store) => store,
+        Err(error @ rift_core::RiftError::ProjectionBusy { .. }) => return Err(error),
+        Err(_) => return Ok(None),
+    };
+    let Ok(serves) = rt.block_on(rift_recall_ledger::attribution::session_serves(
+        &store, session,
+    )) else {
+        return Ok(None);
+    };
     let rebuilt = session_serve_lines(&serves, session);
     let refused = rebuilt.iter().filter(|line| line.is_none()).count();
     if refused > 0 {
@@ -234,14 +237,14 @@ pub(super) fn serve_audit_for_archive(
     lines.sort();
     lines.dedup_by(|later, kept| later.0 == kept.0);
     if lines.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut out = Vec::new();
     for (_, line) in lines {
         out.extend_from_slice(&line);
         out.push(b'\n');
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// The deferred half of `post-commit`: bind identities, diff the commit, replay
@@ -911,7 +914,7 @@ fn run_archive(
     });
     let facts = t.phase("archive_read_facts", || {
         session_facts_for_archive(rt, store, &repo.work_tree, agent, session_id)
-    });
+    })?;
     // The repository's own redactor packs, folded in beside the built-ins. Any
     // note is recorded as a queue marker rather than printed — the worker's
     // stderr is /dev/null, so the next hook is what says it. (This comment used
@@ -1063,6 +1066,263 @@ pub(super) fn record_pack_notes(git_dir: &Path, notes: &[String]) {
             git_dir,
             "redactor-pack-more",
             &format!("and {extra} more redactor pack note(s)"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod projection_replacement_tests {
+    use super::*;
+
+    #[test]
+    fn a_busy_recall_projection_defers_the_real_condense_then_freezes_one_complete_artifact() {
+        use super::super::worker::{drain_jobs, LockWait};
+        let checkout = tempfile::tempdir().unwrap();
+        test_git(checkout.path(), &["init", "--quiet"]);
+        test_git(
+            checkout.path(),
+            &["commit", "--quiet", "--allow-empty", "-m", "fixture"],
+        );
+        let repo = rift_git::discover(checkout.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let recall = seed_condense_serves(checkout.path(), &rt);
+        let expected = serve_audit_for_archive(&rt, checkout.path(), "s-busy")
+            .unwrap()
+            .unwrap();
+        let guard = rift_store::ProjectionReplacementGuard::acquire(&recall).unwrap();
+        let capture = rift_store::open_capture_projection(
+            crate::family::projection_db(checkout.path()).unwrap(),
+        )
+        .unwrap();
+        let path = queue_condense(&repo);
+        let git_dir = repo.git_dir.to_str().unwrap();
+        assert_busy_condense_drains(&repo, &capture, &path, &rt);
+        drop(guard);
+        let condensed = drain_jobs(Some(git_dir), LockWait::None);
+        assert_eq!(
+            condensed.len(),
+            1,
+            "queued={:?}; notes={:?}",
+            crate::agent_queue::jobs(&repo.git_dir),
+            crate::capture_queue::peek_errors(&repo.git_dir)
+        );
+        assert!(!path.exists());
+        assert!(drain_jobs(Some(git_dir), LockWait::None).is_empty());
+        assert_eq!(
+            rt.block_on(rift_store::CanonicalStore::count(
+                &capture,
+                "archive_decision"
+            ))
+            .unwrap(),
+            1
+        );
+        let checkpoint = &condensed[0].1;
+        let artifact = format!(
+            "refs/heads/rift/checkpoints/v1:{}/{}/serve_audit.jsonl",
+            &checkpoint[..2],
+            &checkpoint[2..]
+        );
+        let frozen = test_git(checkout.path(), &["show", &artifact]);
+        assert!(frozen.status.success());
+        assert_eq!(frozen.stdout, expected);
+        assert_eq!(
+            expected
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .count(),
+            4
+        );
+    }
+
+    fn queue_condense(repo: &rift_git::RepoPaths) -> PathBuf {
+        let family = crate::family::resolve_at(&repo.work_tree).unwrap();
+        let cache = rift_shadow::hooks::SessionCache::new("s-busy", "claude-code", "ending", 1);
+        rift_shadow::hooks::write_cache(&repo.git_dir, &cache).unwrap();
+        let job = crate::agent_queue::AgentJob {
+            schema_version: 1,
+            work_tree: repo.work_tree.clone(),
+            queued_at_ms: 1,
+            attempts: 0,
+            kind: crate::agent_queue::JobKind::Condense {
+                session_id: "s-busy".into(),
+                agent: "claude-code".into(),
+                repo_id: family.family_id.to_string(),
+            },
+        };
+        crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap()
+    }
+
+    fn assert_busy_condense_drains(
+        repo: &rift_git::RepoPaths,
+        capture: &rift_store::SqliteStore,
+        path: &Path,
+        rt: &tokio::runtime::Runtime,
+    ) {
+        use super::super::worker::{drain_jobs, LockWait};
+        let before = std::fs::read(path).unwrap();
+        for _ in 0..crate::capture_queue::MAX_ATTEMPTS + 2 {
+            assert!(drain_jobs(repo.git_dir.to_str(), LockWait::None).is_empty());
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert!(crate::capture_queue::peek_errors(&repo.git_dir).is_empty());
+            assert_eq!(
+                rt.block_on(rift_store::CanonicalStore::count(
+                    capture,
+                    "archive_decision"
+                ))
+                .unwrap(),
+                0
+            );
+            assert!(
+                rift_git::resolve_commit(repo, "refs/heads/rift/checkpoints/v1")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    fn test_git(root: &Path, args: &[&str]) -> std::process::Output {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture-id",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2026-10-01T12:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-10-01T12:00:00Z")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    fn seed_condense_serves(root: &Path, rt: &tokio::runtime::Runtime) -> PathBuf {
+        let db = crate::family::recall_db(root).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let attribution = rift_recall_ledger::attribution::ServeAttribution {
+            session_id: "s-busy".into(),
+            window_key: None,
+        };
+        let event = rift_recall_serve::MemdEvent::GrepCapped {
+            handle: "grep:matches=7".into(),
+        };
+        for key in ['a', 'b'] {
+            let call = key.to_string().repeat(32);
+            let audited = event.to_hook_json_keyed(&call);
+            let called = event.to_serve_call_json(
+                rift_recall_serve::ServeChannel::HookInject,
+                &call,
+                "claude-code:search-gate",
+                rift_core::Timestamp::from_millis(1),
+            );
+            for envelope in [audited, called] {
+                rt.block_on(rift_recall_ledger::attribution::append_attributed_serve(
+                    &store,
+                    envelope.as_bytes(),
+                    1,
+                    Some(&attribution),
+                ))
+                .unwrap();
+            }
+        }
+        db
+    }
+
+    #[test]
+    fn a_legitimately_absent_recall_projection_is_omitted_without_creating_state() {
+        let checkout = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(checkout.path())
+            .status()
+            .unwrap()
+            .success());
+        let db = crate::family::recall_db(checkout.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for _ in 0..crate::capture_queue::MAX_ATTEMPTS + 2 {
+            assert_eq!(
+                serve_audit_for_archive(&rt, checkout.path(), "s-1").unwrap(),
+                None
+            );
+            assert!(!db.exists());
+            let mut marker = db.as_os_str().to_owned();
+            marker.push(".lock");
+            assert!(!Path::new(&marker).exists());
+        }
+    }
+
+    #[test]
+    fn a_busy_archive_read_refuses_then_freezes_every_serve_after_release() {
+        let checkout = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(checkout.path())
+            .status()
+            .unwrap()
+            .success());
+        let db = crate::family::recall_db(checkout.path()).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let attribution = rift_recall_ledger::attribution::ServeAttribution {
+            session_id: "s-1".into(),
+            window_key: None,
+        };
+        let event = rift_recall_serve::MemdEvent::GrepCapped {
+            handle: "grep:matches=7".into(),
+        };
+        for key in ['a', 'b'] {
+            let call = key.to_string().repeat(32);
+            let audit = event.to_hook_json_keyed(&call);
+            let served = event.to_serve_call_json(
+                rift_recall_serve::ServeChannel::HookInject,
+                &call,
+                "claude-code:search-gate",
+                rift_core::Timestamp::from_millis(1),
+            );
+            for envelope in [audit, served] {
+                rt.block_on(rift_recall_ledger::attribution::append_attributed_serve(
+                    &store,
+                    envelope.as_bytes(),
+                    1,
+                    Some(&attribution),
+                ))
+                .unwrap();
+            }
+        }
+        drop(store);
+        let before = serve_audit_for_archive(&rt, checkout.path(), "s-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            before
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .count(),
+            4
+        );
+        let guard = rift_store::ProjectionReplacementGuard::acquire(&db).unwrap();
+        assert!(matches!(
+            serve_audit_for_archive(&rt, checkout.path(), "s-1"),
+            Err(rift_core::RiftError::ProjectionBusy { .. })
+        ));
+        drop(guard);
+        assert_eq!(
+            serve_audit_for_archive(&rt, checkout.path(), "s-1").unwrap(),
+            Some(before)
         );
     }
 }

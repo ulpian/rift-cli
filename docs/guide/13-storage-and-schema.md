@@ -442,20 +442,26 @@ transitive dependencies. A reference implementation of the seam for it exists in
 local design notes. Nothing about that decision reaches callers, which is the
 argument for a seam.
 
-Three engine details you may run into:
+Engine details you may run into:
 
 **A busy timeout, because hooks write concurrently.** Each captured event is a
 short-lived process writing the same file, and without a timeout a colliding
 writer fails instantly — which the never-fail hook contract turns into a
 silently dropped row. The connection waits up to five seconds instead.
 
-**A read-only open, enforced by the engine.** Some projections are deliberately
-*set aside*, such as a `.pre-repair` copy whose rows cannot be re-derived, and
-two ordinary behaviours would destroy one: the normal open *creates* a database
-when the path is missing, so a typo yields a silent empty import, and the
-production open *migrates*, rewriting the artifact being kept. The read-only
-open uses SQLite's read-only flag, so a write through that handle fails at the
-engine.
+**Lifetime exclusion for live projections.** Ordinary file-backed live stores own a shared guard on their canonical path's stable concurrency marker before SQLite opens.
+Outstanding connections and transactions retain that guard after the store owner closes.
+Replacement owns the marker exclusively through relocation, recreation and ingest, and refuses promptly while any live guard remains.
+Hardlink aliases are refused by ordinary live opens and replacement.
+Read-only diagnostics never create the source, parent or marker.
+An absent projection is omitted as before; an existing legacy projection without its marker returns an actionable unavailable error.
+For recall, `rift-memd metrics` establishes the marker through its writable ingest path; for capture, `rift init` opens the capture projection.
+These writable actions differ from read-only `rift doctor` and `rift status`.
+
+**Historical imports use an explicit source route.** `rift backfill --from` and `--recall-from` select a historical artifact, refuse current family/destination aliases, and open SQLite READ_ONLY without creating or migrating its database.
+One read transaction pins a consistent snapshot across all imported relations, including pages in the preserved WAL.
+An existing source marker still participates in exclusion; a markerless source requires explicit historical selection.
+This route does not assert physical immutability: SQLite may manage WAL/SHM files, and an inaccessible journal fails explicitly.
 
 **Change notification is a capability, not an assumption.** The reference engine
 reports that it must be polled, and the dashboard's poller keys on a
@@ -473,7 +479,7 @@ are populated — and a CI check greps the binaries to keep it so.
 ## 13.12 Rebuilding, and what a rebuild cannot restore
 
 The two per-repository stores rebuild differently. **The recall projection is
-set aside and re-derived**: `rift-memd rebuild` renames the file and its
+set aside and re-derived**: `rift-memd rebuild` preserves the file and its
 sidecars to dated siblings, re-opens through the migrations, re-ingests from
 git — cold, complete, idempotent. **The capture projection is re-ingested in place**: `rift rebuild`
 walks the redacted checkpoint branch through the ordinary append-only path, and
@@ -506,12 +512,16 @@ The incremental ingest reads the artifact the first time it projects a checkpoin
 What a rebuild cannot restore is a serve no shard carries — one no session made — and the typed words of an exact retrieval's reason: the rebuilt row carries the placeholder `withheld` there.
 
 That is why the rebuild sets the old projection aside and never deletes it.
-It renames `recall.db` to `recall.db.set-aside-<YYYYMMDDTHHMMSSZ>`, stamped once from the binary's clock, and prints the new name on the line before `rebuilt:`; a rebuild over no projection prints nothing there, and the fingerprint it prints is the one it always printed.
+It preserves `recall.db` as `recall.db.set-aside-<YYYYMMDDTHHMMSSZ>`, stamped once from the binary's clock, and prints the new name on the line before `rebuilt:`; a rebuild over no projection prints nothing there, and the fingerprint it prints is the one it always printed.
 A sidecar keeps its SQLite suffix after the new name (`…Z-wal`), so SQLite pairs the set-aside file with its own journal when it is opened, and a name already taken gains a counter instead of being overwritten.
+The complete DB/WAL/SHM set is linked without overwriting any existing path before any original path is removed.
+A failure restores the complete original when possible; failed restoration retains the complete preserved set and names its full path with recovery steps.
+Keep the preserved triple together while restoring the original or quarantining its incomplete paths.
+Backfill refuses an artifact that still aliases the live destination; restore in place or create a distinct live projection before importing the preserved artifact.
 `rift backfill --recall-from <file>` reads the serves back: it opens the file read-only, as the capture import opens its own, refuses a file that is not a recall projection, and replays `memd_audit_event`, `serve_call_event`, `serve_session_event`, `memd_audit_citation`, `serve_grant_event` and `memd_audit_session` into the family's recall projection.
 There is no second writer.
 Each decision and call row is spelled back into the envelope that books exactly that row and handed to the one appender, which writes the citation, first-served and attribution rows as it does live; a grant goes through its own writer.
-Every write is insert-or-ignore on its key, so a second run inserts nothing, and `--dry-run` reads the file and writes nothing anywhere.
+Every write is insert-or-ignore on its key, so a second run inserts nothing, and `--dry-run` inserts no canonical rows.
 The set-aside files are records: `rift clean` never removes them, and `rift doctor` lists them by name, size and age.
 
 > **Tip:** when a projection looks wrong: rebuild the binaries, rebuild the

@@ -708,12 +708,14 @@ are read-only with respect to your repository's files; `rift-memd metrics` and
 
 A rebuild of the recall projection keeps the serves it cannot derive.
 `rift-memd rebuild` sets the old projection aside under a dated name rather than delete it, because a serve a person made at a terminal is in no checkpoint, and the figures above would lose it.
+An active store or retained connection makes replacement refuse promptly; close the reader or writer and retry.
+A live legacy recall projection without its concurrency marker is unavailable to read-only diagnostics until `rift-memd metrics` opens it through the writable ingest path.
 `rift backfill --recall-from <file> [--dry-run]` reads those serves back into the family's recall projection, insert-or-ignore, and prints what it read and inserted per relation; run it again and it inserts nothing.
 `rift doctor` lists every set-aside projection by name, size and age, and `rift clean` never removes one ([§13.12](13-storage-and-schema.md#1312-rebuilding-and-what-a-rebuild-cannot-restore)).
 
 > Tip: `rift-memd metrics` **ingests** as well as reports, walking the
-> repository's checkpoints into the recall projection before computing. Use
-> `rift-memd status` when you only want to look.
+> repository's checkpoints into the recall projection before computing. `rift-memd status` opens or migrates the recall store to report node counts.
+> Use `rift doctor` or `rift status` for guarded read-only diagnostics.
 
 ---
 

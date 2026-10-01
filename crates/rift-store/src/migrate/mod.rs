@@ -235,6 +235,39 @@ pub fn open_migrated(
     Ok(store)
 }
 
+/// Open only an existing projection after acquiring its shared lifetime guard.
+/// Legitimate absence never creates a database; replacement reports busy.
+///
+/// # Errors
+/// Store opening and checksum-locked migration failures are propagated.
+pub fn open_existing_migrated(
+    path: &std::path::Path,
+    migrations: &[Migration],
+) -> Result<Option<SqliteStore>> {
+    let Some(store) = SqliteStore::open_existing(path)? else {
+        return Ok(None);
+    };
+    crate::paths::harden_projection_permissions(path)?;
+    apply_migrations(&store, migrations)?;
+    Ok(Some(store))
+}
+
+/// Transfer exclusive replacement ownership through migration and all uses
+/// of the returned store. Its guard carries the only path opened here.
+///
+/// # Errors
+/// Store opening and checksum-locked migration failures are propagated.
+pub fn open_replacement_migrated(
+    guard: crate::ProjectionReplacementGuard,
+    migrations: &[Migration],
+) -> Result<SqliteStore> {
+    let path = guard.path().to_path_buf();
+    let store = SqliteStore::open_replacement(guard)?;
+    crate::paths::harden_projection_permissions(&path)?;
+    apply_migrations(&store, migrations)?;
+    Ok(store)
+}
+
 /// [`open_migrated`] with the capture projection's migration set
 /// ([`default_migrations`]) — the standard way to open `projection.db`.
 ///

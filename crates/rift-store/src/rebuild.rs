@@ -27,12 +27,14 @@ use crate::SqliteStore;
 /// [`rift_core::RiftError::Io`] if a file cannot be removed, or
 /// [`rift_core::RiftError::Migration`] if the fresh schema cannot be applied.
 pub fn rebuild(path: &Path) -> Result<SqliteStore> {
-    let prior_epoch = read_epoch_best_effort(path);
-    remove_if_exists(path)?;
-    remove_if_exists(&sidecar(path, "-wal"))?;
-    remove_if_exists(&sidecar(path, "-shm"))?;
+    let (guard, prior_epoch) =
+        crate::ProjectionReplacementGuard::acquire_inspected(path, read_epoch_best_effort)?;
+    let path = guard.path().to_path_buf();
+    remove_if_exists(&path)?;
+    remove_if_exists(&sidecar(&path, "-wal"))?;
+    remove_if_exists(&sidecar(&path, "-shm"))?;
     // Re-create through the standard open path (migrations + owner-only perms).
-    let store = crate::migrate::open_migrated(path, &default_migrations())?;
+    let store = crate::migrate::open_replacement_migrated(guard, &default_migrations())?;
     // The epoch row is written exactly once per projection lifetime (the file
     // was just recreated), so the append-only guards never see an UPDATE.
     store.with_conn(|conn| {
@@ -50,18 +52,19 @@ fn read_epoch_best_effort(path: &Path) -> i64 {
     if !path.exists() {
         return 0;
     }
-    let Ok(store) = SqliteStore::open(path) else {
+    // The exclusive stable marker is already held. This scoped SQLite
+    // handle closes before the platform replacement source lease is taken.
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
         return 0;
     };
-    store
-        .with_conn(|conn| {
-            conn.query_row(
-                "SELECT value FROM projection_meta WHERE key = 'rebuild_epoch'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-        })
-        .unwrap_or(0)
+    conn.query_row(
+        "SELECT value FROM projection_meta WHERE key = 'rebuild_epoch'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
 }
 
 fn remove_if_exists(p: &Path) -> Result<()> {
@@ -83,6 +86,53 @@ mod tests {
     use super::*;
     use crate::migrate::apply_migrations;
     use crate::{CanonicalStore, Value};
+
+    #[tokio::test]
+    async fn an_outstanding_connection_excludes_rebuild_after_its_store_owner_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("projection.db");
+        let store = rebuild(&db).unwrap();
+        assert_eq!(store.read_rebuild_epoch().await.unwrap(), 1);
+        drop(store);
+        let store = crate::open_capture_projection(&db).unwrap();
+        let conn = crate::Store::conn(&store).await.unwrap();
+        conn.execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE lease_probe (value INTEGER)")
+            .await
+            .unwrap();
+        drop(store);
+        assert!(matches!(
+            rebuild(&db),
+            Err(rift_core::RiftError::ProjectionBusy { .. })
+        ));
+        conn.execute("INSERT INTO lease_probe VALUES (7)", &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            conn.query("SELECT value FROM lease_probe", &[])
+                .await
+                .unwrap()[0]
+                .get_i64(0)
+                .unwrap(),
+            7
+        );
+        // The connection remains attached to the canonical source after a
+        // refused replacement, rather than an unlinked old inode.
+        let reader = SqliteStore::open_read_only(&db).unwrap();
+        assert_eq!(
+            reader
+                .query("SELECT value FROM lease_probe", &[])
+                .await
+                .unwrap()[0]
+                .get_i64(0)
+                .unwrap(),
+            7
+        );
+        assert_eq!(reader.read_rebuild_epoch().await.unwrap(), 1);
+        drop(reader);
+        drop(conn);
+        let replaced = rebuild(&db).unwrap();
+        assert_eq!(replaced.read_rebuild_epoch().await.unwrap(), 2);
+    }
 
     #[tokio::test]
     async fn rebuild_recreates_a_clean_migrated_projection() {

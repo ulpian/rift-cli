@@ -269,8 +269,9 @@ async fn rebuild(repo: &Path) -> Result<()> {
     // One reading of the clock per rebuild: it names the set-aside files and
     // dates the outcome labels, so the two can never disagree.
     let now = Timestamp::now();
-    let set_aside = set_aside::set_aside(&db, now)?;
-    let store = open_recall_db(&db)?;
+    let guard = rift_store::ProjectionReplacementGuard::acquire(&db)?;
+    let set_aside = set_aside::set_aside(&guard, now)?;
+    let store = rift_store::open_replacement_migrated(guard, &recall_migrations())?;
     let sub = GixSubstrate::open(repo)?;
     let (report, _labels, _blobs) = ingest_all(&store, &sub, repo, now).await?;
     let fingerprint = graph_doctor::rebuild_fingerprint(&store).await?;

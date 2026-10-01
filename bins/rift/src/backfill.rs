@@ -27,9 +27,11 @@
 //! `--from <path>` it has no business accepting, and make one verb mean three
 //! things.
 //!
-//! **The source is never written.** It is opened with
-//! [`rift_store::SqliteStore::open_read_only`], which is enforcement rather
-//! than convention: the two ordinary openers in this workspace would CREATE the
+//! **Source canonical rows are never written.** An explicitly selected
+//! historical source uses [`rift_store::SqliteStore::open_historical_snapshot`],
+//! READ_ONLY with one pinned read transaction, including preserved WAL pages.
+//! SQLite may manage WAL/SHM files; no DB or concurrency marker is created.
+//! Live family/destination identities are refused, including aliases. Unlike this route, the two ordinary openers in this workspace would CREATE the
 //! file if the path were mistyped, or MIGRATE it — and migrating the artifact
 //! you set aside in order to preserve it is a way to lose it.
 //!
@@ -186,11 +188,12 @@ async fn is_a_projection(source: &SqliteStore) -> bool {
 /// [`rift_core::RiftError::Storage`] if the source cannot be opened read-only,
 /// is not a projection, or an insert fails.
 pub(crate) async fn import_from(
-    store: &impl CanonicalStore,
-    path: &Path,
+    store: &(impl CanonicalStore + rift_store::Store),
+    selected: rift_store::HistoricalProjectionSnapshot,
     dry_run: bool,
 ) -> Result<Vec<TableCount>> {
-    let source = SqliteStore::open_read_only(path)?;
+    selected.refuse_live_destination(Path::new(store.descriptor().path()))?;
+    let source = SqliteStore::open_historical_snapshot(selected)?;
     if !is_a_projection(&source).await {
         return Err(rift_core::RiftError::storage(
             "the source is not a capture projection (no `session` table) — refusing to \
@@ -419,6 +422,9 @@ pub(crate) fn cmd_backfill(root: &Path, args: &crate::cli::BackfillArgs) -> Resu
             serde_json::json!({ "error": "unborn_head" }),
         ));
     };
+    let selected_capture = select_family_source(root, args.from.as_deref())?;
+    let selected_recall = select_family_source(root, args.recall_from.as_deref())?;
+
     let reader = rift_git::GixBlobReader::open(&repo.work_tree)?;
     let store =
         rift_store::open_capture_projection(crate::hooks::projection_db_at(&repo.work_tree)?)?;
@@ -428,12 +434,12 @@ pub(crate) fn cmd_backfill(root: &Path, args: &crate::cli::BackfillArgs) -> Resu
 
     let report = rt.block_on(async {
         let (commits, files) = derive_from_history(&reader, &store, &head, args.dry_run).await?;
-        let imported = match &args.from {
-            Some(p) => import_from(&store, Path::new(p), args.dry_run).await?,
+        let imported = match selected_capture {
+            Some(selected) => import_from(&store, selected, args.dry_run).await?,
             None => Vec::new(),
         };
-        let recalled = match &args.recall_from {
-            Some(p) => recall_from(root, Path::new(p), args.dry_run).await?,
+        let recalled = match selected_recall {
+            Some(selected) => recall_from(root, selected, args.dry_run).await?,
             None => Vec::new(),
         };
         Ok::<_, rift_core::RiftError>(BackfillReport {
@@ -471,7 +477,24 @@ pub(crate) fn cmd_backfill(root: &Path, args: &crate::cli::BackfillArgs) -> Resu
 /// # Errors
 /// [`rift_core::RiftError`] when the family cannot be resolved, the source is
 /// refused, or a write fails.
-async fn recall_from(root: &Path, source: &Path, dry_run: bool) -> Result<Vec<TableCount>> {
+fn select_family_source(
+    root: &Path,
+    path: Option<&str>,
+) -> Result<Option<rift_store::HistoricalProjectionSnapshot>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let selected = rift_store::HistoricalProjectionSnapshot::user_selected(path)?;
+    selected.refuse_live_destination(&crate::family::projection_db(root)?)?;
+    selected.refuse_live_destination(&crate::family::recall_db(root)?)?;
+    Ok(Some(selected))
+}
+
+async fn recall_from(
+    root: &Path,
+    source: rift_store::HistoricalProjectionSnapshot,
+    dry_run: bool,
+) -> Result<Vec<TableCount>> {
     if dry_run {
         return recall::count_recall_rows(source).await;
     }
@@ -482,6 +505,113 @@ async fn recall_from(root: &Path, source: &Path, dry_run: bool) -> Result<Vec<Ta
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn both_cli_import_options_refuse_both_live_family_identities_including_dry_run() {
+        let checkout = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["commit", "--quiet", "--allow-empty", "-m", "fixture"],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture-id",
+                    "-c",
+                    "core.hooksPath=/dev/null"
+                ])
+                .args(args)
+                .env("GIT_AUTHOR_DATE", "2026-10-01T12:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2026-10-01T12:00:00Z")
+                .current_dir(checkout.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        for live in [
+            crate::family::projection_db(checkout.path()).unwrap(),
+            crate::family::recall_db(checkout.path()).unwrap(),
+        ] {
+            std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+            std::fs::write(&live, b"live bytes").unwrap();
+            let alias = live.with_extension("alias");
+            std::fs::hard_link(&live, &alias).unwrap();
+            for selected in [&live, &alias] {
+                for dry_run in [false, true] {
+                    for recall in [false, true] {
+                        let source = Some(selected.display().to_string());
+                        let args = crate::cli::BackfillArgs {
+                            from: (!recall).then(|| source.clone()).flatten(),
+                            recall_from: recall.then(|| source.clone()).flatten(),
+                            dry_run,
+                        };
+                        let error = cmd_backfill(checkout.path(), &args).unwrap_err();
+                        assert!(
+                            error.to_string().contains("aliases a live projection"),
+                            "{error}"
+                        );
+                        assert_eq!(std::fs::read(&live).unwrap(), b"live bytes");
+                    }
+                }
+            }
+        }
+    }
+    fn historical_source(
+        path: &Path,
+        destination: &Path,
+    ) -> Result<rift_store::HistoricalProjectionSnapshot> {
+        let selected = rift_store::HistoricalProjectionSnapshot::user_selected(path)?;
+        selected.refuse_live_destination(destination)?;
+        Ok(selected)
+    }
+
+    async fn import_from(
+        store: &SqliteStore,
+        path: &Path,
+        dry_run: bool,
+    ) -> Result<Vec<TableCount>> {
+        let selected = rift_store::HistoricalProjectionSnapshot::user_selected(path)?;
+        super::import_from(store, selected, dry_run).await
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn historical_sources_refuse_canonical_symlink_parent_and_hardlink_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("live");
+        std::fs::create_dir(&parent).unwrap();
+        let destination = parent.join("projection.db");
+        drop(rift_store::SqliteStore::open(&destination).unwrap());
+        let hardlink = dir.path().join("hardlink.db");
+        std::fs::hard_link(&destination, &hardlink).unwrap();
+        let symlink = dir.path().join("symlink.db");
+        let parent_alias = dir.path().join("parent-alias");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&destination, &symlink).unwrap();
+            std::os::unix::fs::symlink(&parent, &parent_alias).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(&destination, &symlink)
+                .expect("Windows alias regression requires Developer Mode or symlink privilege");
+            std::os::windows::fs::symlink_dir(&parent, &parent_alias)
+                .expect("Windows alias regression requires Developer Mode or symlink privilege");
+        }
+        for source in [
+            &destination,
+            &hardlink,
+            &symlink,
+            &parent_alias.join("projection.db"),
+        ] {
+            assert!(historical_source(source, &destination).is_err());
+        }
+        let distinct = dir.path().join("selected-history.db");
+        std::fs::write(&distinct, b"historical").unwrap();
+        assert!(historical_source(&distinct, &destination).is_ok());
+        assert_eq!(std::fs::read(&distinct).unwrap(), b"historical");
+    }
     use super::*;
     use rift_git::{MemoryBlobReader, TreeEntry};
 

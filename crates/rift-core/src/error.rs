@@ -31,6 +31,15 @@ pub enum RiftError {
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// A projection lease excludes replacement or a concurrent store open.
+    #[error("projection busy: {projection}: {reason}")]
+    ProjectionBusy {
+        /// The guarded projection identifier.
+        projection: String,
+        /// The content-free reason the lease cannot be acquired.
+        reason: String,
+    },
+
     /// A substrate-reader error (reading checkpoint/shadow refs or objects from
     /// the canonical Git record). Carries only a content-free reason — never
     /// repository object bytes or transcript fragments.
@@ -147,6 +156,10 @@ mod tests {
             RiftError::Validity(reason.into()),
             RiftError::PolicyDenied(reason.into()),
             RiftError::Storage(reason.into()),
+            RiftError::ProjectionBusy {
+                projection: "projection".into(),
+                reason: reason.into(),
+            },
             RiftError::Substrate(reason.into()),
             RiftError::Migration(reason.into()),
             RiftError::Config(reason.into()),

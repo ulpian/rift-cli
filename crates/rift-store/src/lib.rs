@@ -45,6 +45,7 @@ pub mod keychain;
 pub mod keychain_os;
 pub mod migrate;
 pub mod paths;
+mod projection_lock;
 pub mod rebuild;
 pub mod schema;
 pub mod sensitive;
@@ -114,8 +115,9 @@ pub use keychain::{KeychainBackend, KeyringKeyStore, MemoryKeychain};
 pub use keychain_os::OsKeychain;
 pub use migrate::{
     apply_migrations, apply_migrations_on, canopy_canonical_schema_sql, canopy_migrations,
-    default_migrations, open_capture_projection, open_migrated, recall_canonical_schema_sql,
-    recall_migrations, Migration, MigrationOutcome,
+    default_migrations, open_capture_projection, open_existing_migrated, open_migrated,
+    open_replacement_migrated, recall_canonical_schema_sql, recall_migrations, Migration,
+    MigrationOutcome,
 };
 pub use paths::{
     canopy_ui_db_from, canopy_ui_db_under, capture_projection_db_for_repo, capture_repo_id,
@@ -125,6 +127,7 @@ pub use paths::{
     recall_db_for_family, recall_db_for_family_under, recall_db_for_repo, recall_db_from,
     recall_db_under, recall_repo_id, resolve_cache_root,
 };
+pub use projection_lock::{HistoricalProjectionSnapshot, ProjectionReplacementGuard};
 pub use rebuild::rebuild;
 pub use schema::{
     any_registry_table, canonical_table, canonical_tables, canopy_canonical_table,

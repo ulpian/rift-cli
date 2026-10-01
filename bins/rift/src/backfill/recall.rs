@@ -21,8 +21,10 @@
 //! on its key, so a row the target already holds is no new row and a second
 //! run inserts nothing.
 //!
-//! **The source is never written.** It is opened with
-//! [`SqliteStore::open_read_only`], as the capture importer opens its source.
+//! **Source canonical rows are never written.** The selected historical
+//! source uses [`SqliteStore::open_historical_snapshot`] with READ_ONLY and
+//! one pinned read transaction. WAL pages are included; SQLite may manage
+//! WAL/SHM files. Live destination aliases are refused before SQLite opens.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -53,8 +55,10 @@ type Attributions = BTreeMap<String, ServeAttribution>;
 /// # Errors
 /// [`RiftError::Storage`] when the source cannot be opened read-only or is not
 /// a recall projection.
-pub(super) async fn count_recall_rows(path: &Path) -> Result<Vec<TableCount>> {
-    let (source, present) = open_recall_source(path).await?;
+pub(super) async fn count_recall_rows(
+    selected: rift_store::HistoricalProjectionSnapshot,
+) -> Result<Vec<TableCount>> {
+    let (source, present) = open_recall_source(selected).await?;
     let read = source_counts(&source, &present).await?;
     Ok(RECALL_TABLES
         .iter()
@@ -74,10 +78,11 @@ pub(super) async fn count_recall_rows(path: &Path) -> Result<Vec<TableCount>> {
 /// [`RiftError::Storage`] when the source cannot be opened read-only, is not a
 /// recall projection, or a write fails.
 pub(super) async fn import_recall_from(
-    store: &impl CanonicalStore,
-    path: &Path,
+    store: &(impl CanonicalStore + rift_store::Store),
+    selected: rift_store::HistoricalProjectionSnapshot,
 ) -> Result<Vec<TableCount>> {
-    let (source, present) = open_recall_source(path).await?;
+    selected.refuse_live_destination(Path::new(store.descriptor().path()))?;
+    let (source, present) = open_recall_source(selected).await?;
     let read = source_counts(&source, &present).await?;
     let before = target_counts(store).await?;
     let attributions = source_attributions(&source, &present).await?;
@@ -108,8 +113,10 @@ pub(super) async fn import_recall_from(
 /// relations, so each one is read only where the source has it; the two
 /// tables every recall projection has had from its first version are what
 /// make it one.
-async fn open_recall_source(path: &Path) -> Result<(SqliteStore, BTreeSet<String>)> {
-    let source = SqliteStore::open_read_only(path)?;
+async fn open_recall_source(
+    selected: rift_store::HistoricalProjectionSnapshot,
+) -> Result<(SqliteStore, BTreeSet<String>)> {
+    let source = SqliteStore::open_historical_snapshot(selected)?;
     let present: BTreeSet<String> = source
         .query("SELECT name FROM sqlite_master WHERE type = 'table'", &[])
         .await
@@ -292,6 +299,84 @@ async fn replay_grants(store: &impl CanonicalStore, source: &SqliteStore) -> Res
 
 #[cfg(test)]
 mod tests {
+    async fn import_recall_from(store: &SqliteStore, path: &Path) -> Result<Vec<TableCount>> {
+        let selected = rift_store::HistoricalProjectionSnapshot::user_selected(path)?;
+        super::import_recall_from(store, selected).await
+    }
+
+    async fn count_recall_rows(path: &Path) -> Result<Vec<TableCount>> {
+        let selected = rift_store::HistoricalProjectionSnapshot::user_selected(path)?;
+        super::count_recall_rows(selected).await
+    }
+
+    #[tokio::test]
+    async fn a_markerless_preserved_wal_triple_imports_its_wal_only_serves() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.db");
+        let writer = open_migrated(&live, &recall_migrations()).unwrap();
+        let conn = rift_store::Store::conn(&writer).await.unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
+            .await
+            .unwrap();
+        let event = MemdEvent::GrepCapped {
+            handle: "grep:matches=7".into(),
+        };
+        book(&writer, &event, "wal-call", AT, None).await;
+        let preserved = dir.path().join("selected-history.db");
+        for suffix in ["", "-wal", "-shm"] {
+            std::fs::copy(
+                format!("{}{suffix}", live.display()),
+                format!("{}{suffix}", preserved.display()),
+            )
+            .unwrap();
+        }
+        assert!(!dir.path().join("selected-history.db.lock").exists());
+        let target = recall_target(dir.path());
+        let imported = import_recall_from(&target, &preserved).await.unwrap();
+        assert_eq!(
+            imported
+                .iter()
+                .find(|count| count.table == "memd_audit_event")
+                .unwrap()
+                .inserted,
+            1
+        );
+        assert_eq!(
+            imported
+                .iter()
+                .find(|count| count.table == "serve_call_event")
+                .unwrap()
+                .inserted,
+            1
+        );
+        assert!(!dir.path().join("selected-history.db.lock").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::remove_file(format!("{}-shm", preserved.display())).unwrap();
+            for suffix in ["", "-wal"] {
+                std::fs::set_permissions(
+                    format!("{}{suffix}", preserved.display()),
+                    std::fs::Permissions::from_mode(0o444),
+                )
+                .unwrap();
+            }
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            let result = count_recall_rows(&preserved).await;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            match result {
+                Ok(counts) => assert_eq!(
+                    counts
+                        .iter()
+                        .find(|count| count.table == "memd_audit_event")
+                        .unwrap()
+                        .read,
+                    1
+                ),
+                Err(error) => assert!(!error.to_string().is_empty()),
+            }
+        }
+    }
     use rift_recall_events::{MemdEvent, ServeChannel};
     use rift_recall_ledger::grants::CROSS_BRANCH_GRANT_TAG;
     use rift_store::{open_migrated, recall_migrations};
