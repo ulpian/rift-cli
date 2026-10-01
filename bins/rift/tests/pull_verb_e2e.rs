@@ -26,11 +26,11 @@ use common::rift_cmd;
 /// Run `git` in `dir` with a fixed identity and no ambient configuration.
 ///
 /// `home` is threaded through because git runs Rift's own installed hooks, and
-/// they must land in the same isolated cache — and drain inline. Without
-/// `RIFT_CAPTURE_SYNC` here, git's post-commit hook detaches a worker that
-/// holds the capture queue's lock while the test's own explicit, inline
-/// post-commit finds nothing to drain: the read facts then reach the shard
-/// after the assertions, or not at all. That race is what this argument
+/// they must land in the same isolated cache and project registry — and drain
+/// inline. Without `RIFT_CAPTURE_SYNC` here, git's post-commit hook detaches a
+/// worker that holds the capture queue's lock while the test's own explicit,
+/// inline post-commit finds nothing to drain: the read facts then reach the
+/// shard after the assertions, or not at all. That race is what this argument
 /// removes.
 fn git(dir: &Path, home: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -39,6 +39,7 @@ fn git(dir: &Path, home: &Path, args: &[&str]) -> String {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", dir.join("absent-gitconfig"))
         .env("RIFT_CACHE_DIR", home.join("cache"))
+        .env("RIFT_CONFIG_DIR", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("RIFT_NO_KEYCHAIN", "1")
         .env("RIFT_CAPTURE_SYNC", "1")
@@ -68,6 +69,7 @@ fn rift(repo: &Path, home: &Path, args: &[&str], stdin: &str) -> (i32, String) {
     let mut child = rift_cmd(repo)
         .args(args)
         .env("RIFT_CACHE_DIR", home.join("cache"))
+        .env("RIFT_CONFIG_DIR", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("RIFT_NO_KEYCHAIN", "1")
         .env("RIFT_CAPTURE_SYNC", "1")

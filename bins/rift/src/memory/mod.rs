@@ -55,7 +55,7 @@ pub(crate) fn run(cmd: &MemoryCmd, root: &Path) -> Result<Outcome> {
 
 async fn dispatch(cmd: &MemoryCmd, repo: &Path) -> Result<Outcome> {
     let family = crate::family::resolve_at(repo)?;
-    let db = rift_store::recall_db_for_family(&family);
+    let db = crate::family::recall_db_of(&family);
     let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
     let sub = GixSubstrate::open(repo)?;
 

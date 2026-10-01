@@ -9,7 +9,7 @@
 //! for headless machines (the salt is an unlinkability nonce, not a key); a
 //! zero salt as the last resort (ids remain hashed, just unsalted).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rift_core::identity::{IdentitySource as _, MachineId};
 use rift_core::{binding_evidence, identity_snapshot, Timestamp};
@@ -62,8 +62,7 @@ pub(crate) fn install_salt() -> [u8; 32] {
             return salt;
         }
     }
-    let root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
-    salt_from_file(&root).unwrap_or([0u8; 32])
+    salt_from_file(&crate::family::cache_root()).unwrap_or([0u8; 32])
 }
 
 /// The machine-id cache file under the machine-global cache root.
@@ -83,11 +82,6 @@ struct MachineIdCache {
     schema: u32,
     salt_tag: String,
     machine_id: String,
-}
-
-/// The machine-global cache root, from the environment.
-fn cache_root() -> PathBuf {
-    rift_store::resolve_cache_root(|k| std::env::var(k).ok())
 }
 
 /// The salted machine id for this install: from the cache under `root` when
@@ -166,7 +160,7 @@ fn write_machine_id_cache(root: &Path, path: &Path, tag: &str, id: MachineId) {
 /// Returns whether an id is cached afterwards.
 pub(crate) fn warm_machine_id(salt: &[u8; 32]) -> bool {
     let probe = GitConfigIdentity::new(".", *salt);
-    cached_machine_id(&cache_root(), salt, || probe.machine_id()).is_some()
+    cached_machine_id(&crate::family::cache_root(), salt, || probe.machine_id()).is_some()
 }
 
 /// Observe the local identity for `work_tree` and bind every projection
@@ -195,7 +189,7 @@ pub(crate) async fn bind_new_sessions(
     let src = GitConfigIdentity::new(work_tree, salt);
     // The machine id from the cache when it has one, else derived by this
     // very source (its fingerprint read, memoized) and cached for the next.
-    let src = match cached_machine_id(&cache_root(), &salt, || src.machine_id()) {
+    let src = match cached_machine_id(&crate::family::cache_root(), &salt, || src.machine_id()) {
         Some(id) => src.with_machine_id(id),
         None => src,
     };

@@ -449,9 +449,10 @@ pub(crate) fn orphan_projections(repo: &Path) -> Vec<Orphan> {
     let mut found = Vec::new();
     let mut seen: Vec<PathBuf> = Vec::new();
     for member in rift_git::family_members(&paths) {
-        let Ok(db) = rift_store::capture_projection_db_for_repo(&member.work_tree) else {
+        let Ok(id) = rift_store::capture_repo_id(&member.work_tree) else {
             continue;
         };
+        let db = rift_store::projection_db_under(&crate::family::cache_root(), &id);
         if db == family_db || seen.contains(&db) || !db.exists() {
             continue;
         }

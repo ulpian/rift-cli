@@ -569,7 +569,7 @@ pub(crate) const STALE_REWRITE_TOML: &str =
 pub(crate) fn level_projection(work_tree: &Path) -> Result<()> {
     let family = crate::family::resolve_at(work_tree)?;
     let repo_id = family.family_id.clone();
-    let store = rift_store::open_capture_projection(rift_store::projection_db_for_family(&family))?;
+    let store = rift_store::open_capture_projection(crate::family::projection_db_of(&family))?;
     let reader = rift_recall_substrate::GixSubstrate::open(work_tree)?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
