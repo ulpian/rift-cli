@@ -266,7 +266,10 @@ pub(super) fn doctor_stale_rewrite_toml(repo: &Path) -> (String, serde_json::Val
 /// viewer tier, else through the checksum-locked migration engine. ONE
 /// projection, the family's — resolved through the family manifest, so every
 /// member of a repository opens the same file and there is nothing to union.
-fn doctor_store(repo: &Path, strict_read_only: bool) -> rift_core::Result<rift_store::SqliteStore> {
+pub(super) fn doctor_store(
+    repo: &Path,
+    strict_read_only: bool,
+) -> rift_core::Result<rift_store::SqliteStore> {
     if strict_read_only {
         return open_projection_read_only(repo);
     }

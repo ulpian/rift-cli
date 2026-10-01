@@ -124,25 +124,26 @@ date, with a deterministic tie-break — so "what did this call cost, according 
 what we knew then" stays answerable forever, and a correction appends a
 superseding row rather than rewriting what it corrects.
 
-The catalog ships as two appends: the first seeded the models the first-party
-adapters reported, the second the models the toolchain actually runs, because a
-measurement found **zero** overlap between the sets. Without it, price
-resolution returned nothing for every live model and the savings estimate
-correctly rendered nothing.
-
+The catalog seeds the models the adapters report and the models observed in captured calls.
 A slice of the seed, in dollars per million tokens:
 
-| Model | Uncached in | Cached in | Cache write | Output |
+| Model | Uncached in | Cached in | Cache write (5 min) | Output |
 |---|---|---|---|---|
-| An opus-tier model | $5.00 | $0.50 | $6.25 | $25.00 |
-| A fable-tier model | $10.00 | $1.00 | $12.50 | $50.00 |
-| A sonnet-tier model (introductory) | $2.00 | $0.20 | $2.50 | $10.00 |
-| The same model (standard) | $3.00 | $0.30 | $3.75 | $15.00 |
+| `claude-opus-5` | $5.00 | $0.50 | $6.25 | $25.00 |
+| `claude-fable-5-1` | $10.00 | $0.25 | $12.50 | $50.00 |
+| `claude-sonnet-5` | $2.00 | $0.20 | $2.50 | $10.00 |
 
-The last two rows are the valid-time axis working: one model launched at an
-introductory rate that expired on a known date, and both rows sit in the table
-with adjoining ranges, so a call before the changeover prices at $2.00 and one
-after at $3.00 — no migration, no edit, no branch in code.
+Every class is transcribed from the provider's page, rather than derived from a multiplier: `claude-fable-5-1` reads its cache at a fortieth of its input rate, where the other two models use a tenth.
+The one-hour cache-write class is outside this seed because the usage path records no one-hour writes.
+
+The Sonnet rows show both time axes working.
+Its introductory and standard epochs have adjoining valid-time ranges.
+The original standard rows recorded $3.00 / $15.00; four later rows correct them to $2.00 / $10.00 for the same range, each naming the row it supersedes.
+Resolution prefers the later `recorded_at`, so the current belief prices both epochs at $2.00 / $10.00, while a belief held before the correction still prices the standard epoch at $3.00 / $15.00.
+Nothing is updated.
+
+A model the page does not list gets no row; `rift doctor` names it instead (below).
+Neither `claude-opus-5-5` nor `Gemini 3.7 Flash (Low)` has a seeded price.
 
 Two rules keep the catalog honest. **All four classes or nothing**: resolution
 returns a result only when every class has a row, so a partially-priced model
@@ -153,6 +154,7 @@ pricing at the time of writing, with the effective date recorded.
 > Tip: an unfamiliar model showing tokens but no dollars is not a bug — nobody
 > seeded a price for it, and the breakdown modal
 > ([§8.10](#810-the-savings-chip-in-canopy)) says how many tokens are affected.
+> `rift doctor`'s `prices` line names every such model and its call count.
 
 ---
 
@@ -579,6 +581,18 @@ recorded price; a positive saving below a cent as `~<$0.01`, never `$0.00`; no
 amount at all for tokens whose model has no seeded price; thousands separators;
 and no animation between frames — the figure is copied untweened from the target
 frame, because a cost figure that tweens reads as if it were changing.
+
+**Naming what the figure leaves out.** A model with no seeded price adds usage and no dollars, so a dollar figure over a window that used one silently reads low.
+`rift doctor` says so under its `prices` heading: how many models the captured calls named, then one line per model the catalog cannot price now, with its call count, in a stable order:
+
+```text
+  prices:         3 model(s) observed, 2 without a price
+    Gemini 3.7 Flash (Low): 12 call(s) — their usage is recorded, and no cost is derived until the catalog prices this model
+    claude-opus-5-5: 8 call(s) — their usage is recorded, and no cost is derived until the catalog prices this model
+```
+
+When every observed model prices, the heading says so and nothing follows it.
+The line reads the projection and writes nothing; the remedy is a seeded price, appended like any other, never a guessed one.
 
 ---
 

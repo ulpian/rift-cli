@@ -1,5 +1,5 @@
 //! The capture projection's migration set (`projection.db`): the price seeds,
-//! the fifteen checksum-locked SQL builders and the identity backfill that
+//! the sixteen checksum-locked SQL builders and the identity backfill that
 //! runs on open.
 //!
 //! A separate module because every builder here is frozen once shipped: the
@@ -77,92 +77,123 @@ INSERT INTO price_table (price_id, model, token_class, unit_price_micros, curren
   ('m515seed-claude-sonnet-5-output-std',           'claude-sonnet-5', 'output',         15000000, 'USD', 1788220800000, NULL, 1784505600000, NULL, 1);
 ";
 
+/// The observed-model price append: the models a projection was found
+/// calling with no price on file, and a correction to `claude-sonnet-5`.
+///
+/// Provenance: https://platform.claude.com/docs/en/about-claude/pricing,
+/// the official per-MTok pricing reference cached 2026-06-24 with the
+/// August launch tables. The rows were accepted 2026-09-17; that acceptance
+/// date is the fixed `recorded_at` (2026-09-17T00:00:00Z) for migration
+/// byte-stability, separate from the source reference's date.
+///
+/// `claude-fable-5-1` reads its cache at 0.025× input, not the 0.1× every
+/// other seeded model reads at: the page says so, and deriving it from the
+/// multiplier would have priced reads four times too high. `claude-opus-5`
+/// follows the usual 0.1× read and 1.25× five-minute write.
+///
+/// `claude-sonnet-5`'s standard epoch was transcribed at $3 / $15; the page
+/// says $2 / $10. The four rows here supersede the standard-epoch rows by
+/// name (`supersedes_id`) with the same `valid_from` and a later
+/// `recorded_at`, which is what `effective_class_price` orders on: a belief
+/// held from this date on prices September at $2 / $10, and one held before
+/// it still answers $3 / $15. The introductory epoch is untouched.
+///
+/// Not here: the one-hour cache-write class. No usage path records a
+/// one-hour write, and a row under a class name nothing reads would be a
+/// guess at that name. Not here either: models the page does not list,
+/// which `rift doctor` names instead; no price is invented for them.
+const PRICE_SEED_OBSERVED_SQL: &str = "\
+INSERT INTO price_table (price_id, model, token_class, unit_price_micros, currency, valid_from, valid_to, recorded_at, supersedes_id, schema_version) VALUES
+  ('v16seed-claude-fable-5-1-uncached_input',     'claude-fable-5-1', 'uncached_input', 10000000, 'USD', 0, NULL, 1789603200000, NULL, 1),
+  ('v16seed-claude-fable-5-1-cached_input',       'claude-fable-5-1', 'cached_input',     250000, 'USD', 0, NULL, 1789603200000, NULL, 1),
+  ('v16seed-claude-fable-5-1-cache_creation',     'claude-fable-5-1', 'cache_creation', 12500000, 'USD', 0, NULL, 1789603200000, NULL, 1),
+  ('v16seed-claude-fable-5-1-output',             'claude-fable-5-1', 'output',         50000000, 'USD', 0, NULL, 1789603200000, NULL, 1),
+  ('v16seed-claude-opus-5-uncached_input',        'claude-opus-5',    'uncached_input',  5000000, 'USD', 0, NULL, 1789603200000, NULL, 1),
+  ('v16seed-claude-opus-5-cached_input',          'claude-opus-5',    'cached_input',     500000, 'USD', 0, NULL, 1789603200000, NULL, 1),
+  ('v16seed-claude-opus-5-cache_creation',        'claude-opus-5',    'cache_creation',  6250000, 'USD', 0, NULL, 1789603200000, NULL, 1),
+  ('v16seed-claude-opus-5-output',                'claude-opus-5',    'output',         25000000, 'USD', 0, NULL, 1789603200000, NULL, 1),
+  ('v16seed-claude-sonnet-5-uncached_input-std',  'claude-sonnet-5',  'uncached_input',  2000000, 'USD', 1788220800000, NULL, 1789603200000, 'm515seed-claude-sonnet-5-uncached_input-std', 1),
+  ('v16seed-claude-sonnet-5-cached_input-std',    'claude-sonnet-5',  'cached_input',     200000, 'USD', 1788220800000, NULL, 1789603200000, 'm515seed-claude-sonnet-5-cached_input-std', 1),
+  ('v16seed-claude-sonnet-5-cache_creation-std',  'claude-sonnet-5',  'cache_creation',  2500000, 'USD', 1788220800000, NULL, 1789603200000, 'm515seed-claude-sonnet-5-cache_creation-std', 1),
+  ('v16seed-claude-sonnet-5-output-std',          'claude-sonnet-5',  'output',         10000000, 'USD', 1788220800000, NULL, 1789603200000, 'm515seed-claude-sonnet-5-output-std', 1);
+";
+
 /// The default migration set: meta tables, the canonical schema, the identity
 /// relations, the turn-boundary relations (+ price seed), the projection-meta
 /// table (the rebuild epoch), read-token estimates, the System
 /// identity/context relations, the current-model price append, the
 /// checkpoint↔commit and verification-witness linkages, the v13
-/// `imported_checkpoint` durable-claim relation, and the v14
-/// worktree-provenance relations.
+/// `imported_checkpoint` durable-claim relation, the v14
+/// worktree-provenance relations, the v15 tool-result tokens and the v16
+/// observed-model price append.
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
-    vec![
-        Migration {
-            version: 1,
-            name: "init_meta",
-            sql: META_SQL.to_string(),
-        },
-        Migration {
-            version: 2,
-            name: "canonical_core",
-            sql: canonical_schema_sql(),
-        },
-        Migration {
-            version: 3,
-            name: "capture_identity",
-            sql: capture_identity_schema_sql(),
-        },
-        Migration {
-            version: 4,
-            name: "capture_turn_boundary",
-            sql: capture_turn_boundary_schema_sql(),
-        },
-        Migration {
-            version: 5,
-            name: "capture_projection_meta",
-            sql: capture_projection_meta_schema_sql(),
-        },
-        Migration {
-            version: 6,
-            name: "capture_read_tokens",
-            sql: capture_read_tokens_schema_sql(),
-        },
-        Migration {
-            version: 7,
-            name: "capture_system_truth",
-            sql: capture_system_schema_sql(),
-        },
-        Migration {
-            version: 8,
-            name: "capture_price_seed_current",
-            sql: capture_price_seed_current_sql(),
-        },
-        Migration {
-            version: 9,
-            name: "capture_model_observation",
-            sql: capture_model_observation_schema_sql(),
-        },
-        Migration {
-            version: 10,
-            name: "capture_hook_event_identity_index",
-            sql: capture_hook_event_identity_index_sql(),
-        },
-        Migration {
-            version: 11,
-            name: "capture_checkpoint_commit",
-            sql: capture_checkpoint_commit_schema_sql(),
-        },
-        Migration {
-            version: 12,
-            name: "capture_verification_witness",
-            sql: capture_verification_witness_schema_sql(),
-        },
-        Migration {
-            version: 13,
-            name: "capture_imported_checkpoint",
-            sql: capture_imported_checkpoint_schema_sql(),
-        },
-        Migration {
-            version: 14,
-            name: "capture_worktree_provenance",
-            sql: capture_worktree_schema_sql(),
-        },
-        Migration {
-            version: 15,
-            name: "capture_tool_result_tokens",
-            sql: capture_tool_result_schema_sql(),
-        },
-    ]
+    // One row per version, in order; a new version is a new last row.
+    let set: [(u32, &'static str, String); 16] = [
+        (1, "init_meta", META_SQL.to_string()),
+        (2, "canonical_core", canonical_schema_sql()),
+        (3, "capture_identity", capture_identity_schema_sql()),
+        (
+            4,
+            "capture_turn_boundary",
+            capture_turn_boundary_schema_sql(),
+        ),
+        (
+            5,
+            "capture_projection_meta",
+            capture_projection_meta_schema_sql(),
+        ),
+        (6, "capture_read_tokens", capture_read_tokens_schema_sql()),
+        (7, "capture_system_truth", capture_system_schema_sql()),
+        (
+            8,
+            "capture_price_seed_current",
+            capture_price_seed_current_sql(),
+        ),
+        (
+            9,
+            "capture_model_observation",
+            capture_model_observation_schema_sql(),
+        ),
+        (
+            10,
+            "capture_hook_event_identity_index",
+            capture_hook_event_identity_index_sql(),
+        ),
+        (
+            11,
+            "capture_checkpoint_commit",
+            capture_checkpoint_commit_schema_sql(),
+        ),
+        (
+            12,
+            "capture_verification_witness",
+            capture_verification_witness_schema_sql(),
+        ),
+        (
+            13,
+            "capture_imported_checkpoint",
+            capture_imported_checkpoint_schema_sql(),
+        ),
+        (
+            14,
+            "capture_worktree_provenance",
+            capture_worktree_schema_sql(),
+        ),
+        (
+            15,
+            "capture_tool_result_tokens",
+            capture_tool_result_schema_sql(),
+        ),
+        (
+            16,
+            "capture_price_seed_observed",
+            capture_price_seed_observed_sql(),
+        ),
+    ];
+    set.into_iter()
+        .map(|(version, name, sql)| Migration { version, name, sql })
+        .collect()
 }
 
 /// Build the canonical-schema migration SQL from the **frozen v1 prefix** of
@@ -390,6 +421,14 @@ pub(super) fn backfill_capture_session_identities(store: &SqliteStore) -> Result
     })
 }
 
+/// The v16 additive capture migration: the observed models' prices and the
+/// `claude-sonnet-5` correction (see `PRICE_SEED_OBSERVED_SQL`). Insert-only,
+/// like v8: no DDL, no existing row touched.
+#[must_use]
+fn capture_price_seed_observed_sql() -> String {
+    PRICE_SEED_OBSERVED_SQL.to_string()
+}
+
 /// Render one additive capture migration from a registry slice: DDL + guard
 /// triggers + the per-table `_schema_version` seed rows.
 fn capture_slice_sql(tables: &'static [crate::schema::CanonicalTable]) -> String {
@@ -473,6 +512,101 @@ mod tests {
         assert_eq!(standard.output, 15_000_000);
     }
 
+    /// The observed models the published page prices resolve at its rates on
+    /// a fresh store, across all four classes, from the start of valid time.
+    #[tokio::test]
+    async fn the_observed_fable_and_opus_models_price_at_the_published_rates() {
+        let s = store();
+        apply_migrations(&s, &default_migrations()).unwrap();
+        let now = 1_790_812_800_000_i64; // 2026-10-01T00:00:00Z
+
+        let fable = crate::effective_prices(&s, "claude-fable-5-1", 0, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fable.uncached_input, 10_000_000);
+        assert_eq!(fable.cached_input, 250_000); // 0.025× input, not the usual 0.1×
+        assert_eq!(fable.cache_creation, 12_500_000);
+        assert_eq!(fable.output, 50_000_000);
+
+        let opus = crate::effective_prices(&s, "claude-opus-5", now, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(opus.uncached_input, 5_000_000);
+        assert_eq!(opus.cached_input, 500_000);
+        assert_eq!(opus.cache_creation, 6_250_000);
+        assert_eq!(opus.output, 25_000_000);
+
+        for unpriced in ["claude-opus-5-5", "Gemini 3.7 Flash (Low)"] {
+            assert!(
+                crate::effective_prices(&s, unpriced, now, now)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{unpriced} has no published row, so none is invented"
+            );
+        }
+    }
+
+    /// The corrected standard rate for `claude-sonnet-5` wins by transaction
+    /// time: a belief held after the correction prices September at $2 / $10,
+    /// the belief held before it still answers $3 / $15, and the introductory
+    /// epoch is untouched.
+    #[tokio::test]
+    async fn the_sonnet_standard_rate_is_superseded_by_a_later_belief() {
+        let s = store();
+        apply_migrations(&s, &default_migrations()).unwrap();
+        let changeover = 1_788_220_800_000_i64; // 2026-09-01T00:00:00Z
+        let now = 1_790_812_800_000_i64; // 2026-10-01T00:00:00Z
+        let before_correction = 1_784_505_600_000_i64; // 2026-07-20T00:00:00Z
+
+        let corrected = crate::effective_prices(&s, "claude-sonnet-5", changeover + 1, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(corrected.uncached_input, 2_000_000);
+        assert_eq!(corrected.cached_input, 200_000);
+        assert_eq!(corrected.cache_creation, 2_500_000);
+        assert_eq!(corrected.output, 10_000_000);
+
+        let intro = crate::effective_prices(&s, "claude-sonnet-5", changeover - 1, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(intro.uncached_input, 2_000_000);
+        assert_eq!(intro.output, 10_000_000);
+
+        let earlier_belief =
+            crate::effective_prices(&s, "claude-sonnet-5", changeover + 1, before_correction)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(earlier_belief.uncached_input, 3_000_000);
+        assert_eq!(earlier_belief.output, 15_000_000);
+    }
+
+    /// Each superseding row names the standard-epoch row it corrects, so the
+    /// correction is traceable in the table and not only by its timestamp.
+    #[tokio::test]
+    async fn every_sonnet_correction_names_the_row_it_supersedes() {
+        use crate::Value;
+        let s = store();
+        apply_migrations(&s, &default_migrations()).unwrap();
+        for class in ["uncached_input", "cached_input", "cache_creation", "output"] {
+            let superseded = format!("m515seed-claude-sonnet-5-{class}-std");
+            let n = crate::CanonicalStore::query_opt_i64(
+                &s,
+                "SELECT COUNT(*) FROM price_table \
+                 WHERE model = 'claude-sonnet-5' AND token_class = ?1 AND supersedes_id = ?2",
+                &[Value::text(class.to_owned()), Value::text(superseded)],
+            )
+            .await
+            .unwrap();
+            assert_eq!(n, Some(1), "{class} carries one superseding row");
+        }
+    }
+
     /// The destructive-DDL CI gate, made explicit and order-independent: every
     /// migration in the **shipping** set must be additive. A future migration that
     /// sneaks a `DROP`/`RENAME` in fails here, not only when it happens to apply.
@@ -545,6 +679,12 @@ mod tests {
             checksum_hex(&capture_tool_result_schema_sql()),
             "b5c9899faeda319f768b8a8c3ed0deb52d1c65d07e645f57f05bbd98605582bc",
             "capture_tool_result_tokens (v15) migration SQL changed — frozen once shipped"
+        );
+        // v16, pinned from its FIRST commit, like v11 and v13 through v15.
+        assert_eq!(
+            checksum_hex(&capture_price_seed_observed_sql()),
+            "30fd2335439b59009c54ff1cf33f5f4b61f7e6ed7c639f5536388051cdffd85f",
+            "capture_price_seed_observed (v16) migration SQL changed — frozen once shipped"
         );
     }
 
