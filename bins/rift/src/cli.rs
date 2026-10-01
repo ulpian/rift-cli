@@ -130,8 +130,9 @@ pub(crate) enum Command {
     /// bridge). Idempotent: over a live projection it inserts nothing new.
     Rebuild,
     /// Put back the projection facts a rebuild cannot derive: the per-commit
-    /// diff facts (from git history) and, with `--from`, the session/cost rows
-    /// that only a set-aside projection still holds.
+    /// diff facts (from git history), with `--from` the session/cost rows that
+    /// only a set-aside projection still holds, and with `--recall-from` the
+    /// serves that only a set-aside recall projection still holds.
     Backfill(BackfillArgs),
     /// Read a pre-Rift capture tool's checkpoints out of this repository.
     Import(ImportArgs),
@@ -458,7 +459,7 @@ pub(crate) struct AgentArgs {
     pub(crate) agent: String,
 }
 
-/// `rift backfill [--from <projection>] [--dry-run]`.
+/// `rift backfill [--from <projection>] [--recall-from <recall projection>] [--dry-run]`.
 ///
 /// Its own verb rather than a flag on `rift rebuild`: rebuild walks the
 /// checkpoint branch and takes no arguments, while this walks git history and
@@ -470,6 +471,10 @@ pub(crate) struct BackfillArgs {
     /// it is never created, never migrated and never written.
     #[arg(long = "from", value_name = "PROJECTION")]
     pub(crate) from: Option<String>,
+    /// A recall projection `rift-memd rebuild` set aside, to read the serves
+    /// no checkpoint carries back from. Opened READ-ONLY, like `--from`.
+    #[arg(long = "recall-from", value_name = "RECALL_PROJECTION")]
+    pub(crate) recall_from: Option<String>,
     /// Report what would be written and write nothing.
     #[arg(long = "dry-run")]
     pub(crate) dry_run: bool,

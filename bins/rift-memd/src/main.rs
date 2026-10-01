@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 mod eval_cmd;
+mod set_aside;
 
 use clap::{Parser, Subcommand};
 use rift_core::{Result, RiftError, Timestamp};
@@ -52,7 +53,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Destroy and rebuild recall.db from git (a cold, idempotent ingest).
+    /// Set recall.db aside and rebuild it from git (a cold, idempotent ingest).
     Rebuild {
         /// Repository to read (defaults to the current directory).
         #[arg(long, default_value = ".")]
@@ -255,22 +256,27 @@ async fn metrics(repo: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Destroy recall.db and rebuild it from git (a cold ingest; idempotent by
+/// Set recall.db aside and rebuild it from git (a cold ingest; idempotent by
 /// content-addressed set-union, so this equals accumulated incremental ingests
 /// — the printed fingerprint is the byte-identical comparator that proves it).
+///
+/// The old projection is renamed, never deleted: the rows no checkpoint
+/// carries live only there, and `rift backfill --recall-from` reads them back.
 async fn rebuild(repo: &Path) -> Result<()> {
     // The FAMILY's recall projection: run from a linked worktree this rebuilds
     // the one store its members share, which is the whole point of the family model.
     let db = recall_db_path(repo)?;
-    // destroy the whole recall projection (it is NOT canonical — git is)
-    for suffix in ["", "-wal", "-shm"] {
-        let p = PathBuf::from(format!("{}{suffix}", db.display()));
-        let _ = std::fs::remove_file(&p);
-    }
+    // One reading of the clock per rebuild: it names the set-aside files and
+    // dates the outcome labels, so the two can never disagree.
+    let now = Timestamp::now();
+    let set_aside = set_aside::set_aside(&db, now)?;
     let store = open_recall_db(&db)?;
     let sub = GixSubstrate::open(repo)?;
-    let (report, _labels, _blobs) = ingest_all(&store, &sub, repo, Timestamp::now()).await?;
+    let (report, _labels, _blobs) = ingest_all(&store, &sub, repo, now).await?;
     let fingerprint = graph_doctor::rebuild_fingerprint(&store).await?;
+    if let Some(set_aside) = set_aside {
+        println!("set aside:      {}", set_aside.display());
+    }
     println!("rebuilt:        {}", db.display());
     println!("checkpoints:    {}", report.checkpoints);
     println!("nodes:          {}", report.nodes);

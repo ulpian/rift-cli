@@ -473,9 +473,9 @@ are populated — and a CI check greps the binaries to keep it so.
 ## 13.12 Rebuilding, and what a rebuild cannot restore
 
 The two per-repository stores rebuild differently. **The recall projection is
-destroyed and re-derived**: `rift-memd rebuild` removes the file and its
-sidecars, re-opens through the migrations, re-ingests from git — cold, complete,
-idempotent. **The capture projection is re-ingested in place**: `rift rebuild`
+set aside and re-derived**: `rift-memd rebuild` renames the file and its
+sidecars to dated siblings, re-opens through the migrations, re-ingests from
+git — cold, complete, idempotent. **The capture projection is re-ingested in place**: `rift rebuild`
 walks the redacted checkpoint branch through the ordinary append-only path, and
 because rows are content-addressed and written with `INSERT OR IGNORE`, running
 it over a healthy projection inserts nothing. It is a repair, not a reset.
@@ -504,6 +504,15 @@ A rebuilt row must carry the instant the live row carries, never the rebuild's c
 So the ingest reads every schema-4 line, whose instant is its `serve_call.recorded_at`, and a schema-1 line only when it carries a top-level `recorded_at`; a schema-1 line without one is reported as a parse issue and skipped.
 The incremental ingest reads the artifact the first time it projects a checkpoint, so a live projection and a rebuilt one converge on the same rows.
 What a rebuild cannot restore is a serve no shard carries — one no session made — and the typed words of an exact retrieval's reason: the rebuilt row carries the placeholder `withheld` there.
+
+That is why the rebuild sets the old projection aside and never deletes it.
+It renames `recall.db` to `recall.db.set-aside-<YYYYMMDDTHHMMSSZ>`, stamped once from the binary's clock, and prints the new name on the line before `rebuilt:`; a rebuild over no projection prints nothing there, and the fingerprint it prints is the one it always printed.
+A sidecar keeps its SQLite suffix after the new name (`…Z-wal`), so SQLite pairs the set-aside file with its own journal when it is opened, and a name already taken gains a counter instead of being overwritten.
+`rift backfill --recall-from <file>` reads the serves back: it opens the file read-only, as the capture import opens its own, refuses a file that is not a recall projection, and replays `memd_audit_event`, `serve_call_event`, `serve_session_event`, `memd_audit_citation`, `serve_grant_event` and `memd_audit_session` into the family's recall projection.
+There is no second writer.
+Each decision and call row is spelled back into the envelope that books exactly that row and handed to the one appender, which writes the citation, first-served and attribution rows as it does live; a grant goes through its own writer.
+Every write is insert-or-ignore on its key, so a second run inserts nothing, and `--dry-run` reads the file and writes nothing anywhere.
+The set-aside files are records: `rift clean` never removes them, and `rift doctor` lists them by name, size and age.
 
 > **Tip:** when a projection looks wrong: rebuild the binaries, rebuild the
 > projection, run `rift verify`. If verify was already green, the projection was

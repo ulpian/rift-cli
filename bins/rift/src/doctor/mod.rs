@@ -6,13 +6,15 @@
 //! against its projection, `stores` the caches beside the projection,
 //! `git_hooks` the hooks git runs and the binary they name, `health` whether
 //! each wired agent's capture is arriving, `worktrees` the family's members,
-//! `queues` the work each member still owes. This file assembles the report
+//! `queues` the work each member still owes, `set_asides` the recall
+//! projections a rebuild set aside. This file assembles the report
 //! in the order the legs print.
 
 mod capture;
 mod git_hooks;
 pub(crate) mod health;
 mod queues;
+mod set_asides;
 mod setup;
 mod stores;
 mod worktrees;
@@ -29,6 +31,7 @@ use capture::{
 use git_hooks::{doctor_binary_of_record, doctor_hooks_target};
 use health::doctor_integration_health;
 use queues::{doctor_capture_queue, doctor_push_queue, doctor_session_sweep};
+use set_asides::doctor_recall_set_asides;
 use setup::{doctor_memory_chain, doctor_retired_config_keys, doctor_sibling_tool_hooks};
 use stores::{doctor_basis_store, doctor_document_store, doctor_window_journals};
 use worktrees::{
@@ -99,6 +102,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("retired_config_keys", doctor_retired_config_keys(root));
     report.leg("document_store", doctor_document_store(root));
     report.leg("basis_store", doctor_basis_store(root));
+    report.leg("recall_set_asides", doctor_recall_set_asides(root));
     report.leg("sibling_tool_hooks", doctor_sibling_tool_hooks(root));
     report.json.insert("fix".to_owned(), serde_json::json!(fix));
     Outcome::ok(report.human, serde_json::Value::Object(report.json))

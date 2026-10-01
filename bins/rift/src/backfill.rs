@@ -15,6 +15,10 @@
 //!   copy is in a projection that was set aside.
 //!   [`import_from`] copies those rows back, through the ordinary append-only
 //!   writers.
+//! * **Not derivable from shards at all, on the recall side.** A serve a person
+//!   made at a terminal, a serve booked before shards froze serves, a grant's
+//!   typed reason: a recall rebuild sets the old projection aside, and
+//!   `--recall-from` reads those rows back out of it ([`recall`]).
 //!
 //! **Why this is its own verb rather than a flag on `rift rebuild`.** Rebuild
 //! means one thing — the artifact-bridge walk over the checkpoint branch,
@@ -37,6 +41,8 @@
 //! That one asks before it writes, here rather than in the shared writer —
 //! changing what a duplicate cost fact means for every caller in the workspace
 //! is a money-semantics decision and belongs to `rift-shadow-cost`.
+
+mod recall;
 
 use std::path::Path;
 
@@ -72,6 +78,8 @@ pub(crate) struct BackfillReport {
     pub(crate) files: usize,
     /// Per-table import counts, in insert order.
     pub(crate) imported: Vec<TableCount>,
+    /// Per-relation counts read back into the recall projection.
+    pub(crate) recalled: Vec<TableCount>,
 }
 
 impl BackfillReport {
@@ -90,7 +98,7 @@ impl BackfillReport {
             self.commits,
             self.files
         );
-        for t in &self.imported {
+        for t in self.imported.iter().chain(&self.recalled) {
             let _ = writeln!(s, "  {}: {} read, {} inserted", t.table, t.read, t.inserted);
         }
         // Attribution is NOT here, and its absence is the honest half of the
@@ -424,22 +432,52 @@ pub(crate) fn cmd_backfill(root: &Path, args: &crate::cli::BackfillArgs) -> Resu
             Some(p) => import_from(&store, Path::new(p), args.dry_run).await?,
             None => Vec::new(),
         };
+        let recalled = match &args.recall_from {
+            Some(p) => recall_from(root, Path::new(p), args.dry_run).await?,
+            None => Vec::new(),
+        };
         Ok::<_, rift_core::RiftError>(BackfillReport {
             commits,
             files,
             imported,
+            recalled,
         })
     })?;
 
+    let counts = |tables: &[TableCount]| {
+        tables
+            .iter()
+            .map(
+                |t| serde_json::json!({ "table": t.table, "read": t.read, "inserted": t.inserted }),
+            )
+            .collect::<Vec<_>>()
+    };
     let json = serde_json::json!({
         "backfill": if args.dry_run { "dry-run" } else { "applied" },
         "commits": report.commits,
         "files": report.files,
-        "imported": report.imported.iter().map(|t| serde_json::json!({
-            "table": t.table, "read": t.read, "inserted": t.inserted,
-        })).collect::<Vec<_>>(),
+        "imported": counts(&report.imported),
+        "recall_imported": counts(&report.recalled),
     });
     Ok(Outcome::ok(report.render(args.dry_run), json))
+}
+
+/// Read the serve relations back out of the set-aside recall projection at
+/// `source`, into the family's own recall projection.
+///
+/// A dry run opens only the source: the target is not opened, so it is not
+/// created either.
+///
+/// # Errors
+/// [`rift_core::RiftError`] when the family cannot be resolved, the source is
+/// refused, or a write fails.
+async fn recall_from(root: &Path, source: &Path, dry_run: bool) -> Result<Vec<TableCount>> {
+    if dry_run {
+        return recall::count_recall_rows(source).await;
+    }
+    let db = crate::family::recall_db(root)?;
+    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+    recall::import_recall_from(&store, source).await
 }
 
 #[cfg(test)]
