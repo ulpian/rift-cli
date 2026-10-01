@@ -1,11 +1,11 @@
-//! The reason frames' behaviour: what a deny, a delta, a recovery map, a search
-//! answer and a redirect say, withhold, count and drop.
+//! The reason frames' behaviour: what a deny, a narrowing, a delta, a recovery
+//! map, a search answer and a redirect say, withhold, count and drop.
 
 use super::super::{
-    render_delta_frame, render_deny_frame, render_recovery_map, render_redirect_frame,
-    render_search_answer, HeldEntry, HeldVerdict, PathStatus, SearchHit, CLAUSE_REPEAT,
-    FRAME_DENY_OPENER, FRAME_HINT_OPENER, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER,
-    FRAME_SEARCH_OPENER, WITHHELD_PATH,
+    render_delta_frame, render_deny_frame, render_narrow_frame, render_recovery_map,
+    render_redirect_frame, render_search_answer, HeldEntry, HeldVerdict, PathStatus, SearchHit,
+    CLAUSE_REPEAT, FRAME_DENY_OPENER, FRAME_HINT_OPENER, FRAME_NARROW_OPENER,
+    FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER, FRAME_SEARCH_OPENER, WITHHELD_PATH,
 };
 use super::{HASH, SRC};
 
@@ -41,6 +41,33 @@ fn a_deny_frame_states_the_fact_the_escape_hatch_and_the_pull() {
     let no_turn = render_deny_frame(SRC, HASH, 1, 40, None);
     assert!(no_turn.contains("earlier in this session"), "{no_turn}");
     assert!(!no_turn.contains("turn"), "{no_turn}");
+}
+
+/// The narrowing frame names both runs — the one the window holds and the one
+/// it still lacks — and the turn the held run was read in, and says the
+/// identical call still runs. A lagging turn costs the ordinal and nothing
+/// else, and a path the guard withholds becomes the stand-in.
+#[test]
+fn a_narrowing_frame_names_the_held_run_and_the_run_still_to_read() {
+    let text = render_narrow_frame(SRC, HASH, (200, 400), (120, 199), Some(5));
+    assert!(text.starts_with(FRAME_NARROW_OPENER), "{text}");
+    assert!(
+        text.contains("src/lib.rs@3f9a1c2e8b7d lines 200-400"),
+        "{text}"
+    );
+    assert!(text.contains("in turn 5"), "{text}");
+    assert!(text.contains("Read lines 120-199 for the rest"), "{text}");
+    assert!(text.contains("repeat this exact call"), "{text}");
+    assert_eq!(text.lines().count(), 1, "{text}");
+    let no_turn = render_narrow_frame(SRC, HASH, (1, 40), (41, 80), None);
+    assert!(no_turn.contains("earlier in this session"), "{no_turn}");
+    assert!(!no_turn.contains("turn"), "{no_turn}");
+    let withheld = render_narrow_frame("docs/日本語/README.md", "nothex", (1, 40), (41, 80), None);
+    assert!(withheld.contains(WITHHELD_PATH), "{withheld}");
+    assert!(
+        !withheld.contains('@'),
+        "a hash that is not one is not shown: {withheld}"
+    );
 }
 
 /// A withheld path takes the runnable hint with it, because a hint that

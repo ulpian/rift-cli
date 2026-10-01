@@ -121,6 +121,16 @@ pub struct Report {
     /// Reads of a file the window had just edited with something other than a
     /// whole-file write — the pool this harness declines to model as coverage.
     pub verification_after_edit: Tally,
+    /// The two repeat pools a narrowing works on — overlapping held coverage,
+    /// and over unheld lines of a read revision — each split by how the
+    /// request stands against what is held: narrowable, multi, and not
+    /// narrowable, in that order.
+    pub narrowing_split: [[Tally; 3]; 2],
+    /// Calls this build would have narrowed with narrowing enforced, and what
+    /// that spares: the held lines' share of the result, net of the frames.
+    pub narrowed_if_enforced: Tally,
+    /// What those narrowing frames cost.
+    pub narrowed_frame_tokens: u64,
     /// How many declines rest on the window's own whole-file write rather than
     /// on a read, so a reader can take them out.
     pub declines_resting_on_a_write: u64,

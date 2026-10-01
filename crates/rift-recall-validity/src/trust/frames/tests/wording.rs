@@ -4,12 +4,13 @@
 
 use super::super::{
     neutral_inline_span, neutral_pushed_span, render_delta_frame, render_delta_manifest,
-    render_deny_frame, render_recovery_map, render_redirect_frame, render_search_answer,
-    EntryDetail, HeldEntry, HeldVerdict, ManifestEntry, PathStatus, SearchHit, CLAUSE_CHANGED_AT,
-    CLAUSE_CHANGED_ONLY, CLAUSE_CONVERTED, CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST, CLAUSE_HELD_LIST,
-    CLAUSE_IN_CONTEXT, CLAUSE_IN_CONTEXT_WINDOW, CLAUSE_OTHERS_UNCHANGED, CLAUSE_PROVENANCE,
-    CLAUSE_PULL, CLAUSE_RANKED, CLAUSE_REPEAT, CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED,
-    FRAME_DENY_OPENER, FRAME_HEADER_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER,
+    render_deny_frame, render_narrow_frame, render_recovery_map, render_redirect_frame,
+    render_search_answer, EntryDetail, HeldEntry, HeldVerdict, ManifestEntry, PathStatus,
+    SearchHit, CLAUSE_ALREADY_IN_CONTEXT, CLAUSE_CHANGED_AT, CLAUSE_CHANGED_ONLY, CLAUSE_CONVERTED,
+    CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST, CLAUSE_HELD_LIST, CLAUSE_IN_CONTEXT,
+    CLAUSE_IN_CONTEXT_WINDOW, CLAUSE_OTHERS_UNCHANGED, CLAUSE_PROVENANCE, CLAUSE_PULL,
+    CLAUSE_RANKED, CLAUSE_REPEAT, CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED, FRAME_DENY_OPENER,
+    FRAME_HEADER_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER, FRAME_NARROW_OPENER,
     FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER,
     FRAME_SEARCH_OPENER, FRAME_WITHHELD_OPENER, WITHHELD_PATH,
 };
@@ -27,6 +28,7 @@ use crate::trust::pushed::{is_renderable_char, normalize_pushed};
 const FRAME_OPENERS: &[&str] = &[
     FRAME_HEADER_OPENER,
     FRAME_DENY_OPENER,
+    FRAME_NARROW_OPENER,
     FRAME_RECOVERY_OPENER,
     FRAME_SEARCH_OPENER,
     FRAME_REDIRECT_OPENER,
@@ -44,6 +46,7 @@ const FRAME_OPENERS: &[&str] = &[
 const FRAME_CLAUSES: &[&str] = &[
     CLAUSE_UNCHANGED,
     CLAUSE_IN_CONTEXT,
+    CLAUSE_ALREADY_IN_CONTEXT,
     CLAUSE_REPEAT,
     CLAUSE_PULL,
     CLAUSE_CHANGED_ONLY,
@@ -123,6 +126,7 @@ fn every_frame_rendered() -> String {
         render_delta_manifest(&[ManifestEntry::path_only("src/\u{406}b.rs")], 0, HINT)
             .expect("a withheld-only delta"),
         render_deny_frame(SRC, HASH, 1, 40, Some(3)),
+        render_narrow_frame(SRC, HASH, (1, 40), (41, 120), Some(3)),
         render_delta_frame(SRC, HASH, &[(12, 18)], 3, 400, 3, Some(2))
             .expect("one exact site is a delta frame"),
         render_recovery_map(&held, 2, usize::MAX).expect("a held set"),
@@ -237,7 +241,7 @@ fn a_span_that_forges_a_frame_clause_is_refused_inline_and_bulleted_only_at_the_
     assert!(!text.contains("repeat_this_exact_call"), "{text}");
 }
 
-/// The bytes, all five frames, as the model receives them.
+/// The bytes, all six frames, as the model receives them.
 ///
 /// A reason frame is not an internal string: it is the text a model reads
 /// in the most privileged position this crate writes into, and the one
@@ -252,6 +256,8 @@ fn a_span_that_forges_a_frame_clause_is_refused_inline_and_bulleted_only_at_the_
 /// otherwise catch: an invisible edit (a doubled space, a stray trailing
 /// blank) that a reader's eye slides over in a diff.
 const DENY: &str = "[rift] Read skipped: src/lib.rs@sha256:3f9a1c2e8b7d lines 1-40 are unchanged since your read in turn 3 and are already in your context. Repeat this exact call if you still need it (it is allowed once). To see only what changed since then: rift recall changed-hunks src/lib.rs --known-hash 3f9a1c2e8b7d4f60 --json Provenance: rift why src/lib.rs:1 --json";
+/// The narrowing frame's bytes.
+const NARROW: &str = "[rift] Read narrowed: src/lib.rs@3f9a1c2e8b7d lines 1-40 are unchanged since your read in turn 3 and already in your context. Read lines 41-120 for the rest, or repeat this exact call for the whole range (it is allowed once).";
 /// The delta frame's bytes.
 const DELTA: &str = "[rift] Read skipped: src/lib.rs changed only at lines 12-18, 44-52 (+3 lines) since the revision you hold from turn 7; every other line is unchanged. Read lines 9-55 to see the change in context, or repeat this exact call for the whole file (it is allowed once). Full diff on demand: rift recall changed-hunks src/lib.rs --known-hash 3f9a1c2e8b7d4f60 --json Provenance: rift why src/lib.rs:12 --json";
 /// The recovery map's bytes.
@@ -274,6 +280,15 @@ const REDIRECT: &str = "[rift] Read redirected: docs/report.docx is a document R
 fn the_deny_frame_is_golden() {
     assert_eq!(render_deny_frame(SRC, HASH, 1, 40, Some(3)), DENY);
     assert_eq!(DENY.len(), 353);
+}
+
+#[test]
+fn the_narrow_frame_is_golden() {
+    assert_eq!(
+        render_narrow_frame(SRC, HASH, (1, 40), (41, 120), Some(3)),
+        NARROW
+    );
+    assert_eq!(NARROW.len(), 225);
 }
 
 #[test]
@@ -341,7 +356,7 @@ fn the_redirect_frame_is_golden() {
 /// placeholder an agent would have to fill in itself.
 #[test]
 fn every_golden_frame_is_an_ascii_fact_sheet() {
-    for frame in [DENY, DELTA, RECOVERY, ANSWER, REDIRECT] {
+    for frame in [DENY, NARROW, DELTA, RECOVERY, ANSWER, REDIRECT] {
         for line in frame.lines() {
             assert!(
                 !is_directive_shaped(line) && !is_directive_shaped(line.trim_start_matches("- ")),

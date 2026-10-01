@@ -511,7 +511,9 @@ mod tests {
         );
 
         // What that costs is a saving, never a wrong decision: the repeat of a
-        // read too large to vouch for runs.
+        // read too large to vouch for runs. The one line it was credited with
+        // is held, so the repeat is a narrowing at most — one line spared,
+        // under every floor — and never a decline.
         let line = record(
             &read,
             &Decision::Allow,
@@ -531,7 +533,10 @@ mod tests {
                 DEFAULT_MAX_DELIVERED_BYTES + 1,
                 limits
             ),
-            Decision::Allow
+            Decision::Observe(DenyShape::Narrow {
+                held: run(1, 1),
+                read: run(2, 900)
+            })
         );
     }
 

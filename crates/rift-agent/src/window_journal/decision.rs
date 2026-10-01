@@ -6,13 +6,17 @@
 //! where those queries meet the mode and the family's channel.
 
 use super::{
-    Interval, Journal, Line, ResolvedRead, DEFAULT_MAX_DELIVERED_BYTES,
+    narrowing, Interval, Journal, Line, Narrowing, ResolvedRead, DEFAULT_MAX_DELIVERED_BYTES,
     DEFAULT_MAX_SHELL_DELIVERED_BYTES,
 };
 use crate::respond::Channel;
 
 /// How far interception is allowed to go.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// Ordered from least to most, so the cap one lever puts on another is a
+/// `min`: a narrowing decline goes no further than [`NARROW_MODE`] whatever the
+/// family's own mode allows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Mode {
     /// Nothing is decided and nothing is recorded. This is where an
     /// unreadable policy lands, because a lever whose settings cannot be read
@@ -25,6 +29,40 @@ pub enum Mode {
     /// A read the journal proves is already held may be declined, once.
     Enforce,
 }
+
+/// How far a **narrowing** decline may go, before the family's own mode caps
+/// it.
+///
+/// Observe, so a read that is partly held is decided and recorded and never
+/// acted on: the frame that answers it asks the model to make a different
+/// read than the one it made, and how often a model re-issues the original
+/// instead is a figure the observe window has to publish before any session
+/// meets the frame. The move to enforce is a change to this one constant,
+/// made on its own when that figure is in.
+pub const NARROW_MODE: Mode = Mode::Observe;
+
+/// The fewest **held** lines a narrowing decline may act on.
+///
+/// The same rule the plain floor is derived by: a decline pays for itself
+/// once the lines it spares cost more than the sentence the model reads
+/// instead, at four tokens a line. The narrowing frame is priced on its own,
+/// measured on the renderer's golden fixture with the tokenizer every other
+/// figure is counted with, at **67 tokens**, so the break-even is
+/// `67 / 4 + 1` = **17** held lines. The lines the window still lacks are not
+/// part of the trade: they are read either way.
+///
+/// It sits under the plain floor because the frame does: it names two runs and
+/// a turn and carries neither the pull hint nor the provenance handle, which
+/// are routes to a *change* and this frame is about lines that did not change.
+/// So [`Limits::min_slice_lines`] — the plain frame's break-even — does not
+/// bind it; holding a cheaper frame to a dearer frame's floor would forgo
+/// narrowings that pay.
+///
+/// `the_narrowing_frame_pays_for_itself_at_its_floor` in the binary's gate
+/// tests runs that arithmetic, because the binary has both the renderer and
+/// the tokenizer and this crate has neither; a reword that grows the frame
+/// reds it.
+pub const NARROW_MIN_HELD_LINES: u32 = 17;
 
 /// Whether a family's own edit tool is pinned to tell the model that the file
 /// it just wrote is still current in its context.
@@ -84,6 +122,15 @@ pub struct Limits {
     /// cap and sits lower. Whichever of the two is tighter is what a shell
     /// read is held to.
     pub max_shell_delivered_bytes: usize,
+    /// How far a narrowing decline may go, before the family's mode caps it:
+    /// [`NARROW_MODE`] wherever a decision is taken for a session.
+    ///
+    /// A field rather than the constant read in place, so one caller can ask a
+    /// different question of the same decision. The replay asks what the
+    /// narrowing would have spared had it been enforced, and asks it of the
+    /// shipped decision rather than of a copy of it; with the field at
+    /// [`Mode::Off`] the same replay reproduces the build without narrowing.
+    pub narrow_mode: Mode,
 }
 
 impl Default for Limits {
@@ -94,6 +141,7 @@ impl Default for Limits {
             context_lines: 3,
             max_delivered_bytes: DEFAULT_MAX_DELIVERED_BYTES,
             max_shell_delivered_bytes: DEFAULT_MAX_SHELL_DELIVERED_BYTES,
+            narrow_mode: NARROW_MODE,
         }
     }
 }
@@ -113,6 +161,16 @@ pub enum DenyShape {
         /// A range worth reading instead: the changed sites with a few lines
         /// of context around them.
         window: Interval,
+    },
+    /// Part of the request is held at this revision and the rest is one
+    /// contiguous run, so the decline names both.
+    Narrow {
+        /// The lines of the request the window was handed at this revision,
+        /// one run, at one end of the request.
+        held: Interval,
+        /// The lines of the request it was not, one run: the read worth making
+        /// instead.
+        read: Interval,
     },
 }
 
@@ -216,7 +274,9 @@ fn shape_of(
 /// * the lever is off;
 /// * the slice is larger than a client keeps inline, so what the window holds
 ///   of an earlier delivery may be a pointer rather than the bytes;
-/// * the request asks for a line the window was not handed;
+/// * the request asks for a line the window was not handed — where the
+///   window holds one run at one end of it, it goes on to [`narrowing`] and
+///   the gates that decide one instead;
 /// * this exact request was already declined once, so the repeat is honoured
 ///   — which is what bounds a model that answers a decline by asking again;
 /// * the only thing the window holds this revision by is having written it,
@@ -247,7 +307,7 @@ pub fn decide(
         return Decision::Allow;
     }
     if !journal.coverage(&read.path, read.hash).contains(read.range) {
-        return Decision::Allow;
+        return decide_narrow(read, journal, mode.min(limits.narrow_mode), channel);
     }
     if journal.denied(&read.deny_key()) {
         return Decision::Allow;
@@ -259,6 +319,43 @@ pub fn decide(
     // still a decision this window made, and recording it is what lets the
     // observe window price the floor before anyone moves it.
     let pays_for_itself = read.range.lines() >= limits.min_slice_lines;
+    act_on(shape, mode, pays_for_itself, channel)
+}
+
+/// The decision about a request that is not wholly held: a narrowing, where
+/// the rest of the request is one run, and otherwise nothing.
+///
+/// The gates are the plain decline's, in its order — the lever, then one
+/// decline per key, then the floor — with two differences. The mode is
+/// already capped by [`Limits::narrow_mode`]; and the floor is counted on the
+/// **held** lines against [`NARROW_MIN_HELD_LINES`], because the held lines
+/// are what a narrowing spares and its frame is priced on its own.
+fn decide_narrow(
+    read: &ResolvedRead,
+    journal: &Journal,
+    mode: Mode,
+    channel: Option<Channel>,
+) -> Decision {
+    if mode == Mode::Off {
+        return Decision::Allow;
+    }
+    let Narrowing::Narrow { held, read: unheld } = narrowing(read, journal) else {
+        return Decision::Allow;
+    };
+    if journal.denied(&read.deny_key()) {
+        return Decision::Allow;
+    }
+    let shape = DenyShape::Narrow { held, read: unheld };
+    act_on(shape, mode, held.lines() >= NARROW_MIN_HELD_LINES, channel)
+}
+
+/// Act on a decline that passed every gate but the last three, or record it.
+fn act_on(
+    shape: DenyShape,
+    mode: Mode,
+    pays_for_itself: bool,
+    channel: Option<Channel>,
+) -> Decision {
     if mode == Mode::Enforce && pays_for_itself && reason_reaches_the_model(channel) {
         Decision::Deny(shape)
     } else {
@@ -272,12 +369,23 @@ pub fn decide(
 /// decided: an allowed read is what a later decision is made of, and a
 /// decision that was only observed is what sizes the pool.
 ///
-/// The three lines are not symmetric, which is why the slice's size is an
-/// argument here. A `deny` and an `observe` record what was **asked for** —
-/// that is what sizes the pool and what a repeat is matched against. A `read`
-/// records what the call can have **delivered**, and a slice larger than
+/// The lines are not symmetric, which is why the slice's size is an argument
+/// here. A `deny` and an `observe` record what was **asked for** — that is
+/// what sizes the pool and what a repeat is matched against. A `read` records
+/// what the call can have **delivered**, and a slice larger than
 /// [`Limits::max_delivered_bytes`] cannot be vouched for past its first line
 /// whatever the tool was asked for, so that is all it is credited with.
+///
+/// **An observed narrowing leaves a `read`**, exactly the line an allowed call
+/// leaves. Unlike a plain or a delta observation, the call that runs hands the
+/// window lines it did not hold, and an `observe` line is not coverage: it
+/// would leave the window believing it holds less than it was handed, and the
+/// next read of those lines would be decided as unheld. The `read` credits it
+/// with what the delivery can vouch for and no more. The observation itself is
+/// not lost — the accounting row the decision owes is what sizes the pool —
+/// and the `observe` line keeps its one meaning: a request the window wholly
+/// held. A plain or delta observation is recorded as it always was, because
+/// what it delivers the window already holds.
 #[must_use]
 pub fn record(
     read: &ResolvedRead,
@@ -288,14 +396,9 @@ pub fn record(
     at_ms: u64,
 ) -> Line {
     match decision {
-        Decision::Allow => Line::Read {
-            turn,
-            path: read.path.clone(),
-            hash: read.hash,
-            range: read.range_delivered(slice_bytes, limits),
-            total_lines: read.total_lines,
-            at_ms,
-        },
+        Decision::Allow | Decision::Observe(DenyShape::Narrow { .. }) => {
+            delivered(read, slice_bytes, limits, turn, at_ms)
+        }
         Decision::Observe(_) => Line::Observe {
             turn,
             path: read.path.clone(),
@@ -310,6 +413,24 @@ pub fn record(
             range: read.range,
             at_ms,
         },
+    }
+}
+
+/// The `read` line a call that ran leaves: the lines it can have delivered.
+fn delivered(
+    read: &ResolvedRead,
+    slice_bytes: usize,
+    limits: Limits,
+    turn: u32,
+    at_ms: u64,
+) -> Line {
+    Line::Read {
+        turn,
+        path: read.path.clone(),
+        hash: read.hash,
+        range: read.range_delivered(slice_bytes, limits),
+        total_lines: read.total_lines,
+        at_ms,
     }
 }
 
@@ -587,9 +708,10 @@ mod tests {
     proptest::proptest! {
         /// ★ Coverage is exact at its edge: a request for one line more than
         /// was handed over is a request for a line the window does not hold,
-        /// and it runs.
+        /// and it runs — never declined as held, only recorded as the
+        /// narrowing it would be, in the mode narrowing ships in.
         #[test]
-        fn a_request_one_line_past_coverage_is_allowed(
+        fn a_request_one_line_past_coverage_is_never_declined_as_held(
             lo in 1u32..=500,
             span in 0u32..=200,
             total_extra in 1u32..=100,
@@ -619,7 +741,7 @@ mod tests {
             let one_past = resolved("src/lib.rs", 0x3f, lo, hi + 1, total_lines);
             proptest::prop_assert_eq!(
                 decide(&one_past, &journal, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits),
-                Decision::Allow,
+                Decision::Observe(DenyShape::Narrow { held: run(lo, hi), read: run(hi + 1, hi + 1) }),
                 "one line further is not"
             );
 
@@ -627,7 +749,7 @@ mod tests {
                 let one_before = resolved("src/lib.rs", 0x3f, lo - 1, hi, total_lines);
                 proptest::prop_assert_eq!(
                     decide(&one_before, &journal, Mode::Enforce, Some(CONFIRMED), EditEcho::Pinned, 64, limits),
-                    Decision::Allow,
+                    Decision::Observe(DenyShape::Narrow { held: run(lo, hi), read: run(lo - 1, lo - 1) }),
                     "nor is one line earlier"
                 );
             }
@@ -915,13 +1037,15 @@ mod tests {
         #[test]
         fn at_most_one_deny_per_key_under_any_interleaving(
             steps in proptest::collection::vec(
-                (0usize..=3, 1u32..=6, 0u32..=3, 0usize..=1),
+                (0usize..=3, 1u32..=6, 0u32..=80, 0usize..=1),
                 1..40,
             ),
         ) {
             const PATHS: [&str; 2] = ["src/lib.rs", "src/other.rs"];
-            const TOTAL: u32 = 60;
-            let limits = Limits::default();
+            const TOTAL: u32 = 300;
+            // Narrowing enforced too, so a key a narrowing declined is held to
+            // the same single decline as one a plain decline did.
+            let limits = Limits { narrow_mode: Mode::Enforce, min_slice_lines: 1, ..Limits::default() };
             let mut journal = Journal::default();
             let mut epoch = 0usize;
             // A key is a path, a revision and a range: two revisions of one
@@ -942,7 +1066,7 @@ mod tests {
                 // Two revisions in play, so a decision sometimes rests on
                 // coverage that a later step's hash change wipes out.
                 let seed = if action == 2 { 0x40 } else { 0x3f };
-                let read = resolved(path, seed, lo * 8, lo * 8 + span, TOTAL);
+                let read = resolved(path, seed, lo * 20, lo * 20 + span, TOTAL);
                 let decision = decide(
                     &read,
                     &journal,
@@ -961,14 +1085,7 @@ mod tests {
                     );
                     seen.push(key);
                 }
-                journal.push(record(
-                    &read,
-                    &decision,
-                    0,
-                    Limits::default(),
-                    turn as u32,
-                    turn as u64,
-                ));
+                journal.push(record(&read, &decision, 0, limits, turn as u32, turn as u64));
             }
         }
     }

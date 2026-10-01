@@ -12,6 +12,7 @@ mod denies;
 mod documents;
 mod evictions;
 mod fixtures;
+mod narrows;
 mod paths;
 mod prevented;
 mod search_index;

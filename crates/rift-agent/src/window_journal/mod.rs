@@ -30,16 +30,20 @@ mod delivery;
 mod holds;
 mod intervals;
 mod line;
+mod narrowing;
 
 use rift_core::Sha256Id;
 
 use self::holds::held_of;
 
-pub use self::decision::{decide, record, Decision, DenyShape, EditEcho, Limits, Mode};
+pub use self::decision::{
+    decide, record, Decision, DenyShape, EditEcho, Limits, Mode, NARROW_MIN_HELD_LINES, NARROW_MODE,
+};
 pub use self::delivery::{reconcile_delivery, Reconcile, ResolvedRead, StatedDelivery};
 pub use self::holds::{DenyKey, HeldFile, StandingHold};
 pub use self::intervals::{Interval, IntervalSet};
 pub use self::line::{EvictReason, Line};
+pub use self::narrowing::{narrowing, Narrowing};
 
 /// The schema version every line this module writes carries, and the only one
 /// it reads. A later shape gets a later number rather than a tolerant reader.
@@ -163,6 +167,26 @@ impl Journal {
             }
         }
         set
+    }
+
+    /// The turn this window was last handed any of `run` of `(path, hash)` in,
+    /// from reads alone.
+    ///
+    /// The latest, where several reads make up the run: a narrowing frame
+    /// names one turn, and the last one the window saw the lines in is the
+    /// one its context is most likely to still show.
+    #[must_use]
+    pub fn read_turn(&self, path: &str, hash: Sha256Id, run: Interval) -> Option<u32> {
+        self.live().iter().rev().find_map(|line| match line {
+            Line::Read {
+                turn,
+                path: p,
+                hash: h,
+                range,
+                ..
+            } if p == path && *h == hash && range.intersects(run) => Some(*turn),
+            _ => None,
+        })
     }
 
     /// The lines of `(path, hash)` this context window holds, from reads **and**

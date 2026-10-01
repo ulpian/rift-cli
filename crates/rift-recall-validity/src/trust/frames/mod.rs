@@ -112,6 +112,15 @@ const FRAME_HINT_OPENER: &str = "Detail on demand:";
 /// other.
 const FRAME_DENY_OPENER: &str = "[rift] Read skipped:";
 
+/// The head of the frame for a read that is partly held: the held run is
+/// named, and so is the one run of lines the window still lacks.
+///
+/// An opener of its own rather than [`FRAME_DENY_OPENER`], because it is a
+/// different act. A skipped read hands the model nothing; a narrowed one
+/// tells it which smaller read to make instead, and a model has to be able to
+/// tell the two apart from the first words.
+const FRAME_NARROW_OPENER: &str = "[rift] Read narrowed:";
+
 /// The head of the recovery map, injected at the boundary where the context
 /// lost the bytes it held.
 const FRAME_RECOVERY_OPENER: &str = "[rift] Context was compacted.";
@@ -134,6 +143,10 @@ const WITHHELD_PATH: &str = "a file you read";
 const CLAUSE_UNCHANGED: &str = "unchanged since your read";
 /// The fixed clause that says where those bytes are.
 const CLAUSE_IN_CONTEXT: &str = "are already in your context";
+/// The same fact as the narrowing frame says it, where it shares its verb
+/// with [`CLAUSE_UNCHANGED`]. A clause of its own so the guard refuses a span
+/// that spells it, which the longer clause would not catch.
+const CLAUSE_ALREADY_IN_CONTEXT: &str = "already in your context";
 /// The escape hatch, which is what makes a decline something other than an
 /// unexplained failure: one deny per key, so the identical call succeeds (A3).
 const CLAUSE_REPEAT: &str = "Repeat this exact call";
@@ -182,6 +195,7 @@ const CLAUSE_PROVENANCE: &str = "Provenance: rift why";
 pub(super) const FRAME_OPENERS_NORMALIZED: &[&str] = &[
     "riftrecordeddelta",
     "riftreadskipped:",
+    "riftreadnarrowed:",
     "riftcontextwascompacted",
     "riftsearchanswered:",
     "riftreadredirected:",
@@ -207,6 +221,7 @@ pub(super) const FRAME_OPENERS_NORMALIZED: &[&str] = &[
 const FRAME_CLAUSES_NORMALIZED: &[&str] = &[
     "unchangedsinceyourread",
     "arealreadyinyourcontext",
+    "alreadyinyourcontext",
     "repeatthisexactcall",
     "toseeonlywhatchangedsincethen:",
     "changedonlyatlines",
@@ -434,6 +449,43 @@ pub fn render_delta_frame(
         let _ = write!(out, " {why}");
     }
     Some(out)
+}
+
+/// The reason frame for a read whose lines the session holds only in part:
+/// the held run, the turn it was read in, and the one run still to read.
+///
+/// `held` and `unheld` are `(lo, hi)` pairs in the numbering of the bytes the
+/// read is about, and together they are exactly the lines the call asked for.
+/// `turn` is the read the held run came from; where several reads made up the
+/// run, the caller names the latest, which is the one the window saw last.
+/// Absent, the frame says the same thing without the number, as the plain
+/// frame does.
+///
+/// It carries no pull hint and no provenance handle. Both are routes to a
+/// change, and this frame is about lines that did not change; every token it
+/// spends raises the number of held lines below which narrowing costs more
+/// than it spares.
+#[must_use]
+pub fn render_narrow_frame(
+    path: &str,
+    hash: &str,
+    held: (u32, u32),
+    unheld: (u32, u32),
+    turn: Option<u64>,
+) -> String {
+    let shown = path_display(path);
+    let at_hash = hex_prefix(hash, 12).map_or_else(String::new, |h| format!("@{h}"));
+    let since = turn.map_or_else(
+        || "earlier in this session".to_owned(),
+        |t| format!("in turn {t}"),
+    );
+    let (held_lo, held_hi) = held;
+    let (read_lo, read_hi) = unheld;
+    format!(
+        "{FRAME_NARROW_OPENER} {shown}{at_hash} lines {held_lo}-{held_hi} are {CLAUSE_UNCHANGED} \
+         {since} and {CLAUSE_ALREADY_IN_CONTEXT}. Read lines {read_lo}-{read_hi} for the rest, or \
+         repeat this exact call for the whole range (it is allowed once)."
+    )
 }
 
 /// The held set, injected once at the boundary where the context lost it

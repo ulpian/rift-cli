@@ -121,7 +121,7 @@ pub use rift_recall_validity::trust::{
     ManifestEntry,
 };
 
-/// The two reason frames a declined read is answered with, re-exported by the
+/// The reason frames a declined read is answered with, re-exported by the
 /// same route and for the same reason as [`render_delta_manifest`].
 ///
 /// The hook path composes a decline; the sentence a model reads is written by
@@ -129,7 +129,7 @@ pub use rift_recall_validity::trust::{
 /// tree where pushed text comes into existence. `bins/rift` reaches it here
 /// because this dispatcher is already the validity crate's caller — no crate
 /// edge is added, and no second renderer is created.
-pub use rift_recall_validity::trust::{render_delta_frame, render_deny_frame};
+pub use rift_recall_validity::trust::{render_delta_frame, render_deny_frame, render_narrow_frame};
 
 /// The document redirect's frame, re-exported by the same route and for the
 /// same reason as [`render_deny_frame`].

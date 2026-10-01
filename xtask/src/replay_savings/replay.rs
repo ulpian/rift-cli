@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rift_agent::respond::Channel;
-use rift_agent::window_journal::{EvictReason, Interval, Journal, Limits, Line};
+use rift_agent::window_journal::{EvictReason, Interval, Journal, Limits, Line, Mode};
 use rift_agent::{AgentAdapter, EditKind};
 use rift_agent_claude_code::ClaudeCodeAdapter;
 use rift_core::Sha256Id;
@@ -119,7 +119,13 @@ pub fn replay(opts: &Options) -> Result<Report, String> {
     let adapter = ClaudeCodeAdapter;
     let settings = Replay {
         adapter: &adapter,
-        limits: Limits::default(),
+        // The buckets are the build without narrowing, so every figure they
+        // carry reads the same before and after it; what narrowing would
+        // have done is asked of the same decision on its own line.
+        limits: Limits {
+            narrow_mode: Mode::Off,
+            ..Limits::default()
+        },
         channel: deny_channel(),
     };
     let history = match &opts.history {

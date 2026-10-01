@@ -254,6 +254,19 @@ The predicate is narrow on purpose, and every clause of it closes something:
 - and this window has not already been declined for that exact key since its
   last eviction.
 
+A request that is **partly** held is decided on the same footing, as a
+narrowing.
+Where the window's own reads at the current hash hold one run at one end of
+the request, and the rest of it is one contiguous run, the decision names both.
+The held run must be lines the window read — never its edits, never another
+window's, never lines from before its last eviction — and the floor is counted
+on the held lines against the narrowing frame's own price (17 lines).
+Held lines in the middle of a request, or in two runs, leave two windows to
+name, and the read runs.
+Narrowing ships in `observe` whatever the family's mode, so the decision is
+recorded and the call runs; the observed call is recorded as a read too,
+because the lines it delivered are now coverage.
+
 Anything else allows. An unknown span allows, an unpinned family allows, an
 unreadable policy turns the lever off, a panic anywhere in the gate yields the
 family's neutral response, and the hook exits successfully in every one of
@@ -380,6 +393,21 @@ rung the store shows nobody pulls. It does not claim an earlier tool result
 echoed the content, because no family was measured returning one Rift could
 rely on. And it never uses an error word: the frame is feedback about a
 decision, not a failure report.
+
+**The narrowing frame** names the held run, the turn the window last read any
+of it in, and the run still to read:
+
+```
+[rift] Read narrowed: src/lib.rs@3f9a1c2e8b7d lines 1-40 are unchanged since
+your read in turn 3 and already in your context. Read lines 41-120 for the
+rest, or repeat this exact call for the whole range (it is allowed once).
+```
+
+It carries neither the pull hint nor the provenance handle: both are routes to
+a change, and this frame is about lines that did not change.
+What a narrowing is booked at is its held run, net of the frame; the rest of
+the request is the read the agent still makes, counted when it happens.
+The call itself is never amended.
 
 **The delta frame** is the same shape for a file the window holds at an *older*
 hash. When the difference is known exactly — from the agent's own edit

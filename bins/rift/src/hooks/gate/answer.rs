@@ -62,9 +62,10 @@ pub(super) fn gate_answer(
 /// The explanation a declined call is answered with, or `None` when a decline
 /// has nothing exact left to say and so must not be made.
 ///
-/// Both frames come from the sealed renderers beside the manifest's: this
+/// Every frame comes from the sealed renderers beside the manifest's: this
 /// function chooses which and supplies the numbers, and composes no text of
-/// its own. The delta renderer clamps the changed places to the file's own
+/// its own. A narrowing names the turn the window last read any of its held
+/// run in. The delta renderer clamps the changed places to the file's own
 /// length and derives the window it suggests, which is why the shape's own
 /// window is not passed on — one clamp, in the place that also does the
 /// rendering.
@@ -104,6 +105,37 @@ fn gate_frame(
                 since,
             )
         }
+        DenyShape::Narrow {
+            held: run,
+            read: rest,
+        } => Some(rift_recall_serve::render_narrow_frame(
+            &read.path,
+            &hash,
+            (run.lo, run.hi),
+            (rest.lo, rest.hi),
+            held.read_turn(&read.path, read.hash, *run).map(u64::from),
+        )),
+    }
+}
+
+/// The lines a decision is about: what a decline spares the window, and what
+/// its accounting row is priced over.
+///
+/// The request itself for a plain or a delta decline, which answer all of it.
+/// A narrowing answers only its **held** run: the rest of the request is a
+/// read the agent still makes, and it is counted as a read when it happens,
+/// so a row priced over the whole request would book those lines twice. The
+/// same run sizes an observed narrowing, so the pool the observe window
+/// publishes is the one enforcing would book.
+pub(super) fn spared_lines(
+    read: &rift_agent::window_journal::ResolvedRead,
+    decision: &rift_agent::window_journal::Decision,
+) -> rift_agent::window_journal::Interval {
+    use rift_agent::window_journal::{Decision, DenyShape};
+    match decision {
+        Decision::Deny(DenyShape::Narrow { held, .. })
+        | Decision::Observe(DenyShape::Narrow { held, .. }) => *held,
+        Decision::Allow | Decision::Deny(_) | Decision::Observe(_) => read.range,
     }
 }
 /// The turn this window was last handed — or last authored — the bytes it is
@@ -182,7 +214,8 @@ pub(super) fn journal_decision(
 /// the whole record. A decline owes the row that carries what it saved and
 /// what its reason cost; a decline that was only observed owes the row that
 /// sizes the pool without claiming any of it. `frame` is the text the model
-/// was handed, which is empty until a family is being declined on.
+/// was handed, which is empty until a family is being declined on. The lines
+/// named are [`spared_lines`]: a narrowing is priced over its held run.
 ///
 /// `booked` says that a **prevented** row of this same window has already
 /// taken this slice. The decline itself is unchanged — the model is still
@@ -201,6 +234,7 @@ pub(super) fn read_decision_audit(
 ) -> Option<crate::agent_queue::ServeAudit> {
     use crate::agent_queue::{AuditBasis, AuditLines, ServeAudit, ServeAuditKind};
     use rift_agent::window_journal::Decision;
+    let lines = spared_lines(read, decision);
     let declined = matches!(decision, Decision::Deny(_));
     let decision = match decision {
         Decision::Allow => return None,
@@ -217,8 +251,8 @@ pub(super) fn read_decision_audit(
             content_sha256: read.hash.to_hex(),
             blob_oid: blob_oid.to_owned(),
             lines: Some(AuditLines {
-                lo: read.range.lo,
-                hi: read.range.hi,
+                lo: lines.lo,
+                hi: lines.hi,
             }),
         }),
         frame: frame.to_owned(),
