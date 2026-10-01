@@ -367,6 +367,15 @@ mod tests {
 
     /// A checkout with a couple of files in it and no `.rift` policy: enough to
     /// drive every decision this resolver makes, and nothing it does not.
+    ///
+    /// **Its index is built before any call, by the detached worker's own
+    /// pass.** These tests are about the answer, not the cold budget: left to
+    /// walk inline, the resolver keeps a walk only while it fits the
+    /// wall-clock [`COLD_BUDGET`](rift_recall_search::COLD_BUDGET), so a
+    /// loaded machine answered even a two-file checkout `pending`. A saved
+    /// index that answers is loaded whatever the clock says. What the budget
+    /// decides is held, with an injected budget, by
+    /// `rift_recall_search`'s `a_walk_that_cannot_fit_the_budget_is_not_started`.
     #[cfg(feature = "search")]
     fn search_repo(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("a temp repo");
@@ -377,7 +386,19 @@ mod tests {
             }
             std::fs::write(path, body).unwrap();
         }
+        index_as_the_worker_does(dir.path());
         dir
+    }
+
+    /// The rebuild the detached worker runs (`hooks::worker`), with the
+    /// sensitive paths of the same config the resolver reads, so the index on
+    /// disk is the one production would have left there.
+    #[cfg(feature = "search")]
+    fn index_as_the_worker_does(repo: &Path) {
+        let cfg = rift_config::EffectiveConfig::secure_default().expect("a default config");
+        let head = rift_recall_search::head_oid(repo);
+        rift_recall_search::rebuild(repo, &head, cfg.sensitive_paths())
+            .expect("the worker's own pass");
     }
 
     #[cfg(feature = "search")]
@@ -428,7 +449,7 @@ mod tests {
         let search = req.search.as_ref().expect("the resolver attached one");
         assert!(!search.content);
         let rift_recall_serve::IndexState::Answered { hits, total, lines } = &search.index else {
-            panic!("a walkable checkout is not pending");
+            panic!("an indexed checkout is not pending");
         };
         assert_eq!(
             hits.first().map(|hit| hit.path.as_str()),
@@ -474,7 +495,7 @@ mod tests {
             "a content search has no declared native cost"
         );
         let rift_recall_serve::IndexState::Answered { lines, .. } = &search.index else {
-            panic!("a walkable checkout is not pending");
+            panic!("an indexed checkout is not pending");
         };
         assert_eq!(lines.len(), 1, "{lines:?}");
         let line = lines.first().expect("one line");
@@ -492,7 +513,7 @@ mod tests {
             .expect("the resolver attached one")
             .index
         else {
-            panic!("a walkable checkout is not pending");
+            panic!("an indexed checkout is not pending");
         };
         assert!(
             lines.iter().all(|line| line.text != "fn other() {}"),
@@ -544,7 +565,7 @@ mod tests {
         let req = resolve_search_in(dir.path(), "config", true).expect("a resolved search");
         let search = req.search.as_ref().expect("the resolver attached one");
         let rift_recall_serve::IndexState::Answered { hits, lines, .. } = &search.index else {
-            panic!("a walkable checkout is not pending");
+            panic!("an indexed checkout is not pending");
         };
         assert!(
             hits.iter().all(|hit| hit.path != "config/.env.production"),
