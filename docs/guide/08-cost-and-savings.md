@@ -169,9 +169,17 @@ while a changed belief — a corrected price, a re-derivation — appends a
 superseding fact. Nothing is updated in place, so "what did we think this cost
 last month, and what do we think now" has two answers, both on file.
 
+Current reports quote the captured usage against the latest catalog belief at read time, using each call's start as the price's valid time.
+They count each call once, so an old booking and a correction never add together.
+A newly appended catalog can price previously unpriced usage immediately without writing a cost fact or rebuilding the projection.
+A session with no completely priced calls has no dollar figure; a completely priced call with zero usage has a zero figure.
+Booked facts remain historical beliefs: a correction supersedes the applicable visible predecessor, even when both were recorded at the same instant.
+Recomputing that correction writes nothing, and a same-instant reversion gets a distinct identity linked to the correction.
+
 Money is **integer micro-dollars** end to end — a millionth of a dollar in a
-64-bit integer, via a 128-bit intermediate so a large count can neither overflow
-nor round. Floating point never touches a currency value;
+64-bit integer, calculated through an overflow-safe 128-bit intermediate.
+Each token class truncates fractions smaller than one micro-dollar, and amounts outside the final range are clamped.
+Floating point never touches a currency value;
 formatting to a string happens only at the edge, where a human reads it.
 
 > Tip: if a session shows tokens but its cost stays flat, check the model name

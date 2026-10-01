@@ -14,12 +14,11 @@
 use rift_core::{CanonicalEvent, EventKind, Result};
 use rift_shadow_cost::{call_cost_micros, ClassPrices, CounterMethod, TokenUsage};
 use rift_store::{
-    effective_prices, record_capture_session_identity, record_cost_fact,
+    effective_prices, record_capture_session_identity, record_cost_if_changed,
     record_main_context_observation, record_model_call, record_model_observation, record_session,
     record_session_event, record_subagent_session, record_token_usage, record_turn, CanonicalStore,
-    CaptureSessionIdentityRow, CostFact, MainContextObservationRow, ModelCallRow,
-    ModelObservationRow, SessionEventRow, SessionRow, SubagentSessionRow, TokenUsageRow,
-    ToolCallRow, TurnRow,
+    CaptureSessionIdentityRow, MainContextObservationRow, ModelCallRow, ModelObservationRow,
+    SessionEventRow, SessionRow, SubagentSessionRow, TokenUsageRow, ToolCallRow, TurnRow,
 };
 
 use crate::ids;
@@ -489,30 +488,7 @@ async fn record_call_cost(
         },
         0,
     );
-    if rift_store::current_cost_micros(store, &call_id).await? != Some(amount) {
-        record_cost_fact(
-            store,
-            &CostFact {
-                cost_fact_id: crate::sha256_hex(&[
-                    b"cost_fact",
-                    b"\0",
-                    call_id.as_bytes(),
-                    b"\0",
-                    amount.to_string().as_bytes(),
-                    b"\0",
-                    now_ms.to_string().as_bytes(),
-                ]),
-                call_id,
-                amount_micros: amount,
-                valid_from: ev.occurred_at_ms,
-                valid_to: None,
-                recorded_at: now_ms,
-                supersedes_id: None,
-                schema_version: 1,
-            },
-        )
-        .await?;
-    }
+    record_cost_if_changed(store, &call_id, amount, ev.occurred_at_ms, now_ms).await?;
     Ok(())
 }
 
@@ -619,6 +595,132 @@ mod tests {
         assert_eq!(s.count("model_call").await.unwrap(), 1);
         assert_eq!(s.count("subagent_session").await.unwrap(), 1);
         assert_eq!(s.count("capture_session_identity").await.unwrap(), 1);
+    }
+
+    const SAME_CLOCK: i64 = 1_789_603_200_000;
+
+    async fn sonnet_test_prices(s: &SqliteStore, prefix: &str, input: i64, recorded: i64) {
+        for (class, rate) in [
+            ("uncached_input", input),
+            ("cached_input", 0),
+            ("cache_creation", 0),
+            ("output", 0),
+        ] {
+            assert!(
+                rift_store::record_price(
+                    s,
+                    &rift_store::PriceTableRow {
+                        price_id: format!("{prefix}-{class}"),
+                        model: "claude-sonnet-5".into(),
+                        token_class: class.into(),
+                        unit_price_micros: rate,
+                        currency: "USD".into(),
+                        valid_from: match prefix {
+                            "a-old" => 0,
+                            "b-correction" => 1,
+                            _ => 2,
+                        },
+                        valid_to: None,
+                        recorded_at: recorded,
+                        supersedes_id: None,
+                        schema_version: 1,
+                    },
+                )
+                .await
+                .unwrap(),
+                "fixture catalog row must be inserted"
+            );
+        }
+    }
+
+    async fn recompute_same_clock(s: &SqliteStore, event: &CanonicalEvent, usage: &TokenUsage) {
+        record_call_cost(
+            s,
+            event,
+            "claude-sonnet-5",
+            "same-instant-call".into(),
+            usage,
+            SAME_CLOCK,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_clock_live_correction_retry_and_revert_form_a_superseding_chain() {
+        let s = store();
+        let call = "same-instant-call";
+        let mut event = ev(EventKind::TurnEnd, 1, 3);
+        event.occurred_at_ms = SAME_CLOCK;
+        let usage = TokenUsage {
+            uncached_input: 1_000,
+            ..TokenUsage::default()
+        };
+        sonnet_test_prices(&s, "a-old", 3_000_000, SAME_CLOCK - 1).await;
+        recompute_same_clock(&s, &event, &usage).await;
+        let old_id = crate::sha256_hex(&[
+            b"cost_fact",
+            b"\0",
+            call.as_bytes(),
+            b"\0",
+            b"3000",
+            b"\0",
+            SAME_CLOCK.to_string().as_bytes(),
+        ]);
+        let old_algorithm_corrected = crate::sha256_hex(&[
+            b"cost_fact",
+            b"\0",
+            call.as_bytes(),
+            b"\0",
+            b"2000",
+            b"\0",
+            SAME_CLOCK.to_string().as_bytes(),
+        ]);
+        assert!(
+            old_algorithm_corrected < old_id,
+            "forced old hash inversion"
+        );
+        sonnet_test_prices(&s, "b-correction", 2_000_000, SAME_CLOCK).await;
+        recompute_same_clock(&s, &event, &usage).await;
+        assert_eq!(
+            rift_store::current_cost_micros(&s, call).await.unwrap(),
+            Some(2_000)
+        );
+        recompute_same_clock(&s, &event, &usage).await;
+        assert_eq!(s.count("cost_fact").await.unwrap(), 2);
+        let correction = s
+            .query(
+                "SELECT cost_fact_id, supersedes_id FROM cost_fact WHERE amount_micros = 2000",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(correction[0].get_text(1).unwrap(), old_id);
+        let correction_id = correction[0].get_text(0).unwrap();
+        sonnet_test_prices(&s, "c-revert", 3_000_000, SAME_CLOCK).await;
+        for _ in 0..2 {
+            recompute_same_clock(&s, &event, &usage).await;
+        }
+        assert_eq!(s.count("cost_fact").await.unwrap(), 3);
+        let reverted = s
+            .query(
+                "SELECT cost_fact_id FROM cost_fact WHERE supersedes_id = ?1",
+                &[rift_store::Value::text(correction_id)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(reverted.len(), 1);
+        assert_ne!(reverted[0].get_text(0).unwrap(), old_id);
+        assert_eq!(
+            rift_store::current_cost_micros(&s, call).await.unwrap(),
+            Some(3_000)
+        );
+        assert_eq!(
+            rift_store::cost_belief_as_of(&s, call, SAME_CLOCK - 1)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

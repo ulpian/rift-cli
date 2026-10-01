@@ -41,6 +41,6 @@ rift-shadow-attribution -> rift-core, rift-git
 rift-shadow-cost -> rift-core
 rift-shadow-hooks -> rift-agent, rift-agent-antigravity, rift-agent-claude-code, rift-agent-codex, rift-agent-copilot, rift-agent-cursor, rift-agent-factory-droid, rift-agent-gemini, rift-agent-ollama, rift-agent-opencode, rift-core, rift-hashchain
 rift-shadow-redact -> rift-core
-rift-store -> rift-core, rift-crypto, rift-hashchain
+rift-store -> rift-core, rift-crypto, rift-hashchain, rift-shadow-cost
 rift-tokens -> (none)
 xtask -> rift-agent, rift-agent-claude-code, rift-core, rift-recall-validity, rift-tokens

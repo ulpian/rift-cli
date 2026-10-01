@@ -15,14 +15,14 @@
 //! A test that never touches the surface cannot fail on it. This file touches
 //! it: one seeded projection with **known** rows, and assertions on the real
 //! numbers those rows must produce — counts, splits, sums, savings, the
-//! bitemporal cost predicate, and the sentinel rule the module docs state.
+//! current usage quote, and the sentinel rule the module docs state.
 //!
 //! # The fixture, in one paragraph
 //!
 //! Three sessions, three checkpoints — one with a **recorded** time, one whose
 //! time must be **derived** from its session, one **unresolvable** — two files
-//! (one of them policy-sensitive), two model calls with four cost facts (two of
-//! which the bitemporal predicate must reject), six tool calls over three names
+//! (one of them policy-sensitive), two priced model calls with four booked facts
+//! deliberately ignored by current quotes, six tool calls over three names
 //! and three recall-ledger events (one of them injected spend). Every number
 //! asserted below is derivable by hand from that paragraph.
 
@@ -221,6 +221,18 @@ async fn seed_files(s: &SqliteStore) {
 /// Model calls, their tokens, and four cost facts.
 async fn seed_model_calls(s: &SqliteStore) {
     for (call, model, started) in [("mc1", "opus", 1_500), ("mc2", "sonnet", 6_000)] {
+        rift_store::record_turn(
+            s,
+            &rift_store::TurnRow {
+                turn_id: call.into(),
+                session_id: if call == "mc1" { "s1" } else { "s2" }.into(),
+                ordinal: 1,
+                started_at: started,
+                schema_version: V,
+            },
+        )
+        .await
+        .expect("turn");
         s.insert(
             "model_call",
             &[
@@ -230,7 +242,7 @@ async fn seed_model_calls(s: &SqliteStore) {
                 "started_at",
                 "schema_version",
             ],
-            &[t(call), t("turn"), t(model), i(started), i(V)],
+            &[t(call), t(call), t(model), i(started), i(V)],
         )
         .await
         .expect("model_call");
@@ -252,11 +264,42 @@ async fn seed_model_calls(s: &SqliteStore) {
         .await
         .expect("token_usage");
     }
+    seed_quote_catalog(s).await;
     seed_cost_facts(s).await;
 }
 
-/// `cf_old` is superseded, `cf_closed` is no longer believed: the two halves
-/// of the bitemporal predicate, each with a row that only IT rejects.
+/// Explicit test rates reproduce the existing 1000/250 usage quotes.
+async fn seed_quote_catalog(s: &SqliteStore) {
+    for model in ["opus", "sonnet"] {
+        for class in ["uncached_input", "cached_input", "cache_creation", "output"] {
+            let rate = match (model, class) {
+                ("opus", "uncached_input") => 10_000_000,
+                ("sonnet", "output") => 25_000_000,
+                _ => 0,
+            };
+            rift_store::record_price(
+                s,
+                &rift_store::PriceTableRow {
+                    price_id: format!("test-{model}-{class}"),
+                    model: model.into(),
+                    token_class: class.into(),
+                    unit_price_micros: rate,
+                    currency: "USD".into(),
+                    valid_from: 0,
+                    valid_to: None,
+                    recorded_at: 0,
+                    supersedes_id: None,
+                    schema_version: V,
+                },
+            )
+            .await
+            .expect("test price");
+        }
+    }
+}
+
+/// Superseded, closed and unrelated booked facts are deliberate distractions:
+/// current usage quotes must ignore every booking and price the usage once.
 async fn seed_cost_facts(s: &SqliteStore) {
     for (id, call, micros, valid_to, supersedes) in [
         ("cf_old", "mc1", 5_000, None, None),

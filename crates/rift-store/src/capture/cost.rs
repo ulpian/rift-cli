@@ -2,7 +2,10 @@
 //! the resolution of one model's four effective prices. Prices and usage are
 //! separate relations so the two evolve independently.
 
+use std::collections::BTreeMap;
+
 use rift_core::Result;
+use rift_shadow_cost::{call_cost_micros, ClassPrices, TokenUsage};
 
 use crate::{CanonicalStore, Value};
 
@@ -252,10 +255,363 @@ pub async fn session_usage_facts(
     Ok(out)
 }
 
+/// Which settled calls a current catalog quote includes.
+#[derive(Debug, Clone, Copy)]
+pub enum CostQuoteScope<'a> {
+    /// Every settled call, grouped by session.
+    All,
+    /// The settled calls belonging to one projected session.
+    Session(&'a str),
+    /// Calls starting in the inclusive window, independent of session start.
+    Window(i64, i64),
+}
+
+/// Quote captured usage against the catalog belief supplied by the reader.
+/// Each call uses its own start as valid time and contributes exactly once.
+/// Sessions without any completely priced call are absent; priced zero is present.
+/// Two batched queries read usage and prices without creating durable quote state.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on query or malformed row failure.
+pub async fn quote_usage_costs(
+    store: &impl CanonicalStore,
+    scope: CostQuoteScope<'_>,
+    belief_at: i64,
+) -> Result<BTreeMap<String, i64>> {
+    let (predicate, binds) = match scope {
+        CostQuoteScope::All => ("1 = 1", Vec::new()),
+        CostQuoteScope::Session(id) => ("t.session_id = ?1", vec![Value::text(id)]),
+        CostQuoteScope::Window(start, end) => (
+            "mc.started_at >= ?1 AND mc.started_at <= ?2",
+            vec![Value::Int(start), Value::Int(end)],
+        ),
+    };
+    let calls = store
+        .query(
+            &format!(
+                "SELECT t.session_id, mc.model, mc.started_at, \
+        tu.uncached_input, tu.cached_input, tu.cache_creation, tu.output \
+        FROM model_call mc JOIN token_usage tu ON tu.call_id = mc.call_id \
+        JOIN turn t ON t.turn_id = mc.turn_id WHERE {predicate} \
+        ORDER BY mc.call_id"
+            ),
+            &binds,
+        )
+        .await?;
+    let prices = quote_catalog(store, belief_at).await?;
+    let mut resolved = BTreeMap::new();
+    let mut totals = BTreeMap::<String, i64>::new();
+    for call in calls {
+        let key = (call.get_text(1)?, call.get_i64(2)?);
+        let effective = *resolved
+            .entry(key.clone())
+            .or_insert_with(|| quote_prices(&prices, &key.0, key.1));
+        let Some(effective) = effective else { continue };
+        let count = |index| call.get_i64(index).map(|n| u64::try_from(n).unwrap_or(0));
+        let usage = TokenUsage {
+            uncached_input: count(3)?,
+            cached_input: count(4)?,
+            cache_creation: count(5)?,
+            output: count(6)?,
+        };
+        let amount = call_cost_micros(
+            &usage,
+            &ClassPrices {
+                uncached_input_per_mtok: effective.uncached_input,
+                cached_input_per_mtok: effective.cached_input,
+                cache_write_per_mtok: effective.cache_creation,
+                output_per_mtok: effective.output,
+            },
+            0,
+        );
+        let total = totals.entry(call.get_text(0)?).or_default();
+        *total = total.saturating_add(amount);
+    }
+    Ok(totals)
+}
+
+struct QuotePrice {
+    model: String,
+    class: String,
+    from: i64,
+    until: Option<i64>,
+    rate: i64,
+}
+
+async fn quote_catalog(store: &impl CanonicalStore, belief_at: i64) -> Result<Vec<QuotePrice>> {
+    let rows = store
+        .query(
+            "SELECT model, token_class, valid_from, valid_to, unit_price_micros \
+        FROM price_table WHERE recorded_at <= ?1 \
+        ORDER BY valid_from DESC, recorded_at DESC, price_id DESC",
+            &[Value::Int(belief_at)],
+        )
+        .await?;
+    rows.into_iter()
+        .map(|r| {
+            Ok(QuotePrice {
+                model: r.get_text(0)?,
+                class: r.get_text(1)?,
+                from: r.get_i64(2)?,
+                until: r.get_opt_i64(3)?,
+                rate: r.get_i64(4)?,
+            })
+        })
+        .collect()
+}
+
+fn quote_prices(prices: &[QuotePrice], model: &str, valid_at: i64) -> Option<EffectivePrices> {
+    let class = |name: &str| {
+        prices
+            .iter()
+            .find(|p| {
+                p.model == model
+                    && p.class == name
+                    && p.from <= valid_at
+                    && p.until.is_none_or(|end| end > valid_at)
+            })
+            .map(|p| p.rate)
+    };
+    Some(EffectivePrices {
+        uncached_input: class("uncached_input")?,
+        cached_input: class("cached_input")?,
+        cache_creation: class("cache_creation")?,
+        output: class("output")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::capture::fixtures::store;
+
+    async fn quote_call(
+        s: &crate::SqliteStore,
+        session: &str,
+        call: &str,
+        model: &str,
+        at: i64,
+        input: i64,
+    ) {
+        crate::record_turn(
+            s,
+            &crate::TurnRow {
+                turn_id: call.into(),
+                session_id: session.into(),
+                ordinal: 1,
+                started_at: 999_999,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        crate::record_model_call(
+            s,
+            &crate::ModelCallRow {
+                call_id: call.into(),
+                turn_id: call.into(),
+                model: model.into(),
+                started_at: at,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        record_token_usage(
+            s,
+            &TokenUsageRow {
+                call_id: call.into(),
+                uncached_input: input,
+                cached_input: 0,
+                cache_creation: 0,
+                output: 0,
+                counter_method: "provider_reported".into(),
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn quote_rates(
+        s: &crate::SqliteStore,
+        id: &str,
+        rate: i64,
+        from: i64,
+        until: Option<i64>,
+        belief: i64,
+    ) -> bool {
+        let mut inserted = true;
+        for class in ["uncached_input", "cached_input", "cache_creation", "output"] {
+            inserted &= record_price(
+                s,
+                &PriceTableRow {
+                    price_id: format!("{id}-{class}"),
+                    model: "quoted".into(),
+                    token_class: class.into(),
+                    unit_price_micros: rate,
+                    currency: "USD".into(),
+                    valid_from: from,
+                    valid_to: until,
+                    recorded_at: belief,
+                    supersedes_id: None,
+                    schema_version: 1,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        inserted
+    }
+
+    #[tokio::test]
+    async fn batched_quotes_match_effective_prices_at_every_belief_and_valid_boundary() {
+        let s = store();
+        quote_rates(&s, "base", 1_000_000, 0, None, 1).await;
+        quote_rates(&s, "epoch", 2_000_000, 10, Some(20), 1).await;
+        quote_rates(&s, "a", 3_000_000, 10, Some(20), 2).await;
+        assert!(
+            !quote_rates(&s, "z", 4_000_000, 10, Some(20), 2).await,
+            "canonical same-coordinate duplicates are ignored by UNIQUE"
+        );
+        quote_rates(&s, "late-low-epoch", 9_000_000, 0, None, 9).await;
+        for at in [0, 9, 10, 19, 20] {
+            quote_call(
+                &s,
+                &format!("s-{at}"),
+                &format!("c-{at}"),
+                "quoted",
+                at,
+                1000,
+            )
+            .await;
+        }
+        for belief in [0, 1, 2, 9] {
+            let quotes = quote_usage_costs(&s, CostQuoteScope::All, belief)
+                .await
+                .unwrap();
+            for at in [0, 9, 10, 19, 20] {
+                let expected = effective_prices(&s, "quoted", at, belief)
+                    .await
+                    .unwrap()
+                    .map(|p| p.uncached_input / 1000);
+                assert_eq!(quotes.get(&format!("s-{at}")).copied(), expected);
+            }
+        }
+        let bound = quote_usage_costs(&s, CostQuoteScope::Window(10, 19), 9)
+            .await
+            .unwrap();
+        assert_eq!(bound.keys().cloned().collect::<Vec<_>>(), ["s-10", "s-19"]);
+        assert_eq!(bound.values().copied().collect::<Vec<_>>(), [3000, 3000]);
+    }
+
+    #[tokio::test]
+    async fn quotes_distinguish_unpriced_absence_from_priced_zero_and_ignore_orphan_bookings() {
+        let s = store();
+        quote_rates(&s, "base", 1_000_000, 0, None, 1).await;
+        quote_call(&s, "zero", "zero-call", "quoted", 10, 0).await;
+        quote_call(&s, "unknown", "unknown-call", "unpriced", 10, 1000).await;
+        record_price(
+            &s,
+            &PriceTableRow {
+                price_id: "partial-input".into(),
+                model: "unpriced".into(),
+                token_class: "uncached_input".into(),
+                unit_price_micros: 1_000_000,
+                currency: "USD".into(),
+                valid_from: 0,
+                valid_to: None,
+                recorded_at: 1,
+                supersedes_id: None,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        quote_call(&s, "mixed", "priced-call", "quoted", 10, 1000).await;
+        quote_call(&s, "mixed", "other-call", "unpriced", 10, 1000).await;
+        for id in ["orphan-a", "orphan-z"] {
+            crate::record_cost_fact(
+                &s,
+                &crate::CostFact {
+                    cost_fact_id: id.into(),
+                    call_id: "priced-call".into(),
+                    amount_micros: 999_999,
+                    valid_from: 0,
+                    valid_to: None,
+                    recorded_at: 1,
+                    supersedes_id: None,
+                    schema_version: 1,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let quotes = quote_usage_costs(&s, CostQuoteScope::All, 1).await.unwrap();
+        assert_eq!(quotes.get("zero"), Some(&0));
+        assert_eq!(quotes.get("unknown"), None);
+        assert_eq!(quotes.get("mixed"), Some(&1000));
+        assert_eq!(
+            quote_usage_costs(&s, CostQuoteScope::Session("mixed"), 1)
+                .await
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [("mixed".to_owned(), 1000)]
+        );
+        assert_eq!(s.count("cost_fact").await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn current_quotes_preserve_integer_rounding_count_clamping_and_sum_saturation() {
+        let s = store();
+        quote_rates(&s, "small", 1, 0, None, 1).await;
+        quote_call(&s, "round-down", "below", "quoted", 0, 999_999).await;
+        quote_call(&s, "round-one", "above", "quoted", 0, 1_000_001).await;
+        quote_call(&s, "negative", "negative", "quoted", 0, -1).await;
+        let quotes = quote_usage_costs(&s, CostQuoteScope::All, 1).await.unwrap();
+        assert_eq!(quotes.get("round-down"), Some(&0));
+        assert_eq!(quotes.get("round-one"), Some(&1));
+        assert_eq!(quotes.get("negative"), Some(&0));
+        quote_rates(&s, "large", i64::MAX, 0, None, 2).await;
+        quote_call(&s, "saturated", "large-a", "quoted", 0, i64::MAX).await;
+        quote_call(&s, "saturated", "large-b", "quoted", 0, i64::MAX).await;
+        let amount = quote_usage_costs(&s, CostQuoteScope::Session("saturated"), 2)
+            .await
+            .unwrap();
+        assert_eq!(amount.get("saturated"), Some(&i64::MAX));
+        let per_call = quote_usage_costs(&s, CostQuoteScope::Window(0, 0), 2)
+            .await
+            .unwrap();
+        assert_eq!(per_call.get("saturated"), Some(&i64::MAX));
+    }
+
+    #[tokio::test]
+    async fn alternate_relations_with_duplicate_price_coordinates_obey_the_full_sql_order() {
+        let s = crate::SqliteStore::open_in_memory().unwrap();
+        // Isolated alternate relations, not a modified or migrated canonical schema.
+        s.with_conn(|conn| conn.execute_batch("CREATE TABLE turn (turn_id TEXT PRIMARY KEY, session_id TEXT, ordinal INTEGER, started_at INTEGER, schema_version INTEGER);
+            CREATE TABLE model_call (call_id TEXT PRIMARY KEY, turn_id TEXT, model TEXT, started_at INTEGER, schema_version INTEGER);
+            CREATE TABLE token_usage (call_id TEXT PRIMARY KEY, uncached_input INTEGER, cached_input INTEGER, cache_creation INTEGER, output INTEGER, counter_method TEXT, schema_version INTEGER);
+            CREATE TABLE price_table (price_id TEXT PRIMARY KEY, model TEXT, token_class TEXT, unit_price_micros INTEGER, currency TEXT, valid_from INTEGER, valid_to INTEGER, recorded_at INTEGER, supersedes_id TEXT, schema_version INTEGER);"))
+            .unwrap();
+        assert!(quote_rates(&s, "base", 1_000_000, 0, None, 1).await);
+        assert!(quote_rates(&s, "epoch", 2_000_000, 10, Some(20), 1).await);
+        assert!(quote_rates(&s, "a", 3_000_000, 10, Some(20), 2).await);
+        assert!(quote_rates(&s, "z", 4_000_000, 10, Some(20), 2).await);
+        assert!(quote_rates(&s, "late-low-epoch", 9_000_000, 0, None, 9).await);
+        quote_call(&s, "session", "call", "quoted", 10, 1000).await;
+        let original = effective_prices(&s, "quoted", 10, 9)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(original.uncached_input, 4_000_000);
+        let quoted = quote_usage_costs(&s, CostQuoteScope::Session("session"), 9)
+            .await
+            .unwrap();
+        assert_eq!(quoted.get("session"), Some(&4000));
+        assert_eq!(s.count("price_table").await.unwrap(), 20);
+    }
 
     #[tokio::test]
     async fn token_usage_is_idempotent_per_call() {

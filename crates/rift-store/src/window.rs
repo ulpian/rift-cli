@@ -643,7 +643,7 @@ pub async fn gather(
         open_sessions: open_session_ids(capture, &bounds).await?,
         attributed: window_attribution(capture, &checkpoint_binds).await?,
         tokens: window_tokens(capture, &bounds).await?,
-        cost_micros: window_cost_micros(capture, &bounds).await?,
+        cost_micros: window_cost_micros(capture, window).await?,
         savings: read_savings(recall_db, window).await?,
         ..WindowFacts::default()
     };
@@ -789,21 +789,17 @@ async fn window_tokens(store: &SqliteStore, b: &[Value; 2]) -> Result<TokenClass
     })
 }
 
-/// Bitemporal: only facts still believed, and only the ones nothing
-/// supersedes. Dropping either half double-counts a re-priced call.
-async fn window_cost_micros(store: &SqliteStore, b: &[Value; 2]) -> Result<i64> {
-    Ok(store
-        .query_opt_i64(
-            "SELECT COALESCE(SUM(cf.amount_micros), 0) FROM cost_fact cf \
-             JOIN model_call mc ON mc.call_id = cf.call_id \
-             WHERE mc.started_at >= ?1 AND mc.started_at <= ?2 \
-             AND cf.valid_to IS NULL \
-             AND NOT EXISTS (SELECT 1 FROM cost_fact s \
-                             WHERE s.supersedes_id = cf.cost_fact_id)",
-            b,
-        )
-        .await?
-        .unwrap_or(0))
+/// Current catalog belief is explicit; usage remains anchored to call start.
+async fn window_cost_micros(store: &SqliteStore, window: &Window) -> Result<i64> {
+    let quotes = crate::quote_usage_costs(
+        store,
+        crate::CostQuoteScope::Window(window.since_ms, window.until_ms),
+        i64::MAX,
+    )
+    .await?;
+    Ok(quotes
+        .values()
+        .fold(0i64, |sum, amount| sum.saturating_add(*amount)))
 }
 
 /// Recall's ledger arithmetic, or `None` when this repository has no `recall.db`.

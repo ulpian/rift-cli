@@ -19,9 +19,9 @@ use rift_recall_substrate::parse::{
 use rift_recall_substrate::SubstrateReader;
 use rift_shadow_cost::{call_cost_micros, ClassPrices, TokenUsage};
 use rift_store::{
-    current_cost_micros, effective_prices, record_capture_session_identity, record_cost_fact,
-    record_model_call, record_session, record_token_usage, record_turn, CanonicalStore,
-    CaptureSessionIdentityRow, CostFact, ModelCallRow, SessionRow, TokenUsageRow, TurnRow,
+    effective_prices, record_capture_session_identity, record_cost_if_changed, record_model_call,
+    record_session, record_token_usage, record_turn, CanonicalStore, CaptureSessionIdentityRow,
+    ModelCallRow, SessionRow, TokenUsageRow, TurnRow,
 };
 use serde_json::{Map, Value};
 
@@ -384,31 +384,7 @@ async fn record_line_cost<S: CanonicalStore, R>(
         output_per_mtok: prices.output,
     };
     let amount = call_cost_micros(&usage, &class_prices, 0);
-    if current_cost_micros(ctx.store, &line.call_id).await? == Some(amount) {
-        return Ok(());
-    }
-    record_cost_fact(
-        ctx.store,
-        &CostFact {
-            cost_fact_id: crate::sha256_hex(&[
-                b"cost_fact",
-                b"\0",
-                line.call_id.as_bytes(),
-                b"\0",
-                amount.to_string().as_bytes(),
-                b"\0",
-                ctx.now_ms.to_string().as_bytes(),
-            ]),
-            call_id: line.call_id.clone(),
-            amount_micros: amount,
-            valid_from: line.at,
-            valid_to: None,
-            recorded_at: ctx.now_ms,
-            supersedes_id: None,
-            schema_version: 1,
-        },
-    )
-    .await
+    record_cost_if_changed(ctx.store, &line.call_id, amount, line.at, ctx.now_ms).await
 }
 
 #[cfg(test)]
@@ -461,6 +437,100 @@ mod tests {
             issue.detail
         );
         issue
+    }
+
+    async fn shard_reversion_prices(store: &rift_store::SqliteStore, model: &str, now: i64) {
+        for (class, rate) in [
+            ("uncached_input", 3_000_000),
+            ("cached_input", 300_000),
+            ("cache_creation", 3_750_000),
+            ("output", 15_000_000),
+        ] {
+            assert!(
+                rift_store::record_price(
+                    store,
+                    &rift_store::PriceTableRow {
+                        price_id: format!("zz-revert-{class}"),
+                        model: model.into(),
+                        token_class: class.into(),
+                        unit_price_micros: rate,
+                        currency: "USD".into(),
+                        valid_from: now,
+                        valid_to: None,
+                        recorded_at: now,
+                        supersedes_id: None,
+                        schema_version: 1,
+                    },
+                )
+                .await
+                .unwrap(),
+                "reversion catalog row must be inserted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn same_clock_shard_correction_retry_and_revert_preserve_booking_history() {
+        const NOW: i64 = 1_789_603_200_000;
+        let store = rift_store::SqliteStore::open_in_memory().unwrap();
+        let migrations = rift_store::default_migrations();
+        rift_store::apply_migrations(&store, &migrations[..15]).unwrap();
+        let substrate = rift_recall_substrate::MemorySubstrate::local();
+        let registry = rift_shadow_hooks::AdapterRegistry::with_builtin();
+        let ctx = IngestCtx {
+            store: &store,
+            sub: &substrate,
+            repo_id: "repo",
+            default_agent: "claude-code",
+            now_ms: NOW,
+            registry: &registry,
+        };
+        let line = UsageLine {
+            session: "session".into(),
+            turn: 1,
+            call_id: "same-instant-call".into(),
+            model: "claude-sonnet-5".into(),
+            at: NOW,
+            uncached_input: 1000,
+            cached_input: 0,
+            cache_creation: 0,
+            output: 0,
+            method: "provider_reported".into(),
+        };
+        record_line_cost(&ctx, &line).await.unwrap();
+        let old = rift_store::latest_booked_cost_at(&store, &line.call_id, NOW)
+            .await
+            .unwrap()
+            .unwrap();
+        rift_store::apply_migrations(&store, &migrations).unwrap();
+        for _ in 0..2 {
+            record_line_cost(&ctx, &line).await.unwrap();
+        }
+        let corrected = rift_store::latest_booked_cost_at(&store, &line.call_id, NOW)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(corrected.amount_micros, 2000);
+        assert_eq!(store.count("cost_fact").await.unwrap(), 2);
+        shard_reversion_prices(&store, &line.model, NOW).await;
+        for _ in 0..2 {
+            record_line_cost(&ctx, &line).await.unwrap();
+        }
+        let reverted = rift_store::latest_booked_cost_at(&store, &line.call_id, NOW)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reverted.amount_micros, 3000);
+        assert_ne!(reverted.cost_fact_id, old.cost_fact_id);
+        let chain = store
+            .query(
+                "SELECT supersedes_id FROM cost_fact WHERE cost_fact_id = ?1",
+                &[rift_store::Value::text(reverted.cost_fact_id)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(chain[0].get_text(0).unwrap(), corrected.cost_fact_id);
+        assert_eq!(store.count("cost_fact").await.unwrap(), 3);
     }
 
     #[test]

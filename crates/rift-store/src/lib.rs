@@ -68,12 +68,12 @@ pub use bundle::{
 pub use capture::{
     confidence_to_milli, content_blob_oid_map, effective_prices, latest_archive_ms,
     latest_ingest_watermark, latest_turn_boundary_files, latest_turn_boundary_snapshot,
-    record_agent_enablement, record_agent_hook_event, record_archive_decision, record_attribution,
-    record_attribution_hunk, record_capture_session_identity, record_captured_event,
-    record_changed_hunk, record_checkpoint_worktree_if_new, record_file_read_tokens,
-    record_file_revision, record_ingest_watermark, record_main_context_observation,
-    record_model_call, record_model_observation, record_price, record_session,
-    record_session_event, record_session_in_checkpoint, record_session_transition,
+    quote_usage_costs, record_agent_enablement, record_agent_hook_event, record_archive_decision,
+    record_attribution, record_attribution_hunk, record_capture_session_identity,
+    record_captured_event, record_changed_hunk, record_checkpoint_worktree_if_new,
+    record_file_read_tokens, record_file_revision, record_ingest_watermark,
+    record_main_context_observation, record_model_call, record_model_observation, record_price,
+    record_session, record_session_event, record_session_in_checkpoint, record_session_transition,
     record_session_worktree, record_subagent_session, record_substrate_block_event,
     record_token_usage, record_tool_call, record_tool_edits_file, record_tool_reads_file,
     record_tool_result_tokens, record_turn, record_turn_boundary_file,
@@ -82,7 +82,7 @@ pub use capture::{
     turn_boundary_files_for_session_path, turn_boundary_files_for_snapshot,
     turn_diff_hunks_for_session, AgentEnablementRow, AgentHookEventRow, ArchiveDecisionRow,
     AttributionHunkRow, AttributionRow, CaptureSessionIdentityRow, CapturedEventRow,
-    ChangedHunkRow, EffectivePrices, FileRevisionRow, IngestWatermarkRow,
+    ChangedHunkRow, CostQuoteScope, EffectivePrices, FileRevisionRow, IngestWatermarkRow,
     MainContextObservationRow, ModelCallRow, ModelObservationRow, PriceTableRow, SessionEventRow,
     SessionInCheckpointRow, SessionReadFact, SessionRow, SessionTransitionRow, SessionWorktreeRow,
     SubagentSessionRow, SubstrateBlockEventRow, TokenUsageRow, ToolCallRow, TurnBoundaryFileRow,
@@ -102,10 +102,10 @@ pub use identity_store::{
     record_session_binding, unbound_session_ids,
 };
 pub use integrity::{
-    cost_belief_as_of, current_cost_micros, record_checkpoint, record_checkpoint_commit_if_new,
-    record_checkpoint_if_new, record_cost_fact, record_imported_checkpoint_if_new,
-    verify_against_source, ChainSource, CheckpointRecord, CostFact, ImportedCheckpointRecord,
-    VerifyReport,
+    cost_belief_as_of, current_cost_micros, latest_booked_cost_at, record_checkpoint,
+    record_checkpoint_commit_if_new, record_checkpoint_if_new, record_cost_fact,
+    record_cost_if_changed, record_imported_checkpoint_if_new, verify_against_source, BookedCost,
+    ChainSource, CheckpointRecord, CostFact, ImportedCheckpointRecord, VerifyReport,
 };
 pub use key_metadata::{
     key_metadata_for_generation, latest_key_metadata, record_key_metadata, KeyMetadataRow,

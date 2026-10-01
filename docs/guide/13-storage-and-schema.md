@@ -1,4 +1,4 @@
-worktree provenance, measured tool results | 46 | 15 |# 13. Storage and schema
+# 13. Storage and schema
 
 Capture writes one local database ([Chapter 3](03-capture.md)), the recall plane
 another ([Chapter 6](06-recall.md)), the dashboard a third
@@ -45,7 +45,7 @@ from a trigger created alongside the table (§13.4).
 
 | File | Keyed by | Holds | Tables | Migrations |
 |---|---|---|---|---|
-| `~/.cache/rift/<family-id>/projection.db` | the family's capture identity | sessions, turns, model and tool calls, file revisions, attribution, token usage and cost, hook audit, checkpoint integrity, worktree provenance, measured tool results | 46 | 15 |
+| `~/.cache/rift/<family-id>/projection.db` | the family's capture identity | sessions, turns, model and tool calls, file revisions, attribution, token usage and cost, hook audit, checkpoint integrity, worktree provenance, measured tool results | 46 | 16 |
 | `~/.cache/rift/<recall-id>/recall.db` | the family's *recall* identity | the delta model's derived graph plus governance records: serve audit, serve calls and sessions, outcome labels, metric snapshots, evaluation runs, key metadata | 27 | 12 |
 | `~/.cache/rift/canopy/ui-state.db` | nothing — machine-global | dashboard state spanning repositories: project catalogue, feature toggles, per-project layouts, profiles, membership, theme slots, startup pin | 8 | 5 |
 
@@ -323,6 +323,14 @@ returns nothing rather than a partially-priced fact
 this cost" and "what did we believe it cost in March" are both answerable from
 the same table forever.
 
+Current report amounts quote each captured call's token usage against the catalog at read time, with the call start as valid time and an explicit catalog belief cutoff.
+An upgrade and a cold usage-shard rebuild therefore report the same current amount without summing old and corrected bookings.
+The quote writes no rows; a call with any unpriced token class contributes no amount.
+A mixed session sums its completely priced calls, while a session with none has no dollar figure.
+Historical booked-cost reads select an unsuperseded fact visible at their belief cutoff; a future correction does not hide the old belief.
+A same-instant correction wins over its predecessor through its link, while unrelated leaves retain a deterministic recorded-time and identity order.
+A correction's identity includes its predecessor so reverting an amount at the same instant appends a distinct linked row.
+
 Cost facts carry the identical shape, and key custody uses the idea one level
 down: a rotation inserts a generation whose `supersedes` points at the previous
 one, so data encrypted under an older generation stays decryptable and custody
@@ -489,7 +497,8 @@ it over a healthy projection inserts nothing. It is a repair, not a reset.
 Usage and cost are on the restorable side for every shard that carries the usage artifact.
 A checkpoint's `usage.jsonl` freezes each settled model call of its session: the call's own key, its turn, its model, when it happened, the four token classes and how they were counted.
 The rebuild writes the session, the turn, the model call and its token usage back from each line under the live keys, and a row the live path already wrote wins.
-The call's cost is priced again from the catalog as of the rebuild, because the shard carries no dollar figure; a model the catalog does not price gets its usage and no cost, exactly as it did live.
+The rebuild may append a booking priced from the catalog as of its supplied clock, because the shard carries no dollar figure.
+Current reports quote that same restored usage from the current catalog, independently of when a booking was made; an unpriced model retains its usage with no dollar figure.
 What a line cannot say is when its session and turn opened: a session the projection has never seen is dated by its first recorded call.
 
 Some capture facts a rebuild still cannot derive.

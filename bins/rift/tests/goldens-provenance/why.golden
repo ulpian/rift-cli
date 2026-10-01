@@ -13,7 +13,7 @@
     "worktree": null
   },
   "cost": {
-    "amount_micros": null,
+    "amount_micros": 312,
     "cache_creation": 0,
     "cached_input": 0,
     "output": 8,

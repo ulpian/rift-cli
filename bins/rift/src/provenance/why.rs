@@ -201,8 +201,7 @@ pub(crate) fn prompt_from_shard(root: &std::path::Path, checkpoint_id: &str) -> 
     })
 }
 
-/// One session's four-class token totals and its non-superseded cost, summed
-/// over `turn → model_call → token_usage / cost_fact`.
+/// One session's recorded token totals and current catalog quote.
 #[derive(Clone, Debug, ::serde::Serialize)]
 pub(crate) struct CostView {
     pub(crate) session_id: String,
@@ -210,8 +209,7 @@ pub(crate) struct CostView {
     pub(crate) cached_input: i64,
     pub(crate) cache_creation: i64,
     pub(crate) output: i64,
-    /// Micro-USD over current (non-superseded, open-valid) cost facts; `None`
-    /// when no fact rows exist — tokens without a priced bill stay tokens.
+    /// Current quoted micro-USD; absent when no call has complete prices.
     pub(crate) amount_micros: Option<i64>,
 }
 
@@ -247,22 +245,14 @@ pub(crate) async fn session_cost(
         output: r.get_i64(4)?,
         amount_micros: None,
     };
-    let cost = store
-        .query(
-            "SELECT COUNT(*), COALESCE(SUM(cf.amount_micros),0) \
-             FROM cost_fact cf \
-             JOIN model_call mc ON mc.call_id = cf.call_id \
-             JOIN turn t ON t.turn_id = mc.turn_id \
-             WHERE t.session_id = ? AND cf.valid_to IS NULL \
-             AND NOT EXISTS (SELECT 1 FROM cost_fact s WHERE s.supersedes_id = cf.cost_fact_id)",
-            &[Value::text(session_id.to_owned())],
-        )
-        .await?;
-    if let Some(c) = cost.first() {
-        if c.get_i64(0)? > 0 {
-            view.amount_micros = Some(c.get_i64(1)?);
-        }
-    }
+    view.amount_micros = rift_store::quote_usage_costs(
+        store,
+        rift_store::CostQuoteScope::Session(session_id),
+        i64::MAX,
+    )
+    .await?
+    .get(session_id)
+    .copied();
     Ok(Some(view))
 }
 

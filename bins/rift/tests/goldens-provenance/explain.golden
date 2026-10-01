@@ -10,7 +10,7 @@
   "checkpoint_id": "8eeb6bff4031fd0e43fabafc80a05c29f4ca26123ebc008f9da98d454738bf4b",
   "costs": [
     {
-      "amount_micros": null,
+      "amount_micros": 312,
       "cache_creation": 0,
       "cached_input": 0,
       "output": 8,

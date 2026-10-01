@@ -47,7 +47,7 @@ struct SessionTotals {
     agent: Option<String>,
     /// The session's four recorded token classes.
     tokens: Option<TokenClasses>,
-    /// Micro-USD over its current cost facts.
+    /// Current catalog quote in micro-USD.
     cost_micros: Option<i64>,
 }
 
@@ -218,27 +218,118 @@ async fn read_token_totals(
     Ok(())
 }
 
-/// …and in money: the same non-superseded, open-valid predicate `session_cost`
-/// applies, grouped the same way. Tokens without a priced bill stay tokens, so
-/// a session with no fact rows carries no `cost_micros` rather than a zero.
+/// Current catalog quotes grouped by session, preserving unpriced absence.
 async fn read_cost_totals(
     store: &SqliteStore,
     totals: &mut HashMap<String, SessionTotals>,
 ) -> Result<()> {
-    for r in store
-        .query(
-            "SELECT t.session_id, COALESCE(SUM(cf.amount_micros),0) \
-             FROM cost_fact cf \
-             JOIN model_call mc ON mc.call_id = cf.call_id \
-             JOIN turn t ON t.turn_id = mc.turn_id \
-             WHERE cf.valid_to IS NULL \
-             AND NOT EXISTS (SELECT 1 FROM cost_fact s WHERE s.supersedes_id = cf.cost_fact_id) \
-             GROUP BY t.session_id",
-            &[],
-        )
-        .await?
+    for (session, amount) in
+        rift_store::quote_usage_costs(store, rift_store::CostQuoteScope::All, i64::MAX).await?
     {
-        totals.entry(r.get_text(0)?).or_default().cost_micros = Some(r.get_i64(1)?);
+        totals.entry(session).or_default().cost_micros = Some(amount);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn quote_fixture(s: &SqliteStore) {
+        let turn = rift_store::TurnRow {
+            turn_id: "turn".into(),
+            session_id: "session".into(),
+            ordinal: 1,
+            started_at: 0,
+            schema_version: 1,
+        };
+        rift_store::record_turn(s, &turn).await.unwrap();
+        rift_store::record_model_call(
+            s,
+            &rift_store::ModelCallRow {
+                call_id: "call".into(),
+                turn_id: turn.turn_id,
+                model: "fixture-model".into(),
+                started_at: 10,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        rift_store::record_token_usage(
+            s,
+            &rift_store::TokenUsageRow {
+                call_id: "call".into(),
+                uncached_input: 1000,
+                cached_input: 0,
+                cache_creation: 0,
+                output: 0,
+                counter_method: "provider_reported".into(),
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        for (prefix, input, belief) in [("old", 1_000_000, 1), ("new", 2_000_000, 2)] {
+            for class in ["uncached_input", "cached_input", "cache_creation", "output"] {
+                rift_store::record_price(
+                    s,
+                    &rift_store::PriceTableRow {
+                        price_id: format!("{prefix}-{class}"),
+                        model: "fixture-model".into(),
+                        token_class: class.into(),
+                        unit_price_micros: input,
+                        currency: "USD".into(),
+                        valid_from: 0,
+                        valid_to: None,
+                        recorded_at: belief,
+                        supersedes_id: None,
+                        schema_version: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        }
+        for id in ["orphan-old", "orphan-new"] {
+            rift_store::record_cost_fact(
+                s,
+                &rift_store::CostFact {
+                    cost_fact_id: id.into(),
+                    call_id: "call".into(),
+                    amount_micros: 9999,
+                    valid_from: 0,
+                    valid_to: None,
+                    recorded_at: 1,
+                    supersedes_id: None,
+                    schema_version: 1,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_provenance_and_why_quote_the_latest_catalog_without_summing_orphan_bookings() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.create_canonical_schema().unwrap();
+        quote_fixture(&store).await;
+        let mut before = Vec::new();
+        for table in rift_store::canonical_tables() {
+            before.push((table.name, store.count(table.name).await.unwrap()));
+        }
+        let mut totals = HashMap::new();
+        read_cost_totals(&store, &mut totals).await.unwrap();
+        assert_eq!(totals.get("session").unwrap().cost_micros, Some(2000));
+        let why = crate::provenance::why::session_cost(&store, "session")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(why.amount_micros, Some(2000));
+        assert_eq!(why.uncached_input, 1000);
+        for (table, count) in before {
+            assert_eq!(store.count(table).await.unwrap(), count);
+        }
+    }
 }
