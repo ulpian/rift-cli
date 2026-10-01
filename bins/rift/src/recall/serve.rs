@@ -178,7 +178,7 @@ async fn answer_one_bounded_skill_verb(call: ServeCall<'_>) -> Result<Outcome> {
 /// the agent waiting on it, and this call belongs to the pull channel, which
 /// is a short-lived process answering one question a caller asked.
 fn open_the_recall_store_of_this_family(family: &rift_git::Family) -> Result<SqliteStore> {
-    let db = rift_store::recall_db_for_family(family);
+    let db = crate::family::recall_db_of(family);
     rift_store::open_migrated(&db, &rift_store::recall_migrations())
 }
 
@@ -213,7 +213,7 @@ async fn provenance_oracle_for_this_serve(
     }
     Box::new(
         crate::provenance::CaptureProvenance::read_capture_side(
-            &rift_store::projection_db_for_family(family),
+            &crate::family::projection_db_of(family),
             repo,
         )
         .await,

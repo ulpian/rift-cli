@@ -902,7 +902,7 @@ mod injection_tests {
             "schema_version = 1\n[project]\nname = \"t\"\n[features]\ntotal_recall = true\n",
         )
         .unwrap();
-        let db = rift_store::recall_db_for_repo(repo.path()).unwrap();
+        let db = crate::family::recall_db(repo.path()).unwrap();
         set_up_here(repo.path());
         (repo, db)
     }
