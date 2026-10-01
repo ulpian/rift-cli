@@ -17,8 +17,8 @@ mod common;
 #[path = "common/hooks_fixture.rs"]
 mod hooks_fixture;
 use hooks_fixture::{
-    agent_hook, git_in, run_rift, run_rift_capture, run_rift_in, seed_live_session_repo,
-    RETIRED_BRAND,
+    agent_hook, git_in, post_commit_args, run_rift, run_rift_in, seed_live_session_repo,
+    DetachedHooks, RETIRED_BRAND,
 };
 
 fn git_dir(tmp: &Path) -> std::path::PathBuf {
@@ -39,9 +39,9 @@ fn git_dir(tmp: &Path) -> std::path::PathBuf {
 /// path: the hook returns while the queue still holds its entry, and the shard
 /// appears afterwards, written by a process this one only started.
 ///
-/// It polls rather than asserting a duration. How long the child takes is a
-/// property of the machine; that it finishes, drains its entry and leaves a
-/// shard is a property of the code.
+/// It waits for the worker to exit rather than for a duration. How long the
+/// child takes is a property of the machine; that it finishes, drains its
+/// entry and leaves a shard is a property of the code.
 #[test]
 fn the_detached_worker_archives_after_the_hook_has_already_returned() {
     let tmp = tempfile::tempdir().unwrap();
@@ -49,16 +49,11 @@ fn the_detached_worker_archives_after_the_hook_has_already_returned() {
     let cache = tmp.path().join("cache");
     let queue = repo.join(".git").join("rift-capture-queue");
 
-    let (code, stderr) = run_rift_capture(
+    let hooks = DetachedHooks::default();
+    let (code, stderr) = hooks.run(
         &repo,
-        &[
-            "hooks",
-            "git",
-            "post-commit",
-            "--git-dir",
-            repo.join(".git").to_str().unwrap(),
-        ],
-        Some(""),
+        &post_commit_args(&repo.join(".git")),
+        "",
         &[
             ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
             ("RIFT_NO_KEYCHAIN", "1"),
@@ -74,14 +69,13 @@ fn the_detached_worker_archives_after_the_hook_has_already_returned() {
             .output()
             .is_ok_and(|o| o.status.success())
     };
-    // Poll for BOTH facts, not just the shard.
+    // Assert BOTH facts, not just the shard, and only once the worker is gone.
     //
     // The shard ref appearing does not mean the worker is finished: it still
     // records the checkpoint's chain position and runs the soak's verify before
-    // it drains. Measured on this machine, the shard ref lands 169 ms before
-    // the drain does (0 ms before the chain step existed), so asserting the
-    // drain the instant the ref appears was asserting a duration after all —
-    // the one thing this test's own docstring says it must not do.
+    // it drains, so asserting the drain the instant the ref appears would be
+    // asserting a duration after all — the one thing this test's own docstring
+    // says it must not do.
     let entries_left = || {
         std::fs::read_dir(&queue)
             .map(|d| {
@@ -92,10 +86,7 @@ fn the_detached_worker_archives_after_the_hook_has_already_returned() {
             })
             .unwrap_or_default()
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-    while std::time::Instant::now() < deadline && !(shard_exists() && entries_left().is_empty()) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    hooks.await_workers(|| shard_exists() && entries_left().is_empty());
     assert!(
         shard_exists(),
         "the detached worker archived the checkpoint"
@@ -133,19 +124,16 @@ fn a_direct_hook_link_spawns_the_worker_binary_not_another_hook() {
     let hook = git_dir.join("hooks/post-commit");
     assert!(std::fs::read_link(&hook).is_ok(), "the entry is a symlink");
 
-    let status = hook_command(&hook)
-        .current_dir(&repo)
+    let mut cmd = hook_command(&hook);
+    cmd.current_dir(&repo)
         .env("GIT_DIR", &git_dir)
         .env("RIFT_CACHE_DIR", &cache)
         .env("RIFT_NO_KEYCHAIN", "1")
         .env("RIFT_NO_PROVISION", "1")
-        .env_remove("RIFT_CAPTURE_SYNC")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
-    assert_eq!(status.code(), Some(0), "the direct hook never blocks git");
+        .env_remove("RIFT_CAPTURE_SYNC");
+    let hooks = DetachedHooks::default();
+    let (code, _) = hooks.output(cmd, "");
+    assert_eq!(code, 0, "the direct hook never blocks git");
 
     let queue = git_dir.join("rift-capture-queue");
     let entries_left = || {
@@ -164,10 +152,7 @@ fn a_direct_hook_link_spawns_the_worker_binary_not_another_hook() {
             .output()
             .is_ok_and(|output| output.status.success())
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-    while std::time::Instant::now() < deadline && !(shard_exists() && entries_left() == 0) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    hooks.await_workers(|| shard_exists() && entries_left() == 0);
     assert!(shard_exists(), "the direct-link worker archived the commit");
     assert_eq!(
         entries_left(),

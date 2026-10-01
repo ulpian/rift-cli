@@ -18,7 +18,7 @@ mod hooks_fixture;
 use hooks_fixture::{
     agent_hook, agent_read_hook, capture_queue_leg, checkpoint_shards, doctor_fix_json,
     doctor_json, git_in, rev_parse, run_rift_capture, run_rift_in, run_rift_stdout,
-    seed_live_session_repo, session_phase, sync_env,
+    seed_live_session_repo, session_phase, sync_env, DetachedHooks,
 };
 
 // --- the deferred settle -----------------------------------------------------
@@ -28,22 +28,23 @@ use hooks_fixture::{
 /// Returns the transcript path. The transcript does NOT exist yet when the
 /// Stop runs — the caller writes it afterwards, which is the contract under
 /// test: a Stop cannot have read what was not there.
-fn drive_native_turn(repo: &Path, session: &str, env: &[(&str, &str)]) -> std::path::PathBuf {
+///
+/// Every hook runs through `hooks`, so a caller on the detached path can wait
+/// for the workers the turn's own hooks started as well as its last one's.
+fn drive_native_turn(
+    hooks: &DetachedHooks,
+    repo: &Path,
+    session: &str,
+    env: &[(&str, &str)],
+) -> std::path::PathBuf {
     let transcript = repo.join("..").join(format!("{session}.jsonl"));
     let hook = |verb: &str, body: serde_json::Value| {
         let mut body = body;
         body["session_id"] = serde_json::Value::String(session.to_owned());
         body["hook_event_name"] = serde_json::Value::String(verb.to_owned());
-        assert_eq!(
-            run_rift_in(
-                repo,
-                &["hooks", "claude-code", verb],
-                &body.to_string(),
-                env
-            ),
-            0,
-            "a capture hook never fails the agent"
-        );
+        let args = ["hooks", "claude-code", verb];
+        let (code, _) = hooks.run(repo, &args, &body.to_string(), env);
+        assert_eq!(code, 0, "a capture hook never fails the agent");
     };
     hook(
         "SessionStart",
@@ -156,7 +157,7 @@ async fn a_stop_returns_before_the_transcript_settles_and_the_next_hook_records_
         ("RIFT_CAPTURE_SYNC", "1"),
     ];
     let session = "01JDEFERREDSETTLE0000000001";
-    let transcript = drive_native_turn(&repo, session, &env);
+    let transcript = drive_native_turn(&DetachedHooks::default(), &repo, session, &env);
     write_native_transcript(&transcript);
 
     let (usage, stop) = settled_usage(&cache, &repo, session).await;
@@ -222,7 +223,7 @@ async fn the_doctor_sweep_settles_the_last_turn_of_a_session_no_hook_will_end() 
         ("RIFT_CAPTURE_SYNC", "1"),
     ];
     let session = "01JABANDONEDLASTTURN0000001";
-    let transcript = drive_native_turn(&repo, session, &env);
+    let transcript = drive_native_turn(&DetachedHooks::default(), &repo, session, &env);
     write_native_transcript(&transcript);
     let (usage, stop) = settled_usage(&cache, &repo, session).await;
     assert!(usage.is_empty());
@@ -310,8 +311,9 @@ fn plant_condense_job(repo: &Path, session: &str) {
 /// The DEFAULT path — no `RIFT_CAPTURE_SYNC`: a
 /// `SessionEnd` journals its condense and returns; the detached worker
 /// settles the session's last turn, archives, closes the session and leaves
-/// the done-marker, all after the hook is gone. The test polls the marker
-/// rather than asserting a duration, for the reason the post-commit twin
+/// the done-marker, all after the hook is gone. The test waits for the
+/// workers to exit rather than for a duration, for the reason the
+/// post-commit twin
 /// (`the_detached_worker_archives_after_the_hook_has_already_returned`) gives.
 #[tokio::test]
 async fn a_session_end_returns_and_the_detached_worker_condenses_and_settles() {
@@ -329,7 +331,8 @@ async fn a_session_end_returns_and_the_detached_worker_condenses_and_settles() {
         ("RIFT_NO_KEYCHAIN", "1"),
     ];
     let session = "01JDETACHEDSESSIONEND000001";
-    let transcript = drive_native_turn(&repo, session, &env);
+    let hooks = DetachedHooks::default();
+    let transcript = drive_native_turn(&hooks, &repo, session, &env);
     write_native_transcript(&transcript);
     let (usage, stop) = settled_usage(&cache, &repo, session).await;
     assert!(
@@ -339,25 +342,15 @@ async fn a_session_end_returns_and_the_detached_worker_condenses_and_settles() {
     let stop = stop.expect("turn 1 closed");
 
     let body = serde_json::json!({"session_id": session, "hook_event_name": "SessionEnd", "reason": "exit"});
-    assert_eq!(
-        run_rift_in(
-            &repo,
-            &["hooks", "claude-code", "SessionEnd"],
-            &body.to_string(),
-            &env
-        ),
-        0,
-        "a capture hook never fails the agent"
-    );
+    let args = ["hooks", "claude-code", "SessionEnd"];
+    let (code, _) = hooks.run(&repo, &args, &body.to_string(), &env);
+    assert_eq!(code, 0, "a capture hook never fails the agent");
     assert!(
         repo.join(".git").join("rift-agent-queue").is_dir(),
         "the hook left a durable record of the condense it owes"
     );
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-    while std::time::Instant::now() < deadline && agent_queue_state(&repo, session) != (true, 0) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    hooks.await_workers(|| agent_queue_state(&repo, session) == (true, 0));
     assert_eq!(
         agent_queue_state(&repo, session),
         (true, 0),

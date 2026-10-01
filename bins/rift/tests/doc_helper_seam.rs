@@ -39,7 +39,31 @@ const ROUTE: [&str; 2] = ["hooks", "doc"];
 /// route opens no store and discovers no repository, so the working
 /// directory a spawn inherits cannot leak into anything.
 fn converter() -> ChildProcessConverter {
+    warm_the_binary();
     ChildProcessConverter::new(common::rift_bin(), ROUTE)
+}
+
+/// Run the binary once, outside any budget, before a conversion is timed.
+///
+/// macOS assesses a newly linked executable on its first exec, and the
+/// assessments of new files run one after another, machine-wide. For a debug
+/// build of this size that has been measured here at nearly four seconds on a
+/// lightly loaded machine, against a seventh of a second for the next exec,
+/// and on a machine linking other test binaries it passes the thirty seconds
+/// of [`PATIENT`]. Every test here spawns the binary at once, so whichever
+/// spawns first would carry that queue inside its budget and report a
+/// deadline that is not the conversion's.
+fn warm_the_binary() {
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let status = common::rift_cmd(tmp.path())
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "the binary under test does not start");
+    });
 }
 
 /// ★ The behaviour the hook path depends on: a document that is not in the
@@ -233,11 +257,10 @@ fn a_document_that_expands_past_the_ceiling_is_refused_and_never_read_whole() {
         ..ConvertCaps::default()
     };
     assert_eq!(output_ceiling(&caps), MIN_OUTPUT_BYTES);
+    let converter = converter().with_budget(PATIENT);
     let started = std::time::Instant::now();
     assert_eq!(
-        converter()
-            .with_budget(PATIENT)
-            .convert(&bytes, "ods", &caps),
+        converter.convert(&bytes, "ods", &caps),
         Err(DocError::Engine {
             code: "resourceLimit"
         })
@@ -251,8 +274,7 @@ fn a_document_that_expands_past_the_ceiling_is_refused_and_never_read_whole() {
     // And it really does expand: under a ceiling that fits it, the same 846
     // bytes convert to more than eight ceilings of Markdown. Without this arm
     // the refusal above could be a fixture that simply failed to parse.
-    let markdown = converter()
-        .with_budget(PATIENT)
+    let markdown = converter
         .convert(&bytes, "ods", &ConvertCaps::default())
         .expect("the same document, under a ceiling that fits its answer");
     let ceilings = markdown.text.len() as u64 / MIN_OUTPUT_BYTES;
