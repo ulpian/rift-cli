@@ -23,7 +23,7 @@ use hooks_fixture::{
     hold_drain_lock, json_str, now_ms, only_checkpoint_id, prepare_commit_msg_hook, rev_parse,
     rift_json, run_rift, run_rift_capture, run_rift_capture_in, run_rift_stdout,
     seed_live_session_repo, session_phase, shard_blob, shard_path_of, shard_tree_names, sync_env,
-    sync_env_with_data, write_agent_transcript, LIVE_SESSION, TWO_LINE_TRANSCRIPT,
+    sync_env_with_data, write_agent_transcript, DetachedHooks, LIVE_SESSION, TWO_LINE_TRANSCRIPT,
 };
 
 /// A repository whose live session remembers the agent transcript's ADDRESS,
@@ -817,6 +817,7 @@ struct Scheduled {
     cache: PathBuf,
     data: PathBuf,
     transcript: PathBuf,
+    hooks: DetachedHooks,
 }
 
 impl Scheduled {
@@ -834,6 +835,7 @@ impl Scheduled {
             cache,
             data,
             transcript,
+            hooks: DetachedHooks::default(),
         }
     }
 
@@ -855,38 +857,32 @@ impl Scheduled {
 
     /// One Claude Code `PostToolUse` for the live session, as the client
     /// sends it, under `env` and nothing inherited that could choose the arm.
+    /// The hook runs as the leader of its own process group, so the walk can
+    /// wait for any worker it started.
     fn tool_call(&self, env: &[(&str, &str)]) {
-        use std::io::Write as _;
-
         let body = serde_json::json!({
             "session_id": LIVE_SESSION,
             "transcript_path": self.transcript.display().to_string(),
             "tool_name": "Bash",
             "tool_input": {"command": "true"},
         });
-        let mut child = common::rift_cmd(&self.repo)
-            .args(["hooks", "claude-code", "PostToolUse"])
+        let mut cmd = common::rift_cmd(&self.repo);
+        cmd.args(["hooks", "claude-code", "PostToolUse"])
             .env_remove("RIFT_CAPTURE_SYNC")
-            .envs(env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(body.to_string().as_bytes()).unwrap();
-        drop(stdin);
-        assert!(child.wait().unwrap().success(), "agent hook never fails");
+            .envs(env.iter().copied());
+        let (code, _) = self.hooks.output(cmd, &body.to_string());
+        assert_eq!(code, 0, "agent hook never fails");
     }
 
     /// One worker pass, as a hook would start it, and then the wait for any
     /// worker a hook started while the lock was held: whichever of them takes
-    /// the lock drains the journal, and the walk reads the result after both
-    /// queues are empty rather than after a guessed duration.
+    /// the lock drains the journal, and the walk reads the result once every
+    /// process group it started is empty rather than after a guessed duration.
     fn drain_once(&self) {
         let git_dir = self.repo.join(".git");
         let args = ["hooks", "worker", "--git-dir", git_dir.to_str().unwrap()];
-        assert_eq!(run_rift(&self.repo, &args, None, &self.detached_env()), 0);
+        let (code, _) = self.hooks.run(&self.repo, &args, "", &self.detached_env());
+        assert_eq!(code, 0);
         let drained = || {
             agent_jobs_named(&self.repo, "archive-").is_empty()
                 && std::fs::read_dir(git_dir.join("rift-capture-queue"))
@@ -896,10 +892,7 @@ impl Scheduled {
                     .all(|e| e.path().extension().is_none_or(|x| x != "json"))
                 && !git_dir.join("rift-capture-queue").join(".lock").exists()
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-        while std::time::Instant::now() < deadline && !drained() {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        self.hooks.await_workers(drained);
         assert!(drained(), "a worker drained the journal");
     }
 
@@ -979,7 +972,7 @@ fn a_sensitive_commit_inside_the_interval_checkpoints_after_one_worker_pass() {
     git_in(&fx.repo, &["add", "secrets/token.txt"]);
     git_in(&fx.repo, &["commit", "-q", "-m", "touch a sensitive path"]);
     let lock = hold_drain_lock(&fx.repo);
-    archive_head(&fx.repo, &fx.detached_env());
+    fx.hooks.archive_head(&fx.repo, &fx.detached_env());
     assert_eq!(
         checkpoint_shards(&fx.repo).len(),
         1,

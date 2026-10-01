@@ -28,7 +28,7 @@ use crate::projection::project_name;
 /// The dashboard's registry is the append-only canopy UI-state store; the legacy
 /// TOML registry is imported once (idempotent) so existing users keep their list.
 pub(crate) fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
-    let cache_root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
+    let cache_root = crate::family::cache_root();
     let cstore = rift_canopy_data::CanopyStore::open(&cache_root)?;
     let projects = launch_projects(&cstore)?;
     #[cfg(feature = "tui")]
@@ -98,7 +98,7 @@ fn run_dashboard(
         home_dir: home_dir_from(|k| std::env::var(k).ok()),
     };
     let paths: Vec<String> = projects.iter().map(|p| p.path.clone()).collect();
-    let bus = rift_canopy_data::spawn(paths);
+    let bus = rift_canopy_data::spawn_with_root(crate::family::cache_root(), paths);
     let on_persist = |op: &PersistOp| cstore.apply(op, hooks::now_ms());
     let mut settings_manager = project_settings::RiftProjectSettingsManager;
     let mut dispatcher = RiftDispatcher;
@@ -122,7 +122,7 @@ fn run_dashboard(
 /// The Canopy registry is optional and read-only; an unregistered repository
 /// becomes one session-local rail row.
 pub(crate) fn launch_viewer(cli: &Cli, args: &cli::ViewerArgs) -> rift_core::Result<()> {
-    let cache_root = rift_store::resolve_cache_root(|key| std::env::var(key).ok());
+    let cache_root = crate::family::cache_root();
     let cstore = rift_canopy_data::CanopyStore::open_read_only(&cache_root)?;
     let mut projects = cstore.as_ref().map_or(
         Ok(Vec::new()),
@@ -356,7 +356,7 @@ fn print_ascii_frame(
         .unwrap_or(1200);
     if wait_ms > 0 && !state.app.projects.is_empty() {
         let paths: Vec<String> = state.app.projects.iter().map(|p| p.path.clone()).collect();
-        let bus = rift_canopy_data::spawn(paths);
+        let bus = rift_canopy_data::spawn_with_root(crate::family::cache_root(), paths);
         // The SAME prime the interactive loop runs at its seam — one startup
         // path, so the headless frame can never again mask a dead launch
         // subscribe — a blind spot a one-frame check once had.

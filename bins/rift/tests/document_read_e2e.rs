@@ -68,7 +68,26 @@ fn seed_repo(tmp: &Path) -> PathBuf {
         r#"{"schema":1,"session_id":"doc-1","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":1783000000000,"native_id_map":{}}"#,
     )
     .unwrap();
+    state_a_patient_budget(&repo);
     repo
+}
+
+/// Give the gate's conversion a budget no walk here depends on.
+///
+/// None of these walks is about the deadline: each is about what the answer
+/// carries once a conversion has happened. Under the policy's quarter-second
+/// a loaded machine re-spawning a debug build of this binary misses the
+/// deadline, the read proceeds unconverted, and the walk would be measuring
+/// the machine. The deadline itself is tested at the seam, under the
+/// production budget.
+fn state_a_patient_budget(repo: &Path) {
+    let policies = repo.join(".rift").join("policies");
+    std::fs::create_dir_all(&policies).unwrap();
+    std::fs::write(
+        policies.join("serve.toml"),
+        "[doc]\nconvert_budget_ms = 30000\n",
+    )
+    .unwrap();
 }
 
 /// One document out of the converter's committed corpus, copied in beside the

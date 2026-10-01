@@ -88,7 +88,7 @@ impl ProjectionSeeder {
     /// Open the family's recall projection, setting the fixture up on this
     /// machine first — the injector asks both questions.
     fn open_at(repo: &std::path::Path) -> Self {
-        let db = rift_store::recall_db_for_repo(repo).unwrap();
+        let db = crate::family::recall_db(repo).unwrap();
         set_up_here(repo);
         let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()

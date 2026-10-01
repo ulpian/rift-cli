@@ -9,6 +9,7 @@
 //! `#[allow(dead_code)]`: the allow names a fact about the include, not a
 //! suppression.
 
+use std::cell::RefCell;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -36,6 +37,88 @@ pub(crate) const TWO_LINE_TRANSCRIPT: &str = concat!(
 enum Keep {
     Stdout,
     Stderr,
+}
+
+/// The hooks a test ran on the shipped detached path, each the leader of a
+/// process group of its own, so the test waits for the workers those hooks
+/// started instead of for a guessed duration.
+///
+/// The capture worker a hook spawns stays in the hook's process group (it is
+/// started without `setsid`), and so does every child the worker runs, so a
+/// group outlives its hook exactly as long as the work the hook handed off.
+/// A deadline is the alternative rejected: how long that work takes is a
+/// property of the machine (a fresh binary's first exec waits on the
+/// platform's code-signing assessment, and a loaded runner is slower still),
+/// while that it finishes is a property of the code.
+#[derive(Default)]
+pub(crate) struct DetachedHooks {
+    groups: RefCell<Vec<u32>>,
+}
+
+impl DetachedHooks {
+    /// `rift <args>` from `cwd` with `stdin`, as the leader of its own group:
+    /// `(exit code, stderr)`, like [`run_rift_capture`].
+    pub(crate) fn run(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        stdin: &str,
+        extra_env: &[(&str, &str)],
+    ) -> (i32, String) {
+        let mut cmd = rift_cmd(cwd);
+        cmd.args(args).envs(extra_env.iter().copied());
+        self.output(cmd, stdin)
+    }
+
+    /// [`archive_head`] on the detached path: the real `post-commit` hook as
+    /// git fires it, asserting the hook never fails the git op.
+    pub(crate) fn archive_head(&self, repo: &Path, env: &[(&str, &str)]) -> String {
+        let gd = repo.join(".git");
+        let (code, stderr) = self.run(repo, &post_commit_args(&gd), "", env);
+        assert_eq!(code, 0, "the hook never fails the git op; stderr: {stderr}");
+        stderr
+    }
+
+    /// Run `cmd` to its exit as the leader of a new process group and record
+    /// the group: `(exit code, stderr)`, `-1` for a signal death.
+    pub(crate) fn output(&self, mut cmd: Command, stdin: &str) -> (i32, String) {
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        let (pid, code, stderr) = run_to_exit(cmd, stdin, Keep::Stderr);
+        self.groups.borrow_mut().push(pid);
+        (code, stderr)
+    }
+
+    /// Return once every group this value started has no live member: every
+    /// hook has exited and so has every worker it left behind.
+    ///
+    /// No clock bounds the wait. A worker that dies early ends it at once,
+    /// and the caller's assertion then reports the state it left. A worker
+    /// that never exits is a real hang, and it is left to the test harness to
+    /// report as one: any deadline here would only turn that hang into a
+    /// failure on a machine that is merely slow. `_settled` is not consulted: the group's emptiness, not the
+    /// state, ends the wait, so the caller's assertions see the final state.
+    #[cfg(unix)]
+    pub(crate) fn await_workers(&self, _settled: impl Fn() -> bool) {
+        for &pgid in self.groups.borrow().iter() {
+            while group_has_member(pgid) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+
+    /// Windows keeps the bounded poll of `settled`: a process group there is
+    /// a job object, which std cannot create or probe without the Win32 API,
+    /// and this workspace forbids `unsafe`. The detached worker's lifetime is
+    /// therefore not observable on Windows, and the wait stays the one it
+    /// replaced on Unix.
+    #[cfg(windows)]
+    pub(crate) fn await_workers(&self, settled: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        while std::time::Instant::now() < deadline && !settled() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 /// The hermetic environment every fixture hands the binary: the cache root
@@ -437,18 +520,18 @@ pub(crate) fn rev_parse(repo: &Path, rev: &str) -> String {
 /// it: `(exit code, stderr)`. Every archive in these suites goes through here.
 pub(crate) fn post_commit_hook(repo: &Path, env: &[(&str, &str)]) -> (i32, String) {
     let gd = repo.join(".git");
-    run_rift_capture(
-        repo,
-        &[
-            "hooks",
-            "git",
-            "post-commit",
-            "--git-dir",
-            gd.to_str().unwrap(),
-        ],
-        Some(""),
-        env,
-    )
+    run_rift_capture(repo, &post_commit_args(&gd), Some(""), env)
+}
+
+/// The argv git hands the `post-commit` hook for the git dir `gd`.
+pub(crate) fn post_commit_args(gd: &Path) -> [&str; 5] {
+    [
+        "hooks",
+        "git",
+        "post-commit",
+        "--git-dir",
+        gd.to_str().unwrap(),
+    ]
 }
 
 /// [`post_commit_hook`], asserting the one thing every caller asserts first:
@@ -830,8 +913,7 @@ impl Drop for DrainLock {
     }
 }
 
-/// The one spawn every wrapper above goes through: stdin written, the kept
-/// channel piped, the other discarded, `-1` for a signal death.
+/// The one spawn every wrapper above goes through.
 fn spawn_rift(
     cwd: &Path,
     args: &[&str],
@@ -840,15 +922,22 @@ fn spawn_rift(
     keep: Keep,
 ) -> (i32, String) {
     let mut cmd = rift_cmd(cwd);
-    cmd.args(args).stdin(Stdio::piped());
+    cmd.args(args).envs(extra_env.iter().copied());
+    let (_, code, kept) = run_to_exit(cmd, stdin, keep);
+    (code, kept)
+}
+
+/// Spawn `cmd` with `stdin` written, the kept channel piped and the other
+/// discarded, and wait for it: `(pid, exit code, kept text)`, `-1` for a
+/// signal death.
+fn run_to_exit(mut cmd: Command, stdin: &str, keep: Keep) -> (u32, i32, String) {
+    cmd.stdin(Stdio::piped());
     match keep {
         Keep::Stdout => cmd.stdout(Stdio::piped()).stderr(Stdio::null()),
         Keep::Stderr => cmd.stdout(Stdio::null()).stderr(Stdio::piped()),
     };
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
     let mut child = cmd.spawn().unwrap();
+    let pid = child.id();
     child
         .stdin
         .take()
@@ -861,7 +950,24 @@ fn spawn_rift(
         Keep::Stderr => out.stderr,
     };
     (
+        pid,
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&kept).into_owned(),
     )
+}
+
+/// Whether the process group `pgid` has a live member, asked of the system
+/// `kill` with signal 0, which delivers nothing and fails once the group is
+/// empty. A system binary rather than a written script, so the probe itself
+/// never waits on a first-exec assessment.
+#[cfg(unix)]
+fn group_has_member(pgid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", "--", &format!("-{pgid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
 }
