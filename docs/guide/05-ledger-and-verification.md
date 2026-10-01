@@ -135,7 +135,7 @@ The archive joins the two serve relations to that relation for the session, rebu
 Which shard holds a serve is therefore decided by the row that names its session, never by which checkpoint happened to run next, and a serve no session made — a person running `rift recall` in a terminal — stays an ordinary projection row that no shard freezes.
 A call row holds no handle and no reason, so a schema-4 line's payload names only its kind; a pack's section counts are in no row and are in no line.
 The artifact is cumulative by construction: every checkpoint of a session carries every serve the session has made so far, so a second commit with nothing served since derives the same id and stays a no-op.
-The trailer's prediction runs the same query through the same function, opening the projection read-only, so a session with serves predicts its checkpoint as exactly as it predicts its read facts: a serve booked between the trailer and the condense lands in the archive and not in the trailer, and the archive keeps its true id.
+The trailer's prediction runs the same query through the same function, opening the projection read-only, so the serves a session has made by the time of the trailer are claimed exactly as its read facts are: a serve booked between the trailer and the condense lands in the archive and not in the claim, and the archive keeps its true id.
 
 The usage artifact is the provider-reported spend of every model call the session has settled, frozen so a rebuild of the projection does not report zero.
 It is a query too: the session's `model_call` rows joined to their `token_usage`, ordered by start time and then by call key.
@@ -143,9 +143,13 @@ Each line names the session, the turn, the call's own key, the model, the instan
 The call's key travels as written rather than the coordinates it was minted from, because the projection keeps the key and not the event ordinal inside it; a rebuild re-inserts under that key.
 There is no price and no dollar figure in it: dollars are derived when read, from the price catalog, which moves on its own.
 The model, the method and the key come from provider fields and projection rows rather than from Rift's own grammar, so each is frozen only when it reads as an identifier, and anything else is `withheld`.
-Like the serve audit it is cumulative per session, and the trailer's prediction reads it through the same function as the archive, so the usage never makes the trailer miss; a turn settled between the trailer and the condense lands in the archive and not in the trailer.
-A session whose transcript reaches the archive misses all the same, usage or none, because the prediction never reads the transcript the archive binds into the id; the read side resolves such a commit through the shard's own commit anchor.
+Like the serve audit it is cumulative per session, and the trailer's prediction reads it through the same function as the archive, so the usage settled by the time of the trailer is claimed exactly; a turn settled between the trailer and the condense lands in the archive and not in the claim.
 Spend settles one hook after its turn (see [03-capture.md](03-capture.md) §3.9), so it reaches the shard one hook later too.
+
+The `Rift-Checkpoint` trailer is therefore a claim, made before the commit exists, about the id its checkpoint will have.
+It is exact when the session has no transcript in the shard and nothing lands between `prepare-commit-msg` and the condense.
+A transcript the archive binds into the id moves it, because the prediction never reads a transcript, and so does a serve or a settled turn that arrives in between.
+Nothing reads the trailer as the answer: a reader resolves a commit through the union of the checkpoints its trailer claims and the checkpoints recorded against it, the commit anchor each shard keeps of its own, so a commit whose claim missed still resolves to the checkpoint that landed.
 
 `rift checkpoint explain` renders a shard for a human — metadata, digests, the
 redacted prompt, files touched, tokens and cost, attribution — and with no

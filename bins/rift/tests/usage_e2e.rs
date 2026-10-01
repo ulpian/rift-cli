@@ -19,8 +19,8 @@ mod hooks_fixture;
 
 use hooks_fixture::{
     checkpoint_shards, family_projection_db, git_in, hook_pair_commit, only_checkpoint_id,
-    run_rift_in, run_rift_stdout, seed_live_session_repo, shard_blob, shard_tree_names, sync_env,
-    LIVE_SESSION,
+    rev_parse, rift_json, run_rift_in, run_rift_stdout, seed_live_session_repo, shard_blob,
+    shard_tree_names, sync_env, LIVE_SESSION,
 };
 
 /// One hook of the live session, as Claude Code delivers it.
@@ -188,14 +188,18 @@ fn a_commit_with_nothing_settled_since_names_the_same_checkpoint() {
     assert_eq!(checkpoint_shards(&repo), vec![shard_dir(&first)]);
 }
 
-/// **What the trailer claims for a session that carries its transcript.** The
+/// **The trailer is a claim; the anchor is where the commit lands.** The
 /// commit's archive binds the transcript pair into the checkpoint id and the
-/// trailer's prediction never reads a transcript, so the two ids differ. The
-/// same holds at the commit before `usage.jsonl` existed, with the same
-/// session and no usage frozen: the mismatch belongs to the transcript, not to
-/// the usage leaf, which this commit's shard carries all the same.
+/// trailer's prediction never reads a transcript, so a session whose
+/// transcript reaches the shard lands under an id beside the one its trailer
+/// claimed. The same holds at the commit before `usage.jsonl` existed, with
+/// the same session and no usage frozen: the difference belongs to the
+/// transcript, not to the usage leaf, which this commit's shard carries all
+/// the same. A reader resolves the commit through the union of its trailer
+/// and the checkpoints recorded against it, so `rift checkpoint explain`
+/// over the commit names the checkpoint that landed.
 #[test]
-fn a_transcript_carrying_commit_archives_under_an_id_its_trailer_did_not_predict() {
+fn a_transcript_carrying_commit_lands_beside_its_trailers_claim_and_resolves_through_its_anchor() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
     let cache = tmp.path().join("cache");
@@ -213,12 +217,15 @@ fn a_transcript_carrying_commit_archives_under_an_id_its_trailer_did_not_predict
         "{names}"
     );
     assert!(names.contains(&format!("{dir}/usage.jsonl")), "{names}");
-    // fixme: the trailer names a checkpoint no shard carries whenever the
-    // session's transcript reaches the archive, because the prediction does
-    // not read the transcript the archive binds into the id; the read side
-    // resolves such a commit through the shard's own commit anchor instead.
     assert_ne!(
         predicted, committed,
-        "today the trailer misses by the transcript"
+        "the trailer's claim is not the landing"
+    );
+
+    let commit = rev_parse(&repo, "HEAD");
+    let explained = rift_json(&repo, &["checkpoint", "explain", &commit, "--json"], &env);
+    assert!(
+        explained.to_string().contains(&committed),
+        "the commit resolves to the landed checkpoint: {explained}"
     );
 }
