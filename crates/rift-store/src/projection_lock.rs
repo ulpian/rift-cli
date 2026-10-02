@@ -18,8 +18,9 @@ pub struct ProjectionReplacementGuard {
 
 pub(crate) struct ProjectionLease {
     path: PathBuf,
-    _marker: Option<File>,
+    // Source handles close before the marker releases replacement exclusion.
     source: SourceLease,
+    _marker: Option<MarkerLock>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,7 +86,7 @@ impl HistoricalProjectionSnapshot {
     pub(crate) fn lease(&self) -> Result<Option<ProjectionLease>> {
         match existing_marker(&self.path)? {
             Some(marker) => {
-                lock_shared(&marker, &self.path)?;
+                let marker = lock_shared(marker, &self.path)?;
                 let source = source_file(&self.path, SourceAccess::Shared)?;
                 Ok(Some(ProjectionLease {
                     path: self.path.clone(),
@@ -123,7 +124,7 @@ impl ProjectionReplacementGuard {
         }
         let canonical = canonical_path(path, 0)?;
         let marker = open_marker(&canonical)?;
-        lock_exclusive(&marker, &canonical)?;
+        let marker = lock_exclusive(marker, &canonical)?;
         // Windows' replacement lease denies READ from SQLite's separate
         // handle. Inspect while the stable marker is exclusive but before
         // that lease; then close SQLite and revalidate before any mutation.
@@ -193,7 +194,7 @@ impl ProjectionLease {
     pub(crate) fn existing_writable(path: &Path) -> Result<Self> {
         let path = canonical_path(path, 0)?;
         let marker = open_marker(&path)?;
-        lock_shared(&marker, &path)?;
+        let marker = lock_shared(marker, &path)?;
         let source = source_file(&path, SourceAccess::Shared)?;
         Ok(Self {
             path,
@@ -213,7 +214,7 @@ impl ProjectionLease {
                 reason: "live projection has no concurrency marker; initialize this live projection through its writable workflow (rift-memd metrics for recall; rift init for capture), then retry; use explicit backfill for a historical source".into(),
             });
         };
-        lock_shared(&marker, &path)?;
+        let marker = lock_shared(marker, &path)?;
         let source = source_file(&path, SourceAccess::Shared)?;
         Ok(Self {
             path,
@@ -397,12 +398,27 @@ fn file_identity(path: &Path) -> Result<Option<SourceIdentity>> {
     }
 }
 
-fn lock_shared(file: &File, path: &Path) -> Result<()> {
-    file.try_lock_shared().map_err(|e| lock_error(path, e))
+// Own every successful lock before another fallible constructor step.
+// Explicit release follows the logical owner even if a descriptor was duplicated.
+struct MarkerLock {
+    file: File,
 }
 
-fn lock_exclusive(file: &File, path: &Path) -> Result<()> {
-    file.try_lock().map_err(|e| lock_error(path, e))
+impl Drop for MarkerLock {
+    fn drop(&mut self) {
+        // Failure conservatively falls back to ordinary descriptor close.
+        let _ = self.file.unlock();
+    }
+}
+
+fn lock_shared(file: File, path: &Path) -> Result<MarkerLock> {
+    file.try_lock_shared().map_err(|e| lock_error(path, e))?;
+    Ok(MarkerLock { file })
+}
+
+fn lock_exclusive(file: File, path: &Path) -> Result<MarkerLock> {
+    file.try_lock().map_err(|e| lock_error(path, e))?;
+    Ok(MarkerLock { file })
 }
 
 fn lock_error(path: &Path, error: TryLockError) -> RiftError {
@@ -437,6 +453,76 @@ mod tests {
 
     fn is_busy<T>(result: &Result<T>) -> bool {
         matches!(result, Err(RiftError::ProjectionBusy { .. }))
+    }
+
+    #[test]
+    fn a_marker_descriptor_duplicate_does_not_outlive_its_logical_projection_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("projection.db");
+        let guard = ProjectionReplacementGuard::acquire(&db).unwrap();
+        let ProjectionLease {
+            _marker: Some(marker),
+            ..
+        } = &guard.lease
+        else {
+            panic!("replacement guard owns its marker");
+        };
+        let incidental_descriptor = marker.file.try_clone().unwrap();
+        assert!(is_busy(&ProjectionReplacementGuard::acquire(&db)));
+        drop(guard);
+        let replacement = ProjectionReplacementGuard::acquire(&db);
+        assert!(
+            replacement.is_ok(),
+            "an incidental descriptor must not retain a released logical guard: {:?}",
+            replacement.err()
+        );
+        drop(incidental_descriptor);
+    }
+
+    #[test]
+    fn a_shared_marker_descriptor_duplicate_does_not_outlive_its_logical_projection_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("projection.db");
+        let lease = ProjectionLease::existing_writable(&db).unwrap();
+        let ProjectionLease {
+            _marker: Some(marker),
+            ..
+        } = &lease
+        else {
+            panic!("shared lease owns its marker");
+        };
+        let incidental_descriptor = marker.file.try_clone().unwrap();
+        assert!(is_busy(&ProjectionReplacementGuard::acquire(&db)));
+        drop(lease);
+        let replacement = ProjectionReplacementGuard::acquire(&db);
+        assert!(
+            replacement.is_ok(),
+            "a released shared owner must unlock its marker"
+        );
+        drop(replacement);
+        drop(incidental_descriptor);
+    }
+
+    #[test]
+    fn a_failed_source_constructor_releases_its_owned_marker_with_a_duplicate_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("projection.db");
+        std::fs::write(&db, b"source").unwrap();
+        std::fs::hard_link(&db, dir.path().join("alias.db")).unwrap();
+        let mut incidental_descriptor = None;
+        let result: Result<SourceLease> = (|| {
+            let marker = lock_shared(open_marker(&db)?, &db)?;
+            incidental_descriptor = Some(marker.file.try_clone()?);
+            source_file(&db, SourceAccess::Shared)
+        })();
+        assert!(matches!(result, Err(RiftError::Storage(_))));
+        let replacement = lock_exclusive(open_marker(&db).unwrap(), &db);
+        assert!(
+            replacement.is_ok(),
+            "failed source construction must release its owned marker"
+        );
+        drop(replacement);
+        drop(incidental_descriptor);
     }
 
     #[test]
