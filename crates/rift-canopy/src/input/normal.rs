@@ -27,7 +27,7 @@ pub(super) fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
         // advertises it and no other column swallows a `w`.
         CanopyKey::Char('w') if app.focus == Panel::Graphs => Action::OpenWorktreeAxis,
         // `S` opens the Recall card's savings breakdown — the keyboard twin of
-        // clicking either of its headline chips, which were the only way in.
+        // clicking its headline, which was once the only way in.
         // SHIFT-s, not `s`: the rail's `s` is Project Settings and a second
         // meaning on one key would make that hint a lie. Bound only where it
         // is hinted (`keymap::GRAPHS`), like `w` and the period digits.
@@ -41,11 +41,6 @@ pub(super) fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
         CanopyKey::Char(digit @ '1'..='4') if app.focus == Panel::Graphs => {
             recall_window_for_digit(digit).map_or(Action::None, Action::SetRecallWindow)
         }
-        // `$` flips the Recall bars between tokens and dollars — the keyboard
-        // twin of the card's `[tok]`/`[usd]` chip. The mnemonic is the unit
-        // it reaches, and like the digits it is bound only where it is
-        // hinted, so no other column swallows a `$`.
-        CanopyKey::Char('$') if app.focus == Panel::Graphs => Action::ToggleRecallUnit,
         // `A` adopts the selected member (the family view) — the keyboard twin
         // of clicking the Repository card's status row. SHIFT-a, not `a`: the
         // rail's `a` is already "add project" and a second meaning on one key

@@ -24,7 +24,7 @@ expression: "render_state(&mut\nproject_settings_state(Size::new(100, 32),\nrift
 │         │  .rift/config.toml is invalid; repair it before changing settings            │─────────|
 │         │                                                                              │tings    |
 │         │Integrations                                                                  │         |
-│         │> Claude Code · PATH command · managed                                     [x]│    [tok]|
+│         │> Claude Code · PATH command · managed                                     [x]│         |
 │         │  Codex · PATH command + VS Code extension · capture managed · hooks manag [x]│         |
 │         │About: Installed: PATH command (availability only); wiring: managed.          │         |
 │         │                                                                              │         |

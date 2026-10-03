@@ -23,7 +23,7 @@ expression: "render_state(&mut suggest_state(\"se\"))"
 │                  │╭─ activity · 30d ─────────────────────╮╭─ recall ─────────────────────────────|
 │                  ││(no projection yet)                   ││recall off — open Project Settings    |
 │                  ││                                      ││                                      |
-│                  ││                                      ││[24h][7d][30d][all]              [tok]|
+│                  ││                                      ││[24h][7d][30d][all]                   |
 ╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
 │> select  /select [project]      select a project row                                             │
 │  session  /session [list|show <id>] inspect sessions                                             │

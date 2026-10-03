@@ -1,12 +1,11 @@
 //! The Recall panel's period row: the four trailing windows, what each cuts
-//! against one clock reading, and the row of buttons plus the unit chip that
-//! one solver places for the draw and the hit-test alike.
+//! against one clock reading, and the row of buttons that one solver places
+//! for the draw and the hit-test alike.
 
 use crate::layout::Rect;
 use crate::render::frame::Frame;
 use crate::theme::Theme;
 
-use super::recall_bars::recall_effective_unit;
 use super::Col3;
 
 /// The period the Recall panel's figures cover — a viewer's choice, not a
@@ -130,8 +129,7 @@ pub struct RecallWindowButton {
 /// worst one to lose.
 ///
 /// Empty, and therefore no buttons anywhere, in the collapsed/narrow tier (the
-/// card is already shedding text there, exactly as the two headline chips are)
-/// or when the row would not fit. The keys stay bound in both cases; nothing
+/// card is already shedding text there) or when the row would not fit. The keys stay bound in both cases; nothing
 /// here is the only door to a period.
 #[must_use]
 pub fn recall_window_buttons(collapsed: bool, inner: Rect) -> Vec<RecallWindowButton> {
@@ -168,33 +166,6 @@ pub fn recall_window_buttons(collapsed: bool, inner: Rect) -> Vec<RecallWindowBu
     }
 }
 
-/// The unit toggle's exact cells: a `[tok]`/`[usd]` chip **right-aligned on
-/// the period row**, solved once for the draw and the hit-test.
-///
-/// It shares the period row rather than taking one of its own because the two
-/// choices describe the same chart and the card has no row to spare; right
-/// alignment keeps it off the period buttons at every width the row is drawn
-/// at, and the gap between them is asserted rather than assumed.
-///
-/// `None` when the period row itself is not drawn (the collapsed and narrow
-/// tiers) or when the chip would touch the last period button. The `$` key is
-/// bound in both cases; nothing here is the only door to the unit.
-#[must_use]
-pub fn recall_unit_rect(col3: &Col3, collapsed: bool, inner: Rect) -> Option<Rect> {
-    let buttons = recall_window_buttons(collapsed, inner);
-    let last = buttons.last()?;
-    let w = u16::try_from(recall_effective_unit(col3).label().chars().count() + 2).ok()?;
-    let x = inner.x.checked_add(inner.w)?.checked_sub(w)?;
-    // One clear cell between the periods and the unit, so the row never reads
-    // as five buttons of one kind.
-    (u32::from(x) > u32::from(last.rect.x) + u32::from(last.rect.w)).then_some(Rect {
-        x,
-        y: inner.y + RECALL_WINDOW_DY,
-        w,
-        h: 1,
-    })
-}
-
 /// Draw the period row from [`recall_window_buttons`]. The selected period is
 /// drawn in the key-hint style the rest of the dashboard uses for a live
 /// affordance; the others are dim, so which window the figures cover is
@@ -220,17 +191,6 @@ pub(super) fn draw_recall_window_row(
             style,
         );
     }
-    // The unit toggle, at the row's right edge. It is always a live
-    // affordance, so it always wears the key-hint style — unlike the period
-    // buttons, exactly one of which is the current selection.
-    if let Some(chip) = recall_unit_rect(col3, collapsed, inner) {
-        frame.put_str(
-            chip.x,
-            chip.y,
-            &format!("[{}]", recall_effective_unit(col3).label()),
-            theme.key_hint(),
-        );
-    }
 }
 
 #[cfg(test)]
@@ -241,7 +201,7 @@ mod tests {
     use crate::render::{AsciiBackend, Capabilities};
     use crate::theme::Section;
 
-    use super::super::fixtures::{barred_col3, usd_col3};
+    use super::super::fixtures::usd_col3;
     use super::super::{draw_one, panel_frame, SectionId};
 
     /// The windows are trailing cuts, ordered, and the default is the one
@@ -369,6 +329,16 @@ mod tests {
             .windows(2)
             .all(|p| p[0].rect.x + p[0].rect.w == p[1].rect.x));
         assert!(buttons.iter().all(|b| b.rect.y == buttons[0].rect.y));
+        // Nothing else shares the row: past `[all]` the period row is blank
+        // to the panel's edge.
+        let last = buttons.last().expect("four buttons");
+        let tail: String = (last.rect.x + last.rect.w..inner.x + inner.w)
+            .map(|x| f.get(x, last.rect.y).map_or(' ', |c| c.ch))
+            .collect();
+        assert!(
+            tail.trim().is_empty(),
+            "the period row carries only periods: {tail:?}"
+        );
         assert_eq!(
             buttons.iter().map(|b| b.window).collect::<Vec<_>>(),
             RecallWindow::ALL.to_vec()
@@ -384,51 +354,6 @@ mod tests {
             .map(|b| b.window)
             .collect();
         assert_eq!(live, vec![RecallWindow::Last7Days]);
-    }
-
-    /// The toggle sits on the period row without touching the periods, at
-    /// every width the row is drawn at.
-    #[test]
-    fn the_unit_chip_never_collides_with_a_period_button() {
-        let col3 = barred_col3(10, 1);
-        for w in 20..90u16 {
-            let inner = Rect {
-                x: 1,
-                y: 1,
-                w,
-                h: 8,
-            };
-            let buttons = recall_window_buttons(false, inner);
-            let Some(chip) = recall_unit_rect(&col3, false, inner) else {
-                continue;
-            };
-            assert!(!buttons.is_empty(), "a chip without a period row at w={w}");
-            assert_eq!(chip.y, buttons[0].rect.y, "same row, w={w}");
-            let last = buttons.last().expect("periods");
-            assert!(
-                chip.x > last.rect.x + last.rect.w,
-                "the chip overlaps the periods at w={w}"
-            );
-            assert!(
-                u32::from(chip.x) + u32::from(chip.w) <= u32::from(inner.x) + u32::from(inner.w),
-                "the chip runs past the panel at w={w}"
-            );
-        }
-        // The tiers with no period row have no chip either.
-        assert_eq!(
-            recall_unit_rect(
-                &col3,
-                true,
-                Rect {
-                    x: 1,
-                    y: 1,
-                    w: 60,
-                    h: 8
-                }
-            ),
-            None,
-            "collapsed"
-        );
     }
 
     /// The degraded tiers draw no period row, and they draw **none of it**:

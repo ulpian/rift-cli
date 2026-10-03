@@ -182,15 +182,12 @@ pub enum Action {
     /// because the axis is column-3 data, which the reducer cannot see.
     OpenWorktreeAxis,
     /// Open the Recall card's savings breakdown — the keyboard twin of its
-    /// two chips, and an action for the same reason `OpenWorktreeAxis` is.
+    /// headline, and an action for the same reason `OpenWorktreeAxis` is.
     OpenSavingsBreakdown,
     /// Recompute the Recall card over this period. An action rather than a
     /// state mutation for the same reason: the chosen window lives on the
     /// column-3 model, which this reducer does not hold.
     SetRecallWindow(crate::col3::RecallWindow),
-    /// Flip the Recall card's bars between tokens and dollars — the same
-    /// column-3 model, and the same reason this is an action.
-    ToggleRecallUnit,
     /// Apply one Project Settings lifecycle operation.
     ApplyProjectSettings(crate::ProjectSettingsAction),
     /// Submit the command buffer (the reducer parses; errors render inline).

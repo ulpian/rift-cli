@@ -20,7 +20,7 @@ use super::effects::persist_flow;
 use super::events::fold_health;
 use super::openers::{
     open_adopt_confirm, open_project_settings, open_savings_breakdown, open_worktree_axis,
-    select_recall_window, toggle_recall_unit,
+    select_recall_window,
 };
 use super::verbs::{confirm_dispatch, run_line};
 use super::viewer::{clamp_viewer_scrolls, on_viewer_key, refresh_catalogue};
@@ -364,10 +364,6 @@ fn key_action_flow(s: &mut AppState, action: Action) -> Flow {
         Action::SetRecallWindow(window) => {
             s.arm_press_pulse(Target::RecallWindow(window));
             select_recall_window(s, window)
-        }
-        Action::ToggleRecallUnit => {
-            s.arm_press_pulse(Target::RecallUnitToggle);
-            toggle_recall_unit(s)
         }
         Action::AdoptWorktree => open_adopt_confirm(s),
         Action::ApplyProjectSettings(action) => Flow::Continue(Effects {

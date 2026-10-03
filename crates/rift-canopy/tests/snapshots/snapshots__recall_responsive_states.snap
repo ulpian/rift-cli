@@ -4,14 +4,14 @@ expression: snapshot
 ---
 COLLAPSED
 ╭─ recall ───────────────────────────────╮
-│saved 42.0% (6.0k)                      │
+│saved 6.0k tokens · 42.0%               │
 │17 serves · 2 active sessions           │
 │                                        │
 ╰────────────────────────────────────────╯
 
 NARROW
 ╭─ recall ─────────────╮
-│saved 42.0% (6.0k)    │
+│saved 6.0k tokens     │
 │17 serves             │
 │2 active sessions     │
 │                      │
@@ -25,9 +25,9 @@ NARROW
 
 LEGACY SAVINGS ONLY
 ╭─ recall ───────────────────────────────╮
-│saved 42.0% (6.0k)  [of 90% target]     │
+│saved 6.0k tokens · 42.0%               │
 │0 serves · 2 active sessions            │
-│[24h][7d][30d][all]                [tok]│
+│[24h][7d][30d][all]                     │
 │read  @@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 8.3k│
 │saved @@@@@@@@@@@@@@@@@@@@@+        6.0k│
 │                                        │
@@ -39,9 +39,9 @@ LEGACY SAVINGS ONLY
 
 BOTH CHANNELS
 ╭─ recall ───────────────────────────────────────────╮
-│saved 42.0% (6.0k)  [of 90% target]                 │
+│saved 6.0k tokens · 42.0%                           │
 │72 serves · 2 active sessions                       │
-│[24h][7d][30d][all]                            [tok]│
+│[24h][7d][30d][all]                                 │
 │read  @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 8.3k│
 │saved @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@            6.0k│
 │# hook  # skill                                     │

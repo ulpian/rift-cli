@@ -69,7 +69,7 @@ pub use col2::{
 pub use col3::{
     fmt_km, ActiveSessionsView, ActivityData, ActivityView, BreakdownData, BreakdownView,
     CallsData, ChannelCallSeries, Col3, DayBar, DispatchData, DispatchView, FamilyShareRow,
-    FileTouch, NicReading, NicView, OffStrip, PanelMetrics, RecallUnit, RecallView, RecallWindow,
+    FileTouch, NicReading, NicView, OffStrip, PanelMetrics, RecallView, RecallWindow,
     RecallWindowButton, RecapData, RecapSavings, RecapView, SavingsData, ShareData, SystemScope,
     TokensData, TokensView, UsdRow, WindowCut, WorktreeAxis, WorktreeSlice,
 };

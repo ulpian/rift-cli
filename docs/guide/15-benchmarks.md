@@ -546,7 +546,7 @@ Stated plainly, because a benchmark chapter that omits this is advertising.
   smoothed over.
 - **Savings and cost figures are not in this chapter.** They come from a
   different instrument with a different honesty ladder:
-  [08-cost-and-savings.md §8.13](08-cost-and-savings.md) has the 90% target, the
+  [08-cost-and-savings.md §8.13](08-cost-and-savings.md) has the measured share, the
   staged bar the harness raises, and what may be claimed.
 
 ---

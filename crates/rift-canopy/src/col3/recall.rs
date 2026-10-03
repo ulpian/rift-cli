@@ -1,17 +1,15 @@
-//! The Recall panel: the savings headline with its two chips, the placeholder
-//! states, and the frame that seats the period row, the bars and the call
-//! chart below it.
+//! The Recall panel: the savings headline, the placeholder states, and the
+//! frame that seats the period row, the bars and the call chart below it.
 
 use crate::layout::Rect;
-use crate::render::frame::Frame;
+use crate::render::frame::{Frame, Style};
 use crate::render::RenderBackend;
 use crate::theme::{Section, Theme};
 
 use super::calls::draw_call_chart;
 use super::format::{f64_of, fmt_km};
-use super::recall_bars::{draw_recall_bars, recall_usd_available, RecallUnit};
+use super::recall_bars::draw_recall_bars;
 use super::recall_period::{draw_recall_window_row, RecallWindow, RECALL_CHART_DY};
-use super::savings::SavingsData;
 use super::system::{active_sessions_label, ActiveSessionsView};
 use super::{body, panel_frame, Col3};
 
@@ -27,6 +25,11 @@ pub enum RecallView<T> {
     Data(T),
 }
 
+/// The headline's segments are joined by this, a middle dot between spaces:
+/// three display cells, four bytes, which is why every width here is counted
+/// in characters.
+const HEADLINE_SEPARATOR: &str = " · ";
+
 pub(super) fn draw_recall_panel(
     col3: &Col3,
     theme: Theme,
@@ -37,35 +40,23 @@ pub(super) fn draw_recall_panel(
     backend: &mut dyn RenderBackend,
     frame: &mut Frame,
 ) {
-    let inner = panel_frame(
-        theme,
-        Section::Recall,
-        focused,
-        recall_title(col3),
-        rect,
-        frame,
-    );
+    let inner = panel_frame(theme, Section::Recall, focused, "recall", rect, frame);
     // The period row is drawn BEFORE the placeholder early-return, and that
     // ordering is load-bearing: a narrow window over a quiet ledger puts the
     // card *into* the placeholder state, and buttons that vanished there would
     // leave the only way back on the keyboard.
     draw_recall_window_row(col3, theme, collapsed, inner, frame);
-    if draw_recall_placeholder(col3, theme, inner, frame) {
+    if let Some(sentence) = recall_placeholder(col3) {
+        body(frame, inner, 0, sentence, theme.dim());
         return;
     }
-    let (savings, call_total, sessions) = recall_headlines(col3);
+    let (_, call_total, sessions) = recall_headlines(col3);
     if collapsed || inner.w < 28 || inner.h < 7 {
-        draw_recall_narrow(theme, inner, &savings, call_total, &sessions, frame);
+        draw_recall_headline(col3, inner, theme.body(), frame);
+        draw_recall_serves(theme, inner, call_total, &sessions, frame);
         return;
     }
-    body(
-        frame,
-        inner,
-        0,
-        &savings,
-        theme.tile_value(theme.graph_accent()),
-    );
-    draw_recall_chips(col3, theme, collapsed, inner, frame);
+    draw_recall_headline(col3, inner, theme.tile_value(theme.graph_accent()), frame);
     body(
         frame,
         inner,
@@ -78,17 +69,25 @@ pub(super) fn draw_recall_panel(
     draw_recall_calls(col3, theme, unicode, inner, chart_dy, backend, frame);
 }
 
-/// The collapsed and narrow tiers: the headline and the serve count, with the
-/// session phrase on a row of its own when the two will not share one.
-fn draw_recall_narrow(
+/// Draw the headline on the cells [`recall_headline_rect`] solves, so the
+/// glyphs and the click target cannot drift apart. Flashless by design:
+/// col3 carries no press-pulse plumbing, by a recorded decision.
+fn draw_recall_headline(col3: &Col3, inner: Rect, style: Style, frame: &mut Frame) {
+    let Some((text, door)) = recall_headline_cells(col3, inner) else {
+        return;
+    };
+    frame.put_str(door.x, door.y, &text, style);
+}
+
+/// The collapsed and narrow tiers' serve count, with the session phrase on a
+/// row of its own when the two will not share one.
+fn draw_recall_serves(
     theme: Theme,
     inner: Rect,
-    savings: &str,
     call_total: u64,
     sessions: &str,
     frame: &mut Frame,
 ) {
-    body(frame, inner, 0, savings, theme.body());
     if inner.w >= 30 {
         body(
             frame,
@@ -107,25 +106,6 @@ fn draw_recall_narrow(
         theme.body(),
     );
     body(frame, inner, 2, sessions, theme.body());
-}
-
-/// The two chips on the headline row: the USD estimate and the savings-share
-/// target, each drawn from the same solver the hit-test reads, so pixels ==
-/// target. An absent label draws no chip at all (honest absence, never a
-/// fabricated figure). Flashless by design: col3 carries no press-pulse
-/// plumbing, by a recorded decision.
-fn draw_recall_chips(col3: &Col3, theme: Theme, collapsed: bool, inner: Rect, frame: &mut Frame) {
-    let RecallView::Data(sd) = &col3.savings else {
-        return;
-    };
-    let cost = recall_cost_rect(col3, collapsed, inner);
-    if let (Some(chip), Some(label)) = (cost, sd.usd_label.as_deref()) {
-        frame.put_str(chip.x, chip.y, &format!("[{label}]"), theme.key_hint());
-    }
-    let share = recall_share_rect(col3, collapsed, inner);
-    if let (Some(chip), Some(label)) = (share, share_chip_label(sd)) {
-        frame.put_str(chip.x, chip.y, &label, theme.key_hint());
-    }
 }
 
 /// The per-channel call chart from `chart_dy` down, or the sentence that says
@@ -168,171 +148,99 @@ fn draw_recall_calls(
     draw_call_chart(calls, theme, unicode, chart, backend, frame);
 }
 
-/// The Recall panel's title, carrying the reason the dollar view was refused
-/// when it was.
-///
-/// **Byte-identical to the bare title whenever the card is showing what was
-/// asked for**, the activity card's off-strip precedent, so every golden that
-/// does not exercise the refusal is unchanged. It goes in the title because
-/// the card's rows are all spoken for and a reason that only appears when the
-/// panel is tall enough is a reason the reader cannot rely on.
-pub(super) fn recall_title(col3: &Col3) -> &'static str {
-    if col3.recall_unit == RecallUnit::Usd && !recall_usd_available(col3) {
-        "recall · no seeded price"
-    } else {
-        "recall"
-    }
-}
-
-fn draw_recall_placeholder(col3: &Col3, theme: Theme, inner: Rect, frame: &mut Frame) -> bool {
+/// The sentence a card with nothing to measure draws in place of its
+/// headline, or `None` when there is a headline to draw.
+fn recall_placeholder(col3: &Col3) -> Option<&'static str> {
     if matches!(col3.savings, RecallView::Disabled) && matches!(col3.calls, RecallView::Disabled) {
-        body(
-            frame,
-            inner,
-            0,
-            "recall off — open Project Settings",
-            theme.dim(),
-        );
-        return true;
+        return Some("recall off — open Project Settings");
     }
-    if matches!(col3.savings, RecallView::Quiet) && matches!(col3.calls, RecallView::Quiet) {
-        // Which emptiness, said out loud. Over the whole record an empty
-        // ledger means the plane has never served here and `doctor` is the
-        // next step; over a narrow period it means this period is empty, and
-        // sending an operator to a diagnostic for that would be the card
-        // reporting a fault where there is none. The narrow sentence also
-        // covers the window a broken clock cannot place: nothing is in a
-        // window that could not be placed, which is exactly what it says.
-        let sentence = if col3.recall_window == RecallWindow::AllTime {
-            "enabled, no serves yet — see `rift doctor`"
-        } else {
-            "no serves in this period — try [all]"
+    if !(matches!(col3.savings, RecallView::Quiet) && matches!(col3.calls, RecallView::Quiet)) {
+        return None;
+    }
+    // Which emptiness, said out loud. Over the whole record an empty ledger
+    // means the plane has never served here and `doctor` is the next step;
+    // over a narrow period it means this period is empty, and sending an
+    // operator to a diagnostic for that would be the card reporting a fault
+    // where there is none. The narrow sentence also covers the window a
+    // broken clock cannot place: nothing is in a window that could not be
+    // placed, which is exactly what it says.
+    match col3.recall_window {
+        RecallWindow::AllTime => Some("enabled, no serves yet — see `rift doctor`"),
+        RecallWindow::Today | RecallWindow::Last7Days | RecallWindow::Last30Days => {
+            Some("no serves in this period — try [all]")
+        }
+    }
+}
+
+/// The Recall headline's exact cells: its first body row, from the inner
+/// rect's left edge for as many cells as the line draws once the frame has
+/// clipped it.
+///
+/// **One solver** feeds the draw and the hit-test in every tier — wide,
+/// narrow and collapsed print the same line, clipped by the frame like any
+/// body line — so the cells that read as the headline are the cells that
+/// open the savings breakdown, the click twin of `S`. A door that only
+/// existed beside a dollar figure would vanish on every repository with no
+/// seeded price; the line itself is always there when there is a line.
+///
+/// `None` — and therefore no door — when the card draws a placeholder
+/// sentence instead of a headline, or when the inner rect has no cell.
+#[must_use]
+pub fn recall_headline_rect(col3: &Col3, inner: Rect) -> Option<Rect> {
+    recall_headline_cells(col3, inner).map(|(_, door)| door)
+}
+
+/// The fitted headline text and the cells it occupies — the measurement
+/// both [`recall_headline_rect`] and the draw read.
+fn recall_headline_cells(col3: &Col3, inner: Rect) -> Option<(String, Rect)> {
+    if inner.w == 0 || inner.h == 0 || recall_placeholder(col3).is_some() {
+        return None;
+    }
+    let fitted = fit_headline(&recall_headline_segments(col3), usize::from(inner.w));
+    let w = u16::try_from(fitted.chars().count()).ok()?;
+    let door = Rect {
+        x: inner.x,
+        y: inner.y,
+        w,
+        h: 1,
+    };
+    Some((fitted, door))
+}
+
+/// The widest whole-segment prefix of the headline that fits `width` cells,
+/// shedding from the right — the dollars first, then the share — so no tier
+/// draws half a figure. Only when even `saved N tokens` does not fit does the
+/// line fall back to the rule every other body line on the card follows
+/// ([`body`]): cut at the frame, one cell per character.
+fn fit_headline(segments: &[String], width: usize) -> String {
+    for n in (1..=segments.len()).rev() {
+        let Some(kept) = segments.get(..n) else {
+            continue;
         };
-        body(frame, inner, 0, sentence, theme.dim());
-        return true;
+        let line = kept.join(HEADLINE_SEPARATOR);
+        if line.chars().count() <= width {
+            return line;
+        }
     }
-    false
-}
-
-/// The clickable USD-savings chip on the Recall headline row:
-/// `[~$105.90]`, two cells after the `saved …` text. **One solver** feeds the
-/// draw and the hit-test, so the glyphs and the click target are always the
-/// same cells (`hit_test` recomputes geometry; a second solver would put
-/// clicks on the wrong cells).
-///
-/// `None` — and therefore no chip anywhere — when there is no honest figure
-/// (`usd_label` absent, the priced savings estimate rung 4), in the collapsed/narrow path
-/// (the panel is already shedding text), or when the whole chip cannot fit
-/// on the headline row.
-#[must_use]
-pub fn recall_cost_rect(col3: &Col3, collapsed: bool, inner: Rect) -> Option<Rect> {
-    if collapsed || inner.w < 28 || inner.h < 7 {
-        return None;
-    }
-    let RecallView::Data(sd) = &col3.savings else {
-        return None;
-    };
-    let label = sd.usd_label.as_deref()?;
-    let (savings, _, _) = recall_headlines(col3);
-    let headline = u16::try_from(savings.chars().count()).ok()?;
-    let w = u16::try_from(label.chars().count().checked_add(2)?).ok()?;
-    let x = inner.x.checked_add(headline)?.checked_add(2)?;
-    (u32::from(x) + u32::from(w) <= u32::from(inner.x) + u32::from(inner.w)).then_some(Rect {
-        x,
-        y: inner.y,
-        w,
-        h: 1,
-    })
-}
-
-/// The target chip on the Recall headline row: `[of 90% target]`, two cells
-/// after the USD chip when there is one and after the headline text when there
-/// is not.
-///
-/// It says what the headline beside it is aiming at — the product's stated
-/// savings target, from the ledger's one constant — so a reader can size a
-/// small share against the goal instead of against nothing. It is a target and
-/// never a measurement, which is why it carries no tilde and no `n`.
-///
-/// **One solver** feeds the draw and the hit-test, exactly as the USD chip
-/// does, so the glyphs and the click target are always the same cells. It
-/// opens the same breakdown modal the USD chip opens — the same act through a
-/// second door, so the card gains no act and no new modal surface. That
-/// matters for more than tidiness: the USD chip disappears whenever no seeded
-/// price applies, and without this door the per-family share rows would be
-/// unreachable by mouse on exactly the repositories that have no price
-/// catalogue. Both doors have a key twin (`S`, hinted while the graphs column
-/// has focus), so neither direction of the parity rule rests on the other
-/// chip being drawn.
-///
-/// `None` — and therefore no chip — when the card carries no target, in the
-/// collapsed/narrow path, or when the whole chip cannot fit on the row.
-#[must_use]
-pub fn recall_share_rect(col3: &Col3, collapsed: bool, inner: Rect) -> Option<Rect> {
-    if collapsed || inner.w < 28 || inner.h < 7 {
-        return None;
-    }
-    let RecallView::Data(sd) = &col3.savings else {
-        return None;
-    };
-    let label = share_chip_label(sd)?;
-    let (headline, _, _) = recall_headlines(col3);
-    let mut x = u32::from(inner.x) + headline.chars().count() as u32 + 2;
-    if let Some(cost) = recall_cost_rect(col3, collapsed, inner) {
-        x = u32::from(cost.x) + u32::from(cost.w) + 1;
-    }
-    let w = u32::try_from(label.chars().count()).ok()?;
-    let x = u16::try_from(x).ok()?;
-    let w = u16::try_from(w).ok()?;
-    (u32::from(x) + u32::from(w) <= u32::from(inner.x) + u32::from(inner.w)).then_some(Rect {
-        x,
-        y: inner.y,
-        w,
-        h: 1,
-    })
-}
-
-/// The target chip's glyphs, or `None` when this card carries no target.
-///
-/// "of N% target" rather than a bare percentage, because the row already holds
-/// one percentage and two of them unlabelled is how a reader ends up quoting
-/// the wrong figure.
-#[must_use]
-pub fn share_chip_label(sd: &SavingsData) -> Option<String> {
-    let target = sd.target_pct?;
-    Some(format!("[of {target}% target]"))
+    let first = segments.first().map_or("", String::as_str);
+    first.chars().take(width).collect()
 }
 
 /// The card's headline, its serve count and its active-session phrase.
 ///
-/// The headline is **the shared savings share** and the token count behind it,
-/// both out of the one `savings::compose` call the command line reads from. It
-/// used to be a second percentage — avoided over avoided plus returned — which
-/// is a different question with the same shape, drawn two cells from a chip
-/// that answered the other one. Its denominator is named where there is room
-/// to name it: the two bars under it are literally `read` and `saved`, and the
-/// modal spells the fraction out.
+/// The headline is `saved N tokens`, then the shared savings share, then the
+/// dollar estimate, joined by middle dots — each segment present only when
+/// its figure is. Tokens lead because they are the measurement; the share is
+/// out of the one `savings::compose` call the command line reads from, and
+/// the dollars are the money authority's pre-rendered label, tilde and all.
 ///
-/// One decimal, because that is how `rift savings` prints it: a card that
-/// rounded to whole percent would disagree with the terminal beside it on a
-/// repository sitting at 2.5 %. An unanswerable share is `saved —`, never a
-/// zero — nothing read and nothing avoided is a question with no answer.
-///
-/// It is kept **short** on purpose. Everything else on this row — the dollar
-/// estimate, the target — is positioned after it and shed when it will not
-/// fit, so a longer headline is paid for by whatever stands to its right at
-/// the narrow widths this column is usually drawn at.
+/// One decimal on the share, because that is how `rift savings` prints it: a
+/// card that rounded to whole percent would disagree with the terminal beside
+/// it on a repository sitting at 2.5 %. An unanswerable share draws no
+/// percentage, never a zero — nothing read and nothing avoided is a question
+/// with no answer — and a card with no savings frame at all is `saved —`.
 fn recall_headlines(col3: &Col3) -> (String, u64, String) {
-    let savings = match &col3.savings {
-        RecallView::Data(sd) => match sd.share.overall {
-            Some(pct) => format!(
-                "saved {pct:.1}% ({})",
-                fmt_km(f64_of(sd.share.avoided_tokens))
-            ),
-            None => "saved —".to_string(),
-        },
-        RecallView::Quiet | RecallView::Disabled => "saved —".to_string(),
-    };
+    let savings = recall_headline_segments(col3).join(HEADLINE_SEPARATOR);
     let call_total = match &col3.calls {
         RecallView::Data(calls) => calls.total,
         RecallView::Quiet | RecallView::Disabled => 0,
@@ -344,6 +252,20 @@ fn recall_headlines(col3: &Col3) -> (String, u64, String) {
     (savings, call_total, sessions)
 }
 
+/// The headline's segments in reading order, each present only when its
+/// figure is: the tokens avoided, the share, the dollar estimate.
+fn recall_headline_segments(col3: &Col3) -> Vec<String> {
+    let RecallView::Data(sd) = &col3.savings else {
+        return vec!["saved —".to_owned()];
+    };
+    let tokens = format!("saved {} tokens", fmt_km(f64_of(sd.share.avoided_tokens)));
+    let share = sd.share.overall.map(|pct| format!("{pct:.1}%"));
+    std::iter::once(tokens)
+        .chain(share)
+        .chain(sd.usd_label.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,9 +274,47 @@ mod tests {
     use crate::render::{AsciiBackend, Capabilities};
 
     use super::super::calls::{CallsData, ChannelCallSeries};
-    use super::super::fixtures::{barred_col3, draw_to, share_fixture, text_of, usd_col3};
-    use super::super::savings::ShareData;
+    use super::super::fixtures::{draw_to, share_fixture, text_of, usd_col3};
+    use super::super::savings::{SavingsData, ShareData};
     use super::super::{draw_one, SectionId};
+
+    /// The priced fixture's line, every segment present.
+    const PRICED: &str = "saved 6.0k tokens · 42.0% · ~$105.90";
+
+    /// Draw the Recall card into a `w`×`h` frame and return it with the inner
+    /// rect the panel chrome granted, recomputed through the same solver.
+    fn drawn_card(col3: &Col3, w: u16, h: u16, collapsed: bool) -> (Frame, Rect) {
+        let rect = Rect { x: 0, y: 0, w, h };
+        let mut f = Frame::new(Size::new(w, h));
+        let mut b = AsciiBackend::new(Capabilities::empty());
+        draw_one(
+            col3,
+            SectionId::Recall,
+            false,
+            false,
+            collapsed,
+            rect,
+            &mut b,
+            &mut f,
+        );
+        let mut scratch = Frame::new(Size::new(w, h));
+        let inner = panel_frame(
+            Theme::rift_dark(),
+            Section::Recall,
+            false,
+            "recall",
+            rect,
+            &mut scratch,
+        );
+        (f, inner)
+    }
+
+    /// The glyphs a frame holds on `rect`'s first row, cell by cell.
+    fn cells(f: &Frame, rect: Rect) -> String {
+        (rect.x..rect.x + rect.w)
+            .map(|x| f.get(x, rect.y).map_or(' ', |c| c.ch))
+            .collect()
+    }
 
     #[test]
     fn recall_panel_states_render_honestly() {
@@ -364,7 +324,6 @@ mod tests {
 
         let data = Col3 {
             savings: RecallView::Data(SavingsData {
-                target_pct: Some(90),
                 share: Box::new(ShareData {
                     overall: Some(42.0),
                     avoided_tokens: 6_000,
@@ -387,172 +346,149 @@ mod tests {
         };
         let text = text_of(&draw_to(&data, 40, 24));
         assert!(
-            text.contains("saved 42.0% (6.0k)"),
-            "the shared share and the tokens behind it: \n{text}"
+            text.contains("saved 6.0k tokens · 42.0%"),
+            "the tokens avoided and the shared share: \n{text}"
         );
         assert!(text.contains("17 serves"));
         assert!(text.contains("hook"), "channel legend name: \n{text}");
         assert!(text.contains("3 active sessions"));
     }
 
-    /// the priced savings estimate: the chip's glyphs land exactly on the cells the shared
-    /// solver reports — pixels == target, one geometry for draw and hit-test.
+    /// A priced window says all three things on one line, tokens first,
+    /// because the tokens are the measurement and the other two are read off
+    /// it.
     #[test]
-    fn usd_chip_draws_exactly_where_the_shared_solver_says() {
-        let col3 = usd_col3(Some("~$6.25"));
-        let rect = Rect {
-            x: 0,
-            y: 0,
-            w: 64,
-            h: 10,
-        };
-        let mut f = Frame::new(Size::new(64, 10));
-        let mut b = AsciiBackend::new(Capabilities::empty());
-        draw_one(
-            &col3,
-            SectionId::Recall,
-            false,
-            false,
-            false,
-            rect,
-            &mut b,
-            &mut f,
-        );
-        // Recompute the inner rect through the same chrome solver the panel
-        // used (geometry is theme-independent).
-        let mut scratch = Frame::new(Size::new(64, 10));
-        let inner = panel_frame(
-            Theme::rift_dark(),
-            Section::Recall,
-            false,
-            "recall",
-            rect,
-            &mut scratch,
-        );
-        let chip = recall_cost_rect(&col3, false, inner).expect("an honest figure draws a chip");
-        // The drawn text at the chip's cells is exactly `[~$6.25]`.
-        let drawn: String = (chip.x..chip.x + chip.w)
-            .map(|x| f.get(x, chip.y).map_or(' ', |c| c.ch))
-            .collect();
-        assert_eq!(drawn, "[~$6.25]");
-        assert!(drawn.contains('~'), "the estimate marker is mandatory");
-        // And nowhere else: the row before the chip is the headline text.
-        let row: String = (inner.x..inner.x + inner.w)
-            .map(|x| f.get(x, chip.y).map_or(' ', |c| c.ch))
-            .collect();
-        // The headline row carries exactly two chips: the money and the
-        // target beside it, in that order and never overlapping.
-        assert_eq!(row.matches('[').count(), 2, "money and target: {row}");
-        let target = recall_share_rect(&col3, false, inner).expect("the target chip");
-        assert!(
-            target.x >= chip.x + chip.w,
-            "the chips abut without overlapping: {row}"
-        );
+    fn a_priced_window_draws_tokens_share_and_dollars_on_one_line() {
+        let col3 = usd_col3(Some("~$105.90"));
+        assert_eq!(recall_headlines(&col3).0, PRICED);
     }
 
-    /// Honest absence and degraded layouts draw no chip at all (never a
-    /// fabricated figure, never a truncated one).
+    /// No seeded price means no dollar segment — never `~$0.00`, which would
+    /// be a figure nobody computed.
     #[test]
-    fn usd_chip_absent_without_an_honest_figure_or_room() {
-        // No figure → no chip on the headline row, which is the only row
-        // either chip is ever drawn on. Scoped to that row rather than to the
-        // whole panel: the period buttons own their own row of `[…]` chips,
-        // and a panel-wide search for a bracket could no longer tell a
-        // fabricated dollar figure from the row that lets a viewer change the
-        // window.
-        let none = usd_col3(None);
-        let text = text_of(&draw_to(&none, 64, 24));
+    fn an_unpriced_window_draws_two_segments() {
+        let col3 = usd_col3(None);
+        assert_eq!(recall_headlines(&col3).0, "saved 6.0k tokens · 42.0%");
+        let text = text_of(&draw_to(&col3, 64, 24));
         let headline = text
             .lines()
-            .find(|line| line.contains("saved 42.0% (6.0k)"))
+            .find(|line| line.contains("saved 6.0k tokens"))
             .expect("the recall headline is drawn");
         assert!(
-            !headline.contains("~$"),
+            !headline.contains('$'),
             "no money without a figure: {headline}"
         );
-        assert_eq!(
-            headline.matches('[').count(),
-            1,
-            "the target chip stands alone, and it is the modal's only door \
-             on a repository with no seeded price: {headline}"
-        );
-
-        let some = usd_col3(Some("~$6.25"));
-        let inner = Rect {
-            x: 1,
-            y: 1,
-            w: 38,
-            h: 8,
-        };
-        // Collapsed path: the panel is shedding text; the chip goes first.
-        assert_eq!(recall_cost_rect(&some, true, inner), None);
-        // Narrow / short inners: below the wide-path floor, no chip.
-        assert_eq!(
-            recall_cost_rect(
-                &some,
-                false,
-                Rect {
-                    x: 1,
-                    y: 1,
-                    w: 27,
-                    h: 8
-                }
-            ),
-            None
-        );
-        assert_eq!(
-            recall_cost_rect(
-                &some,
-                false,
-                Rect {
-                    x: 1,
-                    y: 1,
-                    w: 38,
-                    h: 6
-                }
-            ),
-            None
-        );
-        // A row too tight for the whole chip refuses rather than truncates:
-        // headline "saved 42% (6.0k)" = 16 cells + 2 gap + 8 chip = 26 < 28
-        // fits at w=28... shrink until it cannot: chip needs x+w ≤ inner end.
-        let tight = Rect {
-            x: 1,
-            y: 1,
-            w: 28,
-            h: 8,
-        };
-        // 16 + 2 = 18 offset, +8 = 26 ≤ 28 → fits; w=25 would fail the wide
-        // floor first, so prove the fit guard with a longer label instead.
-        let long = usd_col3(Some("~$1,234,567.89"));
-        assert_eq!(
-            recall_cost_rect(&long, false, tight),
-            None,
-            "a chip that cannot fit whole is not drawn at all"
+        assert!(
+            !headline.contains('['),
+            "the headline carries no chip: {headline}"
         );
     }
 
-    /// The title is byte-identical to the bare one whenever the card shows
-    /// what was asked for — the activity card's off-strip rule, and what keeps
-    /// every golden that does not exercise the refusal unchanged.
+    /// An unanswerable share draws no percentage — never `0 %`, because the
+    /// two mean opposite things and only one of them is a measurement — but
+    /// the tokens it avoided are still a count, and the line is still the
+    /// door that explains the absence.
     #[test]
-    fn the_recall_title_is_bare_until_the_dollar_view_is_refused() {
-        let priced = {
-            let mut col3 = barred_col3(10_000, 1_000);
-            if let RecallView::Data(sd) = &mut col3.savings {
-                sd.usd_read_micros = Some(1);
-                sd.usd_read_label = Some("~<$0.01".to_owned());
-                sd.usd_saved_micros = Some(1);
-                sd.usd_label = Some("~<$0.01".to_owned());
-            }
-            col3
+    fn an_unanswerable_share_draws_no_percentage_but_keeps_its_door() {
+        let col3 = Col3 {
+            savings: RecallView::Data(share_fixture(None)),
+            ..Col3::default()
         };
-        assert_eq!(recall_title(&Col3::default()), "recall");
-        assert_eq!(recall_title(&barred_col3(10, 1)), "recall", "tokens asked");
-        assert_eq!(recall_title(&priced), "recall", "dollars available");
-        let mut asked = priced.clone();
-        asked.recall_unit = RecallUnit::Usd;
-        assert_eq!(recall_title(&asked), "recall", "dollars asked and given");
+        assert_eq!(recall_headlines(&col3).0, "saved 10k tokens");
+        let (f, inner) = drawn_card(&col3, 60, 13, false);
+        let door = recall_headline_rect(&col3, inner).expect("a drawn headline is a door");
+        assert_eq!(cells(&f, door), "saved 10k tokens");
+
+        let answered = Col3 {
+            savings: RecallView::Data(share_fixture(Some(3.04))),
+            ..Col3::default()
+        };
+        assert_eq!(
+            recall_headlines(&answered).0,
+            "saved 10k tokens · 3.0%",
+            "the shared share, one decimal like the command line"
+        );
+    }
+
+    /// The headline's door is exactly the cells its glyphs occupy, in the
+    /// wide, narrow and collapsed tiers alike: one solver feeds the draw and
+    /// the hit-test, so a click lands where the line is and nowhere else.
+    ///
+    /// Measured in cells, not bytes: the middle dot is two bytes and one
+    /// cell, and a door sized by byte length would run past the line.
+    #[test]
+    fn the_headline_draws_exactly_where_the_shared_solver_says() {
+        let col3 = usd_col3(Some("~$105.90"));
+        for (w, h, collapsed) in [(64, 13, false), (26, 13, false), (30, 1, true)] {
+            let (f, inner) = drawn_card(&col3, w, h, collapsed);
+            let door = recall_headline_rect(&col3, inner).expect("a drawn headline is a door");
+            let fitted = fit_headline(&recall_headline_segments(&col3), usize::from(inner.w));
+            assert_eq!(cells(&f, door), fitted, "w={w} collapsed={collapsed}");
+            assert_eq!((door.x, door.y, door.h), (inner.x, inner.y, 1));
+            let end = door.x + door.w;
+            if end < inner.x + inner.w {
+                assert_eq!(f.get(end, door.y).map(|c| c.ch), Some(' '), "w={w}");
+            }
+        }
+        let (_, wide) = drawn_card(&col3, 64, 13, false);
+        let door = recall_headline_rect(&col3, wide).expect("the wide door");
+        assert_eq!(usize::from(door.w), PRICED.chars().count());
+        assert!(usize::from(door.w) < PRICED.len(), "cells, never bytes");
+    }
+
+    /// A headline that does not fit sheds whole segments from the right —
+    /// the dollars, then the share — so no tier ever draws half a figure.
+    #[test]
+    fn a_narrow_headline_sheds_whole_segments_and_never_cuts_a_figure() {
+        let col3 = usd_col3(Some("~$105.90"));
+        let prefixes = ["saved 6.0k tokens", "saved 6.0k tokens · 42.0%", PRICED];
+        for (w, h, collapsed) in [
+            (64, 13, false),
+            (40, 13, false),
+            (30, 13, false),
+            (26, 13, false),
+            (30, 1, true),
+            (20, 1, true),
+        ] {
+            let (f, inner) = drawn_card(&col3, w, h, collapsed);
+            let door = recall_headline_rect(&col3, inner).expect("a drawn headline is a door");
+            let drawn = cells(&f, door);
+            assert!(
+                prefixes.contains(&drawn.as_str()),
+                "w={w} collapsed={collapsed} drew a cut figure: {drawn:?}"
+            );
+            let longest = prefixes
+                .iter()
+                .rev()
+                .find(|p| p.chars().count() <= usize::from(inner.w))
+                .expect("the tokens segment fits every tier here");
+            assert_eq!(&drawn, longest, "the widest whole prefix that fits, w={w}");
+        }
+        // Too narrow even for the tokens: the card's body-line clip applies.
+        let (f, inner) = drawn_card(&col3, 12, 1, true);
+        let door = recall_headline_rect(&col3, inner).expect("a clipped headline is a door");
+        assert_eq!(cells(&f, door), "saved 6.0k t");
+    }
+
+    /// A placeholder card draws a sentence, not a headline, so it has no
+    /// headline door; `S` remains the way in, and it always answers.
+    #[test]
+    fn a_placeholder_card_draws_no_headline_and_offers_no_door() {
+        for (savings, calls) in [
+            (RecallView::Quiet, RecallView::Quiet),
+            (RecallView::Disabled, RecallView::Disabled),
+        ] {
+            let col3 = Col3 {
+                savings,
+                calls,
+                ..Col3::default()
+            };
+            for (w, h, collapsed) in [(64, 13, false), (26, 13, false), (30, 1, true)] {
+                let (f, inner) = drawn_card(&col3, w, h, collapsed);
+                assert_eq!(recall_headline_rect(&col3, inner), None, "w={w}");
+                assert!(!cells(&f, inner).contains("saved"), "w={w}");
+            }
+        }
     }
 
     /// A narrow window over a quiet ledger puts the card into its placeholder
@@ -574,18 +510,7 @@ mod tests {
                 recall_window: RecallWindow::Today,
                 ..Col3::default()
             };
-            let mut f = Frame::new(Size::new(40, 10));
-            let mut b = AsciiBackend::new(Capabilities::empty());
-            draw_one(
-                &col3,
-                SectionId::Recall,
-                false,
-                false,
-                false,
-                f.rect(),
-                &mut b,
-                &mut f,
-            );
+            let (f, _) = drawn_card(&col3, 40, 10, false);
             let text = text_of(&f);
             for window in RecallWindow::ALL {
                 assert!(
@@ -595,64 +520,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// An unanswerable share draws no percentage on the card — `saved —`,
-    /// never `0 %`, because the two mean opposite things and only one of them
-    /// is a measurement — while the **target** chip beside it stays, since a
-    /// target is a goal the product states rather than a figure it measured.
-    /// It is also the modal's door, and a door that vanished with the
-    /// measurement would take the explanation of the absence with it.
-    #[test]
-    fn an_unanswerable_share_draws_no_percentage_but_keeps_its_door() {
-        let col3 = Col3 {
-            savings: RecallView::Data(share_fixture(None)),
-            ..Col3::default()
-        };
-        let inner = Rect {
-            x: 0,
-            y: 0,
-            w: 60,
-            h: 10,
-        };
-        assert_eq!(recall_headlines(&col3).0, "saved —");
-        assert!(recall_share_rect(&col3, false, inner).is_some());
-
-        let answered = Col3 {
-            savings: RecallView::Data(share_fixture(Some(3.04))),
-            ..Col3::default()
-        };
-        assert_eq!(
-            recall_headlines(&answered).0,
-            "saved 3.0% (10k)",
-            "the shared share, one decimal like the command line"
-        );
-        assert_eq!(
-            share_chip_label(&share_fixture(Some(3.04))).as_deref(),
-            Some("[of 90% target]")
-        );
-        // A card with no target draws no chip: absence, not a zero target.
-        let targetless = SavingsData {
-            target_pct: None,
-            ..share_fixture(Some(3.04))
-        };
-        assert_eq!(share_chip_label(&targetless), None);
-        let chip = recall_share_rect(&answered, false, inner).expect("a target");
-        assert_eq!(chip.w, 15, "the rect is exactly the glyphs it draws");
-        // Collapsed and narrow shed it, like every other chip on this row.
-        assert_eq!(recall_share_rect(&answered, true, inner), None);
-        assert_eq!(
-            recall_share_rect(
-                &answered,
-                false,
-                Rect {
-                    x: 0,
-                    y: 0,
-                    w: 27,
-                    h: 10
-                }
-            ),
-            None
-        );
     }
 }

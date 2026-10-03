@@ -237,16 +237,22 @@ number is genuinely unknown, and is never rendered as `0`.
 
 ### Recall
 
-The savings headline (`saved 1.4% (110.8M)`), the serve count and active
-sessions, then a **period row**, a **read-vs-saved bar chart**, and a
-per-channel rate chart over the last thirty minutes — `hook` for injected turn
-deltas, `skill` for calls an agent made itself
+The savings headline (`saved 110.8M tokens · 1.4% · ~$412.30`), the serve
+count and active sessions, then a **period row**, a **read-vs-saved bar
+chart**, and a per-channel rate chart over the last thirty minutes — `hook`
+for injected turn deltas, `skill` for calls an agent made itself
 ([07-serving-and-injection.md](07-serving-and-injection.md)).
 
-The headline **is the savings share** — `avoided ÷ (avoided + read)`, the
-figure `rift savings` publishes, to the same one decimal. It used to be a
-second percentage with a different denominator, which looked exactly like this
-one and sat two cells from a chip that answered the other question
+The headline is one line of up to three segments joined by ` · `. `saved N
+tokens` is always there: the tokens the plane avoided in the window. The
+percentage follows only when the share is answerable — `avoided ÷ (avoided +
+read)`, the figure `rift savings` publishes, to the same one decimal — and an
+unanswerable share draws no percentage rather than a zero. The dollar
+estimate, tilde and all, follows only when a seeded price applies: no honest
+figure means no segment. The collapsed and narrow tiers print the same line,
+shedding whole segments from the right — the dollars, then the share — so no
+tier draws half a figure; only a card too narrow for `saved N tokens` cuts it
+at the frame like any other body line
 ([08-cost-and-savings.md](08-cost-and-savings.md)).
 
 `[24h][7d][30d][all]` chooses the period the card's figures cover, by click or
@@ -270,26 +276,23 @@ label that says `24h`.
 
 The two bars are the window's read tokens and the tokens the plane avoided,
 both from that one computation and **on one shared scale** — independently
-normalised bars would draw a 1 % saving exactly like a 99 % one. `[tok]`/`[usd]`
-at the row's right edge, or `$`, reads them as token counts or as dollars
-through the same per-model rates and the same mandatory tilde the savings chip
-uses. Asked for dollars with no seeded price for both sides, the card shows
-tokens and says `recall · no seeded price` in its title rather than inventing a
-rate; a window holding nothing on either side draws no bars at all, because
+normalised bars would draw a 1 % saving exactly like a 99 % one. The bars are
+always token counts; dollars reach the card through the headline and nowhere
+else. A window holding nothing on either side draws no bars at all, because
 absence and a measured zero are different facts.
 
-Two chips sit after the headline. The bracketed `[~$…]` is the dollar
-estimate; `[of 90% target]` names what the share beside it is aiming at — a
-goal the product states, not a figure it measured, from one constant the guide
-and the card share. Either chip opens a read-only breakdown of how the dollar
-estimate was composed, model by model, with its assumptions written out and
-the share block under it: the window, the honesty figure, the `n`, the reads
-the denominator could not weigh, and one row per family. `S`, while the graphs
-column has focus, opens the same overlay through the same opener — the
-breakdown used to be reachable by mouse and by nothing else, which is how a
-keyboard user loses a feature quietly. What the figure means, why the `~` is
-there, and how its denominator differs from the one `rift recap` prints are in
-[08-cost-and-savings.md](08-cost-and-savings.md).
+The headline is the card's one door: clicking any cell of the line opens a
+read-only breakdown of how the dollar estimate was composed, model by model,
+with its assumptions written out and the share block under it — the window,
+the measured share, the honesty figure, the `n`, the reads the denominator
+could not weigh, and one row per family. The card declares no target; every
+figure on it is a measurement with its denominator. `S`, while the graphs
+column has focus, opens the same overlay through the same opener, and it is
+the only door on a placeholder card, which draws a sentence instead of a
+headline. The breakdown used to be reachable by mouse and by nothing else,
+which is how a keyboard user loses a feature quietly. What the figure means,
+why the `~` is there, and how its denominator differs from the one `rift
+recap` prints are in [08-cost-and-savings.md](08-cost-and-savings.md).
 
 When Recall is off the panel says so and names the door:
 `recall off — open Project Settings`.
@@ -331,8 +334,7 @@ rest are inert — which is what the hint bar shows.
 | `p` | any | Profile menu |
 | `w` | graphs | Break the token total down by worktree |
 | `1`–`4` | graphs | The Recall card's period: 24h, 7 days, 30 days, all |
-| `$` | graphs | Read the Recall bars in tokens or in dollars |
-| `S` | graphs | Open the Recall card's savings breakdown (the chips' twin) |
+| `S` | graphs | Open the Recall card's savings breakdown (the headline's twin) |
 | `A` | detail, unadopted member | Adopt the member |
 | `/` | any | Command palette |
 | `q`, `Ctrl-C` | any | Quit |

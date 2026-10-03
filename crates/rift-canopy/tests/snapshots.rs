@@ -283,18 +283,17 @@ fn golden_repository_card_integration_error_ascii() {
 
 // --- column 3: the six-section stack ---------------------------------------
 
+/// A priced window: the headline's dollar segment, present only with an
+/// honest figure and tilde mandatory, after the tokens and the share. The
+/// other goldens keep `None` and draw two segments — absence draws nothing.
 #[test]
-fn golden_recall_usd_chip() {
-    // The USD-estimate chip on the Recall headline: present
-    // only with an honest figure, tilde mandatory, drawn from the same solver
-    // the hit-test reads. The other goldens keep `None` and are untouched —
-    // absence draws nothing.
+fn golden_recall_priced_headline() {
     let mut col3 = col3_with_data();
     if let rift_canopy::RecallView::Data(sd) = &mut col3.savings {
         sd.usd_saved_micros = Some(105_900_000);
         sd.usd_label = Some("~$105.90".to_owned());
     }
-    insta::assert_snapshot!("recall_usd_chip", recall_text(&col3, 40, 10, false));
+    insta::assert_snapshot!("recall_priced_headline", recall_text(&col3, 40, 10, false));
 }
 
 /// The period row and the read-vs-saved bars, at the panel's registered
@@ -321,17 +320,16 @@ fn golden_recall_window_and_bars() {
     insta::assert_snapshot!("recall_window_and_bars", recall_text(&col3, 40, 13, false));
 }
 
-/// The same card read in dollars: the `[usd]` chip is live and both bars
-/// carry the money authority's labels, tilde mandatory.
+/// The same card over a priced window: the dollars reach the headline and
+/// nowhere else, so the bars still read in tokens on their one shared scale.
 ///
 /// A second golden rather than a variant of the first, because the pair is
-/// the point — the token view and the dollar view have to be diffable against
+/// the point — the unpriced and the priced card have to be diffable against
 /// each other when either one drifts.
 #[test]
-fn golden_recall_bars_in_dollars() {
+fn golden_recall_priced_window_and_bars() {
     let mut col3 = col3_with_data();
     col3.recall_window = rift_canopy::RecallWindow::Last7Days;
-    col3.recall_unit = rift_canopy::RecallUnit::Usd;
     if let rift_canopy::RecallView::Data(sd) = &mut col3.savings {
         *sd.share = rift_canopy::ShareData {
             window: Some("since 7 days ago".to_owned()),
@@ -347,7 +345,10 @@ fn golden_recall_bars_in_dollars() {
         sd.usd_read_micros = Some(50_000);
         sd.usd_read_label = Some("~$0.05".to_owned());
     }
-    insta::assert_snapshot!("recall_bars_in_dollars", recall_text(&col3, 40, 13, false));
+    insta::assert_snapshot!(
+        "recall_priced_window_and_bars",
+        recall_text(&col3, 40, 13, false)
+    );
 }
 
 #[test]

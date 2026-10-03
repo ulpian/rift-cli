@@ -59,7 +59,6 @@ pub(super) fn panel_text(col3: &Col3, id: SectionId, w: u16, h: u16, collapsed: 
 pub(super) fn usd_col3(label: Option<&str>) -> Col3 {
     Col3 {
         savings: RecallView::Data(SavingsData {
-            target_pct: Some(90),
             usd_saved_micros: label.map(|_| 6_250_000),
             usd_label: label.map(str::to_owned),
             usd_rows: vec![],
@@ -81,7 +80,6 @@ pub(super) fn usd_col3(label: Option<&str>) -> Col3 {
 pub(super) fn barred_col3(read: u64, avoided: u64) -> Col3 {
     Col3 {
         savings: RecallView::Data(SavingsData {
-            target_pct: Some(90),
             usd_saved_micros: None,
             usd_label: None,
             usd_rows: vec![],
@@ -126,7 +124,6 @@ pub(super) fn tokens_col3(total: f64) -> Col3 {
 
 pub(super) fn share_fixture(overall: Option<f64>) -> SavingsData {
     SavingsData {
-        target_pct: Some(90),
         usd_saved_micros: None,
         usd_label: None,
         usd_rows: Vec::new(),

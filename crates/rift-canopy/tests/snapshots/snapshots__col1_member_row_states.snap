@@ -23,7 +23,7 @@ expression: frame_text(&frame)
 │                      ││                                              │╭─ recall ─────────────────────────────────────█
 │                      ││                                              ││recall off — open Project Settings            █
 │                      ││                                              ││                                              █
-│                      ││                                              ││[24h][7d][30d][all]                      [tok]█
+│                      ││                                              ││[24h][7d][30d][all]                           █
 │                      │╰──────────────────────────────────────────────╯│                                              █
 │                      │╭─ activity · 30d ─────────────────────────────╮│                                              █
 │                      ││(no projection yet)                           ││                                              █

@@ -24,7 +24,7 @@ expression: "render_state(&mut\nproject_settings_state(Size::new(120, 40),\nrift
 │           │                                                                                              │───────────#
 │           │Integrations                                                                                  │           #
 │           │> Claude Code · PATH command · managed                                                     [x]│           #
-│           │  Codex · PATH command + VS Code extension · capture managed · hooks managed               [x]│      [tok]#
+│           │  Codex · PATH command + VS Code extension · capture managed · hooks managed               [x]│           #
 │           │  Gemini CLI · PATH command · conflict · coming soon                                       [ ]│           #
 │           │  Antigravity · PATH command · invalid                                                     [ ]│           #
 │           │  Cursor · not installed · coming soon                                                     [ ]│           #

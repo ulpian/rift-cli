@@ -92,10 +92,9 @@ pub(crate) fn interpolate(from: &Col3, to: &Col3, t: f32) -> Col3 {
             }
         }),
         active_sessions: to.active_sessions.clone(),
-        // Not tweened: the chosen window and unit are the viewer's, read from
-        // the target so the pressed control lights in the frame of the press.
+        // Not tweened: the chosen window is the viewer's, read from the
+        // target so the pressed control lights in the frame of the press.
         recall_window: to.recall_window,
-        recall_unit: to.recall_unit,
         // Domain metrics are headlines — taken from the target immediately.
         metrics: to.metrics.clone(),
         // The workflow panels carry no plottable series at all: every value in
@@ -151,7 +150,6 @@ mod tests {
 
     fn savings(avoided: u64) -> RecallView<SavingsData> {
         RecallView::Data(SavingsData {
-            target_pct: Some(90),
             share: Box::new(ShareData {
                 overall: Some(3.0),
                 avoided_tokens: avoided,
