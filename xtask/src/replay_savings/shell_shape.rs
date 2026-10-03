@@ -617,17 +617,22 @@ fn is_count(word: &Word) -> bool {
     word.text.bytes().all(|b| b.is_ascii_digit()) && word.text.parse::<u32>().is_ok_and(|n| n > 0)
 }
 
-/// `A,Bp`, the one `sed` script the grammar pins — both ends in digits only,
-/// since `1,+3p` is a relative range the grammar refuses.
+/// A list of `A,Bp` and `Ap` runs joined by `;`, the `sed` scripts the
+/// grammar pins — every end in digits only, since `1,+3p` is a relative range
+/// the grammar refuses.
 fn is_line_range(script: &str) -> bool {
-    let Some((lo, hi)) = script.strip_suffix('p').and_then(|b| b.split_once(',')) else {
-        return false;
-    };
     let number = |text: &str| {
         let digits = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
         digits.then(|| text.parse::<u32>().ok()).flatten()
     };
-    matches!((number(lo), number(hi)), (Some(lo), Some(hi)) if lo >= 1 && hi >= lo)
+    let run = |element: &str| {
+        let Some(body) = element.strip_suffix('p') else {
+            return false;
+        };
+        let (lo, hi) = body.split_once(',').unwrap_or((body, body));
+        matches!((number(lo), number(hi)), (Some(lo), Some(hi)) if lo >= 1 && hi >= lo)
+    };
+    script.split(';').all(run)
 }
 
 #[cfg(test)]
@@ -647,7 +652,8 @@ mod tests {
             Shape::PipedIntoHeadTail
         );
         assert_eq!(shape_of("sed -n '1,+3p' a"), Shape::SedScript);
-        assert_eq!(shape_of("sed -n '1,5p;9,12p' a"), Shape::SedScript);
+        assert_eq!(shape_of("sed -n '1,5p;$p' a"), Shape::SedScript);
+        assert_eq!(shape_of("sed -n '1,5p;9p' a b"), Shape::SeveralPaths);
         assert_eq!(shape_of("sed 's/a/b/' a"), Shape::SedOption);
         assert_eq!(shape_of("sed -n '1,5p' a b"), Shape::SeveralPaths);
         assert_eq!(shape_of("head -n 5 a b"), Shape::SeveralPaths);

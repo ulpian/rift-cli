@@ -114,7 +114,7 @@ pub enum ShellSpan {
         /// The line count `-n` named, or [`None`] for the tool's default.
         limit: Option<u32>,
     },
-    /// An explicit run of lines: `sed -n 'A,Bp'`.
+    /// An explicit run of lines: `sed -n 'A,Bp'`, or the one line `'Ap'`.
     Lines {
         /// The first line printed.
         lo: u32,
@@ -124,6 +124,18 @@ pub enum ShellSpan {
     /// Only the lines that matched a pattern: the `grep` family, and `rg`
     /// with a pattern. **Not a derivable range**, and never a name search.
     Matching,
+    /// One run of a `sed -n` script that prints several, `'A,Bp;Cp'`.
+    ///
+    /// The lines are exactly named, and still not credited: the runs reach
+    /// the window as one output, which can pass the terminal threshold — and
+    /// be written to a file the window only gets a pointer to — while each
+    /// run's own slice stays under it, and the gate weighs each read alone.
+    OneOfSeveralRuns {
+        /// The first line of the run.
+        lo: u32,
+        /// The last line of the run.
+        hi: u32,
+    },
 }
 
 /// A trailing `| head -N` or `| tail -N` that narrows what a read delivered.
@@ -209,13 +221,16 @@ impl ShellRead {
             }
             // Decoration changes the byte count; a `head` or `tail` relying on
             // its own default states no count; the `grep` family prints what
-            // matched. None of those is an interval of this file.
+            // matched; a run among several is part of one output whose size
+            // no member answers for. None of those is an interval of this
+            // file a record may be written from.
             (ShellSpan::FromBottom { limit: Some(_) }, Some(First(_)))
             | (
                 ShellSpan::DecoratedWholeFile
                 | ShellSpan::FromTop { limit: None }
                 | ShellSpan::FromBottom { limit: None }
-                | ShellSpan::Matching,
+                | ShellSpan::Matching
+                | ShellSpan::OneOfSeveralRuns { .. },
                 _,
             ) => ReadSpan::Unknown,
         }
@@ -551,13 +566,29 @@ fn top_or_bottom(rest: &[Word], from_top: bool) -> Option<ShellSpan> {
     })
 }
 
-/// A `sed` print script, `A,Bp` — the only script the grammar admits.
-fn sed_range(script: &str) -> Option<ShellSpan> {
+/// One `sed` print element, `A,Bp` or the single line `Ap`.
+fn sed_range(script: &str) -> Option<(u32, u32)> {
     let body = script.strip_suffix('p')?;
-    let (lo, hi) = body.split_once(',')?;
-    let lo = digits(lo)?;
-    let hi = digits(hi)?;
-    (lo >= 1 && hi >= lo).then_some(ShellSpan::Lines { lo, hi })
+    let (lo, hi) = match body.split_once(',') {
+        Some((lo, hi)) => (digits(lo)?, digits(hi)?),
+        None => (digits(body)?, digits(body)?),
+    };
+    (lo >= 1 && hi >= lo).then_some((lo, hi))
+}
+
+/// A `sed` print script of runs joined by `;`, `A,Bp;Cp`, as its runs in the
+/// order it names them — or [`None`] when any element is not one, or there
+/// are more than one call may read.
+///
+/// Under `-n` such a script prints each run in the file's order, a line twice
+/// where two overlap, and nothing else, so the runs are exactly what it
+/// delivered. Nothing between the elements is admitted, not even a space.
+fn sed_runs(script: &str) -> Option<Vec<(u32, u32)>> {
+    let runs = script
+        .split(';')
+        .map(sed_range)
+        .collect::<Option<Vec<_>>>()?;
+    (runs.len() <= MAX_CHAIN_READS).then_some(runs)
 }
 
 /// The `ls` options the grammar admits, and no others.
@@ -928,12 +959,30 @@ fn decorated_read(rest: &[Word]) -> Option<Member> {
 
 /// `sed -n 'A,Bp'`: `-n` suppresses the default printing, which is what makes
 /// the script's own `p` the whole of what is printed.
+///
+/// One run is one read with its range. A script of several runs is one read
+/// per run, recognised and credited with nothing (see
+/// [`ShellSpan::OneOfSeveralRuns`]); naming the runs is still what keeps the
+/// line out of the unseen pool and in a decision that can see all of it.
 fn sed_read(rest: &[Word]) -> Option<Member> {
-    match rest {
-        [flag, script, path] if bare(flag) == Some("-n") => {
-            one_read(path_arg(path)?, sed_range(&pattern_arg(script)?)?)
-        }
-        _ => None,
+    let [flag, script, path] = rest else {
+        return None;
+    };
+    if bare(flag) != Some("-n") {
+        return None;
+    }
+    let path = path_arg(path)?;
+    match sed_runs(&pattern_arg(script)?)?.as_slice() {
+        [(lo, hi)] => one_read(path, ShellSpan::Lines { lo: *lo, hi: *hi }),
+        runs => Some(Member::Reads(
+            runs.iter()
+                .map(|(lo, hi)| ShellRead {
+                    path: path.clone(),
+                    span: ShellSpan::OneOfSeveralRuns { lo: *lo, hi: *hi },
+                    narrowing: None,
+                })
+                .collect(),
+        )),
     }
 }
 

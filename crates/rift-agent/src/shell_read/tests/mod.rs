@@ -5,14 +5,15 @@
 //! it once carried in two trailing modules are split here by what they are
 //! about: the published vocabulary and the range each form supports, the
 //! three compositions and what each one reads, the labels a chain writes
-//! between its reads, the shapes left alone, and the properties a generated
-//! line has to hold. The helpers every file spells its expectations with live
-//! here.
+//! between its reads, the `sed` print scripts beyond one range, the shapes
+//! left alone, and the properties a generated line has to hold. The helpers
+//! every file spells its expectations with live here.
 
 mod compositions;
 mod labels;
 mod properties;
 mod refusals;
+mod sed_scripts;
 mod vocabulary;
 
 use crate::shell_read::{recognise, Narrowing, ShellCall, ShellListing, ShellRead, ShellSpan};

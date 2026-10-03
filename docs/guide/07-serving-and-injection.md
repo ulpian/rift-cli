@@ -304,6 +304,10 @@ GNU `grep` and `rg` do). A `grep` that does not would misread such a line,
 which only moves a measurement, since a search can never decline a read; any
 later form that grants coverage from a late option must first establish which
 `grep` runs.
+A `sed -n` script may also print one line (`'Ap'`), credited like a range, or
+several runs joined by `;` (`'1,40p;90,120p'`), which is one read per run and
+is credited with nothing: the runs reach the window as one output that can
+pass the terminal threshold while each run's own slice stays under it.
 Above it sit exactly three **compositions**, each admitted
 because the lines it delivers still follow from the line itself:
 
