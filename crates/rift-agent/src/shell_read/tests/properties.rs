@@ -71,6 +71,29 @@ fn names_a_word(target: &str, words: &[&str]) -> bool {
     target == "." || under(".") || words.iter().any(|word| *word == target || under(word))
 }
 
+/// The words of a line as a shell splits it: at a space or a tab outside a
+/// quote, with every quote mark taken off, so a quoted path with a space in it
+/// is one word. Written for this check alone; the grammar's own walk is not
+/// consulted.
+fn shell_words(command: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    let mut open: Option<char> = None;
+    for c in command.chars() {
+        match (open, c) {
+            (Some(mark), _) if c == mark => open = None,
+            (None, '\'' | '"') => {
+                open = Some(c);
+                current.get_or_insert_with(String::new);
+            }
+            (None, ' ' | '\t') => out.extend(current.take()),
+            _ => current.get_or_insert_with(String::new).push(c),
+        }
+    }
+    out.extend(current);
+    out
+}
+
 /// The vocabulary alphabet: words of the grammar, options it does and does
 /// not admit, paths, patterns, and the punctuation that ends a recognition.
 const VOCABULARY_TOKENS: &[&str] = &[
@@ -316,7 +339,8 @@ proptest::proptest! {
             return Ok(());
         }
         let Some(call) = call else { return Ok(()) };
-        let words: Vec<&str> = command.split_whitespace().collect();
+        let owned = shell_words(&command);
+        let words: Vec<&str> = owned.iter().map(String::as_str).collect();
         proptest::prop_assert!(
             words.first().is_some_and(|w| COMMAND_WORDS.contains(w)),
             "{command:?} was recognised but starts with no published command"
@@ -359,10 +383,8 @@ proptest::proptest! {
         if let Some(call) = recognise(&command) {
             // The grammar's own splitter: a word ends at a space or a tab,
             // so a non-ASCII separator inside a word stays part of it.
-            let words: Vec<&str> = command
-                .split([' ', '\t'])
-                .filter(|w| !w.is_empty())
-                .collect();
+            let owned = shell_words(&command);
+            let words: Vec<&str> = owned.iter().map(String::as_str).collect();
             for target in targets(&call) {
                 proptest::prop_assert!(
                     names_a_word(&target, &words),

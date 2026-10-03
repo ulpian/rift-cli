@@ -303,6 +303,13 @@ GNU `grep` and `rg` do). A `grep` that does not would misread such a line,
 which only moves a measurement, since a search can never decline a read; any
 later form that grants coverage from a late option must first establish which
 `grep` runs.
+A quoted word is read as the word the shell passes: single quotes as their
+text, and double quotes as their text when they hold no `$`, backtick or `!`
+and every backslash in them comes before an ordinary character, so the shell
+keeps it as written (`grep -n "a\|b"`). An escape the shell resolves (`\$`,
+`` \` ``, `\"`, `\\`), an expansion, and a quoted path that spells a glob, a
+`~` or a kept backslash are left alone. A quoted path is credited exactly as a
+bare one is.
 Above it sit exactly three **compositions**, each admitted
 because the lines it delivers still follow from the line itself:
 
