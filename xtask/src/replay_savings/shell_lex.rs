@@ -196,13 +196,26 @@ impl Lexer<'_> {
         let mut text = String::new();
         let mut closed = false;
         let mut expands = false;
-        while let (Some(inner), _) = self.peek() {
+        while let (Some(inner), next) = self.peek() {
             self.at += inner.len_utf8();
             if inner == mark {
                 closed = true;
                 break;
             }
-            expands |= mark == '"' && matches!(inner, '$' | '`' | '\\');
+            // Inside double quotes a backslash escapes only the four
+            // characters the shell still treats specially there, and a
+            // newline; before anything else it is kept as written, which is
+            // a value the line pins rather than one the shell computes.
+            if mark == '"' && inner == '\\' && next.is_some_and(escapes_in_double_quotes) {
+                expands = true;
+                text.push(inner);
+                if let Some(escaped) = next {
+                    self.at += escaped.len_utf8();
+                    text.push(escaped);
+                }
+                continue;
+            }
+            expands |= mark == '"' && matches!(inner, '$' | '`');
             text.push(inner);
         }
         // The closing quote must end the word, as it must for the grammar.
@@ -268,6 +281,60 @@ const fn bare_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(c, '_' | '.' | '/' | '-' | '+' | '=' | ',' | ':' | '@' | '%')
         || !c.is_ascii()
+}
+
+/// Whether a backslash before this character, inside double quotes, is an
+/// escape the shell resolves rather than a character it keeps.
+const fn escapes_in_double_quotes(c: char) -> bool {
+    matches!(c, '$' | '`' | '"' | '\\' | '\n')
+}
+
+/// The line with every double-quoted word whose backslashes the shell keeps as
+/// written respelled in single quotes, or [`None`] when there is no such word.
+///
+/// The two spellings pass the shell the same word, and the grammar pins the
+/// second, so whether the respelled line is recognised says whether those
+/// backslashes are the whole of the reason the line was refused. A word with
+/// an expansion, a `!`, an escape or a `'` in it is left as it was.
+pub(super) fn literal_backslashes_single_quoted(command: &str) -> Option<String> {
+    let mut out = String::with_capacity(command.len());
+    let mut changed = false;
+    let mut rest = command;
+    while let Some(at) = rest.find(['\'', '"', '\\']) {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        let mut chars = from.chars();
+        let mark = chars.next()?;
+        let body = chars.as_str();
+        let (taken, close) = match mark {
+            '\\' => (body.chars().next().map_or(0, char::len_utf8), 0),
+            _ => (body.find(mark)?, 1),
+        };
+        let inner = body.get(..taken)?;
+        match respelled(mark, inner) {
+            Some(single) => {
+                out.push_str(&single);
+                changed = true;
+            }
+            None => out.push_str(from.get(..1 + taken + close)?),
+        }
+        rest = body.get(taken + close..)?;
+    }
+    out.push_str(rest);
+    changed.then_some(out)
+}
+
+/// One double-quoted word's text in single quotes, when the two pass the same
+/// word and the double-quoted one holds a backslash it keeps.
+fn respelled(mark: char, inner: &str) -> Option<String> {
+    let plain = !inner.contains(['$', '`', '!', '\'']);
+    let kept = inner.match_indices('\\').all(|(at, _)| {
+        !inner
+            .get(at + 1..)
+            .and_then(|r| r.chars().next())
+            .is_some_and(escapes_in_double_quotes)
+    });
+    (mark == '"' && plain && kept && inner.contains('\\')).then(|| format!("'{inner}'"))
 }
 
 /// Cut a command line into members, stages and words.
@@ -409,6 +476,10 @@ mod tests {
             [false, true, true, true, false]
         );
         assert_eq!(words("grep \"a$b\" x'y' a\\ b"), [false, true, true, true]);
+        assert_eq!(
+            words(r#"grep "a\|b" 'c\d' "e\$f" "g\"h""#),
+            [false, false, false, true, true]
+        );
         let member = &lex("sed -n '1,5p' f").members[0];
         assert!(!member.unpinned());
         assert_eq!(member.text(&lex("sed -n '1,5p' f")), "sed -n '1,5p' f");

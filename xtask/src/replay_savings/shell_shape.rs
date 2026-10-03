@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use rift_agent::shell_read::{recognise, ShellCall};
 
 use super::report::Tally;
-use super::shell_lex::{lex, Lexed, Member, Stage, Word};
+use super::shell_lex::{lex, literal_backslashes_single_quoted, Lexed, Member, Stage, Word};
 
 /// Why the grammar refused a shell call that looks like a read.
 ///
@@ -315,6 +315,17 @@ pub(super) fn shape_of(command: &str) -> Shape {
     let lexed = lex(command);
     if lexed.heredoc {
         return heredoc_shape(&lexed);
+    }
+    let probe = if lexed.redirected {
+        lexed.without_redirects.as_str()
+    } else {
+        command
+    };
+    // The lexer pins a backslash the shell keeps inside double quotes, so a
+    // line refused for another reason falls to that reason. Where that
+    // backslash is the whole reason, the respelled line is a read.
+    if literal_backslashes_single_quoted(probe).is_some_and(|line| recognise(&line).is_some()) {
+        return Shape::QuotingOrShellCharacter;
     }
     if lexed.redirected {
         if recognise(&lexed.without_redirects).is_some() {

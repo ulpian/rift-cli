@@ -129,3 +129,27 @@ fn the_ranked_section_prints_under_the_invisible_lines_and_names_no_command() {
         }
     }
 }
+
+/// A backslash the shell keeps as written is not a reason in itself: a line
+/// refused for something else is counted under that, and only a line the
+/// backslash alone keeps out of the grammar is counted as quoting.
+#[test]
+fn a_literal_backslash_is_counted_as_quoting_only_when_it_is_the_reason() {
+    use super::shell_shape::{shape_of, Shape};
+    assert_eq!(shape_of(r#"grep -rn "a\|b" src"#), Shape::SearchFlags);
+    assert_eq!(shape_of(r"grep -rn 'a\|b' src"), Shape::SearchFlags);
+    assert_eq!(shape_of(r#"sed -n "/a\|b/p" src/a.rs"#), Shape::SedScript);
+    assert_eq!(
+        shape_of(r#"grep "a\|b" src/a.rs"#),
+        Shape::QuotingOrShellCharacter
+    );
+    assert_eq!(
+        shape_of(r#"grep "a\|b" src/a.rs 2>/dev/null"#),
+        Shape::QuotingOrShellCharacter
+    );
+    assert_eq!(
+        shape_of(r#"grep -rn "a\$b" src"#),
+        Shape::QuotingOrShellCharacter,
+        "an escaped dollar is the shell's to resolve"
+    );
+}
