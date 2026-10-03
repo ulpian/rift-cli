@@ -6,6 +6,13 @@ use crate::{HiKind, ReadSpan};
 
 use super::{assert_each_recognised, listing, member, narrowed, read, read_of, reads_of};
 
+// The fuzz target includes this same file by path, so the witness the
+// fuzzer asserts with is the one these tests pin.
+#[path = "shell_read_oracle.rs"]
+mod shell_read_oracle;
+
+use shell_read_oracle::names_a_word;
+
 /// **Every way the grammar composes those forms, and what a leading `cd`
 /// makes of each path after it.**
 ///
@@ -288,4 +295,109 @@ fn a_chain_past_the_cap_is_left_alone() {
         .collect::<Vec<_>>()
         .join(" && ");
     assert!(recognise(&chained).is_none(), "one member past the cap");
+}
+
+/// The paths a recognised read reports, in order.
+fn paths_of(command: &str) -> Vec<String> {
+    let Some(ShellCall::Read(reads)) = recognise(command) else {
+        panic!("{command:?} is recognised as a read");
+    };
+    reads.into_iter().map(|read| read.path).collect()
+}
+
+/// **The two lines the fuzzer once failed on are reads of words they
+/// wrote.** Joined with no space around the operator, or spaced around a
+/// `;`, each target is a complete word of the line — which the earlier
+/// witness, splitting on whitespace alone, could not see.
+#[test]
+fn the_preserved_fuzz_crashes_report_only_complete_words() {
+    for (command, expected) in [
+        ("tail lnrg/,&&nl %//", ["lnrg/,", "%//"]),
+        ("  nl n::::j;   nl n", ["n::::j", "n"]),
+    ] {
+        assert_eq!(paths_of(command), expected, "{command:?}");
+        for path in expected {
+            assert!(names_a_word(path, command), "{path:?} in {command:?}");
+        }
+        assert!(!names_a_word("invented/n", command), "{command:?}");
+    }
+}
+
+/// **A target is witnessed by a whole word, the implicit `.` of exactly
+/// `rg --files`, or a join under a genuinely leading `cd` — never by a
+/// prefix, a suffix, a quoted piece or an operator.**
+#[test]
+fn the_witness_needs_a_complete_word_or_a_named_leading_directory() {
+    for (target, command) in [
+        ("a.rs", "cat a.rs&&nl b.rs"),
+        ("b.rs", "cat a.rs;nl b.rs"),
+        ("a.rs", "cat a.rs|head -n 2"),
+        ("my crate/a.rs", "cd 'my crate'&&cat a.rs"),
+        ("dir/a.rs", "echo label&&cd dir/&&cat a.rs"),
+        ("/a.rs", "cd dir&&cat /a.rs"),
+        ("C:/a.rs", "cd dir&&cat C:/a.rs"),
+        ("dir/1:a.rs", "cd dir&&cat 1:a.rs"),
+        (".", "rg --files"),
+        ("dir/.", "cd dir&&rg --files"),
+    ] {
+        assert!(names_a_word(target, command), "{target:?} in {command:?}");
+    }
+    for (target, command) in [
+        ("invented/a.rs", "cat a.rs"),
+        ("invented/.", "rg --files"),
+        ("dir/a.rs", "cat first&&cd dir&&cat a.rs"),
+        ("dir//a.rs", "cd dir&&cat /a.rs"),
+        ("dir/C:/a.rs", "cd dir&&cat C:/a.rs"),
+        ("a.rs", "cat larger-a.rs"),
+        ("a.rs", "cat a.rs.bak"),
+        ("a.rs", "grep 'a.rs' b.rs"),
+        ("a.rs", "cat 'a.rs"),
+        ("&&", "grep '&&' b.rs"),
+        (".", "rg --files --hidden"),
+        (".", "rg --files dir"),
+        (".", "rg --files-with-matches needle"),
+        ("dir/.", "cd dir&&rg --files --hidden"),
+    ] {
+        assert!(!names_a_word(target, command), "{target:?} in {command:?}");
+    }
+}
+
+/// **A drive letter is ASCII and a colon, and only that is rooted.** The
+/// recogniser's reading and the witness's agree on both sides of it, and
+/// the two `rg` shapes with extra flags stay out of the grammar.
+#[test]
+fn drive_like_paths_join_exactly_when_the_letter_is_not_a_drive() {
+    for (command, expected) in [
+        ("cd dir&&cat C:/a.rs", "C:/a.rs"),
+        ("cd dir&&cat C:a.rs", "C:a.rs"),
+        ("cd dir&&cat 1:a.rs", "dir/1:a.rs"),
+        ("cd dir&&cat _:a.rs", "dir/_:a.rs"),
+    ] {
+        assert_eq!(paths_of(command), [expected], "{command:?}");
+        assert!(names_a_word(expected, command), "{command:?}");
+    }
+    for command in [
+        "rg --files --hidden",
+        "rg --files --hidden dir",
+        "rg --hidden --files",
+    ] {
+        assert!(recognise(command).is_none(), "{command:?}");
+    }
+}
+
+/// **An operator inside a quoted pattern splits nothing.** The pattern
+/// stays one quoted word, the file is the one bare witness, and no piece of
+/// the pattern names a target.
+#[test]
+fn quoted_operators_in_a_pattern_witness_no_target() {
+    for command in [
+        "grep 'invented/a.rs&&x;y|z' real.rs",
+        "rg 'invented/a.rs&&x;y|z' real.rs",
+    ] {
+        assert_eq!(paths_of(command), ["real.rs"], "{command:?}");
+        assert!(names_a_word("real.rs", command), "{command:?}");
+        for invented in ["invented/a.rs", "x", "y", "z", "&&", ";", "|"] {
+            assert!(!names_a_word(invented, command), "{invented:?}");
+        }
+    }
 }
