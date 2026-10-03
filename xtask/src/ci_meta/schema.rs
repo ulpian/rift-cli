@@ -59,10 +59,11 @@ pub(crate) fn production_half(text: &str) -> String {
 pub fn no_schema_fastpath_in_bins(root: &Path) -> Result<Vec<String>, String> {
     let mut v = Vec::new();
     for f in source_files(root) {
-        let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
-        if !rel.starts_with("bins/") || rel.contains("/tests/") {
+        let parts = relative_components(root, &f);
+        if !is_production_bin(&parts) {
             continue;
         }
+        let rel = parts.join("/");
         let text = std::fs::read_to_string(&f).map_err(|e| format!("read {rel}: {e}"))?;
         if production_half(&text).contains("create_canonical_schema") {
             v.push(format!(
@@ -72,6 +73,26 @@ pub fn no_schema_fastpath_in_bins(root: &Path) -> Result<Vec<String>, String> {
         }
     }
     Ok(v)
+}
+
+/// The path of `file` under `root`, one string per component.
+///
+/// Matching and reporting both read these rather than the native display
+/// string: Windows displays `bins\rift\src\main.rs`, which a `"bins/"`
+/// prefix test never matched, so the screen silently skipped every bin there.
+fn relative_components(root: &Path, file: &Path) -> Vec<String> {
+    let rel = file.strip_prefix(root).unwrap_or(file);
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// A file under `bins/` that is not in a `tests` directory.
+fn is_production_bin<S: AsRef<str>>(parts: &[S]) -> bool {
+    let Some(first) = parts.first() else {
+        return false;
+    };
+    first.as_ref() == "bins" && !parts.iter().any(|p| p.as_ref() == "tests")
 }
 
 #[cfg(test)]
@@ -149,6 +170,28 @@ mod tests {
     fn the_declared_residual_is_exactly_as_wide_as_documented() {
         let src = "const S: &str = \"\n#[cfg(test)]\nmod x {\";\npub fn p() { create_canonical_schema(); }\n";
         assert!(!production_half(src).contains("create_canonical_schema"));
+    }
+
+    /// Windows splits `bins\planted\src\main.rs` into the same components
+    /// Unix splits the slash spelling into; the match reads components, so
+    /// both are screened and an integration-test directory is exempt in both.
+    #[test]
+    fn a_bin_path_is_screened_by_its_components_on_either_separator() {
+        let windows: Vec<&str> = r"bins\planted\src\main.rs".split('\\').collect();
+        assert!(is_production_bin(&windows));
+        let windows_test: Vec<&str> = r"bins\planted\tests\it.rs".split('\\').collect();
+        assert!(!is_production_bin(&windows_test));
+
+        let root = Path::new("root");
+        let joined = root
+            .join("bins")
+            .join("planted")
+            .join("src")
+            .join("main.rs");
+        let parts = relative_components(root, &joined);
+        assert!(is_production_bin(&parts));
+        assert_eq!(parts.join("/"), "bins/planted/src/main.rs");
+        assert!(!is_production_bin(&["crates", "planted", "src", "lib.rs"]));
     }
 
     /// The screen itself over a planted tree, not only the horizon it cuts at:
