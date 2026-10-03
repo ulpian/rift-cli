@@ -443,7 +443,8 @@ mod tests {
         }
         let shell = &json["shell"][0];
         assert_eq!(shell["client"], "claude-code");
-        assert_eq!(shell["shell"]["scratch"], "/scratch/claude-code/shell/repo");
+        let scratch = shell_scratch().display().to_string();
+        assert_eq!(shell["shell"]["scratch"], scratch.as_str());
         assert_eq!(shell["rows"][0]["read_on"], 9_000);
         assert_eq!(shell["rows"][0]["read_shell"], 3_000);
         assert_eq!(shell["rows"][0]["booked_avoided_shell"], 1_200);
@@ -467,23 +468,35 @@ mod tests {
     #[test]
     fn the_shell_block_prints_both_arms_side_by_side() {
         let block = render_shell_block(&[shell_run()]);
-        assert_eq!(block, SHELL_BLOCK, "\n{block}");
+        assert_eq!(block, shell_block(), "\n{block}");
         assert_eq!(
             render_shell_block(&[]),
             format!("{SHELL_HEADER}  (no client played the shell arm)\n"),
         );
     }
 
+    /// The shell arm's scratch repository, joined the way the fixture's
+    /// `arm_run` joins it: a native path, printed for the person on that
+    /// machine to paste back as `--repo`, so its separators are the OS's.
+    fn shell_scratch() -> PathBuf {
+        Path::new("/scratch/claude-code").join("shell").join("repo")
+    }
+
     /// The shell block the fixture renders.
-    const SHELL_BLOCK: &str = r"shell arm — the levers as they ship, read only through the client's shell
+    fn shell_block() -> String {
+        format!(
+            r"shell arm — the levers as they ship, read only through the client's shell
   client        session                     read_on  read_shell  avoided_on  avoided_shell  returned_on  returned_shell  client_on  client_shell
   claude-code   01-a-session                   9000        3000        2800           1200          700             300      38000         52000
   claude-code   02-a-session !                 4000        1000         900            100          225              25          -             -
   claude-code   (all sessions) !              13000        4000        3700           1300          925             325          -             -
   ! one arm of this row did not complete — it is not a measurement
   claude-code transcripts: /home/dev/.claude/projects/-scratch-claude-code-shell-repo
-    census: cargo run -p xtask -- replay-savings --transcripts /home/dev/.claude/projects/-scratch-claude-code-shell-repo --repo /scratch/claude-code/shell/repo
-";
+    census: cargo run -p xtask -- replay-savings --transcripts /home/dev/.claude/projects/-scratch-claude-code-shell-repo --repo {}
+",
+            shell_scratch().display()
+        )
+    }
     /// The two lines every shell block opens with.
     const SHELL_HEADER: &str = r"shell arm — the levers as they ship, read only through the client's shell
   client        session                     read_on  read_shell  avoided_on  avoided_shell  returned_on  returned_shell  client_on  client_shell
