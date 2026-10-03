@@ -938,14 +938,21 @@ fn sed_read(rest: &[Word]) -> Option<Member> {
 /// The `grep` family: a content search over one named file. It is a read of
 /// lines nobody here can name, and it is never answered from an index.
 ///
-/// Options come first and are read the way the command's own option parser
-/// reads them — letters may share one word, and a letter that takes a value
-/// takes the rest of its word or, when that is empty, the next word — so the
-/// word this walk calls a path is the word the search opens. The walk stops
-/// at the first word that is not an option, and nothing after it may be one:
-/// one `grep` moves a late option to the front and another reads it as a file
-/// name, and a line the two would read differently is no line to name a file
-/// from.
+/// Options are read the way the command's own option parser reads them —
+/// letters may share one word, and a letter that takes a value takes the rest
+/// of its word or, when that is empty, the next word — so the word this walk
+/// calls a path is the word the search opens.
+///
+/// **An option may stand anywhere before `--`**, and every word after `--` is
+/// an operand. That is GNU argument permutation, and it is how the `grep` an
+/// agent's shell actually runs reads a line: Claude Code runs `grep` as
+/// `ugrep`, which permutes, and so do GNU `grep` and `rg`. A `grep` that does
+/// not permute would read a late `-n` as a file name, so this reading can be
+/// wrong on such a machine — and it is admitted anyway because a search
+/// grants no coverage. A misread search can only move a measurement; it can
+/// never decline a read. Any later form that *does* grant coverage from a
+/// late option must first establish which `grep` runs, because there a
+/// misreading would be a decline about content the agent never received.
 ///
 /// Every admitted flag only chooses or labels the lines of the one file, so a
 /// flagged search is the same recognition a bare one is: [`ShellSpan::Matching`],
@@ -953,13 +960,21 @@ fn sed_read(rest: &[Word]) -> Option<Member> {
 fn content_search(rest: &[Word], flags: &str) -> Option<Member> {
     let mut words = rest.iter();
     let mut pattern_given = false;
-    let operands = loop {
-        let word = words.next()?;
-        let Some(letters) = bare(word).and_then(|text| text.strip_prefix('-')) else {
-            break std::iter::once(word).chain(words).collect::<Vec<_>>();
-        };
+    let mut operands: Vec<&Word> = Vec::new();
+    while let Some(word) = words.next() {
+        if bare(word) == Some("--") {
+            operands.extend(words.by_ref());
+            break;
+        }
+        if !word.text.starts_with('-') {
+            operands.push(word);
+            continue;
+        }
+        // A quoted word that starts with `-` is an option to the tool all
+        // the same, wherever it stands, and the grammar pins no quoted one.
+        let letters = bare(word)?.strip_prefix('-')?;
         pattern_given |= search_option(letters, flags, &mut words)?;
-    };
+    }
     let path = match (pattern_given, operands.as_slice()) {
         (true, [path]) => path,
         (false, [pattern, path]) if !pattern.text.starts_with('-') => path,

@@ -219,15 +219,10 @@ fn a_search_flag_the_grammar_does_not_pin_is_left_alone() {
         "grep -A+3 needle src/lib.rs",
         "grep -A 3x needle src/lib.rs",
         "grep -A '3' needle src/lib.rs",
-        // A long option, a bare dash, an end-of-options marker.
+        // A long option, or a bare dash.
         "grep --line-number needle src/lib.rs",
-        "grep -n -- needle src/lib.rs",
         "grep - needle src/lib.rs",
         "grep -n - src/lib.rs",
-        // An option after the pattern or the path.
-        "grep needle -n src/lib.rs",
-        "grep needle src/lib.rs -n",
-        "rg needle src/lib.rs -n",
         // A letter one tool pins and another does not.
         "grep -P needle src/lib.rs",
         "rg -E latin1 needle src/lib.rs",
@@ -242,6 +237,43 @@ fn a_search_flag_the_grammar_does_not_pin_is_left_alone() {
         "grep -n $PAT src/lib.rs",
         "grep -n needle src/*.rs",
         "grep -n -A $N needle src/lib.rs",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}
+
+/// **An option may sit anywhere before `--`, and nothing after it is one.**
+///
+/// The permuted spelling is read the way the search tool reads it, so each
+/// line here is one step outside that reading: a flag after the pattern
+/// that the set does not pin, a second path written after the options, a
+/// word after `--` that would have been an option before it, a pattern
+/// after `--` that the tool would still not take for a file, and a quoted
+/// word that the tool reads as an option wherever it stands.
+#[test]
+fn a_late_option_the_grammar_does_not_pin_is_left_alone() {
+    for command in [
+        "grep -n needle -r src",
+        "grep needle src/lib.rs -c",
+        "grep needle -A src/lib.rs",
+        "grep needle src/lib.rs -A",
+        "grep needle src/lib.rs -A -3",
+        "grep needle src/lib.rs --line-number",
+        "rg needle src/lib.rs -g '*.rs'",
+        "grep -n needle src/lib.rs -A 3 src/main.rs",
+        "grep needle -n src/lib.rs src/main.rs",
+        "grep -e needle src/lib.rs -n src/main.rs",
+        "grep needle -- -n src/lib.rs",
+        "grep -- needle src/lib.rs -n",
+        "grep -n -- needle -- src/lib.rs",
+        "grep -n -- -v src/lib.rs",
+        "grep -n -- needle",
+        "grep needle src/lib.rs '-n'",
+        "grep needle '-A' 3 src/lib.rs",
+        "grep needle src/lib.rs -",
     ] {
         assert!(
             recognise(command).is_none(),

@@ -230,6 +230,53 @@ fn a_single_file_search_with_line_selecting_flags_is_a_content_search() {
     }
 }
 
+/// **An option written after the pattern or the path is still an option.**
+///
+/// The search tools an agent's shell runs read their arguments with
+/// permutation: an option counts wherever it stands before `--`, and every
+/// word after `--` is an operand. So the late spelling is the same search of
+/// the same one file as the early one, recognised the same way and with no
+/// coverage.
+#[test]
+fn a_search_reads_its_options_wherever_they_stand_before_the_end_marker() {
+    let file = "src/lib.rs";
+    let cases: &[(&str, ShellCall)] = &[
+        (
+            "grep -n needle -A 40 src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        ("grep needle -n src/lib.rs", read(file, ShellSpan::Matching)),
+        ("grep needle src/lib.rs -n", read(file, ShellSpan::Matching)),
+        (
+            "grep needle src/lib.rs -nA3",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "grep -n 'fn main' src/lib.rs -B 2 -A 8",
+            read(file, ShellSpan::Matching),
+        ),
+        ("grep src/lib.rs -e needle", read(file, ShellSpan::Matching)),
+        (
+            "grep -n -- needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "grep needle -i -- src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        ("egrep 'a|b' src/lib.rs -n", read(file, ShellSpan::Matching)),
+        ("rg needle src/lib.rs -n", read(file, ShellSpan::Matching)),
+        (
+            "rg needle -n -C 3 src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+    ];
+    assert_each_recognised(cases);
+    for (command, _) in cases {
+        assert!(read_of(command).is_none(), "{command} grants no coverage");
+    }
+}
+
 /// A flagged search composes as a bare one does: under a leading `cd`, and
 /// narrowed by a trailing pipe, with still no coverage to give.
 #[test]

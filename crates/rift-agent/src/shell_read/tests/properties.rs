@@ -231,11 +231,32 @@ const UNPINNED_SEARCH_FLAGS: &[&str] = &[
     "-A +1",
     "-An",
     "--line-number",
-    "--",
     "-",
 ];
 
 proptest::proptest! {
+    /// ★ A run of pinned flags reads the same wherever it stands before
+    /// `--`: in front of the pattern, between the pattern and the path, or
+    /// after the path, the line is the same search of the same one file.
+    #[test]
+    fn a_pinned_flag_run_reads_the_same_wherever_it_stands(
+        command in proptest::sample::select(&["grep", "egrep", "fgrep", "rg"][..]),
+        flags in proptest::collection::vec(proptest::sample::select(PINNED_SEARCH_FLAGS), 1..5),
+        place in 0_usize..3,
+    ) {
+        let flags = flags.join(" ");
+        let pattern = if flags.contains("needle") { "" } else { "needle" };
+        let line = match place {
+            0 => format!("{command} {flags} {pattern} src/lib.rs"),
+            1 => format!("{command} {pattern} {flags} src/lib.rs"),
+            _ => format!("{command} {pattern} src/lib.rs {flags}"),
+        };
+        let early = recognise(&format!("{command} {flags} {pattern} src/lib.rs"));
+        proptest::prop_assert!(early.is_some(), "{flags:?} is pinned");
+        proptest::prop_assert_eq!(recognise(&line), early, "{}", line);
+    }
+
+
     /// ★ A search over one file with any run of pinned flags is a content
     /// search of exactly that file and grants no coverage; one flag outside
     /// the set, anywhere in the run, takes the line out of the grammar.

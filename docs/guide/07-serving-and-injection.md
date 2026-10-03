@@ -296,7 +296,14 @@ one named path, plus a listing grammar of the same shape (`ls`, `find … -name`
 and number the file's own lines (`-n`, `-i`, `-w`, `-x`, `-F`, `-E` on `grep`,
 a context count `-A`, `-B` or `-C N`, a pattern given with `-e`), and it stays
 what a bare one is: recognised, with no coverage, because which lines it
-printed is the file's to decide. Above it sit exactly three **compositions**, each admitted
+printed is the file's to decide. Those options may stand anywhere before `--`,
+after the pattern or the path too, because the `grep` an agent's shell runs
+permutes its arguments (Claude Code runs `grep` as `ugrep`, which permutes, as
+GNU `grep` and `rg` do). A `grep` that does not would misread such a line,
+which only moves a measurement, since a search can never decline a read; any
+later form that grants coverage from a late option must first establish which
+`grep` runs.
+Above it sit exactly three **compositions**, each admitted
 because the lines it delivers still follow from the line itself:
 
 - a single leading `cd <dir> &&`, the directory bare or quoted, after which
