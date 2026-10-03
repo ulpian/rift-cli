@@ -204,6 +204,11 @@ fn what_the_share_is(report: &Report, denominator: u64) -> String {
         report.narrowed_if_enforced,
         denominator,
     ));
+    out.push_str(&row(
+        "  of it, composed chains",
+        report.narrowed_chains_if_enforced,
+        denominator,
+    ));
     out
 }
 
@@ -368,6 +373,10 @@ fn narrowing_json(report: &Report) -> Value {
     json!({
         "narrowed_if_enforced": {
             "calls": report.narrowed_if_enforced.calls,
+            "composed_chains": {
+                "calls": report.narrowed_chains_if_enforced.calls,
+                "net_tokens": report.narrowed_chains_if_enforced.tokens,
+            },
             "frame_tokens": report.narrowed_frame_tokens,
             "net_tokens": report.narrowed_if_enforced.tokens,
         },

@@ -117,7 +117,8 @@
 //! are split beneath by how each request stands against what is held, and one
 //! line asks the same decision, against the same journal, with narrowing
 //! enforced: what it would have declined, sized as the held lines' share of
-//! the result net of the frames.
+//! the result net of the frames. Beneath it, the share of those calls that
+//! were composed chains of several reads.
 
 mod artifact;
 mod bucket;

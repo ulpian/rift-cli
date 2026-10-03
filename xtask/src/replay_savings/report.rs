@@ -131,6 +131,11 @@ pub struct Report {
     pub narrowed_if_enforced: Tally,
     /// What those narrowing frames cost.
     pub narrowed_frame_tokens: u64,
+    /// Of [`Report::narrowed_if_enforced`], the calls that were composed
+    /// chains of several reads and what they spare. Apart because a chain is
+    /// narrowed only when every member is held or narrowable, so it is the
+    /// share a single unheld member forfeits.
+    pub narrowed_chains_if_enforced: Tally,
     /// How many declines rest on the window's own whole-file write rather than
     /// on a read, so a reader can take them out.
     pub declines_resting_on_a_write: u64,

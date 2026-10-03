@@ -16,19 +16,27 @@ use super::Options;
 
 /// The corpus replayed against a checkout holding the one file it pages.
 fn replayed() -> Report {
+    replayed_from("narrow", &[("big.rs", 200)])
+}
+
+/// The corpus under `corpus` replayed against a checkout holding `files`
+/// under `src/`, each of the given number of lines.
+fn replayed_from(corpus: &str, files: &[(&str, u32)]) -> Report {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     std::fs::create_dir_all(repo.join("src")).unwrap();
-    let body = (1..=200).fold(String::new(), |mut out, i| {
-        let _ = writeln!(out, "line {i} of the long file");
-        out
-    });
-    std::fs::write(repo.join("src/big.rs"), body).unwrap();
+    for (name, lines) in files {
+        let body = (1..=*lines).fold(String::new(), |mut out, i| {
+            let _ = writeln!(out, "line {i} of the long file");
+            out
+        });
+        std::fs::write(repo.join("src").join(name), body).unwrap();
+    }
     replay(&Options {
         transcripts: Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join("replay-savings")
-            .join("narrow"),
+            .join(corpus),
         repo,
         json: false,
         history: None,
@@ -92,4 +100,33 @@ fn the_split_prints_under_its_pool_and_names_no_path() {
         assert!(!rendered.contains("big.rs"));
     }
     assert!(document.contains("\"narrowed_if_enforced\""));
+}
+
+/// ★ A chain of a wholly held file and a page held at its head
+/// (narrowed), a chain of a file never read and a narrowable page (runs
+/// whole: one unheld member), then a lone narrowable page (narrowed). Two
+/// calls narrowed, one of them a composed chain, and the chain line prints
+/// beneath the line it is a share of.
+#[test]
+fn the_chain_corpus_pins_the_narrowed_calls_that_were_composed_chains() {
+    let report = replayed_from(
+        "narrow-chain",
+        &[("small.rs", 40), ("big.rs", 200), ("new.rs", 40)],
+    );
+    assert_eq!(report.calls_with_several_reads, 3);
+    assert_eq!(report.narrowed_if_enforced.calls, 2);
+    assert_eq!(report.narrowed_chains_if_enforced.calls, 1);
+    assert!(report.narrowed_chains_if_enforced.tokens > 0);
+    assert!(
+        report.narrowed_chains_if_enforced.tokens < report.narrowed_if_enforced.tokens,
+        "the chain is a share of the narrowed calls, not all of them"
+    );
+    let table = render_table(&report);
+    let lines: Vec<&str> = table.lines().collect();
+    let at = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
+    assert_eq!(
+        at("of it, composed chains"),
+        at("narrowed by this build (if enforced), net") + 1
+    );
+    assert!(render_json(&report).contains("\"composed_chains\""));
 }

@@ -438,7 +438,8 @@ fn note_the_narrowing(
 /// member of it would be declined and one of them is a narrowing. What it
 /// spares is the declined lines' share of the result's own tokens, net of
 /// every frame the call would carry — the held lines of a narrowing, and none
-/// of the lines it still reads.
+/// of the lines it still reads. A call of several members is also booked as a
+/// composed chain.
 fn size_the_narrowing(report: &mut Report, slots: &[Slot], tokens: u64) {
     let mut spared = Vec::with_capacity(slots.len());
     for slot in slots {
@@ -459,9 +460,11 @@ fn size_the_narrowing(report: &mut Report, slots: &[Slot], tokens: u64) {
     let frames: u64 = spared.iter().map(|member| member.frame_tokens).sum();
     let share = u128::from(tokens) * u128::from(lines) / u128::from(requested.max(1));
     let share = u64::try_from(share).unwrap_or(u64::MAX);
-    report
-        .narrowed_if_enforced
-        .add(share.saturating_sub(frames));
+    let net = share.saturating_sub(frames);
+    report.narrowed_if_enforced.add(net);
+    if spared.len() > 1 {
+        report.narrowed_chains_if_enforced.add(net);
+    }
     report.narrowed_frame_tokens = report.narrowed_frame_tokens.saturating_add(frames);
 }
 

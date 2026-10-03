@@ -6,6 +6,7 @@
 
 mod audit;
 mod basis;
+mod chains;
 mod deliveries;
 mod denies;
 #[cfg(feature = "doc")]

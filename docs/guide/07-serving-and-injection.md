@@ -332,7 +332,10 @@ not read-shaped either.
 **A call that performs several reads is one act.** Every member's range is
 recorded; the call is declined only when *every* member is a held range that
 would be declined on its own, and one member the window does not hold — or one
-this checkout cannot resolve at all — lets the whole line run. The reason frame
+this checkout cannot resolve at all — lets the whole line run.
+A member held at one end counts as held where its narrowing would be declined
+on its own, so a chain is declined only when every member is held or
+narrowable, and that member's line is the narrowing frame. The reason frame
 is then each member's own sentence, from the same sealed renderer, one to a
 line. The alternative, declining the parts and running the rest, would mean
 amending a command line Rift did not write.
