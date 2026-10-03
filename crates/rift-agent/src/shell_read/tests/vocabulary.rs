@@ -68,6 +68,12 @@ fn every_grammar_form_yields_the_pinned_range() {
         ),
         ("rg --files", listing(".", None)),
         ("rg --files crates", listing("crates", None)),
+        // A quoted word is the word the shell passes, in a path as anywhere.
+        ("cat 'src/lib.rs'", read(file, ShellSpan::WholeFile)),
+        (
+            "grep -n \"a\\|b\" \"src/lib.rs\"",
+            read(file, ShellSpan::Matching),
+        ),
     ];
     assert_each_recognised(cases);
 }

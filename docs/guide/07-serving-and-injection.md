@@ -308,6 +308,13 @@ A `sed -n` script may also print one line (`'Ap'`), credited like a range, or
 several runs joined by `;` (`'1,40p;90,120p'`), which is one read per run and
 is credited with nothing: the runs reach the window as one output that can
 pass the terminal threshold while each run's own slice stays under it.
+A quoted word is read as the word the shell passes: single quotes as their
+text, and double quotes as their text when they hold no `$`, backtick or `!`
+and every backslash in them comes before an ordinary character, so the shell
+keeps it as written (`grep -n "a\|b"`). An escape the shell resolves (`\$`,
+`` \` ``, `\"`, `\\`), an expansion, and a quoted path that spells a glob, a
+`~` or a kept backslash are left alone. A quoted path is credited exactly as a
+bare one is.
 Above it sit exactly three **compositions**, each admitted
 because the lines it delivers still follow from the line itself:
 

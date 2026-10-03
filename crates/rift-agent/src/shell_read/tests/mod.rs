@@ -13,6 +13,7 @@
 mod compositions;
 mod labels;
 mod properties;
+mod quoting;
 mod refusals;
 mod sed_scripts;
 // The fuzz target includes this same file by path, so the witness the

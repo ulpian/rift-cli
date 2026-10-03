@@ -34,7 +34,6 @@ fn a_shell_that_would_do_more_than_read_is_left_alone() {
         "sed -n '0,4p' src/lib.rs",
         "sed '12,48p' src/lib.rs",
         "sed -i s/a/b/ src/lib.rs",
-        "cat 'src/lib.rs'",
         "cat \"src/$HOME\"",
         "cat src/lib.rs'",
         "cat 'src/lib.rs",
