@@ -113,6 +113,19 @@ mod tests {
     }
 
     #[test]
+    fn a_default_budget_holds_the_published_ceilings() {
+        let mut b = TurnBudget::default();
+        assert_eq!(b.calls_remaining(), DEFAULT_MAX_TOOL_CALLS);
+        assert_eq!(b.tokens_remaining(), DEFAULT_MAX_TOKENS_PER_TURN);
+        for _ in 0..DEFAULT_MAX_TOOL_CALLS {
+            assert!(b.try_call());
+        }
+        assert!(!b.try_call(), "the default call ceiling stops the turn");
+        assert!(!b.try_tokens(DEFAULT_MAX_TOKENS_PER_TURN + 1));
+        assert!(b.try_tokens(DEFAULT_MAX_TOKENS_PER_TURN));
+    }
+
+    #[test]
     fn anchor_resets_draw_down_but_keeps_ceilings() {
         let mut b = TurnBudget::new(2, 100);
         assert!(b.try_call());

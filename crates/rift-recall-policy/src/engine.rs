@@ -474,4 +474,45 @@ mod tests {
         // not sensitive → no downgrade regardless of budget
         assert_eq!(p.downgrade_for("src/main.rs", false), None);
     }
+
+    /// The version is a pack-key input, so it names the policy semantics and
+    /// not the overlay a repository loaded: a fail-closed engine keys packs
+    /// the same way an open one does.
+    #[test]
+    fn the_policy_version_is_the_semantics_constant_whatever_the_overlay() {
+        let cfg = config();
+        let open = PolicyEngine::new(&cfg);
+        let closed = PolicyEngine::new(&cfg).with_serve_policy(ServePolicy {
+            fail_closed: true,
+            ..ServePolicy::default()
+        });
+        assert_eq!(open.version(), SERVE_POLICY_VERSION);
+        assert_eq!(closed.version(), SERVE_POLICY_VERSION);
+    }
+
+    #[test]
+    fn a_transcript_path_that_escapes_the_root_is_never_allowed_raw() {
+        let cfg = config();
+        let p = PolicyEngine::new(&cfg).with_raw_transcript_globs(vec!["logs/**".to_string()]);
+        assert!(p.raw_transcript_allowed("logs/session.jsonl"));
+        assert!(
+            !p.raw_transcript_allowed("logs/../../logs/session.jsonl"),
+            "an escaping path is refused before any glob is consulted"
+        );
+    }
+
+    #[test]
+    fn a_path_that_escapes_the_root_is_handled_as_sensitive() {
+        let cfg = config();
+        let p = PolicyEngine::new(&cfg);
+        assert_eq!(
+            p.optimization_for("../src/main.rs"),
+            Optimization::Conservative
+        );
+        assert!(p.exact_source_required("../src/main.rs"));
+        assert_eq!(
+            p.downgrade_for("../src/main.rs", false),
+            Some(Downgrade::ExactToHandle)
+        );
+    }
 }
