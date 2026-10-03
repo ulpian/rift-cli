@@ -5,7 +5,7 @@
 use rift_core::SecretBytes;
 
 use super::fixtures::masked;
-use crate::marks::{blank, coalesce, propose, select_spans, winners, ByteMarks};
+use crate::marks::{blank, coalesce, propose, select_spans, winners, work, ByteMarks};
 use crate::span::Span;
 use crate::{redact, redact_with, DetectorClass, RulePackSet};
 
@@ -262,9 +262,9 @@ fn subtracting_a_claimed_range_never_widens_what_is_left() {
 
 /// A deterministic 3-3-4 phone column (`dense`), or the same geometry in
 /// digits no detector claims. The generator is inline and seeded so that
-/// every machine draws the same document — a timing ratio over two different
-/// corpora is not a ratio.
-fn timing_corpus(bytes: usize, dense: bool) -> String {
+/// every run draws the same document — a ratio over two different corpora is
+/// not a ratio.
+fn growth_corpus(bytes: usize, dense: bool) -> String {
     let mut seed = 0x5EED_1234_ABCD_0001_u64;
     let mut next = move || {
         seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -286,14 +286,14 @@ fn timing_corpus(bytes: usize, dense: bool) -> String {
     doc
 }
 
-/// Seconds to redact `doc`, and how many spans came out — the second half is
-/// what keeps the ratios below from being green because an arm stopped
-/// matching.
-fn redact_timed(doc: &str) -> (f64, u32) {
+/// The steps [`work`] counted while redacting `doc`, and how many spans came
+/// out — the second half is what keeps the ratios below from being green
+/// because an arm stopped matching.
+fn redact_counted(doc: &str) -> (u64, u32) {
     let raw = SecretBytes::from(doc);
-    let started = std::time::Instant::now();
+    work::take();
     let out = redact(&raw).unwrap();
-    (started.elapsed().as_secs_f64(), out.report.total_spans)
+    (work::take(), out.report.total_spans)
 }
 
 /// **The asymptote, asserted**, so it cannot come back in silence.
@@ -304,134 +304,52 @@ fn redact_timed(doc: &str) -> (f64, u32) {
 /// for a single pass over 1 MiB of this corpus, against 0.03 s for the same
 /// bytes with nothing in them.
 ///
-/// **Both bounds are ratios on purpose.** A wall-clock ceiling measures the
-/// machine and the build at least as much as the algorithm — this suite runs
-/// unoptimized, and again under coverage instrumentation, on a box shared
-/// with other work — so a ceiling loose enough never to flake there is far
-/// too loose to catch what it is for. A ratio cancels all three.
+/// **It counts steps, not seconds.** The clock measured the machine, the
+/// build and whoever else was on the box at least as much as the algorithm,
+/// and its ratio-of-ratios form still reddened under load and passed alone.
+/// [`work`] counts, in the test build only, every step of the loops the
+/// quadratic lived in and could return to: each word (and, in a partly
+/// marked word, each bit) the [`ByteMarks`] queries `mark`, `any` and
+/// `free_runs` walk; each span [`winners`], [`coalesce`], [`blank`] and
+/// `mask` visit and each piece `coalesce` carves; and, in `select_spans`'
+/// settle loop, each proposal per round, each re-stamped find and the full
+/// proposal set per find for the duplicate check. The count is the same on
+/// every machine and under any load, so the bounds are pinned to measured
+/// figures rather than to a guess at the worst box.
 ///
-/// * **Size.** Eight times the document may not cost more than **1.5 times
-///   what eight times the same document costs the SAME pipeline with nothing
-///   in it to find**. Linear predicts 1.0; the scanning implementation's
-///   recorded 24.16 against a scanning arm the span-free corpus leaves at ~8
-///   is ~3.0. The old form of this arm compared 8x the document against a
-///   bare **12.0** — a raw wall-clock ratio, with the flake that implies;
-///   see the paragraph below.
-/// * **Density.** The same byte count with a phone number every fifteen of
-///   them may not cost six times the same byte count with nothing any
-///   detector claims. This is the variable the composition measurement
-///   actually found — same size, same read, same archive, and the cost was
-///   span density — and it measures **3.33** here against **18.16** for the
-///   scanning implementation.
+/// **What it catches:** a rescan of the chosen set per span in `winners` or
+/// `coalesce` that runs through those loops — the marks asked once per
+/// chosen span, or a span loop that carries its own count — turns the
+/// eight-times step below into a sixty-four-times one. **What it cannot
+/// see:** a new loop in this module that nobody counted; the precedence sort
+/// (n log n, outside the count); and the work inside the detectors — the
+/// regex searches, whose engine guarantees time linear in the haystack, the
+/// entropy tokenizer's single forward scan, and the gates that read one
+/// match's bytes each. Those are linear by construction, not by this test.
 ///
-/// **The size arm is a ratio of ratios, and that is a repair with its own
-/// measurements.** It reddened at **14.26x** under fleet load 53 and passed
-/// at load 14 — a guard whose verdict depends on who else is on the box. A
-/// raw `t_large / t_small` has no machine-independent expected value, so its
-/// ceiling has to be chosen loose enough for the worst machine and is then
-/// too loose for the best. Dividing by the *same run's* span-free control
-/// over the *same* two sizes gives a dimensionless number whose expected
-/// value is 1.0 on any machine — the house rule being to quote a ratio to
-/// its own control measured in the same run.
+/// * **Size.** Eight times the document — 2 185 spans to 17 477 — counted
+///   **21 169 → 169 309** steps, a ratio of **7.998**. The ceiling is
+///   8 × 1.25 = **10.0**: linear sits at 8, a quadratic at 64, and the 25 %
+///   leaves room for a counted step a later change adds per span without
+///   letting a super-linear one through at this size.
+/// * **Density.** The span-free control costs this module **zero** steps at
+///   both sizes — nothing proposed, nothing to resolve — so the old
+///   dense-over-flat ratio has no denominator here; the bound becomes steps
+///   per span at the large size, measured **9.69** and held at **12.0**
+///   (9.69 × 1.25, rounded up). A per-span constant that grows is what the
+///   density arm was for: same bytes, more cost from the spans in them.
 ///
-/// **Mutation-calibrated on this tree, not argued.** One line inserted at
-/// the head of [`coalesce`]'s loop —
-/// `chosen.iter().filter(|c| c.start <= s.start).count()`, an O(spans²) scan
-/// and nothing else — reddens this arm at **excess 2.658** (`by_size` 22.86
-/// against a control of 8.60), at fleet load 92; the line reverted, it
-/// passes. So the ceiling of 1.5 sits between a measured ~1.0 and a measured
-/// 2.66 with 1.47x of margin below and 1.77x above, and the plant is the
-/// quadratic class this arm exists for rather than a proxy for it. Note what
-/// the two numbers show together: the raw ratio inflated to 22.86 while the
-/// control inflated to 8.60, and dividing attributed the excess correctly —
-/// which is the whole reason the control is measured rather than assumed
-/// to be 8.
-///
-/// Measured on this box (2026-08-24, 8-core, dev profile, interleaved,
-/// `min` per arm) across a deliberately produced ~5x swing in machine speed:
-///
-/// | load | `t_large/t_small` | control | **ratio of ratios** |
-/// |---|---|---|---|
-/// | ~8, quiet | 8.09 | 7.97 | **1.015** |
-/// | ~30, 16 synthetic burners | 7.97 | 8.25 | **0.966** |
-/// | ~87, fleet | 7.22 | 8.04 | **0.898** |
-///
-/// **If you reproduce the burner row, the load generator runs under
-/// `trap 'kill 0' EXIT` — never a kill step after the measurement**
-/// (a rule this run paid for). The original run's post-measurement kill
-/// never executed because the measurement wedged under the load the
-/// burners created, and 16 of them spun orphaned for 19 hours at ~5
-/// cores, corrupting every wall-clock number on the machine. A wedged
-/// measurement must take its load down with it; only an EXIT trap
-/// guarantees that.
-///
-/// Absolute times moved 4.5x across those rows; the ratio of ratios stayed
-/// within 6% of 1.0. **Stated because it is the honest limit of the claim:
-/// the 14.26x reading was NOT reproduced at any of these three loads**, so
-/// what is demonstrated is that the new statistic is dimensionless and
-/// cancelled a controlled 4.5x slowdown — not that the observed flake is
-/// cured. If it recurs, the reading to record is the ratio of ratios and its
-/// control, which is a number a later reader can compare with these three.
-///
-/// Each arm is the `min` of **five** interleaved rounds (three before), the
-/// estimator that survives a shared machine: contention can only ever make a
-/// sample slower, so more rounds can only improve it.
-///
-/// **One basis for all four figures**, stated because three different pairs
-/// were in circulation for the scanning arm and no reader could tell which
-/// machine any of them came from: 2026-08-08, `cargo test` in the dev
-/// profile (which is how this suite runs), 2019 Intel i5-8279U, min of three.
-/// The scanning pair is this same tree with [`winners`] and [`coalesce`]
-/// replaced by the transcriptions kept in `winners_dropping_the_loser` and
-/// `coalesce_by_scanning`; both bounds fail under it, by 2.0x and 3.0x,
-/// which is what makes asserting them worth the wall clock. An independent
-/// run of the same four measurements on a different machine (recorded in the
-/// C5 verdict) read 7.30 and 32.46 on size, 3.32 and 20.61 on density —
-/// every passing arm *lower* there and every failing arm *higher* — so the
-/// ratios move with the machine in both directions at once, and only the
-/// sign of each comparison travels.
-///
-/// **The headroom is 1.50x on size and 1.80x on density.** On size that is
-/// now 1.5 against a measured ~1.0 in a quantity that does not depend on the
-/// machine, where it used to be 12.0 against a measured 7.99 in one that
-/// does — the same factor, bought in a unit that travels. It is the
-/// number to watch, it is smaller than the ratios alone suggest, and it is
-/// the only wall-clock-derived quantity **in this crate** — one
-/// `Instant::now`, in [`redact_timed`], and nothing else here reads a
-/// clock. It is *not* the only one in the workspace test job the required
-/// suite runs: `rift-shadow-hooks`' flush test, `rift-config`'s glob walk
-/// and (until that crate was deleted) the wrapper's runner
-/// tests all asserted on elapsed time as well. So if anything in *this file* flakes, this is it — which is the
-/// claim this sentence used to make about a suite it had not measured.
-/// The answer is not a looser bound, which
-/// would stop catching the thing it is for; it is that a regression here is
-/// real until measured otherwise.
+/// Calibrated by mutation, not argued: one loop inserted at the head of
+/// `coalesce`'s, asking the marks about every span already chosen, reddens
+/// the size arm at **63.5x** (2 407 189 → 152 883 335 steps); reverted, it
+/// passes.
 #[test]
 fn redaction_cost_does_not_grow_faster_than_the_document() {
-    let small = timing_corpus(32 * 1024, true);
-    let large = timing_corpus(256 * 1024, true);
-    // The control: the SAME two sizes with nothing any detector claims, so
-    // its ratio is this machine's cost of *scanning* eight times the bytes.
-    let flat_small = timing_corpus(32 * 1024, false);
-    let flat = timing_corpus(256 * 1024, false);
-    let (mut t_small, mut t_large) = (f64::MAX, f64::MAX);
-    let (mut t_flat_small, mut t_flat) = (f64::MAX, f64::MAX);
-    let (mut n_small, mut n_large) = (0, 0);
-    let (mut n_flat_small, mut n_flat) = (0, 0);
-    for _ in 0..5 {
-        let (t, n) = redact_timed(&small);
-        t_small = t_small.min(t);
-        n_small = n;
-        let (t, n) = redact_timed(&large);
-        t_large = t_large.min(t);
-        n_large = n;
-        let (t, n) = redact_timed(&flat_small);
-        t_flat_small = t_flat_small.min(t);
-        n_flat_small = n;
-        let (t, n) = redact_timed(&flat);
-        t_flat = t_flat.min(t);
-        n_flat = n;
-    }
+    let (w_small, n_small) = redact_counted(&growth_corpus(32 * 1024, true));
+    let (w_large, n_large) = redact_counted(&growth_corpus(256 * 1024, true));
+    // The control: the same two sizes with nothing any detector claims.
+    let (w_flat_small, n_flat_small) = redact_counted(&growth_corpus(32 * 1024, false));
+    let (w_flat, n_flat) = redact_counted(&growth_corpus(256 * 1024, false));
     assert!(
         n_small > 2_000 && n_large > 16_000,
         "the dense arms stopped matching ({n_small}, {n_large} spans), so the ratios say nothing"
@@ -441,22 +359,21 @@ fn redaction_cost_does_not_grow_faster_than_the_document() {
         (0, 0),
         "a control arm started matching: {n_flat_small}, {n_flat} spans"
     );
-    let by_size = t_large / t_small;
-    // The same eight-times step measured on the same machine in the same
-    // run with no spans to resolve. Linear predicts the two agree.
-    let control_by_size = t_flat / t_flat_small;
-    let excess = by_size / control_by_size;
-    let by_density = t_large / t_flat;
+    assert_eq!(
+        (w_flat_small, w_flat),
+        (0, 0),
+        "a span-free document cost the span arithmetic steps"
+    );
+    let by_size = w_large as f64 / w_small as f64;
+    let per_span = w_large as f64 / f64::from(n_large);
     assert!(
-        excess <= 1.5,
-        "eight times the document cost {by_size:.2}x the time against {control_by_size:.2}x \
-         for the same step with nothing in it — {excess:.3}x more than scanning alone \
-         ({t_small:.4}s -> {t_large:.4}s, control {t_flat_small:.4}s -> {t_flat:.4}s)"
+        by_size <= 8.0 * 1.25,
+        "eight times the document cost {by_size:.3}x the steps \
+         ({w_small} -> {w_large} steps, {n_small} -> {n_large} spans)"
     );
     assert!(
-        by_density <= 6.0,
-        "a span every fifteen bytes cost {by_density:.2}x the same bytes with none \
-         ({t_flat:.4}s -> {t_large:.4}s)"
+        per_span <= 12.0,
+        "a span cost {per_span:.2} steps at the large size ({w_large} steps, {n_large} spans)"
     );
 }
 

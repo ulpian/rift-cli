@@ -73,6 +73,8 @@ impl ByteMarks {
         let end = end.min(self.len);
         let mut i = start.min(end);
         while i < end {
+            #[cfg(test)]
+            work::add(1);
             let base = (i / MARK_BITS) * MARK_BITS;
             let hi = (end - base).min(MARK_BITS);
             let m = Self::word_mask(i - base, hi);
@@ -92,6 +94,8 @@ impl ByteMarks {
         let end = end.min(self.len);
         let mut i = start.min(end);
         while i < end {
+            #[cfg(test)]
+            work::add(1);
             let base = (i / MARK_BITS) * MARK_BITS;
             let hi = (end - base).min(MARK_BITS);
             let m = Self::word_mask(i - base, hi);
@@ -117,6 +121,8 @@ impl ByteMarks {
         let mut open: Option<usize> = None;
         let mut i = start.min(end);
         while i < end {
+            #[cfg(test)]
+            work::add(1);
             let base = (i / MARK_BITS) * MARK_BITS;
             let hi = (end - base).min(MARK_BITS);
             let lo = i - base;
@@ -132,6 +138,8 @@ impl ByteMarks {
                 }
             } else {
                 for b in lo..hi {
+                    #[cfg(test)]
+                    work::add(1);
                     let pos = base + b;
                     if marked & (1u64 << b) == 0 {
                         if open.is_none() {
@@ -186,6 +194,8 @@ pub(crate) const MAX_SETTLE: usize = 4;
 pub(crate) fn select_spans(text: &str, packs: &RulePackSet) -> Vec<Span> {
     let mut spans = propose(text, packs);
     for _ in 0..MAX_SETTLE {
+        #[cfg(test)]
+        work::add(spans.len());
         let hidden = winners(spans.clone());
         if hidden.is_empty() {
             break;
@@ -194,9 +204,15 @@ pub(crate) fn select_spans(text: &str, packs: &RulePackSet) -> Vec<Span> {
         // The round handed every detector a text with holes in it, so nothing it
         // returns is a reading of the input. `coalesce` is where that matters.
         for f in &mut found {
+            #[cfg(test)]
+            work::add(1);
             f.matched = MatchedAgainst::BlankedText;
         }
         found.retain(|f| {
+            // The duplicate check reads the whole proposal set once per found
+            // span, so it is counted at that full price.
+            #[cfg(test)]
+            work::add(spans.len());
             !spans
                 .iter()
                 .any(|s| s.start == f.start && s.end == f.end && s.id == f.id)
@@ -243,6 +259,8 @@ pub(crate) fn winners(mut spans: Vec<Span>) -> Vec<Span> {
     let mut taken = ByteMarks::new(extent_of(&spans));
     let mut chosen: Vec<Span> = Vec::new();
     for s in spans {
+        #[cfg(test)]
+        work::add(1);
         if s.start >= s.end || taken.any(s.start, s.end) {
             continue;
         }
@@ -297,6 +315,8 @@ pub(crate) fn coalesce(mut spans: Vec<Span>) -> Vec<Span> {
     let mut parsed = ByteMarks::new(extent);
     let mut chosen: Vec<Span> = Vec::new();
     for s in spans {
+        #[cfg(test)]
+        work::add(1);
         if s.start >= s.end {
             continue;
         }
@@ -313,6 +333,8 @@ pub(crate) fn coalesce(mut spans: Vec<Span>) -> Vec<Span> {
             continue;
         }
         for (start, end) in taken.free_runs(s.start, s.end) {
+            #[cfg(test)]
+            work::add(1);
             chosen.push(Span {
                 start,
                 end,
@@ -437,6 +459,8 @@ pub(crate) fn precedence(class: DetectorClass) -> u8 {
 pub(crate) fn blank(text: &str, hidden: &[Span]) -> String {
     let mut out = text.as_bytes().to_vec();
     for s in hidden {
+        #[cfg(test)]
+        work::add(1);
         if let Some(slot) = out.get_mut(s.start..s.end) {
             slot.fill(0);
         }
@@ -448,6 +472,8 @@ pub(crate) fn mask(text: &str, spans: &[Span], report: &mut RedactionReport) -> 
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for s in spans {
+        #[cfg(test)]
+        work::add(1);
         out.push_str(&text[last..s.start]);
         let covered = &text[s.start..s.end];
         // Re-masking an already-placed placeholder (e.g. `password=[REDACTED:jdbc]`
@@ -479,4 +505,34 @@ pub(crate) fn mask(text: &str, spans: &[Span], report: &mut RedactionReport) -> 
 /// the marks are concerned.
 fn extent_of(spans: &[Span]) -> usize {
     spans.iter().map(|s| s.end).max().unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(crate) mod work {
+    //! A count of the steps this module's loops take, compiled into the test
+    //! build only.
+    //!
+    //! The super-linear cost this module once had lived in its own loops — a
+    //! scan of the chosen set once per span — so counting the steps of those
+    //! loops measures the property the clock used to stand in for, and counts
+    //! the same on every machine and under any load. Thread-local, so tests
+    //! running in parallel never see each other's steps.
+
+    use std::cell::Cell;
+
+    thread_local! {
+        static STEPS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One call per step, or one call with a collection's length where a loop
+    /// reads that whole collection for a single item.
+    pub(crate) fn add(n: usize) {
+        STEPS.with(|steps| steps.set(steps.get().saturating_add(n as u64)));
+    }
+
+    /// The steps recorded on this thread since the last `take`, zeroing the
+    /// count.
+    pub(crate) fn take() -> u64 {
+        STEPS.with(|steps| steps.replace(0))
+    }
 }
