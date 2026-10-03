@@ -515,8 +515,25 @@ fn line_count(word: &Word) -> Option<u32> {
 /// spelling has the digits stuck to the option, so there is no word of its
 /// own to hand [`line_count`].
 fn line_count_text(text: &str) -> Option<u32> {
-    let n: u32 = text.parse().ok()?;
+    let n = digits(text)?;
     (n > 0).then_some(n)
+}
+
+/// A number written in plain ASCII digits and nothing else, or [`None`].
+///
+/// Every number the grammar reads comes through here, because the integer
+/// parser underneath accepts a leading `+` and the commands do not mean the
+/// same thing by one: `tail -n +5` prints from line five to the end, and
+/// `sed` reads `1,+3p` as line one and the three after it. A signed count is
+/// refused rather than given its own reading — "from line `N` to the end" is
+/// a span this module could only state with an end the hook does not hold.
+/// Leading zeros pass: all three commands read the count in decimal, so
+/// `05` is five to each of them.
+fn digits(text: &str) -> Option<u32> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// `head` and `tail`, which share a shape: an optional `-n N` and one path.
@@ -537,8 +554,8 @@ fn top_or_bottom(rest: &[Word], from_top: bool) -> Option<ShellSpan> {
 fn sed_range(script: &str) -> Option<ShellSpan> {
     let body = script.strip_suffix('p')?;
     let (lo, hi) = body.split_once(',')?;
-    let lo: u32 = lo.parse().ok()?;
-    let hi: u32 = hi.parse().ok()?;
+    let lo = digits(lo)?;
+    let hi = digits(hi)?;
     (lo >= 1 && hi >= lo).then_some(ShellSpan::Lines { lo, hi })
 }
 

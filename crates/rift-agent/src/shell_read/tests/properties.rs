@@ -179,6 +179,20 @@ fn token() -> impl proptest::strategy::Strategy<Value = String> {
     ]
 }
 
+/// The spellings a count reaches the grammar in, each with a `{}` where the
+/// count goes: the command position, both narrowing spellings, and either
+/// end of a `sed` range.
+const COUNT_POSITIONS: &[&str] = &[
+    "tail -n {} src/lib.rs",
+    "head -n {} src/lib.rs",
+    "cat src/lib.rs | tail -n {}",
+    "cat src/lib.rs | tail -{}",
+    "cat src/lib.rs | head -n {}",
+    "cat src/lib.rs | head -{}",
+    "sed -n '{},99999p' src/lib.rs",
+    "sed -n '1,{}p' src/lib.rs",
+];
+
 proptest::proptest! {
     /// ★ Anything outside the grammar is not a read and not a listing.
     ///
@@ -258,5 +272,29 @@ proptest::proptest! {
                 );
             }
         }
+    }
+
+    /// ★ A recognised count is never signed.
+    ///
+    /// A sign in front of a count changes what `tail` and `sed` print — from
+    /// line `N` on, or `N` lines past the start — so wherever a count goes,
+    /// a signed one leaves the line unrecognised, and the same digits
+    /// unsigned are still read.
+    #[test]
+    fn a_recognised_count_is_never_signed(
+        position in proptest::sample::select(COUNT_POSITIONS),
+        sign in proptest::sample::select(&["+", "-", "+-", "-+"][..]),
+        count in 1_u32..100_000,
+    ) {
+        let signed = position.replace("{}", &format!("{sign}{count}"));
+        proptest::prop_assert!(
+            recognise(&signed).is_none(),
+            "{signed:?} carries a signed count, so it is not a read"
+        );
+        let plain = position.replace("{}", &count.to_string());
+        proptest::prop_assert!(
+            recognise(&plain).is_some(),
+            "{plain:?} is the same count unsigned, and it is read"
+        );
     }
 }

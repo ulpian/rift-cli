@@ -606,12 +606,17 @@ fn is_count(word: &Word) -> bool {
     word.text.bytes().all(|b| b.is_ascii_digit()) && word.text.parse::<u32>().is_ok_and(|n| n > 0)
 }
 
-/// `A,Bp`, the one `sed` script the grammar pins.
+/// `A,Bp`, the one `sed` script the grammar pins — both ends in digits only,
+/// since `1,+3p` is a relative range the grammar refuses.
 fn is_line_range(script: &str) -> bool {
     let Some((lo, hi)) = script.strip_suffix('p').and_then(|b| b.split_once(',')) else {
         return false;
     };
-    matches!((lo.parse::<u32>(), hi.parse::<u32>()), (Ok(lo), Ok(hi)) if lo >= 1 && hi >= lo)
+    let number = |text: &str| {
+        let digits = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+        digits.then(|| text.parse::<u32>().ok()).flatten()
+    };
+    matches!((number(lo), number(hi)), (Some(lo), Some(hi)) if lo >= 1 && hi >= lo)
 }
 
 #[cfg(test)]
@@ -625,6 +630,12 @@ mod tests {
         assert_eq!(shape_of("nl -ba src/a.rs"), Shape::DecoratedOption);
         assert_eq!(shape_of("head -20 src/a.rs"), Shape::HeadTailOption);
         assert_eq!(shape_of("tail -c 100 src/a.rs"), Shape::HeadTailOption);
+        assert_eq!(shape_of("tail -n +5 src/a.rs"), Shape::HeadTailOption);
+        assert_eq!(
+            shape_of("cat src/a.rs | tail -n +5"),
+            Shape::PipedIntoHeadTail
+        );
+        assert_eq!(shape_of("sed -n '1,+3p' a"), Shape::SedScript);
         assert_eq!(shape_of("sed -n '1,5p;9,12p' a"), Shape::SedScript);
         assert_eq!(shape_of("sed 's/a/b/' a"), Shape::SedOption);
         assert_eq!(shape_of("sed -n '1,5p' a b"), Shape::SeveralPaths);

@@ -133,3 +133,41 @@ fn a_separator_inside_a_quote_is_part_of_the_pattern() {
         Some(&listing("crates", Some("a|b.rs")))
     );
 }
+
+/// **A count with a sign is a different instruction, not a count.**
+///
+/// `tail -n +5` prints from line five to the end, and GNU `sed` reads
+/// `1,+3p` as line one and the three after it. Rust's integer parser
+/// accepts a leading `+` and would read both as a plain five or three — a
+/// window the command never printed, credited as held. Every count position
+/// the grammar has is listed, because each one used to reach that parser.
+#[test]
+fn a_count_with_a_sign_is_never_read_as_a_count() {
+    for command in [
+        // `tail` and `head` in the command position.
+        "tail -n +5 src/lib.rs",
+        "tail -n+5 src/lib.rs",
+        "tail +5 src/lib.rs",
+        "tail -n -5 src/lib.rs",
+        "head -n +5 src/lib.rs",
+        "head -n -5 src/lib.rs",
+        // The narrowing position, in both spellings.
+        "cat src/lib.rs | tail -n +5",
+        "cat src/lib.rs | tail -+5",
+        "cat src/lib.rs | tail +5",
+        "cat src/lib.rs | head -n +5",
+        "cat src/lib.rs | head -+5",
+        "cat src/lib.rs | head --5",
+        "cd crates && cat src/lib.rs | tail -n +5",
+        // Either end of a `sed` range.
+        "sed -n '1,+3p' src/lib.rs",
+        "sed -n '+1,3p' src/lib.rs",
+        "sed -n '+1,+3p' src/lib.rs",
+        "sed -n '2,-3p' src/lib.rs",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}

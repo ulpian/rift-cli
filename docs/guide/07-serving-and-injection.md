@@ -303,7 +303,9 @@ because the lines it delivers still follow from the line itself:
   prefix or a suffix of it. A suffix is a *count from the end*, so it travels
   as a count and the step that already holds the bytes for its hash turns it
   into line numbers — which is what also brought a plain counted `tail -n N`,
-  long recognised and never creditable, into the ledger. The one composition
+  long recognised and never creditable, into the ledger. Every count is plain
+  digits: a signed one (`tail -n +5`, from line five to the end) means
+  something else to the command, so the line is left alone. The one composition
   with no interval is the first `N` of the last `M`: its start is a number the
   file's length would have to supply, and no span says that, so it is unknown
   and records nothing;
