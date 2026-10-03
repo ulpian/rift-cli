@@ -51,6 +51,12 @@ fn every_grammar_form_yields_the_pinned_range() {
         ("egrep 'a|b' src/lib.rs", read(file, ShellSpan::Matching)),
         ("fgrep needle src/lib.rs", read(file, ShellSpan::Matching)),
         ("rg needle src/lib.rs", read(file, ShellSpan::Matching)),
+        ("grep -n needle src/lib.rs", read(file, ShellSpan::Matching)),
+        (
+            "grep -n -A 3 needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        ("rg -n needle src/lib.rs", read(file, ShellSpan::Matching)),
         ("ls crates", listing("crates", None)),
         ("ls -la crates", listing("crates", None)),
         ("ls -l -a crates", listing("crates", None)),
@@ -115,6 +121,9 @@ fn a_content_search_names_the_one_file_it_searched() {
         "egrep 'a|b' src/lib.rs",
         "fgrep needle src/lib.rs",
         "rg needle src/lib.rs",
+        "grep -n needle src/lib.rs",
+        "grep -in -C 2 needle src/lib.rs",
+        "rg -n needle src/lib.rs",
     ] {
         assert_eq!(
             recognise(command).and_then(|call| call.searched_file().map(str::to_owned)),
@@ -134,6 +143,107 @@ fn a_content_search_names_the_one_file_it_searched() {
             "{command}"
         );
     }
+}
+
+/// **A search over one file with flags that only choose and number its
+/// lines is still a search over that file.**
+///
+/// Every flag here changes which of the file's own lines are printed, or
+/// how they are labelled — a line number, a case fold, a whole-word or
+/// whole-line match, a fixed string, the extended dialect, a few lines of
+/// context around each match, a pattern given with `-e` — and none reads
+/// anything but the one file the line names. So each spelling is the same
+/// recognition the bare form gets: a content search of that file, with no
+/// coverage, because the lines it printed are the file's to decide.
+#[test]
+fn a_single_file_search_with_line_selecting_flags_is_a_content_search() {
+    let file = "src/lib.rs";
+    let cases: &[(&str, ShellCall)] = &[
+        ("grep -n needle src/lib.rs", read(file, ShellSpan::Matching)),
+        (
+            "grep -i -w needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "grep -in needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        ("grep -nF 'a.b' src/lib.rs", read(file, ShellSpan::Matching)),
+        ("grep -nE 'a|b' src/lib.rs", read(file, ShellSpan::Matching)),
+        ("grep -x needle src/lib.rs", read(file, ShellSpan::Matching)),
+        (
+            "grep -n -A 3 needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "grep -n -B 2 -A 8 needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "grep -A3 -n needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "grep -nA3 needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "grep -nC 2 needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "grep -n -C 0 needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "grep -n -e needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        ("grep -e '-v' src/lib.rs", read(file, ShellSpan::Matching)),
+        ("grep -e a -e b src/lib.rs", read(file, ShellSpan::Matching)),
+        (
+            "grep -ne needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        ("egrep -n 'a|b' src/lib.rs", read(file, ShellSpan::Matching)),
+        (
+            "fgrep -in needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        ("rg -n needle src/lib.rs", read(file, ShellSpan::Matching)),
+        (
+            "rg -n -i -F needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        (
+            "rg -n -C 3 needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+    ];
+    assert_each_recognised(cases);
+    for (command, _) in cases {
+        assert!(read_of(command).is_none(), "{command} grants no coverage");
+        assert!(
+            recognise(command).is_some_and(|call| call.search_request().is_none()),
+            "{command} is never a listing"
+        );
+    }
+}
+
+/// A flagged search composes as a bare one does: under a leading `cd`, and
+/// narrowed by a trailing pipe, with still no coverage to give.
+#[test]
+fn a_flagged_search_composes_as_a_bare_one_does() {
+    let command = "cd crates && grep -n needle src/lib.rs | head -n 5";
+    assert_each_recognised(&[(
+        command,
+        ShellCall::Read(vec![super::narrowed(
+            "crates/src/lib.rs",
+            ShellSpan::Matching,
+            crate::shell_read::Narrowing::First(5),
+        )]),
+    )]);
+    assert!(read_of(command).is_none(), "{command} grants no coverage");
 }
 
 /// **A command whose lines depend on the file grants no coverage.**
@@ -157,6 +267,9 @@ fn a_read_whose_lines_depend_on_the_file_grants_no_coverage() {
         "nl src/lib.rs",
         "grep needle src/lib.rs",
         "rg needle src/lib.rs",
+        "grep -n needle src/lib.rs",
+        "grep -n -A 3 needle src/lib.rs",
+        "rg -n needle src/lib.rs",
     ] {
         assert!(recognise(command).is_some(), "{command} is recognised");
         assert!(read_of(command).is_none(), "{command} grants no coverage");

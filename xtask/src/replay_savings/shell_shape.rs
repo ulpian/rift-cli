@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(shape_of("sed 's/a/b/' a"), Shape::SedOption);
         assert_eq!(shape_of("sed -n '1,5p' a b"), Shape::SeveralPaths);
         assert_eq!(shape_of("head -n 5 a b"), Shape::SeveralPaths);
-        assert_eq!(shape_of("grep -n x a"), Shape::SearchFlags);
+        assert_eq!(shape_of("grep -c x a"), Shape::SearchFlags);
         assert_eq!(shape_of("rg x a b"), Shape::SearchSeveralPaths);
     }
 

@@ -50,7 +50,8 @@
 //!    missed recognition is a saving; the cost of a wrong one is a decision
 //!    taken about content an agent never received.
 //! 2. **A recognised command is not always a range.** `grep` delivers the
-//!    lines that matched, which nothing here can know; a bare `head` or
+//!    lines that matched — with or without the flags that only choose and
+//!    number them — which nothing here can know; a bare `head` or
 //!    `tail` relies on a default window no artifact in this tree pins. All of
 //!    them are recognised — so none is ever mistaken for a search that could
 //!    be answered from an index — and none yields coverage, because the honest
@@ -562,6 +563,33 @@ fn sed_range(script: &str) -> Option<ShellSpan> {
 /// The `ls` options the grammar admits, and no others.
 const LIST_OPTIONS: &[&str] = &["-l", "-a", "-la", "-al"];
 
+/// The single-letter flags a `grep` search may carry: a line number, a case
+/// fold, a whole-word or whole-line match, a fixed string, the extended
+/// dialect.
+///
+/// Each one changes which of the file's own lines are printed or how they are
+/// labelled, and nothing else, which is the whole condition. A flag that
+/// reaches past the file (`-r`, `-f`, `--include`) or prints something that
+/// is not a line of it (`-c`, `-l`, `-o`, `-q`), or the lines that did *not*
+/// match (`-v`), is not in the set, and a long option never is.
+const GREP_FLAGS: &str = "niwxFE";
+
+/// The same set for `egrep` and `fgrep`, which already name their dialect,
+/// so a second dialect letter on one of them is left alone rather than
+/// resolved.
+const GREP_VARIANT_FLAGS: &str = "niwx";
+
+/// The same set for `rg`, without `-E`: there it names a text encoding and
+/// takes a value, which is a different option behind the same letter.
+const RG_FLAGS: &str = "niwxF";
+
+/// The letters that take a context count — lines after, before and around
+/// each match — in every one of the four search commands.
+const CONTEXT_FLAGS: &str = "ABC";
+
+/// The letter that takes the pattern itself as its value.
+const PATTERN_FLAG: char = 'e';
+
 /// Split a command line at the separators the grammar composes with, without
 /// ever splitting inside a quote.
 ///
@@ -858,7 +886,8 @@ fn recognise_simple(command: &str) -> Option<Member> {
             one_read(path_arg(rest.last()?)?, span)
         }
         "sed" => sed_read(rest),
-        "grep" | "egrep" | "fgrep" => content_search(rest),
+        "grep" => content_search(rest, GREP_FLAGS),
+        "egrep" | "fgrep" => content_search(rest, GREP_VARIANT_FLAGS),
         "rg" => rg_call(rest),
         "ls" => ls_listing(rest),
         "find" => find_listing(rest),
@@ -908,13 +937,75 @@ fn sed_read(rest: &[Word]) -> Option<Member> {
 
 /// The `grep` family: a content search over one named file. It is a read of
 /// lines nobody here can name, and it is never answered from an index.
-fn content_search(rest: &[Word]) -> Option<Member> {
-    match rest {
-        [pattern, path] if pattern_arg(pattern).is_some() => {
-            one_read(path_arg(path)?, ShellSpan::Matching)
-        }
-        _ => None,
+///
+/// Options come first and are read the way the command's own option parser
+/// reads them — letters may share one word, and a letter that takes a value
+/// takes the rest of its word or, when that is empty, the next word — so the
+/// word this walk calls a path is the word the search opens. The walk stops
+/// at the first word that is not an option, and nothing after it may be one:
+/// one `grep` moves a late option to the front and another reads it as a file
+/// name, and a line the two would read differently is no line to name a file
+/// from.
+///
+/// Every admitted flag only chooses or labels the lines of the one file, so a
+/// flagged search is the same recognition a bare one is: [`ShellSpan::Matching`],
+/// with no coverage.
+fn content_search(rest: &[Word], flags: &str) -> Option<Member> {
+    let mut words = rest.iter();
+    let mut pattern_given = false;
+    let operands = loop {
+        let word = words.next()?;
+        let Some(letters) = bare(word).and_then(|text| text.strip_prefix('-')) else {
+            break std::iter::once(word).chain(words).collect::<Vec<_>>();
+        };
+        pattern_given |= search_option(letters, flags, &mut words)?;
+    };
+    let path = match (pattern_given, operands.as_slice()) {
+        (true, [path]) => path,
+        (false, [pattern, path]) if !pattern.text.starts_with('-') => path,
+        _ => return None,
+    };
+    one_read(path_arg(path)?, ShellSpan::Matching)
+}
+
+/// One option word of a search, its leading `-` already taken off: whether it
+/// gave the pattern, or [`None`] when any letter in it is not one the grammar
+/// pins.
+///
+/// A pattern here is any word, since the option is what says it is one —
+/// except an unquoted one that starts with `-`, which the same rule refuses
+/// everywhere a pattern goes. A count is digits and nothing else, so a signed
+/// one is refused as it is in every other count position.
+fn search_option<'a>(
+    letters: &str,
+    flags: &str,
+    words: &mut impl Iterator<Item = &'a Word>,
+) -> Option<bool> {
+    if letters.is_empty() {
+        return None;
     }
+    for (at, letter) in letters.char_indices() {
+        if flags.contains(letter) {
+            continue;
+        }
+        let attached = letters.get(at + letter.len_utf8()..)?;
+        if CONTEXT_FLAGS.contains(letter) {
+            let count = match attached {
+                "" => bare(words.next()?)?,
+                count => count,
+            };
+            return digits(count).map(|_| false);
+        }
+        if letter != PATTERN_FLAG {
+            return None;
+        }
+        let pattern_is_one = match attached {
+            "" => pattern_arg(words.next()?).is_some(),
+            pattern => !pattern.starts_with('-'),
+        };
+        return pattern_is_one.then_some(true);
+    }
+    Some(false)
 }
 
 /// `rg`: one name does both jobs — `--files` lists, a pattern searches.
@@ -922,10 +1013,7 @@ fn rg_call(rest: &[Word]) -> Option<Member> {
     match rest {
         [flag] if bare(flag) == Some("--files") => one_listing(".".to_owned(), None),
         [flag, dir] if bare(flag) == Some("--files") => one_listing(path_arg(dir)?, None),
-        [pattern, path] if pattern_arg(pattern).is_some() => {
-            one_read(path_arg(path)?, ShellSpan::Matching)
-        }
-        _ => None,
+        _ => content_search(rest, RG_FLAGS),
     }
 }
 

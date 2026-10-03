@@ -193,7 +193,84 @@ const COUNT_POSITIONS: &[&str] = &[
     "sed -n '1,{}p' src/lib.rs",
 ];
 
+/// The search flags every command of the family pins, each spelled as the
+/// whole option word it is written as.
+const PINNED_SEARCH_FLAGS: &[&str] = &[
+    "-n",
+    "-i",
+    "-w",
+    "-x",
+    "-in",
+    "-nw",
+    "-A 3",
+    "-B 1",
+    "-C 0",
+    "-A12",
+    "-nA 2",
+    "-iC4",
+    "-e needle",
+    "-ne needle",
+];
+
+/// Flags one step outside that set: each one reaches past the file, prints
+/// something other than its lines, or is not a count where one goes.
+const UNPINNED_SEARCH_FLAGS: &[&str] = &[
+    "-r",
+    "-R",
+    "-c",
+    "-l",
+    "-L",
+    "-o",
+    "-v",
+    "-q",
+    "-f pats",
+    "-P",
+    "-nr",
+    "-A",
+    "-A -1",
+    "-A +1",
+    "-An",
+    "--line-number",
+    "--",
+    "-",
+];
+
 proptest::proptest! {
+    /// ★ A search over one file with any run of pinned flags is a content
+    /// search of exactly that file and grants no coverage; one flag outside
+    /// the set, anywhere in the run, takes the line out of the grammar.
+    #[test]
+    fn a_pinned_flag_run_keeps_a_search_on_its_one_file(
+        command in proptest::sample::select(&["grep", "egrep", "fgrep", "rg"][..]),
+        flags in proptest::collection::vec(proptest::sample::select(PINNED_SEARCH_FLAGS), 0..5),
+        unpinned in proptest::sample::select(UNPINNED_SEARCH_FLAGS),
+        at in 0_usize..5,
+    ) {
+        let pattern = if flags.iter().any(|flag| flag.ends_with("needle")) { "" } else { "needle" };
+        let line = |flags: &[&str]| {
+            format!("{command} {} {pattern} src/lib.rs", flags.join(" "))
+        };
+        let call = recognise(&line(&flags));
+        let Some(ShellCall::Read(reads)) = call else {
+            return Err(proptest::test_runner::TestCaseError::fail(format!(
+                "{:?} is a pinned search and was not recognised",
+                line(&flags)
+            )));
+        };
+        proptest::prop_assert_eq!(reads.len(), 1);
+        proptest::prop_assert_eq!(reads[0].path.as_str(), "src/lib.rs");
+        proptest::prop_assert_eq!(reads[0].span, crate::shell_read::ShellSpan::Matching);
+        proptest::prop_assert!(reads[0].read_request().is_none());
+        let mut widened = flags.clone();
+        widened.insert(at.min(widened.len()), unpinned);
+        proptest::prop_assert!(
+            recognise(&line(&widened)).is_none(),
+            "{:?} carries a flag the grammar does not pin",
+            line(&widened)
+        );
+    }
+
+
     /// ★ Anything outside the grammar is not a read and not a listing.
     ///
     /// The recogniser's whole safety argument is that a non-match is left

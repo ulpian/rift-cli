@@ -292,7 +292,11 @@ way far more often than through its read tool. The grammar has two levels. The
 **vocabulary** is a client's own read-before-edit list, unchanged: `cat`, `nl`,
 `bat`, `batcat`, `head`, `tail`, `sed -n 'A,Bp'`, the `grep` family and `rg` on
 one named path, plus a listing grammar of the same shape (`ls`, `find … -name`,
-`rg --files`). Above it sit exactly three **compositions**, each admitted
+`rg --files`). A search on that one path may carry the flags that only choose
+and number the file's own lines (`-n`, `-i`, `-w`, `-x`, `-F`, `-E` on `grep`,
+a context count `-A`, `-B` or `-C N`, a pattern given with `-e`), and it stays
+what a bare one is: recognised, with no coverage, because which lines it
+printed is the file's to decide. Above it sit exactly three **compositions**, each admitted
 because the lines it delivers still follow from the line itself:
 
 - a single leading `cd <dir> &&`, the directory bare or quoted, after which
