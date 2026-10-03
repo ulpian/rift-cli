@@ -59,6 +59,14 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
+/// Check files out with the bytes they were committed with, whatever the
+/// machine's global `core.autocrlf`: the fixture precomputes content hashes,
+/// and a CRLF rewrite on checkout would make every one of them stale.
+fn pin_line_endings(dir: &Path) {
+    git(dir, &["config", "core.autocrlf", "false"]);
+    git(dir, &["config", "core.eol", "lf"]);
+}
+
 fn write(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, contents).unwrap();
@@ -71,6 +79,7 @@ fn build_fixture(dir: &Path) {
     let hash = rift_recall_substrate::worktree::sha256_hex(HOOKS_RS.as_bytes());
 
     git(dir, &["init", "-q", "-b", "main"]);
+    pin_line_endings(dir);
     write(&dir.join("bins/rift/src/hooks.rs"), HOOKS_RS);
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-q", "-m", "worktree"]);
@@ -106,6 +115,25 @@ fn assert_history_kept_the_frozen_spelling(dir: &Path) {
         line.contains(FROZEN),
         "the fixture shard must carry the frozen spelling: {line}"
     );
+}
+
+/// The working file's raw bytes hash to the blob `HEAD` commits for it:
+/// `--no-filters` keeps a line-ending conversion from hiding a rewrite.
+fn assert_worktree_holds_the_committed_bytes(dir: &Path, path: &str) {
+    let worktree = git_stdout(dir, &["hash-object", "--no-filters", path]);
+    let committed = git_stdout(dir, &["rev-parse", &format!("HEAD:{path}")]);
+    assert_eq!(worktree, committed, "{path} was rewritten on checkout");
+}
+
+/// Trimmed stdout of a `git` read that must succeed.
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("git is on PATH");
+    assert!(out.status.success(), "git {args:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
 #[test]
@@ -151,6 +179,7 @@ fn fixture_rebuilt_store() -> (tempfile::TempDir, PathBuf) {
 
     build_fixture(&repo);
     assert_history_kept_the_frozen_spelling(&repo);
+    assert_worktree_holds_the_committed_bytes(&repo, KEYED);
     let family = mint_fixture_family(&repo, &families);
     run_rebuild(tmp.path(), &repo, &home);
 
