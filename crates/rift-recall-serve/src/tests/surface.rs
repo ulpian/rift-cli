@@ -2,7 +2,6 @@
 //! one surface, context planning, and the trust and audit vocabulary.
 
 use rift_recall_policy::{PolicyEngine, TurnBudget};
-use rift_recall_substrate::MemorySubstrate;
 use rift_recall_types::Trust;
 use serde_json::json;
 
@@ -175,15 +174,15 @@ fn the_decoder_respells_stated_paths_and_leaves_the_others_alone() {
 #[test]
 fn a_backslash_spelled_argument_resolves_against_a_slash_spelled_row() {
     let cfg = cfg();
-    let store = seeded_store();
-    let reader = MemorySubstrate::local();
+    let (store, checkout, sha_a, _) = held_store();
+    let reader = checkout.reader();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let mut budget = TurnBudget::new(10, 10_000);
     let c = ctx(&store, &reader);
 
     let (tool, req) = decode_request(
         "rift_file_if_changed",
-        &serde_json::json!({ "target": r"src\a.rs", "known_hashes": [SHA_A] }),
+        &serde_json::json!({ "target": r"src\a.rs", "known_hashes": [sha_a] }),
     )
     .unwrap();
     let resp = block(s.dispatch(tool, &req, &c, &mut budget)).unwrap();

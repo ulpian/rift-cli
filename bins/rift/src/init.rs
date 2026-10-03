@@ -583,7 +583,7 @@ fn init_registry_lines(added: &Added, name: &str, registered: &Path, reg_path: &
             row.display()
         ),
     };
-    let cache_root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
+    let cache_root = crate::family::cache_root();
     if let Ok(cstore) = rift_canopy_data::CanopyStore::open(&cache_root) {
         if let Err(error) = cstore.apply(
             &PersistOp::AddProject {

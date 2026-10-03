@@ -26,15 +26,16 @@ AGENTS.md: unchanged since last captured read (re-read avoidable)
 ```
 
 Now ask as an *agent* must — `rift recall file-if-changed AGENTS.md --json` —
-and it answers `changed`, with the new hash, `estimated_tokens_avoided` 1010
-against 59 returned.
+and it answers `changed`, with the hash the file has on disk, and
+`estimated_tokens_avoided` 0 beside `"avoided_basis": "none_stated"`.
 
 Same file, same second, two answers, both correct. The difference is who
 supplies the "state you already hold". `rift memory` answers for **a human**:
 you are in the checkout, so it hashes the working tree on your behalf. `rift recall` answers for **an agent**, whose context is not on disk —
 Rift cannot see it and refuses to guess. An agent that names no hash holds
 nothing, so everything reads as changed: the honest answer, not a bug. Pass
-`--known-hash ee2f8418…c05600` and the same call answers `unchanged`.
+`--known-hash ee2f8418…c05600` and the same call answers `unchanged`, credited
+with the file's read cost because this family recorded reading those bytes.
 
 Both spellings go through one dispatcher, one set of policy gates and one
 budget — one surface, not two implementations.
@@ -182,6 +183,20 @@ agent holds is `known_unchanged` with no summary in the picture — and what is
 
 The state carries zero tokens, and that is the whole saving: the agent learns
 "still what you have" for the cost of a path and a hash.
+
+"Not known to have changed" is a question about the file on disk, not about the projection.
+A projection holds the revisions a checkpoint carried, so its newest revision of a file trails every edit made since; answering from it would tell an agent holding the old bytes that they are current.
+Every answer that says a file is current or unchanged — `file-if-changed`, `known-state`, `diff-since`, `context-pack` and `read-summary` — reads the file in the checkout and compares hashes.
+A file the checkout no longer holds at the stated hash is answered as changed, with the hash it has now.
+A file that cannot be read — no checkout, nothing at the path, a symbolic link, a path that leaves the checkout, a file past the size ceiling — is answered `unavailable` with the reason, and the agent reads the file itself.
+A path no read ever recorded is `invalid` with `path_not_found`, which also means: read it directly.
+An answer given without the checkout's bytes is the projection's view and credits nothing; the push tier's delta list is such an answer, and its figure says `unverified`.
+A hash-bound `retrieve-exact` of a revision the checkout no longer holds is still served, because it is history the agent asked for by address, and it carries `"historical": true`.
+
+The figure beside an answer follows the same line ([§8.6](08-cost-and-savings.md#86-what-avoided-actually-measures)).
+A list answer — `known-state`, `diff-since`, `file-if-changed` — credits only the files it says the agent still holds.
+A file it reports as changed earns nothing there: the list returns no lines, the agent still has to read it, and the pull that serves its changed lines is the answer that spares the read.
+`changed-hunks` and `context-pack` carry those lines, so a changed file whose older revision the agent holds earns its current cost less the lines returned.
 
 A `known_unchanged` entry may also carry `last_seen_turn`: the turn in which the calling context window last read those exact bytes, taken from that window's own journal ([§6.12](#612-what-a-context-window-already-holds)).
 It is a citation, never a condition — the hash decides the state, and an absent turn changes nothing about it.

@@ -73,6 +73,10 @@ struct Fixture {
     reader: MemorySubstrate,
     held: Vec<String>,
     focus: String,
+    /// The scenario's files on disk, which every answer that says a file is
+    /// unchanged is checked against; held so the directory outlives the
+    /// reader bound to it.
+    _checkout: tempfile::TempDir,
 }
 
 impl Split {
@@ -167,7 +171,8 @@ fn seed(scenario: &Scenario) -> Fixture {
     let store = SqliteStore::open_in_memory().unwrap();
     apply_migrations(&store, &recall_migrations()).unwrap();
     insert(&store, "n_checkpoint", &checkpoint_row());
-    let mut reader = MemorySubstrate::local();
+    let checkout = tempfile::tempdir().unwrap();
+    let mut reader = MemorySubstrate::local().with_worktree_root(checkout.path());
     let mut held = Vec::new();
     for (idx, file) in scenario.files.iter().enumerate() {
         let sha = rift_recall_substrate::worktree::sha256_hex(file.content.as_bytes());
@@ -195,6 +200,9 @@ fn seed(scenario: &Scenario) -> Fixture {
         } else {
             held.push(sha.clone());
         }
+        let on_disk = checkout.path().join(&file.path);
+        std::fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+        std::fs::write(on_disk, file.content.as_bytes()).unwrap();
         reader = reader.with_blob(&sha, file.content.as_bytes());
     }
     let focus = scenario.files.iter().find(|f| f.changed);
@@ -204,6 +212,7 @@ fn seed(scenario: &Scenario) -> Fixture {
         reader,
         held,
         focus,
+        _checkout: checkout,
     }
 }
 

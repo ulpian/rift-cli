@@ -32,7 +32,7 @@ use rift_recall_serve::{
     RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse,
 };
 use rift_recall_substrate::MemorySubstrate;
-use rift_recall_types::{NoAncestry, NoProvenance, Scope};
+use rift_recall_types::{CheckpointWindow, NoAncestry, NoProvenance, Scope};
 use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore, Value};
 
 use crate::{replay, PairedRun, ReplayMode, RunMetrics, Scenario, ScenarioFile};
@@ -46,13 +46,20 @@ const MANIFEST_PROBE_TOKENS: u32 = 150;
 /// The injected clock (no wall time enters the harness).
 pub(crate) const EVAL_NOW_MS: i64 = 1_000_000_000;
 
-/// The fixture world one scenario seeds: the recall projection + substrate a
-/// real serve reads.
+/// The fixture world one scenario seeds: the recall projection, the substrate
+/// a real serve reads, and the checkout it is bound to.
 struct Fixture {
     store: SqliteStore,
     reader: MemorySubstrate,
     /// `(path, sha256)` in scenario order.
     files: Vec<(String, String)>,
+    /// The content address of the older revision the scripted agent holds of
+    /// each changed file, in scenario order (`None` for an unchanged file).
+    held: Vec<Option<String>>,
+    /// The scenario's files on disk: every answer that says a file is
+    /// unchanged is checked against these bytes. Held so the directory lives
+    /// as long as the reader bound to it.
+    _checkout: tempfile::TempDir,
 }
 
 /// One scripted turn against the real dispatcher: every serve of the turn
@@ -185,7 +192,7 @@ pub fn replay_served_with_capture(scenario: &Scenario, est_multiplier: u32) -> R
     })
 }
 
-/// The serve context over the fixture: unbounded scope, no ancestry, no
+/// The serve context over the fixture: the newest checkpoint, no ancestry, no
 /// provenance, the injected clock.
 fn eval_context(fixture: &Fixture) -> RecallContext<'_, SqliteStore, MemorySubstrate> {
     RecallContext {
@@ -193,10 +200,15 @@ fn eval_context(fixture: &Fixture) -> RecallContext<'_, SqliteStore, MemorySubst
         reader: &fixture.reader,
         snapshots: None,
         // The harness computes a family fact over a synthetic fixture (eval is
-        // one of the accounting callers): there is no repository
-        // to walk and nothing to contain, and a serving scope here would make
-        // every replay serve nothing.
-        scope: Scope::unbounded("eval"),
+        // one of the accounting callers): there is no repository to walk and
+        // no branch to contain. The serve ranks the newest checkpoint, the one
+        // that read every file as it is now; the earlier one that read the
+        // older revisions the agent holds is history the projection still
+        // records, which is where the credit for a changed file finds it.
+        scope: Scope {
+            checkpoints: CheckpointWindow::LastN(1),
+            ..Scope::unbounded("eval")
+        },
         ancestry: &NoAncestry,
         // The harness measures the delta, not its story: a synthetic fixture has
         // no capture projection behind it, so provenance is honestly unknown.
@@ -215,15 +227,15 @@ fn roomy_budget(scenario: &Scenario) -> TurnBudget {
 }
 
 /// The request the anchor and the pack share: the task names the decisive
-/// fact, the focus is the first changed file (else the first file), and every
-/// unchanged file's hash is already known.
+/// fact, the focus is the first changed file (else the first file), and the
+/// agent states what it holds — every unchanged file as it is now, and each
+/// changed file at the older revision it read before the change.
 fn base_request(scenario: &Scenario, fixture: &Fixture) -> ToolRequest {
     let known_hashes: Vec<String> = fixture
         .files
         .iter()
-        .zip(&scenario.files)
-        .filter(|(_, f)| !f.changed)
-        .map(|((_, sha), _)| sha.clone())
+        .zip(&fixture.held)
+        .map(|((_, sha), held)| held.clone().unwrap_or_else(|| sha.clone()))
         .collect();
     let focus = scenario
         .files
@@ -247,28 +259,38 @@ pub(crate) fn block_on<F: std::future::Future>(f: F) -> Result<F::Output> {
         .block_on(f))
 }
 
-/// Seed the fixture store from the scenario: one checkpoint; per file a
-/// revision + a captured read whose `input_tokens` is the honest tokenizer
+/// Seed the fixture store from the scenario: per file a revision + a captured
+/// read in the newest checkpoint whose `input_tokens` is the honest tokenizer
 /// count times `est_multiplier` (1 = honest capture; >1 plants a real
-/// capture-side over-estimate). Changed files also persist their changed
-/// hunks (old = the content minus the decisive-fact lines), so the pack can
-/// inline the decisive hunk TEXT exactly as production does; every blob is
-/// seeded into the substrate so exact retrieval serves real bytes.
+/// capture-side over-estimate), and the file itself in a checkout on disk.
+/// Changed files also persist their changed hunks (old = the content minus
+/// the decisive-fact lines), so the pack can inline the decisive hunk TEXT
+/// exactly as production does, and a read of the older revision the agent
+/// holds in the checkpoint before. Every blob is seeded into the substrate so
+/// exact retrieval serves real bytes.
 async fn seed(scenario: &Scenario, est_multiplier: u32) -> Result<Fixture> {
     let store = SqliteStore::open_in_memory()?;
     apply_migrations(&store, &recall_migrations())?;
-    seed_checkpoint(&store).await?;
-    let mut reader = MemorySubstrate::local();
+    seed_checkpoint(&store, "c0", 0).await?;
+    seed_checkpoint(&store, "c1", 1).await?;
+    let checkout =
+        tempfile::tempdir().map_err(|e| RiftError::substrate(format!("eval checkout: {e}")))?;
+    let mut reader = MemorySubstrate::local().with_worktree_root(checkout.path());
     let mut files = Vec::new();
+    let mut held = Vec::new();
     for (i, f) in scenario.files.iter().enumerate() {
         let sha = rift_recall_substrate::worktree::sha256_hex(f.content.as_bytes());
         let rev = format!("rev_{i:03}");
         let est = rift_tokens::count(&f.content).saturating_mul(est_multiplier);
-        seed_file_revision(&store, f, &rev, &sha).await?;
-        seed_file_read(&store, &rev, est).await?;
-        if f.changed {
+        seed_file_revision(&store, &f.path, &f.content, &rev, &sha).await?;
+        seed_file_read(&store, "c1", &rev, est).await?;
+        write_file(checkout.path(), f)?;
+        held.push(if f.changed {
             seed_changed_hunks(&store, scenario, f, i, &rev).await?;
-        }
+            Some(seed_held_revision(&store, f, i, est).await?)
+        } else {
+            None
+        });
         reader = reader.with_blob(&sha, f.content.as_bytes());
         files.push((f.path.clone(), sha));
     }
@@ -276,11 +298,50 @@ async fn seed(scenario: &Scenario, est_multiplier: u32) -> Result<Fixture> {
         store,
         reader,
         files,
+        held,
+        _checkout: checkout,
     })
 }
 
-/// The scenario's one checkpoint, `c1`, every read and hunk hangs off.
-async fn seed_checkpoint(store: &SqliteStore) -> Result<()> {
+/// One scenario file, written into the checkout at its path.
+fn write_file(root: &std::path::Path, f: &ScenarioFile) -> Result<()> {
+    let full = root.join(&f.path);
+    let written = full
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&full, f.content.as_bytes()));
+    written.map_err(|e| RiftError::substrate(format!("eval checkout: {e}")))
+}
+
+/// The older revision of a changed file the scripted agent read before the
+/// change: the file as it was before its last line was added. For the file
+/// that carries the decisive fact that line is the fact, the very edit its
+/// persisted hunks describe; for the others it is the last line they gained.
+/// Recorded as read in the earlier checkpoint, so the projection holds the
+/// read the agent's statement rests on. Returns its content address.
+async fn seed_held_revision(
+    store: &SqliteStore,
+    f: &ScenarioFile,
+    i: usize,
+    est: u32,
+) -> Result<String> {
+    let mut lines: Vec<&str> = f.content.lines().collect();
+    lines.pop();
+    let older: String = lines.iter().fold(String::new(), |mut acc, l| {
+        acc.push_str(l);
+        acc.push('\n');
+        acc
+    });
+    let sha = rift_recall_substrate::worktree::sha256_hex(older.as_bytes());
+    let rev = format!("rev_held_{i:03}");
+    seed_file_revision(store, &f.path, &older, &rev, &sha).await?;
+    seed_file_read(store, "c0", &rev, est).await?;
+    Ok(sha)
+}
+
+/// One checkpoint: `c1` is the newest, every current read and hunk hangs off
+/// it; `c0` is the one before.
+async fn seed_checkpoint(store: &SqliteStore, id: &str, ordinal: i64) -> Result<()> {
     store
         .insert_or_ignore(
             "n_checkpoint",
@@ -294,9 +355,9 @@ async fn seed_checkpoint(store: &SqliteStore) -> Result<()> {
                 "developer",
             ],
             &[
-                Value::text("c1"),
+                Value::text(id),
                 Value::text("rift"),
-                Value::Int(1),
+                Value::Int(ordinal),
                 Value::Null,
                 Value::Null,
                 Value::Null,
@@ -310,7 +371,8 @@ async fn seed_checkpoint(store: &SqliteStore) -> Result<()> {
 /// One file's revision row, keyed `rev` and addressed by its content hash.
 async fn seed_file_revision(
     store: &SqliteStore,
-    f: &ScenarioFile,
+    path: &str,
+    content: &str,
     rev: &str,
     sha: &str,
 ) -> Result<()> {
@@ -320,19 +382,20 @@ async fn seed_file_revision(
             &["node_id", "path", "blob_oid", "content_sha256", "size"],
             &[
                 Value::text(rev),
-                Value::text(&f.path),
+                Value::text(path),
                 Value::text(sha),
                 Value::text(sha),
-                Value::Int(i64::try_from(f.content.len()).unwrap_or(i64::MAX)),
+                Value::Int(i64::try_from(content.len()).unwrap_or(i64::MAX)),
             ],
         )
         .await?;
     Ok(())
 }
 
-/// The captured read of revision `rev`, carrying the (possibly inflated)
-/// capture-side `input_tokens` estimate every serve's claim is built from.
-async fn seed_file_read(store: &SqliteStore, rev: &str, est: u32) -> Result<()> {
+/// The captured read of revision `rev` in `checkpoint`, carrying the
+/// (possibly inflated) capture-side `input_tokens` estimate every serve's
+/// claim is built from.
+async fn seed_file_read(store: &SqliteStore, checkpoint: &str, rev: &str, est: u32) -> Result<()> {
     store
         .insert_or_ignore(
             "n_file_read",
@@ -348,7 +411,7 @@ async fn seed_file_read(store: &SqliteStore, rev: &str, est: u32) -> Result<()> 
             ],
             &[
                 Value::text(format!("read_{rev}")),
-                Value::text("c1"),
+                Value::text(checkpoint),
                 Value::text(format!("tc_{rev}")),
                 Value::text(rev),
                 Value::Int(i64::from(est)),

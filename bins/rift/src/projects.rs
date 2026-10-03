@@ -26,7 +26,7 @@ pub(crate) fn projects_cmd(cmd: &cli::ProjectsCmd, root: &Path) -> rift_core::Re
             return worktree::prune_orphan_projections(root, a.yes && !a.dry_run);
         }
     }
-    let cache_root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
+    let cache_root = crate::family::cache_root();
     let strictly_read_only = matches!(cmd, cli::ProjectsCmd::List(_))
         || matches!(cmd, cli::ProjectsCmd::Prune(a) if a.dry_run);
     let cstore = if strictly_read_only {

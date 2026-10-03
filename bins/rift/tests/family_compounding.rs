@@ -541,7 +541,12 @@ fn a_member_is_served_the_summary_its_sibling_bound() {
     let before = f.rows("SELECT summary_id FROM summary_binding").len();
     assert_eq!(before, 1);
 
-    let doc = f.json(&f.ancestry, &["recall", "read-summary", ALPHA]);
+    // The member states the revision it holds: a summary spares a re-read only
+    // of a file the caller said it had, and this family recorded reading.
+    let doc = f.json(
+        &f.ancestry,
+        &["recall", "read-summary", ALPHA, "--known-hash", &sha],
+    );
     let result = &doc["result"]["result"];
     assert_eq!(
         result["state"],
@@ -672,13 +677,21 @@ fn a_granted_serve_crosses_the_branch_and_says_who_asked() {
 #[test]
 fn the_family_total_is_the_sum_of_what_its_members_avoided() {
     let f = family();
+    // The serve that ingests, so the capture's hash of the focus file is on
+    // record; every member then states it, because a pull is credited only
+    // for a file the caller said it held.
+    f.json(&f.main, &known_state(&[]));
+    let alpha = f.rows(&format!(
+        "SELECT content_sha256 FROM n_file_revision WHERE path = '{ALPHA}'"
+    ));
+    let held = alpha[0][0].clone();
     let mut by_member: Vec<(&str, u64)> = Vec::new();
     for (name, cwd) in [
         ("main", &f.main),
         ("ancestry", &f.ancestry),
         ("divergent", &f.divergent),
     ] {
-        let doc = f.json(cwd, &known_state(&[]));
+        let doc = f.json(cwd, &known_state(&["--known-hash", &held]));
         by_member.push((name, doc["estimated_tokens_avoided"].as_u64().unwrap()));
     }
     assert!(

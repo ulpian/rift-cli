@@ -42,6 +42,7 @@
 //! [`held_diff_of`]: crate::held_diff::held_diff_of
 
 use rift_recall_ledger::hunks::{compute_hunks, is_binary, split_lines, Hunk};
+use rift_recall_substrate::worktree::CurrentFile;
 use rift_recall_substrate::SubstrateReader;
 use rift_store::CanonicalStore;
 
@@ -256,17 +257,12 @@ pub async fn basis_bytes_for_path(
 /// that has since moved. That is the one wrong answer this verb must never
 /// give, because a caller believes it and skips the re-read.
 ///
-/// `None` when the reader is not bound to a checkout, the path is not a safe
-/// repo-relative file, or the file is past the diff ceiling — each of which
-/// leaves the caller on the projection route, which is the conservative arm.
+/// Refused, with the reason, when the reader is not bound to a checkout, the
+/// path is not a safe repo-relative file inside it, or the file is past the
+/// diff ceiling: the caller then reads the file itself.
 #[must_use]
-pub fn current_worktree_bytes(
-    reader: &impl SubstrateReader,
-    path: &str,
-) -> Option<(String, Vec<u8>)> {
-    let root = reader.worktree_root()?;
-    let (blob, bytes) = rift_recall_substrate::worktree::hash_blob_bytes(&root, path)?;
-    (bytes.len() <= MAX_DIFF_BYTES).then_some((blob.content_sha256, bytes))
+pub fn current_worktree_file(reader: &impl SubstrateReader, path: &str) -> CurrentFile {
+    rift_recall_substrate::current_file_of(reader, path, MAX_DIFF_BYTES as u64)
 }
 
 // ------------------------------------------------------- the basis ladder ---

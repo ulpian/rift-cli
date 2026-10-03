@@ -4,6 +4,8 @@
 //! The seeders are one per relation, so a fixture that needs one more row
 //! composes them rather than spelling a column list again.
 
+use std::path::Path;
+
 use rift_config::EffectiveConfig;
 use rift_core::Timestamp;
 use rift_recall_substrate::MemorySubstrate;
@@ -13,7 +15,41 @@ use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStor
 use crate::{RecallContext, ToolRequest};
 
 pub(super) const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+pub(super) const A_TEXT: &[u8] = b"fn a() {}\n";
+pub(super) const B_TEXT: &[u8] = b"fn b() {}\n";
 pub(super) const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// A checkout on disk a reader is bound to: the bytes an answer that says
+/// *current* is checked against.
+pub(super) struct Checkout {
+    dir: tempfile::TempDir,
+}
+
+impl Checkout {
+    pub(super) fn holding(files: &[(&str, &[u8])]) -> Self {
+        let checkout = Self {
+            dir: tempfile::tempdir().unwrap(),
+        };
+        for (path, bytes) in files {
+            checkout.write(path, bytes);
+        }
+        checkout
+    }
+
+    pub(super) fn write(&self, path: &str, bytes: &[u8]) {
+        let full = self.dir.path().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, bytes).unwrap();
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    pub(super) fn reader(&self) -> MemorySubstrate {
+        MemorySubstrate::local().with_worktree_root(self.dir.path())
+    }
+}
 
 pub(super) fn block<F: std::future::Future>(f: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
@@ -128,6 +164,28 @@ pub(super) fn seeded_store() -> SqliteStore {
         seed_read(&s, "c1", rev, tokens, 1);
     }
     s
+}
+
+/// [`seeded_store`] over real bytes, with a checkout that holds them: the
+/// fixture for an answer that says a file is unchanged, which is checked
+/// against the bytes on disk. Returns the store, the checkout, and the
+/// content addresses of `src/a.rs` and `src/b.rs`.
+pub(super) fn held_store() -> (SqliteStore, Checkout, String, String) {
+    let s = open_store();
+    seed_checkpoint(&s, "c1", 1);
+    let checkout = Checkout::holding(&[("src/a.rs", A_TEXT), ("src/b.rs", B_TEXT)]);
+    let (a, b) = (
+        rift_recall_substrate::worktree::sha256_hex(A_TEXT),
+        rift_recall_substrate::worktree::sha256_hex(B_TEXT),
+    );
+    for (rev, path, sha, tokens) in [
+        ("rev_a", "src/a.rs", &a, 400),
+        ("rev_b", "src/b.rs", &b, 50),
+    ] {
+        seed_revision(&s, rev, path, sha, sha, 10);
+        seed_read(&s, "c1", rev, tokens, 1);
+    }
+    (s, checkout, a, b)
 }
 
 pub(super) fn cfg() -> EffectiveConfig {

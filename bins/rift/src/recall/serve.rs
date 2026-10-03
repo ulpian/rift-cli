@@ -152,7 +152,7 @@ async fn answer_one_bounded_skill_verb(call: ServeCall<'_>) -> Result<Outcome> {
     // (owner decision O5) — it is the call graph that says so, not a check.
     scope.cross = grant;
     let provenance = provenance_oracle_for_this_serve(tool, &family, repo).await;
-    match crate::memory::tool_call_raw(
+    match crate::memory::tool_call_at_checkout(
         &store,
         repo,
         &scope,
@@ -178,7 +178,7 @@ async fn answer_one_bounded_skill_verb(call: ServeCall<'_>) -> Result<Outcome> {
 /// the agent waiting on it, and this call belongs to the pull channel, which
 /// is a short-lived process answering one question a caller asked.
 fn open_the_recall_store_of_this_family(family: &rift_git::Family) -> Result<SqliteStore> {
-    let db = rift_store::recall_db_for_family(family);
+    let db = crate::family::recall_db_of(family);
     rift_store::open_migrated(&db, &rift_store::recall_migrations())
 }
 
@@ -213,7 +213,7 @@ async fn provenance_oracle_for_this_serve(
     }
     Box::new(
         crate::provenance::CaptureProvenance::read_capture_side(
-            &rift_store::projection_db_for_family(family),
+            &crate::family::projection_db_of(family),
             repo,
         )
         .await,
@@ -366,6 +366,7 @@ fn rendered(verb: &str, resp: &ToolResponse, keys: Option<&ServeKeys>) -> Outcom
         "tokenizer": resp.tokenizer,
         "estimated_tokens_returned": resp.estimated_tokens_returned,
         "estimated_tokens_avoided": resp.estimated_tokens_avoided,
+        "avoided_basis": resp.avoided_basis.as_str(),
         "result": resp.payload,
     });
     if let (Some(keys), Some(fields)) = (keys, doc.as_object_mut()) {
@@ -378,9 +379,10 @@ fn rendered(verb: &str, resp: &ToolResponse, keys: Option<&ServeKeys>) -> Outcom
         format!("serve: {} {}\n", keys.call_id, keys.audit_id)
     });
     let human = format!(
-        "{verb}: {} tokens returned, ~{} avoided ({})\n{key_line}{}",
+        "{verb}: {} tokens returned, ~{} avoided, {} ({})\n{key_line}{}",
         resp.estimated_tokens_returned,
         resp.estimated_tokens_avoided,
+        resp.avoided_basis.as_str(),
         resp.tokenizer,
         serde_json::to_string_pretty(&resp.payload).unwrap_or_default(),
     );
@@ -424,7 +426,7 @@ fn failed(verb: &str, err: &ToolError) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rift_recall_serve::ToolName;
+    use rift_recall_serve::{AvoidedBasis, ToolName};
 
     /// Accounting is invariant across serving channels: two serves are
     /// two rows even when they return byte-identical figures, which is the
@@ -442,6 +444,7 @@ mod tests {
 
         let resp = ToolResponse {
             tool: ToolName::KnownState,
+            avoided_basis: AvoidedBasis::StatedRecorded,
             estimated_tokens_returned: 1168,
             estimated_tokens_avoided: 2_256_482,
             tokenizer: "cl100k_base",
@@ -521,6 +524,7 @@ mod tests {
         apply_migrations(&store, &recall_migrations()).expect("recall migrations");
         let resp = ToolResponse {
             tool: ToolName::KnownState,
+            avoided_basis: AvoidedBasis::StatedRecorded,
             estimated_tokens_returned: 3,
             estimated_tokens_avoided: 4,
             tokenizer: "cl100k_base",
@@ -558,6 +562,35 @@ mod tests {
         let unkeyed = rendered("known-state", &resp, None);
         assert!(!unkeyed.human.contains("serve: "));
         assert!(unkeyed.json.get("serve").is_none());
+    }
+
+    /// The figure is printed beside the rule it was booked under, in the
+    /// document and in the line a person reads.
+    #[test]
+    fn the_avoided_figure_carries_the_rule_it_was_booked_under() {
+        use rift_recall_events::MemdEvent;
+        let resp = ToolResponse {
+            tool: ToolName::DiffSince,
+            avoided_basis: AvoidedBasis::Unverified,
+            estimated_tokens_returned: 7,
+            estimated_tokens_avoided: 0,
+            tokenizer: "cl100k_base",
+            payload: json!({}),
+            event: MemdEvent::ManifestServed {
+                estimated_tokens_returned: 7,
+                estimated_tokens_avoided: 0,
+            },
+        };
+        let answer = rendered("diff-since", &resp, None);
+        assert_eq!(answer.json["avoided_basis"], "unverified");
+        assert_eq!(answer.json["estimated_tokens_avoided"], 0);
+        assert!(
+            answer
+                .human
+                .starts_with("diff-since: 7 tokens returned, ~0 avoided, unverified (cl100k_base)"),
+            "{}",
+            answer.human
+        );
     }
 
     /// Refusals are neutral tags with an honest exit class: "you asked wrong"
@@ -604,6 +637,7 @@ mod tests {
 
         let resp = ToolResponse {
             tool: ToolName::KnownState,
+            avoided_basis: AvoidedBasis::StatedRecorded,
             estimated_tokens_returned: 12,
             estimated_tokens_avoided: 340,
             tokenizer: "cl100k_base",
@@ -665,6 +699,7 @@ mod tests {
         apply_migrations(&store, &recall_migrations()).expect("recall migrations");
         let resp = ToolResponse {
             tool: ToolName::KnownState,
+            avoided_basis: AvoidedBasis::StatedRecorded,
             estimated_tokens_returned: 1,
             estimated_tokens_avoided: 2,
             tokenizer: "cl100k_base",

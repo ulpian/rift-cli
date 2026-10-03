@@ -226,7 +226,7 @@ fn family_projection(
         return Ok(None);
     };
     let store = t.phase("open_store", || {
-        rift_store::open_capture_projection(rift_store::projection_db_for_family(&family))
+        rift_store::open_capture_projection(crate::family::projection_db_of(&family))
     })?;
     let repo_id = t.phase("repo_id", || family.family_id.to_string());
     Ok(Some((store, repo_id)))

@@ -26,7 +26,8 @@ use rift_recall_validity::{
 use rift_store::{CanonicalStore, Row};
 use serde_json::{json, Value};
 
-use super::{internal, sighting, HUNK_RANGES_SQL};
+use super::credit::Evidence;
+use super::{internal, HUNK_RANGES_SQL};
 use crate::envelope::{manifest_event, provenance_trust};
 use crate::{
     RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse, COST_NOTE,
@@ -57,6 +58,9 @@ struct PackAssembly<'a> {
     known: BTreeSet<&'a str>,
     /// The turn the caller's window last read each revision it holds.
     seen_turns: &'a BTreeMap<(String, String), u64>,
+    /// What the checkout and the record say about the ranked files: a file
+    /// is served as held only where the checkout still holds it.
+    evidence: Evidence,
     summaries: SummaryStore,
     digests: MemoryDigestStore,
     snapshot: WorktreeSnapshot,
@@ -79,7 +83,10 @@ impl ServeDispatcher<'_> {
     ) -> Result<ToolResponse, ToolError> {
         let (ranked, _in_scope) = Self::ranked_candidates(req, ctx).await?;
         let key = pack_key(&pack_inputs(req, &ranked, self.policy.version()));
-        let mut assembly = PackAssembly::new(req, citation_pass(&self.policy, &ranked))?;
+        let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
+        let evidence = Evidence::over(ctx, &known, &ranked).await;
+        let table = citation_pass(&self.policy, &ranked);
+        let mut assembly = PackAssembly::new(req, table, known, evidence)?;
         for (rank, lc) in ranked.iter().take(PACK_CANDIDATES).enumerate() {
             let ordinal = u32::try_from(rank).unwrap_or(u32::MAX).saturating_add(1);
             // The table IS the admission list: an artifact the pass refused to
@@ -100,10 +107,10 @@ impl ServeDispatcher<'_> {
                 cap,
             },
         )?;
-        let baseline = ranked
-            .iter()
-            .map(|l| l.candidate.est_tokens)
-            .fold(0u32, u32::saturating_add);
+        // The re-reads this pack spared: the ranked files the caller holds
+        // unchanged, and the changed ones whose older revision the caller
+        // holds, each only where this family recorded the read.
+        let baseline = assembly.evidence.pack_baseline(&assembly.known, &ranked);
         let sections = u32::try_from(pack.sections.len()).unwrap_or(u32::MAX);
         let total_tokens = pack.total_tokens;
         let payload = json!({
@@ -199,12 +206,9 @@ impl ServeDispatcher<'_> {
         evidence: &EvidenceRef,
     ) -> Result<(), ToolError> {
         let c = &lc.candidate;
-        let seen = sighting(
-            &assembly.known,
-            assembly.seen_turns,
-            &c.path,
-            &lc.content_sha256,
-        );
+        let seen = assembly
+            .evidence
+            .sighting(&assembly.known, assembly.seen_turns, lc);
         let validity = resolve(
             &assembly.summaries,
             &assembly.digests,
@@ -304,7 +308,12 @@ impl ServeDispatcher<'_> {
 }
 
 impl<'a> PackAssembly<'a> {
-    fn new(req: &'a ToolRequest, table: Citations) -> Result<Self, ToolError> {
+    fn new(
+        req: &'a ToolRequest,
+        table: Citations,
+        known: BTreeSet<&'a str>,
+        evidence: Evidence,
+    ) -> Result<Self, ToolError> {
         let pack_tokens = pack_tokens(req);
         let mut request = PackRequest::new(pack_tokens);
         request
@@ -314,8 +323,9 @@ impl<'a> PackAssembly<'a> {
         Ok(Self {
             request,
             table,
-            known: req.known_hashes.iter().map(String::as_str).collect(),
+            known,
             seen_turns: &req.seen_turns,
+            evidence,
             summaries: SummaryStore::new(),
             digests: MemoryDigestStore::default(),
             snapshot: WorktreeSnapshot::new(),

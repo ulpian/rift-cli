@@ -40,7 +40,7 @@ use self::verbs::{cost_hotspots, diff_since, file_if_changed};
 
 pub(crate) use self::render::fmt_share;
 pub(crate) use self::savings::{savings, savings_json, savings_report, SavingsReport};
-pub(crate) use self::verbs::tool_call_raw;
+pub(crate) use self::verbs::{tool_call_at_checkout, tool_call_raw};
 
 /// Route one `rift memory` subcommand to its handler. Repo-scoped: the target
 /// is the WORKTREE ROOT discovered upward from `root` (a subdirectory
@@ -55,7 +55,7 @@ pub(crate) fn run(cmd: &MemoryCmd, root: &Path) -> Result<Outcome> {
 
 async fn dispatch(cmd: &MemoryCmd, repo: &Path) -> Result<Outcome> {
     let family = crate::family::resolve_at(repo)?;
-    let db = rift_store::recall_db_for_family(&family);
+    let db = crate::family::recall_db_of(&family);
     let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
     let sub = GixSubstrate::open(repo)?;
 

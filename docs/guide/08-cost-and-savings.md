@@ -193,18 +193,28 @@ verb:
 
 | Verb | Baseline it stands in for |
 |---|---|
-| `known-state` | ingest-time read cost summed over every ranked candidate |
+| `known-state` | ingest-time read cost summed over the ranked candidates the caller stated, that the checkout still holds, and that this family recorded reading |
 | `diff-since` | the same sum over the loaded candidate set |
-| `changed-hunks` | the ingest-time read cost of the focus file |
-| `file-if-changed` | the ingest-time read cost of that one file |
-| `read-summary` | the bound file's read cost when valid; zero when stale |
-| `context-pack` | the sum over the ranked candidates the pack drew from |
+| `changed-hunks` against a held revision | the cost of the file on disk, only when this family recorded reading the revision the caller holds; the lines returned leave through `returned` |
+| `changed-hunks`, ranked | zero — it answers about no file the caller said it held |
+| `file-if-changed` | that file's read cost when it is stated, held by the checkout, and recorded as read; zero when it moved |
+| `read-summary` | the bound file's read cost when the binding matches the file on disk, stated and recorded as read; zero when stale |
+| `context-pack` | the `known-state` sum over the ranked candidates, plus the current cost of each changed file whose older revision the caller stated and this family recorded reading |
 | `retrieve-exact` | zero — you asked for the bytes; nothing was displaced |
 | `doc-read` | the declared native cost of reading that document unconverted |
 | A declined read | the real token count of the slice the read would have delivered |
 | A **prevented** read | the real token count of the lines Rift announced, at the revision it announced them for |
 | A substituted document read | the declared native cost of the document, against the sidecar as returned |
 | Refusals and invalidations | zero |
+
+A pull that states no hash books **zero**.
+A manifest over two hundred candidates is a list, not two hundred spared reads: the only file a pull demonstrably spared is one the caller said it held, that the checkout still holds, and that this family is recorded as having read.
+The caller's word alone is not enough, because a figure Rift publishes rests on what Rift recorded, not on text an agent wrote, and the projection's word is not enough either, because it trails every edit made since the last checkpoint.
+The record is one query per call against the recall projection, and the checkout is one read of each file a claim is made about, both in the process that serves the pull, never on a hook decision's path.
+A changed file earns nothing on a list answer, which returns no lines and leaves the read to do; on `changed-hunks` and `context-pack`, which carry its changed lines, it earns its current cost less those lines, and only against an older revision the caller stated and this family recorded reading.
+A stated file the checkout holds but no read recorded is still answered as unchanged, and its entry carries `"avoided_basis": "stated_unrecorded"` so the withheld credit is visible; a stated file the checkout no longer holds carries `worktree_sha256`, and one it cannot read carries `unverified` with the reason.
+Each response names the rule it was booked under as `avoided_basis` beside the figure: `stated_recorded`, `none_stated`, `unverified` (hashes stated, but no checkout to check them against, so the answer is the projection's view and books zero), `declared` (a document or a path listing), or `not_credited` (exact retrieval, the cost view, the ranked hunk shape).
+Audit rows written before this rule keep the figures they were booked with; the relation is append-only and nothing is re-booked.
 
 Two properties follow. **Avoided is net, not gross**: the figure subtracts what
 the response cost, since publishing the gross baseline would double-count

@@ -16,6 +16,7 @@ use rift_recall_events::MemdEvent;
 use rift_recall_ledger::candidates::{load_candidates_with_scope, LoadedCandidate};
 use rift_recall_ledger::provenance::{commit_oids, hunk_origins, origin_of, HunkOrigin};
 use rift_recall_policy::TurnBudget;
+use rift_recall_substrate::worktree::CurrentFile;
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_types::{OmitReason, ProvenanceOracle, Trust};
 use rift_recall_validity::trust::serialize_untrusted;
@@ -26,6 +27,7 @@ use rift_recall_validity::{
 use rift_store::{CanonicalStore, Row};
 use serde_json::{json, Value};
 
+use super::credit::{recorded_read, STATED_UNRECORDED};
 use super::{fit_with_provenance, internal, manifest_cap, targeted_pull, HUNK_RANGES_SQL};
 use crate::envelope::{envelope_view, manifest_event, omit_tag, provenance_trust};
 use crate::held_diff::{self, Basis, HeldDiff, RedactedDiff};
@@ -62,13 +64,12 @@ struct PullGate<'a> {
 }
 
 /// The file the caller named, resolved to the two revisions the verb diffs.
-struct Revisions<'a> {
-    /// The current revision's row — the most recently touched one.
-    row: &'a LoadedCandidate,
-    /// What the file is now: the checkout's hash, or the projection's.
+struct Revisions {
+    /// What the file is now: the hash of the bytes in the checkout.
     current_hash: String,
-    /// The checkout's bytes, when a checkout was there to read.
-    current_bytes: Option<Vec<u8>>,
+    /// The bytes in the checkout, read once so the hash, the diff and the
+    /// full-file cost all describe the same revision.
+    current_bytes: Vec<u8>,
     /// The caller's basis, resolved through the path-bound resolver.
     basis_hash: String,
 }
@@ -91,6 +92,10 @@ struct Pull<'a> {
     validity: Validity,
     basis_hash: String,
     current_hash: String,
+    /// Whether this family recorded a read of the caller's basis. A hash the
+    /// caller could have found anywhere is not evidence that those bytes were
+    /// ever in a window; a recorded read is, and only it earns the credit.
+    basis_recorded: bool,
 }
 
 /// The changed places of the current file, laid out for a reader.
@@ -269,11 +274,12 @@ impl ServeDispatcher<'_> {
             }),
             containment.as_ref(),
         );
-        let baseline = top.candidate.est_tokens;
+        // The ranked shape answers about no file the caller said it held, so
+        // it spared no read anyone can point to.
         Ok(Self::respond(
             ToolName::ChangedHunks,
             payload,
-            baseline,
+            0,
             budget,
             manifest_event,
         ))
@@ -281,7 +287,7 @@ impl ServeDispatcher<'_> {
 }
 
 impl<'a> Pull<'a> {
-    fn new(gate: &'a PullGate<'a>, revisions: &Revisions<'_>) -> Self {
+    fn new(gate: &'a PullGate<'a>, revisions: &Revisions, basis_recorded: bool) -> Self {
         let handle = format!("file:{}@sha256:{}", gate.path, revisions.current_hash);
         let trust = provenance_trust(&handle);
         let validity = resolve(
@@ -297,6 +303,7 @@ impl<'a> Pull<'a> {
             validity,
             basis_hash: revisions.basis_hash.clone(),
             current_hash: revisions.current_hash.clone(),
+            basis_recorded,
         }
     }
 
@@ -306,6 +313,27 @@ impl<'a> Pull<'a> {
             doc: ServeDispatcher::with_containment(doc, self.gate.containment),
             baseline,
         }
+    }
+
+    /// What an answer that spared a re-read books: the whole of `baseline`
+    /// when the caller's basis is a recorded read, nothing when it is not.
+    fn credit(&self, baseline: u32) -> u32 {
+        if self.basis_recorded {
+            return baseline;
+        }
+        0
+    }
+
+    /// Say on the answer that its credit was withheld because the caller's
+    /// basis was never recorded as read; the answer itself stands.
+    fn attach_basis(&self, doc: &mut Value) {
+        if self.basis_recorded {
+            return;
+        }
+        let Some(obj) = doc.as_object_mut() else {
+            return;
+        };
+        obj.insert("avoided_basis".to_owned(), json!(STATED_UNRECORDED));
     }
 
     /// A named non-answer that carries both addresses and claims nothing.
@@ -353,7 +381,7 @@ impl<'a> Pull<'a> {
     /// have to read, and the sealed constructor is what says so — this handler
     /// never spells `known_unchanged` itself.
     fn unchanged(&self, est_tokens: u32) -> Answer {
-        let doc = json!({
+        let mut doc = json!({
             "tool": "changed_hunks",
             "path": self.gate.path,
             "state": self.constructor_state(SeenStatus::SeenSameHash { last_seen_turn: None }, None, 0),
@@ -362,7 +390,8 @@ impl<'a> Pull<'a> {
             "omitted": 0,
             "truncated": false,
         });
-        self.answer(doc, est_tokens)
+        self.attach_basis(&mut doc);
+        self.answer(doc, self.credit(est_tokens))
     }
 
     /// More changed places than a windowed answer stays smaller than the file
@@ -443,8 +472,7 @@ impl<'a> Pull<'a> {
     /// Nothing fits, so nothing is claimed: an all-elision text would read as
     /// "this file did not change".
     fn omitted(&self, omitted: usize) -> Value {
-        ServeDispatcher::with_containment(
-            json!({
+        let mut doc = json!({
                 "tool": "changed_hunks",
                 "path": self.gate.path,
                 "state": "omitted",
@@ -454,9 +482,9 @@ impl<'a> Pull<'a> {
                 "hunks": [],
                 "omitted": omitted,
                 "truncated": true,
-            }),
-            self.gate.containment,
-        )
+        });
+        self.attach_basis(&mut doc);
+        ServeDispatcher::with_containment(doc, self.gate.containment)
     }
 
     /// The content answer, fitted to the cap with the story sacrificed before
@@ -508,12 +536,13 @@ impl<'a> Pull<'a> {
             });
             self.attach_story(&mut doc, detail, story);
             self.attach_gate(&mut doc);
+            self.attach_basis(&mut doc);
             ServeDispatcher::with_containment(doc, self.gate.containment)
         };
         let (doc, _kept) = fit_with_provenance(manifest_cap(req, budget), n, &build);
         Answer {
             doc,
-            baseline: shown.baseline,
+            baseline: self.credit(shown.baseline),
         }
     }
 
@@ -642,8 +671,13 @@ async fn pull<S: CanonicalStore, R: SubstrateReader>(
             doc: ServeDispatcher::with_containment(doc, gate.containment),
             baseline: 0,
         })?;
-    let pull = Pull::new(gate, &revisions);
-    let est_tokens = revisions.row.candidate.est_tokens;
+    // The one question the credit turns on, asked once: did this family
+    // record reading the revision the caller says it holds?
+    let recorded = recorded_read(ctx, gate.path, &revisions.basis_hash).await;
+    let pull = Pull::new(gate, &revisions, recorded);
+    // The full-file cost is the cost of the bytes the answer describes, not
+    // of whichever revision a checkpoint last carried.
+    let est_tokens = rift_tokens::count(&String::from_utf8_lossy(&revisions.current_bytes));
     if revisions.basis_hash == revisions.current_hash {
         return Ok(pull.unchanged(est_tokens));
     }
@@ -665,26 +699,37 @@ async fn pull<S: CanonicalStore, R: SubstrateReader>(
 /// path in a checkout, and the answer it needs is about the bytes a reader
 /// would get from that path now. A projection's newest revision trails every
 /// edit made since the last checkpoint, and answering from it is how a
-/// changed file gets reported as one the caller already holds. The projection
-/// stays the fallback for a reader with no checkout to look in.
-async fn resolve_revisions<'a, S: CanonicalStore, R: SubstrateReader>(
+/// changed file gets reported as one the caller already holds. So there is no
+/// fallback to it: a checkout that cannot be read answers
+/// `current_unavailable` with the reason, and the caller reads the file.
+async fn resolve_revisions<S: CanonicalStore, R: SubstrateReader>(
     ctx: &RecallContext<'_, S, R>,
     path: &str,
     known_hashes: &[String],
-    loaded: &'a [LoadedCandidate],
-) -> Result<Revisions<'a>, Value> {
-    let Some(row) = current_revision(loaded, path) else {
+    loaded: &[LoadedCandidate],
+) -> Result<Revisions, Value> {
+    if current_revision(loaded, path).is_none() {
         return Err(json!({
             "tool": "changed_hunks",
             "path": path,
             "state": "invalid",
             "reason": "path_not_found",
         }));
+    }
+    let (current_hash, current_bytes) = match held_diff::current_worktree_file(ctx.reader, path) {
+        CurrentFile::Present {
+            content_sha256,
+            bytes,
+        } => (content_sha256, bytes),
+        CurrentFile::Refused(why) => {
+            return Err(json!({
+                "tool": "changed_hunks",
+                "path": path,
+                "state": "current_unavailable",
+                "reason": why.tag(),
+            }))
+        }
     };
-    let now = held_diff::current_worktree_bytes(ctx.reader, path);
-    let current_hash = now
-        .as_ref()
-        .map_or_else(|| row.content_sha256.clone(), |(hash, _)| hash.clone());
     let Some(basis_hash) = held_basis(ctx.store, known_hashes, path).await else {
         return Err(json!({
             "tool": "changed_hunks",
@@ -694,9 +739,8 @@ async fn resolve_revisions<'a, S: CanonicalStore, R: SubstrateReader>(
         }));
     };
     Ok(Revisions {
-        row,
         current_hash,
-        current_bytes: now.map(|(_, bytes)| bytes),
+        current_bytes,
         basis_hash,
     })
 }
@@ -762,15 +806,9 @@ async fn held_basis(
 async fn fetch_bytes<S: CanonicalStore, R: SubstrateReader>(
     ctx: &RecallContext<'_, S, R>,
     pull: &Pull<'_>,
-    current_bytes: Option<Vec<u8>>,
+    current: Vec<u8>,
 ) -> Result<(Basis, Vec<u8>), Answer> {
     let path = pull.gate.path;
-    let current = match current_bytes {
-        Some(bytes) => Some(bytes),
-        None => {
-            held_diff::basis_bytes_for_path(ctx.store, ctx.reader, path, &pull.current_hash).await
-        }
-    };
     let basis = held_diff::resolve_basis_for_path(
         ctx.store,
         ctx.reader,
@@ -779,9 +817,9 @@ async fn fetch_bytes<S: CanonicalStore, R: SubstrateReader>(
         &pull.basis_hash,
     )
     .await;
-    match (current, basis) {
-        (Some(current), Some(basis)) => Ok((basis, current)),
-        _ => Err(pull.addressed("basis_unavailable")),
+    match basis {
+        Some(basis) => Ok((basis, current)),
+        None => Err(pull.addressed("basis_unavailable")),
     }
 }
 

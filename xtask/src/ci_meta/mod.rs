@@ -22,6 +22,8 @@
 //! * `ceilings` — no tracked `.rs` file over 1,500 lines and no function over
 //!   80, read by a lexer that masks comments and strings first.
 //! * `ignores` — every `#[ignore]` carries its reason.
+//! * `cache_root` — the `rift` binary resolves its cache root in one function,
+//!   the one its test build redirects to a temp directory.
 //!
 //! This file holds what the screens share — the file read, the two walkers
 //! that define "every first-party source file" and "every tracked path", the
@@ -31,6 +33,7 @@
 //! `REQUIRED_JOBS` is why a job cannot be quietly dropped from the workflow:
 //! the jobs enforce the invariants, and this list enforces the jobs.
 
+mod cache_root;
 mod ceilings;
 mod deleted_paths;
 mod fuzz;
@@ -45,6 +48,7 @@ mod workflow;
 
 use std::path::Path;
 
+pub use cache_root::one_cache_root_in_the_rift_binary;
 pub use ceilings::{ceilings_hold, Measured};
 pub use deleted_paths::deleted_paths_stay_deleted;
 pub use fuzz::fuzz_targets_all_run_in_ci;
@@ -77,6 +81,8 @@ pub struct MetaReport {
     pub ceilings: Measured,
     /// `#[ignore]` attributes the reason screen read.
     pub ignores: usize,
+    /// `bins/rift/src/` files the cache-root screen read.
+    pub cache_root_files: usize,
     /// Everything any screen objects to. Empty means `ci-meta` passes.
     pub violations: Vec<String>,
 }
@@ -192,10 +198,13 @@ pub fn run_all(root: &Path) -> Result<MetaReport, String> {
     v.extend(oversized);
     let (ignores, bare) = every_ignore_carries_a_reason(root)?;
     v.extend(bare);
+    let (cache_root_files, resolved) = one_cache_root_in_the_rift_binary(root)?;
+    v.extend(resolved);
     Ok(MetaReport {
         vocabulary_files,
         ceilings,
         ignores,
+        cache_root_files,
         violations: v,
     })
 }
@@ -253,6 +262,19 @@ mod tests {
             report.ignores >= 4,
             "the ignore screen read {} attributes",
             report.ignores
+        );
+    }
+
+    /// The runner dispatches the cache-root screen: its planting test calls
+    /// the screen directly, so only the count it leaves on the report shows
+    /// that `run_all` ran it over the binary's sources.
+    #[test]
+    fn the_runner_dispatches_the_cache_root_screen() {
+        let report = run_all(&workspace_root()).expect("meta checks run");
+        assert!(
+            report.cache_root_files > 100,
+            "the cache-root screen read {} files",
+            report.cache_root_files
         );
     }
 }

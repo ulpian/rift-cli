@@ -199,7 +199,7 @@ impl RunPaths {
         // verify` run from a linked worktree verifies the family's chain, not an
         // empty one keyed by the member's own path.
         let repo = crate::family::resolve_at(&cwd)?.family_id;
-        let cache_root = rift_store::resolve_cache_root(|k| std::env::var(k).ok());
+        let cache_root = crate::family::cache_root();
         let db = projection_db_under(&cache_root, &repo);
         Ok(Self {
             cwd,

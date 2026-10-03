@@ -250,15 +250,18 @@ mod tests {
     const CSV: &[u8] = b"name,cost\nalpha,1\n";
 
     /// The budget the protocol tests run under, which is deliberately not the
-    /// production one. macOS puts a freshly written executable through the
-    /// system policy service on its first exec, and that alone has been
-    /// measured here at over half a second — a fact about a stand-in script
-    /// nobody has run before, not about the helper, which is executed on every
-    /// build. The deadline has its own test; these have a protocol to check.
+    /// production one. A stand-in's first exec, the costly one, is taken out
+    /// of every budget by [`warm`]; what is left is a loaded machine
+    /// scheduling a shell, which is a fact about the machine and not about
+    /// the helper. The deadline has its own test; these have a protocol to
+    /// check.
     ///
     /// Gated with `stand_in`, its only users, until the protocol tests have a
     /// Windows stand-in of their own.
     const PATIENT: Duration = Duration::from_secs(30);
+
+    /// The one argument on which a stand-in exits at once, before its body.
+    const WARM: &str = "--warm";
 
     /// A stand-in helper: a script that ignores its arguments and behaves the
     /// way the test needs. Real conversions through the real binary are tested
@@ -269,8 +272,9 @@ mod tests {
     fn stand_in(dir: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::write(&path, script(body)).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        warm(&path);
         path
     }
 
@@ -282,15 +286,43 @@ mod tests {
     /// exactly as on Unix.
     #[cfg(windows)]
     fn stand_in(dir: &Path, name: &str, body: &str) -> PathBuf {
-        let script = dir.join(format!("{name}.sh"));
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let posix = dir.join(format!("{name}.sh"));
+        std::fs::write(&posix, script(body)).unwrap();
         let wrapper = dir.join(format!("{name}.cmd"));
         std::fs::write(
             &wrapper,
             format!("@\"{}\" \"%~dp0{name}.sh\" %*\r\n", bundled_sh().display()),
         )
         .unwrap();
+        warm(&wrapper);
         wrapper
+    }
+
+    /// The stand-in's text: `body`, behind a first line that answers [`WARM`].
+    fn script(body: &str) -> String {
+        format!("#!/bin/sh\n[ \"$1\" = {WARM} ] && exit 0\n{body}\n")
+    }
+
+    /// Run a freshly written stand-in once, outside any budget.
+    ///
+    /// macOS assesses a new executable file on its first exec. The first exec
+    /// of a script written a moment ago has been measured here at one and a
+    /// half to three seconds, against three hundredths of a second for the
+    /// second one, and the assessments of files exec'd at once run one after
+    /// another, machine-wide. Eight stand-ins written by eight concurrent
+    /// tests, on a machine building other test binaries, wait past any budget
+    /// before the first line of any of them runs, so a protocol test would
+    /// be measuring the queue. The warm run takes the queue out of every
+    /// budget below, the deadline test's included: that test is about
+    /// killing a helper that is running, not one that has not started.
+    fn warm(helper: &Path) {
+        let status = Command::new(helper)
+            .arg(WARM)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{} does not start", helper.display());
     }
 
     /// Git for Windows' own `sh.exe`, found from `git --exec-path`
@@ -391,11 +423,14 @@ mod tests {
     #[test]
     fn a_helper_that_overruns_the_budget_is_killed_and_the_read_is_left_alone() {
         let dir = scratch("slow");
-        // Sleeps far past any plausible budget, then would have answered.
+        // Sleeps far past any plausible budget. The sleeper records its own
+        // pid, and it is the helper's process itself: `exec` replaces the
+        // shell rather than forking below it, so the kill lands on the
+        // process that is sleeping.
         let helper = stand_in(
             &dir,
             "rift-doc",
-            r#"cat > /dev/null; sleep 30; printf '%s' '{"status":"ok","text":"late"}'"#,
+            r#"cat > /dev/null; exec sh -c 'echo $$ > "$0"; exec sleep 30' "${0%/*}/sleeper.pid""#,
         );
         let started = std::time::Instant::now();
         let result = ChildProcessConverter::at(helper)
@@ -407,7 +442,34 @@ mod tests {
             "the call waited for the child instead of killing it: {:?}",
             started.elapsed()
         );
+        assert_nothing_it_spawned_survives(&dir.join("sleeper.pid"));
     }
+
+    /// The process that was sleeping when the deadline fell is gone.
+    ///
+    /// The kill reaches the helper's own process and nothing below it, so a
+    /// stand-in that sleeps in a child of its shell leaves that child running
+    /// for as long as it sleeps, holding the pipes it inherited. No pid file
+    /// means the helper was killed before it started sleeping, and then there
+    /// is nothing that could have outlived it.
+    #[cfg(unix)]
+    fn assert_nothing_it_spawned_survives(pid_file: &Path) {
+        let Ok(pid) = std::fs::read_to_string(pid_file) else {
+            return;
+        };
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the sleeper {} outlived the kill", pid.trim());
+    }
+
+    /// Windows has no `kill -0`, and the stand-in there is a wrapper whose kill
+    /// never reached the shell below it anyway.
+    #[cfg(windows)]
+    fn assert_nothing_it_spawned_survives(_pid_file: &Path) {}
 
     /// Everything a child can say that is not an envelope is the same thing:
     /// one refusal, on which the caller leaves the read alone.

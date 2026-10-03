@@ -111,7 +111,12 @@ pub(crate) fn try_at(root: &Path) -> Option<Family> {
 /// # Errors
 /// Propagates [`resolve_at`].
 pub(crate) fn projection_db(root: &Path) -> Result<PathBuf> {
-    Ok(rift_store::projection_db_for_family(&resolve_at(root)?))
+    Ok(projection_db_of(&resolve_at(root)?))
+}
+
+/// The capture projection of a family already resolved, under [`cache_root`].
+pub(crate) fn projection_db_of(family: &Family) -> PathBuf {
+    rift_store::projection_db_for_family_under(&cache_root(), family)
 }
 
 /// Whether the repository at `root` is set up **on this machine**: its
@@ -127,7 +132,7 @@ pub(crate) fn projection_db(root: &Path) -> Result<PathBuf> {
 pub(crate) fn provisioned_here(root: &Path) -> bool {
     matches!(
         rift_git::family_of(root, MintPolicy::Never),
-        Ok((_, FamilyState::Minted(family))) if rift_store::projection_db_for_family(&family).exists()
+        Ok((_, FamilyState::Minted(family))) if projection_db_of(&family).exists()
     )
 }
 
@@ -137,7 +142,59 @@ pub(crate) fn provisioned_here(root: &Path) -> bool {
 /// # Errors
 /// Propagates [`resolve_at`].
 pub(crate) fn recall_db(root: &Path) -> Result<PathBuf> {
-    Ok(rift_store::recall_db_for_family(&resolve_at(root)?))
+    Ok(recall_db_of(&resolve_at(root)?))
+}
+
+/// The recall projection of a family already resolved, under [`cache_root`].
+pub(crate) fn recall_db_of(family: &Family) -> PathBuf {
+    rift_store::recall_db_for_family_under(&cache_root(), family)
+}
+
+/// The machine's cache root: the one place this binary resolves it.
+///
+/// Every state path the binary derives — the family's projections, the
+/// machine-id cache, the install salt's file, the Canopy store — starts here,
+/// and a `ci-meta` screen holds every other spelling out of this crate's
+/// production code. That is what makes the test build's root below total: an
+/// in-process test reaches the machine's cache only through this function,
+/// however many calls lie between the test and the store it opens.
+///
+/// A release build resolves exactly as `rift_store::resolve_cache_root` reads
+/// the process environment: `RIFT_CACHE_DIR`, then `XDG_CACHE_HOME`, then the
+/// platform default.
+#[cfg(not(test))]
+pub(crate) fn cache_root() -> PathBuf {
+    cache_root_from(|key| std::env::var(key).ok())
+}
+
+/// The test build's cache root: one directory per test process, created once
+/// under the system temp dir and never the developer's real cache.
+///
+/// Tests run as threads of one process, so a per-test root would need the
+/// root threaded through every production path a test reaches; one root per
+/// process keeps the production signatures as they are. Tests stay apart
+/// because every store under it is keyed by a family minted in the test's own
+/// temp repository. Setting `RIFT_CACHE_DIR` from a test instead would race
+/// every other thread reading the environment. `cfg(test)` is set only when
+/// this crate's own unit tests are compiled, so no build of the `rift` binary
+/// — release, debug, or the one integration tests spawn — contains this body.
+#[cfg(test)]
+pub(crate) fn cache_root() -> PathBuf {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        tempfile::Builder::new()
+            .prefix("rift-test-cache-")
+            .tempdir_in(std::env::temp_dir())
+            .expect("the test process's cache root is created under the system temp dir")
+            .keep()
+    })
+    .clone()
+}
+
+/// [`cache_root`]'s release resolution over an injected environment lookup —
+/// the seam its resolution order is tested through.
+fn cache_root_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
+    rift_store::resolve_cache_root(env)
 }
 
 /// Forget every memoized resolution of one family: the entries whose
@@ -480,5 +537,48 @@ mod tests {
             serde_json::json!(before.family_id.as_str())
         );
         assert!(!out.human.contains("The ids changed."));
+    }
+
+    /// The release resolution keeps the documented order: the explicit
+    /// override, then the XDG cache home, then the platform default.
+    #[test]
+    fn the_release_cache_root_reads_the_override_then_xdg_then_the_platform_default() {
+        let table = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        static ALL: [(&str, &str); 4] = [
+            ("RIFT_CACHE_DIR", "/override"),
+            ("XDG_CACHE_HOME", "/xdg"),
+            ("HOME", "/home/u"),
+            ("LOCALAPPDATA", "/local"),
+        ];
+        assert_eq!(cache_root_from(table(&ALL)), PathBuf::from("/override"));
+        assert_eq!(cache_root_from(table(&ALL[1..])), PathBuf::from("/xdg"));
+        let platform = if cfg!(windows) {
+            PathBuf::from("/local")
+        } else {
+            PathBuf::from("/home/u/.cache")
+        };
+        assert_eq!(cache_root_from(table(&ALL[2..])), platform);
+    }
+
+    /// An in-process test never reaches the developer's cache: every store
+    /// path this crate derives sits under one temp root per test process.
+    #[test]
+    fn a_test_process_derives_every_store_under_its_own_temp_root() {
+        let root = cache_root();
+        assert!(root.starts_with(std::env::temp_dir()), "{}", root.display());
+        assert!(root.is_dir());
+        assert_eq!(cache_root(), root, "one root for the whole process");
+
+        let tmp = tempfile::tempdir().unwrap();
+        fake_repo(tmp.path()).unwrap();
+        assert!(projection_db(tmp.path()).unwrap().starts_with(&root));
+        assert!(recall_db(tmp.path()).unwrap().starts_with(&root));
     }
 }
