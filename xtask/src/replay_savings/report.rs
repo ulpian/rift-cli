@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use super::bucket::Bucket;
 use super::census::{CensusRow, FirstSightSizes};
+use super::shell_shape::{Shape, ShapeRow};
 use super::worktree::FactsSource;
 
 /// How many calls landed somewhere, and the tokens their results returned.
@@ -90,6 +91,10 @@ pub struct Report {
     /// file this checkout actually has. A command that names a work-tree file
     /// and prints part of it is a read whatever else it does.
     pub invisible_shell_named_file: Tally,
+    /// The same calls by the shape the grammar refused, decided from the
+    /// command line alone: every one on the loose bound, and the part naming a
+    /// work-tree file.
+    pub invisible_shell_shapes: BTreeMap<Shape, ShapeRow>,
     /// Every call to the shell tool, recognised or not.
     pub shell_calls: u64,
     /// How many of them the pinned grammar recognised at all.

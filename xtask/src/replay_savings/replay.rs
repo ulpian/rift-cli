@@ -21,6 +21,7 @@ use super::history::History;
 use super::inheritance::{inheritance_of, leads, WindowLead};
 use super::options::Options;
 use super::report::{finish, land, Report};
+use super::shell_shape::count_shape;
 use super::transcript::{load_window, tree_stems, tree_windows, Call, Event, Window};
 use super::worktree::{path_key, FileFacts, Worktree};
 
@@ -326,12 +327,19 @@ fn note_an_invisible_shell_read(ctx: &mut Ctx<'_>, call: &Call, tokens: u64) -> 
         return false;
     }
     ctx.report.invisible_shell.add(tokens);
-    let named = command.is_some_and(|command| {
-        names_a_work_tree_file(command, call, ctx.worktree, ctx.state.commit)
-    });
+    let Some(command) = command else {
+        return true;
+    };
+    let named = names_a_work_tree_file(command, call, ctx.worktree, ctx.state.commit);
     if named {
         ctx.report.invisible_shell_named_file.add(tokens);
     }
+    count_shape(
+        &mut ctx.report.invisible_shell_shapes,
+        command,
+        named,
+        tokens,
+    );
     true
 }
 

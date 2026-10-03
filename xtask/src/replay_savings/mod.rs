@@ -136,6 +136,10 @@ mod render;
 mod replay;
 mod report;
 mod sections;
+#[cfg(test)]
+mod shape_fixture;
+mod shell_lex;
+mod shell_shape;
 mod transcript;
 mod worktree;
 
@@ -147,6 +151,7 @@ pub use options::{parse_args, run, Options};
 pub use render::{render_json, render_table, SCHEMA_VERSION};
 pub use replay::replay;
 pub use report::{share_percent, Report, Tally};
+pub use shell_shape::{Family, Filter, Shape, ShapeRow};
 pub use worktree::FactsSource;
 
 #[cfg(test)]

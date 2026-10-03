@@ -12,7 +12,7 @@ use super::classify::NarrowClass;
 use super::report::{share_percent, Report, Tally};
 use super::sections::{
     declined_by_the_client, extend_document, facts_header, first_sight_sizes, history_lines,
-    later_first_reads, machine_formats, sibling_classes,
+    later_first_reads, machine_formats, refused_shapes, sibling_classes,
 };
 use super::worktree::MAX_INLINE_HASH_BYTES;
 
@@ -278,6 +278,7 @@ fn what_is_left(report: &Report, denominator: u64) -> String {
         commas(report.invisible_shell_named_file.calls),
         commas(report.invisible_shell_named_file.tokens)
     ));
+    out.push_str(&refused_shapes(report));
     out.push_str(&format!(
         "  {:<48}{:>9}{:>15}\n",
         "shell calls / of them recognised by the grammar",
