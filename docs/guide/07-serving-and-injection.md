@@ -293,8 +293,9 @@ way far more often than through its read tool. The grammar has two levels. The
 `bat`, `batcat`, `head`, `tail`, `sed -n 'A,Bp'`, the `grep` family and `rg` on
 one named path, plus a listing grammar of the same shape (`ls`, `find … -name`,
 `rg --files`). A search on that one path may carry the flags that only choose
-and number the file's own lines (`-n`, `-i`, `-w`, `-x`, `-F`, `-E` on `grep`,
-a context count `-A`, `-B` or `-C N`, a pattern given with `-e`), and it stays
+and number the file's own lines or count them (`-n`, `-i`, `-w`, `-x`, `-c`,
+`-F`, `-E` on `grep`, a context count `-A`, `-B` or `-C N`, a pattern given
+with `-e`), and it stays
 what a bare one is: recognised, with no coverage, because which lines it
 printed is the file's to decide. Those options may stand anywhere before `--`,
 after the pattern or the path too, because the `grep` an agent's shell runs

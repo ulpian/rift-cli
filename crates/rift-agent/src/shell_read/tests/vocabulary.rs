@@ -57,6 +57,7 @@ fn every_grammar_form_yields_the_pinned_range() {
             read(file, ShellSpan::Matching),
         ),
         ("rg -n needle src/lib.rs", read(file, ShellSpan::Matching)),
+        ("grep -c needle src/lib.rs", read(file, ShellSpan::Matching)),
         ("ls crates", listing("crates", None)),
         ("ls -la crates", listing("crates", None)),
         ("ls -l -a crates", listing("crates", None)),
@@ -291,6 +292,32 @@ fn a_flagged_search_composes_as_a_bare_one_does() {
         )]),
     )]);
     assert!(read_of(command).is_none(), "{command} grants no coverage");
+}
+
+/// **A count of the matches in one file is a search of that file.**
+///
+/// `-c` prints how many lines matched instead of the lines, which is still a
+/// number only the one file's bytes decide, and still no interval of it. So
+/// it is recognised exactly as the search it counts, with no coverage, and
+/// it combines with the other pinned flags wherever they stand.
+#[test]
+fn a_count_of_the_matches_in_one_file_is_a_search_of_it() {
+    let file = "src/lib.rs";
+    let cases: &[(&str, ShellCall)] = &[
+        ("grep -c needle src/lib.rs", read(file, ShellSpan::Matching)),
+        (
+            "grep -ci needle src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
+        ("grep -cE 'a|b' src/lib.rs", read(file, ShellSpan::Matching)),
+        ("grep needle src/lib.rs -c", read(file, ShellSpan::Matching)),
+        ("egrep -c 'a|b' src/lib.rs", read(file, ShellSpan::Matching)),
+        ("rg -c needle src/lib.rs", read(file, ShellSpan::Matching)),
+    ];
+    assert_each_recognised(cases);
+    for (command, _) in cases {
+        assert!(read_of(command).is_none(), "{command} grants no coverage");
+    }
 }
 
 /// **A command whose lines depend on the file grants no coverage.**

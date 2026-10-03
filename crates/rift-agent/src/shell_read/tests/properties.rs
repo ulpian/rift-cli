@@ -208,6 +208,7 @@ const PINNED_SEARCH_FLAGS: &[&str] = &[
     "-A12",
     "-nA 2",
     "-iC4",
+    "-c",
     "-e needle",
     "-ne needle",
 ];
@@ -217,7 +218,6 @@ const PINNED_SEARCH_FLAGS: &[&str] = &[
 const UNPINNED_SEARCH_FLAGS: &[&str] = &[
     "-r",
     "-R",
-    "-c",
     "-l",
     "-L",
     "-o",

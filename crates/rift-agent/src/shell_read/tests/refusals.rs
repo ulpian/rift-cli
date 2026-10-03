@@ -177,8 +177,8 @@ fn a_count_with_a_sign_is_never_read_as_a_count() {
 ///
 /// Each line here is one step outside the flagged single-file search: a
 /// flag that reaches past the one file (a recursion, a pattern file, a
-/// glob), one that prints something other than the file's lines (a count,
-/// a file name, a part of a line, the lines that did not match), a second
+/// glob), one that prints something other than the file's lines or their
+/// count (a file name, a part of a line, the lines that did not match), a second
 /// path or none, a context count that is not one, a long option, an option
 /// written after the pattern — which one `grep` permutes and another reads
 /// as a file — and a pattern a search tool would take for an option.
@@ -195,8 +195,11 @@ fn a_search_flag_the_grammar_does_not_pin_is_left_alone() {
         "rg -n -g '*.rs' needle src",
         "rg -n -t rust needle src",
         // Something other than the file's lines.
-        "grep -c needle src/lib.rs",
         "grep -l needle src/lib.rs",
+        "grep -cl needle src/lib.rs",
+        "grep -c needle src/lib.rs src/main.rs",
+        "grep -rc needle src",
+        "grep needle src/lib.rs -cv",
         "grep -L needle src/lib.rs",
         "grep -q needle src/lib.rs",
         "grep -o needle src/lib.rs",
@@ -257,7 +260,6 @@ fn a_search_flag_the_grammar_does_not_pin_is_left_alone() {
 fn a_late_option_the_grammar_does_not_pin_is_left_alone() {
     for command in [
         "grep -n needle -r src",
-        "grep needle src/lib.rs -c",
         "grep needle -A src/lib.rs",
         "grep needle src/lib.rs -A",
         "grep needle src/lib.rs -A -3",

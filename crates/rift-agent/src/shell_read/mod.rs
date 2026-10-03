@@ -565,23 +565,25 @@ const LIST_OPTIONS: &[&str] = &["-l", "-a", "-la", "-al"];
 
 /// The single-letter flags a `grep` search may carry: a line number, a case
 /// fold, a whole-word or whole-line match, a fixed string, the extended
-/// dialect.
+/// dialect, and a count of the matching lines in place of the lines.
 ///
-/// Each one changes which of the file's own lines are printed or how they are
-/// labelled, and nothing else, which is the whole condition. A flag that
-/// reaches past the file (`-r`, `-f`, `--include`) or prints something that
-/// is not a line of it (`-c`, `-l`, `-o`, `-q`), or the lines that did *not*
-/// match (`-v`), is not in the set, and a long option never is.
-const GREP_FLAGS: &str = "niwxFE";
+/// Each one changes which of the file's own lines are printed, how they are
+/// labelled, or prints how many there were, and nothing else, which is the
+/// whole condition: the output is still decided by the one file's bytes and
+/// is still no interval of it. A flag that reaches past the file (`-r`, `-f`,
+/// `--include`), prints something that is neither its lines nor their count
+/// (`-l`, `-o`, `-q`), or the lines that did *not* match (`-v`), is not in
+/// the set, and a long option never is.
+const GREP_FLAGS: &str = "niwxcFE";
 
 /// The same set for `egrep` and `fgrep`, which already name their dialect,
 /// so a second dialect letter on one of them is left alone rather than
 /// resolved.
-const GREP_VARIANT_FLAGS: &str = "niwx";
+const GREP_VARIANT_FLAGS: &str = "niwxc";
 
 /// The same set for `rg`, without `-E`: there it names a text encoding and
 /// takes a value, which is a different option behind the same letter.
-const RG_FLAGS: &str = "niwxF";
+const RG_FLAGS: &str = "niwxcF";
 
 /// The letters that take a context count — lines after, before and around
 /// each match — in every one of the four search commands.
