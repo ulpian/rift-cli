@@ -213,3 +213,23 @@ fn an_oversized_command_line_is_refused_on_its_length() {
     let fits = format!("cat {}", "a".repeat(MAX_COMMAND_BYTES - 4));
     assert!(recognise(&fits).is_some());
 }
+
+/// **A tilde inside a path word already under way is a letter.** Windows
+/// writes a long directory name in its 8.3 short form — `RUNNER~1` — and a
+/// shell expands a tilde only where it starts a word or follows the `=` or
+/// `:` of an assignment, so in the middle of a name it reads as itself.
+#[test]
+fn a_tilde_inside_a_started_path_word_is_part_of_the_name() {
+    assert_each_recognised(&[
+        (
+            "cat C:/Users/RUNNER~1/AppData/x.md",
+            read("C:/Users/RUNNER~1/AppData/x.md", ShellSpan::WholeFile),
+        ),
+        (
+            "head -n 5 /tmp/RUNNER~1/a.rs",
+            read("/tmp/RUNNER~1/a.rs", ShellSpan::FromTop { limit: Some(5) }),
+        ),
+        ("cat a.rs~", read("a.rs~", ShellSpan::WholeFile)),
+        ("ls PROGRA~1", listing("PROGRA~1", None)),
+    ]);
+}

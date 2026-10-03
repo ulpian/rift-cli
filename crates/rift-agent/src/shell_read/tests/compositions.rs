@@ -56,6 +56,10 @@ fn a_leading_cd_puts_every_path_under_its_directory() {
             "cd crates && cat C:/repo/src/lib.rs",
             read("C:/repo/src/lib.rs", ShellSpan::WholeFile),
         ),
+        (
+            "cd C:/Users/RUNNER~1/repo && cat src/lib.rs",
+            read("C:/Users/RUNNER~1/repo/src/lib.rs", ShellSpan::WholeFile),
+        ),
         ("cd crates && ls src", listing("crates/src", None)),
         ("cd crates && rg --files", listing("crates/.", None)),
     ]);

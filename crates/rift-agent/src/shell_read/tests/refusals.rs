@@ -133,3 +133,33 @@ fn a_separator_inside_a_quote_is_part_of_the_pattern() {
         Some(&listing("crates", Some("a|b.rs")))
     );
 }
+
+/// **A tilde a shell would expand is still refused.** Only one inside a path
+/// word already under way is a letter; at the start of a word, or after the
+/// `=` or `:` where an assignment expands one, it names a home directory,
+/// and a word the shell would rewrite is not a path this grammar reads.
+#[test]
+fn a_tilde_the_shell_would_expand_is_left_alone() {
+    for command in [
+        "cat ~",
+        "cat ~/src/lib.rs",
+        "cat ~user/src/lib.rs",
+        "cat ~+/src/lib.rs",
+        "cd ~ && cat src/lib.rs",
+        "cd ~/repo && cat src/lib.rs",
+        "cat src/lib.rs && cat ~/notes.md",
+        "cat a.rs | head -~1",
+        "FOO=~/x cat src/lib.rs",
+        "cat FOO=~/x",
+        "cat PATH=a:~/b",
+        "cat C:~/a.rs",
+        "cat RUNNER~1/$HOME",
+        "cat RUNNER~1/*.rs",
+        "cat 'RUNNER~1'",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}

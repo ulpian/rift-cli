@@ -403,10 +403,27 @@ struct Word {
 ///
 /// Bytes above ASCII are allowed: a path may be spelled in any script, and no
 /// character the shell acts on lives up there.
+///
+/// The `~` is excluded here and admitted only by [`inert_tilde`], which is
+/// the one position where it is a letter rather than a home directory.
 const fn bare_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(c, '_' | '.' | '/' | '-' | '+' | '=' | ',' | ':' | '@' | '%')
         || !c.is_ascii()
+}
+
+/// Whether a `~` continuing the unquoted word `word` so far is a literal
+/// character of it.
+///
+/// A shell expands a tilde only at the start of a word, or after the `=` or
+/// a `:` of an assignment; anywhere else inside a word it is the letter a
+/// Windows short name such as `RUNNER~1` is spelled with, which is the case
+/// this admits. A word not yet started, and one whose last character is an
+/// `=` or a `:`, are refused rather than told apart from an assignment —
+/// a missed recognition costs a saving, a wrong one a decision.
+fn inert_tilde(word: Option<&Word>) -> bool {
+    word.and_then(|word| word.text.chars().last())
+        .is_some_and(|last| !matches!(last, '=' | ':'))
 }
 
 /// Split a command line into words, or refuse it.
@@ -461,15 +478,17 @@ fn words(command: &str) -> Option<Vec<Word>> {
                     return None;
                 }
             }
-            _ if bare_char(c) => match current.as_mut() {
-                Some(word) => word.text.push(c),
-                None => {
-                    current = Some(Word {
-                        text: c.to_string(),
-                        quoted: false,
-                    });
+            _ if bare_char(c) || (c == '~' && inert_tilde(current.as_ref())) => {
+                match current.as_mut() {
+                    Some(word) => word.text.push(c),
+                    None => {
+                        current = Some(Word {
+                            text: c.to_string(),
+                            quoted: false,
+                        });
+                    }
                 }
-            },
+            }
             _ => return None,
         }
     }
