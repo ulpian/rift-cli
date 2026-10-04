@@ -8,7 +8,7 @@ use std::path::Path;
 
 use rift_core::Result;
 
-use super::archive::{archive_now, condense_queued};
+use super::archive::{archive_now, condense_queued, level_projection};
 use super::audit::{attribute_serve_job, read_identified_bytes, serve_audit_job};
 use super::git::{capture_guarded, effective_config, state_from_token, strategy_kind};
 use super::recovery::hook_number;
@@ -33,6 +33,36 @@ pub(super) enum LockWait {
     /// while the previous worker was on its last pass would otherwise leave
     /// that job to the next commit or the next `rift doctor`.
     Brief,
+}
+
+/// What one agent-hook job left on the checkpoint branch.
+#[derive(Debug, PartialEq, Eq)]
+enum Landed {
+    Nothing,
+    /// A checkpoint that finalized no session: an interval archive, or a
+    /// requested sweep that condensed.
+    Checkpoint,
+    /// A session-end condense: the session it finalized and its checkpoint.
+    Condensed(String, String),
+}
+
+/// What one drain landed: the condenses its callers witness, and whether
+/// anything at all wrote a checkpoint the projection has not seen.
+#[derive(Default)]
+struct Drained {
+    condensed: Vec<(String, String)>,
+    minted: bool,
+}
+
+/// How the levelling at a drain's tail ended. Every arm is a value: a drain
+/// never fails on it.
+#[derive(Debug, PartialEq, Eq)]
+enum Levelled {
+    Done,
+    /// The projection is being replaced; the next drain that writes a
+    /// checkpoint levels everything this one would have.
+    Deferred,
+    Failed,
 }
 
 /// The bound on [`LockWait::Brief`]: attempts × the pause between them.
@@ -61,6 +91,13 @@ pub(crate) fn drain_capture_queue(git_dir: Option<&str>) -> Result<()> {
 /// already runs after every commit and every session end, so a session whose
 /// agent went away without ending it is condensed at the family's idle
 /// floor by whichever pass comes next, under the lock this pass holds.
+///
+/// A pass that wrote a checkpoint then levels the projection once, still
+/// under the lock: a condense writes the shard and its chain entry, and
+/// nothing else projects the shard's own rows, so without this the live
+/// projection would hold none of the checkpoints a session end or a sweep
+/// made. A queued commit is not counted, because its archive already levels
+/// through the soak's verify.
 pub(super) fn drain_queues(git_dir: Option<&str>, wait: LockWait) -> Result<Vec<(String, String)>> {
     let Some(git_dir) = git_dir else {
         return Ok(Vec::new());
@@ -71,9 +108,13 @@ pub(super) fn drain_queues(git_dir: Option<&str>, wait: LockWait) -> Result<Vec<
     let Some(_lock) = acquire_queue_lock(git_dir, wait) else {
         return Ok(Vec::new());
     };
-    let condensed = drain_locked(git_dir);
-    let _ = super::sweep::sweep_idle_family(git_dir, now_ms(), None);
-    Ok(condensed)
+    let drained = drain_locked(git_dir);
+    let swept = super::sweep::sweep_idle_family(git_dir, now_ms(), None);
+    if drained.minted || !swept.condensed_checkpoints.is_empty() {
+        let levelled = level_after_condense(git_dir);
+        tracing::debug!(?levelled, "projection levelled after a condense");
+    }
+    Ok(drained.condensed)
 }
 
 /// [`drain_queues`] without the idle sweep at its tail: the drain the
@@ -89,14 +130,14 @@ pub(super) fn drain_jobs(git_dir: Option<&str>, wait: LockWait) -> Vec<(String, 
         return Vec::new();
     };
     match acquire_queue_lock(git_dir, wait) {
-        Some(_lock) => drain_locked(git_dir),
+        Some(_lock) => drain_locked(git_dir).condensed,
         None => Vec::new(),
     }
 }
 
 /// Every job and queued commit, drained under the lock the caller holds.
-fn drain_locked(git_dir: &Path) -> Vec<(String, String)> {
-    let mut condensed = Vec::new();
+fn drain_locked(git_dir: &Path) -> Drained {
+    let mut drained = Drained::default();
     let now = now_ms();
     // Under the lock, on the same clock reading the lock decision used: a temp
     // file older than the lock-steal age is the corpse of a write that died
@@ -122,10 +163,17 @@ fn drain_locked(git_dir: &Path) -> Vec<(String, String)> {
             .filter(|(path, _)| attempted.insert(path.clone()))
             .collect();
         if agent_jobs.is_empty() && commits.is_empty() {
-            return condensed;
+            return drained;
         }
         for (path, job) in agent_jobs {
-            condensed.extend(run_agent_job(&t, git_dir, &path, &job));
+            match run_agent_job(&t, git_dir, &path, &job) {
+                Landed::Nothing => (),
+                Landed::Checkpoint => drained.minted = true,
+                Landed::Condensed(session, checkpoint) => {
+                    drained.minted = true;
+                    drained.condensed.push((session, checkpoint));
+                }
+            }
         }
         for (path, entry) in commits {
             match condense_queued(&t, git_dir, &entry, &path) {
@@ -156,24 +204,72 @@ fn acquire_queue_lock(git_dir: &Path, wait: LockWait) -> Option<crate::capture_q
     None
 }
 
+/// Level the projection with the checkpoint branch after a drain that wrote
+/// to it: the same walk `rift rebuild` runs, through the guarded projection
+/// open every writer uses. The walk reads every shard on the branch (the
+/// watermark is recorded, not yet used to skip), and each row is
+/// insert-or-ignore, so a shard already projected costs a read and no write.
+///
+/// Best-effort and never retried here. A replacement in progress is not a
+/// failure and costs no job an attempt, because no job owes this: the next
+/// drain that writes a checkpoint levels everything this one would have.
+fn level_after_condense(git_dir: &Path) -> Levelled {
+    let Some(work_tree) = rift_shadow::hooks::session_cache::work_tree_of(git_dir) else {
+        return Levelled::Failed;
+    };
+    let levelled =
+        rift_git::discover(&work_tree).and_then(|repo| level_projection(&repo.work_tree));
+    match levelled {
+        Ok(()) => Levelled::Done,
+        Err(e) if projection_busy(&e) => Levelled::Deferred,
+        Err(e) => {
+            tracing::warn!(error = %e, "projection not levelled after a condense");
+            Levelled::Failed
+        }
+    }
+}
+
 /// Run one journaled agent-hook job and settle its file: removed when done,
-/// kept-and-marked (bounded) when it failed. Returns the session finalized
-/// and the checkpoint minted, when the job was a condense that landed.
+/// kept-and-marked (bounded) when it failed. Says what the job left on the
+/// checkpoint branch, naming the session and checkpoint of a condense.
 fn run_agent_job(
     t: &crate::hooktime::HookTimer,
     git_dir: &Path,
     path: &Path,
     job: &crate::agent_queue::AgentJob,
-) -> Option<(String, String)> {
+) -> Landed {
+    match run_job_kind(t, git_dir, job) {
+        Ok(landed) => {
+            crate::agent_queue::remove(path);
+            landed
+        }
+        Err(e) if projection_busy(&e) => Landed::Nothing,
+        Err(e) => {
+            crate::agent_queue::record_failure(path, job, git_dir, &e.to_string());
+            Landed::Nothing
+        }
+    }
+}
+
+/// The work of one journaled job, by its kind.
+fn run_job_kind(
+    t: &crate::hooktime::HookTimer,
+    git_dir: &Path,
+    job: &crate::agent_queue::AgentJob,
+) -> Result<Landed> {
     use crate::agent_queue::JobKind;
 
-    let outcome = match &job.kind {
+    match &job.kind {
         JobKind::Condense {
             session_id,
             agent,
             repo_id,
-        } => condense_agent_job(t, job, session_id, agent, repo_id),
-        JobKind::Archive(archive) => interval_archive_job(t, job, archive).map(|()| None),
+        } => condense_agent_job(t, job, session_id, agent, repo_id).map(|condensed| {
+            condensed.map_or(Landed::Nothing, |(session, checkpoint)| {
+                Landed::Condensed(session, checkpoint)
+            })
+        }),
+        JobKind::Archive(archive) => interval_archive_job(t, job, archive).map(landed_if),
         JobKind::ReadTokens {
             tool_call_id,
             rel_path,
@@ -191,21 +287,25 @@ fn run_agent_job(
             *lines,
             *schema_version,
         )
-        .map(|()| None),
-        JobKind::ServeAudit(audit) => serve_audit_job(t, job, audit).map(|()| None),
-        JobKind::AttributeServe(claim) => attribute_serve_job(t, job, claim).map(|()| None),
-        JobKind::SearchIndex => rebuild_search_index_job(t, job).map(|()| None),
+        .map(|()| Landed::Nothing),
+        JobKind::ServeAudit(audit) => serve_audit_job(t, job, audit).map(|()| Landed::Nothing),
+        JobKind::AttributeServe(claim) => {
+            attribute_serve_job(t, job, claim).map(|()| Landed::Nothing)
+        }
+        JobKind::SearchIndex => rebuild_search_index_job(t, job).map(|()| Landed::Nothing),
         JobKind::DocConvert {
             rel_path,
             content_sha256,
-        } => convert_document_job(t, job, rel_path, content_sha256).map(|()| None),
-        JobKind::DocSweep => sweep_documents_job(t, job).map(|()| None),
+        } => convert_document_job(t, job, rel_path, content_sha256).map(|()| Landed::Nothing),
+        JobKind::DocSweep => sweep_documents_job(t, job).map(|()| Landed::Nothing),
         JobKind::SweepIdle { floor_ms } => Ok(sweep_idle_job(t, git_dir, job, *floor_ms)),
         JobKind::BasisSnapshot {
             rel_path,
             content_sha256,
             blob_oid,
-        } => snapshot_basis_job(t, job, rel_path, content_sha256, blob_oid).map(|()| None),
+        } => {
+            snapshot_basis_job(t, job, rel_path, content_sha256, blob_oid).map(|()| Landed::Nothing)
+        }
         JobKind::ToolResultTokens {
             tool_result_id,
             session_id,
@@ -223,18 +323,7 @@ fn run_agent_job(
             search,
             tree_key.as_ref(),
         )
-        .map(|()| None),
-    };
-    match outcome {
-        Ok(finalized) => {
-            crate::agent_queue::remove(path);
-            finalized
-        }
-        Err(e) if projection_busy(&e) => None,
-        Err(e) => {
-            crate::agent_queue::record_failure(path, job, git_dir, &e.to_string());
-            None
-        }
+        .map(|()| Landed::Nothing),
     }
 }
 
@@ -262,11 +351,20 @@ fn sweep_idle_job(
     git_dir: &Path,
     job: &crate::agent_queue::AgentJob,
     floor_ms: i64,
-) -> Option<(String, String)> {
-    t.phase("sweep_idle", || {
+) -> Landed {
+    let swept = t.phase("sweep_idle", || {
         super::sweep::sweep_idle_family(git_dir, job.queued_at_ms, Some(floor_ms))
     });
-    None
+    landed_if(!swept.condensed_checkpoints.is_empty())
+}
+
+/// [`Landed::Checkpoint`] when a job that finalizes no session wrote one.
+fn landed_if(minted: bool) -> Landed {
+    if minted {
+        Landed::Checkpoint
+    } else {
+        Landed::Nothing
+    }
 }
 
 /// The conversion budget one document gets in the detached worker.
@@ -665,7 +763,7 @@ fn interval_archive_job(
     t: &crate::hooktime::HookTimer,
     job: &crate::agent_queue::AgentJob,
     archive: &crate::agent_queue::IntervalArchive,
-) -> Result<()> {
+) -> Result<bool> {
     archive_if_still_owed(t, job, archive).map_err(|e| {
         if matches!(e, rift_core::RiftError::ProjectionBusy { .. }) {
             return e;
@@ -678,12 +776,13 @@ fn interval_archive_job(
 }
 
 /// [`interval_archive_job`]'s work: the commit to anchor to, the decision, and
-/// the archive the session-end condense and the sweep also run.
+/// the archive the session-end condense and the sweep also run. `true` when
+/// it wrote a checkpoint.
 fn archive_if_still_owed(
     t: &crate::hooktime::HookTimer,
     job: &crate::agent_queue::AgentJob,
     archive: &crate::agent_queue::IntervalArchive,
-) -> Result<()> {
+) -> Result<bool> {
     let repo = rift_git::discover(&job.work_tree)?;
     let reader = t.phase("gix_open", || {
         rift_git::GixBlobReader::open(&repo.work_tree)
@@ -691,7 +790,7 @@ fn archive_if_still_owed(
     // No commit to anchor a checkpoint to defers silently, as the hook always
     // did: the next due hook asks again.
     let Some(commit) = t.phase("head_hex", || reader.head_hex())? else {
-        return Ok(());
+        return Ok(false);
     };
     let store = t.phase("open_projection", || {
         rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
@@ -700,11 +799,11 @@ fn archive_if_still_owed(
         .build()
         .map_err(rift_core::RiftError::from)?;
     let Some(decision) = owed_interval_decision(&rt, &store, &repo, job, archive)? else {
-        return Ok(());
+        return Ok(false);
     };
     // A deferred interval archive changes no lifecycle: the session stays
     // live, and the checkpoint moves the next interval's start.
-    let _checkpoint = t.phase("archive", || {
+    let checkpoint = t.phase("archive", || {
         archive_now(
             &rt,
             &store,
@@ -716,7 +815,7 @@ fn archive_if_still_owed(
             job.queued_at_ms,
         )
     })?;
-    Ok(())
+    Ok(checkpoint.is_some())
 }
 
 /// The strategy's decision for a journaled interval archive, on the job's
@@ -1046,28 +1145,8 @@ mod tests {
     #[test]
     fn a_session_condense_without_a_recall_projection_archives_once() {
         let checkout = tempfile::tempdir().unwrap();
-        fixture_git(checkout.path(), &["init", "--quiet"]);
-        fixture_git(
-            checkout.path(),
-            &["commit", "--quiet", "--allow-empty", "-m", "fixture"],
-        );
-        let repo = rift_git::discover(checkout.path()).unwrap();
-        let family = crate::family::resolve_at(checkout.path()).unwrap();
+        let (repo, path) = queue_session_end(checkout.path(), "s-absent");
         let recall = crate::family::recall_db(checkout.path()).unwrap();
-        let cache = rift_shadow::hooks::SessionCache::new("s-absent", "claude-code", "ending", 1);
-        rift_shadow::hooks::write_cache(&repo.git_dir, &cache).unwrap();
-        let job = AgentJob {
-            schema_version: 1,
-            work_tree: checkout.path().to_owned(),
-            queued_at_ms: 1,
-            attempts: 0,
-            kind: JobKind::Condense {
-                session_id: "s-absent".into(),
-                agent: "claude-code".into(),
-                repo_id: family.family_id.to_string(),
-            },
-        };
-        let path = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();
         let git_dir = repo.git_dir.to_str().unwrap();
         let condensed = drain_jobs(Some(git_dir), LockWait::None);
         assert_eq!(condensed.len(), 1);
@@ -1238,6 +1317,104 @@ mod tests {
         assert!(crate::capture_queue::entries(&repo.git_dir).is_empty());
     }
 
+    #[test]
+    fn a_drained_session_end_condense_leaves_its_checkpoint_in_the_projection() {
+        let checkout = tempfile::tempdir().unwrap();
+        let (repo, path) = queue_session_end(checkout.path(), "s-level");
+        let git_dir = repo.git_dir.to_str().unwrap();
+        let condensed = drain_queues(Some(git_dir), LockWait::None).unwrap();
+        assert_eq!(condensed.len(), 1);
+        assert!(!path.exists());
+        let checkpoint = condensed[0].1.clone();
+        let db = crate::family::projection_db(checkout.path()).unwrap();
+        let store = rift_store::SqliteStore::open_read_only(&db).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let rows = |sql: &str| {
+            rt.block_on(rift_store::CanonicalStore::query_opt_i64(
+                &store,
+                sql,
+                &[rift_store::Value::text(checkpoint.clone())],
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            rows("SELECT COUNT(*) FROM checkpoint WHERE checkpoint_id = ?1"),
+            Some(1)
+        );
+        assert_eq!(
+            rows("SELECT COUNT(*) FROM session_in_checkpoint WHERE checkpoint_id = ?1"),
+            Some(1)
+        );
+        let watermarks = rt
+            .block_on(rift_store::CanonicalStore::count(
+                &store,
+                "ingest_watermark",
+            ))
+            .unwrap();
+        assert!(watermarks >= 1, "the levelling records where it got to");
+    }
+
+    #[test]
+    fn a_busy_projection_defers_the_condense_and_its_levelling_without_spending_an_attempt() {
+        let checkout = tempfile::tempdir().unwrap();
+        let (repo, path) = queue_session_end(checkout.path(), "s-busy");
+        let db = crate::family::projection_db(checkout.path()).unwrap();
+        let guard = rift_store::ProjectionReplacementGuard::acquire(&db).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let git_dir = repo.git_dir.to_str().unwrap();
+        for _ in 0..crate::capture_queue::MAX_ATTEMPTS + 2 {
+            assert!(drain_queues(Some(git_dir), LockWait::None)
+                .unwrap()
+                .is_empty());
+            assert_eq!(level_after_condense(&repo.git_dir), Levelled::Deferred);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(crate::agent_queue::jobs(&repo.git_dir).len(), 1);
+            assert!(crate::capture_queue::peek_errors(&repo.git_dir).is_empty());
+        }
+        drop(guard);
+        let condensed = drain_queues(Some(git_dir), LockWait::None).unwrap();
+        assert_eq!(condensed.len(), 1);
+        assert!(!path.exists());
+        let store = rift_store::SqliteStore::open_read_only(&db).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert_eq!(
+            rt.block_on(rift_store::CanonicalStore::count(&store, "checkpoint"))
+                .unwrap(),
+            1
+        );
+    }
+
+    /// A committed checkout with one session in `ending` and its session-end
+    /// condense journaled, as the `SessionEnd` hook leaves them.
+    fn queue_session_end(root: &Path, session: &str) -> (rift_git::RepoPaths, std::path::PathBuf) {
+        fixture_git(root, &["init", "--quiet"]);
+        fixture_git(
+            root,
+            &["commit", "--quiet", "--allow-empty", "-m", "fixture"],
+        );
+        let repo = rift_git::discover(root).unwrap();
+        let family = crate::family::resolve_at(root).unwrap();
+        let cache = rift_shadow::hooks::SessionCache::new(session, "claude-code", "ending", 1);
+        rift_shadow::hooks::write_cache(&repo.git_dir, &cache).unwrap();
+        let job = AgentJob {
+            schema_version: 1,
+            work_tree: root.to_owned(),
+            queued_at_ms: 1,
+            attempts: 0,
+            kind: JobKind::Condense {
+                session_id: session.into(),
+                agent: "claude-code".into(),
+                repo_id: family.family_id.to_string(),
+            },
+        };
+        let path = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();
+        (repo, path)
+    }
+
     fn fixture_git(root: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .args(["-c", "user.name=Fixture", "-c", "user.email=fixture-id"])
@@ -1275,7 +1452,10 @@ mod tests {
         };
         let path = crate::agent_queue::enqueue(git_dir.path(), &job).unwrap();
         let t = crate::hooktime::HookTimer::new("test", false);
-        assert_eq!(run_agent_job(&t, git_dir.path(), &path, &job), None);
+        assert_eq!(
+            run_agent_job(&t, git_dir.path(), &path, &job),
+            Landed::Nothing
+        );
         let (_, kept) = crate::agent_queue::jobs(git_dir.path()).pop().unwrap();
         assert_eq!(kept.attempts, 1, "kept, with the attempt counted");
         let notes = crate::capture_queue::peek_errors(git_dir.path());

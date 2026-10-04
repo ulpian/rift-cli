@@ -494,6 +494,10 @@ walks the redacted checkpoint branch through the ordinary append-only path, and
 because rows are content-addressed and written with `INSERT OR IGNORE`, running
 it over a healthy projection inserts nothing. It is a repair, not a reset.
 
+A condense writes the shard and its chain entry but not the shard's own rows (`checkpoint`, `session_in_checkpoint` and their siblings), so the detached worker levels the projection once at the end of any drain that wrote a checkpoint, under the queue lock it already holds.
+The walk reads the whole branch each time, because the watermark it records is not yet used to skip, so its cost grows with the branch: a few seconds of the detached worker's time per condense on a branch of about three hundred shards.
+It is best-effort: a projection that is being replaced defers it to the next drain without costing any job an attempt, and no hook ever waits on it.
+
 Usage and cost are on the restorable side for every shard that carries the usage artifact.
 A checkpoint's `usage.jsonl` freezes each settled model call of its session: the call's own key, its turn, its model, when it happened, the four token classes and how they were counted.
 The rebuild writes the session, the turn, the model call and its token usage back from each line under the live keys, and a row the live path already wrote wins.
