@@ -13,13 +13,15 @@
 //! length check refuses in one comparison.
 //!
 //! What is asserted beyond "no panic": a recognised call never invents a
-//! target. Every path or directory it reports is either a complete word that
-//! was on the line, one such word read from under the directory a genuinely
-//! leading `cd` named (the only thing a `cd` may do to a path), or the one
-//! directory `rg --files` implies — the property a mangled input could
-//! otherwise break silently. The words are cut by a quote-aware lexer of its
-//! own that also splits on `&&`, `;` and `|`, so a target joined to an
-//! operator with no space is still a whole word and a suffix of one never is.
+//! target. Every path or directory it reports is either the value the shell
+//! passes for a complete word of the line, one such value read from under the
+//! directory a genuinely leading `cd` named (the only thing a `cd` may do to a
+//! path), or the one directory `rg --files` implies — the property a mangled
+//! input could otherwise break silently. The words are cut by a quote-aware
+//! lexer of its own that also splits on `&&`, `;` and `|`, so a target joined
+//! to an operator with no space is still a whole word and a suffix of one
+//! never is; a quoted word counts by the value its quotes give it, never by
+//! its spelling, and a word the shell would compute counts not at all.
 //!
 //! The composition rules widened what reaches the classification rather than
 //! what it may conclude, so the same assertions are made over **every** read
