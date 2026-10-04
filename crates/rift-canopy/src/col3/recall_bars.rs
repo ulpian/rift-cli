@@ -1,8 +1,8 @@
-//! The Recall panel's read-vs-saved bar chart and the unit it is read in.
+//! The Recall panel's read-vs-saved bar chart.
 //!
-//! Separate from the panel so the one rule the bars carry — both on one scale,
-//! both in one unit, or tokens for both — sits beside the toggle that asks for
-//! dollars and the check that refuses them.
+//! Separate from the panel so the one rule the bars carry — both on one
+//! scale, both in tokens — sits apart from the headline that reads the same
+//! figures as a line.
 
 use crate::layout::Rect;
 use crate::render::frame::{Color, Frame};
@@ -13,46 +13,6 @@ use super::format::{f64_of, fmt_km};
 use super::recall::RecallView;
 use super::recall_period::RECALL_CHART_DY;
 use super::Col3;
-
-/// The unit the Recall card's bar chart is read in — a viewer's choice, like
-/// the period beside it.
-///
-/// Purely a *rendering* choice: both figures ride the same feed frame, so
-/// flipping it costs no read and cannot show two windows at once. It is also
-/// why the toggle emits no data request while the period buttons do.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RecallUnit {
-    /// Token counts, the unit both figures are actually measured in.
-    #[default]
-    Tokens,
-    /// The same figures valued in US dollars — an estimate over an estimate,
-    /// and marked as one by the mandatory leading tilde the money authority
-    /// renders.
-    Usd,
-}
-
-impl RecallUnit {
-    /// The chip's glyphs — what the bars are showing *now*, not what a press
-    /// would switch to. A control labelled with its own effect and a control
-    /// labelled with its own state are both defensible; showing the state is
-    /// the one that still reads correctly when nobody is about to press it.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            RecallUnit::Tokens => "tok",
-            RecallUnit::Usd => "usd",
-        }
-    }
-
-    /// The other unit — what a press selects.
-    #[must_use]
-    pub fn flipped(self) -> RecallUnit {
-        match self {
-            RecallUnit::Tokens => RecallUnit::Usd,
-            RecallUnit::Usd => RecallUnit::Tokens,
-        }
-    }
-}
 
 /// How many inner rows the read/saved bar chart takes: one per bar.
 const RECALL_BAR_ROWS: u16 = 2;
@@ -65,14 +25,8 @@ const RECALL_BAR_MIN_W: u16 = 24;
 /// One bar of the read-vs-saved chart: its row label and the tokens behind it.
 struct RecallBar {
     label: &'static str,
-    /// The token count — the measured figure, and the bar's proportion when
-    /// the card is read in tokens.
+    /// The token count — the measured figure and the bar's proportion.
     value: u64,
-    /// The same figure in micro-USD, when the money authority could value it.
-    micros: Option<i64>,
-    /// The pre-rendered dollar label (tilde mandatory), `Some` exactly when
-    /// [`Self::micros`] is.
-    usd_label: Option<String>,
     color: Color,
 }
 
@@ -86,22 +40,14 @@ struct BarColumns {
 /// The two figures the bar chart compares, or `None` when neither side of the
 /// window holds a token.
 ///
-/// Absence draws nothing, the rule the two headline chips already follow: a
-/// window with no reads and no avoided tokens has no proportion to show, and
-/// two empty rows labelled `read` and `saved` would look like a measured pair
-/// of zeroes rather than a question nobody answered. The rows the chart would
-/// have taken go back to the call chart.
+/// Absence draws nothing: a window with no reads and no avoided tokens has
+/// no proportion to show, and two empty rows labelled `read` and `saved` would
+/// look like a measured pair of zeroes rather than a question nobody answered.
+/// The rows the chart would have taken go back to the call chart.
 ///
-/// **Both figures come from the share**, so the bars stand with the
-/// `[N% of reads]` chip rather than with the `saved N% (…)` headline beside
-/// it. On a narrow period the two agree by construction — one cut reaches
-/// both. At `all` on a repository carrying a boundary marker they can differ,
-/// which is the *existing* difference between those two denominators, spelled
-/// out in the cost chapter's "every rate names its denominator": the headline
-/// asks what share of the context this plane was responsible for it did not
-/// send, the share asks what share of the tokens the agents would have read it
-/// avoided. The bars answer the second question, and it is the second question
-/// the chip beside them answers too.
+/// **Both figures come from the share**, the same one the headline's tokens
+/// and percentage are read from, so the line and the bars under it cannot
+/// describe two windows or two denominators.
 fn recall_bar_pair(col3: &Col3) -> Option<[RecallBar; 2]> {
     let RecallView::Data(sd) = &col3.savings else {
         return None;
@@ -114,8 +60,6 @@ fn recall_bar_pair(col3: &Col3) -> Option<[RecallBar; 2]> {
         RecallBar {
             label: "read",
             value: read,
-            micros: sd.usd_read_micros,
-            usd_label: sd.usd_read_label.clone(),
             // The token panel's accent: read tokens are spend, and that is
             // the colour spend already wears on this dashboard.
             color: Section::TokenUsage.accent(),
@@ -123,31 +67,9 @@ fn recall_bar_pair(col3: &Col3) -> Option<[RecallBar; 2]> {
         RecallBar {
             label: "saved",
             value: saved,
-            micros: sd.usd_saved_micros,
-            usd_label: sd.usd_label.clone(),
             color: Section::Recall.accent(),
         },
     ])
-}
-
-/// Whether the dollar view can be honoured: **both** bars valued, so the pair
-/// is still comparable.
-///
-/// One priced bar beside one unpriced one is worse than two token bars — it
-/// would draw a proportion nobody computed. So the fallback is all-or-nothing,
-/// and the card says why in its title rather than inventing a rate.
-pub(super) fn recall_usd_available(col3: &Col3) -> bool {
-    recall_bar_pair(col3).is_some_and(|bars| bars.iter().all(|bar| bar.micros.is_some()))
-}
-
-/// The unit the bars are actually drawn in: the viewer's choice, unless the
-/// dollar view has no honest basis.
-pub(super) fn recall_effective_unit(col3: &Col3) -> RecallUnit {
-    if col3.recall_unit == RecallUnit::Usd && !recall_usd_available(col3) {
-        RecallUnit::Tokens
-    } else {
-        col3.recall_unit
-    }
 }
 
 /// Draw the read-vs-saved bar chart under the period row, returning the rows
@@ -175,14 +97,13 @@ pub(super) fn draw_recall_bars(
     let Some(bars) = recall_bar_pair(col3) else {
         return 0;
     };
-    let unit = recall_effective_unit(col3);
-    let labels: Vec<String> = bars.iter().map(|bar| bar_label(unit, bar)).collect();
+    let labels: Vec<String> = bars.iter().map(|bar| fmt_km(f64_of(bar.value))).collect();
     let Some(columns) = bar_columns(inner, &labels) else {
         return 0;
     };
     let scale = bars
         .iter()
-        .map(|bar| bar_amount(unit, bar))
+        .map(|bar| f64_of(bar.value))
         .fold(0.0f64, f64::max);
     let shader = if unicode {
         CellShaderKind::Braille
@@ -202,7 +123,7 @@ pub(super) fn draw_recall_bars(
             h: 1,
         };
         let fraction = if scale > 0.0 {
-            bar_amount(unit, bar) / scale
+            f64_of(bar.value) / scale
         } else {
             0.0
         };
@@ -215,28 +136,6 @@ pub(super) fn draw_recall_bars(
         frame.put_str(value_x, y, value, theme.tile_value(bar.color));
     }
     RECALL_BAR_ROWS
-}
-
-/// The figure printed beside a bar: the pre-rendered dollar label in the
-/// dollar view, the token count otherwise.
-fn bar_label(unit: RecallUnit, bar: &RecallBar) -> String {
-    match (unit, bar.usd_label.as_deref()) {
-        (RecallUnit::Usd, Some(label)) => label.to_owned(),
-        _ => fmt_km(f64_of(bar.value)),
-    }
-}
-
-/// What a bar's length is proportioned on.
-///
-/// In dollars the bars are proportioned on the money, not the tokens: a
-/// partially-priced mix can value the same token counts differently, and a
-/// bar whose length disagreed with the figure printed beside it would be the
-/// one thing this chart must never do.
-fn bar_amount(unit: RecallUnit, bar: &RecallBar) -> f64 {
-    match (unit, bar.micros) {
-        (RecallUnit::Usd, Some(micros)) => f64_of(u64::try_from(micros.max(0)).unwrap_or(0)),
-        _ => f64_of(bar.value),
-    }
 }
 
 /// Where a bar row's three columns fall in `inner` for these value labels, or
@@ -271,7 +170,6 @@ mod tests {
     use crate::render::{AsciiBackend, Capabilities};
 
     use super::super::fixtures::{barred_col3, text_of};
-    use super::super::recall::recall_title;
     use super::super::{draw_one, SectionId};
 
     /// The bars go through the **render seam**, so the ASCII floor draws them
@@ -334,131 +232,6 @@ mod tests {
                  got {read_row} vs {saved_row}\n{text}"
             );
         }
-    }
-
-    /// The unit toggle flips what the bars read in, and the chip says which
-    /// unit is on screen now rather than which one a press would reach.
-    #[test]
-    fn the_unit_toggle_switches_the_bar_figures_and_names_the_live_unit() {
-        let mut col3 = barred_col3(10_000, 1_000);
-        if let RecallView::Data(sd) = &mut col3.savings {
-            sd.usd_read_micros = Some(50_000_000);
-            sd.usd_read_label = Some("~$50.00".to_owned());
-            sd.usd_saved_micros = Some(5_000_000);
-            sd.usd_label = Some("~$5.00".to_owned());
-        }
-        let render = |col3: &Col3| -> String {
-            let mut f = Frame::new(Size::new(44, 13));
-            let mut b = AsciiBackend::new(Capabilities::empty());
-            draw_one(
-                col3,
-                SectionId::Recall,
-                false,
-                false,
-                false,
-                f.rect(),
-                &mut b,
-                &mut f,
-            );
-            text_of(&f)
-        };
-
-        let tokens = render(&col3);
-        assert!(
-            tokens.contains("[tok]"),
-            "the live unit is named:\n{tokens}"
-        );
-        assert!(
-            tokens.contains("10k") && tokens.contains("1.0k"),
-            "{tokens}"
-        );
-        assert!(!tokens.contains("~$50.00"), "{tokens}");
-
-        col3.recall_unit = RecallUnit::Usd;
-        let dollars = render(&col3);
-        assert!(
-            dollars.contains("[usd]"),
-            "the live unit is named:\n{dollars}"
-        );
-        assert!(
-            dollars.contains("~$50.00") && dollars.contains("~$5.00"),
-            "both bars are valued, tilde mandatory:\n{dollars}"
-        );
-        // The title is untouched while the request can be honoured.
-        assert!(dollars.contains("recall "), "{dollars}");
-        assert!(!dollars.contains("no seeded price"), "{dollars}");
-    }
-
-    /// Asked for dollars with no seeded price, the card shows **tokens** and
-    /// says why in its title — it never invents a rate, and it never draws one
-    /// priced bar beside one unpriced one.
-    ///
-    /// All-or-nothing because a mixed pair would draw a proportion nobody
-    /// computed, which is worse than the token view the viewer did not ask
-    /// for but can at least read.
-    #[test]
-    fn dollars_without_a_seeded_price_fall_back_to_tokens_and_say_so() {
-        let mut col3 = barred_col3(10_000, 1_000);
-        col3.recall_unit = RecallUnit::Usd;
-        // Only the saved side priced: the pair is not comparable in dollars.
-        if let RecallView::Data(sd) = &mut col3.savings {
-            sd.usd_saved_micros = Some(5_000_000);
-            sd.usd_label = Some("~$5.00".to_owned());
-        }
-        assert!(!recall_usd_available(&col3), "half a basis is not a basis");
-        assert_eq!(recall_effective_unit(&col3), RecallUnit::Tokens);
-        assert_eq!(recall_title(&col3), "recall · no seeded price");
-
-        let mut f = Frame::new(Size::new(44, 13));
-        let mut b = AsciiBackend::new(Capabilities::empty());
-        draw_one(
-            &col3,
-            SectionId::Recall,
-            false,
-            false,
-            false,
-            f.rect(),
-            &mut b,
-            &mut f,
-        );
-        let text = text_of(&f);
-        assert!(
-            text.contains("no seeded price"),
-            "the reason is on the card:\n{text}"
-        );
-        assert!(
-            text.contains("[tok]"),
-            "the chip names what is drawn:\n{text}"
-        );
-        // The BAR rows only. The headline's own `[~$5.00]` savings chip is a
-        // different affordance with its own basis and is right to keep
-        // drawing; what must not appear is a dollar figure on a bar whose
-        // partner has none.
-        // Rows 4 and 5: border, headline, serves, periods, then the two bars.
-        // Selected by position rather than by text, because "saved" also
-        // opens the headline and a filter on it would sweep three rows.
-        let bars: Vec<&str> = text.lines().skip(4).take(2).collect();
-        assert_eq!(bars.len(), 2, "both bars drew:\n{text}");
-        assert!(
-            bars[0].contains("read") && bars[1].contains("saved"),
-            "{text}"
-        );
-        for row in &bars {
-            assert!(
-                !row.contains('$'),
-                "a priced bar beside an unpriced one: {row}"
-            );
-        }
-        assert!(
-            bars[0].contains("10k"),
-            "the read bar in tokens: {}",
-            bars[0]
-        );
-        assert!(
-            bars[1].contains("1.0k"),
-            "the saved bar in tokens: {}",
-            bars[1]
-        );
     }
 
     /// A window with nothing on either side draws no bars at all, and gives

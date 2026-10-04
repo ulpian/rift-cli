@@ -1,0 +1,25 @@
+# Text checks out with LF on every OS, so byte-locked tests read the
+# committed bytes whatever core.autocrlf says.
+* text=auto eol=lf
+# Frozen fixture trees: hashes, offsets and goldens are taken over these exact
+# bytes, so they are never converted on checkout or on a later add.
+/bins/rift/tests/goldens-provenance/** -text
+/crates/rift-shadow/shard-goldens/** -text
+/crates/rift-shadow/legacy-fixtures/** -text
+/crates/rift-shadow/parity/anchors/** -text
+/crates/rift-recall-doc/fixtures/corpus/** -text
+# Fuzz inputs are raw bytes, including committed CR bytes.
+/fuzz/corpus/** -text
+# Binary documents: PDF cross-reference offsets count bytes.
+*.pdf -text
+*.doc -text
+*.docx -text
+*.docm -text
+*.odt -text
+*.ppt -text
+*.pptx -text
+*.odp -text
+*.xls -text
+*.xlsx -text
+*.ods -text
+*.epub -text

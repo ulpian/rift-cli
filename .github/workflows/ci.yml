@@ -42,9 +42,31 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare Linux capacity for Rust builds
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # These hosted-image SDKs are unused by the Rust workspace.
+          # Keep Rust, LLVM, the C toolchain, Git and caches intact.
+          sdk_paths=(/usr/share/dotnet /usr/local/.ghcup /usr/local/lib/android/sdk)
+          capacity_snapshot() {
+            df -h "$GITHUB_WORKSPACE"
+            for sdk_path in "${sdk_paths[@]}"; do
+              if [ -e "$sdk_path" ]; then
+                sudo du -sh -- "$sdk_path"
+              else
+                printf 'absent: %s\n' "$sdk_path"
+              fi
+            done
+          }
+          printf 'Capacity before unused SDK preparation\n'
+          capacity_snapshot
+          sudo rm -rf -- "${sdk_paths[@]}"
+          printf 'Capacity after unused SDK preparation\n'
+          capacity_snapshot
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace --all-features --no-fail-fast
   release-build:
     runs-on: ubuntu-latest
     steps:
@@ -70,6 +92,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare Linux capacity for Rust builds
+        shell: bash
+        run: |
+          # These hosted-image SDKs are unused by the Rust workspace.
+          # Keep Rust, LLVM, the C toolchain, Git and caches intact.
+          sdk_paths=(/usr/share/dotnet /usr/local/.ghcup /usr/local/lib/android/sdk)
+          capacity_snapshot() {
+            df -h "$GITHUB_WORKSPACE"
+            for sdk_path in "${sdk_paths[@]}"; do
+              if [ -e "$sdk_path" ]; then
+                sudo du -sh -- "$sdk_path"
+              else
+                printf 'absent: %s\n' "$sdk_path"
+              fi
+            done
+          }
+          printf 'Capacity before unused SDK preparation\n'
+          capacity_snapshot
+          sudo rm -rf -- "${sdk_paths[@]}"
+          printf 'Capacity after unused SDK preparation\n'
+          capacity_snapshot
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: "llvm-tools-preview" }
       - uses: Swatinem/rust-cache@v2

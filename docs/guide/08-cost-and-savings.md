@@ -124,25 +124,26 @@ date, with a deterministic tie-break — so "what did this call cost, according 
 what we knew then" stays answerable forever, and a correction appends a
 superseding row rather than rewriting what it corrects.
 
-The catalog ships as two appends: the first seeded the models the first-party
-adapters reported, the second the models the toolchain actually runs, because a
-measurement found **zero** overlap between the sets. Without it, price
-resolution returned nothing for every live model and the savings estimate
-correctly rendered nothing.
-
+The catalog seeds the models the adapters report and the models observed in captured calls.
 A slice of the seed, in dollars per million tokens:
 
-| Model | Uncached in | Cached in | Cache write | Output |
+| Model | Uncached in | Cached in | Cache write (5 min) | Output |
 |---|---|---|---|---|
-| An opus-tier model | $5.00 | $0.50 | $6.25 | $25.00 |
-| A fable-tier model | $10.00 | $1.00 | $12.50 | $50.00 |
-| A sonnet-tier model (introductory) | $2.00 | $0.20 | $2.50 | $10.00 |
-| The same model (standard) | $3.00 | $0.30 | $3.75 | $15.00 |
+| `claude-opus-5` | $5.00 | $0.50 | $6.25 | $25.00 |
+| `claude-fable-5-1` | $10.00 | $0.25 | $12.50 | $50.00 |
+| `claude-sonnet-5` | $2.00 | $0.20 | $2.50 | $10.00 |
 
-The last two rows are the valid-time axis working: one model launched at an
-introductory rate that expired on a known date, and both rows sit in the table
-with adjoining ranges, so a call before the changeover prices at $2.00 and one
-after at $3.00 — no migration, no edit, no branch in code.
+Every class is transcribed from the provider's page, rather than derived from a multiplier: `claude-fable-5-1` reads its cache at a fortieth of its input rate, where the other two models use a tenth.
+The one-hour cache-write class is outside this seed because the usage path records no one-hour writes.
+
+The Sonnet rows show both time axes working.
+Its introductory and standard epochs have adjoining valid-time ranges.
+The original standard rows recorded $3.00 / $15.00; four later rows correct them to $2.00 / $10.00 for the same range, each naming the row it supersedes.
+Resolution prefers the later `recorded_at`, so the current belief prices both epochs at $2.00 / $10.00, while a belief held before the correction still prices the standard epoch at $3.00 / $15.00.
+Nothing is updated.
+
+A model the page does not list gets no row; `rift doctor` names it instead (below).
+Neither `claude-opus-5-5` nor `Gemini 3.7 Flash (Low)` has a seeded price.
 
 Two rules keep the catalog honest. **All four classes or nothing**: resolution
 returns a result only when every class has a row, so a partially-priced model
@@ -152,7 +153,8 @@ pricing at the time of writing, with the effective date recorded.
 
 > Tip: an unfamiliar model showing tokens but no dollars is not a bug — nobody
 > seeded a price for it, and the breakdown modal
-> ([§8.10](#810-the-savings-chip-in-canopy)) says how many tokens are affected.
+> ([§8.10](#810-the-savings-headline-in-canopy)) says how many tokens are affected.
+> `rift doctor`'s `prices` line names every such model and its call count.
 
 ---
 
@@ -167,9 +169,17 @@ while a changed belief — a corrected price, a re-derivation — appends a
 superseding fact. Nothing is updated in place, so "what did we think this cost
 last month, and what do we think now" has two answers, both on file.
 
+Current reports quote the captured usage against the latest catalog belief at read time, using each call's start as the price's valid time.
+They count each call once, so an old booking and a correction never add together.
+A newly appended catalog can price previously unpriced usage immediately without writing a cost fact or rebuilding the projection.
+A session with no completely priced calls has no dollar figure; a completely priced call with zero usage has a zero figure.
+Booked facts remain historical beliefs: a correction supersedes the applicable visible predecessor, even when both were recorded at the same instant.
+Recomputing that correction writes nothing, and a same-instant reversion gets a distinct identity linked to the correction.
+
 Money is **integer micro-dollars** end to end — a millionth of a dollar in a
-64-bit integer, via a 128-bit intermediate so a large count can neither overflow
-nor round. Floating point never touches a currency value;
+64-bit integer, calculated through an overflow-safe 128-bit intermediate.
+Each token class truncates fractions smaller than one micro-dollar, and amounts outside the final range are clamped.
+Floating point never touches a currency value;
 formatting to a string happens only at the edge, where a human reads it.
 
 > Tip: if a session shows tokens but its cost stays flat, check the model name
@@ -424,8 +434,8 @@ business being a headline. The dashboard's recall headline divided avoided
 tokens by avoided + returned over every audited row, which asks "of the context
 this plane was responsible for, how much did it not send" — a real question,
 with the same shape on screen as the share below and a different denominator
-under it, drawn two cells from a chip that answered the other one. The card
-publishes the **share** now, and that rate is gone from every surface.
+under it. The card publishes the **share** now, beside the tokens it avoided,
+and that rate is gone from every surface.
 
 What remains beside the share is `rift recap --json`, which divides avoided by
 avoided + total spent: "against everything this repository spent, how big is
@@ -442,7 +452,7 @@ share**, `avoided ÷ (avoided + read)` since the
 last window boundary, where the numerator comes from the audit relation alone
 and the denominator adds the read tokens the capture projection recorded over
 the same window. One computation produces it for every surface — the command
-line, the status block and the dashboard chip read the same function — and it
+line, the status block and the dashboard headline read the same function — and it
 publishes a second variant that drops families with decisions and no captured
 reads, naming them, because a family that decides and is never observed reading
 divides by its own numerator and prints 100 %. The denominator counts a
@@ -467,14 +477,12 @@ counted and published — `reads_unmeasured` on the report, on `--json` and in
 the dashboard's breakdown — never imputed, and never quietly dropped from the
 denominator, which would be a different lever with a different name.
 
-**The target is 90 %, and it is a goal rather than a gate.** The share is the
-figure the product is trying to move, and what it is aiming at is one constant
-(`SAVINGS_TARGET_PCT` in `rift-recall-ledger`) so a surface and this guide
-cannot quote two. The dashboard's card prints `of 90% target` beside the
-share. It gates nothing: the evaluation bar's Go/NoGo threshold
-([§8.13](#813-the-target-is-90-the-bar-is-what-the-harness-measured)) is a separate, versioned
-economic choice, and changing the target moves what surfaces say they are
-aiming at and nothing else.
+**The product declares no target.** The share is the figure the levers move,
+and every surface publishes it as a measurement with its denominator — never
+beside an aspiration it could be mistaken for. The only threshold anywhere is
+the evaluation bar's Go/NoGo
+([§8.13](#813-the-bar-is-what-the-harness-measured)), a separate, versioned
+economic choice that gates the harness and not this figure.
 
 **The window boundary is a file, not a fact about the data.** By default the
 window is the whole record — every row either projection holds — which is what
@@ -489,7 +497,7 @@ no relation is touched: `rift savings --since 0` still answers over the whole
 record, `--since <instant>` answers over any other window for one call without
 moving the stored boundary, and deleting the file restores the whole record.
 Every surface prints the boundary it used, which is why the share on the
-command line and the share on the dashboard chip cannot be two different
+command line and the share on the dashboard headline cannot be two different
 periods. The reread report is the deliberate exception — it is the whole
 record's document, and when a marker makes that a different period it says so
 on the line where a reader would otherwise compare the two.
@@ -580,6 +588,18 @@ amount at all for tokens whose model has no seeded price; thousands separators;
 and no animation between frames — the figure is copied untweened from the target
 frame, because a cost figure that tweens reads as if it were changing.
 
+**Naming what the figure leaves out.** A model with no seeded price adds usage and no dollars, so a dollar figure over a window that used one silently reads low.
+`rift doctor` says so under its `prices` heading: how many models the captured calls named, then one line per model the catalog cannot price now, with its call count, in a stable order:
+
+```text
+  prices:         3 model(s) observed, 2 without a price
+    Gemini 3.7 Flash (Low): 12 call(s) — their usage is recorded, and no cost is derived until the catalog prices this model
+    claude-opus-5-5: 8 call(s) — their usage is recorded, and no cost is derived until the catalog prices this model
+```
+
+When every observed model prices, the heading says so and nothing follows it.
+The line reads the projection and writes nothing; the remedy is a seeded price, appended like any other, never a guessed one.
+
 ---
 
 ## 8.9 The degradation ladder
@@ -590,8 +610,8 @@ With some models unpriced, those still appear with their token slice and an
 explicit *no seeded price* marker contributing no dollars, the modal stating how many
 tokens are unpriced so a partial figure is not mistaken for full coverage. With no usable input-token mix, one reference model — the most
 frequently captured — carries the total as a single disclosed row. With nothing
-resolvable (no model, no price, or any read failure) there is no chip and the
-token headline stands alone. The cross-projection read that resolves the mix is
+resolvable (no model, no price, or any read failure) the headline draws no
+dollar segment and the tokens and share stand alone. The cross-projection read that resolves the mix is
 opened read-only and *any* failure lands on that last rung: a pricing problem
 cannot break the dashboard.
 
@@ -605,42 +625,43 @@ avoided tokens they partition are that window's: a mix taken over all history
 against one period's savings attributes this week's tokens to a model the
 project stopped running in the spring, and the modal would then disclose a
 basis that was never this window's. A period holding no model call therefore
-lands on the bottom rung and shows no chip — which is the honest answer, not a
+lands on the bottom rung and shows no dollars — which is the honest answer, not a
 lost figure. A seeded rate of exactly `0` lands there too: a price of zero is a
 missing price, and `~$0.00` beside a real saving reads as a measurement.
 
 ---
 
-## 8.10 The savings chip in Canopy
+## 8.10 The savings headline in Canopy
 
 The dashboard's Recall panel headline reads
-`saved 1.4% (110.8M) [~$803.11] [of 90% target]` — **the share of
-[§8.7](#87-the-honesty-ladder)**, to one decimal because that is how
-`rift savings` prints it, and the avoided tokens behind it. Every figure on the
+`saved 110.8M tokens · 1.4% · ~$803.11` — the tokens the plane avoided, then
+**the share of [§8.7](#87-the-honesty-ladder)**, to one decimal because that is
+how `rift savings` prints it, then the dollar estimate. Every figure on the
 card comes from one window resolution: the period button's trailing cut
 composed with the family's boundary marker, handed to the same
 `savings::compose` the command line calls, so the headline, the two bars, the
-dollar estimate, the serve count and the modal cannot cover different periods.
+serve count and the modal cannot cover different periods. The bars under it
+are the window's read and avoided tokens on one shared scale; dollars reach
+the card through the headline and nowhere else.
 
-The first bracketed chip is the dollar estimate; the second names the target
-the headline is aiming at. Either one opens a read-only breakdown overlay
-carrying the disclosed basis in full: net tokens avoided priced as uncached
-input at the seeded rates, one row per model summing to the total, a *by
-worktree* line saying the figure is the family's, the share block with its
-window, its `n`, its unmeasured reads and its per-family rows, and the note
-that `~` marks an estimate, not a bill. This repository sits on the ladder's
-second rung — five models observed, two without a seeded price — so the total
-covers the priced share only.
+The headline is the card's one door: any cell of the line opens a read-only
+breakdown overlay carrying the disclosed basis in full — net tokens avoided
+priced as uncached input at the seeded rates, one row per model summing to the
+total, a *by worktree* line saying the figure is the family's, the share block
+with its window, its `n`, its unmeasured reads and its per-family rows, and
+the note that `~` marks an estimate, not a bill. This repository sits on the
+ladder's second rung — five models observed, two without a seeded price — so
+the total covers the priced share only.
 
 Three rules there carry the honesty of the figure. **No honest figure means no
-chip**: not a greyed chip, not `~$0.00` — the glyphs are not drawn and the click
-region does not exist, and a seeded rate of exactly zero is a missing price
-rather than a free saving. **A serve carries no session key**, so the avoided
-total cannot be split by worktree; the modal says the total is the family's
-rather than splitting on a guess (see
+segment**: an unanswerable share draws no percentage and an unpriced window
+draws no dollars — not a greyed figure, not `0 %`, not `~$0.00` — and a seeded
+rate of exactly zero is a missing price rather than a free saving. **A serve
+carries no session key**, so the avoided total cannot be split by worktree;
+the modal says the total is the family's rather than splitting on a guess (see
 [Chapter 9](09-worktrees-and-families.md) for why savings still compound). And
 **the breakdown is reachable both ways**: `S` while the graphs column has focus
-opens exactly what the chips open, through one opener, so a keyboard-only
+opens exactly what the headline opens, through one opener, so a keyboard-only
 operator is not reading the disclosed basis out of `--json` instead.
 [Chapter 11](11-canopy-tour.md) walks the panels, including the four token
 classes' treemap.
@@ -692,9 +713,16 @@ serving trail: total input tokens, `repeated_context_rate`,
 are read-only with respect to your repository's files; `rift-memd metrics` and
 `rift-memd eval` write to the recall projection, which is rebuildable from git.
 
+A rebuild of the recall projection keeps the serves it cannot derive.
+`rift-memd rebuild` sets the old projection aside under a dated name rather than delete it, because a serve a person made at a terminal is in no checkpoint, and the figures above would lose it.
+An active store or retained connection makes replacement refuse promptly; close the reader or writer and retry.
+A live legacy recall projection without its concurrency marker is unavailable to read-only diagnostics until `rift-memd metrics` opens it through the writable ingest path.
+`rift backfill --recall-from <file> [--dry-run]` reads those serves back into the family's recall projection, insert-or-ignore, and prints what it read and inserted per relation; run it again and it inserts nothing.
+`rift doctor` lists every set-aside projection by name, size and age, and `rift clean` never removes one ([§13.12](13-storage-and-schema.md#1312-rebuilding-and-what-a-rebuild-cannot-restore)).
+
 > Tip: `rift-memd metrics` **ingests** as well as reports, walking the
-> repository's checkpoints into the recall projection before computing. Use
-> `rift-memd status` when you only want to look.
+> repository's checkpoints into the recall projection before computing. `rift-memd status` opens or migrates the recall store to report node counts.
+> Use `rift doctor` or `rift status` for guarded read-only diagnostics.
 
 ---
 
@@ -715,7 +743,7 @@ rather than a benchmark. On this repository's captured history it measured
 `repeated_context_rate` 0.1899 and `avoidable_context_rate` 0.3370 — 262000
 repeated and 465060 avoidable tokens out of 1380000 input, so **33.7% avoidable
 context** across eight sessions, which the evaluation bar in
-[§8.13](#813-the-target-is-90-the-bar-is-what-the-harness-measured) was calibrated against.
+[§8.13](#813-the-bar-is-what-the-harness-measured) was calibrated against.
 
 ### What each lever removes from its pool
 
@@ -790,21 +818,22 @@ what a read *is* without saying so.
 
 ---
 
-## 8.13 The target is 90%; the bar is what the harness measured
+## 8.13 The bar is what the harness measured
 
-Two numbers, and conflating them is how a gate comes to fail builds for work
-nobody has done yet.
+A measured share and a gate are two different numbers, and conflating them is
+how a gate comes to fail builds for work nobody has done yet.
 
-**The target is the product's.** Rift aims to return **90% of the
-repository-content tokens** an agent would otherwise read — over *any* channel:
-the Read tool, shell reads, search lines — **first reads included**, measured
-over the windows `rift savings --last` and Canopy show. It is
-`rift_recall_ledger::SAVINGS_TARGET_PCT`, it is a goal rather than a gate, and
-nothing fails because a window sits below it. It exists so "how are we doing"
-has one denominator instead of one per surface.
+**The share is a measurement.** It is the fraction of the
+repository-content tokens an agent would otherwise read — over *any* channel:
+the Read tool, shell reads, search lines — **first reads included** — that
+the plane returned instead, over the windows `rift savings --last` and Canopy
+show. The product declares no target for it: every surface publishes the
+measured share with its denominator, and nothing fails because a window sits
+anywhere in particular. One denominator for every surface is what lets "how
+are we doing" have one answer.
 
-**The bar is the evaluation harness's**, and it is *staged*: `SAVINGS_BAR_PCT`,
-beside the target, is the median savings the harness's own paired replays have
+**The bar is the evaluation harness's**, and it is *staged*: `SAVINGS_BAR_PCT`
+is the median savings the harness's own paired replays have
 measured — a full re-read leg against a delta-served leg over scripted
 scenarios — and the rule written on the constant is that it is raised only
 after the harness measures a higher median and **never above what it last
@@ -813,14 +842,14 @@ set to an aspiration stops being evidence of anything the moment it is set; a
 bar that moves only behind a measurement is a record of what the levers have
 done.
 
-The two are read together or they are misread, which is why they are declared in
-one place and why the go/no-go gate *reads* the bar rather than retyping it.
+The bar is declared once, in `rift-recall-ledger`, and the go/no-go gate
+*reads* it rather than retyping it.
 
 **A third figure is neither.** `cargo run -p xtask -- replay-savings` replays
 recorded transcripts through this build's read gate and reports what it would
-have declined, bucket by bucket, over the same denominator the target uses.
-It is the field measurement the levers are judged by, and it is read against
-the target, not the bar: its denominator carries first reads and searches, which
+have declined, bucket by bucket, over the same denominator the share uses.
+It is the field measurement the levers are judged by, and it is never read
+against the bar: its denominator carries first reads and searches, which
 no gate can decline, so it is always far below the harness's median. On the
 seven session trees recorded on the machine this work was done on (21 windows,
 2,563 calls, 1.07M repository-content tokens), the build before this work
@@ -831,8 +860,8 @@ pool is a first sight of a revision inside its window (21.2% of it read again
 by a sibling window), 19.7% is a later page of a revision the window already
 holds part of, and 638 shell calls naming a file this checkout has are still
 shapes the grammar refuses. That table, not the harness's median, is where the
-distance to the target is measured, and [§18](18-known-gaps.md) carries what
-each of those buckets would take.
+levers' progress on your own traffic is measured, and [§18](18-known-gaps.md)
+carries what each of those buckets would take.
 
 The replay also sizes the pools later levers would work on, which it prints beside the buckets rather than inside them.
 It sets the client's own declines beside this build's, splits the sibling re-reads by whether the second window was forked from the first, was handed the lines in its spawning prompt, was handed only the path, or was handed nothing — one count per later window's first read of a revision a sibling read first, so the routes sum to those reads rather than to the pairs — counts the reads of machine-written files by path shape, and sorts the first sights by the size of the file against a first-contact floor of 400 lines or 16,384 bytes.
@@ -857,11 +886,10 @@ conditions hold regardless of savings — a cheaper-but-worse agent is not a win
 **The threshold has provenance**: 15% was calibrated against the measured 33.7%
 avoidable-context rate of
 [§8.12](#812-the-measured-baseline-repeated-and-avoidable-context). It is not
-the 90 % of [§8.7](#every-rate-names-its-denominator), and the two are not
-comparable: this one is a *gate* on median savings over a synthetic replay
-corpus, that one is the *target* for the share over your own traffic. They are
-separate values on purpose — `SAVINGS_TARGET_PCT` moves what surfaces say they
-are aiming at, the versioned thresholds value moves what CI refuses. **The delta
+comparable with the share of [§8.7](#every-rate-names-its-denominator): this
+one is a *gate* on median savings over a synthetic replay corpus, that one is a
+*measurement* over your own traffic, and only the versioned thresholds value
+moves what CI refuses. **The delta
 leg is a real serve**, driving the dispatcher in-process over a fixture store —
 anchor, pack, handle retrievals — on the path the recall verbs use, with the
 claim captured from real audit events rather than stamped by the harness.
@@ -920,12 +948,10 @@ the median.
   rate in force then is over-engineering for a hedged estimate.
 - **USD only.** No other currency, no locale-aware formatting.
 - **The savings figure appears in one dashboard place**, the Recall panel.
-  Spend reaches it in one form only: the panel's read-vs-saved bars, read in
-  the `usd` unit, value the window's *read* tokens at the same uncached-input
-  rates the avoided side uses — an estimate on the same rung, tilde and all,
-  not the cost facts the command-line reports print. Both bars fall back to
-  tokens when either side has no seeded price, so a priced bar never stands
-  beside an unpriced one.
+  Money reaches it in one form only: the headline's dollar segment, the
+  avoided tokens priced on the ladder above, tilde and all — not the cost
+  facts the command-line reports print. The read-vs-saved bars under it are
+  always token counts.
 - **Prices are seeded data, not user configuration.**
 - **The evaluation corpus is synthetic and small.** Its representativeness is a
   tracked open question.

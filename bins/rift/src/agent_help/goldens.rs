@@ -84,8 +84,13 @@ fn every_written_region_holds_exactly_the_skill_body() {
 /// drifts teaches a reader a pointer no agent is ever shown.
 #[test]
 fn the_guide_quotes_the_session_pointer_exactly() {
-    let excerpt = guide_pointer_excerpt().expect("section 7.2 opens with a fenced block");
-    assert_eq!(excerpt, session_pointer());
+    let lf = SERVING_CHAPTER.replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    for chapter in [&lf, &crlf] {
+        let excerpt =
+            guide_pointer_excerpt(chapter).expect("section 7.2 opens with a fenced block");
+        assert_eq!(excerpt, session_pointer());
+    }
 }
 
 /// The text between a region's two fences, without the newlines that
@@ -114,8 +119,9 @@ fn written_files(root: &std::path::Path) -> Vec<String> {
 }
 
 /// The first fenced block after the pointer section's heading.
-fn guide_pointer_excerpt() -> Option<&'static str> {
-    let section = SERVING_CHAPTER.split_once(POINTER_SECTION)?.1;
+fn guide_pointer_excerpt(chapter: &str) -> Option<String> {
+    let normalized = chapter.replace("\r\n", "\n");
+    let section = normalized.split_once(POINTER_SECTION)?.1;
     let block = section.split_once("```\n")?.1;
-    Some(block.split_once("\n```")?.0)
+    Some(block.split_once("\n```")?.0.to_owned())
 }

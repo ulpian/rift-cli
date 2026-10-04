@@ -3,9 +3,9 @@ source: crates/rift-canopy/tests/snapshots.rs
 expression: "recall_text(&col3, 40, 10, false)"
 ---
 ╭─ recall ─────────────────────────────╮
-│saved 42.0% (6.0k)  [~$105.90]        │
+│saved 6.0k tokens · 42.0% · ~$105.90  │
 │17 serves · 2 active sessions         │
-│[24h][7d][30d][all]              [tok]│
+│[24h][7d][30d][all]                   │
 │read  @@@@@@@@@@@@@@@@@@@@@@@@@@@ 8.3k│
 │saved @@@@@@@@@@@@@@@@@@@@        6.0k│
 │# hook                                │

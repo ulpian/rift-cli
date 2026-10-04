@@ -6,6 +6,7 @@ immutability violation: <reason>
 validity error: <reason>
 policy denied: <reason>
 storage error: <reason>
+projection busy: projection: <reason>
 substrate error: <reason>
 migration error: <reason>
 config error: <reason>

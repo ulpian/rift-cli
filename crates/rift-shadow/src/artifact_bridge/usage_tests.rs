@@ -638,3 +638,160 @@ async fn every_column_the_live_settle_wrote_comes_back_but_the_declared_exceptio
         "only the priced call"
     );
 }
+
+const CATALOG_NOW: i64 = 1_789_603_200_000;
+
+fn migrated_store(version: usize) -> SqliteStore {
+    let s = SqliteStore::open_in_memory().unwrap();
+    let migrations = rift_store::default_migrations();
+    assert_eq!(migrations[14].version, 15, "frozen v15 prefix");
+    rift_store::apply_migrations(&s, &migrations[..version]).unwrap();
+    s
+}
+
+async fn catalog_call(s: &SqliteStore, model: &str, now: i64) {
+    use rift_core::{CanonicalEvent, EventKind, Sha256Id, Trust};
+    let event = CanonicalEvent {
+        schema_version: 1,
+        session: SESSION.into(),
+        turn_ordinal: 1,
+        event_ordinal: 3,
+        kind: EventKind::TurnEnd,
+        trust: Trust::TranscriptUntrusted,
+        occurred_at_ms: 1_788_220_800_000,
+        payload_sha256: Sha256Id::from_bytes([7; 32]),
+    };
+    let facts = crate::project::payload_facts(&serde_json::json!({"model": model}));
+    let usage = rift_shadow_hooks::AdapterTokenUsage {
+        input: Some(1_000),
+        output: Some(2_000),
+        cache_read: Some(200_000),
+        cache_write: Some(10_000),
+    };
+    let ctx = crate::project::ProjectionCtx {
+        agent: AGENT,
+        repo_id: REPO,
+    };
+    crate::project::project_event(s, &event, &facts, ctx)
+        .await
+        .unwrap();
+    crate::project::project_usage(s, &event, &facts, ctx, &usage, now)
+        .await
+        .unwrap();
+}
+
+async fn current_window_cost(s: &SqliteStore) -> i64 {
+    rift_store::window::gather(
+        s,
+        None,
+        &rift_store::window::Window::resolve(None, None).unwrap(),
+    )
+    .await
+    .unwrap()
+    .cost_micros
+}
+
+#[tokio::test]
+async fn v15_unpriced_usage_quotes_the_same_as_a_cold_v16_shard_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("projection.db");
+    let live = rift_store::open_migrated(&db, &rift_store::default_migrations()[..15]).unwrap();
+    catalog_call(&live, "claude-fable-5-1", CATALOG_NOW - 1).await;
+    assert_eq!(live.count("cost_fact").await.unwrap(), 0);
+    let substrate = shard_of(&live).await;
+    let before = rows(&live, "token_usage", &USAGE_COLUMNS).await;
+    rift_store::apply_migrations(&live, &rift_store::default_migrations()).unwrap();
+    assert_eq!(
+        live.count("cost_fact").await.unwrap(),
+        0,
+        "upgrade appends only catalog"
+    );
+    assert_eq!(rows(&live, "token_usage", &USAGE_COLUMNS).await, before);
+    let cold = migrated_store(16);
+    let report = ingest_from_substrate(&cold, &substrate, REPO, AGENT, CATALOG_NOW)
+        .await
+        .unwrap();
+    assert!(report.refused.is_empty());
+    assert_eq!(current_window_cost(&cold).await, 285_000);
+    let before_report = canonical_counts(&live).await;
+    let readonly = SqliteStore::open_read_only(&db).unwrap();
+    assert!(rift_store::quote_usage_costs(
+        &readonly,
+        rift_store::CostQuoteScope::All,
+        CATALOG_NOW - 1
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    let quoted =
+        rift_store::quote_usage_costs(&readonly, rift_store::CostQuoteScope::All, CATALOG_NOW)
+            .await
+            .unwrap();
+    assert_eq!(quoted.values().copied().collect::<Vec<_>>(), [285_000]);
+    assert_eq!(
+        current_window_cost(&readonly).await,
+        285_000,
+        "retained usage quotes identically to the actual cold usage shard"
+    );
+    assert_eq!(
+        canonical_counts(&live).await,
+        before_report,
+        "the full read-only report and explicit quotes append no canonical rows"
+    );
+    assert_eq!(
+        live.count("cost_fact").await.unwrap(),
+        0,
+        "report read books nothing"
+    );
+}
+
+#[tokio::test]
+async fn corrected_sonnet_live_and_shard_reports_never_sum_old_and_new_bookings() {
+    let live = migrated_store(15);
+    catalog_call(&live, "claude-sonnet-5", CATALOG_NOW - 1).await;
+    let call = rift_store::capture::session_usage_facts(
+        &live,
+        &crate::ids::session_row_id(AGENT, SESSION),
+    )
+    .await
+    .unwrap()[0]
+        .call_id
+        .clone();
+    assert_eq!(
+        rift_store::current_cost_micros(&live, &call).await.unwrap(),
+        Some(130_500)
+    );
+    let substrate = shard_of(&live).await;
+    rift_store::apply_migrations(&live, &rift_store::default_migrations()).unwrap();
+    catalog_call(&live, "claude-sonnet-5", CATALOG_NOW).await;
+    catalog_call(&live, "claude-sonnet-5", CATALOG_NOW).await;
+    assert_eq!(live.count("cost_fact").await.unwrap(), 2);
+    assert_eq!(
+        rift_store::cost_belief_as_of(&live, &call, CATALOG_NOW - 1)
+            .await
+            .unwrap(),
+        Some(130_500)
+    );
+    let cold = migrated_store(16);
+    ingest_from_substrate(&cold, &substrate, REPO, AGENT, CATALOG_NOW)
+        .await
+        .unwrap();
+    assert_eq!(current_window_cost(&cold).await, 87_000);
+    assert_eq!(current_window_cost(&live).await, 87_000);
+    let links = live
+        .query(
+            "SELECT supersedes_id FROM cost_fact WHERE amount_micros = 87000",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(!links[0].get_text(0).unwrap().is_empty());
+}
+
+async fn canonical_counts(s: &SqliteStore) -> Vec<(&'static str, i64)> {
+    let mut counts = Vec::new();
+    for table in rift_store::canonical_tables() {
+        counts.push((table.name, s.count(table.name).await.unwrap()));
+    }
+    counts
+}

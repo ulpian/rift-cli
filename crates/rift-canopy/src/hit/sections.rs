@@ -1,5 +1,5 @@
 //! The column-3 panel stack's mouse plane: the overflow scrollbar, the
-//! Recall card's period buttons and chips, the token panel's `Σ` total, and
+//! Recall card's period buttons and headline, the token panel's `Σ` total, and
 //! the section under any other cell — resolved through `col3::solve_stack`
 //! and the chip solvers the renderer draws with, in the blended space
 //! (screen x, content-space y) a scrolled stack blits through.
@@ -81,7 +81,7 @@ fn chip_at(
         // The token panel's `Σ` total is the "by worktree" axis's affordance
         // (the family view) and sits on the panel's TITLE row, so the solver
         // takes the section's outer rect — not the inner one the Recall
-        // chips' headline lives in.
+        // headline lives in.
         SectionId::TokenUsage => {
             let total = col3::token_total_rect(data, panel)?;
             if contains(total, col, content_row) {
@@ -93,11 +93,10 @@ fn chip_at(
     }
 }
 
-/// The Recall card's controls: the period buttons (their own row, so they
-/// cannot collide with the headline chips below), the unit chip, then the two
-/// doors onto the breakdown modal. The USD chip and the savings-share chip map
-/// to the same target — no new act, no new hint — which is why the modal stays
-/// reachable by mouse on a repository whose models carry no seeded price.
+/// The Recall card's controls: the period buttons, then the headline — the
+/// card's one door onto the breakdown modal, present whenever the line is
+/// drawn, so the modal stays reachable by mouse on a repository whose models
+/// carry no seeded price.
 fn recall_chip_at(
     data: &col3::Col3,
     collapsed: bool,
@@ -111,20 +110,9 @@ fn recall_chip_at(
     if let Some(button) = period {
         return Some(Target::RecallWindow(button.window));
     }
-    let unit = col3::recall_unit_rect(data, collapsed, inner);
-    if unit.is_some_and(|chip| contains(chip, col, content_row)) {
-        return Some(Target::RecallUnitToggle);
-    }
-    let breakdown_doors = [
-        col3::recall_cost_rect(data, collapsed, inner),
-        col3::recall_share_rect(data, collapsed, inner),
-    ];
-    let on_a_door = breakdown_doors
-        .into_iter()
-        .flatten()
-        .any(|chip| contains(chip, col, content_row));
-    if on_a_door {
-        return Some(Target::RecallCost);
+    let headline = col3::recall_headline_rect(data, inner)?;
+    if contains(headline, col, content_row) {
+        return Some(Target::RecallHeadline);
     }
     None
 }
@@ -175,112 +163,120 @@ mod tests {
         }
     }
 
-    /// the priced savings estimate: the chip's clickable cells are exactly the drawn glyphs
-    /// — same solver on both sides — and it outranks the section under it;
-    /// without an honest figure the same cells are plain section clicks.
-    #[test]
-    fn recall_cost_chip_wins_over_its_section_exactly_on_its_cells() {
-        use crate::col3::{RecallView, SavingsData};
-        let mut data = col3::Col3 {
+    /// A Recall card carrying a priced window, the line every segment draws.
+    fn priced_card() -> col3::Col3 {
+        use crate::col3::{RecallView, SavingsData, ShareData};
+        col3::Col3 {
             savings: RecallView::Data(SavingsData {
-                target_pct: Some(90),
-                usd_saved_micros: Some(6_250_000),
-                usd_label: Some("~$6.25".to_owned()),
-                usd_rows: vec![],
-                usd_read_micros: None,
-                usd_read_label: None,
-                by_worktree: crate::col3::WorktreeAxis::default(),
-                share: Box::new(crate::col3::ShareData::default()),
+                usd_saved_micros: Some(105_900_000),
+                usd_label: Some("~$105.90".to_owned()),
+                share: Box::new(ShareData {
+                    overall: Some(42.0),
+                    avoided_tokens: 6_000,
+                    read_tokens: 8_285,
+                    ..ShareData::default()
+                }),
+                ..SavingsData::default()
             }),
             ..col3::Col3::default()
-        };
+        }
+    }
+
+    /// The headline is the card's one door onto the breakdown: every cell of
+    /// the drawn line resolves to it, and the cell past its end is the plain
+    /// section — priced or not, since the door is the line and not the money.
+    #[test]
+    fn clicking_the_headline_opens_the_breakdown_modal() {
+        use crate::col3::RecallView;
+        let mut unpriced = priced_card();
+        if let RecallView::Data(sd) = &mut unpriced.savings {
+            sd.usd_saved_micros = None;
+            sd.usd_label = None;
+        }
         let ids = col3::SectionId::ALL;
         let FittedColumn {
             rect,
             inner,
             panel,
             slot,
-        } = fitted_column(40, SectionId::Recall);
+        } = fitted_column(60, SectionId::Recall);
         assert!(!slot.collapsed, "fixture must exercise the wide path");
-        let chip = col3::recall_cost_rect(&data, false, inner_of(panel)).expect("an honest figure");
-        // Blended space → screen: y is content-space (no scroll ⇒ + inner.y).
-        let screen_row = inner.y + chip.y;
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, chip.x, screen_row),
-            Target::RecallCost,
-            "the chip's own cells hit the chip"
-        );
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, chip.x + chip.w - 1, screen_row),
-            Target::RecallCost,
-            "…all the way to its last cell"
-        );
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, chip.x - 1, screen_row),
-            Target::Section(col3::SectionId::Recall),
-            "one cell left (the gap) is the plain section"
-        );
-        assert!(Target::RecallCost.is_button(), "button semantics");
-
-        // No honest figure → the money chip is gone, and the target chip
-        // slides onto the same cells: the same door, which is why the
-        // breakdown is still reachable by mouse on a repository whose models
-        // carry no seeded price.
-        data.savings = RecallView::Data(SavingsData {
-            target_pct: Some(90),
-            ..SavingsData::default()
-        });
-        assert_eq!(col3::recall_cost_rect(&data, false, inner_of(panel)), None);
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, chip.x, screen_row),
-            Target::RecallCost,
-            "the target chip is the second door onto the same modal"
-        );
-
-        // Neither chip → the exact same cells are plain section clicks.
-        data.savings = RecallView::Data(SavingsData::default());
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, chip.x, screen_row),
-            Target::Section(col3::SectionId::Recall),
-            "no figure, no target, no chip"
-        );
+        for data in [priced_card(), unpriced] {
+            let door =
+                col3::recall_headline_rect(&data, inner_of(panel)).expect("a drawn headline");
+            // Blended space → screen: y is content-space (no scroll ⇒ + inner.y).
+            let screen_row = inner.y + door.y;
+            for x in door.x..door.x + door.w {
+                assert_eq!(
+                    section_or_focus(&ids, &data, rect, 0, x, screen_row),
+                    Target::RecallHeadline,
+                    "cell {x} of the headline"
+                );
+            }
+            assert_eq!(
+                section_or_focus(&ids, &data, rect, 0, door.x + door.w, screen_row),
+                Target::Section(col3::SectionId::Recall),
+                "the cell past the line is the plain section"
+            );
+        }
+        assert!(Target::RecallHeadline.is_button(), "button semantics");
     }
 
-    /// The savings-share chip is a SECOND door onto the breakdown modal, not a
-    /// new act: its own cells resolve to the same target the USD chip does,
-    /// and — the case that matters — they still do when no seeded price
-    /// exists, which is exactly when the USD chip is not drawn at all.
+    /// The narrow and collapsed tiers draw the same line with whole segments
+    /// shed to fit, and the door follows the drawn cells — so a collapsed
+    /// card keeps its click twin of `S` instead of shedding it.
     #[test]
-    fn the_share_chip_opens_the_same_modal_as_the_cost_chip() {
-        use crate::col3::{RecallView, SavingsData, ShareData};
-        let share = ShareData {
-            window: None,
-            overall: Some(3.0),
-            honesty: 11_965,
-            avoided_tokens: 12_000,
-            read_tokens: 9_000,
-            sessions_with_reads: 3,
-            reads_unmeasured: 0,
-            by_family: Some(3.0),
-            excluding: Some(1.5),
-            excluded: vec!["codex".to_owned()],
-            families: Vec::new(),
-        };
-        // No dollar figure: the USD chip is absent and the share chip is the
-        // only way in.
-        let data = col3::Col3 {
-            savings: RecallView::Data(SavingsData {
-                target_pct: Some(90),
-                usd_saved_micros: None,
-                usd_label: None,
-                usd_rows: vec![],
-                usd_read_micros: None,
-                usd_read_label: None,
-                by_worktree: crate::col3::WorktreeAxis::default(),
-                share: Box::new(share.clone()),
-            }),
-            ..col3::Col3::default()
-        };
+    fn the_headline_door_follows_the_fitted_line_in_the_narrow_and_collapsed_tiers() {
+        let data = priced_card();
+        // `saved 6.0k tokens` is 17 cells; with the share it is 25.
+        for (inner, collapsed, drawn_w) in [
+            (
+                Rect {
+                    x: 1,
+                    y: 5,
+                    w: 24,
+                    h: 11,
+                },
+                false,
+                17,
+            ),
+            (
+                Rect {
+                    x: 1,
+                    y: 5,
+                    w: 30,
+                    h: 1,
+                },
+                true,
+                25,
+            ),
+        ] {
+            let door = col3::recall_headline_rect(&data, inner).expect("a drawn headline");
+            assert_eq!(
+                door.w, drawn_w,
+                "whole segments only, collapsed={collapsed}"
+            );
+            assert_eq!(
+                recall_chip_at(&data, collapsed, inner, door.x + door.w, inner.y),
+                None,
+                "the cell past the fitted line opens nothing"
+            );
+            for x in door.x..door.x + door.w {
+                assert_eq!(
+                    recall_chip_at(&data, collapsed, inner, x, inner.y),
+                    Some(Target::RecallHeadline),
+                    "cell {x}, collapsed={collapsed}"
+                );
+            }
+        }
+    }
+
+    /// A placeholder card draws a sentence rather than a headline, so its
+    /// first row opens nothing; the `S` key, hinted with the column, is the
+    /// door there and always answers.
+    #[test]
+    fn a_placeholder_card_has_no_headline_door() {
+        use crate::col3::RecallView;
         let ids = col3::SectionId::ALL;
         let FittedColumn {
             rect,
@@ -288,29 +284,25 @@ mod tests {
             panel,
             slot: _,
         } = fitted_column(60, SectionId::Recall);
-        assert_eq!(
-            col3::recall_cost_rect(&data, false, inner_of(panel)),
-            None,
-            "no seeded price, no dollar chip"
-        );
-        let chip = col3::recall_share_rect(&data, false, inner_of(panel))
-            .expect("an answerable share draws a chip");
-        let screen_row = inner.y + chip.y;
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, chip.x, screen_row),
-            Target::RecallCost,
-            "the share chip's own cells open the breakdown"
-        );
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, chip.x + chip.w - 1, screen_row),
-            Target::RecallCost,
-            "…all the way to its last cell"
-        );
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, chip.x - 1, screen_row),
-            Target::Section(col3::SectionId::Recall),
-            "one cell left (the gap) is the plain section"
-        );
+        let card = inner_of(panel);
+        for (savings, calls) in [
+            (RecallView::Quiet, RecallView::Quiet),
+            (RecallView::Disabled, RecallView::Disabled),
+        ] {
+            let data = col3::Col3 {
+                savings,
+                calls,
+                ..col3::Col3::default()
+            };
+            assert_eq!(col3::recall_headline_rect(&data, card), None);
+            for x in card.x..card.x + card.w {
+                assert_eq!(
+                    section_or_focus(&ids, &data, rect, 0, x, inner.y + card.y),
+                    Target::Section(col3::SectionId::Recall),
+                    "cell {x} of the placeholder row"
+                );
+            }
+        }
     }
 
     /// Each period button resolves to **its own** window on exactly its own
@@ -351,45 +343,17 @@ mod tests {
         // headline row above it never answers a period.
         let last = buttons.last().expect("four buttons");
         let after = last.rect.x + last.rect.w;
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, after, inner.y + last.rect.y),
-            Target::Section(col3::SectionId::Recall),
-        );
+        for x in after..inner.x + inner.w {
+            assert_eq!(
+                section_or_focus(&ids, &data, rect, 0, x, inner.y + last.rect.y),
+                Target::Section(col3::SectionId::Recall),
+                "cell {x} past the periods belongs to no control"
+            );
+        }
         assert_eq!(
             section_or_focus(&ids, &data, rect, 0, buttons[0].rect.x, inner.y + slot.y),
             Target::Section(col3::SectionId::Recall),
             "the panel's title row is not the period row",
-        );
-    }
-
-    /// The unit chip resolves to the toggle on exactly its own cells, and the
-    /// gap between it and the last period button is a plain section click —
-    /// so a press that misses lands on nothing rather than on a period.
-    #[test]
-    fn the_unit_chip_resolves_to_the_toggle_and_not_to_a_period() {
-        let data = col3::Col3::default();
-        let ids = col3::SectionId::ALL;
-        let FittedColumn {
-            rect,
-            inner,
-            panel,
-            slot,
-        } = fitted_column(40, SectionId::Recall);
-        let chip = col3::recall_unit_rect(&data, slot.collapsed, inner_of(panel))
-            .expect("the fixture draws the unit chip");
-        let screen_row = inner.y + chip.y;
-        for x in chip.x..chip.x + chip.w {
-            assert_eq!(
-                section_or_focus(&ids, &data, rect, 0, x, screen_row),
-                Target::RecallUnitToggle,
-                "cell {x} of the unit chip"
-            );
-        }
-        assert!(Target::RecallUnitToggle.is_button());
-        assert_eq!(
-            section_or_focus(&ids, &data, rect, 0, chip.x - 1, screen_row),
-            Target::Section(col3::SectionId::Recall),
-            "the gap before the chip belongs to no control"
         );
     }
 

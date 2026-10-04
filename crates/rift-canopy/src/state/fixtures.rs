@@ -208,7 +208,6 @@ pub(super) fn recall_feed(rate: Vec<f64>) -> Event {
         project: "/r/a".into(),
         payload: FeedPayload::Recall {
             savings: RecallView::Data(SavingsData {
-                target_pct: Some(90),
                 ..SavingsData::default()
             }),
             calls: RecallView::Data(CallsData {

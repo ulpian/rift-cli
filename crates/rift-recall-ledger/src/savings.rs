@@ -63,20 +63,6 @@ use rift_store::{CanonicalStore, Value};
 /// the two cannot drift apart.
 pub const PREVENTED_VERB: &str = "memd.read_prevented";
 
-/// The product **target**: the share of repository-content tokens Rift returns
-/// instead of the agent reading them — over any channel (the Read tool, shell
-/// reads, search lines), first reads included — as a percentage of the share
-/// [`Savings::share`] publishes over the windows `rift savings --last` and
-/// Canopy show. **A goal, never a measurement.**
-///
-/// It is one constant because a target quoted in two places is a target that
-/// eventually disagrees with itself: the guide's evaluation chapter and every
-/// surface that prints "of N % target" read this number. It deliberately does
-/// **not** gate anything — the evaluation bar's Go/NoGo threshold is a
-/// separate, versioned economic choice that lives with the harness — so
-/// changing it moves what surfaces claim to be aiming at and nothing else.
-pub const SAVINGS_TARGET_PCT: u8 = 90;
-
 /// The name a read whose session row the projection has not caught up with is
 /// credited to. It is a real bucket, not a family: keeping it visible is what
 /// stops those reads from being silently folded into a family that may not

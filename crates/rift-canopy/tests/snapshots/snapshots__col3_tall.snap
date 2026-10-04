@@ -20,9 +20,9 @@ expression: "col3_text(&col3_with_data(), 30)"
 │- projection storage: 17.7MB    │
 ╰────────────────────────────────╯
 ╭─ recall ───────────────────────╮
-│saved 42.0% (6.0k)              │
+│saved 6.0k tokens · 42.0%       │
 │17 serves · 2 active sessions   │
-│[24h][7d][30d][all]        [tok]│
+│[24h][7d][30d][all]             │
 │read  @@@@@@@@@@@@@@@@@@@@@ 8.3k│
 │saved @@@@@@@@@@@@@@@+      6.0k│
 │# hook                          │

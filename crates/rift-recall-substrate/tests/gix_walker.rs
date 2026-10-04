@@ -39,6 +39,14 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
+/// Check files out with the bytes they were committed with, whatever the
+/// machine's global `core.autocrlf`: the fixture precomputes content hashes,
+/// and a CRLF rewrite on checkout would make every one of them stale.
+fn pin_line_endings(dir: &Path) {
+    git(dir, &["config", "core.autocrlf", "false"]);
+    git(dir, &["config", "core.eol", "lf"]);
+}
+
 fn write(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, contents).unwrap();
@@ -56,6 +64,7 @@ fn build_fixture(dir: &Path) {
 
     // A real working branch with a.rs committed.
     git(dir, &["init", "-q", "-b", "main"]);
+    pin_line_endings(dir);
     write(&dir.join("a.rs"), A_RS);
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-q", "-m", "worktree"]);
@@ -180,6 +189,8 @@ fn metrics_report_tokens_avoided_gt_zero() {
     let dir = tempfile::tempdir().unwrap();
     build_fixture(dir.path());
 
+    assert_worktree_holds_the_committed_bytes(dir.path(), "a.rs");
+
     let sub = GixSubstrate::open(dir.path()).unwrap();
     let (reads, issues) = ingest::read_facts_all(&sub).unwrap();
     assert!(
@@ -200,6 +211,14 @@ fn metrics_report_tokens_avoided_gt_zero() {
         m.tokens_avoided > 0,
         "definition-of-done: tokens_avoided > 0"
     );
+}
+
+/// The working file's raw bytes hash to the blob `HEAD` commits for it:
+/// `--no-filters` keeps a line-ending conversion from hiding a rewrite.
+fn assert_worktree_holds_the_committed_bytes(dir: &Path, path: &str) {
+    let worktree = git_out(dir, &["hash-object", "--no-filters", path]);
+    let committed = git_out(dir, &["rev-parse", &format!("HEAD:{path}")]);
+    assert_eq!(worktree, committed, "{path} was rewritten on checkout");
 }
 
 fn list_refs(dir: &Path) -> String {

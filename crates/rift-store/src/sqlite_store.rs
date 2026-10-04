@@ -18,14 +18,21 @@ use async_trait::async_trait;
 use rift_core::{Result, RiftError};
 use rusqlite::Connection;
 
+use crate::projection_lock::{ProjectionLease, ProjectionReplacementGuard};
 use crate::schema::canonical_tables;
 use crate::store::{Row, Store, StoreConn, StoreDescriptor};
 use crate::value::Value;
 
 /// A SQLite-backed append-only store (the always-available reference engine).
 pub struct SqliteStore {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<ConnectionState>,
     desc: StoreDescriptor,
+}
+
+// Field order closes SQLite before releasing its marker/source leases.
+struct ConnectionState {
+    connection: Mutex<Connection>,
+    _lease: Option<ProjectionLease>,
 }
 
 impl SqliteStore {
@@ -35,7 +42,7 @@ impl SqliteStore {
     /// Returns [`RiftError::Storage`] if the connection or pragmas fail.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(map_sql)?;
-        Self::init(conn, ":memory:")
+        Self::init(conn, ":memory:", None)
     }
 
     /// Open (or create) a store at `path`.
@@ -43,55 +50,102 @@ impl SqliteStore {
     /// # Errors
     /// Returns [`RiftError::Storage`] if the database cannot be opened.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let p = path.as_ref();
-        let display = p.display().to_string();
-        let conn = Connection::open(p).map_err(map_sql)?;
-        Self::init(conn, display)
+        let lease = ProjectionLease::writable(path.as_ref())?;
+        let display = lease.path().display().to_string();
+        let conn = Connection::open(lease.path()).map_err(map_sql)?;
+        Self::init(conn, display, Some(lease))
     }
 
-    /// Open an existing store **read-only**: no creation, no migration, no
-    /// write of any kind.
-    ///
-    /// For reading a projection that has been SET ASIDE — a `.pre-repair` file
-    /// kept because its rows could not be re-derived. Two things must not
-    /// happen to such a file, and both are ordinary behaviour elsewhere in this
-    /// crate: [`open`](Self::open) CREATES the database when the path is
-    /// missing (so a typo yields a silent empty import instead of an error),
-    /// and [`crate::open_capture_projection`] MIGRATES it — which would rewrite
-    /// the artifact being preserved, the migration-edit hazard this program has
-    /// already paid for once.
-    ///
-    /// `SQLITE_OPEN_READ_ONLY` is the enforcement, not a convention: a write
-    /// attempted through this handle fails at the SQLite layer rather than
-    /// relying on the caller to only call readers.
+    /// Open a guarded live projection read-only, without creating its DB,
+    /// parent, or marker. SQLite may manage WAL/SHM files.
+    /// A legacy projection without a concurrency marker refuses until an
+    /// ordinary writable open establishes its marker.
     ///
     /// # Errors
-    /// [`RiftError::Storage`] if the file does not exist or is not a database.
+    /// Returns typed busy for replacement or a missing concurrency marker,
+    /// and storage/filesystem errors for a missing or invalid database.
     pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let p = path.as_ref();
-        let display = p.display().to_string();
-        let conn = Connection::open_with_flags(p, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(map_sql)?;
-        Self::init(conn, display)
+        let lease = ProjectionLease::read_only(path.as_ref())?;
+        let display = lease.path().display().to_string();
+        let conn =
+            Connection::open_with_flags(lease.path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(map_sql)?;
+        Self::init(conn, display, Some(lease))
     }
 
-    fn init(conn: Connection, path: impl Into<String>) -> Result<Self> {
-        conn.pragma_update(None, "foreign_keys", true)
-            .map_err(map_sql)?;
-        // Hook processes write concurrently (one short-lived `rift hooks`
-        // per event); without a busy timeout a colliding writer fails with
-        // SQLITE_BUSY instantly and the never-fail hook contract turns that
-        // into a silently dropped row.
-        conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(map_sql)?;
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+    /// Read an explicitly selected historical source in one read transaction.
+    /// An existing marker still participates in lifetime exclusion. A
+    /// markerless source requires explicit historical selection. SQLite
+    /// remains READ_ONLY and preserves WAL visibility; the first query pins
+    /// a consistent snapshot until this store closes. Physical immutability
+    /// is not asserted, and SQLite may manage existing WAL/SHM sidecars.
+    ///
+    /// # Errors
+    /// Returns busy for a held source marker and storage/filesystem errors
+    /// for an invalid source. No migration, parent, source DB, or marker is
+    /// created; SQLite may manage WAL/SHM files.
+    pub fn open_historical_snapshot(snapshot: crate::HistoricalProjectionSnapshot) -> Result<Self> {
+        let lease = snapshot.lease()?;
+        let display = snapshot.path().display().to_string();
+        let conn = Connection::open_with_flags(
+            snapshot.path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(map_sql)?;
+        let store = Self::init(conn, display, lease)?;
+        store.with_conn(|conn| conn.execute_batch("BEGIN DEFERRED"))?;
+        Ok(store)
+    }
+
+    pub(crate) fn open_existing(path: &std::path::Path) -> Result<Option<Self>> {
+        let lease = match ProjectionLease::existing_writable(path) {
+            Ok(lease) => lease,
+            Err(RiftError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        if !lease.has_source() {
+            return Ok(None);
+        }
+        let display = lease.path().display().to_string();
+        let conn =
+            Connection::open_with_flags(lease.path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                .map_err(map_sql)?;
+        Self::init(conn, display, Some(lease)).map(Some)
+    }
+
+    pub(crate) fn open_replacement(guard: ProjectionReplacementGuard) -> Result<Self> {
+        let lease = guard.into_lease()?;
+        let display = lease.path().display().to_string();
+        let conn = Connection::open(lease.path()).map_err(map_sql)?;
+        Self::init(conn, display, Some(lease))
+    }
+
+    fn init(
+        conn: Connection,
+        path: impl Into<String>,
+        lease: Option<ProjectionLease>,
+    ) -> Result<Self> {
+        let store = Self {
+            conn: Arc::new(ConnectionState {
+                connection: Mutex::new(conn),
+                _lease: lease,
+            }),
             desc: StoreDescriptor::new(path),
-        })
+        };
+        // Construct ownership before fallible pragmas: an initialization
+        // error must also close SQLite before releasing its lifetime guard.
+        store.with_conn(|conn| {
+            conn.pragma_update(None, "foreign_keys", true)?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+        })?;
+        Ok(store)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.conn
+            .connection
             .lock()
             .map_err(|_| RiftError::storage("sqlite connection mutex poisoned"))
     }
@@ -255,12 +309,23 @@ impl SqliteStore {
 /// by the mutex). For the reference engine, "per-call connection" is a cheap clone
 /// of the `Arc`.
 struct SqliteConn {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<ConnectionState>,
 }
 
 impl SqliteConn {
+    fn begin_transaction(&self) -> Result<SqliteTx> {
+        self.lock()?
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(map_sql)?;
+        Ok(SqliteTx {
+            conn: Arc::clone(&self.conn),
+            finished: false,
+        })
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.conn
+            .connection
             .lock()
             .map_err(|_| RiftError::storage("sqlite connection mutex poisoned"))
     }
@@ -329,15 +394,7 @@ impl StoreConn for SqliteConn {
     }
 
     async fn begin(&self, _mode: crate::TxMode) -> Result<Box<dyn crate::StoreTx + '_>> {
-        // The reference engine treats `Concurrent` as `Deferred` (single
-        // mutex-serialized connection; MVCC is a native-engine capability).
-        self.lock()?
-            .execute_batch("BEGIN DEFERRED")
-            .map_err(map_sql)?;
-        Ok(Box::new(SqliteTx {
-            conn: Arc::clone(&self.conn),
-            finished: false,
-        }))
+        Ok(Box::new(self.begin_transaction()?))
     }
 }
 
@@ -345,13 +402,14 @@ impl StoreConn for SqliteConn {
 /// `COMMIT`/`ROLLBACK`; dropping unfinished rolls back best-effort so a failed
 /// migration never leaves the connection stuck inside a transaction.
 struct SqliteTx {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<ConnectionState>,
     finished: bool,
 }
 
 impl SqliteTx {
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.conn
+            .connection
             .lock()
             .map_err(|_| RiftError::storage("sqlite connection mutex poisoned"))
     }
@@ -392,7 +450,7 @@ impl crate::StoreTx for SqliteTx {
 impl Drop for SqliteTx {
     fn drop(&mut self) {
         if !self.finished {
-            if let Ok(conn) = self.conn.lock() {
+            if let Ok(conn) = self.conn.connection.lock() {
                 let _ = conn.execute_batch("ROLLBACK");
             }
         }
@@ -1039,6 +1097,38 @@ mod tests {
             let result = store.execute_raw(&stmt);
             prop_assert!(matches!(result, Err(RiftError::Immutability(_))));
             prop_assert_eq!(block(store.count(table.name)).unwrap(), 1);
+        }
+    }
+    #[test]
+    fn an_owned_transaction_keeps_exclusion_after_both_connection_owners_drop() {
+        for finish in ["commit", "rollback", "drop"] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("projection.db");
+            let store = SqliteStore::open(&db).unwrap();
+            store
+                .with_conn(|c| c.execute_batch("CREATE TABLE lease_probe (n INTEGER)"))
+                .unwrap();
+            let conn = SqliteConn {
+                conn: Arc::clone(&store.conn),
+            };
+            let mut tx = conn.begin_transaction().unwrap();
+            drop(store);
+            drop(conn);
+            assert!(matches!(
+                crate::ProjectionReplacementGuard::acquire(&db),
+                Err(RiftError::ProjectionBusy { .. })
+            ));
+            tx.lock()
+                .unwrap()
+                .execute("INSERT INTO lease_probe VALUES (7)", [])
+                .unwrap();
+            match finish {
+                "commit" => tx.finish("COMMIT").unwrap(),
+                "rollback" => tx.finish("ROLLBACK").unwrap(),
+                _ => (),
+            }
+            drop(tx);
+            assert!(crate::ProjectionReplacementGuard::acquire(&db).is_ok());
         }
     }
 }

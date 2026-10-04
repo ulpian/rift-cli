@@ -70,7 +70,7 @@ pub struct ShareData {
     /// card has always used — so an absent field reads as it always did.
     pub window: Option<String>,
     /// The headline share, over the audit relation. `None` is unanswerable —
-    /// nothing read and nothing avoided — and draws no chip at all.
+    /// nothing read and nothing avoided — and the headline draws no percentage.
     pub overall: Option<f64>,
     /// Avoided minus returned over the same relation.
     pub honesty: i64,
@@ -80,7 +80,7 @@ pub struct ShareData {
     /// [`Self::overall`] and the read side, because the share is a rounded
     /// percentage and inverting it would put a token count on the card that no
     /// relation ever held. Both come out of one `savings::compose` call, so the
-    /// two bars and the chip beside them describe one window.
+    /// two bars and the headline above them describe one window.
     pub avoided_tokens: u64,
     /// The read side of the denominator.
     pub read_tokens: u64,
@@ -116,9 +116,10 @@ pub struct ShareData {
 pub struct SavingsData {
     /// Estimated USD saved, integer micro-USD: the sum of the
     /// priced [`UsdRow`] subtotals. `None` is honest absence — no resolvable
-    /// pricing basis — and draws no chip.
+    /// pricing basis — and the headline draws no dollar segment.
     pub usd_saved_micros: Option<i64>,
-    /// The chip label, pre-rendered by the money authority (`"~$105.90"`).
+    /// The headline's dollar segment, pre-rendered by the money authority
+    /// (`"~$105.90"`).
     /// `Some` exactly when [`Self::usd_saved_micros`] is.
     pub usd_label: Option<String>,
     /// The per-model rows whose priced subtotals compose the headline
@@ -126,30 +127,20 @@ pub struct SavingsData {
     pub usd_rows: Vec<UsdRow>,
     /// [`ShareData::read_tokens`] valued through the **same** model mix and
     /// the same uncached-input rates as [`Self::usd_saved_micros`], in
-    /// micro-USD. `None` is honest absence, and the bar chart falls back to
-    /// tokens rather than drawing one priced bar beside one unpriced one.
+    /// micro-USD. `None` is honest absence.
     ///
-    /// One basis, read twice — never a second price table. The two bars are
-    /// comparable in dollars only because their tokens were partitioned
-    /// across the same models at the same moment.
+    /// One basis, read twice — never a second price table: the read side and
+    /// the saved side are comparable in dollars only because their tokens
+    /// were partitioned across the same models at the same moment.
     pub usd_read_micros: Option<i64>,
-    /// The read bar's label, pre-rendered by the money authority (`"~$12.40"`,
-    /// tilde mandatory). `Some` exactly when [`Self::usd_read_micros`] is.
+    /// The read side's dollar label, pre-rendered by the money authority
+    /// (`"~$12.40"`, tilde mandatory). `Some` exactly when [`Self::usd_read_micros`] is.
     pub usd_read_label: Option<String>,
     /// The avoided total decomposed by worktree (the family view). Today every
     /// avoided token lands in [`WorktreeAxis::family_only`], because no serve
     /// relation records the session that was served; the breakdown modal
     /// discloses that rather than attributing a serve to a guess.
     pub by_worktree: WorktreeAxis,
-    /// The product's stated savings target, as a whole percentage — the card
-    /// says what it is aiming at beside what it reached.
-    ///
-    /// It arrives from `rift_recall_ledger::savings::SAVINGS_TARGET_PCT`,
-    /// because this crate depends on `rift-core` and the registry and on
-    /// nothing else: a number the product publishes is data, and data reaches
-    /// the render layer on the view model like every other figure here.
-    /// `None` draws no target at all — a target of zero is not a target.
-    pub target_pct: Option<u8>,
     /// The savings share the owner judges this plane by, overall and per
     /// family — **the card's headline figure**. Absent figures draw nothing.
     ///
@@ -180,14 +171,14 @@ const SHARE_JOIN_NOTE: [&str; 4] = [
 #[must_use]
 pub fn usd_breakdown_lines(sd: &SavingsData) -> Vec<String> {
     let Some(total_label) = sd.usd_label.as_deref() else {
-        // Reachable, and not rarely: the share chip opens this modal on every
+        // Reachable, and not rarely: the headline opens this modal on every
         // repository whose models carry no seeded price. The dollar half says
         // it has nothing to say, and the share half below still answers.
         let mut lines = vec![
             "no dollar figure: no seeded price applies to this".to_owned(),
             "project's models — the token headline stands alone".to_owned(),
         ];
-        lines.extend(savings_share_lines(&sd.share, sd.target_pct));
+        lines.extend(savings_share_lines(&sd.share));
         return lines;
     };
     // The rows' own slices, which sum to exactly the avoided total this card's
@@ -242,13 +233,11 @@ pub fn usd_breakdown_lines(sd: &SavingsData) -> Vec<String> {
     lines.extend(savings_worktree_lines(&sd.by_worktree));
     lines.push(String::new());
     lines.push("~ marks an estimate, not a bill: token counts are".to_owned());
-    // (the target line is appended with the share block below, where the
-    // figure it is a target *for* is printed)
     lines.push("cl100k_base (not the provider's billing tokenizer),".to_owned());
     lines.push("and the per-model split is attributed from observed".to_owned());
     lines.push("usage — the serve trail records no per-serve model".to_owned());
     lines.push("(the priced savings estimate).".to_owned());
-    lines.extend(savings_share_lines(&sd.share, sd.target_pct));
+    lines.extend(savings_share_lines(&sd.share));
     lines
 }
 
@@ -260,7 +249,7 @@ pub fn usd_breakdown_lines(sd: &SavingsData) -> Vec<String> {
 /// drawn as `n/a`, never as `0 %` — the two mean opposite things, and the
 /// second is a measurement nobody made.
 #[must_use]
-pub fn savings_share_lines(share: &ShareData, target_pct: Option<u8>) -> Vec<String> {
+pub fn savings_share_lines(share: &ShareData) -> Vec<String> {
     // The window the numbers cover, in the card's own voice: the default is the
     // whole record, and a boundary marker replaces that clause rather than
     // being appended to it — two window sentences on one card is how a reader
@@ -281,10 +270,7 @@ pub fn savings_share_lines(share: &ShareData, target_pct: Option<u8>) -> Vec<Str
         "savings share — of the tokens this repository's agents".to_owned(),
         "would have read, the share the recall plane avoided,".to_owned(),
         window,
-        match target_pct {
-            Some(target) => format!("overall              {overall:.1}% of a {target}% target"),
-            None => format!("overall              {overall:.1}%"),
-        },
+        format!("overall              {overall:.1}%"),
         format!("honesty              {:+} tok avoided net", share.honesty),
         format!(
             "sessions with reads  {} (the n behind the share)",
@@ -380,7 +366,6 @@ mod tests {
     #[test]
     fn breakdown_lines_disclose_the_whole_basis() {
         let sd = SavingsData {
-            target_pct: Some(90),
             usd_saved_micros: Some(2_500_000),
             usd_label: Some("~$2.50".to_owned()),
             usd_rows: vec![
@@ -438,7 +423,6 @@ mod tests {
     #[test]
     fn serves_with_no_session_key_count_under_family_only() {
         let sd = SavingsData {
-            target_pct: Some(90),
             usd_saved_micros: Some(2_500_000),
             usd_label: Some("~$2.50".to_owned()),
             usd_rows: vec![UsdRow {
@@ -482,7 +466,6 @@ mod tests {
     #[test]
     fn an_empty_axis_adds_no_block_to_the_savings_modal() {
         let sd = SavingsData {
-            target_pct: Some(90),
             usd_saved_micros: Some(1),
             usd_label: Some("~$0.01".to_owned()),
             usd_rows: vec![UsdRow {
@@ -522,7 +505,7 @@ mod tests {
             body.contains("reads: 5.3% (excluded: codex)"),
             "the excluding variant names what it excluded: {body}"
         );
-        // Reachable with no dollar figure at all: the share chip is the door
+        // Reachable with no dollar figure at all: the headline is the door
         // on every project whose models carry no seeded price.
         assert!(body.contains("no dollar figure"), "{body}");
     }
@@ -552,7 +535,7 @@ mod tests {
         // since the reset" and "unanswerable since Tuesday" are different
         // claims about the same plane.
         sd.share.overall = None;
-        let empty = savings_share_lines(&sd.share, sd.target_pct).join("\n");
+        let empty = savings_share_lines(&sd.share).join("\n");
         assert!(empty.contains("unanswerable"), "{empty}");
         assert!(
             empty.contains("since the window was reset 2026-09-07T18:00:00.000Z"),

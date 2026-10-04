@@ -276,6 +276,19 @@ fn unix_secs(t: SystemTime) -> u64 {
 mod tests {
     use super::*;
 
+    const SOURCE_SECONDS: u64 = 1_700_000_000;
+
+    /// Pin filesystem ordering without depending on the host clock's resolution.
+    fn modified_at(path: &Path, seconds: u64) {
+        let modified = UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+
     /// A checkout-shaped tree: `crates/x/src/lib.rs` plus the manifests.
     fn checkout(root: &Path) {
         fs::create_dir_all(root.join("crates/x/src")).unwrap();
@@ -283,6 +296,9 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
         fs::write(root.join("crates/x/src/lib.rs"), "pub fn a() {}\n").unwrap();
         fs::write(root.join("bins/rift/src/main.rs"), "fn main() {}\n").unwrap();
+        for path in ["Cargo.toml", "crates/x/src/lib.rs", "bins/rift/src/main.rs"] {
+            modified_at(&root.join(path), SOURCE_SECONDS);
+        }
     }
 
     #[test]
@@ -292,9 +308,12 @@ mod tests {
         let first = SourceClock::scan(tmp.path()).unwrap();
         assert_eq!(first.files, 3, "two sources plus the manifest");
 
-        // Written last, so it is the newest.
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Explicitly newer than every checkout source, even on coarse clocks.
         fs::write(tmp.path().join("bins/rift/src/hooks.rs"), "// later\n").unwrap();
+        modified_at(
+            &tmp.path().join("bins/rift/src/hooks.rs"),
+            SOURCE_SECONDS + 2,
+        );
         let second = SourceClock::scan(tmp.path()).unwrap();
         assert_eq!(second.newest_path, Path::new("bins/rift/src/hooks.rs"));
         assert_eq!(second.files, 4);
@@ -329,9 +348,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("rift");
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        modified_at(&bin, SOURCE_SECONDS - 2);
         checkout(tmp.path());
         fs::write(tmp.path().join("crates/x/src/late.rs"), "// after\n").unwrap();
+        modified_at(&tmp.path().join("crates/x/src/late.rs"), SOURCE_SECONDS + 2);
 
         let clock = SourceClock::scan(tmp.path()).unwrap();
         let freshness = Freshness::of(&bin, Some(&clock));
@@ -354,9 +374,9 @@ mod tests {
     fn a_binary_written_after_its_sources_is_fresh_and_earns_no_refusal() {
         let tmp = tempfile::tempdir().unwrap();
         checkout(tmp.path());
-        std::thread::sleep(std::time::Duration::from_millis(10));
         let bin = tmp.path().join("rift");
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        modified_at(&bin, SOURCE_SECONDS + 2);
 
         let clock = SourceClock::scan(tmp.path()).unwrap();
         let freshness = Freshness::of(&bin, Some(&clock));

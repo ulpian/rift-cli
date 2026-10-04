@@ -34,20 +34,6 @@ pub(super) fn select_recall_window(s: &mut AppState, window: crate::col3::Recall
     })
 }
 
-/// Flip the Recall card's bars between tokens and dollars — the ONE act
-/// behind the `[tok]`/`[usd]` chip and the `$` key.
-///
-/// It emits **no data request**, and that is the difference from a period
-/// change rather than an omission: both figures ride the same feed frame, so
-/// the flip is a rendering choice the current frame can already answer. A
-/// recompute here would cost a read to redraw numbers Canopy is holding.
-pub(super) fn toggle_recall_unit(s: &mut AppState) -> Flow {
-    let mut col3 = (*s.col3).clone();
-    col3.recall_unit = col3.recall_unit.flipped();
-    s.set_col3(col3);
-    Flow::Continue(Effects::default())
-}
-
 pub(super) fn open_project_settings(s: &mut AppState) -> Flow {
     let Some(project) = s.app.selected_project() else {
         return Flow::Continue(Effects::default());
@@ -92,14 +78,14 @@ pub(super) fn open_worktree_axis(s: &mut AppState) -> Flow {
     Flow::Continue(Effects::default())
 }
 
-/// The recall savings breakdown — the **one** opener behind all three doors:
-/// the `[~$…]` chip, the `[of N% target]` chip beside it and the `S` key.
+/// The recall savings breakdown — the **one** opener behind both doors: the
+/// Recall headline and the `S` key.
 ///
-/// The chips were the only way in until this existed, which made the whole
+/// The headline was the only way in until this existed, which made the whole
 /// disclosed basis — the per-model rows, the per-family share, the window it
 /// covers — mouse-only, on a dashboard whose standing rule is that anything a
 /// hint teaches is reachable both ways. It was not caught by the mechanical
-/// parity checks because the chips are not drawn as a modal surface; now the
+/// parity checks because the card is not drawn as a modal surface; now the
 /// key is hinted where it is bound (`keymap::GRAPHS`) and the hint-derivation
 /// proof covers it like every other.
 ///
@@ -278,38 +264,6 @@ mod tests {
         }
     }
 
-    /// The unit chip and `$` are one act, and it asks the data plane for
-    /// nothing: both figures already ride the frame the card is drawing, so a
-    /// flip is a rendering choice and a recompute would cost a read to redraw
-    /// numbers Canopy is holding.
-    #[test]
-    fn the_unit_chip_and_the_dollar_key_flip_one_act_without_a_read() {
-        use crate::col3::RecallUnit;
-        let mut clicked = ready(vec![project("a")]);
-        clicked.app.set_focus(Panel::Graphs);
-        assert_eq!(clicked.col3.recall_unit, RecallUnit::Tokens, "the default");
-        let click = click_on(Target::RecallUnitToggle, &mut clicked);
-        let click_effects = effects_of(update(&mut clicked, Event::Mouse(click)));
-
-        let mut keyed = ready(vec![project("a")]);
-        keyed.app.set_focus(Panel::Graphs);
-        let key_effects = effects_of(update(&mut keyed, Event::Key(CanopyKey::Char('$'))));
-
-        assert_eq!(clicked.col3.recall_unit, RecallUnit::Usd);
-        assert_eq!(keyed.col3.recall_unit, RecallUnit::Usd);
-        assert!(
-            click_effects.data_requests.is_empty(),
-            "no read to flip a unit"
-        );
-        assert!(key_effects.data_requests.is_empty());
-        assert_eq!(clicked.pressed, Some(Target::RecallUnitToggle));
-        assert_eq!(keyed.pressed, clicked.pressed);
-
-        // And it flips back — a toggle, not a latch.
-        update(&mut keyed, Event::Key(CanopyKey::Char('$')));
-        assert_eq!(keyed.col3.recall_unit, RecallUnit::Tokens);
-    }
-
     /// Re-selecting the live period is inert beyond the flash: the card is
     /// already showing it, and asking the bus again would still cost a read.
     #[test]
@@ -335,24 +289,17 @@ mod tests {
             let effects = effects_of(update(&mut s, Event::Key(CanopyKey::Char('1'))));
             assert!(effects.data_requests.is_empty(), "{panel:?}");
             assert_eq!(s.col3.recall_window, RecallWindow::AllTime, "{panel:?}");
-            update(&mut s, Event::Key(CanopyKey::Char('$')));
-            assert_eq!(
-                s.col3.recall_unit,
-                crate::col3::RecallUnit::Tokens,
-                "`$` is bound with the periods, and only there: {panel:?}"
-            );
         }
     }
 
-    /// the priced savings estimate: the chip opens the breakdown as the existing read-only
+    /// the priced savings estimate: the headline opens the breakdown as the existing read-only
     /// `Overlay::Results` — full disclosed basis, no new modal surface.
     #[test]
-    fn clicking_the_cost_chip_opens_the_breakdown_modal() {
+    fn clicking_the_priced_headline_opens_the_breakdown_modal() {
         use crate::col3::{RecallView, SavingsData, UsdRow};
         let mut s = ready(vec![project("a")]);
         let mut col3 = (*s.col3).clone();
         col3.savings = RecallView::Data(SavingsData {
-            target_pct: Some(90),
             usd_saved_micros: Some(6_250_000),
             usd_label: Some("~$6.25".to_owned()),
             usd_rows: vec![
@@ -379,7 +326,7 @@ mod tests {
             share: Box::new(crate::col3::ShareData::default()),
         });
         s.set_col3(col3);
-        let _ = apply_click(&mut s, Target::RecallCost);
+        let _ = apply_click(&mut s, Target::RecallHeadline);
         let Some(Overlay::Results { title, lines, .. }) = &s.app.overlay else {
             panic!(
                 "expected the breakdown Results overlay, got {:?}",
@@ -659,11 +606,11 @@ mod tests {
         }
     }
 
-    /// The breakdown **always** opens and says what is absent, through either
-    /// chip or through `S`.
+    /// The breakdown **always** opens and says what is absent, through the
+    /// headline or through `S`.
     ///
     /// It used to open nothing without a dollar figure, which was defensible
-    /// while the chips were the only doors — there was no chip to click. A
+    /// while a dollar chip was the only door — there was nothing to click. A
     /// hinted key cannot work that way: a key that sometimes does nothing is
     /// a dead key some of the time, so the modal answers on a card with no
     /// savings by saying it has none (the worktree axis's rule, and the same
@@ -671,7 +618,7 @@ mod tests {
     #[test]
     fn the_savings_modal_answers_even_with_nothing_to_break_down() {
         let by_click = |s: &mut AppState| {
-            let _ = apply_click(s, Target::RecallCost);
+            let _ = apply_click(s, Target::RecallHeadline);
         };
         let by_key = |s: &mut AppState| {
             s.app.set_focus(crate::Panel::Graphs);

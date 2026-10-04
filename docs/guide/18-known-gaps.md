@@ -525,7 +525,7 @@ property of deferring the work at all.
 
 *Honest limit, measured 2026-09-15.* `cargo run -p xtask -- replay-savings`
 over the seven session trees recorded on the owner's machine before the
-90 %-target work (21 windows, 2,563 calls, 1.07M repository-content tokens)
+work it measures (21 windows, 2,563 calls, 1.07M repository-content tokens)
 has this build declining **0 calls**; the build before it declined one, a
 slice the floor of 28 lines now leaves alone. The levers did move what they
 were aimed at — the shell grammar recognises 132 of 1,252 shell calls where it
@@ -551,8 +551,8 @@ truncated one on this client's surface.
 
 Closing the first two takes new serving shapes; closing the third takes a
 third census; the fourth is the client's to publish. The figure is published
-as the replay prints it, beside the target in
-[08 §8.13](08-cost-and-savings.md#813-the-target-is-90-the-bar-is-what-the-harness-measured),
+as the replay prints it, as a measurement with its denominator
+([08 §8.13](08-cost-and-savings.md#813-the-bar-is-what-the-harness-measured)),
 and is not re-denominated to the reads the gate can see.
 
 **Read more.** [08](08-cost-and-savings.md) §8.13,
@@ -676,8 +676,8 @@ enters scope.
 ### The header's help affordance has no key
 
 *Measured defect.* The header cluster draws a help affordance that is
-hit-testable and that no key binding opens — the same parity problem as the
-savings chip, a hint teaching an act a keyboard cannot perform. Closing it takes
+hit-testable and that no key binding opens — the same parity problem the
+savings breakdown once had, a hint teaching an act a keyboard cannot perform. Closing it takes
 a binding, or a hint that does not advertise one.
 
 **Read more.** [11](11-canopy-tour.md).

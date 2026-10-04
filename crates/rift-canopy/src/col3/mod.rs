@@ -53,11 +53,8 @@ pub use activity::{ActivityData, ActivityView, DayBar, OffStrip};
 pub(crate) use anim::{interpolate, should_animate};
 pub use calls::{CallsData, ChannelCallSeries};
 pub use format::{fmt_count, fmt_km};
-pub use recall::{recall_cost_rect, recall_share_rect, share_chip_label, RecallView};
-pub use recall_bars::RecallUnit;
-pub use recall_period::{
-    recall_unit_rect, recall_window_buttons, RecallWindow, RecallWindowButton, WindowCut,
-};
+pub use recall::{recall_headline_rect, RecallView};
+pub use recall_period::{recall_window_buttons, RecallWindow, RecallWindowButton, WindowCut};
 pub use savings::{
     savings_share_lines, usd_breakdown_lines, FamilyShareRow, SavingsData, ShareData, UsdRow,
 };
@@ -312,10 +309,6 @@ pub struct Col3 {
     pub savings: RecallView<SavingsData>,
     /// Recall serve calls.
     pub calls: RecallView<CallsData>,
-    /// The unit the Recall panel's bar chart is read in. A viewer's choice,
-    /// set by the reducer; no feed writes it, and flipping it needs no read
-    /// because both figures ride the same frame.
-    pub recall_unit: RecallUnit,
     /// The period the Recall panel's figures were computed over.
     ///
     /// A **viewer's choice**, so the reducer sets it and no feed ever does:

@@ -175,8 +175,7 @@ const GRAPHS: &[Hint] = &[
     // each digit selects the Recall card's period button of the same
     // position, and all four are bound only here — where the buttons are.
     hint("1-4", "recall period", CanopyKey::Char('1')),
-    hint("$", "tokens/$", CanopyKey::Char('$')),
-    // The keyboard twin of the Recall card's headline chips: both open the
+    // The keyboard twin of the Recall card's headline: both open the
     // savings breakdown, and until this hint existed the whole disclosed
     // basis was mouse-only.
     hint("S", "savings", CanopyKey::Char('S')),

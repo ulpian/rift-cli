@@ -26,7 +26,6 @@ pub(super) fn fold_action(action: Action) -> Flow {
         | Action::OpenWorktreeAxis
         | Action::OpenSavingsBreakdown
         | Action::SetRecallWindow(_)
-        | Action::ToggleRecallUnit
         | Action::AdoptWorktree
         | Action::ApplyProjectSettings(_)
         | Action::RunLine(_)

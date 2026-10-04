@@ -26,6 +26,7 @@ keyring = ["dep:keyring"]
 # design notes; re-evaluate before wiring.
 
 [dependencies]
+rift-shadow-cost = { version = "0.0.1", path = "../rift-shadow-cost" }
 rift-core = { version = "0.0.1", path = "../rift-core" }
 rift-hashchain = { version = "0.0.1", path = "../rift-hashchain" }
 rift-crypto = { version = "0.0.1", path = "../rift-crypto" }
@@ -36,6 +37,9 @@ sha2 = { workspace = true }
 # block_on hazard.
 async-trait = { workspace = true }
 keyring = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
 
 [dev-dependencies]
 proptest = { workspace = true }

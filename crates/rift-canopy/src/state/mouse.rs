@@ -209,9 +209,8 @@ fn wheel_region(app: &App, target: Option<&Target>) -> WheelRegion {
         }
         Target::Scrollbar(ScrollRegion::Detail) => WheelRegion::Panel(Panel::Detail),
         Target::Section(_)
-        | Target::RecallCost
+        | Target::RecallHeadline
         | Target::RecallWindow(_)
-        | Target::RecallUnitToggle
         | Target::TokensByWorktree
         | Target::Scrollbar(ScrollRegion::Graphs) => WheelRegion::Panel(Panel::Graphs),
         Target::PanelFocus(panel) => WheelRegion::Panel(*panel),

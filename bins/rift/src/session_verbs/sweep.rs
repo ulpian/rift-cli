@@ -198,6 +198,8 @@ fn swept_transients(
 ) -> CleanReport {
     let ttl_ms = i64::from(ttl_days) * 86_400_000;
     let cutoff_unix = (now - ttl_ms) / 1000;
+    // TTL 0 retains nothing: no cutoff, rather than one a whole second wide.
+    let cutoff_unix = (ttl_days > 0).then_some(cutoff_unix);
     let (pruned_refs, kept_refs) = pruned_shadow_refs(repo, cutoff_unix, dry_run);
     let (pruned_queue, swept_tmps) = pruned_queue_entries(repo, now, ttl_ms, dry_run);
     // The per-window journals, by their own age: a window still being
@@ -230,15 +232,21 @@ fn swept_transients(
 
 /// The ephemeral shadow refs past TTL (by their tip's committer time): the
 /// names pruned, and how many were kept inside the TTL.
+///
+/// A positive TTL keeps every tip at or after `cutoff_unix`. TTL zero arrives
+/// as `None` and keeps no ephemeral shadow ref at all: committer times are
+/// whole seconds, so a strict cutoff would keep a tip minted in the same
+/// second as the clean. The zero rule reaches only this already enumerated
+/// ephemeral namespace; canonical refs stay out of scope at every TTL.
 fn pruned_shadow_refs(
     repo: &rift_git::RepoPaths,
-    cutoff_unix: i64,
+    cutoff_unix: Option<i64>,
     dry_run: bool,
 ) -> (Vec<String>, usize) {
     let shadow = shadow_refs(repo);
     let (prunable, kept): (Vec<_>, Vec<_>) = shadow
         .iter()
-        .partition(|(_, tip_unix)| *tip_unix < cutoff_unix);
+        .partition(|(_, tip_unix)| cutoff_unix.is_none_or(|cutoff| *tip_unix < cutoff));
     let mut pruned_refs = Vec::new();
     for (name, _) in &prunable {
         // Belt and braces: the enumeration is already namespace-scoped, but a
@@ -608,5 +616,125 @@ mod tests {
     fn a_checkout_that_has_never_recovered_sweeps_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(sweep_recovery_markers(tmp.path(), 1_000, 1, false), 0);
+    }
+
+    const SHADOW_PREFIX: &str = concat!("refs/", "ent", "ire", "/shadow/");
+
+    /// Refs the sweep must never touch, whatever the TTL.
+    const CANONICAL_REFS: [&str; 3] = [
+        "refs/heads/rift/checkpoints/v1",
+        "refs/rift/chain/v1",
+        concat!("refs/", "ent", "ire", "/checkpoints/v1"),
+    ];
+
+    /// A checked git call with a fixed identity; `at` is the author and
+    /// committer time in unix seconds, injected so no tip age is read off
+    /// the wall clock.
+    fn git_at(dir: &Path, at: i64, args: &[&str]) -> String {
+        let date = format!("@{at} +0000");
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// A commit of the empty tree committed at `at`, named by `name`.
+    fn ref_at(dir: &Path, name: &str, at: i64) {
+        let tree = git_at(dir, at, &["mktree"]);
+        let commit = git_at(dir, at, &["commit-tree", &tree, "-m", name]);
+        git_at(dir, at, &["update-ref", name, &commit]);
+    }
+
+    /// Every ref and the object it names, so "untouched" is byte-for-byte.
+    fn all_refs(dir: &Path) -> String {
+        git_at(
+            dir,
+            0,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        )
+    }
+
+    /// A real repository holding the canonical refs, all committed at `at`.
+    fn repo_with_canonical_refs(dir: &Path, at: i64) -> rift_git::RepoPaths {
+        git_at(dir, at, &["init", "-q"]);
+        for name in CANONICAL_REFS {
+            ref_at(dir, name, at);
+        }
+        rift_git::discover(dir).unwrap()
+    }
+
+    fn without_shadow_refs(refs: &str) -> Vec<&str> {
+        refs.lines()
+            .filter(|l| !l.starts_with(SHADOW_PREFIX))
+            .collect()
+    }
+
+    /// ★ **TTL zero keeps no ephemeral shadow ref, even one committed in the
+    /// same second as the clean.** The sweep counts in whole seconds, so a
+    /// strict "older than the cutoff" kept a tip minted moments before
+    /// `--ttl-days 0`; a positive TTL still keeps it, and every canonical ref
+    /// stays byte-identical throughout.
+    #[test]
+    fn zero_retention_prunes_the_same_second_tip_and_positive_retention_keeps_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tip = 1_800_000_000;
+        let repo = repo_with_canonical_refs(tmp.path(), tip);
+        let shadow = format!("{SHADOW_PREFIX}deadbeef");
+        ref_at(tmp.path(), &shadow, tip);
+        let before = all_refs(tmp.path());
+        let now = tip * 1000 + 500;
+
+        let dry = swept_transients(&repo, now, 0, true);
+        assert_eq!(dry.pruned_refs, std::slice::from_ref(&shadow));
+        assert_eq!(dry.kept_refs, 0);
+        assert_eq!(all_refs(tmp.path()), before, "a dry run removes nothing");
+
+        let kept = swept_transients(&repo, now, 14, false);
+        assert!(kept.pruned_refs.is_empty(), "{:?}", kept.pruned_refs);
+        assert_eq!(kept.kept_refs, 1);
+        assert_eq!(all_refs(tmp.path()), before, "a ref inside TTL survives");
+
+        let clean = swept_transients(&repo, now, 0, false);
+        assert_eq!(clean.pruned_refs, [shadow]);
+        assert_eq!(clean.kept_refs, 0);
+        let after = all_refs(tmp.path());
+        assert!(!after.contains(SHADOW_PREFIX), "{after}");
+        assert_eq!(without_shadow_refs(&after), without_shadow_refs(&before));
+        assert_eq!(without_shadow_refs(&after).len(), CANONICAL_REFS.len());
+    }
+
+    /// A positive TTL keeps the strict cutoff: a tip exactly at it is still
+    /// inside the TTL, and one a second older is past it.
+    #[test]
+    fn positive_shadow_retention_keeps_the_exact_cutoff_and_prunes_only_older_tips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_s: i64 = 1_800_000_000;
+        let cutoff = now_s - 14 * 86_400;
+        let repo = repo_with_canonical_refs(tmp.path(), now_s);
+        let at_cutoff = format!("{SHADOW_PREFIX}at-cutoff");
+        let older = format!("{SHADOW_PREFIX}one-second-older");
+        ref_at(tmp.path(), &at_cutoff, cutoff);
+        ref_at(tmp.path(), &older, cutoff - 1);
+        let before = all_refs(tmp.path());
+
+        let report = swept_transients(&repo, now_s * 1000, 14, false);
+        assert_eq!(report.pruned_refs, [older]);
+        assert_eq!(report.kept_refs, 1);
+        let after = all_refs(tmp.path());
+        assert!(after.contains(&at_cutoff), "{after}");
+        assert_eq!(without_shadow_refs(&after), without_shadow_refs(&before));
     }
 }

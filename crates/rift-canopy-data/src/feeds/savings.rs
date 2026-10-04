@@ -98,9 +98,6 @@ pub fn compute_recall(root: &Path, path: &str, now_ms: i64, window: RecallWindow
                     rows: Vec::new(),
                     family_only: share.avoided_tokens,
                 },
-                // The product's stated goal, from the ledger's one constant: a
-                // target the card names, never a measurement it took.
-                target_pct: Some(rift_recall_ledger::savings::SAVINGS_TARGET_PCT),
                 // The owner's evaluation figure, computed by the ONE shared
                 // function the CLI report, the `savings` verb and the recall
                 // status table also call — so the card and the terminal can

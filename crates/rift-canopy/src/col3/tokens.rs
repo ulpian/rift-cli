@@ -174,8 +174,8 @@ pub(super) fn draw_token_panel(
 /// The `Σ` total re-drawn over its own title cells, from the SAME solver the
 /// hit-test reads, in the key-hint style that marks an act everywhere else in
 /// the dashboard — it is the "by worktree" axis's affordance (the family
-/// view). Flashless by design, like the USD chip: col3 carries no press-pulse
-/// plumbing, by a recorded decision.
+/// view). Flashless by design, like the Recall headline: col3 carries no
+/// press-pulse plumbing, by a recorded decision.
 fn draw_total_chip(col3: &Col3, theme: Theme, title: &str, rect: Rect, frame: &mut Frame) {
     let Some(chip) = token_total_rect(col3, rect) else {
         return;
@@ -619,7 +619,7 @@ mod tests {
 
     /// No total, no border, or a clipped title → no target at all. A
     /// truncated affordance is not one, and a click must never land on a
-    /// panel that never offered it (the `recall_cost_rect` rule, the priced savings estimate).
+    /// panel that never offered it (the Recall headline's rule: no line, no door).
     #[test]
     fn no_total_and_no_room_offer_no_axis_target() {
         let wide = Rect {

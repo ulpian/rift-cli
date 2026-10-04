@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::inclusion::{discovered, hard_refusal, CAPTURE_DOC_HEADER, INCLUDE_FILE};
+use crate::inclusion::{discovered, hard_refusal, link_record, CAPTURE_DOC_HEADER, INCLUDE_FILE};
 
 use super::fixtures::doc;
 
@@ -140,15 +140,28 @@ fn a_target_that_renders_as_nothing_is_not_an_empty_target() {
         "a BOM-only target is WRITTEN, and reads back as the exact bytes \
          `readlink` returned: {text}"
     );
-    assert!(
-        empty_exists,
-        "the control has to exist for the contrast to be measured"
+    // The control, asserted through the walk's own admission decision:
+    // Linux refuses `symlink("")` with ENOENT, so on that leg no empty link
+    // can exist for the walk to reach, and the contrast is measured here.
+    assert_eq!(
+        link_record("t_bom", "\u{FEFF}").as_deref(),
+        Some("t_bom -> \u{FEFF}"),
+        "the decision admits the BOM target the walk wrote"
     );
-    assert!(
-        text.contains("x t_empty unsafe-link-target"),
+    assert_eq!(
+        link_record("t_empty", ""),
+        None,
         "while an EMPTY target is REFUSED — the two are one invisible \
-         character apart on a terminal and a whole rule apart here: {text}"
+         character apart on a terminal and a whole rule apart here"
     );
+    // Where the OS lets the control exist (APFS does), the walk itself
+    // still says so in the record.
+    if empty_exists {
+        assert!(
+            text.contains("x t_empty unsafe-link-target"),
+            "the walk refuses the empty target as the decision does: {text}"
+        );
+    }
 }
 
 /// A symlink target that is **not valid UTF-8**: refused, never

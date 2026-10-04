@@ -308,7 +308,7 @@ fn predicted_trailers(
     })?;
     let facts = t.phase("read_facts", || {
         session_facts_for_archive(&rt, &store, &repo.work_tree, &sess.agent, &sess.session_id)
-    });
+    })?;
     let raw = t.phase("raw_capture", || session_raw_capture(&repo.work_tree));
     let (packs, notes) = t.phase("rule_packs", || {
         crate::redactor_packs::capture_rule_packs(&repo.work_tree)

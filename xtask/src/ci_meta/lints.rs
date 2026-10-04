@@ -70,7 +70,7 @@ pub fn unsafe_only_in_sanctioned_modules(root: &Path) -> Result<Vec<String>, Str
     const SANCTIONED: &[&str] = &[]; // extend with FFI seams as they land
     let mut v = Vec::new();
     for f in source_files(root) {
-        let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
+        let rel = slash_relative(root, &f);
         if SANCTIONED.iter().any(|s| rel.starts_with(s)) {
             continue;
         }
@@ -170,7 +170,7 @@ pub fn no_blanket_allow_at_crate_root(root: &Path) -> Result<Vec<String>, String
         if !is_crate_root {
             continue;
         }
-        let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
+        let rel = slash_relative(root, &f);
         let text = std::fs::read_to_string(&f).map_err(|e| format!("read {rel}: {e}"))?;
         for line in blanket_clippy_allow_lines(&text) {
             v.push(format!(
@@ -180,6 +180,19 @@ pub fn no_blanket_allow_at_crate_root(root: &Path) -> Result<Vec<String>, String
         }
     }
     Ok(v)
+}
+
+/// The path of `file` under `root`, its components joined with `/`.
+///
+/// Not the native display string: on Windows that spells the location with
+/// backslashes, so the same finding would read differently per OS and a
+/// `SANCTIONED` prefix written with slashes would never match.
+fn slash_relative(root: &Path, file: &Path) -> String {
+    let rel = file.strip_prefix(root).unwrap_or(file);
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]
@@ -273,6 +286,19 @@ mod tests {
             vec!["crates/planted/src/lib.rs:2: `unsafe` outside a sanctioned module".to_owned()]
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A location is reported in the slash spelling whatever separator the
+    /// platform splits on, so a diagnostic reads the same from every OS.
+    #[test]
+    fn a_located_path_is_spelled_with_slashes() {
+        let root = Path::new("root");
+        let file = root
+            .join("crates")
+            .join("planted")
+            .join("src")
+            .join("lib.rs");
+        assert_eq!(slash_relative(root, &file), "crates/planted/src/lib.rs");
     }
 
     /// The lint-table screen itself, not just its normalizer: a manifest whose

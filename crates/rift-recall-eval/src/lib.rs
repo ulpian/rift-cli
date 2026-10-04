@@ -76,8 +76,7 @@ impl GaThresholds {
     /// The figure is **read** from `rift-recall-ledger` rather than retyped
     /// here, so the staged-bar rule written on that constant — raised only to
     /// what the last `replay-savings` achieved, never to an aspiration — governs
-    /// this gate too. [`SAVINGS_TARGET_PCT`](rift_recall_ledger::SAVINGS_TARGET_PCT)
-    /// is the product goal and is deliberately *not* what the gate reads.
+    /// this gate too.
     pub const V1: Self = Self {
         version: 1,
         min_p50_token_savings_pct: rift_recall_ledger::SAVINGS_BAR_PCT,

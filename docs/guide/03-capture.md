@@ -68,7 +68,7 @@ name and behaviour cannot drift apart.
 
 | Hook | What Rift does |
 |---|---|
-| `prepare-commit-msg` | Adds the `Rift-Checkpoint` and `Rift-Attribution` trailers when a session is live. Only rewrites the message file; never rejects. |
+| `prepare-commit-msg` | Adds the `Rift-Checkpoint` and `Rift-Attribution` trailers when a session is live; the checkpoint trailer is a claim, made before the commit exists. Only rewrites the message file; never rejects. |
 | `commit-msg` | Normalizes those trailers idempotently — deduplicated, canonical order. Never rejects. |
 | `post-commit` | The main capture beat: records which commit and which session this was, then hands the heavy work to a detached worker. |
 | `pre-push` | Screens the refs about to leave the machine and refuses Rift's internal ones, treats the push as the "work is leaving" signal for the on-push strategy, and drains the push queue. |
@@ -80,6 +80,12 @@ behind it reads as coverage Rift does not have. What that costs is stated
 rather than implied: a rebase that moves the commits a session recorded leaves
 the ledger holding pre-rewrite shapes
 ([18-known-gaps.md](18-known-gaps.md)).
+
+The `Rift-Checkpoint` trailer names the checkpoint the commit is expected to land, predicted from what the session holds when the message is written.
+It is a claim, not a record: the archive mints the real id after the commit, and the two agree when the session has no transcript in the shard and nothing lands between `prepare-commit-msg` and `post-commit`.
+A transcript, which the archive binds into the id and the prediction never reads, lands the checkpoint under another id, and so does a serve or a settled turn that arrives in between.
+The prediction leaves the transcript out because it has to finish inside git's hook budget, and making the hook heavier to close the gap would trade a commit's latency for a claim no reader depends on alone.
+Readers never take the trailer alone: a commit resolves through the union of the checkpoints its trailer claims and the checkpoints recorded against it, so `rift checkpoint explain <commit>` names the checkpoint that landed whichever way the claim went ([05-ledger-and-verification.md](05-ledger-and-verification.md) §5.3).
 
 ### How they are installed
 

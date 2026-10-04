@@ -13,6 +13,7 @@
 
 use rift_core::{Result, RiftError, Sha256Id};
 use rift_hashchain::{verify_chain, ChainLink};
+use sha2::{Digest, Sha256};
 
 use crate::{CanonicalStore, Value};
 
@@ -383,7 +384,99 @@ pub async fn record_cost_fact(store: &impl CanonicalStore, f: &CostFact) -> Resu
         .await
 }
 
-/// The current believed cost for a call (latest `recorded_at`).
+/// One applicable, unsuperseded booking at a supplied belief cutoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookedCost {
+    /// The identity a later correction must supersede.
+    pub cost_fact_id: String,
+    /// The booked amount, independent of current catalog quoting.
+    pub amount_micros: i64,
+}
+
+/// Resolve identity and amount together among visible booking leaves.
+/// A future superseder cannot hide its predecessor from an earlier belief.
+/// Unrelated leaves retain the recorded-time and identity tie-break.
+///
+/// # Errors
+/// [`RiftError::Storage`] on query failure.
+pub async fn latest_booked_cost_at(
+    store: &impl CanonicalStore,
+    call_id: &str,
+    belief_at: i64,
+) -> Result<Option<BookedCost>> {
+    let rows = store
+        .query(
+            "SELECT cf.cost_fact_id, cf.amount_micros FROM cost_fact cf \
+        WHERE cf.call_id = ?1 AND cf.recorded_at <= ?2 \
+        AND NOT EXISTS (SELECT 1 FROM cost_fact successor \
+            WHERE successor.call_id = cf.call_id AND successor.supersedes_id = cf.cost_fact_id \
+            AND successor.recorded_at <= ?2) \
+        ORDER BY cf.recorded_at DESC, cf.cost_fact_id DESC LIMIT 1",
+            &[Value::text(call_id), Value::Int(belief_at)],
+        )
+        .await?;
+    rows.first()
+        .map(|r| {
+            Ok(BookedCost {
+                cost_fact_id: r.get_text(0)?,
+                amount_micros: r.get_i64(1)?,
+            })
+        })
+        .transpose()
+}
+
+/// Append a changed booking and link it to the same visible leaf readers select.
+/// First-booking identities retain their original spelling; corrections include
+/// their predecessor so a same-clock reversion cannot collide with the first row.
+/// An unchanged recomputation writes nothing.
+///
+/// # Errors
+/// [`RiftError::Storage`] on query or append failure.
+pub async fn record_cost_if_changed(
+    store: &impl CanonicalStore,
+    call_id: &str,
+    amount: i64,
+    valid_from: i64,
+    belief_at: i64,
+) -> Result<()> {
+    let previous = latest_booked_cost_at(store, call_id, belief_at).await?;
+    if previous.as_ref().is_some_and(|p| p.amount_micros == amount) {
+        return Ok(());
+    }
+    let predecessor = previous.map(|p| p.cost_fact_id);
+    let mut hash = Sha256::new();
+    for bytes in [
+        b"cost_fact".as_slice(),
+        b"\0",
+        call_id.as_bytes(),
+        b"\0",
+        amount.to_string().as_bytes(),
+        b"\0",
+        belief_at.to_string().as_bytes(),
+    ] {
+        hash.update(bytes);
+    }
+    if let Some(id) = &predecessor {
+        hash.update(b"\0supersedes\0");
+        hash.update(id.as_bytes());
+    }
+    record_cost_fact(
+        store,
+        &CostFact {
+            cost_fact_id: format!("{:x}", hash.finalize()),
+            call_id: call_id.to_owned(),
+            amount_micros: amount,
+            valid_from,
+            valid_to: None,
+            recorded_at: belief_at,
+            supersedes_id: predecessor,
+            schema_version: 1,
+        },
+    )
+    .await
+}
+
+/// The latest believed booking for a call, independent of current catalog prices.
 ///
 /// # Errors
 /// [`RiftError::Storage`] on query failure.
@@ -391,16 +484,12 @@ pub async fn current_cost_micros(
     store: &impl CanonicalStore,
     call_id: &str,
 ) -> Result<Option<i64>> {
-    store
-        .query_opt_i64(
-            "SELECT amount_micros FROM cost_fact WHERE call_id = ? \
-             ORDER BY recorded_at DESC, cost_fact_id DESC LIMIT 1",
-            &[Value::text(call_id)],
-        )
-        .await
+    Ok(latest_booked_cost_at(store, call_id, i64::MAX)
+        .await?
+        .map(|p| p.amount_micros))
 }
 
-/// The cost we believed for a call *as of* a transaction time.
+/// The booking believed at a transaction time, with supersession visible only then.
 ///
 /// # Errors
 /// [`RiftError::Storage`] on query failure.
@@ -409,16 +498,9 @@ pub async fn cost_belief_as_of(
     call_id: &str,
     as_of: i64,
 ) -> Result<Option<i64>> {
-    store
-        .query_opt_i64(
-            // Same two-key order as `current_cost_micros`: without the
-            // `cost_fact_id` tiebreak, same-millisecond reconciliations would
-            // make "as of now" disagree with "current".
-            "SELECT amount_micros FROM cost_fact WHERE call_id = ? AND recorded_at <= ? \
-             ORDER BY recorded_at DESC, cost_fact_id DESC LIMIT 1",
-            &[Value::text(call_id), Value::Int(as_of)],
-        )
-        .await
+    Ok(latest_booked_cost_at(store, call_id, as_of)
+        .await?
+        .map(|p| p.amount_micros))
 }
 
 #[cfg(test)]
@@ -810,6 +892,45 @@ mod tests {
             verify_against_source(&s, &Fixture(bad)).await,
             Err(RiftError::Integrity(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn linked_bookings_respect_the_belief_cutoff_and_same_clock_reversions() {
+        let s = store();
+        record_cost_if_changed(&s, "call", 3000, 1, 10)
+            .await
+            .unwrap();
+        let first = latest_booked_cost_at(&s, "call", 10)
+            .await
+            .unwrap()
+            .unwrap();
+        record_cost_if_changed(&s, "call", 2000, 1, 20)
+            .await
+            .unwrap();
+        let corrected = latest_booked_cost_at(&s, "call", 20)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest_booked_cost_at(&s, "call", 19).await.unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(cost_belief_as_of(&s, "call", 19).await.unwrap(), Some(3000));
+        record_cost_if_changed(&s, "call", 3000, 1, 20)
+            .await
+            .unwrap();
+        record_cost_if_changed(&s, "call", 3000, 1, 20)
+            .await
+            .unwrap();
+        let reverted = latest_booked_cost_at(&s, "call", 20)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(reverted.cost_fact_id, first.cost_fact_id);
+        assert_ne!(reverted.cost_fact_id, corrected.cost_fact_id);
+        assert_eq!(reverted.amount_micros, 3000);
+        assert_eq!(s.count("cost_fact").await.unwrap(), 3);
+        assert_eq!(cost_belief_as_of(&s, "call", 19).await.unwrap(), Some(3000));
     }
 
     #[tokio::test]

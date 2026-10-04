@@ -24,7 +24,7 @@ expression: "render_state(&mut\nproject_settings_state_with_codex_hooks(Size::ne
 │           │                                                                                              │───────────#
 │           │Integrations                                                                                  │           #
 │           │  Claude Code · PATH command · managed                                                     [x]│           #
-│           │  Codex · PATH command + VS Code extension · capture managed · hooks need refresh          [ ]│      [tok]#
+│           │  Codex · PATH command + VS Code extension · capture managed · hooks need refresh          [ ]│           #
 │           │  Gemini CLI · PATH command · conflict · coming soon                                       [ ]│           #
 │           │  Antigravity · PATH command · invalid                                                     [ ]│           #
 │           │  Cursor · not installed · coming soon                                                     [ ]│           #

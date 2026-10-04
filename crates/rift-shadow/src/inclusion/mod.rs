@@ -743,6 +743,30 @@ fn discovered(rel: &str, name: &std::ffi::OsStr) -> Result<String, String> {
     }
 }
 
+/// The `l` record [`Walk::link`] writes for a symlink at `rel` whose target
+/// is `target`, or `None` when the target earns `unsafe-link-target`: it is
+/// empty, holds a control character, or does not read back as the pair that
+/// went in.
+///
+/// **A function, like [`discovered`], so the decision can be asserted where
+/// the filesystem cannot produce the input.** Linux refuses `symlink("")`
+/// with `ENOENT` while APFS creates it, so on one leg no empty target ever
+/// reaches the walk; here it is handed one directly. The walk writes these
+/// exact bytes, so the decision and the record cannot be about different
+/// strings. (`a_target_that_renders_as_nothing_is_not_an_empty_target`.)
+fn link_record(rel: &str, target: &str) -> Option<String> {
+    // The record a reader will see, assembled once, then read back by the
+    // reader's rule.
+    let record = format!("{rel} -> {target}");
+    if target.is_empty()
+        || target.chars().any(char::is_control)
+        || record.rsplit_once(" -> ") != Some((rel, target))
+    {
+        return None;
+    }
+    Some(record)
+}
+
 /// The parsed `.worktreeinclude`: the roots capture is allowed to reach.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IncludeList {
@@ -1074,7 +1098,7 @@ impl Walk {
     /// and the record `l arrowtarget -> -> y` rsplits to `("arrowtarget ->",
     /// "y")` when the truth is the path `arrowtarget` and the target `-> y`.
     /// **Both sides misread it, and the guard passed it.** So the record is
-    /// assembled once and read back here by the same rule the reader will use;
+    /// assembled once and read back by [`link_record`], by the rule the reader uses;
     /// anything that does not come back as the pair that went in earns
     /// [`Refusal::UnsafeLinkTarget`]. A guard that has to anticipate spellings
     /// is the shape that has now failed this module four times — the check must
@@ -1126,17 +1150,10 @@ impl Walk {
             self.refuse(rel, Refusal::UnsafeLinkTarget);
             return;
         };
-        // The record a reader will see, assembled once, then read back by the
-        // reader's rule. The bytes written below are these bytes, so the test
-        // and the record cannot be about different strings.
-        let record = format!("{rel} -> {target}");
-        if target.is_empty()
-            || target.chars().any(char::is_control)
-            || record.rsplit_once(" -> ") != Some((rel, target.as_str()))
-        {
+        let Some(record) = link_record(rel, &target) else {
             self.refuse(rel, Refusal::UnsafeLinkTarget);
             return;
-        }
+        };
         self.records += 1;
         self.doc.extend_from_slice(b"l ");
         self.doc.extend_from_slice(record.as_bytes());

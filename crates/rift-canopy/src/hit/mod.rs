@@ -12,7 +12,7 @@
 //! centered frames (Project Settings, the profile menu, the colour picker, the
 //! destination explorer, the dispatch overlay), `grid` the dashboard tiers and
 //! the rail and card columns, `sections` the column-3 panel stack with its
-//! Recall chips, and `viewer` the Recall Viewer. This file keeps the
+//! Recall controls, and `viewer` the Recall Viewer. This file keeps the
 //! [`Target`] vocabulary, the dispatcher, and the cell arithmetic every
 //! resolver shares.
 
@@ -101,20 +101,16 @@ pub enum Target {
     ProjectSettingsCancel,
     /// A column-3 graph section.
     Section(col3::SectionId),
-    /// The `[~$…]` USD-savings chip on the Recall headline: opens
-    /// the read-only breakdown modal explaining how the estimate was
-    /// composed. Only hit when an honest figure exists — no figure, no chip,
-    /// no target.
-    RecallCost,
+    /// The Recall card's headline line: opens the read-only savings
+    /// breakdown, the pointer twin of `S`. Hit on exactly the cells the line
+    /// draws, in every tier that draws one; a placeholder card has no line
+    /// and so no target.
+    RecallHeadline,
     /// One `[24h]`/`[7d]`/`[30d]`/`[all]` period button on the Recall card:
     /// recompute the card's figures over that window. The pointer twin of the
     /// `1`–`4` keys, which are bound only while the graphs column has focus —
     /// so every button has a key and every key a button.
     RecallWindow(col3::RecallWindow),
-    /// The `[tok]`/`[usd]` chip at the right of the Recall card's period row:
-    /// flip the unit the read-vs-saved bars are read in. The pointer twin of
-    /// `$`, bound only while the graphs column has focus.
-    RecallUnitToggle,
     /// The `Σ …` total on the token-usage panel's title row (the family view):
     /// opens the read-only "by worktree" axis of exactly that number, in
     /// the existing `Overlay::Results`. The pointer twin of `w` in the graphs
@@ -247,9 +243,8 @@ impl Target {
                 | Target::ProjectSettingsAction(_)
                 | Target::ProjectSettingsClose
                 | Target::ProjectSettingsCancel
-                | Target::RecallCost
+                | Target::RecallHeadline
                 | Target::RecallWindow(_)
-                | Target::RecallUnitToggle
                 | Target::TokensByWorktree
                 | Target::ProfileSettings(_)
                 | Target::ProfileNew

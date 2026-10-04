@@ -235,6 +235,39 @@ pub fn open_migrated(
     Ok(store)
 }
 
+/// Open only an existing projection after acquiring its shared lifetime guard.
+/// Legitimate absence never creates a database; replacement reports busy.
+///
+/// # Errors
+/// Store opening and checksum-locked migration failures are propagated.
+pub fn open_existing_migrated(
+    path: &std::path::Path,
+    migrations: &[Migration],
+) -> Result<Option<SqliteStore>> {
+    let Some(store) = SqliteStore::open_existing(path)? else {
+        return Ok(None);
+    };
+    crate::paths::harden_projection_permissions(path)?;
+    apply_migrations(&store, migrations)?;
+    Ok(Some(store))
+}
+
+/// Transfer exclusive replacement ownership through migration and all uses
+/// of the returned store. Its guard carries the only path opened here.
+///
+/// # Errors
+/// Store opening and checksum-locked migration failures are propagated.
+pub fn open_replacement_migrated(
+    guard: crate::ProjectionReplacementGuard,
+    migrations: &[Migration],
+) -> Result<SqliteStore> {
+    let path = guard.path().to_path_buf();
+    let store = SqliteStore::open_replacement(guard)?;
+    crate::paths::harden_projection_permissions(&path)?;
+    apply_migrations(&store, migrations)?;
+    Ok(store)
+}
+
 /// [`open_migrated`] with the capture projection's migration set
 /// ([`default_migrations`]) — the standard way to open `projection.db`.
 ///
@@ -403,8 +436,8 @@ mod tests {
     async fn applies_pending_migrations_in_order() {
         let s = store();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
-        assert_eq!(out.applied, 15);
-        assert_eq!(out.high_water, 15);
+        assert_eq!(out.applied, 16);
+        assert_eq!(out.high_water, 16);
         // canonical tables exist (insert succeeds)
         s.insert(
             "session",
@@ -438,12 +471,12 @@ mod tests {
         let out = apply_migrations_on(&s, &default_migrations())
             .await
             .unwrap();
-        assert_eq!(out.applied, 15);
-        assert_eq!(out.high_water, 15);
+        assert_eq!(out.applied, 16);
+        assert_eq!(out.high_water, 16);
         // The sync runner sees everything applied (same _migrations ledger).
         let again = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 15);
+        assert_eq!(again.skipped, 16);
         // And the tamper lock holds through the seam.
         let mut edited = default_migrations();
         edited[1].sql.push_str("\n-- tampered");
@@ -481,7 +514,7 @@ mod tests {
             let rest = apply_migrations(&s, &migs).unwrap();
             proptest::prop_assert_eq!(rest.skipped, split);
             proptest::prop_assert_eq!(rest.applied, migs.len() - split);
-            proptest::prop_assert_eq!(rest.high_water, 15);
+            proptest::prop_assert_eq!(rest.high_water, 16);
 
             let fresh = store();
             apply_migrations(&fresh, &migs).unwrap();
@@ -496,7 +529,7 @@ mod tests {
         apply_migrations(&s, &default_migrations()).unwrap();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(out.applied, 0);
-        assert_eq!(out.skipped, 15);
+        assert_eq!(out.skipped, 16);
     }
 
     #[test]
@@ -598,7 +631,7 @@ mod tests {
         let migs: i64 = again
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0)))
             .unwrap();
-        assert_eq!(migs, 15);
+        assert_eq!(migs, 16);
     }
 
     /// The filesystem control: a projection opened through the standard

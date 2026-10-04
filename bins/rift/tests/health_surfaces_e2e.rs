@@ -81,14 +81,29 @@ impl Fixture {
         self.repo.path().join(".claude/settings.local.json")
     }
 
-    /// Point Claude Code's hooks at a binary that does not exist.
+    /// Point every Claude Code hook handler at a binary that does not exist,
+    /// rewriting the decoded command strings rather than the JSON text: on
+    /// Windows the file holds `"D:\\…\\rift.exe"` escaped, which no search
+    /// for a path spelling finds.
     fn break_the_hook_binary(&self) -> String {
-        let missing = self.home.path().join("gone").join("rift");
-        let missing = common::shell_spelling(&missing);
+        let missing = native_spelling(&self.home.path().join("gone").join("rift"));
+        let binary = native_spelling(Path::new(common::rift_bin()));
         let text = std::fs::read_to_string(self.hook_file()).unwrap();
-        let spelled = common::shell_spelling(Path::new(common::rift_bin()));
-        assert!(text.contains(&spelled), "{text}");
-        std::fs::write(self.hook_file(), text.replace(&spelled, &missing)).unwrap();
+        let mut settings: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let commands = handler_commands(&mut settings);
+        let handlers = commands.len();
+        let mut rewritten = 0;
+        for command in commands {
+            let Some(retargeted) = retarget_command(command, &binary, &missing) else {
+                continue;
+            };
+            *command = retargeted;
+            rewritten += 1;
+        }
+        assert!(handlers > 0, "{text}");
+        assert_eq!(rewritten, handlers, "{binary} in {text}");
+        let json = serde_json::to_string_pretty(&settings).unwrap();
+        std::fs::write(self.hook_file(), json).unwrap();
         missing
     }
 
@@ -134,6 +149,59 @@ fn sentence_under(text: &str, headline: &str) -> String {
         .find(|line| line.trim_end().ends_with(headline))
         .unwrap_or_else(|| panic!("no {headline:?} in {text}"));
     lines.next().unwrap().trim().to_owned()
+}
+
+/// A path as this OS names it to a child process: `display()` with the
+/// verbatim prefix dropped. Spelled here, not borrowed from the installer, so
+/// the fixture checks what the installer wrote rather than agreeing with it.
+fn native_spelling(path: &Path) -> String {
+    let spelled = path.display().to_string();
+    spelled
+        .strip_prefix(r"\\?\")
+        .map_or_else(|| spelled.clone(), str::to_owned)
+}
+
+/// Every `hooks.<event>[].hooks[].command` string in a Claude Code settings
+/// document.
+fn handler_commands(settings: &mut serde_json::Value) -> Vec<&mut String> {
+    let Some(events) = settings["hooks"].as_object_mut() else {
+        return Vec::new();
+    };
+    events
+        .values_mut()
+        .filter_map(serde_json::Value::as_array_mut)
+        .flatten()
+        .filter_map(|group| group["hooks"].as_array_mut())
+        .flatten()
+        .filter_map(|handler| match &mut handler["command"] {
+            serde_json::Value::String(command) => Some(command),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `command` with its executable replaced by `missing` when that executable
+/// is `binary` — double-quoted, single-quoted or bare, the quoting kept — and
+/// `None` when the command runs anything else.
+fn retarget_command(command: &str, binary: &str, missing: &str) -> Option<String> {
+    let binary = binary.strip_prefix(r"\\?\").unwrap_or(binary);
+    for quote in ["\"", "'"] {
+        let Some(rest) = command
+            .strip_prefix(quote)
+            .and_then(|tail| tail.strip_prefix(binary))
+            .and_then(|tail| tail.strip_prefix(quote))
+        else {
+            continue;
+        };
+        return ends_the_word(rest).then(|| format!("{quote}{missing}{quote}{rest}"));
+    }
+    let rest = command.strip_prefix(binary)?;
+    ends_the_word(rest).then(|| format!("{missing}{rest}"))
+}
+
+/// Whether what follows an executable leaves it a whole word.
+fn ends_the_word(rest: &str) -> bool {
+    rest.is_empty() || rest.starts_with(' ')
 }
 
 #[test]
@@ -244,5 +312,39 @@ fn reading_health_writes_none_of_its_inputs_even_under_fix() {
         let out = fixture.rift(args);
         assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
         assert_eq!(fixture.inputs(), before, "{args:?} wrote an input");
+    }
+}
+
+#[test]
+fn a_quoted_windows_hook_command_is_retargeted_through_its_decoded_executable() {
+    let command = r#""D:\a\rift-cli\rift-cli\target\debug\rift.exe" hooks claude-code PostToolUse"#;
+    let binary = r"\\?\D:\a\rift-cli\rift-cli\target\debug\rift.exe";
+    let missing = r"C:\Users\runner\gone\rift";
+    let json = serde_json::to_string(command).unwrap();
+    let spelled = common::shell_spelling(Path::new(binary));
+    assert!(!json.contains(&spelled), "the raw-text search misses it");
+    assert_eq!(
+        retarget_command(command, binary, missing).as_deref(),
+        Some(r#""C:\Users\runner\gone\rift" hooks claude-code PostToolUse"#)
+    );
+}
+
+#[test]
+fn a_hook_command_is_retargeted_only_when_its_whole_executable_is_the_binary() {
+    let binary = "/opt/rift";
+    assert_eq!(
+        retarget_command("'/opt/rift' hooks claude-code Stop", binary, "/gone").as_deref(),
+        Some("'/gone' hooks claude-code Stop")
+    );
+    assert_eq!(
+        retarget_command("/opt/rift hooks claude-code Stop", binary, "/gone").as_deref(),
+        Some("/gone hooks claude-code Stop")
+    );
+    for other in [
+        "/opt/rift2 hooks claude-code Stop",
+        "\"/opt/rift.old\" hooks claude-code Stop",
+        "/usr/bin/env /opt/rift hooks claude-code Stop",
+    ] {
+        assert_eq!(retarget_command(other, binary, "/gone"), None, "{other}");
     }
 }

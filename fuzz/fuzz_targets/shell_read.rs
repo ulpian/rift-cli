@@ -13,11 +13,13 @@
 //! length check refuses in one comparison.
 //!
 //! What is asserted beyond "no panic": a recognised call never invents a
-//! target. Every path or directory it reports is either a word that was on the
-//! line, one word read from under the directory another word named (which is
-//! the only thing a leading `cd` may do to a path), or the one directory the
-//! grammar implies — the property a mangled input could otherwise break
-//! silently.
+//! target. Every path or directory it reports is either a complete word that
+//! was on the line, one such word read from under the directory a genuinely
+//! leading `cd` named (the only thing a `cd` may do to a path), or the one
+//! directory `rg --files` implies — the property a mangled input could
+//! otherwise break silently. The words are cut by a quote-aware lexer of its
+//! own that also splits on `&&`, `;` and `|`, so a target joined to an
+//! operator with no space is still a whole word and a suffix of one never is.
 //!
 //! The composition rules widened what reaches the classification rather than
 //! what it may conclude, so the same assertions are made over **every** read
@@ -35,25 +37,14 @@
 //! come back `None`, never an empty read), and it never names more than the
 //! cap.
 
+// The witness lives beside the recogniser's unit tests, which pin its
+// verdicts; including it by path keeps one copy rather than two that drift.
+#[path = "../../crates/rift-agent/src/shell_read/tests/shell_read_oracle.rs"]
+mod shell_read_oracle;
+
 use libfuzzer_sys::fuzz_target;
 use rift_agent::shell_read::{recognise, ShellCall, MAX_CHAIN_READS, MAX_COMMAND_BYTES};
-
-/// Whether a reported target is made of names the line actually wrote: a word
-/// verbatim, or one word under a directory another word named.
-fn names_a_word(target: &str, command: &str) -> bool {
-    let under = |name: &str| {
-        target
-            .strip_suffix(name)
-            .is_some_and(|prefix| prefix.ends_with('/'))
-    };
-    // The grammar's own splitter: a word ends at a space or a tab, as a
-    // shell's does, so a Unicode separator inside a word is part of it.
-    target == "."
-        || under(".")
-        || command
-            .split([' ', '\t'])
-            .any(|word| word == target || under(word))
-}
+use shell_read_oracle::names_a_word;
 
 fuzz_target!(|data: &[u8]| {
     let data = &data[..data.len().min(MAX_COMMAND_BYTES + 64)];

@@ -47,8 +47,6 @@ pub mod validity_store;
 
 use std::collections::BTreeSet;
 
-pub use savings::SAVINGS_TARGET_PCT;
-
 /// The staged **bar**: the median savings the evaluation harness's paired
 /// replays have measured, which is the most its go/no-go gate may demand.
 ///
@@ -58,7 +56,7 @@ pub use savings::SAVINGS_TARGET_PCT;
 /// That is **not** the share `rift savings` publishes over a person's own
 /// traffic, and not what `cargo run -p xtask -- replay-savings` reports over
 /// recorded transcripts; those carry first reads and searches in their
-/// denominator and are read against [`SAVINGS_TARGET_PCT`], never against this.
+/// denominator, and they are published as measurements, never held against this.
 ///
 /// The rule, in one sentence: **this value is raised only after the harness
 /// has measured a higher median, and never above what it last measured.** A
@@ -66,9 +64,9 @@ pub use savings::SAVINGS_TARGET_PCT;
 /// bar that drifts up with a hopeful edit stops being evidence of anything.
 /// 15 is the original calibration seed, taken against the 33.7% avoidable
 /// context the reread report measured on this repository's own sessions
-/// (`docs/guide/08-cost-and-savings.md` §8.12). [`SAVINGS_TARGET_PCT`] is
-/// where the ambition lives; this is where the measurement does, and the two
-/// sit beside each other so neither is read alone.
+/// (`docs/guide/08-cost-and-savings.md` §8.12). This is where the
+/// measurement lives; the product declares no target beside it, so no
+/// surface can quote an aspiration as if it were a figure.
 pub const SAVINGS_BAR_PCT: f64 = 15.0;
 
 /// A single file-read event captured from the session ledger.

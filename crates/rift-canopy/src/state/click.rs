@@ -27,7 +27,7 @@ use super::actions::{
 use super::effects::persist_flow;
 use super::openers::{
     open_adopt_confirm, open_project_settings, open_savings_breakdown, open_worktree_axis,
-    select_recall_window, toggle_recall_unit,
+    select_recall_window,
 };
 use super::reduce::{layout_persist_op, selection_change_effects};
 use super::verbs::{confirm_dispatch, dashboard_verb_flow};
@@ -79,10 +79,9 @@ pub(super) fn apply_click(s: &mut AppState, target: Target) -> Flow {
         | Target::OverlayBody
         | Target::Scrollbar(_) => click_overlay(s, target),
         Target::SuggestRow(i) => click_suggestion(s, i),
-        Target::TokensByWorktree
-        | Target::RecallWindow(_)
-        | Target::RecallUnitToggle
-        | Target::RecallCost => click_graphs_card(s, target),
+        Target::TokensByWorktree | Target::RecallWindow(_) | Target::RecallHeadline => {
+            click_graphs_card(s, target)
+        }
         Target::HeaderHelp
         | Target::HeaderPalette
         | Target::HeaderEditor
@@ -356,11 +355,11 @@ fn click_suggestion(s: &mut AppState, i: usize) -> Flow {
 
 /// The graphs column's chips, each through the SAME opener its key uses so
 /// the two doors cannot drift apart: the token panel's `Σ` total opens the
-/// "by worktree" axis (the pointer twin of `w`), the USD-savings chip the
-/// read-only breakdown, a period button adopts its window in the same frame
-/// as the press and asks the data plane to recompute over it (re-pressing
-/// the live window is inert beyond the flash), and the unit chip flips tokens
-/// and dollars. The axis and the breakdown are `Overlay::Results` — the
+/// "by worktree" axis (the pointer twin of `w`), the Recall headline the
+/// read-only breakdown (the pointer twin of `S`), and a period button adopts
+/// its window in the same frame as the press and asks the data plane to
+/// recompute over it (re-pressing the live window is inert beyond the
+/// flash). The axis and the breakdown are `Overlay::Results` — the
 /// existing modal surface, so the shared close X, focus ring, scroll and
 /// hints come with zero new parity wiring — and read the TRUTH col3, never
 /// the animated display.
@@ -374,11 +373,7 @@ fn click_graphs_card(s: &mut AppState, target: Target) -> Flow {
             s.dirty = true;
             select_recall_window(s, window)
         }
-        Target::RecallUnitToggle => {
-            s.dirty = true;
-            toggle_recall_unit(s)
-        }
-        Target::RecallCost => open_savings_breakdown(s),
+        Target::RecallHeadline => open_savings_breakdown(s),
         _ => Flow::Continue(Effects::default()),
     }
 }

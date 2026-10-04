@@ -88,12 +88,12 @@ pub(super) fn attribute_serve_job(
     };
     let repo = rift_git::discover(&job.work_tree)?;
     let db = crate::family::recall_db(&repo.work_tree)?;
-    if !db.is_file() {
+    let Some(store) = t.phase("open_recall", || {
+        rift_store::open_existing_migrated(&db, &rift_store::recall_migrations())
+    })?
+    else {
         return Ok(());
-    }
-    let store = t.phase("open_recall", || {
-        rift_store::open_migrated(&db, &rift_store::recall_migrations())
-    })?;
+    };
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;

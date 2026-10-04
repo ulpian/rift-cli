@@ -601,7 +601,6 @@ mod tests {
                 project: "/r/a".into(),
                 payload: FeedPayload::Recall {
                     savings: RecallView::Data(SavingsData {
-                        target_pct: Some(90),
                         ..SavingsData::default()
                     }),
                     calls: RecallView::Data(crate::col3::CallsData {

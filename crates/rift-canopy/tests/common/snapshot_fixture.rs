@@ -626,7 +626,6 @@ pub(crate) fn member_row_detail(
 /// (`saved —`, no bars) and the drawn one would have no coverage at all.
 fn savings_fixture() -> rift_canopy::SavingsData {
     rift_canopy::SavingsData {
-        target_pct: Some(90),
         by_worktree: rift_canopy::WorktreeAxis {
             rows: Vec::new(),
             family_only: 6_000,
@@ -655,7 +654,6 @@ pub(crate) fn col3_with_data() -> rift_canopy::Col3 {
         calls: rift_canopy::RecallView::Data(calls_fixture()),
         active_sessions: rift_canopy::ActiveSessionsView::Count(2),
         recall_window: rift_canopy::RecallWindow::AllTime,
-        recall_unit: rift_canopy::RecallUnit::Tokens,
         metrics: metrics_fixture(),
         dispatch: rift_canopy::DispatchView::Data(dispatch_fixture()),
         recap: rift_canopy::RecapView::Data(recap_fixture()),
