@@ -114,21 +114,6 @@ would then have to gate. The trade was deliberate.
 
 ## 18.4 Redaction
 
-### Two redaction settings are read from your config and used by nothing
-
-*Measured defect.* `.rift/config.toml` accepts an entropy threshold and a list of
-extra patterns under its redaction table. Both are parsed, validated and folded
-into the policy fingerprint; neither reaches the pipeline, because the entropy
-floor is compiled in and the supported way to add patterns is a rule pack file,
-which *is* wired. This is the worst shape a configuration bug can take: you lower
-the threshold, watch the fingerprint change — confirming the setting was seen —
-and get exactly the same masking. Closing it means threading both values through
-to the detector table, or refusing them at load time with an error naming the
-rule-pack path. Silently accepting them is the one option that should not stand.
-
-**Read more.** [04](04-redaction-and-secrets.md) §4.12,
-[02](02-configuration.md).
-
 ### The legal cross-class split has no live instance
 
 *Honest limit.* The false-positive census lets one file's accepted hits fall

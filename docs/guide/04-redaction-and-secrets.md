@@ -620,13 +620,13 @@ through the ordinary path, redacted like anything else.
 
 ## 4.12 One thing to know about configuration
 
-`.rift/config.toml`'s `[redaction]` table has two keys, `entropy_threshold` and
-`extra_patterns`, and **today they are recorded but not applied**: parsed,
-validated and folded into the policy hash, with nothing in the pipeline reading
-them back. The entropy floor is compiled in at 20 characters and 4.0 bits, and
-the way a project adds patterns is a rule pack (§4.8). So a lowered
-`entropy_threshold` changes your policy hash and not what gets masked — see
-[02](02-configuration.md), and the gap listed in [18](18-known-gaps.md).
+`.rift/config.toml`'s `[redaction]` table takes no keys, and **a config that
+sets `entropy_threshold` or `extra_patterns` there does not load**: the error
+names the key and points at `.rift/policies/redactors/`. The entropy floor is
+compiled in at 20 characters and 4.0 bits, and the way a project adds patterns
+is a rule pack (§4.8). Refusing the keys is the point — accepting them would
+change your policy hash and not what gets masked. See
+[02](02-configuration.md).
 
 ---
 

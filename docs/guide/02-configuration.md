@@ -50,9 +50,6 @@ raw_transcripts = false
 acknowledge_risk = false
 checkpoint_strategy = "manual-commit"
 schedule_interval_minutes = 30
-[redaction]
-entropy_threshold = 4.5
-extra_patterns = ["acme-[a-z0-9]{20}"]
 [paths]
 sensitive_paths = ["infra/terraform/**", "**/*.tfstate"]
 [models]
@@ -153,20 +150,21 @@ value and is not configured here ([03-capture.md](03-capture.md) §3.6).
 
 ### `[redaction]`
 
-| Key | Type | Default | Meaning |
-|---|---|---|---|
-| `entropy_threshold` | float | `4.5` | Parsed, defaulted and folded into the policy hash. Not read by the redaction pipeline today. |
-| `extra_patterns` | array of strings | `[]` | Parsed, deduplicated and folded into the policy hash. Not read by the redaction pipeline today. |
+The table takes no keys.
+An empty `[redaction]` table loads, as does a file without one.
+Two keys, `entropy_threshold` and `extra_patterns`, are refused at load by
+name, with an error that says where the setting belongs instead.
 
-Be honest about these two keys: the schema accepts them and the policy hash
-changes when you set them, but nothing downstream consults them. The pipeline's
-entropy floor is compiled in (4.0 bits per character on tokens of at least 20
-characters), and the only way to add a detector today is a rule pack under
-`.rift/policies/redactors/**/*.toml` (or `.json`) — see
-[04-redaction-and-secrets.md](04-redaction-and-secrets.md). The keys are kept
-so a future pipeline can honour them without a schema change; until then they
-change what your policy *says*, not what it *does*, which chapter 18 lists as a
-known gap.
+| Key | Refused because |
+|---|---|
+| `entropy_threshold` | The entropy floor is fixed in the redactor (4.0 bits per character on tokens of at least 20 characters). |
+| `extra_patterns` | Patterns are added by a rule pack under `.rift/policies/redactors/**/*.toml` (or `.json`). |
+
+A refusal rather than a silent acceptance, because a key that moved the policy
+hash without changing the masking would tell you the setting was seen and then
+ignore it.
+To add a detector, write a rule pack — see
+[04-redaction-and-secrets.md](04-redaction-and-secrets.md) §4.8.
 
 ### `[paths]`
 
@@ -249,9 +247,12 @@ gates; the caps are defence in depth.
 ### The policy hash
 
 Every effective configuration carries a hash of its *content*: schema version,
-project name, capture flags, strategy and interval, entropy threshold,
-retention default, recall flag, and the sorted model, sensitive-path,
-extra-pattern and retention-class lists. Captured records reference it, so you
+project name, capture flags, strategy and interval, the fixed entropy floor,
+retention default, recall flag, and the sorted model, sensitive-path and
+retention-class lists.
+The entropy line is a constant: no config sets the floor, but hashes already
+recorded were taken over it, so it stays in the hash's input and they keep
+matching. Captured records reference it, so you
 can always answer "which policy was in force when this was recorded". Two
 exclusions are deliberate — the checkpoint remote (a destination) and *where
 the policy came from* (§2.4) — because both would make identical policies hash
