@@ -87,13 +87,21 @@ fn resolve_uncached(root: &Path) -> Result<Family> {
              prove it",
             root.display()
         ))),
-        FamilyState::Corrupt(manifest) => Err(RiftError::Validity(format!(
-            "the family manifest at {} cannot be read; nothing was repaired. Run \
-             `rift family remint --adopt-main --yes` from the main work tree to \
-             record the identity again",
-            manifest.display()
-        ))),
+        FamilyState::Corrupt(manifest) => {
+            Err(RiftError::Validity(corrupt_manifest_refusal(&manifest)))
+        }
     }
+}
+
+/// The refusal a manifest this reader cannot trust earns, spelled once so the
+/// product path's error and the doctor's identity leg say the same sentence.
+pub(crate) fn corrupt_manifest_refusal(manifest: &Path) -> String {
+    format!(
+        "the family manifest at {} cannot be read; nothing was repaired. Run \
+         `rift family remint --adopt-main --yes` from the main work tree to \
+         record the identity again",
+        manifest.display()
+    )
 }
 
 /// The family for a path that must never fail loudly — the agent-hook path.

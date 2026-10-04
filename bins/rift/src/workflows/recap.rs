@@ -27,6 +27,19 @@ use crate::screen::{Closed, Screen};
 /// a citation as a tool name and never fail.
 pub(crate) const RECAP_SCHEMA_VERSION: u32 = 2;
 
+/// The RAW rows the human recap renders — raw rather than cited, because the
+/// human render is where a citation resolves (see [`render_recap`]).
+#[derive(Clone, Copy)]
+pub(super) struct RecapRows<'a> {
+    pub(super) facts: &'a WindowFacts,
+    pub(super) mix: &'a [(String, i64)],
+    /// Serve counts per verb, `None` when this repository has no recall store.
+    pub(super) calls: Option<&'a [(String, i64)]>,
+    pub(super) split: &'a [(String, usize)],
+    pub(super) by_model: bool,
+    pub(super) worktrees: &'a [String],
+}
+
 /// `rift recap` — offline usage analytics over the governance tables.
 ///
 /// Fully local, which is the comparison worth making: the tool this replaces
@@ -74,10 +87,15 @@ pub(crate) async fn recap_in(
     let mut screen = Screen::default();
     let cited = cite_recap(&mut screen, &mix, calls.as_deref(), &split, by_model);
     let doc = recap_json(&window, &facts, &worktrees, &cited);
-    Ok(Outcome::ok(
-        render_recap(&facts, &mix, &split, by_model, &screen, &worktrees),
-        doc,
-    ))
+    let rows = RecapRows {
+        facts: &facts,
+        mix: &mix,
+        calls: calls.as_deref(),
+        split: &split,
+        by_model,
+        worktrees: &worktrees,
+    };
+    Ok(Outcome::ok(render_recap(&rows, &screen), doc))
 }
 
 /// A tool-name histogram over a window.
@@ -250,19 +268,20 @@ fn recap_json(
 /// The human recap. Tool names and agent names are escaped for the same reason
 /// paths are: an agent-namespaced tool name is not Rift's own text.
 ///
-/// It takes the RAW `mix` and `split` rather than the cited ones, because this
+/// It takes the RAW rows rather than the cited ones, because this
 /// is a human-only surface and it is where a citation is meant to resolve. The
 /// [`Screen`]'s map rides at the end so an operator holding a `--json` document
 /// beside this one can read `cite:3` back.
-pub(super) fn render_recap(
-    facts: &WindowFacts,
-    mix: &[(String, i64)],
-    split: &[(String, usize)],
-    by_model: bool,
-    screen: &Screen,
-    worktrees: &[String],
-) -> String {
+pub(super) fn render_recap(rows: &RecapRows<'_>, screen: &Screen) -> String {
     use std::fmt::Write as _;
+    let RecapRows {
+        facts,
+        mix,
+        calls,
+        split,
+        by_model,
+        worktrees,
+    } = *rows;
     let mut s = String::new();
     let _ = writeln!(
         s,
@@ -294,15 +313,189 @@ pub(super) fn render_recap(
             );
         }
     }
+    push_savings_line(&mut s, facts);
+    push_serve_calls(&mut s, calls);
     screen.push_map(&mut s);
     s
 }
 
+/// The savings line: dispatch's wording, plus the rate with its denominator
+/// named, because a bare percentage is the shape a claim hides in. No rate is
+/// printed when [`savings_rate_percent`] has none to state.
+fn push_savings_line(s: &mut String, facts: &WindowFacts) {
+    use std::fmt::Write as _;
+    let rate = savings_rate_percent(facts)
+        .map_or_else(String::new, |r| format!(", {r}% of avoided + spent"));
+    let _ = writeln!(
+        s,
+        "  savings     {}{rate}",
+        super::recall_savings_text(facts)
+    );
+}
+
+/// The serve calls by verb, escaped like tool names. With no recall store the
+/// section is one line saying so — the same absent arm as the savings line, so
+/// an empty list never reads as "nothing was served" when nothing could be.
+fn push_serve_calls(s: &mut String, calls: Option<&[(String, i64)]>) {
+    use std::fmt::Write as _;
+    let Some(calls) = calls else {
+        let _ = writeln!(s, "  serves      no recall store");
+        return;
+    };
+    if calls.is_empty() {
+        let _ = writeln!(s, "  serves      none in this window");
+        return;
+    }
+    let _ = writeln!(s, "  serves:");
+    for (verb, n) in calls {
+        let _ = writeln!(
+            s,
+            "    {n:>4}  {}",
+            crate::provenance::safe_path(verb.as_str())
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use rift_store::window::SessionFact;
+    use rift_store::window::{Savings, SessionFact, TokenClasses};
 
     use super::*;
+
+    /// A window that spent 414 tokens, and — when `savings` is given — whose
+    /// recall ledger claims 1,000 avoided and 120 injected.
+    fn window_with(savings: Option<Savings>) -> WindowFacts {
+        WindowFacts {
+            tokens: TokenClasses {
+                uncached_input: 400,
+                output: 14,
+                ..TokenClasses::default()
+            },
+            savings,
+            ..WindowFacts::default()
+        }
+    }
+
+    fn rows<'a>(facts: &'a WindowFacts, calls: Option<&'a [(String, i64)]>) -> RecapRows<'a> {
+        RecapRows {
+            facts,
+            mix: &[],
+            calls,
+            split: &[],
+            by_model: false,
+            worktrees: &[],
+        }
+    }
+
+    #[test]
+    fn the_human_recap_states_the_savings_bound_and_the_rate_with_its_denominator() {
+        let facts = window_with(Some(Savings {
+            avoided_upper_bound: 1_000,
+            injected: 120,
+            ..Savings::default()
+        }));
+        let out = render_recap(&rows(&facts, Some(&[])), &Screen::default());
+        assert!(
+            out.contains(
+                "1000 tokens avoided (estimated upper bound), 120 injected, \
+                 70.7% of avoided + spent"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_human_recap_says_there_is_no_ledger_rather_than_zero_savings() {
+        let facts = window_with(None);
+        let out = render_recap(&rows(&facts, None), &Screen::default());
+        assert!(
+            out.contains("savings     no ledger in this repository"),
+            "{out}"
+        );
+        assert!(out.contains("serves      no recall store"), "{out}");
+        assert!(!out.contains("tokens avoided"), "{out}");
+    }
+
+    #[test]
+    fn the_human_recap_lists_serve_calls_by_verb_when_a_recall_store_answered() {
+        let facts = window_with(Some(Savings::default()));
+        let calls = vec![
+            ("memd.manifest_injected".to_owned(), 2),
+            ("memd.manifest_served".to_owned(), 1),
+        ];
+        let out = render_recap(&rows(&facts, Some(&calls)), &Screen::default());
+        assert!(out.contains("  serves:\n"), "{out}");
+        // Quoted like every name `safe_path` renders: a verb is not Rift's text.
+        assert!(
+            out.contains("       2  \"memd.manifest_injected\"\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("       1  \"memd.manifest_served\"\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_hostile_serve_verb_cannot_reach_the_rendered_recap() {
+        // A verb is written by whatever wrote the audit row; it is not Rift's
+        // own text, and the recap prints it.
+        let facts = window_with(None);
+        let calls = vec![("\u{1b}]0;pwned\u{7}memd.served".to_owned(), 1)];
+        let out = render_recap(&rows(&facts, Some(&calls)), &Screen::default());
+        for needle in ["\u{1b}", "\u{7}"] {
+            assert!(
+                !out.contains(needle),
+                "a control sequence reached the recap"
+            );
+        }
+        assert!(out.contains("memd.served"), "the verb is still readable");
+    }
+
+    /// The `--json` document is the machine contract and the human savings and
+    /// serves lines must not move it: every key, the rate's denominator in its
+    /// name, and `null` for a repository with no recall store.
+    #[test]
+    fn the_recap_document_keeps_its_shape_beside_the_human_savings_lines() {
+        let facts = window_with(Some(Savings {
+            avoided_upper_bound: 1_000,
+            injected: 120,
+            ..Savings::default()
+        }));
+        let window = Window::resolve(Some("0"), Some("100")).unwrap();
+        let cited = CitedRecap {
+            mix: vec![("cite:1".to_owned(), 3)],
+            calls: None,
+            split: vec![("claude-code".to_owned(), 1)],
+            by: "agent",
+        };
+        let doc = recap_json(&window, &facts, &[], &cited);
+        let expected = json!({
+            "schema_version": 2,
+            "window": window_json(&window),
+            "sessions": 0,
+            "checkpoints": 0,
+            "worktrees": [],
+            "tokens": {
+                "uncached_input": 400,
+                "cached_input": 0,
+                "cache_creation": 0,
+                "output": 14,
+                "total": 414,
+            },
+            "cost": { "amount_micros": 0 },
+            "tool_mix": [{ "tool": "cite:1", "calls": 3 }],
+            "serve_calls": null,
+            "split": { "by": "agent", "counts": [{ "key": "claude-code", "sessions": 1 }] },
+            "savings": {
+                "available": true,
+                "tokens_avoided_estimated_upper_bound": 1_000,
+                "tokens_injected_spend": 120,
+                "rate_percent_of_avoided_plus_spent": 70.7,
+            },
+        });
+        assert_eq!(doc, expected);
+    }
 
     #[test]
     fn a_recap_split_counts_sessions_by_the_axis_it_was_asked_for() {
@@ -355,7 +548,15 @@ mod tests {
         };
         let mix = vec![(hostile.to_owned(), 3)];
         let split = split_by(&facts, false);
-        let out = render_recap(&facts, &mix, &split, false, &Screen::default(), &[]);
+        let rows = RecapRows {
+            facts: &facts,
+            mix: &mix,
+            calls: None,
+            split: &split,
+            by_model: false,
+            worktrees: &[],
+        };
+        let out = render_recap(&rows, &Screen::default());
         for needle in ["\u{1b}", "\u{7}"] {
             assert!(
                 !out.contains(needle),

@@ -243,6 +243,22 @@ impl<'a> Planes<'a> {
     }
 }
 
+/// Recall's savings in the words both window verbs print: the avoided figure
+/// labelled an estimated upper bound beside the injected spend, or — when the
+/// repository has no recall ledger — a sentence saying so, never a zero.
+///
+/// One function for `dispatch` and `recap` because two spellings of one fact
+/// drift, and the label on the bound is the part that must never be lost.
+pub(super) fn recall_savings_text(facts: &WindowFacts) -> String {
+    match facts.savings {
+        Some(sv) => format!(
+            "{} tokens avoided (estimated upper bound), {} injected",
+            sv.avoided_upper_bound, sv.injected
+        ),
+        None => "no ledger in this repository".to_owned(),
+    }
+}
+
 /// The window as the report echoes it back.
 ///
 /// A free function rather than a method because the JSON stayed here: nothing

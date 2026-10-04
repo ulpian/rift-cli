@@ -144,6 +144,21 @@ because data filed under the previous identifiers is not moved and there is no
 undo but another remint, and `rift doctor --fix` prints this command rather than
 running it: an identity that can change as a side effect is not a record.
 
+The doctor's `family_identity` leg is what tells you a remint is due. It reads
+the manifest without minting, re-derives the identifiers by the rule the family
+was minted by — the main work tree's path-derived identifiers when the manifest
+records one, the common directory's work-tree-less identifiers when it does not —
+and compares. It is silent when they match. When they differ and nothing is
+stored under the derived identifiers it says `moved`: the manifest travelled with
+the git directory, which is the design working, and there is nothing to do. When
+a projection or recall store already exists under the derived identifiers it says
+`split` — data is being filed in two places — and names both identities, both
+stores and the remint command, adding that the data under the old identifiers is
+not moved. A vantage that cannot prove the main work tree, or a repository with
+no manifest yet, reads `unprovable` with what to run and from where; an
+unparseable manifest reports the refusal above. The leg never re-mints,
+`--fix` included.
+
 ---
 
 ## 9.5 What is shared, and what stays put
@@ -564,8 +579,9 @@ member, and says so.
 `rift doctor`'s session sweep, queue legs and memory-chain leg enumerate every
 member's git directory, and `--fix` drains and adopts across members. Its
 family-related legs are `phantom_gitdirs` and `orphan_projections` (§9.12),
-`push_queue`, `prunable_worktrees`, `hooks_target` (a dangling link `--fix`
-self-heals with a record), `binary_of_record`, and `worktree_wiring`.
+`family_identity` (§9.4), `push_queue`, `prunable_worktrees`, `hooks_target` (a
+dangling link `--fix` self-heals with a record), `binary_of_record`, and
+`worktree_wiring`.
 
 In the dashboard, members are child rows of their repository with status derived
 from **family** data rather than a projection that will never fill, and token
@@ -636,12 +652,12 @@ retires the administrative entry afterwards.
   recorded identity: minting is a product act, and that binary projects.
 - **Adoption cannot grant Codex trust**, and does not try — that approval is
   yours to give in Codex.
-- **There is no doctor leg for identity drift.** Doctor covers phantoms, the
-  push queue, prunable members, orphan projections, the hook target, the binary
-  of record and member wiring, but does not compare the recorded identifiers
-  against what the current main checkout would derive. If you suspect drift,
-  `rift family remint --adopt-main` is the repair and the history file is the
-  audit trail ([18-known-gaps.md](18-known-gaps.md)).
+- **Identity drift is reported, never repaired.** The doctor's
+  `family_identity` leg compares the recorded identifiers against what the
+  current main checkout derives and calls the result `matches`, `moved`, `split`
+  or `unprovable` (§9.4). Only `split` needs you: `rift family remint
+  --adopt-main` is the repair, run by hand, and the history file is the audit
+  trail.
 - **The dead-schema table for raw shadow branches is still empty** and has no
   writer; §9.8's two relations are the provenance. Nothing on the dashboard
   reads them any more ([18-known-gaps.md](18-known-gaps.md)).

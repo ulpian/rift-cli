@@ -114,21 +114,6 @@ would then have to gate. The trade was deliberate.
 
 ## 18.4 Redaction
 
-### Two redaction settings are read from your config and used by nothing
-
-*Measured defect.* `.rift/config.toml` accepts an entropy threshold and a list of
-extra patterns under its redaction table. Both are parsed, validated and folded
-into the policy fingerprint; neither reaches the pipeline, because the entropy
-floor is compiled in and the supported way to add patterns is a rule pack file,
-which *is* wired. This is the worst shape a configuration bug can take: you lower
-the threshold, watch the fingerprint change — confirming the setting was seen —
-and get exactly the same masking. Closing it means threading both values through
-to the detector table, or refusing them at load time with an error naming the
-rule-pack path. Silently accepting them is the one option that should not stand.
-
-**Read more.** [04](04-redaction-and-secrets.md) §4.12,
-[02](02-configuration.md).
-
 ### The legal cross-class split has no live instance
 
 *Honest limit.* The false-positive census lets one file's accepted hits fall
@@ -572,31 +557,9 @@ a client that publishes one.
 
 **Read more.** [08](08-cost-and-savings.md) §8.6.
 
-### `rift recap` prints no savings line
-
-*Measured defect.* The verb's help text advertises a savings summary; its human
-renderer does not print one, though the machine-readable output carries the
-figures. A help string promising output the command does not produce is the
-cheapest kind of wrong documentation to fix and the easiest to leave. Closing it
-takes either the line or a help string that stops promising it.
-
-**Read more.** [08](08-cost-and-savings.md).
-
 ---
 
 ## 18.8 Worktrees and families
-
-### There is no doctor leg for family-identity drift
-
-*Never built.* The doctor checks phantom directories, the push queue, prunable
-members, orphaned projections, the hook target, the binary of record and member
-wiring. It does not compare the recorded family identifier against what the main
-checkout would derive — and identity drift is the failure that would quietly split
-one family's data into two stores. Closing it takes a leg that derives and
-compares, **reporting rather than repairing**: the repair verb exists and writes
-an audit trail, and re-minting is explicit on purpose.
-
-**Read more.** [09](09-worktrees-and-families.md) §9.12.
 
 ### The compounding proof's binding is seeded
 

@@ -31,8 +31,6 @@ EffectiveConfig {
     capture_token_usage: true,
     checkpoint_strategy: "manual-commit",
     schedule_interval_minutes: 30,
-    entropy_threshold: 4.5,
-    extra_patterns: [],
     default_retention_class: "standard",
     retention_classes: [
         "standard",

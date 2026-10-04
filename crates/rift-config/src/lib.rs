@@ -433,6 +433,49 @@ mod tests {
         }
     }
 
+    /// The refusal message of a config whose `[redaction]` table holds `body`.
+    fn redaction_refusal(body: &str) -> String {
+        let src = format!("schema_version = 1\n[project]\nname = \"x\"\n[redaction]\n{body}\n");
+        match parse(&src) {
+            Err(RiftError::Config(m)) => m,
+            other => panic!("expected the [redaction] key to be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_entropy_threshold_is_refused_and_the_floor_is_said_to_be_fixed() {
+        let m = redaction_refusal("entropy_threshold = 3.0");
+        assert!(m.contains("redaction.entropy_threshold"), "{m}");
+        assert!(m.contains("fixed"), "{m}");
+        assert!(m.contains(".rift/policies/redactors"), "{m}");
+    }
+
+    #[test]
+    fn extra_patterns_are_refused_and_pointed_at_a_rule_pack() {
+        let m = redaction_refusal("extra_patterns = [\"acme-[a-z0-9]{20}\"]");
+        assert!(m.contains("redaction.extra_patterns"), "{m}");
+        assert!(m.contains(".rift/policies/redactors"), "{m}");
+    }
+
+    #[test]
+    fn an_empty_redaction_table_loads_with_the_absent_tables_fingerprint() {
+        let absent = parse("schema_version = 1\n[project]\nname = \"x\"\n").unwrap();
+        let empty = parse("schema_version = 1\n[project]\nname = \"x\"\n[redaction]\n").unwrap();
+        assert_eq!(absent.policy_hash(), empty.policy_hash());
+    }
+
+    /// Fingerprints already stamped into events and summary bindings must keep
+    /// matching, so the preimage keeps the fixed entropy line the retired key
+    /// once contributed.
+    #[test]
+    fn the_default_policy_fingerprint_is_unchanged_by_the_retired_redaction_keys() {
+        let default = EffectiveConfig::secure_default().unwrap();
+        assert_eq!(
+            default.policy_hash().to_string(),
+            "066a7fcd223f7f05e64dc6a473993795f7f41ff398a2d87988d5a7c88d1671f4"
+        );
+    }
+
     #[test]
     fn raw_transcripts_requires_acknowledge() {
         let err =

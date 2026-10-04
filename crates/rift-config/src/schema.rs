@@ -10,10 +10,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_entropy() -> f32 {
-    4.5
-}
-
 /// The raw, deserialized config (before validation / defaulting / hashing).
 #[derive(Debug, Clone, ::serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,26 +146,23 @@ impl Default for FeaturePolicy {
     }
 }
 
-/// Redaction tuning knobs.
-#[derive(Debug, Clone, ::serde::Deserialize)]
+/// The `[redaction]` table, which holds no setting: patterns are added by a
+/// rule pack under `.rift/policies/redactors/`, and the entropy floor is
+/// compiled into the redactor.
+///
+/// The two keys the table once took are still recognized so validation can
+/// refuse them by name and point at the rule packs. A plain
+/// `deny_unknown_fields` rejection would say "unknown field" and leave the
+/// author guessing; accepting them silently would change the policy hash
+/// while the masking stayed the same. Any value type is held, so a key of the
+/// wrong type is refused for the same reason as one of the right type.
+#[derive(Debug, Clone, Default, ::serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RedactionPolicy {
-    /// Shannon-entropy threshold (bits/char) above which a token is treated as a
-    /// likely secret.
-    #[serde(default = "default_entropy")]
-    pub entropy_threshold: f32,
-    /// Extra user-supplied secret patterns (added to the built-in set).
     #[serde(default)]
-    pub extra_patterns: Vec<String>,
-}
-
-impl Default for RedactionPolicy {
-    fn default() -> Self {
-        Self {
-            entropy_threshold: default_entropy(),
-            extra_patterns: Vec::new(),
-        }
-    }
+    pub(crate) entropy_threshold: Option<toml::Value>,
+    #[serde(default)]
+    pub(crate) extra_patterns: Option<toml::Value>,
 }
 
 /// Model allow/deny lists. Empty `allow` means allow-all; `deny` always wins.

@@ -43,8 +43,6 @@ pub struct EffectiveConfig {
     capture_token_usage: bool,
     checkpoint_strategy: String,
     schedule_interval_minutes: u32,
-    entropy_threshold: f32,
-    extra_patterns: Vec<String>,
     default_retention_class: String,
     retention_classes: Vec<String>,
     feature_total_recall: bool,
@@ -149,8 +147,6 @@ impl EffectiveConfig {
             capture_token_usage: cfg.capture.token_usage,
             checkpoint_strategy: cfg.capture.checkpoint_strategy,
             schedule_interval_minutes: cfg.capture.schedule_interval_minutes,
-            entropy_threshold: cfg.redaction.entropy_threshold,
-            extra_patterns: sorted_unique(cfg.redaction.extra_patterns.clone()),
             default_retention_class: cfg.retention.default_class,
             retention_classes: sorted_unique(cfg.retention.classes.clone()),
             feature_total_recall: cfg.features.total_recall,
@@ -182,10 +178,11 @@ impl EffectiveConfig {
             "schedule_interval_minutes",
             &self.schedule_interval_minutes.to_string(),
         );
-        field(
-            "entropy_threshold",
-            &format!("{:.4}", f64::from(self.entropy_threshold)),
-        );
+        // The entropy floor is compiled into the redactor and no config sets
+        // it, but every fingerprint already recorded was taken over this line,
+        // so it stays in the preimage at the value it always had. No
+        // `extra_pattern` line follows: a config that named any is refused.
+        field("entropy_threshold", "4.5000");
         field("default_retention_class", &self.default_retention_class);
         field(
             "feature_total_recall",
@@ -199,9 +196,6 @@ impl EffectiveConfig {
         }
         for v in &self.sensitive_paths {
             field("sensitive_path", v);
-        }
-        for v in &self.extra_patterns {
-            field("extra_pattern", v);
         }
         for v in &self.retention_classes {
             field("retention_class", v);
@@ -306,12 +300,6 @@ impl EffectiveConfig {
         self.capture_token_usage
     }
 
-    /// The redaction entropy threshold (bits/char).
-    #[must_use]
-    pub fn entropy_threshold(&self) -> f32 {
-        self.entropy_threshold
-    }
-
     /// The default retention class.
     #[must_use]
     pub fn default_retention_class(&self) -> &str {
@@ -369,6 +357,7 @@ fn validate_config(cfg: &RiftConfig) -> Result<Option<RepoId>> {
     check_globs(cfg, &mut errors);
     check_capture(cfg, &mut errors);
     check_retention(cfg, &mut errors);
+    check_redaction(cfg, &mut errors);
     let repo_id = parse_repo_id(cfg, &mut errors);
     if !errors.is_empty() {
         return Err(RiftError::config(errors.join("; ")));
@@ -465,6 +454,28 @@ fn check_retention(cfg: &RiftConfig, errors: &mut Vec<String>) {
             "retention.default_class {:?} is not in retention.classes",
             cfg.retention.default_class
         ));
+    }
+}
+
+/// The two keys `[redaction]` once took are refused by name: neither ever
+/// reached the redactor, so a config that sets one would move the policy hash
+/// and leave the masking as it was. The message says where the setting
+/// belongs instead.
+fn check_redaction(cfg: &RiftConfig, errors: &mut Vec<String>) {
+    if cfg.redaction.entropy_threshold.is_some() {
+        errors.push(
+            "redaction.entropy_threshold is not a setting: the entropy floor is fixed in the \
+             redactor; remove the key (patterns go in a rule pack under \
+             .rift/policies/redactors/)"
+                .to_string(),
+        );
+    }
+    if cfg.redaction.extra_patterns.is_some() {
+        errors.push(
+            "redaction.extra_patterns is not a setting: add patterns as a rule pack under \
+             .rift/policies/redactors/ (a .toml or .json file) and remove the key"
+                .to_string(),
+        );
     }
 }
 
