@@ -476,6 +476,7 @@ pub(crate) fn cmd_rebuild(root: &Path) -> rift_core::Result<Outcome> {
         "shards_seen": report.shards_seen,
         "shards_projected": report.shards_projected,
         "refused": report.refused.len(),
+        "parse_issues": report.parse_issues,
         "events_derived": report.events_derived,
         "events_inserted": report.events_inserted,
         "watermark": report.tip,

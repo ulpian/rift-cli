@@ -256,10 +256,16 @@ fn re_import_applies_nothing(target: &Path, tcache: &Path, out: &Path, src_ck: &
 }
 
 /// The imported repository verifies: rebuild projects what the bundle brought
-/// in, and `rift verify` re-derives the roots from it.
+/// in, reading every artifact it carries without a parse issue, and `rift
+/// verify` re-derives the roots from it.
 fn imported_repository_verifies(target: &Path, tcache: &Path) {
     let (code, stdout, err) = rift(target, tcache, &["--json", "rebuild"]);
     assert_eq!(code, 0, "rebuild after import failed: {stdout}{err}");
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        doc["parse_issues"], 0,
+        "the bundle's shards parse whole: {doc}"
+    );
     let (code, stdout, err) = rift(target, tcache, &["--json", "verify"]);
     assert_eq!(code, 0, "verify after import must be green: {stdout}{err}");
 }
