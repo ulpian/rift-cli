@@ -607,18 +607,6 @@ stop being *used* but do not disappear from history.
 
 ## 18.9 Agent integrations
 
-### Two refused adapters carry compatibility notes that are wrong
-
-*Measured defect.* Two adapters outside the supported set declare in their notes
-that their agent publishes no compaction signal. Both agents publish one. The
-notes are dead configuration behind a refusal — no user is shown them today — and
-they are recorded as defects rather than quietly deleted, because deleting the
-record would make the refusal look better-founded than it is: the refusal rests
-on verb-mapping facts, which are correct. Closing it means correcting the notes,
-which changes no behaviour, and that is the point.
-
-**Read more.** [10](10-agent-integrations.md) §10.6.
-
 ### The Gemini adapter drops the model identifier and under-declares events
 
 *Measured defect.* Its adapter maps the one event carrying the model identifier
