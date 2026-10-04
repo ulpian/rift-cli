@@ -70,7 +70,10 @@ const POLICY: &str = "schema_version = 1\n\
 
 fn family() -> Family {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().to_path_buf();
+    // Named with an underscore: Claude Code folds `_` in a project path like
+    // any other non-alphanumeric character, and a temporary directory that
+    // happens to carry none would hide a fixture that folds it differently.
+    let root = tmp.path().join("fixture_root");
     let main = root.join("main");
     std::fs::create_dir_all(&main).unwrap();
     git_in(&main, &["init", "-q", "-b", "main"]);
@@ -140,23 +143,9 @@ fn rift_json(f: &Family, cwd: &Path, args: &[&str]) -> serde_json::Value {
 }
 
 /// claude-code's per-repository transcript directory under the fixture's
-/// `HOME`: the absolute worktree path with `/` and `.` folded to `-`, and on
-/// Windows `\` and the drive's `:` as well (its own project directory for
-/// `c:\Users\…\x` is `c--Users-…-x`). The binary discovers the worktree
-/// CANONICALIZED (macOS `/var` → `/private/var`), so the munge is computed
-/// over the canonical path, spelled plainly first so the name stays relative.
+/// `HOME`, folded by the shared rule the binary's own lookup mirrors.
 fn transcript_dir(f: &Family, work_tree: &Path) -> PathBuf {
-    let munged: String = common::shell_spelling(&work_tree.canonicalize().unwrap())
-        .chars()
-        .map(|c| {
-            if c == '/' || c == '.' || c == ':' {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    f.home.join(".claude").join("projects").join(munged)
+    common::claude_code_project_dir(&f.home, work_tree)
 }
 
 /// Write one minimal native transcript for `session` under `dir`.
