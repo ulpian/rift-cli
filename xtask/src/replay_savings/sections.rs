@@ -1,6 +1,7 @@
 //! The sections that size the next levers rather than measure this build:
 //! where the facts came from, the client's own declines, the sibling re-reads
-//! by inheritance route, the machine-format census and the first-sight sizes.
+//! by inheritance route, the machine-format census, the first-sight sizes and
+//! the shapes of the shell reads the grammar refused.
 //!
 //! Kept apart from the table they extend so the table's existing lines — which
 //! two runs are compared by — are visibly untouched by them. Aggregates only,
@@ -16,7 +17,8 @@ use super::census::{
 };
 use super::inheritance::Inheritance;
 use super::render::{commas, row};
-use super::report::{Report, Tally};
+use super::report::{share_percent, Report, Tally};
+use super::shell_shape::ranked;
 
 /// The header line naming where the path facts came from.
 pub(super) fn facts_header(report: &Report) -> String {
@@ -107,6 +109,34 @@ pub(super) fn machine_formats(report: &Report, denominator: u64) -> String {
     out
 }
 
+/// The refused shell reads by shape, ranked by the tokens of the calls naming
+/// a work-tree file, each beside its share of that pool and its count on the
+/// loose bound. Shape names only: a command line never reaches the table.
+pub(super) fn refused_shapes(report: &Report) -> String {
+    let pool = report.invisible_shell_named_file.tokens;
+    let mut out = format!(
+        "    {:<46}{:>9}{:>15}{:>13}{:>9}{:>15}\n",
+        "refused, by shape (naming a file / loose)",
+        "calls",
+        "tokens",
+        "of named",
+        "calls",
+        "tokens"
+    );
+    for (shape, row) in ranked(&report.invisible_shell_shapes) {
+        out.push_str(&format!(
+            "      {:<44}{:>9}{:>15}{:>11.2} %{:>9}{:>15}\n",
+            shape.key(),
+            commas(row.named.calls),
+            commas(row.named.tokens),
+            share_percent(row.named.tokens, pool),
+            commas(row.all.calls),
+            commas(row.all.tokens)
+        ));
+    }
+    out
+}
+
 /// The first-sight calls by file size, and the first-contact floor.
 pub(super) fn first_sight_sizes(report: &Report, denominator: u64) -> String {
     let sizes = &report.first_sight_sizes;
@@ -161,6 +191,10 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
     map.insert(
         "first_sight_sizes".to_owned(),
         first_sight_sizes_json(report),
+    );
+    map.insert(
+        "invisible_shell_read_shapes".to_owned(),
+        refused_shapes_json(report),
     );
 }
 
@@ -245,4 +279,21 @@ fn first_sight_sizes_json(report: &Report) -> Value {
             "toml": tally_json(sizes.first_contact_toml),
         },
     })
+}
+
+/// The refused shell reads by shape, in the table's ranked order.
+fn refused_shapes_json(report: &Report) -> Value {
+    let pool = report.invisible_shell_named_file.tokens;
+    let rows: Vec<Value> = ranked(&report.invisible_shell_shapes)
+        .into_iter()
+        .map(|(shape, row)| {
+            json!({
+                "loose_bound": tally_json(row.all),
+                "naming_a_work_tree_file": tally_json(row.named),
+                "shape": shape.key(),
+                "share_of_naming_a_work_tree_file_percent": share_percent(row.named.tokens, pool),
+            })
+        })
+        .collect();
+    Value::Array(rows)
 }

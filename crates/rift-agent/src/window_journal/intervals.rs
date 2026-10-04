@@ -45,6 +45,13 @@ impl Interval {
         self.lo <= other.hi && other.lo <= self.hi
     }
 
+    /// The lines this run and `other` have in common, or `None` when they
+    /// share none.
+    #[must_use]
+    pub fn intersection(&self, other: Self) -> Option<Self> {
+        Self::new(self.lo.max(other.lo), self.hi.min(other.hi))
+    }
+
     /// How many lines the run spans.
     #[must_use]
     pub const fn lines(&self) -> u32 {

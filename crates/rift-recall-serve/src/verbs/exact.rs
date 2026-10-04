@@ -12,6 +12,7 @@ use rift_recall_validity::trust::{
 use rift_store::CanonicalStore;
 use serde_json::{json, Value};
 
+use super::credit::Current;
 use super::pack::{citation_pass, pack_inputs};
 use crate::envelope::{exact_sha, handle_display_path, omit_tag, provenance_trust};
 use crate::{RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse};
@@ -38,6 +39,9 @@ struct ExactGrant {
     trust: Trust,
     /// The caller's mandatory reason, as the audit records it.
     reason: String,
+    /// The file the bytes are a revision of, when they are a file's: the
+    /// answer says whether they are still what the checkout holds.
+    file: Option<String>,
 }
 
 impl ServeDispatcher<'_> {
@@ -97,6 +101,7 @@ impl ServeDispatcher<'_> {
                     sha: exact_sha_owned(req.target.as_deref().unwrap_or_default()),
                     trust,
                     reason,
+                    file: file_of(req.target.as_deref().unwrap_or_default()),
                 },
             ),
             AuditDecision::Deny(reason) => Ok(Self::refuse_exact(&target, trust, reason, budget)),
@@ -264,10 +269,14 @@ impl ServeDispatcher<'_> {
                 },
             ));
         }
-        let payload = json!({
-            "tool": "retrieve_exact",
-            "result": { "state": "exact", grant.exact_id.0: grant.exact_id.1, "body": body },
-        });
+        let mut result =
+            json!({ "state": "exact", grant.exact_id.0: grant.exact_id.1, "body": body });
+        if is_historical(ctx.reader, &grant) {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("historical".to_owned(), json!(true));
+            }
+        }
+        let payload = json!({ "tool": "retrieve_exact", "result": result });
         let handle = grant.audit_name;
         let reason = grant.reason;
         Ok(Self::respond(
@@ -346,6 +355,29 @@ impl ServeDispatcher<'_> {
     }
 }
 
+/// Whether served bytes are a revision the checkout no longer holds — or one
+/// it cannot be shown to hold. A hash-bound retrieval serves the revision it
+/// names, which may be history; the answer says so rather than letting the
+/// bytes pass for the file as it is now. A reader bound to no checkout can
+/// say nothing either way, and the answer carries no label.
+fn is_historical<R: SubstrateReader>(reader: &R, grant: &ExactGrant) -> bool {
+    let Some(path) = grant.file.as_deref() else {
+        return false;
+    };
+    if reader.worktree_root().is_none() {
+        return false;
+    }
+    Current::of(reader, path) != Current::Verified(grant.sha.clone())
+}
+
+/// The path a `file:` handle names, when the target is one.
+fn file_of(target: &str) -> Option<String> {
+    match target.parse::<Handle>() {
+        Ok(Handle::File { path, .. }) => Some(path),
+        _ => None,
+    }
+}
+
 /// [`exact_sha`] as an owned string (the grant outlives the borrow).
 fn exact_sha_owned(target: &str) -> String {
     exact_sha(target).to_string()
@@ -372,6 +404,7 @@ fn citation_grant(
         sha: cited.content_sha256().to_string(),
         trust,
         reason,
+        file: Some(cited.path().to_string()),
     }
 }
 

@@ -6,8 +6,8 @@
 //! against the client's statement, and only then count.
 
 use rift_agent::window_journal::{
-    self, Decision, DenyShape, EditEcho, EvictReason, Interval, Journal, Line, Mode, Reconcile,
-    ResolvedRead, StatedDelivery,
+    self, Decision, DenyShape, EditEcho, EvictReason, Interval, Journal, Limits, Line, Mode,
+    Narrowing, Reconcile, ResolvedRead, StatedDelivery,
 };
 use rift_agent::ReadRequest;
 
@@ -66,6 +66,36 @@ struct Member {
     /// The bucket this member puts the call in, were it the first to block a
     /// decline.
     bucket: Bucket,
+    /// How the request stands against what the window holds of it.
+    narrowing: NarrowClass,
+    /// What the shipped decision declines of it with narrowing enforced.
+    if_enforced: Option<Spared>,
+}
+
+/// How a repeat that is not wholly held stands against what is: the split the
+/// two repeat pools are published under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NarrowClass {
+    /// One held run at one end, and one unheld run beside it.
+    Narrowable,
+    /// Held lines, or the lines left to read, in two or more runs.
+    Multi,
+    /// Nothing of it held at this revision.
+    NotNarrowable,
+}
+
+/// What enforcing narrowing would have declined of one member: the lines it
+/// spares, the lines asked for, and the frame it travels with.
+struct Spared {
+    /// The lines the decline answers — the held run of a narrowing, the
+    /// whole request otherwise.
+    lines: u32,
+    /// The lines the member asked for.
+    requested: u32,
+    /// What the frame costs.
+    frame_tokens: u64,
+    /// Whether it is a narrowing rather than a plain or delta decline.
+    narrowed: bool,
 }
 
 /// One slot of a call, in the order the command line performs it.
@@ -74,6 +104,47 @@ enum Slot {
     Blocked(Bucket),
     /// The member resolved.
     Member(Box<Member>),
+}
+
+impl NarrowClass {
+    /// Every class, in the order the table prints them.
+    pub(super) const ALL: [Self; 3] = [Self::Narrowable, Self::Multi, Self::NotNarrowable];
+
+    /// The class a classification falls in.
+    const fn of(narrowing: Narrowing) -> Self {
+        match narrowing {
+            Narrowing::Narrow { .. } => Self::Narrowable,
+            Narrowing::Multi => Self::Multi,
+            Narrowing::NotNarrowable => Self::NotNarrowable,
+        }
+    }
+
+    /// Where this class sits in [`NarrowClass::ALL`].
+    pub(super) const fn index(self) -> usize {
+        match self {
+            Self::Narrowable => 0,
+            Self::Multi => 1,
+            Self::NotNarrowable => 2,
+        }
+    }
+
+    /// The key this class is published under.
+    pub(super) const fn key(self) -> &'static str {
+        match self {
+            Self::Narrowable => "narrowable",
+            Self::Multi => "multi",
+            Self::NotNarrowable => "not_narrowable",
+        }
+    }
+
+    /// The sentence the table prints for this class.
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Narrowable => "  narrowable: one unheld run",
+            Self::Multi => "  multi: two or more runs",
+            Self::NotNarrowable => "  not narrowable",
+        }
+    }
 }
 
 impl Slot {
@@ -170,6 +241,7 @@ pub(super) fn classify_reads(
     if bucket.declinable() {
         ctx.report.declinable.add(tokens);
     }
+    note_the_narrowing(ctx.report, bucket, blocker, &slots, tokens);
     if matches!(bucket, Bucket::FirstSight | Bucket::CreditedFromStatement) {
         note_a_first_sight(ctx, blocker, text, tokens);
     }
@@ -333,6 +405,69 @@ fn bucket_for_the_call(wholly_declined: bool, text: &str, blocker: Option<&Slot>
     blocker.map_or(Bucket::NoLineCount, Slot::bucket)
 }
 
+/// Split a repeat that is not wholly held by how it stands against what is,
+/// and size what enforcing narrowing would have spared of the call.
+fn note_the_narrowing(
+    report: &mut Report,
+    bucket: Bucket,
+    blocker: Option<&Slot>,
+    slots: &[Slot],
+    tokens: u64,
+) {
+    let pool = match bucket {
+        Bucket::RepeatOverlapping => 0,
+        Bucket::RepeatDisjoint => 1,
+        _ => return,
+    };
+    if let Some(Slot::Member(member)) = blocker {
+        let cell = report
+            .narrowing_split
+            .get_mut(pool)
+            .and_then(|split| split.get_mut(member.narrowing.index()));
+        if let Some(tally) = cell {
+            tally.add(tokens);
+        }
+    }
+    size_the_narrowing(report, slots, tokens);
+}
+
+/// What enforcing narrowing would have spared of one call, booked where it
+/// would have been declined at all.
+///
+/// All-or-nothing, as a decline is: the call is narrowed only when every
+/// member of it would be declined and one of them is a narrowing. What it
+/// spares is the declined lines' share of the result's own tokens, net of
+/// every frame the call would carry — the held lines of a narrowing, and none
+/// of the lines it still reads. A call of several members is also booked as a
+/// composed chain.
+fn size_the_narrowing(report: &mut Report, slots: &[Slot], tokens: u64) {
+    let mut spared = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let Slot::Member(member) = slot else { return };
+        let Some(member) = &member.if_enforced else {
+            return;
+        };
+        spared.push(member);
+    }
+    if !spared.iter().any(|member| member.narrowed) {
+        return;
+    }
+    let lines: u64 = spared.iter().map(|member| u64::from(member.lines)).sum();
+    let requested: u64 = spared
+        .iter()
+        .map(|member| u64::from(member.requested))
+        .sum();
+    let frames: u64 = spared.iter().map(|member| member.frame_tokens).sum();
+    let share = u128::from(tokens) * u128::from(lines) / u128::from(requested.max(1));
+    let share = u64::try_from(share).unwrap_or(u64::MAX);
+    let net = share.saturating_sub(frames);
+    report.narrowed_if_enforced.add(net);
+    if spared.len() > 1 {
+        report.narrowed_chains_if_enforced.add(net);
+    }
+    report.narrowed_frame_tokens = report.narrowed_frame_tokens.saturating_add(frames);
+}
+
 /// What this call's declines cost, and how many of them rest on the window's
 /// own whole-file write rather than on a read.
 fn charge_the_reason_frames(report: &mut Report, slots: &[Slot]) {
@@ -449,11 +584,16 @@ fn resolve_member(ctx: &mut Ctx<'_>, call: &Call, request: &ReadRequest, text: &
             .delivery_is_complete(slice_bytes, ctx.replay.limits)
     {
         return Slot::Member(Box::new(Member {
+            narrowing: NarrowClass::of(window_journal::narrowing(
+                &resolved.read,
+                &ctx.state.journal,
+            )),
             resolved,
             decision: None,
             frame: None,
             rests_on_a_write: false,
             bucket: Bucket::OverCreditBound,
+            if_enforced: None,
         }));
     }
     Slot::Member(Box::new(decide_member(
@@ -499,12 +639,49 @@ fn decide_member(journal: &Journal, replay: &Replay<'_>, resolved: Resolved) -> 
         replay.limits.min_slice_lines,
     );
     Member {
+        narrowing: NarrowClass::of(window_journal::narrowing(read, journal)),
+        if_enforced: if_narrowing_enforced(journal, replay, &resolved),
         resolved,
         decision: Some(decision),
         frame,
         rests_on_a_write,
         bucket,
     }
+}
+
+/// What the shipped decision declines of one member with narrowing enforced,
+/// against the same journal the bucket was decided over, or `None` when it
+/// declines nothing.
+fn if_narrowing_enforced(
+    journal: &Journal,
+    replay: &Replay<'_>,
+    resolved: &Resolved,
+) -> Option<Spared> {
+    let read = &resolved.read;
+    let limits = Limits {
+        narrow_mode: Mode::Enforce,
+        ..replay.limits
+    };
+    let decision = window_journal::decide(
+        read,
+        journal,
+        Mode::Enforce,
+        replay.channel,
+        EditEcho::Pinned,
+        resolved.slice_bytes,
+        limits,
+    );
+    let frame = frame_for(journal, read, &decision, limits.context_lines)?;
+    let (lines, narrowed) = match decision {
+        Decision::Deny(DenyShape::Narrow { held, .. }) => (held.lines(), true),
+        _ => (read.range.lines(), false),
+    };
+    Some(Spared {
+        lines,
+        requested: read.range.lines(),
+        frame_tokens: u64::from(rift_tokens::count(&frame)),
+        narrowed,
+    })
 }
 
 /// Which bucket a decided call belongs in.
@@ -574,6 +751,16 @@ fn frame_for(
                 since,
             )
         }
+        DenyShape::Narrow {
+            held: run,
+            read: rest,
+        } => Some(rift_recall_validity::trust::render_narrow_frame(
+            &read.path,
+            &hash,
+            (run.lo, run.hi),
+            (rest.lo, rest.hi),
+            held.read_turn(&read.path, read.hash, *run).map(u64::from),
+        )),
     }
 }
 

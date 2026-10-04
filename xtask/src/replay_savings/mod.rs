@@ -107,6 +107,18 @@
 //! the file read, with the first-contact floor of 400 lines or 16,384 bytes.
 //! `--artifact <dir>` writes the table and the document with the build, the
 //! facts mode, the corpus and the run's times attached.
+//!
+//! ## What narrowing would have done
+//!
+//! The buckets are decided with narrowing off, so every figure above reads the
+//! same before and after it: the shipped decision with
+//! [`Limits::narrow_mode`](rift_agent::window_journal::Limits::narrow_mode) at
+//! `off` is the build without it. The two repeat pools a narrowing works on
+//! are split beneath by how each request stands against what is held, and one
+//! line asks the same decision, against the same journal, with narrowing
+//! enforced: what it would have declined, sized as the held lines' share of
+//! the result net of the frames. Beneath it, the share of those calls that
+//! were composed chains of several reads.
 
 mod artifact;
 mod bucket;
@@ -117,11 +129,17 @@ mod classify;
 mod delivery;
 mod history;
 mod inheritance;
+#[cfg(test)]
+mod narrow_fixture;
 mod options;
 mod render;
 mod replay;
 mod report;
 mod sections;
+#[cfg(test)]
+mod shape_fixture;
+mod shell_lex;
+mod shell_shape;
 mod transcript;
 mod worktree;
 
@@ -133,6 +151,7 @@ pub use options::{parse_args, run, Options};
 pub use render::{render_json, render_table, SCHEMA_VERSION};
 pub use replay::replay;
 pub use report::{share_percent, Report, Tally};
+pub use shell_shape::{Family, Filter, Shape, ShapeRow};
 pub use worktree::FactsSource;
 
 #[cfg(test)]

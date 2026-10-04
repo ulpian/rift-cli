@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use super::answer::{gate_answer, journal_decision};
+use super::answer::{gate_answer, journal_decision, spared_lines};
 use super::delivery::{gate_delivery_is_actionable, reconcile_stated_delivery};
 use super::file::{gate_resolve, GateFile};
 use super::{gate_edit_echo, gate_mode, GateStep};
@@ -212,7 +212,7 @@ pub(super) fn gate_record_members(
         ) && pass.held.prevented_intersects(
             &member.read.path,
             member.read.hash,
-            member.read.range,
+            spared_lines(&member.read, &member.decision),
         );
         let _ = pass.journal.append(&rift_agent::window_journal::record(
             &member.read,

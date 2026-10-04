@@ -121,7 +121,7 @@ pub use rift_recall_validity::trust::{
     ManifestEntry,
 };
 
-/// The two reason frames a declined read is answered with, re-exported by the
+/// The reason frames a declined read is answered with, re-exported by the
 /// same route and for the same reason as [`render_delta_manifest`].
 ///
 /// The hook path composes a decline; the sentence a model reads is written by
@@ -129,7 +129,7 @@ pub use rift_recall_validity::trust::{
 /// tree where pushed text comes into existence. `bins/rift` reaches it here
 /// because this dispatcher is already the validity crate's caller — no crate
 /// edge is added, and no second renderer is created.
-pub use rift_recall_validity::trust::{render_delta_frame, render_deny_frame};
+pub use rift_recall_validity::trust::{render_delta_frame, render_deny_frame, render_narrow_frame};
 
 /// The document redirect's frame, re-exported by the same route and for the
 /// same reason as [`render_deny_frame`].
@@ -465,6 +465,42 @@ pub struct ToolResponse {
     pub payload: Value,
     /// The event the caller must hand to `rift hooks memd`.
     pub event: MemdEvent,
+    /// The rule `estimated_tokens_avoided` was booked under, decided by the
+    /// dispatcher from the verb, the request and the reader.
+    pub avoided_basis: AvoidedBasis,
+}
+
+/// The rule a response's `estimated_tokens_avoided` was booked under — the
+/// word a surface prints beside the figure so a reader knows what it rests on.
+///
+/// A closed set of five, decided by the verb, the request and whether the
+/// reader is bound to a checkout, before any store is read: it names the rule
+/// that applied, not how much it credited, so a stated-hash call that matched
+/// nothing still says `stated_recorded` beside its zero. The per-entry cases
+/// the rule withholds credit for are tagged on the entry itself, where the
+/// caller can see which file it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AvoidedBasis {
+    /// `stated_recorded`: the caller stated hashes, and a file is credited
+    /// only where the checkout holds the bytes the answer describes and this
+    /// family recorded reading the revision the caller holds — unchanged
+    /// files at their cost, and, on the answers that carry changed lines, a
+    /// changed file at its current cost less the lines returned.
+    StatedRecorded,
+    /// `none_stated`: a crediting verb called without a single stated hash; it
+    /// books zero, because a list is not a set of spared reads.
+    NoneStated,
+    /// `unverified`: the caller stated hashes, but the reader is bound to no
+    /// checkout, so the answer is the projection's view, never checked against
+    /// the file, and books zero.
+    Unverified,
+    /// `declared`: the baseline is the declared native cost of the read the
+    /// answer replaced — a document or a path listing.
+    Declared,
+    /// `not_credited`: the verb books zero by design — an exact retrieval, the
+    /// cost view, or the ranked hunk shape, which answers about no file the
+    /// caller said it held.
+    NotCredited,
 }
 
 /// A tool failure.
@@ -656,6 +692,42 @@ impl ToolName {
     }
 }
 
+impl AvoidedBasis {
+    /// The basis a call of `tool` with `req` is booked under, through a
+    /// reader that is (`checkout`) or is not bound to a checkout.
+    #[must_use]
+    pub fn of(tool: ToolName, req: &ToolRequest, checkout: bool) -> Self {
+        let credits_stated = match tool {
+            ToolName::KnownState
+            | ToolName::DiffSince
+            | ToolName::FileIfChanged
+            | ToolName::ReadSummary
+            | ToolName::ContextPack => true,
+            ToolName::ChangedHunks => targeted_pull(tool, req),
+            ToolName::DocRead | ToolName::Search => return Self::Declared,
+            ToolName::RetrieveExact | ToolName::CostHotspots => false,
+        };
+        match (credits_stated, req.known_hashes.is_empty(), checkout) {
+            (false, _, _) => Self::NotCredited,
+            (true, true, _) => Self::NoneStated,
+            (true, false, false) => Self::Unverified,
+            (true, false, true) => Self::StatedRecorded,
+        }
+    }
+
+    /// The word the envelopes print.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StatedRecorded => "stated_recorded",
+            Self::NoneStated => "none_stated",
+            Self::Unverified => "unverified",
+            Self::Declared => "declared",
+            Self::NotCredited => "not_credited",
+        }
+    }
+}
+
 impl<'a> ServeDispatcher<'a> {
     /// Construct with a policy engine. The turn budget is owned by the caller;
     /// a `known_state` call anchors it (see [`ServeDispatcher::dispatch`]).
@@ -742,6 +814,9 @@ impl<'a> ServeDispatcher<'a> {
         {
             return Err(ToolError::QueryParamsRequired);
         }
+        // The rule the figure is booked under is decided on what the caller
+        // stated, before a prefix is resolved away.
+        let basis = AvoidedBasis::of(tool, req, ctx.reader.worktree_root().is_some());
         // 3. resolve the hashes the caller says it holds, once, for every
         //    verb whose answer turns on one. A hash reaches a handler as a
         //    full content address or not at all: the handlers compare
@@ -765,8 +840,9 @@ impl<'a> ServeDispatcher<'a> {
             };
             &resolved
         };
-        // 4. dispatch to the store-backed handler.
-        match tool {
+        // 4. dispatch to the store-backed handler, and stamp the rule its
+        //    figure was booked under.
+        let resp = match tool {
             ToolName::KnownState => self.known_state(req, ctx, budget).await,
             ToolName::DiffSince => Self::diff_since(req, ctx, budget).await,
             ToolName::FileIfChanged => Self::file_if_changed(req, ctx, budget).await,
@@ -783,7 +859,11 @@ impl<'a> ServeDispatcher<'a> {
             // reach. What is left here is the screening, the rendering and the
             // accounting — which is precisely what has to happen in one place.
             ToolName::Search => self.search(req, budget),
-        }
+        }?;
+        Ok(ToolResponse {
+            avoided_basis: basis,
+            ..resp
+        })
     }
 }
 

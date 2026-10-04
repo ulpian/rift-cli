@@ -80,12 +80,12 @@ fn the_hunk_verb_reports_what_containment_held_back() {
 /// at the current revision, the content→blob bridge for both, and a substrate
 /// holding both blobs. `path` is the candidate's path, so a caller can ask
 /// about it by name.
-fn two_revisions(
+pub(super) fn two_revisions(
     path: &str,
     old: &[u8],
     new: &[u8],
     est_tokens: i64,
-) -> (SqliteStore, MemorySubstrate) {
+) -> (SqliteStore, MemorySubstrate, Checkout) {
     let address = rift_recall_substrate::worktree::sha256_hex(new);
     two_revisions_addressed(path, old, new, est_tokens, &address)
 }
@@ -100,7 +100,7 @@ fn two_revisions_addressed(
     new: &[u8],
     est_tokens: i64,
     current_address: &str,
-) -> (SqliteStore, MemorySubstrate) {
+) -> (SqliteStore, MemorySubstrate, Checkout) {
     use rift_recall_substrate::worktree::{git_blob_oid, sha256_hex, WorktreeBlob};
     let s = open_store();
     seed_checkpoint(&s, "c1", 1);
@@ -130,17 +130,24 @@ fn two_revisions_addressed(
         0,
     ))
     .unwrap();
-    let reader = MemorySubstrate::local()
+    // The checkout holds the current revision, unless the path could not be
+    // a file inside one at all.
+    let checkout = Checkout::holding(&[]);
+    if !path.split('/').any(|seg| seg == "..") {
+        checkout.write(path, new);
+    }
+    let reader = checkout
+        .reader()
         .with_blob(&git_blob_oid(old), old)
         .with_blob(&git_blob_oid(new), new);
-    (s, reader)
+    (s, reader, checkout)
 }
 
 /// A source file of twenty small indented blocks. Two properties matter: a
 /// change inside one block has an edge to grow to, and the rest of the file is
 /// large enough that not sending it is worth more than the answer costs —
 /// which is the whole claim this verb makes.
-fn source_file(marker: &str) -> Vec<u8> {
+pub(super) fn source_file(marker: &str) -> Vec<u8> {
     let mut out = String::from("use std::io;\n\n");
     for b in 0..20 {
         out.push_str(&format!("fn f{b}() {{\n"));
@@ -153,7 +160,7 @@ fn source_file(marker: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
-fn pull(path: &str, basis: &str) -> ToolRequest {
+pub(super) fn pull(path: &str, basis: &str) -> ToolRequest {
     ToolRequest {
         target: Some(path.to_owned()),
         known_hashes: vec![basis.to_owned()],
@@ -175,7 +182,7 @@ fn the_pull_diffs_the_basis_against_the_current_file_not_a_checkpoint() {
     let old = source_file("");
     let recorded = source_file("9");
     let edited = source_file("7");
-    let (store, reader) = two_revisions("src/a.rs", &old, &recorded, 400);
+    let (store, reader, _checkout) = two_revisions("src/a.rs", &old, &recorded, 400);
 
     // The checkout has moved past every revision anyone recorded.
     let tmp = tempfile::tempdir().unwrap();
@@ -217,10 +224,11 @@ fn the_pull_diffs_the_basis_against_the_current_file_not_a_checkpoint() {
     assert!(resp.estimated_tokens_avoided > 0);
 
     // The counterfactual, on the same store: a reader with no checkout to look
-    // in has only the projection to answer from, and there the caller's hash IS
-    // the newest revision — so it is told it holds the current bytes. That is
-    // the fallback arm, and it is the shape the checkout removes.
-    let (_, blind_reader) = two_revisions("src/a.rs", &old, &recorded, 400);
+    // in has only the projection, where the caller's hash IS the newest
+    // revision. Answering from it would tell the caller it holds the current
+    // bytes, so the verb says it cannot see the file instead, and credits
+    // nothing.
+    let blind_reader = MemorySubstrate::local();
     let blind = ctx(&store, &blind_reader);
     let mut budget = TurnBudget::new(8, 4000);
     let stale = block(s.dispatch(
@@ -230,7 +238,12 @@ fn the_pull_diffs_the_basis_against_the_current_file_not_a_checkpoint() {
         &mut budget,
     ))
     .unwrap();
-    assert_eq!(stale.payload["state"], serde_json::json!("known_unchanged"));
+    assert_eq!(
+        stale.payload["state"],
+        serde_json::json!("current_unavailable")
+    );
+    assert_eq!(stale.payload["reason"], serde_json::json!("no_worktree"));
+    assert_eq!(stale.estimated_tokens_avoided, 0);
 }
 
 /// The pull the manifest's own hint teaches, on a twenty-block file whose
@@ -243,13 +256,15 @@ struct HeldHashPull {
     old: Vec<u8>,
     new: Vec<u8>,
     resp: ToolResponse,
+    /// Held so the checkout the reader is bound to outlives the call.
+    _checkout: Checkout,
 }
 
 fn held_hash_pull() -> HeldHashPull {
     use rift_recall_substrate::worktree::sha256_hex;
     let old = source_file("");
     let new = source_file("9");
-    let (store, reader) = two_revisions("src/a.rs", &old, &new, 400);
+    let (store, reader, checkout) = two_revisions("src/a.rs", &old, &new, 400);
     let cfg = cfg();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let held = sha256_hex(&old);
@@ -267,6 +282,7 @@ fn held_hash_pull() -> HeldHashPull {
         old,
         new,
         resp,
+        _checkout: checkout,
     }
 }
 
@@ -310,38 +326,35 @@ fn changed_hunks_against_the_held_hash_serves_the_diff_content() {
     assert!(!content.contains("let x9_1"), "{content}");
 }
 
-/// ★ The figure is the point. A re-read of this file costs its full tokenizer
-/// count; this answer costs the payload; the difference is the saving, and it
-/// is measured at the seam over the exact bytes the transport ships rather
-/// than declared anywhere. The caller that already holds the current bytes is
-/// told so by the four-state constructor, and the whole file is what it did
-/// not re-read.
+/// ★ The figure is the point, and it rests on a read Rift recorded. The
+/// caller's basis here is a revision the bridge maps but no read landed on, so
+/// the changed lines are served and nothing is credited: the hash is the
+/// caller's word, not evidence the bytes were ever in a window. The caller
+/// that holds the current bytes — which this family did read — is told so by
+/// the four-state constructor, and the whole file is what it did not re-read,
+/// measured at the seam over the exact bytes the transport ships.
 #[test]
-fn changed_hunks_against_the_held_hash_books_full_minus_served() {
+fn changed_hunks_credits_only_a_basis_this_family_recorded_reading() {
     use rift_recall_substrate::worktree::sha256_hex;
     let HeldHashPull {
         store,
         reader,
         new,
         resp,
+        _checkout,
         ..
     } = held_hash_pull();
 
-    // The accounting: baseline is THIS file by the real tokenizer, avoided is
-    // that minus the payload, and it is a saving rather than a cost.
-    let full = rift_tokens::count(&String::from_utf8_lossy(&new));
+    // The accounting: the payload is measured, and an unrecorded basis
+    // earns nothing — the answer says why.
     assert_eq!(
         resp.estimated_tokens_returned,
         rift_tokens::count(&resp.payload.to_string())
     );
+    assert_eq!(resp.estimated_tokens_avoided, 0);
     assert_eq!(
-        resp.estimated_tokens_avoided,
-        full.saturating_sub(resp.estimated_tokens_returned)
-    );
-    assert!(
-        resp.estimated_tokens_avoided > 0,
-        "served {} of a {full}-token file",
-        resp.estimated_tokens_returned
+        resp.payload["avoided_basis"],
+        serde_json::json!("stated_unrecorded")
     );
     assert_eq!(resp.event.tokens_avoided(), resp.estimated_tokens_avoided);
 
@@ -357,6 +370,17 @@ fn changed_hunks_against_the_held_hash_books_full_minus_served() {
     .unwrap();
     assert_eq!(same.payload["state"], serde_json::json!("known_unchanged"));
     assert!(same.payload["content"].is_null(), "{}", same.payload);
+    assert!(
+        same.payload.get("avoided_basis").is_none(),
+        "{}",
+        same.payload
+    );
+    // The whole file is the bytes on disk, counted, not the captured estimate.
+    let full = rift_tokens::count(&String::from_utf8_lossy(&new));
+    assert_eq!(
+        same.estimated_tokens_avoided,
+        full.saturating_sub(same.estimated_tokens_returned)
+    );
     assert!(same.estimated_tokens_avoided > 0);
 }
 
@@ -364,32 +388,30 @@ fn changed_hunks_against_the_held_hash_books_full_minus_served() {
 /// quoted. The trust class comes from the artifact's address, not from the
 /// caller and not from the fact that the bytes turned out to be reachable.
 ///
-/// The address here is a git object id recorded where a content address
-/// belongs — the shape a half-written or foreign projection row has. It names
-/// no tracked blob this tree can vouch for, so the lines it leads to are
-/// summarized rather than served, exactly as an untrusted tool output is.
+/// The current side is the checkout's file, addressed by its own hash, so the
+/// address that fails here is the path half: a name carrying a control byte
+/// is a file a checkout can hold but never a well-formed handle, so its lines
+/// are summarized rather than served, exactly as an untrusted tool output is.
+///
+/// The byte is DEL (U+007F) because a file name may hold it on every platform
+/// CI runs: POSIX forbids only NUL and `/`, and NTFS only 0x00–0x1F and
+/// `<>:"/\|?*`, while the handle grammar refuses every ASCII control byte,
+/// DEL included.
 #[test]
 fn untrusted_provenance_is_digested_not_served() {
-    use rift_recall_substrate::worktree::{git_blob_oid, sha256_hex};
+    use rift_recall_substrate::worktree::sha256_hex;
     let old = source_file("");
     let new = source_file("9");
-    // The current revision is recorded by its git object id where a content
-    // address belongs. The bytes are the same and still reachable; what is
-    // gone is the address that made them a code fact.
-    let (store, reader) = two_revisions_addressed("src/a.rs", &old, &new, 400, &git_blob_oid(&new));
+    let path = "src/a\u{7f}.rs";
+    let (store, reader, _checkout) = two_revisions(path, &old, &new, 400);
     let cfg = cfg();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let c = ctx(&store, &reader);
     let held = sha256_hex(&old);
 
     let mut budget = TurnBudget::new(8, 4000);
-    let resp = block(s.dispatch(
-        ToolName::ChangedHunks,
-        &pull("src/a.rs", &held),
-        &c,
-        &mut budget,
-    ))
-    .unwrap();
+    let resp =
+        block(s.dispatch(ToolName::ChangedHunks, &pull(path, &held), &c, &mut budget)).unwrap();
 
     let rendered = resp.payload.to_string();
     assert_eq!(
@@ -425,7 +447,7 @@ fn untrusted_provenance_is_digested_not_served() {
 fn a_denied_path_is_refused_by_the_pull_verb_too() {
     let old = source_file("");
     let new = source_file("9");
-    let (store, reader) = two_revisions("../outside/evil.rs", &old, &new, 400);
+    let (store, reader, _checkout) = two_revisions("../outside/evil.rs", &old, &new, 400);
     let cfg = cfg();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let c = ctx(&store, &reader);
@@ -457,16 +479,16 @@ fn a_denied_path_is_refused_by_the_pull_verb_too() {
 /// untrusted payload leaves by: counts and a handle, never the text.
 #[test]
 fn a_hunk_that_rests_on_a_masked_basis_is_served_as_counts() {
-    use rift_recall_substrate::worktree::{git_blob_oid, sha256_hex};
+    use rift_recall_substrate::worktree::sha256_hex;
     let secret = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB";
     let mut old = String::from_utf8(source_file("")).unwrap();
     old.push_str(&format!("const TOKEN: &str = \"{secret}\";\n"));
     let new = format!("{old}fn tail() {{}}\n");
-    let (store, _) = two_revisions("src/a.rs", old.as_bytes(), new.as_bytes(), 400);
+    let (store, _, checkout) = two_revisions("src/a.rs", old.as_bytes(), new.as_bytes(), 400);
     // The basis is recorded in the bridge — a caller may name it — and its
     // blob is NOT in the substrate: the first rung answers nothing, which is
     // the state an uncommitted revision is always in.
-    let reader = MemorySubstrate::local().with_blob(&git_blob_oid(new.as_bytes()), new.as_bytes());
+    let reader = checkout.reader();
 
     let tmp = tempfile::tempdir().unwrap();
     let snapshots = crate::basis_store::BasisStore::for_family(tmp.path());
@@ -544,7 +566,7 @@ fn each_way_of_not_knowing_the_basis_has_its_own_name() {
     use rift_recall_substrate::worktree::sha256_hex;
     let old = source_file("");
     let new = source_file("9");
-    let (store, reader) = two_revisions("src/a.rs", &old, &new, 400);
+    let (store, reader, checkout) = two_revisions("src/a.rs", &old, &new, 400);
     let cfg = cfg();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let c = ctx(&store, &reader);
@@ -568,7 +590,7 @@ fn each_way_of_not_knowing_the_basis_has_its_own_name() {
     assert_eq!(avoided, 0);
 
     // A revision the bridge maps but the substrate no longer holds.
-    let empty_substrate = MemorySubstrate::local();
+    let empty_substrate = checkout.reader();
     let forgotten = ctx(&store, &empty_substrate);
     let mut budget = TurnBudget::new(8, 4000);
     let gone = block(s.dispatch(
@@ -601,7 +623,7 @@ fn each_way_of_not_knowing_the_basis_has_its_own_name() {
             }
         })
         .collect();
-    let (store2, reader2) = two_revisions("src/w.rs", &scattered, &rewritten, 400);
+    let (store2, reader2, _checkout) = two_revisions("src/w.rs", &scattered, &rewritten, 400);
     let c2 = ctx(&store2, &reader2);
     let mut budget = TurnBudget::new(8, 4000);
     let diffuse = block(s.dispatch(
@@ -664,7 +686,7 @@ fn a_sensitive_path_is_digested_by_the_pull_verb() {
     use rift_recall_substrate::worktree::sha256_hex;
     let old = source_file("");
     let new = source_file("9");
-    let (store, reader) = two_revisions("config/.env.production", &old, &new, 400);
+    let (store, reader, _checkout) = two_revisions("config/.env.production", &old, &new, 400);
     let cfg = cfg();
     let policy = PolicyEngine::new(&cfg);
     assert!(
@@ -702,7 +724,7 @@ fn a_sensitive_path_is_digested_by_the_pull_verb() {
     );
     // The same fixture at an ordinary path still serves, so the screen is the
     // path's sensitivity and not something about this fixture.
-    let (store2, reader2) = two_revisions("src/a.rs", &old, &new, 400);
+    let (store2, reader2, _checkout) = two_revisions("src/a.rs", &old, &new, 400);
     let c2 = ctx(&store2, &reader2);
     let mut budget = TurnBudget::new(8, 4000);
     let ok = block(s.dispatch(
@@ -728,7 +750,7 @@ fn a_fail_closed_policy_refuses_the_pull_verb() {
     use rift_recall_substrate::worktree::sha256_hex;
     let old = source_file("");
     let new = source_file("9");
-    let (store, reader) = two_revisions("src/a.rs", &old, &new, 400);
+    let (store, reader, _checkout) = two_revisions("src/a.rs", &old, &new, 400);
     let cfg = cfg();
     let unreadable = ServePolicy {
         fail_closed: true,
@@ -807,7 +829,7 @@ fn a_basis_recorded_for_another_path_is_unknown() {
     use rift_recall_substrate::worktree::sha256_hex;
     let old = source_file("");
     let new = source_file("9");
-    let (store, reader) = two_revisions("src/a.rs", &old, &new, 400);
+    let (store, reader, _checkout) = two_revisions("src/a.rs", &old, &new, 400);
     // A real revision of a real, unrelated file, reachable in the substrate —
     // so an unbound resolver would resolve it AND find its bytes.
     let other = b"# notes\n\nnothing to do with src/a.rs\n".to_vec();
@@ -874,7 +896,7 @@ fn red_team_an_unrelated_address_cannot_render_a_sensitive_file_from_line_one() 
     use rift_recall_substrate::worktree::sha256_hex;
     let old = source_file("");
     let new = source_file("9");
-    let (store, reader) = two_revisions("config/.env.production", &old, &new, 400);
+    let (store, reader, _checkout) = two_revisions("config/.env.production", &old, &new, 400);
     let other = b"# notes\n\nnothing to do with the environment file\n".to_vec();
     let reader = with_unrelated_revision(&store, reader, "docs/other.md", &other);
     let cfg = cfg();
@@ -920,7 +942,7 @@ fn the_pull_serves_the_newest_revision_of_the_path() {
     use rift_recall_substrate::worktree::{git_blob_oid, sha256_hex};
     let old = source_file("");
     let new = source_file("9");
-    let (store, reader) = two_revisions("src/a.rs", &old, &new, 400);
+    let (store, reader, _checkout) = two_revisions("src/a.rs", &old, &new, 400);
     // A SECOND, older read of the same path: an earlier checkpoint, the old
     // revision, wired exactly as ingest would have written it at the time. Its
     // id sorts BEFORE the current one's on purpose — a selection that takes

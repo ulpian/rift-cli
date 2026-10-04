@@ -6,12 +6,14 @@
 
 mod audit;
 mod basis;
+mod chains;
 mod deliveries;
 mod denies;
 #[cfg(feature = "doc")]
 mod documents;
 mod evictions;
 mod fixtures;
+mod narrows;
 mod paths;
 mod prevented;
 mod search_index;

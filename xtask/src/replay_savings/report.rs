@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use super::bucket::Bucket;
 use super::census::{CensusRow, FirstSightSizes};
+use super::shell_shape::{Shape, ShapeRow};
 use super::worktree::FactsSource;
 
 /// How many calls landed somewhere, and the tokens their results returned.
@@ -90,6 +91,10 @@ pub struct Report {
     /// file this checkout actually has. A command that names a work-tree file
     /// and prints part of it is a read whatever else it does.
     pub invisible_shell_named_file: Tally,
+    /// The same calls by the shape the grammar refused, decided from the
+    /// command line alone: every one on the loose bound, and the part naming a
+    /// work-tree file.
+    pub invisible_shell_shapes: BTreeMap<Shape, ShapeRow>,
     /// Every call to the shell tool, recognised or not.
     pub shell_calls: u64,
     /// How many of them the pinned grammar recognised at all.
@@ -121,6 +126,21 @@ pub struct Report {
     /// Reads of a file the window had just edited with something other than a
     /// whole-file write — the pool this harness declines to model as coverage.
     pub verification_after_edit: Tally,
+    /// The two repeat pools a narrowing works on — overlapping held coverage,
+    /// and over unheld lines of a read revision — each split by how the
+    /// request stands against what is held: narrowable, multi, and not
+    /// narrowable, in that order.
+    pub narrowing_split: [[Tally; 3]; 2],
+    /// Calls this build would have narrowed with narrowing enforced, and what
+    /// that spares: the held lines' share of the result, net of the frames.
+    pub narrowed_if_enforced: Tally,
+    /// What those narrowing frames cost.
+    pub narrowed_frame_tokens: u64,
+    /// Of [`Report::narrowed_if_enforced`], the calls that were composed
+    /// chains of several reads and what they spare. Apart because a chain is
+    /// narrowed only when every member is held or narrowable, so it is the
+    /// share a single unheld member forfeits.
+    pub narrowed_chains_if_enforced: Tally,
     /// How many declines rest on the window's own whole-file write rather than
     /// on a read, so a reader can take them out.
     pub declines_resting_on_a_write: u64,

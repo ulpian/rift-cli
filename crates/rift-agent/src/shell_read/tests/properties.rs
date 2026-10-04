@@ -179,7 +179,119 @@ fn token() -> impl proptest::strategy::Strategy<Value = String> {
     ]
 }
 
+/// The spellings a count reaches the grammar in, each with a `{}` where the
+/// count goes: the command position, both narrowing spellings, and either
+/// end of a `sed` range.
+const COUNT_POSITIONS: &[&str] = &[
+    "tail -n {} src/lib.rs",
+    "head -n {} src/lib.rs",
+    "cat src/lib.rs | tail -n {}",
+    "cat src/lib.rs | tail -{}",
+    "cat src/lib.rs | head -n {}",
+    "cat src/lib.rs | head -{}",
+    "sed -n '{},99999p' src/lib.rs",
+    "sed -n '1,{}p' src/lib.rs",
+];
+
+/// The search flags every command of the family pins, each spelled as the
+/// whole option word it is written as.
+const PINNED_SEARCH_FLAGS: &[&str] = &[
+    "-n",
+    "-i",
+    "-w",
+    "-x",
+    "-in",
+    "-nw",
+    "-A 3",
+    "-B 1",
+    "-C 0",
+    "-A12",
+    "-nA 2",
+    "-iC4",
+    "-c",
+    "-e needle",
+    "-ne needle",
+];
+
+/// Flags one step outside that set: each one reaches past the file, prints
+/// something other than its lines, or is not a count where one goes.
+const UNPINNED_SEARCH_FLAGS: &[&str] = &[
+    "-r",
+    "-R",
+    "-l",
+    "-L",
+    "-o",
+    "-v",
+    "-q",
+    "-f pats",
+    "-P",
+    "-nr",
+    "-A",
+    "-A -1",
+    "-A +1",
+    "-An",
+    "--line-number",
+    "-",
+];
+
 proptest::proptest! {
+    /// ★ A run of pinned flags reads the same wherever it stands before
+    /// `--`: in front of the pattern, between the pattern and the path, or
+    /// after the path, the line is the same search of the same one file.
+    #[test]
+    fn a_pinned_flag_run_reads_the_same_wherever_it_stands(
+        command in proptest::sample::select(&["grep", "egrep", "fgrep", "rg"][..]),
+        flags in proptest::collection::vec(proptest::sample::select(PINNED_SEARCH_FLAGS), 1..5),
+        place in 0_usize..3,
+    ) {
+        let flags = flags.join(" ");
+        let pattern = if flags.contains("needle") { "" } else { "needle" };
+        let line = match place {
+            0 => format!("{command} {flags} {pattern} src/lib.rs"),
+            1 => format!("{command} {pattern} {flags} src/lib.rs"),
+            _ => format!("{command} {pattern} src/lib.rs {flags}"),
+        };
+        let early = recognise(&format!("{command} {flags} {pattern} src/lib.rs"));
+        proptest::prop_assert!(early.is_some(), "{flags:?} is pinned");
+        proptest::prop_assert_eq!(recognise(&line), early, "{}", line);
+    }
+
+
+    /// ★ A search over one file with any run of pinned flags is a content
+    /// search of exactly that file and grants no coverage; one flag outside
+    /// the set, anywhere in the run, takes the line out of the grammar.
+    #[test]
+    fn a_pinned_flag_run_keeps_a_search_on_its_one_file(
+        command in proptest::sample::select(&["grep", "egrep", "fgrep", "rg"][..]),
+        flags in proptest::collection::vec(proptest::sample::select(PINNED_SEARCH_FLAGS), 0..5),
+        unpinned in proptest::sample::select(UNPINNED_SEARCH_FLAGS),
+        at in 0_usize..5,
+    ) {
+        let pattern = if flags.iter().any(|flag| flag.ends_with("needle")) { "" } else { "needle" };
+        let line = |flags: &[&str]| {
+            format!("{command} {} {pattern} src/lib.rs", flags.join(" "))
+        };
+        let call = recognise(&line(&flags));
+        let Some(ShellCall::Read(reads)) = call else {
+            return Err(proptest::test_runner::TestCaseError::fail(format!(
+                "{:?} is a pinned search and was not recognised",
+                line(&flags)
+            )));
+        };
+        proptest::prop_assert_eq!(reads.len(), 1);
+        proptest::prop_assert_eq!(reads[0].path.as_str(), "src/lib.rs");
+        proptest::prop_assert_eq!(reads[0].span, crate::shell_read::ShellSpan::Matching);
+        proptest::prop_assert!(reads[0].read_request().is_none());
+        let mut widened = flags.clone();
+        widened.insert(at.min(widened.len()), unpinned);
+        proptest::prop_assert!(
+            recognise(&line(&widened)).is_none(),
+            "{:?} carries a flag the grammar does not pin",
+            line(&widened)
+        );
+    }
+
+
     /// ★ Anything outside the grammar is not a read and not a listing.
     ///
     /// The recogniser's whole safety argument is that a non-match is left
@@ -258,5 +370,29 @@ proptest::proptest! {
                 );
             }
         }
+    }
+
+    /// ★ A recognised count is never signed.
+    ///
+    /// A sign in front of a count changes what `tail` and `sed` print — from
+    /// line `N` on, or `N` lines past the start — so wherever a count goes,
+    /// a signed one leaves the line unrecognised, and the same digits
+    /// unsigned are still read.
+    #[test]
+    fn a_recognised_count_is_never_signed(
+        position in proptest::sample::select(COUNT_POSITIONS),
+        sign in proptest::sample::select(&["+", "-", "+-", "-+"][..]),
+        count in 1_u32..100_000,
+    ) {
+        let signed = position.replace("{}", &format!("{sign}{count}"));
+        proptest::prop_assert!(
+            recognise(&signed).is_none(),
+            "{signed:?} carries a signed count, so it is not a read"
+        );
+        let plain = position.replace("{}", &count.to_string());
+        proptest::prop_assert!(
+            recognise(&plain).is_some(),
+            "{plain:?} is the same count unsigned, and it is read"
+        );
     }
 }

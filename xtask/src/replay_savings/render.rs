@@ -4,14 +4,15 @@
 //! Aggregates only. No path, no prompt, no command line and no result text
 //! reaches either string, which is a property a test asserts.
 
-use rift_agent::window_journal::Limits;
+use rift_agent::window_journal::{Limits, Mode, NARROW_MODE};
 use serde_json::{json, Map, Value};
 
 use super::bucket::Bucket;
+use super::classify::NarrowClass;
 use super::report::{share_percent, Report, Tally};
 use super::sections::{
     declined_by_the_client, extend_document, facts_header, first_sight_sizes, history_lines,
-    later_first_reads, machine_formats, sibling_classes,
+    later_first_reads, machine_formats, refused_shapes, sibling_classes,
 };
 use super::worktree::MAX_INLINE_HASH_BYTES;
 
@@ -129,6 +130,7 @@ fn the_buckets(report: &Report, denominator: u64) -> String {
             continue;
         }
         out.push_str(&row(bucket.label(), tally, denominator));
+        out.push_str(&narrowing_rows(report, bucket, denominator));
     }
     out.push_str(&row("read channels", report.reads, denominator));
     out.push_str(&row("search channel", report.searches, denominator));
@@ -138,6 +140,28 @@ fn the_buckets(report: &Report, denominator: u64) -> String {
         denominator,
     ));
     out
+}
+
+/// The split under a repeat pool narrowing works on, or nothing under any
+/// other bucket.
+fn narrowing_rows(report: &Report, bucket: Bucket, denominator: u64) -> String {
+    let Some(split) = narrowing_split(report, bucket) else {
+        return String::new();
+    };
+    NarrowClass::ALL
+        .iter()
+        .zip(split)
+        .map(|(class, tally)| row(class.label(), tally, denominator))
+        .collect()
+}
+
+/// The split of one repeat pool, where it has one.
+fn narrowing_split(report: &Report, bucket: Bucket) -> Option<[Tally; 3]> {
+    match bucket {
+        Bucket::RepeatOverlapping => report.narrowing_split.first().copied(),
+        Bucket::RepeatDisjoint => report.narrowing_split.get(1).copied(),
+        _ => None,
+    }
 }
 
 /// What the journal found held, what this build would have acted on, and what
@@ -174,6 +198,16 @@ fn what_the_share_is(report: &Report, denominator: u64) -> String {
         "  {:<48}{:>9}\n",
         "declines lost to an unheld sibling read",
         commas(report.declines_lost_to_a_sibling)
+    ));
+    out.push_str(&row(
+        "narrowed by this build (if enforced), net",
+        report.narrowed_if_enforced,
+        denominator,
+    ));
+    out.push_str(&row(
+        "  of it, composed chains",
+        report.narrowed_chains_if_enforced,
+        denominator,
     ));
     out
 }
@@ -244,6 +278,7 @@ fn what_is_left(report: &Report, denominator: u64) -> String {
         commas(report.invisible_shell_named_file.calls),
         commas(report.invisible_shell_named_file.tokens)
     ));
+    out.push_str(&refused_shapes(report));
     out.push_str(&format!(
         "  {:<48}{:>9}{:>15}\n",
         "shell calls / of them recognised by the grammar",
@@ -306,8 +341,49 @@ fn constants() -> Vec<(&'static str, String)> {
         ),
         ("max inline hash bytes", MAX_INLINE_HASH_BYTES.to_string()),
         ("mode", "enforce".to_owned()),
+        (
+            "narrowing as shipped (enforced on its own line)",
+            mode_name(NARROW_MODE).to_owned(),
+        ),
         ("edit echo", "pinned".to_owned()),
     ]
+}
+
+/// A mode as the constants block spells it.
+const fn mode_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Off => "off",
+        Mode::Observe => "observe",
+        Mode::Enforce => "enforce",
+    }
+}
+
+/// The repeat pools' split and what enforcing narrowing would have spared,
+/// as the document spells them.
+fn narrowing_json(report: &Report) -> Value {
+    let pool = |bucket: Bucket| {
+        let mut classes = Map::new();
+        for (class, tally) in NarrowClass::ALL
+            .iter()
+            .zip(narrowing_split(report, bucket).unwrap_or_default())
+        {
+            classes.insert(class.key().to_owned(), tally_json(tally));
+        }
+        Value::Object(classes)
+    };
+    json!({
+        "narrowed_if_enforced": {
+            "calls": report.narrowed_if_enforced.calls,
+            "composed_chains": {
+                "calls": report.narrowed_chains_if_enforced.calls,
+                "net_tokens": report.narrowed_chains_if_enforced.tokens,
+            },
+            "frame_tokens": report.narrowed_frame_tokens,
+            "net_tokens": report.narrowed_if_enforced.tokens,
+        },
+        "repeat_disjoint": pool(Bucket::RepeatDisjoint),
+        "repeat_overlapping": pool(Bucket::RepeatOverlapping),
+    })
 }
 
 /// One tally as the document spells it.
@@ -415,6 +491,7 @@ pub(super) fn document(report: &Report) -> Value {
         },
         "declinable": tally_json(report.declinable),
         "first_read_floor": tally_json(report.first_read_floor),
+        "narrowing": narrowing_json(report),
         "invisible_shell_reads": {
             "loose_bound": tally_json(report.invisible_shell),
             "naming_a_work_tree_file": tally_json(report.invisible_shell_named_file),

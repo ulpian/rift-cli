@@ -254,6 +254,19 @@ The predicate is narrow on purpose, and every clause of it closes something:
 - and this window has not already been declined for that exact key since its
   last eviction.
 
+A request that is **partly** held is decided on the same footing, as a
+narrowing.
+Where the window's own reads at the current hash hold one run at one end of
+the request, and the rest of it is one contiguous run, the decision names both.
+The held run must be lines the window read — never its edits, never another
+window's, never lines from before its last eviction — and the floor is counted
+on the held lines against the narrowing frame's own price (17 lines).
+Held lines in the middle of a request, or in two runs, leave two windows to
+name, and the read runs.
+Narrowing ships in `observe` whatever the family's mode, so the decision is
+recorded and the call runs; the observed call is recorded as a read too,
+because the lines it delivered are now coverage.
+
 Anything else allows. An unknown span allows, an unpinned family allows, an
 unreadable policy turns the lever off, a panic anywhere in the gate yields the
 family's neutral response, and the hook exits successfully in every one of
@@ -279,7 +292,23 @@ way far more often than through its read tool. The grammar has two levels. The
 **vocabulary** is a client's own read-before-edit list, unchanged: `cat`, `nl`,
 `bat`, `batcat`, `head`, `tail`, `sed -n 'A,Bp'`, the `grep` family and `rg` on
 one named path, plus a listing grammar of the same shape (`ls`, `find … -name`,
-`rg --files`). Above it sit exactly three **compositions**, each admitted
+`rg --files`). A search on that one path may carry the flags that only choose
+and number the file's own lines or count them (`-n`, `-i`, `-w`, `-x`, `-c`,
+`-F`, `-E` on `grep`, a context count `-A`, `-B` or `-C N`, a pattern given
+with `-e`), and it stays
+what a bare one is: recognised, with no coverage, because which lines it
+printed is the file's to decide. Those options may stand anywhere before `--`,
+after the pattern or the path too, because the `grep` an agent's shell runs
+permutes its arguments (Claude Code runs `grep` as `ugrep`, which permutes, as
+GNU `grep` and `rg` do). A `grep` that does not would misread such a line,
+which only moves a measurement, since a search can never decline a read; any
+later form that grants coverage from a late option must first establish which
+`grep` runs.
+A `sed -n` script may also print one line (`'Ap'`), credited like a range, or
+several runs joined by `;` (`'1,40p;90,120p'`), which is one read per run and
+is credited with nothing: the runs reach the window as one output that can
+pass the terminal threshold while each run's own slice stays under it.
+Above it sit exactly three **compositions**, each admitted
 because the lines it delivers still follow from the line itself:
 
 - a single leading `cd <dir> &&`, the directory bare or quoted, after which
@@ -290,7 +319,9 @@ because the lines it delivers still follow from the line itself:
   prefix or a suffix of it. A suffix is a *count from the end*, so it travels
   as a count and the step that already holds the bytes for its hash turns it
   into line numbers — which is what also brought a plain counted `tail -n N`,
-  long recognised and never creditable, into the ledger. The one composition
+  long recognised and never creditable, into the ledger. Every count is plain
+  digits: a signed one (`tail -n +5`, from line five to the end) means
+  something else to the command, so the line is left alone. The one composition
   with no interval is the first `N` of the last `M`: its start is a number the
   file's length would have to supply, and no span says that, so it is unknown
   and records nothing;
@@ -319,7 +350,10 @@ not read-shaped either.
 **A call that performs several reads is one act.** Every member's range is
 recorded; the call is declined only when *every* member is a held range that
 would be declined on its own, and one member the window does not hold — or one
-this checkout cannot resolve at all — lets the whole line run. The reason frame
+this checkout cannot resolve at all — lets the whole line run.
+A member held at one end counts as held where its narrowing would be declined
+on its own, so a chain is declined only when every member is held or
+narrowable, and that member's line is the narrowing frame. The reason frame
 is then each member's own sentence, from the same sealed renderer, one to a
 line. The alternative, declining the parts and running the rest, would mean
 amending a command line Rift did not write.
@@ -380,6 +414,21 @@ rung the store shows nobody pulls. It does not claim an earlier tool result
 echoed the content, because no family was measured returning one Rift could
 rely on. And it never uses an error word: the frame is feedback about a
 decision, not a failure report.
+
+**The narrowing frame** names the held run, the turn the window last read any
+of it in, and the run still to read:
+
+```
+[rift] Read narrowed: src/lib.rs@3f9a1c2e8b7d lines 1-40 are unchanged since
+your read in turn 3 and already in your context. Read lines 41-120 for the
+rest, or repeat this exact call for the whole range (it is allowed once).
+```
+
+It carries neither the pull hint nor the provenance handle: both are routes to
+a change, and this frame is about lines that did not change.
+What a narrowing is booked at is its held run, net of the frame; the rest of
+the request is the read the agent still makes, counted when it happens.
+The call itself is never amended.
 
 **The delta frame** is the same shape for a file the window holds at an *older*
 hash. When the difference is known exactly — from the agent's own edit
@@ -900,7 +949,11 @@ Every response, refusals included, leaves through one function, which:
 2. counts them with the real tokenizer;
 3. performs the **only** budget charge in the crate, clamped so the counter
    cannot breach its ceiling;
-4. computes `avoided = baseline − returned`, saturating;
+4. computes `avoided = baseline − returned`, saturating, where a pull's
+   baseline counts only files the caller stated, that the checkout still holds
+   or, on the answers that carry changed lines, whose older revision the caller
+   holds — each only where this family recorded reading the stated revision
+   ([§8.6](08-cost-and-savings.md#86-what-avoided-actually-measures));
 5. seals the audit event from those same two figures.
 
 Handlers never touch the budget: every shaping decision upstream — dropping a

@@ -115,21 +115,30 @@ fn per_turn_call_ceiling_is_enforced() {
 }
 
 /// Seed a store with a drawn corpus: one checkpoint, one revision + one read
-/// per file, `est[i]` as the captured `input_tokens`. Returns `(store,
-/// [(path, sha)])` in the deterministic id order candidates load in.
-fn corpus_store(est: &[u32]) -> (SqliteStore, Vec<(String, String)>) {
+/// per file, `est[i]` as the captured `input_tokens`, and a checkout holding
+/// every file as recorded. Returns `(store, [(path, sha)], checkout)` in the
+/// deterministic id order candidates load in.
+fn corpus_store(est: &[u32]) -> (SqliteStore, Vec<(String, String)>, Checkout) {
     let s = open_store();
     seed_checkpoint(&s, "c1", 1);
+    let checkout = Checkout::holding(&[]);
     let mut corpus = Vec::new();
     for (i, tokens) in est.iter().enumerate() {
         let path = format!("src/file_{i:02}.rs");
-        let sha = format!("{:064x}", i + 1);
+        let text = corpus_text(i);
+        let sha = rift_recall_substrate::worktree::sha256_hex(text.as_bytes());
         let rev = format!("rev_{i:02}");
         seed_revision(&s, &rev, &path, &sha, &sha, 10);
         seed_read(&s, "c1", &rev, i64::from(*tokens), 1);
+        checkout.write(&path, text.as_bytes());
         corpus.push((path, sha));
     }
-    (s, corpus)
+    (s, corpus, checkout)
+}
+
+/// The bytes of corpus file `i`.
+fn corpus_text(i: usize) -> String {
+    format!("// corpus file {i}\n")
 }
 
 /// The baseline of a verb this sequence never draws. Named rather than written
@@ -174,10 +183,6 @@ struct Corpus<'a> {
 }
 
 impl Corpus<'_> {
-    fn sum_est(&self) -> u32 {
-        self.est.iter().fold(0u32, |a, &t| a.saturating_add(t))
-    }
-
     fn est_of(&self, path: &str) -> u32 {
         self.files
             .iter()
@@ -257,7 +262,7 @@ impl Shadow {
         let remaining_before = self.remaining();
         match block(s.dispatch(tool, &req, c, budget)) {
             Ok(resp) => {
-                check_figures(&resp, tool, corpus)?;
+                check_figures(&resp, tool, corpus, know_first)?;
                 if matches!(tool, ToolName::KnownState | ToolName::DiffSince) {
                     check_manifest_bounds(&resp, tool, req_budget, remaining_before, corpus)?;
                 }
@@ -326,12 +331,13 @@ fn check_figures(
     resp: &ToolResponse,
     tool: ToolName,
     corpus: &Corpus<'_>,
+    know_first: bool,
 ) -> Result<(), TestCaseError> {
     let measured = rift_tokens::count(&resp.payload.to_string());
     prop_assert_eq!(resp.estimated_tokens_returned, measured);
     prop_assert_eq!(resp.event.tokens_returned(), resp.estimated_tokens_returned);
     prop_assert_eq!(resp.event.tokens_avoided(), resp.estimated_tokens_avoided);
-    let baseline = expected_baseline(tool, corpus, resp);
+    let baseline = expected_baseline(tool, corpus, know_first);
     prop_assert_eq!(
         resp.estimated_tokens_avoided,
         baseline.saturating_sub(resp.estimated_tokens_returned)
@@ -339,13 +345,29 @@ fn check_figures(
     Ok(())
 }
 
-/// Net avoided is measured against the tool's gross baseline.
-fn expected_baseline(tool: ToolName, corpus: &Corpus<'_>, resp: &ToolResponse) -> u32 {
+/// Net avoided is measured against the tool's gross baseline: the one file a
+/// draw can state is the first, every file in the corpus is recorded as read,
+/// so a crediting verb's baseline is that file's cost when it was stated and
+/// nothing otherwise. The hunk pull that stated it finds the file unchanged;
+/// the ranked shape states nothing it can be credited for.
+fn expected_baseline(tool: ToolName, corpus: &Corpus<'_>, know_first: bool) -> u32 {
+    let stated = if know_first {
+        corpus.est_of(&corpus.first().0)
+    } else {
+        0
+    };
     match tool {
-        ToolName::KnownState | ToolName::DiffSince | ToolName::ContextPack => corpus.sum_est(),
-        ToolName::FileIfChanged => corpus.est_of(&corpus.first().0),
-        ToolName::ChangedHunks => corpus.est_of(resp.payload["path"].as_str().unwrap_or_default()),
-        ToolName::ReadSummary | ToolName::RetrieveExact | ToolName::CostHotspots => 0,
+        ToolName::KnownState
+        | ToolName::DiffSince
+        | ToolName::ContextPack
+        | ToolName::FileIfChanged => stated,
+        // A pull against the current revision is credited the cost of the
+        // bytes on disk, not the captured estimate.
+        ToolName::ChangedHunks if know_first => rift_tokens::count(&corpus_text(0)),
+        ToolName::ChangedHunks
+        | ToolName::ReadSummary
+        | ToolName::RetrieveExact
+        | ToolName::CostHotspots => 0,
         // Not drawn by this sequence (`projection_verbs`), and an arm that
         // guessed a figure for either would be a property this fixture cannot
         // see fail.
@@ -407,8 +429,8 @@ proptest::proptest! {
         seq in call_sequence(),
     ) {
         let cfg = cfg();
-        let (store, files) = corpus_store(&est);
-        let reader = MemorySubstrate::local();
+        let (store, files, checkout) = corpus_store(&est);
+        let reader = checkout.reader();
         let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
         let c = ctx(&store, &reader);
         let corpus = Corpus { est: &est, files: &files };

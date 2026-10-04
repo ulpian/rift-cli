@@ -163,3 +163,153 @@ fn a_tilde_the_shell_would_expand_is_left_alone() {
         );
     }
 }
+
+/// **A count with a sign is a different instruction, not a count.**
+///
+/// `tail -n +5` prints from line five to the end, and GNU `sed` reads
+/// `1,+3p` as line one and the three after it. Rust's integer parser
+/// accepts a leading `+` and would read both as a plain five or three — a
+/// window the command never printed, credited as held. Every count position
+/// the grammar has is listed, because each one used to reach that parser.
+#[test]
+fn a_count_with_a_sign_is_never_read_as_a_count() {
+    for command in [
+        // `tail` and `head` in the command position.
+        "tail -n +5 src/lib.rs",
+        "tail -n+5 src/lib.rs",
+        "tail +5 src/lib.rs",
+        "tail -n -5 src/lib.rs",
+        "head -n +5 src/lib.rs",
+        "head -n -5 src/lib.rs",
+        // The narrowing position, in both spellings.
+        "cat src/lib.rs | tail -n +5",
+        "cat src/lib.rs | tail -+5",
+        "cat src/lib.rs | tail +5",
+        "cat src/lib.rs | head -n +5",
+        "cat src/lib.rs | head -+5",
+        "cat src/lib.rs | head --5",
+        "cd crates && cat src/lib.rs | tail -n +5",
+        // Either end of a `sed` range.
+        "sed -n '1,+3p' src/lib.rs",
+        "sed -n '+1,3p' src/lib.rs",
+        "sed -n '+1,+3p' src/lib.rs",
+        "sed -n '2,-3p' src/lib.rs",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}
+
+/// **A search stays a search over one file, and only the flags that choose
+/// its lines come with it.**
+///
+/// Each line here is one step outside the flagged single-file search: a
+/// flag that reaches past the one file (a recursion, a pattern file, a
+/// glob), one that prints something other than the file's lines or their
+/// count (a file name, a part of a line, the lines that did not match), a second
+/// path or none, a context count that is not one, a long option, an option
+/// written after the pattern — which one `grep` permutes and another reads
+/// as a file — and a pattern a search tool would take for an option.
+#[test]
+fn a_search_flag_the_grammar_does_not_pin_is_left_alone() {
+    for command in [
+        // Past the one file.
+        "grep -r needle src",
+        "grep -rn needle src",
+        "grep -nr needle src",
+        "grep -R needle src",
+        "grep -f patterns.txt src/lib.rs",
+        "grep -n --include '*.rs' needle src",
+        "rg -n -g '*.rs' needle src",
+        "rg -n -t rust needle src",
+        // Something other than the file's lines.
+        "grep -l needle src/lib.rs",
+        "grep -cl needle src/lib.rs",
+        "grep -c needle src/lib.rs src/main.rs",
+        "grep -rc needle src",
+        "grep needle src/lib.rs -cv",
+        "grep -L needle src/lib.rs",
+        "grep -q needle src/lib.rs",
+        "grep -o needle src/lib.rs",
+        "grep -v needle src/lib.rs",
+        "grep -nv needle src/lib.rs",
+        "rg -r x needle src/lib.rs",
+        // One path, not two and not none.
+        "grep -n needle src/lib.rs src/main.rs",
+        "grep -n -e needle src/lib.rs src/main.rs",
+        "grep -n needle",
+        "grep -n -e needle",
+        "grep -n -e src/lib.rs",
+        "rg -n needle",
+        // A context count that is not one.
+        "grep -A needle src/lib.rs",
+        "grep -An needle src/lib.rs",
+        "grep -nA needle src/lib.rs",
+        "grep -A -3 needle src/lib.rs",
+        "grep -A +3 needle src/lib.rs",
+        "grep -A+3 needle src/lib.rs",
+        "grep -A 3x needle src/lib.rs",
+        "grep -A '3' needle src/lib.rs",
+        // A long option, or a bare dash.
+        "grep --line-number needle src/lib.rs",
+        "grep - needle src/lib.rs",
+        "grep -n - src/lib.rs",
+        // A letter one tool pins and another does not.
+        "grep -P needle src/lib.rs",
+        "rg -E latin1 needle src/lib.rs",
+        "egrep -F needle src/lib.rs",
+        "fgrep -E 'a|b' src/lib.rs",
+        // A pattern the tool would read as an option, quoted or not.
+        "grep '-v' src/lib.rs",
+        "grep -n '-v' src/lib.rs",
+        "rg \"-n\" src/lib.rs",
+        "grep -e -v src/lib.rs",
+        // The shell's own characters, as everywhere else.
+        "grep -n $PAT src/lib.rs",
+        "grep -n needle src/*.rs",
+        "grep -n -A $N needle src/lib.rs",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}
+
+/// **An option may sit anywhere before `--`, and nothing after it is one.**
+///
+/// The permuted spelling is read the way the search tool reads it, so each
+/// line here is one step outside that reading: a flag after the pattern
+/// that the set does not pin, a second path written after the options, a
+/// word after `--` that would have been an option before it, a pattern
+/// after `--` that the tool would still not take for a file, and a quoted
+/// word that the tool reads as an option wherever it stands.
+#[test]
+fn a_late_option_the_grammar_does_not_pin_is_left_alone() {
+    for command in [
+        "grep -n needle -r src",
+        "grep needle -A src/lib.rs",
+        "grep needle src/lib.rs -A",
+        "grep needle src/lib.rs -A -3",
+        "grep needle src/lib.rs --line-number",
+        "rg needle src/lib.rs -g '*.rs'",
+        "grep -n needle src/lib.rs -A 3 src/main.rs",
+        "grep needle -n src/lib.rs src/main.rs",
+        "grep -e needle src/lib.rs -n src/main.rs",
+        "grep needle -- -n src/lib.rs",
+        "grep -- needle src/lib.rs -n",
+        "grep -n -- needle -- src/lib.rs",
+        "grep -n -- -v src/lib.rs",
+        "grep -n -- needle",
+        "grep needle src/lib.rs '-n'",
+        "grep needle '-A' 3 src/lib.rs",
+        "grep needle src/lib.rs -",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}

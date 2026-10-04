@@ -402,7 +402,9 @@ fn a_wider_decline_over_a_prevented_slice_books_nothing_more() {
     let (tmp, file) = a_booking_then_a_wider_decline("s-p9");
     let here = tmp.path();
     let rows = audits(here);
-    assert_eq!(rows.len(), 2, "{rows:?}");
+    // The booking, the observed narrowing that sizes the pool and claims
+    // nothing, and the decline.
+    assert_eq!(rows.len(), 3, "{rows:?}");
     let slice_cost = rift_tokens::count(&head_of(&file, 20));
     assert!(slice_cost > 0, "a slice worth reading");
     assert!(

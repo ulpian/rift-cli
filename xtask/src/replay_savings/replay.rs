@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rift_agent::respond::Channel;
-use rift_agent::window_journal::{EvictReason, Interval, Journal, Limits, Line};
+use rift_agent::window_journal::{EvictReason, Interval, Journal, Limits, Line, Mode};
 use rift_agent::{AgentAdapter, EditKind};
 use rift_agent_claude_code::ClaudeCodeAdapter;
 use rift_core::Sha256Id;
@@ -21,6 +21,7 @@ use super::history::History;
 use super::inheritance::{inheritance_of, leads, WindowLead};
 use super::options::Options;
 use super::report::{finish, land, Report};
+use super::shell_shape::count_shape;
 use super::transcript::{load_window, tree_stems, tree_windows, Call, Event, Window};
 use super::worktree::{path_key, FileFacts, Worktree};
 
@@ -119,7 +120,13 @@ pub fn replay(opts: &Options) -> Result<Report, String> {
     let adapter = ClaudeCodeAdapter;
     let settings = Replay {
         adapter: &adapter,
-        limits: Limits::default(),
+        // The buckets are the build without narrowing, so every figure they
+        // carry reads the same before and after it; what narrowing would
+        // have done is asked of the same decision on its own line.
+        limits: Limits {
+            narrow_mode: Mode::Off,
+            ..Limits::default()
+        },
         channel: deny_channel(),
     };
     let history = match &opts.history {
@@ -320,12 +327,19 @@ fn note_an_invisible_shell_read(ctx: &mut Ctx<'_>, call: &Call, tokens: u64) -> 
         return false;
     }
     ctx.report.invisible_shell.add(tokens);
-    let named = command.is_some_and(|command| {
-        names_a_work_tree_file(command, call, ctx.worktree, ctx.state.commit)
-    });
+    let Some(command) = command else {
+        return true;
+    };
+    let named = names_a_work_tree_file(command, call, ctx.worktree, ctx.state.commit);
     if named {
         ctx.report.invisible_shell_named_file.add(tokens);
     }
+    count_shape(
+        &mut ctx.report.invisible_shell_shapes,
+        command,
+        named,
+        tokens,
+    );
     true
 }
 

@@ -307,8 +307,8 @@ fn diff_since_drops_unchanged_before_changed() {
 #[test]
 fn file_if_changed_classifies_unchanged_changed_invalid() {
     let cfg = cfg();
-    let store = seeded_store();
-    let reader = MemorySubstrate::local();
+    let (store, checkout, sha_a, _) = held_store();
+    let reader = checkout.reader();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let mut budget = TurnBudget::new(10, 10_000);
     let c = ctx(&store, &reader);
@@ -317,7 +317,7 @@ fn file_if_changed_classifies_unchanged_changed_invalid() {
         ToolName::FileIfChanged,
         &ToolRequest {
             target: Some("src/a.rs".into()),
-            known_hashes: vec![SHA_A.into()],
+            known_hashes: vec![sha_a.clone()],
             ..Default::default()
         },
         &c,
@@ -432,8 +432,8 @@ fn a_manifest_with_nothing_held_back_carries_no_containment_block() {
 #[test]
 fn a_prefix_the_caller_holds_answers_the_verbs_that_ask_about_hashes() {
     let cfg = cfg();
-    let store = seeded_store();
-    let reader = MemorySubstrate::local();
+    let (store, checkout, sha_a, _) = held_store();
+    let reader = checkout.reader();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let c = ctx(&store, &reader);
     let ask = |hash: &str| ToolRequest {
@@ -446,7 +446,7 @@ fn a_prefix_the_caller_holds_answers_the_verbs_that_ask_about_hashes() {
     let mut budget = TurnBudget::default();
     let resp = block(s.dispatch(
         ToolName::FileIfChanged,
-        &ask(&SHA_A[..basis::MIN_BASIS_HEX]),
+        &ask(&sha_a[..basis::MIN_BASIS_HEX]),
         &c,
         &mut budget,
     ))
@@ -457,7 +457,7 @@ fn a_prefix_the_caller_holds_answers_the_verbs_that_ask_about_hashes() {
     );
     // And the whole address still is.
     let mut budget = TurnBudget::default();
-    let whole = block(s.dispatch(ToolName::FileIfChanged, &ask(SHA_A), &c, &mut budget)).unwrap();
+    let whole = block(s.dispatch(ToolName::FileIfChanged, &ask(&sha_a), &c, &mut budget)).unwrap();
     assert_eq!(
         whole.payload["result"]["state"],
         serde_json::json!("unchanged")
@@ -468,7 +468,7 @@ fn a_prefix_the_caller_holds_answers_the_verbs_that_ask_about_hashes() {
     let mut budget = TurnBudget::default();
     let delta = block(s.dispatch(
         ToolName::DiffSince,
-        &ask(&SHA_A[..basis::MIN_BASIS_HEX]),
+        &ask(&sha_a[..basis::MIN_BASIS_HEX]),
         &c,
         &mut budget,
     ))
@@ -486,15 +486,15 @@ fn a_prefix_the_caller_holds_answers_the_verbs_that_ask_about_hashes() {
         "n_blob_oid_map",
         &["content_sha256", "blob_oid", "path", "first_seen"],
         &[
-            // Sixteen characters of SHA_A, then a difference.
-            Value::text(format!("{}{}", &SHA_A[..16], "c".repeat(48))),
+            // Sixteen characters of sha_a, then a difference.
+            Value::text(format!("{}{}", &sha_a[..16], "c".repeat(48))),
             Value::text("oid_twin"),
             Value::text("src/twin.rs"),
             Value::Int(0),
         ],
     ))
     .unwrap();
-    for given in [&SHA_A[..12], &SHA_A[..basis::MIN_BASIS_HEX]] {
+    for given in [&sha_a[..12], &sha_a[..basis::MIN_BASIS_HEX]] {
         let mut budget = TurnBudget::default();
         let resp =
             block(s.dispatch(ToolName::FileIfChanged, &ask(given), &c, &mut budget)).unwrap();
@@ -509,13 +509,17 @@ fn a_prefix_the_caller_holds_answers_the_verbs_that_ask_about_hashes() {
 #[test]
 fn token_accounting_is_non_negative_and_honest() {
     let cfg = cfg();
-    let store = seeded_store();
-    let reader = MemorySubstrate::local();
+    let (store, checkout, sha_a, _) = held_store();
+    let reader = checkout.reader();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let mut budget = TurnBudget::default();
+    let holding_a = ToolRequest {
+        known_hashes: vec![sha_a],
+        ..ranking_req()
+    };
     let resp = block(s.dispatch(
         ToolName::KnownState,
-        &ranking_req(),
+        &holding_a,
         &ctx(&store, &reader),
         &mut budget,
     ))
@@ -526,12 +530,13 @@ fn token_accounting_is_non_negative_and_honest() {
         resp.estimated_tokens_returned,
         rift_tokens::count(&resp.payload.to_string())
     );
-    // …and avoided is NET: the captured re-read baseline (400 + 50) minus the
-    // manifest's own cost, which still dominates for this corpus.
-    assert!(resp.estimated_tokens_avoided >= resp.estimated_tokens_returned);
+    // …and avoided is NET: the re-read the caller said it was spared (a.rs,
+    // 400, stated, unchanged and read) minus the manifest's own cost. The
+    // b.rs entry is listed and credits nothing, because nobody said it was
+    // held.
     assert!(resp.estimated_tokens_avoided > 0);
     assert_eq!(
         resp.estimated_tokens_avoided,
-        450_u32.saturating_sub(resp.estimated_tokens_returned)
+        400_u32.saturating_sub(resp.estimated_tokens_returned)
     );
 }

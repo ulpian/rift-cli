@@ -327,6 +327,24 @@ pub trait SubstrateReader {
     }
 }
 
+/// The file at `path` as the reader's checkout holds it now, or why it could
+/// not be read — [`worktree::CurrentRefusal::NoWorktree`] when the reader is
+/// bound to no checkout.
+///
+/// The one door every answer that claims *current* goes through, so a reader
+/// without a checkout can never be read as "the projection is current".
+#[must_use]
+pub fn current_file_of<R: SubstrateReader + ?Sized>(
+    reader: &R,
+    path: &str,
+    max_bytes: u64,
+) -> worktree::CurrentFile {
+    let Some(root) = reader.worktree_root() else {
+        return worktree::CurrentFile::Refused(worktree::CurrentRefusal::NoWorktree);
+    };
+    worktree::current_file(&root, path, max_bytes)
+}
+
 /// Whether `ancestor` is reachable from `descendant` (i.e. `ancestor ⊑ descendant`
 /// in the commit DAG): a parent-walk from `descendant` over
 /// [`SubstrateReader::commit_meta`], bounded by `max_walk` commits.

@@ -50,7 +50,8 @@
 //!    missed recognition is a saving; the cost of a wrong one is a decision
 //!    taken about content an agent never received.
 //! 2. **A recognised command is not always a range.** `grep` delivers the
-//!    lines that matched, which nothing here can know; a bare `head` or
+//!    lines that matched — with or without the flags that only choose and
+//!    number them — which nothing here can know; a bare `head` or
 //!    `tail` relies on a default window no artifact in this tree pins. All of
 //!    them are recognised — so none is ever mistaken for a search that could
 //!    be answered from an index — and none yields coverage, because the honest
@@ -113,7 +114,7 @@ pub enum ShellSpan {
         /// The line count `-n` named, or [`None`] for the tool's default.
         limit: Option<u32>,
     },
-    /// An explicit run of lines: `sed -n 'A,Bp'`.
+    /// An explicit run of lines: `sed -n 'A,Bp'`, or the one line `'Ap'`.
     Lines {
         /// The first line printed.
         lo: u32,
@@ -123,6 +124,18 @@ pub enum ShellSpan {
     /// Only the lines that matched a pattern: the `grep` family, and `rg`
     /// with a pattern. **Not a derivable range**, and never a name search.
     Matching,
+    /// One run of a `sed -n` script that prints several, `'A,Bp;Cp'`.
+    ///
+    /// The lines are exactly named, and still not credited: the runs reach
+    /// the window as one output, which can pass the terminal threshold — and
+    /// be written to a file the window only gets a pointer to — while each
+    /// run's own slice stays under it, and the gate weighs each read alone.
+    OneOfSeveralRuns {
+        /// The first line of the run.
+        lo: u32,
+        /// The last line of the run.
+        hi: u32,
+    },
 }
 
 /// A trailing `| head -N` or `| tail -N` that narrows what a read delivered.
@@ -208,13 +221,16 @@ impl ShellRead {
             }
             // Decoration changes the byte count; a `head` or `tail` relying on
             // its own default states no count; the `grep` family prints what
-            // matched. None of those is an interval of this file.
+            // matched; a run among several is part of one output whose size
+            // no member answers for. None of those is an interval of this
+            // file a record may be written from.
             (ShellSpan::FromBottom { limit: Some(_) }, Some(First(_)))
             | (
                 ShellSpan::DecoratedWholeFile
                 | ShellSpan::FromTop { limit: None }
                 | ShellSpan::FromBottom { limit: None }
-                | ShellSpan::Matching,
+                | ShellSpan::Matching
+                | ShellSpan::OneOfSeveralRuns { .. },
                 _,
             ) => ReadSpan::Unknown,
         }
@@ -534,8 +550,25 @@ fn line_count(word: &Word) -> Option<u32> {
 /// spelling has the digits stuck to the option, so there is no word of its
 /// own to hand [`line_count`].
 fn line_count_text(text: &str) -> Option<u32> {
-    let n: u32 = text.parse().ok()?;
+    let n = digits(text)?;
     (n > 0).then_some(n)
+}
+
+/// A number written in plain ASCII digits and nothing else, or [`None`].
+///
+/// Every number the grammar reads comes through here, because the integer
+/// parser underneath accepts a leading `+` and the commands do not mean the
+/// same thing by one: `tail -n +5` prints from line five to the end, and
+/// `sed` reads `1,+3p` as line one and the three after it. A signed count is
+/// refused rather than given its own reading — "from line `N` to the end" is
+/// a span this module could only state with an end the hook does not hold.
+/// Leading zeros pass: all three commands read the count in decimal, so
+/// `05` is five to each of them.
+fn digits(text: &str) -> Option<u32> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// `head` and `tail`, which share a shape: an optional `-n N` and one path.
@@ -552,17 +585,62 @@ fn top_or_bottom(rest: &[Word], from_top: bool) -> Option<ShellSpan> {
     })
 }
 
-/// A `sed` print script, `A,Bp` — the only script the grammar admits.
-fn sed_range(script: &str) -> Option<ShellSpan> {
+/// One `sed` print element, `A,Bp` or the single line `Ap`.
+fn sed_range(script: &str) -> Option<(u32, u32)> {
     let body = script.strip_suffix('p')?;
-    let (lo, hi) = body.split_once(',')?;
-    let lo: u32 = lo.parse().ok()?;
-    let hi: u32 = hi.parse().ok()?;
-    (lo >= 1 && hi >= lo).then_some(ShellSpan::Lines { lo, hi })
+    let (lo, hi) = match body.split_once(',') {
+        Some((lo, hi)) => (digits(lo)?, digits(hi)?),
+        None => (digits(body)?, digits(body)?),
+    };
+    (lo >= 1 && hi >= lo).then_some((lo, hi))
+}
+
+/// A `sed` print script of runs joined by `;`, `A,Bp;Cp`, as its runs in the
+/// order it names them — or [`None`] when any element is not one, or there
+/// are more than one call may read.
+///
+/// Under `-n` such a script prints each run in the file's order, a line twice
+/// where two overlap, and nothing else, so the runs are exactly what it
+/// delivered. Nothing between the elements is admitted, not even a space.
+fn sed_runs(script: &str) -> Option<Vec<(u32, u32)>> {
+    let runs = script
+        .split(';')
+        .map(sed_range)
+        .collect::<Option<Vec<_>>>()?;
+    (runs.len() <= MAX_CHAIN_READS).then_some(runs)
 }
 
 /// The `ls` options the grammar admits, and no others.
 const LIST_OPTIONS: &[&str] = &["-l", "-a", "-la", "-al"];
+
+/// The single-letter flags a `grep` search may carry: a line number, a case
+/// fold, a whole-word or whole-line match, a fixed string, the extended
+/// dialect, and a count of the matching lines in place of the lines.
+///
+/// Each one changes which of the file's own lines are printed, how they are
+/// labelled, or prints how many there were, and nothing else, which is the
+/// whole condition: the output is still decided by the one file's bytes and
+/// is still no interval of it. A flag that reaches past the file (`-r`, `-f`,
+/// `--include`), prints something that is neither its lines nor their count
+/// (`-l`, `-o`, `-q`), or the lines that did *not* match (`-v`), is not in
+/// the set, and a long option never is.
+const GREP_FLAGS: &str = "niwxcFE";
+
+/// The same set for `egrep` and `fgrep`, which already name their dialect,
+/// so a second dialect letter on one of them is left alone rather than
+/// resolved.
+const GREP_VARIANT_FLAGS: &str = "niwxc";
+
+/// The same set for `rg`, without `-E`: there it names a text encoding and
+/// takes a value, which is a different option behind the same letter.
+const RG_FLAGS: &str = "niwxcF";
+
+/// The letters that take a context count — lines after, before and around
+/// each match — in every one of the four search commands.
+const CONTEXT_FLAGS: &str = "ABC";
+
+/// The letter that takes the pattern itself as its value.
+const PATTERN_FLAG: char = 'e';
 
 /// Split a command line at the separators the grammar composes with, without
 /// ever splitting inside a quote.
@@ -860,7 +938,8 @@ fn recognise_simple(command: &str) -> Option<Member> {
             one_read(path_arg(rest.last()?)?, span)
         }
         "sed" => sed_read(rest),
-        "grep" | "egrep" | "fgrep" => content_search(rest),
+        "grep" => content_search(rest, GREP_FLAGS),
+        "egrep" | "fgrep" => content_search(rest, GREP_VARIANT_FLAGS),
         "rg" => rg_call(rest),
         "ls" => ls_listing(rest),
         "find" => find_listing(rest),
@@ -899,24 +978,119 @@ fn decorated_read(rest: &[Word]) -> Option<Member> {
 
 /// `sed -n 'A,Bp'`: `-n` suppresses the default printing, which is what makes
 /// the script's own `p` the whole of what is printed.
+///
+/// One run is one read with its range. A script of several runs is one read
+/// per run, recognised and credited with nothing (see
+/// [`ShellSpan::OneOfSeveralRuns`]); naming the runs is still what keeps the
+/// line out of the unseen pool and in a decision that can see all of it.
 fn sed_read(rest: &[Word]) -> Option<Member> {
-    match rest {
-        [flag, script, path] if bare(flag) == Some("-n") => {
-            one_read(path_arg(path)?, sed_range(&pattern_arg(script)?)?)
-        }
-        _ => None,
+    let [flag, script, path] = rest else {
+        return None;
+    };
+    if bare(flag) != Some("-n") {
+        return None;
+    }
+    let path = path_arg(path)?;
+    match sed_runs(&pattern_arg(script)?)?.as_slice() {
+        [(lo, hi)] => one_read(path, ShellSpan::Lines { lo: *lo, hi: *hi }),
+        runs => Some(Member::Reads(
+            runs.iter()
+                .map(|(lo, hi)| ShellRead {
+                    path: path.clone(),
+                    span: ShellSpan::OneOfSeveralRuns { lo: *lo, hi: *hi },
+                    narrowing: None,
+                })
+                .collect(),
+        )),
     }
 }
 
 /// The `grep` family: a content search over one named file. It is a read of
 /// lines nobody here can name, and it is never answered from an index.
-fn content_search(rest: &[Word]) -> Option<Member> {
-    match rest {
-        [pattern, path] if pattern_arg(pattern).is_some() => {
-            one_read(path_arg(path)?, ShellSpan::Matching)
+///
+/// Options are read the way the command's own option parser reads them —
+/// letters may share one word, and a letter that takes a value takes the rest
+/// of its word or, when that is empty, the next word — so the word this walk
+/// calls a path is the word the search opens.
+///
+/// **An option may stand anywhere before `--`**, and every word after `--` is
+/// an operand. That is GNU argument permutation, and it is how the `grep` an
+/// agent's shell actually runs reads a line: Claude Code runs `grep` as
+/// `ugrep`, which permutes, and so do GNU `grep` and `rg`. A `grep` that does
+/// not permute would read a late `-n` as a file name, so this reading can be
+/// wrong on such a machine — and it is admitted anyway because a search
+/// grants no coverage. A misread search can only move a measurement; it can
+/// never decline a read. Any later form that *does* grant coverage from a
+/// late option must first establish which `grep` runs, because there a
+/// misreading would be a decline about content the agent never received.
+///
+/// Every admitted flag only chooses or labels the lines of the one file, so a
+/// flagged search is the same recognition a bare one is: [`ShellSpan::Matching`],
+/// with no coverage.
+fn content_search(rest: &[Word], flags: &str) -> Option<Member> {
+    let mut words = rest.iter();
+    let mut pattern_given = false;
+    let mut operands: Vec<&Word> = Vec::new();
+    while let Some(word) = words.next() {
+        if bare(word) == Some("--") {
+            operands.extend(words.by_ref());
+            break;
         }
-        _ => None,
+        if !word.text.starts_with('-') {
+            operands.push(word);
+            continue;
+        }
+        // A quoted word that starts with `-` is an option to the tool all
+        // the same, wherever it stands, and the grammar pins no quoted one.
+        let letters = bare(word)?.strip_prefix('-')?;
+        pattern_given |= search_option(letters, flags, &mut words)?;
     }
+    let path = match (pattern_given, operands.as_slice()) {
+        (true, [path]) => path,
+        (false, [pattern, path]) if !pattern.text.starts_with('-') => path,
+        _ => return None,
+    };
+    one_read(path_arg(path)?, ShellSpan::Matching)
+}
+
+/// One option word of a search, its leading `-` already taken off: whether it
+/// gave the pattern, or [`None`] when any letter in it is not one the grammar
+/// pins.
+///
+/// A pattern here is any word, since the option is what says it is one —
+/// except an unquoted one that starts with `-`, which the same rule refuses
+/// everywhere a pattern goes. A count is digits and nothing else, so a signed
+/// one is refused as it is in every other count position.
+fn search_option<'a>(
+    letters: &str,
+    flags: &str,
+    words: &mut impl Iterator<Item = &'a Word>,
+) -> Option<bool> {
+    if letters.is_empty() {
+        return None;
+    }
+    for (at, letter) in letters.char_indices() {
+        if flags.contains(letter) {
+            continue;
+        }
+        let attached = letters.get(at + letter.len_utf8()..)?;
+        if CONTEXT_FLAGS.contains(letter) {
+            let count = match attached {
+                "" => bare(words.next()?)?,
+                count => count,
+            };
+            return digits(count).map(|_| false);
+        }
+        if letter != PATTERN_FLAG {
+            return None;
+        }
+        let pattern_is_one = match attached {
+            "" => pattern_arg(words.next()?).is_some(),
+            pattern => !pattern.starts_with('-'),
+        };
+        return pattern_is_one.then_some(true);
+    }
+    Some(false)
 }
 
 /// `rg`: one name does both jobs — `--files` lists, a pattern searches.
@@ -924,10 +1098,7 @@ fn rg_call(rest: &[Word]) -> Option<Member> {
     match rest {
         [flag] if bare(flag) == Some("--files") => one_listing(".".to_owned(), None),
         [flag, dir] if bare(flag) == Some("--files") => one_listing(path_arg(dir)?, None),
-        [pattern, path] if pattern_arg(pattern).is_some() => {
-            one_read(path_arg(path)?, ShellSpan::Matching)
-        }
-        _ => None,
+        _ => content_search(rest, RG_FLAGS),
     }
 }
 

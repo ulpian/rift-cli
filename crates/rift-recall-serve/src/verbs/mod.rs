@@ -9,6 +9,7 @@
 //! counted and charged, and every verb reaches it as a private method of the
 //! same `impl`, so a second charge site cannot appear without appearing here.
 
+pub(crate) mod credit;
 mod doc;
 mod exact;
 mod hunks;
@@ -168,6 +169,9 @@ impl ServeDispatcher<'_> {
             tokenizer: rift_tokens::provenance(),
             payload,
             event,
+            // The dispatcher stamps the rule it decided on every response it
+            // hands out; a response is never handed out any other way.
+            avoided_basis: crate::AvoidedBasis::NotCredited,
         }
     }
 }
