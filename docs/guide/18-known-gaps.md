@@ -605,23 +605,6 @@ stop being *used* but do not disappear from history.
 
 ---
 
-## 18.9 Agent integrations
-
-### The Gemini adapter drops the model identifier and under-declares events
-
-*Measured defect.* Its adapter maps the one event carrying the model identifier
-to zero canonical events, so a session is captured with no record of which model
-ran; and it declares nine of the eleven events the agent publishes, so two land
-as unrecognised verbs. These are ordinary bugs and **not** the reason the agent
-is unwired — that is a scope decision, held apart on purpose: fixing the bugs
-would not change the support decision, and the support decision does not make the
-bugs disappear. Closing them takes two small adapter edits, whenever the agent
-enters scope.
-
-**Read more.** [10](10-agent-integrations.md) §10.6.
-
----
-
 ## 18.10 The dashboard
 
 ### The header's help affordance has no key
