@@ -206,6 +206,8 @@ fn gemini_shape() -> PinnedShape {
             ("SessionStart", Some("hello"), None),
             ("UserPromptSubmit", Some("hello"), None),
             ("BeforeModel", Some("hello"), None),
+            ("BeforeToolSelection", Some("hello"), None),
+            ("Notification", Some("hello"), None),
             ("Stop", Some("hello"), None),
         ],
         declined: None,
