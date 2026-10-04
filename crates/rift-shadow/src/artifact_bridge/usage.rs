@@ -577,6 +577,25 @@ mod tests {
         }
     }
 
+    /// A synthetic assistant message's call, frozen by the writer under
+    /// Claude Code's own `<synthetic>` model name, reads back as that call with
+    /// its four token classes rather than as a withheld line.
+    #[test]
+    fn a_synthetic_models_call_reads_back_with_its_tokens() {
+        let bytes = usage_jsonl_bytes(&[fact("<synthetic>", "call-1")]).unwrap();
+        let out = parse_usage(&bytes, SHARD);
+        assert!(out.is_clean(), "{:?}", out.issues);
+        let calls: Vec<_> = out
+            .value
+            .iter()
+            .map(|l| {
+                let tokens = (l.uncached_input, l.cached_input, l.cache_creation, l.output);
+                (l.call_id.as_str(), l.model.as_str(), tokens)
+            })
+            .collect();
+        assert_eq!(calls, vec![("call-1", "<synthetic>", (20, 30, 0, 2))]);
+    }
+
     #[test]
     fn a_line_missing_a_member_or_mistyping_one_is_refused() {
         let missing = edited_line(|o| {

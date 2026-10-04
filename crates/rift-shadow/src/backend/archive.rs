@@ -471,8 +471,18 @@ fn usage_line(fact: &ArchivedUsageFact) -> serde_json::Value {
 }
 
 /// `value` when it is a bounded identifier (ASCII letters, digits and the
-/// punctuation model ids and counting methods use), else [`WITHHELD`].
+/// punctuation model ids and counting methods use) or one closed-vocabulary
+/// literal, else [`WITHHELD`].
 fn identifier_or_withheld(value: &str) -> &str {
+    // Claude Code reports this model for a synthetic assistant message. It is
+    // admitted as the exact literal, not by widening the character class:
+    // `<` and `>` stay outside the grammar, so no other bracketed text can
+    // reach a shard, and the call's tokens are frozen under its own name
+    // instead of a placeholder the rebuild has to skip.
+    const SYNTHETIC_MODEL: &str = "<synthetic>";
+    if value == SYNTHETIC_MODEL {
+        return value;
+    }
     let is_identifier_char = |c: char| {
         c.is_ascii_alphanumeric()
             || matches!(c, '-' | '.' | '_' | ':' | '/' | '@' | '+' | '[' | ']')
@@ -809,6 +819,23 @@ mod tests {
         assert_eq!(value["call_id"], "c1");
     }
 
+    /// Claude Code names a synthetic assistant message's model `<synthetic>`,
+    /// and that call's tokens are frozen under the name it was reported with.
+    /// Only the exact literal: a near miss is still withheld.
+    #[test]
+    fn claude_codes_synthetic_model_is_frozen_as_written() {
+        let frozen = |model: &str| {
+            let text = String::from_utf8(usage_jsonl_bytes(&[usage_fact("c1", model, 1)]).unwrap())
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+            value["model"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(frozen("<synthetic>"), "<synthetic>");
+        for near_miss in ["<synthetic> ", "<Synthetic>", "<synthetic>x", "<script>"] {
+            assert_eq!(frozen(near_miss), WITHHELD, "{near_miss:?}");
+        }
+    }
+
     proptest::proptest! {
         /// Whatever the rows hold, every line carries exactly the declared
         /// members, and every string member but the session is an
@@ -829,6 +856,9 @@ mod tests {
             for member in ["call_id", "model", "method"] {
                 let text = value[member].as_str().unwrap();
                 proptest::prop_assert_eq!(identifier_or_withheld(text), text);
+                // Angle brackets reach a line only as the one admitted literal.
+                let bracketed = text.contains(['<', '>']);
+                proptest::prop_assert!(!bracketed || text == "<synthetic>", "{}", text);
             }
         }
     }

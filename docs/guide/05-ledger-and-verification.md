@@ -143,6 +143,7 @@ Each line names the session, the turn, the call's own key, the model, the instan
 The call's key travels as written rather than the coordinates it was minted from, because the projection keeps the key and not the event ordinal inside it; a rebuild re-inserts under that key.
 There is no price and no dollar figure in it: dollars are derived when read, from the price catalog, which moves on its own.
 The model, the method and the key come from provider fields and projection rows rather than from Rift's own grammar, so each is frozen only when it reads as an identifier, and anything else is `withheld`.
+One value outside that grammar is frozen as written: `<synthetic>`, the model Claude Code reports for a synthetic assistant message, admitted as that exact literal so the call's tokens survive a rebuild; the grammar itself is not widened, and any other bracketed text is still `withheld`.
 Like the serve audit it is cumulative per session, and the trailer's prediction reads it through the same function as the archive, so the usage settled by the time of the trailer is claimed exactly; a turn settled between the trailer and the condense lands in the archive and not in the claim.
 Spend settles one hook after its turn (see [03-capture.md](03-capture.md) §3.9), so it reaches the shard one hook later too.
 
