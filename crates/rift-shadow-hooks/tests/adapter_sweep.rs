@@ -714,16 +714,14 @@ const SWEEP: &[Row] = &[
         verdict: Verdict::Gap,
         finding: "Rift declares session.start, message, tool.execute, session.end. \
                   OpenCode's plugin fires session-start, session-end, turn-start, \
-                  turn-end and compaction — so Rift has no turn end, and its \
-                  `compat_notes` claim of \"no explicit compaction signal\" is \
-                  simply wrong: OpenCode has one.",
+                  turn-end and compaction — so Rift has no turn end and maps \
+                  nothing to the compaction event OpenCode does publish.",
         evidence: "upstream: opencode/lifecycle.go HookNames() + ParseHookEvent, which \
                    maps `compaction` to a Compaction event. \
                    UNSUPPORTED-ADAPTER FACT: this \
                    alpha does not capture OpenCode at all — `enable` refuses it \
                    before writing a descriptor. The gap stays open and stays \
-                   counted; the wrong compat_notes claim is dead configuration \
-                   behind the refusal, not a sentence shown to a user.",
+                   counted.",
     },
     Row {
         id: "opencode.file_mutating_tools",
@@ -768,8 +766,8 @@ const SWEEP: &[Row] = &[
                   tool_use, task_end, session_end). Factory Droid's surface is \
                   Claude-Code-shaped PascalCase: SessionStart, SessionEnd, Stop, \
                   UserPromptSubmit, PreToolUse, PostToolUse, SubagentStop, \
-                  PreCompact, Notification. Nothing it sends maps, and its \
-                  compat_notes claim of \"no explicit compaction signal\" is wrong.",
+                  PreCompact, Notification. Nothing it sends maps, PreCompact \
+                  included.",
         evidence: "upstream: factoryaidroid/{lifecycle,types}.go: HookNames() is those \
                    nine and the settings schema carries seven PascalCase keys. \
                    UNSUPPORTED-ADAPTER FACT: this \
