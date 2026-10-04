@@ -557,16 +557,6 @@ a client that publishes one.
 
 **Read more.** [08](08-cost-and-savings.md) §8.6.
 
-### `rift recap` prints no savings line
-
-*Measured defect.* The verb's help text advertises a savings summary; its human
-renderer does not print one, though the machine-readable output carries the
-figures. A help string promising output the command does not produce is the
-cheapest kind of wrong documentation to fix and the easiest to leave. Closing it
-takes either the line or a help string that stops promising it.
-
-**Read more.** [08](08-cost-and-savings.md).
-
 ---
 
 ## 18.8 Worktrees and families

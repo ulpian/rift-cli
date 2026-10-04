@@ -713,10 +713,10 @@ milliseconds, and both bounds are inclusive: a **day is a period**, so
 `--since D` opens at that day's midnight and `--until D` closes at its last
 millisecond — `--since D --until D` is the whole of day `D`. (It used to
 resolve both edges to midnight, which admitted one millisecond of the day a
-reader asked for.) `--model` splits by model instead of agent. One wrinkle: the
-*human* rendering prints sessions, checkpoints, tokens, tool mix and split but
-no savings line, even though the command's help advertises savings
-(`render_recap` in `bins/rift/src/workflows/recap.rs`) — use `--json`, or `rift dispatch`.
+reader asked for.) `--model` splits by model instead of agent.
+The *human* rendering prints sessions, checkpoints, tokens, worktrees, the split and the tool mix, then a savings line and the serve calls by verb.
+The savings line uses `rift dispatch`'s words — tokens avoided, labelled an estimated upper bound, beside the tokens injected — and adds the rate with its denominator named (`70.7% of avoided + spent`) whenever there is one to state.
+A repository with no recall ledger reads `no ledger in this repository` on the savings line and `no recall store` on the serves line, never a zero.
 `rift-memd metrics` reports the delta-ledger's *baseline* rather than the
 serving trail: total input tokens, `repeated_context_rate`,
 `avoidable_context_rate` and the counts they imply. All of these commands

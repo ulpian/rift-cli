@@ -329,7 +329,7 @@ fn render_text(window: &Window, f: &WindowFacts, screen: &Screen, worktrees: &[S
         f.tokens.output,
         rift_shadow::cost::fmt_usd_estimate(f.cost_micros)
     );
-    push_recall_line(&mut s, f);
+    let _ = writeln!(s, "  recall      {}", super::recall_savings_text(f));
     push_evidence_map(&mut s, f);
     // …and the citations the `--json` sibling carries, resolved. This is a
     // human-only surface — no pack is compiled from it — which is the whole
@@ -366,23 +366,6 @@ fn push_counts(s: &mut String, f: &WindowFacts) {
              every bounded window",
             f.unresolved_checkpoints
         );
-    }
-}
-
-/// Recall's line, whose absent arm says there is no ledger rather than zero.
-fn push_recall_line(s: &mut String, f: &WindowFacts) {
-    use std::fmt::Write as _;
-    match f.savings {
-        Some(sv) => {
-            let _ = writeln!(
-                s,
-                "  recall      {} tokens avoided (estimated upper bound), {} injected",
-                sv.avoided_upper_bound, sv.injected
-            );
-        }
-        None => {
-            let _ = writeln!(s, "  recall      no ledger in this repository");
-        }
     }
 }
 
@@ -564,7 +547,7 @@ mod tests {
     use rift_store::window::{Savings, SessionFact};
 
     use super::*;
-    use crate::workflows::recap::render_recap;
+    use crate::workflows::recap::{render_recap, RecapRows};
     use crate::workflows::CheckpointFact;
 
     /// **The other side of the screen**, without which "it stops the corpus"
@@ -640,8 +623,15 @@ mod tests {
             !text.contains("worktrees   main"),
             "absence is never the main work tree (D6): {text}"
         );
-        assert!(render_recap(&facts, &[], &[], false, &empty_screen, &[])
-            .contains("worktrees   unknown"));
+        let rows = RecapRows {
+            facts: &facts,
+            mix: &[],
+            calls: None,
+            split: &[],
+            by_model: false,
+            worktrees: &[],
+        };
+        assert!(render_recap(&rows, &empty_screen).contains("worktrees   unknown"));
     }
 
     /// **The negative control for the screen** ([`crate::screen`]): the same
