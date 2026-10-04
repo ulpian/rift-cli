@@ -495,7 +495,9 @@ because rows are content-addressed and written with `INSERT OR IGNORE`, running
 it over a healthy projection inserts nothing. It is a repair, not a reset.
 
 A condense writes the shard and its chain entry but not the shard's own rows (`checkpoint`, `session_in_checkpoint` and their siblings), so the detached worker levels the projection once at the end of any drain that wrote a checkpoint, under the queue lock it already holds.
-The walk reads the whole branch each time, because the watermark it records is not yet used to skip, so its cost grows with the branch: a few seconds of the detached worker's time per condense on a branch of about three hundred shards.
+The walk opens only the shards no completed walk has projected: a shard is skipped when it sits at or before the recorded watermark and its `checkpoint` row exists, and that row is the last one a shard's projection writes, so a walk that stopped mid-shard re-projects that shard next time.
+Position alone would not do, because the walk order is the chain's order followed by every shard the chain does not name, and a new checkpoint sorts before those.
+A projection with no watermark, or one whose watermark names a shard no longer on the branch, is walked in full, which is what `rift rebuild` into an empty projection does; `rift rebuild --json` reports the skipped shards as `shards_skipped` beside `shards_projected`.
 It is best-effort: a projection that is being replaced defers it to the next drain without costing any job an attempt, and no hook ever waits on it.
 
 Usage and cost are on the restorable side for every shard that carries the usage artifact.

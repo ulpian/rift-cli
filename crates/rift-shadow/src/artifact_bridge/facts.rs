@@ -15,9 +15,9 @@ use super::created_at::created_at_for;
 use super::report::{note, truncate_token, BridgeReport};
 use super::{IngestCtx, ShardHeader};
 
-/// Checkpoint header → chain row, anchor commit and archiving worktree
-/// (idempotent), for a shard whose id is a SHA-256 and whose header carries a
-/// Merkle root.
+/// Checkpoint header → the predecessor check, anchor commit and archiving
+/// worktree (idempotent), for a shard whose id is a SHA-256 and whose header
+/// carries a Merkle root; [`seal_checkpoint`] writes the chain row itself.
 ///
 /// THE CHAIN COMES FROM THE WALK, NOT FROM THE HEADER.
 ///
@@ -45,7 +45,6 @@ pub(super) async fn record_chain_facts(
     store: &impl CanonicalStore,
     report: &mut BridgeReport,
     header: &ShardHeader<'_>,
-    root: Sha256Id,
     prev: Option<Sha256Id>,
 ) -> Result<()> {
     // The header's own claim is not the chain, but it is not nothing either: a
@@ -61,6 +60,21 @@ pub(super) async fn record_chain_facts(
             report.parse_issues += 1;
         }
     }
+    record_anchor_commit(store, report, header).await?;
+    record_archiving_worktree(store, report, header).await
+}
+
+/// The shard's `checkpoint` row, written as the **last** row of its projection.
+///
+/// Last because the row is what tells a later walk the shard is projected
+/// (`resume::already_projected`): written first, a crash between it and the
+/// shard's events would leave a shard every later walk skips half-projected.
+pub(super) async fn seal_checkpoint(
+    store: &impl CanonicalStore,
+    header: &ShardHeader<'_>,
+    root: Sha256Id,
+    prev: Option<Sha256Id>,
+) -> Result<()> {
     record_checkpoint_if_new(
         store,
         &CheckpointRecord {
@@ -81,8 +95,7 @@ pub(super) async fn record_chain_facts(
         },
     )
     .await?;
-    record_anchor_commit(store, report, header).await?;
-    record_archiving_worktree(store, report, header).await
+    Ok(())
 }
 
 /// THE ANCHOR COMMIT, which was in scope here all along.
