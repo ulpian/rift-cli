@@ -6,12 +6,14 @@
 //! against its projection, `stores` the caches beside the projection,
 //! `git_hooks` the hooks git runs and the binary they name, `health` whether
 //! each wired agent's capture is arriving, `worktrees` the family's members,
+//! `family` the recorded identity against the one its minting rule derives,
 //! `queues` the work each member still owes, `set_asides` the recall
 //! projections a rebuild set aside, `prices` the observed models the price
 //! catalog cannot price. This file assembles the report
 //! in the order the legs print.
 
 mod capture;
+mod family;
 mod git_hooks;
 pub(crate) mod health;
 mod prices;
@@ -30,6 +32,7 @@ use capture::{
     doctor_capture_chain, doctor_shadow_refs, doctor_soak, doctor_stale_rewrite_toml,
     doctor_turn_boundaries, doctor_watermark,
 };
+use family::doctor_family_identity;
 use git_hooks::{doctor_binary_of_record, doctor_hooks_target};
 use health::doctor_integration_health;
 use prices::doctor_unpriced_models;
@@ -93,6 +96,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("push_queue", doctor_push_queue(root, repair));
     report.leg("prunable_worktrees", doctor_prunable_worktrees(root));
     report.leg("orphan_projections", doctor_orphan_projections(root));
+    report.leg("family_identity", doctor_family_identity(root));
     report.leg(
         "turn_boundaries",
         doctor_turn_boundaries(root, strict_read_only),

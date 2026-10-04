@@ -561,18 +561,6 @@ a client that publishes one.
 
 ## 18.8 Worktrees and families
 
-### There is no doctor leg for family-identity drift
-
-*Never built.* The doctor checks phantom directories, the push queue, prunable
-members, orphaned projections, the hook target, the binary of record and member
-wiring. It does not compare the recorded family identifier against what the main
-checkout would derive — and identity drift is the failure that would quietly split
-one family's data into two stores. Closing it takes a leg that derives and
-compares, **reporting rather than repairing**: the repair verb exists and writes
-an audit trail, and re-minting is explicit on purpose.
-
-**Read more.** [09](09-worktrees-and-families.md) §9.12.
-
 ### The compounding proof's binding is seeded
 
 *Honest limit; downstream of the summary-writer gap in §18.6.* The test proving
