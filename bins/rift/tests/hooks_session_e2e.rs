@@ -33,9 +33,10 @@ struct OutOfBand {
 
 impl OutOfBand {
     fn seed(tmp: &Path) -> Self {
+        let tmp = &underscored_root(tmp);
         let repo = seed_plain_repo(tmp);
         let home = tmp.join("home");
-        let native = claude_code_project_dir(&home, &repo).join("oob-1.jsonl");
+        let native = common::claude_code_project_dir(&home, &repo).join("oob-1.jsonl");
         std::fs::create_dir_all(native.parent().unwrap()).unwrap();
         std::fs::write(
             &native,
@@ -114,9 +115,10 @@ struct ClaudeStore {
 
 impl ClaudeStore {
     fn seed(tmp: &Path) -> Self {
+        let tmp = &underscored_root(tmp);
         let repo = seed_plain_repo(tmp);
         let home = tmp.join("home");
-        let store_dir = claude_code_project_dir(&home, &repo);
+        let store_dir = common::claude_code_project_dir(&home, &repo);
         std::fs::create_dir_all(&store_dir).unwrap();
         std::fs::write(
             store_dir.join("s-one.jsonl"),
@@ -276,28 +278,14 @@ fn attach_with_force_amends_the_commit_once_and_explain_resolves_it() {
     );
 }
 
-/// Claude Code's per-project transcript store under `home`: the absolute
-/// worktree path with `/` and `.` folded to `-`. The binary discovers the
-/// worktree CANONICALIZED (macOS /var -> /private/var), so the munge is
-/// computed over the canonical path.
-///
-/// On Windows the canonical spelling is verbatim and carries `\` and the
-/// drive's `:`; Claude Code folds those too (its own project directory
-/// for `c:\Users\…\x` is `c--Users-…-x`), so the fixture spells the plain
-/// `/`-form first and folds `:` with the rest. The result is relative on
-/// every platform, so the transcript stays inside this tempdir.
-fn claude_code_project_dir(home: &Path, repo: &Path) -> PathBuf {
-    let munged: String = common::shell_spelling(&repo.canonicalize().unwrap())
-        .chars()
-        .map(|c| {
-            if c == '/' || c == '.' || c == ':' {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    home.join(".claude").join("projects").join(munged)
+/// The fixture's root under `tmp`, named with an underscore: Claude Code
+/// folds `_` in a project path like any other non-alphanumeric character,
+/// and a temporary directory that happens to carry none would hide a fixture
+/// that folds it differently from the binary.
+fn underscored_root(tmp: &Path) -> PathBuf {
+    let root = tmp.join("fixture_root");
+    std::fs::create_dir_all(&root).unwrap();
+    root
 }
 
 /// A live session with one turn behind it, provider-reported usage on the

@@ -97,6 +97,54 @@ pub(crate) fn shell_spelling(path: &Path) -> String {
     let plain = spelled.strip_prefix(r"\\?\").unwrap_or(&spelled);
     plain.replace('\\', "/")
 }
+
+/// Claude Code's per-project transcript directory for `work_tree` under the
+/// redirected `home`, folded by the binary's own rule: every UTF-16 code unit
+/// outside `[A-Za-z0-9]` becomes `-`, and a name over 200 units keeps its
+/// first 200, then `-` and the base-36 absolute value of the path's Java
+/// string hash.
+///
+/// One copy for every suite, because two fixtures that each folded only the
+/// characters their author's temporary directory happened to contain went
+/// red on a runner whose temporary directory carried a `_`. The binary
+/// discovers the work tree canonicalized (macOS `/var` → `/private/var`), so
+/// the fold runs over the canonical path, spelled plainly first so the name
+/// stays relative on Windows too.
+#[allow(dead_code)] // only the suites that plant an agent transcript call it; this module is shared
+pub(crate) fn claude_code_project_dir(home: &Path, work_tree: &Path) -> PathBuf {
+    const MAX_UNITS: usize = 200;
+    let path = shell_spelling(&work_tree.canonicalize().unwrap());
+    let folded: String = path
+        .encode_utf16()
+        .map(|unit| match u8::try_from(unit) {
+            Ok(byte) if byte.is_ascii_alphanumeric() => char::from(byte),
+            _ => '-',
+        })
+        .collect();
+    let name = match folded.get(..MAX_UNITS) {
+        Some(prefix) if folded.len() > MAX_UNITS => {
+            let hash = path.encode_utf16().fold(0_i32, |hash, unit| {
+                hash.wrapping_mul(31).wrapping_add(i32::from(unit))
+            });
+            format!("{prefix}-{}", base36(hash.unsigned_abs()))
+        }
+        _ => folded,
+    };
+    home.join(".claude").join("projects").join(name)
+}
+
+/// `Number.prototype.toString(36)` for a non-negative integer: lowercase.
+fn base36(mut value: u32) -> String {
+    let mut digits = Vec::new();
+    loop {
+        digits.extend(char::from_digit(value % 36, 36));
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    digits.iter().rev().collect()
+}
 /// THE spawn chokepoint: a `Command` for the binary under test, pinned to a
 /// hermetic working directory, with the re-targeting environment scrubbed.
 /// Layer stdio/env/args on the returned builder as the test needs.
