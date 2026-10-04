@@ -68,7 +68,13 @@ pub(super) fn recovery_map(
     ) {
         return None;
     }
-    record_recovery_injection(repo, agent, &text);
+    record_recovery_injection(
+        repo,
+        agent,
+        &opening.raw.session,
+        opening.window.as_deref(),
+        &text,
+    );
     announce_recovery(
         &opening.journal,
         &opening.engine,
@@ -428,6 +434,62 @@ mod tests {
         let pointer = session_pointer_in(&repo, &CC, START, &startup)
             .expect("a fresh session still gets its pointer");
         assert!(pointer.contains("rift recall"), "{pointer}");
+        drop_family_store(&repo);
+    }
+
+    /// **A map is a serve its session made.** Both of its rows are written
+    /// with the attribution that names the session and the window it was
+    /// handed to, which is what the session's next checkpoint freezes; a map
+    /// written unattributed would be the one serve no shard carries.
+    #[test]
+    fn a_recovery_maps_rows_name_the_session_and_window_it_was_handed_to() {
+        use rift_store::CanonicalStore as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = recall_repo(tmp.path());
+        let session = "s-attributed";
+        read_and_hold(&repo, session, "a.txt", "alpha\n", 10);
+        evict(&repo, session, 40);
+
+        let cfg = rift_config::EffectiveConfig::load(&repo.join(".rift")).unwrap();
+        recovery_map(&repo, &cfg, &CC, START, &compacted(session)).expect("a map");
+
+        let db = crate::family::recall_db(&repo).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let rows = rt
+            .block_on(store.query(
+                "SELECT relation, session_id, window_key FROM memd_audit_session \
+                 ORDER BY relation",
+                &[],
+            ))
+            .unwrap();
+        let attributed: Vec<(String, String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get_text(0).unwrap(),
+                    row.get_text(1).unwrap(),
+                    row.get_text(2).unwrap(),
+                )
+            })
+            .collect();
+        let window = crate::window_journal::key(session, None);
+        assert_eq!(
+            attributed,
+            vec![
+                (
+                    "memd_audit_event".to_owned(),
+                    session.to_owned(),
+                    window.clone()
+                ),
+                ("serve_call_event".to_owned(), session.to_owned(), window),
+            ],
+            "the decision row and the call row both name the session and window"
+        );
+        drop(store);
         drop_family_store(&repo);
     }
 

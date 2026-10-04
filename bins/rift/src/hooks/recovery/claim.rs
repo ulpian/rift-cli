@@ -7,7 +7,9 @@
 
 use rift_core::Result;
 
-use crate::hooks::audit::{append_memd_audit, serve_audit_envelopes, serve_audit_event};
+use rift_recall_ledger::attribution::append_attributed_serve;
+
+use crate::hooks::audit::{serve_attribution, serve_audit_envelopes, serve_audit_event};
 use crate::hooks::gate::AUDIT_IDS;
 use crate::hooks::now_ms;
 
@@ -60,15 +62,21 @@ pub(super) fn claim_recovery(
 }
 
 /// Book what the map cost, in both relations, through the same pair of
-/// envelopes every other hook-side decision is written with.
+/// envelopes every other hook-side decision is written with, attributed to
+/// the session and window it was handed to.
 ///
 /// A recovery map is pure spend — it avoids nothing by itself, and what it
 /// saves is a read that never happens later — so it books a returned figure and
-/// no avoided one, which is exactly what the honesty gate has to net.
+/// no avoided one, which is exactly what the honesty gate has to net. The
+/// attribution is what the session's next checkpoint freezes the map's rows
+/// by, keyed exactly as the session pointer's: the native session id and the
+/// window journal's key of the window the map was decided from.
 /// Best-effort: an unavailable projection costs an audit row, never a turn.
 pub(super) fn record_recovery_injection(
     repo: &std::path::Path,
     agent: &rift_core::AgentId,
+    session: &str,
+    window: Option<&str>,
     text: &str,
 ) {
     use rift_core::UlidSource as _;
@@ -83,11 +91,10 @@ pub(super) fn record_recovery_injection(
         declared_avoided: None,
         // Not a name search: nothing here stood in for a listing.
         shape: None,
-        // This writer is handed no session and no window, so the map's rows
-        // are written unattributed and frozen into no shard.
-        session: None,
-        window: None,
+        session: Some(session.to_owned()),
+        window: Some(crate::window_journal::key(session, window)),
     };
+    let attribution = serve_attribution(audit.session.as_deref(), audit.window.as_deref());
     let _ = (|| -> Result<()> {
         let db = crate::family::recall_db(repo)?;
         let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
@@ -98,8 +105,11 @@ pub(super) fn record_recovery_injection(
             .build()
             .map_err(rift_core::RiftError::from)?;
         rt.block_on(async {
-            append_memd_audit(&store, audited.as_bytes(), at_ms).await?;
-            append_memd_audit(&store, called.as_bytes(), at_ms).await
+            for envelope in [audited, called] {
+                append_attributed_serve(&store, envelope.as_bytes(), at_ms, attribution.as_ref())
+                    .await?;
+            }
+            Ok(())
         })
     })();
 }
