@@ -456,4 +456,56 @@ mod tests {
         assert_eq!(loaded.policy.doc.ttl_days, 1);
         assert_eq!(loaded.policy.doc.max_input_bytes, 1);
     }
+
+    /// A repository with no `.rift` at all is the default with no revision to
+    /// conflict against; a declared file's revision is the hash of its bytes.
+    #[test]
+    fn a_missing_rift_directory_is_the_default_and_a_declared_file_is_hashed() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = load_serve_policy(&dir.path().join(".rift"));
+        assert_eq!(missing.source, ServePolicySource::Default);
+        assert!(!missing.policy.fail_closed);
+        assert_eq!(missing.revision.source_hash(), None);
+
+        let src = "injection_turn_budget = 7\n";
+        let (declared, _d) = load_src(src);
+        let expected = blake3::hash(src.as_bytes()).to_hex().to_string();
+        assert_eq!(declared.revision.source_hash(), Some(expected.as_str()));
+    }
+
+    /// A `.rift` that cannot be inspected is not the same as an absent one:
+    /// Rift does not know what it holds, so every lever is off.
+    ///
+    /// Unix only: there a path through a file fails as not-a-directory, the
+    /// uninspectable case; Windows reports the same path as not found, which
+    /// is the absent case and is covered above.
+    #[cfg(unix)]
+    #[test]
+    fn a_rift_directory_that_cannot_be_inspected_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("checkout");
+        std::fs::write(&file, "a file, not a directory").unwrap();
+        let loaded = load_serve_policy(&file.join(".rift"));
+        assert_eq!(loaded.source, ServePolicySource::Refused);
+        assert!(loaded.policy.fail_closed);
+        assert_eq!(loaded.policy.injection_turn_budget, 0);
+    }
+
+    /// The same holds one level down: a `policies` entry that is a file makes
+    /// the policy path uninspectable, which is refused rather than read as
+    /// absent.
+    ///
+    /// Unix only: there a path through a file fails as not-a-directory, the
+    /// uninspectable case; Windows reports the same path as not found, which
+    /// is the absent case and is covered above.
+    #[cfg(unix)]
+    #[test]
+    fn a_policy_path_that_cannot_be_inspected_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("policies"), "a file, not a directory").unwrap();
+        let loaded = load_serve_policy(dir.path());
+        assert_eq!(loaded.source, ServePolicySource::Refused);
+        assert!(loaded.policy.fail_closed);
+        assert_eq!(loaded.policy.doc.mode, Mode::Off);
+    }
 }

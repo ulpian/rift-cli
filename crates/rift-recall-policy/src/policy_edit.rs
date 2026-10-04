@@ -368,4 +368,54 @@ mod tests {
             "a refused patch writes nothing"
         );
     }
+
+    /// A staging file that cannot be written fails the edit with the path it
+    /// tried, and the policy on disk is left as it was.
+    #[test]
+    fn an_edit_whose_staging_file_cannot_be_written_reports_it_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let pol = dir.path().join("policies");
+        let staging = pol.join(format!(".serve.toml.rift-tmp-{}", std::process::id()));
+        std::fs::create_dir_all(&staging).unwrap();
+        let loaded = load_serve_policy(dir.path());
+        assert_eq!(loaded.source, ServePolicySource::Default);
+        let error = patch_injection_turn_budget(dir.path(), &loaded.revision, 0).unwrap_err();
+        match error {
+            ServePolicyEditError::Io { path, .. } => assert_eq!(path, staging),
+            other => panic!("expected an I/O refusal, got {other:?}"),
+        }
+        assert!(!pol.join("serve.toml").exists());
+    }
+
+    #[test]
+    fn the_atomic_replace_reports_the_target_when_the_rename_cannot_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("policies").join("serve.toml");
+        std::fs::create_dir_all(target.join("occupied")).unwrap();
+        let error = atomic_policy_replace(&target, b"injection_turn_budget = 0\n").unwrap_err();
+        match error {
+            ServePolicyEditError::Io { path, .. } => assert_eq!(path, target),
+            other => panic!("expected an I/O refusal, got {other:?}"),
+        }
+        assert!(target.join("occupied").is_dir(), "the target is untouched");
+    }
+
+    #[test]
+    fn the_atomic_replace_reports_the_directory_it_could_not_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("checkout");
+        std::fs::write(&file, "a file, not a directory").unwrap();
+        let parent = file.join("policies");
+        let error = atomic_policy_replace(&parent.join("serve.toml"), b"").unwrap_err();
+        match error {
+            ServePolicyEditError::Io { path, .. } => assert_eq!(path, parent),
+            other => panic!("expected an I/O refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_atomic_replace_refuses_a_path_with_no_directory() {
+        let error = atomic_policy_replace(Path::new(""), b"").unwrap_err();
+        assert!(matches!(error, ServePolicyEditError::Invalid));
+    }
 }
