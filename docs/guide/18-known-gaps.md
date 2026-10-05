@@ -630,21 +630,6 @@ replace-and-restamp is ever the right rebuild, and a caller if it is.
 
 **Read more.** [13](13-storage-and-schema.md).
 
-### Some comments still call worktree content hashing blake3
-
-*Stale description.* Worktree file content hashing is plain SHA-256, so it
-matches the hash recorded when the file was read; blake3 covers salted
-identities, configuration and policy fingerprints, integration-artifact ownership
-fingerprints, and frozen envelope identifiers. At least two source comments still
-describe the first as blake3, and blurring a deliberate split — substrate
-byte-compatibility on one side, internal handles on the other — will eventually
-mislead somebody into the wrong identifier type. A second instance sits on the
-recall plane, where doc comments state a stricter unchanged-state rule than the
-code checks. Closing both means editing comments; the code is correct.
-
-**Read more.** [13](13-storage-and-schema.md),
-[06](06-recall.md), [17](17-invariants.md) rule 5.
-
 ### A task-runner illustration names a retired sub-command
 
 *Stale description.* The task-runner files show an example invoking a recall

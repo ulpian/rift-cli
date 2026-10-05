@@ -128,11 +128,6 @@ than being wrong in a way nothing notices until a verify fails months later.
 **Enforced by** the type system (distinct identifier types with no conversion)
 and by the golden fixtures pinning the wire bytes of each family's artifacts.
 
-> **Where the code and an older description disagree.** Some source comments call
-> worktree content hashing blake3. It is not: a file read from a checkout is
-> hashed with plain SHA-256, matching the capture recorded at read time. The code
-> is the authority; the stale phrasing is listed in [18](18-known-gaps.md).
-
 **Read more.** [13](13-storage-and-schema.md).
 
 ### 6. Sealed capture is never rewritten
