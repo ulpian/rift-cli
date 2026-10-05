@@ -366,6 +366,7 @@ async fn settle_window(
             .as_ref()
             .map(|_| ModelSource::RuntimeHook.as_str().to_owned()),
         tool_name: None,
+        tool_use_id: None,
         child_session: None,
         read_path: None,
         read_content: None,

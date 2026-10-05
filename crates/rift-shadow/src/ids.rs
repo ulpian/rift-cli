@@ -102,6 +102,18 @@ pub fn tool_call_row_id(session_row_id: &str, turn_ordinal: u32, event_ordinal: 
     )
 }
 
+/// A `tool_call.tool_call_id` keyed by the agent's own tool-use id.
+///
+/// The slot id above restarts its event ordinal in every hook, so every tool
+/// call of a turn derives the same slot and `INSERT OR IGNORE` keeps only the
+/// first. The agent's tool-use id names one call for the whole session, so it
+/// tells a turn's calls apart and a redelivered hook re-derives the same row.
+/// The slot id stays the fallback for a payload that names no tool-use id.
+#[must_use]
+pub fn tool_call_native_row_id(session_row_id: &str, native_tool_use_id: &str) -> String {
+    tagged("tool_call.native", &[session_row_id, native_tool_use_id])
+}
+
 /// A read-shaped tool call's OWN `tool_call.tool_call_id`, content-addressed
 /// over the fact — `(session, turn, path, read-time hash)` — never the shared
 /// `(turn, event_ordinal)` slot, whose ordinals restart per hook and collide
@@ -297,6 +309,22 @@ mod tests {
         let s = session_row_id("claude-code", "native-1");
         assert_ne!(model_call_id(&s, 1, 2), tool_call_row_id(&s, 1, 2));
         assert_ne!(model_call_id(&s, 1, 2), subagent_child_id(&s, 1, 2));
+        // The native-keyed tool-call row never meets the slot-keyed one, nor a
+        // read's own row, whatever the agent spells its tool-use id as.
+        assert_ne!(tool_call_native_row_id(&s, "1"), tool_call_row_id(&s, 1, 0));
+        assert_ne!(
+            tool_call_native_row_id(&s, "1\u{0}0"),
+            tool_call_row_id(&s, 1, 0)
+        );
+        assert_ne!(tool_call_native_row_id(&s, "t"), turn_row_id(&s, 0));
+        assert_ne!(
+            tool_call_native_row_id(&s, "t"),
+            read_call_row_id(&s, 0, "t", "")
+        );
+        assert_eq!(
+            tool_call_native_row_id(&s, "toolu_1"),
+            tool_call_native_row_id(&s, "toolu_1")
+        );
         // Boundary ids separate start from end.
         assert_ne!(
             turn_boundary_snapshot_id(&s, 3, "start"),

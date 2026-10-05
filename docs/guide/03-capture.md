@@ -265,6 +265,25 @@ where an invented one is a claim nobody can check. Nothing new is stored for
 this: the fact is the same relation a read tool's is, on a `tool_call` whose
 own `tool_name` says which of the two it was.
 
+### One `tool_call` row per tool call
+
+A `tool_call` row records that a tool ran: one row per call, written by the
+pre-tool-use hook, keyed by the agent's own tool-use id (`tool_use_id`, which
+Claude Code and Codex both send on their tool hooks). A read has a second row
+of its own beside it, written when the read completes and keyed by what was
+read (the turn, the path, the bytes' hash), because that is the row the file
+revision and the read's token count hang from. So a reader that counts tool
+calls skips the rows `tool_reads_file` links, and `rift recap`'s tool mix does
+exactly that: a `Read` counts once.
+
+The key was once the hook's event slot — turn ordinal plus event ordinal. The
+event ordinal restarts at zero in every hook, so every call of a turn derived
+the same id and the first one won; projections written before the change hold
+one tool-ran row per turn, and nothing rewrites them. A family whose payload
+carries no tool-use id (Antigravity's names a step, not a call) still keys by
+the slot, as does an id that is empty, longer than 256 bytes or holds a control
+character.
+
 ### Trust is a field, not a vibe
 
 Every event carries a trust class that travels with the data forever:

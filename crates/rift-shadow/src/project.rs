@@ -33,6 +33,9 @@ pub struct PayloadFacts {
     pub model_source: Option<String>,
     /// The tool named by the payload (`tool_name`), if any.
     pub tool_name: Option<String>,
+    /// The agent's own id for this tool call (`tool_use_id`), when the payload
+    /// carries a bounded one — what keys the call's `tool_call` row.
+    pub tool_use_id: Option<String>,
     /// A child-session id for subagent events, if the payload names one.
     pub child_session: Option<String>,
     /// The path a **read-shaped** tool touched (`tool_input.file_path`), raw
@@ -72,6 +75,23 @@ pub struct TokenEstimate {
     pub tokenizer: String,
 }
 
+/// The longest tool-use id accepted as one. Claude Code's and Codex's ids are
+/// a few dozen bytes; anything far longer is not an id this projector keys by.
+const MAX_TOOL_USE_ID_BYTES: usize = 256;
+
+/// The payload's top-level `tool_use_id` (Claude Code's and Codex's spelling,
+/// on both tool hooks), when it is a bounded identifier: non-empty, at most
+/// 256 bytes, and free of control characters. Anything else
+/// reads as absent, so the row falls back to its slot id rather than keying
+/// on whatever an agent wrote there.
+#[must_use]
+pub fn native_tool_use_id(payload: &serde_json::Value) -> Option<String> {
+    let id = payload.get("tool_use_id")?.as_str()?;
+    let bounded =
+        !id.is_empty() && id.len() <= MAX_TOOL_USE_ID_BYTES && !id.chars().any(char::is_control);
+    bounded.then(|| id.to_owned())
+}
+
 /// Extract [`PayloadFacts`] from a native payload. Total: unknown shapes yield
 /// defaults. Only scalar identity fields are read — never content bytes.
 #[must_use]
@@ -101,6 +121,7 @@ pub fn payload_facts(payload: &serde_json::Value) -> PayloadFacts {
             .and_then(serde_json::Value::as_str)
             .map(|_| "runtime_hook".to_owned()),
         tool_name,
+        tool_use_id: native_tool_use_id(payload),
         child_session: str_at(&[
             "subagent_session_id",
             "child_session_id",
@@ -297,17 +318,24 @@ async fn project_prompt_response(
     Ok(())
 }
 
-/// A tool call anchors one `tool_call` row in its turn.
+/// A tool call anchors one `tool_call` row in its turn, keyed by the agent's
+/// tool-use id when the payload names one. The slot id is the fallback only:
+/// its event ordinal restarts in every hook, so it names every call of a turn
+/// alike and keeps just the first.
 async fn project_tool_call(
     store: &impl CanonicalStore,
     ev: &CanonicalEvent,
     facts: &PayloadFacts,
     session_row: &str,
 ) -> Result<()> {
+    let tool_call_id = match &facts.tool_use_id {
+        Some(native) => ids::tool_call_native_row_id(session_row, native),
+        None => ids::tool_call_row_id(session_row, ev.turn_ordinal, ev.event_ordinal),
+    };
     rift_store::record_tool_call(
         store,
         &ToolCallRow {
-            tool_call_id: ids::tool_call_row_id(session_row, ev.turn_ordinal, ev.event_ordinal),
+            tool_call_id,
             turn_id: ids::turn_row_id(session_row, ev.turn_ordinal),
             tool_name: facts.tool_name.clone().unwrap_or_default(),
             started_at: ev.occurred_at_ms,
