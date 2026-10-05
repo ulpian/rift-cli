@@ -6,15 +6,21 @@
 //! about: the published vocabulary and the range each form supports, the
 //! three compositions and what each one reads, the labels a chain writes
 //! between its reads, the `sed` print scripts beyond one range, the shapes
-//! left alone, and the properties a generated line has to hold. The helpers
+//! left alone, the properties a generated line has to hold, and the witness
+//! the fuzz target checks every recognised target against. The helpers
 //! every file spells its expectations with live here.
 
 mod compositions;
 mod labels;
 mod properties;
+mod quoting;
 mod refusals;
 mod sed_scripts;
+// The fuzz target includes this same file by path, so the witness the
+// fuzzer asserts with is the one these tests pin.
+mod shell_read_oracle;
 mod vocabulary;
+mod witness;
 
 use crate::shell_read::{recognise, Narrowing, ShellCall, ShellListing, ShellRead, ShellSpan};
 use crate::{ReadChannel, ReadRequest, ReadSpan};

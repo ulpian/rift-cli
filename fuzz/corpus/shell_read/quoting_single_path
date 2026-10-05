@@ -1,0 +1,1 @@
+cd 'my crate' && sed -n '1,5p' 'src/my file.rs'

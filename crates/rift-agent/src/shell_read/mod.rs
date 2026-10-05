@@ -393,14 +393,20 @@ impl ShellCall {
 
 /// One word of a command line, and whether quotes produced it.
 ///
-/// The distinction is enforced rather than recorded: quoting is pinned only
-/// where the grammar needs it — a `sed` script, a `find` name pattern, a
-/// search pattern — and a quoted word anywhere else takes the whole line out
-/// of the grammar.
+/// The text is the word the shell passes, quotes taken off; that a quote
+/// produced it is kept because the positions differ in what they admit. A
+/// pattern, a `sed` script and a `cd` take any quoted word the walk below
+/// resolves; a path takes one only when it spells a file rather than a
+/// pattern; and every other position — a command word, an option, a count —
+/// takes none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Word {
     text: String,
     quoted: bool,
+    /// Whether a backslash inside double quotes is part of the text: the
+    /// shell passes it as written, but a path spelled that way is one an
+    /// agent almost never means, so a path refuses it.
+    kept_backslash: bool,
 }
 
 /// Whether a character may appear in an unquoted word.
@@ -446,9 +452,9 @@ fn inert_tilde(word: Option<&Word>) -> bool {
 ///
 /// Refusal is the common case and is meant to be: anything with a character
 /// the shell would act on, a quote that does not wrap a whole word, an
-/// unterminated quote, a line break, or a double-quoted word that could still
-/// expand (`$`, a backtick or a backslash inside it) is not a command line
-/// this module will classify.
+/// unterminated quote, a line break, or a double-quoted word whose text the
+/// shell would compute rather than pass (see [`quoted_word`]) is not a
+/// command line this module will classify.
 fn words(command: &str) -> Option<Vec<Word>> {
     if command.len() > MAX_COMMAND_BYTES {
         return None;
@@ -469,26 +475,7 @@ fn words(command: &str) -> Option<Vec<Word>> {
                 if current.is_some() {
                     return None;
                 }
-                let mut text = String::new();
-                let mut closed = false;
-                for inner in chars.by_ref() {
-                    if inner == c {
-                        closed = true;
-                        break;
-                    }
-                    // Inside double quotes the shell still expands, so the
-                    // three characters that do it end the recognition. A
-                    // control character ends it in either kind of quote.
-                    let expands = c == '"' && matches!(inner, '$' | '`' | '\\');
-                    if expands || inner.is_control() {
-                        return None;
-                    }
-                    text.push(inner);
-                }
-                if !closed {
-                    return None;
-                }
-                out.push(Word { text, quoted: true });
+                out.push(quoted_word(c, &mut chars)?);
                 // The closing quote must end the word.
                 if !matches!(chars.clone().next(), None | Some(' ' | '\t')) {
                     return None;
@@ -501,6 +488,7 @@ fn words(command: &str) -> Option<Vec<Word>> {
                         current = Some(Word {
                             text: c.to_string(),
                             quoted: false,
+                            kept_backslash: false,
                         });
                     }
                 }
@@ -514,23 +502,69 @@ fn words(command: &str) -> Option<Vec<Word>> {
     Some(out)
 }
 
+/// The rest of a quoted word, its opening `mark` already read, as the word
+/// the shell passes — or [`None`] when the shell would compute it instead.
+///
+/// Inside single quotes every character is itself. Inside double quotes the
+/// shell still acts on `$` and a backtick, and a backslash escapes `$`, a
+/// backtick, `"`, `\` and a newline; before any other character it is kept
+/// as written. So a double-quoted word with no `$`, no backtick and only
+/// kept backslashes is exactly its text, and anything else is refused rather
+/// than resolved. A `!` is refused as well: an interactive shell expands it
+/// even inside double quotes, and this module cannot tell which shell it is.
+/// A control character ends the recognition in either kind of quote.
+fn quoted_word(mark: char, chars: &mut std::str::Chars<'_>) -> Option<Word> {
+    let mut word = Word {
+        text: String::new(),
+        quoted: true,
+        kept_backslash: false,
+    };
+    while let Some(inner) = chars.next() {
+        if inner == mark {
+            return Some(word);
+        }
+        if inner.is_control() {
+            return None;
+        }
+        if mark == '"' {
+            let escapes = |next: char| matches!(next, '$' | '`' | '"' | '\\' | '\n');
+            match inner {
+                '$' | '`' | '!' => return None,
+                '\\' if chars.clone().next().is_none_or(escapes) => return None,
+                '\\' => word.kept_backslash = true,
+                _ => (),
+            }
+        }
+        word.text.push(inner);
+    }
+    None
+}
+
 /// An unquoted word's text, or [`None`] when it was quoted.
 fn bare(word: &Word) -> Option<&str> {
     (!word.quoted).then_some(word.text.as_str())
 }
 
-/// A path or directory argument: unquoted, non-empty, and not something the
-/// command would read as an option.
+/// A path or directory argument: non-empty, and not something the command
+/// would read as an option.
+///
+/// A quoted one is the word the shell passes, which is what lets a path with a
+/// space in it be read. It is still refused when it spells what an agent
+/// almost certainly meant as something else — a glob or a `~` the quotes kept
+/// from expanding, or a backslash kept inside double quotes — because the
+/// shell would open a file by that literal name, and a read credited to it is
+/// one nobody intended.
 fn path_arg(word: &Word) -> Option<String> {
-    let text = bare(word)?;
-    if text.is_empty() || text.starts_with('-') {
+    let text = word.text.as_str();
+    let spells_a_pattern = word.kept_backslash || text.contains(['*', '?', '[', '~']);
+    if text.is_empty() || text.starts_with('-') || (word.quoted && spells_a_pattern) {
         return None;
     }
     Some(text.to_owned())
 }
 
-/// A pattern argument, which is the one place the grammar admits quotes —
-/// and still not an option.
+/// A pattern argument, which takes any quoted word the walk resolved — and
+/// still not an option.
 fn pattern_arg(word: &Word) -> Option<String> {
     if !word.quoted && (word.text.is_empty() || word.text.starts_with('-')) {
         return None;
@@ -694,9 +728,9 @@ fn split_on<'a>(command: &'a str, seps: &[&str], limit: usize) -> Vec<&'a str> {
 
 /// The directory a leading `cd` names, or [`None`] when this piece is not one.
 ///
-/// A `cd` is the one place the grammar takes a quoted path, because it is the
-/// one place an agent routinely writes a directory with a space in it. The
-/// quote still has to wrap the whole word — [`words`] sees to that — so what
+/// The directory may be quoted, because a `cd` is where an agent most often
+/// writes a directory with a space in it. The quote still has to wrap the
+/// whole word and resolve to one fixed word — [`words`] sees to that — so what
 /// is admitted is a spelling, never an expansion.
 fn cd_dir(piece: &str) -> Option<String> {
     let words = words(piece)?;
@@ -782,7 +816,9 @@ enum Member {
 /// reaches this list only as a bare word or a whole-word quoted literal, and
 /// every way a shell could turn one of those into something else — `$`, a
 /// backtick, a backslash outside a single-quoted word, a redirect, a
-/// substitution — is a character no word may hold.
+/// substitution — is a character no word may hold. A backslash kept inside
+/// double quotes is the one exception the walk admits, and a label refuses it
+/// itself, because both commands may read it as an escape of their own.
 const LABEL_COMMANDS: &[&str] = &["echo", "printf"];
 
 /// Recognise one member: a simple command, and at most one trailing pipe into
@@ -927,8 +963,12 @@ fn recognise_simple(command: &str) -> Option<Member> {
     // quoted literal, which is the whole condition on a label. The count is
     // not one of the conditions — `echo` with no operands is the blank line an
     // agent puts between two reads, and it is the commonest label there is.
+    // A backslash kept inside double quotes is a word the shell passes as
+    // written, but `echo` and `printf` may each read it as an escape of their
+    // own, and a label that prints something other than its text is a shape
+    // nobody has measured.
     if LABEL_COMMANDS.contains(&head_word) {
-        return Some(Member::Label);
+        return (!rest.iter().any(|word| word.kept_backslash)).then_some(Member::Label);
     }
     match head_word {
         "cat" => cat_reads(rest),

@@ -4,14 +4,8 @@
 use crate::shell_read::{recognise, Narrowing, ShellCall, ShellSpan, MAX_CHAIN_READS};
 use crate::{HiKind, ReadSpan};
 
+use super::shell_read_oracle::names_a_word;
 use super::{assert_each_recognised, listing, member, narrowed, read, read_of, reads_of};
-
-// The fuzz target includes this same file by path, so the witness the
-// fuzzer asserts with is the one these tests pin.
-#[path = "shell_read_oracle.rs"]
-mod shell_read_oracle;
-
-use shell_read_oracle::names_a_word;
 
 /// **Every way the grammar composes those forms, and what a leading `cd`
 /// makes of each path after it.**
