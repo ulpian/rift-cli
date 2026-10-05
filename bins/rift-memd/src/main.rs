@@ -30,6 +30,7 @@ use rift_core::{Result, RiftError, Timestamp};
 use rift_git::{Family, FamilyState, MintPolicy};
 use rift_recall_ledger::ingest::{self, IngestReport};
 use rift_recall_ledger::metrics::{compute_metrics, record_metric_snapshot};
+use rift_recall_ledger::production::Pass;
 use rift_recall_ledger::{doctor as graph_doctor, outcome};
 use rift_recall_substrate::{worktree, Dialect, GixSubstrate, SubstrateReader};
 use rift_recall_types::{NoAncestry, Scope};
@@ -52,6 +53,10 @@ enum Cmd {
         /// Emit the metrics as JSON.
         #[arg(long)]
         json: bool,
+        /// Read every shard and walk history, rather than skipping the steps
+        /// whose answer cannot have changed since the last pass.
+        #[arg(long)]
+        full: bool,
     },
     /// Set recall.db aside and rebuild it from git (a cold, idempotent ingest).
     Rebuild {
@@ -78,6 +83,21 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+}
+
+impl Cmd {
+    /// The production pass this command ingests with. `rebuild` starts from an
+    /// empty projection, where a shortcut has nothing to stand on, so it is
+    /// always the full pass.
+    fn pass(&self) -> Pass {
+        match self {
+            Cmd::Metrics { full: true, .. } | Cmd::Rebuild { .. } => Pass::Full,
+            Cmd::Metrics { full: false, .. }
+            | Cmd::Status { .. }
+            | Cmd::Doctor { .. }
+            | Cmd::Eval { .. } => Pass::Incremental,
+        }
+    }
 }
 
 /// Diagnostic logging: structured `tracing` to stderr, opt-in via
@@ -110,11 +130,13 @@ fn main() -> Result<()> {
 }
 
 async fn run(command: Option<Cmd>) -> Result<()> {
-    match command.unwrap_or(Cmd::Status {
+    let command = command.unwrap_or(Cmd::Status {
         repo: PathBuf::from("."),
-    }) {
-        Cmd::Metrics { repo, json } => metrics(&repo, json).await,
-        Cmd::Rebuild { repo } => rebuild(&repo).await,
+    });
+    let pass = command.pass();
+    match command {
+        Cmd::Metrics { repo, json, .. } => metrics(&repo, json, pass).await,
+        Cmd::Rebuild { repo } => rebuild(&repo, pass).await,
         Cmd::Status { repo } => status(&repo).await,
         Cmd::Doctor { repo } => doctor(&repo).await,
         // Dispatched pre-runtime in `main`; unreachable here, kept total on
@@ -187,35 +209,43 @@ pub(crate) fn open_recall_db(db: &Path) -> Result<SqliteStore> {
     rift_store::open_migrated(db, &recall_migrations())
 }
 
-/// The full production ingest pass, shared by `metrics`, `rebuild`, and the
-/// serve path's startup ingest: the ONE shared builder
-/// ([`rift_recall_ledger::production::production_ingest`] — blob-oid map first,
-/// then the incremental graph ingest with the developer axis + token
-/// fallback), followed by outcome-label derivation at the injected `now`.
+/// The production ingest pass, shared by `metrics` and `rebuild`: the ONE
+/// shared builder ([`rift_recall_ledger::production::production_ingest`] —
+/// blob-oid map first, then the incremental graph ingest with the developer
+/// axis + token fallback, then the basis bridge), as the `pass` the command
+/// asked for, followed by outcome-label derivation at the injected `now`.
 pub(crate) async fn ingest_all(
     store: &SqliteStore,
     sub: &GixSubstrate,
     repo: &Path,
     now: Timestamp,
+    pass: Pass,
 ) -> Result<(
     IngestReport,
     outcome::DeriveReport,
     Vec<worktree::WorktreeBlob>,
 )> {
-    let pass = rift_recall_ledger::production::production_ingest(store, sub, repo).await?;
+    let pass = match pass {
+        Pass::Incremental => {
+            rift_recall_ledger::production::production_ingest(store, sub, repo).await?
+        }
+        Pass::Full => {
+            rift_recall_ledger::production::production_ingest_full(store, sub, repo).await?
+        }
+    };
     let labels = outcome::derive_labels(store, sub, now).await?;
     Ok((pass.report, labels, pass.blobs))
 }
 
 /// Ingest the repo's checkpoints into recall.db, then compute + report scoped metrics.
-async fn metrics(repo: &Path, json: bool) -> Result<()> {
+async fn metrics(repo: &Path, json: bool, pass: Pass) -> Result<()> {
     // Resolved once: the family names both the store these numbers come from
     // and the scope they are recorded under.
     let family = family_at(repo)?;
     let sub = GixSubstrate::open(repo)?;
     let db = rift_store::recall_db_for_family(&family);
     let store = open_recall_db(&db)?;
-    let (report, _labels, blobs) = ingest_all(&store, &sub, repo, Timestamp::now()).await?;
+    let (report, _labels, blobs) = ingest_all(&store, &sub, repo, Timestamp::now(), pass).await?;
 
     // worktree hashes for the avoidable-context component (paths the agent
     // read): SHA-256 is the validity comparator; the blob-oid side of the same
@@ -262,7 +292,7 @@ async fn metrics(repo: &Path, json: bool) -> Result<()> {
 ///
 /// The old projection is renamed, never deleted: the rows no checkpoint
 /// carries live only there, and `rift backfill --recall-from` reads them back.
-async fn rebuild(repo: &Path) -> Result<()> {
+async fn rebuild(repo: &Path, pass: Pass) -> Result<()> {
     // The FAMILY's recall projection: run from a linked worktree this rebuilds
     // the one store its members share, which is the whole point of the family model.
     let db = recall_db_path(repo)?;
@@ -273,7 +303,7 @@ async fn rebuild(repo: &Path) -> Result<()> {
     let set_aside = set_aside::set_aside(&guard, now)?;
     let store = rift_store::open_replacement_migrated(guard, &recall_migrations())?;
     let sub = GixSubstrate::open(repo)?;
-    let (report, _labels, _blobs) = ingest_all(&store, &sub, repo, now).await?;
+    let (report, _labels, _blobs) = ingest_all(&store, &sub, repo, now, pass).await?;
     let fingerprint = graph_doctor::rebuild_fingerprint(&store).await?;
     if let Some(set_aside) = set_aside {
         println!("set aside:      {}", set_aside.display());
@@ -442,6 +472,19 @@ mod tests {
     fn cli_parses_rebuild() {
         let cli = Cli::try_parse_from(["rift-memd", "rebuild"]).unwrap();
         assert!(matches!(cli.command, Some(Cmd::Rebuild { .. })));
+    }
+
+    fn pass_of(args: &[&str]) -> Pass {
+        Cli::try_parse_from(args).unwrap().command.unwrap().pass()
+    }
+
+    /// `metrics` takes the incremental pass unless `--full` asks otherwise,
+    /// and `rebuild`, which starts from nothing, is always the full pass.
+    #[test]
+    fn full_asks_for_the_full_pass_and_rebuild_always_takes_it() {
+        assert_eq!(pass_of(&["rift-memd", "metrics"]), Pass::Incremental);
+        assert_eq!(pass_of(&["rift-memd", "metrics", "--full"]), Pass::Full);
+        assert_eq!(pass_of(&["rift-memd", "rebuild"]), Pass::Full);
     }
 
     /// The stored spelling and the printed spelling are two different things,

@@ -448,11 +448,18 @@ not disabled by a flag; it is unrepresentable.
 ChangedHunk 764, Checkpoint 182, FileRead 1633, FileRevision 1079, Session 67,
 ToolCall 1657. Ingest is incremental and idempotent: a watermark
 records the last checkpoint ingested per branch, so re-ingest is a set-union
-no-op. Maintenance verbs live on the projection binary:
+no-op.
+The pass runs before every pull verb, so its warm cost is what an agent pays to ask.
+Two steps dominate it: reading every checkpoint's read facts, and walking history for revisions git does not hold.
+When no checkpoint is new, the facts are not read, because they only shape the rows of checkpoints the ingest writes, and the read paths come from the projection instead.
+A finished walk is recorded as a proof, a watermark row whose id digests `HEAD` and the revisions it left unavailable, and a pass that finds the same proof does not walk again.
+A new read or a moved `HEAD` changes the digest, so the shortcut never answers differently from the full pass.
+`rift-memd metrics --full` and `rebuild` take the full pass, which reads and walks every time.
+Maintenance verbs live on the projection binary:
 
 | Verb | What it does |
 |---|---|
-| `metrics` | ingests the repository's checkpoints, then reports scoped metrics |
+| `metrics` | ingests the repository's checkpoints, then reports scoped metrics (`--full` for the full pass) |
 | `rebuild` | destroys and rebuilds the projection from git — a cold, idempotent ingest |
 | `status` | projection health: node counts by kind, and its location |
 | `doctor` | walks the repository, reporting checkpoints, sessions, shadow refs, parse issues |
