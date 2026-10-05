@@ -19,8 +19,9 @@
     clippy::panic
 )]
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 mod common;
 use common::rift_cmd;
@@ -558,4 +559,67 @@ fn session_verbs_label_both_arms(f: &Family, named_session: &str, old_session: &
     assert_eq!(info["worktree_history"][0]["basis"], "attach", "{info}");
     let show = rift_json(f, &f.member, &["session", "show", old_session]);
     assert_eq!(show["worktree"], serde_json::Value::Null, "{show}");
+}
+
+/// Drive one real Claude Code hook from `cwd` with `payload` on stdin.
+fn claude_hook(f: &Family, cwd: &Path, verb: &str, payload: &serde_json::Value) {
+    let mut child = rift_cmd(cwd)
+        .args(["hooks", "claude-code", verb])
+        .env("RIFT_CACHE_DIR", &f.cache)
+        .env("RIFT_CONFIG_DIR", f.main.join(".rift-conf"))
+        .env("RIFT_CAPTURE_SYNC", "1")
+        .env("RIFT_NO_KEYCHAIN", "1")
+        .env("RIFT_HEADLESS", "1")
+        .env("HOME", &f.home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert!(
+        child.wait().unwrap().success(),
+        "a hook never fails the agent"
+    );
+}
+
+/// ★ An agent sitting in the main checkout that reads a member's file through
+/// `cd <member> && sed …` read in the member, and every surface that names a
+/// session's checkout says so: the session's current worktree, its history
+/// with the basis that decided it, and the member's own observations.
+#[test]
+fn a_read_after_cd_into_a_member_is_the_members_on_every_surface() {
+    let f = family();
+    let main = f.main.display().to_string();
+    let start = serde_json::json!({
+        "session_id": "cd-1", "cwd": main, "hook_event_name": "SessionStart",
+    });
+    claude_hook(&f, &f.main, "SessionStart", &start);
+    let read = serde_json::json!({
+        "session_id": "cd-1", "cwd": main, "hook_event_name": "PostToolUse",
+        "tool_name": "Bash", "tool_use_id": "t-1",
+        "tool_input": { "command": format!("cd {} && sed -n '1,2p' a.txt", f.member.display()) },
+        "tool_response": { "stdout": "one\ntwo\n" },
+    });
+    claude_hook(&f, &f.main, "PostToolUse", &read);
+
+    let info = rift_json(&f, &f.main, &["session", "info", "cd-1"]);
+    assert_eq!(info["worktree"], "member", "{info}");
+    let history = info["worktree_history"].as_array().unwrap();
+    assert_eq!(history.first().unwrap()["name"], "main", "{info}");
+    assert_eq!(history.last().unwrap()["basis"], "shell_cd", "{info}");
+
+    let status = rift_json(&f, &f.member, &["worktree", "status"]);
+    let bases: Vec<&str> = status["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|o| o["basis"].as_str())
+        .collect();
+    assert_eq!(bases, ["shell_cd"], "{status}");
 }

@@ -367,6 +367,23 @@ CREATE TABLE session_worktree (
   PRIMARY KEY (observation_id)
 ) STRICT
 
+-- table session_worktree_cd
+CREATE TABLE session_worktree_cd (
+  observation_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  worktree_token TEXT NOT NULL,
+  worktree_name TEXT NOT NULL,
+  is_linked INTEGER NOT NULL,
+  work_tree TEXT NOT NULL,
+  branch TEXT,
+  head_oid TEXT,
+  subagent_id TEXT,
+  basis TEXT NOT NULL CHECK (basis IN ('payload_cwd', 'workspace_path', 'process_cwd', 'commit', 'attach', 'import', 'shell_cd')),
+  first_observed_at INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (observation_id)
+) STRICT
+
 -- table shadow_branch
 CREATE TABLE shadow_branch (
   shadow_branch_id TEXT NOT NULL,
@@ -717,6 +734,12 @@ CREATE TRIGGER session_transition_no_delete BEFORE DELETE ON session_transition 
 
 -- trigger session_transition_no_update
 CREATE TRIGGER session_transition_no_update BEFORE UPDATE ON session_transition BEGIN SELECT RAISE(ABORT, 'rift: session_transition is append-only (UPDATE forbidden)'); END
+
+-- trigger session_worktree_cd_no_delete
+CREATE TRIGGER session_worktree_cd_no_delete BEFORE DELETE ON session_worktree_cd BEGIN SELECT RAISE(ABORT, 'rift: session_worktree_cd is append-only (DELETE forbidden)'); END
+
+-- trigger session_worktree_cd_no_update
+CREATE TRIGGER session_worktree_cd_no_update BEFORE UPDATE ON session_worktree_cd BEGIN SELECT RAISE(ABORT, 'rift: session_worktree_cd is append-only (UPDATE forbidden)'); END
 
 -- trigger session_worktree_no_delete
 CREATE TRIGGER session_worktree_no_delete BEFORE DELETE ON session_worktree BEGIN SELECT RAISE(ABORT, 'rift: session_worktree is append-only (DELETE forbidden)'); END

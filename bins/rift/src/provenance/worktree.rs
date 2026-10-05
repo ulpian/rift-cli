@@ -41,7 +41,8 @@ pub(crate) struct WorktreeObservation {
     pub(crate) linked: bool,
     /// `HEAD`'s branch at the observation; `None` for detached or unreadable.
     pub(crate) branch: Option<Label>,
-    /// Where the observation came from (`rift_store::schema::SESSION_WORKTREE_BASES`).
+    /// Where the observation came from (`rift_store::schema::SESSION_WORKTREE_BASES`,
+    /// or `shell_cd`).
     pub(crate) basis: Label,
     /// Epoch milliseconds of the first insert of this state.
     pub(crate) first_observed_at: i64,
@@ -175,16 +176,21 @@ pub(crate) async fn session_worktree(store: &SqliteStore, row_id: &str) -> Optio
 ///
 /// Ordered by `first_observed_at` then `observation_id`, which is the same
 /// total order the writer's own tests read the relation in, so two runs cannot
-/// disagree about which observation is current.
+/// disagree about which observation is current. Read from both observation
+/// relations, so a read a leading `cd` filed under another member is part of
+/// the history like any other.
 pub(crate) async fn session_worktree_history(
     store: &SqliteStore,
     row_id: &str,
 ) -> Vec<WorktreeObservation> {
+    let relation = rift_store::SessionWorktreeRow::relation(store).await;
     let Ok(rows) = store
         .query(
-            "SELECT worktree_name, worktree_token, is_linked, branch, basis, first_observed_at \
-             FROM session_worktree WHERE session_id = ? \
-             ORDER BY first_observed_at, observation_id",
+            &format!(
+                "SELECT worktree_name, worktree_token, is_linked, branch, basis, first_observed_at \
+                 FROM {relation} WHERE session_id = ? \
+                 ORDER BY first_observed_at, observation_id"
+            ),
             &[Value::text(row_id.to_owned())],
         )
         .await
@@ -375,5 +381,67 @@ mod tests {
             spread_text(&["main".to_owned(), "swt-d".to_owned()]),
             "main, swt-d"
         );
+    }
+
+    /// ★ A read a leading `cd` filed under another member is part of the
+    /// session's history, in order with the rest, and becomes its current
+    /// worktree; a projection opened before that relation existed still reads
+    /// every observation it has.
+    #[test]
+    fn a_cd_filed_observation_joins_the_history_in_order() {
+        let (_dir, store, rt, _labelled) = worktree_fixture();
+        observe(&store, &rt, "s1", "main", Some("main"), 1_000);
+        let mut filed = rift_store::SessionWorktreeRow {
+            observation_id: "cd-1".to_owned(),
+            session_id: "s1".to_owned(),
+            worktree_token: "112233445566".to_owned(),
+            worktree_name: "swt-d".to_owned(),
+            is_linked: 1,
+            work_tree: "/tmp/swt-d".to_owned(),
+            branch: None,
+            head_oid: None,
+            subagent_id: None,
+            basis: "shell_cd".to_owned(),
+            first_observed_at: 2_000,
+            schema_version: 1,
+        };
+        assert!(rt
+            .block_on(rift_store::record_session_worktree(&store, &filed))
+            .expect("session_worktree_cd row"));
+        filed.observation_id = "cd-0".to_owned();
+        filed.first_observed_at = 500;
+        filed.worktree_name = "swt-a".to_owned();
+        assert!(rt
+            .block_on(rift_store::record_session_worktree(&store, &filed))
+            .expect("an earlier session_worktree_cd row"));
+
+        let history = rt.block_on(session_worktree_history(&store, "s1"));
+        let seen: Vec<(String, String)> = history
+            .iter()
+            .map(|o| (o.name.to_string(), o.basis.to_string()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("swt-a".to_owned(), "shell_cd".to_owned()),
+                ("main".to_owned(), "payload_cwd".to_owned()),
+                ("swt-d".to_owned(), "shell_cd".to_owned()),
+            ],
+            "both relations, ordered by first observation"
+        );
+        let current = rt.block_on(session_worktree(&store, "s1"));
+        assert_eq!(worktree_label(current.as_ref()), "swt-d");
+
+        rt.block_on(async {
+            let conn = rift_store::Store::conn(&store).await?;
+            conn.execute("DROP TABLE session_worktree_cd", &[]).await
+        })
+        .expect("drop the v17 relation");
+        let names: Vec<String> = rt
+            .block_on(session_worktree_history(&store, "s1"))
+            .iter()
+            .map(|o| o.name.to_string())
+            .collect();
+        assert_eq!(names, ["main"], "the older relation alone still reads");
     }
 }

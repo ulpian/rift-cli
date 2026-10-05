@@ -340,8 +340,9 @@ fn wiring_notes(member: &Path) -> Vec<String> {
     out
 }
 
-/// Every `session_worktree` observation recorded in one member, oldest first:
-/// `(session_id, basis, first_observed_at)`.
+/// Every session worktree observation recorded in one member, from both
+/// observation relations, oldest first: `(session_id, basis,
+/// first_observed_at)`.
 ///
 /// Total, on [`last_captures`]'s rule: no projection, no relation, or an
 /// unreadable one is an empty history rather than a failed verb.
@@ -353,9 +354,12 @@ fn member_observations(root: &Path, token: &str) -> Vec<(String, String, i64)> {
     let Ok(store) = rift_store::SqliteStore::open_read_only(&db) else {
         return Vec::new();
     };
+    let relation = rt.block_on(rift_store::SessionWorktreeRow::relation(&store));
     let Ok(rows) = rt.block_on(store.query(
-        "SELECT session_id, basis, first_observed_at FROM session_worktree \
-         WHERE worktree_token = ? ORDER BY first_observed_at, observation_id",
+        &format!(
+            "SELECT session_id, basis, first_observed_at FROM {relation} \
+             WHERE worktree_token = ? ORDER BY first_observed_at, observation_id"
+        ),
         &[rift_store::Value::text(token.to_owned())],
     )) else {
         return Vec::new();

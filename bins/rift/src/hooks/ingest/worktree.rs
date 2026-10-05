@@ -9,8 +9,14 @@ use std::path::Path;
 
 use rift_core::Result;
 
+use super::owed::search_result_args;
 use super::CapturedHook;
 use crate::hooks::now_ms;
+
+/// The `basis` word of an observation a recognised shell read's leading `cd`
+/// decided — the one word `session_worktree_cd` admits that
+/// `session_worktree` cannot.
+const SHELL_CD_BASIS: &str = "shell_cd";
 
 /// The worktree-provenance step of one agent hook: read the
 /// payload's own facts through the adapter that mapped this hook, and record
@@ -21,24 +27,47 @@ use crate::hooks::now_ms;
 /// reason to fail an agent's hook, and the timer keeps its phase either way so
 /// the budget instrument sees what this step cost.
 pub(super) fn observe_hook_worktree(run: &CapturedHook<'_>, owner: &str) {
-    let raw = run.raw;
     let _ = run.t.phase("observe_worktree", || {
-        let facts = run
-            .registry
-            .get(&raw.agent)
-            .map(|adapter| adapter.facts(&raw.verb, &raw.payload))
-            .unwrap_or_default();
-        observe_worktree(
-            run.rt,
-            run.store,
-            run.repo,
-            facts.cwd.as_ref(),
-            &raw.session,
-            &rift_shadow::ids::session_row_id(owner, &raw.session),
-            facts.child_session.as_deref(),
-            now_ms(),
-        )
+        observe_payload_worktree(run, owner, now_ms())
     });
+}
+
+/// The observation one hook's payload implies, at `now`: its directory, and
+/// the shell command it carries when it carries one.
+fn observe_payload_worktree(run: &CapturedHook<'_>, owner: &str, now: i64) -> Result<bool> {
+    let raw = run.raw;
+    let facts = run
+        .registry
+        .get(&raw.agent)
+        .map(|adapter| adapter.facts(&raw.verb, &raw.payload))
+        .unwrap_or_default();
+    observe_worktree(
+        run.rt,
+        run.store,
+        run.repo,
+        facts.cwd.as_ref(),
+        shell_command(raw, &facts),
+        &raw.session,
+        &rift_shadow::ids::session_row_id(owner, &raw.session),
+        facts.child_session.as_deref(),
+        now,
+    )
+}
+
+/// The command line of a shell call, read through the family's pinned
+/// tool-field row; `None` for every call that is not a shell call.
+fn shell_command<'a>(
+    raw: &'a rift_shadow::hooks::RawHook,
+    facts: &rift_agent::HookFacts,
+) -> Option<&'a str> {
+    let tool = facts.tool_name.as_deref()?;
+    let row = rift_agent::tool_fields::tool_field_row(&raw.agent, tool)?;
+    if row.shape != rift_agent::tool_fields::ToolShape::Shell {
+        return None;
+    }
+    search_result_args(row, &raw.payload)?
+        .get(row.fact("command").unwrap_or("command"))?
+        .as_str()
 }
 
 /// Record the `session_worktree` observation this hook implies, when it is a
@@ -65,6 +94,7 @@ pub(in crate::hooks) fn observe_worktree(
     store: &rift_store::SqliteStore,
     repo: &rift_git::RepoPaths,
     cwd: Option<&rift_agent::CwdFact>,
+    command: Option<&str>,
     native_session: &str,
     session_row_id: &str,
     subagent_id: Option<&str>,
@@ -72,7 +102,7 @@ pub(in crate::hooks) fn observe_worktree(
 ) -> Result<bool> {
     use rift_shadow::hooks::session_cache;
 
-    let (observed, basis) = observed_worktree(repo, cwd);
+    let (observed, basis) = observed_worktree(repo, cwd, command);
     let head = rift_git::head_state(&observed);
     let seen = rift_shadow::hooks::WorktreeObservation {
         token: observed.worktree_token(),
@@ -96,14 +126,15 @@ pub(in crate::hooks) fn observe_worktree(
         return Ok(false);
     }
 
+    let state_id = rift_shadow::ids::session_worktree_observation_id(
+        session_row_id,
+        &seen.token,
+        seen.branch.as_deref(),
+        seen.head.as_deref(),
+        seen.subagent.as_deref(),
+    );
     let row = rift_store::SessionWorktreeRow {
-        observation_id: rift_shadow::ids::session_worktree_observation_id(
-            session_row_id,
-            &seen.token,
-            seen.branch.as_deref(),
-            seen.head.as_deref(),
-            seen.subagent.as_deref(),
-        ),
+        observation_id: observation_id(&state_id, basis),
         session_id: session_row_id.to_owned(),
         worktree_token: seen.token.clone(),
         worktree_name: seen.name.clone(),
@@ -132,7 +163,7 @@ pub(in crate::hooks) fn observe_worktree(
 }
 
 /// Which checkout the observation names, and the `basis` token that says how it
-/// was decided (`rift_store::schema::SESSION_WORKTREE_BASES`).
+/// was decided (`rift_store::schema::SESSION_WORKTREE_BASES`, or `shell_cd`).
 ///
 /// The payload's directory wins when the adapter carries one — it is the agent
 /// speaking about itself, while the hook process's cwd is wherever the shell
@@ -141,22 +172,89 @@ pub(in crate::hooks) fn observe_worktree(
 /// none at all) falls back to the discovered capture repo with `process_cwd`,
 /// because filing one family's session under another family's worktree is the
 /// misattributed credit the provenance rules forbid, and a basis token that
-/// lied about where the value
-/// came from would hide it.
+/// lied about where the value came from would hide it.
+///
+/// One thing outranks the payload's directory: a shell read the grammar
+/// recognises whose leading `cd` lands in a *different* member of the same
+/// family. The payload says where the agent's shell sat, and the `cd` says
+/// where it read; the read is the member's, so the observation is too.
 fn observed_worktree(
     repo: &rift_git::RepoPaths,
     cwd: Option<&rift_agent::CwdFact>,
+    command: Option<&str>,
 ) -> (rift_git::RepoPaths, &'static str) {
-    let claimed = cwd
-        .and_then(|fact| {
-            rift_git::discover(Path::new(&fact.path))
-                .ok()
-                .map(|found| (found, fact.source.as_str()))
-        })
-        .filter(|(found, _)| {
-            canonical_display(&found.common_dir) == canonical_display(&repo.common_dir)
-        });
-    claimed.unwrap_or_else(|| (repo.clone(), "process_cwd"))
+    let claimed = payload_worktree(repo, cwd).unwrap_or_else(|| (repo.clone(), "process_cwd"));
+    let Some(member) = shell_cd_member(repo, cwd, command) else {
+        return claimed;
+    };
+    if canonical_display(&member.work_tree) == canonical_display(&claimed.0.work_tree) {
+        return claimed;
+    }
+    (member, SHELL_CD_BASIS)
+}
+
+/// The checkout the payload's own directory names, when it is one of this
+/// family's.
+fn payload_worktree(
+    repo: &rift_git::RepoPaths,
+    cwd: Option<&rift_agent::CwdFact>,
+) -> Option<(rift_git::RepoPaths, &'static str)> {
+    let fact = cwd?;
+    let found = rift_git::discover(Path::new(&fact.path)).ok()?;
+    if !same_family(&found, repo) {
+        return None;
+    }
+    Some((found, fact.source.as_str()))
+}
+
+/// The member of this family a recognised shell read's leading `cd` moved to.
+///
+/// A relative directory is read from the payload's directory, the only place
+/// the agent's shell is known to have stood; with no payload directory it
+/// names nothing, because the hook process's own directory is not the
+/// shell's. The target is canonicalised before discovery, so a symlink or a
+/// `..` names the member it resolves to and the worktree token is the one
+/// the member's own path gives.
+fn shell_cd_member(
+    repo: &rift_git::RepoPaths,
+    cwd: Option<&rift_agent::CwdFact>,
+    command: Option<&str>,
+) -> Option<rift_git::RepoPaths> {
+    let dir = rift_agent::shell_read::leading_cd(command?)?;
+    let dir = Path::new(&dir);
+    let target = match cwd {
+        Some(fact) => Path::new(&fact.path).join(dir),
+        None if dir.is_absolute() => dir.to_path_buf(),
+        None => return None,
+    };
+    let found = rift_git::discover(&std::fs::canonicalize(target).ok()?).ok()?;
+    if !same_family(&found, repo) {
+        return None;
+    }
+    Some(found)
+}
+
+/// Whether two checkouts share one git common dir — one family.
+fn same_family(found: &rift_git::RepoPaths, repo: &rift_git::RepoPaths) -> bool {
+    canonical_display(&found.common_dir) == canonical_display(&repo.common_dir)
+}
+
+/// The id of an observation: the state's own id, as every writer derives it,
+/// for a basis `session_worktree` admits; for `shell_cd`, a second address
+/// over that id and the basis under its own domain tag, so a row of
+/// `session_worktree_cd` can never share an id with a row of the older
+/// relation.
+fn observation_id(state_id: &str, basis: &str) -> String {
+    if basis != SHELL_CD_BASIS {
+        return state_id.to_owned();
+    }
+    rift_shadow::sha256_hex(&[
+        b"session_worktree_cd\0",
+        state_id.as_bytes(),
+        b"\0",
+        basis.as_bytes(),
+        b"\0",
+    ])
 }
 
 /// A path as an address: canonical where the filesystem can say so, verbatim
@@ -215,5 +313,150 @@ pub(in crate::hooks) fn worktree_read_hasher(
             content_sha256: blob.content_sha256,
             tokens: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod shell_cd_tests {
+    use std::path::Path;
+
+    use rift_shadow::hooks::{AdapterRegistry, RawHook};
+    use rift_store::CanonicalStore as _;
+
+    use super::*;
+    use crate::hooks::capture_repo;
+    use crate::hooks::tests::{projection_in, repo_with_linked_worktree, seed_cache};
+
+    /// A Claude Code shell call, after the fact, as its hook payload spells
+    /// one: the agent sat in `cwd` and ran `command`.
+    fn shell_hook(cwd: &Path, command: &str) -> RawHook {
+        RawHook {
+            agent: rift_core::AgentId::new("claude-code"),
+            verb: "PostToolUse".to_owned(),
+            session: "s-cd".to_owned(),
+            turn: Some(1),
+            occurred_at_ms: 1_000,
+            payload: serde_json::json!({
+                "session_id": "s-cd",
+                "cwd": cwd.display().to_string(),
+                "tool_name": "Bash",
+                "tool_input": { "command": command },
+            }),
+        }
+    }
+
+    /// Run the hook's observation step from the main checkout, as the
+    /// ingest runs it, and return what the session was filed under:
+    /// `(worktree_name, basis)` for every observation, oldest first.
+    fn observed_from_main(main: &Path, tmp: &Path, command: &str) -> Vec<(String, String)> {
+        let repo = capture_repo(main).unwrap();
+        let (store, rt) = projection_in(tmp);
+        seed_cache(&repo.git_dir, "s-cd");
+        let raw = shell_hook(main, command);
+        let timer = crate::hooktime::HookTimer::new("agent-hook", false);
+        let registry = AdapterRegistry::with_builtin();
+        let run = CapturedHook {
+            t: &timer,
+            rt: &rt,
+            store: &store,
+            repo: &repo,
+            registry: &registry,
+            raw: &raw,
+            repo_id: "repo",
+        };
+        assert!(observe_payload_worktree(&run, "claude-code", 10).unwrap());
+        let relation = rt.block_on(rift_store::SessionWorktreeRow::relation(&store));
+        rt.block_on(store.query(
+            &format!(
+                "SELECT worktree_name, basis FROM {relation} \
+                 ORDER BY first_observed_at, observation_id"
+            ),
+            &[],
+        ))
+        .unwrap()
+        .iter()
+        .map(|r| (r.get_text(0).unwrap(), r.get_text(1).unwrap()))
+        .collect()
+    }
+
+    fn filed(name: &str, basis: &str) -> Vec<(String, String)> {
+        vec![(name.to_owned(), basis.to_owned())]
+    }
+
+    /// The agent sat in main and read a file of the member: the read is
+    /// filed under the member, and the basis says a `cd` decided it.
+    #[test]
+    fn a_read_after_cd_into_a_member_is_filed_under_the_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, linked) = repo_with_linked_worktree(tmp.path());
+        let command = format!("cd {} && sed -n '1,40p' src/a.rs", linked.display());
+        assert_eq!(
+            observed_from_main(&main, tmp.path(), &command),
+            filed("linked", "shell_cd")
+        );
+    }
+
+    /// A `cd` into another repository is never followed: that family's
+    /// checkout is not this family's member.
+    #[test]
+    fn a_cd_into_an_unrelated_repository_keeps_the_payload_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, _linked) = repo_with_linked_worktree(tmp.path());
+        let stranger = tmp.path().join("stranger");
+        rift_git::test_support::fake_repo(&stranger).unwrap();
+        let command = format!("cd {} && sed -n '1,40p' src/a.rs", stranger.display());
+        assert_eq!(
+            observed_from_main(&main, tmp.path(), &command),
+            filed("main", "payload_cwd")
+        );
+    }
+
+    /// A command the grammar does not read moves nothing, `cd` or not.
+    #[test]
+    fn an_unrecognised_command_keeps_the_payload_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, linked) = repo_with_linked_worktree(tmp.path());
+        let command = format!("cd {} && cargo test", linked.display());
+        assert_eq!(
+            observed_from_main(&main, tmp.path(), &command),
+            filed("main", "payload_cwd")
+        );
+    }
+
+    /// A relative `cd` is read from the directory the payload says the agent
+    /// sat in.
+    #[test]
+    fn a_relative_cd_resolves_against_the_payload_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, _linked) = repo_with_linked_worktree(tmp.path());
+        assert_eq!(
+            observed_from_main(&main, tmp.path(), "cd ../linked && cat a.txt"),
+            filed("linked", "shell_cd")
+        );
+    }
+
+    /// A symlink into the member is the member: the target is canonicalised
+    /// before the family is asked about it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_cd_target_canonicalises_to_the_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, linked) = repo_with_linked_worktree(tmp.path());
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&linked, &alias).unwrap();
+        let command = format!("cd {} && head -n 5 a.txt", alias.display());
+        assert_eq!(
+            observed_from_main(&main, tmp.path(), &command),
+            filed("linked", "shell_cd")
+        );
+    }
+
+    /// The new word goes to the relation that admits it, and its id is not
+    /// the bare state id the older relation would have used.
+    #[test]
+    fn a_cd_observation_id_covers_its_basis() {
+        assert_eq!(observation_id("abc", "payload_cwd"), "abc");
+        assert_ne!(observation_id("abc", SHELL_CD_BASIS), "abc");
+        assert!(!rift_store::schema::SESSION_WORKTREE_BASES.contains(&SHELL_CD_BASIS));
     }
 }

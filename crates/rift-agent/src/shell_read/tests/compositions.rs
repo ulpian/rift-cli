@@ -1,7 +1,7 @@
 //! The three compositions above the vocabulary — a leading `cd`, a trailing
 //! narrowing pipe, a chain of reads — and the reads each one derives.
 
-use crate::shell_read::{recognise, Narrowing, ShellCall, ShellSpan, MAX_CHAIN_READS};
+use crate::shell_read::{leading_cd, recognise, Narrowing, ShellCall, ShellSpan, MAX_CHAIN_READS};
 use crate::{HiKind, ReadSpan};
 
 use super::shell_read_oracle::names_a_word;
@@ -397,5 +397,33 @@ fn quoted_operators_in_a_pattern_witness_no_target() {
         for invented in ["invented/a.rs", "x", "y", "z", "&&", ";", "|"] {
             assert!(!names_a_word(invented, command), "{invented:?}");
         }
+    }
+}
+
+/// **The directory a leading `cd` moved to is answered only for a line the
+/// grammar reads.** It is spelled exactly as written, quoted or relative, and
+/// a label in front of the `cd` does not hide it; a line the grammar leaves
+/// alone, or one with no `cd`, names no directory at all.
+#[test]
+fn a_leading_cd_is_named_only_on_a_recognised_line() {
+    for (command, expected) in [
+        ("cd /w/member && sed -n '1,40p' src/a.rs", "/w/member"),
+        ("cd ../x && cat a.rs", "../x"),
+        ("cd '/w/a b' && ls src", "/w/a b"),
+        ("echo one && cd /w/member && cat a.rs", "/w/member"),
+    ] {
+        assert_eq!(
+            leading_cd(command).as_deref(),
+            Some(expected),
+            "{command:?}"
+        );
+    }
+    for command in [
+        "cd /w/member && cargo test",
+        "cd /w/member",
+        "sed -n '1,40p' src/a.rs",
+        "cat a.rs && cd /w/member && cat b.rs",
+    ] {
+        assert_eq!(leading_cd(command), None, "{command:?}");
     }
 }

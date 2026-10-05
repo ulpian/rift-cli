@@ -351,6 +351,8 @@ directory in another repository falls back to the discovered repository with
 `process_cwd`: filing one family's session under another family's worktree is
 exactly the mis-credit the per-checkout discriminator forbids, and a basis token
 that lied about where the value came from would hide it.
+One thing outranks the payload's directory: a shell read the grammar recognises whose leading `cd` lands in a different member of the same family is filed under that member with the basis `shell_cd`, because the payload says where the agent's shell sat and the `cd` says where it read.
+Those observations live in a second relation, `session_worktree_cd`, whose CHECK admits the old vocabulary plus `shell_cd` — a CHECK changes only by rebuilding its table, so the wider vocabulary is a new table — and every reader reads the union of the two.
 
 Every agent hook observes; the ingest keeps the last seen triple in the session
 cache and skips the insert when unchanged, so the hot path pays one comparison.

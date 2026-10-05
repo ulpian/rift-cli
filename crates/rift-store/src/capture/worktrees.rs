@@ -5,16 +5,19 @@ use rift_core::Result;
 
 use crate::{CanonicalStore, Value};
 
-/// A `session_worktree` row: one OBSERVATION of the worktree a session was
-/// seen in.
+/// A session worktree observation: one OBSERVATION of the worktree a session
+/// was seen in, stored in `session_worktree` or, under a basis that relation's
+/// CHECK cannot admit, in `session_worktree_cd`.
 ///
 /// Append-only and content-addressed over the observed state, so a session's
 /// history is the ordered set of its rows and nothing is ever updated. The
 /// caller derives `observation_id`
 /// (`rift_shadow::ids::session_worktree_observation_id`) — as every other
-/// content-addressed row here does — and screens `basis` against
-/// [`crate::schema::SESSION_WORKTREE_BASES`] before this DAO sees it (the CHECK
-/// constraint refuses anything else regardless).
+/// content-addressed row here does — and screens `basis` against the closed
+/// vocabularies before this DAO sees it (the CHECK constraints refuse anything
+/// else regardless). An observation filed in `session_worktree_cd` carries an
+/// id that also covers its basis, so it never shares an id with a row of the
+/// older relation.
 #[derive(Debug, Clone)]
 pub struct SessionWorktreeRow {
     /// Content-addressed over `(session, token, branch, head, subagent)`.
@@ -39,7 +42,7 @@ pub struct SessionWorktreeRow {
     /// carries inside a subagent.
     pub subagent_id: Option<String>,
     /// Where the observed directory came from — one of
-    /// [`crate::schema::SESSION_WORKTREE_BASES`].
+    /// [`crate::schema::SESSION_WORKTREE_BASES`], or `shell_cd`.
     pub basis: String,
     /// Epoch ms of the FIRST insert. A repeat observation keeps this value,
     /// because the id dedups before the timestamp is ever compared — which is
@@ -49,11 +52,44 @@ pub struct SessionWorktreeRow {
     pub schema_version: i64,
 }
 
-/// Record a `session_worktree` observation (insert-only, idempotent on the
+/// Both observation relations as one, for a reader on a projection that has
+/// the second. Same columns in the same order, so `SELECT *` lines them up.
+const BOTH_OBSERVATION_RELATIONS: &str =
+    "(SELECT * FROM session_worktree UNION ALL SELECT * FROM session_worktree_cd)";
+
+impl SessionWorktreeRow {
+    /// The relation every reader of session observations selects from: the
+    /// union of `session_worktree` and `session_worktree_cd`, or the first
+    /// alone on a projection opened before the second existed.
+    ///
+    /// One answer for every reader, because a reader that forgot the second
+    /// relation would file a `cd`-decided read under the payload's checkout
+    /// again, silently. The fallback keeps every reader working on a
+    /// projection a read-only open never migrates; a reader orders the union
+    /// exactly as it ordered the one table.
+    pub async fn relation(store: &impl CanonicalStore) -> &'static str {
+        let probe = store
+            .query(
+                "SELECT 1 FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'session_worktree_cd'",
+                &[],
+            )
+            .await;
+        match probe {
+            Ok(rows) if !rows.is_empty() => BOTH_OBSERVATION_RELATIONS,
+            _ => "session_worktree",
+        }
+    }
+}
+
+/// Record a session worktree observation (insert-only, idempotent on the
 /// state's own id): `true` when this state had not been observed before.
 ///
-/// `basis` must be one of [`crate::schema::SESSION_WORKTREE_BASES`]. The CHECK
-/// constraint enforces that, and — because this is `INSERT OR IGNORE`, which
+/// A basis in [`crate::schema::SESSION_WORKTREE_BASES`] goes to
+/// `session_worktree`, as it always has; any other goes to
+/// `session_worktree_cd`, whose CHECK admits that vocabulary plus `shell_cd`.
+/// One observation is written to one relation, never both. The CHECK
+/// constraints enforce the vocabulary, and — because this is `INSERT OR IGNORE`, which
 /// SQLite applies to CHECK violations as well as to key conflicts — an unknown
 /// token DROPS THE ROW and returns `false` rather than raising. Said plainly
 /// rather than left to be discovered: every caller in this workspace passes a
@@ -67,9 +103,14 @@ pub async fn record_session_worktree(
     store: &impl CanonicalStore,
     r: &SessionWorktreeRow,
 ) -> Result<bool> {
+    let table = if crate::schema::SESSION_WORKTREE_BASES.contains(&r.basis.as_str()) {
+        "session_worktree"
+    } else {
+        "session_worktree_cd"
+    };
     store
         .insert_or_ignore(
-            "session_worktree",
+            table,
             &[
                 "observation_id",
                 "session_id",
@@ -281,5 +322,115 @@ mod tests {
         assert_eq!(kept[0].get_text(0).unwrap(), "lane-a");
         assert_eq!(kept[0].get_i64(1).unwrap(), 1);
         assert_eq!(kept[0].get_opt_text(2).unwrap().as_deref(), Some("wt/a"));
+    }
+}
+
+#[cfg(test)]
+mod worktree_cd_tests {
+    use super::*;
+    use crate::capture::fixtures::store;
+
+    fn observation(id: &str, basis: &str, at: i64) -> SessionWorktreeRow {
+        SessionWorktreeRow {
+            observation_id: id.into(),
+            session_id: "sess".into(),
+            worktree_token: "0123456789ab".into(),
+            worktree_name: format!("{basis}-member"),
+            is_linked: 1,
+            work_tree: "/w/member".into(),
+            branch: None,
+            head_oid: None,
+            subagent_id: None,
+            basis: basis.into(),
+            first_observed_at: at,
+            schema_version: 1,
+        }
+    }
+
+    /// Every observation of one session, in the order a reader takes them.
+    async fn names_in_order(s: &impl CanonicalStore) -> Vec<String> {
+        let relation = SessionWorktreeRow::relation(s).await;
+        s.query(
+            &format!(
+                "SELECT worktree_name FROM {relation} WHERE session_id = 'sess' \
+                 ORDER BY first_observed_at, observation_id"
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get_text(0).unwrap())
+        .collect()
+    }
+
+    /// A `shell_cd` observation lands in the new relation and only there; an
+    /// old word lands in the old relation and only there.
+    #[tokio::test]
+    async fn each_observation_lands_in_exactly_one_relation() {
+        let s = store();
+        assert!(
+            record_session_worktree(&s, &observation("o1", "payload_cwd", 10))
+                .await
+                .unwrap()
+        );
+        assert!(
+            record_session_worktree(&s, &observation("o2", "shell_cd", 20))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !record_session_worktree(&s, &observation("o2", "shell_cd", 30))
+                .await
+                .unwrap()
+        );
+        assert_eq!(s.count("session_worktree").await.unwrap(), 1);
+        assert_eq!(s.count("session_worktree_cd").await.unwrap(), 1);
+    }
+
+    /// An unknown word still writes nothing anywhere: the new relation's
+    /// CHECK refuses it exactly as the old one did.
+    #[tokio::test]
+    async fn an_unknown_basis_lands_in_neither_relation() {
+        let s = store();
+        assert!(
+            !record_session_worktree(&s, &observation("o3", "guessed", 10))
+                .await
+                .unwrap()
+        );
+        assert_eq!(s.count("session_worktree").await.unwrap(), 0);
+        assert_eq!(s.count("session_worktree_cd").await.unwrap(), 0);
+    }
+
+    /// The reader's relation is the union, ordered by first observation, and
+    /// on a projection without the new relation it is the old one alone.
+    #[tokio::test]
+    async fn the_reader_relation_is_the_ordered_union_and_falls_back_without_it() {
+        let s = store();
+        for (id, basis, at) in [
+            ("o1", "payload_cwd", 30),
+            ("o2", "shell_cd", 20),
+            ("o3", "process_cwd", 10),
+        ] {
+            assert!(record_session_worktree(&s, &observation(id, basis, at))
+                .await
+                .unwrap());
+        }
+        assert_eq!(
+            names_in_order(&s).await,
+            [
+                "process_cwd-member",
+                "shell_cd-member",
+                "payload_cwd-member"
+            ]
+        );
+
+        s.with_conn(|conn| conn.execute_batch("DROP TABLE session_worktree_cd"))
+            .unwrap();
+        assert_eq!(SessionWorktreeRow::relation(&s).await, "session_worktree");
+        assert_eq!(
+            names_in_order(&s).await,
+            ["process_cwd-member", "payload_cwd-member"]
+        );
     }
 }

@@ -816,6 +816,22 @@ const TABLES: &[CanonicalTable] = &[
         primary_key: &["tool_result_id"],
         unique: NO_UNIQUE,
     },
+    // --- capture v17 additive (observations a leading `cd` decided) ----------
+    // The same observation as `session_worktree`, under a basis that table's
+    // CHECK cannot admit: a read whose leading `cd` named another member of
+    // the family is filed under that member, because the payload's directory
+    // is where the agent's shell sat, not where it read. A CHECK changes only
+    // by rebuilding its table, and a migration may not DROP or RENAME — the
+    // guards that make the ledger append-only make its SHAPE append-only too —
+    // so the wider vocabulary is a NEW relation beside the old one, never a
+    // widened copy of it. Every reader reads the union of the two. Like its
+    // twin it is projection-only: `work_tree` is a local address.
+    CanonicalTable {
+        name: "session_worktree_cd",
+        columns: SESSION_WORKTREE_CD_COLUMNS,
+        primary_key: &["observation_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// Columns for the v11 `checkpoint_commit` linkage.
@@ -912,6 +928,45 @@ pub const SESSION_WORKTREE_BASES: &[&str] = &[
     "commit",
     "attach",
     "import",
+];
+
+/// Columns for the v17 `session_worktree_cd` relation: exactly
+/// [`SESSION_WORKTREE_COLUMNS`] but for the `basis` CHECK, which admits
+/// [`SESSION_WORKTREE_CD_BASES`].
+///
+/// The same columns in the same order, so a reader can take the union of the
+/// two relations with one `SELECT *` apiece and order it as it always has.
+const SESSION_WORKTREE_CD_COLUMNS: &[Column] = &[
+    Column::text("observation_id"), // content-addressed over the state AND the basis
+    Column::text("session_id"),     // FK: session (1:N observations)
+    Column::text("worktree_token"), // RepoPaths::worktree_token() (12 hex)
+    Column::text("worktree_name"),  // admin name, or 'main'
+    Column::int("is_linked"),       // 0/1
+    Column::text("work_tree"),      // absolute path — local address, not content
+    Column::text_null("branch"),    // HEAD's symbolic name at observation
+    Column::text_null("head_oid"),  // HEAD oid at observation
+    Column::text_null("subagent_id"), // the subagent_session id when a subagent's hook observed
+    Column::text_one_of("basis", SESSION_WORKTREE_CD_BASES),
+    Column::int("first_observed_at"), // epoch ms of the first insert
+    Column::int("schema_version"),
+];
+
+/// The closed `basis` vocabulary for [`SESSION_WORKTREE_CD_COLUMNS`]: every
+/// word of [`SESSION_WORKTREE_BASES`], and `shell_cd` — a shell read the
+/// grammar recognised, filed under the member its leading `cd` named.
+///
+/// A superset rather than `shell_cd` alone so the relation describes what an
+/// observation may say rather than which writer happens to use it; the writer
+/// still sends every old word to the old relation, so no observation is ever
+/// in both.
+const SESSION_WORKTREE_CD_BASES: &[&str] = &[
+    "payload_cwd",
+    "workspace_path",
+    "process_cwd",
+    "commit",
+    "attach",
+    "import",
+    "shell_cd",
 ];
 
 /// Columns for the v14 `checkpoint_worktree` projection: the
@@ -1078,8 +1133,9 @@ pub(crate) const CAPTURE_IMPORTED_CHECKPOINT_TABLE_COUNT: usize = 43;
 /// shipped; later tables append past it and ship in their own migration.
 pub(crate) const CAPTURE_WORKTREE_TABLE_COUNT: usize = 45;
 
-/// Boundary after the v15 `tool_result_tokens` relation — the current end of
-/// the capture registry. The next additive capture migration starts here.
+/// Boundary after the v15 `tool_result_tokens` relation. The v17
+/// `session_worktree_cd` relation sits past it, the current end of the
+/// registry, and its migration reads it by name.
 pub(crate) const CAPTURE_TOOL_RESULT_TABLE_COUNT: usize = 46;
 
 /// The v3 `capture_identity` tables (frozen once shipped — see
@@ -1251,5 +1307,37 @@ mod tests {
         ] {
             assert!(is_canonical_table(required), "missing table {required}");
         }
+    }
+}
+
+#[cfg(test)]
+mod worktree_cd_tests {
+    use super::*;
+
+    /// The wider relation can say everything the old one can, and the one
+    /// word it adds is the only difference: a writer that routes by the old
+    /// vocabulary therefore never has an observation neither relation admits.
+    #[test]
+    fn the_cd_vocabulary_is_the_old_one_plus_shell_cd() {
+        let (old, wide) = (SESSION_WORKTREE_BASES, SESSION_WORKTREE_CD_BASES);
+        assert!(old.iter().all(|basis| wide.contains(basis)), "{wide:?}");
+        let added: Vec<&str> = wide.iter().copied().filter(|b| !old.contains(b)).collect();
+        assert_eq!(added, ["shell_cd"]);
+    }
+
+    /// The two relations differ only in the `basis` CHECK, so their union is
+    /// a plain `SELECT *` on each side.
+    #[test]
+    fn the_cd_relation_has_the_old_relations_columns_in_order() {
+        let names = |columns: &[Column]| columns.iter().map(|c| c.name).collect::<Vec<_>>();
+        assert_eq!(
+            names(SESSION_WORKTREE_CD_COLUMNS),
+            names(SESSION_WORKTREE_COLUMNS)
+        );
+        assert_eq!(
+            TABLES.last().map(|t| t.name),
+            Some("session_worktree_cd"),
+            "the v17 relation is the end of the registry"
+        );
     }
 }

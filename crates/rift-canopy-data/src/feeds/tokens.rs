@@ -63,17 +63,22 @@ struct TokenRow {
 /// Total: an unreadable table is an empty map, never an error. A projection
 /// still on a pre-v14 schema has no `session_worktree` at all, and the token
 /// panel must keep working there — it simply reads every fact as `unknown`.
+/// Both observation relations are read, so a session whose latest read a
+/// leading `cd` filed under another member is that member's.
 fn latest_worktree_by_session(
     store: &SqliteStore,
     rt: &tokio::runtime::Runtime,
 ) -> BTreeMap<String, String> {
+    let relation = rt.block_on(rift_store::SessionWorktreeRow::relation(store));
     let Ok(rows) = rt.block_on(store.query(
-        "SELECT w.session_id, MIN(w.worktree_name) \
-         FROM session_worktree w \
-         JOIN (SELECT session_id, MAX(first_observed_at) AS latest \
-               FROM session_worktree GROUP BY session_id) l \
-           ON l.session_id = w.session_id AND l.latest = w.first_observed_at \
-         GROUP BY w.session_id",
+        &format!(
+            "SELECT w.session_id, MIN(w.worktree_name) \
+             FROM {relation} w \
+             JOIN (SELECT session_id, MAX(first_observed_at) AS latest \
+                   FROM {relation} GROUP BY session_id) l \
+               ON l.session_id = w.session_id AND l.latest = w.first_observed_at \
+             GROUP BY w.session_id"
+        ),
         &[],
     )) else {
         return BTreeMap::new();
@@ -564,6 +569,71 @@ mod tests {
         };
         assert!((t.total - 7.0).abs() < f64::EPSILON);
         assert_eq!(t.by_worktree.total(), 7, "and still decomposes, as unknown");
+    }
+
+    /// A session whose latest read a leading `cd` filed under a member is
+    /// that member's on the worktree axis — read from the second relation —
+    /// and the axis still reads the first relation alone without it.
+    #[test]
+    fn a_cd_filed_session_is_its_members_on_the_worktree_axis() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p");
+        let store = open_proj(root.path(), &proj);
+        let rt = runtime().unwrap();
+        seed_observation(&store, &rt, "o1", "s1", "main", 10);
+        rt.block_on(rift_store::record_session_worktree(
+            &store,
+            &rift_store::SessionWorktreeRow {
+                observation_id: "o2".into(),
+                session_id: "s1".into(),
+                worktree_token: "112233445566".into(),
+                worktree_name: "member".into(),
+                is_linked: 1,
+                work_tree: "/w/member".into(),
+                branch: None,
+                head_oid: None,
+                subagent_id: None,
+                basis: "shell_cd".into(),
+                first_observed_at: 20,
+                schema_version: 1,
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            latest_worktree_by_session(&store, &rt)
+                .get("s1")
+                .map(String::as_str),
+            Some("member")
+        );
+        seed_session_turn(&store, &rt, "s1", "t1");
+        seed_model_fact_in_turn(&store, &rt, "c1", "t1", "m", 1_000, (10, 0, 0, 0));
+        let FeedPayload::Tokens { tokens, .. } = compute_tokens(root.path(), &proj).payload else {
+            panic!("expected a Tokens payload");
+        };
+        let TokensView::Data(t) = tokens else {
+            panic!("expected token data");
+        };
+        assert_eq!(
+            t.by_worktree.rows,
+            vec![WorktreeSlice {
+                name: Some("member".to_owned()),
+                tokens: 10,
+            }],
+            "the worktree column names the member the read was filed under"
+        );
+
+        rt.block_on(async {
+            let conn = rift_store::Store::conn(&store).await.unwrap();
+            conn.execute("DROP TABLE session_worktree_cd", &[]).await
+        })
+        .unwrap();
+        assert_eq!(
+            latest_worktree_by_session(&store, &rt)
+                .get("s1")
+                .map(String::as_str),
+            Some("main"),
+            "a projection without the second relation reads the first"
+        );
     }
 
     #[test]

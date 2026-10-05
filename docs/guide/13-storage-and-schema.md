@@ -45,7 +45,7 @@ from a trigger created alongside the table (§13.4).
 
 | File | Keyed by | Holds | Tables | Migrations |
 |---|---|---|---|---|
-| `~/.cache/rift/<family-id>/projection.db` | the family's capture identity | sessions, turns, model and tool calls, file revisions, attribution, token usage and cost, hook audit, checkpoint integrity, worktree provenance, measured tool results | 46 | 16 |
+| `~/.cache/rift/<family-id>/projection.db` | the family's capture identity | sessions, turns, model and tool calls, file revisions, attribution, token usage and cost, hook audit, checkpoint integrity, worktree provenance, measured tool results | 47 | 17 |
 | `~/.cache/rift/<recall-id>/recall.db` | the family's *recall* identity | the delta model's derived graph plus governance records: serve audit, serve calls and sessions, outcome labels, metric snapshots, evaluation runs, key metadata | 27 | 12 |
 | `~/.cache/rift/canopy/ui-state.db` | nothing — machine-global | dashboard state spanning repositories: project catalogue, feature toggles, per-project layouts, profiles, membership, theme slots, startup pin | 8 | 5 |
 
@@ -89,6 +89,10 @@ names the channel it arrived on and the basis of its count, both
 CHECK-constrained to closed vocabularies, so an unrecognised spelling cannot
 reach storage and be summed as though it meant something
 ([§8.6](08-cost-and-savings.md#86-what-avoided-actually-measures)).
+
+**The v17 `session_worktree_cd` relation is the same kind of answer.**
+It holds session worktree observations under a basis the v14 `session_worktree` CHECK cannot admit — `shell_cd`, a read filed under the member its leading `cd` named.
+Widening that CHECK would mean rebuilding the table, and a migration may not drop or rename one, so the wider vocabulary got its own table with its own guards; the writer sends each observation to exactly one of the two, and every reader reads their union ([Chapter 9](09-worktrees-and-families.md)).
 
 **The cache root is resolvable, so tests never touch your home directory**,
 chosen in order from `RIFT_CACHE_DIR`, `XDG_CACHE_HOME`, `$HOME/.cache` on unix
