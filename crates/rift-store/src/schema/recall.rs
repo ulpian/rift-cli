@@ -576,6 +576,13 @@ const RECALL_TABLES: &[CanonicalTable] = &[
         primary_key: &["serve_key"],
         unique: NO_UNIQUE,
     },
+    // --- v14 additive (pull claims) ---------------------------------------------
+    CanonicalTable {
+        name: "memd_audit_pull_claim",
+        columns: MEMD_AUDIT_PULL_CLAIM_COLUMNS,
+        primary_key: &["audit_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// The two relations a serve key can live in: a schema-1 decision row, or a
@@ -601,6 +608,34 @@ const MEMD_AUDIT_SESSION_COLUMNS: &[Column] = &[
     Column::text_one_of("relation", SERVE_KEY_RELATIONS),
     Column::text("session_id"),      // the agent's own session id
     Column::text_null("window_key"), // the window journal's one-way key; NULL when unknown
+    Column::int("schema_version"),
+];
+
+/// The rules a pull's claim can be booked under: the two a stated hash leads
+/// to, spelled as the serving envelope spells them.
+///
+/// The three other words a response can carry describe a call that stated
+/// nothing or a verb that credits nothing, and such a call writes no claim
+/// row, so they are not admitted here.
+const PULL_CLAIM_BASES: &[&str] = &["stated_recorded", "unverified"];
+
+/// Columns for the v14 `memd_audit_pull_claim` relation: how many held
+/// revisions a pull's caller named, and how many of them this family had
+/// recorded reading.
+///
+/// A sparse companion on the audit row's own key, for the reason
+/// `memd_audit_citation` is one: `memd_audit_event` is frozen, and widening
+/// it would move a checksum every deployed `recall.db` holds. A pull that
+/// stated no hash writes no row, so a row's presence says a claim was made,
+/// and a row of zeros never stands for "nothing was claimed". Counts and the
+/// rule's word only: never a hash, a path or a byte. The writer refuses a
+/// row whose stated count is not the sum of the other two.
+const MEMD_AUDIT_PULL_CLAIM_COLUMNS: &[Column] = &[
+    Column::text("audit_id"), // FK: memd_audit_event(audit_id), 1:0..1
+    Column::int("stated_count"),
+    Column::int("recorded_count"),
+    Column::int("unrecorded_count"),
+    Column::text_one_of("basis", PULL_CLAIM_BASES),
     Column::int("schema_version"),
 ];
 

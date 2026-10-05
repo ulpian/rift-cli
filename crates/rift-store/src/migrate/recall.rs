@@ -1,4 +1,4 @@
-//! The recall projection's migration set (`recall.db`): the thirteen
+//! The recall projection's migration set (`recall.db`): the fourteen
 //! checksum-locked SQL builders over the recall registry slices and their
 //! secondary indexes.
 //!
@@ -20,7 +20,8 @@ use super::Migration;
 /// `ServeChannel`-discriminated `serve_call_event`/
 /// `serve_session_event` relations; version 12 adds the worktree-scope
 /// mirrors and the grant-reason store; version 13 adds the
-/// `memd_audit_session` serve attribution.
+/// `memd_audit_session` serve attribution; version 14 adds the
+/// `memd_audit_pull_claim` record of what a pull's caller claimed to hold.
 #[must_use]
 pub fn recall_migrations() -> Vec<Migration> {
     vec![
@@ -88,6 +89,11 @@ pub fn recall_migrations() -> Vec<Migration> {
             version: 13,
             name: "recall_serve_attribution",
             sql: recall_serve_attribution_schema_sql(),
+        },
+        Migration {
+            version: 14,
+            name: "recall_pull_claims",
+            sql: recall_pull_claim_schema_sql(),
         },
     ]
 }
@@ -381,8 +387,7 @@ pub fn recall_worktree_scope_schema_sql() -> String {
 /// archive's per-session query reads through.
 ///
 /// The table is found by name in the registry rather than through a slice
-/// function, because it is the registry's last row and a name cannot drift
-/// the way a count can.
+/// function, because a name cannot drift the way a count can.
 fn recall_serve_attribution_schema_sql() -> String {
     const INDEX_SQL: &str = "\
 CREATE INDEX IF NOT EXISTS idx_memd_audit_session_session ON memd_audit_session(session_id);\n";
@@ -399,6 +404,34 @@ CREATE INDEX IF NOT EXISTS idx_memd_audit_session_session ON memd_audit_session(
         sql.push('\n');
     }
     sql.push_str(INDEX_SQL);
+    for table in tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
+/// The v14 additive recall migration: the `memd_audit_pull_claim`
+/// companion relation, one row per pull that stated the revisions its caller
+/// held.
+///
+/// Found by name for the reason v13's relation is. No secondary index: the
+/// relation is read by its key or summed whole.
+fn recall_pull_claim_schema_sql() -> String {
+    let tables = || {
+        crate::schema::recall_canonical_tables()
+            .iter()
+            .filter(|table| table.name == "memd_audit_pull_claim")
+    };
+    let mut sql = String::new();
+    for table in tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
     for table in tables() {
         sql.push_str(&format!(
             "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
@@ -526,7 +559,16 @@ mod tests {
                 "memd_audit_session_no_delete",
                 "idx_memd_audit_session_session",
             ],
-            &["serve_grant_event"],
+            &["serve_grant_event", "memd_audit_pull_claim"],
+        ),
+        (
+            "recall_pull_claims",
+            &[
+                "CREATE TABLE IF NOT EXISTS memd_audit_pull_claim",
+                "memd_audit_pull_claim_no_update",
+                "memd_audit_pull_claim_no_delete",
+            ],
+            &["memd_audit_session"],
         ),
     ];
 
@@ -537,7 +579,7 @@ mod tests {
     #[test]
     fn every_recall_version_creates_only_its_own_relations() {
         let migs = recall_migrations();
-        assert_eq!(migs.len(), 13);
+        assert_eq!(migs.len(), 14);
         for (version, (name, creates, excludes)) in VERSION_CONTENTS.iter().enumerate() {
             assert_eq!(migs[version].name, *name);
             let sql = &migs[version].sql;
@@ -559,10 +601,61 @@ mod tests {
     fn recall_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &recall_migrations()).unwrap();
-        assert_eq!(out.applied, 13);
-        assert_eq!(out.high_water, 13);
+        assert_eq!(out.applied, 14);
+        assert_eq!(out.high_water, 14);
         let again = apply_migrations(&s, &recall_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 13);
+        assert_eq!(again.skipped, 14);
+    }
+}
+
+#[cfg(test)]
+mod pull_claim_tests {
+    use super::*;
+    use crate::migrate::apply_migrations;
+    use crate::migrate::fixtures::store;
+
+    const ROW: &str = "INSERT INTO memd_audit_pull_claim \
+        (audit_id, stated_count, recorded_count, unrecorded_count, basis, schema_version) \
+        VALUES ('a1', 3, 2, 1, 'stated_recorded', 1)";
+
+    #[test]
+    fn a_store_at_the_previous_version_gains_the_pull_claim_relation_alone() {
+        let s = store();
+        let migs = recall_migrations();
+        let before = apply_migrations(&s, &migs[..13]).unwrap();
+        assert_eq!(before.high_water, 13);
+        let after = apply_migrations(&s, &migs).unwrap();
+        assert_eq!(after.applied, 1);
+        assert_eq!(after.high_water, 14);
+        assert_eq!(s.execute_raw(ROW).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_fresh_store_takes_a_pull_claim_row() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        assert_eq!(s.execute_raw(ROW).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_pull_claim_row_can_be_neither_updated_nor_deleted() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        s.execute_raw(ROW).unwrap();
+        let update = s.execute_raw("UPDATE memd_audit_pull_claim SET stated_count = 9");
+        let delete = s.execute_raw("DELETE FROM memd_audit_pull_claim");
+        assert!(matches!(update, Err(rift_core::RiftError::Immutability(_))));
+        assert!(matches!(delete, Err(rift_core::RiftError::Immutability(_))));
+    }
+
+    #[test]
+    fn a_basis_outside_the_two_a_stated_hash_leads_to_is_refused() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        let none_stated = ROW.replace("stated_recorded", "none_stated");
+        assert!(s.execute_raw(&none_stated).is_err());
+        let unverified = ROW.replace("stated_recorded", "unverified");
+        assert_eq!(s.execute_raw(&unverified).unwrap(), 1);
     }
 }

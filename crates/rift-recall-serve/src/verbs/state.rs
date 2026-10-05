@@ -259,6 +259,7 @@ impl SummaryCall<'_> {
                 handle,
                 estimated_tokens_returned: returned,
                 estimated_tokens_avoided: avoided,
+                pull_claim: None,
             }),
         )
     }

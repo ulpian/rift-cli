@@ -169,6 +169,17 @@ CREATE TABLE memd_audit_event (
   PRIMARY KEY (audit_id)
 ) STRICT
 
+-- table memd_audit_pull_claim
+CREATE TABLE memd_audit_pull_claim (
+  audit_id TEXT NOT NULL,
+  stated_count INTEGER NOT NULL,
+  recorded_count INTEGER NOT NULL,
+  unrecorded_count INTEGER NOT NULL,
+  basis TEXT NOT NULL CHECK (basis IN ('stated_recorded', 'unverified')),
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (audit_id)
+) STRICT
+
 -- table memd_audit_session
 CREATE TABLE memd_audit_session (
   serve_key TEXT NOT NULL,
@@ -430,6 +441,12 @@ CREATE TRIGGER memd_audit_event_no_delete BEFORE DELETE ON memd_audit_event BEGI
 
 -- trigger memd_audit_event_no_update
 CREATE TRIGGER memd_audit_event_no_update BEFORE UPDATE ON memd_audit_event BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_event is append-only (UPDATE forbidden)'); END
+
+-- trigger memd_audit_pull_claim_no_delete
+CREATE TRIGGER memd_audit_pull_claim_no_delete BEFORE DELETE ON memd_audit_pull_claim BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_pull_claim is append-only (DELETE forbidden)'); END
+
+-- trigger memd_audit_pull_claim_no_update
+CREATE TRIGGER memd_audit_pull_claim_no_update BEFORE UPDATE ON memd_audit_pull_claim BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_pull_claim is append-only (UPDATE forbidden)'); END
 
 -- trigger memd_audit_session_no_delete
 CREATE TRIGGER memd_audit_session_no_delete BEFORE DELETE ON memd_audit_session BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_session is append-only (DELETE forbidden)'); END

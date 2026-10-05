@@ -44,6 +44,8 @@ pub mod basis;
 /// The family's read-time basis snapshots: the redacted bytes of a revision a
 /// window was handed, so a delta against it survives the edit that followed.
 pub mod basis_store;
+/// What a pull's caller claimed to hold, counted for its audit record.
+mod claim;
 
 /// The view of a sealed envelope, and the trust, charge and audit vocabulary
 /// every verb answers in.
@@ -817,6 +819,9 @@ impl<'a> ServeDispatcher<'a> {
         // The rule the figure is booked under is decided on what the caller
         // stated, before a prefix is resolved away.
         let basis = AvoidedBasis::of(tool, req, ctx.reader.worktree_root().is_some());
+        // Counted over every revision the caller named, before any is
+        // resolved away; a call that makes no claim asks nothing here.
+        let claim = claim::pull_claim(ctx.store, &req.known_hashes, basis).await;
         // 3. resolve the hashes the caller says it holds, once, for every
         //    verb whose answer turns on one. A hash reaches a handler as a
         //    full content address or not at all: the handlers compare
@@ -841,8 +846,28 @@ impl<'a> ServeDispatcher<'a> {
             &resolved
         };
         // 4. dispatch to the store-backed handler, and stamp the rule its
-        //    figure was booked under.
-        let resp = match tool {
+        //    figure was booked under and what the caller claimed to hold.
+        let resp = self.route(tool, req, ctx, budget).await?;
+        let event = match claim {
+            Some(claim) => resp.event.with_pull_claim(claim),
+            None => resp.event,
+        };
+        Ok(ToolResponse {
+            avoided_basis: basis,
+            event,
+            ..resp
+        })
+    }
+
+    /// Hand a call to the handler of its verb.
+    async fn route<S: CanonicalStore, R: SubstrateReader>(
+        &self,
+        tool: ToolName,
+        req: &ToolRequest,
+        ctx: &RecallContext<'_, S, R>,
+        budget: &mut TurnBudget,
+    ) -> Result<ToolResponse, ToolError> {
+        match tool {
             ToolName::KnownState => self.known_state(req, ctx, budget).await,
             ToolName::DiffSince => Self::diff_since(req, ctx, budget).await,
             ToolName::FileIfChanged => Self::file_if_changed(req, ctx, budget).await,
@@ -859,11 +884,7 @@ impl<'a> ServeDispatcher<'a> {
             // reach. What is left here is the screening, the rendering and the
             // accounting — which is precisely what has to happen in one place.
             ToolName::Search => self.search(req, budget),
-        }?;
-        Ok(ToolResponse {
-            avoided_basis: basis,
-            ..resp
-        })
+        }
     }
 }
 
