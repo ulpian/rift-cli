@@ -6,9 +6,9 @@
 //! newest revision of a file is a statement about the past, and only the bytes
 //! on disk say what the file is now. The second is the record: a caller that
 //! states a hash may have found it anywhere, while a read the capture recorded
-//! is a fact Rift saw. A file is answered unchanged only where the checkout
-//! agrees with the caller, and a spared re-read is credited only where the
-//! record agrees too.
+//! is a fact Rift saw. When a checkout is bound, a file is answered unchanged
+//! only where the SHA-256 of its bytes on disk is the hash the caller stated,
+//! and a spared re-read is credited only where the record agrees too.
 //!
 //! The evidence is gathered here rather than inside the accounting seam
 //! ([`ServeDispatcher::respond`](crate::ServeDispatcher)) because the seam is
@@ -154,7 +154,7 @@ impl Evidence {
     }
 
     /// Whether the answer says the caller holds this candidate unchanged: it
-    /// was stated, and the checkout holds those very bytes. With no checkout
+    /// was stated, and the bytes in the checkout hash to it. With no checkout
     /// the answer is the projection's view, which is the statement alone.
     pub(crate) fn holds(&self, known: &BTreeSet<&str>, lc: &LoadedCandidate) -> bool {
         let hash = lc.content_sha256.as_str();
