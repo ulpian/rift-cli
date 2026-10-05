@@ -98,7 +98,8 @@ on saves nobody anything, and off is a written `total_recall = false`, never
 an omission. The key does not wire anything by itself — skills reach an agent
 client only through `rift init`, Project Settings or `rift recall init`, which
 read it rather than act on the file's absence; `rift init --no-recall` skips
-that step and writes nothing.
+that step, so it writes no skill and no `total_recall` line, though it still
+wires the capture hooks of the agents it detects.
 
 `search` is accepted and ignored: file search reads how to behave from its own
 policy table, never from a bool here, so the key records a fact about your

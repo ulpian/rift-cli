@@ -139,10 +139,12 @@ configuration is refused for repair, never clobbered.
 Recall, the memory-delta plane, lets an agent ask "what changed since I last
 looked?" instead of re-reading the repository. `init` enables it rather than
 leaving it to a separate ritual, because a recall plane nobody turned on saves
-nobody anything. Opt out with `rift init --no-recall`; turn it on later, or
-inspect or remove it, with `rift recall init`, `rift recall status` and `rift
-recall disable`. That last removes only Rift-owned, fingerprint-matching blocks
-and keeps every captured byte: disabling is not a delete.
+nobody anything. Opt out with `rift init --no-recall`, which skips Recall's
+skills and initial ingest and still wires the capture hooks of every agent it
+detects; turn Recall on later, or inspect or remove it, with `rift recall
+init`, `rift recall status` and `rift recall disable`. That last removes only
+Rift-owned, fingerprint-matching blocks and keeps every captured byte:
+disabling is not a delete.
 
 ### There is nothing to provision
 
