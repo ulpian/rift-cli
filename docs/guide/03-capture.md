@@ -378,6 +378,8 @@ them), and a session recorded `ended` or `idle` while its own events kept
 arriving as Rift's own defect, with nothing asked of you; `--fix` sweeps at the
 sweep's floor, under the same per-member lock, and reports a session whose
 member a worker is draining as *deferred* rather than waiting for it.
+Every deferral carries one cause from a closed vocabulary — `worker-holds-lock`, `no-idle-edge`, `no-commit-to-anchor`, `archive-produced-nothing`, `done-mark-failed` — printed one line per cause and given per session under `condense_deferred_causes` in `--json` (`deferred_causes` from `rift session stop`).
+Only `worker-holds-lock` is somebody else's to finish: that worker's own sweep condenses the session and nothing is lost, while every other cause waits for the next `rift doctor --fix`.
 
 ---
 

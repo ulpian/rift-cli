@@ -124,6 +124,10 @@ fn the_deferral_line_names_this_repos_true_cause() {
         "the cause is this repo's, and it is the true one: {stdout}"
     );
     assert!(
+        !stdout.contains("queue lock") && !stdout.contains("archive itself failed"),
+        "and it is the only one named: {stdout}"
+    );
+    assert!(
         !stdout.contains("rift setup") && !stdout.to_lowercase().contains("not provisioned"),
         "nothing may send a developer to install a capture backend: there is \
          none, and there is nothing to install: {stdout}"
@@ -381,6 +385,11 @@ fn a_deferred_sweep_keeps_the_live_session_first_and_retries_later() {
         "nothing to anchor to: the session defers, it is not closed on a \
          condense that never happened: {first}"
     );
+    assert_eq!(
+        first["condense_deferred_causes"],
+        serde_json::json!({ "crashed-1": "no-commit-to-anchor" }),
+        "{first}"
+    );
     assert_eq!(first["finalized"], serde_json::json!([]));
     assert_eq!(first["live"], serde_json::json!(["current-1"]));
     assert_eq!(session_phase(&repo, "crashed-1"), "ending");
@@ -411,4 +420,40 @@ fn a_deferred_sweep_keeps_the_live_session_first_and_retries_later() {
         checkpoint_ref_exists(&repo),
         "the retry condensed real work"
     );
+}
+
+/// An archive that ran against a real commit and minted no checkpoint defers
+/// with its own cause, never the lock's: the checkpoint branch's namespace is
+/// blocked by a plain file, so the write fails while HEAD is there to anchor.
+#[test]
+fn an_archive_that_mints_nothing_defers_with_its_own_cause() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    seed_session(&repo, "crashed-1", 0);
+    std::fs::write(
+        repo.join(".git").join("refs").join("heads").join("rift"),
+        "",
+    )
+    .unwrap();
+    let cache = tmp.path().join("cache");
+    let data = tmp.path().join("data");
+    let env = sync_env_with_data(&cache, &data);
+
+    let doc = doctor_fix_json(&repo, &env);
+    let sessions = sessions_leg(&doc);
+    assert_eq!(
+        sessions["condense_deferred_causes"],
+        serde_json::json!({ "crashed-1": "archive-produced-nothing" }),
+        "{sessions}"
+    );
+    let (code, human) = run_rift_stdout(&repo, &["doctor", "--fix"], &env);
+    assert_eq!(code, 0, "{human}");
+    let deferred: Vec<&str> = human.lines().filter(|l| l.contains("deferred")).collect();
+    assert_eq!(deferred.len(), 1, "one line per cause present: {human}");
+    assert!(deferred[0].contains("archive-produced-nothing"), "{human}");
+    assert!(
+        deferred[0].contains("`rift doctor --fix` retries"),
+        "{human}"
+    );
+    assert!(!deferred[0].contains("queue lock"), "{human}");
 }

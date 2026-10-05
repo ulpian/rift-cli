@@ -20,14 +20,13 @@ pub(crate) struct SessionSweep {
     pub(crate) live: Vec<String>,
     /// Sessions this pass finalized: `IdleTimeout` → condense → `Ended`.
     pub(crate) finalized: Vec<String>,
-    /// Sessions this pass moved to `ending` — or found already there, left by an
-    /// earlier pass or by a `SessionEnd` hook whose archive did not land — and
-    /// could not condense: no commit to anchor a checkpoint to, or no archive
-    /// backend to write one with. They stay live, and **the next sweep retries
-    /// them**. Nothing else does: `Ending` has no `IdleTimeout` edge, so the
-    /// machine will not re-request a condense, and `post-commit` only ever runs
-    /// the strategy decision — it never picks up a pending `RequestCondense`.
-    pub(crate) condense_deferred: Vec<String>,
+    /// Idle sessions this pass did not close, each with the one
+    /// [`DeferCause`] that stopped it. They stay live, and either the worker
+    /// holding the member's lock or **the next sweep** condenses them. Nothing
+    /// else does: `Ending` has no `IdleTimeout` edge, so the machine will not
+    /// re-request a condense, and `post-commit` only ever runs the strategy
+    /// decision — it never picks up a pending `RequestCondense`.
+    pub(crate) condense_deferred: Vec<Deferred>,
     /// The checkpoints this pass actually minted, one per finalized session.
     ///
     /// Carried rather than discarded because the caller has to WITNESS them:
@@ -37,6 +36,39 @@ pub(crate) struct SessionSweep {
     /// `archive_now`'s own doc records as how the silent-loss defect was
     /// written.
     pub(crate) condensed_checkpoints: Vec<String>,
+}
+
+/// One idle session the sweep left owed, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Deferred {
+    /// The session still owed a condense.
+    pub(crate) session_id: String,
+    /// The one point the sweep stopped at for it.
+    pub(crate) cause: DeferCause,
+}
+
+/// Why a sweep left an idle session's condense owed: a closed vocabulary, so a
+/// scripted caller can tell "a worker is finishing this" from "this failed".
+///
+/// One count with three possible causes was a report nobody could act on: a
+/// fixture that should wait for a worker and a CI step that should flag a
+/// failed archive read the same line. Each variant is a point in
+/// [`finalize_idle_session`] or [`sweep_member_under_its_lock`] where the
+/// sweep stops short, and only [`DeferCause::WorkerHoldsLock`] is somebody
+/// else's to finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DeferCause {
+    /// A capture worker holds the member's queue lock; its own tail sweep
+    /// condenses the session under that lock.
+    WorkerHoldsLock,
+    /// The machine answered the idle timeout without asking for a condense.
+    NoIdleEdge,
+    /// HEAD is unborn: there is no commit to anchor a checkpoint to.
+    NoCommitToAnchor,
+    /// The archive ran against HEAD and minted no checkpoint.
+    ArchiveProducedNothing,
+    /// The checkpoint was minted, but recording the condense as done failed.
+    DoneMarkFailed,
 }
 
 /// What every session of one sweep is finalized against, opened once by
@@ -56,6 +88,63 @@ struct SweepCtx<'a> {
     repo_id: String,
     /// The sweep's clock.
     now: i64,
+}
+
+impl DeferCause {
+    /// The wire token, used verbatim in every JSON document that reports it.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkerHoldsLock => "worker-holds-lock",
+            Self::NoIdleEdge => "no-idle-edge",
+            Self::NoCommitToAnchor => "no-commit-to-anchor",
+            Self::ArchiveProducedNothing => "archive-produced-nothing",
+            Self::DoneMarkFailed => "done-mark-failed",
+        }
+    }
+
+    /// Whether a worker that is already running finishes this condense, so
+    /// the caller is told to wait rather than to retry or look.
+    pub(crate) fn is_left_to_worker(self) -> bool {
+        matches!(self, Self::WorkerHoldsLock)
+    }
+
+    /// What stopped the condense, in one clause.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::WorkerHoldsLock => "a capture worker holds the member's queue lock",
+            Self::NoIdleEdge => "the session machine did not ask for a condense",
+            Self::NoCommitToAnchor => "no commit to anchor to, nothing archived",
+            Self::ArchiveProducedNothing => "the archive ran and minted no checkpoint",
+            Self::DoneMarkFailed => {
+                "the checkpoint was written but the session could not be closed"
+            }
+        }
+    }
+}
+
+impl SessionSweep {
+    /// Record one session left owed, under the cause that stopped it.
+    fn defer(&mut self, session_id: String, cause: DeferCause) {
+        self.condense_deferred.push(Deferred { session_id, cause });
+    }
+
+    /// The ids of the sessions left owed, in the order they were deferred.
+    pub(crate) fn deferred_ids(&self) -> Vec<&str> {
+        self.condense_deferred
+            .iter()
+            .map(|d| d.session_id.as_str())
+            .collect()
+    }
+
+    /// Each deferred session's cause token, keyed by session id: the shape a
+    /// scripted caller reads to decide whether to wait or to look.
+    pub(crate) fn deferred_causes_json(&self) -> serde_json::Value {
+        self.condense_deferred
+            .iter()
+            .map(|d| (d.session_id.clone(), d.cause.as_str().into()))
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    }
 }
 
 /// The crashed-session sweep, and the **driver** the
@@ -132,7 +221,9 @@ pub(crate) fn sweep_stale_sessions(
         None => LockWait::None,
     };
     rescue_agent_jobs(&repo.git_dir, only, wait, &mut sweep);
-    sweep_member_under_its_lock(&repo, now, timeout_ms, only, &mut sweep)?;
+    // The caller's clock is the wall clock here (doctor and the stop verb
+    // both read it), so it doubles as the lock's.
+    sweep_member_under_its_lock(&repo, now, now, timeout_ms, only, &mut sweep)?;
     Ok(sweep)
 }
 
@@ -178,7 +269,9 @@ pub(crate) fn sweep_idle_family(git_dir: &Path, now: i64, floor_ms: Option<i64>)
         let _ = if canonical_git_dir(&repo.git_dir) == held {
             sweep_member(&repo, now, floor, None, &mut sweep)
         } else {
-            sweep_member_under_its_lock(&repo, now, floor, None, &mut sweep)
+            // `now` may be a job's queue time; a lock is stamped and judged
+            // stale on the wall clock alone.
+            sweep_member_under_its_lock(&repo, now, now_ms(), floor, None, &mut sweep)
         };
     }
     sweep
@@ -211,9 +304,11 @@ fn canonical_git_dir(git_dir: &Path) -> std::path::PathBuf {
 /// sweep runs this for every sibling on every worker pass, and a held lock
 /// is a sibling's hook drain that finds the queue busy. The sessions are
 /// read again under the lock: the worker that held it may have ended them.
+/// `lock_now` stamps the lock and judges a held one stale.
 fn sweep_member_under_its_lock(
     repo: &rift_git::RepoPaths,
     now: i64,
+    lock_now: i64,
     timeout_ms: i64,
     only: Option<&str>,
     sweep: &mut SessionSweep,
@@ -223,11 +318,11 @@ fn sweep_member_under_its_lock(
         sweep.live.extend(live.into_iter().map(|c| c.session_id));
         return Ok(());
     }
-    let Some(_lock) = crate::capture_queue::acquire_lock(&repo.git_dir, now_ms()) else {
+    let Some(_lock) = crate::capture_queue::acquire_lock(&repo.git_dir, lock_now) else {
         sweep.live.extend(live.into_iter().map(|c| c.session_id));
-        sweep
-            .condense_deferred
-            .extend(idle.into_iter().map(|c| c.session_id));
+        for cache in idle {
+            sweep.defer(cache.session_id, DeferCause::WorkerHoldsLock);
+        }
         return Ok(());
     };
     sweep_member(repo, now, timeout_ms, only, sweep)
@@ -307,20 +402,20 @@ fn finalize_idle_session(ctx: &SweepCtx<'_>, cache: &SessionCache, sweep: &mut S
             // The machine refused a state with no idle edge. Unreachable
             // through `live_sessions` today (it yields only active /
             // compacting / ending), so nothing is owed and nothing is done.
-            sweep.condense_deferred.push(id);
+            sweep.defer(id, DeferCause::NoIdleEdge);
             return;
         }
     }
     settle_last_turn(ctx, cache);
-    let minted = condense_swept_session(ctx, cache);
-    let condensed = minted.is_some();
-    if let Some(checkpoint) = minted {
-        sweep.condensed_checkpoints.push(checkpoint);
-    }
-    if condensed && mark_swept_condensed(ctx, cache) {
+    let checkpoint = match condense_swept_session(ctx, cache) {
+        Ok(checkpoint) => checkpoint,
+        Err(cause) => return sweep.defer(id, cause),
+    };
+    sweep.condensed_checkpoints.push(checkpoint);
+    if mark_swept_condensed(ctx, cache) {
         sweep.finalized.push(id);
     } else {
-        sweep.condense_deferred.push(id);
+        sweep.defer(id, DeferCause::DoneMarkFailed);
     }
 }
 
@@ -392,18 +487,19 @@ fn settle_last_turn(ctx: &SweepCtx<'_>, cache: &SessionCache) {
 /// The ordinary session-end condense, against HEAD, and the checkpoint it
 /// minted.
 ///
-/// An archive that was skipped for want of a backend is not a condense,
-/// however successfully it returned: only a minted checkpoint id counts, so a
-/// repository with no commit to anchor to, or no backend to write with,
-/// answers `None`.
+/// An archive that returned without minting is not a condense, however
+/// successfully it returned: only a minted checkpoint id counts, and anything
+/// else answers the cause the session is deferred under.
 fn condense_swept_session(
     ctx: &SweepCtx<'_>,
     cache: &SessionCache,
-) -> Option<rift_shadow::CheckpointId> {
+) -> std::result::Result<rift_shadow::CheckpointId, DeferCause> {
     use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason};
 
-    let commit = ctx.head.as_ref()?;
-    archive_now(
+    let Some(commit) = ctx.head.as_ref() else {
+        return Err(DeferCause::NoCommitToAnchor);
+    };
+    let archived = archive_now(
         &ctx.rt,
         &ctx.store,
         &ctx.repo.work_tree,
@@ -416,9 +512,11 @@ fn condense_swept_session(
             strategy: ctx.strategy,
         },
         ctx.now,
-    )
-    .ok()
-    .flatten()
+    );
+    match archived {
+        Ok(Some(checkpoint)) => Ok(checkpoint),
+        Ok(None) | Err(_) => Err(DeferCause::ArchiveProducedNothing),
+    }
 }
 
 /// Tell the machine the condense landed, closing the session; `false` leaves
@@ -433,4 +531,68 @@ fn mark_swept_condensed(ctx: &SweepCtx<'_>, cache: &SessionCache) -> bool {
             ctx.now,
         ))
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sweep's clock and the lock's stamp, both injected.
+    const NOW: i64 = 1_790_000_000_000;
+
+    /// An `active` session cache last touched at `updated_at_ms`.
+    fn seed_session(git_dir: &Path, id: &str, updated_at_ms: i64) {
+        let sessions = git_dir.join("rift-sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join(format!("{id}.json")),
+            format!(
+                r#"{{"schema":1,"session_id":"{id}","state":"active","agent":"claude-code",
+"current_turn_ordinal":1,"turn_open":false,"compaction_boundary":null,
+"updated_at_ms":{updated_at_ms},"native_id_map":{{}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_idle_session_beside_a_held_queue_lock_is_deferred_to_the_worker_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        let repo = rift_git::discover(tmp.path()).unwrap();
+        seed_session(&repo.git_dir, "idle-1", 0);
+        let held = crate::capture_queue::acquire_lock(&repo.git_dir, NOW).unwrap();
+
+        let mut sweep = SessionSweep::default();
+        sweep_member_under_its_lock(&repo, NOW, NOW, 60_000, None, &mut sweep).unwrap();
+
+        let deferred = Deferred {
+            session_id: "idle-1".to_owned(),
+            cause: DeferCause::WorkerHoldsLock,
+        };
+        assert_eq!(sweep.condense_deferred, vec![deferred]);
+        assert!(sweep.finalized.is_empty() && sweep.condensed_checkpoints.is_empty());
+        assert_eq!(
+            sweep.deferred_causes_json(),
+            serde_json::json!({ "idle-1": "worker-holds-lock" })
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn every_defer_cause_has_its_own_token_and_only_the_lock_is_left_to_a_worker() {
+        let all = [
+            DeferCause::WorkerHoldsLock,
+            DeferCause::NoIdleEdge,
+            DeferCause::NoCommitToAnchor,
+            DeferCause::ArchiveProducedNothing,
+            DeferCause::DoneMarkFailed,
+        ];
+        let mut tokens: Vec<&str> = all.iter().map(|c| c.as_str()).collect();
+        tokens.sort_unstable();
+        tokens.dedup();
+        assert_eq!(tokens.len(), all.len());
+        let left: Vec<DeferCause> = all.into_iter().filter(|c| c.is_left_to_worker()).collect();
+        assert_eq!(left, vec![DeferCause::WorkerHoldsLock]);
+    }
 }
