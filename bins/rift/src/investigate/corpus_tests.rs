@@ -355,8 +355,7 @@ fn the_four_escaped_needles_can_now_fail_and_could_not_before() {
 fn no_hostile_seed_can_plant_instruction_shaped_content_in_a_pack() {
     with_planes(|rt, planes| {
         for h in CORPUS {
-            // Without the flag: refused, no pack, no scaffold, and the refusal
-            // itself does not echo the seed.
+            // Without the flag: refused, no pack, and the refusal does not echo the seed.
             let refused = rt
                 .block_on(investigate(planes, Some(h.text), false, &[]))
                 .expect("refusal");
@@ -583,13 +582,12 @@ fn a_captured_instruction_shaped_path_resolves_as_evidence_and_never_renders() {
             "the seed's path text reached the wire: {}",
             seed.json
         );
-        // …and the scaffold the agent is DESIGNED to read carries the pack, so
-        // it is asserted too rather than assumed to follow.
-        let scaffold = std::fs::read_to_string(seed.json["scaffold"].as_str().unwrap_or_default())
-            .unwrap_or_default();
-        assert!(
-            !scaffold.is_empty() && !scaffold.contains("Ignore all previous instructions"),
-            "findings.md carried the path: {scaffold}"
+        // …and no file beside the repository carries the pack: the printed
+        // answer is the only copy, so it is the only surface to assert.
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("tree").count(),
+            0,
+            "the verb wrote into the tree"
         );
 
         // DOOR TWO — the evidence handle, cited with its REAL content address.

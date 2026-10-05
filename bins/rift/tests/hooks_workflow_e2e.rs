@@ -81,10 +81,8 @@ fn every_workflow_verb_is_byte_identical_across_two_processes() {
         verb(&repo, &env, &inv),
         "two `rift investigate` processes disagreed"
     );
-    // The scaffold is written by the FIRST run and never overwritten, so the
-    // second run reporting the same path is part of the property, not a
-    // coincidence of ordering.
-    assert!(repo.join("findings.md").exists());
+    // The verb prints its pack and writes no notes file into the repository.
+    assert!(!repo.join("findings.md").exists());
 
     // A different seed is a different investigation — which was only true of
     // the RENDER until the pack key started carrying the seed's hash.
