@@ -11,6 +11,7 @@
 //!   time*, so a later turn can be told it is `known_unchanged`.
 
 mod serve_audit;
+mod window_journal;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -364,6 +365,8 @@ fn build_rows(
         push_token_usage_rows(&mut b, cid, &primary, &cost);
     }
     b.serves = serve_audit::read_serves(reader, cid, &mut b.issues)?;
+    let window_rows = window_journal::read_window_rows(reader, cid, &mut b.issues)?;
+    b.inserts.extend(window_rows);
     Ok(b)
 }
 

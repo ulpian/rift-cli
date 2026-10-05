@@ -583,6 +583,13 @@ const RECALL_TABLES: &[CanonicalTable] = &[
         primary_key: &["audit_id"],
         unique: NO_UNIQUE,
     },
+    // --- v15 additive (window rows) ---------------------------------------------
+    CanonicalTable {
+        name: "n_window_row",
+        columns: N_WINDOW_ROW_COLUMNS,
+        primary_key: &["row_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// The two relations a serve key can live in: a schema-1 decision row, or a
@@ -636,6 +643,54 @@ const MEMD_AUDIT_PULL_CLAIM_COLUMNS: &[Column] = &[
     Column::int("recorded_count"),
     Column::int("unrecorded_count"),
     Column::text_one_of("basis", PULL_CLAIM_BASES),
+    Column::int("schema_version"),
+];
+
+/// The kinds a frozen window row can be: the five a run of lines takes, the
+/// expected hash of a whole-file write, an edit and an eviction, spelled as
+/// `window_journal.jsonl` spells them.
+const WINDOW_ROW_KINDS: &[&str] = &[
+    "read",
+    "deny",
+    "observe",
+    "hold",
+    "prevented",
+    "expect",
+    "edit",
+    "evict",
+];
+
+/// Columns for the v15 `n_window_row` relation: one row per line a
+/// checkpoint's `window_journal.jsonl` froze.
+///
+/// Keyed by the SHA-256 of the line's canonical bytes rather than by any of
+/// its members, because the artifact is cumulative per session: every later
+/// checkpoint of a session carries the earlier rows again, and the same line
+/// must land once however many shards carry it and whichever order a rebuild
+/// reads them in. The per-kind members are nullable columns of one relation,
+/// not one relation per kind, since every reader asks about a window or a
+/// revision across kinds. `file_revision` is the `n_file_revision` node id of
+/// the revision a row names, which is how the row joins the read graph;
+/// `checkpoint_id` is the first checkpoint whose ingest wrote it.
+const N_WINDOW_ROW_COLUMNS: &[Column] = &[
+    Column::text("row_id"),     // sha256 of the line's canonical bytes
+    Column::text("window_key"), // the window journal's one-way key
+    Column::text_null("subagent"),
+    Column::text_one_of("kind", WINDOW_ROW_KINDS),
+    Column::int("turn"),
+    Column::int("at"),                   // epoch ms
+    Column::text_null("path"),           // `/`-spelled repository path
+    Column::text_null("content_sha256"), // a slice's or expect's hash, an edit's hash_new
+    Column::text_null("hash_old"),
+    Column::int_null("range_lo"),
+    Column::int_null("range_hi"),
+    Column::int_null("total_lines"),
+    Column::text_null("sites"), // the canonical JSON array of `[lo, hi]` runs
+    Column::int_null("shift"),
+    Column::int_null("full"), // 0/1
+    Column::text_null("reason"),
+    Column::text_null("file_revision"), // FK: n_file_revision (comment-FK)
+    Column::text("checkpoint_id"),
     Column::int("schema_version"),
 ];
 

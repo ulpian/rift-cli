@@ -411,12 +411,16 @@ repository family, holding the derived facts.
 Every row is derivable from git, and the append-only discipline of
 [Chapter 13](13-storage-and-schema.md) applies in full: no in-place updates, no
 deletes, corrections as new superseding rows, a mutation guard on every
-canonical table. There are 27 such tables today, in three families, and the
+canonical table. There are 30 such tables today, in three families, and the
 split explains what is safe to throw away:
 
 - **Derived graph facts** — a generic node/edge graph with each node kind's
   payload in its own typed relation: checkpoints, sessions, tool calls, file
   revisions, file reads, token usage, changed hunks. Rebuildable from git.
+  A checkpoint's `window_journal.jsonl` lands here too, one `n_window_row`
+  per line, keyed by the SHA-256 of the line's canonical bytes so the rows
+  every later checkpoint of the session carries again land once, and tied
+  to the file revision node the line names.
 - **Validity artifacts** — summary bindings and the content-addressed digest
   blobs they point at. Rebuildable, because the extractors are deterministic.
 - **Governance records** — the serve audit, serve-call and session events,
@@ -532,6 +536,7 @@ declined. That is the failure direction the whole design leans toward, and it
 is why this state is a file rather than a row: a decision taken while an agent
 waits can afford a file read and cannot afford a store open.
 What the file decided reaches the record at condense, not before: the archive copies the rows a session's windows hold at that moment into the checkpoint's `window_journal.jsonl` ([§5.3](05-ledger-and-verification.md#53-anatomy-of-a-checkpoint)), and the file itself stays run state, swept on its own schedule.
+Those decisions reach `recall.db` through the checkpoint alone: the recall ingest reads the artifact back into `n_window_row` ([§6.10](#610-where-the-delta-models-state-lives)), so a rebuild restores every decline, edit and eviction a shard carries, and no hook writes the relation.
 
 **The key is one context window, not one session.** A coding assistant runs a
 subagent under the *parent's* session id, and the two hold different bytes, so

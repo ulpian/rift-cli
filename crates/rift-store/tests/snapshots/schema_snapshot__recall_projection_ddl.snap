@@ -318,6 +318,30 @@ CREATE TABLE n_tool_call (
   PRIMARY KEY (node_id)
 ) STRICT
 
+-- table n_window_row
+CREATE TABLE n_window_row (
+  row_id TEXT NOT NULL,
+  window_key TEXT NOT NULL,
+  subagent TEXT,
+  kind TEXT NOT NULL CHECK (kind IN ('read', 'deny', 'observe', 'hold', 'prevented', 'expect', 'edit', 'evict')),
+  turn INTEGER NOT NULL,
+  at INTEGER NOT NULL,
+  path TEXT,
+  content_sha256 TEXT,
+  hash_old TEXT,
+  range_lo INTEGER,
+  range_hi INTEGER,
+  total_lines INTEGER,
+  sites TEXT,
+  shift INTEGER,
+  full INTEGER,
+  reason TEXT,
+  file_revision TEXT,
+  checkpoint_id TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (row_id)
+) STRICT
+
 -- table outcome_label
 CREATE TABLE outcome_label (
   label_id TEXT NOT NULL,
@@ -525,6 +549,12 @@ CREATE TRIGGER n_tool_call_no_delete BEFORE DELETE ON n_tool_call BEGIN SELECT R
 
 -- trigger n_tool_call_no_update
 CREATE TRIGGER n_tool_call_no_update BEFORE UPDATE ON n_tool_call BEGIN SELECT RAISE(ABORT, 'rift: n_tool_call is append-only (UPDATE forbidden)'); END
+
+-- trigger n_window_row_no_delete
+CREATE TRIGGER n_window_row_no_delete BEFORE DELETE ON n_window_row BEGIN SELECT RAISE(ABORT, 'rift: n_window_row is append-only (DELETE forbidden)'); END
+
+-- trigger n_window_row_no_update
+CREATE TRIGGER n_window_row_no_update BEFORE UPDATE ON n_window_row BEGIN SELECT RAISE(ABORT, 'rift: n_window_row is append-only (UPDATE forbidden)'); END
 
 -- trigger outcome_label_no_delete
 CREATE TRIGGER outcome_label_no_delete BEFORE DELETE ON outcome_label BEGIN SELECT RAISE(ABORT, 'rift: outcome_label is append-only (DELETE forbidden)'); END
