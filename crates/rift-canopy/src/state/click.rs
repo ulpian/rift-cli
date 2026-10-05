@@ -383,10 +383,7 @@ fn click_graphs_card(s: &mut AppState, target: Target) -> Flow {
 /// profile menu.
 fn click_header(s: &mut AppState, target: Target) -> Flow {
     match target {
-        Target::HeaderHelp => {
-            s.dirty = true;
-            dashboard_verb_flow(s, Verb::Help)
-        }
+        Target::HeaderHelp => open_header_help(s),
         Target::HeaderPalette => {
             s.app.set_focus(Panel::Command);
             s.app.mode = Mode::Command;
@@ -401,6 +398,13 @@ fn click_header(s: &mut AppState, target: Target) -> Flow {
         Target::HeaderProfile => toggle_profile_menu(s),
         _ => Flow::Continue(Effects::default()),
     }
+}
+
+/// Open the palette help overlay — what the header's `? Help` does, whether
+/// it is clicked or its `?` is pressed, so the two doors cannot drift apart.
+pub(super) fn open_header_help(s: &mut AppState) -> Flow {
+    s.dirty = true;
+    dashboard_verb_flow(s, Verb::Help)
 }
 
 /// Enter the panel editor, or exit it if already editing — the click
@@ -638,6 +642,30 @@ mod tests {
             matches!(s.app.overlay, Some(Overlay::Results { .. })),
             "the help overlay opened"
         );
+    }
+
+    #[test]
+    fn pressing_question_mark_on_the_dashboard_opens_the_overlay_the_header_click_opens() {
+        let mut clicked = ready(vec![project("a")]);
+        let _ = apply_click(&mut clicked, Target::HeaderHelp);
+        let mut keyed = ready(vec![project("a")]);
+        let _ = update(&mut keyed, Event::Key(CanopyKey::Char('?')));
+        assert!(
+            matches!(keyed.app.overlay, Some(Overlay::Results { .. })),
+            "the help overlay opened"
+        );
+        assert_eq!(keyed.app.overlay, clicked.app.overlay);
+        assert_eq!(keyed.app.mode, clicked.app.mode);
+    }
+
+    #[test]
+    fn a_question_mark_typed_into_the_palette_is_text_not_a_help_open() {
+        let mut s = ready(vec![project("a")]);
+        let _ = update(&mut s, Event::Key(CanopyKey::Char('/')));
+        let _ = update(&mut s, Event::Key(CanopyKey::Char('?')));
+        assert_eq!(s.app.mode, Mode::Command);
+        assert_eq!(s.app.command_line, "?");
+        assert_eq!(s.app.overlay, None, "no help overlay over the palette");
     }
 
     #[test]

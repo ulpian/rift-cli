@@ -177,6 +177,9 @@ pub enum Action {
     OpenProjectSettings,
     /// Open the selected repository in the read-only Recall Viewer.
     OpenRecallViewer,
+    /// Open the palette help overlay — the keyboard twin of the header's
+    /// `? Help`, folded by the reducer through the same opener the click uses.
+    OpenHelp,
     /// Open the graphs column's "by worktree" axis (the family view) as the
     /// existing results overlay. An action rather than a state mutation
     /// because the axis is column-3 data, which the reducer cannot see.

@@ -16,6 +16,7 @@ use crate::{App, Mode, ProjectSettingsAction, ProjectSettingsActionKind, Project
 
 use super::actions::{profile_or_fold_action, remove_project_op, reorder_project_op};
 use super::anim::refresh_every_ticks;
+use super::click::open_header_help;
 use super::effects::persist_flow;
 use super::events::fold_health;
 use super::openers::{
@@ -359,6 +360,7 @@ fn key_action_flow(s: &mut AppState, action: Action) -> Flow {
         }
         Action::OpenProjectSettings => open_project_settings(s),
         Action::OpenRecallViewer => Flow::Continue(s.open_recall_viewer(None)),
+        Action::OpenHelp => open_header_help(s),
         Action::OpenWorktreeAxis => open_worktree_axis(s),
         Action::OpenSavingsBreakdown => open_savings_breakdown(s),
         Action::SetRecallWindow(window) => {
