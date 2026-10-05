@@ -812,6 +812,10 @@ mod tests {
             path: "src/a.rs".into(),
             content_sha256: "aa".into(),
             input_tokens: None,
+            at: None,
+            turn: None,
+            blob_oid: None,
+            tokenizer: None,
         }];
         let shape = with_facts
             .digest_shape_json()
@@ -999,6 +1003,10 @@ mod tests {
             path: "a.rs".into(),
             content_sha256: "aa".into(),
             input_tokens: None,
+            at: None,
+            turn: None,
+            blob_oid: None,
+            tokenizer: None,
         }];
         assert_ne!(with_facts.merkle_root(), root, "tool_calls.jsonl");
 

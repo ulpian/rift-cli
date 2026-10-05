@@ -221,10 +221,21 @@ pub struct SessionReadFact {
     /// Token estimate over the read-time bytes, when one was captured
     /// (facts recorded before the v6 migration have none).
     pub input_tokens: Option<u32>,
+    /// The tokenizer that counted [`Self::input_tokens`], beside it.
+    pub tokenizer: Option<String>,
+    /// When the read's tool call was made (`tool_call.started_at`).
+    pub started_at: i64,
+    /// The ordinal of the read's turn (`turn.ordinal`).
+    pub turn_ordinal: i64,
+    /// The git blob oid of the revision read (`file_revision.blob_oid`).
+    pub blob_oid: String,
 }
 
 /// Every read fact captured for `session_row_id` (the projected session id),
 /// oldest first — the condense-time source of the shard's `tool_calls.jsonl`.
+/// It reads the same rows the savings denominator joins (the call's instant,
+/// its turn, the revision's blob oid, the count's tokenizer), so a rebuild
+/// can write them back.
 ///
 /// # Errors
 /// [`rift_core::RiftError::Storage`] on a query failure.
@@ -234,7 +245,8 @@ pub async fn session_read_facts(
 ) -> Result<Vec<SessionReadFact>> {
     let rows = store
         .query(
-            "SELECT tc.tool_call_id, tc.tool_name, fr.path, fr.content_sha256, frt.input_tokens \
+            "SELECT tc.tool_call_id, tc.tool_name, fr.path, fr.content_sha256, frt.input_tokens, \
+             frt.tokenizer, tc.started_at, t.ordinal, fr.blob_oid \
              FROM tool_reads_file trf \
              JOIN tool_call tc ON tc.tool_call_id = trf.tool_call_id \
              JOIN turn t ON t.turn_id = tc.turn_id \
@@ -253,6 +265,10 @@ pub async fn session_read_facts(
             path: r.get_text(2)?,
             content_sha256: r.get_text(3)?,
             input_tokens: r.get_opt_i64(4)?.and_then(|t| u32::try_from(t).ok()),
+            tokenizer: r.get_opt_text(5)?,
+            started_at: r.get_i64(6)?,
+            turn_ordinal: r.get_i64(7)?,
+            blob_oid: r.get_text(8)?,
         });
     }
     Ok(out)

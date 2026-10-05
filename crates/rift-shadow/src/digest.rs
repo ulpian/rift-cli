@@ -364,6 +364,10 @@ mod tests {
             path: "src/a.rs".into(),
             content_sha256: "aa".into(),
             input_tokens: None,
+            at: None,
+            turn: None,
+            blob_oid: None,
+            tokenizer: None,
         }];
         let families: [(&str, Option<Vec<u8>>); 4] = [
             ("failures", failures_json(t)),
@@ -407,6 +411,10 @@ mod tests {
             path: path.into(),
             content_sha256: sha.into(),
             input_tokens: None,
+            at: None,
+            turn: None,
+            blob_oid: None,
+            tokenizer: None,
         };
         let doc = shape_json(&[
             fact("src/a.rs", "a1"),

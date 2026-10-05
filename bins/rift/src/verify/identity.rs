@@ -599,6 +599,10 @@ mod tests {
             path: "src/a.rs".to_owned(),
             content_sha256: "aa".to_owned(),
             input_tokens: None,
+            at: None,
+            turn: None,
+            blob_oid: None,
+            tokenizer: None,
         }
     }
 

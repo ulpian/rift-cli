@@ -105,7 +105,7 @@ and a version field nothing binds documents nothing.
 | `redaction_report.json` | counts only — what redaction removed, never what it removed |
 | `serve_audit.jsonl` | the serves the recall projection attributes to the session, one canonical envelope per line; absent when there were none |
 | `sessions.jsonl` | the agent each covered session was captured from, one line per session: its native id and its agent's token; absent on a checkpoint written before it existed |
-| `tool_calls.jsonl` | the tool calls, reduced to identifiers |
+| `tool_calls.jsonl` | the tool calls, reduced to identifiers: each read's call id, tool, path, content hash and token count, and, from checkpoints written after they were added, the call's instant, its turn, the revision's blob oid and the tokenizer that counted it |
 | `transcript.*.jsonl` | the transcript: a full copy and a deterministic compact one |
 | `usage.jsonl` | the session's settled model calls, one line each: the four token classes, how they were counted, the model and the call's key; absent when none has settled |
 
@@ -122,6 +122,10 @@ The sessions artifact says which agent each covered session came from.
 `metadata.json` names a session by its native id alone, and a rebuild keys every session row by agent and native id together, so without it a rebuild could only guess the agent, and it guessed one for every session.
 It is a sibling file rather than a new `metadata.json` member because `metadata.json` is part of `content_hash.txt`'s preimage: a member there would change the digest's input for every checkpoint that carried it, and the digest's definition does not move.
 Each line is the native session id `metadata.json` already names, the agent's token, and a `schema_version`; the token comes from the closed list of first-party agents, and anything else is frozen as `withheld`, which a rebuild skips.
+
+A read's line also carries what the savings denominator joins it through: when the call was made, the ordinal of its turn, the blob oid of the revision read and the tokenizer behind its count.
+They are a time, a count, a hash and a token from a closed list, and they are written only when the projection holds them, so a session's older reads freeze exactly the lines they always did.
+A blob oid that is not an object id, or a tokenizer outside the list, is frozen as `withheld`.
 
 The serve audit is the recall plane's record of what it served, frozen where a
 rebuild cannot reach it.

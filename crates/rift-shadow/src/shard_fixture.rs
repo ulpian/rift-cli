@@ -197,7 +197,10 @@ fn fixture_events() -> Vec<ArchivedEvent> {
 }
 
 /// The read facts the fixture archives as `tool_calls.jsonl` — and, because
-/// they are the shape digest's whole input, as `digest.shape.json` too.
+/// they are the shape digest's whole input, as `digest.shape.json` too. The
+/// first carries every member a rebuild restores the savings denominator
+/// from; the second carries none of them, the shape every line written
+/// before those members existed has.
 fn fixture_read_facts() -> Vec<ArchivedReadFact> {
     vec![
         ArchivedReadFact {
@@ -206,6 +209,10 @@ fn fixture_read_facts() -> Vec<ArchivedReadFact> {
             path: "crates/rift-shadow/src/backend.rs".to_owned(),
             content_sha256: "a".repeat(64),
             input_tokens: Some(1_200),
+            at: Some(FIXTURE_CREATED_AT_MS - 8_000),
+            turn: Some(1),
+            blob_oid: Some("e".repeat(40)),
+            tokenizer: Some("cl100k_base".to_owned()),
         },
         ArchivedReadFact {
             tool_use_id: "toolu_01GREPA".to_owned(),
@@ -213,6 +220,10 @@ fn fixture_read_facts() -> Vec<ArchivedReadFact> {
             path: "crates/rift-shadow/src/lib.rs".to_owned(),
             content_sha256: "b".repeat(64),
             input_tokens: None,
+            at: None,
+            turn: None,
+            blob_oid: None,
+            tokenizer: None,
         },
     ]
 }

@@ -505,6 +505,10 @@ The rebuild keys the session's checkpoint link, its session row and its native i
 A session the projection has never seen gets a row even when no usage line names it: no model, dated by its first usage line in that checkpoint, or by the checkpoint's own capture time when there is none.
 A checkpoint written before the artifact keys every session under the walk's default agent, as it always did, and a session that was never condensed into any checkpoint cannot be rebuilt at all.
 
+The savings denominator is restorable for every read whose `tool_calls.jsonl` line carries its instant, turn, blob oid and tokenizer.
+From such a line the rebuild writes the read's tool call, its file revision, the link between them and its token count, keyed as the live path keys them, so the rebuilt share equals the live one over checkpoints written after those members were added.
+A line written before them is still the recall plane's read fact but restores none of these rows, so a read from an older checkpoint stays out of the rebuilt denominator.
+
 Usage and cost are on the restorable side for every shard that carries the usage artifact.
 A checkpoint's `usage.jsonl` freezes each settled model call of its session: the call's own key, its turn, its model, when it happened, the four token classes and how they were counted.
 The rebuild writes the session, the turn, the model call and its token usage back from each line under the live keys, and a row the live path already wrote wins.

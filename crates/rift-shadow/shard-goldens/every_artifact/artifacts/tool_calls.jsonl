@@ -1,2 +1,2 @@
-{"id":"toolu_01READA","input_tokens":1200,"path":"crates/rift-shadow/src/backend.rs","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tool":"Read"}
+{"at":1755999992000,"blob_oid":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","id":"toolu_01READA","input_tokens":1200,"path":"crates/rift-shadow/src/backend.rs","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tokenizer":"cl100k_base","tool":"Read","turn":1}
 {"id":"toolu_01GREPA","path":"crates/rift-shadow/src/lib.rs","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","tool":"Grep"}

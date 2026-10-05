@@ -723,6 +723,7 @@ serving trail: total input tokens, `repeated_context_rate`,
 are read-only with respect to your repository's files; `rift-memd metrics` and
 `rift-memd eval` write to the recall projection, which is rebuildable from git.
 
+A rebuild of the capture projection restores the share's denominator for every read a checkpoint froze with its instant, turn, blob oid and tokenizer, and the session each read belongs to under its own agent, so the rebuilt share equals the live one over those checkpoints; a read from an older checkpoint stays out of it ([§13.12](13-storage-and-schema.md#1312-rebuilding-and-what-a-rebuild-cannot-restore)).
 A rebuild of the recall projection keeps the serves it cannot derive.
 `rift-memd rebuild` sets the old projection aside under a dated name rather than delete it, because a serve a person made at a terminal is in no checkpoint, and the figures above would lose it.
 An active store or retained connection makes replacement refuse promptly; close the reader or writer and retry.

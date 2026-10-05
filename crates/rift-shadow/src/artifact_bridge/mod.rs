@@ -17,6 +17,9 @@
 mod created_at;
 mod events;
 mod facts;
+mod reads;
+#[cfg(test)]
+mod reads_tests;
 mod report;
 mod resume;
 #[cfg(test)]
@@ -41,6 +44,7 @@ use crate::ids;
 
 use events::project_full_events;
 use facts::{record_chain_facts, record_sessions, seal_checkpoint};
+use reads::project_read_lines;
 pub use report::{BridgeReport, RefusedShard, MAX_PARSE_NOTES};
 use sessions::{read_session_agents, record_named_sessions};
 use usage::project_usage_lines;
@@ -191,7 +195,8 @@ pub async fn ingest_dialect(
 
 /// Judge one shard, then project what it carries: the chain facts from its
 /// header, its session links under each session's own agent, its archived
-/// event stream, its settled usage and its named sessions. `parsed_id` is the
+/// event stream, its settled usage, its restorable reads and its named
+/// sessions. `parsed_id` is the
 /// shard's id when it is a SHA-256; `prev` is the nearest preceding shard whose
 /// id is one.
 async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
@@ -247,6 +252,7 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
     // After the events, so a session or turn an archived event opened keeps
     // the live row's start and model; the usage rows only fill what is absent.
     project_usage_lines(ctx, report, id, &agents).await?;
+    project_read_lines(ctx, id, &metadata, &agents).await?;
     // After the usage, so a usage line's model and instant win over the
     // empty model and the shard's own time a session line would give.
     record_named_sessions(ctx, &agents, &metadata).await?;

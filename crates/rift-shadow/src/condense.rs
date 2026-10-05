@@ -653,6 +653,10 @@ mod tests {
             path: "a.rs".into(),
             content_sha256: "aa".into(),
             input_tokens: None,
+            at: None,
+            turn: None,
+            blob_oid: None,
+            tokenizer: None,
         }];
         let content = rift_shadow_redact::redact(&SecretBytes::new(b"capture".to_vec()))
             .unwrap()
@@ -950,6 +954,10 @@ mod tests {
                 path: "src/a.rs".into(),
                 content_sha256: "aa".into(),
                 input_tokens: None,
+                at: None,
+                turn: None,
+                blob_oid: None,
+                tokenizer: None,
             }],
             serve_audit: None,
             usage: Vec::new(),
