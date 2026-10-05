@@ -99,8 +99,9 @@ silent, nothing is listening.**
 
 **The command bar** at the foot is where slash commands are typed (§11.7).
 
-> **Tip:** The one glyph without a matching key is the header's `? Help`:
-> clicking it opens the help overlay, but there is no `?` key. Type `/help`.
+> **Tip:** Every glyph in the header is also its key.
+> `?` on the dashboard opens the same help overlay a click on `? Help` opens, and so does typing `/help`.
+> Inside the palette's input, `?` is just a character.
 
 ---
 

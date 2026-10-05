@@ -60,7 +60,7 @@ impl AgentAdapter for OpenCodeAdapter {
     fn compat_notes(&self) -> CompatNotes {
         CompatNotes {
             agent: Self::AGENT_ID,
-            lifecycle_gaps: &["no explicit compaction signal"],
+            lifecycle_gaps: &["no tool boundary event"],
             surfaces_token_usage: false,
             best_effort: true,
             note: "Open-source; most directly hookable — usage to be wired once confirmed.",
@@ -83,5 +83,16 @@ mod tests {
             Case::new("session.end", serde_json::json!({}), &[SessionEnd]),
         ];
         check(&OpenCodeAdapter, &cases).unwrap();
+    }
+
+    /// OpenCode's plugin publishes a `compaction` event (its `HookNames()`
+    /// lists it beside the session and turn events), so a note that says the
+    /// agent has none misdescribes the agent rather than the adapter.
+    #[test]
+    fn notes_never_claim_opencode_publishes_no_compaction_signal() {
+        let notes = OpenCodeAdapter.compat_notes();
+        for gap in notes.lifecycle_gaps {
+            assert!(!gap.contains("compaction"), "wrong gap: {gap}");
+        }
     }
 }

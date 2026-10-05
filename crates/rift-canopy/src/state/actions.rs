@@ -23,6 +23,7 @@ pub(super) fn fold_action(action: Action) -> Flow {
         | Action::ReorderProject(_)
         | Action::OpenProjectSettings
         | Action::OpenRecallViewer
+        | Action::OpenHelp
         | Action::OpenWorktreeAxis
         | Action::OpenSavingsBreakdown
         | Action::SetRecallWindow(_)

@@ -605,45 +605,7 @@ stop being *used* but do not disappear from history.
 
 ---
 
-## 18.9 Agent integrations
-
-### Two refused adapters carry compatibility notes that are wrong
-
-*Measured defect.* Two adapters outside the supported set declare in their notes
-that their agent publishes no compaction signal. Both agents publish one. The
-notes are dead configuration behind a refusal — no user is shown them today — and
-they are recorded as defects rather than quietly deleted, because deleting the
-record would make the refusal look better-founded than it is: the refusal rests
-on verb-mapping facts, which are correct. Closing it means correcting the notes,
-which changes no behaviour, and that is the point.
-
-**Read more.** [10](10-agent-integrations.md) §10.6.
-
-### The Gemini adapter drops the model identifier and under-declares events
-
-*Measured defect.* Its adapter maps the one event carrying the model identifier
-to zero canonical events, so a session is captured with no record of which model
-ran; and it declares nine of the eleven events the agent publishes, so two land
-as unrecognised verbs. These are ordinary bugs and **not** the reason the agent
-is unwired — that is a scope decision, held apart on purpose: fixing the bugs
-would not change the support decision, and the support decision does not make the
-bugs disappear. Closing them takes two small adapter edits, whenever the agent
-enters scope.
-
-**Read more.** [10](10-agent-integrations.md) §10.6.
-
----
-
 ## 18.10 The dashboard
-
-### The header's help affordance has no key
-
-*Measured defect.* The header cluster draws a help affordance that is
-hit-testable and that no key binding opens — the same parity problem the
-savings breakdown once had, a hint teaching an act a keyboard cannot perform. Closing it takes
-a binding, or a hint that does not advertise one.
-
-**Read more.** [11](11-canopy-tour.md).
 
 ### A reorder hint teaches a spelling no key matches
 

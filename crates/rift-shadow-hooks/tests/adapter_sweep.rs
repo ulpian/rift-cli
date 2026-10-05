@@ -99,7 +99,9 @@ struct Row {
 /// Neither could have been found by re-reading this table, which is the point
 /// of the rule: a supported agent's own surface is now pinned into the tree
 /// (see [`PINNED_SURFACES`]) and the tables are measured against it.
-const OPEN_GAPS: usize = 15;
+/// **15 → 13 once Gemini CLI's own surface was pinned**: the model row was the
+/// same kind of correction, the verb row was work.
+const OPEN_GAPS: usize = 13;
 
 /// The rows whose subject is an agent this alpha does not capture at all.
 ///
@@ -108,16 +110,11 @@ const OPEN_GAPS: usize = 15;
 /// not-yet-supported if the product actually refuses to wire it. Without it,
 /// adding an adapter to [`ALPHA_AGENTS`] would leave four rows telling a
 /// reader that Rift declines to install something it now installs.
-/// **ORDER IS TABLE ORDER, and the two Gemini rows insert in the MIDDLE.** The
-/// assertion at the bottom of
+/// **ORDER IS TABLE ORDER.** The assertion at the bottom of
 /// [`every_unsupported_adapter_row_names_an_agent_the_product_refuses_to_wire`]
 /// compares this list against the marked rows *in the order the table declares
-/// them*, so appending Gemini after `factory-droid.verb_surface` — the obvious
-/// edit — reds. Gemini's rows sit above Cursor's in `SWEEP`, so they sit above
-/// Cursor's here.
+/// them*.
 const UNSUPPORTED_ADAPTER_ROWS: &[&str] = &[
-    "gemini.model_fact_is_dropped",
-    "gemini.missing_verbs",
     "cursor.verb_surface",
     "copilot-cli.verb_surface",
     "opencode.verb_surface",
@@ -484,44 +481,34 @@ const SWEEP: &[Row] = &[
     },
     Row {
         id: "gemini.model_fact_is_dropped",
-        verdict: Verdict::Gap,
-        finding: "Gemini states its model in exactly one place — \
-                  `llm_request.model` on BeforeModel — and Rift maps BeforeModel \
-                  to *zero* canonical events. Payload facts are projected per \
-                  event, so with no event there is no session row, no model \
-                  observation, and no record of which model ran. Every Gemini \
-                  session is captured model-less.",
-        evidence: "Adapter maps BeforeModel to an empty vec; \
+        verdict: Verdict::AtParity,
+        finding: "Gemini states its model in `llm_request.model` on BeforeModel, \
+                  BeforeToolSelection and AfterModel. AfterModel maps to \
+                  PromptResponse, and payload facts are projected per event, so \
+                  each model call records a model observation on its response.",
+        evidence: "crates/rift-agent-gemini/fixtures/gemini-cli-hook-surface.md \
+                   pins Gemini CLI's own AfterModelInput carrying `llm_request` \
+                   beside `llm_response`; the earlier verdict graded the agent \
+                   against a wrapper that parsed only BeforeModel's payload. \
                    rift_shadow::project::project_event is the only caller of \
-                   record_model_observation and runs once per event. Confirmed \
-                   by the golden stream below, which is deliberately written to \
-                   show the empty step. UNSUPPORTED-ADAPTER FACT: this alpha \
-                   does not capture Gemini CLI at all — `enable` refuses it \
-                   before writing a descriptor. THE \
-                   REASON IS NOT THIS DEFECT. Gemini is out of scope by owner \
-                   ruling, and this gap is an ordinary one that would be fixed \
-                   if it were in scope; the four rows above it are unsupported \
-                   because the agents do not send what Rift declares, which is a \
-                   different sentence. The gap is NOT closed: a Gemini session \
-                   is still captured model-less, and it stays counted. What is \
-                   withdrawn is the promise to fix it in this alpha.",
+                   record_model_observation; the golden stream below asserts the \
+                   model on its AfterModel step. Gemini stays unwired by scope \
+                   decision, and this row was never the reason.",
     },
     Row {
         id: "gemini.missing_verbs",
-        verdict: Verdict::Gap,
-        finding: "Gemini publishes eleven hook events; Rift declares nine. \
-                  `BeforeToolSelection` and `Notification` are undeclared, so \
-                  each lands as a skipped-unknown-verb receipt.",
-        evidence: "upstream: geminicli/{types,lifecycle}.go: GeminiHooks has eleven \
-                   keys and HookNames() returns eleven. Visible, not silent \
-                   (see all.unknown_verb_is_countable), which is why this is a \
-                   gap and not an incident. UNSUPPORTED-ADAPTER FACT: this \
-                   alpha does not capture Gemini CLI at all — `enable` refuses \
-                   it before writing a descriptor. THE REASON IS NOT THIS \
-                   DEFECT: Gemini is out of scope by an owner scope decision, \
-                   not by a measurement of its surface. Re-worded, \
-                   never closed — the two undeclared verbs are as real as they \
-                   were and stay counted.",
+        verdict: Verdict::AtParity,
+        finding: "Gemini publishes eleven hook events and Rift declares all \
+                  eleven. BeforeToolSelection and Notification map to no \
+                  canonical event: a tool-selection pass belongs to one model \
+                  call, and a tool-permission notification precedes a tool call \
+                  BeforeTool already records.",
+        evidence: "crates/rift-agent-gemini/fixtures/gemini-cli-hook-surface.md \
+                   pins HookEventName's eleven members, and \
+                   the_adapter_declares_every_event_the_pin_publishes in \
+                   crates/rift-agent-gemini/src/lib.rs holds verbs() to exactly \
+                   that set. Gemini stays unwired by scope decision, and this \
+                   row was never the reason.",
     },
     Row {
         id: "gemini.usage_shape_unverified",
@@ -714,16 +701,14 @@ const SWEEP: &[Row] = &[
         verdict: Verdict::Gap,
         finding: "Rift declares session.start, message, tool.execute, session.end. \
                   OpenCode's plugin fires session-start, session-end, turn-start, \
-                  turn-end and compaction — so Rift has no turn end, and its \
-                  `compat_notes` claim of \"no explicit compaction signal\" is \
-                  simply wrong: OpenCode has one.",
+                  turn-end and compaction — so Rift has no turn end and maps \
+                  nothing to the compaction event OpenCode does publish.",
         evidence: "upstream: opencode/lifecycle.go HookNames() + ParseHookEvent, which \
                    maps `compaction` to a Compaction event. \
                    UNSUPPORTED-ADAPTER FACT: this \
                    alpha does not capture OpenCode at all — `enable` refuses it \
                    before writing a descriptor. The gap stays open and stays \
-                   counted; the wrong compat_notes claim is dead configuration \
-                   behind the refusal, not a sentence shown to a user.",
+                   counted.",
     },
     Row {
         id: "opencode.file_mutating_tools",
@@ -768,8 +753,8 @@ const SWEEP: &[Row] = &[
                   tool_use, task_end, session_end). Factory Droid's surface is \
                   Claude-Code-shaped PascalCase: SessionStart, SessionEnd, Stop, \
                   UserPromptSubmit, PreToolUse, PostToolUse, SubagentStop, \
-                  PreCompact, Notification. Nothing it sends maps, and its \
-                  compat_notes claim of \"no explicit compaction signal\" is wrong.",
+                  PreCompact, Notification. Nothing it sends maps, PreCompact \
+                  included.",
         evidence: "upstream: factoryaidroid/{lifecycle,types}.go: HookNames() is those \
                    nine and the settings schema carries seven PascalCase keys. \
                    UNSUPPORTED-ADAPTER FACT: this \
@@ -1314,24 +1299,35 @@ fn codex_golden_stream() {
 
 #[test]
 fn gemini_golden_stream() {
+    let response = serde_json::json!({"session_id": "s", "llm_request": {"model": "gemini-2.5-pro"},
+                                      "llm_response": {"usageMetadata": {"promptTokenCount": 8}}});
     stream_for(
         "gemini",
         &Stream::new(
-            "a turn whose model is stated and then dropped",
+            "a turn whose model is stated and recorded on the response",
             &[
                 ("SessionStart", serde_json::json!({"session_id": "s"})),
                 (
                     "BeforeAgent",
                     serde_json::json!({"session_id": "s", "prompt": "go"}),
                 ),
-                // The only hook that states the model — and it produces nothing.
-                // The empty step is the gemini.model_fact_is_dropped gap, made
-                // visible rather than described.
+                // The two hooks that open a model call emit nothing: one turn
+                // may hold several calls, so neither is a turn start.
                 (
                     "BeforeModel",
                     serde_json::json!({"session_id": "s", "llm_request": {"model": "gemini-2.5-pro"}}),
                 ),
-                ("AfterModel", serde_json::json!({"session_id": "s"})),
+                (
+                    "BeforeToolSelection",
+                    serde_json::json!({"session_id": "s", "llm_request": {"model": "gemini-2.5-pro"}}),
+                ),
+                // The response carries the same request, so the model is
+                // recorded against this step's event (asserted below).
+                ("AfterModel", response.clone()),
+                (
+                    "Notification",
+                    serde_json::json!({"session_id": "s", "notification_type": "ToolPermission"}),
+                ),
                 (
                     "BeforeTool",
                     serde_json::json!({"session_id": "s", "tool_name": "edit_file"}),
@@ -1354,6 +1350,12 @@ fn gemini_golden_stream() {
             ],
         ),
     );
+    let registry = AdapterRegistry::with_builtin();
+    let facts = registry
+        .get(&rift_core::AgentId::GEMINI)
+        .unwrap()
+        .facts("AfterModel", &response);
+    assert_eq!(facts.model.unwrap().model, "gemini-2.5-pro");
 }
 
 #[test]

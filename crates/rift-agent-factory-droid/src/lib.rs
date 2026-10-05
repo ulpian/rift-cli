@@ -86,7 +86,7 @@ impl AgentAdapter for FactoryDroidAdapter {
     fn compat_notes(&self) -> CompatNotes {
         CompatNotes {
             agent: Self::AGENT_ID,
-            lifecycle_gaps: &["no explicit compaction signal", "usage reporting (verify)"],
+            lifecycle_gaps: &["usage reporting (verify)"],
             surfaces_token_usage: false,
             best_effort: true,
             note: "Agentic workflows; tasks mapped to turn boundaries.",
@@ -146,6 +146,17 @@ mod tests {
                 .map(|e| e.kind)
                 .collect();
             assert_eq!(kinds, vec![ToolCall], "{tool} must not imply an edit");
+        }
+    }
+
+    /// Droid's hook surface is Claude-Code-shaped and includes `PreCompact`,
+    /// so a note that says the agent has no compaction signal misdescribes the
+    /// agent rather than the adapter.
+    #[test]
+    fn notes_never_claim_factory_droid_publishes_no_compaction_signal() {
+        let notes = FactoryDroidAdapter.compat_notes();
+        for gap in notes.lifecycle_gaps {
+            assert!(!gap.contains("compaction"), "wrong gap: {gap}");
         }
     }
 }

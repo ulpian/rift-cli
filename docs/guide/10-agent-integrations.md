@@ -318,17 +318,13 @@ gap to close.
 ### One is refused by scope decision
 
 Gemini CLI is out of the supported set by decision, not by measurement. Its
-adapter has two real defects — it maps the one event carrying the model
-identifier to zero canonical events, so a Gemini session is captured with no
-record of which model ran, and it declares nine of the eleven hook events
-Gemini publishes, so two land as unrecognised verbs — ordinary bugs that would
-be fixed if the agent were in scope.
+adapter declares all eleven hook events Gemini publishes, and records the model
+each call names on the response event, whose payload carries the request that
+named it.
 
-They are **not the reason** Gemini is unwired, and saying they were would be a
-sentence that outlives its facts: fix the bugs and the row is still unwired, at
-which point the stated reason is a lie in the tree. Both defects stay **counted
-as open** ([18-known-gaps.md](18-known-gaps.md)), because declaring an agent
-unsupported withdraws the promise to fix something without fixing it.
+Nothing about that surface is the reason Gemini is unwired, and the two are
+kept apart on purpose: a refusal stated as a defect is a sentence that outlives
+its facts the moment the defect is fixed. The refusal is the scope decision.
 
 ---
 
