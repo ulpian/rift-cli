@@ -546,14 +546,13 @@ pub(super) fn doctor_session_sweep(repo: &Path, fix: bool) -> (String, serde_jso
     if let Some(reason) = accrue_sweep_soak(repo, &family.sweep.condensed_checkpoints) {
         human.push_str(&format!("\n    soak verify:  {reason}"));
     }
-    if !family.sweep.condense_deferred.is_empty() {
-        human.push_str(&deferred_line(family.sweep.condense_deferred.len()));
-    }
+    human.push_str(&deferred_lines(&family.sweep));
     let json = serde_json::json!({
         "readable": true,
         "live": family.sweep.live,
         "finalized": family.sweep.finalized,
-        "condense_deferred": family.sweep.condense_deferred,
+        "condense_deferred": family.sweep.deferred_ids(),
+        "condense_deferred_causes": family.sweep.deferred_causes_json(),
         "idle_timeout_ms": IDLE_TIMEOUT_MS,
         "idle_sweep_ms": family.floor_ms,
         "members_swept": family.swept,
@@ -679,18 +678,31 @@ fn accrue_sweep_soak(repo: &Path, condensed_checkpoints: &[String]) -> Option<St
     hooks::accrue_soak(&t, repo, &witness)
 }
 
-/// Honest about all three: what was NOT done (nothing was archived, so the
-/// session is still owed a condense), why, and who retries — this pass,
-/// because nothing else ever will. There is exactly one cause left to name:
-/// with the archive route and its binary both gone, an archive that produced
-/// nothing had nothing to anchor to or failed outright.
-fn deferred_line(deferred: usize) -> String {
-    format!(
-        "\n    deferred:     {deferred} idle, condense still owed — nothing archived \
-         (no commit to anchor to, the archive itself failed, or a capture worker \
-         holds the member's queue lock and its own sweep condenses them); re-run \
-         `rift doctor` to retry"
-    )
+/// One line per cause present, each honest about three things: that the
+/// condense is still owed, the one cause that stopped it, and who finishes it.
+/// A held lock is a worker's to finish under the lock it holds; everything
+/// else only this command's next `--fix` retries, because nothing else ever
+/// will. One line naming every possible cause for one count used to leave a
+/// scripted caller unable to tell "wait for the worker" from "this failed".
+fn deferred_lines(sweep: &hooks::SessionSweep) -> String {
+    let mut by_cause = std::collections::BTreeMap::new();
+    for deferred in &sweep.condense_deferred {
+        *by_cause.entry(deferred.cause).or_insert(0_usize) += 1;
+    }
+    let mut lines = String::new();
+    for (cause, count) in by_cause {
+        let next = if cause.is_left_to_worker() {
+            "its own sweep condenses them when it finishes — nothing is lost"
+        } else {
+            "the next `rift doctor --fix` retries"
+        };
+        lines.push_str(&format!(
+            "\n    deferred:     {count} idle, condense still owed [{}] — {}; {next}",
+            cause.as_str(),
+            cause.reason()
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]

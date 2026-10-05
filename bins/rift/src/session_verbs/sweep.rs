@@ -57,14 +57,7 @@ pub(crate) fn stop(root: &Path, target: Option<&str>) -> Result<Outcome> {
             Label::of(id)
         ));
     }
-    for id in &sweep.condense_deferred {
-        human.push_str(&format!(
-            "{}: stop deferred (no commit to anchor to yet, or a capture worker is \
-             draining this checkout) — run `rift session stop {}` again\n",
-            Label::of(id),
-            safe(id)
-        ));
-    }
+    human.push_str(&stop_deferred_lines(&sweep));
     for id in &closed_idle {
         human.push_str(&format!(
             "closed {} (idle: the machine's pre-session state — nothing to condense)\n",
@@ -78,11 +71,36 @@ pub(crate) fn stop(root: &Path, target: Option<&str>) -> Result<Outcome> {
         human.trim_end().to_owned(),
         serde_json::json!({
             "finalized": sweep.finalized,
-            "deferred": sweep.condense_deferred,
+            "deferred": sweep.deferred_ids(),
+            "deferred_causes": sweep.deferred_causes_json(),
             "closed_idle": closed_idle,
             "already_ended": [],
         }),
     ))
+}
+
+/// One line per deferred session, in the sweep's cause vocabulary: the cause
+/// alone, and the verb to run again. A held lock is not a failure, but the
+/// stop cannot promise the worker's tail sweep reaches the session — that
+/// sweep runs at the family's idle floor, and a stop runs at zero — so the
+/// operator who named the session re-runs the stop once the worker is done.
+fn stop_deferred_lines(sweep: &crate::hooks::SessionSweep) -> String {
+    let mut lines = String::new();
+    for deferred in &sweep.condense_deferred {
+        let when = if deferred.cause.is_left_to_worker() {
+            "once that worker finishes"
+        } else {
+            "to retry"
+        };
+        lines.push_str(&format!(
+            "{}: stop deferred [{}] — {}; run `rift session stop {}` again {when}\n",
+            Label::of(&deferred.session_id),
+            deferred.cause.as_str(),
+            deferred.cause.reason(),
+            safe(&deferred.session_id)
+        ));
+    }
+    lines
 }
 
 /// How long an `idle` cache must have gone untouched before stop-all closes

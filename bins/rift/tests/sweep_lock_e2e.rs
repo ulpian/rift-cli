@@ -185,6 +185,37 @@ fn a_doctor_sweep_beside_a_worker_holding_the_lock_leaves_the_commit_to_that_wor
     assert_chain_is_the_branch(&repo);
 }
 
+/// The deferral says which cause it was, alone: a scripted caller reading the
+/// lock-held reason knows to wait for the worker, not to look for a failure.
+#[test]
+fn a_doctor_sweep_beside_a_held_lock_names_the_lock_as_the_only_cause() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    let cache = tmp.path().join("cache");
+    seed_session(&repo, LIVE_SESSION, LONG_AGO_MS);
+
+    let lock = HeldLock::take(&repo.join(".git"));
+    let doc = doctor_fix_json(&repo, &sync_env(&cache));
+    let sessions = sessions_leg(&doc);
+    assert_eq!(
+        sessions["condense_deferred_causes"],
+        serde_json::json!({ LIVE_SESSION: "worker-holds-lock" }),
+        "{sessions}"
+    );
+    let (code, human) = run_rift_stdout(&repo, &["doctor", "--fix"], &sync_env(&cache));
+    assert_eq!(code, 0, "{human}");
+    let deferred: Vec<&str> = human.lines().filter(|l| l.contains("deferred")).collect();
+    assert_eq!(deferred.len(), 1, "one line per cause present: {human}");
+    let line = deferred[0];
+    assert!(line.contains("worker-holds-lock"), "{line}");
+    assert!(line.contains("nothing is lost"), "{line}");
+    assert!(
+        !line.contains("anchor") && !line.contains("archive"),
+        "the line names the lock alone: {line}"
+    );
+    drop(lock);
+}
+
 /// A targeted stop waits briefly for a worker, and one that outlasts the wait
 /// leaves the session deferred in the verb's usual shape, never finalized.
 #[test]
@@ -201,6 +232,11 @@ fn a_targeted_stop_beside_a_held_lock_defers_the_session_in_the_usual_shape() {
     let args = ["session", "stop", LIVE_SESSION, "--json"];
     let doc = rift_json(&repo, &args, &sync_env(&cache));
     assert_eq!(doc["deferred"], serde_json::json!([LIVE_SESSION]), "{doc}");
+    assert_eq!(
+        doc["deferred_causes"],
+        serde_json::json!({ LIVE_SESSION: "worker-holds-lock" }),
+        "{doc}"
+    );
     assert_eq!(doc["finalized"], serde_json::json!([]), "{doc}");
     assert_eq!(doc["already_ended"], serde_json::json!([]), "{doc}");
     assert!(
