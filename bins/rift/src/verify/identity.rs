@@ -168,6 +168,7 @@ mod tests {
                     serve_audit: None,
                     sessions: None,
                     usage: None,
+                    window_journal: None,
                     full: None,
                     transcript_compact: None,
                     transcript_full: None,
@@ -281,6 +282,7 @@ mod tests {
             serve_audit: None,
             sessions: None,
             usage: None,
+            window_journal: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -413,6 +415,7 @@ mod tests {
             serve_audit: None,
             sessions: None,
             usage: None,
+            window_journal: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -518,6 +521,7 @@ mod tests {
                 serve_audit: None,
                 sessions: None,
                 usage: None,
+                window_journal: None,
                 tool_calls: Some(&tool_calls),
                 transcript_compact: None,
                 transcript_full: None,
@@ -577,6 +581,7 @@ mod tests {
                 serve_audit: None,
                 sessions: None,
                 usage: None,
+                window_journal: None,
                 tool_calls: Some(&self.tool_calls),
                 transcript_compact: None,
                 transcript_full: None,
@@ -680,15 +685,7 @@ mod tests {
                 content_redacted: content,
                 full_jsonl: Some(edited),
                 redaction_report: report.as_bytes(),
-                serve_audit: None,
-                sessions: None,
-                usage: None,
-                tool_calls: None,
-                transcript_compact: None,
-                transcript_full: None,
-                tasks: &[],
-                session_metas: &[],
-                digests: rift_shadow::backend::DigestLeafBytes::default(),
+                ..rift_shadow::backend::ShardLeafBytes::default()
             })
             .to_hex();
         let forged = MemorySubstrate::local()
@@ -714,6 +711,7 @@ mod tests {
                     serve_audit: None,
                     sessions: None,
                     usage: None,
+                    window_journal: None,
                     full: forged.read_artifact(&id, "full.jsonl").unwrap(),
                     transcript_compact: None,
                     transcript_full: None,
@@ -763,6 +761,7 @@ mod tests {
             serve_audit: None,
             sessions: None,
             usage: None,
+            window_journal: None,
             tool_calls: None,
             transcript_compact: Some(compact),
             transcript_full: Some(tfull),
@@ -847,6 +846,7 @@ mod tests {
                 serve_audit: None,
                 sessions: None,
                 usage: None,
+                window_journal: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,
@@ -909,6 +909,7 @@ mod tests {
             serve_audit: None,
             sessions: None,
             usage: None,
+            window_journal: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -1029,7 +1030,8 @@ mod tests {
     }
 
     /// An epoch-3 shard carrying one optional artifact — `serve_audit.jsonl`,
-    /// `sessions.jsonl` or `usage.jsonl` — at the id its own artifacts address.
+    /// `sessions.jsonl`, `usage.jsonl` or `window_journal.jsonl` — at the id
+    /// its own artifacts address.
     fn artifact_bound_shard(content: &[u8], name: &str, bytes: &[u8]) -> (MemorySubstrate, String) {
         use rift_shadow::backend::ROOT_BOUND_ID_MIN_CANON_VERSION as EPOCH;
         use rift_shadow::backend::{shard_merkle_root, ShardLeafBytes};
@@ -1040,6 +1042,7 @@ mod tests {
             serve_audit: (name == "serve_audit.jsonl").then_some(bytes),
             sessions: (name == "sessions.jsonl").then_some(bytes),
             usage: (name == "usage.jsonl").then_some(bytes),
+            window_journal: (name == "window_journal.jsonl").then_some(bytes),
             ..ShardLeafBytes::default()
         };
         let root = shard_merkle_root(&leaves).to_hex();
@@ -1130,6 +1133,29 @@ mod tests {
         assert!(
             matches!(shard_passes(&edited).unwrap().worst, Verdict::Tamper(_)),
             "an edited agent must not verify"
+        );
+    }
+
+    /// **The frozen window journal is read back and bound like every leaf.**
+    /// A shard carrying `window_journal.jsonl` verifies, and turning a
+    /// declined read into a handed one is tamper.
+    #[test]
+    fn a_frozen_window_journal_is_read_back_and_bound_by_the_root() {
+        let content = b"the redacted capture".as_slice();
+        let line = |kind: &str| {
+            let window = "a".repeat(64);
+            format!("{{\"at\":1,\"kind\":\"{kind}\",\"schema_version\":1,\"turn\":1,\"window\":\"{window}\"}}\n")
+        };
+        let honest = line("deny");
+        let (with, id) = artifact_bound_shard(content, "window_journal.jsonl", honest.as_bytes());
+        let out = shard_passes(&with).unwrap();
+        assert!(matches!(out.worst, Verdict::Ok), "honest: {:?}", out.worst);
+        assert_eq!(out.checked, 1);
+
+        let edited = with.with_artifact(&id, "window_journal.jsonl", line("read").as_bytes());
+        assert!(
+            matches!(shard_passes(&edited).unwrap().worst, Verdict::Tamper(_)),
+            "an edited journal row must not verify"
         );
     }
 }

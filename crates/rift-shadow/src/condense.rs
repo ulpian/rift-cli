@@ -27,8 +27,8 @@ pub type CheckpointId = String;
 /// What a session captured beside its capture document, handed to the archive
 /// as one value: the read facts that become `tool_calls.jsonl`, the frozen
 /// serve envelopes that become `serve_audit.jsonl`, the settled usage that
-/// becomes `usage.jsonl` and the session's agent that becomes
-/// `sessions.jsonl`.
+/// becomes `usage.jsonl`, the session's agent that becomes `sessions.jsonl`
+/// and its context windows' journal rows that become `window_journal.jsonl`.
 ///
 /// One struct rather than one parameter per artifact, because the prediction
 /// and the archive must fold exactly the same facts, and every new fact
@@ -47,6 +47,9 @@ pub struct SessionFacts {
     /// The agent token the session was captured from (`sessions.jsonl`);
     /// `None` writes no artifact.
     pub agent: Option<String>,
+    /// Every row the session's context windows' journals held
+    /// (`window_journal.jsonl`), in any order: the writer sorts them.
+    pub window_journal: Vec<crate::backend::ArchivedWindowFact>,
 }
 
 /// **The one derivation of a new checkpoint id**: `sha256(session ‖ \0 ‖
@@ -266,6 +269,7 @@ fn archive_for_id(
             .agent
             .map(|agent| std::collections::BTreeMap::from([(session.to_owned(), agent)]))
             .unwrap_or_default(),
+        window_journal: facts.window_journal,
         content,
         report,
         transcript: None,
@@ -673,6 +677,7 @@ mod tests {
             serve_audit: None,
             usage: Vec::new(),
             session_agents: std::collections::BTreeMap::new(),
+            window_journal: Vec::new(),
             content,
             report: RedactionReportView {
                 total_spans: 0,
@@ -962,6 +967,7 @@ mod tests {
             serve_audit: None,
             usage: Vec::new(),
             agent: None,
+            window_journal: Vec::new(),
         };
         let predicted = predicted_checkpoint_id(SESSION, &raw, &facts, &packs).unwrap();
         let archived = condense(
@@ -1005,6 +1011,7 @@ mod tests {
             serve_audit: Some(lines.into_bytes()),
             usage: Vec::new(),
             agent: None,
+            window_journal: Vec::new(),
         }
     }
 
@@ -1066,6 +1073,7 @@ mod tests {
             serve_audit: Some(Vec::new()),
             usage: Vec::new(),
             agent: None,
+            window_journal: Vec::new(),
         };
         assert_eq!(
             condensed_with(empty, 1).await,
@@ -1149,6 +1157,37 @@ mod tests {
         let bare =
             predicted_checkpoint_id(SESSION, &raw, &SessionFacts::default(), &packs).unwrap();
         assert_ne!(bare, predicted, "the agent is a leaf of the id");
+    }
+
+    /// **One id for the prediction and the archive of a session whose
+    /// windows journaled rows**, the same id again when nothing was added,
+    /// and a different one from the same session with no rows: the journal is
+    /// a leaf of the id, folded identically by both hooks and cumulative.
+    #[tokio::test]
+    async fn the_trailer_prediction_and_the_archive_mint_one_id_with_window_rows() {
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let packs = RulePackSet::builtin();
+        let evict = crate::backend::ArchivedWindowRow::Evict {
+            reason: "pre_compact".to_owned(),
+        };
+        let row = crate::backend::ArchivedWindowFact {
+            window: "c".repeat(64),
+            subagent: None,
+            turn: 2,
+            at: 7,
+            row: evict,
+        };
+        let journaled = SessionFacts {
+            window_journal: vec![row],
+            ..SessionFacts::default()
+        };
+        let predicted = predicted_checkpoint_id(SESSION, &raw, &journaled, &packs).unwrap();
+        assert_eq!(condensed_with(journaled.clone(), 1).await, predicted);
+        assert_eq!(condensed_with(journaled, 2).await, predicted, "unchanged");
+
+        let bare =
+            predicted_checkpoint_id(SESSION, &raw, &SessionFacts::default(), &packs).unwrap();
+        assert_ne!(bare, predicted, "the journal is a leaf of the id");
     }
 
     /// **The rollup rule, pinned at the assembly.** A

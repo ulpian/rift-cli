@@ -40,15 +40,18 @@
 //! So are the settled usage facts: two calls of the first session on two
 //! models, in two turns, which `usage.jsonl` freezes one line each. And so are
 //! the sessions' agents, two different ones, which `sessions.jsonl` freezes
-//! one line each.
+//! one line each. And so are the window-journal rows: the first session's own
+//! window reads, is declined, edits and is emptied, and one subagent window
+//! reads, which `window_journal.jsonl` freezes one line each, revisions and
+//! window keys computed rather than spelled.
 
 use std::path::PathBuf;
 
 use rift_core::{Result, SecretBytes};
 
 use crate::backend::{
-    ArchivedEvent, ArchivedReadFact, ArchivedTask, ArchivedUsageFact, CheckpointArchive,
-    RedactionReportView,
+    ArchivedEvent, ArchivedReadFact, ArchivedTask, ArchivedUsageFact, ArchivedWindowFact,
+    ArchivedWindowRow, CheckpointArchive, RedactionReportView, WindowSliceKind,
 };
 
 /// The fixture's capture time — a literal, so no artifact moves with the clock.
@@ -122,6 +125,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
         serve_audit: Some(fixture_serve_audit()),
         usage: fixture_usage(),
         session_agents: fixture_session_agents(),
+        window_journal: fixture_window_journal(),
         content: redacted.redacted,
         report: RedactionReportView::from_redact(&redacted.report),
         transcript: Some(transcript),
@@ -307,4 +311,58 @@ fn fixture_session_agents() -> std::collections::BTreeMap<String, String> {
         (FIXTURE_SESSIONS[0].to_owned(), "claude-code".to_owned()),
         (FIXTURE_SESSIONS[1].to_owned(), "codex".to_owned()),
     ])
+}
+
+/// The window-journal rows the fixture archives as `window_journal.jsonl`:
+/// the first session's own window reads a file, is declined on the re-read,
+/// edits it and is emptied by a compaction; a subagent window under the same
+/// session reads one file. Every kind with members of its own is present.
+fn fixture_window_journal() -> Vec<ArchivedWindowFact> {
+    let session = FIXTURE_SESSIONS[0];
+    let window =
+        |agent: &str| rift_hashchain::leaf_hash(format!("{session}\0{agent}").as_bytes()).to_hex();
+    let revision = |n: u8| crate::sha256_hex(&[b"src/lib.rs@", &[n]]);
+    let at = |back: u64| FIXTURE_CREATED_AT_MS.unsigned_abs() - back;
+    let slice = |kind, range, total_lines| ArchivedWindowRow::Slice {
+        kind,
+        path: "src/lib.rs".to_owned(),
+        hash: revision(1),
+        range,
+        total_lines,
+    };
+    let edit = ArchivedWindowRow::Edit {
+        path: "src/lib.rs".to_owned(),
+        hash_old: Some(revision(1)),
+        hash_new: revision(2),
+        sites: vec![(10, 12)],
+        shift: 2,
+        full: true,
+    };
+    let evict = ArchivedWindowRow::Evict {
+        reason: "pre_compact".to_owned(),
+    };
+    let row = |subagent: Option<&str>, turn, back, row| ArchivedWindowFact {
+        window: window(subagent.unwrap_or_default()),
+        subagent: subagent.map(str::to_owned),
+        turn,
+        at: at(back),
+        row,
+    };
+    vec![
+        row(
+            None,
+            1,
+            8_000,
+            slice(WindowSliceKind::Read, (1, 120), Some(120)),
+        ),
+        row(None, 2, 6_500, slice(WindowSliceKind::Deny, (1, 120), None)),
+        row(None, 2, 6_000, edit),
+        row(None, 3, 3_000, evict),
+        row(
+            Some("explore-1"),
+            2,
+            5_000,
+            slice(WindowSliceKind::Read, (1, 40), Some(120)),
+        ),
+    ]
 }

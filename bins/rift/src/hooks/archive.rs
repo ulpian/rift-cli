@@ -114,7 +114,7 @@ pub(super) fn archive_now(
 }
 
 /// What the session captured beside its capture document: its read facts, its
-/// serves and its settled usage.
+/// serves, its settled usage, its agent and its context windows' journal rows.
 ///
 /// The one reading both the trailer's prediction and the archive fold, so
 /// the two derive one checkpoint id from the same bytes. The prediction can
@@ -134,6 +134,9 @@ pub(super) fn session_facts_for_archive(
         serve_audit: serve_audit_for_archive(rt, work_tree, session)?,
         usage: usage_facts_for_archive(rt, store, agent, session),
         agent: Some(agent.to_owned()),
+        window_journal: crate::window_journal::session_window_facts(
+            rt, store, work_tree, agent, session,
+        ),
     })
 }
 

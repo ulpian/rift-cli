@@ -25,6 +25,7 @@ mod artifacts;
 mod fixtures;
 mod leaves;
 mod shard;
+mod window;
 
 use rift_core::Result;
 use rift_git::{GitIdent, MemoryGitWrite, NativeGitWrite};
@@ -42,6 +43,10 @@ pub use artifacts::session_meta_json;
 pub use leaves::{
     shard_merkle_leaves, shard_merkle_root, DigestLeafBytes, SessionMetaLeaf, ShardLeafBytes,
     TaskLeafBytes,
+};
+pub use window::{
+    window_journal_jsonl_bytes, ArchivedWindowFact, ArchivedWindowRow, WindowSliceKind,
+    WINDOW_JOURNAL_SCHEMA_VERSION,
 };
 
 /// The fully-qualified orphan checkpoint branch the native archive writes

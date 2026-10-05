@@ -85,7 +85,7 @@ checkpoint branch under a path derived from its own id:
     content.redacted   content_hash.txt   full.jsonl   metadata.json
     redaction_report.json   serve_audit.jsonl   sessions.jsonl   tool_calls.jsonl
     digest.failures.json  digest.intent.json  digest.log.json  digest.shape.json
-    transcript.jsonl   transcript.compact.jsonl   usage.jsonl
+    transcript.jsonl   transcript.compact.jsonl   usage.jsonl   window_journal.jsonl
     sessions/<index>/metadata.json      (per-session header; only when the checkpoint covers 2+ sessions)
     tasks/<tool-use-id>/{metadata.json, transcript.jsonl, transcript.compact.jsonl}   (one subtree per subagent: its own header and transcript pair)
 ```
@@ -108,6 +108,7 @@ and a version field nothing binds documents nothing.
 | `tool_calls.jsonl` | the tool calls, reduced to identifiers: each read's call id, tool, path, content hash and token count, and, from checkpoints written after they were added, the call's instant, its turn, the revision's blob oid and the tokenizer that counted it |
 | `transcript.*.jsonl` | the transcript: a full copy and a deterministic compact one |
 | `usage.jsonl` | the session's settled model calls, one line each: the four token classes, how they were counted, the model and the call's key; absent when none has settled |
+| `window_journal.jsonl` | every row the session's context windows held when it was archived — reads, declines, edits, evictions — one line each under its window's key; absent when they held none |
 
 The compact transcript is not a summary but the output of a deterministic
 compactor: tool calls reduced to bare identifiers, file reads elided to handles,
@@ -122,6 +123,13 @@ The sessions artifact says which agent each covered session came from.
 `metadata.json` names a session by its native id alone, and a rebuild keys every session row by agent and native id together, so without it a rebuild could only guess the agent, and it guessed one for every session.
 It is a sibling file rather than a new `metadata.json` member because `metadata.json` is part of `content_hash.txt`'s preimage: a member there would change the digest's input for every checkpoint that carried it, and the digest's definition does not move.
 Each line is the native session id `metadata.json` already names, the agent's token, and a `schema_version`; the token comes from the closed list of first-party agents, and anything else is frozen as `withheld`, which a rebuild skips.
+
+The window journal freezes what each of the session's context windows was handed, declined, told, wrote and lost ([§6.12](06-recall.md#612-what-a-context-window-already-holds)).
+The journal files are local run state that a sweep deletes; this artifact is where the declines and evictions the savings figures rest on become tamper-evident.
+It is gathered at archive time from the session's own window and the window of every subagent the capture projection links to one of its turns, and it is cumulative: every checkpoint of a session carries every row its windows hold, so re-archiving an unchanged session derives the same id.
+Each line carries the window's 64-hex key, the subagent id when the window is a subagent's, the kind, the turn, the time and that kind's own members — a repository path, revisions, a line range, a line count, edit sites, a shift, a flag, an eviction reason — and its own `schema_version`, which is the artifact's and not the journal's, so a change to the journal's grammar cannot silently change a frozen line.
+A row whose path is not a `/`-spelled repository path, whose revision is not 64 lowercase hex or whose reason is not declared is left out whole, never rewritten; a subagent id that is not an identifier is frozen as `withheld`.
+Lines are sorted by window, time, kind and the line's own bytes, with identical lines collapsed.
 
 A read's line also carries what the savings denominator joins it through: when the call was made, the ordinal of its turn, the blob oid of the revision read and the tokenizer behind its count.
 They are a time, a count, a hash and a token from a closed list, and they are written only when the projection holds them, so a session's older reads freeze exactly the lines they always did.
@@ -205,8 +213,8 @@ exactly the order git sorts the tree into: `content.redacted`, the four
 `digest.*.json`, each line of `full.jsonl` as its own leaf,
 `redaction_report.json`, `serve_audit.jsonl`, `sessions.jsonl`, `sessions/<index>/metadata.json` (bytewise by index
 name, so "10" precedes "2"), `tasks/<id>/…` (bytewise by tool-use id),
-`tool_calls.jsonl`, then `transcript.compact.jsonl` and `transcript.jsonl`, and
-last `usage.jsonl`.
+`tool_calls.jsonl`, then `transcript.compact.jsonl` and `transcript.jsonl`,
+`usage.jsonl`, and last `window_journal.jsonl`.
 
 **Absence is the compatibility contract.** A checkpoint lacking an artifact
 derives, leaf for leaf, the sequence it would have derived before that artifact
@@ -220,6 +228,8 @@ So was `sessions.jsonl`, which lands after `serve_audit.jsonl` and before the
 So was `usage.jsonl`, which sorts after every other name (`t` < `u`): its one
 leaf is appended to the sequence, never inserted into it, so no shard without
 it derives a different root.
+So was `window_journal.jsonl`, which sorts after `usage.jsonl` (`u` < `w`) and
+is never written empty: a shard without it derives the root it always did.
 A future
 artifact must respect that rule: pick the name knowing where it lands.
 

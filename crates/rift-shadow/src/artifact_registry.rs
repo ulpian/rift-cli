@@ -185,6 +185,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         version: VersionField::PerLineSchemaVersion(crate::backend::USAGE_SCHEMA_VERSION),
         sync_format_row: "Usage (`usage.jsonl`)",
     },
+    ShardArtifact {
+        path: "window_journal.jsonl",
+        version: VersionField::PerLineSchemaVersion(crate::backend::WINDOW_JOURNAL_SCHEMA_VERSION),
+        sync_format_row: "Window journal (`window_journal.jsonl`)",
+    },
 ];
 
 /// The registry row a shard-relative path belongs to, or `None` when the
@@ -405,6 +410,32 @@ mod tests {
             .map(|line| json_version(line, "schema_version").expect("every line declares one"))
             .collect();
         assert_eq!(versions, vec![u64::from(want); 2], "two lines, one version");
+    }
+
+    /// Every frozen window-journal line declares the line format the
+    /// registry names, read off the maximal fixture, whose lines the one
+    /// writer rendered.
+    #[test]
+    fn every_frozen_window_journal_line_declares_the_registered_schema_version() {
+        let Some(VersionField::PerLineSchemaVersion(want)) =
+            is_declared("window_journal.jsonl").map(|a| a.version)
+        else {
+            panic!("window_journal.jsonl is declared with a per-line schema_version");
+        };
+        let archive = crate::shard_fixture::every_artifact_archive().unwrap();
+        let bytes = archive
+            .window_journal_jsonl()
+            .expect("the fixture freezes window rows");
+        let versions: Vec<u64> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| json_version(line, "schema_version").expect("every line declares one"))
+            .collect();
+        assert_eq!(
+            versions,
+            vec![u64::from(want); 5],
+            "five lines, one version"
+        );
     }
 
     /// A task metadata document from the real writer.

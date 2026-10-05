@@ -208,6 +208,11 @@ pub struct CheckpointArchive {
     /// rather than a `metadata.json` member, because `metadata.json` is in
     /// `content_hash.txt`'s preimage and a new member there would move it.
     pub session_agents: BTreeMap<String, String>,
+    /// Every row the session's context windows' journals held at archive time
+    /// (empty ⇒ no `window_journal.jsonl`) — the reads, declines, edits and
+    /// evictions the savings figures are derived from, frozen where a rebuild
+    /// can reach them.
+    pub window_journal: Vec<super::ArchivedWindowFact>,
     /// The redacted raw capture (durable-blob proof of the gate).
     pub content: RedactedBytes,
     /// The redaction report for `redaction_report.json` (must be valid).
@@ -459,7 +464,7 @@ pub const USAGE_SCHEMA_VERSION: u32 = 1;
 
 /// What a `usage.jsonl` member that could carry text other than an
 /// identifier is frozen as.
-const WITHHELD: &str = "withheld";
+pub(super) const WITHHELD: &str = "withheld";
 
 /// The longest identifier a `usage.jsonl` member freezes as written.
 const MAX_IDENTIFIER_LEN: usize = 128;
@@ -536,7 +541,7 @@ fn usage_line(fact: &ArchivedUsageFact) -> serde_json::Value {
 /// `value` when it is a bounded identifier (ASCII letters, digits and the
 /// punctuation model ids and counting methods use) or one closed-vocabulary
 /// literal, else [`WITHHELD`].
-fn identifier_or_withheld(value: &str) -> &str {
+pub(super) fn identifier_or_withheld(value: &str) -> &str {
     // Claude Code reports this model for a synthetic assistant message. It is
     // admitted as the exact literal, not by widening the character class:
     // `<` and `>` stay outside the grammar, so no other bracketed text can

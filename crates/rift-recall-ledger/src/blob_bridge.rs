@@ -18,6 +18,13 @@
 //! returned rather than hidden, because a basis-availability rate is the thing
 //! the pull verb's usefulness is actually made of.
 //!
+//! The walk is the expensive half, and its answer is a function of two things
+//! only: the revisions still wanted and the line of history `HEAD` names. So a
+//! walk that finished is recorded as a proof — one `ingest_watermark` row whose
+//! id digests `HEAD` and the revisions it left unavailable — and the
+//! incremental pass skips a walk whose proof is already there. A new read or a
+//! moved `HEAD` changes the digest and walks again; the full pass always walks.
+//!
 //! **Opens a store and walks history**, so it belongs to the ingest pass the
 //! worker runs and to nothing on a tool-call gate path.
 
@@ -26,7 +33,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use rift_core::Result;
 use rift_recall_substrate::worktree::{sha256_hex, WorktreeBlob};
 use rift_recall_substrate::SubstrateReader;
-use rift_store::CanonicalStore;
+use rift_store::{CanonicalStore, Value};
+
+use crate::graph::sha256_id;
 
 /// How far back the candidate walk goes: the last sixty-four commits of the
 /// checked-out line, first-parent. Deep enough to cover the sessions a
@@ -46,6 +55,14 @@ pub const MAX_BRIDGED_PATHS: usize = 64;
 /// spent to learn nothing.
 pub const MAX_BASIS_BYTES: usize = 1024 * 1024;
 
+/// The `ingest_watermark` branch a finished walk's proof is recorded under. No
+/// checkpoint dialect is spelled like a bare name, so a dialect's resume never
+/// reads one of these rows as its tip.
+pub const PROOF_BRANCH: &str = "blob-bridge";
+
+/// The revisions a pass wants, grouped by the path they were recorded at.
+type Wanted = BTreeMap<String, BTreeSet<String>>;
+
 /// What one bridging pass found. `wanted + 0 = mapped + unavailable` by
 /// construction: every recorded revision the pass looked at is in exactly one
 /// of the two.
@@ -57,13 +74,67 @@ pub struct BridgeReport {
     pub mapped: usize,
     /// Of those, the ones no candidate blob matched — uncommitted bytes.
     pub basis_unavailable: usize,
+    /// Whether this pass walked history, rather than finding a proof that a
+    /// walk from the same `HEAD` had already left these revisions unavailable.
+    pub history_walked: bool,
+}
+
+/// Map every recorded read revision whose bytes git already holds to the blob
+/// that holds them — the full pass, which walks whenever anything is wanted.
+///
+/// Idempotent: the map's primary key is the content address and the write is
+/// insert-or-ignore, so a second pass re-proves nothing and writes nothing. A
+/// reader that cannot walk history (the fail-safe default) bridges nothing and
+/// reports every wanted revision unavailable, which is what it truly knows.
+///
+/// # Errors
+/// Propagates store read/write errors. A history-walk failure is not an
+/// error — it yields fewer candidates.
+pub async fn bridge_read_revisions(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+    now: i64,
+) -> Result<BridgeReport> {
+    let wanted = unmapped_read_revisions(store).await?;
+    walk_and_prove(store, reader, wanted, now).await
+}
+
+/// [`bridge_read_revisions`] for the incremental pass: a wanted set a walk from
+/// this same `HEAD` already left unavailable is reported as that walk found it,
+/// without walking again.
+///
+/// Equal to the full pass by construction: the walk reads nothing but the
+/// wanted set, the first-parent line from `HEAD` and the immutable objects on
+/// it, and the proof's id digests the first two. A reader that cannot name
+/// `HEAD` has no proof to find and always walks.
+///
+/// # Errors
+/// Propagates store read/write errors.
+pub async fn bridge_unproven_revisions(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+    now: i64,
+) -> Result<BridgeReport> {
+    let wanted = unmapped_read_revisions(store).await?;
+    let proven = match head_of(reader) {
+        Some(head) => proof_recorded(store, &proof_id(&head, &wanted)).await?,
+        None => false,
+    };
+    if !proven {
+        return walk_and_prove(store, reader, wanted, now).await;
+    }
+    let n_wanted = wanted.values().map(BTreeSet::len).sum();
+    Ok(BridgeReport {
+        wanted: n_wanted,
+        mapped: 0,
+        basis_unavailable: n_wanted,
+        history_walked: false,
+    })
 }
 
 /// Every `(path, content_sha256)` a read recorded that the blob map does not
 /// yet carry, oldest-sorted for determinism.
-async fn unmapped_read_revisions(
-    store: &impl CanonicalStore,
-) -> Result<BTreeMap<String, BTreeSet<String>>> {
+async fn unmapped_read_revisions(store: &impl CanonicalStore) -> Result<Wanted> {
     let rows = store
         .query(
             "SELECT DISTINCT r.path, r.content_sha256 \
@@ -75,7 +146,7 @@ async fn unmapped_read_revisions(
             &[],
         )
         .await?;
-    let mut wanted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut wanted = Wanted::new();
     for r in &rows {
         let (Ok(path), Ok(hash)) = (r.get_text(0), r.get_text(1)) else {
             continue;
@@ -91,34 +162,60 @@ async fn unmapped_read_revisions(
     Ok(wanted)
 }
 
-/// Map every recorded read revision whose bytes git already holds to the blob
-/// that holds them.
+/// Walk history for `wanted`, map what it finds, and record the proof of what
+/// it left unavailable when the walk was whole.
 ///
-/// Idempotent: the map's primary key is the content address and the write is
-/// insert-or-ignore, so a second pass re-proves nothing and writes nothing. A
-/// reader that cannot walk history (the fail-safe default) bridges nothing and
-/// reports every wanted revision unavailable, which is what it truly knows.
-///
-/// # Errors
-/// Propagates store read/write errors. A history-walk failure is not an
-/// error — it yields fewer candidates.
-pub async fn bridge_read_revisions(
+/// The proof names the revisions left over, not the ones asked for: the next
+/// pass wants exactly those, and finds the proof without walking once more.
+async fn walk_and_prove(
     store: &impl CanonicalStore,
     reader: &impl SubstrateReader,
+    mut wanted: Wanted,
     now: i64,
 ) -> Result<BridgeReport> {
-    let mut wanted = unmapped_read_revisions(store).await?;
-    let mut report = BridgeReport {
-        wanted: wanted.values().map(BTreeSet::len).sum(),
-        ..BridgeReport::default()
-    };
-    if wanted.is_empty() {
-        return Ok(report);
+    let n_wanted = wanted.values().map(BTreeSet::len).sum();
+    if n_wanted == 0 {
+        return Ok(BridgeReport::default());
     }
+    let head = head_of(reader);
+    let walk = walk_history(store, reader, &mut wanted, now).await?;
+    if let Some(head) = head {
+        record_proof(store, reader, &head, &walk, &wanted).await?;
+    }
+    Ok(BridgeReport {
+        wanted: n_wanted,
+        mapped: walk.mapped,
+        basis_unavailable: n_wanted.saturating_sub(walk.mapped),
+        history_walked: true,
+    })
+}
+
+/// What one walk did: how many revisions it mapped, and whether it read every
+/// candidate it was offered.
+struct Walk {
+    mapped: usize,
+    whole: bool,
+}
+
+/// Hash every candidate blob of the wanted paths and map each one whose bytes
+/// a read recorded, removing it from `wanted`.
+async fn walk_history(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+    wanted: &mut Wanted,
+    now: i64,
+) -> Result<Walk> {
     let paths: BTreeSet<String> = wanted.keys().cloned().collect();
-    let candidates = reader
-        .path_blob_oids(&paths, MAX_HISTORY_COMMITS)
-        .unwrap_or_default();
+    let Ok(candidates) = reader.path_blob_oids(&paths, MAX_HISTORY_COMMITS) else {
+        return Ok(Walk {
+            mapped: 0,
+            whole: false,
+        });
+    };
+    let mut walk = Walk {
+        mapped: 0,
+        whole: true,
+    };
     for (path, oids) in &candidates {
         let Some(missing) = wanted.get_mut(path) else {
             continue;
@@ -128,6 +225,9 @@ pub async fn bridge_read_revisions(
                 break;
             }
             let Ok(Some(bytes)) = reader.blob(oid) else {
+                // A candidate the object store cannot produce leaves the walk
+                // partial, and a partial walk proves nothing.
+                walk.whole = false;
                 continue;
             };
             if bytes.len() > MAX_BASIS_BYTES {
@@ -150,11 +250,69 @@ pub async fn bridge_read_revisions(
                 now,
             )
             .await?;
-            report.mapped += 1;
+            walk.mapped += 1;
         }
     }
-    report.basis_unavailable = report.wanted.saturating_sub(report.mapped);
-    Ok(report)
+    Ok(walk)
+}
+
+/// Record that a walk from `head` left `left_over` unavailable — unless the
+/// walk missed a candidate or raced a moving `HEAD`, when it proves nothing
+/// about the line it was meant to read, or left nothing over to prove.
+async fn record_proof(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+    head: &str,
+    walk: &Walk,
+    left_over: &Wanted,
+) -> Result<()> {
+    let head_held = head_of(reader).as_deref() == Some(head);
+    if !walk.whole || !head_held || left_over.is_empty() {
+        return Ok(());
+    }
+    let id = proof_id(head, left_over);
+    crate::ingest::record_watermark(store, &id, PROOF_BRANCH, head).await
+}
+
+/// The commit `HEAD` names, when the reader can say.
+fn head_of(reader: &impl SubstrateReader) -> Option<String> {
+    reader.resolve_commitish("HEAD").ok().flatten()
+}
+
+/// The id of the proof that a walk from `head` left exactly `wanted`
+/// unavailable. The domain carries the walk's bounds, so changing them retires
+/// every proof recorded under the old ones.
+fn proof_id(head: &str, wanted: &Wanted) -> String {
+    let domain =
+        format!("rift.bridge.v1/{MAX_HISTORY_COMMITS}/{MAX_BRIDGED_PATHS}/{MAX_BASIS_BYTES}");
+    // Each path's count of hashes goes in beside it, so two different
+    // groupings of the same strings can never digest alike.
+    let counts: Vec<[u8; 8]> = wanted
+        .values()
+        .map(|hashes| {
+            u64::try_from(hashes.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes()
+        })
+        .collect();
+    let mut parts: Vec<&[u8]> = vec![head.as_bytes()];
+    for ((path, hashes), count) in wanted.iter().zip(&counts) {
+        parts.push(path.as_bytes());
+        parts.push(count);
+        parts.extend(hashes.iter().map(String::as_bytes));
+    }
+    sha256_id(&domain, &parts)
+}
+
+/// Whether the proof `id` is on record.
+async fn proof_recorded(store: &impl CanonicalStore, id: &str) -> Result<bool> {
+    let rows = store
+        .query(
+            "SELECT 1 FROM ingest_watermark WHERE watermark_id = ?1",
+            &[Value::text(id)],
+        )
+        .await?;
+    Ok(!rows.is_empty())
 }
 
 #[cfg(test)]
@@ -250,7 +408,8 @@ mod tests {
             BridgeReport {
                 wanted: 1,
                 mapped: 1,
-                basis_unavailable: 0
+                basis_unavailable: 0,
+                history_walked: true,
             }
         );
         assert_eq!(
@@ -287,7 +446,8 @@ mod tests {
             BridgeReport {
                 wanted: 2,
                 mapped: 1,
-                basis_unavailable: 1
+                basis_unavailable: 1,
+                history_walked: true,
             },
             "the uncommitted revision is named as unreachable, not as unchanged"
         );
@@ -329,7 +489,8 @@ mod tests {
             BridgeReport {
                 wanted: 1,
                 mapped: 0,
-                basis_unavailable: 1
+                basis_unavailable: 1,
+                history_walked: true,
             }
         );
         assert_eq!(block(store.count("n_blob_oid_map")).unwrap(), 0);
@@ -355,5 +516,52 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get_text(0).unwrap(), "src/a.rs");
+    }
+
+    /// A walk from a `HEAD` the reader names is recorded as a proof, and the
+    /// incremental bridge answers the same wanted set from it without walking.
+    #[test]
+    fn a_recorded_proof_answers_the_same_wanted_set_without_a_walk() {
+        let store = recall_store();
+        record_read(&store, "rev1", "src/a.rs", UNCOMMITTED);
+        let sub = MemorySubstrate::local().with_revision("HEAD", "c0ffee01");
+        let walked = block(bridge_unproven_revisions(&store, &sub, 0)).unwrap();
+        assert!(walked.history_walked);
+        let proved = block(bridge_unproven_revisions(&store, &sub, 0)).unwrap();
+        assert_eq!(
+            proved,
+            BridgeReport {
+                history_walked: false,
+                ..walked
+            }
+        );
+    }
+
+    /// A reader that cannot name `HEAD` has no line to prove anything about,
+    /// so the incremental bridge walks on every pass and records nothing.
+    #[test]
+    fn a_reader_with_no_head_walks_every_time_and_records_no_proof() {
+        let store = recall_store();
+        record_read(&store, "rev1", "src/a.rs", UNCOMMITTED);
+        let sub = MemorySubstrate::local();
+        for _ in 0..2 {
+            let report = block(bridge_unproven_revisions(&store, &sub, 0)).unwrap();
+            assert!(report.history_walked);
+        }
+        assert_eq!(block(store.count("ingest_watermark")).unwrap(), 0);
+    }
+
+    /// A candidate the object store cannot produce makes the walk partial, and
+    /// a partial walk proves nothing: the next pass walks again.
+    #[test]
+    fn a_walk_that_missed_a_candidate_records_no_proof() {
+        let store = recall_store();
+        record_read(&store, "rev1", "src/a.rs", UNCOMMITTED);
+        let sub = MemorySubstrate::local()
+            .with_revision("HEAD", "c0ffee01")
+            .with_path_blob("src/a.rs", "an-object-the-store-lost");
+        block(bridge_unproven_revisions(&store, &sub, 0)).unwrap();
+        let again = block(bridge_unproven_revisions(&store, &sub, 0)).unwrap();
+        assert!(again.history_walked);
     }
 }

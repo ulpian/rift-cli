@@ -23,6 +23,22 @@ use rift_store::{CanonicalStore, Value};
 use crate::graph::{file_read_id, file_revision_id, sha256_id, Built, INGEST_TS};
 use crate::FileRead;
 
+/// The read facts of a walk, with the paths of the ones the graph projects.
+#[derive(Debug, Default)]
+pub(crate) struct ReadFacts {
+    /// Every read-shaped call carrying a path and a content hash, in walk
+    /// order.
+    pub(crate) reads: Vec<FileRead>,
+    /// The paths of the reads whose tool call carries an identity — exactly
+    /// the reads the graph projects. A pass that reads no shard recovers its
+    /// paths from the projection, so both kinds of pass must name the same set:
+    /// a path seen only in an anonymous call would otherwise be hashed by one
+    /// and not the other.
+    pub(crate) projected_paths: BTreeSet<String>,
+    /// Parse issues met along the way.
+    pub(crate) issues: Vec<ParseIssue>,
+}
+
 /// Extract the file-read facts from a single checkpoint's artifacts, plus any
 /// parse issues. Only read-shaped tool calls carrying both a path and a content
 /// hash become `FileRead`s; tokens are taken inline or joined from
@@ -34,12 +50,70 @@ pub fn read_facts_for(
     reader: &impl SubstrateReader,
     checkpoint_id: &str,
 ) -> Result<(Vec<FileRead>, Vec<ParseIssue>)> {
-    let mut issues = Vec::new();
+    let mut facts = ReadFacts::default();
+    collect_read_facts(reader, checkpoint_id, &mut facts)?;
+    Ok((facts.reads, facts.issues))
+}
 
+/// Extract file-read facts across every checkpoint of a reader, in walk order.
+///
+/// # Errors
+/// Propagates substrate read errors.
+pub fn read_facts_all(reader: &impl SubstrateReader) -> Result<(Vec<FileRead>, Vec<ParseIssue>)> {
+    let facts = read_facts_of(reader, &reader.checkpoints()?)?;
+    Ok((facts.reads, facts.issues))
+}
+
+/// The read facts of `shards`, in their order. Taking the shards rather than
+/// walking them again lets a caller read the very snapshot its ingest plan
+/// holds.
+///
+/// # Errors
+/// Propagates substrate read errors.
+pub(crate) fn read_facts_of(
+    reader: &impl SubstrateReader,
+    shards: &[CheckpointShard],
+) -> Result<ReadFacts> {
+    let mut facts = ReadFacts::default();
+    for shard in shards {
+        collect_read_facts(reader, &shard.checkpoint_id, &mut facts)?;
+    }
+    Ok(facts)
+}
+
+/// The distinct repo-relative paths that appear in `reads` (the paths the
+/// worktree hasher needs for the avoidable-context metric).
+#[must_use]
+pub fn read_paths(reads: &[FileRead]) -> std::collections::BTreeSet<String> {
+    reads.iter().map(|r| r.path.clone()).collect()
+}
+
+/// The paths the projection holds a read for: what [`ReadFacts::projected_paths`]
+/// names for the walk the projection was built from.
+///
+/// # Errors
+/// Propagates store read errors.
+pub(crate) async fn projected_read_paths(store: &impl CanonicalStore) -> Result<BTreeSet<String>> {
+    let rows = store
+        .query(
+            "SELECT DISTINCT r.path FROM n_file_revision r \
+             JOIN n_file_read k ON k.file_revision = r.node_id",
+            &[],
+        )
+        .await?;
+    Ok(rows.iter().filter_map(|r| r.get_text(0).ok()).collect())
+}
+
+/// Append one checkpoint's read facts to `facts`.
+fn collect_read_facts(
+    reader: &impl SubstrateReader,
+    checkpoint_id: &str,
+    facts: &mut ReadFacts,
+) -> Result<()> {
     let tool_calls = match reader.read_artifact(checkpoint_id, "tool_calls.jsonl")? {
         Some(bytes) => {
             let out = parse::parse_tool_calls(&bytes, checkpoint_id);
-            issues.extend(out.issues);
+            facts.issues.extend(out.issues);
             out.value
         }
         None => Vec::new(),
@@ -47,7 +121,7 @@ pub fn read_facts_for(
     let tokens = match reader.read_artifact(checkpoint_id, "token_estimates.json")? {
         Some(bytes) => {
             let out = parse::parse_token_estimates(&bytes, checkpoint_id);
-            issues.extend(out.issues);
+            facts.issues.extend(out.issues);
             out.value
         }
         None => Vec::new(),
@@ -57,7 +131,6 @@ pub fn read_facts_for(
         .map(|t| (t.tool_use_id.as_str(), t.input_tokens))
         .collect();
 
-    let mut reads = Vec::new();
     for tc in &tool_calls {
         if !tc.is_read() {
             continue;
@@ -69,35 +142,18 @@ pub fn read_facts_for(
             .input_tokens
             .or_else(|| tok_by_id.get(tc.tool_use_id.as_str()).copied())
             .unwrap_or(0);
-        reads.push(FileRead {
+        // The graph's rule, kept in step with `push_tool_call_rows`: a call
+        // with no identity becomes no node, so its path is not a projected one.
+        if !tc.tool_use_id.is_empty() {
+            facts.projected_paths.insert(path.clone());
+        }
+        facts.reads.push(FileRead {
             path: path.clone(),
             content_sha256: hash.clone(),
             input_tokens,
         });
     }
-    Ok((reads, issues))
-}
-
-/// Extract file-read facts across every checkpoint of a reader, in walk order.
-///
-/// # Errors
-/// Propagates substrate read errors.
-pub fn read_facts_all(reader: &impl SubstrateReader) -> Result<(Vec<FileRead>, Vec<ParseIssue>)> {
-    let mut reads = Vec::new();
-    let mut issues = Vec::new();
-    for shard in reader.checkpoints()? {
-        let (r, i) = read_facts_for(reader, &shard.checkpoint_id)?;
-        reads.extend(r);
-        issues.extend(i);
-    }
-    Ok((reads, issues))
-}
-
-/// The distinct repo-relative paths that appear in `reads` (the paths the
-/// worktree hasher needs for the avoidable-context metric).
-#[must_use]
-pub fn read_paths(reads: &[FileRead]) -> std::collections::BTreeSet<String> {
-    reads.iter().map(|r| r.path.clone()).collect()
+    Ok(())
 }
 
 // =========================================================================
@@ -535,6 +591,23 @@ pub async fn ingest_with(
     reader: &impl SubstrateReader,
     opts: &IngestOptions,
 ) -> Result<IngestReport> {
+    let plan = plan_ingest(store, reader).await?;
+    ingest_planned(store, reader, plan, opts).await
+}
+
+/// Decide what an ingest will project, before it projects anything.
+///
+/// Split from [`ingest_planned`] so a caller can ask whether anything is new
+/// and build its options only then, and so the answer and the ingest that acts
+/// on it read one walk: a shard that lands in between is the next pass's,
+/// never projected under options built for a pass that expected nothing.
+///
+/// # Errors
+/// Propagates substrate read and store read errors.
+pub(crate) async fn plan_ingest(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+) -> Result<IngestPlan> {
     // The durable seen-set: checkpoints are content-addressed, so presence in
     // the projection is proof of prior ingest (robust even if walk ordinals
     // reshuffle as new shards sort in between old ones).
@@ -544,24 +617,40 @@ pub async fn ingest_with(
         .iter()
         .filter_map(|r| r.get_text(0).ok())
         .collect();
-
     let mut report = IngestReport::default();
     // The resume frontier, taken through the ONE cursor path.
     let shards = reader.checkpoints()?;
     let frontier = resume_frontier(store, &shards, &mut report).await?;
+    Ok(IngestPlan {
+        shards,
+        seen,
+        frontier,
+        report,
+    })
+}
+
+/// Project what `plan` found new, then write the watermarks, the containment
+/// backfill and the changed hunks. See [`ingest_with`].
+///
+/// # Errors
+/// Propagates substrate read and store write errors.
+pub(crate) async fn ingest_planned(
+    store: &impl CanonicalStore,
+    reader: &impl SubstrateReader,
+    plan: IngestPlan,
+    opts: &IngestOptions,
+) -> Result<IngestReport> {
+    let mut report = plan.report.clone();
     // Last shard per dialect (by walk ordinal) → the durable watermark row.
     let mut tips: BTreeMap<&'static str, (u64, String)> = BTreeMap::new();
-    for shard in &shards {
+    for shard in &plan.shards {
         report.checkpoints += 1;
         let branch = shard.dialect.checkpoint_ref();
         let tip = tips.entry(branch).or_insert((0, String::new()));
         if shard.ordinal >= tip.0 {
             *tip = (shard.ordinal, shard.checkpoint_id.clone());
         }
-        // Two independent reasons to skip, in cost order. The cursor answers
-        // without touching the projection; the seen-set is the backstop that
-        // still catches a run which applied rows and died before its watermark.
-        if !frontier.admits(branch, &shard.checkpoint_id) || seen.contains(&shard.checkpoint_id) {
+        if !plan.projects(shard) {
             report.skipped += 1;
             continue;
         }
@@ -574,7 +663,7 @@ pub async fn ingest_with(
 
     // The containment facts for shards this index projected BEFORE the branch
     // axis existed (see `backfill_containment_rows`).
-    report.containment_backfilled = backfill_containment_rows(store, reader, &shards).await?;
+    report.containment_backfilled = backfill_containment_rows(store, reader, &plan.shards).await?;
 
     // Durable incremental-ingest evidence: one append-only row per dialect,
     // content-addressed on (branch, tip) so a re-run at the same tip dedupes.
@@ -583,30 +672,44 @@ pub async fn ingest_with(
             continue;
         }
         let wid = sha256_id("rift.wm.v1", &[branch.as_bytes(), tip.as_bytes()]);
-        store
-            .insert_or_ignore(
-                "ingest_watermark",
-                &[
-                    "watermark_id",
-                    "branch",
-                    "branch_tip",
-                    "ingested_at",
-                    "schema_version",
-                ],
-                &[
-                    Value::text(wid.as_str()),
-                    Value::text(*branch),
-                    Value::text(tip.as_str()),
-                    Value::Int(INGEST_TS),
-                    Value::Int(1),
-                ],
-            )
-            .await?;
+        record_watermark(store, &wid, branch, tip).await?;
     }
 
     // Changed hunks between consecutive revisions of each read path.
     report.hunks = persist_read_hunks(store, reader).await?;
     Ok(report)
+}
+
+/// Append one `ingest_watermark` row; a row already there is kept.
+///
+/// # Errors
+/// Propagates store write errors.
+pub(crate) async fn record_watermark(
+    store: &impl CanonicalStore,
+    watermark_id: &str,
+    branch: &str,
+    tip: &str,
+) -> Result<()> {
+    store
+        .insert_or_ignore(
+            "ingest_watermark",
+            &[
+                "watermark_id",
+                "branch",
+                "branch_tip",
+                "ingested_at",
+                "schema_version",
+            ],
+            &[
+                Value::text(watermark_id),
+                Value::text(branch),
+                Value::text(tip),
+                Value::Int(INGEST_TS),
+                Value::Int(1),
+            ],
+        )
+        .await?;
+    Ok(())
 }
 
 /// Write the containment rows for checkpoints this index projected
@@ -675,6 +778,39 @@ impl ResumeFrontier {
         self.unseen
             .get(branch)
             .is_none_or(|unseen| unseen.contains(id))
+    }
+}
+
+/// One ingest's reading of the walk: the shards, and which of them it will
+/// project. Built by [`plan_ingest`], spent by [`ingest_planned`].
+#[derive(Debug)]
+pub(crate) struct IngestPlan {
+    shards: Vec<CheckpointShard>,
+    seen: BTreeSet<String>,
+    frontier: ResumeFrontier,
+    /// The resume counts the plan took, carried into the ingest's report.
+    report: IngestReport,
+}
+
+impl IngestPlan {
+    /// The walk this plan read.
+    pub(crate) fn shards(&self) -> &[CheckpointShard] {
+        &self.shards
+    }
+
+    /// Whether the ingest will project any checkpoint at all.
+    pub(crate) fn projects_any(&self) -> bool {
+        self.shards.iter().any(|shard| self.projects(shard))
+    }
+
+    /// Two independent reasons to skip a shard, in cost order. The cursor
+    /// answers without touching the projection; the seen-set is the backstop
+    /// that still catches a run which applied rows and died before its
+    /// watermark.
+    fn projects(&self, shard: &CheckpointShard) -> bool {
+        self.frontier
+            .admits(shard.dialect.checkpoint_ref(), &shard.checkpoint_id)
+            && !self.seen.contains(&shard.checkpoint_id)
     }
 }
 

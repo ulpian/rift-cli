@@ -18,3 +18,4 @@ tool_calls.jsonl
 transcript.compact.jsonl
 transcript.jsonl
 usage.jsonl
+window_journal.jsonl
