@@ -417,6 +417,7 @@ async fn doctor(repo: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use rift_git::test_support::fake_repo;
     use rift_recall_serve::TOOL_SURFACE;
 
@@ -540,5 +541,50 @@ mod tests {
             "a subdirectory resolves to its repository's store"
         );
         assert!(from_root.ends_with("recall.db"));
+    }
+
+    /// The three task-runner files illustrate the `memd` task with a verb, and
+    /// an illustration that names a verb this binary lost sends a reader to a
+    /// usage error, so every example they show is checked against the verbs
+    /// clap declares rather than against a hand-kept list.
+    #[test]
+    fn every_task_runner_example_names_a_verb_this_binary_declares() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let declared: Vec<String> = Cli::command()
+            .get_subcommands()
+            .map(|sub| sub.get_name().to_owned())
+            .collect();
+        for file in ["skills.sh", "SKILLS.md", "skills.json"] {
+            let text = std::fs::read_to_string(root.join(file)).unwrap();
+            let verbs = memd_example_verbs(&text);
+            assert!(
+                !verbs.is_empty(),
+                "{file} shows no `memd -- <verb>` example"
+            );
+            for verb in verbs {
+                assert!(
+                    declared.iter().any(|name| name == verb),
+                    "{file} illustrates `memd -- {verb}`, which rift-memd does not declare: {declared:?}"
+                );
+            }
+        }
+    }
+
+    /// The verb after each `memd -- ` in `text`; a forwarded `"$@"` or an
+    /// argument list left open is not an example and yields nothing.
+    fn memd_example_verbs(text: &str) -> Vec<&str> {
+        text.match_indices("memd -- ")
+            .filter_map(|(at, marker)| {
+                let rest = &text[at + marker.len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .unwrap_or(rest.len());
+                let verb = &rest[..end];
+                if !verb.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                    return None;
+                }
+                Some(verb)
+            })
+            .collect()
     }
 }
