@@ -15,7 +15,8 @@ mod common;
 #[path = "common/hooks_fixture.rs"]
 mod hooks_fixture;
 use hooks_fixture::{
-    agent_read_hook, archive_head, rift_json, run_rift_stdout, seed_live_session_repo, sync_env,
+    agent_hook, archive_head, json_str, rift_json, run_rift_stdout, seed_live_session_repo,
+    sync_env,
 };
 
 /// **Determinism as a property of INVOCATIONS, not of one process — for ALL
@@ -144,10 +145,11 @@ fn dispatch_and_recap_are_byte_identical_across_two_processes() {
     );
 }
 
-/// A repository whose rows real hooks wrote: one agent tool call BEFORE the
-/// commit, so the window holds something `recap` reads and `dispatch` does not
-/// (`tool_mix` comes from `tool_call`, which no other fact here would fill),
-/// then one archive. A report verb refuses an uninitialized repository outright
+/// A repository whose rows real hooks wrote: one agent `Read` BEFORE the
+/// commit — its `PreToolUse` and its `PostToolUse`, under one `tool_use_id` —
+/// so the window holds something `recap` reads and `dispatch` does not
+/// (`tool_mix` counts the tool-ran row the `PreToolUse` writes, never the
+/// read's own row the `PostToolUse` links), then one archive. A report verb refuses an uninitialized repository outright
 /// (`error: not_initialized`), so the marker directory is part of the fixture
 /// rather than an incantation. Returns `(repo, cache)`.
 fn captured_repo(tmp: &Path) -> (PathBuf, PathBuf) {
@@ -155,7 +157,13 @@ fn captured_repo(tmp: &Path) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(repo.join(".rift")).unwrap();
     let cache = tmp.join("cache");
     let env = sync_env(&cache);
-    agent_read_hook(&repo, "e2e-live-1", 1, &repo.join("a.txt"), &env);
+    let read = format!(
+        r#"{{"tool_name":"Read","tool_use_id":"toolu_e2e_read","tool_input":{{"file_path":{}}}}}"#,
+        json_str(&repo.join("a.txt"))
+    );
+    for verb in ["PreToolUse", "PostToolUse"] {
+        agent_hook(&repo, verb, "e2e-live-1", 1, &read, &env);
+    }
     archive_head(&repo, &env);
     (repo, cache)
 }

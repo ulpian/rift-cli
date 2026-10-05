@@ -24,6 +24,8 @@ mod reads;
 mod session;
 #[cfg(test)]
 mod settle_tests;
+#[cfg(test)]
+mod tool_call_tests;
 mod turns;
 
 use std::path::Path;
@@ -392,7 +394,12 @@ async fn project_hook(
         .unwrap_or_default();
     let commanded = reads::commanded_read(ctx, &normalized, events);
     let read_lines = commanded.as_ref().map(|&(_, lines)| lines);
-    let facts = payload_facts(normalized, commanded.map(|(path, _)| path), read_hasher);
+    let facts = payload_facts(
+        normalized,
+        &ctx.raw.payload,
+        commanded.map(|(path, _)| path),
+        read_hasher,
+    );
     let projection = ProjectionCtx {
         agent: ctx.owner,
         repo_id: ctx.repo_id,
@@ -414,9 +421,11 @@ async fn project_hook(
 /// The read-time content identity is resolved through the caller's worktree
 /// hasher: the ingest layer never touches the filesystem itself, and an
 /// unresolvable path (outside the repo, vanished, unsafe) simply records no
-/// read fact.
+/// read fact. The tool-use id is read from the raw payload by the same rule
+/// the archived-event replay applies, so both sources key one call alike.
 fn payload_facts(
     normalized: HookFacts,
+    payload: &serde_json::Value,
     commanded_path: Option<String>,
     read_hasher: Option<ReadHasher<'_>>,
 ) -> PayloadFacts {
@@ -432,6 +441,7 @@ fn payload_facts(
             .as_ref()
             .map(|fact| fact.source.as_str().to_owned()),
         tool_name: normalized.tool_name,
+        tool_use_id: crate::project::native_tool_use_id(payload),
         child_session: normalized.child_session,
         read_path,
         read_content,

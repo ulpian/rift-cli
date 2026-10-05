@@ -98,7 +98,11 @@ pub(crate) async fn recap_in(
     Ok(Outcome::ok(render_recap(&rows, &screen), doc))
 }
 
-/// A tool-name histogram over a window.
+/// A tool-name histogram over a window, one count per tool call.
+///
+/// A read lands two `tool_call` rows: the tool-ran row its `PreToolUse` wrote
+/// and the read's own row, which `tool_reads_file` links to the revision it
+/// read. Only the first is counted here, so a read is one call, not two.
 ///
 /// # Errors
 /// Propagates projection read errors.
@@ -106,9 +110,11 @@ async fn tool_mix(store: &SqliteStore, window: &Window) -> Result<Vec<(String, i
     let mut out = Vec::new();
     for r in store
         .query(
-            "SELECT tool_name, COUNT(*) AS n FROM tool_call \
-             WHERE started_at >= ?1 AND started_at <= ?2 \
-             GROUP BY tool_name ORDER BY n DESC, tool_name",
+            "SELECT tc.tool_name, COUNT(*) AS n FROM tool_call tc \
+             WHERE tc.started_at >= ?1 AND tc.started_at <= ?2 \
+             AND NOT EXISTS (SELECT 1 FROM tool_reads_file trf \
+                             WHERE trf.tool_call_id = tc.tool_call_id) \
+             GROUP BY tc.tool_name ORDER BY n DESC, tc.tool_name",
             &window.bounds(),
         )
         .await?
@@ -564,5 +570,69 @@ mod tests {
             );
         }
         assert!(out.contains("claude"), "the name is still readable");
+    }
+
+    /// Deliver one Claude Code hook of `verb` in turn 1; a `Read` resolves
+    /// to a fixed revision so its `PostToolUse` lands the read's own row.
+    async fn deliver(store: &SqliteStore, git_dir: &Path, verb: &str, payload: serde_json::Value) {
+        let reg = rift_shadow::hooks::AdapterRegistry::with_builtin();
+        let hasher = |path: &str| {
+            Some(rift_shadow::project::ReadContent {
+                rel_path: path.to_owned(),
+                blob_oid: "oid-1".into(),
+                content_sha256: "aa11".into(),
+                tokens: None,
+            })
+        };
+        let hook = rift_shadow::hooks::RawHook {
+            agent: rift_shadow::hooks::AgentId::CLAUDE_CODE,
+            verb: verb.into(),
+            session: "01JSESSION".into(),
+            turn: Some(1),
+            occurred_at_ms: 1,
+            payload,
+        };
+        rift_shadow::ingest_hook(
+            &hook,
+            &reg,
+            store,
+            git_dir,
+            "claude-code",
+            "repo-1",
+            10,
+            Some(&hasher),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_tool_mix_counts_each_tool_call_once_and_never_the_reads_own_row() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.create_canonical_schema().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        for (tool, id) in [
+            ("Bash", "toolu_01BASHA"),
+            ("Read", "toolu_01READA"),
+            ("Grep", "toolu_01GREPA"),
+            ("Bash", "toolu_01BASHB"),
+        ] {
+            let pre = json!({"tool_name": tool, "tool_use_id": id, "tool_input": {}});
+            deliver(&store, tmp.path(), "PreToolUse", pre).await;
+        }
+        let post_read = json!({
+            "tool_name": "Read",
+            "tool_use_id": "toolu_01READA",
+            "tool_input": {"file_path": "src/lib.rs"},
+        });
+        deliver(&store, tmp.path(), "PostToolUse", post_read).await;
+
+        let mix = tool_mix(&store, &Window::resolve(None, None).unwrap())
+            .await
+            .unwrap();
+        let expected = [("Bash", 2), ("Grep", 1), ("Read", 1)]
+            .map(|(tool, n)| (tool.to_owned(), n))
+            .to_vec();
+        assert_eq!(mix, expected);
     }
 }
