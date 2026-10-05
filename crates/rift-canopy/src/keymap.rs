@@ -143,7 +143,7 @@ const RAIL: &[Hint] = &[
     hint("⏎", "open", CanopyKey::Enter),
     hint("a", "add", CanopyKey::Char('a')),
     hint("d", "remove", CanopyKey::Char('d')),
-    hint("⇧j/k", "reorder", CanopyKey::ShiftDown),
+    hint("⇧↑/↓", "reorder", CanopyKey::ShiftDown),
     hint("/", "palette", CanopyKey::Char('/')),
     hint("q", "quit", CanopyKey::Char('q')),
 ];
@@ -171,7 +171,7 @@ const GRAPHS: &[Hint] = &[
     // the "by worktree" axis in the existing results
     // overlay. Hinted only here, because it is bound only here.
     hint("w", "by worktree", CanopyKey::Char('w')),
-    // One hint over four probe-equivalent keys, the `j/k` and `⇧j/k` form:
+    // One hint over four probe-equivalent keys, the `j/k` and `⇧↑/↓` form:
     // each digit selects the Recall card's period button of the same
     // position, and all four are bound only here — where the buttons are.
     hint("1-4", "recall period", CanopyKey::Char('1')),
@@ -222,7 +222,7 @@ const PROFILE_SETTINGS: &[Hint] = &[
 const PROFILE_MEMBERS: &[Hint] = &[
     hint("j/k", "move", CanopyKey::Down),
     hint("d", "remove", CanopyKey::Char('d')),
-    hint("⇧j/k", "reorder", CanopyKey::ShiftDown),
+    hint("⇧↑/↓", "reorder", CanopyKey::ShiftDown),
     hint("a", "add", CanopyKey::Char('a')),
     hint("esc", "back", CanopyKey::Esc),
 ];
@@ -309,6 +309,34 @@ mod tests {
     use super::*;
     use crate::input::{on_key, Action};
     use crate::{App, EntryKind, Project, ProjectStatus};
+
+    /// Every context, so the tests over the tables read them all. A new
+    /// context fails to compile in `app_in`'s exhaustive match, which is the
+    /// prompt to list it here too.
+    const ALL: [HintContext; 22] = [
+        HintContext::Rail,
+        HintContext::Detail,
+        HintContext::DetailNotAdopted,
+        HintContext::Graphs,
+        HintContext::CommandIdle,
+        HintContext::CommandEditing,
+        HintContext::AddProject,
+        HintContext::PanelEditor,
+        HintContext::ProfileMenu,
+        HintContext::ProfileSettings,
+        HintContext::ProfileMembers,
+        HintContext::ProfileMembersAdd,
+        HintContext::ProfileNaming,
+        HintContext::ProfileConfirm,
+        HintContext::ColourPicker,
+        HintContext::Explorer,
+        HintContext::ProjectSettings,
+        HintContext::ProjectSettingsRunning,
+        HintContext::OverlayResults,
+        HintContext::OverlayConfirm,
+        HintContext::OverlayMessage,
+        HintContext::OverlayRunning,
+    ];
 
     fn project(name: &str) -> Project {
         Project {
@@ -629,30 +657,6 @@ mod tests {
     /// an action is returned. A hint can never advertise a dead key.
     #[test]
     fn every_hint_key_is_handled_by_the_reducer() {
-        const ALL: [HintContext; 22] = [
-            HintContext::Rail,
-            HintContext::Detail,
-            HintContext::DetailNotAdopted,
-            HintContext::Graphs,
-            HintContext::CommandIdle,
-            HintContext::CommandEditing,
-            HintContext::AddProject,
-            HintContext::PanelEditor,
-            HintContext::ProfileMenu,
-            HintContext::ProfileSettings,
-            HintContext::ProfileMembers,
-            HintContext::ProfileMembersAdd,
-            HintContext::ProfileNaming,
-            HintContext::ProfileConfirm,
-            HintContext::ColourPicker,
-            HintContext::Explorer,
-            HintContext::ProjectSettings,
-            HintContext::ProjectSettingsRunning,
-            HintContext::OverlayResults,
-            HintContext::OverlayConfirm,
-            HintContext::OverlayMessage,
-            HintContext::OverlayRunning,
-        ];
         for ctx in ALL {
             for h in hints(ctx) {
                 let mut app = app_in(ctx);
@@ -663,6 +667,33 @@ mod tests {
                     handled,
                     "{ctx:?}: hinted key {:?} (`{}` {}) is dead in the reducer",
                     h.probe, h.keys, h.verb
+                );
+            }
+        }
+    }
+
+    /// Shift-J/K arrive as ordinary capitals and act on nothing; only Shift
+    /// with an arrow reaches `ShiftUp`/`ShiftDown`, because Canopy does not
+    /// enable the keyboard-enhancement protocol that would report Shift on a
+    /// letter. So a reorder hint spelled with a letter teaches a dead key.
+    #[test]
+    fn every_shifted_reorder_hint_spells_an_arrow_not_a_letter() {
+        for ctx in ALL {
+            for h in hints(ctx) {
+                if !matches!(h.probe, CanopyKey::ShiftUp | CanopyKey::ShiftDown) {
+                    continue;
+                }
+                assert!(
+                    h.keys.contains('↑') || h.keys.contains('↓'),
+                    "{ctx:?}: `{}` {} names no arrow",
+                    h.keys,
+                    h.verb
+                );
+                assert!(
+                    !h.keys.chars().any(char::is_alphabetic),
+                    "{ctx:?}: `{}` {} spells a letter",
+                    h.keys,
+                    h.verb
                 );
             }
         }

@@ -168,9 +168,9 @@ pub enum Target {
     MemberRow(usize),
     /// An add-stage candidate row: a click includes it, exactly like `Enter`.
     MemberAddRow(usize),
-    /// The members editor's `[↑]` chip — reorder the cursor row up (⇧k).
+    /// The members editor's `[↑]` chip — reorder the cursor row up (⇧↑).
     MemberUp,
-    /// The members editor's `[↓]` chip — reorder the cursor row down (⇧j).
+    /// The members editor's `[↓]` chip — reorder the cursor row down (⇧↓).
     MemberDown,
     /// The members editor's `[remove]` chip — remove the cursor row (`d`).
     MemberRemove,

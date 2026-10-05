@@ -282,7 +282,7 @@ fn draw_name_rows(
 }
 
 /// The members editor's action-chip row (the rail pattern — chips act on the
-/// cursor row, the click twins of d / ⇧j/k / a — modal-surface parity).
+/// cursor row, the click twins of d / ⇧↑/↓ / a — modal-surface parity).
 fn draw_members_chips(vm: &ViewModel, frame: &mut Frame, menu: ModalFrame) {
     for (chip_rect, _, text) in members_action_chips(menu.rect, vm.profile_menu.members.len()) {
         let style = mode_chip_style(vm, &members_chip_target(text));
@@ -396,7 +396,7 @@ fn draw_stage_line(vm: &ViewModel, frame: &mut Frame, inner: Rect) {
     let hint = match &vm.profile_menu.stage {
         MenuStage::Browse => " ⏎ switch · s settings · n new · d delete · esc close",
         MenuStage::Settings { .. } => " ⏎ open · esc back",
-        MenuStage::Members { .. } => " d remove · ⇧j/k reorder · a add · esc back",
+        MenuStage::Members { .. } => " d remove · ⇧↑/↓ reorder · a add · esc back",
         MenuStage::MembersAdd { .. } => " ⏎ add · esc back",
         MenuStage::NamingCreate
         | MenuStage::NamingRename { .. }
@@ -483,5 +483,21 @@ mod tests {
         s.app.startup_profile = None;
         let text = render_to_text(&s.snapshot());
         assert!(text.contains("startup pin  [off]"), "{text}");
+    }
+
+    /// The members stage line is drawn from its own string rather than the
+    /// keymap tables, so it is held to the same spelling separately: reorder
+    /// is Shift with an arrow, the only form the dashboard receives.
+    #[test]
+    fn members_stage_line_teaches_reorder_with_the_arrow_keys() {
+        use crate::profile_menu::MenuStage;
+        let mut s = profiled_state();
+        crate::input::enter_profile_menu(&mut s.app);
+        s.app.profile_menu.stage = MenuStage::Members {
+            profile: "pf0".into(),
+        };
+        let text = render_to_text(&s.snapshot());
+        assert!(text.contains("⇧↑/↓ reorder"), "{text}");
+        assert!(!text.contains("⇧j"), "{text}");
     }
 }

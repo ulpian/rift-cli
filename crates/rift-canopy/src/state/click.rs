@@ -472,7 +472,7 @@ fn click_profile_menu(s: &mut AppState, target: Target) -> Flow {
 
 /// The members editor: a row click selects (the chips act on the cursor); an
 /// add-stage candidate row includes it, exactly like `Enter`; and the action
-/// chips are the click twins of ⇧k / ⇧j / d / a on the cursor row
+/// chips are the click twins of ⇧↑ / ⇧↓ / d / a on the cursor row
 /// (modal-surface parity).
 fn click_members_editor(s: &mut AppState, target: Target) -> Flow {
     match target {
