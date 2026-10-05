@@ -17,7 +17,7 @@ expression: four_tier_golden(dashboard_frame)
 |│                │                                    │                                  │|
 |│[+][↑][↓][✕]    │                                    │context unavailable               │|
 |╰────────────────╯                                    │· events · 5m: —                  │|
-| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  ·  q quit |
+| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette  ·  q quit |
 |╭─ command ──────────────────────────────────────────────────────────────────────────────╮|
 |│/█                                                                                      │|
 |╰────────────────────────────────────────────────────────────────────────────────────────╯|
@@ -71,7 +71,7 @@ b  fg=#f0b45c  bg=#1a201e  +bold
 |│                │                                    │                                  │|
 |│[+][↑][↓][✕]    │                                    │context unavailable               │|
 |╰────────────────╯                                    │· events · 5m: —                  │|
-| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  ·  q quit |
+| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette  ·  q quit |
 |╭─ command ──────────────────────────────────────────────────────────────────────────────╮|
 |│/█                                                                                      │|
 |╰────────────────────────────────────────────────────────────────────────────────────────╯|
@@ -125,7 +125,7 @@ b  fg=@215  bg=@234  +bold
 |│                │                                    │                                  ||
 |│[+][^][v][x]    │                                    │context unavailable               ||
 |╰────────────────╯                                    │- events · 5m: —                  ||
-| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  ·  q quit |
+| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette  ·  q quit |
 |╭─ command ──────────────────────────────────────────────────────────────────────────────╮|
 |│/█                                                                                      │|
 |╰────────────────────────────────────────────────────────────────────────────────────────╯|
@@ -168,7 +168,7 @@ b  fg=@215  bg=@234  +bold
 |│                │                                    │                                  ||
 |│[+][^][v][x]    │                                    │context unavailable               ||
 |╰────────────────╯                                    │- events · 5m: —                  ||
-| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  ·  q quit |
+| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette  ·  q quit |
 |╭─ command ──────────────────────────────────────────────────────────────────────────────╮|
 |│/█                                                                                      │|
 |╰────────────────────────────────────────────────────────────────────────────────────────╯|

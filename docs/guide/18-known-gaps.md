@@ -605,19 +605,6 @@ stop being *used* but do not disappear from history.
 
 ---
 
-## 18.10 The dashboard
-
-### A reorder hint teaches a spelling no key matches
-
-*Measured defect.* The panel-editor hint shows shifted letter keys for
-reordering; the live bindings are the shifted arrow keys. The hint is display
-shorthand and reads as literal, so a user following it exactly gets nothing.
-Closing it means spelling the hint the way the binding is spelled.
-
-**Read more.** [11](11-canopy-tour.md).
-
----
-
 ## 18.11 Storage, and descriptions that no longer match
 
 ### Column encryption has no production writer

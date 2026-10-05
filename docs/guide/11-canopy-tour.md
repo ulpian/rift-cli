@@ -72,7 +72,7 @@ At a comfortable terminal size you get this:
 │                  ││[ Recall Viewer ] [ Project Settings ]││input 4.4M read 7685.6M      read 100%#
 │                  │╰──────────────────────────────────────╯│output 38.8M cache-write 244.7M       #
    … column 1 …    │      … column 2 …                     │      … column 3 …
- j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  ·  q quit
+ j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette  ·  q quit
 ╭─ command ─────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                 │
 ╰───────────────────────────────────────────────────────────────────────────────────╯
@@ -142,10 +142,9 @@ Removal hides a project, it does not erase anything: the registry is
 append-only, so "removed" is a new superseding entry over the old one and the
 history stays intact — as with reordering and relabelling.
 
-> **Tip:** The hint bar writes reorder as `⇧j/k`, but the dashboard receives
-> **Shift with the arrows**: Shift-J and Shift-K arrive as ordinary capitals and
-> do nothing, since reliable Shift reporting for letters needs a terminal
-> protocol Canopy does not enable.
+> **Tip:** Reorder is **Shift with the arrows**, written `⇧↑/↓` in the hint bar.
+> Shift-J and Shift-K arrive as ordinary capitals and do nothing, since reliable
+> Shift reporting for letters needs a terminal protocol Canopy does not enable.
 
 ---
 
