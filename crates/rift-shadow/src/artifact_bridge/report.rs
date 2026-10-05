@@ -22,8 +22,11 @@ pub struct BridgeReport {
     pub tip: Option<String>,
     /// Shards enumerated on the branch.
     pub shards_seen: usize,
-    /// Shards projected (valid redaction report).
+    /// Shards projected by this walk (valid redaction report).
     pub shards_projected: usize,
+    /// Shards this walk did not open because a completed earlier walk
+    /// projected them already (`shards_seen` still counts them).
+    pub shards_skipped: usize,
     /// Shards refused, with reasons.
     pub refused: Vec<RefusedShard>,
     /// Canonical events re-derived from artifacts.
@@ -59,9 +62,15 @@ impl BridgeReport {
         use std::fmt::Write as _;
         let mut s = String::new();
         let _ = writeln!(s, "bridge: {}", self.branch);
+        // The skipped count is printed only when a walk skipped something, so
+        // a full walk renders exactly as it always has.
+        let skipped = match self.shards_skipped {
+            0 => String::new(),
+            n => format!(", {n} already projected"),
+        };
         let _ = writeln!(
             s,
-            "  shards: {} seen, {} projected, {} refused",
+            "  shards: {} seen, {} projected{skipped}, {} refused",
             self.shards_seen,
             self.shards_projected,
             self.refused.len()

@@ -18,6 +18,9 @@ mod created_at;
 mod events;
 mod facts;
 mod report;
+mod resume;
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod tests;
 mod usage;
@@ -34,7 +37,7 @@ use rift_store::{record_ingest_watermark, CanonicalStore, IngestWatermarkRow};
 use crate::ids;
 
 use events::project_full_events;
-use facts::{record_chain_facts, record_sessions};
+use facts::{record_chain_facts, record_sessions, seal_checkpoint};
 pub use report::{BridgeReport, RefusedShard, MAX_PARSE_NOTES};
 use usage::project_usage_lines;
 
@@ -73,7 +76,8 @@ struct ShardHeader<'a> {
 
 /// Ingest everything on the checkpoint branch into the projection.
 /// Crash-resumable and idempotent; refuses non-local readers and unredacted
-/// shards. `default_agent` names the adapter used for usage extraction when a
+/// shards. A shard a completed earlier walk projected is not opened again
+/// (`resume`), so levelling after each condense costs the new shards only. `default_agent` names the adapter used for usage extraction when a
 /// record does not carry its own agent token.
 ///
 /// # Errors
@@ -144,6 +148,7 @@ pub async fn ingest_dialect(
         shards_seen: shards.len(),
         ..BridgeReport::default()
     };
+    let projected = resume::already_projected(store, &shards).await?;
     let registry = AdapterRegistry::with_builtin();
     let ctx = IngestCtx {
         store,
@@ -160,13 +165,19 @@ pub async fn ingest_dialect(
     // Refusal is a fact about a shard's report, not about where it sits in the
     // walk, and the checker's own re-derivation does not consult the report at
     // all: if the two advanced on different conditions they would disagree the
-    // moment a shard was refused.
+    // moment a shard was refused. A shard an earlier walk projected advances it
+    // too, so the first shard this walk opens links to the same predecessor a
+    // full walk would give it.
     let mut last_parseable: Option<Sha256Id> = None;
     for shard in &shards {
         let id = shard.checkpoint_id.as_str();
         let parsed_id = Sha256Id::parse_hex(id).ok();
         let prev = last_parseable;
         last_parseable = parsed_id.or(last_parseable);
+        if projected.contains(id) {
+            report.shards_skipped += 1;
+            continue;
+        }
         ingest_shard(&ctx, &mut report, id, parsed_id, prev).await?;
     }
 
@@ -210,20 +221,29 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
         .merkle_root
         .as_deref()
         .and_then(|h| Sha256Id::parse_hex(h).ok());
-    if let (Some(ckpt_id), Some(root)) = (parsed_id, merkle_root) {
-        let header = ShardHeader {
-            id,
-            ckpt_id,
-            metadata: &metadata,
-            metadata_bytes: metadata_bytes.as_deref(),
-        };
-        record_chain_facts(ctx.store, report, &header, root, prev).await?;
+    let chained = match (parsed_id, merkle_root) {
+        (Some(ckpt_id), Some(root)) => Some((
+            ShardHeader {
+                id,
+                ckpt_id,
+                metadata: &metadata,
+                metadata_bytes: metadata_bytes.as_deref(),
+            },
+            root,
+        )),
+        _ => None,
+    };
+    if let Some((header, _)) = &chained {
+        record_chain_facts(ctx.store, report, header, prev).await?;
     }
     record_sessions(ctx, id, &metadata).await?;
     project_full_events(ctx, report, id).await?;
     // After the events, so a session or turn an archived event opened keeps
     // the live row's start and model; the usage rows only fill what is absent.
     project_usage_lines(ctx, report, id).await?;
+    if let Some((header, root)) = &chained {
+        seal_checkpoint(ctx.store, header, *root, prev).await?;
+    }
     report.shards_projected += 1;
     Ok(())
 }
