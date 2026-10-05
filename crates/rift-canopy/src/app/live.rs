@@ -408,6 +408,7 @@ mod tests {
         for (code, expected) in [
             (KeyCode::Char('q'), CanopyKey::Char('q')),
             (KeyCode::Char('/'), CanopyKey::Char('/')),
+            (KeyCode::Char('?'), CanopyKey::Char('?')),
             (KeyCode::Enter, CanopyKey::Enter),
             (KeyCode::Esc, CanopyKey::Esc),
             (KeyCode::Backspace, CanopyKey::Backspace),
@@ -459,6 +460,9 @@ mod tests {
             (KeyCode::Left, CanopyKey::Left),
             (KeyCode::Right, CanopyKey::Right),
             (KeyCode::Home, CanopyKey::Home),
+            // `?` is a shifted glyph on most layouts; it must arrive as itself
+            // whether or not the terminal reports the Shift that made it.
+            (KeyCode::Char('?'), CanopyKey::Char('?')),
         ] {
             assert_eq!(to_canopy(&press(code, shift)), Some(expected), "{code:?}");
         }

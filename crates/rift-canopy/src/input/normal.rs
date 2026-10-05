@@ -120,7 +120,7 @@ fn on_key_normal_motion(app: &mut App, key: CanopyKey) -> Action {
     }
 }
 
-/// The mode openers and quit, reachable from any focus.
+/// The mode openers, help and quit, reachable from any focus.
 fn on_key_normal_modes(app: &mut App, key: CanopyKey) -> Action {
     match key {
         // `e` enters the panel editor — the freed mnemonic (it opened
@@ -129,6 +129,10 @@ fn on_key_normal_modes(app: &mut App, key: CanopyKey) -> Action {
             enter_panel_editor(app);
             Action::None
         }
+        // `?` opens the palette help — the header's `? Help` item, which
+        // teaches this key beside the click. Normal mode only: the palette's
+        // input and every modal stage keep `?` as typed text or inert.
+        CanopyKey::Char('?') => Action::OpenHelp,
         // `p` opens the profile menu — same act as clicking the
         // header identity button; inert until the profile plane is wired.
         CanopyKey::Char('p') => {

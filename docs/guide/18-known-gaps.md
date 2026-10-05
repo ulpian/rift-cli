@@ -607,15 +607,6 @@ stop being *used* but do not disappear from history.
 
 ## 18.10 The dashboard
 
-### The header's help affordance has no key
-
-*Measured defect.* The header cluster draws a help affordance that is
-hit-testable and that no key binding opens — the same parity problem the
-savings breakdown once had, a hint teaching an act a keyboard cannot perform. Closing it takes
-a binding, or a hint that does not advertise one.
-
-**Read more.** [11](11-canopy-tour.md).
-
 ### A reorder hint teaches a spelling no key matches
 
 *Measured defect.* The panel-editor hint shows shifted letter keys for

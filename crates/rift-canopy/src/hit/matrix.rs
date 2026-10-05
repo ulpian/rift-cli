@@ -7,11 +7,11 @@ use crate::hit::fixtures::{
     explorer_state, populated_viewer_state, profiled_state, project, state_with_detail,
 };
 use crate::hit::{hit_test, ScrollRegion, Target};
-use crate::input::Mode;
+use crate::input::{CanopyKey, Mode, MouseButton, MouseInput, MouseKind};
 use crate::profile_menu::MenuStage;
 use crate::render::frame::Size;
-use crate::state::AppState;
-use crate::Panel;
+use crate::state::{update, AppState, Flow};
+use crate::{Event, Panel};
 
 /// Every distinct target a scan of every cell of `state`'s surface resolves.
 fn scanned_targets(state: &mut AppState) -> Vec<Target> {
@@ -39,6 +39,22 @@ fn assert_scanned(state: &mut AppState, expected: &[Target]) {
     }
 }
 
+/// The profiled dashboard with nothing over it, so its header is live.
+fn header_dashboard() -> AppState {
+    let mut dashboard = profiled_state(120, 40);
+    dashboard.app.overlay = None;
+    dashboard
+}
+
+/// A left press and release at `col` on the header row; the flow the press
+/// produced, which is where a click acts.
+fn click_header_at(state: &mut AppState, col: u16) -> Flow {
+    let press = |kind| Event::Mouse(MouseInput { kind, col, row: 0 });
+    let flow = update(state, press(MouseKind::Down(MouseButton::Left)));
+    let _ = update(state, press(MouseKind::Up(MouseButton::Left)));
+    flow
+}
+
 /// A profile plane with its menu open on the hub.
 fn open_profile_menu() -> AppState {
     let mut profiles = profiled_state(120, 40);
@@ -62,6 +78,39 @@ fn the_dashboard_exposes_its_header_rail_card_and_command_targets() {
             Target::CommandBar,
         ],
     );
+}
+
+/// The header teaches a key glyph beside every item; a click on the item and
+/// a press of the glyph must leave the dashboard in the same state, so no
+/// header item is clickable without being keyable or the other way round.
+#[test]
+fn every_header_item_is_reachable_by_its_key_and_by_its_click() {
+    let profile_name = header_dashboard().snapshot().profile_name;
+    let items = crate::bars::header_cluster(120, profile_name.as_deref());
+    assert_eq!(items.len(), 5, "the identity item is in the cluster");
+    for item in items {
+        let glyph = item.key.chars().next().unwrap();
+        let mut keyed = header_dashboard();
+        let key_flow = update(&mut keyed, Event::Key(CanopyKey::Char(glyph)));
+        let mut clicked = header_dashboard();
+        let click_flow = click_header_at(&mut clicked, item.span.start);
+        let action = item.span.action;
+        assert_eq!(
+            matches!(key_flow, Flow::Quit),
+            matches!(click_flow, Flow::Quit),
+            "{action:?}: quit"
+        );
+        assert_eq!(keyed.app.mode, clicked.app.mode, "{action:?}: mode");
+        assert_eq!(keyed.app.focus, clicked.app.focus, "{action:?}: focus");
+        assert_eq!(
+            keyed.app.overlay, clicked.app.overlay,
+            "{action:?}: overlay"
+        );
+        assert_eq!(
+            keyed.app.command_line, clicked.app.command_line,
+            "{action:?}: command line"
+        );
+    }
 }
 
 #[test]
