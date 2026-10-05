@@ -13,7 +13,7 @@ expression: four_tier_golden(bars_frame)
 |                                                                                |
 |                                                                                |
 |                                                                                |
-| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  |
+| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette  |
 |╭─ command ────────────────────────────────────────────────────────────────────╮|
 |│/█                                                                            │|
 |╰──────────────────────────────────────────────────────────────────────────────╯|
@@ -55,7 +55,7 @@ expression: four_tier_golden(bars_frame)
 |                                                                                |
 |                                                                                |
 |                                                                                |
-| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  |
+| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette  |
 |╭─ command ────────────────────────────────────────────────────────────────────╮|
 |│/█                                                                            │|
 |╰──────────────────────────────────────────────────────────────────────────────╯|
@@ -97,7 +97,7 @@ expression: four_tier_golden(bars_frame)
 |                                                                                |
 |                                                                                |
 |                                                                                |
-| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  |
+| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette  |
 |╭─ command ────────────────────────────────────────────────────────────────────╮|
 |│/█                                                                            │|
 |╰──────────────────────────────────────────────────────────────────────────────╯|
@@ -132,7 +132,7 @@ expression: four_tier_golden(bars_frame)
 |                                                                                |
 |                                                                                |
 |                                                                                |
-| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette  |
+| j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette  |
 |╭─ command ────────────────────────────────────────────────────────────────────╮|
 |│/█                                                                            │|
 |╰──────────────────────────────────────────────────────────────────────────────╯|

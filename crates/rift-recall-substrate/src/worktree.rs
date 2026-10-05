@@ -64,12 +64,15 @@ pub struct WorktreeBlob {
 /// The file a caller named, as the checkout holds it now — or the reason it
 /// could not be read.
 ///
-/// This is what every answer that says *current* or *unchanged* stands on: a
-/// projection records the revisions a checkpoint carried, and an edit made
-/// after the last checkpoint is not among them, so the projection's newest
-/// revision is a statement about the past. Only the bytes on disk say what
-/// the file is now, and when they cannot be read the honest answer is that
-/// nobody knows, never the projection's guess.
+/// This is what every answer from a reader bound to a checkout stands on when
+/// it says *current* or *unchanged*: a projection records the revisions a
+/// checkpoint carried, and an edit made after the last checkpoint is not among
+/// them, so the projection's newest revision is a statement about the past.
+/// Only the bytes on disk say what the file is now, and when they cannot be
+/// read the honest answer is that nobody knows, never the projection's guess.
+/// A reader bound to no checkout is refused with [`CurrentRefusal::NoWorktree`],
+/// and an answer given without these bytes is the projection's view, which
+/// credits nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CurrentFile {
     /// The bytes on disk and their plain SHA-256.

@@ -16,7 +16,7 @@ expression: frame_text(&f)
 │              │                                │                              |
 │[+][^][v][x]  │                                │context unavailable           |
 ╰──────────────╯                                │- events · 5m: —              |
- j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧j/k reorder  ·  / palette
+ j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette
 ╭─ command ────────────────────────────────────────────────────────────────────╮
 │/█                                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────╯

@@ -1,7 +1,11 @@
 //! The verbs that answer "what do you already hold, and what moved": the
 //! manifest, the delta list, one file's verdict, and a hash-bound summary.
-//! All four answer from the projection, and every *unchanged* they say is
-//! checked against the file as the checkout holds it ([`super::credit`]).
+//! All four answer from the projection. When the reader is bound to a
+//! checkout, every *unchanged* they say is the stated hash matching the SHA-256
+//! of the file as the checkout holds it ([`super::credit`]); a reader bound to
+//! no checkout — the push tier's — gets the manifest and the delta list as the
+//! projection's view, where a stated hash alone is *unchanged* and nothing is
+//! credited, while one file's verdict and a summary answer `unavailable`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

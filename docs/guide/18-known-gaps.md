@@ -42,8 +42,8 @@ restoring either reddens a check. The code graph was never revisited, and nothin
 binary, served recall over a long-lived server transport, spawned your editor
 from the dashboard, and keyed everything by individual worktree. All of it is
 removed; the read-compatibility paths keeping old captures readable are the only
-survivors. A description that reads as live is stale — §18.11 lists the known
-ones.
+survivors. A description that reads as live is stale, and the code is the
+authority.
 
 ---
 
@@ -605,20 +605,7 @@ stop being *used* but do not disappear from history.
 
 ---
 
-## 18.10 The dashboard
-
-### A reorder hint teaches a spelling no key matches
-
-*Measured defect.* The panel-editor hint shows shifted letter keys for
-reordering; the live bindings are the shifted arrow keys. The hint is display
-shorthand and reads as literal, so a user following it exactly gets nothing.
-Closing it means spelling the hint the way the binding is spelled.
-
-**Read more.** [11](11-canopy-tour.md).
-
----
-
-## 18.11 Storage, and descriptions that no longer match
+## 18.11 Storage and the registry
 
 ### Column encryption has no production writer
 
@@ -642,30 +629,6 @@ projection was not replaced. Closing it needs a decision about whether
 replace-and-restamp is ever the right rebuild, and a caller if it is.
 
 **Read more.** [13](13-storage-and-schema.md).
-
-### Some comments still call worktree content hashing blake3
-
-*Stale description.* Worktree file content hashing is plain SHA-256, so it
-matches the hash recorded when the file was read; blake3 covers salted
-identities, configuration and policy fingerprints, integration-artifact ownership
-fingerprints, and frozen envelope identifiers. At least two source comments still
-describe the first as blake3, and blurring a deliberate split — substrate
-byte-compatibility on one side, internal handles on the other — will eventually
-mislead somebody into the wrong identifier type. A second instance sits on the
-recall plane, where doc comments state a stricter unchanged-state rule than the
-code checks. Closing both means editing comments; the code is correct.
-
-**Read more.** [13](13-storage-and-schema.md),
-[06](06-recall.md), [17](17-invariants.md) rule 5.
-
-### A task-runner illustration names a retired sub-command
-
-*Stale description.* The task-runner files show an example invoking a recall
-sub-command that no longer exists — running it exits with a usage error — because
-the retired server transport it belonged to is gone. Closing it means changing
-the illustration to a verb that exists.
-
-**Read more.** [16](16-development.md).
 
 ### One registry path can hold the same family twice
 

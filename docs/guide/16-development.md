@@ -77,19 +77,14 @@ Three files describe the same list and must agree:
 `skills.sh` for the shell. Adding a task means editing all three; the redundancy
 is the point, because a machine-readable manifest that drifts from the runner is
 worse than no manifest. Raw `cargo` works too.
+The `memd -- <verb>` example each file shows is checked by a `rift-memd` unit
+test against the verbs the binary declares, so the illustration cannot name a
+verb that is gone.
 
 > Tip: `./skills.sh run -- status` and `./skills.sh run -- doctor` are worth
 > muscle memory. `--fix` gates `doctor`'s repairs, but even a plain run opens —
 > and can create and migrate — the projection it resolves, so point a check that
 > drives it at a sandbox cache first (§16.12).
-
-**One stale example.** All three files illustrate the `memd` task as
-`memd -- serve`; there is no `serve` subcommand, the projection binary taking
-`metrics`, `rebuild`, `status`, `doctor` and `eval`
-(`bins/rift-memd/src/main.rs`). The illustration predates the retirement of a
-long-running server surface — recall verbs are served through hook injection and
-the recall skill CLI. Use `./skills.sh memd -- status`. See
-[07-serving-and-injection.md](07-serving-and-injection.md).
 
 ---
 
