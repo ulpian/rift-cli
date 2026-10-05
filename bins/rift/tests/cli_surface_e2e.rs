@@ -268,6 +268,29 @@ fn no_recall_is_the_explicit_init_opt_out() {
     assert!(!repo.path().join(".agents/mcp_config.json").exists());
 }
 
+/// `--no-recall` skips Recall and nothing else: Project Settings passes it and
+/// provisions Recall itself, so the capture hooks of a detected agent are
+/// still wired, and the help says so.
+#[test]
+fn no_recall_still_wires_the_agents_init_detects() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    git_init(repo.path());
+    let out = rift_with_detected_agents(
+        home.path(),
+        repo.path(),
+        &["init", "--no-recall", "--json"],
+        &["codex"],
+    );
+    assert_eq!(code(&out), 0, "init --no-recall exits 0: {out:?}");
+    assert!(
+        repo.path().join(".rift/agents/codex.json").exists(),
+        "the detected agent is wired under --no-recall: {out:?}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["recall"]["skipped"], true, "and Recall is skipped");
+}
+
 #[test]
 fn recall_status_json_has_all_native_adapter_rows() {
     let home = tempfile::tempdir().unwrap();

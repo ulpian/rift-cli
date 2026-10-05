@@ -234,7 +234,9 @@ pub(crate) struct ViewerArgs {
 /// `rift init` / `rift setup`.
 #[derive(Args, Debug)]
 pub(crate) struct InitArgs {
-    /// Skip automatic Total Recall initialization and native agent wiring.
+    /// Skip Recall: its skills, the `total_recall` write and the initial ingest.
+    /// Init still installs the git hooks and still wires the capture hooks of
+    /// every agent it detects.
     #[arg(long)]
     pub(crate) no_recall: bool,
 }
@@ -1092,5 +1094,37 @@ impl Outcome {
             human: human.into(),
             json,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    /// The help `rift init --help` prints for `--no-recall`.
+    fn no_recall_help() -> String {
+        let root = Cli::command();
+        let init = root.find_subcommand("init").expect("init is a subcommand");
+        let flag = init
+            .get_arguments()
+            .find(|arg| arg.get_id() == "no_recall")
+            .expect("init declares --no-recall");
+        flag.get_help().map(ToString::to_string).unwrap_or_default()
+    }
+
+    #[test]
+    fn init_help_says_no_recall_skips_recall_but_still_wires_detected_agents() {
+        let help = no_recall_help();
+        assert!(help.contains("Recall"), "the flag names Recall: {help}");
+        assert!(
+            !help.contains("agent wiring"),
+            "agent wiring still runs under --no-recall: {help}"
+        );
+        assert!(
+            help.contains("still wires"),
+            "the help says what still runs: {help}"
+        );
     }
 }
