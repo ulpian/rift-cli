@@ -1085,6 +1085,34 @@ mod tests {
         );
     }
 
+    /// **A pull's claim is bound like the rest of its line.** A shard whose
+    /// frozen serve carries a claim verifies, and editing one of the claim's
+    /// counts is tamper.
+    #[test]
+    fn a_frozen_serve_carrying_a_pull_claim_verifies_and_an_edited_claim_is_tamper() {
+        let content = b"the redacted capture".as_slice();
+        let line = |recorded: u32, unrecorded: u32| {
+            format!(
+                "{{\"idempotency_key\":\"k\",\"payload\":{{\"estimated_tokens_avoided\":9,\
+                 \"estimated_tokens_returned\":3,\"kind\":\"manifest_served\",\"pull_claim\":\
+                 {{\"basis\":\"stated_recorded\",\"recorded\":{recorded},\"stated\":4,\
+                 \"unrecorded\":{unrecorded}}}}},\"recorded_at\":1,\"schema\":1,\
+                 \"session_id\":\"s\",\"verb\":\"memd.manifest_served\"}}\n"
+            )
+        };
+        let honest = line(1, 3);
+        let (with, id) = artifact_bound_shard(content, "serve_audit.jsonl", honest.as_bytes());
+        let out = shard_passes(&with).unwrap();
+        assert!(matches!(out.worst, Verdict::Ok), "honest: {:?}", out.worst);
+        assert_eq!(out.checked, 1);
+
+        let edited = with.with_artifact(&id, "serve_audit.jsonl", line(4, 0).as_bytes());
+        assert!(
+            matches!(shard_passes(&edited).unwrap().worst, Verdict::Tamper(_)),
+            "an edited claim must not verify"
+        );
+    }
+
     /// **The settled usage is read back and bound like every leaf.** A shard
     /// carrying `usage.jsonl` verifies, one without it verifies as it always
     /// did, and editing a frozen count is tamper.

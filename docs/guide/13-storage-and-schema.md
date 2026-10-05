@@ -541,7 +541,8 @@ A rebuilt row must carry the instant the live row carries, never the rebuild's c
 So the ingest reads every schema-4 line, whose instant is its `serve_call.recorded_at`, and a schema-1 line only when it carries a top-level `recorded_at`; a schema-1 line without one is reported as a parse issue and skipped.
 The incremental ingest reads the artifact the first time it projects a checkpoint, so a live projection and a rebuilt one converge on the same rows.
 What a rebuild cannot restore is a serve no shard carries — one no session made — and the typed words of an exact retrieval's reason: the rebuilt row carries the placeholder `withheld` there.
-Nor can it restore a pull's claim: a frozen line carries the serve's figures but not the counts in `memd_audit_pull_claim`, so a rebuilt projection holds the serve and not what its caller claimed to hold.
+A pull's claim is restored too, for every shard written since a frozen line could carry it: the line's payload holds `pull_claim`, the three counts of `memd_audit_pull_claim` and the rule its credit was booked under, and the appender writes the claim row back under the serve's own key.
+A line from an older shard carries no claim, so its serve is rebuilt without one.
 
 That is why the rebuild sets the old projection aside and never deletes it.
 It preserves `recall.db` as `recall.db.set-aside-<YYYYMMDDTHHMMSSZ>`, stamped once from the binary's clock, and prints the new name on the line before `rebuilt:`; a rebuild over no projection prints nothing there, and the fingerprint it prints is the one it always printed.

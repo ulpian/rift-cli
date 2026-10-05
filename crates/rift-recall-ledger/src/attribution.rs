@@ -11,7 +11,7 @@
 //! which checkpoint happened to run next, and nothing but the store holds it.
 
 use rift_core::Result;
-use rift_store::{CanonicalStore, Value};
+use rift_store::{CanonicalStore, Row, Value};
 
 /// The session that made one serve and, when the writer knew it, the context
 /// window inside that session.
@@ -44,6 +44,22 @@ pub struct AttributedDecision {
     pub recorded_at: i64,
     /// The window the serve was made in, when known.
     pub window_key: Option<String>,
+    /// What the pull's caller claimed to hold, when it named held revisions.
+    pub pull_claim: Option<AttributedPullClaim>,
+}
+
+/// The `memd_audit_pull_claim` row beside one decision, as its frozen line
+/// carries it: counts and the rule's word, never a hash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttributedPullClaim {
+    /// Distinct revisions the caller said it held.
+    pub stated: i64,
+    /// Of those, the ones this family recorded a read of.
+    pub recorded: i64,
+    /// Of those, the ones no recorded read accounts for.
+    pub unrecorded: i64,
+    /// The rule the pull's figure was booked under.
+    pub basis: String,
 }
 
 /// One schema-4 call row a session made, with every column its frozen line is
@@ -162,9 +178,11 @@ pub async fn session_serves(
     let decisions = store
         .query(
             "SELECT e.audit_id, e.verb, e.handle, e.reason, e.tokens_returned, \
-             e.tokens_avoided, e.recorded_at, s.window_key \
+             e.tokens_avoided, e.recorded_at, s.window_key, c.stated_count, \
+             c.recorded_count, c.unrecorded_count, c.basis \
              FROM memd_audit_event e JOIN memd_audit_session s \
              ON s.serve_key = e.audit_id AND s.relation = 'memd_audit_event' \
+             LEFT JOIN memd_audit_pull_claim c ON c.audit_id = e.audit_id \
              WHERE s.session_id = ? ORDER BY e.audit_id",
             &session,
         )
@@ -180,6 +198,7 @@ pub async fn session_serves(
                 tokens_avoided: row.get_i64(5)?,
                 recorded_at: row.get_i64(6)?,
                 window_key: row.get_opt_text(7)?,
+                pull_claim: pull_claim_at(row, 8)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -216,6 +235,20 @@ async fn session_calls(
             })
         })
         .collect()
+}
+
+/// The claim a LEFT JOIN put in the four columns from `at`, or `None` where
+/// the decision has no claim row and all four are NULL.
+fn pull_claim_at(row: &Row, at: usize) -> Result<Option<AttributedPullClaim>> {
+    let Some(basis) = row.get_opt_text(at + 3)? else {
+        return Ok(None);
+    };
+    Ok(Some(AttributedPullClaim {
+        stated: row.get_i64(at)?,
+        recorded: row.get_i64(at + 1)?,
+        unrecorded: row.get_i64(at + 2)?,
+        basis,
+    }))
 }
 
 /// Write the attribution row of the serve `envelope` booked, if it booked one.
@@ -361,6 +394,40 @@ mod tests {
             theirs.decisions[0].handle.as_deref(),
             Some("grep:matches=2")
         );
+    }
+
+    /// A pull's claim row rides with its decision, and a decision with no
+    /// claim row reads back none.
+    #[test]
+    fn a_decision_reads_back_its_pull_claim_and_one_without_reads_none() {
+        use rift_recall_events::{PullClaim, PullClaimBasis};
+        let store = recall_store();
+        let session = attributed("s-a", None);
+        let pull = MemdEvent::ManifestServed {
+            estimated_tokens_returned: 3,
+            estimated_tokens_avoided: 4,
+            pull_claim: None,
+        }
+        .with_pull_claim(PullClaim::new(4, 1, PullClaimBasis::Unverified));
+        book(&store, &pull, "call-pull", &session);
+        book(&store, &capped(1), "call-grep", &session);
+
+        let claims: Vec<(String, Option<AttributedPullClaim>)> =
+            block(session_serves(&store, "s-a"))
+                .unwrap()
+                .decisions
+                .into_iter()
+                .map(|d| (d.verb, d.pull_claim))
+                .collect();
+        let claimed = AttributedPullClaim {
+            stated: 4,
+            recorded: 1,
+            unrecorded: 3,
+            basis: "unverified".to_owned(),
+        };
+        assert!(claims.contains(&("memd.manifest_served".to_owned(), Some(claimed))));
+        assert!(claims.contains(&("memd.grep_capped".to_owned(), None)));
+        assert_eq!(claims.len(), 2);
     }
 
     /// A serve no session made is an ordinary row with no attribution, and no
