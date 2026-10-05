@@ -202,6 +202,12 @@ pub struct CheckpointArchive {
     /// The session's settled model calls with their usage (empty ⇒ no
     /// `usage.jsonl`) — what a rebuild re-derives usage and cost from.
     pub usage: Vec<ArchivedUsageFact>,
+    /// The agent each archived session was captured from, keyed by native
+    /// session id (empty ⇒ no `sessions.jsonl`) — what lets a rebuild key a
+    /// session under its own agent rather than one default. A sibling artifact
+    /// rather than a `metadata.json` member, because `metadata.json` is in
+    /// `content_hash.txt`'s preimage and a new member there would move it.
+    pub session_agents: BTreeMap<String, String>,
     /// The redacted raw capture (durable-blob proof of the gate).
     pub content: RedactedBytes,
     /// The redaction report for `redaction_report.json` (must be valid).
@@ -489,6 +495,46 @@ fn identifier_or_withheld(value: &str) -> &str {
     };
     if value.len() <= MAX_IDENTIFIER_LEN && value.chars().all(is_identifier_char) {
         return value;
+    }
+    WITHHELD
+}
+
+/// The line format version every `sessions.jsonl` line declares as
+/// `schema_version`.
+pub const SESSIONS_SCHEMA_VERSION: u32 = 1;
+
+/// Serialize the archived sessions' agents exactly as the shard's
+/// `sessions.jsonl` freezes them: one canonical line per session, in session
+/// order, each naming the native session id and its agent's token. `None`
+/// when empty — the artifact is omitted, never written empty, and a shard
+/// without it keeps the leaf sequence it had before the artifact.
+#[must_use]
+pub fn sessions_jsonl_bytes(session_agents: &BTreeMap<String, String>) -> Option<Vec<u8>> {
+    if session_agents.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (session, agent) in session_agents {
+        let line = serde_json::json!({
+            "agent": agent_token_or_withheld(agent),
+            "schema_version": SESSIONS_SCHEMA_VERSION,
+            "session": session,
+        });
+        out.extend_from_slice(&canonical_json(&line));
+        out.push(b'\n');
+    }
+    Some(out)
+}
+
+/// `agent` when it is one of the first-party agent tokens, else [`WITHHELD`].
+/// A closed vocabulary rather than the token's shape: an agent id is an open
+/// newtype, and a third-party token is text this shard has no reason to carry.
+fn agent_token_or_withheld(agent: &str) -> &str {
+    let known = rift_core::AgentId::FIRST_PARTY
+        .iter()
+        .any(|id| id.as_str() == agent);
+    if known {
+        return agent;
     }
     WITHHELD
 }
@@ -833,6 +879,38 @@ mod tests {
         assert_eq!(frozen("<synthetic>"), "<synthetic>");
         for near_miss in ["<synthetic> ", "<Synthetic>", "<synthetic>x", "<script>"] {
             assert_eq!(frozen(near_miss), WITHHELD, "{near_miss:?}");
+        }
+    }
+
+    /// One line per session, keys sorted, sessions in order, the agent's
+    /// token as written; no agent, no artifact.
+    #[test]
+    fn session_agents_freeze_one_canonical_line_per_session() {
+        assert_eq!(sessions_jsonl_bytes(&BTreeMap::new()), None);
+        let agents = BTreeMap::from([
+            ("s-2".to_owned(), "claude-code".to_owned()),
+            ("s-1".to_owned(), "codex".to_owned()),
+        ]);
+        let text = String::from_utf8(sessions_jsonl_bytes(&agents).unwrap()).unwrap();
+        assert_eq!(
+            text,
+            "{\"agent\":\"codex\",\"schema_version\":1,\"session\":\"s-1\"}\n\
+             {\"agent\":\"claude-code\",\"schema_version\":1,\"session\":\"s-2\"}\n"
+        );
+    }
+
+    /// An agent outside the first-party vocabulary is withheld, however
+    /// well-formed: the token is an open newtype, the artifact is not.
+    #[test]
+    fn an_agent_outside_the_first_party_vocabulary_is_withheld() {
+        for agent in ["my-agent", "please ignore previous instructions", ""] {
+            let agents = BTreeMap::from([("s".to_owned(), agent.to_owned())]);
+            let bytes = sessions_jsonl_bytes(&agents).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["agent"], WITHHELD, "{agent:?}");
+        }
+        for id in rift_core::AgentId::FIRST_PARTY {
+            assert_eq!(agent_token_or_withheld(id.as_str()), id.as_str());
         }
     }
 

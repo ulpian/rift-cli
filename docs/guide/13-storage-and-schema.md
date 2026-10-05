@@ -500,6 +500,11 @@ Position alone would not do, because the walk order is the chain's order followe
 A projection with no watermark, or one whose watermark names a shard no longer on the branch, is walked in full, which is what `rift rebuild` into an empty projection does; `rift rebuild --json` reports the skipped shards as `shards_skipped` beside `shards_projected`.
 It is best-effort: a projection that is being replaced defers it to the next drain without costing any job an attempt, and no hook ever waits on it.
 
+Every session a checkpoint covers is restorable under its own agent when the checkpoint carries `sessions.jsonl`.
+The rebuild keys the session's checkpoint link, its session row and its native identity under the agent the line names, with the ids the live path mints, so a Codex or Antigravity session rebuilds onto its live row rather than under a Claude Code key that matches none.
+A session the projection has never seen gets a row even when no usage line names it: no model, dated by its first usage line in that checkpoint, or by the checkpoint's own capture time when there is none.
+A checkpoint written before the artifact keys every session under the walk's default agent, as it always did, and a session that was never condensed into any checkpoint cannot be rebuilt at all.
+
 Usage and cost are on the restorable side for every shard that carries the usage artifact.
 A checkpoint's `usage.jsonl` freezes each settled model call of its session: the call's own key, its turn, its model, when it happened, the four token classes and how they were counted.
 The rebuild writes the session, the turn, the model call and its token usage back from each line under the live keys, and a row the live path already wrote wins.

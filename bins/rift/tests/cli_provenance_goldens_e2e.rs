@@ -143,6 +143,7 @@ fn archive_for(
         read_facts: Vec::new(),
         serve_audit: None,
         usage: Vec::new(),
+        session_agents: std::collections::BTreeMap::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript: seed.transcript,

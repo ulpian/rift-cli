@@ -21,6 +21,9 @@ mod report;
 mod resume;
 #[cfg(test)]
 mod resume_tests;
+mod sessions;
+#[cfg(test)]
+mod sessions_tests;
 #[cfg(test)]
 mod tests;
 mod usage;
@@ -39,6 +42,7 @@ use crate::ids;
 use events::project_full_events;
 use facts::{record_chain_facts, record_sessions, seal_checkpoint};
 pub use report::{BridgeReport, RefusedShard, MAX_PARSE_NOTES};
+use sessions::{read_session_agents, record_named_sessions};
 use usage::project_usage_lines;
 
 /// The checkpoint branch the bridge ingests.
@@ -186,7 +190,8 @@ pub async fn ingest_dialect(
 }
 
 /// Judge one shard, then project what it carries: the chain facts from its
-/// header, its session links, its archived event stream and its settled usage. `parsed_id` is the
+/// header, its session links under each session's own agent, its archived
+/// event stream, its settled usage and its named sessions. `parsed_id` is the
 /// shard's id when it is a SHA-256; `prev` is the nearest preceding shard whose
 /// id is one.
 async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
@@ -236,11 +241,15 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
     if let Some((header, _)) = &chained {
         record_chain_facts(ctx.store, report, header, prev).await?;
     }
-    record_sessions(ctx, id, &metadata).await?;
+    let agents = read_session_agents(ctx, report, id)?;
+    record_sessions(ctx, id, &metadata, &agents).await?;
     project_full_events(ctx, report, id).await?;
     // After the events, so a session or turn an archived event opened keeps
     // the live row's start and model; the usage rows only fill what is absent.
-    project_usage_lines(ctx, report, id).await?;
+    project_usage_lines(ctx, report, id, &agents).await?;
+    // After the usage, so a usage line's model and instant win over the
+    // empty model and the shard's own time a session line would give.
+    record_named_sessions(ctx, &agents, &metadata).await?;
     if let Some((header, root)) = &chained {
         seal_checkpoint(ctx.store, header, *root, prev).await?;
     }

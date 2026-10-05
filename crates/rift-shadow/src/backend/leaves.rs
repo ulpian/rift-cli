@@ -27,6 +27,9 @@ pub struct ShardLeafBytes<'a> {
     /// `serve_audit.jsonl` — the session's frozen serve envelopes, or `None`
     /// when it froze none.
     pub serve_audit: Option<&'a [u8]>,
+    /// `sessions.jsonl` — each archived session's agent, or `None` on a shard
+    /// written without it.
+    pub sessions: Option<&'a [u8]>,
     /// `tool_calls.jsonl` — the archived read facts, or `None` when the session
     /// captured none.
     pub tool_calls: Option<&'a [u8]>,
@@ -109,7 +112,8 @@ pub struct TaskLeafBytes<'a> {
 ///
 /// So the sequence is `content.redacted`, then the `digest.*` documents, then
 /// each `full.jsonl` line, then `redaction_report.json`, then
-/// `serve_audit.jsonl`, then each `sessions/<index>/metadata.json`, then each
+/// `serve_audit.jsonl`, then `sessions.jsonl`, then each
+/// `sessions/<index>/metadata.json`, then each
 /// `tasks/<tool-use-id>/` subtree's artifacts (`metadata.json`, then the
 /// transcript pair when present — the task dir's own bytewise name order —
 /// tasks ordered by tool-use id), then `tool_calls.jsonl`, then
@@ -185,6 +189,12 @@ pub fn shard_merkle_leaves(bytes: &ShardLeafBytes<'_>) -> Vec<Sha256Id> {
     // `redaction_report.json` and before `sessions/`, so one leaf here.
     if let Some(serve_audit) = bytes.serve_audit {
         leaves.push(rift_hashchain::leaf_hash(serve_audit));
+    }
+    // The sessions' agents: `sessions.jsonl` sorts after `serve_audit.jsonl`
+    // (`r` < `s` at the third byte) and before `sessions/` (`.` < `/`), so one
+    // leaf here, ahead of the per-session metadata.
+    if let Some(sessions) = bytes.sessions {
+        leaves.push(rift_hashchain::leaf_hash(sessions));
     }
     // The per-session metadata of a multi-session checkpoint, in bytewise
     // index-name order (`sessions/` sorts between `redaction_report.json`
@@ -313,6 +323,7 @@ mod tests {
             full_jsonl: Some(br#"{"e":0}"#),
             redaction_report: report,
             serve_audit: None,
+            sessions: None,
             usage: None,
             tool_calls: Some(br#"{"id":"t1"}"#),
             transcript_compact: None,
@@ -432,5 +443,43 @@ mod tests {
         let mut appended = old;
         appended.push(leaf_hash(b"usage line"));
         assert_eq!(shard_merkle_leaves(&with), appended, "one trailing leaf");
+    }
+
+    /// **The sessions leaf sits between the serve audit and the per-session
+    /// metadata, and its absence changes nothing.** `sessions.jsonl` sorts
+    /// after `serve_audit.jsonl` and before the `sessions/` tree (`.` < `/`).
+    #[test]
+    fn a_sessions_leaf_sits_before_the_session_dirs_and_absence_changes_nothing() {
+        use rift_hashchain::leaf_hash;
+
+        let metas = [SessionMetaLeaf {
+            index_name: "0",
+            metadata: b"meta",
+        }];
+        let without = ShardLeafBytes {
+            content_redacted: b"c",
+            redaction_report: b"r",
+            serve_audit: Some(b"serves"),
+            session_metas: &metas,
+            ..ShardLeafBytes::default()
+        };
+        let old = vec![
+            leaf_hash(b"c"),
+            leaf_hash(b"r"),
+            leaf_hash(b"serves"),
+            leaf_hash(b"meta"),
+        ];
+        assert_eq!(
+            shard_merkle_leaves(&without),
+            old,
+            "no artifact, old sequence"
+        );
+        let with = ShardLeafBytes {
+            sessions: Some(b"agents"),
+            ..without
+        };
+        let mut inserted = old;
+        inserted.insert(3, leaf_hash(b"agents"));
+        assert_eq!(shard_merkle_leaves(&with), inserted);
     }
 }

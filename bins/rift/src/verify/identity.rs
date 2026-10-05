@@ -166,6 +166,7 @@ mod tests {
                     content: sub.read_artifact(&id, "content.redacted").unwrap(),
                     tool_calls: None,
                     serve_audit: None,
+                    sessions: None,
                     usage: None,
                     full: None,
                     transcript_compact: None,
@@ -278,6 +279,7 @@ mod tests {
             full_jsonl: Some(full),
             redaction_report: report.as_bytes(),
             serve_audit: None,
+            sessions: None,
             usage: None,
             tool_calls: None,
             transcript_compact: None,
@@ -409,6 +411,7 @@ mod tests {
             full_jsonl: None,
             redaction_report: report.as_bytes(),
             serve_audit: None,
+            sessions: None,
             usage: None,
             tool_calls: None,
             transcript_compact: None,
@@ -513,6 +516,7 @@ mod tests {
                 full_jsonl: None,
                 redaction_report: report.as_bytes(),
                 serve_audit: None,
+                sessions: None,
                 usage: None,
                 tool_calls: Some(&tool_calls),
                 transcript_compact: None,
@@ -571,6 +575,7 @@ mod tests {
                 full_jsonl: None,
                 redaction_report: self.report.as_bytes(),
                 serve_audit: None,
+                sessions: None,
                 usage: None,
                 tool_calls: Some(&self.tool_calls),
                 transcript_compact: None,
@@ -672,6 +677,7 @@ mod tests {
                 full_jsonl: Some(edited),
                 redaction_report: report.as_bytes(),
                 serve_audit: None,
+                sessions: None,
                 usage: None,
                 tool_calls: None,
                 transcript_compact: None,
@@ -702,6 +708,7 @@ mod tests {
                     content: forged.read_artifact(&id, "content.redacted").unwrap(),
                     tool_calls: None,
                     serve_audit: None,
+                    sessions: None,
                     usage: None,
                     full: forged.read_artifact(&id, "full.jsonl").unwrap(),
                     transcript_compact: None,
@@ -750,6 +757,7 @@ mod tests {
             full_jsonl: None,
             redaction_report: report.as_bytes(),
             serve_audit: None,
+            sessions: None,
             usage: None,
             tool_calls: None,
             transcript_compact: Some(compact),
@@ -833,6 +841,7 @@ mod tests {
                 full_jsonl: Some(edited),
                 redaction_report: report.as_bytes(),
                 serve_audit: None,
+                sessions: None,
                 usage: None,
                 tool_calls: None,
                 transcript_compact: None,
@@ -894,6 +903,7 @@ mod tests {
             full_jsonl: None,
             redaction_report: report.as_bytes(),
             serve_audit: None,
+            sessions: None,
             usage: None,
             tool_calls: None,
             transcript_compact: None,
@@ -1014,21 +1024,18 @@ mod tests {
         );
     }
 
-    /// An epoch-3 shard carrying one optional artifact — `serve_audit.jsonl`
-    /// or `usage.jsonl` — at the id its own artifacts address.
+    /// An epoch-3 shard carrying one optional artifact — `serve_audit.jsonl`,
+    /// `sessions.jsonl` or `usage.jsonl` — at the id its own artifacts address.
     fn artifact_bound_shard(content: &[u8], name: &str, bytes: &[u8]) -> (MemorySubstrate, String) {
         use rift_shadow::backend::ROOT_BOUND_ID_MIN_CANON_VERSION as EPOCH;
         use rift_shadow::backend::{shard_merkle_root, ShardLeafBytes};
         let report = fixture_report();
-        let (serve_audit, usage) = match name {
-            "serve_audit.jsonl" => (Some(bytes), None),
-            _ => (None, Some(bytes)),
-        };
         let leaves = ShardLeafBytes {
             content_redacted: content,
             redaction_report: report.as_bytes(),
-            serve_audit,
-            usage,
+            serve_audit: (name == "serve_audit.jsonl").then_some(bytes),
+            sessions: (name == "sessions.jsonl").then_some(bytes),
+            usage: (name == "usage.jsonl").then_some(bytes),
             ..ShardLeafBytes::default()
         };
         let root = shard_merkle_root(&leaves).to_hex();
@@ -1097,6 +1104,28 @@ mod tests {
         assert!(
             matches!(shard_passes(&edited).unwrap().worst, Verdict::Tamper(_)),
             "an edited usage line must not verify"
+        );
+    }
+
+    /// **The sessions' agents are read back and bound like every leaf.** A
+    /// shard carrying `sessions.jsonl` verifies, and editing the agent a
+    /// session was frozen under is tamper.
+    #[test]
+    fn frozen_session_agents_are_read_back_and_bound_by_the_root() {
+        let content = b"the redacted capture".as_slice();
+        let line = |agent: &str| {
+            format!("{{\"agent\":\"{agent}\",\"schema_version\":1,\"session\":\"s\"}}\n")
+        };
+        let honest = line("codex");
+        let (with, id) = artifact_bound_shard(content, "sessions.jsonl", honest.as_bytes());
+        let out = shard_passes(&with).unwrap();
+        assert!(matches!(out.worst, Verdict::Ok), "honest: {:?}", out.worst);
+        assert_eq!(out.checked, 1);
+
+        let edited = with.with_artifact(&id, "sessions.jsonl", line("claude-code").as_bytes());
+        assert!(
+            matches!(shard_passes(&edited).unwrap().worst, Verdict::Tamper(_)),
+            "an edited agent must not verify"
         );
     }
 }

@@ -38,7 +38,9 @@
 //! freezes from the recall rows (keys sorted, typed text already withheld,
 //! the session and window that made them named), sorted by idempotency key.
 //! So are the settled usage facts: two calls of the first session on two
-//! models, in two turns, which `usage.jsonl` freezes one line each.
+//! models, in two turns, which `usage.jsonl` freezes one line each. And so are
+//! the sessions' agents, two different ones, which `sessions.jsonl` freezes
+//! one line each.
 
 use std::path::PathBuf;
 
@@ -119,6 +121,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
         read_facts: fixture_read_facts(),
         serve_audit: Some(fixture_serve_audit()),
         usage: fixture_usage(),
+        session_agents: fixture_session_agents(),
         content: redacted.redacted,
         report: RedactionReportView::from_redact(&redacted.report),
         transcript: Some(transcript),
@@ -284,4 +287,13 @@ fn fixture_usage() -> Vec<ArchivedUsageFact> {
         call(1, "claude-sonnet-4-5", FIXTURE_CREATED_AT_MS - 7_500, '5'),
         call(2, "claude-opus-4-1", FIXTURE_CREATED_AT_MS - 1_500, '6'),
     ]
+}
+
+/// The agent each fixture session was captured from: two different agents,
+/// so the lines differ in the member a rebuild keys on.
+fn fixture_session_agents() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([
+        (FIXTURE_SESSIONS[0].to_owned(), "claude-code".to_owned()),
+        (FIXTURE_SESSIONS[1].to_owned(), "codex".to_owned()),
+    ])
 }

@@ -133,6 +133,7 @@ pub(super) fn session_facts_for_archive(
         read_facts: read_facts_for_archive(rt, store, agent, session),
         serve_audit: serve_audit_for_archive(rt, work_tree, session)?,
         usage: usage_facts_for_archive(rt, store, agent, session),
+        agent: Some(agent.to_owned()),
     })
 }
 

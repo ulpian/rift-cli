@@ -11,8 +11,9 @@ use rift_core::Sha256Id;
 
 use super::leaves::{DigestLeafBytes, SessionMetaLeaf, ShardLeafBytes, TaskLeafBytes};
 use super::{
-    shard_merkle_root, tool_calls_jsonl_bytes, usage_jsonl_bytes, ArchivedTask, ArchivedTranscript,
-    CheckpointArchive, NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
+    sessions_jsonl_bytes, shard_merkle_root, tool_calls_jsonl_bytes, usage_jsonl_bytes,
+    ArchivedTask, ArchivedTranscript, CheckpointArchive, NATIVE_CANON_VERSION,
+    TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
 };
 use crate::sha256_hex;
 
@@ -20,6 +21,11 @@ use crate::sha256_hex;
 /// `redaction_report.json` (`r` < `s`) and before `sessions/` (`r` < `s` at the
 /// third byte), which is where its leaf sits.
 pub(super) const SERVE_AUDIT_NAME: &str = "serve_audit.jsonl";
+
+/// The shard name of the archived sessions' agents. It sorts after
+/// `serve_audit.jsonl` and before the `sessions/` tree (`.` < `/`), which is
+/// where its leaf sits.
+pub(super) const SESSIONS_NAME: &str = "sessions.jsonl";
 
 /// The shard name of the frozen settled usage. It sorts after
 /// `transcript.jsonl` (`t` < `u`), after every other top-level name, so its
@@ -42,6 +48,7 @@ impl CheckpointArchive {
         let report = self.redaction_report_json();
         let tool_calls = self.tool_calls_jsonl();
         let usage = self.usage_jsonl();
+        let sessions = self.sessions_jsonl();
         let digest_failures = self.digest_failures_json();
         let digest_intent = self.digest_intent_json();
         let digest_log = self.digest_log_json();
@@ -74,6 +81,7 @@ impl CheckpointArchive {
             full_jsonl: full.as_deref(),
             redaction_report: &report,
             serve_audit: self.serve_audit_jsonl(),
+            sessions: sessions.as_deref(),
             tool_calls: tool_calls.as_deref(),
             transcript_compact: self.transcript.as_ref().map(|t| t.compact.as_slice()),
             transcript_full: self.transcript.as_ref().map(|t| t.full.as_slice()),
@@ -226,6 +234,14 @@ impl CheckpointArchive {
         tool_calls_jsonl_bytes(&self.read_facts)
     }
 
+    /// Render `sessions.jsonl` — one line per archived session naming its
+    /// agent. `None` when the archive names no agent (the artifact is
+    /// omitted, never written empty).
+    #[must_use]
+    pub fn sessions_jsonl(&self) -> Option<Vec<u8>> {
+        sessions_jsonl_bytes(&self.session_agents)
+    }
+
     /// Render `usage.jsonl` — one line per settled model call. `None` when
     /// the session settled none (the artifact is omitted, never written empty).
     #[must_use]
@@ -362,6 +378,9 @@ impl CheckpointArchive {
         }
         if let Some(usage) = self.usage_jsonl() {
             out.insert(USAGE_NAME.to_owned(), usage);
+        }
+        if let Some(sessions) = self.sessions_jsonl() {
+            out.insert(SESSIONS_NAME.to_owned(), sessions);
         }
         for (name, bytes) in [
             (
@@ -1020,6 +1039,7 @@ mod tests {
             full_jsonl: Some(&full),
             redaction_report: &report,
             serve_audit: None,
+            sessions: None,
             usage: None,
             tool_calls: None,
             transcript_compact: None,
@@ -1052,6 +1072,7 @@ mod tests {
                 full_jsonl: Some(&terminated),
                 redaction_report: &report,
                 serve_audit: None,
+                sessions: None,
                 usage: None,
                 tool_calls: None,
                 transcript_compact: None,
@@ -1129,6 +1150,7 @@ mod tests {
                 full_jsonl: None,
                 redaction_report: &a.redaction_report_json(),
                 serve_audit: None,
+                sessions: None,
                 usage: None,
                 tool_calls: None,
                 transcript_compact: None,

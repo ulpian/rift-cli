@@ -83,7 +83,7 @@ checkpoint branch under a path derived from its own id:
 ```
 <id[:2]>/<id[2:]>/
     content.redacted   content_hash.txt   full.jsonl   metadata.json
-    redaction_report.json   serve_audit.jsonl   tool_calls.jsonl
+    redaction_report.json   serve_audit.jsonl   sessions.jsonl   tool_calls.jsonl
     digest.failures.json  digest.intent.json  digest.log.json  digest.shape.json
     transcript.jsonl   transcript.compact.jsonl   usage.jsonl
     sessions/<index>/metadata.json      (per-session header; only when the checkpoint covers 2+ sessions)
@@ -104,6 +104,7 @@ and a version field nothing binds documents nothing.
 | `metadata.json` | the header: sessions covered, recorded Merkle root, canonicalization era, task list, token rollups |
 | `redaction_report.json` | counts only — what redaction removed, never what it removed |
 | `serve_audit.jsonl` | the serves the recall projection attributes to the session, one canonical envelope per line; absent when there were none |
+| `sessions.jsonl` | the agent each covered session was captured from, one line per session: its native id and its agent's token; absent on a checkpoint written before it existed |
 | `tool_calls.jsonl` | the tool calls, reduced to identifiers |
 | `transcript.*.jsonl` | the transcript: a full copy and a deterministic compact one |
 | `usage.jsonl` | the session's settled model calls, one line each: the four token classes, how they were counted, the model and the call's key; absent when none has settled |
@@ -116,6 +117,11 @@ is what a verifier can re-derive. The redaction report is re-verified on every
 `rift verify`, and the artifact bridge refuses to project a checkpoint whose
 report is missing or invalid, so "this checkpoint went through the gate" is
 checkable rather than hopeful.
+
+The sessions artifact says which agent each covered session came from.
+`metadata.json` names a session by its native id alone, and a rebuild keys every session row by agent and native id together, so without it a rebuild could only guess the agent, and it guessed one for every session.
+It is a sibling file rather than a new `metadata.json` member because `metadata.json` is part of `content_hash.txt`'s preimage: a member there would change the digest's input for every checkpoint that carried it, and the digest's definition does not move.
+Each line is the native session id `metadata.json` already names, the agent's token, and a `schema_version`; the token comes from the closed list of first-party agents, and anything else is frozen as `withheld`, which a rebuild skips.
 
 The serve audit is the recall plane's record of what it served, frozen where a
 rebuild cannot reach it.
@@ -193,7 +199,7 @@ artifact and a short path prove membership without handing over the checkpoint.
 A checkpoint's leaves are its content artifacts **in bytewise full-path order**,
 exactly the order git sorts the tree into: `content.redacted`, the four
 `digest.*.json`, each line of `full.jsonl` as its own leaf,
-`redaction_report.json`, `serve_audit.jsonl`, `sessions/<index>/metadata.json` (bytewise by index
+`redaction_report.json`, `serve_audit.jsonl`, `sessions.jsonl`, `sessions/<index>/metadata.json` (bytewise by index
 name, so "10" precedes "2"), `tasks/<id>/…` (bytewise by tool-use id),
 `tool_calls.jsonl`, then `transcript.compact.jsonl` and `transcript.jsonl`, and
 last `usage.jsonl`.
@@ -205,6 +211,8 @@ existed — so the transcript pair (sorting last) and the subagent subtrees
 `ta` < `to`) were both addable without changing any existing root.
 So was `serve_audit.jsonl`, which lands right after `redaction_report.json`
 and before `sessions/`: `r` < `s` at the first byte, and again at the third.
+So was `sessions.jsonl`, which lands after `serve_audit.jsonl` and before the
+`sessions/` subtree, because `.` sorts before `/`.
 So was `usage.jsonl`, which sorts after every other name (`t` < `u`): its one
 leaf is appended to the sequence, never inserted into it, so no shard without
 it derives a different root.

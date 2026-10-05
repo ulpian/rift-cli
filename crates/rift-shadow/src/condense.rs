@@ -26,8 +26,9 @@ pub type CheckpointId = String;
 
 /// What a session captured beside its capture document, handed to the archive
 /// as one value: the read facts that become `tool_calls.jsonl`, the frozen
-/// serve envelopes that become `serve_audit.jsonl` and the settled usage that
-/// becomes `usage.jsonl`.
+/// serve envelopes that become `serve_audit.jsonl`, the settled usage that
+/// becomes `usage.jsonl` and the session's agent that becomes
+/// `sessions.jsonl`.
 ///
 /// One struct rather than one parameter per artifact, because the prediction
 /// and the archive must fold exactly the same facts, and every new fact
@@ -43,6 +44,9 @@ pub struct SessionFacts {
     pub serve_audit: Option<Vec<u8>>,
     /// The session's settled model calls with their usage (`usage.jsonl`).
     pub usage: Vec<crate::backend::ArchivedUsageFact>,
+    /// The agent token the session was captured from (`sessions.jsonl`);
+    /// `None` writes no artifact.
+    pub agent: Option<String>,
 }
 
 /// **The one derivation of a new checkpoint id**: `sha256(session ‖ \0 ‖
@@ -258,6 +262,10 @@ fn archive_for_id(
         read_facts: facts.read_facts,
         serve_audit: facts.serve_audit,
         usage: facts.usage,
+        session_agents: facts
+            .agent
+            .map(|agent| std::collections::BTreeMap::from([(session.to_owned(), agent)]))
+            .unwrap_or_default(),
         content,
         report,
         transcript: None,
@@ -660,6 +668,7 @@ mod tests {
             read_facts: facts,
             serve_audit: None,
             usage: Vec::new(),
+            session_agents: std::collections::BTreeMap::new(),
             content,
             report: RedactionReportView {
                 total_spans: 0,
@@ -944,6 +953,7 @@ mod tests {
             }],
             serve_audit: None,
             usage: Vec::new(),
+            agent: None,
         };
         let predicted = predicted_checkpoint_id(SESSION, &raw, &facts, &packs).unwrap();
         let archived = condense(
@@ -986,6 +996,7 @@ mod tests {
             read_facts: Vec::new(),
             serve_audit: Some(lines.into_bytes()),
             usage: Vec::new(),
+            agent: None,
         }
     }
 
@@ -1046,6 +1057,7 @@ mod tests {
             read_facts: Vec::new(),
             serve_audit: Some(Vec::new()),
             usage: Vec::new(),
+            agent: None,
         };
         assert_eq!(
             condensed_with(empty, 1).await,
@@ -1105,6 +1117,30 @@ mod tests {
         let first = condensed_with(facts_with_usage(2), 1).await;
         assert_eq!(condensed_with(facts_with_usage(2), 2).await, first);
         assert_ne!(condensed_with(facts_with_usage(3), 1).await, first);
+    }
+
+    /// **One id for the prediction and the archive of a session whose agent
+    /// is named**, and a different one from the same session with none: the
+    /// agent is a leaf of the id, folded identically by both hooks.
+    #[tokio::test]
+    async fn the_trailer_prediction_and_the_archive_mint_one_id_with_the_agent() {
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let packs = RulePackSet::builtin();
+        let named = SessionFacts {
+            agent: Some("codex".to_owned()),
+            ..SessionFacts::default()
+        };
+        let predicted = predicted_checkpoint_id(SESSION, &raw, &named, &packs).unwrap();
+        assert_eq!(condensed_with(named.clone(), 1).await, predicted);
+        assert_eq!(
+            condensed_with(named, 2).await,
+            predicted,
+            "unchanged, same id"
+        );
+
+        let bare =
+            predicted_checkpoint_id(SESSION, &raw, &SessionFacts::default(), &packs).unwrap();
+        assert_ne!(bare, predicted, "the agent is a leaf of the id");
     }
 
     /// **The rollup rule, pinned at the assembly.** A

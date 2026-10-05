@@ -47,6 +47,7 @@ pub(super) fn archive() -> CheckpointArchive {
         read_facts: Vec::new(),
         serve_audit: None,
         usage: Vec::new(),
+        session_agents: std::collections::BTreeMap::new(),
         content: redacted(),
         report: RedactionReportView {
             total_spans: 0,
