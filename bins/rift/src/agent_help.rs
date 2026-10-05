@@ -921,7 +921,7 @@ mod tests {
         (
             "investigate",
             true,
-            "scaffolds findings.md and an evidence pack",
+            "compiles an investigation evidence pack",
         ),
         (
             "explain",
@@ -1346,7 +1346,7 @@ Workflow verbs (Rift compiles the evidence; the reasoning is yours):
       --profile <PROFILE>      Which sections and budget: `full` (default), `signals`, or `risk`
 
   rift investigate <SEED> [options] --json
-      Scaffold an investigation: findings.md plus a budgeted evidence pack
+      Compile an investigation's budgeted evidence pack; writes no file
       <SEED>                   The seed: a path, a checkpoint id, or `sha256:<hex>`
       --allow-untrusted-seed   Admit a non-identifier seed as a neutral digest (never verbatim)
       --finding <FINDING>      A finding from the `investigate` skill: `<kind>:<handle>::<text>`. Repeatable. Accepted findings are UNVERIFIED notes

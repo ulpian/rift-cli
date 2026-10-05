@@ -159,7 +159,7 @@ pub(crate) enum Command {
     /// Compile the review evidence pack for the commits in scope. Rift gathers
     /// the facts; the verdict is your agent's.
     Review(ReviewArgs),
-    /// Scaffold an investigation: findings.md plus a budgeted evidence pack.
+    /// Compile an investigation's budgeted evidence pack; writes no file.
     Investigate(InvestigateArgs),
     /// Explain a checkpoint: roots, chain position, attribution, cost.
     Explain(ExplainArgs),

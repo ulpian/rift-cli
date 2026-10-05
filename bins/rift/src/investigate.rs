@@ -1,5 +1,4 @@
-//! `rift investigate` — scaffold a `findings.md` and an **InvestigationPack**
-//! from a seed.
+//! `rift investigate` — compile an **InvestigationPack** from a seed.
 //!
 //! # A seed is an IDENTIFIER, and free text has exactly one door
 //!
@@ -69,11 +68,16 @@
 //!
 //! # No agents, no quorum
 //!
-//! This verb spawns nothing and runs no model. It writes a `findings.md`
-//! scaffold for the user's agent to append to, and compiles the pack that agent
-//! reads. The user, or an outer loop, drives the agents.
-
-use std::path::Path;
+//! This verb spawns nothing, runs no model and writes no file. It compiles the
+//! pack an agent reads and prints it with the admitted findings' neutral
+//! digests. The user, or an outer loop, drives the agents.
+//!
+//! # No findings file
+//!
+//! An agent's claim is already captured where it was made, in the transcript,
+//! and a finding reaches a pack only through `--finding`. A notes file beside
+//! the repository would be a second, mutable record that nothing reads back,
+//! that works only if the agent obeys it, and that dirties the working tree.
 
 use rift_core::{Result, RiftError};
 use rift_recall_serve::pack::{
@@ -89,10 +93,10 @@ use crate::cli::{exit, Outcome};
 use crate::workflows::Planes;
 
 /// The `rift investigate` JSON contract version.
-pub(crate) const INVESTIGATE_SCHEMA_VERSION: u32 = 1;
-
-/// The scaffold file this verb writes beside the repository's `.rift`.
-pub(crate) const FINDINGS_FILE: &str = "findings.md";
+///
+/// Version 2 drops the `scaffold` member: the verb no longer writes a
+/// `findings.md` notes file, so there is no path to report.
+pub(crate) const INVESTIGATE_SCHEMA_VERSION: u32 = 2;
 
 /// A seed as the caller supplied it, once classified.
 ///
@@ -168,10 +172,10 @@ async fn classify(seed: &str, planes: &Planes<'_>) -> Seed {
     Seed::Untrusted
 }
 
-/// `rift investigate` — scaffold `findings.md` and compile the pack.
+/// `rift investigate` — compile the pack and print it; nothing is written.
 ///
 /// # Errors
-/// [`RiftError`] if the scaffold cannot be written or the pack cannot compile.
+/// [`RiftError`] if the pack cannot compile.
 /// A refused seed is an [`Outcome`], not an `Err`.
 pub(crate) async fn investigate(
     planes: &Planes<'_>,
@@ -179,7 +183,6 @@ pub(crate) async fn investigate(
     allow_untrusted: bool,
     findings: &[&str],
 ) -> Result<Outcome> {
-    let root = planes.root;
     let Some(seed_text) = seed else {
         return Ok(Outcome::coded(
             exit::USAGE,
@@ -227,7 +230,6 @@ pub(crate) async fn investigate(
     let evidence = pack.to_evidence(&pack_key_inputs(seed_kind, seed_text, accepted));
     let pack_json = serde_json::to_value(&evidence).map_err(|e| RiftError::Serde(e.to_string()))?;
 
-    let scaffold = write_scaffold(root, seed_kind, &pack.render())?;
     let code = if accepted == 0 && refused > 0 {
         exit::PRECONDITION
     } else {
@@ -240,14 +242,13 @@ pub(crate) async fn investigate(
             "schema_version": INVESTIGATE_SCHEMA_VERSION,
             "seed_kind": seed_kind,
             "findings": { "accepted": accepted, "refused": refused },
-            "scaffold": scaffold,
             "pack": pack_json,
         }),
     ))
 }
 
 /// Classify the seed and push it into the pack, returning the kind tag the
-/// pack key and the scaffold carry; `None` when the seed is untrusted text and
+/// pack key and the answer carry; `None` when the seed is untrusted text and
 /// `--allow-untrusted-seed` was not passed, with nothing pushed.
 async fn push_seed(
     req: &mut PackRequest,
@@ -491,38 +492,15 @@ fn parse_finding(raw: &str) -> Option<(FindingShape, &str)> {
     Some((FindingShape { kind, evidence }, body))
 }
 
-/// Write the `findings.md` scaffold, returning its path as a string.
-///
-/// **Never overwrites.** An existing `findings.md` is the user's (or their
-/// agent's) work; a scaffolding verb that clobbers it is a data-loss bug
-/// wearing a helpful hat.
-fn write_scaffold(root: &Path, seed_kind: &str, pack_text: &str) -> Result<String> {
-    let path = root.join(FINDINGS_FILE);
-    let shown = path.display().to_string();
-    if path.exists() {
-        return Ok(shown);
-    }
-    let body = format!(
-        "# Findings\n\n\
-         Seed kind: {seed_kind}\n\n\
-         > Rift compiled the evidence below and reasons about none of it. Append\n\
-         > findings as `- <kind>: <claim>` citing a handle; `rift investigate`\n\
-         > admits them as UNVERIFIED notes, and corroboration is what promotes\n\
-         > one to a fact.\n\n\
-         ## Evidence pack\n\n```\n{pack_text}\n```\n\n## Findings\n\n"
-    );
-    std::fs::write(&path, body)
-        .map_err(|e| RiftError::storage(format!("investigate: cannot write the scaffold: {e}")))?;
-    Ok(shown)
-}
-
 /// Test planes: a capture projection holding ONE recorded tool call and a
 /// recall ledger holding ONE bound summary, so a RESOLVABLE handle exists in
 /// every scheme — which is what lets the corpus assert from both sides instead
 /// of only proving that everything is refused.
 #[cfg(test)]
 pub(crate) mod fixture {
-    use super::{CanonicalStore, Path, SqliteStore, Value};
+    use std::path::Path;
+
+    use super::{CanonicalStore, SqliteStore, Value};
 
     /// The one tool call the capture projection recorded.
     pub(crate) const TOOL_ID: &str = "toolu_01ABCdef-9";
@@ -681,6 +659,8 @@ mod corpus_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::fixture::{self, TOOL_ID};
     use super::*;
 
@@ -751,9 +731,10 @@ mod tests {
             .unwrap();
         assert_eq!(out.code, exit::PRECONDITION);
         assert_eq!(out.json["error"], "untrusted_seed_not_allowed");
-        assert!(
-            !d.path().join(FINDINGS_FILE).exists(),
-            "no scaffold on a refusal"
+        assert_eq!(
+            std::fs::read_dir(d.path()).unwrap().count(),
+            0,
+            "a refusal wrote into the tree"
         );
 
         let allowed = rt
@@ -778,8 +759,29 @@ mod tests {
         }
     }
 
+    /// Every path under `dir` with its bytes, sorted, so two listings compare
+    /// as values.
+    fn listing(dir: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).unwrap() {
+                let path = entry.unwrap().path();
+                let bytes = if path.is_dir() {
+                    stack.push(path.clone());
+                    Vec::new()
+                } else {
+                    std::fs::read(&path).unwrap()
+                };
+                out.push((path, bytes));
+            }
+        }
+        out.sort();
+        out
+    }
+
     #[test]
-    fn the_scaffold_is_written_once_and_never_clobbers_the_users_work() {
+    fn investigating_writes_nothing_into_the_working_tree() {
         let rt = fixture::rt();
         let d = tmp();
         let cap = fixture::capture(&rt);
@@ -788,14 +790,52 @@ mod tests {
             root: d.path(),
             recall_db: None,
         };
-        let id = "c".repeat(64);
-        rt.block_on(investigate(&planes, Some(&id), false, &[]))
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/a.rs"), "fn a() {}\n").unwrap();
+        let before = listing(d.path());
+        let finding = format!("lesson:log:{TOOL_ID}::the retry loop hid the error");
+        let out = rt
+            .block_on(investigate(
+                &planes,
+                Some(&"c".repeat(64)),
+                false,
+                &[&finding],
+            ))
             .unwrap();
-        let p = d.path().join(FINDINGS_FILE);
-        std::fs::write(&p, "MY NOTES").unwrap();
-        rt.block_on(investigate(&planes, Some(&id), false, &[]))
+        assert_eq!(out.code, exit::OK);
+        assert_eq!(out.json["findings"]["accepted"], 1);
+        assert_eq!(listing(d.path()), before, "the verb wrote into the tree");
+    }
+
+    #[test]
+    fn the_schema_two_answer_carries_the_pack_and_no_file_path() {
+        let rt = fixture::rt();
+        let d = tmp();
+        let cap = fixture::capture(&rt);
+        let planes = Planes {
+            capture: &cap,
+            root: d.path(),
+            recall_db: None,
+        };
+        let out = rt
+            .block_on(investigate(&planes, Some(&"c".repeat(64)), false, &[]))
             .unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "MY NOTES");
+        assert_eq!(out.json["schema_version"], 2);
+        let mut members: Vec<&str> = out
+            .json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        members.sort_unstable();
+        assert_eq!(members, ["findings", "pack", "schema_version", "seed_kind"]);
+        assert_eq!(out.json["seed_kind"], "checkpoint");
+        assert_eq!(
+            out.json["findings"],
+            serde_json::json!({ "accepted": 0, "refused": 0 })
+        );
+        assert!(out.json["pack"]["pack_key"].is_string());
     }
 
     #[test]
