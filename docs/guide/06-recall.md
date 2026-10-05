@@ -524,6 +524,7 @@ synced, and losing the directory costs a re-read that would otherwise have been
 declined. That is the failure direction the whole design leans toward, and it
 is why this state is a file rather than a row: a decision taken while an agent
 waits can afford a file read and cannot afford a store open.
+What the file decided reaches the record at condense, not before: the archive copies the rows a session's windows hold at that moment into the checkpoint's `window_journal.jsonl` ([§5.3](05-ledger-and-verification.md#53-anatomy-of-a-checkpoint)), and the file itself stays run state, swept on its own schedule.
 
 **The key is one context window, not one session.** A coding assistant runs a
 subagent under the *parent's* session id, and the two hold different bytes, so

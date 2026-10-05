@@ -186,6 +186,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
     let transcript_full = read("transcript.jsonl");
     let usage = read("usage.jsonl");
     let sessions = read("sessions.jsonl");
+    let window_journal = read("window_journal.jsonl");
     let derived = shard_merkle_root(&ShardLeafBytes {
         content_redacted: &content,
         full_jsonl: full.as_deref(),
@@ -193,6 +194,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
         serve_audit: serve_audit.as_deref(),
         sessions: sessions.as_deref(),
         usage: usage.as_deref(),
+        window_journal: window_journal.as_deref(),
         tool_calls: tool_calls.as_deref(),
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
@@ -225,6 +227,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
         serve_audit: serve_audit.as_deref(),
         sessions: sessions.as_deref(),
         usage: usage.as_deref(),
+        window_journal: window_journal.as_deref(),
         tool_calls: tool_calls.as_deref(),
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
@@ -319,6 +322,7 @@ fn a_seeded_secret_never_reaches_any_native_artifact() {
         serve_audit: None,
         usage: Vec::new(),
         session_agents: std::collections::BTreeMap::new(),
+        window_journal: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript: None,
@@ -383,6 +387,7 @@ fn archive_with_transcript(
         serve_audit: None,
         usage: Vec::new(),
         session_agents: std::collections::BTreeMap::new(),
+        window_journal: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript,

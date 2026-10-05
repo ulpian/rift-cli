@@ -42,6 +42,9 @@ pub struct ShardLeafBytes<'a> {
     /// `usage.jsonl` — the session's settled model calls, or `None` when it
     /// settled none.
     pub usage: Option<&'a [u8]>,
+    /// `window_journal.jsonl` — the session's frozen window-journal rows, or
+    /// `None` when it froze none or was written before the artifact existed.
+    pub window_journal: Option<&'a [u8]>,
     /// The `tasks/<tool-use-id>/` subtrees' artifact bytes, or empty when the
     /// checkpoint carries no subagent task. Order here is
     /// irrelevant: [`shard_merkle_leaves`] orders by tool-use id itself, so
@@ -117,13 +120,14 @@ pub struct TaskLeafBytes<'a> {
 /// `tasks/<tool-use-id>/` subtree's artifacts (`metadata.json`, then the
 /// transcript pair when present — the task dir's own bytewise name order —
 /// tasks ordered by tool-use id), then `tool_calls.jsonl`, then
-/// `transcript.compact.jsonl`, then `transcript.jsonl`, then `usage.jsonl` —
+/// `transcript.compact.jsonl`, then `transcript.jsonl`, then `usage.jsonl`,
+/// then `window_journal.jsonl` —
 /// which is the artifacts' bytewise **full-path** order (`serve_audit.jsonl`
 /// sits between `redaction_report.json` and `sessions/` because `r` < `s` at
 /// the first byte and again at the third; `tasks/…` sits between `sessions/`
-/// and `tool_calls.jsonl` because `'t','a' < 't','o'`; `usage.jsonl` trails
-/// because `t` < `u`, so it is appended to every sequence rather than
-/// inserted into one), the same order
+/// and `tool_calls.jsonl` because `'t','a' < 't','o'`; `usage.jsonl` and then
+/// `window_journal.jsonl` trail because `t` < `u` < `w`, so each is appended
+/// to every sequence rather than inserted into one), the same order
 /// `NativeBackend::write_shard` sorts the tree into. One rule, and it makes
 /// "the checkpoint's event leaves" literally true the moment an event stream is
 /// threaded through condense: today a shard carries no events and the leaf set
@@ -222,21 +226,24 @@ pub fn shard_merkle_leaves(bytes: &ShardLeafBytes<'_>) -> Vec<Sha256Id> {
             leaves.push(rift_hashchain::leaf_hash(full_transcript));
         }
     }
-    if let Some(tool_calls) = bytes.tool_calls {
-        leaves.push(rift_hashchain::leaf_hash(tool_calls));
-    }
-    if let Some(compact) = bytes.transcript_compact {
-        leaves.push(rift_hashchain::leaf_hash(compact));
-    }
-    if let Some(full_transcript) = bytes.transcript_full {
-        leaves.push(rift_hashchain::leaf_hash(full_transcript));
-    }
-    // The settled usage: `usage.jsonl` sorts after every other top-level
-    // name, so its one leaf is the last.
-    if let Some(usage) = bytes.usage {
-        leaves.push(rift_hashchain::leaf_hash(usage));
-    }
+    push_trailing_leaves(bytes, &mut leaves);
     leaves
+}
+
+/// The top-level artifacts that sort after the `tasks/` tree, in bytewise
+/// name order: `tool_calls.jsonl`, the transcript pair, `usage.jsonl`, then
+/// `window_journal.jsonl` (`t` < `u` < `w`), each one leaf when present.
+fn push_trailing_leaves(bytes: &ShardLeafBytes<'_>, leaves: &mut Vec<Sha256Id>) {
+    let trailing = [
+        bytes.tool_calls,
+        bytes.transcript_compact,
+        bytes.transcript_full,
+        bytes.usage,
+        bytes.window_journal,
+    ];
+    for artifact in trailing.into_iter().flatten() {
+        leaves.push(rift_hashchain::leaf_hash(artifact));
+    }
 }
 
 /// The Merkle root over [`shard_merkle_leaves`] — the value a
@@ -325,6 +332,7 @@ mod tests {
             serve_audit: None,
             sessions: None,
             usage: None,
+            window_journal: None,
             tool_calls: Some(br#"{"id":"t1"}"#),
             transcript_compact: None,
             transcript_full: None,
@@ -481,5 +489,30 @@ mod tests {
         let mut inserted = old;
         inserted.insert(3, leaf_hash(b"agents"));
         assert_eq!(shard_merkle_leaves(&with), inserted);
+    }
+
+    /// **The window-journal leaf is the last, and its absence changes
+    /// nothing.** `window_journal.jsonl` sorts after `usage.jsonl` (`u` <
+    /// `w`), so a shard carrying both ends usage then journal, and a shard
+    /// without it derives the sequence it always did.
+    #[test]
+    fn a_window_journal_leaf_trails_even_the_usage_and_absence_changes_nothing() {
+        use rift_hashchain::leaf_hash;
+
+        let without = ShardLeafBytes {
+            content_redacted: b"c",
+            redaction_report: b"r",
+            usage: Some(b"usage"),
+            ..ShardLeafBytes::default()
+        };
+        let old = vec![leaf_hash(b"c"), leaf_hash(b"r"), leaf_hash(b"usage")];
+        assert_eq!(shard_merkle_leaves(&without), old, "old sequence");
+        let with = ShardLeafBytes {
+            window_journal: Some(b"rows"),
+            ..without
+        };
+        let mut appended = old;
+        appended.push(leaf_hash(b"rows"));
+        assert_eq!(shard_merkle_leaves(&with), appended, "one trailing leaf");
     }
 }

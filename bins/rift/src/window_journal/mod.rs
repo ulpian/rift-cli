@@ -12,7 +12,10 @@
 //! joined to a canonical table, synced, or trusted to be well-formed: the
 //! directory sits in a work tree an agent can write to, so every row is
 //! validated on the way in and a row that fails is dropped rather than
-//! interpreted.
+//! interpreted. What the files decided reaches the record another way: when a
+//! session is condensed, the rows its windows hold at that moment are copied
+//! into the checkpoint's own `window_journal.jsonl`, in that artifact's own
+//! grammar, and the files themselves stay exactly the run state they were.
 //!
 //! **Every failure leans one way.** A file that cannot be read, a snapshot
 //! that will not parse, a row longer than one atomic write, a directory that
@@ -77,12 +80,14 @@
 //! questions a decision asks of a journal already in memory. [`seen`] is the
 //! one question a pull asks of it: the turn each held revision was last read
 //! in. [`housekeeping`] counts a checkout's journals and sweeps the ones it has
-//! finished with.
+//! finished with. [`frozen`] reads a session's windows for the checkpoint
+//! that freezes them, on the archive path and never on a decision's.
 //!
 
 mod denies;
 mod edits;
 mod fold;
+mod frozen;
 mod housekeeping;
 mod journal;
 mod seen;
@@ -91,6 +96,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use denies::{deny_stands, ineffective_denies};
 pub(crate) use edits::{edit_facts, expected_write, prior_revision};
+pub(crate) use frozen::session_window_facts;
 pub(crate) use housekeeping::{survey, sweep_expired};
 pub(crate) use journal::WindowJournal;
 pub(crate) use seen::last_read_turns;

@@ -12,8 +12,8 @@ use rift_core::Sha256Id;
 use super::leaves::{DigestLeafBytes, SessionMetaLeaf, ShardLeafBytes, TaskLeafBytes};
 use super::{
     sessions_jsonl_bytes, shard_merkle_root, tool_calls_jsonl_bytes, usage_jsonl_bytes,
-    ArchivedTask, ArchivedTranscript, CheckpointArchive, NATIVE_CANON_VERSION,
-    TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
+    window_journal_jsonl_bytes, ArchivedTask, ArchivedTranscript, CheckpointArchive,
+    NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
 };
 use crate::sha256_hex;
 
@@ -32,6 +32,10 @@ pub(super) const SESSIONS_NAME: &str = "sessions.jsonl";
 /// leaf trails the sequence.
 pub(super) const USAGE_NAME: &str = "usage.jsonl";
 
+/// The shard name of the frozen window journals. It sorts after `usage.jsonl`
+/// (`u` < `w`), after every other top-level name, so its leaf is the last.
+pub(super) const WINDOW_JOURNAL_NAME: &str = "window_journal.jsonl";
+
 impl CheckpointArchive {
     /// This shard's Merkle root — **derived from the bytes, never supplied.**
     ///
@@ -49,6 +53,7 @@ impl CheckpointArchive {
         let tool_calls = self.tool_calls_jsonl();
         let usage = self.usage_jsonl();
         let sessions = self.sessions_jsonl();
+        let window_journal = self.window_journal_jsonl();
         let digest_failures = self.digest_failures_json();
         let digest_intent = self.digest_intent_json();
         let digest_log = self.digest_log_json();
@@ -86,6 +91,7 @@ impl CheckpointArchive {
             transcript_compact: self.transcript.as_ref().map(|t| t.compact.as_slice()),
             transcript_full: self.transcript.as_ref().map(|t| t.full.as_slice()),
             usage: usage.as_deref(),
+            window_journal: window_journal.as_deref(),
             tasks: &task_leaves,
             session_metas: &session_meta_leaves,
             digests: DigestLeafBytes {
@@ -249,6 +255,14 @@ impl CheckpointArchive {
         usage_jsonl_bytes(&self.usage)
     }
 
+    /// Render `window_journal.jsonl` — one line per row the session's context
+    /// windows held. `None` when they held none it can freeze (the artifact is
+    /// omitted, never written empty).
+    #[must_use]
+    pub fn window_journal_jsonl(&self) -> Option<Vec<u8>> {
+        window_journal_jsonl_bytes(&self.window_journal)
+    }
+
     /// `serve_audit.jsonl` — the session's frozen serve envelopes, or `None`
     /// when it froze none. An empty buffer reads as absent, so the artifact
     /// is never written empty and a serve-less shard keeps the leaf sequence
@@ -381,6 +395,9 @@ impl CheckpointArchive {
         }
         if let Some(sessions) = self.sessions_jsonl() {
             out.insert(SESSIONS_NAME.to_owned(), sessions);
+        }
+        if let Some(window_journal) = self.window_journal_jsonl() {
+            out.insert(WINDOW_JOURNAL_NAME.to_owned(), window_journal);
         }
         for (name, bytes) in [
             (
@@ -1049,6 +1066,7 @@ mod tests {
             serve_audit: None,
             sessions: None,
             usage: None,
+            window_journal: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -1082,6 +1100,7 @@ mod tests {
                 serve_audit: None,
                 sessions: None,
                 usage: None,
+                window_journal: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,
@@ -1160,6 +1179,7 @@ mod tests {
                 serve_audit: None,
                 sessions: None,
                 usage: None,
+                window_journal: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,

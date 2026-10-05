@@ -73,6 +73,13 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         if let Some(sessions) = archive.sessions_jsonl() {
             entries.push(self.structural_entry(super::artifacts::SESSIONS_NAME, &sessions)?);
         }
+        // The frozen window journals: window keys, closed kind tokens, turns,
+        // times, repository paths, revisions and line counts, each screened
+        // by the one writer — structural, like the read facts.
+        if let Some(window_journal) = archive.window_journal_jsonl() {
+            let name = super::artifacts::WINDOW_JOURNAL_NAME;
+            entries.push(self.structural_entry(name, &window_journal)?);
+        }
         self.push_digest_entries(archive, &mut entries)?;
         Ok(entries)
     }

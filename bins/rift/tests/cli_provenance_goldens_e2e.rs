@@ -144,6 +144,7 @@ fn archive_for(
         serve_audit: None,
         usage: Vec::new(),
         session_agents: std::collections::BTreeMap::new(),
+        window_journal: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript: seed.transcript,
