@@ -551,10 +551,10 @@ The complete DB/WAL/SHM set is linked without overwriting any existing path befo
 A failure restores the complete original when possible; failed restoration retains the complete preserved set and names its full path with recovery steps.
 Keep the preserved triple together while restoring the original or quarantining its incomplete paths.
 Backfill refuses an artifact that still aliases the live destination; restore in place or create a distinct live projection before importing the preserved artifact.
-`rift backfill --recall-from <file>` reads the serves back: it opens the file read-only, as the capture import opens its own, refuses a file that is not a recall projection, and replays `memd_audit_event`, `serve_call_event`, `serve_session_event`, `memd_audit_citation`, `serve_grant_event` and `memd_audit_session` into the family's recall projection.
-It does not replay `memd_audit_pull_claim`.
+`rift backfill --recall-from <file>` reads the serves back: it opens the file read-only, as the capture import opens its own, refuses a file that is not a recall projection, and replays `memd_audit_event`, `serve_call_event`, `serve_session_event`, `memd_audit_citation`, `serve_grant_event`, `memd_audit_session` and `memd_audit_pull_claim` into the family's recall projection.
+A source set aside before claims were recorded has no claim relation and imports as it always did.
 There is no second writer.
-Each decision and call row is spelled back into the envelope that books exactly that row and handed to the one appender, which writes the citation, first-served and attribution rows as it does live; a grant goes through its own writer.
+Each decision and call row is spelled back into the envelope that books exactly that row, a decision's claim included, and handed to the one appender, which writes the citation, first-served, claim and attribution rows as it does live; a grant goes through its own writer.
 Every write is insert-or-ignore on its key, so a second run inserts nothing, and `--dry-run` inserts no canonical rows.
 The set-aside files are records: `rift clean` never removes them, and `rift doctor` lists them by name, size and age.
 
