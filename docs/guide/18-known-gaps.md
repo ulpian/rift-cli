@@ -42,8 +42,8 @@ restoring either reddens a check. The code graph was never revisited, and nothin
 binary, served recall over a long-lived server transport, spawned your editor
 from the dashboard, and keyed everything by individual worktree. All of it is
 removed; the read-compatibility paths keeping old captures readable are the only
-survivors. A description that reads as live is stale — §18.11 lists the known
-ones.
+survivors. A description that reads as live is stale, and the code is the
+authority.
 
 ---
 
@@ -605,7 +605,7 @@ stop being *used* but do not disappear from history.
 
 ---
 
-## 18.11 Storage, and descriptions that no longer match
+## 18.11 Storage and the registry
 
 ### Column encryption has no production writer
 
@@ -629,15 +629,6 @@ projection was not replaced. Closing it needs a decision about whether
 replace-and-restamp is ever the right rebuild, and a caller if it is.
 
 **Read more.** [13](13-storage-and-schema.md).
-
-### A task-runner illustration names a retired sub-command
-
-*Stale description.* The task-runner files show an example invoking a recall
-sub-command that no longer exists — running it exits with a usage error — because
-the retired server transport it belonged to is gone. Closing it means changing
-the illustration to a verb that exists.
-
-**Read more.** [16](16-development.md).
 
 ### One registry path can hold the same family twice
 
