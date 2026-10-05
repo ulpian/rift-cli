@@ -1,11 +1,11 @@
 //! A fresh cache root and both rebuilds reproduce what Rift recorded.
 //!
 //! One Claude Code session is replayed through the shipped `rift` binary with
-//! the capture worker drained inline: a file read twice, so the second read
-//! is declined; a prompt, so the session is handed its pointer; one
-//! `rift recall file-if-changed` made from inside the session, whose tool
-//! result carries its `serve:` keys back through `PostToolUse` and so
-//! attributes it; two turns settled on two models, one of them unpriced; and
+//! the capture worker drained inline: a file read, then asked for again, so
+//! the second read is declined; a prompt, so the session is handed its
+//! pointer; one `rift recall file-if-changed` made from inside the session,
+//! whose tool result carries its `serve:` keys back through `PostToolUse` and
+//! so attributes it; two turns settled on two models, one of them unpriced; and
 //! a session end that condenses everything into a checkpoint. The figures
 //! the owner reads are recorded off `rift savings --json`, `rift recap --json`
 //! and the two projections' raw rows. Then the cache root moves to an empty
@@ -18,10 +18,11 @@
 //! the rebuild and absent after it, with exactly its own verb, channel and
 //! token figures gone.
 //!
-//! The savings *share* is deliberately not compared. After a cold rebuild its
-//! denominator, `read_tokens`, is zero, because the capture rebuild derives no
-//! `tool_reads_file` or `file_read_tokens` rows from the shard's
-//! `tool_calls.jsonl`; the share would compare a gap, not a figure.
+//! The savings share is compared too, with its denominator `read_tokens` and
+//! the session count: the shard's `tool_calls.jsonl` freezes each read's
+//! instant, turn, blob oid and tokenizer, and its `sessions.jsonl` the
+//! session's agent, so the capture rebuild writes back the rows the
+//! denominator joins and the session they hang off.
 //!
 //! Hermetic by construction, as `rebuild_spelling_e2e` is: a fixture
 //! repository in a tempdir and every root either binary could resolve on the
@@ -81,6 +82,12 @@ struct Figures {
     tokens_by_model: BTreeMap<String, [i64; 4]>,
     /// `rift recap --json`, `cost.amount_micros`.
     cost_micros: i64,
+    /// `rift savings --json`, `overall.read_tokens`: the share's denominator.
+    read_tokens: i64,
+    /// `rift savings --json`, `overall.share_pct`, as the document spells it.
+    share_pct: String,
+    /// `session` rows in the capture projection.
+    sessions: i64,
 }
 
 /// The two keys a serve's answer names: its call row and its decision row.
@@ -279,6 +286,11 @@ fn decline_a_repeat_read(fx: &Fixture) {
         "tool_use_id": "toolu_roundtrip_read",
     });
     fx.hook("PreToolUse", read.clone());
+    let mut done = read.clone();
+    done["tool_response"] = serde_json::json!({
+        "file": {"filePath": file.display().to_string(), "content": std::fs::read_to_string(&file).unwrap()},
+    });
+    fx.hook("PostToolUse", done);
     let repeat = fx.hook("PreToolUse", read);
     assert!(
         repeat.contains(r#""permissionDecision":"deny""#),
@@ -346,6 +358,9 @@ fn figures(fx: &Fixture, cache: &str) -> Figures {
         ),
         tokens_by_model: tokens_by_model(&capture),
         cost_micros: recap["cost"]["amount_micros"].as_i64().unwrap(),
+        read_tokens: savings["overall"]["read_tokens"].as_i64().unwrap(),
+        share_pct: savings["overall"]["share_pct"].to_string(),
+        sessions: counted(&capture, "SELECT 'session', count(*) FROM session")["session"],
     }
 }
 
@@ -374,6 +389,13 @@ fn without(fx: &Fixture, before: &Figures, person: &Serve) -> Figures {
     expected.serves_by_channel.retain(|_, n| *n > 0);
     expected.tokens_avoided -= call.get_i64(1).unwrap();
     expected.tokens_returned -= call.get_i64(2).unwrap();
+    // The share moves with its numerator, by the one formula the report uses.
+    let count = |n: i64| u64::try_from(n).unwrap();
+    let share = rift_recall_ledger::savings::share(
+        count(expected.tokens_avoided),
+        count(expected.read_tokens),
+    );
+    expected.share_pct = serde_json::json!(share).to_string();
     expected
 }
 
@@ -403,6 +425,11 @@ fn assert_the_session_left_every_kind_of_figure(before: &Figures) {
     let models: Vec<&str> = before.tokens_by_model.keys().map(String::as_str).collect();
     assert_eq!(models, [PRICED, UNPRICED]);
     assert!(before.cost_micros > 0, "the priced turn costs: {before:?}");
+    assert!(
+        before.read_tokens > 0,
+        "the read is in the denominator: {before:?}"
+    );
+    assert_eq!(before.sessions, 1, "{before:?}");
 }
 
 /// How many `memd_audit_event` and `serve_call_event` rows carry the serve's

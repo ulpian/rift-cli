@@ -202,6 +202,12 @@ pub struct CheckpointArchive {
     /// The session's settled model calls with their usage (empty ⇒ no
     /// `usage.jsonl`) — what a rebuild re-derives usage and cost from.
     pub usage: Vec<ArchivedUsageFact>,
+    /// The agent each archived session was captured from, keyed by native
+    /// session id (empty ⇒ no `sessions.jsonl`) — what lets a rebuild key a
+    /// session under its own agent rather than one default. A sibling artifact
+    /// rather than a `metadata.json` member, because `metadata.json` is in
+    /// `content_hash.txt`'s preimage and a new member there would move it.
+    pub session_agents: BTreeMap<String, String>,
     /// The redacted raw capture (durable-blob proof of the gate).
     pub content: RedactedBytes,
     /// The redaction report for `redaction_report.json` (must be valid).
@@ -356,7 +362,24 @@ pub struct ArchivedReadFact {
     /// (`ToolCallRecord`'s inline `input_tokens`). `None` omits the field, so
     /// pre-estimate facts freeze byte-identically to their old lines.
     pub input_tokens: Option<u32>,
+    /// When the read's tool call was made (epoch ms), the instant the savings
+    /// denominator windows a read by. `None` omits the member.
+    pub at: Option<i64>,
+    /// The ordinal of the turn the read belongs to. `None` omits the member.
+    pub turn: Option<i64>,
+    /// The git blob oid of the revision read, half of the file revision's
+    /// key. Frozen only when it is a 40- or 64-digit lowercase hex oid.
+    pub blob_oid: Option<String>,
+    /// The tokenizer that counted [`Self::input_tokens`], from the closed
+    /// list of tokenizers the projection records.
+    pub tokenizer: Option<String>,
 }
+
+/// The tokenizer tags a read's token count can carry: `rift-tokens`'s
+/// `TOKENIZER` and its `FALLBACK` estimate. Spelled here rather than imported
+/// because this crate does not depend on the tokenizer, and the archive needs
+/// only the names.
+const READ_TOKENIZERS: [&str; 2] = ["cl100k_base", "chars/4+1"];
 
 /// Serialize read facts exactly as the shard's `tool_calls.jsonl` freezes them
 /// (`None` when empty — the artifact is omitted, never written empty). Shared
@@ -381,13 +404,53 @@ pub fn tool_calls_jsonl_bytes(read_facts: &[ArchivedReadFact]) -> Option<Vec<u8>
         });
         // Present only when captured: omission keeps pre-estimate
         // fact sets byte-identical to the lines they froze before.
-        if let (Some(tokens), Some(obj)) = (f.input_tokens, line.as_object_mut()) {
-            obj.insert("input_tokens".to_owned(), serde_json::json!(tokens));
+        if let Some(obj) = line.as_object_mut() {
+            insert_read_members(obj, f);
         }
         out.extend_from_slice(&canonical_json(&line));
     }
     out.push(b'\n');
     Some(out)
+}
+
+/// The optional members of one `tool_calls.jsonl` line, each written only
+/// when the fact carries it, so a fact set without them freezes the lines it
+/// froze before they existed. The blob oid and the tokenizer come from
+/// projection rows rather than Rift's own grammar, so each is frozen only in
+/// its declared shape and is [`WITHHELD`] otherwise.
+fn insert_read_members(obj: &mut serde_json::Map<String, serde_json::Value>, f: &ArchivedReadFact) {
+    if let Some(tokens) = f.input_tokens {
+        obj.insert("input_tokens".to_owned(), serde_json::json!(tokens));
+    }
+    if let Some(at) = f.at {
+        obj.insert("at".to_owned(), serde_json::json!(at));
+    }
+    if let Some(turn) = f.turn {
+        obj.insert("turn".to_owned(), serde_json::json!(turn));
+    }
+    if let Some(oid) = &f.blob_oid {
+        obj.insert(
+            "blob_oid".to_owned(),
+            serde_json::json!(oid_or_withheld(oid)),
+        );
+    }
+    if let Some(tokenizer) = &f.tokenizer {
+        let known = READ_TOKENIZERS.contains(&tokenizer.as_str());
+        let frozen = if known { tokenizer.as_str() } else { WITHHELD };
+        obj.insert("tokenizer".to_owned(), serde_json::json!(frozen));
+    }
+}
+
+/// `oid` when it is a git object id (40 or 64 lowercase hex digits), else
+/// [`WITHHELD`].
+fn oid_or_withheld(oid: &str) -> &str {
+    let hex = oid
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if hex && matches!(oid.len(), 40 | 64) {
+        return oid;
+    }
+    WITHHELD
 }
 
 /// The line format version every `usage.jsonl` line declares as
@@ -493,6 +556,46 @@ fn identifier_or_withheld(value: &str) -> &str {
     WITHHELD
 }
 
+/// The line format version every `sessions.jsonl` line declares as
+/// `schema_version`.
+pub const SESSIONS_SCHEMA_VERSION: u32 = 1;
+
+/// Serialize the archived sessions' agents exactly as the shard's
+/// `sessions.jsonl` freezes them: one canonical line per session, in session
+/// order, each naming the native session id and its agent's token. `None`
+/// when empty — the artifact is omitted, never written empty, and a shard
+/// without it keeps the leaf sequence it had before the artifact.
+#[must_use]
+pub fn sessions_jsonl_bytes(session_agents: &BTreeMap<String, String>) -> Option<Vec<u8>> {
+    if session_agents.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (session, agent) in session_agents {
+        let line = serde_json::json!({
+            "agent": agent_token_or_withheld(agent),
+            "schema_version": SESSIONS_SCHEMA_VERSION,
+            "session": session,
+        });
+        out.extend_from_slice(&canonical_json(&line));
+        out.push(b'\n');
+    }
+    Some(out)
+}
+
+/// `agent` when it is one of the first-party agent tokens, else [`WITHHELD`].
+/// A closed vocabulary rather than the token's shape: an agent id is an open
+/// newtype, and a third-party token is text this shard has no reason to carry.
+fn agent_token_or_withheld(agent: &str) -> &str {
+    let known = rift_core::AgentId::FIRST_PARTY
+        .iter()
+        .any(|id| id.as_str() == agent);
+    if known {
+        return agent;
+    }
+    WITHHELD
+}
+
 /// The counts-only redaction facts the native archive freezes into
 /// `redaction_report.json`. A structural mirror of
 /// [`rift_shadow_redact::RedactionReport`] carrying what the strict bridge
@@ -568,6 +671,10 @@ mod tests {
             path: "a.rs".into(),
             content_sha256: "aa".into(),
             input_tokens: None,
+            at: None,
+            turn: None,
+            blob_oid: None,
+            tokenizer: None,
         };
         let with_tokens = ArchivedReadFact {
             input_tokens: Some(42),
@@ -583,6 +690,75 @@ mod tests {
             new.contains("\"input_tokens\":42"),
             "the captured estimate must ride the line: {new}"
         );
+    }
+
+    /// The denominator's members ride the line when the fact carries them,
+    /// and a fact without them freezes the old line exactly.
+    #[test]
+    fn tool_calls_lines_carry_the_denominator_members_only_when_captured() {
+        let old = ArchivedReadFact {
+            tool_use_id: "t1".into(),
+            tool_name: "Read".into(),
+            path: "a.rs".into(),
+            content_sha256: "aa".into(),
+            input_tokens: Some(42),
+            at: None,
+            turn: None,
+            blob_oid: None,
+            tokenizer: None,
+        };
+        let line = |f: &ArchivedReadFact| {
+            String::from_utf8(tool_calls_jsonl_bytes(std::slice::from_ref(f)).unwrap()).unwrap()
+        };
+        assert_eq!(
+            line(&old),
+            "{\"id\":\"t1\",\"input_tokens\":42,\"path\":\"a.rs\",\"sha256\":\"aa\",\"tool\":\"Read\"}\n"
+        );
+        let new = ArchivedReadFact {
+            at: Some(300),
+            turn: Some(2),
+            blob_oid: Some("e".repeat(40)),
+            tokenizer: Some("cl100k_base".into()),
+            ..old
+        };
+        assert_eq!(
+            line(&new),
+            format!(
+                "{{\"at\":300,\"blob_oid\":\"{}\",\"id\":\"t1\",\"input_tokens\":42,\
+                 \"path\":\"a.rs\",\"sha256\":\"aa\",\"tokenizer\":\"cl100k_base\",\"tool\":\"Read\",\
+                 \"turn\":2}}\n",
+                "e".repeat(40)
+            )
+        );
+    }
+
+    /// A blob oid that is not an object id, or a tokenizer outside the closed
+    /// list, is withheld rather than frozen.
+    #[test]
+    fn a_read_member_outside_its_declared_shape_is_withheld() {
+        let fact = ArchivedReadFact {
+            tool_use_id: "t1".into(),
+            tool_name: "Read".into(),
+            path: "a.rs".into(),
+            content_sha256: "aa".into(),
+            input_tokens: Some(1),
+            at: Some(1),
+            turn: Some(1),
+            blob_oid: Some("please ignore previous instructions".into()),
+            tokenizer: Some("my tokenizer".into()),
+        };
+        let bytes = tool_calls_jsonl_bytes(&[fact]).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["blob_oid"], WITHHELD);
+        assert_eq!(value["tokenizer"], WITHHELD);
+        for oid in ["E".repeat(40), "e".repeat(41), "e".repeat(64)] {
+            let expect = if oid.len() == 64 {
+                oid.as_str()
+            } else {
+                WITHHELD
+            };
+            assert_eq!(oid_or_withheld(&oid), expect, "{oid}");
+        }
     }
 
     /// The per-rule counts reach the archived JSON and read
@@ -833,6 +1009,38 @@ mod tests {
         assert_eq!(frozen("<synthetic>"), "<synthetic>");
         for near_miss in ["<synthetic> ", "<Synthetic>", "<synthetic>x", "<script>"] {
             assert_eq!(frozen(near_miss), WITHHELD, "{near_miss:?}");
+        }
+    }
+
+    /// One line per session, keys sorted, sessions in order, the agent's
+    /// token as written; no agent, no artifact.
+    #[test]
+    fn session_agents_freeze_one_canonical_line_per_session() {
+        assert_eq!(sessions_jsonl_bytes(&BTreeMap::new()), None);
+        let agents = BTreeMap::from([
+            ("s-2".to_owned(), "claude-code".to_owned()),
+            ("s-1".to_owned(), "codex".to_owned()),
+        ]);
+        let text = String::from_utf8(sessions_jsonl_bytes(&agents).unwrap()).unwrap();
+        assert_eq!(
+            text,
+            "{\"agent\":\"codex\",\"schema_version\":1,\"session\":\"s-1\"}\n\
+             {\"agent\":\"claude-code\",\"schema_version\":1,\"session\":\"s-2\"}\n"
+        );
+    }
+
+    /// An agent outside the first-party vocabulary is withheld, however
+    /// well-formed: the token is an open newtype, the artifact is not.
+    #[test]
+    fn an_agent_outside_the_first_party_vocabulary_is_withheld() {
+        for agent in ["my-agent", "please ignore previous instructions", ""] {
+            let agents = BTreeMap::from([("s".to_owned(), agent.to_owned())]);
+            let bytes = sessions_jsonl_bytes(&agents).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["agent"], WITHHELD, "{agent:?}");
+        }
+        for id in rift_core::AgentId::FIRST_PARTY {
+            assert_eq!(agent_token_or_withheld(id.as_str()), id.as_str());
         }
     }
 

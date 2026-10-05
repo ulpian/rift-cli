@@ -538,9 +538,9 @@ fn provenance_verbs_answer_over_the_real_shard(repo: &Path, env: &[(&str, &str)]
          ingested a projection session row): {v}"
     );
     assert_eq!(
-        v["sessions"][0]["agent"], "unknown",
-        "an un-ingested session keeps its linkage and says its metadata is \
-         unknown rather than vanishing: {v}"
+        v["sessions"][0]["agent"], "claude-code",
+        "a session no hook ingested is attributed to the agent its shard \
+         names, because the levelling rebuilds its row from the shard: {v}"
     );
     assert_eq!(
         v["metadata"]["sessions"][0], "e2e-live-1",

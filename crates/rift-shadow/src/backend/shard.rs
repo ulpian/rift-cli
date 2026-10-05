@@ -67,6 +67,12 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         if let Some(usage) = archive.usage_jsonl() {
             entries.push(self.structural_entry(super::artifacts::USAGE_NAME, &usage)?);
         }
+        // The archived sessions' agents: a native session id and a token from
+        // the first-party agent vocabulary per line — structural, like the
+        // usage beside it.
+        if let Some(sessions) = archive.sessions_jsonl() {
+            entries.push(self.structural_entry(super::artifacts::SESSIONS_NAME, &sessions)?);
+        }
         self.push_digest_entries(archive, &mut entries)?;
         Ok(entries)
     }

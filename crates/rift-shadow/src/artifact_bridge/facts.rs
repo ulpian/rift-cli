@@ -13,6 +13,7 @@ use crate::ids;
 
 use super::created_at::created_at_for;
 use super::report::{note, truncate_token, BridgeReport};
+use super::sessions::SessionAgents;
 use super::{IngestCtx, ShardHeader};
 
 /// Checkpoint header → the predecessor check, anchor commit and archiving
@@ -201,18 +202,22 @@ async fn record_archiving_worktree(
     Ok(())
 }
 
-/// Link every session the header names to this checkpoint, in header order.
+/// Link every session the header names to this checkpoint, in header order,
+/// each keyed under the agent the shard names for it (the walk's default
+/// agent when it names none).
 pub(super) async fn record_sessions<S: CanonicalStore, R>(
     ctx: &IngestCtx<'_, S, R>,
     id: &str,
     metadata: &CheckpointMetadata,
+    agents: &SessionAgents,
 ) -> Result<()> {
     for (ordinal, session) in metadata.sessions.iter().enumerate() {
+        let agent = agents.agent_of(session, ctx.default_agent);
         record_session_in_checkpoint(
             ctx.store,
             &SessionInCheckpointRow {
                 checkpoint_id: id.to_owned(),
-                session_id: ids::session_row_id(ctx.default_agent, session),
+                session_id: ids::session_row_id(agent, session),
                 ordinal: i64::try_from(ordinal).unwrap_or(i64::MAX),
                 schema_version: 1,
             },

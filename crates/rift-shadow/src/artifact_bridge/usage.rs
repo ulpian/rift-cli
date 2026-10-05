@@ -29,6 +29,7 @@ use crate::backend::USAGE_SCHEMA_VERSION;
 use crate::ids;
 
 use super::report::{note, BridgeReport};
+use super::sessions::SessionAgents;
 use super::IngestCtx;
 
 /// The artifact this module reads.
@@ -111,6 +112,7 @@ pub(super) async fn project_usage_lines<S: CanonicalStore, R: SubstrateReader>(
     ctx: &IngestCtx<'_, S, R>,
     report: &mut BridgeReport,
     id: &str,
+    agents: &SessionAgents,
 ) -> Result<()> {
     let Some(bytes) = ctx.sub.read_artifact(id, ARTIFACT)? else {
         return Ok(());
@@ -122,7 +124,8 @@ pub(super) async fn project_usage_lines<S: CanonicalStore, R: SubstrateReader>(
     }
     let starts = Starts::of(&parsed.value);
     for line in &parsed.value {
-        project_line(ctx, &starts, line).await?;
+        let agent = agents.agent_of(&line.session, ctx.default_agent);
+        project_line(ctx, &starts, line, agent).await?;
     }
     Ok(())
 }
@@ -259,9 +262,10 @@ async fn project_line<S: CanonicalStore, R>(
     ctx: &IngestCtx<'_, S, R>,
     starts: &Starts<'_>,
     line: &UsageLine,
+    agent: &str,
 ) -> Result<()> {
-    let session_row = ids::session_row_id(ctx.default_agent, &line.session);
-    record_session_rows(ctx, starts, line, &session_row).await?;
+    let session_row = ids::session_row_id(agent, &line.session);
+    record_session_rows(ctx, starts, line, &session_row, agent).await?;
     let turn_id = ids::turn_row_id(&session_row, line.turn);
     let turn_start = starts
         .turns
@@ -283,14 +287,15 @@ async fn project_line<S: CanonicalStore, R>(
     record_line_cost(ctx, line).await
 }
 
-/// The session row and its native identity, as the live projector writes the
-/// pair. The row is dated by the session's earliest call and names that
+/// The session row and its native identity under `agent`, as the live
+/// projector writes the pair. The row is dated by the session's earliest call and names that
 /// call's model; a session the live path already recorded keeps its own.
 async fn record_session_rows<S: CanonicalStore, R>(
     ctx: &IngestCtx<'_, S, R>,
     starts: &Starts<'_>,
     line: &UsageLine,
     session_row: &str,
+    agent: &str,
 ) -> Result<()> {
     let first = starts
         .sessions
@@ -301,7 +306,7 @@ async fn record_session_rows<S: CanonicalStore, R>(
         ctx.store,
         &SessionRow {
             session_id: session_row.to_owned(),
-            agent: ctx.default_agent.to_owned(),
+            agent: agent.to_owned(),
             model_primary: first.model.clone(),
             repo_id: ctx.repo_id.to_owned(),
             started_at: first.at,
@@ -313,7 +318,7 @@ async fn record_session_rows<S: CanonicalStore, R>(
         ctx.store,
         &CaptureSessionIdentityRow {
             session_id: session_row.to_owned(),
-            agent: ctx.default_agent.to_owned(),
+            agent: agent.to_owned(),
             native_session_id: line.session.clone(),
             schema_version: ROW_SCHEMA_VERSION,
         },

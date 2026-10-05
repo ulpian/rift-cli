@@ -515,6 +515,7 @@ fn empty_archive() -> CheckpointArchive {
         read_facts: Vec::new(),
         serve_audit: None,
         usage: Vec::new(),
+        session_agents: std::collections::BTreeMap::new(),
         content,
         report,
         transcript: None,
@@ -583,6 +584,7 @@ fn two_turn_archive() -> CheckpointArchive {
         read_facts: Vec::new(),
         serve_audit: None,
         usage: Vec::new(),
+        session_agents: std::collections::BTreeMap::new(),
         content,
         report: RedactionReportView {
             total_spans: 0,
@@ -806,6 +808,7 @@ mod tests {
             read_facts: Vec::new(),
             serve_audit: None,
             usage: Vec::new(),
+            session_agents: std::collections::BTreeMap::new(),
             content: empty_content(),
             report: empty_report(),
             transcript: None,

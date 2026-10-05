@@ -133,6 +133,7 @@ pub(super) fn session_facts_for_archive(
         read_facts: read_facts_for_archive(rt, store, agent, session),
         serve_audit: serve_audit_for_archive(rt, work_tree, session)?,
         usage: usage_facts_for_archive(rt, store, agent, session),
+        agent: Some(agent.to_owned()),
     })
 }
 
@@ -155,6 +156,10 @@ fn read_facts_for_archive(
             path: f.path,
             content_sha256: f.content_sha256,
             input_tokens: f.input_tokens,
+            at: Some(f.started_at),
+            turn: Some(f.turn_ordinal),
+            blob_oid: Some(f.blob_oid),
+            tokenizer: f.tokenizer,
         })
         .collect()
 }

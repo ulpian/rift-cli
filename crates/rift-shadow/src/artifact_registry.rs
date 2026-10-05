@@ -141,6 +141,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         sync_format_row: "Serve audit (`serve_audit.jsonl`)",
     },
     ShardArtifact {
+        path: "sessions.jsonl",
+        version: VersionField::PerLineSchemaVersion(crate::backend::SESSIONS_SCHEMA_VERSION),
+        sync_format_row: "Session agents (`sessions.jsonl`)",
+    },
+    ShardArtifact {
         path: "sessions/<index>/metadata.json",
         version: VersionField::SchemaVersion(1),
         sync_format_row: "Per-session checkpoint metadata (`sessions/<index>/metadata.json`)",
@@ -290,6 +295,10 @@ mod tests {
                     path: "src/a.rs".into(),
                     content_sha256: "aa".into(),
                     input_tokens: None,
+                    at: None,
+                    turn: None,
+                    blob_oid: None,
+                    tokenizer: None,
                 }])
                 .expect("one read fact"),
             ),
@@ -370,6 +379,26 @@ mod tests {
         };
         let archive = crate::shard_fixture::every_artifact_archive().unwrap();
         let bytes = archive.usage_jsonl().expect("the fixture freezes usage");
+        let versions: Vec<u64> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| json_version(line, "schema_version").expect("every line declares one"))
+            .collect();
+        assert_eq!(versions, vec![u64::from(want); 2], "two lines, one version");
+    }
+
+    /// Every frozen session line declares the line format the registry
+    /// names, read off the maximal fixture, whose lines the one writer
+    /// rendered.
+    #[test]
+    fn every_frozen_session_line_declares_the_registered_schema_version() {
+        let Some(VersionField::PerLineSchemaVersion(want)) =
+            is_declared("sessions.jsonl").map(|a| a.version)
+        else {
+            panic!("sessions.jsonl is declared with a per-line schema_version");
+        };
+        let archive = crate::shard_fixture::every_artifact_archive().unwrap();
+        let bytes = archive.sessions_jsonl().expect("the fixture names agents");
         let versions: Vec<u64> = bytes
             .split(|b| *b == b'\n')
             .filter(|line| !line.is_empty())
