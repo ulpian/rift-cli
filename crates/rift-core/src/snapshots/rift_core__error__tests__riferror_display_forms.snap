@@ -7,6 +7,7 @@ validity error: <reason>
 policy denied: <reason>
 storage error: <reason>
 projection busy: projection: <reason>
+constraint refused: table: <reason>
 substrate error: <reason>
 migration error: <reason>
 config error: <reason>

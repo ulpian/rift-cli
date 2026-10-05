@@ -163,17 +163,25 @@ pub trait CanonicalStore: Send + Sync {
     ///
     /// # Errors
     /// Returns [`rift_core::RiftError::Storage`] if `columns`/`values` lengths
-    /// differ or the engine rejects the row (e.g. duplicate primary key), or
+    /// differ or the engine rejects the row (e.g. duplicate primary key),
+    /// [`rift_core::RiftError::ConstraintRefused`] if a CHECK, NOT NULL or
+    /// datatype constraint refuses it, or
     /// [`rift_core::RiftError::Immutability`] if an append-only guard fires.
     async fn insert(&self, table: &str, columns: &[&str], values: &[Value]) -> Result<()>;
 
-    /// Insert a row, **ignoring a duplicate-primary-key conflict** — the
+    /// Insert a row, **skipping a primary-key or UNIQUE conflict** — the
     /// idempotent set-union used for content-addressed ingest (re-ingesting the
     /// same fact is a no-op, db-design §4.4/§4.7). Returns `true` if a new row was
-    /// inserted, `false` if an identical key was already present.
+    /// inserted, `false` if a row with the same key was already present.
+    ///
+    /// Only a key conflict is skipped: a row a CHECK, NOT NULL or datatype
+    /// constraint forbids is an error, so `false` always means "already on
+    /// record" and never "refused".
     ///
     /// # Errors
-    /// As [`CanonicalStore::insert`], except a duplicate PK is **not** an error.
+    /// As [`CanonicalStore::insert`], except a key conflict is **not** an
+    /// error; [`rift_core::RiftError::ConstraintRefused`] names the table and
+    /// the constraint when the engine refuses the row itself.
     async fn insert_or_ignore(
         &self,
         table: &str,
@@ -309,6 +317,21 @@ fn insert_sql(verb: &str, table: &str, columns: &[&str]) -> String {
     )
 }
 
+/// Name the table on a constraint refusal. The engine's CHECK message names
+/// only the failing expression, and the insert is the one place that knows
+/// which table it wrote, so every refusal names the table the same way.
+fn refused_in(table: &str, error: rift_core::RiftError) -> rift_core::RiftError {
+    match error {
+        rift_core::RiftError::ConstraintRefused { constraint, .. } => {
+            rift_core::RiftError::ConstraintRefused {
+                table: table.to_owned(),
+                constraint,
+            }
+        }
+        other => other,
+    }
+}
+
 #[async_trait]
 impl<S: Store + ?Sized> CanonicalStore for S {
     async fn register_canonical_table(&self, table: &CanonicalTable) -> Result<()> {
@@ -328,8 +351,10 @@ impl<S: Store + ?Sized> CanonicalStore for S {
             )));
         }
         let sql = insert_sql("INSERT", table, columns);
-        self.conn().await?.execute(&sql, values).await?;
-        Ok(())
+        match self.conn().await?.execute(&sql, values).await {
+            Ok(_) => Ok(()),
+            Err(error) => Err(refused_in(table, error)),
+        }
     }
 
     async fn insert_or_ignore(
@@ -346,9 +371,18 @@ impl<S: Store + ?Sized> CanonicalStore for S {
                 values.len()
             )));
         }
-        let sql = insert_sql("INSERT OR IGNORE", table, columns);
-        let changed = self.conn().await?.execute(&sql, values).await?;
-        Ok(changed > 0)
+        // `ON CONFLICT DO NOTHING` with no target skips every PRIMARY KEY and
+        // UNIQUE conflict, as `INSERT OR IGNORE` did, but — unlike `OR IGNORE`
+        // — lets a CHECK, NOT NULL or datatype failure raise, so a refused row
+        // can never read as an already-present one.
+        let sql = format!(
+            "{} ON CONFLICT DO NOTHING",
+            insert_sql("INSERT", table, columns)
+        );
+        match self.conn().await?.execute(&sql, values).await {
+            Ok(changed) => Ok(changed > 0),
+            Err(error) => Err(refused_in(table, error)),
+        }
     }
 
     async fn count(&self, table: &str) -> Result<i64> {

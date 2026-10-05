@@ -89,16 +89,14 @@ impl SessionWorktreeRow {
 /// `session_worktree`, as it always has; any other goes to
 /// `session_worktree_cd`, whose CHECK admits that vocabulary plus `shell_cd`.
 /// One observation is written to one relation, never both. The CHECK
-/// constraints enforce the vocabulary, and — because this is `INSERT OR IGNORE`, which
-/// SQLite applies to CHECK violations as well as to key conflicts — an unknown
-/// token DROPS THE ROW and returns `false` rather than raising. Said plainly
-/// rather than left to be discovered: every caller in this workspace passes a
-/// `&'static str` from the closed set, which is what keeps the silent arm
-/// unreachable.
+/// constraints enforce the vocabulary, and an unknown token is REFUSED with
+/// [`rift_core::RiftError::ConstraintRefused`] rather than dropped: `false`
+/// means only that this state was already on record.
 ///
 /// # Errors
-/// [`rift_core::RiftError::Storage`]/[`rift_core::RiftError::Immutability`] on
-/// a non-conflict failure.
+/// [`rift_core::RiftError::ConstraintRefused`] for a basis outside every
+/// vocabulary; [`rift_core::RiftError::Storage`]/
+/// [`rift_core::RiftError::Immutability`] on any other non-conflict failure.
 pub async fn record_session_worktree(
     store: &impl CanonicalStore,
     r: &SessionWorktreeRow,
@@ -262,21 +260,22 @@ mod tests {
     }
 
     /// `basis` is a closed vocabulary at the SQL layer, not only at the
-    /// caller's: a token outside `SESSION_WORKTREE_BASES` never lands.
-    /// `INSERT OR IGNORE` makes that a DROPPED ROW rather than an error —
-    /// stated as an assertion because a silent drop is worth knowing about,
-    /// and unreachable from the product path only because every caller's
-    /// basis is a `&'static str` from the closed set (pinned in
-    /// `bins/rift`'s `the_basis_tokens_the_hook_writes_are_the_ones_the_
-    /// schema_admits`).
+    /// caller's: a token outside `SESSION_WORKTREE_BASES` never lands, and
+    /// the writer says so with a typed refusal naming the relation and the
+    /// column rather than the `false` a redelivery earns.
     #[tokio::test]
-    async fn an_unknown_basis_writes_nothing() {
+    async fn an_unknown_basis_is_refused_and_writes_nothing() {
         let s = store();
         let mut bogus = observation("o3", None);
         bogus.basis = "guessed".into();
+        let refused = record_session_worktree(&s, &bogus).await;
         assert!(
-            !record_session_worktree(&s, &bogus).await.unwrap(),
-            "an unknown basis writes nothing"
+            matches!(
+                &refused,
+                Err(rift_core::RiftError::ConstraintRefused { table, constraint })
+                    if table == "session_worktree_cd" && constraint == "check(basis)"
+            ),
+            "{refused:?}"
         );
         assert_eq!(
             s.query(
@@ -389,14 +388,18 @@ mod worktree_cd_tests {
     }
 
     /// An unknown word still writes nothing anywhere: the new relation's
-    /// CHECK refuses it exactly as the old one did.
+    /// CHECK refuses it exactly as the old one did, and the refusal is typed.
     #[tokio::test]
-    async fn an_unknown_basis_lands_in_neither_relation() {
+    async fn an_unknown_basis_is_refused_by_the_new_relation_and_lands_in_neither() {
         let s = store();
+        let refused = record_session_worktree(&s, &observation("o3", "guessed", 10)).await;
         assert!(
-            !record_session_worktree(&s, &observation("o3", "guessed", 10))
-                .await
-                .unwrap()
+            matches!(
+                &refused,
+                Err(rift_core::RiftError::ConstraintRefused { table, constraint })
+                    if table == "session_worktree_cd" && constraint == "check(basis)"
+            ),
+            "{refused:?}"
         );
         assert_eq!(s.count("session_worktree").await.unwrap(), 0);
         assert_eq!(s.count("session_worktree_cd").await.unwrap(), 0);

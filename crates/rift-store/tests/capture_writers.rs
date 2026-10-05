@@ -2,7 +2,7 @@
 //! crate (`rift-shadow`, the hook worker) drives them, through the public API
 //! only.
 //!
-//! Every writer is `INSERT OR IGNORE` on a content-addressed key, so the
+//! Every writer skips a conflict on its content-addressed key, so the
 //! property each test pins is the same one the event bridge relies on: the
 //! first delivery lands one row, a redelivery is a no-op that reports `false`,
 //! and the readers give back exactly what was written. The clock is a literal;
@@ -255,12 +255,17 @@ async fn a_tool_result_measurement_lands_once_and_its_channel_is_a_closed_vocabu
     let replay = record("result-1", "search").await.unwrap();
     assert_lands_once(&store, "tool_result_tokens", first, replay).await;
 
-    // The CHECK fails inside `INSERT OR IGNORE`, so the refusal is a silent
-    // no-op rather than an error: the row is never written either way.
-    let landed = record("result-2", "telepathy").await.unwrap();
+    // A channel outside the closed vocabulary is refused with a typed error
+    // naming the relation and the column — never the `false` a redelivery
+    // earns — and the row is not written.
+    let refused = record("result-2", "telepathy").await;
     assert!(
-        !landed,
-        "a channel outside the closed vocabulary must not reach storage"
+        matches!(
+            &refused,
+            Err(rift_core::RiftError::ConstraintRefused { table, constraint })
+                if table == "tool_result_tokens" && constraint == "check(channel)"
+        ),
+        "{refused:?}"
     );
     assert_eq!(store.count("tool_result_tokens").await.unwrap(), 1);
 }
@@ -305,8 +310,12 @@ async fn an_unmeasured_tool_result_is_counted_with_zero_tokens() {
     )
     .await;
     assert!(
-        !landed.unwrap(),
-        "a basis outside the vocabulary is refused"
+        matches!(
+            &landed,
+            Err(rift_core::RiftError::ConstraintRefused { table, constraint })
+                if table == "tool_result_tokens" && constraint == "check(basis)"
+        ),
+        "a basis outside the vocabulary is refused: {landed:?}"
     );
     assert_eq!(store.count("tool_result_tokens").await.unwrap(), 1);
 }

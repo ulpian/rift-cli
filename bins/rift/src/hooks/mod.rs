@@ -647,11 +647,12 @@ mod tests {
         );
     }
 
-    /// The one place the hook path could poison an append-only table with a
-    /// value the schema drops on the floor: `basis`. Every token this binary
-    /// can write is a member of the closed vocabulary, so the DAO's silent
-    /// `INSERT OR IGNORE` arm is unreachable from here — asserted rather than
-    /// argued, because "unreachable" is a claim that rots.
+    /// The one place the hook path could offer an append-only table a value
+    /// the schema refuses: `basis`. Every token this binary can write is a
+    /// member of the closed vocabulary — asserted rather than argued, because
+    /// "unreachable" is a claim that rots — and a token outside it is refused
+    /// with a typed error naming the relation and the column, never dropped
+    /// as if it were a redelivery.
     #[test]
     fn the_basis_tokens_the_hook_writes_are_the_ones_the_schema_admits() {
         let admitted = rift_store::schema::SESSION_WORKTREE_BASES;
@@ -662,6 +663,28 @@ mod tests {
         ] {
             assert!(admitted.contains(&token), "{token} is not in {admitted:?}");
         }
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, rt) = projection_in(tmp.path());
+        let row = rift_store::SessionWorktreeRow {
+            observation_id: "o-guessed".into(),
+            session_id: "s".into(),
+            worktree_token: "0123456789ab".into(),
+            worktree_name: "main".into(),
+            is_linked: 0,
+            work_tree: "/w".into(),
+            branch: None,
+            head_oid: None,
+            subagent_id: None,
+            basis: "guessed".into(),
+            first_observed_at: 1,
+            schema_version: 1,
+        };
+        let refused = rt.block_on(rift_store::record_session_worktree(&store, &row));
+        assert!(
+            matches!(&refused, Err(rift_core::RiftError::ConstraintRefused { table, constraint })
+                if table == "session_worktree_cd" && constraint == "check(basis)"),
+            "{refused:?}"
+        );
     }
 
     #[test]

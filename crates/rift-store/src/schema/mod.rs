@@ -28,11 +28,14 @@
 //!   integrity; emitting real FK constraints (with `PRAGMA foreign_keys=ON`)
 //!   would require global insert-ordering and is deferred to a later hardening
 //!   pass.
-//! * **`CHECK` constraints** (confidence range, category enum, non-negative
-//!   counts) are enforced at the Rust writer layer (clamped scores, typed
-//!   enums, `u32` counts); SQL-level `CHECK` is a later hardening item. (Kept
-//!   out of the DDL so the registry-driven immutability test can insert a generic
-//!   sample row into every table.)
+//! * **`CHECK` constraints** on closed vocabularies are in the DDL: a
+//!   [`Column::text_one_of`] column emits `CHECK (<name> IN (…))`, and the
+//!   engine refuses any other word with
+//!   [`rift_core::RiftError::ConstraintRefused`], through
+//!   `insert_or_ignore` as well as `insert`. Ranges and counts (confidence,
+//!   non-negative counts) are enforced at the Rust writer layer instead
+//!   (clamped scores, `u32` counts), so the registry-driven tests can build a
+//!   generic sample row for every table from its column metadata alone.
 //! * **Floats** never reach the store: confidence is an integer in milli-units
 //!   (`confidence_milli ∈ 0..=1000`), money is integer micro-units — consistent
 //!   with the no-float money posture.

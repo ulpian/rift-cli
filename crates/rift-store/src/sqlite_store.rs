@@ -512,11 +512,66 @@ fn classify(error: &rusqlite::Error) -> (bool, String) {
 }
 
 /// Map a rusqlite error into [`RiftError`], classifying append-only trigger
-/// aborts as [`RiftError::Immutability`] so callers can distinguish them.
+/// aborts as [`RiftError::Immutability`] and a row a constraint forbids as
+/// [`RiftError::ConstraintRefused`] so callers can distinguish them.
 fn map_sql(error: rusqlite::Error) -> RiftError {
+    if let Some(refused) = constraint_refused(&error) {
+        return refused;
+    }
     match classify(&error) {
         (true, msg) => RiftError::Immutability(msg),
         (false, msg) => RiftError::Storage(msg),
+    }
+}
+
+/// A CHECK, NOT NULL or datatype refusal, by its extended code, with the
+/// column taken from the engine's message only where it is a schema
+/// identifier: the leading name of a CHECK expression (the DDL's
+/// `<column> IN (…)`), or the `table.column` suffix of the other two. The
+/// message tail is never carried, and the table is left for the insert that
+/// knows it ([`crate::CanonicalStore::insert_or_ignore`]) to name.
+fn constraint_refused(error: &rusqlite::Error) -> Option<RiftError> {
+    let rusqlite::Error::SqliteFailure(e, msg) = error else {
+        return None;
+    };
+    let msg = msg.as_deref().unwrap_or_default();
+    let (kind, column) = match e.extended_code {
+        rusqlite::ffi::SQLITE_CONSTRAINT_CHECK => {
+            let expression = msg.strip_prefix("CHECK constraint failed: ");
+            ("check", expression.map(leading_identifier))
+        }
+        rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL => ("not-null", qualified_column(msg)),
+        rusqlite::ffi::SQLITE_CONSTRAINT_DATATYPE => ("datatype", qualified_column(msg)),
+        _ => return None,
+    };
+    let constraint = match column {
+        Some(column) if !column.is_empty() => format!("{kind}({column})"),
+        _ => kind.to_owned(),
+    };
+    Some(RiftError::ConstraintRefused {
+        table: String::new(),
+        constraint,
+    })
+}
+
+/// The identifier a CHECK expression starts with.
+fn leading_identifier(expression: &str) -> &str {
+    let end = expression
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(expression.len());
+    expression.get(..end).unwrap_or_default()
+}
+
+/// The column of a message ending in `table.column`, kept only when both
+/// halves are plain identifiers.
+fn qualified_column(msg: &str) -> Option<&str> {
+    let last = msg.rsplit(' ').next()?;
+    let (table, column) = last.split_once('.')?;
+    let plain = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if plain(table) && plain(column) {
+        Some(column)
+    } else {
+        None
     }
 }
 

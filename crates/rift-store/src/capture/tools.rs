@@ -83,7 +83,10 @@ pub async fn record_tool_reads_file(
 /// tokens and exists to be counted rather than summed.
 ///
 /// # Errors
-/// [`rift_core::RiftError::Storage`] on a non-conflict insert failure.
+/// [`rift_core::RiftError::ConstraintRefused`] if `channel` or `basis` is
+/// outside its closed vocabulary — permanent, so a queued job that meets it
+/// is dropped, not retried; [`rift_core::RiftError::Storage`] on any other
+/// non-conflict insert failure.
 #[allow(clippy::too_many_arguments)] // one row, one argument per column it fills
 pub async fn record_tool_result_tokens(
     store: &impl CanonicalStore,

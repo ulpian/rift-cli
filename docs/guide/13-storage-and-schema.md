@@ -128,8 +128,8 @@ consequences.
    reason to rewrite rows in place and the migration engine can refuse
    destructive statements outright (§13.6).
 3. **Re-ingest is a no-op.** Rows are content-addressed and written with
-   `INSERT OR IGNORE`, so ingesting the same checkpoint twice converges on the
-   same set instead of duplicating it.
+   `INSERT … ON CONFLICT DO NOTHING`, so ingesting the same checkpoint twice
+   converges on the same set instead of duplicating it.
 
 The one exception matters: **governance records are not derivable from git.**
 What was served to an agent, what an evaluation concluded, which key generation
@@ -170,6 +170,8 @@ delta model's node and edge kinds use this: mechanical kinds are declared, while
 semantic kinds — "similar to", "relates to" — are not, so the database *refuses*
 them. Semantic recall is not off by a flag; it is unrepresentable until a
 migration widens the set ([Chapter 6](06-recall.md)).
+The idempotent insert skips only a key conflict, never a constraint: a word outside a closed set, a missing required value or a value of the wrong type is a typed `ConstraintRefused` error naming the table and the column, so a refused row can never pass for one already on record.
+That is why it is `ON CONFLICT DO NOTHING` and not `INSERT OR IGNORE`, which SQLite applies to CHECK and NOT NULL failures as well as to key conflicts.
 
 **No floats reach the store.** Confidence is an integer in thousandths, bounded
 zero to a thousand; money is integer micro-units. Comparing money as floating
@@ -495,7 +497,7 @@ set aside and re-derived**: `rift-memd rebuild` preserves the file and its
 sidecars to dated siblings, re-opens through the migrations, re-ingests from
 git — cold, complete, idempotent. **The capture projection is re-ingested in place**: `rift rebuild`
 walks the redacted checkpoint branch through the ordinary append-only path, and
-because rows are content-addressed and written with `INSERT OR IGNORE`, running
+because rows are content-addressed and written with `ON CONFLICT DO NOTHING`, running
 it over a healthy projection inserts nothing. It is a repair, not a reset.
 
 A condense writes the shard and its chain entry but not the shard's own rows (`checkpoint`, `session_in_checkpoint` and their siblings), so the detached worker levels the projection once at the end of any drain that wrote a checkpoint, under the queue lock it already holds.

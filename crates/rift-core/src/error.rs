@@ -31,6 +31,21 @@ pub enum RiftError {
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// The engine refused a row a constraint forbids — a value outside a closed
+    /// vocabulary (`check`), a missing required value (`not-null`) or a value
+    /// of the wrong storage class (`datatype`). Distinct from [`Self::Storage`]
+    /// because it is permanent: the same row is refused on every retry, so a
+    /// queued write that meets it is dropped rather than tried again. Carries
+    /// the table and the constraint kind with its column, never the value.
+    #[error("constraint refused: {table}: {constraint}")]
+    ConstraintRefused {
+        /// The canonical table that refused the row.
+        table: String,
+        /// The constraint kind, with the column when the engine names one
+        /// (`check(channel)`, `not-null(agent)`, `datatype(started_at)`).
+        constraint: String,
+    },
+
     /// A projection lease excludes replacement or a concurrent store open.
     #[error("projection busy: {projection}: {reason}")]
     ProjectionBusy {
@@ -159,6 +174,10 @@ mod tests {
             RiftError::ProjectionBusy {
                 projection: "projection".into(),
                 reason: reason.into(),
+            },
+            RiftError::ConstraintRefused {
+                table: "table".into(),
+                constraint: reason.into(),
             },
             RiftError::Substrate(reason.into()),
             RiftError::Migration(reason.into()),
