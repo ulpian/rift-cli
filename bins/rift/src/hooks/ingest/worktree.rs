@@ -18,6 +18,10 @@ use crate::hooks::now_ms;
 /// `session_worktree` cannot.
 const SHELL_CD_BASIS: &str = "shell_cd";
 
+/// The capture-note key a refused observation is said under; one key, so a
+/// refusal that recurs on every hook is one note, not one per hook.
+const REFUSED_NOTE_KEY: &str = "worktree-observation-refused";
+
 /// The worktree-provenance step of one agent hook: read the
 /// payload's own facts through the adapter that mapped this hook, and record
 /// the observation under the session's OWNER — the label every other
@@ -25,11 +29,21 @@ const SHELL_CD_BASIS: &str = "shell_cd";
 ///
 /// Best-effort and infallible by signature: a provenance label is never a
 /// reason to fail an agent's hook, and the timer keeps its phase either way so
-/// the budget instrument sees what this step cost.
+/// the budget instrument sees what this step cost. A row the schema refuses
+/// is not silent, though: it is said once on the capture-note channel, which
+/// the next commit hook and `rift doctor` report, because a refusal recurs on
+/// every hook until the vocabulary and the writer agree again.
 pub(super) fn observe_hook_worktree(run: &CapturedHook<'_>, owner: &str) {
-    let _ = run.t.phase("observe_worktree", || {
+    let observed = run.t.phase("observe_worktree", || {
         observe_payload_worktree(run, owner, now_ms())
     });
+    if let Err(refused @ rift_core::RiftError::ConstraintRefused { .. }) = observed {
+        crate::capture_queue::mark_note(
+            &run.repo.git_dir,
+            REFUSED_NOTE_KEY,
+            &format!("worktree observation not recorded: {refused}"),
+        );
+    }
 }
 
 /// The observation one hook's payload implies, at `now`: its directory, and
@@ -79,14 +93,16 @@ fn shell_command<'a>(
 /// this exists for — gets a second row, and the ordered set is the history an
 /// auditor reads.
 ///
-/// **Two layers of idempotence, on purpose.** The database layer is `INSERT OR
-/// IGNORE` on the state's own id and is what makes the record correct. The
+/// **Two layers of idempotence, on purpose.** The database layer skips a
+/// conflict on the state's own id and is what makes the record correct. The
 /// session cache's `last_worktree` is a *memo* in front of it and is what makes
 /// it cheap: the overwhelmingly common hook observes exactly what the previous
 /// hook observed, and on that path this function reads three small files and
 /// touches no database at all. A lost, stale or absent memo costs one redundant
-/// no-op insert and never a row — which is why the memo is written only AFTER
-/// the row lands, and why a session with no cache file still records.
+/// no-op insert and never a row — which is why the memo is written only once
+/// the row is on record (landed now, or already there), never after a refusal,
+/// so a refused observation is tried again by the next identical hook; and why
+/// a session with no cache file still records.
 ///
 /// Returns whether a row was written (the tests' oracle; the caller ignores it).
 pub(in crate::hooks) fn observe_worktree(
@@ -150,6 +166,7 @@ pub(in crate::hooks) fn observe_worktree(
         first_observed_at: now,
         schema_version: 1,
     };
+    // A refusal returns here, before the memo: only a row on record is memoized.
     let wrote = rt.block_on(rift_store::record_session_worktree(store, &row))?;
 
     // Memoize only what landed. A cache that does not exist is not invented
@@ -320,12 +337,13 @@ pub(in crate::hooks) fn worktree_read_hasher(
 mod shell_cd_tests {
     use std::path::Path;
 
-    use rift_shadow::hooks::{AdapterRegistry, RawHook};
-    use rift_store::CanonicalStore as _;
+    use rift_shadow::hooks::{read_cache, AdapterRegistry, RawHook};
+    use rift_store::{CanonicalStore as _, Store as _};
 
     use super::*;
     use crate::hooks::capture_repo;
     use crate::hooks::tests::{projection_in, repo_with_linked_worktree, seed_cache};
+    use crate::hooktime::HookTimer;
 
     /// A Claude Code shell call, after the fact, as its hook payload spells
     /// one: the agent sat in `cwd` and ran `command`.
@@ -377,6 +395,69 @@ mod shell_cd_tests {
         .iter()
         .map(|r| (r.get_text(0).unwrap(), r.get_text(1).unwrap()))
         .collect()
+    }
+
+    /// A refused observation leaves the hook successful, says itself once on
+    /// the capture-note channel, and leaves the memo unwritten, so the next
+    /// identical hook tries the row again instead of trusting one that never
+    /// landed.
+    #[test]
+    fn a_refused_observation_is_noted_once_and_never_memoized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, _linked) = repo_with_linked_worktree(tmp.path());
+        let repo = capture_repo(&main).unwrap();
+        let (store, rt) = projection_admitting_only_commit();
+        seed_cache(&repo.git_dir, "s-cd");
+        let (raw, timer) = (
+            shell_hook(&main, "true"),
+            HookTimer::new("agent-hook", false),
+        );
+        let registry = AdapterRegistry::with_builtin();
+        let run = CapturedHook {
+            t: &timer,
+            rt: &rt,
+            store: &store,
+            repo: &repo,
+            registry: &registry,
+            raw: &raw,
+            repo_id: "repo",
+        };
+        observe_hook_worktree(&run, "claude-code");
+        let memo = || {
+            read_cache(&repo.git_dir, "s-cd")
+                .unwrap()
+                .unwrap()
+                .last_worktree
+        };
+        assert_eq!(memo(), None, "a refused row is never memoized");
+        let again = observe_payload_worktree(&run, "claude-code", 20);
+        assert!(
+            matches!(&again, Err(rift_core::RiftError::ConstraintRefused { table, constraint })
+                if table == "session_worktree" && constraint == "check(basis)"),
+            "the identical hook tries the row again: {again:?}"
+        );
+        assert_eq!(memo(), None);
+        let notes = crate::capture_queue::peek_errors(&repo.git_dir);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("check(basis)"), "{notes:?}");
+    }
+
+    /// A projection whose `session_worktree.basis` admits only `commit`: the
+    /// shape of a schema whose vocabulary does not hold the hook's word.
+    fn projection_admitting_only_commit() -> (rift_store::SqliteStore, tokio::runtime::Runtime) {
+        let store = rift_store::SqliteStore::open_in_memory().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let ddl = "CREATE TABLE session_worktree (observation_id TEXT NOT NULL PRIMARY KEY, \
+            session_id TEXT NOT NULL, worktree_token TEXT NOT NULL, \
+            worktree_name TEXT NOT NULL, is_linked INTEGER NOT NULL, work_tree TEXT NOT NULL, \
+            branch TEXT, head_oid TEXT, subagent_id TEXT, \
+            basis TEXT NOT NULL CHECK (basis IN ('commit')), \
+            first_observed_at INTEGER NOT NULL, schema_version INTEGER NOT NULL) STRICT;";
+        rt.block_on(async { store.conn().await.unwrap().execute_batch(ddl).await })
+            .unwrap();
+        (store, rt)
     }
 
     fn filed(name: &str, basis: &str) -> Vec<(String, String)> {

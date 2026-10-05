@@ -64,15 +64,21 @@ pub(crate) struct WorktreeObservation {
 /// originally worked: that would be a claim, and the honest one is that a
 /// human adopted the transcript here.
 ///
-/// Returns whether a row was written. Never fails the verb: a projection
-/// without the v14 relation costs the observation, not the import.
+/// Returns whether a row was written. A projection without the v14 relation
+/// costs the observation, not the verb; a row the schema refuses fails it,
+/// because a refused basis is a writer out of step with the schema and an
+/// operator at a terminal is the one reader who can act on that.
+///
+/// # Errors
+/// [`rift_core::RiftError::ConstraintRefused`] when the schema refuses the
+/// row.
 pub(crate) async fn record_worktree_observation(
     store: &SqliteStore,
     repo: &rift_git::RepoPaths,
     session_row_id: &str,
     basis: &str,
     now: i64,
-) -> bool {
+) -> rift_core::Result<bool> {
     let head = rift_git::head_state(repo);
     let token = repo.worktree_token();
     let row = rift_store::SessionWorktreeRow {
@@ -101,9 +107,11 @@ pub(crate) async fn record_worktree_observation(
         first_observed_at: now,
         schema_version: 1,
     };
-    rift_store::record_session_worktree(store, &row)
-        .await
-        .unwrap_or(false)
+    match rift_store::record_session_worktree(store, &row).await {
+        Ok(wrote) => Ok(wrote),
+        Err(refused @ rift_core::RiftError::ConstraintRefused { .. }) => Err(refused),
+        Err(_) => Ok(false),
+    }
 }
 
 /// The member a checkpoint was **archived in** — `checkpoint_worktree`'s

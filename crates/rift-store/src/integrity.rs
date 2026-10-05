@@ -184,9 +184,9 @@ pub struct ImportedCheckpointRecord {
 /// relation.
 ///
 /// # Errors
-/// [`RiftError::Storage`]/[`RiftError::Immutability`] on a non-conflict
-/// failure (including a CHECK-constraint violation if `source_layout` or
-/// `root_check` is outside the closed vocabulary).
+/// [`RiftError::ConstraintRefused`] if `source_layout` or `root_check` is
+/// outside its closed vocabulary; [`RiftError::Storage`]/
+/// [`RiftError::Immutability`] on any other non-conflict failure.
 pub async fn record_imported_checkpoint_if_new(
     store: &impl CanonicalStore,
     r: &ImportedCheckpointRecord,

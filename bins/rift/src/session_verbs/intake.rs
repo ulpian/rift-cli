@@ -75,7 +75,7 @@ pub(crate) fn attach(
         &rift_core::capture_session_row_id(agent, session_id),
         "attach",
         now,
-    ));
+    ))?;
     let Some(checkpoint_id) = checkpoint else {
         return Ok(Outcome::coded(
             exit::FAILURE,
@@ -512,7 +512,7 @@ fn archived_transcripts(run: &ImportRun<'_>, sources: &[(String, PathBuf)]) -> R
                 &rift_core::capture_session_row_id(run.agent, sid),
                 "import",
                 run.now,
-            ));
+            ))?;
         tally.rows.push(serde_json::json!({
             "session_id": sid, "status": status, "checkpoint_id": id,
             "chain_position": order.iter().position(|c| *c == id),

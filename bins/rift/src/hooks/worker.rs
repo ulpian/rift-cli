@@ -230,8 +230,9 @@ fn level_after_condense(git_dir: &Path) -> Levelled {
 }
 
 /// Run one journaled agent-hook job and settle its file: removed when done,
-/// kept-and-marked (bounded) when it failed. Says what the job left on the
-/// checkpoint branch, naming the session and checkpoint of a condense.
+/// kept-and-marked (bounded) when it failed, dropped-and-marked when the
+/// schema refused its row, which no retry can change. Says what the job left
+/// on the checkpoint branch, naming the session and checkpoint of a condense.
 fn run_agent_job(
     t: &crate::hooktime::HookTimer,
     git_dir: &Path,
@@ -244,6 +245,12 @@ fn run_agent_job(
             landed
         }
         Err(e) if projection_busy(&e) => Landed::Nothing,
+        Err(e @ rift_core::RiftError::ConstraintRefused { .. }) => {
+            let key = crate::agent_queue::note_key(job);
+            crate::capture_queue::mark_note(git_dir, &key, &format!("{e} (dropped)"));
+            crate::agent_queue::remove(path);
+            Landed::Nothing
+        }
         Err(e) => {
             crate::agent_queue::record_failure(path, job, git_dir, &e.to_string());
             Landed::Nothing
@@ -1136,6 +1143,9 @@ fn masked_line_runs(raw: &[u8], redacted: &[u8]) -> Vec<(u32, u32)> {
     }
     runs
 }
+
+#[cfg(test)]
+mod refused_job_tests;
 
 #[cfg(test)]
 mod tests {

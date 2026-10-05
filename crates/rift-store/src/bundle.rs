@@ -908,7 +908,7 @@ mod tests {
     #[async_trait::async_trait]
     impl StoreConn for FailingConn {
         async fn execute(&self, sql: &str, params: &[Value]) -> rift_core::Result<u64> {
-            if sql.starts_with("INSERT OR IGNORE INTO checkpoint") {
+            if sql.starts_with("INSERT INTO checkpoint") {
                 let n = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
                 if n > self.budget {
                     return Err(RiftError::storage("planted mid-loop write failure"));

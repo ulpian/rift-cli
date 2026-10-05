@@ -587,7 +587,9 @@ nothing, because both inputs are durable and both outputs are idempotent
 appends. Failure is **bounded and loud once**: after a bounded number of
 attempts it is reported on a marker channel that says a thing once and stops
 the moment it stops being true, named by the *next* commit — the correction to
-weeks of silent condense failures. And **the session only claims to be ended
+weeks of silent condense failures.
+A job whose row the schema refuses is dropped on its first run with one such note, because no retry can change a refusal.
+And **the session only claims to be ended
 when a checkpoint exists**: a failed archive leaves it in `ending`, retryable.
 
 If you need the work inline — an end-to-end test, or a CI run with nowhere to
