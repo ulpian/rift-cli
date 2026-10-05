@@ -93,6 +93,9 @@ reach storage and be summed as though it meant something
 **The v17 `session_worktree_cd` relation is the same kind of answer.**
 It holds session worktree observations under a basis the v14 `session_worktree` CHECK cannot admit — `shell_cd`, a read filed under the member its leading `cd` named.
 Widening that CHECK would mean rebuilding the table, and a migration may not drop or rename one, so the wider vocabulary got its own table with its own guards; the writer sends each observation to exactly one of the two, and every reader reads their union ([Chapter 9](09-worktrees-and-families.md)).
+Both observation relations are machine-local and no shard carries them, so a capture rebuild restores neither: a rebuilt projection knows each checkpoint's archiving checkout from its shard, and a session's observed checkouts only from the hooks that run after it.
+
+**The recall v14 `memd_audit_pull_claim` relation is a sparse companion of `memd_audit_event`**, keyed on the audit row's id like `memd_audit_citation` and `memd_audit_session`: for a pull whose caller named held revisions, how many it named, how many of them this family had recorded reading, how many it had not, and the rule the credit was booked under. A pull that named nothing writes no row, so a row's presence means a claim was made. The row is written just after its audit row; a stop between the two loses only the side row, and redelivering the serve writes it once under the same key.
 
 **The cache root is resolvable, so tests never touch your home directory**,
 chosen in order from `RIFT_CACHE_DIR`, `XDG_CACHE_HOME`, `$HOME/.cache` on unix
@@ -540,6 +543,8 @@ A rebuilt row must carry the instant the live row carries, never the rebuild's c
 So the ingest reads every schema-4 line, whose instant is its `serve_call.recorded_at`, and a schema-1 line only when it carries a top-level `recorded_at`; a schema-1 line without one is reported as a parse issue and skipped.
 The incremental ingest reads the artifact the first time it projects a checkpoint, so a live projection and a rebuilt one converge on the same rows.
 What a rebuild cannot restore is a serve no shard carries — one no session made — and the typed words of an exact retrieval's reason: the rebuilt row carries the placeholder `withheld` there.
+A pull's claim is restored too, for every shard written since a frozen line could carry it: the line's payload holds `pull_claim`, the three counts of `memd_audit_pull_claim` and the rule its credit was booked under, and the appender writes the claim row back under the serve's own key.
+A line from an older shard carries no claim, so its serve is rebuilt without one.
 
 That is why the rebuild sets the old projection aside and never deletes it.
 It preserves `recall.db` as `recall.db.set-aside-<YYYYMMDDTHHMMSSZ>`, stamped once from the binary's clock, and prints the new name on the line before `rebuilt:`; a rebuild over no projection prints nothing there, and the fingerprint it prints is the one it always printed.
@@ -548,9 +553,10 @@ The complete DB/WAL/SHM set is linked without overwriting any existing path befo
 A failure restores the complete original when possible; failed restoration retains the complete preserved set and names its full path with recovery steps.
 Keep the preserved triple together while restoring the original or quarantining its incomplete paths.
 Backfill refuses an artifact that still aliases the live destination; restore in place or create a distinct live projection before importing the preserved artifact.
-`rift backfill --recall-from <file>` reads the serves back: it opens the file read-only, as the capture import opens its own, refuses a file that is not a recall projection, and replays `memd_audit_event`, `serve_call_event`, `serve_session_event`, `memd_audit_citation`, `serve_grant_event` and `memd_audit_session` into the family's recall projection.
+`rift backfill --recall-from <file>` reads the serves back: it opens the file read-only, as the capture import opens its own, refuses a file that is not a recall projection, and replays `memd_audit_event`, `serve_call_event`, `serve_session_event`, `memd_audit_citation`, `serve_grant_event`, `memd_audit_session` and `memd_audit_pull_claim` into the family's recall projection.
+A source set aside before claims were recorded has no claim relation and imports as it always did.
 There is no second writer.
-Each decision and call row is spelled back into the envelope that books exactly that row and handed to the one appender, which writes the citation, first-served and attribution rows as it does live; a grant goes through its own writer.
+Each decision and call row is spelled back into the envelope that books exactly that row, a decision's claim included, and handed to the one appender, which writes the citation, first-served, claim and attribution rows as it does live; a grant goes through its own writer.
 Every write is insert-or-ignore on its key, so a second run inserts nothing, and `--dry-run` inserts no canonical rows.
 The set-aside files are records: `rift clean` never removes them, and `rift doctor` lists them by name, size and age.
 

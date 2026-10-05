@@ -38,13 +38,14 @@ use super::TableCount;
 
 /// The relations read back, in the order the report prints them: the two
 /// serve relations, then their companions.
-const RECALL_TABLES: [&str; 6] = [
+const RECALL_TABLES: [&str; 7] = [
     "memd_audit_event",
     "serve_call_event",
     "serve_session_event",
     "memd_audit_citation",
     "serve_grant_event",
     "memd_audit_session",
+    "memd_audit_pull_claim",
 ];
 
 /// The source's attribution rows, by the serve key each names.
@@ -86,7 +87,7 @@ pub(super) async fn import_recall_from(
     let read = source_counts(&source, &present).await?;
     let before = target_counts(store).await?;
     let attributions = source_attributions(&source, &present).await?;
-    replay_decisions(store, &source, &attributions).await?;
+    replay_decisions(store, &source, &present, &attributions).await?;
     if present.contains("serve_call_event") {
         replay_calls(store, &source, &attributions).await?;
     }
@@ -187,19 +188,27 @@ async fn source_attributions(
         .collect()
 }
 
-/// Every decision row, oldest first, through the appender.
+/// Every decision row, oldest first, with its claim where the source holds
+/// one, through the appender.
 async fn replay_decisions(
     store: &impl CanonicalStore,
     source: &SqliteStore,
+    present: &BTreeSet<String>,
     attributions: &Attributions,
 ) -> Result<()> {
-    let rows = source
-        .query(
-            "SELECT audit_id, verb, handle, reason, tokens_returned, tokens_avoided, \
-             recorded_at FROM memd_audit_event ORDER BY recorded_at, audit_id",
-            &[],
-        )
-        .await?;
+    // A source set aside before claims were recorded has no claim relation;
+    // its decisions read as claiming nothing, which is what they booked.
+    let claims = if present.contains("memd_audit_pull_claim") {
+        "c.stated_count, c.recorded_count, c.basis FROM memd_audit_event e \
+         LEFT JOIN memd_audit_pull_claim c ON c.audit_id = e.audit_id"
+    } else {
+        "NULL, NULL, NULL FROM memd_audit_event e"
+    };
+    let sql = format!(
+        "SELECT e.audit_id, e.verb, e.handle, e.reason, e.tokens_returned, \
+         e.tokens_avoided, e.recorded_at, {claims} ORDER BY e.recorded_at, e.audit_id"
+    );
+    let rows = source.query(&sql, &[]).await?;
     for row in &rows {
         let audit_id = row.get_text(0)?;
         let recorded_at = row.get_i64(6)?;
@@ -210,19 +219,29 @@ async fn replay_decisions(
 }
 
 /// The schema-1 envelope that books exactly this decision row: the appender
-/// writes `handle`, `reason` and the two estimates from the payload, and the
-/// instant from the clock it is handed.
+/// writes `handle`, `reason` and the two estimates from the payload, the
+/// claim row from `pull_claim` spelled as the live envelope spells it, and
+/// the instant from the clock it is handed.
 fn decision_envelope(audit_id: &str, row: &Row) -> Result<Vec<u8>> {
+    let mut payload = serde_json::json!({
+        "handle": row.get_opt_text(2)?,
+        "reason": row.get_opt_text(3)?,
+        "estimated_tokens_returned": row.get_i64(4)?,
+        "estimated_tokens_avoided": row.get_i64(5)?,
+    });
+    if let (Some(basis), Some(members)) = (row.get_opt_text(9)?, payload.as_object_mut()) {
+        let claim = serde_json::json!({
+            "stated": row.get_i64(7)?,
+            "recorded": row.get_i64(8)?,
+            "basis": basis,
+        });
+        members.insert("pull_claim".to_owned(), claim);
+    }
     let envelope = serde_json::json!({
         "schema": 1,
         "idempotency_key": audit_id,
         "verb": row.get_text(1)?,
-        "payload": {
-            "handle": row.get_opt_text(2)?,
-            "reason": row.get_opt_text(3)?,
-            "estimated_tokens_returned": row.get_i64(4)?,
-            "estimated_tokens_avoided": row.get_i64(5)?,
-        },
+        "payload": payload,
     });
     serde_json::to_vec(&envelope).map_err(|e| RiftError::storage(format!("serve envelope: {e}")))
 }
@@ -385,7 +404,7 @@ mod tests {
 
     const AT: i64 = 1_790_856_000_000;
 
-    /// Every row of the six relations, as text, sorted: two projections hold
+    /// Every row of the seven relations, as text, sorted: two projections hold
     /// the same rows exactly when these are equal.
     async fn every_row(store: &impl CanonicalStore) -> Vec<String> {
         let mut out = Vec::new();
@@ -432,6 +451,18 @@ mod tests {
         record_serve_grant(&store, "grant-1", "branches", "reviewing a hotfix", AT + 3)
             .await
             .unwrap();
+        book(&store, &claimed_pull(), "call-pull", AT + 4, None).await;
+    }
+
+    /// A pull whose caller named four held revisions, one of them read here.
+    fn claimed_pull() -> MemdEvent {
+        use rift_recall_events::{PullClaim, PullClaimBasis};
+        MemdEvent::ManifestServed {
+            estimated_tokens_returned: 3,
+            estimated_tokens_avoided: 8,
+            pull_claim: None,
+        }
+        .with_pull_claim(PullClaim::new(4, 1, PullClaimBasis::StatedRecorded))
     }
 
     /// One decision's pair, as the skill CLI books it, attributed when a
@@ -466,7 +497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_row_of_the_six_relations_comes_back_and_a_second_run_inserts_none() {
+    async fn every_row_of_the_seven_relations_comes_back_and_a_second_run_inserts_none() {
         let tmp = tempfile::tempdir().unwrap();
         let source_path = tmp.path().join("recall.db.set-aside-20261001T120000Z");
         seed_source(&source_path).await;
@@ -507,15 +538,57 @@ mod tests {
         assert_eq!(
             read,
             [
-                ("memd_audit_event", 4, 0),
-                ("serve_call_event", 3, 0),
+                ("memd_audit_event", 5, 0),
+                ("serve_call_event", 4, 0),
                 ("serve_session_event", 1, 0),
                 ("memd_audit_citation", 1, 0),
                 ("serve_grant_event", 1, 0),
                 ("memd_audit_session", 2, 0),
+                ("memd_audit_pull_claim", 1, 0),
             ]
         );
         assert_eq!(sha256_of(&source_path), record);
+    }
+
+    /// A projection set aside before claims were recorded imports exactly as
+    /// it always did: every serve comes back, and no claim is read or written.
+    #[tokio::test]
+    async fn a_source_that_predates_the_claim_relation_imports_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_path = tmp.path().join("recall.db.set-aside-20261001T120000Z");
+        let migrations = recall_migrations();
+        let source = open_migrated(&source_path, &migrations[..13]).unwrap();
+        let attribution = ServeAttribution {
+            session_id: "s-1".to_owned(),
+            window_key: None,
+        };
+        let grep = MemdEvent::GrepCapped {
+            handle: "grep:matches=2".to_owned(),
+        };
+        book(&source, &grep, "call-old", AT, Some(&attribution)).await;
+        drop(source);
+        let target = recall_target(tmp.path());
+
+        let first = import_recall_from(&target, &source_path).await.unwrap();
+
+        let counts: Vec<(&str, usize, usize)> = first
+            .iter()
+            .map(|t| (t.table, t.read, t.inserted))
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                ("memd_audit_event", 1, 1),
+                ("serve_call_event", 1, 1),
+                ("serve_session_event", 1, 1),
+                ("memd_audit_citation", 0, 0),
+                ("serve_grant_event", 0, 0),
+                ("memd_audit_session", 2, 2),
+                ("memd_audit_pull_claim", 0, 0),
+            ]
+        );
+        let again = import_recall_from(&target, &source_path).await.unwrap();
+        assert!(again.iter().all(|t| t.inserted == 0), "{again:?}");
     }
 
     #[tokio::test]

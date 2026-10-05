@@ -49,6 +49,7 @@
 //! | `reason` | `exact_retrieved` | **withheld** (the caller's own words), unless it is the grant tag |
 //! | `reason` | every other kind that has one | kept when a closed tag (`[a-z0-9_-]`, at most 64 bytes), else withheld |
 //! | `reason` | a kind that declares none | kept only when it is the grant tag |
+//! | `pull_claim` | `manifest_served`, `summary_served`, `pack_built` | kept whole when it is `{basis, recorded, stated, unrecorded}`, else the line is refused |
 //!
 //! `ExactRetrieved.reason` is the reason the caller supplied, typed and
 //! mandatory: a row rebuilt from a frozen line carries the placeholder,
@@ -58,6 +59,15 @@
 //! fabricated target is text — so only a citation, a grammar the pack
 //! compiler composes, is kept. Every other `handle` is composed by Rift
 //! from a repository path and a content hash it computed.
+//!
+//! A pull's `pull_claim` is counts and a closed tag, so nothing in it is
+//! withheld; it is checked instead. Its three counts are non-negative
+//! integers, `stated` is `recorded + unrecorded` and at least one, and
+//! `basis` is one of the two rules a stated revision leads to — the shape
+//! of the `memd_audit_pull_claim` row it is frozen from and rebuilt into. A
+//! claim that is anything else refuses the line, as an undeclared member
+//! does, rather than freezing a claim that row could not hold. A decision
+//! with no claim row carries no member, so its line is the one it always was.
 
 use serde_json::{Map, Value};
 
@@ -85,13 +95,20 @@ enum Member {
     RefusedTarget,
     /// A `reason` on a kind that declares none: only the grant tag.
     GrantTag,
+    /// What a pull's caller claimed to hold: three counts and a rule.
+    PullClaim,
 }
+
+/// The rules a pull's claim can be booked under, spelled as the serving
+/// envelope and the claim relation spell them.
+const PULL_CLAIM_BASES: [&str; 2] = ["stated_recorded", "unverified"];
 
 const RETURNED: (&str, Member) = ("estimated_tokens_returned", Member::Count);
 const AVOIDED: (&str, Member) = ("estimated_tokens_avoided", Member::Count);
 const REASON: (&str, Member) = ("reason", Member::Tag);
 const FILE: (&str, Member) = ("handle", Member::FileHandle);
 const SUMMARY: (&str, Member) = ("handle", Member::SummaryHandle);
+const CLAIM: (&str, Member) = ("pull_claim", Member::PullClaim);
 
 /// The canonical line of one envelope, or `None` when it is not one this
 /// table declares.
@@ -200,6 +217,7 @@ fn decision_envelope(
             "reason" => row.reason.as_deref().map_or(Value::Null, Value::from),
             "estimated_tokens_returned" => row.tokens_returned.into(),
             "estimated_tokens_avoided" => row.tokens_avoided.into(),
+            "pull_claim" => row.pull_claim.as_ref().map_or(Value::Null, claim_member),
             // `sections` and `total_tokens`: no row holds them.
             _ => Value::Null,
         };
@@ -221,6 +239,16 @@ fn decision_envelope(
     envelope.insert("schema".into(), 1.into());
     envelope.insert("verb".into(), row.verb.as_str().into());
     Some(Value::Object(envelope))
+}
+
+/// The payload member a decision's claim row is frozen as.
+fn claim_member(claim: &rift_recall_ledger::attribution::AttributedPullClaim) -> Value {
+    serde_json::json!({
+        "basis": claim.basis,
+        "recorded": claim.recorded,
+        "stated": claim.stated,
+        "unrecorded": claim.unrecorded,
+    })
 }
 
 /// The schema-4 envelope one call row was booked from.
@@ -286,15 +314,17 @@ fn canonical_attribution(env: &Map<String, Value>) -> Option<Map<String, Value>>
 fn declared(kind: &str) -> Option<&'static [(&'static str, Member)]> {
     use Member::{ExactHandle, GrepHandle, RefusedTarget, Typed};
     Some(match kind {
-        "manifest_served" | "search_served" => &[RETURNED, AVOIDED],
+        "manifest_served" => &[RETURNED, AVOIDED, CLAIM],
+        "search_served" => &[RETURNED, AVOIDED],
         "manifest_injected" | "recovery_injected" => &[RETURNED],
-        "summary_served" => &[SUMMARY, RETURNED, AVOIDED],
+        "summary_served" => &[SUMMARY, RETURNED, AVOIDED, CLAIM],
         "exact_retrieved" => &[("handle", ExactHandle), ("reason", Typed), RETURNED],
         "pack_built" => &[
             ("sections", Member::Count),
             ("total_tokens", Member::Count),
             RETURNED,
             AVOIDED,
+            CLAIM,
         ],
         "invalidated" => &[SUMMARY, RETURNED],
         "refused" => &[("target", RefusedTarget), REASON, RETURNED],
@@ -381,19 +411,52 @@ fn canonical_call(key: &str, call: &Value) -> Option<Value> {
 /// One member frozen by its rule; `None` when its JSON type is not the
 /// one the rule reads, which refuses the whole line.
 fn frozen_member(rule: Member, value: &Value) -> Option<Value> {
-    if let Member::Count = rule {
-        return Some(value.as_u64()?.into());
+    match rule {
+        Member::Count => return Some(value.as_u64()?.into()),
+        Member::PullClaim => return frozen_claim(value),
+        _ => (),
     }
     let text = value.as_str()?;
     Some(if is_kept(rule, text) { text } else { WITHHELD }.into())
+}
+
+/// A pull's claim, whole, or `None` when it cannot describe one pull: a
+/// member missing or added, a count that is not a count, counts that do not
+/// add up, a claim of nothing, or a rule outside the two.
+fn frozen_claim(claim: &Value) -> Option<Value> {
+    const MEMBERS: [&str; 4] = ["basis", "recorded", "stated", "unrecorded"];
+    let Value::Object(fields) = claim else {
+        return None;
+    };
+    if fields.len() != MEMBERS.len() || fields.keys().any(|k| !MEMBERS.contains(&k.as_str())) {
+        return None;
+    }
+    // The relation's writer reads each count as a `u32`, so a larger one
+    // could not come back as the row it was frozen from.
+    let count = |name: &str| {
+        let n = fields.get(name)?.as_u64()?;
+        u32::try_from(n).ok().map(u64::from)
+    };
+    let (stated, recorded, unrecorded) =
+        (count("stated")?, count("recorded")?, count("unrecorded")?);
+    let basis = fields.get("basis")?.as_str()?;
+    if stated == 0 || recorded + unrecorded != stated || !PULL_CLAIM_BASES.contains(&basis) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "basis": basis,
+        "recorded": recorded,
+        "stated": stated,
+        "unrecorded": unrecorded,
+    }))
 }
 
 /// Whether a text member's value is one its rule lets through.
 fn is_kept(rule: Member, text: &str) -> bool {
     let grant = text == rift_recall_serve::CROSS_BRANCH_GRANT_TAG;
     match rule {
-        // A count that arrives as text is not a count.
-        Member::Count => false,
+        // A count that arrives as text is not a count, nor is a claim.
+        Member::Count | Member::PullClaim => false,
         Member::Tag => is_tag(text),
         Member::Typed | Member::GrantTag => grant,
         Member::FileHandle => text.is_empty() || is_file_handle(text),
@@ -1021,6 +1084,254 @@ mod tests {
             every_row(&live).len(),
             4 * events.len(),
             "a decision row, a call row and two attributions per serve"
+        );
+    }
+
+    /// The kinds a pull is booked as, the only ones that can carry a claim.
+    const CLAIMED_KINDS: [&str; 3] = ["manifest_served", "summary_served", "pack_built"];
+
+    /// A claim as a frozen line spells it.
+    fn claim(stated: i64, recorded: i64, unrecorded: i64, basis: &str) -> Value {
+        serde_json::json!({
+            "basis": basis,
+            "recorded": recorded,
+            "stated": stated,
+            "unrecorded": unrecorded,
+        })
+    }
+
+    /// A canonical schema-1 line of `kind` whose payload carries `claim`.
+    fn claimed_line(kind: &str, claim: Value) -> String {
+        let mut payload = serde_json::json!({
+            "estimated_tokens_avoided": 9,
+            "estimated_tokens_returned": 3,
+            "kind": kind,
+            "pull_claim": claim,
+        });
+        match kind {
+            "summary_served" => payload["handle"] = "summary:src/a.rs".into(),
+            "pack_built" => {
+                payload["sections"] = 2.into();
+                payload["total_tokens"] = 7.into();
+            }
+            _ => (),
+        }
+        serde_json::json!({
+            "idempotency_key": "k",
+            "payload": payload,
+            "recorded_at": 1_700_000_000_000_i64,
+            "schema": 1,
+            "session_id": "s-1",
+            "verb": format!("memd.{kind}"),
+        })
+        .to_string()
+    }
+
+    /// A line carrying a pull's claim is kept whole: the three counts and the
+    /// rule, on every kind a pull is booked as, under either rule.
+    #[test]
+    fn a_line_carrying_a_pull_claim_is_its_own_canonical_form() {
+        for kind in CLAIMED_KINDS {
+            for basis in ["stated_recorded", "unverified"] {
+                let line = claimed_line(kind, claim(4, 1, 3, basis));
+                assert_eq!(
+                    canonical_serve_line(line.as_bytes()),
+                    Some(line.clone().into_bytes()),
+                    "{line}"
+                );
+            }
+        }
+    }
+
+    /// A claim that cannot describe a pull refuses the whole line: a count
+    /// that is not a non-negative integer, a rule outside the two, counts that
+    /// do not add up, a member missing or added, and a claim of nothing.
+    #[test]
+    fn a_malformed_pull_claim_refuses_the_line() {
+        let mut odd_members = claim(2, 1, 1, "unverified");
+        odd_members["hash"] = "a".repeat(64).into();
+        let malformed = [
+            claim(2, -1, 3, "unverified"),
+            serde_json::json!({"basis": "unverified", "recorded": "1", "stated": 2, "unrecorded": 1}),
+            serde_json::json!({"basis": "unverified", "recorded": 1.5, "stated": 2, "unrecorded": 1}),
+            serde_json::json!({"basis": "unverified", "recorded": 1, "stated": 2}),
+            claim(2, 1, 1, "declared"),
+            claim(2, 1, 1, "Unverified"),
+            serde_json::json!({"basis": 1, "recorded": 1, "stated": 2, "unrecorded": 1}),
+            claim(4, 1, 2, "stated_recorded"),
+            claim(0, 0, 0, "stated_recorded"),
+            claim(1 << 32, 0, 1 << 32, "stated_recorded"),
+            odd_members,
+            "4".into(),
+        ];
+        for kind in CLAIMED_KINDS {
+            for bad in &malformed {
+                let line = claimed_line(kind, bad.clone());
+                assert_eq!(canonical_serve_line(line.as_bytes()), None, "{line}");
+            }
+        }
+        let capped = serde_json::json!({
+            "idempotency_key": "k",
+            "payload": {
+                "handle": "grep:matches=4",
+                "kind": "grep_capped",
+                "pull_claim": claim(1, 1, 0, "unverified"),
+            },
+            "recorded_at": 1,
+            "schema": 1,
+            "verb": "memd.grep_capped",
+        });
+        assert_eq!(
+            canonical_serve_line(capped.to_string().as_bytes()),
+            None,
+            "a kind no pull is booked as takes no claim"
+        );
+    }
+
+    /// Every claim row a projection holds, key first.
+    fn claim_rows(store: &rift_store::SqliteStore) -> Vec<String> {
+        use rift_store::CanonicalStore as _;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let sql = "SELECT audit_id || '|' || stated_count || '|' || recorded_count || '|' || \
+                   unrecorded_count || '|' || basis || '|' || schema_version \
+                   FROM memd_audit_pull_claim ORDER BY audit_id";
+        rt.block_on(store.query(sql, &[]))
+            .unwrap()
+            .iter()
+            .map(|row| row.get_text(0).unwrap())
+            .collect()
+    }
+
+    /// The pulls a session made: one of each kind a pull is booked as, each
+    /// carrying a claim, and one pull that claimed nothing.
+    fn claimed_pulls() -> Vec<MemdEvent> {
+        use rift_recall_events::{PullClaim, PullClaimBasis};
+        let mut pulls: Vec<MemdEvent> = composed_events()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    MemdEvent::ManifestServed { .. }
+                        | MemdEvent::SummaryServed { .. }
+                        | MemdEvent::PackBuilt { .. }
+                )
+            })
+            .zip([
+                PullClaim::new(4, 1, PullClaimBasis::StatedRecorded),
+                PullClaim::new(2, 0, PullClaimBasis::Unverified),
+                PullClaim::new(3, 3, PullClaimBasis::StatedRecorded),
+            ])
+            .map(|(event, claim)| event.with_pull_claim(claim))
+            .collect();
+        pulls.push(MemdEvent::ManifestServed {
+            estimated_tokens_returned: 5,
+            estimated_tokens_avoided: 6,
+            pull_claim: None,
+        });
+        pulls
+    }
+
+    /// ★ **A claim survives the shard.** Each pull a session made, booked live
+    /// with its claim, frozen from its rows, read back through the shard
+    /// reader and re-appended into an empty projection, leaves the claim row
+    /// it was frozen from: the same key, the same three counts, the same rule.
+    #[test]
+    fn a_pulls_claim_frozen_and_read_back_is_the_same_claim_row() {
+        use rift_recall_ledger::attribution::{
+            append_attributed_serve, session_serves, ServeAttribution,
+        };
+        let fresh = || {
+            let store = rift_store::SqliteStore::open_in_memory().unwrap();
+            rift_store::apply_migrations(&store, &rift_store::recall_migrations()).unwrap();
+            store
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let session = ServeAttribution {
+            session_id: "s-1".to_owned(),
+            window_key: None,
+        };
+        let live = fresh();
+        for (n, event) in claimed_pulls().iter().enumerate() {
+            let envelope = event.to_hook_json_keyed(&format!("pull-{n}"));
+            let at = 1_700_000_000_000 + i64::try_from(n).unwrap();
+            rt.block_on(append_attributed_serve(
+                &live,
+                envelope.as_bytes(),
+                at,
+                Some(&session),
+            ))
+            .unwrap();
+        }
+        assert_eq!(claim_rows(&live).len(), 3, "three pulls claimed");
+
+        let serves = rt.block_on(session_serves(&live, "s-1")).unwrap();
+        let artifact: Vec<u8> = session_serve_lines(&serves, "s-1")
+            .into_iter()
+            .map(|line| line.expect("every row freezes").1)
+            .collect::<Vec<_>>()
+            .join(&b'\n');
+        let parsed = rift_recall_substrate::parse::parse_serve_audit(&artifact, "cp");
+        assert!(parsed.is_clean(), "{:?}", parsed.issues);
+        let rebuilt = fresh();
+        for frozen in &parsed.value {
+            rt.block_on(append_attributed_serve(
+                &rebuilt,
+                &frozen.envelope,
+                frozen.recorded_at,
+                Some(&session),
+            ))
+            .unwrap();
+        }
+        assert_eq!(claim_rows(&rebuilt), claim_rows(&live));
+    }
+
+    /// The rules a frozen claim may name are the ones the serving envelope
+    /// spells.
+    #[test]
+    fn the_claim_rules_a_line_may_name_are_the_envelopes_own() {
+        use rift_recall_events::PullClaimBasis;
+        let spelled = [PullClaimBasis::StatedRecorded, PullClaimBasis::Unverified]
+            .map(PullClaimBasis::as_str);
+        assert_eq!(PULL_CLAIM_BASES, spelled);
+    }
+
+    /// A pull that made no claim freezes to the bytes it always froze to.
+    #[test]
+    fn a_decision_with_no_claim_freezes_to_the_bytes_it_always_did() {
+        use rift_recall_ledger::attribution::{AttributedDecision, SessionServes};
+        let row = AttributedDecision {
+            audit_id: "k".to_owned(),
+            verb: "memd.manifest_served".to_owned(),
+            handle: None,
+            reason: None,
+            tokens_returned: 3,
+            tokens_avoided: 9,
+            recorded_at: 1_700_000_000_000,
+            window_key: Some("e".repeat(64)),
+            pull_claim: None,
+        };
+        let serves = SessionServes {
+            decisions: vec![row],
+            calls: Vec::new(),
+        };
+        let lines = session_serve_lines(&serves, "s-1");
+        let [Some((key, line))] = lines.as_slice() else {
+            panic!("one line: {lines:?}");
+        };
+        assert_eq!(key, "k");
+        assert_eq!(
+            String::from_utf8(line.clone()).unwrap(),
+            format!(
+                "{{\"idempotency_key\":\"k\",\"payload\":{{\"estimated_tokens_avoided\":9,\
+                 \"estimated_tokens_returned\":3,\"kind\":\"manifest_served\"}},\
+                 \"recorded_at\":1700000000000,\"schema\":1,\"session_id\":\"s-1\",\
+                 \"verb\":\"memd.manifest_served\",\"window_key\":\"{}\"}}",
+                "e".repeat(64)
+            )
         );
     }
 }
