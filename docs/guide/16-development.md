@@ -92,10 +92,10 @@ verb that is gone.
 
 `.github/workflows/ci.yml` triggers on pushes to the default branch and every
 pull request, grants `contents: read` and nothing else, and cancels superseded
-runs for the same ref. It declares **fifteen jobs**; fourteen are named in a
+runs for the same ref. It declares **fifteen jobs**, and all fifteen are named in a
 required-job list inside `xtask` (`REQUIRED_JOBS` in `xtask/src/ci_meta/workflow.rs`)
 checked by the `ci-meta` job itself, so a job cannot be quietly deleted while CI
-stays green. The fifteenth, `release-build`, is not required.
+stays green.
 
 | Job | Runs | What it proves |
 |---|---|---|
@@ -113,7 +113,7 @@ stays green. The fifteenth, `release-build`, is not required.
 | `docs` | `cargo doc` with `RUSTDOCFLAGS: -D warnings`, then `xtask rustdoc-baseline` | A doc comment cannot rot into an unfollowable link |
 | `dialect-conformance` | The legacy-import golden suites and the substrate walker suite, by name | A suite cannot be dropped from an unnamed slice of `test` and go unnoticed |
 | `miri` | Miri over the crypto, hash-chain and dashboard crates, on nightly | Advisory — `continue-on-error` is set so the failure state is *visible* rather than swallowed by `\|\| true` |
-| `release-build` | `cargo build --workspace --release` | The optimised profile compiles (not required) |
+| `release-build` | `cargo build --workspace --release` | The optimised profile compiles |
 
 **Why the feature-off leg exists.** The binary's optional features — the
 terminal backend, document conversion, search — carry real code, and

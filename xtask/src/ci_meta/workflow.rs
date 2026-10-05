@@ -13,6 +13,7 @@ const REQUIRED_JOBS: &[&str] = &[
     "fmt:",
     "clippy:",
     "test:",
+    "release-build:",
     "msrv:",
     "coverage:",
     "security:",
@@ -232,6 +233,30 @@ mod tests {
         assert_eq!(
             violations,
             vec!["ci.yml: required job `miri` is missing".to_owned()]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The real workflow with its release build renamed away is reported, so a
+    /// change that drops `cargo build --release` from CI cannot land silently.
+    #[test]
+    fn a_workflow_without_its_release_build_is_reported() {
+        let root = scratch_dir("release-build");
+        let dir = root.join(".github/workflows");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ci = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
+            .expect("the workflow is readable");
+        assert!(
+            ci.contains("\n  release-build:"),
+            "the real workflow declares it"
+        );
+        let dropped = ci.replace("\n  release-build:", "\n  renamed-build:");
+        std::fs::write(dir.join("ci.yml"), dropped).unwrap();
+
+        let violations = required_jobs_present(&root).expect("the screen runs");
+        assert_eq!(
+            violations,
+            vec!["ci.yml: required job `release-build` is missing".to_owned()]
         );
         std::fs::remove_dir_all(&root).unwrap();
     }
