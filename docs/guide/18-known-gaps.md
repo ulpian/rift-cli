@@ -781,16 +781,6 @@ drifting apart.
 
 **Read more.** [16](16-development.md).
 
-### One required-job list is narrower than the declared list
-
-*Honest limit.* The workflow declares fifteen jobs; fourteen are on the required
-list. The release build is declared and not required, so a failure there is
-advisory — a choice, and one that should be visible. Closing it means adding it
-to the required list, or stating the reason it is advisory where the list is
-defined.
-
-**Read more.** [16](16-development.md) §16.4.
-
 ### There is no workspace-wide clock abstraction
 
 *Honest limit.* The determinism convention says to inject the clock. There is
