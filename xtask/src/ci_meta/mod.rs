@@ -214,17 +214,61 @@ mod tests {
     use super::*;
     use crate::workspace_root;
 
+    /// The scratch names handed out in this process: tests run on threads,
+    /// so two sharing a name would clear each other's fixtures.
+    static CLAIMED_NAMES: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+
     /// A deterministic, ignored scratch directory for the fixtures below —
     /// under the build directory, named for the test, no clock and no
-    /// randomness, so a re-run reuses the same path.
+    /// randomness. The root is keyed by process id as well as by name: two
+    /// test processes in one checkout (a gate beside a worker's leg) would
+    /// otherwise clear and refill each other's fixtures, and isolation wins
+    /// over a re-run reusing the same path. A reused pid finds its root
+    /// cleared on first use. The empty per-process directory a run leaves
+    /// behind is a few bytes and goes with `cargo clean`; a held `TempDir`
+    /// was rejected because a static is never dropped, so it would not clean
+    /// either, and a guard per call would change every caller.
     pub(super) fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let fresh = CLAIMED_NAMES.lock().unwrap().insert(name.to_owned());
+        assert!(
+            fresh,
+            "two fixtures in one process share the scratch name `{name}`"
+        );
+        scratch_dir_for(name, std::process::id())
+    }
+
+    fn scratch_dir_for(name: &str, process: u32) -> std::path::PathBuf {
         let root = workspace_root()
             .join("target")
             .join("xtask-fixtures")
+            .join(process.to_string())
             .join(name);
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    /// Two processes running these tests in one checkout — a gate beside a
+    /// worker's leg — each clear and refill their fixture root; sharing one
+    /// root per name let one delete the other's files mid-test.
+    #[test]
+    fn one_fixture_name_in_two_processes_gets_two_disjoint_roots() {
+        // The name carries this run's pid so two concurrent runs of this
+        // very test never share the two fixed discriminators' roots.
+        let name = format!("two-processes-{}", std::process::id());
+        let first = scratch_dir_for(&name, u32::MAX);
+        std::fs::write(first.join("planted.txt"), "first").unwrap();
+
+        let second = scratch_dir_for(&name, u32::MAX - 1);
+
+        assert_ne!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(first.join("planted.txt")).unwrap(),
+            "first"
+        );
+        std::fs::remove_dir_all(&first).unwrap();
+        std::fs::remove_dir_all(&second).unwrap();
     }
 
     /// The meta-checks pass on the real repository — this is the actual gate,
