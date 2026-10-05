@@ -522,6 +522,7 @@ mod tests {
             MemdEvent::ManifestServed {
                 estimated_tokens_returned: 3,
                 estimated_tokens_avoided: 9,
+                pull_claim: None,
             },
             MemdEvent::ManifestInjected {
                 estimated_tokens_returned: 3,
@@ -531,6 +532,7 @@ mod tests {
                 total_tokens: 7,
                 estimated_tokens_returned: 3,
                 estimated_tokens_avoided: 9,
+                pull_claim: None,
             },
             MemdEvent::RecoveryInjected {
                 estimated_tokens_returned: 3,
@@ -550,6 +552,7 @@ mod tests {
                 handle: s(),
                 estimated_tokens_returned: 3,
                 estimated_tokens_avoided: 9,
+                pull_claim: None,
             },
             MemdEvent::ExactRetrieved {
                 handle: s(),
@@ -680,6 +683,7 @@ mod tests {
         let served = MemdEvent::ManifestServed {
             estimated_tokens_returned: 1,
             estimated_tokens_avoided: 2,
+            pull_claim: None,
         };
         let granted = rift_recall_serve::grant_tagged_envelope(&served, "k");
         assert_eq!(
@@ -847,6 +851,7 @@ mod tests {
                 handle: "summary:src/a.rs".to_owned(),
                 estimated_tokens_returned: 3,
                 estimated_tokens_avoided: 9,
+                pull_claim: None,
             },
             MemdEvent::ExactRetrieved {
                 handle: file.clone(),

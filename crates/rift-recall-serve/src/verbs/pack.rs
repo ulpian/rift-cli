@@ -129,6 +129,7 @@ impl ServeDispatcher<'_> {
                 total_tokens,
                 estimated_tokens_returned: returned,
                 estimated_tokens_avoided: avoided,
+                pull_claim: None,
             },
         ))
     }

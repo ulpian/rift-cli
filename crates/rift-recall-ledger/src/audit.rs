@@ -8,6 +8,20 @@
 //! function they mint the same key from the same envelope and leave one row.
 
 use rift_core::Result;
+use rift_recall_events::PullClaimBasis;
+
+/// The pull claims of a window, summed: how many held revisions callers
+/// named, how many of them this family had recorded reading, and how many no
+/// recorded read accounts for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PullClaimTotals {
+    /// Revisions callers said they held.
+    pub stated: u64,
+    /// Of those, the ones this family recorded a read of.
+    pub recorded: u64,
+    /// Of those, the ones no recorded read accounts for.
+    pub unrecorded: u64,
+}
 
 /// What a serve decision's own payload says, for its row in the legacy
 /// `memd_audit_event` relation.
@@ -384,7 +398,8 @@ async fn append_serve_decision(
     // Two proper columns beside the composed string, derived from
     // it exactly once — at this, the one place a `memd_audit_event` row is
     // ever written — rather than re-parsed by every future query.
-    record_audit_citation_if_any(store, audit_id, payload.handle.as_deref()).await
+    record_audit_citation_if_any(store, audit_id, payload.handle.as_deref()).await?;
+    record_pull_claim_if_any(store, audit_id, env).await
 }
 
 /// The companion write for those columns: a row lands ONLY when `handle` is a
@@ -419,6 +434,78 @@ async fn record_audit_citation_if_any(
     Ok(())
 }
 
+/// The companion write for a pull's claim: a row lands only when the payload
+/// carries one, which only a successful pull that stated revisions does.
+///
+/// Written after its audit row, not in one transaction with it: the store
+/// seam has none. A stop between the two loses this row and nothing else.
+/// The key is the audit row's own, read off the same envelope, so a later
+/// delivery writes the row once, insert-or-ignore, and never under another
+/// serve's key.
+async fn record_pull_claim_if_any(
+    store: &impl rift_store::CanonicalStore,
+    audit_id: &str,
+    env: &serde_json::Value,
+) -> Result<()> {
+    use rift_store::Value;
+    let Some((stated, recorded, basis)) = env
+        .get("payload")
+        .and_then(|payload| payload.get("pull_claim"))
+        .and_then(pull_claim_of)
+    else {
+        return Ok(());
+    };
+    store
+        .insert_or_ignore(
+            "memd_audit_pull_claim",
+            &[
+                "audit_id",
+                "stated_count",
+                "recorded_count",
+                "unrecorded_count",
+                "basis",
+                "schema_version",
+            ],
+            &[
+                Value::text(audit_id),
+                Value::Int(stated),
+                Value::Int(recorded),
+                Value::Int(stated - recorded),
+                Value::text(basis.as_str()),
+                Value::Int(1),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+/// The `(stated, recorded, basis)` of a claim member, or `None` for one that
+/// cannot describe a pull: no stated revision, a recorded count past the
+/// stated one, a count that is not a count, or a rule outside the two a
+/// stated hash leads to. Refused here rather than left to the relation's
+/// CHECK, so a malformed claim never reaches the append-only guard.
+fn pull_claim_of(claim: &serde_json::Value) -> Option<(i64, i64, PullClaimBasis)> {
+    let count = |key: &str| {
+        claim
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .map(i64::from)
+    };
+    let (Some(stated), Some(recorded)) = (count("stated"), count("recorded")) else {
+        return None;
+    };
+    let basis = match claim.get("basis").and_then(serde_json::Value::as_str)? {
+        "stated_recorded" => PullClaimBasis::StatedRecorded,
+        "unverified" => PullClaimBasis::Unverified,
+        _ => return None,
+    };
+    if stated == 0 || stated < recorded {
+        return None;
+    }
+    Some((stated, recorded, basis))
+}
+
 /// The `(pack_key, ordinal)` a `memd_audit_event.handle`/`target` string
 /// names, if it is a citation identity — `pack:<key>/evidence:<n>`,
 /// optionally followed by `=file:<path>@sha256:<hash>` once the ordinal
@@ -436,6 +523,45 @@ fn citation_identity_of(handle: &str) -> Option<(String, u32)> {
     let head = handle.split_once('=').map_or(handle, |(h, _)| h);
     let citation = rift_recall_pack::CitationTarget::parse(head)?;
     Some((citation.pack_key, citation.ordinal))
+}
+
+/// Sum the pull claims booked at or after `since_ms` (every claim when
+/// `None`), on the audit row's clock, the clock the savings numerator is cut
+/// on.
+///
+/// The reader sits beside the one writer so the relation's shape is known in
+/// one module.
+///
+/// # Errors
+///
+/// The store's own error, including on a projection that predates the
+/// relation; the caller says the figure is not recorded there.
+pub async fn pull_claim_totals(
+    store: &impl rift_store::CanonicalStore,
+    since_ms: Option<i64>,
+) -> Result<PullClaimTotals> {
+    use rift_store::Value;
+    let rows = store
+        .query(
+            "SELECT CAST(COALESCE(SUM(c.stated_count), 0) AS INTEGER), \
+                    CAST(COALESCE(SUM(c.recorded_count), 0) AS INTEGER), \
+                    CAST(COALESCE(SUM(c.unrecorded_count), 0) AS INTEGER) \
+             FROM memd_audit_pull_claim c \
+             JOIN memd_audit_event e ON e.audit_id = c.audit_id \
+             WHERE e.recorded_at >= ?1",
+            &[Value::Int(since_ms.unwrap_or(i64::MIN))],
+        )
+        .await?;
+    let count = |idx: usize| {
+        rows.first()
+            .and_then(|row| row.get_i64(idx).ok())
+            .map_or(0, |n| u64::try_from(n).unwrap_or(0))
+    };
+    Ok(PullClaimTotals {
+        stated: count(0),
+        recorded: count(1),
+        unrecorded: count(2),
+    })
 }
 
 #[cfg(test)]
@@ -596,5 +722,202 @@ mod tests {
                 "{not_a_citation} is not a citation"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pull_claim_tests {
+    use rift_recall_events::{MemdEvent, PullClaim, PullClaimBasis};
+    use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore, Store};
+
+    use super::*;
+
+    fn recall_store() -> (SqliteStore, tokio::runtime::Runtime) {
+        let store = SqliteStore::open_in_memory().unwrap();
+        apply_migrations(&store, &recall_migrations()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        (store, rt)
+    }
+
+    fn pull(stated: u32, recorded: u32, basis: PullClaimBasis) -> MemdEvent {
+        MemdEvent::ManifestServed {
+            estimated_tokens_returned: 7,
+            estimated_tokens_avoided: 40,
+            pull_claim: None,
+        }
+        .with_pull_claim(PullClaim::new(stated, recorded, basis))
+    }
+
+    fn append(store: &SqliteStore, rt: &tokio::runtime::Runtime, envelope: &str, at: i64) {
+        rt.block_on(append_memd_audit(store, envelope.as_bytes(), at))
+            .unwrap();
+    }
+
+    fn claims(store: &SqliteStore, rt: &tokio::runtime::Runtime) -> Vec<(String, i64, i64, i64)> {
+        let rows = rt
+            .block_on(store.query(
+                "SELECT audit_id, stated_count, recorded_count, unrecorded_count \
+                 FROM memd_audit_pull_claim ORDER BY audit_id",
+                &[],
+            ))
+            .unwrap();
+        rows.iter()
+            .map(|r| {
+                (
+                    r.get_text(0).unwrap(),
+                    r.get_i64(1).unwrap(),
+                    r.get_i64(2).unwrap(),
+                    r.get_i64(3).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    fn key(envelope: &str) -> String {
+        let doc: serde_json::Value = serde_json::from_str(envelope).unwrap();
+        doc["idempotency_key"].as_str().unwrap().to_owned()
+    }
+
+    /// Make every claim write fail from here on, as a stop between the audit
+    /// row and its claim would: a connection-local trigger, so the guard
+    /// triggers the migration installed stay as they are.
+    fn fail_claim_writes(store: &SqliteStore, rt: &tokio::runtime::Runtime) {
+        batch(
+            store,
+            rt,
+            "CREATE TEMP TRIGGER claim_write_fails BEFORE INSERT ON main.memd_audit_pull_claim \
+             BEGIN SELECT RAISE(ABORT, 'stopped between the two writes'); END;",
+        );
+    }
+
+    fn restore_claim_writes(store: &SqliteStore, rt: &tokio::runtime::Runtime) {
+        batch(store, rt, "DROP TRIGGER temp.claim_write_fails;");
+    }
+
+    fn batch(store: &SqliteStore, rt: &tokio::runtime::Runtime, sql: &str) {
+        rt.block_on(async { store.conn().await?.execute_batch(sql).await })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_pull_that_stated_revisions_books_its_counts_beside_its_audit_row() {
+        let (store, rt) = recall_store();
+        let envelope = pull(3, 2, PullClaimBasis::StatedRecorded).to_hook_json_keyed("call-1");
+        append(&store, &rt, &envelope, 10);
+        assert_eq!(claims(&store, &rt), vec![(key(&envelope), 3, 2, 1)]);
+        let basis = rt
+            .block_on(store.query("SELECT basis FROM memd_audit_pull_claim", &[]))
+            .unwrap();
+        assert_eq!(basis[0].get_text(0).unwrap(), "stated_recorded");
+        let audit = rt
+            .block_on(store.query("SELECT audit_id FROM memd_audit_event", &[]))
+            .unwrap();
+        assert_eq!(audit[0].get_text(0).unwrap(), key(&envelope));
+    }
+
+    #[test]
+    fn a_refusal_a_pull_with_no_claim_and_a_hook_decision_book_no_claim() {
+        let (store, rt) = recall_store();
+        let refused = MemdEvent::Refused {
+            target: "src/a.rs".to_owned(),
+            reason: "path_not_found".to_owned(),
+            estimated_tokens_returned: 5,
+        };
+        let unclaimed = MemdEvent::ManifestServed {
+            estimated_tokens_returned: 5,
+            estimated_tokens_avoided: 0,
+            pull_claim: None,
+        };
+        let intercepted = MemdEvent::ReadIntercepted {
+            handle: "file:src/a.rs@sha256:ab".to_owned(),
+            reason: "already_held".to_owned(),
+            estimated_tokens_returned: 1,
+            estimated_tokens_avoided: 9,
+        };
+        for event in [refused, unclaimed, intercepted] {
+            append(&store, &rt, &event.to_hook_json_keyed("k"), 10);
+        }
+        assert_eq!(rt.block_on(store.count("memd_audit_event")).unwrap(), 3);
+        assert!(claims(&store, &rt).is_empty());
+    }
+
+    /// A stop between the audit row and its claim loses the claim and nothing
+    /// else; a later delivery of the same envelope writes it once, under the
+    /// audit row's own key, and never under another serve's.
+    #[test]
+    fn a_crash_between_the_two_writes_can_only_lose_the_claim() {
+        let (store, rt) = recall_store();
+        let first = pull(4, 1, PullClaimBasis::StatedRecorded).to_hook_json_keyed("call-a");
+        let second = pull(2, 2, PullClaimBasis::Unverified).to_hook_json_keyed("call-b");
+        fail_claim_writes(&store, &rt);
+        let stopped = rt.block_on(append_memd_audit(&store, first.as_bytes(), 10));
+        assert!(stopped.is_err());
+        assert_eq!(rt.block_on(store.count("memd_audit_event")).unwrap(), 1);
+        assert!(claims(&store, &rt).is_empty());
+        restore_claim_writes(&store, &rt);
+        // Another serve lands before the stopped one is delivered again: its
+        // claim is its own, and the lost one is never pinned to it.
+        append(&store, &rt, &second, 12);
+        assert_eq!(claims(&store, &rt), vec![(key(&second), 2, 2, 0)]);
+        for _ in 0..3 {
+            append(&store, &rt, &first, 11);
+        }
+        let mut want = vec![(key(&first), 4, 1, 3), (key(&second), 2, 2, 0)];
+        want.sort();
+        assert_eq!(claims(&store, &rt), want);
+        assert_eq!(rt.block_on(store.count("memd_audit_event")).unwrap(), 2);
+        let orphans = rt
+            .block_on(store.query(
+                "SELECT COUNT(*) FROM memd_audit_pull_claim c \
+                 WHERE NOT EXISTS (SELECT 1 FROM memd_audit_event e WHERE e.audit_id = c.audit_id)",
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(orphans[0].get_i64(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_claim_that_does_not_add_up_or_names_no_known_rule_books_nothing() {
+        let (store, rt) = recall_store();
+        let good = pull(3, 1, PullClaimBasis::StatedRecorded).to_hook_json_keyed("k");
+        let mut doc: serde_json::Value = serde_json::from_str(&good).unwrap();
+        for (n, (member, value)) in [
+            ("recorded", serde_json::json!(5)),
+            ("stated", serde_json::json!(-1)),
+            ("basis", serde_json::json!("none_stated")),
+            ("stated", serde_json::json!(0)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut bad = doc.clone();
+            bad["payload"]["pull_claim"][member] = value;
+            bad["idempotency_key"] = serde_json::json!(format!("bad-{n}"));
+            append(&store, &rt, &bad.to_string(), 10);
+        }
+        assert!(claims(&store, &rt).is_empty());
+        doc["idempotency_key"] = serde_json::json!("good");
+        append(&store, &rt, &doc.to_string(), 10);
+        assert_eq!(claims(&store, &rt).len(), 1);
+    }
+
+    #[test]
+    fn the_totals_sum_every_claim_in_the_window_and_split_the_stated_count() {
+        let (store, rt) = recall_store();
+        let early = pull(5, 5, PullClaimBasis::StatedRecorded).to_hook_json_keyed("early");
+        let late_a = pull(3, 1, PullClaimBasis::StatedRecorded).to_hook_json_keyed("a");
+        let late_b = pull(2, 0, PullClaimBasis::Unverified).to_hook_json_keyed("b");
+        append(&store, &rt, &early, 100);
+        append(&store, &rt, &late_a, 200);
+        append(&store, &rt, &late_b, 300);
+        let whole = rt.block_on(pull_claim_totals(&store, None)).unwrap();
+        assert_eq!((whole.stated, whole.recorded, whole.unrecorded), (10, 6, 4));
+        let window = rt.block_on(pull_claim_totals(&store, Some(150))).unwrap();
+        assert_eq!(
+            (window.stated, window.recorded, window.unrecorded),
+            (5, 1, 4)
+        );
     }
 }

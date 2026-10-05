@@ -452,6 +452,7 @@ mod tests {
             event: MemdEvent::ManifestServed {
                 estimated_tokens_returned: 1168,
                 estimated_tokens_avoided: 2_256_482,
+                pull_claim: None,
             },
         };
         let ungranted = rift_recall_types::Scope::unbounded("fam");
@@ -532,6 +533,7 @@ mod tests {
             event: MemdEvent::ManifestServed {
                 estimated_tokens_returned: 3,
                 estimated_tokens_avoided: 4,
+                pull_claim: None,
             },
         };
         let keys = record_serve(
@@ -579,6 +581,7 @@ mod tests {
             event: MemdEvent::ManifestServed {
                 estimated_tokens_returned: 7,
                 estimated_tokens_avoided: 0,
+                pull_claim: None,
             },
         };
         let answer = rendered("diff-since", &resp, None);
@@ -645,6 +648,7 @@ mod tests {
             event: MemdEvent::ManifestServed {
                 estimated_tokens_returned: 12,
                 estimated_tokens_avoided: 340,
+                pull_claim: None,
             },
         };
         let mut scope = rift_recall_types::Scope::unbounded("fam");
@@ -707,6 +711,7 @@ mod tests {
             event: MemdEvent::ManifestServed {
                 estimated_tokens_returned: 1,
                 estimated_tokens_avoided: 2,
+                pull_claim: None,
             },
         };
         record_serve(

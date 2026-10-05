@@ -371,6 +371,7 @@ fn a_grant_tags_the_audit_envelope_and_carries_no_free_text() {
     let event = rift_recall_events::MemdEvent::ManifestServed {
         estimated_tokens_returned: 10,
         estimated_tokens_avoided: 90,
+        pull_claim: None,
     };
     let tagged = grant_tagged_envelope(&event, "invocation-1");
     let doc: serde_json::Value = serde_json::from_str(&tagged).unwrap();

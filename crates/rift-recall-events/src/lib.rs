@@ -17,7 +17,11 @@
     )
 )]
 
+mod claim;
+
 use sha2::{Digest, Sha256};
+
+pub use claim::{PullClaim, PullClaimBasis};
 
 /// The opaque per-connection identity carried by the retired schema-2
 /// envelope, retained so that envelope stays constructible and decodable. It
@@ -199,6 +203,11 @@ pub enum MemdEvent {
         estimated_tokens_returned: u32,
         /// Tokens avoided vs a full re-read.
         estimated_tokens_avoided: u32,
+        /// What the caller claimed to hold, on a pull that stated revisions;
+        /// absent otherwise, and then absent from the payload too, so every
+        /// other serve's bytes and key are what they always were.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pull_claim: Option<PullClaim>,
     },
     /// A manifest was **injected** — the push side: Rift put it in
     /// the agent's context unasked, so it is pure spend.
@@ -228,6 +237,11 @@ pub enum MemdEvent {
         estimated_tokens_returned: u32,
         /// Tokens avoided vs the full artifact.
         estimated_tokens_avoided: u32,
+        /// What the caller claimed to hold, on a pull that stated revisions;
+        /// absent otherwise, and then absent from the payload too, so every
+        /// other serve's bytes and key are what they always were.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pull_claim: Option<PullClaim>,
     },
     /// Exact content was retrieved (policy-gated, reason-required, audited).
     ExactRetrieved {
@@ -249,6 +263,11 @@ pub enum MemdEvent {
         estimated_tokens_returned: u32,
         /// Tokens avoided vs full re-reads.
         estimated_tokens_avoided: u32,
+        /// What the caller claimed to hold, on a pull that stated revisions;
+        /// absent otherwise, and then absent from the payload too, so every
+        /// other serve's bytes and key are what they always were.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pull_claim: Option<PullClaim>,
     },
     /// A summary/handle was invalidated by a source change.
     Invalidated {
@@ -809,6 +828,7 @@ mod tests {
             MemdEvent::ManifestServed {
                 estimated_tokens_returned: 1,
                 estimated_tokens_avoided: 2,
+                pull_claim: None,
             },
             MemdEvent::ManifestInjected {
                 estimated_tokens_returned: 1,
@@ -817,6 +837,7 @@ mod tests {
                 handle: handle.to_owned(),
                 estimated_tokens_returned: 1,
                 estimated_tokens_avoided: 2,
+                pull_claim: None,
             },
             MemdEvent::ExactRetrieved {
                 handle: handle.to_owned(),
@@ -828,6 +849,7 @@ mod tests {
                 total_tokens: 1,
                 estimated_tokens_returned: 1,
                 estimated_tokens_avoided: 2,
+                pull_claim: None,
             },
             MemdEvent::Invalidated {
                 handle: handle.to_owned(),
@@ -989,6 +1011,7 @@ mod tests {
         let m = MemdEvent::ManifestServed {
             estimated_tokens_returned: 50,
             estimated_tokens_avoided: 900,
+            pull_claim: None,
         };
         assert_eq!(m.verb(), "manifest_served");
         assert_eq!(m.tokens_avoided(), 900);
@@ -1020,6 +1043,7 @@ mod tests {
         let served = MemdEvent::ManifestServed {
             estimated_tokens_returned: 86,
             estimated_tokens_avoided: 0,
+            pull_claim: None,
         };
         assert_eq!(injected.verb(), "manifest_injected");
         assert_eq!(served.verb(), "manifest_served");
@@ -1095,6 +1119,7 @@ mod tests {
             handle: "summary:k".into(),
             estimated_tokens_returned: 30,
             estimated_tokens_avoided: 400,
+            pull_claim: None,
         };
         let json = m.to_hook_json();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1151,6 +1176,7 @@ mod tests {
             handle: "summary:neutral".into(),
             estimated_tokens_returned: 12,
             estimated_tokens_avoided: 90,
+            pull_claim: None,
         };
         let json = Schema2Terminal::Event(&event)
             .to_hook_json(&call, rift_core::Timestamp::from_millis(123));
@@ -1180,6 +1206,7 @@ mod tests {
             total_tokens: 120,
             estimated_tokens_returned: 480,
             estimated_tokens_avoided: 900,
+            pull_claim: None,
         };
         assert_eq!(e.tokens_returned(), 480);
         let v: serde_json::Value = serde_json::from_str(&e.to_hook_json()).unwrap();
@@ -1241,6 +1268,7 @@ mod tests {
             handle: "summary:neutral".into(),
             estimated_tokens_returned: 12,
             estimated_tokens_avoided: 90,
+            pull_claim: None,
         };
         let json = e.to_serve_call_json(
             ServeChannel::SkillCli,

@@ -21,6 +21,7 @@ use super::classes::{family_repeat_classes, render_repeat_classes};
 use super::journals::{member_window_journals, render_compaction, render_window_journals};
 use super::levers::{family_levers, render_levers};
 use super::panes::{family_enforce_split, render_enforce_split};
+use super::savings::render_pull_claims;
 
 /// The data behind one reread report (separated from rendering so the report
 /// format is lockable by a golden test with fixed inputs).
@@ -146,8 +147,13 @@ pub(super) async fn reread_report(
     // declining: an observe half and an enforce half, so the two are compared
     // as measured windows rather than as one blended total.
     let split = family_enforce_split(repo).await;
+    // What pulls claimed to hold, over the whole record like the rest of this
+    // document, set beside how many of those revisions this family read.
+    let claims = rift_recall_ledger::audit::pull_claim_totals(store, None)
+        .await
+        .ok();
     let human = format!(
-        "{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}",
         render_reread_report(&report),
         render_repeat_classes(&classes),
         render_levers(&levers, classes.total_tokens()),
@@ -160,7 +166,9 @@ pub(super) async fn reread_report(
         // Appended after the block's own eviction lines rather than inside
         // it, so every line the block printed before is printed unchanged.
         render_compaction(&windows.compaction, windows.note.as_deref()),
-        render_enforce_split(&split)
+        render_enforce_split(&split),
+        // Last, so every line the report printed before is printed unchanged.
+        render_pull_claims(claims.as_ref())
     );
     let db_path = crate::family::recall_db(repo)?;
     Ok(Outcome::ok(
@@ -174,6 +182,7 @@ pub(super) async fn reread_report(
             "levers": levers,
             "window_journals": windows,
             "enforce_split": split,
+            "pull_claims": claims,
             "snapshot": "appended",
             "recall_db": db_path.display().to_string(),
         }),

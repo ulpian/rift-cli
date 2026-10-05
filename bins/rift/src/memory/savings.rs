@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use rift_core::{Result, RiftError};
+use rift_recall_ledger::audit::{pull_claim_totals, PullClaimTotals};
 use rift_recall_ledger::savings::Savings;
 use rift_recall_ledger::savings_window::{self, Boundary, Marker};
 use rift_store::SqliteStore;
@@ -442,10 +443,54 @@ pub(crate) fn savings(root: &Path, args: &SavingsArgs) -> Result<Outcome> {
     // The journals are this member's own run state, read through the same
     // entry point the reread report reads them by.
     let windows = member_window_journals(&crate::worktree_root(root));
-    Ok(Outcome::ok(
-        render_savings(&report).trim_end().to_owned(),
-        with_compaction(savings_json(&report), &windows.compaction),
-    ))
+    let mut human = render_savings(&report);
+    let mut json = with_compaction(savings_json(&report), &windows.compaction);
+    // Beside the figure, never inside it: the claims explain how much of the
+    // pull credit was claimed, and change none of it.
+    if report.note.is_none() {
+        let claims = family_pull_claims(&report);
+        human.push_str(&render_pull_claims(claims.as_ref()));
+        json = with_pull_claims(json, claims.as_ref());
+    }
+    Ok(Outcome::ok(human.trim_end().to_owned(), json))
+}
+
+/// The pull claims booked over the report's window, read from the recall
+/// projection the report names, or `None` where that projection cannot say:
+/// it predates the relation, or it would not open.
+fn family_pull_claims(report: &SavingsReport) -> Option<PullClaimTotals> {
+    let store = SqliteStore::open_read_only(Path::new(&report.recall_db)).ok()?;
+    let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
+    rt.block_on(pull_claim_totals(&store, report.window.cut_ms()))
+        .ok()
+}
+
+/// The one line that sets what pulls claimed beside what this family read,
+/// so a claim no recorded read accounts for is visible rather than silent.
+pub(super) fn render_pull_claims(totals: Option<&PullClaimTotals>) -> String {
+    let Some(t) = totals else {
+        return "  pull claims:           not recorded by this projection\n".to_owned();
+    };
+    format!(
+        "  pull claims:           {} stated, {} read by this family, {} stated but never read\n",
+        t.stated, t.recorded, t.unrecorded
+    )
+}
+
+/// A document with the pull claims added under one new key, `null` where the
+/// projection cannot say, so every key it already had stays as it was.
+pub(super) fn with_pull_claims(
+    mut json: serde_json::Value,
+    totals: Option<&PullClaimTotals>,
+) -> serde_json::Value {
+    let Some(map) = json.as_object_mut() else {
+        return json;
+    };
+    map.insert(
+        "pull_claims".to_owned(),
+        serde_json::to_value(totals).unwrap_or_default(),
+    );
+    json
 }
 
 /// Which window `rift savings` was asked for, against one reading of the
@@ -1012,5 +1057,47 @@ savings window moved
         assert!(out.human.contains("not measured:"), "{}", out.human);
         assert!(!out.human.contains("0.0%"), "{}", out.human);
         assert!(out.json["overall"]["share_pct"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod pull_claim_tests {
+    use super::*;
+
+    #[test]
+    fn the_pull_claim_line_sets_the_stated_count_beside_the_read_one() {
+        let totals = PullClaimTotals {
+            stated: 7,
+            recorded: 4,
+            unrecorded: 3,
+        };
+        assert_eq!(
+            render_pull_claims(Some(&totals)),
+            "  pull claims:           7 stated, 4 read by this family, 3 stated but never read\n"
+        );
+        assert_eq!(
+            render_pull_claims(None),
+            "  pull claims:           not recorded by this projection\n"
+        );
+    }
+
+    #[test]
+    fn the_pull_claims_are_one_additive_key() {
+        let before = serde_json::json!({ "overall": { "share_pct": 1.0 } });
+        let totals = PullClaimTotals {
+            stated: 2,
+            recorded: 2,
+            unrecorded: 0,
+        };
+        let after = with_pull_claims(before.clone(), Some(&totals));
+        assert_eq!(after["overall"], before["overall"]);
+        assert_eq!(
+            after["pull_claims"],
+            serde_json::json!({ "stated": 2, "recorded": 2, "unrecorded": 0 })
+        );
+        assert_eq!(
+            with_pull_claims(before, None)["pull_claims"],
+            serde_json::Value::Null
+        );
     }
 }

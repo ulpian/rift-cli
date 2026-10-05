@@ -150,6 +150,7 @@ pub(crate) fn manifest_event(returned: u32, avoided: u32) -> MemdEvent {
     MemdEvent::ManifestServed {
         estimated_tokens_returned: returned,
         estimated_tokens_avoided: avoided,
+        pull_claim: None,
     }
 }
 

@@ -1142,6 +1142,7 @@ mod tests {
             handle: "summary:neutral".into(),
             estimated_tokens_returned: 12,
             estimated_tokens_avoided: 90,
+            pull_claim: None,
         };
         let envelope = event.to_serve_call_json(
             rift_recall_serve::ServeChannel::SkillCli,
@@ -1173,6 +1174,7 @@ mod tests {
         let event2 = rift_recall_events::MemdEvent::ManifestServed {
             estimated_tokens_returned: 5,
             estimated_tokens_avoided: 10,
+            pull_claim: None,
         };
         let envelope2 = event2.to_serve_call_json(
             rift_recall_serve::ServeChannel::SkillCli,
@@ -1229,6 +1231,7 @@ mod tests {
             total_tokens: 500,
             estimated_tokens_returned: 648,
             estimated_tokens_avoided: 2_551_121,
+            pull_claim: None,
         };
         // v1 path: the content-addressed envelope.
         audit.append(pack.to_hook_json().as_bytes(), 100);
