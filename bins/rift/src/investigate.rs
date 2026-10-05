@@ -49,7 +49,8 @@
 //! a finding whose handle was invented would tell a reader that a record backs
 //! the claim when none does. A handle that resolves names a RECORDED fact: a
 //! `file:` path+hash the capture projection holds in `file_revision`, a `log:`
-//! id it holds in `tool_call`, a `summary:` id the recall ledger bound. A
+//! tool-use id a `tool_call` row is keyed by, a `summary:` id the recall
+//! ledger bound. A
 //! handle that merely parses is a CLAIM, and a claim written into an
 //! append-only record with no fact behind it is this program's standing failure
 //! mode. Rendering was the injection vector; resolution is the evidence gate,
@@ -86,11 +87,16 @@ use rift_recall_serve::pack::{
 };
 use rift_recall_serve::serialize_untrusted;
 use rift_recall_types::{path_is_safe, Handle};
+use rift_shadow::ids::tool_call_native_row_id;
 use rift_store::{CanonicalStore, SqliteStore, Value};
 use serde_json::json;
 
 use crate::cli::{exit, Outcome};
 use crate::workflows::Planes;
+
+/// How many derived `tool_call` keys one `log:` resolution query binds — well
+/// under SQLite's bound-parameter ceiling.
+const LOG_KEYS_PER_QUERY: usize = 256;
 
 /// The `rift investigate` JSON contract version.
 ///
@@ -364,7 +370,8 @@ fn is_wellformed_handle(h: &Handle) -> bool {
 ///
 /// * `file:` — the capture projection holds a `file_revision` with that PATH
 ///   and that CONTENT ADDRESS. Not the worktree: see below;
-/// * `log:` — the capture projection recorded a `tool_call` with that id;
+/// * `log:` — the capture projection recorded a `tool_call` keyed by that
+///   tool-use id in one of its sessions;
 /// * `summary:` — the recall ledger holds a `summary_binding` with that id.
 ///
 /// A missing recall ledger makes every `summary:` handle unresolvable, which
@@ -438,16 +445,12 @@ async fn resolve_handle(planes: &Planes<'_>, h: &Handle) -> bool {
             .ok()
             .flatten()
             .is_some(),
-        Handle::Log { tool_use_id } => planes
-            .capture
-            .query_opt_i64(
-                "SELECT 1 FROM tool_call WHERE tool_call_id = ?1 LIMIT 1",
-                &[Value::Text(tool_use_id.clone())],
-            )
-            .await
-            .ok()
-            .flatten()
-            .is_some(),
+        // The agent's tool-use id is not a row key: the projector keys the
+        // row by `(session row, tool-use id)`, and the handle names no
+        // session. Forward-only: a row written before tool calls were keyed
+        // by the tool-use id is keyed by its turn slot and stays
+        // unresolvable.
+        Handle::Log { tool_use_id } => tool_use_recorded(planes.capture, tool_use_id).await,
         Handle::Summary { key } => {
             let Some(db) = planes.recall_db.as_deref() else {
                 return false;
@@ -466,6 +469,31 @@ async fn resolve_handle(planes: &Planes<'_>, h: &Handle) -> bool {
                 .is_some()
         }
     }
+}
+
+/// Does the capture projection hold a `tool_call` row the projector keyed by
+/// `tool_use_id` in any captured session?
+///
+/// Derives the key for every session row and asks in chunks, so one statement
+/// stays bounded however many sessions the projection holds. Any read error
+/// answers `false`, like every other arm of [`resolve_handle`].
+async fn tool_use_recorded(capture: &SqliteStore, tool_use_id: &str) -> bool {
+    let Ok(sessions) = capture.query("SELECT session_id FROM session", &[]).await else {
+        return false;
+    };
+    let keys: Vec<Value> = sessions
+        .iter()
+        .filter_map(|row| row.get_text(0).ok())
+        .map(|session| Value::Text(tool_call_native_row_id(&session, tool_use_id)))
+        .collect();
+    for chunk in keys.chunks(LOG_KEYS_PER_QUERY) {
+        let marks = vec!["?"; chunk.len()].join(", ");
+        let sql = format!("SELECT 1 FROM tool_call WHERE tool_call_id IN ({marks}) LIMIT 1");
+        if let Ok(Some(_)) = capture.query_opt_i64(&sql, chunk).await {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse one `<kind>:<handle>::<text>` finding from the skill.
@@ -500,9 +528,12 @@ fn parse_finding(raw: &str) -> Option<(FindingShape, &str)> {
 pub(crate) mod fixture {
     use std::path::Path;
 
-    use super::{CanonicalStore, SqliteStore, Value};
+    use super::{tool_call_native_row_id, CanonicalStore, SqliteStore, Value};
 
-    /// The one tool call the capture projection recorded.
+    /// The capture session row the fixture's tool call ran in.
+    pub(crate) const SESSION_ROW: &str = "session-row-0";
+    /// The agent's tool-use id of the one tool call the capture projection
+    /// recorded.
     pub(crate) const TOOL_ID: &str = "toolu_01ABCdef-9";
     /// The one summary the recall ledger bound.
     pub(crate) const SUMMARY_ID: &str = "sum_01-abc.def";
@@ -530,29 +561,48 @@ pub(crate) mod fixture {
         Value::Text(s.to_owned())
     }
 
-    pub(crate) fn capture(rt: &tokio::runtime::Runtime) -> SqliteStore {
+    /// Record a session and one tool call it ran, keyed the way the projector
+    /// keys a tool call whose payload carried the agent's tool-use id.
+    pub(crate) async fn record_tool_ran(s: &SqliteStore, session_row: &str, tool_use_id: &str) {
+        rift_store::record_session(
+            s,
+            &rift_store::SessionRow {
+                session_id: session_row.to_owned(),
+                agent: "claude-code".to_owned(),
+                model_primary: String::new(),
+                repo_id: "repo".to_owned(),
+                started_at: 1,
+                schema_version: 1,
+            },
+        )
+        .await
+        .expect("session");
+        rift_store::record_tool_call(
+            s,
+            &rift_store::ToolCallRow {
+                tool_call_id: tool_call_native_row_id(session_row, tool_use_id),
+                turn_id: "turn".to_owned(),
+                tool_name: "Read".to_owned(),
+                started_at: 1,
+                schema_version: 1,
+            },
+        )
+        .await
+        .expect("tool_call");
+    }
+
+    /// A migrated capture projection holding no rows, for a test that plants
+    /// every row it asserts over.
+    pub(crate) fn empty_capture() -> SqliteStore {
         let s = SqliteStore::open_in_memory().expect("store");
         rift_store::apply_migrations(&s, &rift_store::default_migrations()).expect("migrations");
+        s
+    }
+
+    pub(crate) fn capture(rt: &tokio::runtime::Runtime) -> SqliteStore {
+        let s = empty_capture();
         rt.block_on(async {
-            s.insert(
-                "tool_call",
-                &[
-                    "tool_call_id",
-                    "turn_id",
-                    "tool_name",
-                    "started_at",
-                    "schema_version",
-                ],
-                &[
-                    t(TOOL_ID),
-                    t("turn"),
-                    t("Read"),
-                    Value::Int(1),
-                    Value::Int(1),
-                ],
-            )
-            .await
-            .expect("tool_call");
+            record_tool_ran(&s, SESSION_ROW, TOOL_ID).await;
             // Two captured file revisions: one whose file still exists, and one
             // capture recorded and the worktree no longer has. Both must
             // resolve; neither is a file anybody can create.
@@ -742,6 +792,30 @@ mod tests {
             .unwrap();
         assert_eq!(allowed.code, 0);
         assert_eq!(allowed.json["seed_kind"], "untrusted_digest");
+    }
+
+    #[test]
+    fn a_log_handle_resolves_by_the_key_the_projector_gave_the_tool_call() {
+        let rt = fixture::rt();
+        let d = tmp();
+        let cap = fixture::empty_capture();
+        rt.block_on(fixture::record_tool_ran(&cap, "session-row-x", "toolu_x"));
+        let planes = Planes {
+            capture: &cap,
+            root: d.path(),
+            recall_db: None,
+        };
+        let resolves = |id: &str| {
+            let h = Handle::Log {
+                tool_use_id: id.to_owned(),
+            };
+            rt.block_on(resolve_handle(&planes, &h))
+        };
+        assert!(
+            resolves("toolu_x"),
+            "log:toolu_x names a recorded tool call"
+        );
+        assert!(!resolves("toolu_y"), "log:toolu_y names nothing recorded");
     }
 
     #[test]

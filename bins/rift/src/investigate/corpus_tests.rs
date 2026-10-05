@@ -936,7 +936,8 @@ fn no_hostile_free_text_column_can_reach_the_plain_dispatch_json() {
         // empty report.
         assert_eq!(
             out.json["sessions"]["count"].as_u64().unwrap_or(0),
-            CORPUS.len() as u64,
+            // …plus the shared fixture's own session, the control.
+            CORPUS.len() as u64 + 1,
             "every corpus shape must be a session: {}",
             out.json
         );
@@ -979,7 +980,9 @@ fn no_hostile_free_text_column_can_reach_the_recap_json() {
             );
             assert_eq!(
                 out.json["split"]["counts"].as_array().map_or(0, Vec::len),
-                CORPUS.len(),
+                // …plus the session that `Read` call ran in, the control on
+                // this axis.
+                CORPUS.len() + 1,
                 "every corpus shape must be a split key: {}",
                 out.json
             );
