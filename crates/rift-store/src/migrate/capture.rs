@@ -124,12 +124,13 @@ INSERT INTO price_table (price_id, model, token_class, unit_price_micros, curren
 /// identity/context relations, the current-model price append, the
 /// checkpoint↔commit and verification-witness linkages, the v13
 /// `imported_checkpoint` durable-claim relation, the v14
-/// worktree-provenance relations, the v15 tool-result tokens and the v16
-/// observed-model price append.
+/// worktree-provenance relations, the v15 tool-result tokens, the v16
+/// observed-model price append and the v17 relation for observations a
+/// leading `cd` decided.
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
     // One row per version, in order; a new version is a new last row.
-    let set: [(u32, &'static str, String); 16] = [
+    let set: [(u32, &'static str, String); 17] = [
         (1, "init_meta", META_SQL.to_string()),
         (2, "canonical_core", canonical_schema_sql()),
         (3, "capture_identity", capture_identity_schema_sql()),
@@ -190,6 +191,7 @@ pub fn default_migrations() -> Vec<Migration> {
             "capture_price_seed_observed",
             capture_price_seed_observed_sql(),
         ),
+        (17, "capture_worktree_cd", capture_worktree_cd_schema_sql()),
     ];
     set.into_iter()
         .map(|(version, name, sql)| Migration { version, name, sql })
@@ -427,6 +429,26 @@ pub(super) fn backfill_capture_session_identities(store: &SqliteStore) -> Result
 #[must_use]
 fn capture_price_seed_observed_sql() -> String {
     PRICE_SEED_OBSERVED_SQL.to_string()
+}
+
+/// The v17 `session_worktree_cd` relation: worktree observations under a
+/// basis the v14 relation's CHECK cannot admit.
+///
+/// A NEW table and not a widened CHECK, because a CHECK changes only by
+/// rebuilding its table and `is_additive` refuses the DROP and RENAME that
+/// takes (see the registry note at the table itself).
+fn capture_worktree_cd_schema_sql() -> String {
+    capture_slice_sql(capture_worktree_cd_tables())
+}
+
+/// The v17 slice, read from the registry by name: the relation is the last
+/// registry entry, and the slice-growth test pins that it is the only one past
+/// the v15 boundary.
+fn capture_worktree_cd_tables() -> &'static [crate::schema::CanonicalTable] {
+    match crate::schema::canonical_table("session_worktree_cd") {
+        Some(table) => std::slice::from_ref(table),
+        None => &[],
+    }
 }
 
 /// Render one additive capture migration from a registry slice: DDL + guard
@@ -691,7 +713,7 @@ mod tests {
     /// Every shipped capture slice, labelled by its migration, with the table
     /// that must still close it: the registry accessor is the slice's live
     /// reading, the name its frozen boundary.
-    fn shipped_capture_slices() -> [(&'static str, &'static [CanonicalTable], &'static str); 12] {
+    fn shipped_capture_slices() -> [(&'static str, &'static [CanonicalTable], &'static str); 13] {
         use crate::schema::{
             capture_checkpoint_commit_tables, capture_identity_tables,
             capture_imported_checkpoint_tables, capture_model_observation_tables,
@@ -755,6 +777,11 @@ mod tests {
                 "v15 capture_tool_result_tokens",
                 capture_tool_result_tables(),
                 "tool_result_tokens",
+            ),
+            (
+                "v17 capture_worktree_cd",
+                capture_worktree_cd_tables(),
+                "session_worktree_cd",
             ),
         ]
     }
@@ -993,5 +1020,107 @@ mod tests {
             sql.contains("WHERE session_id IS NOT NULL"),
             "the index must stay partial — NULL session_ids carry no identity"
         );
+    }
+}
+
+#[cfg(test)]
+mod worktree_cd_tests {
+    use super::*;
+    use crate::migrate::{apply_migrations, checksum_hex, open_capture_projection};
+    use crate::{CanonicalStore, SqliteStore};
+
+    /// The v17 relation's existence, read from the database itself.
+    fn has_cd_relation(store: &SqliteStore) -> bool {
+        store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM sqlite_master \
+                     WHERE type = 'table' AND name = 'session_worktree_cd'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap()
+            == 1
+    }
+
+    /// v17, pinned from its FIRST commit like every additive capture slice
+    /// since v11: the window in which a migration is quietly editable is the
+    /// window in which someone edits it.
+    #[test]
+    fn the_v17_migration_sql_is_byte_stable() {
+        assert_eq!(
+            checksum_hex(&capture_worktree_cd_schema_sql()),
+            "467cbbe65e05aaec5fa8a6382a2d502c8e5b0469cfa0cae1da5245db03c8d367",
+            "capture_worktree_cd (v17) migration SQL changed — frozen once shipped"
+        );
+    }
+
+    /// A fresh projection gets the relation with the rest of the schema.
+    #[test]
+    fn a_fresh_projection_has_the_cd_relation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_capture_projection(dir.path().join("projection.db")).unwrap();
+        assert!(has_cd_relation(&store));
+    }
+
+    /// A projection left at v16 — every install before this relation — gains
+    /// it on its next open, and only it: the sixteen applied versions are
+    /// skipped on their checksums, never re-run.
+    #[test]
+    fn a_projection_at_v16_gains_the_cd_relation_and_nothing_else() {
+        let store = crate::migrate::fixtures::store();
+        let all = default_migrations();
+        let (through_v16, _) = all.split_at(16);
+        apply_migrations(&store, through_v16).unwrap();
+        assert!(!has_cd_relation(&store), "v16 has no such relation");
+
+        let outcome = apply_migrations(&store, &all).unwrap();
+        assert_eq!((outcome.applied, outcome.skipped), (1, 16));
+        assert!(has_cd_relation(&store));
+    }
+
+    /// The relation is append-only at the SQL layer, whatever writes to it.
+    #[test]
+    fn the_cd_relation_refuses_update_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_capture_projection(dir.path().join("projection.db")).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(store.insert(
+            "session_worktree_cd",
+            &[
+                "observation_id",
+                "session_id",
+                "worktree_token",
+                "worktree_name",
+                "is_linked",
+                "work_tree",
+                "basis",
+                "first_observed_at",
+                "schema_version",
+            ],
+            &[
+                crate::Value::text("o1"),
+                crate::Value::text("s1"),
+                crate::Value::text("0123456789ab"),
+                crate::Value::text("member"),
+                crate::Value::Int(1),
+                crate::Value::text("/w/member"),
+                crate::Value::text("shell_cd"),
+                crate::Value::Int(1),
+                crate::Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        for sql in [
+            "UPDATE session_worktree_cd SET worktree_name = 'main'",
+            "DELETE FROM session_worktree_cd",
+        ] {
+            let refused = store.with_conn(|conn| conn.execute(sql, []));
+            assert!(refused.is_err(), "{sql} must be refused");
+        }
+        assert_eq!(rt.block_on(store.count("session_worktree_cd")).unwrap(), 1);
     }
 }

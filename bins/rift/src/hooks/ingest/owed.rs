@@ -278,7 +278,7 @@ fn owe_search_measurement(
 /// it: two families put them flat under the envelope field beside `tool_name`
 /// and one nests them, and the row is where that fact is already pinned to an
 /// artifact.
-fn search_result_args(
+pub(super) fn search_result_args(
     row: rift_agent::tool_fields::ToolFieldRow,
     payload: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {

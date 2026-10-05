@@ -411,7 +411,7 @@ mod tests {
     /// A real repository with one commit and one **linked worktree**; returns
     /// `(main, linked)`. `core.hooksPath` is an empty directory so the
     /// developer's own installed Rift hooks can never fire inside a fixture.
-    fn repo_with_linked_worktree(tmp: &Path) -> (PathBuf, PathBuf) {
+    pub(in crate::hooks) fn repo_with_linked_worktree(tmp: &Path) -> (PathBuf, PathBuf) {
         let main = tmp.join("main");
         let nohooks = tmp.join("nohooks");
         std::fs::create_dir_all(&main).unwrap();
@@ -443,7 +443,9 @@ mod tests {
 
     /// A capture projection under `dir`, and the current-thread runtime the
     /// production hook path drives it with.
-    fn projection_in(dir: &Path) -> (rift_store::SqliteStore, tokio::runtime::Runtime) {
+    pub(in crate::hooks) fn projection_in(
+        dir: &Path,
+    ) -> (rift_store::SqliteStore, tokio::runtime::Runtime) {
         let store = rift_store::open_capture_projection(dir.join("projection.db")).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -480,7 +482,7 @@ mod tests {
 
     /// Seed the session cache the ingest would have written, so the memo path
     /// under test is the production one.
-    fn seed_cache(git_dir: &Path, session: &str) {
+    pub(in crate::hooks) fn seed_cache(git_dir: &Path, session: &str) {
         let cache = rift_shadow::hooks::SessionCache::new(session, "claude-code", "active", 1);
         rift_shadow::hooks::write_cache(git_dir, &cache).unwrap();
     }
@@ -497,11 +499,13 @@ mod tests {
         seed_cache(&repo.git_dir, "s1");
         let row_id = rift_shadow::ids::session_row_id("claude-code", "s1");
 
-        let first = observe_worktree(&rt, &store, &repo, None, "s1", &row_id, None, 1_000).unwrap();
+        let first =
+            observe_worktree(&rt, &store, &repo, None, None, "s1", &row_id, None, 1_000).unwrap();
         assert!(first, "the first observation of a state is a row");
 
         // Redelivered: the memo answers, no row, no database round trip.
-        let again = observe_worktree(&rt, &store, &repo, None, "s1", &row_id, None, 2_000).unwrap();
+        let again =
+            observe_worktree(&rt, &store, &repo, None, None, "s1", &row_id, None, 2_000).unwrap();
         assert!(!again, "the same state is not observed twice");
 
         // And with the memo gone — a deleted cache, or one written before
@@ -518,7 +522,7 @@ mod tests {
         cache.last_worktree = None;
         rift_shadow::hooks::write_cache(&repo.git_dir, &cache).unwrap();
         assert!(
-            !observe_worktree(&rt, &store, &repo, None, "s1", &row_id, None, 3_000).unwrap(),
+            !observe_worktree(&rt, &store, &repo, None, None, "s1", &row_id, None, 3_000).unwrap(),
             "INSERT OR IGNORE on the state's own id"
         );
 
@@ -545,8 +549,12 @@ mod tests {
         seed_cache(&main_repo.git_dir, "s2");
         seed_cache(&member.git_dir, "s2");
 
-        assert!(observe_worktree(&rt, &store, &main_repo, None, "s2", &row_id, None, 10).unwrap());
-        assert!(observe_worktree(&rt, &store, &member, None, "s2", &row_id, None, 20).unwrap());
+        assert!(
+            observe_worktree(&rt, &store, &main_repo, None, None, "s2", &row_id, None, 10).unwrap()
+        );
+        assert!(
+            observe_worktree(&rt, &store, &member, None, None, "s2", &row_id, None, 20).unwrap()
+        );
         // A subagent's hook in the member is a THIRD observation under the
         // same session: the subagent id is part of the state, so the row that
         // says "this work was a subagent's" cannot be swallowed by the row
@@ -555,6 +563,7 @@ mod tests {
             &rt,
             &store,
             &member,
+            None,
             None,
             "s2",
             &row_id,
@@ -600,6 +609,7 @@ mod tests {
             &store,
             &main_repo,
             Some(&in_member),
+            None,
             "s3",
             &row_id,
             None,
@@ -621,6 +631,7 @@ mod tests {
             &store,
             &main_repo,
             Some(&elsewhere),
+            None,
             "s3",
             &row_id,
             None,

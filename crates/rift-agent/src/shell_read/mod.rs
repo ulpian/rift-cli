@@ -948,6 +948,22 @@ pub fn recognise(command: &str) -> Option<ShellCall> {
     ))
 }
 
+/// The directory a recognised line's leading `cd` moved to, exactly as the
+/// line spelled it.
+///
+/// [`recognise`] folds that directory into every path it returns, which is
+/// what a read needs; the checkout an agent read *in* needs the directory
+/// itself, because a read path may be absolute and say nothing about where the
+/// shell stood. Only a line the grammar recognises answers, so a `cd` in front
+/// of a command nothing here can read never moves an observation.
+#[must_use]
+pub fn leading_cd(command: &str) -> Option<String> {
+    match recognise(command) {
+        Some(_) => cd_prefix(command).0,
+        None => None,
+    }
+}
+
 /// Recognise one *simple* command — the published vocabulary, and nothing
 /// composed.
 ///
