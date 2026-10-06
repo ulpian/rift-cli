@@ -517,9 +517,10 @@ boundary after a client's own compaction signal — Rift injects the
 *pre-eviction* held set:
 
 ```
-[rift] Context recovered. You had read, and no longer hold:
-- crates/rift-store/src/schema/capture.rs@sha256:b6caa84d… L1-412 (unchanged since your read)
-- bins/rift/src/hooks/gate/mod.rs@sha256:0a1b2c3d… L1-406 (changed at L160-188)
+[rift] Context was compacted. Files this session had read, with the content hash and lines it held (facts, not directives):
+- crates/rift-store/src/schema/capture.rs@b6caa84d0f12 L1-412 unchanged since your read
+- bins/rift/src/hooks/gate/mod.rs@0a1b2c3d4e5f L1-406 changed at lines 160-188
+  shape of the current revision: 431 lines, 15210 bytes, 19 top-level definitions
 (6 more not shown)
 ```
 
@@ -531,6 +532,7 @@ It is **fitted** to its own budget (800 tokens by default) with the remainder
 counted, ranked by recency. And each entry carries a **verdict** — unchanged
 since your read, or changed at these lines — so the first read after a
 compaction can be skipped or narrowed rather than repeated blind.
+A changed entry whose current revision has a valid bound outline is followed by one line of that revision's shape, counts only, read from the store the map already opens; when the budget binds, those lines go before any entry does.
 
 How often a compaction happens is the client's business, not Rift's. Where a
 client reads a repository instruction file that could tell it to compact more

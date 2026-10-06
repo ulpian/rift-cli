@@ -16,6 +16,8 @@
 
 use core::fmt::Write as _;
 
+use crate::summary::ValidSummary;
+
 /// The extensions whose files get an outline. Code only: the keyword rules
 /// below are a code grammar, and a heading or a table in a document is a
 /// different shape this outline does not claim to know.
@@ -124,6 +126,18 @@ pub struct FileOutline {
     lines: u32,
     bytes: u64,
     definitions: Vec<Definition>,
+}
+
+/// The size an outline's shape line states: what a surface may say about a
+/// file without naming anything inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutlineShape {
+    /// The file's line count.
+    pub lines: u32,
+    /// The file's byte count.
+    pub bytes: u64,
+    /// How many top-level definitions the outline lists.
+    pub definitions: u32,
 }
 
 impl DefinitionKind {
@@ -315,6 +329,25 @@ pub fn unnamed_outline(digest: &str) -> Option<String> {
         let _ = write!(out, "; #{} {kind} {range}", at.saturating_add(1));
     }
     Some(out)
+}
+
+/// The shape a valid summary's outline states, or `None` when the summary is
+/// not an outline.
+///
+/// Takes a [`ValidSummary`] rather than text, so a shape can only ever come
+/// from a summary proven current against the checkout.
+#[must_use]
+pub fn outline_shape(summary: &ValidSummary) -> Option<OutlineShape> {
+    let digest = core::str::from_utf8(summary.digest()).ok()?;
+    let line = shape_line_of(digest.lines().next()?)?;
+    let mut counts = line
+        .split(", ")
+        .map(|part| part.split(' ').next().unwrap_or_default());
+    Some(OutlineShape {
+        lines: counts.next()?.parse().ok()?,
+        bytes: counts.next()?.parse().ok()?,
+        definitions: counts.next()?.parse().ok()?,
+    })
 }
 
 /// `line` when it is an outline's shape line.

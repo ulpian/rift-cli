@@ -22,8 +22,13 @@ const MAX_RECOVERY_VERDICTS: usize = rift_recall_serve::held_diff::MAX_DIFFED_FI
 enum RecoveryVerdict {
     /// The bytes still hash to the revision the session read.
     Unchanged,
-    /// The file changed, in these places in the numbering a reader sees now.
-    ChangedAt(Vec<(u32, u32)>),
+    /// The file changed, in these places in the numbering a reader sees now,
+    /// with the shape of the revision it holds now when a valid outline of
+    /// that revision is bound.
+    ChangedAt {
+        sites: Vec<(u32, u32)>,
+        shape: Option<rift_recall_serve::OutlineShape>,
+    },
     /// Nothing was reachable to compare against, so nothing is claimed.
     Unknown,
 }
@@ -60,10 +65,14 @@ impl RecoveryEntry {
             held: &self.held,
             verdict: match &self.verdict {
                 RecoveryVerdict::Unchanged => rift_recall_serve::HeldVerdict::Unchanged,
-                RecoveryVerdict::ChangedAt(sites) => {
+                RecoveryVerdict::ChangedAt { sites, .. } => {
                     rift_recall_serve::HeldVerdict::ChangedAt(sites)
                 }
                 RecoveryVerdict::Unknown => rift_recall_serve::HeldVerdict::Unknown,
+            },
+            shape: match &self.verdict {
+                RecoveryVerdict::ChangedAt { shape, .. } => *shape,
+                RecoveryVerdict::Unchanged | RecoveryVerdict::Unknown => None,
             },
         }
     }
@@ -192,11 +201,19 @@ fn recovery_verdict(
     let diff = rt.block_on(rift_recall_serve::held_diff::held_diff_against_basis(
         store, substrate, snapshots, &held, &bytes,
     ));
-    match diff {
-        rift_recall_serve::held_diff::HeldDiff::Changed { ranges, .. } => {
-            RecoveryVerdict::ChangedAt(ranges)
-        }
-        _ => RecoveryVerdict::Unknown,
+    let rift_recall_serve::held_diff::HeldDiff::Changed { ranges, .. } = diff else {
+        return RecoveryVerdict::Unknown;
+    };
+    // The shape of what the file is now, from a valid outline of exactly
+    // these bytes: the store is already open, and nothing is counted here.
+    let shape = rt.block_on(rift_recall_serve::current_outline_shape(
+        store,
+        rel_path,
+        &blob.content_sha256,
+    ));
+    RecoveryVerdict::ChangedAt {
+        sites: ranges,
+        shape,
     }
 }
 
@@ -315,6 +332,20 @@ mod tests {
     /// manifest and the pull verb use — so a real repository, a real commit
     /// and a real mapped blob are what this is built on rather than a stub.
     fn a_window_whose_file_moved() -> (tempfile::TempDir, std::path::PathBuf, &'static str) {
+        a_window_whose_file_moved_from(
+            "moved.txt",
+            "alpha\nbravo\ncharlie\n",
+            "alpha\nBRAVO\ncharlie\n",
+        )
+    }
+
+    /// [`a_window_whose_file_moved`], for a file `name` read at `basis` that
+    /// then became `moved`.
+    fn a_window_whose_file_moved_from(
+        name: &str,
+        basis: &str,
+        moved: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf, &'static str) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -327,14 +358,13 @@ mod tests {
             "schema_version = 1\n[project]\nname = \"t\"\n[features]\ntotal_recall = true\n",
         )
         .unwrap();
-        let basis = "alpha\nbravo\ncharlie\n";
-        std::fs::write(repo.join("moved.txt"), basis).unwrap();
+        std::fs::write(repo.join(name), basis).unwrap();
         std::fs::write(repo.join("still.txt"), "one\n").unwrap();
         git_in(&repo, &["add", "-A"]);
         git_in(&repo, &["commit", "-qm", "seed"]);
 
         let session = "s-labelled";
-        read_and_hold(&repo, session, "moved.txt", basis, 20);
+        read_and_hold(&repo, session, name, basis, 20);
         read_and_hold(&repo, session, "still.txt", "one\n", 10);
 
         // The route to the revision a window holds is the blob map the
@@ -348,9 +378,9 @@ mod tests {
         rt.block_on(rift_recall_ledger::blob_map::persist_blob_oid_map(
             &store,
             &[rift_recall_substrate::worktree::WorktreeBlob {
-                path: "moved.txt".to_owned(),
+                path: name.to_owned(),
                 content_sha256: rift_shadow::sha256_hex(&[basis.as_bytes()]),
-                blob_oid: git_in(&repo, &["rev-parse", "HEAD:moved.txt"]),
+                blob_oid: git_in(&repo, &["rev-parse", &format!("HEAD:{name}")]),
             }],
             0,
         ))
@@ -359,7 +389,7 @@ mod tests {
 
         // The file moves after the session read it, and then the context is
         // compacted.
-        std::fs::write(repo.join("moved.txt"), "alpha\nBRAVO\ncharlie\n").unwrap();
+        std::fs::write(repo.join(name), moved).unwrap();
         evict(&repo, session, 30);
         (tmp, repo, session)
     }
@@ -391,6 +421,76 @@ mod tests {
             "one file, one claim: {map}"
         );
         drop_family_store(&repo);
+    }
+
+    /// **A changed file with a valid outline of what it is now is followed by
+    /// its shape**, read from the store the map already opened; a file with
+    /// no such outline, or one that did not change, gets no shape line.
+    #[test]
+    fn a_changed_file_with_a_bound_outline_of_its_current_bytes_is_followed_by_its_shape() {
+        let moved = "fn alpha() {}\nfn bravo_two() {}\nfn charlie() {}\n";
+        let (_tmp, repo, session) = a_window_whose_file_moved_from(
+            "moved.rs",
+            "fn alpha() {}\nfn bravo() {}\nfn charlie() {}\n",
+            moved,
+        );
+        bind_outline(&repo, "moved.rs", moved);
+        let cfg = rift_config::EffectiveConfig::load(&repo.join(".rift")).unwrap();
+        let map = recovery_map(&repo, &cfg, &CC, START, &compacted(session)).expect("a map");
+        let lines: Vec<&str> = map.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains("moved.rs"))
+            .expect("the moved file is listed");
+        assert!(lines[at].contains("changed at lines 2-2"), "{map}");
+        assert_eq!(
+            lines[at + 1],
+            format!(
+                "  shape of the current revision: 3 lines, {} bytes, 3 top-level definitions",
+                moved.len()
+            ),
+            "{map}"
+        );
+        assert_eq!(
+            map.matches("shape of the current revision").count(),
+            1,
+            "{map}"
+        );
+        drop_family_store(&repo);
+    }
+
+    /// Bind the outline of `text` at `rel` in the family's store, as the
+    /// detached worker will.
+    fn bind_outline(repo: &std::path::Path, rel: &str, text: &str) {
+        let source =
+            rift_shadow::redact::redact(&rift_core::SecretBytes::new(text.as_bytes().to_vec()))
+                .unwrap()
+                .redacted;
+        let counts = rift_recall_ledger::validity_store::OutlineCounts::measure(
+            rel,
+            &source,
+            &|t: &str| u32::try_from(t.len()).unwrap(),
+            "cl100k_base",
+        )
+        .unwrap();
+        let file = rift_recall_ledger::validity_store::OutlineSource {
+            path: rel,
+            source: &source,
+            policy_version: rift_recall_policy::SERVE_POLICY_VERSION,
+            refuses_path: &|_| false,
+        };
+        let db = crate::family::recall_db(repo).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let bound = rt.block_on(rift_recall_ledger::validity_store::put_file_outline(
+            &store,
+            &rift_store::PlainCipher,
+            &file,
+            &counts,
+        ));
+        assert!(bound.unwrap().is_some());
     }
 
     /// ★ **Every position the renderer hands back names its own entry.** Over

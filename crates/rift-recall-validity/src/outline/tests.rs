@@ -195,6 +195,37 @@ fn a_digest_that_is_not_an_outline_is_refused_whole() {
     }
 }
 
+fn valid(digest: &[u8]) -> crate::ValidSummary {
+    let dg = crate::MemoryDigestStore::default();
+    let store = crate::SummaryStore::new();
+    let source = b"fn a() {}\n";
+    let versions = crate::outline_versions(1);
+    let key = store.put_summary(&dg, "a.rs", source, versions, digest);
+    let mut snap = crate::WorktreeSnapshot::new();
+    snap.insert("a.rs".into(), crate::summary::sha256_hex(source));
+    let crate::Validity::Valid(summary) = crate::resolve(&store, &dg, &snap, &key) else {
+        panic!("a fresh binding resolves valid");
+    };
+    summary
+}
+
+#[test]
+fn a_valid_outline_states_its_shape_and_any_other_digest_states_none() {
+    let shape = outline_shape(&valid(
+        b"412 lines, 13840 bytes, 27 top-level defs\nfn a L1-L3\n",
+    ));
+    assert_eq!(
+        shape,
+        Some(OutlineShape {
+            lines: 412,
+            bytes: 13_840,
+            definitions: 27,
+        })
+    );
+    assert_eq!(outline_shape(&valid(b"2x error: boom\n")), None);
+    assert_eq!(outline_shape(&valid(&[0xff, 0xfe])), None);
+}
+
 proptest::proptest! {
     /// Whatever the bytes, a path whose extension is not a code extension
     /// gets no outline, so no summary of it can ever be bound.

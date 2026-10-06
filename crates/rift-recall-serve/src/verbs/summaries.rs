@@ -9,10 +9,12 @@
 use std::collections::BTreeMap;
 
 use rift_recall_ledger::candidates::LoadedCandidate;
-use rift_recall_ledger::validity_store::current_summaries;
+use rift_recall_ledger::validity_store::{current_summaries, current_summary, CurrentSummary};
 use rift_recall_policy::SERVE_POLICY_VERSION;
 use rift_recall_substrate::SubstrateReader;
-use rift_recall_validity::{outline_versions, SummaryVersions, Validity};
+use rift_recall_validity::{
+    outline_shape, outline_versions, OutlineShape, SummaryVersions, Validity,
+};
 use rift_store::{CanonicalStore, PlainCipher};
 use serde_json::{json, Value};
 
@@ -64,6 +66,29 @@ pub(crate) async fn checked_summaries<S: CanonicalStore, R: SubstrateReader>(
             Validity::Invalid { .. } | Validity::Degraded { .. } => false,
         })
         .collect()
+}
+
+/// The shape of the outline bound to `path` at `current`, the revision the
+/// caller has just hashed off the checkout, or `None` when no valid outline
+/// of that revision is bound.
+///
+/// For the recovery map, which already holds the store open at a turn
+/// boundary and has already hashed the file: one read, no tokenizer.
+pub async fn current_outline_shape(
+    store: &impl CanonicalStore,
+    path: &str,
+    current: &str,
+) -> Option<OutlineShape> {
+    let bound = current_summary(store, &PlainCipher, path, Some(current), served_versions())
+        .await
+        .ok()?;
+    match bound {
+        CurrentSummary::Bound(Validity::Valid(summary)) => outline_shape(&summary),
+        CurrentSummary::Bound(_)
+        | CurrentSummary::NotBound
+        | CurrentSummary::Unchecked
+        | CurrentSummary::Stale => None,
+    }
 }
 
 /// Whether the checkout's bytes at `path` hash to `revision`, asking the

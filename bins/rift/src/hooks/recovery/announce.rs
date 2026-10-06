@@ -140,6 +140,7 @@ mod tests {
                 hash: &hash,
                 held: &held,
                 verdict: rift_recall_serve::HeldVerdict::Unchanged,
+                shape: None,
             })
             .collect();
         let mut fitted = 0usize;
@@ -216,6 +217,7 @@ mod tests {
                 hash: &hash,
                 held: &held,
                 verdict: rift_recall_serve::HeldVerdict::Unchanged,
+                shape: None,
             })
             .collect();
         let whole_entries = |text: &str| -> usize {
