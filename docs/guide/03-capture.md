@@ -554,6 +554,13 @@ The `scheduled` strategy's interval archive is the third.
 It redacts the session's whole transcript, which on a long session is megabytes, and performed on the hook it outlasted the agent client's own hook timeout: the hook was killed inside it, nothing after it ran, and the next hook began it again, so the interval checkpoint never landed.
 The hook only decides, and journals one archive per session however many hooks find the same interval due.
 
+The working-tree snapshot a turn boundary takes is the fourth.
+A prompt opens a turn and closes the human's window; a turn's end closes the agent's.
+At each, capture observes every path that differs from `HEAD`, diffs it against the previous boundary and writes the anchor bytes to the local object store, which costs a `git status` and a read and a diff per changed path, so it grows with what you have left uncommitted.
+The hook records only the commit `HEAD` names, read from the ref files without running git, and the boundary's instant; the worker takes the snapshot as of that instant, before the next boundary's and before the commit whose attribution replays it.
+A file whose modification time is after the instant is unknown to that boundary: no edit is recorded for it in the window the boundary closes, and its bytes as the worker finds them anchor the next window.
+An edit that lands between the hook and the worker therefore costs that file's human/agent split for one window, where diffing the later bytes would credit the edit to the window that closed before it was made.
+
 None of them fits, and there is no daemon to hand them to, so the answer reuses the
 shape the commit path already had. The hook writes down what is owed in a job
 journal under the git directory — identifier-only jobs, written atomically,
@@ -561,7 +568,7 @@ the file name being the job's identity, so a redelivered hook overwrites its
 own job rather than queueing a second — then spawns one detached, one-shot
 child and does not wait; the child's standard streams go nowhere, so it can
 never write over the terminal git is using, and it drains everything under one
-lock in order (token counts, then condenses and interval archives, then queued commits) until a pass finds
+lock in order (token counts and boundary snapshots, then condenses and interval archives, then queued commits) until a pass finds
 nothing new. **`rift doctor` is the backstop**: its sweep drains the journal
 *first*, before any idle-window logic, because a session whose end journaled a
 condense that no worker finished is exactly what the sweep exists to rescue and
@@ -578,6 +585,7 @@ A job carries **identifiers only**, never capture bytes: a condense job names
 the session, a token job names the read's row and the content identity of the
 bytes to count, so the worker re-reads *those* bytes or none.
 An interval archive job names the session and why it was due.
+A boundary snapshot job names the session, the turn and its edge, `HEAD` and the instant.
 The worker asks the strategy again under its lock, on the job's clock, and archives only if the interval is still owed, so a commit that archived the session in the meantime is not followed by a second checkpoint for the same interval.
 
 Three properties hold this together. The journal entry is **durable before the

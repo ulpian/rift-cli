@@ -28,6 +28,47 @@ pub fn hash_object_write(repo: &RepoPaths, bytes: &[u8]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out).trim().to_owned())
 }
 
+/// Write the worktree files at `rel_paths` into the object store with one
+/// `git hash-object -w --no-filters --stdin-paths`, returning their oids in
+/// the order given.
+///
+/// One process for a whole turn boundary instead of one per file. The oids
+/// are those [`hash_object_write`] gives the same bytes: `--no-filters` hashes
+/// the file as it is on disk, which `--stdin` always does, so no clean filter
+/// or line-ending rule can make the two disagree. Paths go to git absolute,
+/// because `--stdin-paths` reads them against the process's directory, and an
+/// absolute path never starts with the quote that makes git unquote a line.
+///
+/// # Errors
+/// [`RiftError::Validity`] for a path the line protocol cannot carry (a line
+/// break, or not UTF-8); [`RiftError::Storage`] if `git` cannot be spawned,
+/// exits non-zero (a file it cannot read) or answers with a different count.
+pub fn hash_files_write(repo: &RepoPaths, rel_paths: &[&str]) -> Result<Vec<String>> {
+    if rel_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let work_tree = child_process_path(&repo.work_tree);
+    let mut stdin = String::new();
+    for rel in rel_paths {
+        let path = work_tree.join(rel);
+        let Some(line) = path.to_str().filter(|p| !p.contains(['\n', '\r'])) else {
+            return Err(RiftError::validity("path cannot be named on a line"));
+        };
+        stdin.push_str(line);
+        stdin.push('\n');
+    }
+    let argv = ["hash-object", "-w", "--no-filters", "--stdin-paths"].map(String::from);
+    let out = run_git_capture(repo, &argv, stdin.as_bytes())?;
+    let oids: Vec<String> = String::from_utf8_lossy(&out)
+        .lines()
+        .map(|l| l.trim().to_owned())
+        .collect();
+    if oids.len() != rel_paths.len() {
+        return Err(RiftError::storage("hash-object answered a different count"));
+    }
+    Ok(oids)
+}
+
 /// The trimmed first line of git stdout as an oid (hex).
 fn trim_oid(out: &[u8]) -> String {
     String::from_utf8_lossy(out)
@@ -773,5 +814,39 @@ mod tests {
         // A name that merely CONTAINS an exempt name is not exempt: the match
         // is on the tab-delimited entry name, not on a substring.
         assert!(!is_anchor_dependent_entry(&line("not-metadata.json")));
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn one_batch_write_names_the_same_oids_as_one_write_per_file() {
+        let (tmp, repo) = init_repo();
+        let dir = tmp.path();
+        // A line-ending rule and a nested path: the batch must hash the bytes
+        // on disk, exactly as the one-file write of those bytes does.
+        std::fs::write(dir.join(".gitattributes"), b"* text eol=crlf\n").unwrap();
+        std::fs::create_dir_all(dir.join("src/deep")).unwrap();
+        std::fs::write(dir.join("src/deep/lf.rs"), b"fn a() {}\nfn b() {}\n").unwrap();
+        std::fs::write(dir.join("crlf.txt"), b"one\r\ntwo\r\n").unwrap();
+        std::fs::write(dir.join("empty"), b"").unwrap();
+        let paths = ["src/deep/lf.rs", "crlf.txt", "empty", ".gitattributes"];
+
+        let batch = hash_files_write(&repo, &paths).unwrap();
+
+        let one_by_one: Vec<String> = paths
+            .iter()
+            .map(|p| hash_object_write(&repo, &std::fs::read(dir.join(p)).unwrap()).unwrap())
+            .collect();
+        assert_eq!(batch, one_by_one);
+        let reader = crate::GixBlobReader::open(dir).unwrap();
+        let first = crate::BlobReader::read_blob(&reader, &batch[0]).unwrap();
+        assert_eq!(first.as_deref(), Some(&b"fn a() {}\nfn b() {}\n"[..]));
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn a_batch_write_refuses_a_path_with_a_line_break_before_git_runs() {
+        let (_tmp, repo) = init_repo();
+        assert!(hash_files_write(&repo, &["a\nb"]).is_err());
+        assert_eq!(hash_files_write(&repo, &[]).unwrap(), Vec::<String>::new());
     }
 }

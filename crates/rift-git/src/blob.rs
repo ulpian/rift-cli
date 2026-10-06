@@ -38,6 +38,22 @@ pub trait BlobReader {
     /// [`rift_core::RiftError`] on a read failure.
     fn tree_entries_at(&self, commit_hex: &str) -> Result<Vec<TreeEntry>>;
 
+    /// The blob entries of the commit's tree at exactly `paths`, in path
+    /// order; a path the tree lacks, or names a tree or a submodule at, is left
+    /// out. The answer equals [`BlobReader::tree_entries_at`] filtered to
+    /// `paths`, which is how a reader without a cheaper lookup gives it; the
+    /// production reader walks one path at a time instead of listing the whole
+    /// tree, since a turn boundary asks about a handful of files.
+    ///
+    /// # Errors
+    /// [`rift_core::RiftError`] on a read failure.
+    fn tree_entries_for(&self, commit_hex: &str, paths: &[String]) -> Result<Vec<TreeEntry>> {
+        let wanted: std::collections::BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+        let mut entries = self.tree_entries_at(commit_hex)?;
+        entries.retain(|e| wanted.contains(e.path.as_str()));
+        Ok(entries)
+    }
+
     /// The first-parent commit oid (hex) of `commit_hex`, if any (a root commit
     /// has none).
     ///
@@ -216,6 +232,32 @@ mod gix_reader {
             Ok(out)
         }
 
+        fn tree_entries_for(&self, commit_hex: &str, paths: &[String]) -> Result<Vec<TreeEntry>> {
+            let Some(commit) = self.commit(commit_hex)? else {
+                return Ok(Vec::new());
+            };
+            let tree = commit
+                .tree()
+                .map_err(|e| RiftError::substrate(format!("read tree: {e}")))?;
+            let mut out = Vec::new();
+            for path in paths {
+                let entry = tree
+                    .lookup_entry(path.split('/').map(str::as_bytes))
+                    .map_err(|e| RiftError::substrate(format!("look up tree entry: {e}")))?;
+                let Some(entry) = entry else {
+                    continue;
+                };
+                if entry.mode().is_blob() {
+                    out.push(TreeEntry {
+                        path: path.clone(),
+                        blob_oid: entry.object_id().to_string(),
+                    });
+                }
+            }
+            out.sort_by(|a, b| a.path.cmp(&b.path));
+            Ok(out)
+        }
+
         fn parent_of(&self, commit_hex: &str) -> Result<Option<String>> {
             let Some(commit) = self.commit(commit_hex)? else {
                 return Ok(None);
@@ -333,5 +375,55 @@ mod tests {
             reader.read_blob(&pa.blob_oid).unwrap().unwrap(),
             b"one\ntwo\n"
         );
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn looking_up_paths_one_at_a_time_agrees_with_listing_the_whole_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        for path in ["a.txt", "src/lib.rs", "src/deep/mod.rs", "src/deep/z.rs"] {
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, path.as_bytes()).unwrap();
+        }
+        run(&["add", "."]);
+        run(&["commit", "-qm", "c0"]);
+        let reader = GixBlobReader::open(dir.path()).unwrap();
+        let head = reader.head_hex().unwrap().unwrap();
+        let paths: Vec<String> = [
+            "src/deep/z.rs",
+            "a.txt",
+            "src/deep",
+            "a.txt/x",
+            "missing.rs",
+        ]
+        .map(String::from)
+        .to_vec();
+
+        let looked_up = reader.tree_entries_for(&head, &paths).unwrap();
+
+        let mut listed = reader.tree_entries_at(&head).unwrap();
+        listed.retain(|e| paths.contains(&e.path));
+        assert_eq!(looked_up, listed);
+        assert_eq!(
+            looked_up.len(),
+            2,
+            "a directory or a missing path is no blob"
+        );
+        let memory = MemoryBlobReader::new().with_tree("c", listed.clone());
+        assert_eq!(memory.tree_entries_for("c", &paths).unwrap(), listed);
     }
 }
