@@ -82,8 +82,11 @@
 //! in. [`housekeeping`] counts a checkout's journals and sweeps the ones it has
 //! finished with. [`frozen`] reads a session's windows for the checkpoint
 //! that freezes them, on the archive path and never on a decision's.
-//!
+//! [`coordinator`] is the one question asked of a window that is not the
+//! caller's: what a subagent's coordinator has read that the subagent does not
+//! hold, named as a hint and never counted as coverage.
 
+mod coordinator;
 mod denies;
 mod edits;
 mod fold;
