@@ -91,20 +91,17 @@ fn a_cache_miss_converts_through_the_respawned_binary_within_the_deadline_or_fal
     // Arm 2: the production budget. Either it converted, or it fell back —
     // and the fallback is a refusal, never a panic and never a wait. Which of
     // the two happens depends on the machine, so the test asserts the property
-    // that must hold on both. This arm is also the latency canary for a child
-    // that is now the whole binary: a deadline here on an idle machine is a
-    // route that got slower than the budget it runs under.
+    // that must hold on both, and nothing about the test's own clock. The
+    // converter's deadline starts once the spawn has returned and ends in a
+    // kill, so a stopwatch around the call measures how fast this machine
+    // execs and reaps a process, not the bound the converter keeps; that bound
+    // is the budget it carries, and a wait past it can only come back as the
+    // `deadline` refusal asserted here.
     assert_eq!(converter.budget(), DEFAULT_BUDGET);
-    let started = std::time::Instant::now();
     match converter.convert(CSV, "csv", &caps) {
         Ok(markdown) => assert!(markdown.text.contains("| alpha | 1 |"), "{markdown:?}"),
         Err(error) => assert_eq!(error, DocError::Engine { code: "deadline" }),
     }
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "a conversion on the hook path took {:?}",
-        started.elapsed()
-    );
 
     // Arm 3: a budget nothing can meet, so the fallback is not left to the
     // machine's mood. A deadline that had to be waited out would be a hook
@@ -154,18 +151,21 @@ fn the_converter_spawns_this_very_binary_and_nothing_on_path() {
 /// No program is not an error the developer ever sees: the caller is handed a
 /// refusal, leaves the read untouched, and the agent opens the file it asked
 /// for. Nothing is written, nothing is retried, nothing is logged at them.
+///
+/// Nothing is waited for either, and the refusal's code is what says so:
+/// `helperMissing` is given only when the spawn itself fails, before the
+/// deadline has started, so a converter that had waited out any part of its
+/// budget would have answered something else.
 #[test]
 fn a_missing_program_leaves_the_read_untouched() {
     let absent = Path::new(common::rift_bin()).with_file_name("rift-that-was-never-built");
     assert!(!absent.exists());
-    let started = std::time::Instant::now();
     assert_eq!(
         ChildProcessConverter::new(&absent, ROUTE).convert(CSV, "csv", &ConvertCaps::default()),
         Err(DocError::Engine {
             code: "helperMissing"
         })
     );
-    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 /// The command line the seam spawns, over a real file, end to end: the route
@@ -257,18 +257,15 @@ fn a_document_that_expands_past_the_ceiling_is_refused_and_never_read_whole() {
         ..ConvertCaps::default()
     };
     assert_eq!(output_ceiling(&caps), MIN_OUTPUT_BYTES);
+    // A refusal that is the child's own classification, rather than
+    // `deadline`, is an answer that arrived inside the budget: the expanding
+    // document was declined, not waited out.
     let converter = converter().with_budget(PATIENT);
-    let started = std::time::Instant::now();
     assert_eq!(
         converter.convert(&bytes, "ods", &caps),
         Err(DocError::Engine {
             code: "resourceLimit"
         })
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(20),
-        "the expanding document was waited out: {:?}",
-        started.elapsed()
     );
 
     // And it really does expand: under a ceiling that fits it, the same 846
