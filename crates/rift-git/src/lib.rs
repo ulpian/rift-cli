@@ -48,8 +48,9 @@ pub use blob::GixBlobReader;
 pub use blob::{BlobReader, MemoryBlobReader, TreeEntry};
 pub use child_path::{child_process_path, display_path};
 pub use command::{
-    changed_worktree_paths, checkout_argv, git_checkout, git_reset_hard, reset_hard_argv, run_git,
-    run_git_capture, run_git_capture_env, run_git_status, validate_oid, validate_refspec,
+    changed_worktree_paths, changed_worktree_paths_outside_rift_state, checkout_argv, git_checkout,
+    git_reset_hard, reset_hard_argv, run_git, run_git_capture, run_git_capture_env, run_git_status,
+    validate_oid, validate_refspec,
 };
 pub use discovery::{
     discover, gitdir_text_path, is_gitdir, list_worktrees, repo_id_for, LinkedWorktree, RepoPaths,
@@ -61,8 +62,8 @@ pub use family::{
 pub use head::{head_state, HeadState};
 pub use identity::{GitConfigIdentity, ENV_DEVELOPER_OVERRIDE};
 pub use plumbing::{
-    commit_tree, commit_tree_oid, hash_object_write, mktree, path_in_commit, path_object_oid,
-    resolve_commit, update_ref_cas, update_ref_create, PlumbingGitWrite,
+    commit_tree, commit_tree_oid, hash_files_write, hash_object_write, mktree, path_in_commit,
+    path_object_oid, resolve_commit, update_ref_cas, update_ref_create, PlumbingGitWrite,
 };
 pub use write::{
     GitFileMode, GitIdent, MemoryGitWrite, NativeGitWrite, OrphanCommit, TreeWriteEntry,

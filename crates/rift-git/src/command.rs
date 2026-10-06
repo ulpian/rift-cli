@@ -7,6 +7,9 @@ use rift_core::{Result, RiftError};
 
 use crate::{child_process_path, RepoPaths};
 
+/// Rift's own state directory, relative to a work tree's root.
+const RIFT_STATE_DIR: &str = ".rift/state";
+
 /// Validate a git object id: non-empty lowercase hex of a sha1/sha256 length.
 ///
 /// # Errors
@@ -161,16 +164,54 @@ pub fn run_git_status(
 /// # Errors
 /// [`RiftError::Storage`] if `git` cannot be spawned or exits non-zero.
 pub fn changed_worktree_paths(repo: &RepoPaths) -> Result<Vec<String>> {
-    let out = run_git_capture(
+    let out = run_git_capture(repo, &status_argv(&[]), &[])?;
+    Ok(porcelain_z_paths(&out))
+}
+
+/// [`changed_worktree_paths`] without anything under Rift's own state
+/// directory (`.rift/state/`).
+///
+/// A turn boundary observes what a person or an agent changed; Rift's search
+/// index and serve records are neither, and nothing makes a user's repository
+/// ignore them, so the exclusion is a pathspec on the status call itself
+/// rather than an ignore rule written into the user's repository. `top` roots
+/// the pathspec at the work tree whatever directory the hook runs from, and
+/// `literal` keeps the name from being read as a glob. `GIT_LITERAL_PATHSPECS`
+/// is pinned off because, set in the environment, it turns the magic into a
+/// literal name and the status would answer with nothing.
+///
+/// # Errors
+/// [`RiftError::Storage`] if `git` cannot be spawned or exits non-zero.
+pub fn changed_worktree_paths_outside_rift_state(repo: &RepoPaths) -> Result<Vec<String>> {
+    let exclude = format!(":(top,exclude,literal){RIFT_STATE_DIR}");
+    let out = run_git_capture_env(
         repo,
-        &[
-            "status".into(),
-            "--porcelain=v1".into(),
-            "-z".into(),
-            "--untracked-files=all".into(),
-        ],
+        &status_argv(&[exclude]),
         &[],
+        &[("GIT_LITERAL_PATHSPECS", "0")],
     )?;
+    Ok(porcelain_z_paths(&out))
+}
+
+/// `git status --porcelain=v1 -z --untracked-files=all`, then `pathspecs`
+/// after a `--` terminator. Porcelain v1 names paths from the work tree's
+/// root whatever the process's directory, and `-z` never quotes them.
+fn status_argv(pathspecs: &[String]) -> Vec<String> {
+    let mut argv: Vec<String> = vec![
+        "status".into(),
+        "--porcelain=v1".into(),
+        "-z".into(),
+        "--untracked-files=all".into(),
+    ];
+    if !pathspecs.is_empty() {
+        argv.push("--".into());
+        argv.extend_from_slice(pathspecs);
+    }
+    argv
+}
+
+/// The paths of a `status --porcelain=v1 -z` answer, sorted and deduplicated.
+fn porcelain_z_paths(out: &[u8]) -> Vec<String> {
     let mut paths = Vec::new();
     let mut fields = out.split(|b| *b == 0);
     while let Some(entry) = fields.next() {
@@ -190,7 +231,7 @@ pub fn changed_worktree_paths(repo: &RepoPaths) -> Result<Vec<String>> {
     }
     paths.sort();
     paths.dedup();
-    Ok(paths)
+    paths
 }
 
 #[cfg(test)]
@@ -220,5 +261,56 @@ mod tests {
         assert_eq!(checkout_argv("rift/x"), vec!["checkout", "--", "rift/x"]);
         // the `--` precedes the untrusted value → it can't parse as a flag.
         assert!(argv.iter().position(|a| a == "--").unwrap() < argv.len() - 1);
+    }
+
+    /// A real repository with one commit and a linked worktree beside it.
+    #[cfg(feature = "gix")]
+    fn repo_with_a_linked_worktree(root: &std::path::Path) -> std::path::PathBuf {
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        let main = root.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["config", "user.email", "t@example.invalid"]);
+        git(&main, &["config", "user.name", "T"]);
+        git(&main, &["config", "commit.gpgsign", "false"]);
+        git(&main, &["config", "core.quotePath", "true"]);
+        std::fs::write(main.join("a.txt"), b"one\n").unwrap();
+        git(&main, &["add", "a.txt"]);
+        git(&main, &["commit", "-q", "-m", "seed"]);
+        let linked = root.join("linked");
+        git(&main, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+        linked
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn the_boundary_status_leaves_rift_state_out_of_a_linked_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let linked = repo_with_a_linked_worktree(tmp.path());
+        let state = linked.join(".rift/state/na\u{ef}ve dir");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("x\u{e9}.json"), b"{}\n").unwrap();
+        std::fs::write(linked.join(".rift/config.toml"), b"[x]\n").unwrap();
+        std::fs::write(linked.join("na\u{ef}ve.txt"), b"user\n").unwrap();
+        std::fs::write(linked.join("a.txt"), b"one\ntwo\n").unwrap();
+        let repo = crate::discover(&linked).unwrap();
+
+        assert_eq!(
+            changed_worktree_paths_outside_rift_state(&repo).unwrap(),
+            vec![".rift/config.toml", "a.txt", "na\u{ef}ve.txt"],
+            "Rift's state is left out; its committed configuration is not"
+        );
+        assert_eq!(
+            changed_worktree_paths(&repo).unwrap().len(),
+            4,
+            "the plain status still names every untracked file"
+        );
     }
 }
