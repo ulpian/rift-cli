@@ -58,6 +58,8 @@
 //! them, and is not built. Installer drift is already pinned elsewhere.
 
 mod capture;
+#[cfg(test)]
+mod capture_tests;
 mod enrich;
 mod preview;
 mod stack;
