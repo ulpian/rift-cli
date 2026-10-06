@@ -1,5 +1,5 @@
 //! The capture rebuild reads `session_worktrees.jsonl`: every frozen
-//! observation of a session the projection does not already place is
+//! observation whose state the projection does not already hold is
 //! restored, headless, into the relation its basis belongs to, with this
 //! machine's checkout for path.
 
@@ -25,6 +25,9 @@ const OBSERVATIONS: &str = "SELECT observation_id, session_id, worktree_token, w
      is_linked, branch, head_oid, subagent_id, basis, first_observed_at, schema_version \
      FROM {relation} ORDER BY observation_id";
 
+/// Both observation relations as one, as every reader reads them.
+const BOTH: &str = "(SELECT * FROM session_worktree UNION ALL SELECT * FROM session_worktree_cd)";
+
 fn store() -> SqliteStore {
     let s = SqliteStore::open_in_memory().unwrap();
     s.create_canonical_schema().unwrap();
@@ -38,7 +41,19 @@ fn shard_id() -> String {
 /// A header-only shard naming [`NATIVE`], carrying `artifact` as its
 /// `session_worktrees.jsonl`.
 fn shard_with(artifact: &[u8]) -> MemorySubstrate {
-    let id = shard_id();
+    let shard = CheckpointShard {
+        checkpoint_id: shard_id(),
+        dialect: Dialect::Rift,
+        prev: None,
+        ordinal: 0,
+    };
+    add_shard(MemorySubstrate::local(), shard, artifact)
+}
+
+/// `sub` with one more header-only shard naming [`NATIVE`], carrying
+/// `artifact` as its `session_worktrees.jsonl`.
+fn add_shard(sub: MemorySubstrate, shard: CheckpointShard, artifact: &[u8]) -> MemorySubstrate {
+    let id = shard.checkpoint_id.clone();
     let report = format!(
         r#"{{"total_spans":0,"rule_pack_versions":["builtin@1"],"input_sha256":"{}"}}"#,
         "c".repeat(64)
@@ -48,14 +63,7 @@ fn shard_with(artifact: &[u8]) -> MemorySubstrate {
         rfc3339_utc_ms(CREATED_AT),
         "d".repeat(64)
     );
-    let shard = CheckpointShard {
-        checkpoint_id: id.clone(),
-        dialect: Dialect::Rift,
-        prev: None,
-        ordinal: 0,
-    };
-    MemorySubstrate::local()
-        .with_shard(shard)
+    sub.with_shard(shard)
         .with_artifact(&id, "redaction_report.json", report.as_bytes())
         .with_artifact(&id, "metadata.json", metadata.as_bytes())
         .with_artifact(&id, "session_worktrees.jsonl", artifact)
@@ -129,8 +137,9 @@ async fn paths(s: &SqliteStore) -> Vec<String> {
 
 /// ★ Into an empty projection a frozen observation restores the row a
 /// writer with no head derives for the same state, id included, and a second
-/// pass writes nothing; over a live projection that already places the
-/// session, nothing is written, so no headless row sits beside a live one.
+/// pass writes nothing; over a live projection, which holds every frozen
+/// state with its head, nothing is written, so no headless row sits beside a
+/// live one.
 #[tokio::test]
 async fn a_frozen_observation_fills_an_empty_projection_and_leaves_a_live_one_alone() {
     let observations = [
@@ -142,13 +151,14 @@ async fn a_frozen_observation_fills_an_empty_projection_and_leaves_a_live_one_al
 
     let live = store();
     let head = "e".repeat(40);
-    let row = written_row(&observations[0], Some(&head), "/live/checkout");
-    assert!(record_session_worktree(&live, &row).await.unwrap());
-    let before = rows(&live, "session_worktree").await;
+    for observation in &observations {
+        let row = written_row(observation, Some(&head), "/live/checkout");
+        assert!(record_session_worktree(&live, &row).await.unwrap());
+    }
+    let before = rows(&live, BOTH).await;
     let report = rebuild(&live, &sub).await;
     assert_eq!(report.parse_issues, 0, "{:?}", report.parse_notes);
-    assert_eq!(rows(&live, "session_worktree").await, before);
-    assert_eq!(live.count("session_worktree_cd").await.unwrap(), 0);
+    assert_eq!(rows(&live, BOTH).await, before);
 
     let rebuilt = store();
     rebuild(&rebuilt, &sub).await;
@@ -163,6 +173,39 @@ async fn a_frozen_observation_fills_an_empty_projection_and_leaves_a_live_one_al
     let first = rows(&rebuilt, "session_worktree").await;
     rebuild(&rebuilt, &sub).await;
     assert_eq!(rows(&rebuilt, "session_worktree").await, first, "no-op");
+}
+
+/// The artifact is cumulative, so a later shard of a session carries every
+/// state an earlier one froze plus the states seen since: a cold rebuild
+/// restores the new states too — a subagent's, here — while the states the
+/// first shard already restored are not written twice.
+#[tokio::test]
+async fn a_later_shard_restores_the_states_an_earlier_shard_did_not_carry() {
+    let main = seen("main", "payload_cwd", 10);
+    let subagent = ArchivedWorktreeObservation {
+        subagent: Some("agent-7".to_owned()),
+        ..seen("lane-a", "payload_cwd", 20)
+    };
+    let first = session_worktrees_jsonl_bytes(std::slice::from_ref(&main)).unwrap();
+    let both = session_worktrees_jsonl_bytes(&[main.clone(), subagent.clone()]).unwrap();
+    let later = CheckpointShard {
+        checkpoint_id: "ab".repeat(32),
+        dialect: Dialect::Rift,
+        prev: Some(shard_id()),
+        ordinal: 1,
+    };
+    let sub = add_shard(shard_with(&first), later, &both);
+
+    let rebuilt = store();
+    let report = rebuild(&rebuilt, &sub).await;
+    assert_eq!(report.parse_issues, 0, "{:?}", report.parse_notes);
+    let want = store();
+    for observation in [&main, &subagent] {
+        let row = written_row(observation, None, "");
+        assert!(record_session_worktree(&want, &row).await.unwrap());
+    }
+    let relation = "session_worktree";
+    assert_eq!(rows(&rebuilt, relation).await, rows(&want, relation).await);
 }
 
 /// A `shell_cd` observation lands in `session_worktree_cd` and only there,

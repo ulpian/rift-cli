@@ -5,7 +5,10 @@
 //! with the capture worker drained inline, from the main checkout of a
 //! repository with one linked member: a prompt, a shell read whose leading
 //! `cd` moves into the member, and a session end that condenses the
-//! session's observations into the checkpoint's `session_worktrees.jsonl`.
+//! session's observations into the checkpoint's `session_worktrees.jsonl`;
+//! then a second turn in which a subagent reads, and a second end that
+//! condenses a second checkpoint whose artifact is the first's plus the
+//! subagent's state.
 //! The rows of both observation relations are recorded off the live capture
 //! projection; then the cache root moves to an empty directory, `rift
 //! rebuild` reads the same checkpoint, and the rows are recorded again. Every
@@ -152,6 +155,7 @@ impl Fixture {
 fn a_cold_rebuild_restores_every_worktree_observation_the_live_hooks_recorded() {
     let fx = Fixture::new();
     replay_session(&fx);
+    replay_subagent_turn(&fx);
 
     let live = fx.capture_projection("live");
     let (code, out) = fx.rift("rebuilt", &["rebuild"], "");
@@ -160,7 +164,11 @@ fn a_cold_rebuild_restores_every_worktree_observation_the_live_hooks_recorded() 
 
     let main_rows = observations(&live, "session_worktree");
     let cd_rows = observations(&live, "session_worktree_cd");
-    assert_eq!(main_rows.len(), 1, "the main checkout: {main_rows:?}");
+    assert_eq!(
+        main_rows.len(),
+        2,
+        "the parent and the subagent: {main_rows:?}"
+    );
     assert_eq!(cd_rows.len(), 1, "the member the cd named: {cd_rows:?}");
     assert_eq!(observations(&rebuilt, "session_worktree"), main_rows);
     assert_eq!(observations(&rebuilt, "session_worktree_cd"), cd_rows);
@@ -168,11 +176,12 @@ fn a_cold_rebuild_restores_every_worktree_observation_the_live_hooks_recorded() 
     let want = [
         ("lane-a".to_owned(), canonical(&fx.member)),
         ("main".to_owned(), canonical(&fx.repo)),
+        ("main".to_owned(), canonical(&fx.repo)),
     ];
     assert_eq!(paths(&live), want, "the live hooks' paths");
     assert_eq!(paths(&rebuilt), want, "the restored paths");
-    assert_eq!(heads(&live), [true, true], "the live hooks read HEAD");
-    assert_eq!(heads(&rebuilt), [false, false], "no shard carries a head");
+    assert_eq!(heads(&live), [true; 3], "the live hooks read HEAD");
+    assert_eq!(heads(&rebuilt), [false; 3], "no shard carries a head");
 }
 
 /// The session, replayed hook by hook: a prompt, a shell read that moves into
@@ -185,6 +194,25 @@ fn replay_session(fx: &Fixture) {
         "tool_name": "Bash",
         "tool_input": {"command": command},
         "tool_use_id": "toolu_worktree_cd",
+    });
+    fx.hook("PreToolUse", read);
+    fx.hook("SessionEnd", serde_json::json!({"reason": "exit"}));
+}
+
+/// The session again, after its first checkpoint: a turn in which a
+/// subagent reads, and an end that condenses a second checkpoint. The
+/// subagent's state is first frozen there, so only a rebuild that reads every
+/// shard's new states restores it.
+fn replay_subagent_turn(fx: &Fixture) {
+    fx.hook(
+        "UserPromptSubmit",
+        serde_json::json!({"prompt": "delegate"}),
+    );
+    let read = serde_json::json!({
+        "tool_name": "Read",
+        "tool_input": {"file_path": fx.repo.join("a.txt").display().to_string()},
+        "tool_use_id": "toolu_worktree_subagent",
+        "agent_id": "child-1",
     });
     fx.hook("PreToolUse", read);
     fx.hook("SessionEnd", serde_json::json!({"reason": "exit"}));
