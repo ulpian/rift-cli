@@ -46,7 +46,7 @@ from a trigger created alongside the table (§13.4).
 | File | Keyed by | Holds | Tables | Migrations |
 |---|---|---|---|---|
 | `~/.cache/rift/<family-id>/projection.db` | the family's capture identity | sessions, turns, model and tool calls, file revisions, attribution, token usage and cost, hook audit, checkpoint integrity, worktree provenance, measured tool results | 47 | 17 |
-| `~/.cache/rift/<recall-id>/recall.db` | the family's *recall* identity | the delta model's derived graph plus governance records: serve audit, serve calls and sessions, outcome labels, metric snapshots, evaluation runs, key metadata | 30 | 15 |
+| `~/.cache/rift/<recall-id>/recall.db` | the family's *recall* identity | the delta model's derived graph plus governance records: serve audit, serve calls and sessions, outcome labels, metric snapshots, evaluation runs, key metadata | 31 | 16 |
 | `~/.cache/rift/canopy/ui-state.db` | nothing — machine-global | dashboard state spanning repositories: project catalogue, feature toggles, per-project layouts, profiles, membership, theme slots, startup pin | 8 | 5 |
 
 **The two per-repository stores sit in different directories.** The capture and
@@ -158,7 +158,7 @@ END
 
 Nobody typed that, which is why the guarantee holds for *every* table rather
 than the ones somebody remembered. The arithmetic is exact: 45 capture tables
-and 90 triggers, 30 recall tables and 60, 8 dashboard tables and 16. Four
+and 90 triggers, 31 recall tables and 62, 8 dashboard tables and 16. Four
 decisions inside the generator are worth knowing.
 
 **`STRICT` mode** makes column types engine-enforced rather than advisory, so a
@@ -363,6 +363,7 @@ the `(table, column)` slots AEAD-encrypted before reaching durable storage.
 Today it has one entry: the digest bodies the validity plane produces. Two tests
 hold it honest — every registered column must exist in one of the three schema
 registries and be declared `BLOB`, because ciphertext has to fit.
+No production path holds a recall data key yet, so outline digests are written and read through the plain frame, an encrypted row fails closed to unavailable, and in exchange the outline writer takes only redacted bytes and refuses any path the serve policy denies or marks sensitive.
 
 **Anti-relocation.** Each ciphertext is a nonce followed by the sealed bytes,
 with table, column and row id bound in as associated data, so copying one into

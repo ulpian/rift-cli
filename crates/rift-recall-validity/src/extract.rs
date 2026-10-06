@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::outline::FileOutline;
 use crate::summary::{DigestStore, SummaryStore, SummaryVersions};
 
 /// Which kind of deterministic digest an extractor produces.
@@ -59,32 +60,25 @@ impl Extractor for LogExtractor {
     }
 }
 
-/// File-shape digest: line count, byte size, top-level structural markers.
+/// File-shape digest: the code outline of [`FileOutline`] — the file's line
+/// and byte counts, then each top-level definition's kind, name and
+/// block-expanded lines.
+///
+/// Version 2: version 1 printed the counts and a marker tally only. The bump
+/// is what keeps a version-1 binding from ever being served as an outline,
+/// since the version is part of the binding key.
 pub struct FileShapeExtractor;
 impl Extractor for FileShapeExtractor {
     fn kind(&self) -> ExtractorKind {
         ExtractorKind::FileShape
     }
     fn version(&self) -> u32 {
-        1
+        2
     }
     fn extract(&self, source: &[u8]) -> Vec<u8> {
-        let text = String::from_utf8_lossy(source);
-        let lines = text.lines().count();
-        let bytes = source.len();
-        let markers = text
-            .lines()
-            .filter(|l| {
-                let t = l.trim_start();
-                t.starts_with("fn ")
-                    || t.starts_with("pub fn ")
-                    || t.starts_with("struct ")
-                    || t.starts_with("class ")
-                    || t.starts_with("def ")
-                    || t.starts_with("impl ")
-            })
-            .count();
-        format!("{lines} lines, {bytes} bytes, {markers} top-level defs").into_bytes()
+        FileOutline::of_text(&String::from_utf8_lossy(source))
+            .render()
+            .into_bytes()
     }
 }
 
@@ -292,7 +286,10 @@ mod tests {
 
         let shape = FileShapeExtractor;
         let out = String::from_utf8(shape.extract(b"fn a() {}\nstruct S;\nlet x = 1;\n")).unwrap();
-        assert!(out.contains("2 top-level defs"));
+        assert_eq!(
+            out,
+            "3 lines, 31 bytes, 2 top-level defs\nfn a L1-L1\nstruct S L2-L2\n"
+        );
     }
 
     #[test]
@@ -424,6 +421,43 @@ FAILED tests/test_x.py::test_y - AssertionError\n\
             b"different digest",
         );
         assert_ne!(bumped, key, "the extractor version is not in the key");
+    }
+
+    #[test]
+    fn a_file_shape_binding_from_before_the_outline_is_never_found_as_one() {
+        // The outline is version 2. A version-1 binding of the same bytes sits
+        // under another key, so a lookup for the outline cannot land on the
+        // old marker tally.
+        assert_eq!(FileShapeExtractor.version(), 2);
+        let dg = MemoryDigestStore::default();
+        let store = SummaryStore::new();
+        let source = b"fn a() {}\n";
+        let old = store.put_summary(
+            &dg,
+            "a.rs",
+            source,
+            SummaryVersions {
+                extractor_version: 1,
+                policy_version: 1,
+                redaction_version: 1,
+            },
+            b"1 lines, 10 bytes, 1 top-level defs",
+        );
+        let current = crate::summary_key(
+            source,
+            SummaryVersions {
+                extractor_version: FileShapeExtractor.version(),
+                policy_version: 1,
+                redaction_version: 1,
+            },
+        );
+        assert_ne!(old, current);
+        let mut snap = WorktreeSnapshot::new();
+        snap.insert("a.rs".into(), sha256_hex(source));
+        assert!(matches!(
+            resolve(&store, &dg, &snap, &current),
+            Validity::Degraded { .. }
+        ));
     }
 
     #[test]

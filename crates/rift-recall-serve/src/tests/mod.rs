@@ -13,6 +13,7 @@ mod doc;
 mod exact;
 mod fixtures;
 mod manifest;
+mod outline;
 mod pack;
 mod pricing;
 mod pull;
