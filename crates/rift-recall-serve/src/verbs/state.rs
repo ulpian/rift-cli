@@ -13,16 +13,18 @@ use rift_recall_events::MemdEvent;
 use rift_recall_ledger::candidates::{
     load_candidates, load_candidates_with_scope, LoadedCandidate,
 };
+use rift_recall_ledger::validity_store::{current_summary, CurrentSummary};
 use rift_recall_policy::TurnBudget;
 use rift_recall_substrate::worktree::CurrentRefusal;
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_types::{Envelope, Trust};
-use rift_recall_validity::{manifest_envelope, Budget};
-use rift_store::CanonicalStore;
+use rift_recall_validity::{manifest_envelope, Budget, ValidSummary, Validity};
+use rift_store::{CanonicalStore, PlainCipher};
 use serde_json::{json, Value};
 
 use super::credit::{Current, Evidence, STATED_UNRECORDED};
-use super::{fit_with_provenance, manifest_cap, Story};
+use super::summaries::{checked_summaries, served_versions, versions_view};
+use super::{fit_with_provenance, internal, manifest_cap, Story};
 use crate::envelope::{envelope_view, manifest_event};
 use crate::{RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse};
 
@@ -47,6 +49,16 @@ struct Deltas {
     unchanged: Vec<Value>,
 }
 
+/// What a manifest entry is decided from besides its revision: the hashes
+/// the caller stated, the turns its window read them, what the checkout and
+/// the record say, and the valid summaries of the revisions the checkout holds.
+struct ManifestSources<'a> {
+    known: &'a BTreeSet<&'a str>,
+    seen_turns: &'a BTreeMap<(String, String), u64>,
+    evidence: &'a Evidence,
+    summaries: &'a BTreeMap<String, Validity>,
+}
+
 impl ServeDispatcher<'_> {
     pub(crate) async fn known_state<S: CanonicalStore, R: SubstrateReader>(
         &self,
@@ -58,7 +70,14 @@ impl ServeDispatcher<'_> {
         let containment = Self::containment_view(&in_scope, ctx);
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let evidence = Evidence::over(ctx, &known, &ranked).await;
-        let envelopes = manifest_entries(&ranked, &known, &req.seen_turns, budget, &evidence);
+        let summaries = checked_summaries(ctx, &evidence, &ranked).await;
+        let sources = ManifestSources {
+            known: &known,
+            seen_turns: &req.seen_turns,
+            evidence: &evidence,
+            summaries: &summaries,
+        };
+        let envelopes = manifest_entries(&ranked, &sources, budget);
         let baseline = evidence.list_baseline(&known, &ranked);
         // The story behind each entry that moved. Anchors come from the rows
         // already loaded — the loader picked the checkpoint to decide recency —
@@ -172,24 +191,22 @@ impl ServeDispatcher<'_> {
         budget: &mut TurnBudget,
     ) -> Result<ToolResponse, ToolError> {
         // The summary is hash-bound; serving re-checks validity. We look up
-        // the binding for the requested path and compare its bound hash to the
-        // file as the checkout holds it: a moved source returns `stale`, never
-        // the summary, and a file that cannot be read returns `unavailable`.
+        // the bindings for the requested path against the file as the
+        // checkout holds it: a moved source returns `stale`, never the
+        // summary, and a file that cannot be read returns `unavailable`.
         let path = req.target.clone().unwrap_or_default();
         let loaded = load_candidates(ctx.store, &ctx.scope, ctx.now, ctx.ancestry)
             .await
             .map_err(|e| ToolError::Internal(e.to_string()))?;
-        let rows = ctx
-            .store
-            .query(
-                "SELECT source_sha256 FROM summary_binding WHERE path = ?1 ORDER BY created_at DESC LIMIT 1",
-                &[rift_store::Value::text(path.as_str())],
-            )
-            .await
-            .map_err(|e| ToolError::Internal(e.to_string()))?;
-        let bound = rows.first().and_then(|r| r.get_text(0).ok());
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let evidence = Evidence::at_path(ctx, &known, &path).await;
+        let now = match evidence.current(&path) {
+            Some(Current::Verified(now)) => Some(now.as_str()),
+            Some(Current::Unverified(_)) | None => None,
+        };
+        let bound = current_summary(ctx.store, &PlainCipher, &path, now, served_versions())
+            .await
+            .map_err(internal)?;
         let summary = SummaryCall {
             path: &path,
             known: &known,
@@ -217,11 +234,11 @@ impl SummaryCall<'_> {
     /// when the caller stated that revision and this family recorded reading
     /// it: a summary served to a caller who never held the file spared no
     /// re-read.
-    fn answer(&self, bound: Option<String>) -> (Value, u32, EventBuilder) {
+    fn answer(&self, bound: CurrentSummary) -> (Value, u32, EventBuilder) {
         let path = self.path;
-        let Some(bound) = bound else {
+        if matches!(bound, CurrentSummary::NotBound) {
             return unavailable_summary(path, "not_bound");
-        };
+        }
         if !self.loaded.iter().any(|l| l.candidate.path == path) {
             return unavailable_summary(path, "not_bound");
         }
@@ -230,20 +247,19 @@ impl SummaryCall<'_> {
             Some(Current::Unverified(why)) => return unavailable_summary(path, why.tag()),
             None => return unavailable_summary(path, CurrentRefusal::NoWorktree.tag()),
         };
-        let handle = format!("summary:{path}");
-        if bound != now {
-            return (
-                json!({ "state": "stale", "path": path, "current_hash": now }),
-                0,
-                Box::new(move |returned, _| MemdEvent::Invalidated {
-                    handle,
-                    estimated_tokens_returned: returned,
-                }),
-            );
-        }
-        let summary = format!("summary bound to {bound}");
-        let mut result =
-            json!({ "state": "summary", "path": path, "source_hash": bound, "summary": summary });
+        let summary = match bound {
+            CurrentSummary::Bound(Validity::Valid(summary)) => summary,
+            CurrentSummary::Bound(Validity::Degraded { .. }) => {
+                return unavailable_summary(path, "digest_unavailable")
+            }
+            CurrentSummary::Stale | CurrentSummary::Bound(Validity::Invalid { .. }) => {
+                return stale_summary(path, now)
+            }
+            CurrentSummary::NotBound | CurrentSummary::Unchecked => {
+                return unavailable_summary(path, "not_bound")
+            }
+        };
+        let mut result = served_summary(path, &now, &summary);
         let row = self
             .loaded
             .iter()
@@ -252,6 +268,7 @@ impl SummaryCall<'_> {
         if let Some(lc) = row {
             self.evidence.tag(self.known, lc, &mut result);
         }
+        let handle = format!("summary:{path}");
         (
             result,
             baseline,
@@ -263,6 +280,33 @@ impl SummaryCall<'_> {
             }),
         )
     }
+}
+
+/// A valid summary's answer: the stored outline, with the key it is bound
+/// under, the versions in that key and the revision it describes.
+fn served_summary(path: &str, now: &str, summary: &ValidSummary) -> Value {
+    json!({
+        "state": "summary",
+        "path": path,
+        "source_hash": now,
+        "summary": String::from_utf8_lossy(summary.digest()),
+        "summary_key": summary.key(),
+        "versions": versions_view(served_versions()),
+        "handle": format!("file:{path}@sha256:{now}"),
+    })
+}
+
+/// A summary whose source moved: the new hash, never the summary.
+fn stale_summary(path: &str, now: String) -> (Value, u32, EventBuilder) {
+    let handle = format!("summary:{path}");
+    (
+        json!({ "state": "stale", "path": path, "current_hash": now }),
+        0,
+        Box::new(move |returned, _| MemdEvent::Invalidated {
+            handle,
+            estimated_tokens_returned: returned,
+        }),
+    )
 }
 
 /// A summary that cannot be served, and why.
@@ -376,29 +420,35 @@ fn deltas<S: CanonicalStore, R: SubstrateReader>(
 /// content (summaries) will draw on this trial allowance; manifest-first,
 /// most entries carry no bytes. The trial never touches the turn budget — the
 /// single charge happens at the respond seam. Provenance: a tracked file blob
-/// is a code fact. Real summaries are resolved here once ingest populates
-/// them; until then a live revision with no bound summary is
-/// `available_by_handle`, never "deleted".
+/// is a code fact. A revision with a valid summary of the bytes the checkout
+/// holds carries it when it fits; one without is `available_by_handle`, never
+/// "deleted".
 fn manifest_entries(
     ranked: &[LoadedCandidate],
-    known: &BTreeSet<&str>,
-    seen_turns: &BTreeMap<(String, String), u64>,
+    sources: &ManifestSources<'_>,
     budget: &TurnBudget,
-    evidence: &Evidence,
 ) -> Vec<Envelope> {
     let mut envelopes: Vec<Envelope> = Vec::new();
     let mut vbudget = Budget::new(budget.tokens_remaining());
     for lc in ranked {
         let c = &lc.candidate;
         let handle = format!("file:{}@sha256:{}", c.path, lc.content_sha256);
-        let seen = evidence.sighting(known, seen_turns, lc);
+        let seen = sources
+            .evidence
+            .sighting(sources.known, sources.seen_turns, lc);
+        let summary = match sources.summaries.get(&c.path) {
+            Some(Validity::Valid(summary)) if summary.bound_oid() == lc.content_sha256 => {
+                Some(summary)
+            }
+            _ => None,
+        };
         envelopes.push(manifest_envelope(
             &c.path,
             Trust::CodeFact,
             &handle,
             &lc.content_sha256,
             seen,
-            None,
+            summary,
             &mut vbudget,
         ));
     }

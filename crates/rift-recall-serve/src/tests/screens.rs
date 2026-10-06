@@ -39,6 +39,7 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
     ("verbs/pack.rs", include_str!("../verbs/pack.rs")),
     ("verbs/search.rs", include_str!("../verbs/search.rs")),
     ("verbs/state.rs", include_str!("../verbs/state.rs")),
+    ("verbs/summaries.rs", include_str!("../verbs/summaries.rs")),
     ("window.rs", include_str!("../window.rs")),
 ];
 

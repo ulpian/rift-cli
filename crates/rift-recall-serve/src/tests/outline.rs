@@ -7,7 +7,7 @@ use rift_recall_ledger::validity_store::{
     put_file_outline, resolve, token_counts, OutlineCounts, OutlineSource,
 };
 use rift_recall_substrate::worktree::sha256_hex;
-use rift_recall_validity::{FileOutline, Validity, WorktreeSnapshot};
+use rift_recall_validity::{Validity, WorktreeSnapshot};
 use rift_store::{CanonicalStore, PlainCipher, SqliteStore};
 
 use super::fixtures::*;
@@ -34,22 +34,17 @@ fn bind_outline_refusing(
     refuses_path: &dyn Fn(&str) -> bool,
 ) -> Option<String> {
     let source = redacted(bytes);
-    let counts = FileOutline::of(path, source.as_slice()).map_or_else(
-        || OutlineCounts {
+    let counts = OutlineCounts::measure(path, &source, &byte_count, "cl100k_base").unwrap_or(
+        OutlineCounts {
             tokenizer: "cl100k_base",
             whole_file: 1,
             definitions: Vec::new(),
-        },
-        |outline| {
-            let text = std::str::from_utf8(source.as_slice()).unwrap();
-            OutlineCounts::measure(&outline, text, &byte_count, "cl100k_base")
         },
     );
     let file = OutlineSource {
         path,
         source: &source,
         policy_version: 1,
-        redaction_version: 1,
         refuses_path,
     };
     block(put_file_outline(store, &PlainCipher, &file, &counts)).unwrap()
@@ -127,14 +122,13 @@ fn a_one_byte_change_binds_under_another_key_and_the_old_one_goes_stale() {
 fn counts_that_do_not_match_the_outline_are_refused_before_any_write() {
     let store = open_store();
     let source = redacted(OUTLINED.as_bytes());
-    let outline = FileOutline::of("src/a.rs", source.as_slice()).unwrap();
-    let mut counts = OutlineCounts::measure(&outline, OUTLINED, &byte_count, "cl100k_base");
+    let mut counts =
+        OutlineCounts::measure("src/a.rs", &source, &byte_count, "cl100k_base").unwrap();
     counts.definitions.pop();
     let file = OutlineSource {
         path: "src/a.rs",
         source: &source,
         policy_version: 1,
-        redaction_version: 1,
         refuses_path: &|_| false,
     };
     assert!(block(put_file_outline(&store, &PlainCipher, &file, &counts)).is_err());

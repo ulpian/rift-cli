@@ -1080,8 +1080,10 @@ cannot be constructed there.
 
 **What comes back today.** A permitted `retrieve-exact` answers `state: exact`
 with an **empty body**: the blob reader wired into that channel is an in-memory
-substrate with nothing in it, and `read-summary` always answers `unavailable /
-not_bound`. Two answers do carry content. `changed-hunks` with a hash you hold
+substrate with nothing in it, and `read-summary` answers `unavailable /
+not_bound` until a binding exists, then the stored outline of the revision the
+checkout holds (no shipped path writes one; see
+[§6.15](06-recall.md#615-what-is-running-and-what-is-not)). Two answers do carry content. `changed-hunks` with a hash you hold
 reads the basis blob out of the object store and returns the **changed lines
 themselves**, each hunk windowed by three lines of context or grown to the
 nearest blank or column-zero boundary within a cap — a deterministic,

@@ -82,6 +82,25 @@ impl Extractor for FileShapeExtractor {
     }
 }
 
+/// The redaction-rules version every outline is bound and served under.
+///
+/// One constant rather than a figure each side supplies: the writer and the
+/// serve-time loader must name the same key, and two callers passing their
+/// own numbers is how a binding becomes one nothing ever finds. Bumped when
+/// the redaction rules change what an outline may contain.
+pub const OUTLINE_REDACTION_VERSION: u32 = 1;
+
+/// The versions an outline is bound and served under, given the serve
+/// policy's version.
+#[must_use]
+pub fn outline_versions(policy_version: u32) -> SummaryVersions {
+    SummaryVersions {
+        extractor_version: FileShapeExtractor.version(),
+        policy_version,
+        redaction_version: OUTLINE_REDACTION_VERSION,
+    }
+}
+
 /// Replace volatile spans in a failure line with stable placeholders so the
 /// same logical error yields the same signature across runs: line/column
 /// numbers (`:12:34` → `:_:_`), hex addresses (`0x7f…` → `0x_`), and durations

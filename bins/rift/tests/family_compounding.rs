@@ -395,14 +395,12 @@ fn commit(f: &Family, rel: &str, body: &str, message: &str) {
 /// Bind a summary to `path`'s captured revision, as a session in the main work
 /// tree would have.
 ///
-/// **Seeded, and that is a recorded deviation.** `summary_binding`'s one writer
-/// is `rift_recall_ledger::validity_store::put_summary`, and no shipped path
-/// calls it: the validity ingest that will is not built, and `known_state` passes
-/// `None` for every summary today. So the half of the compounding claim this
-/// file can prove is the SERVING half — that a binding written once in the family's
-/// store is served to a member that did not write it, on the same bytes, and
-/// is not recomputed — and the binding itself is planted at the seam the ingest
-/// will use, against the hash the projection actually holds.
+/// Through the one writer, `rift_recall_ledger::validity_store::put_file_outline`,
+/// over the main work tree's redacted bytes — which must be the revision the
+/// capture holds — so the binding is a real outline with a real digest. The
+/// half of the compounding claim this file proves is the SERVING half: a
+/// binding written once in the family's store is served to a member that did
+/// not write it, on the same bytes, and is not recomputed.
 fn bind_summary(f: &Family, path: &str) -> String {
     let revisions = f.rows(&format!(
         "SELECT content_sha256 FROM n_file_revision WHERE path = '{path}'"
@@ -413,41 +411,40 @@ fn bind_summary(f: &Family, path: &str) -> String {
         "the capture recorded exactly one revision of {path}: {revisions:?}"
     );
     let sha = revisions[0][0].clone();
+    let bytes = std::fs::read(f.main.join(path)).unwrap();
+    assert_eq!(
+        rift_recall_substrate::worktree::sha256_hex(&bytes),
+        sha,
+        "the main work tree still holds the captured revision of {path}"
+    );
+    let source = rift_shadow::redact::redact(&rift_core::SecretBytes::new(bytes))
+        .unwrap()
+        .redacted;
+    let counts = rift_recall_ledger::validity_store::OutlineCounts::measure(
+        path,
+        &source,
+        &rift_tokens::count,
+        rift_tokens::provenance(),
+    )
+    .unwrap();
+    let file = rift_recall_ledger::validity_store::OutlineSource {
+        path,
+        source: &source,
+        policy_version: rift_recall_policy::SERVE_POLICY_VERSION,
+        refuses_path: &|_| false,
+    };
     let db = f.recall_db();
     let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    rt.block_on(async {
-        store
-            .insert_or_ignore(
-                "summary_binding",
-                &[
-                    "summary_id",
-                    "path",
-                    "source_sha256",
-                    "bound_blob_oid",
-                    "extractor_ver",
-                    "policy_ver",
-                    "redaction_ver",
-                    "digest_ref",
-                    "created_at",
-                ],
-                &[
-                    rift_store::Value::text(format!("summary-{sha}")),
-                    rift_store::Value::text(path),
-                    rift_store::Value::text(&sha),
-                    rift_store::Value::text(&sha),
-                    rift_store::Value::Int(1),
-                    rift_store::Value::Int(1),
-                    rift_store::Value::Int(1),
-                    rift_store::Value::text(format!("digest-{sha}")),
-                    rift_store::Value::Int(0),
-                ],
-            )
-            .await
-            .unwrap();
-    });
+    let bound = rt.block_on(rift_recall_ledger::validity_store::put_file_outline(
+        &store,
+        &rift_store::PlainCipher,
+        &file,
+        &counts,
+    ));
+    assert!(bound.unwrap().is_some(), "{path} is a code file and binds");
     sha
 }
 
