@@ -202,3 +202,23 @@ fn the_context_pack_renders_the_outline_without_its_names() {
         "{text}"
     );
 }
+
+#[test]
+fn a_summary_that_does_not_fit_never_displaces_its_entry() {
+    let store = projection();
+    bind_outline(&store, PATH, BYTES).unwrap();
+    let checkout = Checkout::holding(&[(PATH, BYTES)]);
+    let tight = ToolRequest {
+        token_budget: 90,
+        ..asking(Vec::new())
+    };
+    let resp = serve(&store, &checkout.reader(), ToolName::KnownState, &tight);
+    let entry = &resp.payload["envelopes"][0];
+    assert_eq!(entry["path"], json!(PATH), "{}", resp.payload);
+    assert_eq!(
+        entry["state"],
+        json!("available_by_handle"),
+        "{}",
+        resp.payload
+    );
+}

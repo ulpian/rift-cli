@@ -363,7 +363,7 @@ the `(table, column)` slots AEAD-encrypted before reaching durable storage.
 Today it has one entry: the digest bodies the validity plane produces. Two tests
 hold it honest — every registered column must exist in one of the three schema
 registries and be declared `BLOB`, because ciphertext has to fit.
-No production path holds a recall data key yet, so outline digests are written and read through the plain frame, an encrypted row fails closed to unavailable, and in exchange the outline writer takes only redacted bytes and refuses any path the serve policy denies or marks sensitive.
+No production path holds a recall data key, so outline digests are written and read through the plain frame, an encrypted row fails closed to unavailable, and in exchange the outline writer takes only redacted bytes and refuses any path the serve policy denies or marks sensitive.
 
 **Anti-relocation.** Each ciphertext is a nonce followed by the sealed bytes,
 with table, column and row id bound in as associated data, so copying one into
@@ -533,6 +533,7 @@ Some capture facts a rebuild still cannot derive.
 Per-commit diff facts come from git history rather than from a shard.
 Sessions whose shards were written before the usage artifact existed carry no usage, so their session, usage and cost rows live only in a projection that holds them.
 Those have their own verb, `rift backfill`, which is why §13.11's read-only open exists: the set-aside file must be readable without being created, migrated or modified.
+Outline bindings and their token counts are not in the shard either: they are derived from a file's bytes, so a rebuilt recall projection holds none until the next condense of a session that read the file binds it again.
 
 And the standing exception: **governance records are not rebuildable.** Serve
 audit rows, outcome labels, evaluation runs and key metadata record what this

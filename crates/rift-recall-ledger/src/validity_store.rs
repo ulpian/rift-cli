@@ -20,8 +20,8 @@
 use rift_core::{RedactedBytes, Result, RiftError};
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_validity::{
-    classify, line_span, outline_versions, summary_key, BlobResolver, FileOutline, SummaryBinding,
-    SummaryVersions, Validity, WorktreeSnapshot,
+    classify, is_code_path, line_span, outline_versions, summary_key, BlobResolver, FileOutline,
+    SummaryBinding, SummaryVersions, Validity, WorktreeSnapshot,
 };
 use rift_store::{CanonicalStore, ColumnCipher, Value};
 use sha2::{Digest, Sha256};
@@ -96,6 +96,77 @@ pub struct TokenCount {
     pub tokens: u32,
     /// The basis the count was taken on.
     pub tokenizer: String,
+}
+
+/// The most outlines one batch binds.
+///
+/// Each one reads a file and runs the tokenizer over it, so the bound is on
+/// the work a condense adds to the detached worker, not on correctness: a read
+/// past it is counted `deferred` and the next condense of the family takes it,
+/// since a session's read facts are cumulative and the writer is idempotent.
+/// Sixty-four is the cap the recovery map and the blob bridge already put on a
+/// per-boundary walk.
+pub const MAX_OUTLINES_PER_BATCH: u32 = 64;
+
+/// The largest file a batch outlines: the ceiling on a file a first read may
+/// be answered with its outline for, so an outline past it would never be
+/// served in its stead.
+pub const MAX_OUTLINE_SOURCE_BYTES: u64 = 1024 * 1024;
+
+/// A batch of read revisions to outline, and what the caller supplies for it:
+/// the checkout the bytes are read from, the serve policy's version and
+/// verdict, the redaction gate, and the tokenizer.
+///
+/// The redaction gate and the tokenizer come from the caller because this
+/// crate holds neither the rule packs nor the decision to load a tokenizer;
+/// the caller is the detached worker, the one place both are allowed.
+pub struct OutlineBatch<'a> {
+    /// The work tree the session read in.
+    pub work_tree: &'a std::path::Path,
+    /// The serve-policy version in force.
+    pub policy_version: u32,
+    /// Whether the serve policy denies the path or marks it sensitive.
+    pub refuses_path: &'a dyn Fn(&str) -> bool,
+    /// The redaction gate: raw bytes in, cleared bytes out.
+    pub redact: &'a dyn Fn(Vec<u8>) -> Option<RedactedBytes>,
+    /// The token counter.
+    pub count: &'a dyn Fn(&str) -> u32,
+    /// The counter's basis, `rift_tokens::provenance()`.
+    pub tokenizer: &'static str,
+}
+
+/// What one batch did with each path it was handed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutlineBindCounts {
+    /// Outlines written now.
+    pub bound: u32,
+    /// Already bound for the bytes on disk; nothing written.
+    pub already_bound: u32,
+    /// The file is gone or no longer the revision the session read.
+    pub changed: u32,
+    /// The serve policy denies the path or marks it sensitive, or the
+    /// redaction gate masked part of the file.
+    pub refused: u32,
+    /// Not a code file, or not UTF-8.
+    pub not_code: u32,
+    /// Past [`MAX_OUTLINE_SOURCE_BYTES`].
+    pub oversize: u32,
+    /// Past [`MAX_OUTLINES_PER_BATCH`]; the next batch takes it.
+    pub deferred: u32,
+    /// A read, the gate or the store failed; dropped, never retried here.
+    pub failed: u32,
+}
+
+/// One path's fate in a batch, before it is counted.
+enum OutlineStep {
+    Bound,
+    AlreadyBound,
+    Changed,
+    Refused,
+    NotCode,
+    Oversize,
+    Deferred,
+    Failed,
 }
 
 /// A [`BlobResolver`] over the read-only substrate: `file:` handles resolve by
@@ -383,6 +454,135 @@ async fn put_token_count(store: &impl CanonicalStore, key: &str, count: &TokenCo
         )
         .await?;
     Ok(())
+}
+
+/// Outline every code file the session read whose bytes on disk are still a
+/// revision it read, and count what happened to each path.
+///
+/// `reads` are `(path, content_sha256)` pairs, repeats allowed; each path is
+/// visited once, in path order, so the cap always takes the same prefix. A
+/// file is read from the work tree, never from the object database, and is
+/// bound only when its SHA-256 is one the session read. Nothing here fails
+/// its caller: every failure is a count.
+pub async fn bind_read_outlines(
+    store: &impl CanonicalStore,
+    cipher: &dyn ColumnCipher,
+    batch: &OutlineBatch<'_>,
+    reads: &[(String, String)],
+) -> OutlineBindCounts {
+    let mut by_path: std::collections::BTreeMap<&str, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for (path, sha) in reads {
+        by_path.entry(path.as_str()).or_default().push(sha.as_str());
+    }
+    let mut counts = OutlineBindCounts::default();
+    for (path, read_shas) in by_path {
+        let budget_left = counts.bound < MAX_OUTLINES_PER_BATCH;
+        let step = outline_step(store, cipher, batch, path, &read_shas, budget_left).await;
+        counts.add(step);
+    }
+    counts
+}
+
+impl OutlineBindCounts {
+    fn add(&mut self, step: OutlineStep) {
+        let slot = match step {
+            OutlineStep::Bound => &mut self.bound,
+            OutlineStep::AlreadyBound => &mut self.already_bound,
+            OutlineStep::Changed => &mut self.changed,
+            OutlineStep::Refused => &mut self.refused,
+            OutlineStep::NotCode => &mut self.not_code,
+            OutlineStep::Oversize => &mut self.oversize,
+            OutlineStep::Deferred => &mut self.deferred,
+            OutlineStep::Failed => &mut self.failed,
+        };
+        *slot = slot.saturating_add(1);
+    }
+}
+
+/// One path through the batch: the cheap refusals first, then the read, the
+/// revision check, the already-bound check, the cap, and the write.
+async fn outline_step(
+    store: &impl CanonicalStore,
+    cipher: &dyn ColumnCipher,
+    batch: &OutlineBatch<'_>,
+    path: &str,
+    read_shas: &[&str],
+    budget_left: bool,
+) -> OutlineStep {
+    if !is_code_path(path) {
+        return OutlineStep::NotCode;
+    }
+    if std::path::Path::new(path).is_absolute() || (batch.refuses_path)(path) {
+        return OutlineStep::Refused;
+    }
+    let bytes = match read_bounded(&batch.work_tree.join(path)) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return OutlineStep::Oversize,
+        Err(()) => return OutlineStep::Changed,
+    };
+    let now = sha256_hex(&bytes);
+    if !read_shas.contains(&now.as_str()) {
+        return OutlineStep::Changed;
+    }
+    let versions = outline_versions(batch.policy_version);
+    if let Ok(CurrentSummary::Bound(Validity::Valid(_))) =
+        current_summary(store, cipher, path, Some(&now), versions).await
+    {
+        return OutlineStep::AlreadyBound;
+    }
+    if !budget_left {
+        return OutlineStep::Deferred;
+    }
+    write_outline(store, cipher, batch, path, bytes).await
+}
+
+/// Redact, count and bind one file whose bytes are a revision the session
+/// read.
+async fn write_outline(
+    store: &impl CanonicalStore,
+    cipher: &dyn ColumnCipher,
+    batch: &OutlineBatch<'_>,
+    path: &str,
+    bytes: Vec<u8>,
+) -> OutlineStep {
+    let raw_len = bytes.len();
+    let raw_sha = sha256_hex(&bytes);
+    let Some(source) = (batch.redact)(bytes) else {
+        return OutlineStep::Failed;
+    };
+    // A file the gate masked hashes differently from the checkout, so its
+    // binding could never be served; it is refused rather than written.
+    if source.as_slice().len() != raw_len || sha256_hex(source.as_slice()) != raw_sha {
+        return OutlineStep::Refused;
+    }
+    let Some(counts) = OutlineCounts::measure(path, &source, batch.count, batch.tokenizer) else {
+        return OutlineStep::NotCode;
+    };
+    let file = OutlineSource {
+        path,
+        source: &source,
+        policy_version: batch.policy_version,
+        refuses_path: batch.refuses_path,
+    };
+    match put_file_outline(store, cipher, &file, &counts).await {
+        Ok(Some(_)) => OutlineStep::Bound,
+        Ok(None) => OutlineStep::Refused,
+        Err(_) => OutlineStep::Failed,
+    }
+}
+
+/// The file's bytes, `Ok(None)` past [`MAX_OUTLINE_SOURCE_BYTES`], or
+/// `Err(())` when there is no regular file to read.
+fn read_bounded(file: &std::path::Path) -> std::result::Result<Option<Vec<u8>>, ()> {
+    let meta = std::fs::symlink_metadata(file).map_err(|_| ())?;
+    if !meta.is_file() {
+        return Err(());
+    }
+    if meta.len() > MAX_OUTLINE_SOURCE_BYTES {
+        return Ok(None);
+    }
+    std::fs::read(file).map(Some).map_err(|_| ())
 }
 
 async fn fetch_binding(store: &impl CanonicalStore, key: &str) -> Result<Option<SummaryBinding>> {

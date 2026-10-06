@@ -49,14 +49,18 @@ struct Deltas {
     unchanged: Vec<Value>,
 }
 
-/// What a manifest entry is decided from besides its revision: the hashes
-/// the caller stated, the turns its window read them, what the checkout and
-/// the record say, and the valid summaries of the revisions the checkout holds.
-struct ManifestSources<'a> {
+/// What a manifest is decided from besides the ranked revisions' own rows:
+/// the hashes the caller stated, the turns its window read them, what the
+/// checkout and the record say, each entry's story, the containment block and
+/// the cap the payload is fitted to.
+struct ManifestFit<'a> {
+    ranked: &'a [LoadedCandidate],
     known: &'a BTreeSet<&'a str>,
     seen_turns: &'a BTreeMap<(String, String), u64>,
     evidence: &'a Evidence,
-    summaries: &'a BTreeMap<String, Validity>,
+    story: &'a Story,
+    containment: Option<Value>,
+    cap: u32,
 }
 
 impl ServeDispatcher<'_> {
@@ -67,42 +71,26 @@ impl ServeDispatcher<'_> {
         budget: &mut TurnBudget,
     ) -> Result<ToolResponse, ToolError> {
         let (ranked, in_scope) = Self::ranked_candidates(req, ctx).await?;
-        let containment = Self::containment_view(&in_scope, ctx);
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let evidence = Evidence::over(ctx, &known, &ranked).await;
         let summaries = checked_summaries(ctx, &evidence, &ranked).await;
-        let sources = ManifestSources {
-            known: &known,
-            seen_turns: &req.seen_turns,
-            evidence: &evidence,
-            summaries: &summaries,
-        };
-        let envelopes = manifest_entries(&ranked, &sources, budget);
         let baseline = evidence.list_baseline(&known, &ranked);
         // The story behind each entry that moved. Anchors come from the rows
         // already loaded — the loader picked the checkpoint to decide recency —
         // so this costs one query for the commit mirror and nothing else.
         let story = Story::over(ctx, &ranked, &known).await;
-        let (telling, plain) = manifest_views(ctx, &envelopes, &ranked, &known, &story, &evidence);
-        // The manifest cap: known_state anchored before the trial,
-        // so the trial sees the fresh allowance. Entries are already
-        // in rank order — truncation keeps the highest-ranked prefix and says
-        // so honestly (`truncated`, `omitted`).
-        let cap = manifest_cap(req, budget);
-        let n = telling.len();
-        let build = |kept: usize, truncated: bool, detail: bool| {
-            let views = if detail { &telling } else { &plain };
-            Self::with_containment(
-                json!({
-                    "tool": "known_state",
-                    "envelopes": views.get(..kept).unwrap_or(&[]),
-                    "truncated": truncated,
-                    "omitted": n.saturating_sub(kept),
-                }),
-                containment.as_ref(),
-            )
+        let fit = ManifestFit {
+            ranked: &ranked,
+            known: &known,
+            seen_turns: &req.seen_turns,
+            evidence: &evidence,
+            story: &story,
+            containment: Self::containment_view(&in_scope, ctx),
+            // The manifest cap: known_state anchored before the trial, so the
+            // trial sees the fresh allowance.
+            cap: manifest_cap(req, budget),
         };
-        let (payload, _kept) = fit_with_provenance(cap, n, &build);
+        let payload = fit.payload(ctx, &summaries);
         Ok(Self::respond(
             ToolName::KnownState,
             payload,
@@ -421,22 +409,20 @@ fn deltas<S: CanonicalStore, R: SubstrateReader>(
 /// most entries carry no bytes. The trial never touches the turn budget — the
 /// single charge happens at the respond seam. Provenance: a tracked file blob
 /// is a code fact. A revision with a valid summary of the bytes the checkout
-/// holds carries it when it fits; one without is `available_by_handle`, never
-/// "deleted".
+/// holds carries it when it fits in `room`; one without is
+/// `available_by_handle`, never "deleted".
 fn manifest_entries(
-    ranked: &[LoadedCandidate],
-    sources: &ManifestSources<'_>,
-    budget: &TurnBudget,
+    fit: &ManifestFit<'_>,
+    summaries: &BTreeMap<String, Validity>,
+    room: u32,
 ) -> Vec<Envelope> {
     let mut envelopes: Vec<Envelope> = Vec::new();
-    let mut vbudget = Budget::new(budget.tokens_remaining());
-    for lc in ranked {
+    let mut vbudget = Budget::new(room);
+    for lc in fit.ranked {
         let c = &lc.candidate;
         let handle = format!("file:{}@sha256:{}", c.path, lc.content_sha256);
-        let seen = sources
-            .evidence
-            .sighting(sources.known, sources.seen_turns, lc);
-        let summary = match sources.summaries.get(&c.path) {
+        let seen = fit.evidence.sighting(fit.known, fit.seen_turns, lc);
+        let summary = match summaries.get(&c.path) {
             Some(Validity::Valid(summary)) if summary.bound_oid() == lc.content_sha256 => {
                 Some(summary)
             }
@@ -453,6 +439,66 @@ fn manifest_entries(
         ));
     }
     envelopes
+}
+
+impl ManifestFit<'_> {
+    /// The manifest payload, fitted to the cap, with summaries where they fit.
+    ///
+    /// The summaries get only the room the manifest without them leaves, so
+    /// an outline never displaces an entry: the manifest without summaries is
+    /// fitted first, and when the one with summaries would keep fewer entries
+    /// the one without is served instead. With no summary to include, the
+    /// answer is exactly what it was.
+    fn payload<S: CanonicalStore, R: SubstrateReader>(
+        &self,
+        ctx: &RecallContext<'_, S, R>,
+        summaries: &BTreeMap<String, Validity>,
+    ) -> Value {
+        let bare = manifest_entries(self, &BTreeMap::new(), 0);
+        let (bare_payload, bare_kept) = self.fitted(ctx, &bare);
+        if summaries.is_empty() {
+            return bare_payload;
+        }
+        let used = rift_tokens::count(&bare_payload.to_string());
+        let room = self.cap.saturating_sub(used);
+        let rich = manifest_entries(self, summaries, room);
+        let (rich_payload, rich_kept) = self.fitted(ctx, &rich);
+        if rich_kept < bare_kept {
+            return bare_payload;
+        }
+        rich_payload
+    }
+
+    /// One set of envelopes fitted to the cap: the highest-ranked prefix that
+    /// fits, said honestly (`truncated`, `omitted`), and how many it kept.
+    fn fitted<S: CanonicalStore, R: SubstrateReader>(
+        &self,
+        ctx: &RecallContext<'_, S, R>,
+        envelopes: &[Envelope],
+    ) -> (Value, usize) {
+        let (telling, plain) = manifest_views(
+            ctx,
+            envelopes,
+            self.ranked,
+            self.known,
+            self.story,
+            self.evidence,
+        );
+        let n = telling.len();
+        let build = |kept: usize, truncated: bool, detail: bool| {
+            let views = if detail { &telling } else { &plain };
+            ServeDispatcher::with_containment(
+                json!({
+                    "tool": "known_state",
+                    "envelopes": views.get(..kept).unwrap_or(&[]),
+                    "truncated": truncated,
+                    "omitted": n.saturating_sub(kept),
+                }),
+                self.containment.as_ref(),
+            )
+        };
+        fit_with_provenance(self.cap, n, &build)
+    }
 }
 
 /// Every entry's view twice over: telling its story, and with the story

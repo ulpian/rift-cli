@@ -21,6 +21,10 @@ use rift_store::{CanonicalStore as _, SqliteStore, Value};
 
 mod common;
 use common::rift_cmd;
+#[allow(dead_code)] // The hooks suites share these builders; this file uses one.
+#[path = "common/hooks_fixture.rs"]
+mod hooks_fixture;
+use hooks_fixture::DetachedHooks;
 
 const PATH: &str = "src/parse.rs";
 const SOURCE: &str = "pub fn parse(input: &str) -> Vec<String> {
@@ -334,4 +338,219 @@ fn a_moved_file_is_served_no_outline() {
         summary["result"]["result"]["state"],
         serde_json::json!("stale")
     );
+}
+
+/// Repository policy, committed with the seed so the condense reads Recall on.
+const POLICY: &str = "schema_version = 1\n[project]\nname = \"outlines\"\n\
+[features]\ntotal_recall = true\n";
+
+/// A session journal the capture path accepts as live. Fixed timestamp.
+const JOURNAL: &str = r#"{"schema":1,"session_id":"s-outline","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":1783000000000,"native_id_map":{}}"#;
+
+impl Fixture {
+    fn rift(&self, args: &[&str], sync: bool) -> std::process::Child {
+        let mut cmd = rift_cmd(&self.repo);
+        cmd.args(args)
+            .envs(self.env())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if !sync {
+            cmd.env_remove("RIFT_CAPTURE_SYNC");
+        }
+        cmd.spawn().expect("rift runs")
+    }
+
+    /// The live session reads `PATH` through the agent hook.
+    fn agent_read(&self) {
+        use std::io::Write as _;
+        let body = serde_json::json!({
+            "schema": 1,
+            "session": "s-outline",
+            "turn": 1,
+            "payload": {
+                "tool_name": "Read",
+                "tool_input": { "file_path": self.repo.join(PATH).display().to_string() },
+            },
+        })
+        .to_string();
+        let mut child = self.rift(&["hooks", "claude-code", "PostToolUse"], true);
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "a hook never fails");
+    }
+
+    fn post_commit_inline(&self) -> std::process::Child {
+        let git_dir = self.repo.join(".git");
+        self.rift(
+            &[
+                "hooks",
+                "git",
+                "post-commit",
+                "--git-dir",
+                git_dir.to_str().unwrap(),
+            ],
+            true,
+        )
+    }
+
+    /// The environment of a detached run: the fixture's, without the
+    /// variable that makes a hook drain its queue inline.
+    fn detached_env(&self) -> Vec<(&'static str, String)> {
+        self.env()
+            .into_iter()
+            .filter(|(key, _)| *key != "RIFT_CAPTURE_SYNC")
+            .collect()
+    }
+
+    /// Run `rift <args>` in its own process group, leaving any worker it
+    /// spawns detached for `hooks` to wait on.
+    fn detached(&self, hooks: &DetachedHooks, args: &[&str]) {
+        let env = self.detached_env();
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let (code, stderr) = hooks.run(&self.repo, args, "", &env);
+        assert_eq!(code, 0, "rift {args:?} never fails: {stderr}");
+    }
+
+    fn git_dir_arg(&self) -> String {
+        self.repo.join(".git").display().to_string()
+    }
+
+    fn count(&self, sql: &str) -> i64 {
+        let rows = runtime().block_on(self.store().query(sql, &[])).unwrap();
+        rows[0].get_i64(0).unwrap()
+    }
+}
+
+/// A repository whose live session has read `PATH` and committed, with the
+/// commit not yet condensed.
+fn session_fixture() -> Fixture {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_path_buf();
+    let repo = home.join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::create_dir_all(repo.join(".rift")).unwrap();
+    std::fs::create_dir_all(home.join("nohooks")).unwrap();
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(
+        &repo,
+        &[
+            "config",
+            "core.hooksPath",
+            home.join("nohooks").to_str().unwrap(),
+        ],
+    );
+    std::fs::write(repo.join(PATH), SOURCE).unwrap();
+    std::fs::write(repo.join(".rift/config.toml"), POLICY).unwrap();
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "seed"]);
+    let sessions = repo.join(".git").join("rift-sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(sessions.join("s-outline.json"), JOURNAL).unwrap();
+    let f = Fixture {
+        _tmp: tmp,
+        home,
+        repo,
+    };
+    f.agent_read();
+    std::fs::write(f.repo.join("notes.txt"), "work\n").unwrap();
+    git_in(&f.repo, &["add", "notes.txt"]);
+    git_in(&f.repo, &["commit", "-q", "-m", "work"]);
+    f
+}
+
+/// The detached worker's condense of the fixture's commit, waited out.
+fn condense_detached(f: &Fixture) {
+    let hooks = DetachedHooks::default();
+    let git_dir = f.git_dir_arg();
+    f.detached(
+        &hooks,
+        &["hooks", "git", "post-commit", "--git-dir", &git_dir],
+    );
+    hooks.await_workers(|| true);
+}
+
+fn chain_and_checkpoints(f: &Fixture) -> (usize, String) {
+    let order = rift_git::chain::read_order(&f.repo.join(".git")).unwrap();
+    let checkpoints = git_in(
+        &f.repo,
+        &["rev-list", "--count", "refs/heads/rift/checkpoints/v1"],
+    );
+    (order.len(), checkpoints)
+}
+
+#[test]
+fn the_condense_binds_the_outline_a_pull_then_serves_until_the_file_moves() {
+    let f = session_fixture();
+    condense_detached(&f);
+
+    let entry = entry_for(&f.json(&known_state()));
+    assert_eq!(
+        entry["state"],
+        serde_json::json!("summary_included"),
+        "{entry}"
+    );
+    assert_eq!(entry["summary"], serde_json::json!(OUTLINE));
+    let summary = f.json(&["recall", "read-summary", PATH]);
+    assert_eq!(
+        summary["result"]["result"]["summary"],
+        serde_json::json!(OUTLINE)
+    );
+
+    let moved = format!("{SOURCE}\npub const EXTRA: u8 = 1;\n");
+    std::fs::write(f.repo.join(PATH), &moved).unwrap();
+    let stale = f.json(&["recall", "read-summary", PATH]);
+    assert_eq!(
+        stale["result"]["result"],
+        serde_json::json!({
+            "state": "stale",
+            "path": PATH,
+            "current_hash": sha256_hex(moved.as_bytes()),
+        })
+    );
+    assert!(!f.json(&known_state()).to_string().contains(OUTLINE));
+}
+
+#[test]
+fn two_workers_racing_over_one_commit_record_one_checkpoint_one_entry_and_one_outline() {
+    let f = session_fixture();
+    let hooks = DetachedHooks::default();
+    let git_dir = f.git_dir_arg();
+    // The hook spawns its worker and returns; a second worker races it for
+    // the drain lock while it runs.
+    f.detached(
+        &hooks,
+        &["hooks", "git", "post-commit", "--git-dir", &git_dir],
+    );
+    f.detached(&hooks, &["hooks", "worker", "--git-dir", &git_dir]);
+    hooks.await_workers(|| true);
+
+    let (entries, checkpoints) = chain_and_checkpoints(&f);
+    assert_eq!(checkpoints, "1", "one condense, under one lock");
+    assert_eq!(entries, 1, "one chain entry, through the compare-and-set");
+    assert_eq!(
+        f.count(&format!(
+            "SELECT COUNT(*) FROM summary_binding WHERE path = '{PATH}'"
+        )),
+        1
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM summary_token_count"), 3);
+}
+
+#[test]
+fn a_condense_drained_inline_in_the_hook_binds_nothing_while_its_archive_and_entry_land() {
+    let f = session_fixture();
+    assert!(
+        f.post_commit_inline().wait().unwrap().success(),
+        "a hook never fails git"
+    );
+    let (entries, checkpoints) = chain_and_checkpoints(&f);
+    assert_eq!(checkpoints, "1", "the archive landed");
+    assert_eq!(entries, 1, "and its chain entry");
+    assert_eq!(f.count("SELECT COUNT(*) FROM summary_binding"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM summary_token_count"), 0);
 }

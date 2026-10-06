@@ -411,6 +411,11 @@ its tokens roll up to the parent even when it started before the boundary,
 while the parent's metadata enumerates the task ids so hiding one is detected
 rather than merely absent.
 
+One step follows the checkpoint and is not part of it.
+Once a condense run by the detached worker has landed its checkpoint and chain entry, it binds an outline of every code file the session read whose bytes in the work tree are still a revision it read, redacted first and refused for any path the serve policy denies or marks sensitive, at most 64 per condense, into the recall projection ([§6.15](06-recall.md#615-what-is-running-and-what-is-not)).
+It opens that projection for writing and runs the tokenizer, so a hook never does it: an archive made inside a hook, including a condense drained inline under `RIFT_CAPTURE_SYNC`, binds nothing, and the next worker condense of the session does.
+A failed binding is counted and dropped; it never fails or retries the condense.
+
 ### When does a condense happen?
 
 That is the **strategy**, configured per repository

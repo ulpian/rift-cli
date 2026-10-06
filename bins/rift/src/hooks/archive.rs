@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use rift_core::Result;
 
 use super::audit::session_serve_lines;
-use super::git::{effective_config, session_raw_capture, state_from_token, strategy_kind};
+use super::git::{
+    effective_config, session_raw_capture, state_from_token, strategy_kind, CAPTURE_SYNC_ENV,
+};
 use super::{now_ms, projection_db_at};
 
 /// One archive of one commit, with what its caller opened for it: every step
@@ -52,8 +54,38 @@ struct ArchiveCtx<'a> {
 /// `Ok(true)` beside a `return` is exactly how an earlier silent-loss defect
 /// was written — the flag said "archived" where no checkpoint existed;
 /// threading the `Option<CheckpointId>` makes that spelling unavailable.
+///
+/// The detached worker's and the doctor's road: once the checkpoint and its
+/// chain entry have landed, the outlines of what the session read are bound
+/// ([`bind_session_outlines`]). A git hook archives through
+/// [`archive_in_git_hook`] instead, which binds nothing.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn archive_now(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    work_tree: &Path,
+    commit: &str,
+    session: &str,
+    agent: &str,
+    decision: rift_shadow::hooks::strategy::ArchiveDecision,
+    now: i64,
+) -> Result<Option<rift_shadow::CheckpointId>> {
+    let archived = archive_in_git_hook(rt, store, work_tree, commit, session, agent, decision, now);
+    if let Ok(Some(_)) = &archived {
+        bind_session_outlines(rt, store, work_tree, agent, session);
+    }
+    archived
+}
+
+/// [`archive_now`] without the outline binding: the archive and its chain
+/// entry only.
+///
+/// For the one caller that runs inside a git hook, which has git's latency
+/// budget and so may neither open the recall projection for writing nor load
+/// the tokenizer. Its session's outlines are bound by the next condense the
+/// worker runs, since the read facts are cumulative.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn archive_in_git_hook(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
     work_tree: &Path,
@@ -111,6 +143,72 @@ pub(super) fn archive_now(
         record_chain_entry(&t, &repo, Some(id.as_str()), now);
     }
     archived
+}
+
+/// Bind the outline of every code file the session read and has not changed
+/// since, once its checkpoint and chain entry have landed.
+///
+/// After the archive on purpose: the binding is a rebuildable projection
+/// derived from the bytes, and nothing in the checkpoint depends on it, so it
+/// is the last step and its failure costs only itself. It runs on the
+/// detached worker's condense, under the capture-queue lock the drain holds,
+/// and never in a hook: it opens the recall projection for writing and runs
+/// the tokenizer. Every outcome is a count; nothing here fails or retries the
+/// condense, and the next condense of the family tries again because the
+/// writer is idempotent. A repository with Recall turned off binds nothing.
+///
+/// Nor does a condense drained inline under [`CAPTURE_SYNC_ENV`]: that
+/// variable is the one thing that makes a hook drain the queue itself, so a
+/// process that has it set may be inside a hook. The next condense the worker
+/// runs binds those reads, because a session's read facts are cumulative.
+pub(super) fn bind_session_outlines(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    work_tree: &Path,
+    agent: &str,
+    session: &str,
+) -> Option<rift_recall_ledger::validity_store::OutlineBindCounts> {
+    if std::env::var_os(CAPTURE_SYNC_ENV).is_some() {
+        return None;
+    }
+    let cfg = effective_config(work_tree);
+    if !cfg.recall_enabled() {
+        return None;
+    }
+    let reads: Vec<(String, String)> = read_facts_for_archive(rt, store, agent, session)
+        .into_iter()
+        .map(|fact| (fact.path, fact.content_sha256))
+        .collect();
+    if reads.is_empty() {
+        return None;
+    }
+    let db = crate::family::recall_db(work_tree).ok()?;
+    let recall = rift_store::open_migrated(&db, &rift_store::recall_migrations()).ok()?;
+    let engine = rift_recall_policy::PolicyEngine::new(&cfg).with_serve_policy(
+        rift_recall_policy::ServePolicy::load(&work_tree.join(".rift")),
+    );
+    let refuses = |path: &str| engine.is_denied_path(path) || engine.exact_source_required(path);
+    let redact = |bytes: Vec<u8>| {
+        rift_shadow::redact::redact(&rift_core::SecretBytes::new(bytes))
+            .ok()
+            .map(|out| out.redacted)
+    };
+    let batch = rift_recall_ledger::validity_store::OutlineBatch {
+        work_tree,
+        policy_version: rift_recall_policy::SERVE_POLICY_VERSION,
+        refuses_path: &refuses,
+        redact: &redact,
+        count: &rift_tokens::count,
+        tokenizer: rift_tokens::provenance(),
+    };
+    let counts = rt.block_on(rift_recall_ledger::validity_store::bind_read_outlines(
+        &recall,
+        &rift_store::PlainCipher,
+        &batch,
+        &reads,
+    ));
+    tracing::info!(?counts, session, "outlines bound after the archive");
+    Some(counts)
 }
 
 /// What the session captured beside its capture document: its read facts, its
@@ -417,6 +515,9 @@ fn archive_queued_session(
     // refuses a checkpoint that has no entry, so recording it later
     // would mean a red run in between.
     record_chain_entry(ctx.t, ctx.repo, checkpoint.as_deref(), ctx.now);
+    if checkpoint.is_some() {
+        bind_session_outlines(ctx.rt, ctx.store, &ctx.repo.work_tree, agent, session_id);
+    }
     // The soak accrues against the checkpoint that was just written, and
     // there is no arm here that accrues without one. `run_archive`
     // inside `decision.archive` returns `Ok(Some(_))` or `Err`, so this
