@@ -4,7 +4,7 @@
 use crate::shell_read::{recognise, ShellCall, ShellSpan, MAX_COMMAND_BYTES};
 use crate::{HiKind, ReadSpan, SearchKind};
 
-use super::{assert_each_recognised, listing, read, read_of, reads_of};
+use super::{assert_each_recognised, listing, member, read, read_of, reads_of};
 
 /// **Every form the grammar spells, and the range each one supports.**
 ///
@@ -81,6 +81,14 @@ fn every_grammar_form_yields_the_pinned_range() {
             read(file, ShellSpan::Lines { lo: 12, hi: 48 }),
         ),
         ("/bin/cat src/lib.rs", read(file, ShellSpan::WholeFile)),
+        // A search over several named files is a search of each of them.
+        (
+            "grep -n needle src/lib.rs src/main.rs",
+            ShellCall::Read(vec![
+                member(file, ShellSpan::Matching),
+                member("src/main.rs", ShellSpan::Matching),
+            ]),
+        ),
     ];
     assert_each_recognised(cases);
 }
@@ -469,5 +477,58 @@ fn a_command_spelled_from_a_system_directory_reads_as_the_bare_one() {
         assert!(recognise(bare).is_some(), "{bare:?}");
         assert_eq!(recognise(spelled), recognise(bare), "{spelled:?}");
         assert_eq!(read_of(spelled), read_of(bare), "{spelled:?}");
+    }
+}
+
+/// **A search over several named files is a search of each of them.**
+///
+/// With the same flags that only choose, number or count the lines, every
+/// file the line names is searched for the same pattern and nothing else is
+/// opened; the tool labels each match with the file it came from. So the
+/// line is one content search per file, in the order it names them, each
+/// recognised as a one-file search is: with no coverage. It is not the one
+/// search an index could stand in for, so it names no single searched file.
+#[test]
+fn a_search_over_several_named_files_is_a_search_of_each() {
+    let each = |paths: &[&str]| {
+        ShellCall::Read(
+            paths
+                .iter()
+                .map(|path| member(path, ShellSpan::Matching))
+                .collect(),
+        )
+    };
+    let cases: &[(&str, ShellCall)] = &[
+        ("grep needle a.rs b.rs", each(&["a.rs", "b.rs"])),
+        (
+            "grep -n needle a.rs b.rs c.rs",
+            each(&["a.rs", "b.rs", "c.rs"]),
+        ),
+        ("grep -n -A 3 'fn a' a.rs b.rs", each(&["a.rs", "b.rs"])),
+        ("grep -c -e x -e y a.rs b.rs", each(&["a.rs", "b.rs"])),
+        ("grep needle a.rs -n b.rs -C2", each(&["a.rs", "b.rs"])),
+        ("grep -n -- needle a.rs b.rs", each(&["a.rs", "b.rs"])),
+        ("egrep -n 'a|b' a.rs b.rs", each(&["a.rs", "b.rs"])),
+        ("fgrep -i needle a.rs b.rs", each(&["a.rs", "b.rs"])),
+        ("rg -n needle a.rs 'my b.rs'", each(&["a.rs", "my b.rs"])),
+        (
+            "cd crates && grep -n needle a.rs /r/b.rs",
+            each(&["crates/a.rs", "/r/b.rs"]),
+        ),
+        ("/usr/bin/grep -n needle a.rs b.rs", each(&["a.rs", "b.rs"])),
+    ];
+    assert_each_recognised(cases);
+    for (command, _) in cases {
+        let call = recognise(command);
+        assert!(read_of(command).is_none(), "{command} grants no coverage");
+        assert_eq!(
+            call.as_ref().and_then(ShellCall::searched_file),
+            None,
+            "{command}"
+        );
+        assert!(
+            call.is_some_and(|call| call.search_request().is_none()),
+            "{command} is never a listing"
+        );
     }
 }

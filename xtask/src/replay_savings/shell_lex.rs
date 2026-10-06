@@ -280,7 +280,7 @@ impl Lexer<'_> {
 const fn bare_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(c, '_' | '.' | '/' | '-' | '+' | '=' | ',' | ':' | '@' | '%')
-        || !c.is_ascii()
+        || (!c.is_ascii() && !matches!(c, '\u{80}'..='\u{9f}'))
 }
 
 /// Whether a backslash before this character, inside double quotes, is an

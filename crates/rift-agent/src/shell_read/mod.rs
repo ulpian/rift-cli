@@ -423,15 +423,18 @@ struct Word {
 /// `|` that reaches this function is a `|` in a position the grammar has no
 /// meaning for, and it is refused exactly as it always was.
 ///
-/// Bytes above ASCII are allowed: a path may be spelled in any script, and no
-/// character the shell acts on lives up there.
+/// Characters above ASCII are allowed: a path may be spelled in any script,
+/// and no character the shell acts on lives up there. The C1 control codes
+/// (U+0080 to U+009F) are the exception: a terminal acts on them, nobody
+/// spells a name with one, and a quoted word already refuses every control
+/// character, so a bare word does too.
 ///
 /// The `~` is excluded here and admitted only by [`inert_tilde`], which is
 /// the one position where it is a letter rather than a home directory.
 const fn bare_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(c, '_' | '.' | '/' | '-' | '+' | '=' | ',' | ':' | '@' | '%')
-        || !c.is_ascii()
+        || (!c.is_ascii() && !matches!(c, '\u{80}'..='\u{9f}'))
 }
 
 /// Whether a `~` continuing the unquoted word `word` so far is a literal
@@ -1095,8 +1098,19 @@ fn sed_read(rest: &[Word]) -> Option<Member> {
     }
 }
 
-/// The `grep` family: a content search over one named file. It is a read of
-/// lines nobody here can name, and it is never answered from an index.
+/// The `grep` family: a content search over the files the line names. It is
+/// a read of lines nobody here can name, and it is never answered from an
+/// index.
+///
+/// **Several named files are one search of each**, in the order the line
+/// names them: the tool opens those files and nothing else, searches each for
+/// the same pattern under the same flags, and labels every match with its
+/// file, so what it printed is still decided by the named files' bytes alone.
+/// Each one is recognised as a one-file search is, with no coverage, and the
+/// member is refused a narrowing pipe like any other member of several reads,
+/// because a cut of the joined matches is a run of none of the files. A
+/// flag that reaches past the named files (`-r`) stays refused, because then
+/// which files were opened is the filesystem's to say.
 ///
 /// Options are read the way the command's own option parser reads them —
 /// letters may share one word, and a letter that takes a value takes the rest
@@ -1135,12 +1149,25 @@ fn content_search(rest: &[Word], flags: &str) -> Option<Member> {
         let letters = bare(word)?.strip_prefix('-')?;
         pattern_given |= search_option(letters, flags, &mut words)?;
     }
-    let path = match (pattern_given, operands.as_slice()) {
-        (true, [path]) => path,
-        (false, [pattern, path]) if !pattern.text.starts_with('-') => path,
+    let paths = match (pattern_given, operands.as_slice()) {
+        (true, paths) => paths,
+        (false, [pattern, paths @ ..]) if !pattern.text.starts_with('-') => paths,
         _ => return None,
     };
-    one_read(path_arg(path)?, ShellSpan::Matching)
+    if paths.is_empty() {
+        return None;
+    }
+    let reads = paths
+        .iter()
+        .map(|path| {
+            Some(ShellRead {
+                path: path_arg(path)?,
+                span: ShellSpan::Matching,
+                narrowing: None,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Member::Reads(reads))
 }
 
 /// One option word of a search, its leading `-` already taken off: whether it

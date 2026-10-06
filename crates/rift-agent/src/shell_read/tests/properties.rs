@@ -451,6 +451,33 @@ proptest::proptest! {
         );
     }
 
+    /// ★ A search with any run of pinned flags over any number of named
+    /// files, up to the cap, is one content search per file in the order
+    /// the line names them, and none grants coverage.
+    #[test]
+    fn a_pinned_search_over_named_files_is_one_search_per_file(
+        command in proptest::sample::select(&["grep", "egrep", "fgrep", "rg"][..]),
+        flags in proptest::collection::vec(proptest::sample::select(PINNED_SEARCH_FLAGS), 0..4),
+        count in 1_usize..=crate::shell_read::MAX_CHAIN_READS,
+    ) {
+        let pattern = if flags.iter().any(|flag| flag.ends_with("needle")) { "" } else { "needle" };
+        let paths: Vec<String> = (0..count).map(|n| format!("src/f{n}.rs")).collect();
+        let line = format!("{command} {} {pattern} {}", flags.join(" "), paths.join(" "));
+        let Some(ShellCall::Read(reads)) = recognise(&line) else {
+            return Err(proptest::test_runner::TestCaseError::fail(format!(
+                "{line:?} is a pinned search and was not recognised"
+            )));
+        };
+        let read_paths: Vec<&str> = reads.iter().map(|read| read.path.as_str()).collect();
+        proptest::prop_assert_eq!(read_paths, paths.iter().map(String::as_str).collect::<Vec<_>>());
+        for read in &reads {
+            proptest::prop_assert_eq!(read.span, crate::shell_read::ShellSpan::Matching);
+            proptest::prop_assert!(read.read_request().is_none());
+        }
+        let narrowed = format!("{line} | head -n 5");
+        proptest::prop_assert_eq!(recognise(&narrowed).is_some(), count == 1, "{}", narrowed);
+    }
+
     /// ★ A recognised count is never signed.
     ///
     /// A sign in front of a count changes what `tail` and `sed` print — from

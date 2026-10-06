@@ -304,6 +304,9 @@ GNU `grep` and `rg` do). A `grep` that does not would misread such a line,
 which only moves a measurement, since a search can never decline a read; any
 later form that grants coverage from a late option must first establish which
 `grep` runs.
+A search may name several files (`grep -n x a.rs b.rs`): it opens those and no
+others, so it is one search of each, recognised with no coverage; narrowed by a
+pipe it is left alone, because the cut falls on the files' matches joined.
 A `sed -n` script may also print one line (`'Ap'`), credited like a range, or
 several runs joined by `;` (`'1,40p;90,120p'`), which is one read per run and
 is credited with nothing: the runs reach the window as one output that can
