@@ -1,4 +1,4 @@
-//! The recall projection's migration set (`recall.db`): the fourteen
+//! The recall projection's migration set (`recall.db`): the fifteen
 //! checksum-locked SQL builders over the recall registry slices and their
 //! secondary indexes.
 //!
@@ -21,7 +21,9 @@ use super::Migration;
 /// `serve_session_event` relations; version 12 adds the worktree-scope
 /// mirrors and the grant-reason store; version 13 adds the
 /// `memd_audit_session` serve attribution; version 14 adds the
-/// `memd_audit_pull_claim` record of what a pull's caller claimed to hold.
+/// `memd_audit_pull_claim` record of what a pull's caller claimed to hold;
+/// version 15 adds the `n_window_row` relation a checkpoint's frozen window
+/// rows are read back into.
 #[must_use]
 pub fn recall_migrations() -> Vec<Migration> {
     vec![
@@ -94,6 +96,11 @@ pub fn recall_migrations() -> Vec<Migration> {
             version: 14,
             name: "recall_pull_claims",
             sql: recall_pull_claim_schema_sql(),
+        },
+        Migration {
+            version: 15,
+            name: "recall_window_rows",
+            sql: recall_window_row_schema_sql(),
         },
     ]
 }
@@ -441,6 +448,33 @@ fn recall_pull_claim_schema_sql() -> String {
     sql
 }
 
+/// The v15 additive recall migration: the `n_window_row` relation, one row
+/// per line a checkpoint's `window_journal.jsonl` froze.
+///
+/// Found by name for the reason v13's relation is. No secondary index: no
+/// reader asks it a question yet, and an index is additive whenever one does.
+fn recall_window_row_schema_sql() -> String {
+    let tables = || {
+        crate::schema::recall_canonical_tables()
+            .iter()
+            .filter(|table| table.name == "n_window_row")
+    };
+    let mut sql = String::new();
+    for table in tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    for table in tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,7 +602,16 @@ mod tests {
                 "memd_audit_pull_claim_no_update",
                 "memd_audit_pull_claim_no_delete",
             ],
-            &["memd_audit_session"],
+            &["memd_audit_session", "n_window_row"],
+        ),
+        (
+            "recall_window_rows",
+            &[
+                "CREATE TABLE IF NOT EXISTS n_window_row",
+                "n_window_row_no_update",
+                "n_window_row_no_delete",
+            ],
+            &["memd_audit_pull_claim"],
         ),
     ];
 
@@ -579,7 +622,7 @@ mod tests {
     #[test]
     fn every_recall_version_creates_only_its_own_relations() {
         let migs = recall_migrations();
-        assert_eq!(migs.len(), 14);
+        assert_eq!(migs.len(), 15);
         for (version, (name, creates, excludes)) in VERSION_CONTENTS.iter().enumerate() {
             assert_eq!(migs[version].name, *name);
             let sql = &migs[version].sql;
@@ -601,11 +644,11 @@ mod tests {
     fn recall_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &recall_migrations()).unwrap();
-        assert_eq!(out.applied, 14);
-        assert_eq!(out.high_water, 14);
+        assert_eq!(out.applied, 15);
+        assert_eq!(out.high_water, 15);
         let again = apply_migrations(&s, &recall_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 14);
+        assert_eq!(again.skipped, 15);
     }
 }
 
@@ -625,7 +668,7 @@ mod pull_claim_tests {
         let migs = recall_migrations();
         let before = apply_migrations(&s, &migs[..13]).unwrap();
         assert_eq!(before.high_water, 13);
-        let after = apply_migrations(&s, &migs).unwrap();
+        let after = apply_migrations(&s, &migs[..14]).unwrap();
         assert_eq!(after.applied, 1);
         assert_eq!(after.high_water, 14);
         assert_eq!(s.execute_raw(ROW).unwrap(), 1);
@@ -657,5 +700,69 @@ mod pull_claim_tests {
         assert!(s.execute_raw(&none_stated).is_err());
         let unverified = ROW.replace("stated_recorded", "unverified");
         assert_eq!(s.execute_raw(&unverified).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod window_row_tests {
+    use super::*;
+    use crate::migrate::apply_migrations;
+    use crate::migrate::fixtures::store;
+
+    const ROW: &str = "INSERT INTO n_window_row \
+        (row_id, window_key, subagent, kind, turn, at, path, content_sha256, hash_old, \
+         range_lo, range_hi, total_lines, sites, shift, full, reason, file_revision, \
+         checkpoint_id, schema_version) \
+        VALUES ('r1', 'w1', NULL, 'read', 1, 2, 'src/a.rs', 'h1', NULL, 1, 40, 400, \
+         NULL, NULL, NULL, NULL, 'fr1', 'c1', 1)";
+
+    const PULL_CLAIM: &str = "INSERT INTO memd_audit_pull_claim \
+        (audit_id, stated_count, recorded_count, unrecorded_count, basis, schema_version) \
+        VALUES ('a1', 3, 2, 1, 'stated_recorded', 1)";
+
+    #[test]
+    fn a_store_at_the_previous_version_gains_the_window_relation_and_keeps_its_rows() {
+        let s = store();
+        let migs = recall_migrations();
+        let before = apply_migrations(&s, &migs[..14]).unwrap();
+        assert_eq!(before.high_water, 14);
+        assert_eq!(s.execute_raw(PULL_CLAIM).unwrap(), 1);
+        let after = apply_migrations(&s, &migs).unwrap();
+        assert_eq!(after.applied, 1);
+        assert_eq!(after.high_water, 15);
+        let kept: i64 = s
+            .with_conn(|c| {
+                c.query_row("SELECT COUNT(*) FROM memd_audit_pull_claim", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(kept, 1);
+        assert_eq!(s.execute_raw(ROW).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_window_row_can_be_neither_updated_nor_deleted() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        s.execute_raw(ROW).unwrap();
+        let update = s.execute_raw("UPDATE n_window_row SET turn = 9");
+        let delete = s.execute_raw("DELETE FROM n_window_row");
+        assert!(matches!(update, Err(rift_core::RiftError::Immutability(_))));
+        assert!(matches!(delete, Err(rift_core::RiftError::Immutability(_))));
+    }
+
+    #[test]
+    fn a_kind_the_journal_does_not_declare_is_refused() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        assert!(s
+            .execute_raw(&ROW.replace("'read'", "'summarize'"))
+            .is_err());
+        assert_eq!(
+            s.execute_raw(&ROW.replace("'read'", "'prevented'"))
+                .unwrap(),
+            1
+        );
     }
 }

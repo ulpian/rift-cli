@@ -7,6 +7,8 @@
 //! allocation; [`redact_err`] surfaces only position/category, never raw payload
 //! — a parse error never leaks the bytes that caused it.
 
+mod window_journal;
+
 use rift_recall_types::checkpoint::{
     AttributionFacts, CheckpointMetadata, CompactTranscriptRecord, CostEstimate, FullEventRecord,
     RedactionReportFacts, TaskMetadata, TaskRecord, TestResultsFacts, TokenEstimate,
@@ -14,6 +16,8 @@ use rift_recall_types::checkpoint::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
+
+pub use window_journal::{parse_window_journal, WindowJournalRow};
 
 /// Hard cap on a single artifact blob, applied before any parse allocates.
 pub const MAX_ARTIFACT_BYTES: usize = 32 * 1024 * 1024;
@@ -610,6 +614,48 @@ fn serve_call_instant(env: &Map<String, Value>, key: &str) -> Result<i64, String
     }
 }
 
+/// Split a JSONL artifact into lines and validate each with `validate`,
+/// under the same size caps as every other artifact: a refused line is one
+/// [`IssueKind::Corrupt`] issue carrying the validator's words, never its bytes.
+fn parse_validated_lines<T>(
+    bytes: &[u8],
+    artifact: &'static str,
+    checkpoint_id: &str,
+    validate: fn(&[u8]) -> Result<T, String>,
+) -> Outcome<Vec<T>> {
+    if bytes.len() > MAX_ARTIFACT_BYTES {
+        let issue = oversize(checkpoint_id, artifact, Locator::WholeFile, bytes.len());
+        return Outcome {
+            value: Vec::new(),
+            issues: vec![issue],
+        };
+    }
+    let mut value = Vec::new();
+    let mut issues = Vec::new();
+    for (n, line) in bytes.split(|&b| b == b'\n').enumerate() {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let locator = Locator::Line(n + 1);
+        if line.is_empty() {
+            continue;
+        }
+        if line.len() > MAX_JSONL_LINE_BYTES {
+            issues.push(oversize(checkpoint_id, artifact, locator, line.len()));
+            continue;
+        }
+        match validate(line) {
+            Ok(parsed) => value.push(parsed),
+            Err(detail) => issues.push(ParseIssue {
+                checkpoint_id: checkpoint_id.to_owned(),
+                artifact,
+                locator,
+                kind: IssueKind::Corrupt,
+                detail,
+            }),
+        }
+    }
+    Outcome { value, issues }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,6 +952,7 @@ not json
             let _ = parse_task_metadata(&bytes, "cp");
             let _ = parse_merkle_leaves(&bytes, "cp");
             let _ = parse_serve_audit(&bytes, "cp");
+            let _ = window_journal::parse_window_journal(&bytes, "cp");
         }
     }
 }

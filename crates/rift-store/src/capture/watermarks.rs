@@ -52,8 +52,20 @@ pub async fn record_ingest_watermark(
 }
 
 /// The most recently recorded branch tip for `branch`, if any — where the
-/// bridge resumes from. Append-only reads: latest `ingested_at` wins (ties
-/// broken by `watermark_id` for determinism).
+/// bridge resumes from. The latest `ingested_at` wins, and a tie goes to the
+/// row written last.
+///
+/// The tie is the common case, not a corner: the recall plane stamps every
+/// row with one constant time so a rebuild is deterministic, and the capture
+/// plane can append twice within a millisecond. The ids are hashes, so
+/// breaking the tie by `watermark_id` picked an arbitrary row. `rowid` is the
+/// order of writing instead, and for this relation that order is true: it is
+/// append-only (its guards abort every `UPDATE` and `DELETE`), so no row is
+/// ever removed and SQLite hands each insert a `rowid` above every row already
+/// there. A `VACUUM` may renumber the rowids of a table without an integer
+/// key, but it copies rows in `rowid` order, so their relative order survives.
+/// Inventing timestamps in the recall writer was the alternative rejected: it
+/// would put a clock into a rebuild that must not depend on one.
 ///
 /// # Errors
 /// [`rift_core::RiftError::Storage`] on a query failure.
@@ -64,7 +76,7 @@ pub async fn latest_ingest_watermark(
     let rows = store
         .query(
             "SELECT branch_tip FROM ingest_watermark WHERE branch = ?1 \
-             ORDER BY ingested_at DESC, watermark_id DESC LIMIT 1",
+             ORDER BY ingested_at DESC, rowid DESC LIMIT 1",
             &[Value::text(branch.to_owned())],
         )
         .await?;
@@ -139,6 +151,29 @@ mod tests {
             !record_ingest_watermark(&s, &watermark("w2", "rift/checkpoints/v1", "tipB", 20))
                 .await
                 .unwrap()
+        );
+    }
+
+    /// The recall plane stamps every watermark with one constant time so a
+    /// rebuild is deterministic; its ids are hashes. The tip it resumes from
+    /// must still be the one it wrote last, not the one whose hash sorts last.
+    #[tokio::test]
+    async fn rows_with_one_ingest_time_resume_from_the_last_one_written() {
+        let s = crate::SqliteStore::open_in_memory().unwrap();
+        crate::apply_migrations(&s, &crate::recall_migrations()).unwrap();
+        let branch = "rift/checkpoints/v1";
+        record_ingest_watermark(&s, &watermark("ffff", branch, "tipA", 0))
+            .await
+            .unwrap();
+        record_ingest_watermark(&s, &watermark("0000", branch, "tipB", 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            latest_ingest_watermark(&s, branch)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("tipB")
         );
     }
 }

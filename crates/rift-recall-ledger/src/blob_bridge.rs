@@ -18,12 +18,19 @@
 //! returned rather than hidden, because a basis-availability rate is the thing
 //! the pull verb's usefulness is actually made of.
 //!
-//! The walk is the expensive half, and its answer is a function of two things
-//! only: the revisions still wanted and the line of history `HEAD` names. So a
-//! walk that finished is recorded as a proof — one `ingest_watermark` row whose
-//! id digests `HEAD` and the revisions it left unavailable — and the
-//! incremental pass skips a walk whose proof is already there. A new read or a
-//! moved `HEAD` changes the digest and walks again; the full pass always walks.
+//! The walk is the expensive half, and its answer for one revision is a
+//! function of two things only: the path it was read at and the line of
+//! history `HEAD` names. So a walk that finished records a proof for each
+//! revision it left unavailable — one `ingest_watermark` row whose id digests
+//! `HEAD`, the path and the content address — and the incremental pass skips a
+//! walk when every revision it wants has its proof. A new read or a moved
+//! `HEAD` has no proof and walks again; the full pass always walks.
+//!
+//! The same proofs keep the cap on paths per pass from starving the rest. A
+//! pass takes the paths with a revision no walk from this `HEAD` has tried
+//! before the ones already shown unavailable, so bytes git will never hold
+//! cannot occupy the cap forever, and every wanted path is walked within as
+//! many passes as it takes the cap to cover them.
 //!
 //! **Opens a store and walks history**, so it belongs to the ingest pass the
 //! worker runs and to nothing on a tool-call gate path.
@@ -44,10 +51,10 @@ use crate::graph::sha256_id;
 /// found, which costs a saving and never names wrong bytes.
 pub const MAX_HISTORY_COMMITS: usize = 64;
 
-/// How many distinct paths one pass will walk history for. The unmapped set
-/// shrinks monotonically (the map is append-only), so a repository with more
-/// than this many unbridged paths finishes over consecutive passes rather than
-/// paying for all of them at once.
+/// How many distinct paths one pass will walk history for. Paths not yet tried
+/// from the current `HEAD` are taken first, so a repository with more than
+/// this many unbridged paths reaches every one of them over consecutive passes
+/// rather than paying for all of them at once.
 pub const MAX_BRIDGED_PATHS: usize = 64;
 
 /// The largest blob this will hash. A basis past it could not be diffed
@@ -55,13 +62,20 @@ pub const MAX_BRIDGED_PATHS: usize = 64;
 /// spent to learn nothing.
 pub const MAX_BASIS_BYTES: usize = 1024 * 1024;
 
-/// The `ingest_watermark` branch a finished walk's proof is recorded under. No
+/// The `ingest_watermark` branch a finished walk's proofs are recorded under. No
 /// checkpoint dialect is spelled like a bare name, so a dialect's resume never
 /// reads one of these rows as its tip.
 pub const PROOF_BRANCH: &str = "blob-bridge";
 
 /// The revisions a pass wants, grouped by the path they were recorded at.
 type Wanted = BTreeMap<String, BTreeSet<String>>;
+
+/// The revisions one pass takes, and whether a walk from the current `HEAD`
+/// has already shown every one of them unavailable.
+struct Selection {
+    wanted: Wanted,
+    proven: bool,
+}
 
 /// What one bridging pass found. `wanted + 0 = mapped + unavailable` by
 /// construction: every recorded revision the pass looked at is in exactly one
@@ -95,18 +109,20 @@ pub async fn bridge_read_revisions(
     reader: &impl SubstrateReader,
     now: i64,
 ) -> Result<BridgeReport> {
-    let wanted = unmapped_read_revisions(store).await?;
-    walk_and_prove(store, reader, wanted, now).await
+    let head = head_of(reader);
+    let selection = select_wanted(store, head.as_deref()).await?;
+    walk_and_prove(store, reader, selection.wanted, now).await
 }
 
 /// [`bridge_read_revisions`] for the incremental pass: a wanted set a walk from
 /// this same `HEAD` already left unavailable is reported as that walk found it,
 /// without walking again.
 ///
-/// Equal to the full pass by construction: the walk reads nothing but the
-/// wanted set, the first-parent line from `HEAD` and the immutable objects on
-/// it, and the proof's id digests the first two. A reader that cannot name
-/// `HEAD` has no proof to find and always walks.
+/// Equal to the full pass by construction: both take the same selection, the
+/// walk reads nothing for a revision but its path's first-parent line from
+/// `HEAD` and the immutable objects on it, and each proof's id digests the
+/// revision, its path and `HEAD`. A reader that cannot name `HEAD` has no proof
+/// to find and always walks.
 ///
 /// # Errors
 /// Propagates store read/write errors.
@@ -115,15 +131,12 @@ pub async fn bridge_unproven_revisions(
     reader: &impl SubstrateReader,
     now: i64,
 ) -> Result<BridgeReport> {
-    let wanted = unmapped_read_revisions(store).await?;
-    let proven = match head_of(reader) {
-        Some(head) => proof_recorded(store, &proof_id(&head, &wanted)).await?,
-        None => false,
-    };
-    if !proven {
-        return walk_and_prove(store, reader, wanted, now).await;
+    let head = head_of(reader);
+    let selection = select_wanted(store, head.as_deref()).await?;
+    if !selection.proven {
+        return walk_and_prove(store, reader, selection.wanted, now).await;
     }
-    let n_wanted = wanted.values().map(BTreeSet::len).sum();
+    let n_wanted = selection.wanted.values().map(BTreeSet::len).sum();
     Ok(BridgeReport {
         wanted: n_wanted,
         mapped: 0,
@@ -132,8 +145,43 @@ pub async fn bridge_unproven_revisions(
     })
 }
 
+/// The paths one pass walks for: those with a revision no walk from `head` has
+/// tried come first, then those whose every revision a walk from `head` left
+/// unavailable, each group in path order, up to [`MAX_BRIDGED_PATHS`].
+///
+/// Taking the untried first is what lets every path be reached: a pass that
+/// leaves a revision unavailable records its proof, which moves its path behind
+/// every untried one on the next pass. Filling the rest of the cap with proven
+/// paths keeps their revisions in the count, so a pass with nothing new to try
+/// reports what the last walk found rather than nothing at all.
+/// Without a `HEAD` nothing is proven, and the order is path order alone.
+async fn select_wanted(store: &impl CanonicalStore, head: Option<&str>) -> Result<Selection> {
+    let unmapped = unmapped_read_revisions(store).await?;
+    let (proven, untried): (Wanted, Wanted) = match head {
+        Some(head) => {
+            let proofs = recorded_proofs(store, head).await?;
+            unmapped.into_iter().partition(|(path, hashes)| {
+                hashes
+                    .iter()
+                    .all(|hash| proofs.contains(&proof_id(head, path, hash)))
+            })
+        }
+        None => (Wanted::new(), unmapped),
+    };
+    let all_proven = untried.is_empty() && !proven.is_empty();
+    let wanted = untried
+        .into_iter()
+        .chain(proven)
+        .take(MAX_BRIDGED_PATHS)
+        .collect();
+    Ok(Selection {
+        wanted,
+        proven: all_proven,
+    })
+}
+
 /// Every `(path, content_sha256)` a read recorded that the blob map does not
-/// yet carry, oldest-sorted for determinism.
+/// yet carry, in path order for determinism.
 async fn unmapped_read_revisions(store: &impl CanonicalStore) -> Result<Wanted> {
     let rows = store
         .query(
@@ -154,9 +202,6 @@ async fn unmapped_read_revisions(store: &impl CanonicalStore) -> Result<Wanted> 
         if path.is_empty() || hash.len() != 64 {
             continue;
         }
-        if wanted.len() >= MAX_BRIDGED_PATHS && !wanted.contains_key(&path) {
-            continue;
-        }
         wanted.entry(path).or_default().insert(hash);
     }
     Ok(wanted)
@@ -165,8 +210,8 @@ async fn unmapped_read_revisions(store: &impl CanonicalStore) -> Result<Wanted> 
 /// Walk history for `wanted`, map what it finds, and record the proof of what
 /// it left unavailable when the walk was whole.
 ///
-/// The proof names the revisions left over, not the ones asked for: the next
-/// pass wants exactly those, and finds the proof without walking once more.
+/// The proofs name the revisions left over, not the ones asked for: those are
+/// what the next pass still wants, and it finds them proven without walking.
 async fn walk_and_prove(
     store: &impl CanonicalStore,
     reader: &impl SubstrateReader,
@@ -256,9 +301,9 @@ async fn walk_history(
     Ok(walk)
 }
 
-/// Record that a walk from `head` left `left_over` unavailable — unless the
-/// walk missed a candidate or raced a moving `HEAD`, when it proves nothing
-/// about the line it was meant to read, or left nothing over to prove.
+/// Record that a walk from `head` left each revision of `left_over`
+/// unavailable — unless the walk missed a candidate or raced a moving `HEAD`,
+/// when it proves nothing about the line it was meant to read.
 async fn record_proof(
     store: &impl CanonicalStore,
     reader: &impl SubstrateReader,
@@ -267,11 +312,16 @@ async fn record_proof(
     left_over: &Wanted,
 ) -> Result<()> {
     let head_held = head_of(reader).as_deref() == Some(head);
-    if !walk.whole || !head_held || left_over.is_empty() {
+    if !walk.whole || !head_held {
         return Ok(());
     }
-    let id = proof_id(head, left_over);
-    crate::ingest::record_watermark(store, &id, PROOF_BRANCH, head).await
+    for (path, hashes) in left_over {
+        for hash in hashes {
+            let id = proof_id(head, path, hash);
+            crate::ingest::record_watermark(store, &id, PROOF_BRANCH, head).await?;
+        }
+    }
+    Ok(())
 }
 
 /// The commit `HEAD` names, when the reader can say.
@@ -279,40 +329,28 @@ fn head_of(reader: &impl SubstrateReader) -> Option<String> {
     reader.resolve_commitish("HEAD").ok().flatten()
 }
 
-/// The id of the proof that a walk from `head` left exactly `wanted`
-/// unavailable. The domain carries the walk's bounds, so changing them retires
-/// every proof recorded under the old ones.
-fn proof_id(head: &str, wanted: &Wanted) -> String {
-    let domain =
-        format!("rift.bridge.v1/{MAX_HISTORY_COMMITS}/{MAX_BRIDGED_PATHS}/{MAX_BASIS_BYTES}");
-    // Each path's count of hashes goes in beside it, so two different
-    // groupings of the same strings can never digest alike.
-    let counts: Vec<[u8; 8]> = wanted
-        .values()
-        .map(|hashes| {
-            u64::try_from(hashes.len())
-                .unwrap_or(u64::MAX)
-                .to_le_bytes()
-        })
-        .collect();
-    let mut parts: Vec<&[u8]> = vec![head.as_bytes()];
-    for ((path, hashes), count) in wanted.iter().zip(&counts) {
-        parts.push(path.as_bytes());
-        parts.push(count);
-        parts.extend(hashes.iter().map(String::as_bytes));
-    }
-    sha256_id(&domain, &parts)
+/// The id of the proof that a walk from `head` left the revision `hash` read
+/// at `path` unavailable. The domain carries the walk's bounds, so changing
+/// them retires every proof recorded under the old ones; the cap on paths per
+/// pass is not among them, because it decides which revisions a walk tries and
+/// never what the walk finds for one.
+fn proof_id(head: &str, path: &str, hash: &str) -> String {
+    let domain = format!("rift.bridge.v2/{MAX_HISTORY_COMMITS}/{MAX_BASIS_BYTES}");
+    sha256_id(
+        &domain,
+        &[head.as_bytes(), path.as_bytes(), hash.as_bytes()],
+    )
 }
 
-/// Whether the proof `id` is on record.
-async fn proof_recorded(store: &impl CanonicalStore, id: &str) -> Result<bool> {
+/// The ids of every proof recorded for a walk from `head`.
+async fn recorded_proofs(store: &impl CanonicalStore, head: &str) -> Result<BTreeSet<String>> {
     let rows = store
         .query(
-            "SELECT 1 FROM ingest_watermark WHERE watermark_id = ?1",
-            &[Value::text(id)],
+            "SELECT watermark_id FROM ingest_watermark WHERE branch = ?1 AND branch_tip = ?2",
+            &[Value::text(PROOF_BRANCH), Value::text(head)],
         )
         .await?;
-    Ok(!rows.is_empty())
+    Ok(rows.iter().filter_map(|r| r.get_text(0).ok()).collect())
 }
 
 #[cfg(test)]
@@ -549,6 +587,38 @@ mod tests {
             assert!(report.history_walked);
         }
         assert_eq!(block(store.count("ingest_watermark")).unwrap(), 0);
+    }
+
+    /// More unbridgeable paths than one pass takes must not starve the rest:
+    /// once a walk from this `HEAD` has shown the first paths unavailable, the
+    /// next pass reaches the path after them, whose bytes git does hold.
+    #[test]
+    fn paths_past_the_cap_are_walked_once_the_first_ones_are_proven_unavailable() {
+        let store = recall_store();
+        for i in 0..MAX_BRIDGED_PATHS {
+            let bytes = format!("never committed {i}\n");
+            record_read(
+                &store,
+                &format!("rev{i}"),
+                &format!("src/a{i:03}.rs"),
+                bytes.as_bytes(),
+            );
+        }
+        let hash = record_read(&store, "last", "src/z.rs", COMMITTED);
+        let oid = git_blob_oid(COMMITTED);
+        let sub = MemorySubstrate::local()
+            .with_revision("HEAD", "c0ffee01")
+            .with_blob(&oid, COMMITTED)
+            .with_path_blob("src/z.rs", &oid);
+
+        let first = block(bridge_unproven_revisions(&store, &sub, 0)).unwrap();
+        assert_eq!(first.mapped, 0, "the first pass takes the first paths");
+        let second = block(bridge_unproven_revisions(&store, &sub, 0)).unwrap();
+        assert_eq!(second.mapped, 1, "{second:?}");
+        assert_eq!(
+            block(crate::blob_map::blob_oid_for(&store, &hash)).unwrap(),
+            Some(oid)
+        );
     }
 
     /// A candidate the object store cannot produce makes the walk partial, and

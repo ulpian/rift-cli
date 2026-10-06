@@ -15,8 +15,8 @@
 //! walking history for revisions git does not hold — and the
 //! [`Pass::Incremental`] pass skips each when its answer cannot have changed:
 //! the facts when the ingest plan projects no checkpoint (they feed only the
-//! options of rows the ingest writes), the walk when a proof from the same
-//! `HEAD` over the same wanted set is on record. Hashing the read paths stays
+//! options of rows the ingest writes), the walk when every wanted revision
+//! has a proof from the same `HEAD` on record. Hashing the read paths stays
 //! whole on every pass: it is a small fraction of the cost, and the metrics
 //! need every current hash anyway. [`Pass::Full`] reads and walks every time.
 
