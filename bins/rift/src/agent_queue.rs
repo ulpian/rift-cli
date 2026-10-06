@@ -186,6 +186,47 @@ pub(crate) enum JobKind {
         /// The idle floor the requesting hook read from the family's config.
         floor_ms: i64,
     },
+    /// The working-tree snapshot one turn boundary owes: the hook that closed
+    /// the boundary records only `HEAD` and the instant, and the worker
+    /// observes the working set as of that instant.
+    BoundarySnapshot(BoundarySnapshot),
+}
+
+/// One turn boundary a hook closed and the worker owes a snapshot of.
+///
+/// Journaled because the observation (a `git status`, a read and a diff per
+/// changed path, a batched object write) costs more than an agent hook has,
+/// and grows with what the user has left dirty. The hook keeps the two facts
+/// only it can have: which commit `HEAD` named and when the boundary fell.
+/// The worker takes the snapshot as of that instant, and a path written
+/// after it is not this boundary's to describe.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BoundarySnapshot {
+    /// The agent-supplied session id.
+    pub session_id: String,
+    /// The session's *owner* agent, not the hook's.
+    pub agent: String,
+    /// The turn the boundary opens or closes.
+    pub ordinal: u32,
+    /// Whether it opens the turn or closes it.
+    pub boundary: BoundaryEdge,
+    /// The commit `HEAD` named when the hook ran; `None` on an unborn branch
+    /// or a ref store the hook's reader does not understand.
+    #[serde(default)]
+    pub head_oid: Option<String>,
+    /// The boundary's own instant, epoch milliseconds.
+    pub captured_at_ms: i64,
+}
+
+/// Which edge of a turn a [`BoundarySnapshot`] is, spelled as the boundary
+/// rows spell it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum BoundaryEdge {
+    /// The turn opens: closes the human's window.
+    Start,
+    /// The turn ends: closes the agent's window.
+    End,
 }
 
 /// One interval archive a hook decided and the worker owes.
@@ -213,6 +254,33 @@ pub(crate) enum IntervalReason {
     Schedule,
     /// A sensitive path was touched: the overlay that archives under any base.
     SensitivePath,
+}
+
+impl BoundaryEdge {
+    /// The journal's spelling of a boundary the state machine closed.
+    pub(crate) fn of(boundary: rift_shadow::Boundary) -> Self {
+        match boundary {
+            rift_shadow::Boundary::Start => Self::Start,
+            rift_shadow::Boundary::End => Self::End,
+        }
+    }
+
+    /// The boundary the capture takes.
+    pub(crate) fn boundary(self) -> rift_shadow::Boundary {
+        match self {
+            Self::Start => rift_shadow::Boundary::Start,
+            Self::End => rift_shadow::Boundary::End,
+        }
+    }
+
+    /// The edge's place within its turn, for the journal's file name: a start
+    /// before the end of the same turn.
+    fn position(self) -> &'static str {
+        match self {
+            Self::Start => "0-start",
+            Self::End => "1-end",
+        }
+    }
 }
 
 impl IntervalReason {
@@ -461,13 +529,26 @@ impl JobKind {
             // asks for the same pass, so the name (and the note a failure
             // leaves) is constant.
             Self::SweepIdle { .. } => Some("sweep-idle".to_owned()),
+            // One snapshot per boundary: a redelivered hook owes the one its
+            // first delivery journaled. The ordinal is zero-padded so the
+            // names of one session sort in turn order, start before end,
+            // which is the order the drain breaks a tie of instants in.
+            Self::BoundarySnapshot(snapshot) => Some(format!(
+                "boundary-{}-{:010}-{}",
+                session_key(&snapshot.session_id),
+                snapshot.ordinal,
+                snapshot.boundary.position()
+            )),
         }
     }
 
     /// Token jobs drain before condense and archive jobs, so the shard either
     /// writes carries every count the session's reads were owed; the sweep drains
     /// last, so a session whose own end is queued is condensed by that end
-    /// rather than timed out beside it.
+    /// rather than timed out beside it. Boundary snapshots drain with the
+    /// first rank, in the order of their instants: each diffs against the
+    /// boundary before it, so a turn's end must be observed before the next
+    /// turn's start, and both before the condense that follows them.
     fn rank(&self) -> u8 {
         match self {
             Self::ReadTokens { .. }
@@ -477,7 +558,8 @@ impl JobKind {
             | Self::DocConvert { .. }
             | Self::BasisSnapshot { .. }
             | Self::ToolResultTokens { .. }
-            | Self::DocSweep => 0,
+            | Self::DocSweep
+            | Self::BoundarySnapshot(_) => 0,
             Self::Condense { .. } | Self::Archive(_) => 1,
             Self::SweepIdle { .. } => 2,
         }
@@ -905,6 +987,44 @@ mod tests {
         assert_eq!(ranks, vec![0, 1]);
         let body = std::fs::read_to_string(&a).unwrap();
         assert!(body.contains(r#""reason":"sensitive-path""#), "{body}");
+    }
+
+    /// A boundary snapshot is one job per (session, turn, edge), and one
+    /// session's boundaries list in turn order, a start before its end, even
+    /// when two of them carry the same instant.
+    #[test]
+    fn boundary_snapshots_are_one_job_per_edge_and_list_in_turn_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let boundary = |ordinal: u32, edge: BoundaryEdge, at: i64| AgentJob {
+            kind: JobKind::BoundarySnapshot(BoundarySnapshot {
+                session_id: "../s".into(),
+                agent: "claude-code".into(),
+                ordinal,
+                boundary: edge,
+                head_oid: None,
+                captured_at_ms: at,
+            }),
+            ..condense("s", at)
+        };
+        enqueue(tmp.path(), &boundary(10, BoundaryEdge::Start, 7)).unwrap();
+        enqueue(tmp.path(), &boundary(9, BoundaryEdge::End, 7)).unwrap();
+        let first = enqueue(tmp.path(), &boundary(9, BoundaryEdge::Start, 7)).unwrap();
+        assert_eq!(
+            first,
+            enqueue(tmp.path(), &boundary(9, BoundaryEdge::Start, 8)).unwrap(),
+            "a redelivered boundary is the same job"
+        );
+        assert!(!first.to_string_lossy().contains("../s"));
+        let listed: Vec<AgentJob> = jobs(tmp.path()).into_iter().map(|(_, j)| j).collect();
+        assert_eq!(
+            listed,
+            vec![
+                boundary(9, BoundaryEdge::End, 7),
+                boundary(10, BoundaryEdge::Start, 7),
+                boundary(9, BoundaryEdge::Start, 8),
+            ],
+            "an instant orders first; a tie falls to turn and edge"
+        );
     }
 
     /// The done-marker is what makes a redelivered or re-found condense a

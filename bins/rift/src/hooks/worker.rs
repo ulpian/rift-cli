@@ -4,6 +4,8 @@
 //! nothing here runs inside a hook's latency budget; it is the work a hook
 //! deferred.
 
+mod boundary;
+
 use std::path::Path;
 
 use rift_core::Result;
@@ -108,7 +110,8 @@ pub(super) fn drain_queues(git_dir: Option<&str>, wait: LockWait) -> Result<Vec<
     let Some(_lock) = acquire_queue_lock(git_dir, wait) else {
         return Ok(Vec::new());
     };
-    let drained = drain_locked(git_dir);
+    let t = crate::hooktime::HookTimer::from_env("capture-worker");
+    let drained = drain_locked(&t, git_dir);
     let swept = super::sweep::sweep_idle_family(git_dir, now_ms(), None);
     if drained.minted || !swept.condensed_checkpoints.is_empty() {
         let levelled = level_after_condense(git_dir);
@@ -130,13 +133,21 @@ pub(super) fn drain_jobs(git_dir: Option<&str>, wait: LockWait) -> Vec<(String, 
         return Vec::new();
     };
     match acquire_queue_lock(git_dir, wait) {
-        Some(_lock) => drain_locked(git_dir).condensed,
+        Some(_lock) => {
+            let t = crate::hooktime::HookTimer::from_env("capture-worker");
+            drain_locked(&t, git_dir).condensed
+        }
         None => Vec::new(),
     }
 }
 
 /// Every job and queued commit, drained under the lock the caller holds.
-fn drain_locked(git_dir: &Path) -> Drained {
+///
+/// Within a pass every journaled job runs before any queued commit, in the
+/// journal's order. That is what keeps a turn's boundary snapshots ahead of
+/// the commit whose attribution replays them, and a turn's end ahead of the
+/// next turn's start.
+fn drain_locked(t: &crate::hooktime::HookTimer, git_dir: &Path) -> Drained {
     let mut drained = Drained::default();
     let now = now_ms();
     // Under the lock, on the same clock reading the lock decision used: a temp
@@ -146,7 +157,6 @@ fn drain_locked(git_dir: &Path) -> Drained {
     if swept > 0 {
         tracing::debug!(swept, "removed stale capture-queue temp files");
     }
-    let t = crate::hooktime::HookTimer::from_env("capture-worker");
     // A job attempted once in this drain is not attempted again by it: a
     // failed job is re-journaled with its count raised, and re-finding it on
     // the next pass would spend every retry it has inside one worker — the
@@ -166,7 +176,7 @@ fn drain_locked(git_dir: &Path) -> Drained {
             return drained;
         }
         for (path, job) in agent_jobs {
-            match run_agent_job(&t, git_dir, &path, &job) {
+            match run_agent_job(t, git_dir, &path, &job) {
                 Landed::Nothing => (),
                 Landed::Checkpoint => drained.minted = true,
                 Landed::Condensed(session, checkpoint) => {
@@ -176,7 +186,7 @@ fn drain_locked(git_dir: &Path) -> Drained {
             }
         }
         for (path, entry) in commits {
-            match condense_queued(&t, git_dir, &entry, &path) {
+            match condense_queued(t, git_dir, &entry, &path) {
                 Ok(()) => crate::capture_queue::remove(&path),
                 Err(e) if projection_busy(&e) => (),
                 Err(e) => {
@@ -306,6 +316,9 @@ fn run_job_kind(
         } => convert_document_job(t, job, rel_path, content_sha256).map(|()| Landed::Nothing),
         JobKind::DocSweep => sweep_documents_job(t, job).map(|()| Landed::Nothing),
         JobKind::SweepIdle { floor_ms } => Ok(sweep_idle_job(t, git_dir, job, *floor_ms)),
+        JobKind::BoundarySnapshot(snapshot) => {
+            boundary::boundary_snapshot_job(t, job, snapshot).map(|()| Landed::Nothing)
+        }
         JobKind::BasisSnapshot {
             rel_path,
             content_sha256,

@@ -3,8 +3,9 @@
 //!
 //! Two halves:
 //!
-//! * [`capture_boundary`] runs at a turn boundary (`start` closes the human's
-//!   H_i window, `end` closes the agent's A_i window): it observes the working
+//! * [`capture_boundary`] runs for a turn boundary (`start` closes the human's
+//!   H_i window, `end` closes the agent's A_i window), in the detached worker
+//!   and as of the boundary's own instant and `HEAD`: it observes the working
 //!   set (every tracked path differing from HEAD plus everything the previous
 //!   boundary observed), diffs each file against the previous boundary's
 //!   content, and persists append-only `turn_boundary_snapshot` /
@@ -48,7 +49,8 @@
 //! * **E — boundary-snapshot failures were swallowed** on the hook path, so a
 //!   session could lose its boundaries without a word. CLOSED: the failure is
 //!   said once through the capture queue's note channel and `rift doctor`
-//!   reports it (`bins/rift/src/hooks.rs::snapshot_boundaries`).
+//!   reports it (the hook's journaling in `snapshot_boundaries`, the
+//!   worker's bounded job failure otherwise).
 //!
 //! Left by construction: **imports carry no boundary** — `rift import` lands
 //! a read-only transcript with no working-tree observation, so its lines stay

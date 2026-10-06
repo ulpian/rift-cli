@@ -169,9 +169,9 @@ fn capture_into_projection(
     };
     let condense_queued = settle_after_ingest(&run, &outcome);
     // One worker for everything this hook journaled: the condense (if the
-    // session ended) or the interval archive, and the token counts. An
-    // archive job that was enqueued already dispatched; otherwise the owed
-    // counts dispatch here.
+    // session ended) or the interval archive, the boundary snapshots, and the
+    // token counts. Any of the first three already dispatched; otherwise the
+    // owed counts dispatch here.
     if (owed > 0 || gate_journaled || sweep_owed) && !matches!(condense_queued, Ok(true)) {
         t.phase("spawn_worker", || dispatch_agent_worker(git_dir));
     }
@@ -238,8 +238,8 @@ fn family_projection(
 /// fired this hook: when two agents drive one session id, rows written under
 /// the firing agent would belong to a session row that does not exist.
 ///
-/// Returns whether a condense or an interval archive was journaled — its
-/// worker is then already dispatched.
+/// Returns whether a condense, an interval archive or a boundary snapshot was
+/// journaled — its worker is then already dispatched.
 fn settle_after_ingest(
     run: &CapturedHook<'_>,
     outcome: &rift_shadow::IngestOutcome,
@@ -271,15 +271,17 @@ fn settle_after_ingest(
             ))
     });
     // Turn-boundary working-tree snapshots: close the H_i/A_i windows
-    // this hook implied. Best-effort — never fails the agent's hook.
-    let _ = run.t.phase("snapshot_boundaries", || {
+    // this hook implied, journaled for the detached worker. Best-effort —
+    // never fails the agent's hook.
+    let snapshots_owed = run.t.phase("snapshot_boundaries", || {
         snapshot_boundaries(run, owner, &outcome.boundaries)
     });
     // Post-ingest strategy drivers: the session-end condense effect and the
-    // scheduled interval, both journaled for the detached worker.
-    // Best-effort — never fails the agent's hook.
+    // scheduled interval, both journaled for the detached worker, which is
+    // dispatched once for them and the snapshots. Best-effort — never fails
+    // the agent's hook.
     run.t.phase("post_ingest", || {
-        drive_post_ingest(run, owner, outcome.state, &outcome.effects)
+        drive_post_ingest(run, owner, outcome.state, &outcome.effects, snapshots_owed)
     })
 }
 
