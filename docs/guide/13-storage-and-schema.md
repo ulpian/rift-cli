@@ -509,9 +509,10 @@ The rebuild keys the session's checkpoint link, its session row and its native i
 A session the projection has never seen gets a row even when no usage line names it: no model, dated by its first usage line in that checkpoint, or by the checkpoint's own capture time when there is none.
 A checkpoint written before the artifact keys every session under the walk's default agent, as it always did, and a session that was never condensed into any checkpoint cannot be rebuilt at all.
 
-A session's worktree observations are restorable when its checkpoint carries `session_worktrees.jsonl`, and only for a session the projection does not already place.
-A session with any observation in either relation is left as it is, the rule the usage rows follow, so levelling into the live projection writes nothing.
-For any other session the rebuild writes each line back into `session_worktree`, or into `session_worktree_cd` for a `shell_cd` line, under the session's own agent.
+A session's worktree observations are restorable when its checkpoint carries `session_worktrees.jsonl`, and only for a state the projection does not already hold.
+A line is skipped when either relation has an observation of the same session with the same token, name, linkage, branch, subagent and basis at any head, the rule the usage rows follow made per state, so levelling into the live projection writes nothing.
+The artifact is cumulative, so a cold rebuild restores from each checkpoint the states its predecessors did not carry, a subagent's observations first frozen in a later checkpoint among them.
+The rebuild writes every other line back into `session_worktree`, or into `session_worktree_cd` for a `shell_cd` line, under the session's own agent.
 A restored row carries no head, because no shard does, and its id is the one the live writer would derive for the same state with no head; a session the live hooks saw at several heads of one member is restored as one row, first observed when the earliest of them was.
 The path is not in the shard either: the rebuild resolves the token to this machine's checkout of the family member, and writes the empty string when no member here has that token, because no reader spells an unknown path otherwise and another machine's path would name nothing here.
 A token is a digest of the checkout's path as it was spelled, so a checkout reached through another spelling also resolves to nothing.
