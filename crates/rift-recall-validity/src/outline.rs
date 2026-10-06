@@ -297,6 +297,58 @@ pub fn line_span(text: &str, first: u32, last: u32) -> &str {
     }
 }
 
+/// An outline digest with every name left out — the shape line, then each
+/// definition by its position, kind and lines — or `None` when the digest is
+/// not an outline in this grammar.
+///
+/// For a surface that must not render source text at all: a name is an
+/// identifier, but it is still a span of a file someone else may have
+/// written, while a position, a closed kind word and two numbers are Rift's
+/// own. Anything that does not parse is refused whole rather than passed
+/// through in part.
+#[must_use]
+pub fn unnamed_outline(digest: &str) -> Option<String> {
+    let mut lines = digest.lines();
+    let mut out = shape_line_of(lines.next()?)?.to_owned();
+    for (at, line) in lines.enumerate() {
+        let (kind, range) = definition_line(line)?;
+        let _ = write!(out, "; #{} {kind} {range}", at.saturating_add(1));
+    }
+    Some(out)
+}
+
+/// `line` when it is an outline's shape line.
+fn shape_line_of(line: &str) -> Option<&str> {
+    let mut parts = line.split(", ");
+    let counts = [" lines", " bytes", " top-level defs"];
+    for suffix in counts {
+        let number = parts.next()?.strip_suffix(suffix)?;
+        if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(line)
+}
+
+/// The kind word and the `Lx-Ly` range of one outline definition line.
+fn definition_line(line: &str) -> Option<(&'static str, &str)> {
+    let (kind, rest) = line.split_once(' ')?;
+    let (_, range) = rest.rsplit_once(' ')?;
+    let kind = KEYWORDS
+        .iter()
+        .map(|(_, k)| k.as_str())
+        .find(|word| *word == kind)?;
+    let (lo, hi) = range.strip_prefix('L')?.split_once("-L")?;
+    let is_number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !is_number(lo) || !is_number(hi) {
+        return None;
+    }
+    Some((kind, range))
+}
+
 /// The kind and name a column-zero line defines, or `None` when it defines
 /// nothing.
 fn definition_at(line: &str) -> Option<(DefinitionKind, String)> {

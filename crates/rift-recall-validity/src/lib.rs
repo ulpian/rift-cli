@@ -36,11 +36,13 @@ mod summary;
 
 pub use envelope::{envelope_for, manifest_envelope, Budget, SeenStatus};
 pub use extract::{
-    extract_and_bind, DiffExtractor, Extractor, ExtractorKind, FailureExtractor,
-    FileShapeExtractor, LogExtractor,
+    extract_and_bind, outline_versions, DiffExtractor, Extractor, ExtractorKind, FailureExtractor,
+    FileShapeExtractor, LogExtractor, OUTLINE_REDACTION_VERSION,
 };
 pub use handle::{resolve_handle, BlobResolver, Resolved};
-pub use outline::{is_code_path, line_span, Definition, DefinitionKind, FileOutline};
+pub use outline::{
+    is_code_path, line_span, unnamed_outline, Definition, DefinitionKind, FileOutline,
+};
 pub use summary::{
     classify, resolve, summary_key, DigestStore, MemoryDigestStore, SummaryBinding, SummaryStore,
     SummaryVersions, ValidSummary, Validity, WorktreeSnapshot,

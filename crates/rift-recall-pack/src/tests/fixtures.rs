@@ -49,10 +49,7 @@ pub(super) fn req() -> PackRequest {
     ))
     .unwrap();
     r.push_unchanged(env_entry(
-        &summary_env(
-            "src/billing.rs",
-            "BillingClient.charge() signature unchanged",
-        ),
+        &summary_env("src/billing.rs", OUTLINE_DIGEST),
         Sensitivity::Normal,
     ))
     .unwrap();
@@ -208,7 +205,7 @@ pub(super) fn degrading_req(budget: u32) -> PackRequest {
         .unwrap();
     }
     r.push_unchanged(env_entry(
-        &summary_env("src/stable.rs", "signatures unchanged"),
+        &summary_env("src/stable.rs", OUTLINE_DIGEST),
         Sensitivity::Normal,
     ))
     .unwrap();
@@ -275,6 +272,11 @@ pub(super) fn exact_env(path: &str, content: &str) -> Envelope {
         },
     )
 }
+
+/// A file-shape outline as the extractor writes one: the only digest a pack
+/// renders as a summary line.
+pub(super) const OUTLINE_DIGEST: &str =
+    "12 lines, 300 bytes, 2 top-level defs\nfn charge L1-L8\nstruct BillingClient L10-L12\n";
 
 pub(super) fn summary_env(path: &str, summary: &str) -> Envelope {
     env(

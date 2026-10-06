@@ -20,8 +20,8 @@
 use rift_core::{RedactedBytes, Result, RiftError};
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_validity::{
-    classify, line_span, summary_key, BlobResolver, Extractor, FileOutline, FileShapeExtractor,
-    SummaryBinding, SummaryVersions, Validity,
+    classify, line_span, outline_versions, summary_key, BlobResolver, FileOutline, SummaryBinding,
+    SummaryVersions, Validity, WorktreeSnapshot,
 };
 use rift_store::{CanonicalStore, ColumnCipher, Value};
 use sha2::{Digest, Sha256};
@@ -29,8 +29,10 @@ use sha2::{Digest, Sha256};
 use crate::graph::{file_revision_id, Built};
 
 /// A code file a writer binds an outline of: its path and redacted bytes,
-/// the policy and redaction versions the binding key carries beside the
-/// extractor's own, and the serve policy's verdict on the path.
+/// the serve-policy version the binding key carries, and the serve policy's
+/// verdict on the path. The extractor and redaction versions are the
+/// outline's own ([`outline_versions`]), so the serve-time loader names the
+/// same key.
 ///
 /// Redacted bytes only: digests are read back through the plain cipher, since
 /// no recall key custody exists, so an outline is never built from bytes the
@@ -43,8 +45,6 @@ pub struct OutlineSource<'a> {
     pub source: &'a RedactedBytes,
     /// The serve-policy version in force.
     pub policy_version: u32,
-    /// The redaction-rules version in force.
-    pub redaction_version: u32,
     /// Whether the serve policy denies the path or marks it sensitive. A
     /// closure because this crate does not depend on the policy crate; the
     /// caller asks its policy engine.
@@ -65,6 +65,22 @@ pub struct OutlineCounts {
     pub whole_file: u32,
     /// One count per definition, in outline order.
     pub definitions: Vec<u32>,
+}
+
+/// What the store holds for one path, read against the revision the checkout
+/// holds now.
+pub enum CurrentSummary {
+    /// No binding names the path.
+    NotBound,
+    /// Bindings name the path, and there is no current revision to check
+    /// them against.
+    Unchecked,
+    /// Bindings name the path, none of them at the current revision.
+    Stale,
+    /// The binding at the current revision under the versions asked for:
+    /// [`Validity::Valid`] with its digest, or [`Validity::Degraded`] when the
+    /// digest cannot be read.
+    Bound(Validity),
 }
 
 /// One stored count: which span of the outline, its lines and its tokens.
@@ -250,11 +266,7 @@ pub async fn put_file_outline(
             outline.definitions().len()
         )));
     }
-    let versions = SummaryVersions {
-        extractor_version: FileShapeExtractor.version(),
-        policy_version: file.policy_version,
-        redaction_version: file.redaction_version,
-    };
+    let versions = outline_versions(file.policy_version);
     let digest = outline.render();
     let key = put_summary(
         store,
@@ -298,16 +310,19 @@ pub async fn token_counts(store: &impl CanonicalStore, key: &str) -> Result<Vec<
 }
 
 impl OutlineCounts {
-    /// Count an outline's spans with `count`: the whole file, then each
-    /// definition's lines. The caller passes the tokenizer, so the caller is
-    /// the one that loads it.
+    /// Count the outline of `source` at `path` with `count`: the whole file,
+    /// then each definition's lines — or `None` for a file that gets no
+    /// outline. The caller passes the tokenizer, so the caller is the one that
+    /// loads it, and the spans counted are the ones the writer will bind.
     pub fn measure(
-        outline: &FileOutline,
-        text: &str,
+        path: &str,
+        source: &RedactedBytes,
         count: &dyn Fn(&str) -> u32,
         tokenizer: &'static str,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        let outline = FileOutline::of(path, source.as_slice())?;
+        let text = core::str::from_utf8(source.as_slice()).ok()?;
+        Some(Self {
             tokenizer,
             whole_file: count(text),
             definitions: outline
@@ -315,7 +330,7 @@ impl OutlineCounts {
                 .iter()
                 .map(|d| count(line_span(text, d.first_line(), d.last_line())))
                 .collect(),
-        }
+        })
     }
 }
 
@@ -445,6 +460,130 @@ pub async fn resolve(
         crate::ingest::apply_rows(store, &b).await?;
     }
     Ok(verdict)
+}
+
+/// The summary bound to `path` at `current`, the revision the checkout holds
+/// now, under `versions`.
+///
+/// A binding at the current revision under other versions is no binding of
+/// this summary, so it answers [`CurrentSummary::NotBound`]: a version bump
+/// orphans what came before rather than serving it. A digest that cannot be
+/// read — an encrypted row with no key custody, a lost blob — fails closed to
+/// [`Validity::Degraded`] rather than an error.
+///
+/// # Errors
+/// Propagates store read errors.
+pub async fn current_summary(
+    store: &impl CanonicalStore,
+    cipher: &dyn ColumnCipher,
+    path: &str,
+    current: Option<&str>,
+    versions: SummaryVersions,
+) -> Result<CurrentSummary> {
+    let rows = store
+        .query(
+            "SELECT summary_id, bound_blob_oid, extractor_ver, policy_ver, redaction_ver \
+             FROM summary_binding WHERE path = ? ORDER BY summary_id",
+            &[Value::text(path)],
+        )
+        .await?;
+    if rows.is_empty() {
+        return Ok(CurrentSummary::NotBound);
+    }
+    let Some(current) = current else {
+        return Ok(CurrentSummary::Unchecked);
+    };
+    let mut at_current = false;
+    for row in &rows {
+        if row.get_text(1)? != current {
+            continue;
+        }
+        at_current = true;
+        if row_versions(row)? == versions {
+            let key = row.get_text(0)?;
+            let validity = classify_current(store, cipher, &key, path, current).await?;
+            return Ok(CurrentSummary::Bound(validity));
+        }
+    }
+    Ok(if at_current {
+        CurrentSummary::NotBound
+    } else {
+        CurrentSummary::Stale
+    })
+}
+
+/// The summaries bound at the current revision of each `(path, current)`
+/// pair, under `versions`, by path: one scan of the bindings for a whole
+/// manifest rather than one query per entry.
+///
+/// A pair with no such binding is absent from the map.
+///
+/// # Errors
+/// Propagates store read errors.
+pub async fn current_summaries(
+    store: &impl CanonicalStore,
+    cipher: &dyn ColumnCipher,
+    wanted: &[(&str, &str)],
+    versions: SummaryVersions,
+) -> Result<std::collections::BTreeMap<String, Validity>> {
+    let mut found = std::collections::BTreeMap::new();
+    if wanted.is_empty() {
+        return Ok(found);
+    }
+    let rows = store
+        .query(
+            "SELECT summary_id, path, bound_blob_oid FROM summary_binding \
+             WHERE extractor_ver = ? AND policy_ver = ? AND redaction_ver = ? \
+             ORDER BY summary_id",
+            &[
+                Value::Int(i64::from(versions.extractor_version)),
+                Value::Int(i64::from(versions.policy_version)),
+                Value::Int(i64::from(versions.redaction_version)),
+            ],
+        )
+        .await?;
+    for row in &rows {
+        let (path, oid) = (row.get_text(1)?, row.get_text(2)?);
+        if found.contains_key(&path) || !wanted.contains(&(path.as_str(), oid.as_str())) {
+            continue;
+        }
+        let key = row.get_text(0)?;
+        let validity = classify_current(store, cipher, &key, &path, &oid).await?;
+        found.insert(path, validity);
+    }
+    Ok(found)
+}
+
+/// Classify the binding `key` against the revision it was found at; a digest
+/// that cannot be decrypted counts as absent, so the verdict is `Degraded`.
+async fn classify_current(
+    store: &impl CanonicalStore,
+    cipher: &dyn ColumnCipher,
+    key: &str,
+    path: &str,
+    current: &str,
+) -> Result<Validity> {
+    let Some(binding) = fetch_binding(store, key).await? else {
+        return Ok(Validity::Degraded {
+            key: key.to_owned(),
+        });
+    };
+    let digest = fetch_digest(store, cipher, &binding.digest_ref)
+        .await
+        .ok()
+        .flatten();
+    let mut snapshot = WorktreeSnapshot::new();
+    snapshot.insert(path.to_owned(), current.to_owned());
+    Ok(classify(&binding, &snapshot, digest))
+}
+
+fn row_versions(row: &rift_store::Row) -> Result<SummaryVersions> {
+    let version = |at: usize| -> Result<u32> { Ok(u32::try_from(row.get_i64(at)?).unwrap_or(0)) };
+    Ok(SummaryVersions {
+        extractor_version: version(2)?,
+        policy_version: version(3)?,
+        redaction_version: version(4)?,
+    })
 }
 
 #[cfg(test)]

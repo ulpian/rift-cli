@@ -758,14 +758,9 @@ search is a different question with a different answer, which is the subject of
 
 ## 6.15 What is running, and what is not
 
-**Summaries are not bound by any shipped path.** The validity engine, digest
-store, extractors, sealed types and the serving of a binding are built and
-tested; the ingest step that would *write* bindings in production is missing.
-The summary-binding tables are empty here and the manifest builder passes no
-summary, so `summary_included` does not occur today — an artifact is
-`known_unchanged` or `available_by_handle`, and `rift recall read-summary <path>`
-answers `unavailable` with the reason `not_bound`: honest absence rather than a
-guess dressed as a digest.
+**Summaries are served, and no shipped path binds them.** The validity engine, digest store, extractors, sealed types, the outline writer and the serve-time loader are built and tested; the detached-worker step that calls the writer in production is missing, so the binding tables are empty here.
+Where a binding exists, the pulls read it: `rift recall read-summary <path>` answers `summary` with the stored outline, its key, the versions in that key and its `file:` handle; `known-state` makes an entry `summary_included` when the checkout's bytes hash to the bound revision and the outline fits; and the context pack renders the outline with every name left out, each definition by position, kind and lines.
+A binding of another revision answers `stale`, a binding under older versions or none at all answers `unavailable` with `not_bound`, and a binding whose digest cannot be read answers `unavailable` with `digest_unavailable`: honest absence rather than a guess dressed as a digest.
 
 **Serving from git through an in-session index was designed and never built.**
 No such crate exists in the workspace; §6.10's projection is what runs, and the

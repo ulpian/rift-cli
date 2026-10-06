@@ -18,7 +18,7 @@ fn work() {
     // a hunk of changed lines
     do_the_thing();
 }
-file: evidence:811@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa summary: signatures unchanged
+file: evidence:811@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa summary: 12 lines, 300 bytes, 2 top-level defs; #1 fn L1-L8; #2 struct L10-L12
 retrieve: evidence:182@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 Informational only: these areas account for the most repeated read tokens.
 CRITICAL: evidence:1's last provenance was reverted - verify before reuse

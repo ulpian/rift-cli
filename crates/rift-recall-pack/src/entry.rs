@@ -11,6 +11,7 @@
 
 use rift_recall_types::{ArtifactState, Envelope, Handle, OmitReason};
 use rift_recall_validity::trust::NeutralDigest;
+use rift_recall_validity::unnamed_outline;
 
 /// The provenance class an entry was built from — the discriminant the
 /// placement invariants are written against. Deliberately coarse: it names
@@ -763,31 +764,32 @@ impl SectionEntry {
 
     /// The summary line under `sensitivity`: a sensitive summary downgrades to
     /// its handle (exact-or-handle, never a lossy summary), a normal one
-    /// renders its sanitized digest and spills to its handle.
+    /// renders its outline unnamed and spills to its handle.
+    ///
+    /// The artifact is named by its ordinal, as every line here is, and the
+    /// summary text gets the same treatment: [`unnamed_outline`] keeps the
+    /// shape line and each definition's position, kind and lines, and drops
+    /// every name, so no span of the source reaches the pack. A digest that is
+    /// not an outline in that grammar is withheld whole rather than passed
+    /// through, and the line is sanitized besides.
     fn summary_entry(cite: &str, summary: &str, sensitivity: Sensitivity) -> Self {
-        match sensitivity {
-            Sensitivity::Sensitive => Self::new(
+        if sensitivity == Sensitivity::Sensitive {
+            return Self::new(
                 format!("{cite} available (sensitive; summary withheld)"),
                 EntryClass::Handle,
-            ),
-            // **A DECLARED, DORMANT GAP — NOT CLOSED.** This is
-            // the one remaining field on an artifact line that renders
-            // caller TEXT, and this file's own note above says why it
-            // matters: a summary is a digest whose text can echo spans
-            // of its source (the failure extractor stabilizes log
-            // lines, the diff extractor names paths out of the diff).
-            // It is unreachable on the shipped serve path only because
-            // `SummaryStore::new()` is always empty there, so `resolve`
-            // verdicts `Degraded` and this arm is never taken —
-            // dormant, which is not the same as closed. When summaries
-            // are persisted, this arm needs the name-by-ordinal treatment
-            // (or a chokepoint) BEFORE it goes live.
-            Sensitivity::Normal => Self::with_spill(
-                format!("{cite} summary: {}", sanitize_field(summary)),
-                EntryClass::SummaryBound,
-                Some(format!("{cite} available (budget_exhausted)")),
-            ),
+            );
         }
+        let Some(unnamed) = unnamed_outline(summary) else {
+            return Self::new(
+                format!("{cite} available (summary withheld)"),
+                EntryClass::Handle,
+            );
+        };
+        Self::with_spill(
+            format!("{cite} summary: {}", sanitize_field(&unnamed)),
+            EntryClass::SummaryBound,
+            Some(format!("{cite} available (budget_exhausted)")),
+        )
     }
 
     /// Build an entry from a neutral digest — the output of the trust
