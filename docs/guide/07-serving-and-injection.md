@@ -324,7 +324,10 @@ because the lines it delivers still follow from the line itself:
 
 - a single leading `cd <dir> &&`, the directory bare or quoted, after which
   every relative path in the line is read from there (a rooted path is
-  untouched);
+  untouched). A `cd <dir>;` is the same `cd`: the reads after a `;` run even
+  when the `cd` fails, but it fails only where the directory cannot be
+  entered, so every path read from it then names a file nobody can open and
+  nothing is recorded;
 - one trailing `| head -N`, `| head -n N`, `| tail -N` or `| tail -n N` on a
   member that is one read, which narrows the run that member produced to a
   prefix or a suffix of it. A suffix is a *count from the end*, so it travels

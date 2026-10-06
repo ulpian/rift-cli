@@ -90,7 +90,6 @@ fn a_composition_the_grammar_does_not_spell_is_left_alone() {
         "cd crates",
         "cd crates && cd rift-core && cat src/lib.rs",
         "cat src/lib.rs && cd crates && cat src/main.rs",
-        "cd crates; cat src/lib.rs",
         "cd && cat src/lib.rs",
         "cd -P crates && cat src/lib.rs",
         "cd crates other && cat src/lib.rs",
@@ -305,6 +304,40 @@ fn a_late_option_the_grammar_does_not_pin_is_left_alone() {
         "grep needle src/lib.rs '-n'",
         "grep needle '-A' 3 src/lib.rs",
         "grep needle src/lib.rs -",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}
+
+/// **A `cd` joined by `;` stops exactly where the `&&` one does.**
+///
+/// The `;` admits the same one leading `cd` and nothing more: a second `cd`,
+/// one after a read, one with no directory, an option or two operands, a
+/// `cd` that ends the line, and the other joins a shell has — `||`, a
+/// background `&`, a line break — are each left alone.
+#[test]
+fn a_cd_joined_by_a_semicolon_is_admitted_only_at_the_front() {
+    for command in [
+        "cd crates; cd rift-core; cat src/lib.rs",
+        "cd crates; cd rift-core && cat src/lib.rs",
+        "cat src/lib.rs; cd crates; cat src/main.rs",
+        "cd; cat src/lib.rs",
+        "cd -P crates; cat src/lib.rs",
+        "cd crates other; cat src/lib.rs",
+        "cd crates;",
+        "cd crates; ",
+        "cd crates || cat src/lib.rs",
+        "cd crates & cat src/lib.rs",
+        "cd crates\ncat src/lib.rs",
+        "cd crates\n cat src/lib.rs",
+        "cd $HOME; cat src/lib.rs",
+        "cd ~/repo; cat src/lib.rs",
+        "cd crates; cargo test",
+        "cd crates; ls src && cat a.rs",
+        "cd crates;; cat src/lib.rs",
     ] {
         assert!(
             recognise(command).is_none(),

@@ -26,7 +26,7 @@
 //! one of those was a read of this repository that the journal never saw, and
 //! a read the journal never saw can never be declined and never counted. So
 //! three *composition* rules sit above the vocabulary — an optional leading
-//! `cd <dir> &&`, a trailing `| head -N` or `| tail -N` on a read, and a chain
+//! `cd <dir> &&` (or `cd <dir>;`), a trailing `| head -N` or `| tail -N` on a read, and a chain
 //! of reads joined by `&&` or `;`. Each one is a shape whose delivered lines
 //! still follow from the line itself; a member the vocabulary does not spell
 //! still takes the whole command out of the grammar, exactly as before.
@@ -862,11 +862,18 @@ fn recognise_member(member: &str) -> Option<Member> {
     }
 }
 
-/// Peel the optional leading `cd <dir> &&`, and say what is left of the line.
+/// Peel the optional leading `cd <dir> &&` or `cd <dir>;`, and say what is
+/// left of the line.
 ///
-/// Against `&&` alone, which is the join that makes the directory a
-/// precondition of the reads rather than an unrelated statement standing
-/// before them.
+/// `&&` makes the directory a precondition of the reads. A `;` does not — the
+/// reads run even when the `cd` fails — and it is admitted all the same,
+/// because a `cd` fails only where its directory cannot be entered, and then
+/// every relative path this module puts under that directory names a file
+/// nobody can open either: the caller that resolves it finds nothing and
+/// records nothing. Where the `cd` succeeds the two joins deliver the same
+/// lines. So the difference costs at most a saving and never makes a claim,
+/// and a rooted path is read the same either way. `||`, a background `&` and
+/// a line break are not peeled.
 ///
 /// Labels in front of the `cd` are stepped over, because a label is a member
 /// that does nothing and a rule that said otherwise here would mean an `echo`
@@ -879,7 +886,7 @@ fn recognise_member(member: &str) -> Option<Member> {
 fn cd_prefix(command: &str) -> (Option<String>, &str) {
     let mut rest = command;
     loop {
-        let split = split_on(rest, &["&&"], 1);
+        let split = split_on(rest, &["&&", ";"], 1);
         let [head, tail] = split.as_slice() else {
             return (None, command);
         };
@@ -889,7 +896,7 @@ fn cd_prefix(command: &str) -> (Option<String>, &str) {
         if !matches!(recognise_simple(head), Some(Member::Label)) {
             return (None, command);
         }
-        // Each step consumes one `&&`, so this walks the line once at most.
+        // Each step consumes one join, so this walks the line once at most.
         rest = tail;
     }
 }
@@ -898,11 +905,11 @@ fn cd_prefix(command: &str) -> (Option<String>, &str) {
 ///
 /// The only entry point. Above the published vocabulary it admits exactly
 /// three compositions, each one a shape whose delivered lines still follow
-/// from the line alone: a single leading `cd <dir> &&`, one trailing
-/// `| head -N` or `| tail -N` on a read, and members joined by `&&` or `;` of
-/// which every one is itself a read — **or a label**, which is a member that
-/// read nothing and so neither contributes a read nor takes the line out of
-/// the grammar.
+/// from the line alone: a single leading `cd <dir> &&` or `cd <dir>;`, one
+/// trailing `| head -N` or `| tail -N` on a read, and members joined by `&&`
+/// or `;` of which every one is itself a read — **or a label**, which is a
+/// member that read nothing and so neither contributes a read nor takes the
+/// line out of the grammar.
 ///
 /// Everything else is what it always was — no redirection, no substitution,
 /// no variable, no glob outside a pattern argument, no environment

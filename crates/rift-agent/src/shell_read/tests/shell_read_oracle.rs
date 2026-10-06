@@ -320,7 +320,10 @@ fn value_option(option: &str, value_letters: &str) -> Option<(char, bool)> {
 }
 
 /// The directory a genuinely leading `cd` named, stepping over the `echo`
-/// and `printf` labels that may stand in front of it, each joined by `&&`.
+/// and `printf` labels that may stand in front of it, each joined by `&&` or
+/// `;`. A `cd` joined by `;` still names the directory every relative word
+/// after it is opened from whenever that `cd` succeeded, and when it failed
+/// the joined name is one no file answers to.
 fn leading_directory(tokens: &[Token]) -> Option<&str> {
     let mut rest = tokens;
     loop {
@@ -328,7 +331,7 @@ fn leading_directory(tokens: &[Token]) -> Option<&str> {
             .iter()
             .position(|token| !matches!(token, Token::Word { .. }))?;
         let (head, tail) = rest.split_at(end);
-        if tail.first() != Some(&Token::And) {
+        if !matches!(tail.first(), Some(Token::And | Token::Semi)) {
             return None;
         }
         let command = head.first().and_then(bare_word);

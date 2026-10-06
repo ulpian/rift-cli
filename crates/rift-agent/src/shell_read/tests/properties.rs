@@ -431,6 +431,26 @@ proptest::proptest! {
         proptest::prop_assert!(recognise(&elsewhere).is_none(), "{elsewhere:?}");
     }
 
+    /// ★ A leading `cd` joined by `;` reads exactly as the one joined by
+    /// `&&`, whatever follows it — a form of the grammar, a chain of them, or
+    /// a line the grammar leaves alone.
+    #[test]
+    fn a_leading_cd_reads_the_same_joined_by_either_separator(
+        dir in proptest::sample::select(&["crates", "'my crate'", "/w/a", "C:/r", "$HOME", "~/r"][..]),
+        rest in proptest::collection::vec(token(), 1..4),
+        spaced in proptest::bool::ANY,
+    ) {
+        let rest = rest.join(" ");
+        let semicolon = if spaced { " ; " } else { ";" };
+        let joined_by_semicolon = format!("cd {dir}{semicolon}{rest}");
+        let joined_by_and = format!("cd {dir} && {rest}");
+        proptest::prop_assert_eq!(
+            crate::shell_read::recognise(&joined_by_semicolon),
+            crate::shell_read::recognise(&joined_by_and),
+            "{}", joined_by_semicolon
+        );
+    }
+
     /// ★ A recognised count is never signed.
     ///
     /// A sign in front of a count changes what `tail` and `sed` print — from
