@@ -191,7 +191,10 @@ Two files in the checkout are yours and authoritative: `.rift/config.toml`
 (capture, redaction, retention) and `.rift/policies/serve.toml` (what Recall
 may serve, to whom, under what budget). The rest is Rift's:
 `.rift/agents/*.json`, one descriptor per wired agent; `.rift/state/`,
-per-checkout run state and adoption markers; the five hooks and their sidecar
+per-checkout run state and adoption markers, which git ignores through the
+`.rift/.gitignore` `init` writes where none exists — one it finds is kept as
+found, and when that one lets `.rift/state/` through, `init` says so in one
+line rather than edit it; the five hooks and their sidecar
 markers in the git common directory's `hooks/`; this family's minted identity
 in `<git common dir>/rift-family/`, never to be hand-edited; the project list
 at `~/.config/rift/projects.toml`; and the projection database at

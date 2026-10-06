@@ -475,7 +475,7 @@ fn switch_to_branch(
         return Ok(None);
     }
     // Never checkout over uncommitted work.
-    if !rift_git::changed_worktree_paths(repo)?.is_empty() {
+    if has_uncommitted_work(repo)? {
         return Ok(Some(Outcome::coded(
             exit::PRECONDITION,
             "you have uncommitted changes — commit or stash them first",
@@ -520,6 +520,14 @@ fn switch_to_branch(
     }
     rift_git::git_checkout(repo, branch)?;
     Ok(None)
+}
+
+/// Whether the work tree holds changes a checkout could lose. Rift's own
+/// state under `.rift/` is not work: the `.rift/.gitignore` `init` writes
+/// keeps it out of git's status, but one the repository authored itself may
+/// not, and a refusal over Rift's search index would be Rift blocking itself.
+fn has_uncommitted_work(repo: &rift_git::RepoPaths) -> Result<bool> {
+    Ok(!rift_git::changed_worktree_paths_outside_rift_state(repo)?.is_empty())
 }
 
 /// Interactive confirm for resuming from an older checkpoint. Only ever asked
@@ -597,5 +605,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `git` in `dir` with a fixed identity and no hooks.
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=Fixture", "-c", "user.email=fixture-id"])
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    /// A one-commit repository with a file under `.rift/state/` that nothing
+    /// tells git to ignore.
+    fn repo_with_rift_state() -> (tempfile::TempDir, rift_git::RepoPaths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(root, &["add", "a.txt"]);
+        git(root, &["commit", "-qm", "seed"]);
+        std::fs::create_dir_all(root.join(".rift/state/injection")).unwrap();
+        std::fs::write(root.join(".rift/state/injection/x.json"), "{}").unwrap();
+        let paths = rift_git::discover(root).unwrap();
+        (tmp, paths)
+    }
+
+    /// Rift's own state is not uncommitted work, even where no ignore rule
+    /// names it — a repository whose `.rift/.gitignore` is somebody else's,
+    /// say — while a real edit beside it still is.
+    #[test]
+    fn rift_state_alone_never_reads_as_a_dirty_worktree() {
+        let (tmp, repo) = repo_with_rift_state();
+        assert!(!has_uncommitted_work(&repo).unwrap());
+        std::fs::write(tmp.path().join("a.txt"), "edited\n").unwrap();
+        assert!(has_uncommitted_work(&repo).unwrap());
+    }
+
+    /// The `.rift/.gitignore` `init` writes is enough on its own: git's
+    /// status no longer lists the state at all.
+    #[test]
+    fn the_gitignore_init_writes_hides_rift_state_from_git_status() {
+        let (tmp, repo) = repo_with_rift_state();
+        assert!(!rift_git::changed_worktree_paths(&repo).unwrap().is_empty());
+        crate::init::ignore_rift_state(tmp.path()).unwrap();
+        git(tmp.path(), &["add", ".rift/.gitignore"]);
+        git(tmp.path(), &["commit", "-qm", "ignore rift state"]);
+        assert!(
+            rift_git::changed_worktree_paths(&repo).unwrap().is_empty(),
+            "the committed ignore file leaves nothing for the status to list"
+        );
     }
 }
