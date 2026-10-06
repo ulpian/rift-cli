@@ -172,3 +172,24 @@ fn a_quoted_command_word_is_read_by_neither_side() {
         assert!(!names_a_word(target, command), "{target:?} in {command:?}");
     }
 }
+
+/// **A command word spelled from `/bin` or `/usr/bin` is that command to the
+/// witness too**: a search's pattern is still no file, and `rg --files`
+/// still implies its directory. Spelled from anywhere else it is a word and
+/// nothing more, and a `cd` or a label is only ever bare.
+#[test]
+fn a_command_spelled_from_a_system_directory_is_read_by_the_witness_alike() {
+    assert_witnessed(&[
+        ("b.rs", "/usr/bin/grep -n a.rs b.rs"),
+        ("dir/a.rs", "echo hi && cd dir && /bin/cat a.rs"),
+        (".", "/usr/bin/rg --files"),
+        ("dir/.", "cd dir && /usr/bin/rg --files"),
+    ]);
+    assert_unwitnessed(&[
+        ("a.rs", "/usr/bin/grep -n a.rs b.rs"),
+        ("a.rs", "/bin/grep a.rs b.rs"),
+        (".", "/usr/local/bin/rg --files"),
+        ("dir/a.rs", "/bin/echo hi && cd dir && cat a.rs"),
+        ("dir/a.rs", "/usr/bin/cd dir && cat a.rs"),
+    ]);
+}

@@ -315,6 +315,10 @@ keeps it as written (`grep -n "a\|b"`). An escape the shell resolves (`\$`,
 `` \` ``, `\"`, `\\`), an expansion, and a quoted path that spells a glob, a
 `~` or a kept backslash are left alone. A quoted path is credited exactly as a
 bare one is.
+A read or listing command may be spelled from `/bin` or `/usr/bin`
+(`/usr/bin/sed -n '1,40p' a.rs`), the system's own copies, and reads exactly
+as the bare word; any other directory, and a `cd`, a label or a narrowing
+command spelled that way, is left alone.
 Above it sit exactly three **compositions**, each admitted
 because the lines it delivers still follow from the line itself:
 

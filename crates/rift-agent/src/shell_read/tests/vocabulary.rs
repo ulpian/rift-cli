@@ -74,6 +74,13 @@ fn every_grammar_form_yields_the_pinned_range() {
             "grep -n \"a\\|b\" \"src/lib.rs\"",
             read(file, ShellSpan::Matching),
         ),
+        // A command word spelled from the system's own directory is that
+        // command.
+        (
+            "/usr/bin/sed -n '12,48p' src/lib.rs",
+            read(file, ShellSpan::Lines { lo: 12, hi: 48 }),
+        ),
+        ("/bin/cat src/lib.rs", read(file, ShellSpan::WholeFile)),
     ];
     assert_each_recognised(cases);
 }
@@ -425,4 +432,42 @@ fn a_tilde_inside_a_started_path_word_is_part_of_the_name() {
         ("cat a.rs~", read("a.rs~", ShellSpan::WholeFile)),
         ("ls PROGRA~1", listing("PROGRA~1", None)),
     ]);
+}
+
+/// **A command spelled from `/bin` or `/usr/bin` is the command itself.**
+///
+/// Those two directories hold the system's own copies of the vocabulary, and
+/// an agent reaches for the full spelling to step around a shell alias or a
+/// function of the same name. The full spelling names the program more
+/// exactly than the bare word does, so each line reads exactly as its bare
+/// form: the same reads, the same spans, the same coverage.
+#[test]
+fn a_command_spelled_from_a_system_directory_reads_as_the_bare_one() {
+    for (spelled, bare) in [
+        ("/bin/cat src/lib.rs", "cat src/lib.rs"),
+        ("/usr/bin/head -n 40 src/lib.rs", "head -n 40 src/lib.rs"),
+        ("/usr/bin/tail -n 40 src/lib.rs", "tail -n 40 src/lib.rs"),
+        (
+            "/usr/bin/sed -n '12,48p' src/lib.rs",
+            "sed -n '12,48p' src/lib.rs",
+        ),
+        ("/usr/bin/nl src/lib.rs", "nl src/lib.rs"),
+        (
+            "/usr/bin/grep -n needle src/lib.rs | head -n 5",
+            "grep -n needle src/lib.rs | head -n 5",
+        ),
+        ("/bin/ls -la crates", "ls -la crates"),
+        (
+            "/usr/bin/find crates -name '*.rs'",
+            "find crates -name '*.rs'",
+        ),
+        (
+            "cd crates && echo '=== a ===' && /usr/bin/sed -n '1,9p' a.rs",
+            "cd crates && echo '=== a ===' && sed -n '1,9p' a.rs",
+        ),
+    ] {
+        assert!(recognise(bare).is_some(), "{bare:?}");
+        assert_eq!(recognise(spelled), recognise(bare), "{spelled:?}");
+        assert_eq!(read_of(spelled), read_of(bare), "{spelled:?}");
+    }
 }

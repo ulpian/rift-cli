@@ -821,6 +821,16 @@ enum Member {
 /// itself, because both commands may read it as an escape of their own.
 const LABEL_COMMANDS: &[&str] = &["echo", "printf"];
 
+/// The two directories a command word may be spelled from.
+///
+/// They hold the system's own copies of the vocabulary — root-owned on a
+/// Unix system, and sealed by the operating system on macOS — so a
+/// program reached through one of them is the program the word names, more
+/// exactly than a bare word resolved through a `PATH` is. Every other
+/// directory is one a user or a package manager writes into, and a program
+/// found there is whatever was put there.
+const SYSTEM_COMMAND_DIRS: &[&str] = &["/usr/bin/", "/bin/"];
+
 /// Recognise one member: a simple command, and at most one trailing pipe into
 /// a narrowing command.
 ///
@@ -986,11 +996,12 @@ fn recognise_simple(command: &str) -> Option<Member> {
     if LABEL_COMMANDS.contains(&head_word) {
         return (!rest.iter().any(|word| word.kept_backslash)).then_some(Member::Label);
     }
-    match head_word {
+    let name = command_name(head_word);
+    match name {
         "cat" => cat_reads(rest),
         "nl" | "bat" | "batcat" => decorated_read(rest),
         "head" | "tail" => {
-            let span = top_or_bottom(rest, head_word == "head")?;
+            let span = top_or_bottom(rest, name == "head")?;
             one_read(path_arg(rest.last()?)?, span)
         }
         "sed" => sed_read(rest),
@@ -1001,6 +1012,22 @@ fn recognise_simple(command: &str) -> Option<Member> {
         "find" => find_listing(rest),
         _ => None,
     }
+}
+
+/// The command a bare command word names: the word itself, or the name
+/// after one of the [`SYSTEM_COMMAND_DIRS`].
+///
+/// Only the read and listing dispatch asks. A `cd` is read off its bare word
+/// alone, because the `cd` a system ships runs in a child process and moves
+/// nobody's directory; a label and the narrowing commands after a pipe keep
+/// their bare spelling, because that is the only one anybody has measured in
+/// those positions. A name left with a `/` in it is no command of the
+/// vocabulary, so the dispatch refuses it like any other word off the list.
+fn command_name(word: &str) -> &str {
+    SYSTEM_COMMAND_DIRS
+        .iter()
+        .find_map(|dir| word.strip_prefix(dir))
+        .unwrap_or(word)
 }
 
 /// `cat`: the whole file, no options — an option would change what is

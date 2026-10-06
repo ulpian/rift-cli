@@ -312,3 +312,48 @@ fn a_late_option_the_grammar_does_not_pin_is_left_alone() {
         );
     }
 }
+
+/// **Only `/bin` and `/usr/bin` name a command, and only in the command
+/// position.**
+///
+/// Every other directory is one a user or a package manager writes, so a
+/// program found there is whatever was put there; a relative spelling, an
+/// empty name, a nested one or a path through `..` names no command the
+/// grammar knows. `cd` is a shell builtin, and the `/usr/bin/cd` a system
+/// ships runs in a child process and moves nobody, so it is never a leading
+/// `cd`. A label and the narrowing commands after a pipe keep their bare
+/// spelling.
+#[test]
+fn a_command_spelled_from_any_other_directory_is_left_alone() {
+    for command in [
+        "/usr/local/bin/sed -n '1,9p' src/lib.rs",
+        "/opt/homebrew/bin/grep -n needle src/lib.rs",
+        "/usr/local/bin/ggrep -n needle src/lib.rs",
+        "/usr/bin/ggrep -n needle src/lib.rs",
+        "./cat src/lib.rs",
+        "bin/cat src/lib.rs",
+        "usr/bin/cat src/lib.rs",
+        "/usr/bin/ src/lib.rs",
+        "/bin/ src/lib.rs",
+        "/usr/bin/x/cat src/lib.rs",
+        "/usr/bin/../bin/cat src/lib.rs",
+        "/usr//bin/cat src/lib.rs",
+        "//bin/cat src/lib.rs",
+        "/sbin/cat src/lib.rs",
+        "'/bin/cat' src/lib.rs",
+        "\"/usr/bin/sed\" -n '1,9p' src/lib.rs",
+        "/usr/bin/cd crates && cat src/lib.rs",
+        "/bin/cd crates && cat src/lib.rs",
+        "cat src/lib.rs | /usr/bin/head -n 5",
+        "cat src/lib.rs | /usr/bin/tail -5",
+        "/bin/echo hi && cat src/lib.rs",
+        "cat src/lib.rs && /usr/bin/printf x",
+        "/usr/bin/awk 'NR<5' src/lib.rs",
+        "/usr/bin/sed 's/a/b/' src/lib.rs",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}

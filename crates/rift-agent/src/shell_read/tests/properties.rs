@@ -257,6 +257,23 @@ const UNPINNED_SEARCH_FLAGS: &[&str] = &[
     "-",
 ];
 
+/// One line of every command family, each starting with its command word.
+const SPELLED_FROM_A_DIRECTORY: &[&str] = &[
+    "cat src/lib.rs",
+    "nl src/lib.rs",
+    "head -n 40 src/lib.rs",
+    "tail -n 40 src/lib.rs | head -n 5",
+    "sed -n '12,48p' src/lib.rs",
+    "grep -n needle src/lib.rs",
+    "egrep 'a|b' src/lib.rs",
+    "fgrep needle src/lib.rs",
+    "rg -n needle src/lib.rs",
+    "ls -la crates",
+    "find crates -name '*.rs'",
+    "rg --files",
+    "cat src/lib.rs && echo hi",
+];
+
 proptest::proptest! {
     /// ★ A run of pinned flags reads the same wherever it stands before
     /// `--`: in front of the pattern, between the pattern and the path, or
@@ -392,6 +409,26 @@ proptest::proptest! {
                 );
             }
         }
+    }
+
+    /// ★ A command word spelled from `/bin` or `/usr/bin` reads exactly as
+    /// the bare word, and spelled from any other directory it reads as
+    /// nothing at all.
+    #[test]
+    fn a_command_word_reads_the_same_only_from_a_system_directory(
+        base in proptest::sample::select(SPELLED_FROM_A_DIRECTORY),
+        system in proptest::sample::select(&["/bin/", "/usr/bin/"][..]),
+        other in proptest::sample::select(&[
+            "/usr/local/bin/", "/opt/homebrew/bin/", "./", "bin/", "/sbin/", "/usr/bin/x/",
+            "/usr/bin/../bin/", "//bin/", "/usr//bin/",
+        ][..]),
+    ) {
+        let bare = recognise(base);
+        proptest::prop_assert!(bare.is_some(), "{base:?} is a form of the grammar");
+        let spelled = format!("{system}{base}");
+        proptest::prop_assert_eq!(recognise(&spelled), bare, "{}", spelled);
+        let elsewhere = format!("{other}{base}");
+        proptest::prop_assert!(recognise(&elsewhere).is_none(), "{elsewhere:?}");
     }
 
     /// ★ A recognised count is never signed.
