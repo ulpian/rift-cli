@@ -192,6 +192,12 @@ pub use rift_recall_validity::trust::{
     render_recovery_map, render_recovery_map_naming, HeldEntry, HeldVerdict,
 };
 
+/// The shape line's source for the recovery map, by the same route: the
+/// outline of the revision the checkout holds, read from the store the map
+/// already opens.
+pub use self::verbs::summaries::current_outline_shape;
+pub use rift_recall_validity::OutlineShape;
+
 pub use self::envelope::{
     exact_sha, grant_tagged_envelope, handle_display_path, injection_audit_envelope, omit_tag,
     provenance_trust,

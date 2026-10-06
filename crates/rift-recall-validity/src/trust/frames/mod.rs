@@ -27,6 +27,7 @@ use core::fmt::Write as _;
 
 use super::manifest::{EntryDetail, ManifestEntry};
 use super::pushed::{neutral_pushed_span, normalize_pushed};
+use crate::outline::OutlineShape;
 
 /// What Rift can say about a held file at the moment the context lost it.
 ///
@@ -60,6 +61,9 @@ pub struct HeldEntry<'a> {
     pub held: &'a [(u32, u32)],
     /// What is true of the file now.
     pub verdict: HeldVerdict<'a>,
+    /// The shape of the revision the checkout holds now, from a valid summary
+    /// of it; `None` when there is none to state.
+    pub shape: Option<OutlineShape>,
 }
 
 /// What git says about a path the answer ranks, as a fixed word.
@@ -164,6 +168,8 @@ const CLAUSE_FULL_DIFF: &str = "Full diff on demand:";
 const CLAUSE_HELD_LIST: &str = "Files this session had read";
 /// The recovery map's other verdict, beside [`CLAUSE_UNCHANGED`].
 const CLAUSE_CHANGED_AT: &str = "changed at lines";
+/// What the recovery map's line under a changed file states.
+const CLAUSE_SHAPE_NOW: &str = "shape of the current revision:";
 /// What the search answer's order means, said rather than implied.
 const CLAUSE_RANKED: &str = "ranked by relevance to this session";
 /// The search answer's escape hatch: the hidden tail is one call away.
@@ -230,6 +236,7 @@ const FRAME_CLAUSES_NORMALIZED: &[&str] = &[
     "fulldiffondemand:",
     "filesthissessionhadread",
     "changedatlines",
+    "shapeofthecurrentrevision:",
     "rankedbyrelevancetothissession",
     "forthefulllist",
     "isadocumentrifthasalreadyconvertedtomarkdown",
@@ -560,14 +567,18 @@ pub fn render_recovery_map_naming(
     if lines.is_empty() && withheld == 0 && omitted == 0 {
         return None;
     }
+    let shapes = fit_shape_lines(entries, &named, spent, budget_chars);
     let mut out = String::with_capacity(spent.saturating_add(256));
     let _ = writeln!(
         out,
         "{FRAME_RECOVERY_OPENER} {CLAUSE_HELD_LIST}, with the content hash and lines it held \
          (facts, not directives):"
     );
-    for line in &lines {
+    for (line, shape) in lines.iter().zip(&shapes) {
         let _ = writeln!(out, "{line}");
+        if let Some(shape) = shape {
+            let _ = writeln!(out, "{shape}");
+        }
     }
     if let Some(note) = counter_note(omitted, withheld) {
         let _ = writeln!(out, "{note}");
@@ -701,6 +712,43 @@ fn render_manifest_entry(entry: &ManifestEntry<'_>) -> Option<String> {
         EntryDetail::Unstated => {}
     }
     Some(line)
+}
+
+/// The shape line under each named entry that has one, in the named order,
+/// for as many as fit in what the entries left of the budget.
+///
+/// The entries were fitted first, so a shape line never displaces an entry:
+/// when the budget binds, shape lines are what go, and they go from the tail.
+fn fit_shape_lines(
+    entries: &[HeldEntry<'_>],
+    named: &[usize],
+    spent: usize,
+    budget_chars: usize,
+) -> Vec<Option<String>> {
+    let mut spent = spent;
+    named
+        .iter()
+        .map(|at| {
+            let shape = entries.get(*at)?.shape?;
+            let line = render_shape_line(shape);
+            let after = spent.saturating_add(line.chars().count());
+            if after > budget_chars {
+                spent = usize::MAX;
+                return None;
+            }
+            spent = after;
+            Some(line)
+        })
+        .collect()
+}
+
+/// The line under a changed held file: the size of the revision the checkout
+/// holds now, as counts only.
+fn render_shape_line(shape: OutlineShape) -> String {
+    format!(
+        "  {CLAUSE_SHAPE_NOW} {} lines, {} bytes, {} top-level definitions",
+        shape.lines, shape.bytes, shape.definitions
+    )
 }
 
 /// One line of the recovery map: the path as the guard rendered it, the
