@@ -106,6 +106,7 @@ agent saw is not in git, that read's cost cannot be reconstructed and is left ou
 prefers to omit what it cannot support. Closing it means capturing the bytes at
 read time, trading a known omission for a durable copy the redaction pipeline
 would then have to gate. The trade was deliberate.
+A turn-boundary snapshot has the same shape: the worker takes it as of the boundary's instant, and a file changed after that instant is unknown to the window the boundary closes, its human/agent split left out rather than credited to that window.
 
 **Read more.** [03](03-capture.md),
 [08](08-cost-and-savings.md).

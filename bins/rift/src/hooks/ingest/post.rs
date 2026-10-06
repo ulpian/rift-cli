@@ -2,57 +2,83 @@
 //! boundaries imply, and the archive work the state machine asked for.
 //!
 //! Separate because both steps are best-effort and neither may fail the
-//! agent's hook — and because every archive is journaled for the detached
-//! worker rather than performed here.
+//! agent's hook — and because every snapshot and every archive is journaled
+//! for the detached worker rather than performed here.
 
 use std::path::Path;
 
 use rift_core::Result;
 
 use super::{dispatch_agent_worker, CapturedHook};
-use crate::agent_queue::{AgentJob, IntervalArchive, IntervalReason, JobKind};
+use crate::agent_queue::{
+    AgentJob, BoundaryEdge, BoundarySnapshot, IntervalArchive, IntervalReason, JobKind,
+};
 use crate::hooks::git::{effective_config, strategy_kind};
 use crate::hooks::now_ms;
 
-/// Capture the working-tree snapshot for each boundary this hook closed.
+/// Journal the working-tree snapshot each boundary this hook closed owes,
+/// for the detached worker. Returns whether any is owed — the caller then
+/// sees the worker dispatched, once, with whatever else this hook journaled.
+///
+/// The snapshot itself (a `git status`, a read and a diff per changed path,
+/// a batched object write) measured past the agent-hook budget and grows with
+/// what the user has left dirty, so the hook keeps only what the worker
+/// cannot recover later: the commit `HEAD` names, read from the ref files
+/// (`rift_git::head_state` — no git process, no object database), and the
+/// boundary's instant. The worker observes the working set as of that instant.
+///
+/// A boundary already journaled is left as it is, so a redelivered hook owes
+/// the snapshot its first delivery asked for, on that delivery's instant.
+///
 /// Takes the RESOLVED work tree (never the process cwd: a hook's cwd is not
-/// guaranteed to be the repository). A failure is **said once** rather than
-/// swallowed (cause E of `turn_boundary`'s register, 2026-08-29): it lands
+/// guaranteed to be the repository). A journaling failure is **said once**
+/// rather than swallowed (cause E of `turn_boundary`'s register): it lands
 /// on the capture queue's note channel under `boundary-<sha16(session)>`, so
 /// re-noticing overwrites instead of accumulating, and `rift doctor` reports
-/// it without consuming it. Never blocks — the caller ignores the `Err`.
+/// it without consuming it.
 pub(super) fn snapshot_boundaries(
     run: &CapturedHook<'_>,
     agent: &str,
     boundaries: &[(u32, rift_shadow::Boundary)],
-) -> Result<()> {
+) -> bool {
     if boundaries.is_empty() {
-        return Ok(());
+        return false;
     }
     let session = run.raw.session.as_str();
-    let repo = rift_git::discover(&run.repo.work_tree)?;
-    let result = (|| -> Result<()> {
-        let reader = rift_git::GixBlobReader::open(&repo.work_tree)?;
-        let head = reader.head_hex()?;
-        for (ordinal, boundary) in boundaries {
-            run.rt.block_on(rift_shadow::capture_boundary(
-                run.store,
-                &repo,
-                &reader,
-                head.as_deref(),
-                agent,
-                session,
-                *ordinal,
-                *boundary,
-                now_ms(),
-            ))?;
+    let head_oid = rift_git::head_state(run.repo).oid;
+    let captured_at_ms = now_ms();
+    for (ordinal, boundary) in boundaries {
+        let kind = JobKind::BoundarySnapshot(BoundarySnapshot {
+            session_id: session.to_owned(),
+            agent: agent.to_owned(),
+            ordinal: *ordinal,
+            boundary: BoundaryEdge::of(*boundary),
+            head_oid: head_oid.clone(),
+            captured_at_ms,
+        });
+        if let Err(e) = journal_once(run.repo, kind, captured_at_ms) {
+            note_boundary_failure(&run.repo.git_dir, session, &e);
         }
-        Ok(())
-    })();
-    if let Err(e) = &result {
-        note_boundary_failure(&repo.git_dir, session, e);
     }
-    result
+    true
+}
+
+/// Journal one job unless a job of its identity is already pending.
+fn journal_once(repo: &rift_git::RepoPaths, kind: JobKind, queued_at_ms: i64) -> Result<()> {
+    if crate::agent_queue::is_queued(&repo.git_dir, &kind) {
+        return Ok(());
+    }
+    crate::agent_queue::enqueue(
+        &repo.git_dir,
+        &AgentJob {
+            schema_version: 1,
+            work_tree: repo.work_tree.clone(),
+            queued_at_ms,
+            attempts: 0,
+            kind,
+        },
+    )?;
+    Ok(())
 }
 
 /// Say a failed boundary snapshot once, on the capture queue's note channel.
@@ -73,10 +99,28 @@ fn note_boundary_failure(git_dir: &Path, session: &str, e: &rift_core::RiftError
 
 /// Journal the archive work an agent hook may have triggered for the detached
 /// worker: the state machine's `RequestCondense` effect (session end) and the
-/// `scheduled` strategy's interval archive. Returns whether either was
-/// journaled — its worker is then already dispatched, so the caller need not
-/// spawn a second.
+/// `scheduled` strategy's interval archive. Returns whether the worker is now
+/// dispatched — for either of those, or for the boundary snapshots
+/// [`snapshot_boundaries`] journaled (`snapshots_owed`) — so the caller need
+/// not spawn a second.
 pub(super) fn drive_post_ingest(
+    run: &CapturedHook<'_>,
+    agent: &str,
+    state: rift_shadow::hooks::SessionState,
+    effects: &[rift_shadow::hooks::Effect],
+    snapshots_owed: bool,
+) -> Result<bool> {
+    let archived = drive_archives(run, agent, state, effects);
+    if snapshots_owed && !matches!(archived, Ok(true)) {
+        dispatch_agent_worker(&run.repo.git_dir);
+        return Ok(true);
+    }
+    archived
+}
+
+/// The session-end condense or the interval archive, whichever this hook
+/// owes; `true` when one was journaled and its worker dispatched.
+fn drive_archives(
     run: &CapturedHook<'_>,
     agent: &str,
     state: rift_shadow::hooks::SessionState,
@@ -197,18 +241,44 @@ fn queue_interval_archive(
         agent: agent.to_owned(),
         reason,
     });
-    if !crate::agent_queue::is_queued(&repo.git_dir, &kind) {
-        crate::agent_queue::enqueue(
-            &repo.git_dir,
-            &AgentJob {
-                schema_version: 1,
-                work_tree: repo.work_tree.clone(),
-                queued_at_ms: now,
-                attempts: 0,
-                kind,
-            },
-        )?;
-    }
+    journal_once(repo, kind, now)?;
     dispatch_agent_worker(&repo.git_dir);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A boundary journaled twice keeps the job and the instant of its first
+    /// delivery: the redelivery owes the same snapshot, of the same moment.
+    #[test]
+    fn a_redelivered_boundary_keeps_its_first_instant() {
+        let checkout = tempfile::tempdir().unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(checkout.path())
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        let repo = rift_git::discover(checkout.path()).unwrap();
+        let kind = |at: i64| {
+            JobKind::BoundarySnapshot(BoundarySnapshot {
+                session_id: "s-1".into(),
+                agent: "claude-code".into(),
+                ordinal: 1,
+                boundary: BoundaryEdge::End,
+                head_oid: None,
+                captured_at_ms: at,
+            })
+        };
+
+        journal_once(&repo, kind(100), 100).unwrap();
+        journal_once(&repo, kind(200), 200).unwrap();
+
+        let jobs = crate::agent_queue::jobs(&repo.git_dir);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].1.kind, kind(100));
+        assert_eq!(jobs[0].1.queued_at_ms, 100);
+    }
 }

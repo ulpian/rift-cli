@@ -1,7 +1,9 @@
 //! What a boundary snapshot leaves out, and what it costs: Rift's own state
-//! never enters the working set, and a boundary with nothing to observe never
-//! lists HEAD's tree. Driven through the real [`capture_boundary`] over a real
-//! repository, like the tests beside the function.
+//! never enters the working set, a boundary with nothing to observe never
+//! lists HEAD's tree, a path written after the boundary's instant is unknown
+//! to it, and a commit made since the boundary does not hide what it saw.
+//! Driven through the real [`capture_boundary`] over a real repository, like
+//! the tests beside the function.
 
 use std::cell::Cell;
 use std::path::Path;
@@ -21,6 +23,14 @@ const AGENT: &str = "claude-code";
 const NATIVE: &str = "sess-own-state";
 const STATE_FILE: &str = ".rift/state/injection/x.json";
 const STATE_BYTES: &[u8] = b"{\"served\":[\"a.txt\"]}\n";
+/// A boundary instant after every edit these fixtures make, fixed so no
+/// verdict reads the clock: 2100-01-01.
+const AFTER_THE_EDITS: i64 = 4_102_444_800_000;
+/// The instant a race fixture's boundary falls at, and the file times either
+/// side of it (2030-01-01, a second before and a second after).
+const INSTANT: i64 = 1_893_456_000_000;
+const BEFORE_INSTANT: i64 = INSTANT - 1_000;
+const AFTER_INSTANT: i64 = INSTANT + 1_000;
 
 /// The production reader, counting how often HEAD's whole tree is listed.
 struct CountingReader {
@@ -95,9 +105,19 @@ async fn capture(
     head: &str,
     boundary: Boundary,
 ) {
-    capture_boundary(s, repo, reader, Some(head), AGENT, NATIVE, 0, boundary, 1)
-        .await
-        .unwrap();
+    capture_boundary(
+        s,
+        repo,
+        reader,
+        Some(head),
+        AGENT,
+        NATIVE,
+        0,
+        boundary,
+        AFTER_THE_EDITS,
+    )
+    .await
+    .unwrap();
 }
 
 /// Every hunk row the session recorded, as `(edit_kind, path)`.
@@ -204,4 +224,112 @@ async fn a_boundary_with_nothing_to_observe_never_lists_the_head_tree() {
 
     assert_eq!(counting.tree_listings.get(), 0);
     assert_eq!(anchored_paths(&s).await, Vec::<String>::new());
+}
+
+/// Stamp `path` with a modification time of `epoch_ms`, the way an editor's
+/// write would have left it at that instant.
+fn stamp(path: &Path, epoch_ms: i64) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(system_time(epoch_ms))
+        .unwrap();
+}
+
+fn system_time(epoch_ms: i64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_millis(epoch_ms.unsigned_abs())
+}
+
+/// A file edited before the boundary's instant is the closing window's; one
+/// edited after it — by whoever's window came next, before the worker took
+/// the snapshot — is unknown to the boundary: no hunk for it, and its
+/// current bytes anchor the next window instead.
+#[tokio::test]
+async fn a_file_written_after_the_boundary_instant_records_no_hunk_for_that_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, head) = repo_with_a_commit(tmp.path());
+    std::fs::write(tmp.path().join("a.txt"), b"one\ntwo\nlate\n").unwrap();
+    stamp(&tmp.path().join("a.txt"), AFTER_INSTANT);
+    std::fs::write(tmp.path().join("new.txt"), b"alpha\n").unwrap();
+    stamp(&tmp.path().join("new.txt"), BEFORE_INSTANT);
+    let s = store();
+
+    capture_boundary(
+        &s,
+        &repo,
+        &reader(tmp.path()),
+        Some(&head),
+        AGENT,
+        NATIVE,
+        1,
+        Boundary::Start,
+        INSTANT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        hunk_paths(&s).await,
+        vec![("human".to_owned(), "new.txt".to_owned())],
+        "only the file written before the instant is the human's"
+    );
+    assert_eq!(
+        anchored_paths(&s).await,
+        vec!["a.txt".to_owned(), "new.txt".to_owned()],
+        "the late file still anchors the next window"
+    );
+}
+
+/// A tracked file deleted after the boundary's instant changed its directory
+/// after it, and is unknown to the boundary rather than a deletion it saw.
+///
+/// Unix only for the fixture's sake: std opens a directory to set its time
+/// only where a directory can be opened as a file.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_file_deleted_after_the_boundary_instant_records_no_deletion_for_that_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, head) = repo_with_a_commit(tmp.path());
+    std::fs::remove_file(tmp.path().join("a.txt")).unwrap();
+    std::fs::File::open(tmp.path())
+        .unwrap()
+        .set_modified(system_time(AFTER_INSTANT))
+        .unwrap();
+    let s = store();
+
+    capture_boundary(
+        &s,
+        &repo,
+        &reader(tmp.path()),
+        Some(&head),
+        AGENT,
+        NATIVE,
+        1,
+        Boundary::End,
+        INSTANT,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(hunk_paths(&s).await, Vec::new());
+}
+
+/// A commit made between the boundary and the snapshot takes the boundary's
+/// edits out of `git status`; the snapshot still observes them against the
+/// boundary's own `HEAD`, as a snapshot taken at the boundary would have.
+#[tokio::test]
+async fn a_commit_made_after_the_boundary_does_not_hide_what_the_boundary_saw() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, head) = repo_with_a_commit(tmp.path());
+    std::fs::write(tmp.path().join("a.txt"), b"one\ntwo\nthree\n").unwrap();
+    git(tmp.path(), &["commit", "-q", "-am", "the agent's work"]);
+    let s = store();
+
+    capture(&s, &repo, &reader(tmp.path()), &head, Boundary::End).await;
+
+    assert_eq!(
+        hunk_paths(&s).await,
+        vec![("agent".to_owned(), "a.txt".to_owned())]
+    );
 }
