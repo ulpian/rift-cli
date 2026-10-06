@@ -1,13 +1,15 @@
 //! `rift init` / `rift setup`, and the one shared initialization Project
 //! Settings runs too.
 //!
-//! Register the family, scaffold `.rift/`, open the projection, install the
+//! Register the family, scaffold `.rift/` (its configuration and the ignore
+//! file that keeps Rift's own state out of git), open the projection, install the
 //! git hooks, wire the native capture integrations, adopt a linked member,
 //! and provision Recall — every step reported to a progress sink as it
 //! lands, so the dashboard's setup dialog and the CLI's report are one
 //! sequence of facts.
 
 use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use rift_canopy::{PersistOp, SetupProgress, SetupStep};
@@ -20,6 +22,57 @@ use crate::{adopt, agents, family, features, hooks};
 /// A default `.rift/config.toml` (secure defaults apply for absent keys).
 const DEFAULT_CONFIG: &str = "# Rift project configuration (.rift/config.toml).\n\
                               # Secure defaults apply when keys are absent.\n";
+
+/// The `.rift/.gitignore` `init` writes where there is none. A path in a
+/// nested ignore file is relative to its directory, so `state/` here is
+/// `.rift/state/` and nothing else: the configuration, the policies and this
+/// file stay committable.
+const STATE_GITIGNORE: &str = "# Written by rift init: Rift's own state is never committed.\n\
+                               state/\n";
+
+/// What `init` found or did at `.rift/.gitignore`.
+///
+/// Rift never writes `.git/info/exclude`, which is the user's file, and never
+/// rewrites an ignore file that is already there, whoever wrote it: the file
+/// is created only where nothing was, and anything else is reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StateIgnore {
+    /// This call created it.
+    Written,
+    /// One was there, and git ignores `.rift/state/` — by it or otherwise.
+    Kept,
+    /// One was there, and git does not ignore `.rift/state/`.
+    KeptNotIgnoring,
+    /// A symbolic link, which is neither followed nor replaced.
+    SymlinkNotFollowed,
+}
+
+impl StateIgnore {
+    /// The identifier `--json` carries.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Kept => "kept",
+            Self::KeptNotIgnoring => "kept_not_ignoring",
+            Self::SymlinkNotFollowed => "symlink_not_followed",
+        }
+    }
+
+    /// The line `init`'s report owes, or `None` when there is nothing to say.
+    fn report_line(self) -> Option<&'static str> {
+        match self {
+            Self::Written => Some(".rift/.gitignore: written (git ignores .rift/state/)"),
+            Self::Kept => None,
+            Self::KeptNotIgnoring => {
+                Some(".rift/.gitignore: kept as found; it does not ignore .rift/state/")
+            }
+            Self::SymlinkNotFollowed => Some(
+                ".rift/.gitignore: a symbolic link, left unfollowed; \
+                 it does not ignore .rift/state/",
+            ),
+        }
+    }
+}
 
 /// `rift init` / `rift setup`: register the cwd, scaffold `.rift/`, init the
 /// projection, install git hooks (if a repo), and provision the backend.
@@ -210,19 +263,14 @@ pub(crate) fn cmd_init_with_integrations(
     let target = InitTarget::of(&canon);
     let (added, reg_path) = register_family(&target)?;
     let (cfg, scaffolded) = scaffold_config(&canon)?;
+    let state_ignore = ignore_rift_state(&canon)?;
     let projection = projection_progress(&canon);
 
     let mut human = init_registry_lines(&added, &target.name, &target.registered, &reg_path);
     progress(SetupProgress::done(SetupStep::Registry, first_line(&human)));
     human.push_str(&format!("config: {}\n", cfg.display()));
-    progress(SetupProgress::done(
-        SetupStep::Configuration,
-        if scaffolded {
-            ".rift/config.toml written"
-        } else {
-            "kept as the repository committed it"
-        },
-    ));
+    human.extend(state_ignore.report_line().map(|line| format!("{line}\n")));
+    progress(configuration_progress(scaffolded, state_ignore));
     progress(projection);
 
     let hooks_line = init_git_hooks(&canon);
@@ -249,6 +297,7 @@ pub(crate) fn cmd_init_with_integrations(
         "adopted_worktree": target.member,
         "refused": refused,
         "config": cfg.display().to_string(),
+        "state_ignore": state_ignore.as_str(),
         "recall": recall_json,
         "codex_trust_remedy": agents::written_codex_trust(&canon, "codex")
             .and_then(|trust| trust.remedy()),
@@ -288,6 +337,78 @@ fn scaffold_config(canon: &Path) -> rift_core::Result<(PathBuf, bool)> {
         std::fs::write(&cfg, DEFAULT_CONFIG)?;
     }
     Ok((cfg, scaffolded))
+}
+
+/// Make git ignore `.rift/state/` by writing `.rift/.gitignore` where there
+/// is none, and say what was found where there is one.
+///
+/// The create is exclusive (`create_new`), so neither a file somebody wrote
+/// nor one a concurrent `init` wrote a moment ago is truncated, and a symbolic
+/// link — dangling or not — is never opened through. Every `init` path runs
+/// this: the CLI, `rift setup`, and the dashboard's add, with or without
+/// Recall, and on a clone whose `.rift/config.toml` was committed.
+pub(crate) fn ignore_rift_state(canon: &Path) -> std::io::Result<StateIgnore> {
+    let path = canon.join(".rift").join(".gitignore");
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path);
+    match created {
+        Ok(mut file) => {
+            file.write_all(STATE_GITIGNORE.as_bytes())?;
+            return Ok(StateIgnore::Written);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+        Err(error) => return Err(error),
+    }
+    if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+        return Ok(StateIgnore::SymlinkNotFollowed);
+    }
+    if git_ignores_rift_state(canon) {
+        return Ok(StateIgnore::Kept);
+    }
+    Ok(StateIgnore::KeptNotIgnoring)
+}
+
+/// Whether git ignores a path under `.rift/state/`, asked of git itself
+/// (`check-ignore`) rather than read off the file: negations, globs and the
+/// user's other ignore sources all count, and git's answer is the one that
+/// decides what `git status` shows.
+///
+/// Outside a repository nothing can be committed, and a `git` that cannot be
+/// run gives no answer to report; both read as ignored, so `init` stays quiet
+/// rather than warn about a fact it could not establish.
+fn git_ignores_rift_state(canon: &Path) -> bool {
+    let Ok(repo) = rift_git::discover(canon) else {
+        return true;
+    };
+    let work_tree = rift_git::child_process_path(&repo.work_tree);
+    let args = [
+        "-C".to_owned(),
+        work_tree.to_string_lossy().into_owned(),
+        "check-ignore".to_owned(),
+        "-q".to_owned(),
+        "--".to_owned(),
+        ".rift/state/x".to_owned(),
+    ];
+    rift_git::run_git_status(&repo, &args, &[], &[]).map_or(true, |(ignored, _)| ignored)
+}
+
+/// The configuration step as the setup dialog hears it: the config file's
+/// fate, and the ignore file's when there is something to say about it.
+fn configuration_progress(scaffolded: bool, state_ignore: StateIgnore) -> SetupProgress {
+    let config = if scaffolded {
+        ".rift/config.toml written"
+    } else {
+        "kept as the repository committed it"
+    };
+    let detail = match state_ignore {
+        StateIgnore::Written | StateIgnore::Kept => config.to_owned(),
+        StateIgnore::KeptNotIgnoring | StateIgnore::SymlinkNotFollowed => {
+            format!("{config}; .rift/.gitignore does not ignore .rift/state/")
+        }
+    };
+    SetupProgress::done(SetupStep::Configuration, detail)
 }
 
 /// Best-effort projection init, as the dialog hears it: a failure is SAID
@@ -727,5 +848,67 @@ mod tests {
         assert_eq!(wired_detail("codex", "something else\n"), "something else");
         assert_eq!(first_line("  a\nb\n"), "a");
         assert_eq!(first_line(""), "");
+    }
+
+    /// A directory with `.rift/` in it and nothing else.
+    fn rift_dir() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".rift")).unwrap();
+        tmp
+    }
+
+    /// The ignore file is written once, names `state/` and nothing else, and
+    /// a second call leaves the bytes it wrote exactly as they were.
+    #[test]
+    fn the_ignore_file_is_written_once_and_a_second_init_leaves_it_alone() {
+        let tmp = rift_dir();
+        let path = tmp.path().join(".rift/.gitignore");
+        assert_eq!(ignore_rift_state(tmp.path()).unwrap(), StateIgnore::Written);
+        let written = std::fs::read_to_string(&path).unwrap();
+        let rules: Vec<&str> = written
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(rules, ["state/"]);
+        assert_eq!(ignore_rift_state(tmp.path()).unwrap(), StateIgnore::Kept);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+    }
+
+    /// A symbolic link at `.rift/.gitignore` is neither followed nor
+    /// replaced: the file it names keeps its bytes, a dangling one stays
+    /// dangling, and the report says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_ignore_file_is_never_followed() {
+        let tmp = rift_dir();
+        let link = tmp.path().join(".rift/.gitignore");
+        let target = tmp.path().join("elsewhere");
+        std::fs::write(&target, "mine\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let found = ignore_rift_state(tmp.path()).unwrap();
+        assert_eq!(found, StateIgnore::SymlinkNotFollowed);
+        assert!(found.report_line().is_some());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
+
+        std::fs::remove_file(&target).unwrap();
+        let found = ignore_rift_state(tmp.path()).unwrap();
+        assert_eq!(found, StateIgnore::SymlinkNotFollowed);
+        assert!(!target.exists(), "a dangling link is not written through");
+    }
+
+    /// The dialog hears about an ignore file that does not ignore the state,
+    /// and hears nothing extra when the state is ignored.
+    #[test]
+    fn the_configuration_step_names_an_ignore_file_that_lets_the_state_through() {
+        let quiet = configuration_progress(true, StateIgnore::Written);
+        assert_eq!(quiet.detail, ".rift/config.toml written");
+        let kept = configuration_progress(false, StateIgnore::KeptNotIgnoring);
+        assert!(
+            kept.detail
+                .ends_with(".rift/.gitignore does not ignore .rift/state/"),
+            "{}",
+            kept.detail
+        );
+        assert_eq!(StateIgnore::Kept.report_line(), None);
     }
 }

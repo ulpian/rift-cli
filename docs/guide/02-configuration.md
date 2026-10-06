@@ -515,6 +515,7 @@ projection: a hook that is running is its own proof that hooks are installed.
 | `.rift/config.toml` | Repository policy. | No — authoritative. |
 | `.rift/policies/serve.toml` | Serving overlay. | Deleting means "defaults". |
 | `.rift/policies/redactors/` | Shared redaction rule packs. | Yes — you lose the extra rules. |
+| `.rift/.gitignore` | The one rule `state/`, so git ignores `.rift/state/` and nothing else. `rift init` writes it only where no file is; one already there, the repository's own or a symbolic link, is never rewritten or followed, and `init` names it when it lets `.rift/state/` through. | Yes — the next `rift init` writes it again; meanwhile `.rift/state/` shows in `git status`. |
 | `.rift/agents/` | One capture descriptor per wired agent (`<agent>.json`), plus recall install and probe records. | Yes — `rift enable` regenerates. |
 | `.rift/state/native-integrations.json` | Which integrations this checkout has, and their ownership fingerprints. | Regenerated; deleting makes fragments read as unowned. |
 | `.rift/state/project-setup.json` | This checkout's setup progress. | Yes. |

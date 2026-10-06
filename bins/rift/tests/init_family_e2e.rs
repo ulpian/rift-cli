@@ -10,6 +10,9 @@
 //! `git worktree add`, with the registry, cache, family and Codex roots all
 //! redirected into the fixture — this machine's own `~/.config/rift/
 //! projects.toml` is neither read nor written.
+//!
+//! The same fixture holds the ignore file `init` writes into `.rift/`, since
+//! what git makes of it is only provable against a real repository.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -363,4 +366,88 @@ fn the_worktrees_flag_lists_members_under_their_root_and_leaves_the_bare_list_al
     assert_eq!(rows[0]["kind"], "repo");
     assert_eq!(rows[1]["kind"], "worktree");
     assert_eq!(rows[1]["path"], member.display().to_string());
+}
+
+/// Whether git ignores `path` (relative to `dir`), asked of git itself:
+/// `check-ignore -q` exits 0 for an ignored path and 1 for one it keeps.
+fn git_ignores(dir: &Path, path: &str) -> bool {
+    let status = Command::new("git")
+        .args(["check-ignore", "-q", "--", path])
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", dir.join("absent-gitconfig"))
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .status()
+        .expect("git is on PATH");
+    match status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        other => panic!("git check-ignore {path}: exit {other:?}"),
+    }
+}
+
+/// The sha256 of a file's bytes, as hex.
+fn file_sha256(path: &Path) -> String {
+    use sha2::Digest as _;
+    let bytes = std::fs::read(path).unwrap();
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// ★ A fresh `init` writes `.rift/.gitignore`, so git ignores Rift's own state
+/// and still sees the configuration; a second `init` changes nothing.
+///
+/// A path in a nested `.gitignore` is relative to its directory, so `state/`
+/// there is `.rift/state/` and nothing else — `git check-ignore` is asked
+/// rather than the file read, because git's answer is the one that matters.
+#[test]
+fn a_fresh_init_makes_git_ignore_rift_state_and_a_second_init_changes_nothing() {
+    let f = Family::new();
+    let (code, out) = f.rift(&f.main, &["init", "--no-recall", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["state_ignore"], "written", "{doc}");
+
+    let ignore = f.main.join(".rift/.gitignore");
+    assert!(ignore.is_file(), "init writes .rift/.gitignore");
+    assert!(git_ignores(&f.main, ".rift/state/injection/x.json"));
+    assert!(!git_ignores(&f.main, ".rift/config.toml"));
+    assert!(!git_ignores(&f.main, ".rift/.gitignore"));
+
+    let before = file_sha256(&ignore);
+    let (code, again) = f.rift(&f.main, &["init", "--no-recall", "--json"]);
+    assert_eq!(code, 0, "{again}");
+    let doc: serde_json::Value = serde_json::from_str(&again).unwrap();
+    assert_eq!(doc["state_ignore"], "kept", "{doc}");
+    assert_eq!(
+        file_sha256(&ignore),
+        before,
+        "the second init wrote nothing"
+    );
+}
+
+/// ★ A `.rift/.gitignore` the repository already carries is kept byte for byte
+/// — on a config-only clone too — and when it does not ignore Rift's state,
+/// `init` says so in one plain line instead of editing somebody else's file.
+#[test]
+fn a_user_authored_rift_gitignore_is_kept_byte_identical_and_said_not_to_ignore_state() {
+    let f = Family::new();
+    std::fs::create_dir_all(f.main.join(".rift")).unwrap();
+    std::fs::write(f.main.join(".rift/config.toml"), "# committed\n").unwrap();
+    let ignore = f.main.join(".rift/.gitignore");
+    std::fs::write(&ignore, "# ours\nagents/\n").unwrap();
+    let before = file_sha256(&ignore);
+
+    let (code, out) = f.rift(&f.main, &["init", "--no-recall"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains(".rift/.gitignore: kept as found; it does not ignore .rift/state/"),
+        "{out}"
+    );
+    let (code, out) = f.rift(&f.main, &["init", "--no-recall", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["state_ignore"], "kept_not_ignoring", "{doc}");
+    assert_eq!(file_sha256(&ignore), before, "the user's file is untouched");
+    assert!(!git_ignores(&f.main, ".rift/state/injection/x.json"));
 }
