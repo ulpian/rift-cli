@@ -9,10 +9,10 @@ use super::super::{
     SearchHit, CLAUSE_ALREADY_IN_CONTEXT, CLAUSE_CHANGED_AT, CLAUSE_CHANGED_ONLY, CLAUSE_CONVERTED,
     CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST, CLAUSE_HELD_LIST, CLAUSE_IN_CONTEXT,
     CLAUSE_IN_CONTEXT_WINDOW, CLAUSE_OTHERS_UNCHANGED, CLAUSE_PROVENANCE, CLAUSE_PULL,
-    CLAUSE_RANKED, CLAUSE_REPEAT, CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED, FRAME_DENY_OPENER,
-    FRAME_HEADER_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER, FRAME_NARROW_OPENER,
-    FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER,
-    FRAME_SEARCH_OPENER, FRAME_WITHHELD_OPENER, WITHHELD_PATH,
+    CLAUSE_RANKED, CLAUSE_REPEAT, CLAUSE_SHAPE_NOW, CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED,
+    FRAME_DENY_OPENER, FRAME_HEADER_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER,
+    FRAME_NARROW_OPENER, FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED, FRAME_RECOVERY_OPENER,
+    FRAME_REDIRECT_OPENER, FRAME_SEARCH_OPENER, FRAME_WITHHELD_OPENER, WITHHELD_PATH,
 };
 use super::{HASH, HASH2, SRC};
 use crate::trust::directive::is_directive_shaped;
@@ -55,6 +55,7 @@ const FRAME_CLAUSES: &[&str] = &[
     CLAUSE_FULL_DIFF,
     CLAUSE_HELD_LIST,
     CLAUSE_CHANGED_AT,
+    CLAUSE_SHAPE_NOW,
     CLAUSE_RANKED,
     CLAUSE_FULL_LIST,
     CLAUSE_CONVERTED,
@@ -107,12 +108,18 @@ fn every_frame_rendered() -> String {
             hash: HASH,
             held: &[(1, 40)],
             verdict: HeldVerdict::Unchanged,
+            shape: None,
         },
         HeldEntry {
             path: "src/b.rs",
             hash: HASH,
             held: &[(1, 40)],
             verdict: HeldVerdict::ChangedAt(&[(4, 9)]),
+            shape: Some(crate::OutlineShape {
+                lines: 120,
+                bytes: 4096,
+                definitions: 6,
+            }),
         },
     ];
     let hit = SearchHit {
@@ -309,12 +316,14 @@ fn the_recovery_map_is_golden() {
             hash: HASH,
             held: &[(1, 500)],
             verdict: HeldVerdict::Unchanged,
+            shape: None,
         },
         HeldEntry {
             path: "bins/rift/src/hooks.rs",
             hash: HASH2,
             held: &[(2600, 2960), (3390, 3560)],
             verdict: HeldVerdict::ChangedAt(&changed),
+            shape: None,
         },
     ];
     assert_eq!(

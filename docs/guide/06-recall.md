@@ -251,8 +251,12 @@ Four extractor kinds ship: failure, log, diff and file shape, each a pure
 function — same bytes in, same bytes out, no clock, no I/O, no model — that
 counts, scrubs and outlines, never paraphrases. The log extractor keeps
 severity-marked lines, deduplicates them and prefixes counts; file shape emits
-`412 lines, 13840 bytes, 27 top-level defs`; diff emits per-file add/remove
-counts under a total. Failure signatures are *stabilized* first: line and column
+a code outline, `412 lines, 13840 bytes, 27 top-level defs` and then one line
+per top-level definition with its kind, its name and the lines its block spans
+(`fn summary_key L36-L52`); diff emits per-file add/remove counts under a total.
+The outline is for code files only, chosen by extension.
+A definition is a column-zero line opened by a fixed keyword table, its range is block expansion over the layout, and its name keeps identifier characters only, so no comment or string text reaches it.
+Beside each outline the writer stores the raw token count of every definition's lines and of the whole file, under the outline's own summary key (`summary_token_count`), so a surface can state what a definition costs without starting a tokenizer. Failure signatures are *stabilized* first: line and column
 positions become `:_`, hex addresses `0x_`, durations `(_s)`, so the same
 logical error yields the same signature across runs.
 
@@ -411,7 +415,7 @@ repository family, holding the derived facts.
 Every row is derivable from git, and the append-only discipline of
 [Chapter 13](13-storage-and-schema.md) applies in full: no in-place updates, no
 deletes, corrections as new superseding rows, a mutation guard on every
-canonical table. There are 30 such tables today, in three families, and the
+canonical table. There are 31 such tables today, in three families, and the
 split explains what is safe to throw away:
 
 - **Derived graph facts** — a generic node/edge graph with each node kind's
@@ -421,8 +425,9 @@ split explains what is safe to throw away:
   per line, keyed by the SHA-256 of the line's canonical bytes so the rows
   every later checkpoint of the session carries again land once, and tied
   to the file revision node the line names.
-- **Validity artifacts** — summary bindings and the content-addressed digest
-  blobs they point at. Rebuildable, because the extractors are deterministic.
+- **Validity artifacts** — summary bindings, the content-addressed digest
+  blobs they point at, and the token counts beside each outline.
+  Rebuildable, because the extractors are deterministic.
 - **Governance records** — the serve audit, serve-call and session events,
   outcome labels, metric snapshots, evaluation runs, key metadata. *Not*
   derivable from git: they record what was served, to whom, and what was
@@ -753,14 +758,9 @@ search is a different question with a different answer, which is the subject of
 
 ## 6.15 What is running, and what is not
 
-**Summaries are not bound by any shipped path.** The validity engine, digest
-store, extractors, sealed types and the serving of a binding are built and
-tested; the ingest step that would *write* bindings in production is missing.
-The summary-binding tables are empty here and the manifest builder passes no
-summary, so `summary_included` does not occur today — an artifact is
-`known_unchanged` or `available_by_handle`, and `rift recall read-summary <path>`
-answers `unavailable` with the reason `not_bound`: honest absence rather than a
-guess dressed as a digest.
+**Summaries are bound at the condense and served on pull.** After the detached worker's condense lands a checkpoint, it binds the outline of each code file the session read and has not changed since ([§3.7](03-capture.md#37-from-session-to-checkpoint-the-condense)), with the raw token count of each definition beside it.
+Where a binding exists, the pulls read it: `rift recall read-summary <path>` answers `summary` with the stored outline, its key, the versions in that key and its `file:` handle; `known-state` makes an entry `summary_included` when the checkout's bytes hash to the bound revision and the outline fits; and the context pack renders the outline with every name left out, each definition by position, kind and lines.
+A binding of another revision answers `stale`, a binding under older versions or none at all answers `unavailable` with `not_bound`, and a binding whose digest cannot be read answers `unavailable` with `digest_unavailable`: honest absence rather than a guess dressed as a digest.
 
 **Serving from git through an in-session index was designed and never built.**
 No such crate exists in the workspace; §6.10's projection is what runs, and the

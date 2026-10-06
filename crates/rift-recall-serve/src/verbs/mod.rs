@@ -16,6 +16,7 @@ mod hunks;
 pub(crate) mod pack;
 mod search;
 mod state;
+pub(crate) mod summaries;
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -1,4 +1,4 @@
-//! The recall projection's migration set (`recall.db`): the fifteen
+//! The recall projection's migration set (`recall.db`): the sixteen
 //! checksum-locked SQL builders over the recall registry slices and their
 //! secondary indexes.
 //!
@@ -7,6 +7,42 @@
 //! and v9 bodies survive as read-compat history.
 
 use super::Migration;
+
+/// One recall migration as the table lists it: its name and its SQL builder.
+type RecallMigration = (&'static str, fn() -> String);
+
+/// Every recall migration's name and SQL builder, in version order: the
+/// position is the version, so a row appends and never moves.
+const RECALL_MIGRATIONS: [RecallMigration; 16] = [
+    ("recall_core", recall_canonical_schema_sql),
+    ("recall_outcome_labels", recall_outcome_label_schema_sql),
+    ("recall_key_custody", recall_key_custody_schema_sql),
+    ("recall_memd_audit", recall_memd_audit_schema_sql),
+    ("recall_blob_oid_map", recall_blob_oid_map_schema_sql),
+    (
+        "recall_ingest_watermark",
+        recall_ingest_watermark_schema_sql,
+    ),
+    ("recall_memd_calls", recall_memd_call_schema_sql),
+    ("recall_eval_run", recall_eval_run_schema_sql),
+    ("recall_mcp_connections", recall_mcp_connection_schema_sql),
+    (
+        "recall_memd_audit_citation",
+        recall_memd_audit_citation_schema_sql,
+    ),
+    ("recall_serve_channel", recall_serve_channel_schema_sql),
+    ("recall_worktree_scope", recall_worktree_scope_schema_sql),
+    (
+        "recall_serve_attribution",
+        recall_serve_attribution_schema_sql,
+    ),
+    ("recall_pull_claims", recall_pull_claim_schema_sql),
+    ("recall_window_rows", recall_window_row_schema_sql),
+    (
+        "recall_summary_token_counts",
+        recall_summary_token_count_schema_sql,
+    ),
+];
 
 /// The recall projection's migration set (applied to a fresh `recall.db`).
 /// [`super::apply_migrations`] creates the meta tables itself, so version 1 is the
@@ -23,86 +59,19 @@ use super::Migration;
 /// `memd_audit_session` serve attribution; version 14 adds the
 /// `memd_audit_pull_claim` record of what a pull's caller claimed to hold;
 /// version 15 adds the `n_window_row` relation a checkpoint's frozen window
-/// rows are read back into.
+/// rows are read back into; version 16 adds the `summary_token_count` costs
+/// beside each bound outline.
 #[must_use]
 pub fn recall_migrations() -> Vec<Migration> {
-    vec![
-        Migration {
-            version: 1,
-            name: "recall_core",
-            sql: recall_canonical_schema_sql(),
-        },
-        Migration {
-            version: 2,
-            name: "recall_outcome_labels",
-            sql: recall_outcome_label_schema_sql(),
-        },
-        Migration {
-            version: 3,
-            name: "recall_key_custody",
-            sql: recall_key_custody_schema_sql(),
-        },
-        Migration {
-            version: 4,
-            name: "recall_memd_audit",
-            sql: recall_memd_audit_schema_sql(),
-        },
-        Migration {
-            version: 5,
-            name: "recall_blob_oid_map",
-            sql: recall_blob_oid_map_schema_sql(),
-        },
-        Migration {
-            version: 6,
-            name: "recall_ingest_watermark",
-            sql: recall_ingest_watermark_schema_sql(),
-        },
-        Migration {
-            version: 7,
-            name: "recall_memd_calls",
-            sql: recall_memd_call_schema_sql(),
-        },
-        Migration {
-            version: 8,
-            name: "recall_eval_run",
-            sql: recall_eval_run_schema_sql(),
-        },
-        Migration {
-            version: 9,
-            name: "recall_mcp_connections",
-            sql: recall_mcp_connection_schema_sql(),
-        },
-        Migration {
-            version: 10,
-            name: "recall_memd_audit_citation",
-            sql: recall_memd_audit_citation_schema_sql(),
-        },
-        Migration {
-            version: 11,
-            name: "recall_serve_channel",
-            sql: recall_serve_channel_schema_sql(),
-        },
-        Migration {
-            version: 12,
-            name: "recall_worktree_scope",
-            sql: recall_worktree_scope_schema_sql(),
-        },
-        Migration {
-            version: 13,
-            name: "recall_serve_attribution",
-            sql: recall_serve_attribution_schema_sql(),
-        },
-        Migration {
-            version: 14,
-            name: "recall_pull_claims",
-            sql: recall_pull_claim_schema_sql(),
-        },
-        Migration {
-            version: 15,
-            name: "recall_window_rows",
-            sql: recall_window_row_schema_sql(),
-        },
-    ]
+    RECALL_MIGRATIONS
+        .into_iter()
+        .zip(1u32..)
+        .map(|((name, sql), version)| Migration {
+            version,
+            name,
+            sql: sql(),
+        })
+        .collect()
 }
 
 /// Build the recall-schema migration SQL from the recall table registry (the
@@ -475,6 +444,33 @@ fn recall_window_row_schema_sql() -> String {
     sql
 }
 
+/// The v16 additive recall migration: the `summary_token_count` relation,
+/// the raw token counts beside each bound outline.
+///
+/// Found by name for the reason v13's relation is. No secondary index: the
+/// relation is read by its key's prefix, which the primary key already serves.
+fn recall_summary_token_count_schema_sql() -> String {
+    let tables = || {
+        crate::schema::recall_canonical_tables()
+            .iter()
+            .filter(|table| table.name == "summary_token_count")
+    };
+    let mut sql = String::new();
+    for table in tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    for table in tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,7 +607,16 @@ mod tests {
                 "n_window_row_no_update",
                 "n_window_row_no_delete",
             ],
-            &["memd_audit_pull_claim"],
+            &["memd_audit_pull_claim", "summary_token_count"],
+        ),
+        (
+            "recall_summary_token_counts",
+            &[
+                "CREATE TABLE IF NOT EXISTS summary_token_count",
+                "summary_token_count_no_update",
+                "summary_token_count_no_delete",
+            ],
+            &["n_window_row"],
         ),
     ];
 
@@ -622,7 +627,7 @@ mod tests {
     #[test]
     fn every_recall_version_creates_only_its_own_relations() {
         let migs = recall_migrations();
-        assert_eq!(migs.len(), 15);
+        assert_eq!(migs.len(), 16);
         for (version, (name, creates, excludes)) in VERSION_CONTENTS.iter().enumerate() {
             assert_eq!(migs[version].name, *name);
             let sql = &migs[version].sql;
@@ -644,11 +649,11 @@ mod tests {
     fn recall_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &recall_migrations()).unwrap();
-        assert_eq!(out.applied, 15);
-        assert_eq!(out.high_water, 15);
+        assert_eq!(out.applied, 16);
+        assert_eq!(out.high_water, 16);
         let again = apply_migrations(&s, &recall_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 15);
+        assert_eq!(again.skipped, 16);
     }
 }
 
@@ -727,7 +732,7 @@ mod window_row_tests {
         let before = apply_migrations(&s, &migs[..14]).unwrap();
         assert_eq!(before.high_water, 14);
         assert_eq!(s.execute_raw(PULL_CLAIM).unwrap(), 1);
-        let after = apply_migrations(&s, &migs).unwrap();
+        let after = apply_migrations(&s, &migs[..15]).unwrap();
         assert_eq!(after.applied, 1);
         assert_eq!(after.high_water, 15);
         let kept: i64 = s
@@ -761,6 +766,75 @@ mod window_row_tests {
             .is_err());
         assert_eq!(
             s.execute_raw(&ROW.replace("'read'", "'prevented'"))
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
+mod token_count_tests {
+    use super::*;
+    use crate::migrate::apply_migrations;
+    use crate::migrate::fixtures::store;
+
+    const ROW: &str = "INSERT INTO summary_token_count \
+        (summary_id, ordinal, line_lo, line_hi, tokens, tokenizer, schema_version) \
+        VALUES ('s1', 0, 1, 40, 312, 'cl100k_base', 1)";
+
+    const WINDOW_ROW: &str = "INSERT INTO n_window_row \
+        (row_id, window_key, kind, turn, at, checkpoint_id, schema_version) \
+        VALUES ('r1', 'w1', 'read', 1, 2, 'c1', 1)";
+
+    #[test]
+    fn a_store_at_the_previous_version_gains_the_token_counts_and_keeps_its_rows() {
+        let s = store();
+        let migs = recall_migrations();
+        let before = apply_migrations(&s, &migs[..15]).unwrap();
+        assert_eq!(before.high_water, 15);
+        assert_eq!(s.execute_raw(WINDOW_ROW).unwrap(), 1);
+        let after = apply_migrations(&s, &migs).unwrap();
+        assert_eq!(after.applied, 1);
+        assert_eq!(after.high_water, 16);
+        let kept: i64 = s
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM n_window_row", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(kept, 1);
+        assert_eq!(s.execute_raw(ROW).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_fresh_store_takes_a_token_count_row_once_per_ordinal() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        assert_eq!(s.execute_raw(ROW).unwrap(), 1);
+        assert!(s.execute_raw(ROW).is_err(), "the key is (summary, ordinal)");
+        assert_eq!(
+            s.execute_raw(&ROW.replace("'s1', 0", "'s1', 1")).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_token_count_can_be_neither_updated_nor_deleted() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        s.execute_raw(ROW).unwrap();
+        let update = s.execute_raw("UPDATE summary_token_count SET tokens = 9");
+        let delete = s.execute_raw("DELETE FROM summary_token_count");
+        assert!(matches!(update, Err(rift_core::RiftError::Immutability(_))));
+        assert!(matches!(delete, Err(rift_core::RiftError::Immutability(_))));
+    }
+
+    #[test]
+    fn a_count_on_a_basis_the_tokenizer_does_not_name_is_refused() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        assert!(s
+            .execute_raw(&ROW.replace("cl100k_base", "o200k_base"))
+            .is_err());
+        assert_eq!(
+            s.execute_raw(&ROW.replace("cl100k_base", "chars/4+1"))
                 .unwrap(),
             1
         );

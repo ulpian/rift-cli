@@ -10,7 +10,7 @@ use std::path::Path;
 use rift_core::Result;
 use rift_shadow::hooks::{screen_push, PushDecision, PushRef};
 
-use super::archive::{archive_now, record_pack_notes, session_facts_for_archive};
+use super::archive::{archive_in_git_hook, record_pack_notes, session_facts_for_archive};
 use super::worker::{drain_capture_queue, owe_document_sweep, owe_search_index};
 use super::{current_dir_or_dot, flag, now_ms, projection_db_at};
 
@@ -462,7 +462,7 @@ fn on_pr_archive(git_dir: Option<&str>) -> Result<()> {
         // Nothing here turns on whether the backend was available: a strategy
         // archive that defers simply did not happen, and the next signal asks
         // again.
-        let _checkpoint = archive_now(
+        let _checkpoint = archive_in_git_hook(
             &rt,
             &store,
             &repo.work_tree,

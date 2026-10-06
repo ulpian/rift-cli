@@ -160,6 +160,8 @@ pub(crate) fn manifest_event(returned: u32, avoided: u32) -> MemdEvent {
 /// A `known_unchanged` entry also names the turn the caller's window last read
 /// those bytes, when there is evidence of one; with none the key is absent
 /// rather than null, so a view without evidence is byte-for-byte what it was.
+/// A `summary_included` entry carries the summary itself, the key it is bound
+/// under, the versions in that key and its handle, which names the revision.
 pub(crate) fn envelope_view(e: &Envelope) -> Value {
     let (state, basis): (&str, Option<String>) = match &e.state {
         ArtifactState::KnownUnchanged { basis_sha256, .. } => {
@@ -185,6 +187,24 @@ pub(crate) fn envelope_view(e: &Envelope) -> Value {
     ) = (&e.state, view.as_object_mut())
     {
         fields.insert("last_seen_turn".to_owned(), json!(turn));
+    }
+    if let (
+        ArtifactState::SummaryIncluded {
+            handle,
+            summary,
+            summary_key,
+            ..
+        },
+        Some(fields),
+    ) = (&e.state, view.as_object_mut())
+    {
+        fields.insert("handle".to_owned(), json!(handle));
+        fields.insert("summary".to_owned(), json!(summary));
+        fields.insert("summary_key".to_owned(), json!(summary_key));
+        fields.insert(
+            "versions".to_owned(),
+            crate::verbs::summaries::versions_view(crate::verbs::summaries::served_versions()),
+        );
     }
     view
 }

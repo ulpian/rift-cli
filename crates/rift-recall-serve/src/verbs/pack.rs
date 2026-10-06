@@ -2,7 +2,7 @@
 //! the citation table it publishes, and the cost-awareness verb beside it.
 //!
 //! Every section entry is built from a sealed-constructor output:
-//! `envelope_for` (with `resolve` supplying the validity verdict) for trusted
+//! `envelope_for` (with the durable store supplying the validity verdict) for trusted
 //! artifacts, the trust chokepoint for untrusted provenance, parse-validated
 //! handles for recommendations, and the closed critical/cost vocabularies. No
 //! inline strings enter a pack.
@@ -20,13 +20,12 @@ use rift_recall_policy::{PolicyEngine, TurnBudget};
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_types::{Handle, Trust};
 use rift_recall_validity::trust::{serialize_untrusted, IntoRawBody, TrustedPayload};
-use rift_recall_validity::{
-    envelope_for, resolve, Budget, MemoryDigestStore, SeenStatus, SummaryStore, WorktreeSnapshot,
-};
+use rift_recall_validity::{envelope_for, Budget, SeenStatus, Validity};
 use rift_store::{CanonicalStore, Row};
 use serde_json::{json, Value};
 
 use super::credit::Evidence;
+use super::summaries::checked_summaries;
 use super::{internal, HUNK_RANGES_SQL};
 use crate::envelope::{manifest_event, provenance_trust};
 use crate::{
@@ -44,10 +43,10 @@ pub const PACK_CANDIDATES: usize = 8;
 /// table that is also its admission list, and the sealed constructor's
 /// inputs.
 ///
-/// The summary store is empty until ingest persists digest bindings (a
-/// deliberate deferral): `resolve` then verdicts `Degraded`, so the envelope
-/// honestly serves known-unchanged / exact-hunks / handles and never
-/// fabricates a summary.
+/// The summaries are the valid ones of the revisions the checkout holds; a
+/// candidate with none gets the `Degraded` verdict, so the envelope honestly
+/// serves known-unchanged / exact-hunks / handles and never fabricates a
+/// summary.
 struct PackAssembly<'a> {
     request: PackRequest,
     /// **THE EVIDENCE ORDINAL PASS + THE CITATION TABLE** — one function
@@ -61,9 +60,7 @@ struct PackAssembly<'a> {
     /// What the checkout and the record say about the ranked files: a file
     /// is served as held only where the checkout still holds it.
     evidence: Evidence,
-    summaries: SummaryStore,
-    digests: MemoryDigestStore,
-    snapshot: WorktreeSnapshot,
+    summaries: BTreeMap<String, Validity>,
     env_budget: Budget,
 }
 
@@ -86,7 +83,9 @@ impl ServeDispatcher<'_> {
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let evidence = Evidence::over(ctx, &known, &ranked).await;
         let table = citation_pass(&self.policy, &ranked);
-        let mut assembly = PackAssembly::new(req, table, known, evidence)?;
+        let cited = ranked.get(..PACK_CANDIDATES).unwrap_or(&ranked);
+        let summaries = checked_summaries(ctx, &evidence, cited).await;
+        let mut assembly = PackAssembly::new(req, table, known, evidence, summaries)?;
         for (rank, lc) in ranked.iter().take(PACK_CANDIDATES).enumerate() {
             let ordinal = u32::try_from(rank).unwrap_or(u32::MAX).saturating_add(1);
             // The table IS the admission list: an artifact the pass refused to
@@ -210,12 +209,14 @@ impl ServeDispatcher<'_> {
         let seen = assembly
             .evidence
             .sighting(&assembly.known, assembly.seen_turns, lc);
-        let validity = resolve(
-            &assembly.summaries,
-            &assembly.digests,
-            &assembly.snapshot,
-            &format!("summary:{}", c.path),
-        );
+        let validity = match assembly.summaries.remove(&c.path) {
+            Some(Validity::Valid(summary)) if summary.bound_oid() == lc.content_sha256 => {
+                Validity::Valid(summary)
+            }
+            _ => Validity::Degraded {
+                key: format!("summary:{}", c.path),
+            },
+        };
         let hunk_rows = ctx
             .store
             .query(HUNK_RANGES_SQL, &[rift_store::Value::text(c.id.as_str())])
@@ -314,6 +315,7 @@ impl<'a> PackAssembly<'a> {
         table: Citations,
         known: BTreeSet<&'a str>,
         evidence: Evidence,
+        summaries: BTreeMap<String, Validity>,
     ) -> Result<Self, ToolError> {
         let pack_tokens = pack_tokens(req);
         let mut request = PackRequest::new(pack_tokens);
@@ -327,9 +329,7 @@ impl<'a> PackAssembly<'a> {
             known,
             seen_turns: &req.seen_turns,
             evidence,
-            summaries: SummaryStore::new(),
-            digests: MemoryDigestStore::default(),
-            snapshot: WorktreeSnapshot::new(),
+            summaries,
             env_budget: Budget::new(pack_tokens),
         })
     }

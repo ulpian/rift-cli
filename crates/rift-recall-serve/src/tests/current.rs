@@ -10,7 +10,7 @@
 use rift_recall_policy::{PolicyEngine, TurnBudget};
 use rift_recall_substrate::worktree::sha256_hex;
 use rift_recall_substrate::MemorySubstrate;
-use rift_store::{CanonicalStore, SqliteStore, Value};
+use rift_store::SqliteStore;
 use serde_json::json;
 
 use super::fixtures::*;
@@ -33,37 +33,8 @@ fn projection() -> SqliteStore {
     seed_read(&store, "c1", "rev_a", A_TOKENS, 1);
     seed_revision(&store, "rev_b", OTHER, &other, &other, 10);
     seed_read(&store, "c1", "rev_b", 40, 1);
-    bind_summary(&store, PATH, &a);
+    super::outline::bind_outline(&store, PATH, A_BYTES).unwrap();
     store
-}
-
-fn bind_summary(store: &SqliteStore, path: &str, sha: &str) {
-    block(store.insert_or_ignore(
-        "summary_binding",
-        &[
-            "summary_id",
-            "path",
-            "source_sha256",
-            "bound_blob_oid",
-            "extractor_ver",
-            "policy_ver",
-            "redaction_ver",
-            "digest_ref",
-            "created_at",
-        ],
-        &[
-            Value::text(format!("summary-{sha}")),
-            Value::text(path),
-            Value::text(sha),
-            Value::text(sha),
-            Value::Int(1),
-            Value::Int(1),
-            Value::Int(1),
-            Value::text(format!("digest-{sha}")),
-            Value::Int(0),
-        ],
-    ))
-    .unwrap();
 }
 
 fn serve(

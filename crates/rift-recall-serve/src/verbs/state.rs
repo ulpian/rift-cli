@@ -13,16 +13,18 @@ use rift_recall_events::MemdEvent;
 use rift_recall_ledger::candidates::{
     load_candidates, load_candidates_with_scope, LoadedCandidate,
 };
+use rift_recall_ledger::validity_store::{current_summary, CurrentSummary};
 use rift_recall_policy::TurnBudget;
 use rift_recall_substrate::worktree::CurrentRefusal;
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_types::{Envelope, Trust};
-use rift_recall_validity::{manifest_envelope, Budget};
-use rift_store::CanonicalStore;
+use rift_recall_validity::{manifest_envelope, Budget, ValidSummary, Validity};
+use rift_store::{CanonicalStore, PlainCipher};
 use serde_json::{json, Value};
 
 use super::credit::{Current, Evidence, STATED_UNRECORDED};
-use super::{fit_with_provenance, manifest_cap, Story};
+use super::summaries::{checked_summaries, served_versions, versions_view};
+use super::{fit_with_provenance, internal, manifest_cap, Story};
 use crate::envelope::{envelope_view, manifest_event};
 use crate::{RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse};
 
@@ -47,6 +49,20 @@ struct Deltas {
     unchanged: Vec<Value>,
 }
 
+/// What a manifest is decided from besides the ranked revisions' own rows:
+/// the hashes the caller stated, the turns its window read them, what the
+/// checkout and the record say, each entry's story, the containment block and
+/// the cap the payload is fitted to.
+struct ManifestFit<'a> {
+    ranked: &'a [LoadedCandidate],
+    known: &'a BTreeSet<&'a str>,
+    seen_turns: &'a BTreeMap<(String, String), u64>,
+    evidence: &'a Evidence,
+    story: &'a Story,
+    containment: Option<Value>,
+    cap: u32,
+}
+
 impl ServeDispatcher<'_> {
     pub(crate) async fn known_state<S: CanonicalStore, R: SubstrateReader>(
         &self,
@@ -55,35 +71,26 @@ impl ServeDispatcher<'_> {
         budget: &mut TurnBudget,
     ) -> Result<ToolResponse, ToolError> {
         let (ranked, in_scope) = Self::ranked_candidates(req, ctx).await?;
-        let containment = Self::containment_view(&in_scope, ctx);
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let evidence = Evidence::over(ctx, &known, &ranked).await;
-        let envelopes = manifest_entries(&ranked, &known, &req.seen_turns, budget, &evidence);
+        let summaries = checked_summaries(ctx, &evidence, &ranked).await;
         let baseline = evidence.list_baseline(&known, &ranked);
         // The story behind each entry that moved. Anchors come from the rows
         // already loaded — the loader picked the checkpoint to decide recency —
         // so this costs one query for the commit mirror and nothing else.
         let story = Story::over(ctx, &ranked, &known).await;
-        let (telling, plain) = manifest_views(ctx, &envelopes, &ranked, &known, &story, &evidence);
-        // The manifest cap: known_state anchored before the trial,
-        // so the trial sees the fresh allowance. Entries are already
-        // in rank order — truncation keeps the highest-ranked prefix and says
-        // so honestly (`truncated`, `omitted`).
-        let cap = manifest_cap(req, budget);
-        let n = telling.len();
-        let build = |kept: usize, truncated: bool, detail: bool| {
-            let views = if detail { &telling } else { &plain };
-            Self::with_containment(
-                json!({
-                    "tool": "known_state",
-                    "envelopes": views.get(..kept).unwrap_or(&[]),
-                    "truncated": truncated,
-                    "omitted": n.saturating_sub(kept),
-                }),
-                containment.as_ref(),
-            )
+        let fit = ManifestFit {
+            ranked: &ranked,
+            known: &known,
+            seen_turns: &req.seen_turns,
+            evidence: &evidence,
+            story: &story,
+            containment: Self::containment_view(&in_scope, ctx),
+            // The manifest cap: known_state anchored before the trial, so the
+            // trial sees the fresh allowance.
+            cap: manifest_cap(req, budget),
         };
-        let (payload, _kept) = fit_with_provenance(cap, n, &build);
+        let payload = fit.payload(ctx, &summaries);
         Ok(Self::respond(
             ToolName::KnownState,
             payload,
@@ -172,24 +179,22 @@ impl ServeDispatcher<'_> {
         budget: &mut TurnBudget,
     ) -> Result<ToolResponse, ToolError> {
         // The summary is hash-bound; serving re-checks validity. We look up
-        // the binding for the requested path and compare its bound hash to the
-        // file as the checkout holds it: a moved source returns `stale`, never
-        // the summary, and a file that cannot be read returns `unavailable`.
+        // the bindings for the requested path against the file as the
+        // checkout holds it: a moved source returns `stale`, never the
+        // summary, and a file that cannot be read returns `unavailable`.
         let path = req.target.clone().unwrap_or_default();
         let loaded = load_candidates(ctx.store, &ctx.scope, ctx.now, ctx.ancestry)
             .await
             .map_err(|e| ToolError::Internal(e.to_string()))?;
-        let rows = ctx
-            .store
-            .query(
-                "SELECT source_sha256 FROM summary_binding WHERE path = ?1 ORDER BY created_at DESC LIMIT 1",
-                &[rift_store::Value::text(path.as_str())],
-            )
-            .await
-            .map_err(|e| ToolError::Internal(e.to_string()))?;
-        let bound = rows.first().and_then(|r| r.get_text(0).ok());
         let known: BTreeSet<&str> = req.known_hashes.iter().map(String::as_str).collect();
         let evidence = Evidence::at_path(ctx, &known, &path).await;
+        let now = match evidence.current(&path) {
+            Some(Current::Verified(now)) => Some(now.as_str()),
+            Some(Current::Unverified(_)) | None => None,
+        };
+        let bound = current_summary(ctx.store, &PlainCipher, &path, now, served_versions())
+            .await
+            .map_err(internal)?;
         let summary = SummaryCall {
             path: &path,
             known: &known,
@@ -217,11 +222,11 @@ impl SummaryCall<'_> {
     /// when the caller stated that revision and this family recorded reading
     /// it: a summary served to a caller who never held the file spared no
     /// re-read.
-    fn answer(&self, bound: Option<String>) -> (Value, u32, EventBuilder) {
+    fn answer(&self, bound: CurrentSummary) -> (Value, u32, EventBuilder) {
         let path = self.path;
-        let Some(bound) = bound else {
+        if matches!(bound, CurrentSummary::NotBound) {
             return unavailable_summary(path, "not_bound");
-        };
+        }
         if !self.loaded.iter().any(|l| l.candidate.path == path) {
             return unavailable_summary(path, "not_bound");
         }
@@ -230,20 +235,19 @@ impl SummaryCall<'_> {
             Some(Current::Unverified(why)) => return unavailable_summary(path, why.tag()),
             None => return unavailable_summary(path, CurrentRefusal::NoWorktree.tag()),
         };
-        let handle = format!("summary:{path}");
-        if bound != now {
-            return (
-                json!({ "state": "stale", "path": path, "current_hash": now }),
-                0,
-                Box::new(move |returned, _| MemdEvent::Invalidated {
-                    handle,
-                    estimated_tokens_returned: returned,
-                }),
-            );
-        }
-        let summary = format!("summary bound to {bound}");
-        let mut result =
-            json!({ "state": "summary", "path": path, "source_hash": bound, "summary": summary });
+        let summary = match bound {
+            CurrentSummary::Bound(Validity::Valid(summary)) => summary,
+            CurrentSummary::Bound(Validity::Degraded { .. }) => {
+                return unavailable_summary(path, "digest_unavailable")
+            }
+            CurrentSummary::Stale | CurrentSummary::Bound(Validity::Invalid { .. }) => {
+                return stale_summary(path, now)
+            }
+            CurrentSummary::NotBound | CurrentSummary::Unchecked => {
+                return unavailable_summary(path, "not_bound")
+            }
+        };
+        let mut result = served_summary(path, &now, &summary);
         let row = self
             .loaded
             .iter()
@@ -252,6 +256,7 @@ impl SummaryCall<'_> {
         if let Some(lc) = row {
             self.evidence.tag(self.known, lc, &mut result);
         }
+        let handle = format!("summary:{path}");
         (
             result,
             baseline,
@@ -263,6 +268,33 @@ impl SummaryCall<'_> {
             }),
         )
     }
+}
+
+/// A valid summary's answer: the stored outline, with the key it is bound
+/// under, the versions in that key and the revision it describes.
+fn served_summary(path: &str, now: &str, summary: &ValidSummary) -> Value {
+    json!({
+        "state": "summary",
+        "path": path,
+        "source_hash": now,
+        "summary": String::from_utf8_lossy(summary.digest()),
+        "summary_key": summary.key(),
+        "versions": versions_view(served_versions()),
+        "handle": format!("file:{path}@sha256:{now}"),
+    })
+}
+
+/// A summary whose source moved: the new hash, never the summary.
+fn stale_summary(path: &str, now: String) -> (Value, u32, EventBuilder) {
+    let handle = format!("summary:{path}");
+    (
+        json!({ "state": "stale", "path": path, "current_hash": now }),
+        0,
+        Box::new(move |returned, _| MemdEvent::Invalidated {
+            handle,
+            estimated_tokens_returned: returned,
+        }),
+    )
 }
 
 /// A summary that cannot be served, and why.
@@ -376,33 +408,97 @@ fn deltas<S: CanonicalStore, R: SubstrateReader>(
 /// content (summaries) will draw on this trial allowance; manifest-first,
 /// most entries carry no bytes. The trial never touches the turn budget — the
 /// single charge happens at the respond seam. Provenance: a tracked file blob
-/// is a code fact. Real summaries are resolved here once ingest populates
-/// them; until then a live revision with no bound summary is
+/// is a code fact. A revision with a valid summary of the bytes the checkout
+/// holds carries it when it fits in `room`; one without is
 /// `available_by_handle`, never "deleted".
 fn manifest_entries(
-    ranked: &[LoadedCandidate],
-    known: &BTreeSet<&str>,
-    seen_turns: &BTreeMap<(String, String), u64>,
-    budget: &TurnBudget,
-    evidence: &Evidence,
+    fit: &ManifestFit<'_>,
+    summaries: &BTreeMap<String, Validity>,
+    room: u32,
 ) -> Vec<Envelope> {
     let mut envelopes: Vec<Envelope> = Vec::new();
-    let mut vbudget = Budget::new(budget.tokens_remaining());
-    for lc in ranked {
+    let mut vbudget = Budget::new(room);
+    for lc in fit.ranked {
         let c = &lc.candidate;
         let handle = format!("file:{}@sha256:{}", c.path, lc.content_sha256);
-        let seen = evidence.sighting(known, seen_turns, lc);
+        let seen = fit.evidence.sighting(fit.known, fit.seen_turns, lc);
+        let summary = match summaries.get(&c.path) {
+            Some(Validity::Valid(summary)) if summary.bound_oid() == lc.content_sha256 => {
+                Some(summary)
+            }
+            _ => None,
+        };
         envelopes.push(manifest_envelope(
             &c.path,
             Trust::CodeFact,
             &handle,
             &lc.content_sha256,
             seen,
-            None,
+            summary,
             &mut vbudget,
         ));
     }
     envelopes
+}
+
+impl ManifestFit<'_> {
+    /// The manifest payload, fitted to the cap, with summaries where they fit.
+    ///
+    /// The summaries get only the room the manifest without them leaves, so
+    /// an outline never displaces an entry: the manifest without summaries is
+    /// fitted first, and when the one with summaries would keep fewer entries
+    /// the one without is served instead. With no summary to include, the
+    /// answer is exactly what it was.
+    fn payload<S: CanonicalStore, R: SubstrateReader>(
+        &self,
+        ctx: &RecallContext<'_, S, R>,
+        summaries: &BTreeMap<String, Validity>,
+    ) -> Value {
+        let bare = manifest_entries(self, &BTreeMap::new(), 0);
+        let (bare_payload, bare_kept) = self.fitted(ctx, &bare);
+        if summaries.is_empty() {
+            return bare_payload;
+        }
+        let used = rift_tokens::count(&bare_payload.to_string());
+        let room = self.cap.saturating_sub(used);
+        let rich = manifest_entries(self, summaries, room);
+        let (rich_payload, rich_kept) = self.fitted(ctx, &rich);
+        if rich_kept < bare_kept {
+            return bare_payload;
+        }
+        rich_payload
+    }
+
+    /// One set of envelopes fitted to the cap: the highest-ranked prefix that
+    /// fits, said honestly (`truncated`, `omitted`), and how many it kept.
+    fn fitted<S: CanonicalStore, R: SubstrateReader>(
+        &self,
+        ctx: &RecallContext<'_, S, R>,
+        envelopes: &[Envelope],
+    ) -> (Value, usize) {
+        let (telling, plain) = manifest_views(
+            ctx,
+            envelopes,
+            self.ranked,
+            self.known,
+            self.story,
+            self.evidence,
+        );
+        let n = telling.len();
+        let build = |kept: usize, truncated: bool, detail: bool| {
+            let views = if detail { &telling } else { &plain };
+            ServeDispatcher::with_containment(
+                json!({
+                    "tool": "known_state",
+                    "envelopes": views.get(..kept).unwrap_or(&[]),
+                    "truncated": truncated,
+                    "omitted": n.saturating_sub(kept),
+                }),
+                self.containment.as_ref(),
+            )
+        };
+        fit_with_provenance(self.cap, n, &build)
+    }
 }
 
 /// Every entry's view twice over: telling its story, and with the story

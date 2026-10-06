@@ -30,9 +30,11 @@
 //!
 //! # Determinism
 //!
-//! Every session journal is planted with fixed timestamps, every hook runs with
-//! `RIFT_CAPTURE_SYNC=1` so nothing is handed to a detached worker that could
-//! land between two assertions, and no test reads a clock. Each test builds its
+//! Every session journal is planted with fixed timestamps, every agent hook runs
+//! with `RIFT_CAPTURE_SYNC=1` so nothing is handed to a detached worker that
+//! could land between two assertions, each commit's condense runs in the
+//! worker its `post-commit` spawns and is waited out before the next step, and
+//! no test reads a clock. Each test builds its
 //! **own** family: five of the six serve, and a serve writes an audit row, so a
 //! shared fixture would make the sixth assertion depend on test order.
 //!
@@ -53,6 +55,10 @@ use std::process::{Command, Stdio};
 
 mod common;
 use common::rift_cmd;
+#[allow(dead_code)] // The hooks suites share these builders; this file uses one.
+#[path = "common/hooks_fixture.rs"]
+mod hooks_fixture;
+use hooks_fixture::DetachedHooks;
 
 use rift_store::CanonicalStore as _;
 
@@ -379,7 +385,17 @@ fn commit(f: &Family, rel: &str, body: &str, message: &str) {
     git_in(&f.main, &["add", "--", rel]);
     git_in(&f.main, &["commit", "-q", "-m", message]);
     let git_dir = f.main.join(".git");
-    let (code, out, err) = f.rift(
+    // Condensed by the detached worker the hook spawns, and waited out: a
+    // condense drained inline inside the hook binds no outline, and the
+    // summary this file serves has to come from a real condense.
+    let env: Vec<(&str, String)> = f
+        .env()
+        .into_iter()
+        .filter(|(key, _)| *key != "RIFT_CAPTURE_SYNC")
+        .collect();
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let hooks = DetachedHooks::default();
+    let (code, err) = hooks.run(
         &f.main,
         &[
             "hooks",
@@ -388,22 +404,22 @@ fn commit(f: &Family, rel: &str, body: &str, message: &str) {
             "--git-dir",
             git_dir.to_str().unwrap(),
         ],
+        "",
+        &env,
     );
-    assert_eq!(code, 0, "a hook never fails git: {out}{err}");
+    assert_eq!(code, 0, "a hook never fails git: {err}");
+    hooks.await_workers(|| true);
 }
 
-/// Bind a summary to `path`'s captured revision, as a session in the main work
-/// tree would have.
+/// The revision of `path` the capture holds, after checking that the
+/// session's condense bound its outline in the family's store.
 ///
-/// **Seeded, and that is a recorded deviation.** `summary_binding`'s one writer
-/// is `rift_recall_ledger::validity_store::put_summary`, and no shipped path
-/// calls it: the validity ingest that will is not built, and `known_state` passes
-/// `None` for every summary today. So the half of the compounding claim this
-/// file can prove is the SERVING half — that a binding written once in the family's
-/// store is served to a member that did not write it, on the same bytes, and
-/// is not recomputed — and the binding itself is planted at the seam the ingest
-/// will use, against the hash the projection actually holds.
-fn bind_summary(f: &Family, path: &str) -> String {
+/// No binding is planted: the condense that archived the session that read
+/// `path` wrote it, through the one writer, over the main work tree's redacted
+/// bytes. The half of the compounding claim this file proves is the SERVING
+/// half: a binding written once in the family's store is served to a member
+/// that did not write it, on the same bytes, and is not recomputed.
+fn condensed_summary(f: &Family, path: &str) -> String {
     let revisions = f.rows(&format!(
         "SELECT content_sha256 FROM n_file_revision WHERE path = '{path}'"
     ));
@@ -413,41 +429,14 @@ fn bind_summary(f: &Family, path: &str) -> String {
         "the capture recorded exactly one revision of {path}: {revisions:?}"
     );
     let sha = revisions[0][0].clone();
-    let db = f.recall_db();
-    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    rt.block_on(async {
-        store
-            .insert_or_ignore(
-                "summary_binding",
-                &[
-                    "summary_id",
-                    "path",
-                    "source_sha256",
-                    "bound_blob_oid",
-                    "extractor_ver",
-                    "policy_ver",
-                    "redaction_ver",
-                    "digest_ref",
-                    "created_at",
-                ],
-                &[
-                    rift_store::Value::text(format!("summary-{sha}")),
-                    rift_store::Value::text(path),
-                    rift_store::Value::text(&sha),
-                    rift_store::Value::text(&sha),
-                    rift_store::Value::Int(1),
-                    rift_store::Value::Int(1),
-                    rift_store::Value::Int(1),
-                    rift_store::Value::text(format!("digest-{sha}")),
-                    rift_store::Value::Int(0),
-                ],
-            )
-            .await
-            .unwrap();
-    });
+    let bound = f.rows(&format!(
+        "SELECT source_sha256 FROM summary_binding WHERE path = '{path}'"
+    ));
+    assert_eq!(
+        bound,
+        vec![vec![sha.clone()]],
+        "the condense bound one outline of {path}, at the captured revision"
+    );
     sha
 }
 
@@ -535,10 +524,11 @@ fn one_store_answers_every_member_of_the_family() {
 #[test]
 fn a_member_is_served_the_summary_its_sibling_bound() {
     let f = family();
-    // The serve that ingests, so the capture's own hash is there to bind to.
+    // The serve that ingests, so the capture's own hash is there to name.
     f.json(&f.main, &known_state(&[]));
-    let sha = bind_summary(&f, ALPHA);
-    let before = f.rows("SELECT summary_id FROM summary_binding").len();
+    let sha = condensed_summary(&f, ALPHA);
+    let bindings = format!("SELECT summary_id FROM summary_binding WHERE path = '{ALPHA}'");
+    let before = f.rows(&bindings).len();
     assert_eq!(before, 1);
 
     // The member states the revision it holds: a summary spares a re-read only
@@ -563,7 +553,7 @@ fn a_member_is_served_the_summary_its_sibling_bound() {
         "a served summary stands in for the file it summarises: {doc}"
     );
     assert_eq!(
-        f.rows("SELECT summary_id FROM summary_binding").len(),
+        f.rows(&bindings).len(),
         before,
         "nothing was recomputed: the family's one binding answered"
     );
