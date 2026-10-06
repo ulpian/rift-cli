@@ -150,7 +150,7 @@ pub(in crate::hooks) fn observe_worktree(
         seen.subagent.as_deref(),
     );
     let row = rift_store::SessionWorktreeRow {
-        observation_id: observation_id(&state_id, basis),
+        observation_id: rift_shadow::ids::session_worktree_filed_id(&state_id, basis),
         session_id: session_row_id.to_owned(),
         worktree_token: seen.token.clone(),
         worktree_name: seen.name.clone(),
@@ -254,24 +254,6 @@ fn shell_cd_member(
 /// Whether two checkouts share one git common dir — one family.
 fn same_family(found: &rift_git::RepoPaths, repo: &rift_git::RepoPaths) -> bool {
     canonical_display(&found.common_dir) == canonical_display(&repo.common_dir)
-}
-
-/// The id of an observation: the state's own id, as every writer derives it,
-/// for a basis `session_worktree` admits; for `shell_cd`, a second address
-/// over that id and the basis under its own domain tag, so a row of
-/// `session_worktree_cd` can never share an id with a row of the older
-/// relation.
-fn observation_id(state_id: &str, basis: &str) -> String {
-    if basis != SHELL_CD_BASIS {
-        return state_id.to_owned();
-    }
-    rift_shadow::sha256_hex(&[
-        b"session_worktree_cd\0",
-        state_id.as_bytes(),
-        b"\0",
-        basis.as_bytes(),
-        b"\0",
-    ])
 }
 
 /// A path as an address: canonical where the filesystem can say so, verbatim
@@ -536,8 +518,9 @@ mod shell_cd_tests {
     /// the bare state id the older relation would have used.
     #[test]
     fn a_cd_observation_id_covers_its_basis() {
-        assert_eq!(observation_id("abc", "payload_cwd"), "abc");
-        assert_ne!(observation_id("abc", SHELL_CD_BASIS), "abc");
+        let filed = rift_shadow::ids::session_worktree_filed_id;
+        assert_eq!(filed("abc", "payload_cwd"), "abc");
+        assert_ne!(filed("abc", SHELL_CD_BASIS), "abc");
         assert!(!rift_store::schema::SESSION_WORKTREE_BASES.contains(&SHELL_CD_BASIS));
     }
 }

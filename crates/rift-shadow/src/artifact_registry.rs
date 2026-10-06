@@ -141,6 +141,13 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         sync_format_row: "Serve audit (`serve_audit.jsonl`)",
     },
     ShardArtifact {
+        path: "session_worktrees.jsonl",
+        version: VersionField::PerLineSchemaVersion(
+            crate::backend::SESSION_WORKTREES_SCHEMA_VERSION,
+        ),
+        sync_format_row: "Session worktrees (`session_worktrees.jsonl`)",
+    },
+    ShardArtifact {
         path: "sessions.jsonl",
         version: VersionField::PerLineSchemaVersion(crate::backend::SESSIONS_SCHEMA_VERSION),
         sync_format_row: "Session agents (`sessions.jsonl`)",
@@ -410,6 +417,32 @@ mod tests {
             .map(|line| json_version(line, "schema_version").expect("every line declares one"))
             .collect();
         assert_eq!(versions, vec![u64::from(want); 2], "two lines, one version");
+    }
+
+    /// Every frozen worktree-observation line declares the line format the
+    /// registry names, read off the maximal fixture, whose lines the one
+    /// writer rendered.
+    #[test]
+    fn every_frozen_worktree_line_declares_the_registered_schema_version() {
+        let Some(VersionField::PerLineSchemaVersion(want)) =
+            is_declared("session_worktrees.jsonl").map(|a| a.version)
+        else {
+            panic!("session_worktrees.jsonl is declared with a per-line schema_version");
+        };
+        let archive = crate::shard_fixture::every_artifact_archive().unwrap();
+        let bytes = archive
+            .session_worktrees_jsonl()
+            .expect("the fixture freezes observations");
+        let versions: Vec<u64> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| json_version(line, "schema_version").expect("every line declares one"))
+            .collect();
+        assert_eq!(
+            versions,
+            vec![u64::from(want); 3],
+            "three lines, one version"
+        );
     }
 
     /// Every frozen window-journal line declares the line format the

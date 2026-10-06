@@ -1,0 +1,3 @@
+{"at":1755999991000,"basis":"payload_cwd","branch":"main","linked":false,"name":"main","schema_version":1,"session":"01JSHARDGOLDENA","token":"0123456789ab"}
+{"at":1755999996000,"basis":"shell_cd","branch":"wt/lane-a","linked":true,"name":"lane-a","schema_version":1,"session":"01JSHARDGOLDENA","subagent":"explore-1","token":"abcdef012345"}
+{"at":1755999993000,"basis":"payload_cwd","linked":false,"name":"main","schema_version":1,"session":"01JSHARDGOLDENB","token":"0123456789ab"}

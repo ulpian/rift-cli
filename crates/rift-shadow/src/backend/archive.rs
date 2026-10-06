@@ -213,6 +213,12 @@ pub struct CheckpointArchive {
     /// evictions the savings figures are derived from, frozen where a rebuild
     /// can reach them.
     pub window_journal: Vec<super::ArchivedWindowFact>,
+    /// Every observation of the member the session was seen in (empty ⇒ no
+    /// `session_worktrees.jsonl`) — frozen without the checkout's path or the
+    /// head, one line per distinct state. Not the `session_worktrees` label
+    /// map, which names only a session archived from another member and
+    /// carries no subagent, basis or time.
+    pub worktree_observations: Vec<super::ArchivedWorktreeObservation>,
     /// The redacted raw capture (durable-blob proof of the gate).
     pub content: RedactedBytes,
     /// The redaction report for `redaction_report.json` (must be valid).
@@ -548,17 +554,22 @@ pub(super) fn identifier_or_withheld(value: &str) -> &str {
     // reach a shard, and the call's tokens are frozen under its own name
     // instead of a placeholder the rebuild has to skip.
     const SYNTHETIC_MODEL: &str = "<synthetic>";
-    if value == SYNTHETIC_MODEL {
+    if value == SYNTHETIC_MODEL || is_identifier(value) {
         return value;
     }
+    WITHHELD
+}
+
+/// Whether `value` is a bounded identifier: ASCII letters, digits and the
+/// punctuation model ids and counting methods use, at most
+/// [`MAX_IDENTIFIER_LEN`] bytes. The empty string is one, vacuously; a caller
+/// that needs a name says so itself.
+pub(super) fn is_identifier(value: &str) -> bool {
     let is_identifier_char = |c: char| {
         c.is_ascii_alphanumeric()
             || matches!(c, '-' | '.' | '_' | ':' | '/' | '@' | '+' | '[' | ']')
     };
-    if value.len() <= MAX_IDENTIFIER_LEN && value.chars().all(is_identifier_char) {
-        return value;
-    }
-    WITHHELD
+    value.len() <= MAX_IDENTIFIER_LEN && value.chars().all(is_identifier_char)
 }
 
 /// The line format version every `sessions.jsonl` line declares as

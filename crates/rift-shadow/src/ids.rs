@@ -276,6 +276,33 @@ pub fn session_worktree_observation_id(
     sha256_hex(&parts)
 }
 
+/// The basis a shell read's leading `cd` gives an observation, the one word
+/// `session_worktree_cd` admits that `session_worktree` does not.
+pub const SHELL_CD_BASIS: &str = "shell_cd";
+
+/// The id of an observation: the state's own id, as every writer derives it,
+/// for a basis `session_worktree` admits; for `shell_cd`, a second address
+/// over that id and the basis under its own domain tag, so a row of
+/// `session_worktree_cd` can never share an id with a row of the older
+/// relation.
+///
+/// Here rather than beside the hook that first wrote such a row, because the
+/// artifact bridge restores the same rows from a shard and must derive the
+/// same id, or a rebuilt row would land beside the live one.
+#[must_use]
+pub fn session_worktree_filed_id(state_id: &str, basis: &str) -> String {
+    if basis != SHELL_CD_BASIS {
+        return state_id.to_owned();
+    }
+    sha256_hex(&[
+        b"session_worktree_cd\0",
+        state_id.as_bytes(),
+        b"\0",
+        basis.as_bytes(),
+        b"\0",
+    ])
+}
+
 /// An `imported_checkpoint.import_id` — one per `(source_id, source_layout)`.
 /// The layout is part of the key, not just the id: a `sharded-branch` id and a
 /// `per-checkpoint-refs` id are drawn from disjoint alphabets in practice, but
@@ -396,6 +423,21 @@ mod tests {
         assert_ne!(
             session_worktree_observation_id("s", "0123456789ab", None, None, None),
             watermark_id("s", "0123456789ab")
+        );
+    }
+
+    /// The filed id is the state's own for every basis `session_worktree`
+    /// admits, and for `shell_cd` the exact bytes the hook has always
+    /// written, pinned as a literal so a moved derivation cannot drift.
+    #[test]
+    fn a_shell_cd_observation_is_filed_under_the_id_the_hook_always_wrote() {
+        let state = "a".repeat(64);
+        for basis in ["payload_cwd", "process_cwd", "attach", "import"] {
+            assert_eq!(session_worktree_filed_id(&state, basis), state, "{basis}");
+        }
+        assert_eq!(
+            session_worktree_filed_id(&state, SHELL_CD_BASIS),
+            "e95b0d3801c12dc571edaa9c7f63fa4d243c781e1ce979bccd4c58e7735a4281"
         );
     }
 }

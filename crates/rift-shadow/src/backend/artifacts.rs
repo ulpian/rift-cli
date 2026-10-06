@@ -11,9 +11,9 @@ use rift_core::Sha256Id;
 
 use super::leaves::{DigestLeafBytes, SessionMetaLeaf, ShardLeafBytes, TaskLeafBytes};
 use super::{
-    sessions_jsonl_bytes, shard_merkle_root, tool_calls_jsonl_bytes, usage_jsonl_bytes,
-    window_journal_jsonl_bytes, ArchivedTask, ArchivedTranscript, CheckpointArchive,
-    NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
+    session_worktrees_jsonl_bytes, sessions_jsonl_bytes, shard_merkle_root, tool_calls_jsonl_bytes,
+    usage_jsonl_bytes, window_journal_jsonl_bytes, ArchivedTask, ArchivedTranscript,
+    CheckpointArchive, NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
 };
 use crate::sha256_hex;
 
@@ -26,6 +26,11 @@ pub(super) const SERVE_AUDIT_NAME: &str = "serve_audit.jsonl";
 /// `serve_audit.jsonl` and before the `sessions/` tree (`.` < `/`), which is
 /// where its leaf sits.
 pub(super) const SESSIONS_NAME: &str = "sessions.jsonl";
+
+/// The shard name of the frozen worktree observations. It sorts after
+/// `serve_audit.jsonl` and before `sessions.jsonl` (`_` < `s` at the eighth
+/// byte), which is where its leaf sits.
+pub(super) const SESSION_WORKTREES_NAME: &str = "session_worktrees.jsonl";
 
 /// The shard name of the frozen settled usage. It sorts after
 /// `transcript.jsonl` (`t` < `u`), after every other top-level name, so its
@@ -53,6 +58,7 @@ impl CheckpointArchive {
         let tool_calls = self.tool_calls_jsonl();
         let usage = self.usage_jsonl();
         let sessions = self.sessions_jsonl();
+        let session_worktrees = self.session_worktrees_jsonl();
         let window_journal = self.window_journal_jsonl();
         let digest_failures = self.digest_failures_json();
         let digest_intent = self.digest_intent_json();
@@ -86,6 +92,7 @@ impl CheckpointArchive {
             full_jsonl: full.as_deref(),
             redaction_report: &report,
             serve_audit: self.serve_audit_jsonl(),
+            session_worktrees: session_worktrees.as_deref(),
             sessions: sessions.as_deref(),
             tool_calls: tool_calls.as_deref(),
             transcript_compact: self.transcript.as_ref().map(|t| t.compact.as_slice()),
@@ -248,6 +255,14 @@ impl CheckpointArchive {
         sessions_jsonl_bytes(&self.session_agents)
     }
 
+    /// Render `session_worktrees.jsonl` — one line per observation of the
+    /// member a session was seen in. `None` when there is none it can freeze
+    /// (the artifact is omitted, never written empty).
+    #[must_use]
+    pub fn session_worktrees_jsonl(&self) -> Option<Vec<u8>> {
+        session_worktrees_jsonl_bytes(&self.worktree_observations)
+    }
+
     /// Render `usage.jsonl` — one line per settled model call. `None` when
     /// the session settled none (the artifact is omitted, never written empty).
     #[must_use]
@@ -395,6 +410,9 @@ impl CheckpointArchive {
         }
         if let Some(sessions) = self.sessions_jsonl() {
             out.insert(SESSIONS_NAME.to_owned(), sessions);
+        }
+        if let Some(observations) = self.session_worktrees_jsonl() {
+            out.insert(SESSION_WORKTREES_NAME.to_owned(), observations);
         }
         if let Some(window_journal) = self.window_journal_jsonl() {
             out.insert(WINDOW_JOURNAL_NAME.to_owned(), window_journal);
@@ -1064,6 +1082,7 @@ mod tests {
             full_jsonl: Some(&full),
             redaction_report: &report,
             serve_audit: None,
+            session_worktrees: None,
             sessions: None,
             usage: None,
             window_journal: None,
@@ -1098,6 +1117,7 @@ mod tests {
                 full_jsonl: Some(&terminated),
                 redaction_report: &report,
                 serve_audit: None,
+                session_worktrees: None,
                 sessions: None,
                 usage: None,
                 window_journal: None,
@@ -1177,6 +1197,7 @@ mod tests {
                 full_jsonl: None,
                 redaction_report: &a.redaction_report_json(),
                 serve_audit: None,
+                session_worktrees: None,
                 sessions: None,
                 usage: None,
                 window_journal: None,

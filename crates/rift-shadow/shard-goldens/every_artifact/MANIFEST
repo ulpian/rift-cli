@@ -8,6 +8,7 @@ full.jsonl
 metadata.json
 redaction_report.json
 serve_audit.jsonl
+session_worktrees.jsonl
 sessions.jsonl
 sessions/0/metadata.json
 sessions/1/metadata.json

@@ -27,6 +27,9 @@ pub struct ShardLeafBytes<'a> {
     /// `serve_audit.jsonl` — the session's frozen serve envelopes, or `None`
     /// when it froze none.
     pub serve_audit: Option<&'a [u8]>,
+    /// `session_worktrees.jsonl` — every observation of the member each
+    /// session was seen in, or `None` on a shard written without it.
+    pub session_worktrees: Option<&'a [u8]>,
     /// `sessions.jsonl` — each archived session's agent, or `None` on a shard
     /// written without it.
     pub sessions: Option<&'a [u8]>,
@@ -115,7 +118,8 @@ pub struct TaskLeafBytes<'a> {
 ///
 /// So the sequence is `content.redacted`, then the `digest.*` documents, then
 /// each `full.jsonl` line, then `redaction_report.json`, then
-/// `serve_audit.jsonl`, then `sessions.jsonl`, then each
+/// `serve_audit.jsonl`, then `session_worktrees.jsonl`, then `sessions.jsonl`,
+/// then each
 /// `sessions/<index>/metadata.json`, then each
 /// `tasks/<tool-use-id>/` subtree's artifacts (`metadata.json`, then the
 /// transcript pair when present — the task dir's own bytewise name order —
@@ -124,7 +128,9 @@ pub struct TaskLeafBytes<'a> {
 /// then `window_journal.jsonl` —
 /// which is the artifacts' bytewise **full-path** order (`serve_audit.jsonl`
 /// sits between `redaction_report.json` and `sessions/` because `r` < `s` at
-/// the first byte and again at the third; `tasks/…` sits between `sessions/`
+/// the first byte and again at the third; `session_worktrees.jsonl` sits
+/// between `serve_audit.jsonl` and `sessions.jsonl` because `r` < `s` at the
+/// third byte and `_` < `s` at the eighth; `tasks/…` sits between `sessions/`
 /// and `tool_calls.jsonl` because `'t','a' < 't','o'`; `usage.jsonl` and then
 /// `window_journal.jsonl` trail because `t` < `u` < `w`, so each is appended
 /// to every sequence rather than inserted into one), the same order
@@ -194,11 +200,16 @@ pub fn shard_merkle_leaves(bytes: &ShardLeafBytes<'_>) -> Vec<Sha256Id> {
     if let Some(serve_audit) = bytes.serve_audit {
         leaves.push(rift_hashchain::leaf_hash(serve_audit));
     }
-    // The sessions' agents: `sessions.jsonl` sorts after `serve_audit.jsonl`
-    // (`r` < `s` at the third byte) and before `sessions/` (`.` < `/`), so one
-    // leaf here, ahead of the per-session metadata.
-    if let Some(sessions) = bytes.sessions {
-        leaves.push(rift_hashchain::leaf_hash(sessions));
+    // The worktree observations, then the sessions' agents:
+    // `session_worktrees.jsonl` sorts after `serve_audit.jsonl` (`r` < `s` at
+    // the third byte) and before `sessions.jsonl` (`_` < `s` at the eighth),
+    // which sorts before `sessions/` (`.` < `/`), so one leaf each here,
+    // ahead of the per-session metadata.
+    for artifact in [bytes.session_worktrees, bytes.sessions]
+        .into_iter()
+        .flatten()
+    {
+        leaves.push(rift_hashchain::leaf_hash(artifact));
     }
     // The per-session metadata of a multi-session checkpoint, in bytewise
     // index-name order (`sessions/` sorts between `redaction_report.json`
@@ -330,6 +341,7 @@ mod tests {
             full_jsonl: Some(br#"{"e":0}"#),
             redaction_report: report,
             serve_audit: None,
+            session_worktrees: None,
             sessions: None,
             usage: None,
             window_journal: None,
@@ -489,6 +501,40 @@ mod tests {
         let mut inserted = old;
         inserted.insert(3, leaf_hash(b"agents"));
         assert_eq!(shard_merkle_leaves(&with), inserted);
+    }
+
+    /// **The worktree-observation leaf sits between the serve audit and the
+    /// sessions' agents, and its absence changes nothing.**
+    /// `session_worktrees.jsonl` sorts after `serve_audit.jsonl` and before
+    /// `sessions.jsonl` (`_` < `s`), a middle insertion only a shard carrying
+    /// it sees.
+    #[test]
+    fn a_worktree_leaf_sits_between_the_serve_audit_and_the_agents_and_absence_changes_nothing() {
+        use rift_hashchain::leaf_hash;
+
+        let without = ShardLeafBytes {
+            content_redacted: b"c",
+            redaction_report: b"r",
+            serve_audit: Some(b"serves"),
+            sessions: Some(b"agents"),
+            ..ShardLeafBytes::default()
+        };
+        let old = vec![
+            leaf_hash(b"c"),
+            leaf_hash(b"r"),
+            leaf_hash(b"serves"),
+            leaf_hash(b"agents"),
+        ];
+        assert_eq!(shard_merkle_leaves(&without), old, "old sequence");
+        let with = ShardLeafBytes {
+            session_worktrees: Some(b"observations"),
+            ..without
+        };
+        let mut inserted = old;
+        inserted.insert(3, leaf_hash(b"observations"));
+        assert_eq!(shard_merkle_leaves(&with), inserted);
+        assert!("serve_audit.jsonl" < "session_worktrees.jsonl");
+        assert!("session_worktrees.jsonl" < "sessions.jsonl");
     }
 
     /// **The window-journal leaf is the last, and its absence changes

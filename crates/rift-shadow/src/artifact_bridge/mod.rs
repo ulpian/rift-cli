@@ -11,8 +11,9 @@
 //! opens only the checkpoint ref, and a non-local reader is refused outright.
 //!
 //! The walk lives here; the report it fills, the per-shard fact recording, the
-//! event projection, the settled usage and the shard's own clock each live in a
-//! module of their own so a new shard artifact lands beside the concern it feeds.
+//! event projection, the settled usage, the worktree observations and the
+//! shard's own clock each live in a module of their own so a new shard
+//! artifact lands beside the concern it feeds.
 
 mod created_at;
 mod events;
@@ -32,6 +33,9 @@ mod tests;
 mod usage;
 #[cfg(test)]
 mod usage_tests;
+mod worktrees;
+#[cfg(test)]
+mod worktrees_tests;
 
 use rift_core::{Result, RiftError, Sha256Id};
 use rift_recall_substrate::parse;
@@ -48,6 +52,7 @@ use reads::project_read_lines;
 pub use report::{BridgeReport, RefusedShard, MAX_PARSE_NOTES};
 use sessions::{read_session_agents, record_named_sessions};
 use usage::project_usage_lines;
+use worktrees::restore_worktree_observations;
 
 /// The checkpoint branch the bridge ingests.
 pub const CHECKPOINT_BRANCH: &str = "rift/checkpoints/v1";
@@ -195,8 +200,8 @@ pub async fn ingest_dialect(
 
 /// Judge one shard, then project what it carries: the chain facts from its
 /// header, its session links under each session's own agent, its archived
-/// event stream, its settled usage, its restorable reads and its named
-/// sessions. `parsed_id` is the
+/// event stream, its settled usage, its restorable reads, its named sessions
+/// and their worktree observations. `parsed_id` is the
 /// shard's id when it is a SHA-256; `prev` is the nearest preceding shard whose
 /// id is one.
 async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
@@ -256,6 +261,8 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
     // After the usage, so a usage line's model and instant win over the
     // empty model and the shard's own time a session line would give.
     record_named_sessions(ctx, &agents, &metadata).await?;
+    // After the sessions, so every observation lands on a session row.
+    restore_worktree_observations(ctx, report, id, &agents).await?;
     if let Some((header, root)) = &chained {
         seal_checkpoint(ctx.store, header, *root, prev).await?;
     }
