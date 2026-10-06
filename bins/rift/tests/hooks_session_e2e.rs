@@ -471,6 +471,39 @@ fn import_bulk_reads_the_agent_store_idempotently_as_read_only_checkpoints() {
     );
 }
 
+/// The first import records an `import`-basis worktree observation after the
+/// archive; a checkpoint freezes hook-basis observations only, so that record
+/// cannot reach the second import's derivation: the unchanged session keeps
+/// its checkpoint id and the checkpoint ref stays where it was.
+#[test]
+fn reimporting_an_unchanged_session_keeps_its_checkpoint_id_and_moves_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = ClaudeStore::seed(tmp.path());
+
+    let v = fx.import(&["--session", "s-one"]);
+    assert_eq!(v["imported"], 1, "{v}");
+    let checkpoint_id = v["sessions"][0]["checkpoint_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ref_before = rev_parse(&fx.repo, "refs/heads/rift/checkpoints/v1");
+
+    let v2 = fx.import(&["--session", "s-one"]);
+    assert_eq!(v2["imported"], 0, "{v2}");
+    assert_eq!(v2["sessions"][0]["status"], "already-imported", "{v2}");
+    assert_eq!(
+        v2["sessions"][0]["checkpoint_id"],
+        checkpoint_id.as_str(),
+        "same id: {v2}"
+    );
+    assert_eq!(
+        rev_parse(&fx.repo, "refs/heads/rift/checkpoints/v1"),
+        ref_before,
+        "an unchanged re-import is a no-op on the checkpoint ref"
+    );
+    assert_eq!(checkpoint_shards(&fx.repo).len(), 1, "one shard, not two");
+}
+
 /// Read-only means NOT resumable: no journal entry rides an import and no
 /// commit claims one, so both resume surfaces answer emptiness — but the
 /// imports ARE explainable by id, and `--session` imports exactly the named
