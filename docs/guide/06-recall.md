@@ -456,8 +456,9 @@ no-op.
 The pass runs before every pull verb, so its warm cost is what an agent pays to ask.
 Two steps dominate it: reading every checkpoint's read facts, and walking history for revisions git does not hold.
 When no checkpoint is new, the facts are not read, because they only shape the rows of checkpoints the ingest writes, and the read paths come from the projection instead.
-A finished walk is recorded as a proof, a watermark row whose id digests `HEAD` and the revisions it left unavailable, and a pass that finds the same proof does not walk again.
-A new read or a moved `HEAD` changes the digest, so the shortcut never answers differently from the full pass.
+A finished walk records a proof for each revision it left unavailable, a watermark row whose id digests `HEAD`, the path and the content address, and a pass that finds every wanted revision proven does not walk again.
+A new read or a moved `HEAD` has no proof yet, so the shortcut never answers differently from the full pass.
+One pass walks for at most 64 paths, and it takes the paths no walk from this `HEAD` has tried before the ones already proven, so bytes git will never hold cannot keep the rest from being tried.
 `rift-memd metrics --full` and `rebuild` take the full pass, which reads and walks every time.
 Maintenance verbs live on the projection binary:
 
