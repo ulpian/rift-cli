@@ -11,16 +11,76 @@
 //! The worktree snapshot maps path → **SHA-256** of the current bytes (the
 //! worktree hasher's output); the binding's `bound_oid` is the same SHA-256, so
 //! the bind-time and check-time comparators line up.
+//!
+//! [`put_file_outline`] is the one writer of a code file's outline: it binds
+//! the outline through [`put_summary`] and writes the raw token count of each
+//! definition and of the whole file beside it in `summary_token_count`, so a
+//! surface that prints what a definition costs never starts a tokenizer.
 
-use rift_core::Result;
+use rift_core::{RedactedBytes, Result, RiftError};
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_validity::{
-    classify, summary_key, BlobResolver, SummaryBinding, SummaryVersions, Validity,
+    classify, line_span, summary_key, BlobResolver, Extractor, FileOutline, FileShapeExtractor,
+    SummaryBinding, SummaryVersions, Validity,
 };
 use rift_store::{CanonicalStore, ColumnCipher, Value};
 use sha2::{Digest, Sha256};
 
 use crate::graph::{file_revision_id, Built};
+
+/// A code file a writer binds an outline of: its path and redacted bytes,
+/// the policy and redaction versions the binding key carries beside the
+/// extractor's own, and the serve policy's verdict on the path.
+///
+/// Redacted bytes only: digests are read back through the plain cipher, since
+/// no recall key custody exists, so an outline is never built from bytes the
+/// redaction gate has not cleared. A file whose redaction masked anything
+/// hashes differently from the checkout, so its binding is never valid.
+pub struct OutlineSource<'a> {
+    /// The repository path, `/`-spelled.
+    pub path: &'a str,
+    /// The file's bytes, through the redaction gate.
+    pub source: &'a RedactedBytes,
+    /// The serve-policy version in force.
+    pub policy_version: u32,
+    /// The redaction-rules version in force.
+    pub redaction_version: u32,
+    /// Whether the serve policy denies the path or marks it sensitive. A
+    /// closure because this crate does not depend on the policy crate; the
+    /// caller asks its policy engine.
+    pub refuses_path: &'a dyn Fn(&str) -> bool,
+}
+
+/// The raw token counts of one outline: the whole file and each definition,
+/// in the outline's order, with the basis they were counted on.
+///
+/// Raw on purpose: a count stored here is the hard figure every fitting
+/// decision uses, and a calibrated figure is derived from it at read time, so
+/// a calibration can never change what a serve fits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutlineCounts {
+    /// `rift_tokens::provenance()` when the counts were taken.
+    pub tokenizer: &'static str,
+    /// The whole file's count.
+    pub whole_file: u32,
+    /// One count per definition, in outline order.
+    pub definitions: Vec<u32>,
+}
+
+/// One stored count: which span of the outline, its lines and its tokens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenCount {
+    /// 0 for the whole file, `n` for the outline's `n`-th definition.
+    pub ordinal: u32,
+    /// The first line of the span, 1-based.
+    pub line_lo: u32,
+    /// The last line of the span, inclusive.
+    pub line_hi: u32,
+    /// The raw token count.
+    pub tokens: u32,
+    /// The basis the count was taken on.
+    pub tokenizer: String,
+}
 
 /// A [`BlobResolver`] over the read-only substrate: `file:` handles resolve by
 /// mapping the handle's `content_sha256` to its git blob oid and
@@ -155,6 +215,159 @@ pub async fn put_summary(
     b.edge(&key, &fr, "binds");
     crate::ingest::apply_rows(store, &b).await?;
     Ok(key)
+}
+
+/// Bind a code file's outline and store its token counts beside it, or do
+/// nothing for a file that is not code or that the serve policy refuses.
+///
+/// The detached worker is the caller: it counts with the real tokenizer and
+/// hands the counts in, so neither this crate nor any hook decision starts
+/// one. Every write is insert-or-ignore, so binding the same bytes twice is a
+/// no-op. `Ok(None)` is the answer for a path the policy denies or marks
+/// sensitive, a path outside the code extensions, or bytes that are not
+/// UTF-8: no binding, no counts.
+///
+/// # Errors
+/// Refuses counts that do not match the outline's definitions one for one,
+/// before anything is written; propagates store and cipher errors.
+pub async fn put_file_outline(
+    store: &impl CanonicalStore,
+    cipher: &dyn ColumnCipher,
+    file: &OutlineSource<'_>,
+    counts: &OutlineCounts,
+) -> Result<Option<String>> {
+    if (file.refuses_path)(file.path) {
+        return Ok(None);
+    }
+    let source = file.source.as_slice();
+    let Some(outline) = FileOutline::of(file.path, source) else {
+        return Ok(None);
+    };
+    if counts.definitions.len() != outline.definitions().len() {
+        return Err(RiftError::validity(format!(
+            "{} definition counts for an outline of {} definitions",
+            counts.definitions.len(),
+            outline.definitions().len()
+        )));
+    }
+    let versions = SummaryVersions {
+        extractor_version: FileShapeExtractor.version(),
+        policy_version: file.policy_version,
+        redaction_version: file.redaction_version,
+    };
+    let digest = outline.render();
+    let key = put_summary(
+        store,
+        cipher,
+        file.path,
+        source,
+        versions,
+        digest.as_bytes(),
+    )
+    .await?;
+    for count in outline_counts(&outline, counts) {
+        put_token_count(store, &key, &count).await?;
+    }
+    Ok(Some(key))
+}
+
+/// The counts stored under a summary key, whole file first.
+///
+/// # Errors
+/// Propagates store read errors.
+pub async fn token_counts(store: &impl CanonicalStore, key: &str) -> Result<Vec<TokenCount>> {
+    let rows = store
+        .query(
+            "SELECT ordinal, line_lo, line_hi, tokens, tokenizer \
+             FROM summary_token_count WHERE summary_id = ? ORDER BY ordinal",
+            &[Value::text(key)],
+        )
+        .await?;
+    let number = |v: i64| u32::try_from(v).unwrap_or(0);
+    rows.iter()
+        .map(|r| {
+            Ok(TokenCount {
+                ordinal: number(r.get_i64(0)?),
+                line_lo: number(r.get_i64(1)?),
+                line_hi: number(r.get_i64(2)?),
+                tokens: number(r.get_i64(3)?),
+                tokenizer: r.get_text(4)?,
+            })
+        })
+        .collect()
+}
+
+impl OutlineCounts {
+    /// Count an outline's spans with `count`: the whole file, then each
+    /// definition's lines. The caller passes the tokenizer, so the caller is
+    /// the one that loads it.
+    pub fn measure(
+        outline: &FileOutline,
+        text: &str,
+        count: &dyn Fn(&str) -> u32,
+        tokenizer: &'static str,
+    ) -> Self {
+        Self {
+            tokenizer,
+            whole_file: count(text),
+            definitions: outline
+                .definitions()
+                .iter()
+                .map(|d| count(line_span(text, d.first_line(), d.last_line())))
+                .collect(),
+        }
+    }
+}
+
+/// The rows one outline's counts become, whole file first.
+fn outline_counts(outline: &FileOutline, counts: &OutlineCounts) -> Vec<TokenCount> {
+    let whole = TokenCount {
+        ordinal: 0,
+        line_lo: u32::from(outline.lines() > 0),
+        line_hi: outline.lines(),
+        tokens: counts.whole_file,
+        tokenizer: counts.tokenizer.to_owned(),
+    };
+    let definitions = outline
+        .definitions()
+        .iter()
+        .zip(&counts.definitions)
+        .zip(1u32..)
+        .map(|((d, tokens), ordinal)| TokenCount {
+            ordinal,
+            line_lo: d.first_line(),
+            line_hi: d.last_line(),
+            tokens: *tokens,
+            tokenizer: counts.tokenizer.to_owned(),
+        });
+    std::iter::once(whole).chain(definitions).collect()
+}
+
+async fn put_token_count(store: &impl CanonicalStore, key: &str, count: &TokenCount) -> Result<()> {
+    store
+        .insert_or_ignore(
+            "summary_token_count",
+            &[
+                "summary_id",
+                "ordinal",
+                "line_lo",
+                "line_hi",
+                "tokens",
+                "tokenizer",
+                "schema_version",
+            ],
+            &[
+                Value::text(key),
+                Value::Int(i64::from(count.ordinal)),
+                Value::Int(i64::from(count.line_lo)),
+                Value::Int(i64::from(count.line_hi)),
+                Value::Int(i64::from(count.tokens)),
+                Value::text(&count.tokenizer),
+                Value::Int(1),
+            ],
+        )
+        .await?;
+    Ok(())
 }
 
 async fn fetch_binding(store: &impl CanonicalStore, key: &str) -> Result<Option<SummaryBinding>> {

@@ -412,6 +412,18 @@ CREATE TABLE summary_binding (
   PRIMARY KEY (summary_id)
 ) STRICT
 
+-- table summary_token_count
+CREATE TABLE summary_token_count (
+  summary_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  line_lo INTEGER NOT NULL,
+  line_hi INTEGER NOT NULL,
+  tokens INTEGER NOT NULL,
+  tokenizer TEXT NOT NULL CHECK (tokenizer IN ('cl100k_base', 'chars/4+1')),
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (summary_id, ordinal)
+) STRICT
+
 -- trigger digest_blob_no_delete
 CREATE TRIGGER digest_blob_no_delete BEFORE DELETE ON digest_blob BEGIN SELECT RAISE(ABORT, 'rift: digest_blob is append-only (DELETE forbidden)'); END
 
@@ -591,3 +603,9 @@ CREATE TRIGGER summary_binding_no_delete BEFORE DELETE ON summary_binding BEGIN 
 
 -- trigger summary_binding_no_update
 CREATE TRIGGER summary_binding_no_update BEFORE UPDATE ON summary_binding BEGIN SELECT RAISE(ABORT, 'rift: summary_binding is append-only (UPDATE forbidden)'); END
+
+-- trigger summary_token_count_no_delete
+CREATE TRIGGER summary_token_count_no_delete BEFORE DELETE ON summary_token_count BEGIN SELECT RAISE(ABORT, 'rift: summary_token_count is append-only (DELETE forbidden)'); END
+
+-- trigger summary_token_count_no_update
+CREATE TRIGGER summary_token_count_no_update BEFORE UPDATE ON summary_token_count BEGIN SELECT RAISE(ABORT, 'rift: summary_token_count is append-only (UPDATE forbidden)'); END

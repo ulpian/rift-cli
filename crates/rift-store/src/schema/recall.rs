@@ -590,6 +590,13 @@ const RECALL_TABLES: &[CanonicalTable] = &[
         primary_key: &["row_id"],
         unique: NO_UNIQUE,
     },
+    // --- v16 additive (outline token counts) ----------------------------------
+    CanonicalTable {
+        name: "summary_token_count",
+        columns: SUMMARY_TOKEN_COUNT_COLUMNS,
+        primary_key: &["summary_id", "ordinal"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// The two relations a serve key can live in: a schema-1 decision row, or a
@@ -691,6 +698,33 @@ const N_WINDOW_ROW_COLUMNS: &[Column] = &[
     Column::text_null("reason"),
     Column::text_null("file_revision"), // FK: n_file_revision (comment-FK)
     Column::text("checkpoint_id"),
+    Column::int("schema_version"),
+];
+
+/// The two bases a token count can rest on, spelled as `rift_tokens` spells
+/// them (this crate does not depend on it): the bundled BPE, or the
+/// conservative estimate it falls back to.
+const TOKEN_COUNT_BASES: &[&str] = &["cl100k_base", "chars/4+1"];
+
+/// Columns for the v16 `summary_token_count` relation: the raw token count of
+/// each definition an outline names, and of the whole file, under the
+/// outline's own summary key.
+///
+/// A sparse companion on `summary_binding`'s key rather than new columns:
+/// that relation is in the frozen v1 body, and widening it would move a
+/// checksum every deployed `recall.db` holds. Nor do the counts ride inside
+/// the digest: the digest is the extractor's output alone, sealed under the
+/// column cipher, while a count is the tokenizer's, read by queries that must
+/// not decrypt anything. Ordinal 0 is the whole file; ordinal `n` is the
+/// outline's `n`-th definition. Identifiers, line numbers and counts only:
+/// never a name, which stays in the sealed digest.
+const SUMMARY_TOKEN_COUNT_COLUMNS: &[Column] = &[
+    Column::text("summary_id"), // FK: summary_binding(summary_id)
+    Column::int("ordinal"),     // 0 = the whole file
+    Column::int("line_lo"),
+    Column::int("line_hi"),
+    Column::int("tokens"), // raw, never calibrated
+    Column::text_one_of("tokenizer", TOKEN_COUNT_BASES),
     Column::int("schema_version"),
 ];
 
