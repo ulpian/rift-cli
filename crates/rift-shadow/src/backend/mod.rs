@@ -26,6 +26,7 @@ mod fixtures;
 mod leaves;
 mod shard;
 mod window;
+mod worktrees;
 
 use rift_core::Result;
 use rift_git::{GitIdent, MemoryGitWrite, NativeGitWrite};
@@ -47,6 +48,10 @@ pub use leaves::{
 pub use window::{
     window_journal_jsonl_bytes, ArchivedWindowFact, ArchivedWindowRow, WindowSliceKind,
     WINDOW_JOURNAL_SCHEMA_VERSION,
+};
+pub use worktrees::{
+    session_worktree_observations, session_worktrees_jsonl_bytes, ArchivedWorktreeObservation,
+    SESSION_WORKTREES_SCHEMA_VERSION,
 };
 
 /// The fully-qualified orphan checkpoint branch the native archive writes

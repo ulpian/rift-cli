@@ -114,7 +114,8 @@ pub(super) fn archive_now(
 }
 
 /// What the session captured beside its capture document: its read facts, its
-/// serves, its settled usage, its agent and its context windows' journal rows.
+/// serves, its settled usage, its agent, its context windows' journal rows and
+/// its worktree observations.
 ///
 /// The one reading both the trailer's prediction and the archive fold, so
 /// the two derive one checkpoint id from the same bytes. The prediction can
@@ -137,6 +138,7 @@ pub(super) fn session_facts_for_archive(
         window_journal: crate::window_journal::session_window_facts(
             rt, store, work_tree, agent, session,
         ),
+        worktree_observations: worktree_observations_for_archive(rt, store, agent, session),
     })
 }
 
@@ -165,6 +167,30 @@ fn read_facts_for_archive(
             tokenizer: f.tokenizer,
         })
         .collect()
+}
+
+/// Every observation of the member the session was seen in, from both
+/// observation relations, for the shard's `session_worktrees.jsonl`.
+/// Cumulative like the read facts. An observation the shard cannot spell in
+/// its declared shapes is left out whole and counted in one warning, never
+/// rewritten. Best-effort: a query failure archives none rather than blocking
+/// the checkpoint.
+fn worktree_observations_for_archive(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    agent: &str,
+    session: &str,
+) -> Vec<rift_shadow::backend::ArchivedWorktreeObservation> {
+    let gathered = rift_shadow::backend::session_worktree_observations(store, agent, session);
+    let observations = rt.block_on(gathered).unwrap_or_default();
+    let refused = observations.iter().filter(|o| !o.is_freezable()).count();
+    if refused > 0 {
+        tracing::warn!(
+            refused,
+            "worktree observations outside the frozen shapes were not archived"
+        );
+    }
+    observations
 }
 
 /// The session's settled model calls with their usage, mapped for the shard's

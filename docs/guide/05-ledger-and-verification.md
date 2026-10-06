@@ -83,7 +83,8 @@ checkpoint branch under a path derived from its own id:
 ```
 <id[:2]>/<id[2:]>/
     content.redacted   content_hash.txt   full.jsonl   metadata.json
-    redaction_report.json   serve_audit.jsonl   sessions.jsonl   tool_calls.jsonl
+    redaction_report.json   serve_audit.jsonl   session_worktrees.jsonl   sessions.jsonl
+    tool_calls.jsonl
     digest.failures.json  digest.intent.json  digest.log.json  digest.shape.json
     transcript.jsonl   transcript.compact.jsonl   usage.jsonl   window_journal.jsonl
     sessions/<index>/metadata.json      (per-session header; only when the checkpoint covers 2+ sessions)
@@ -104,6 +105,7 @@ and a version field nothing binds documents nothing.
 | `metadata.json` | the header: sessions covered, recorded Merkle root, canonicalization era, task list, token rollups |
 | `redaction_report.json` | counts only — what redaction removed, never what it removed |
 | `serve_audit.jsonl` | the serves the recall projection attributes to the session, one canonical envelope per line; absent when there were none |
+| `session_worktrees.jsonl` | where a covered session was seen, one line per distinct state: the worktree token, the member's name, whether it is linked, the branch, the subagent, how it was decided and when it was first seen — never the checkout's path or the head; absent when the session was never observed |
 | `sessions.jsonl` | the agent each covered session was captured from, one line per session: its native id and its agent's token; absent on a checkpoint written before it existed |
 | `tool_calls.jsonl` | the tool calls, reduced to identifiers: each read's call id, tool, path, content hash and token count, and, from checkpoints written after they were added, the call's instant, its turn, the revision's blob oid and the tokenizer that counted it |
 | `transcript.*.jsonl` | the transcript: a full copy and a deterministic compact one |
@@ -123,6 +125,17 @@ The sessions artifact says which agent each covered session came from.
 `metadata.json` names a session by its native id alone, and a rebuild keys every session row by agent and native id together, so without it a rebuild could only guess the agent, and it guessed one for every session.
 It is a sibling file rather than a new `metadata.json` member because `metadata.json` is part of `content_hash.txt`'s preimage: a member there would change the digest's input for every checkpoint that carried it, and the digest's definition does not move.
 Each line is the native session id `metadata.json` already names, the agent's token, and a `schema_version`; the token comes from the closed list of first-party agents, and anything else is frozen as `withheld`, which a rebuild skips.
+
+The worktree artifact freezes the session's worktree observations ([§9](09-worktrees-and-families.md)), which until it existed lived only in the capture projection, so a rebuild lost every session's checkout.
+It is gathered at archive time from both observation relations, the observations a subagent's hook made under the parent's session included, and it is cumulative like the window journal.
+Only an agent hook's observations are frozen: `commit`, `attach` and `import` record a verb's own act after the archive that verb made, so freezing one would give the verb's next run a new checkpoint for a session that did not change.
+Each line carries the session, the worktree token, the member's name, whether it is linked, the branch, the subagent, the basis and the time the state was first observed.
+The head is not a member: every commit moves it and the next hook records the session again, so a line that carried it would mint a new checkpoint for a session whose capture did not change.
+Observations that differ only by head are therefore one line, dated by the earliest of them, and a session gains a line only when it moves to another member, branch, subagent or basis.
+The checkout's absolute path is never a member either: it is a local address, and another machine's would name nothing here.
+An observation whose name is not an identifier without a `/`, whose token is not twelve lowercase hex digits, whose basis is not one a hook observes under or whose subagent is not an identifier is left out whole, never rewritten.
+Lines are sorted by session, time and the line's own bytes.
+It is a sibling file rather than the `session_worktrees` label map in `metadata.json`, which names only a session whose label differs from the archiving checkout's and carries no head, subagent, basis or time.
 
 The window journal freezes what each of the session's context windows was handed, declined, told, wrote and lost ([§6.12](06-recall.md#612-what-a-context-window-already-holds)).
 The journal files are local run state that a sweep deletes; this artifact is where the declines and evictions the savings figures rest on become tamper-evident.
@@ -211,7 +224,7 @@ artifact and a short path prove membership without handing over the checkpoint.
 A checkpoint's leaves are its content artifacts **in bytewise full-path order**,
 exactly the order git sorts the tree into: `content.redacted`, the four
 `digest.*.json`, each line of `full.jsonl` as its own leaf,
-`redaction_report.json`, `serve_audit.jsonl`, `sessions.jsonl`, `sessions/<index>/metadata.json` (bytewise by index
+`redaction_report.json`, `serve_audit.jsonl`, `session_worktrees.jsonl`, `sessions.jsonl`, `sessions/<index>/metadata.json` (bytewise by index
 name, so "10" precedes "2"), `tasks/<id>/…` (bytewise by tool-use id),
 `tool_calls.jsonl`, then `transcript.compact.jsonl` and `transcript.jsonl`,
 `usage.jsonl`, and last `window_journal.jsonl`.
@@ -225,6 +238,9 @@ So was `serve_audit.jsonl`, which lands right after `redaction_report.json`
 and before `sessions/`: `r` < `s` at the first byte, and again at the third.
 So was `sessions.jsonl`, which lands after `serve_audit.jsonl` and before the
 `sessions/` subtree, because `.` sorts before `/`.
+So was `session_worktrees.jsonl`, which lands after `serve_audit.jsonl` and
+before `sessions.jsonl`, because `_` sorts before `s`: a middle insertion only a
+shard carrying it sees.
 So was `usage.jsonl`, which sorts after every other name (`t` < `u`): its one
 leaf is appended to the sequence, never inserted into it, so no shard without
 it derives a different root.

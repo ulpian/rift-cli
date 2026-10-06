@@ -169,6 +169,7 @@ mod tests {
                     sessions: None,
                     usage: None,
                     window_journal: None,
+                    session_worktrees: None,
                     full: None,
                     transcript_compact: None,
                     transcript_full: None,
@@ -283,6 +284,7 @@ mod tests {
             sessions: None,
             usage: None,
             window_journal: None,
+            session_worktrees: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -416,6 +418,7 @@ mod tests {
             sessions: None,
             usage: None,
             window_journal: None,
+            session_worktrees: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -522,6 +525,7 @@ mod tests {
                 sessions: None,
                 usage: None,
                 window_journal: None,
+                session_worktrees: None,
                 tool_calls: Some(&tool_calls),
                 transcript_compact: None,
                 transcript_full: None,
@@ -582,6 +586,7 @@ mod tests {
                 sessions: None,
                 usage: None,
                 window_journal: None,
+                session_worktrees: None,
                 tool_calls: Some(&self.tool_calls),
                 transcript_compact: None,
                 transcript_full: None,
@@ -712,6 +717,7 @@ mod tests {
                     sessions: None,
                     usage: None,
                     window_journal: None,
+                    session_worktrees: None,
                     full: forged.read_artifact(&id, "full.jsonl").unwrap(),
                     transcript_compact: None,
                     transcript_full: None,
@@ -762,6 +768,7 @@ mod tests {
             sessions: None,
             usage: None,
             window_journal: None,
+            session_worktrees: None,
             tool_calls: None,
             transcript_compact: Some(compact),
             transcript_full: Some(tfull),
@@ -847,6 +854,7 @@ mod tests {
                 sessions: None,
                 usage: None,
                 window_journal: None,
+                session_worktrees: None,
                 tool_calls: None,
                 transcript_compact: None,
                 transcript_full: None,
@@ -910,6 +918,7 @@ mod tests {
             sessions: None,
             usage: None,
             window_journal: None,
+            session_worktrees: None,
             tool_calls: None,
             transcript_compact: None,
             transcript_full: None,
@@ -1030,7 +1039,8 @@ mod tests {
     }
 
     /// An epoch-3 shard carrying one optional artifact — `serve_audit.jsonl`,
-    /// `sessions.jsonl`, `usage.jsonl` or `window_journal.jsonl` — at the id
+    /// `session_worktrees.jsonl`, `sessions.jsonl`, `usage.jsonl` or
+    /// `window_journal.jsonl` — at the id
     /// its own artifacts address.
     fn artifact_bound_shard(content: &[u8], name: &str, bytes: &[u8]) -> (MemorySubstrate, String) {
         use rift_shadow::backend::ROOT_BOUND_ID_MIN_CANON_VERSION as EPOCH;
@@ -1040,6 +1050,7 @@ mod tests {
             content_redacted: content,
             redaction_report: report.as_bytes(),
             serve_audit: (name == "serve_audit.jsonl").then_some(bytes),
+            session_worktrees: (name == "session_worktrees.jsonl").then_some(bytes),
             sessions: (name == "sessions.jsonl").then_some(bytes),
             usage: (name == "usage.jsonl").then_some(bytes),
             window_journal: (name == "window_journal.jsonl").then_some(bytes),
@@ -1156,6 +1167,31 @@ mod tests {
         assert!(
             matches!(shard_passes(&edited).unwrap().worst, Verdict::Tamper(_)),
             "an edited journal row must not verify"
+        );
+    }
+
+    /// A shard carrying `session_worktrees.jsonl` verifies, and moving an
+    /// observation into another member is tamper.
+    #[test]
+    fn frozen_worktree_observations_are_read_back_and_bound_by_the_root() {
+        let content = b"the redacted capture".as_slice();
+        let line = |name: &str| {
+            format!(
+                "{{\"at\":1,\"basis\":\"payload_cwd\",\"linked\":true,\"name\":\"{name}\",\
+                 \"schema_version\":1,\"session\":\"{FIXTURE_SESSION}\",\"token\":\"0123456789ab\"}}\n"
+            )
+        };
+        let honest = line("lane-a");
+        let (with, id) =
+            artifact_bound_shard(content, "session_worktrees.jsonl", honest.as_bytes());
+        let out = shard_passes(&with).unwrap();
+        assert!(matches!(out.worst, Verdict::Ok), "honest: {:?}", out.worst);
+        assert_eq!(out.checked, 1);
+
+        let edited = with.with_artifact(&id, "session_worktrees.jsonl", line("lane-b").as_bytes());
+        assert!(
+            matches!(shard_passes(&edited).unwrap().worst, Verdict::Tamper(_)),
+            "an edited observation must not verify"
         );
     }
 }

@@ -27,8 +27,9 @@ pub type CheckpointId = String;
 /// What a session captured beside its capture document, handed to the archive
 /// as one value: the read facts that become `tool_calls.jsonl`, the frozen
 /// serve envelopes that become `serve_audit.jsonl`, the settled usage that
-/// becomes `usage.jsonl`, the session's agent that becomes `sessions.jsonl`
-/// and its context windows' journal rows that become `window_journal.jsonl`.
+/// becomes `usage.jsonl`, the session's agent that becomes `sessions.jsonl`,
+/// its context windows' journal rows that become `window_journal.jsonl` and
+/// its worktree observations that become `session_worktrees.jsonl`.
 ///
 /// One struct rather than one parameter per artifact, because the prediction
 /// and the archive must fold exactly the same facts, and every new fact
@@ -50,6 +51,9 @@ pub struct SessionFacts {
     /// Every row the session's context windows' journals held
     /// (`window_journal.jsonl`), in any order: the writer sorts them.
     pub window_journal: Vec<crate::backend::ArchivedWindowFact>,
+    /// Every observation of the member the session was seen in
+    /// (`session_worktrees.jsonl`), in any order: the writer sorts them.
+    pub worktree_observations: Vec<crate::backend::ArchivedWorktreeObservation>,
 }
 
 /// **The one derivation of a new checkpoint id**: `sha256(session ‖ \0 ‖
@@ -270,6 +274,7 @@ fn archive_for_id(
             .map(|agent| std::collections::BTreeMap::from([(session.to_owned(), agent)]))
             .unwrap_or_default(),
         window_journal: facts.window_journal,
+        worktree_observations: facts.worktree_observations,
         content,
         report,
         transcript: None,
@@ -678,6 +683,7 @@ mod tests {
             usage: Vec::new(),
             session_agents: std::collections::BTreeMap::new(),
             window_journal: Vec::new(),
+            worktree_observations: Vec::new(),
             content,
             report: RedactionReportView {
                 total_spans: 0,
@@ -968,6 +974,7 @@ mod tests {
             usage: Vec::new(),
             agent: None,
             window_journal: Vec::new(),
+            worktree_observations: Vec::new(),
         };
         let predicted = predicted_checkpoint_id(SESSION, &raw, &facts, &packs).unwrap();
         let archived = condense(
@@ -1012,6 +1019,7 @@ mod tests {
             usage: Vec::new(),
             agent: None,
             window_journal: Vec::new(),
+            worktree_observations: Vec::new(),
         }
     }
 
@@ -1074,6 +1082,7 @@ mod tests {
             usage: Vec::new(),
             agent: None,
             window_journal: Vec::new(),
+            worktree_observations: Vec::new(),
         };
         assert_eq!(
             condensed_with(empty, 1).await,

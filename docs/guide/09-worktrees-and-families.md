@@ -336,7 +336,10 @@ head="a")` cannot collide, and taken over the *state* rather than the time, so a
 repeat is an ignore-on-conflict insert. Beside it: `session_id`;
 `worktree_token`, twelve lowercase hex of the path digest; `worktree_name` and
 `is_linked`; `work_tree`, an absolute path and therefore a **local address**,
-which is why this relation is projection-only — paths never enter shards;
+which is why it never enters a shard: a checkpoint freezes an agent hook's
+observations in `session_worktrees.jsonl` — member, branch, subagent, basis and
+time, though not the head — and a rebuild resolves the token back to this
+machine's checkout;
 `branch` and `head_oid`, nullable because detached or unreadable is *absent*,
 never an empty string; `subagent_id`; `basis`; and `first_observed_at`.
 

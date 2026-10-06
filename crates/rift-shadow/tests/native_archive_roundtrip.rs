@@ -187,7 +187,8 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
     let usage = read("usage.jsonl");
     let sessions = read("sessions.jsonl");
     let window_journal = read("window_journal.jsonl");
-    let derived = shard_merkle_root(&ShardLeafBytes {
+    let session_worktrees = read("session_worktrees.jsonl");
+    let leaves = ShardLeafBytes {
         content_redacted: &content,
         full_jsonl: full.as_deref(),
         redaction_report: &report,
@@ -195,13 +196,15 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
         sessions: sessions.as_deref(),
         usage: usage.as_deref(),
         window_journal: window_journal.as_deref(),
+        session_worktrees: session_worktrees.as_deref(),
         tool_calls: tool_calls.as_deref(),
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
         tasks: &[],
         session_metas: &[],
         digests: DigestLeafBytes::default(),
-    });
+    };
+    let derived = shard_merkle_root(&leaves);
 
     let meta: serde_json::Value =
         serde_json::from_slice(&read("metadata.json").unwrap()).expect("metadata parses");
@@ -222,18 +225,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
     tampered.push(b'x');
     let after = shard_merkle_root(&ShardLeafBytes {
         content_redacted: &tampered,
-        full_jsonl: full.as_deref(),
-        redaction_report: &report,
-        serve_audit: serve_audit.as_deref(),
-        sessions: sessions.as_deref(),
-        usage: usage.as_deref(),
-        window_journal: window_journal.as_deref(),
-        tool_calls: tool_calls.as_deref(),
-        transcript_compact: transcript_compact.as_deref(),
-        transcript_full: transcript_full.as_deref(),
-        tasks: &[],
-        session_metas: &[],
-        digests: DigestLeafBytes::default(),
+        ..leaves
     });
     assert_ne!(
         after.to_hex(),
@@ -323,6 +315,7 @@ fn a_seeded_secret_never_reaches_any_native_artifact() {
         usage: Vec::new(),
         session_agents: std::collections::BTreeMap::new(),
         window_journal: Vec::new(),
+        worktree_observations: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript: None,
@@ -388,6 +381,7 @@ fn archive_with_transcript(
         usage: Vec::new(),
         session_agents: std::collections::BTreeMap::new(),
         window_journal: Vec::new(),
+        worktree_observations: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript,

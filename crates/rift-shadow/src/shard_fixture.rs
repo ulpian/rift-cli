@@ -43,7 +43,10 @@
 //! one line each. And so are the window-journal rows: the first session's own
 //! window reads, is declined, edits and is emptied, and one subagent window
 //! reads, which `window_journal.jsonl` freezes one line each, revisions and
-//! window keys computed rather than spelled.
+//! window keys computed rather than spelled. And so are the worktree
+//! observations: the first session seen in the main checkout and then, by a
+//! subagent's shell `cd`, in a linked member, and the second detached in the
+//! main checkout, which `session_worktrees.jsonl` freezes one line each.
 
 use std::path::PathBuf;
 
@@ -51,7 +54,8 @@ use rift_core::{Result, SecretBytes};
 
 use crate::backend::{
     ArchivedEvent, ArchivedReadFact, ArchivedTask, ArchivedUsageFact, ArchivedWindowFact,
-    ArchivedWindowRow, CheckpointArchive, RedactionReportView, WindowSliceKind,
+    ArchivedWindowRow, ArchivedWorktreeObservation, CheckpointArchive, RedactionReportView,
+    WindowSliceKind,
 };
 
 /// The fixture's capture time — a literal, so no artifact moves with the clock.
@@ -126,6 +130,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
         usage: fixture_usage(),
         session_agents: fixture_session_agents(),
         window_journal: fixture_window_journal(),
+        worktree_observations: fixture_worktree_observations(),
         content: redacted.redacted,
         report: RedactionReportView::from_redact(&redacted.report),
         transcript: Some(transcript),
@@ -364,5 +369,37 @@ fn fixture_window_journal() -> Vec<ArchivedWindowFact> {
             5_000,
             slice(WindowSliceKind::Read, (1, 40), Some(120)),
         ),
+    ]
+}
+
+/// The worktree observations the fixture archives as
+/// `session_worktrees.jsonl`: the first session in the main checkout on
+/// `main`, then a subagent's shell `cd` into the linked member `lane-a`; the
+/// second session detached in the main checkout. Every optional member is
+/// present on one line and absent on another.
+fn fixture_worktree_observations() -> Vec<ArchivedWorktreeObservation> {
+    let main = |session: &str, branch: Option<&str>, back: i64| ArchivedWorktreeObservation {
+        session: session.to_owned(),
+        token: "0123456789ab".to_owned(),
+        name: "main".to_owned(),
+        linked: false,
+        branch: branch.map(str::to_owned),
+        subagent: None,
+        basis: "payload_cwd".to_owned(),
+        at: FIXTURE_CREATED_AT_MS - back,
+    };
+    let lane = ArchivedWorktreeObservation {
+        token: "abcdef012345".to_owned(),
+        name: "lane-a".to_owned(),
+        linked: true,
+        branch: Some("wt/lane-a".to_owned()),
+        subagent: Some("explore-1".to_owned()),
+        basis: "shell_cd".to_owned(),
+        ..main(FIXTURE_SESSIONS[0], None, 4_000)
+    };
+    vec![
+        main(FIXTURE_SESSIONS[0], Some("main"), 9_000),
+        lane,
+        main(FIXTURE_SESSIONS[1], None, 7_000),
     ]
 }

@@ -509,6 +509,14 @@ The rebuild keys the session's checkpoint link, its session row and its native i
 A session the projection has never seen gets a row even when no usage line names it: no model, dated by its first usage line in that checkpoint, or by the checkpoint's own capture time when there is none.
 A checkpoint written before the artifact keys every session under the walk's default agent, as it always did, and a session that was never condensed into any checkpoint cannot be rebuilt at all.
 
+A session's worktree observations are restorable when its checkpoint carries `session_worktrees.jsonl`, and only for a session the projection does not already place.
+A session with any observation in either relation is left as it is, the rule the usage rows follow, so levelling into the live projection writes nothing.
+For any other session the rebuild writes each line back into `session_worktree`, or into `session_worktree_cd` for a `shell_cd` line, under the session's own agent.
+A restored row carries no head, because no shard does, and its id is the one the live writer would derive for the same state with no head; a session the live hooks saw at several heads of one member is restored as one row, first observed when the earliest of them was.
+The path is not in the shard either: the rebuild resolves the token to this machine's checkout of the family member, and writes the empty string when no member here has that token, because no reader spells an unknown path otherwise and another machine's path would name nothing here.
+A token is a digest of the checkout's path as it was spelled, so a checkout reached through another spelling also resolves to nothing.
+A checkpoint written before the artifact restores no observation, and neither does a session known only through `rift session attach`, `rift session import` or a commit: those verbs' own observations are never frozen, because each is written after the archive it describes and would otherwise change the verb's next checkpoint.
+
 The savings denominator is restorable for every read whose `tool_calls.jsonl` line carries its instant, turn, blob oid and tokenizer.
 From such a line the rebuild writes the read's tool call, its file revision, the link between them and its token count, keyed as the live path keys them, so the rebuilt share equals the live one over checkpoints written after those members were added.
 A line written before them is still the recall plane's read fact but restores none of these rows, so a read from an older checkpoint stays out of the rebuilt denominator.

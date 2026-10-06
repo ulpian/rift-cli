@@ -73,6 +73,13 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         if let Some(sessions) = archive.sessions_jsonl() {
             entries.push(self.structural_entry(super::artifacts::SESSIONS_NAME, &sessions)?);
         }
+        // The worktree observations: tokens, member names, branches, subagent
+        // ids and closed basis words, each screened by the one writer, and
+        // never a checkout's path — structural, like the agents beside them.
+        if let Some(observations) = archive.session_worktrees_jsonl() {
+            let name = super::artifacts::SESSION_WORKTREES_NAME;
+            entries.push(self.structural_entry(name, &observations)?);
+        }
         // The frozen window journals: window keys, closed kind tokens, turns,
         // times, repository paths, revisions and line counts, each screened
         // by the one writer — structural, like the read facts.
