@@ -451,3 +451,57 @@ fn a_user_authored_rift_gitignore_is_kept_byte_identical_and_said_not_to_ignore_
     assert_eq!(file_sha256(&ignore), before, "the user's file is untouched");
     assert!(!git_ignores(&f.main, ".rift/state/injection/x.json"));
 }
+
+/// ★ A fresh `init` makes git ignore `.rift/agents/`: a descriptor names this
+/// machine's `rift` binary, so each machine writes its own and none is
+/// committed by accident. The configuration stays committable.
+#[test]
+fn a_fresh_init_makes_git_ignore_agent_descriptors_and_keeps_the_configuration_committable() {
+    let f = Family::new();
+    let (code, out) = f.rift(&f.main, &["init", "--no-recall", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(git_ignores(&f.main, ".rift/agents/claude-code.json"));
+    assert!(!git_ignores(&f.main, ".rift/config.toml"));
+}
+
+/// ★ A descriptor the repository committed before `init` stays tracked and is
+/// still read: ignoring `agents/` only keeps new files out of `git status`.
+///
+/// `rift doctor` reads the wiring off the descriptor, so its `wiring` for the
+/// agent is `managed` only while the committed file is there to be read.
+#[test]
+fn a_descriptor_committed_before_init_stays_tracked_and_is_still_read() {
+    let f = Family::new();
+    let (code, out) = f.rift(&f.main, &["enable", "--agent", "claude-code"]);
+    assert_eq!(code, 0, "{out}");
+    let descriptor = f.main.join(".rift/agents/claude-code.json");
+    git_in(&f.main, &["add", ".rift/agents/claude-code.json"]);
+    git_in(&f.main, &["commit", "-q", "-m", "descriptor"]);
+    let before = file_sha256(&descriptor);
+
+    let (code, out) = f.rift(&f.main, &["init", "--no-recall"]);
+    assert_eq!(code, 0, "{out}");
+    git_in(
+        &f.main,
+        &[
+            "ls-files",
+            "--error-unmatch",
+            ".rift/agents/claude-code.json",
+        ],
+    );
+    assert_eq!(
+        file_sha256(&descriptor),
+        before,
+        "init left it as committed"
+    );
+
+    let (code, out) = f.rift(&f.main, &["doctor", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let integrations = doc["memory_chain"]["integrations"].as_array().unwrap();
+    let claude = integrations
+        .iter()
+        .find(|row| row["agent"] == "claude-code")
+        .unwrap();
+    assert_eq!(claude["wiring"], "managed", "{claude}");
+}
