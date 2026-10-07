@@ -150,6 +150,7 @@ fn passes_the_inline_guard(path: &str) -> bool {
         hash: "",
         held: &[],
         verdict: HeldVerdict::Unknown,
+        shape: None,
     };
     render_recovery_map_naming(&[entry], 0, usize::MAX)
         .is_some_and(|(_, named)| named.as_slice() == [0])
