@@ -13,7 +13,9 @@
 //! hook path where the developer is waiting:
 //!
 //! - **The deadline is the parent's.** [`DEFAULT_BUDGET`] is 250 ms, measured
-//!   from the spawn, and it is enforced by killing the child rather than by
+//!   from before the spawn, and it bounds the caller's whole wait: the spawn,
+//!   the kill and the reap happen on a worker thread, and the caller leaves
+//!   when the budget does. The child is stopped by killing it rather than by
 //!   asking it to stop. A parser wedged on a hostile file cannot be reasoned
 //!   with, and the read it was going to improve still has to happen.
 //! - **Every failure is one failure.** A missing helper, a deadline, a crash,
@@ -31,9 +33,9 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{is_supported_extension, wire, ConvertCaps, DocConverter, DocError, Markdown};
 
@@ -86,6 +88,32 @@ pub struct ChildProcessConverter {
     program: PathBuf,
     prefix_args: Vec<OsString>,
     budget: Duration,
+}
+
+/// One conversion's worth of state, moved whole onto its worker thread.
+struct Call {
+    command: Command,
+    payload: Vec<u8>,
+    /// The most output the parent will read; see [`output_ceiling`].
+    ceiling: u64,
+    /// The instant before the spawn, which the deadline is measured from.
+    started: Instant,
+    budget: Duration,
+    watch: Watch,
+}
+
+/// What a test can see of the reap that happens after the caller has left.
+///
+/// Empty outside tests. Inside them, `hold` keeps the worker at the kill
+/// until the test lets it go, so the helper's being alive after the call
+/// returned is a fact rather than a race, and `reaped` reports the reap, so
+/// a test waits for that event instead of for a length of time.
+#[derive(Default)]
+struct Watch {
+    #[cfg(test)]
+    hold: Option<mpsc::Receiver<()>>,
+    #[cfg(test)]
+    reaped: Option<mpsc::Sender<()>>,
 }
 
 impl ChildProcessConverter {
@@ -148,8 +176,57 @@ impl ChildProcessConverter {
 
     /// Run the helper over `bytes` and return whatever it wrote, or the one
     /// reason it wrote nothing usable.
-    fn run(&self, bytes: &[u8], ext: &str, caps: &ConvertCaps) -> Result<Vec<u8>, DocError> {
-        let mut child = Command::new(&self.program)
+    ///
+    /// The clock starts before the spawn, and the spawn happens on a worker
+    /// thread. `spawn()` returns only once the exec has happened, which is a
+    /// few milliseconds on a quiet machine and seconds under load, while the
+    /// system assesses a program it has not run before, and nothing can
+    /// interrupt it. A deadline started after it, or a kill and reap done
+    /// here after the deadline, would add both to what the developer waits.
+    /// So this thread waits on one channel for at most the budget and
+    /// leaves; the worker, whenever its spawn returns, finishes the call on
+    /// its own deadline, kills and reaps the child, and its answer goes
+    /// unread.
+    fn run(
+        &self,
+        bytes: &[u8],
+        ext: &str,
+        caps: &ConvertCaps,
+        watch: Watch,
+    ) -> Result<Vec<u8>, DocError> {
+        let started = Instant::now();
+        let call = Call {
+            command: self.command(ext, caps),
+            // Copied, because the worker may outlive this call.
+            payload: bytes.to_vec(),
+            ceiling: output_ceiling(caps),
+            started,
+            budget: self.budget,
+            watch,
+        };
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new().spawn(move || {
+            let _ = sender.send(converse(call));
+        });
+        if worker.is_err() {
+            return Err(DocError::Engine {
+                code: HELPER_MISSING,
+            });
+        }
+        match receiver.recv_timeout(self.budget.saturating_sub(started.elapsed())) {
+            Ok(outcome) => outcome,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(DocError::Engine { code: DEADLINE }),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(DocError::Engine {
+                code: HELPER_BROKEN,
+            }),
+        }
+    }
+
+    /// The helper's command line: the prefix, then `convert - --ext …
+    /// --json`, with stdin and stdout piped.
+    fn command(&self, ext: &str, caps: &ConvertCaps) -> Command {
+        let mut command = Command::new(&self.program);
+        command
             .args(&self.prefix_args)
             .arg("convert")
             .arg("-")
@@ -167,59 +244,8 @@ impl ChildProcessConverter {
             // The helper's diagnostics are for a human at a terminal. On this
             // path they would be an unread pipe that fills and blocks a parser
             // mid-document, which is the one thing the deadline cannot fix.
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| DocError::Engine {
-                code: HELPER_MISSING,
-            })?;
-
-        let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(DocError::Engine {
-                code: HELPER_BROKEN,
-            });
-        };
-
-        // Both pipes get a thread of their own, and neither is joined. A child
-        // writing its answer while the parent is still writing its question
-        // deadlocks the pair if one thread serves both, and *waiting* for
-        // either thread would hand the deadline back to the child: a killed
-        // process whose own descendant still holds the pipe open would keep the
-        // developer waiting for as long as that descendant lives. So the
-        // deadline is a channel timeout on the main thread, and the two helper
-        // threads end when the pipes close, whenever that is. The document is
-        // copied for the same reason — a borrow could not outlive this call.
-        let payload = bytes.to_vec();
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&payload);
-            drop(stdin);
-        });
-        let (sender, receiver) = mpsc::channel();
-        // One byte past the ceiling, so that reaching the ceiling and passing
-        // it are distinguishable and the read still stops either way.
-        let ceiling = output_ceiling(caps);
-        std::thread::spawn(move || {
-            let mut out = Vec::new();
-            let read = stdout.take(ceiling.saturating_add(1)).read_to_end(&mut out);
-            let _ = sender.send(read.map(|_| out));
-        });
-        let outcome = match receiver.recv_timeout(self.budget) {
-            Ok(Ok(out)) if out.len() as u64 > ceiling => Err(DocError::Engine {
-                code: HELPER_BROKEN,
-            }),
-            Ok(Ok(out)) => Ok(out),
-            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => Err(DocError::Engine {
-                code: HELPER_BROKEN,
-            }),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(DocError::Engine { code: DEADLINE }),
-        };
-        // Unconditionally, on every path: a helper that answered and then kept
-        // running is as much of a problem as one that never answered, and the
-        // exit status is not the channel this reads anyway.
-        let _ = child.kill();
-        let _ = child.wait();
-        outcome
+            .stderr(Stdio::null());
+        command
     }
 }
 
@@ -236,11 +262,87 @@ impl DocConverter for ChildProcessConverter {
         if !is_supported_extension(&ext) {
             return Err(DocError::UnsupportedExtension(ext));
         }
-        let out = self.run(bytes, &ext, caps)?;
+        let out = self.run(bytes, &ext, caps, Watch::default())?;
         wire::decode(&out, &ext, size, caps).unwrap_or(Err(DocError::Engine {
             code: HELPER_BROKEN,
         }))
     }
+}
+
+/// The whole of a call off the caller's thread: spawn, write, read, kill,
+/// reap. Its answer is only read if it arrives inside the budget.
+fn converse(call: Call) -> Result<Vec<u8>, DocError> {
+    let Call {
+        mut command,
+        payload,
+        ceiling,
+        started,
+        budget,
+        watch,
+    } = call;
+    let Ok(mut child) = command.spawn() else {
+        return Err(DocError::Engine {
+            code: HELPER_MISSING,
+        });
+    };
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        reap(&mut child, watch);
+        return Err(DocError::Engine {
+            code: HELPER_BROKEN,
+        });
+    };
+
+    // Both pipes get a thread of their own, and neither is joined. A child
+    // writing its answer while the parent is still writing its question
+    // deadlocks the pair if one thread serves both, and *waiting* for either
+    // thread would hand the deadline back to the child: a killed process
+    // whose own descendant still holds the pipe open would keep the worker
+    // for as long as that descendant lives, and the child unreaped with it.
+    // So the worker's deadline is a channel timeout too, and the two pipe
+    // threads end when the pipes close, whenever that is.
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(&payload);
+        drop(stdin);
+    });
+    let (sender, receiver) = mpsc::channel();
+    // One byte past the ceiling, so that reaching the ceiling and passing it
+    // are distinguishable and the read still stops either way.
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let read = stdout.take(ceiling.saturating_add(1)).read_to_end(&mut out);
+        let _ = sender.send(read.map(|_| out));
+    });
+    let outcome = match receiver.recv_timeout(budget.saturating_sub(started.elapsed())) {
+        Ok(Ok(out)) if out.len() as u64 > ceiling => Err(DocError::Engine {
+            code: HELPER_BROKEN,
+        }),
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => Err(DocError::Engine {
+            code: HELPER_BROKEN,
+        }),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(DocError::Engine { code: DEADLINE }),
+    };
+    // Unconditionally, on every path: a helper that answered and then kept
+    // running is as much of a problem as one that never answered, and the
+    // exit status is not the channel this reads anyway.
+    reap(&mut child, watch);
+    outcome
+}
+
+/// Kill the helper and collect its exit, so that no call leaves a zombie.
+fn reap(child: &mut Child, watch: Watch) {
+    #[cfg(test)]
+    if let Some(hold) = &watch.hold {
+        let _ = hold.recv();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    #[cfg(test)]
+    if let Some(reaped) = watch.reaped {
+        let _ = reaped.send(());
+    }
+    #[cfg(not(test))]
+    let _ = watch;
 }
 
 #[cfg(test)]
@@ -432,17 +534,89 @@ mod tests {
             "rift-doc",
             r#"cat > /dev/null; exec sh -c 'echo $$ > "$0"; exec sleep 30' "${0%/*}/sleeper.pid""#,
         );
-        let started = std::time::Instant::now();
+        let (reaped, on_reaped) = mpsc::channel();
+        let watch = Watch {
+            hold: None,
+            reaped: Some(reaped),
+        };
         let result = ChildProcessConverter::at(helper)
             .with_budget(Duration::from_millis(120))
-            .convert(CSV, "csv", &ConvertCaps::default());
+            .run(CSV, "csv", &ConvertCaps::default(), watch);
         assert_eq!(result, Err(DocError::Engine { code: DEADLINE }));
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "the call waited for the child instead of killing it: {:?}",
-            started.elapsed()
-        );
+        // The kill happens off the caller's thread, so the proof waits for the
+        // reap to be reported rather than for any length of time.
+        on_reaped.recv().unwrap();
         assert_nothing_it_spawned_survives(&dir.join("sleeper.pid"));
+    }
+
+    /// The budget is the caller's whole wait: a helper that has not even
+    /// begun its work when the deadline falls is abandoned there, and the
+    /// kill and the reap happen afterwards, off the caller's thread.
+    ///
+    /// The stand-in's start is slow — it hands its pid through a fifo and
+    /// sleeps before it would read a byte — and the reaper is held at the
+    /// kill until the test lets it go, so "the call returned without waiting
+    /// for the helper" is judged by the helper still running at the return,
+    /// and "never a zombie" by its pid vanishing once the reap is reported.
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_slow_to_start_is_abandoned_at_the_deadline_and_reaped_after_the_return() {
+        let dir = scratch("slow-start");
+        let fifo = dir.join("helper.pid");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let helper = stand_in(
+            &dir,
+            "rift-doc",
+            r#"echo $$ > "${0%/*}/helper.pid"; exec sleep 30"#,
+        );
+        let (release, hold) = mpsc::channel();
+        let (reaped, on_reaped) = mpsc::channel();
+        let watch = Watch {
+            hold: Some(hold),
+            reaped: Some(reaped),
+        };
+        let result = ChildProcessConverter::at(helper)
+            .with_budget(Duration::from_millis(120))
+            .run(CSV, "csv", &ConvertCaps::default(), watch);
+        assert_eq!(result, Err(DocError::Engine { code: DEADLINE }));
+        let events = first_of_pid_or_reap(fifo, on_reaped);
+        let Some(pid) = events.recv().unwrap() else {
+            panic!("the helper was reaped before the call returned");
+        };
+        assert!(
+            is_alive(&pid),
+            "the helper {pid} was not running at the return"
+        );
+        release.send(()).unwrap();
+        assert_eq!(events.recv().unwrap(), None, "the reap was never reported");
+        assert!(!is_alive(&pid), "the helper {pid} outlived its reap");
+    }
+
+    /// One channel carrying whichever comes first: the pid the stand-in
+    /// writes into `fifo` (`Some`), or the reaper's report (`None`). A helper
+    /// killed before it wrote its pid never opens the fifo, so waiting on the
+    /// fifo alone would wait forever; the reap ends that wait instead.
+    #[cfg(unix)]
+    fn first_of_pid_or_reap(
+        fifo: PathBuf,
+        on_reaped: mpsc::Receiver<()>,
+    ) -> mpsc::Receiver<Option<String>> {
+        let (sender, events) = mpsc::channel();
+        let pid_sender = sender.clone();
+        std::thread::spawn(move || {
+            let pid = std::fs::read_to_string(fifo).unwrap();
+            let _ = pid_sender.send(Some(pid.trim().to_owned()));
+        });
+        std::thread::spawn(move || {
+            if on_reaped.recv().is_ok() {
+                let _ = sender.send(None);
+            }
+        });
+        events
     }
 
     /// The process that was sleeping when the deadline fell is gone.
@@ -457,13 +631,22 @@ mod tests {
         let Ok(pid) = std::fs::read_to_string(pid_file) else {
             return;
         };
-        let alive = Command::new("kill")
-            .args(["-0", pid.trim()])
+        assert!(
+            !is_alive(pid.trim()),
+            "the sleeper {} outlived the kill",
+            pid.trim()
+        );
+    }
+
+    /// Whether `pid` names a live process, by `kill -0`.
+    #[cfg(unix)]
+    fn is_alive(pid: &str) -> bool {
+        Command::new("kill")
+            .args(["-0", pid])
             .stderr(Stdio::null())
             .status()
             .unwrap()
-            .success();
-        assert!(!alive, "the sleeper {} outlived the kill", pid.trim());
+            .success()
     }
 
     /// Windows has no `kill -0`, and the stand-in there is a wrapper whose kill
