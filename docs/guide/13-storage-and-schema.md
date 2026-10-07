@@ -93,7 +93,7 @@ reach storage and be summed as though it meant something
 **The v17 `session_worktree_cd` relation is the same kind of answer.**
 It holds session worktree observations under a basis the v14 `session_worktree` CHECK cannot admit — `shell_cd`, a read filed under the member its leading `cd` named.
 Widening that CHECK would mean rebuilding the table, and a migration may not drop or rename one, so the wider vocabulary got its own table with its own guards; the writer sends each observation to exactly one of the two, and every reader reads their union ([Chapter 9](09-worktrees-and-families.md)).
-Both observation relations are machine-local and no shard carries them, so a capture rebuild restores neither: a rebuilt projection knows each checkpoint's archiving checkout from its shard, and a session's observed checkouts only from the hooks that run after it.
+Their `work_tree` column is a machine-local address and never enters a shard, but a checkpoint freezes the rest of each agent-hook observation in `session_worktrees.jsonl`, so a capture rebuild restores those states without their head (see [§13.12](#1312-rebuilding-and-what-a-rebuild-cannot-restore)); an `attach`, `import` or `commit` observation is written after its archive and is restored by nothing.
 
 **The recall v14 `memd_audit_pull_claim` relation is a sparse companion of `memd_audit_event`**, keyed on the audit row's id like `memd_audit_citation` and `memd_audit_session`: for a pull whose caller named held revisions, how many it named, how many of them this family had recorded reading, how many it had not, and the rule the credit was booked under. A pull that named nothing writes no row, so a row's presence means a claim was made. The row is written just after its audit row; a stop between the two loses only the side row, and redelivering the serve writes it once under the same key.
 
@@ -515,9 +515,10 @@ The rebuild keys the session's checkpoint link, its session row and its native i
 A session the projection has never seen gets a row even when no usage line names it: no model, dated by its first usage line in that checkpoint, or by the checkpoint's own capture time when there is none.
 A checkpoint written before the artifact keys every session under the walk's default agent, as it always did, and a session that was never condensed into any checkpoint cannot be rebuilt at all.
 
-A session's worktree observations are restorable when its checkpoint carries `session_worktrees.jsonl`, and only for a session the projection does not already place.
-A session with any observation in either relation is left as it is, the rule the usage rows follow, so levelling into the live projection writes nothing.
-For any other session the rebuild writes each line back into `session_worktree`, or into `session_worktree_cd` for a `shell_cd` line, under the session's own agent.
+A session's worktree observations are restorable when its checkpoint carries `session_worktrees.jsonl`, and only for a state the projection does not already hold.
+A line is skipped when either relation has an observation of the same session with the same token, name, linkage, branch, subagent and basis at any head, the rule the usage rows follow made per state, so levelling into the live projection writes nothing.
+The artifact is cumulative, so a cold rebuild restores from each checkpoint the states its predecessors did not carry, a subagent's observations first frozen in a later checkpoint among them.
+The rebuild writes every other line back into `session_worktree`, or into `session_worktree_cd` for a `shell_cd` line, under the session's own agent.
 A restored row carries no head, because no shard does, and its id is the one the live writer would derive for the same state with no head; a session the live hooks saw at several heads of one member is restored as one row, first observed when the earliest of them was.
 The path is not in the shard either: the rebuild resolves the token to this machine's checkout of the family member, and writes the empty string when no member here has that token, because no reader spells an unknown path otherwise and another machine's path would name nothing here.
 A token is a digest of the checkout's path as it was spelled, so a checkout reached through another spelling also resolves to nothing.

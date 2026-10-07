@@ -5,11 +5,13 @@
 //! fact no other artifact needs: the checkout's absolute path is never
 //! frozen, so a rebuild resolves each frozen worktree token to this machine's
 //! checkout of the family. `HEAD` is not frozen either, so a restored row
-//! carries none, and the rebuild writes a session's observations only where
-//! the projection holds none for it: over a live projection it writes
-//! nothing. Only an agent hook's observations are frozen, so a session known
-//! only through `commit`, `attach` or `import` restores none. A shard without the artifact restores no observation, which is
-//! what every shard written before it gets.
+//! carries none, and the rebuild writes a frozen state only where the
+//! projection holds no observation of that state at any head: over a live
+//! projection it writes nothing. Only an agent hook's observations are
+//! frozen, so a session known only through `commit`, `attach` or `import`
+//! restores none. A shard without
+//! the artifact restores no observation, which is what every shard written
+//! before it gets.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -48,13 +50,19 @@ const MEMBERS: [&str; 9] = [
 /// The row schema the live writers stamp on the rows they write.
 const ROW_SCHEMA_VERSION: i64 = 1;
 
-/// Restore the observations the shard's `session_worktrees.jsonl` froze for
-/// every session the projection does not already place, each under the
-/// session's own agent. A session with any observation in either relation is
-/// left as it is — the usage rows' rule, that a rebuild only fills what is
-/// absent — so levelling into the live projection writes nothing, and a
-/// restored row never sits beside a live one that carries its head. A
-/// refused line is counted and named in the report, and skipped.
+/// Restore every observation the shard's `session_worktrees.jsonl` froze
+/// whose state the projection does not already hold, each under the
+/// session's own agent. A state counts as held when either relation has an
+/// observation of the same session with the same token, name, linkage,
+/// branch, subagent and basis, at any head — the usage rows' rule, that a
+/// rebuild only fills what is absent, made per state. Levelling into the
+/// live projection therefore writes nothing, because the live writer holds
+/// every frozen state with its head, and a restored row never sits beside a
+/// live one that carries its head. Per session rather than per state would
+/// lose every state first frozen in a later shard: the artifact is
+/// cumulative, so the earliest shard would place the session and every
+/// later one would be skipped. A refused line is counted and named in the
+/// report, and skipped.
 ///
 /// Written after the shard's sessions, so the session row an observation
 /// hangs off exists when it lands.
@@ -76,32 +84,46 @@ pub(super) async fn restore_worktree_observations<S: CanonicalStore, R: Substrat
         return Ok(());
     }
     let checkouts = member_checkouts(ctx.sub.worktree_root().as_deref());
-    let mut placed: BTreeMap<String, bool> = BTreeMap::new();
+    let relation = SessionWorktreeRow::relation(ctx.store).await;
     for seen in &observations {
         let agent = agents.agent_of(&seen.session, ctx.default_agent);
         let session_id = ids::session_row_id(agent, &seen.session);
-        let already = match placed.get(&session_id) {
-            Some(already) => *already,
-            None => is_placed(ctx.store, &session_id).await?,
-        };
-        placed.insert(session_id.clone(), already);
-        if already {
+        let row = observation_row(seen, session_id, &checkouts);
+        if is_held(ctx.store, relation, &row).await? {
             continue;
         }
-        let row = observation_row(seen, session_id, &checkouts);
         record_session_worktree(ctx.store, &row).await?;
     }
     Ok(())
 }
 
-/// Whether the projection holds any observation of `session_id`, in either
-/// relation, before this shard's lines are written.
-async fn is_placed(store: &impl CanonicalStore, session_id: &str) -> Result<bool> {
-    let relation = SessionWorktreeRow::relation(store).await;
-    let sql = format!("SELECT 1 FROM {relation} WHERE session_id = ? LIMIT 1");
-    let rows = store
-        .query(&sql, &[rift_store::Value::text(session_id)])
-        .await?;
+/// Whether `relation` already holds the state `row` restores, at any head.
+/// `IS` compares the nullable branch and subagent so that absent equals
+/// absent; the path and the time are not part of a state.
+async fn is_held(
+    store: &impl CanonicalStore,
+    relation: &str,
+    row: &SessionWorktreeRow,
+) -> Result<bool> {
+    let sql = format!(
+        "SELECT 1 FROM {relation} WHERE session_id = ? AND worktree_token = ? \
+         AND worktree_name = ? AND is_linked = ? AND branch IS ? \
+         AND subagent_id IS ? AND basis = ? LIMIT 1"
+    );
+    let optional = |value: &Option<String>| match value {
+        Some(text) => rift_store::Value::text(text.as_str()),
+        None => rift_store::Value::Null,
+    };
+    let params = [
+        rift_store::Value::text(row.session_id.as_str()),
+        rift_store::Value::text(row.worktree_token.as_str()),
+        rift_store::Value::text(row.worktree_name.as_str()),
+        rift_store::Value::Int(row.is_linked),
+        optional(&row.branch),
+        optional(&row.subagent_id),
+        rift_store::Value::text(row.basis.as_str()),
+    ];
+    let rows = store.query(&sql, &params).await?;
     Ok(!rows.is_empty())
 }
 
