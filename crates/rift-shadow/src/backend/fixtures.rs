@@ -50,6 +50,7 @@ pub(super) fn archive() -> CheckpointArchive {
         session_agents: std::collections::BTreeMap::new(),
         window_journal: Vec::new(),
         worktree_observations: Vec::new(),
+        tool_results: Vec::new(),
         content: redacted(),
         report: RedactionReportView {
             total_spans: 0,

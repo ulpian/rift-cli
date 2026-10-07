@@ -526,6 +526,9 @@ A checkpoint written before the artifact restores no observation, and neither do
 The savings denominator is restorable for every read whose `tool_calls.jsonl` line carries its instant, turn, blob oid and tokenizer.
 From such a line the rebuild writes the read's tool call, its file revision, the link between them and its token count, keyed as the live path keys them, so the rebuilt share equals the live one over checkpoints written after those members were added.
 A line written before them is still the recall plane's read fact but restores none of these rows, so a read from an older checkpoint stays out of the rebuilt denominator.
+The denominator's search half is restorable when the checkpoint carries `tool_results.jsonl`: the rebuild writes each line back into `tool_result_tokens` under its frozen id, its session keyed under the agent `sessions.jsonl` names, and its frozen instant rather than the rebuild's clock, so the rebuilt search channel and the count of results nobody measured equal the live ones.
+Every write is insert-or-ignore, so a live row wins and levelling into the live projection writes nothing; a tool name the archive withheld is restored as `withheld`, and a line whose tokenizer was withheld restores nothing.
+A checkpoint written before the artifact restores no tool result, so a search from an older checkpoint stays out of the rebuilt denominator.
 
 Usage and cost are on the restorable side for every shard that carries the usage artifact.
 A checkpoint's `usage.jsonl` freezes each settled model call of its session: the call's own key, its turn, its model, when it happened, the four token classes and how they were counted.

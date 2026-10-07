@@ -188,6 +188,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
     let sessions = read("sessions.jsonl");
     let window_journal = read("window_journal.jsonl");
     let session_worktrees = read("session_worktrees.jsonl");
+    let tool_results = read("tool_results.jsonl");
     let leaves = ShardLeafBytes {
         content_redacted: &content,
         full_jsonl: full.as_deref(),
@@ -198,6 +199,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
         window_journal: window_journal.as_deref(),
         session_worktrees: session_worktrees.as_deref(),
         tool_calls: tool_calls.as_deref(),
+        tool_results: tool_results.as_deref(),
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
         tasks: &[],
@@ -316,6 +318,7 @@ fn a_seeded_secret_never_reaches_any_native_artifact() {
         session_agents: std::collections::BTreeMap::new(),
         window_journal: Vec::new(),
         worktree_observations: Vec::new(),
+        tool_results: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript: None,
@@ -382,6 +385,7 @@ fn archive_with_transcript(
         session_agents: std::collections::BTreeMap::new(),
         window_journal: Vec::new(),
         worktree_observations: Vec::new(),
+        tool_results: Vec::new(),
         content: out.redacted,
         report: RedactionReportView::from_redact(&out.report),
         transcript,

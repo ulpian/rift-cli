@@ -11,8 +11,8 @@
 //! opens only the checkpoint ref, and a non-local reader is refused outright.
 //!
 //! The walk lives here; the report it fills, the per-shard fact recording, the
-//! event projection, the settled usage, the worktree observations and the
-//! shard's own clock each live in a module of their own so a new shard
+//! event projection, the settled usage, the worktree observations, the
+//! measured tool results and the shard's own clock each live in a module of their own so a new shard
 //! artifact lands beside the concern it feeds.
 
 mod created_at;
@@ -30,6 +30,9 @@ mod sessions;
 mod sessions_tests;
 #[cfg(test)]
 mod tests;
+mod tool_results;
+#[cfg(test)]
+mod tool_results_tests;
 mod usage;
 #[cfg(test)]
 mod usage_tests;
@@ -51,6 +54,7 @@ use facts::{record_chain_facts, record_sessions, seal_checkpoint};
 use reads::project_read_lines;
 pub use report::{BridgeReport, RefusedShard, MAX_PARSE_NOTES};
 use sessions::{read_session_agents, record_named_sessions};
+use tool_results::restore_tool_results;
 use usage::project_usage_lines;
 use worktrees::restore_worktree_observations;
 
@@ -200,8 +204,9 @@ pub async fn ingest_dialect(
 
 /// Judge one shard, then project what it carries: the chain facts from its
 /// header, its session links under each session's own agent, its archived
-/// event stream, its settled usage, its restorable reads, its named sessions
-/// and their worktree observations. `parsed_id` is the
+/// event stream, its settled usage, its restorable reads, its named sessions,
+/// their worktree observations and their measured tool results. `parsed_id`
+/// is the
 /// shard's id when it is a SHA-256; `prev` is the nearest preceding shard whose
 /// id is one.
 async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
@@ -263,6 +268,8 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
     record_named_sessions(ctx, &agents, &metadata).await?;
     // After the sessions, so every observation lands on a session row.
     restore_worktree_observations(ctx, report, id, &agents).await?;
+    // After the sessions too, so every result lands on a session row.
+    restore_tool_results(ctx, report, id, &agents).await?;
     if let Some((header, root)) = &chained {
         seal_checkpoint(ctx.store, header, *root, prev).await?;
     }

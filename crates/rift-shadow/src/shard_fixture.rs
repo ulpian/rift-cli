@@ -53,9 +53,9 @@ use std::path::PathBuf;
 use rift_core::{Result, SecretBytes};
 
 use crate::backend::{
-    ArchivedEvent, ArchivedReadFact, ArchivedTask, ArchivedUsageFact, ArchivedWindowFact,
-    ArchivedWindowRow, ArchivedWorktreeObservation, CheckpointArchive, RedactionReportView,
-    WindowSliceKind,
+    ArchivedEvent, ArchivedReadFact, ArchivedTask, ArchivedToolResult, ArchivedUsageFact,
+    ArchivedWindowFact, ArchivedWindowRow, ArchivedWorktreeObservation, CheckpointArchive,
+    RedactionReportView, WindowSliceKind,
 };
 
 /// The fixture's capture time — a literal, so no artifact moves with the clock.
@@ -131,6 +131,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
         session_agents: fixture_session_agents(),
         window_journal: fixture_window_journal(),
         worktree_observations: fixture_worktree_observations(),
+        tool_results: fixture_tool_results(),
         content: redacted.redacted,
         report: RedactionReportView::from_redact(&redacted.report),
         transcript: Some(transcript),
@@ -401,5 +402,36 @@ fn fixture_worktree_observations() -> Vec<ArchivedWorktreeObservation> {
         main(FIXTURE_SESSIONS[0], Some("main"), 9_000),
         lane,
         main(FIXTURE_SESSIONS[1], None, 7_000),
+    ]
+}
+
+/// The measured tool results the fixture archives as `tool_results.jsonl`:
+/// the first session's glob, measured in process, and a piped shell search
+/// nobody could measure, counted with no tokens; the second session's
+/// re-executed search. Every channel a search arrives on and every basis.
+fn fixture_tool_results() -> Vec<ArchivedToolResult> {
+    let result = |session: &str, n: char, tool: &str, basis: &str, tokens: u32, back: i64| {
+        ArchivedToolResult {
+            id: n.to_string().repeat(64),
+            session: session.to_owned(),
+            tool: tool.to_owned(),
+            channel: "search".to_owned(),
+            output_tokens: tokens,
+            tokenizer: "cl100k_base".to_owned(),
+            basis: basis.to_owned(),
+            recorded_at: FIXTURE_CREATED_AT_MS - back,
+        }
+    };
+    vec![
+        result(FIXTURE_SESSIONS[0], '7', "Glob", "in_process", 64, 7_800),
+        result(FIXTURE_SESSIONS[0], '8', "Bash", "unmeasured", 0, 7_200),
+        result(
+            FIXTURE_SESSIONS[1],
+            '9',
+            "exec_command",
+            "reexecuted",
+            310,
+            6_800,
+        ),
     ]
 }

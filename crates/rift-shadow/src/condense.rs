@@ -28,8 +28,9 @@ pub type CheckpointId = String;
 /// as one value: the read facts that become `tool_calls.jsonl`, the frozen
 /// serve envelopes that become `serve_audit.jsonl`, the settled usage that
 /// becomes `usage.jsonl`, the session's agent that becomes `sessions.jsonl`,
-/// its context windows' journal rows that become `window_journal.jsonl` and
-/// its worktree observations that become `session_worktrees.jsonl`.
+/// its context windows' journal rows that become `window_journal.jsonl`, its
+/// worktree observations that become `session_worktrees.jsonl` and its
+/// measured tool results that become `tool_results.jsonl`.
 ///
 /// One struct rather than one parameter per artifact, because the prediction
 /// and the archive must fold exactly the same facts, and every new fact
@@ -54,6 +55,9 @@ pub struct SessionFacts {
     /// Every observation of the member the session was seen in
     /// (`session_worktrees.jsonl`), in any order: the writer sorts them.
     pub worktree_observations: Vec<crate::backend::ArchivedWorktreeObservation>,
+    /// Every measured tool result the session recorded
+    /// (`tool_results.jsonl`), in any order: the writer sorts them.
+    pub tool_results: Vec<crate::backend::ArchivedToolResult>,
 }
 
 /// **The one derivation of a new checkpoint id**: `sha256(session ‖ \0 ‖
@@ -275,6 +279,7 @@ fn archive_for_id(
             .unwrap_or_default(),
         window_journal: facts.window_journal,
         worktree_observations: facts.worktree_observations,
+        tool_results: facts.tool_results,
         content,
         report,
         transcript: None,
@@ -684,6 +689,7 @@ mod tests {
             session_agents: std::collections::BTreeMap::new(),
             window_journal: Vec::new(),
             worktree_observations: Vec::new(),
+            tool_results: Vec::new(),
             content,
             report: RedactionReportView {
                 total_spans: 0,
@@ -975,6 +981,7 @@ mod tests {
             agent: None,
             window_journal: Vec::new(),
             worktree_observations: Vec::new(),
+            tool_results: Vec::new(),
         };
         let predicted = predicted_checkpoint_id(SESSION, &raw, &facts, &packs).unwrap();
         let archived = condense(
@@ -1020,6 +1027,7 @@ mod tests {
             agent: None,
             window_journal: Vec::new(),
             worktree_observations: Vec::new(),
+            tool_results: Vec::new(),
         }
     }
 
@@ -1083,6 +1091,7 @@ mod tests {
             agent: None,
             window_journal: Vec::new(),
             worktree_observations: Vec::new(),
+            tool_results: Vec::new(),
         };
         assert_eq!(
             condensed_with(empty, 1).await,
@@ -1197,6 +1206,33 @@ mod tests {
         let bare =
             predicted_checkpoint_id(SESSION, &raw, &SessionFacts::default(), &packs).unwrap();
         assert_ne!(bare, predicted, "the journal is a leaf of the id");
+    }
+
+    /// **One id for the prediction and the archive of a session that
+    /// searched**, and a different one with no measured result: the tool
+    /// results are a leaf of the id, folded identically by both hooks.
+    #[tokio::test]
+    async fn the_trailer_prediction_and_the_archive_mint_one_id_with_tool_results() {
+        let raw = SecretBytes::new(b"capture".to_vec());
+        let packs = RulePackSet::builtin();
+        let searched = SessionFacts {
+            tool_results: vec![crate::backend::ArchivedToolResult {
+                id: "a".repeat(64),
+                session: SESSION.to_owned(),
+                tool: "Glob".to_owned(),
+                channel: "search".to_owned(),
+                output_tokens: 40,
+                tokenizer: "cl100k_base".to_owned(),
+                basis: "in_process".to_owned(),
+                recorded_at: 7,
+            }],
+            ..SessionFacts::default()
+        };
+        let predicted = predicted_checkpoint_id(SESSION, &raw, &searched, &packs).unwrap();
+        assert_eq!(condensed_with(searched, 1).await, predicted);
+        let bare =
+            predicted_checkpoint_id(SESSION, &raw, &SessionFacts::default(), &packs).unwrap();
+        assert_ne!(bare, predicted, "the tool results are a leaf of the id");
     }
 
     /// **The rollup rule, pinned at the assembly.** A

@@ -3,7 +3,8 @@
 //! One Claude Code session is replayed through the shipped `rift` binary with
 //! the capture worker drained inline: a file read, then asked for again, so
 //! the second read is declined; a prompt, so the session is handed its
-//! pointer; one `rift recall file-if-changed` made from inside the session,
+//! pointer; a glob, whose result Rift measures as search tokens; one
+//! `rift recall file-if-changed` made from inside the session,
 //! whose tool result carries its `serve:` keys back through `PostToolUse` and
 //! so attributes it; two turns settled on two models, one of them unpriced; and
 //! a session end that condenses everything into a checkpoint. The figures
@@ -18,11 +19,13 @@
 //! the rebuild and absent after it, with exactly its own verb, channel and
 //! token figures gone.
 //!
-//! The savings share is compared too, with its denominator `read_tokens` and
-//! the session count: the shard's `tool_calls.jsonl` freezes each read's
-//! instant, turn, blob oid and tokenizer, and its `sessions.jsonl` the
-//! session's agent, so the capture rebuild writes back the rows the
-//! denominator joins and the session they hang off.
+//! The savings share is compared too, with its denominator `read_tokens`, its
+//! search channel and the session count: the shard's `tool_calls.jsonl`
+//! freezes each read's instant, turn, blob oid and tokenizer, its
+//! `tool_results.jsonl` each measured tool result, and its `sessions.jsonl`
+//! the session's agent, so the capture rebuild writes back the rows the
+//! denominator joins and the session they hang off. The measured tool results
+//! are compared row for row, every column included.
 //!
 //! Hermetic by construction, as `rebuild_spelling_e2e` is: a fixture
 //! repository in a tempdir and every root either binary could resolve on the
@@ -86,6 +89,11 @@ struct Figures {
     read_tokens: i64,
     /// `rift savings --json`, `overall.share_pct`, as the document spells it.
     share_pct: String,
+    /// `rift savings --json`, `overall.channels.search`: the denominator's
+    /// search half.
+    search_tokens: i64,
+    /// Every `tool_result_tokens` row, every column, in id order.
+    tool_results: Vec<Vec<String>>,
     /// `session` rows in the capture projection.
     sessions: i64,
 }
@@ -255,6 +263,17 @@ fn replay_session(fx: &Fixture) -> Serve {
         serde_json::json!({"source": "startup", "transcript_path": transcript}),
     );
     fx.hook("UserPromptSubmit", serde_json::json!({"prompt": "add it"}));
+    // Before the read writes `booked.txt`: the glob is measured against the
+    // path index only while the tree is the tree the index was built over.
+    fx.hook(
+        "PostToolUse",
+        serde_json::json!({
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "*.txt"},
+            "tool_response": {"filenames": ["a.txt"]},
+            "tool_use_id": "toolu_roundtrip_glob",
+        }),
+    );
     decline_a_repeat_read(fx);
     let (answer, _) = cli_serve(fx, "a.txt");
     fx.hook(
@@ -360,6 +379,10 @@ fn figures(fx: &Fixture, cache: &str) -> Figures {
         cost_micros: recap["cost"]["amount_micros"].as_i64().unwrap(),
         read_tokens: savings["overall"]["read_tokens"].as_i64().unwrap(),
         share_pct: savings["overall"]["share_pct"].to_string(),
+        search_tokens: savings["overall"]["channels"]["search"]
+            .as_i64()
+            .unwrap_or(0),
+        tool_results: tool_result_rows(&capture),
         sessions: counted(&capture, "SELECT 'session', count(*) FROM session")["session"],
     }
 }
@@ -429,7 +452,27 @@ fn assert_the_session_left_every_kind_of_figure(before: &Figures) {
         before.read_tokens > 0,
         "the read is in the denominator: {before:?}"
     );
+    assert!(
+        before.search_tokens > 0,
+        "the glob is in the denominator: {before:?}"
+    );
+    assert_eq!(before.tool_results.len(), 1, "{before:?}");
     assert_eq!(before.sessions, 1, "{before:?}");
+}
+
+/// Every `tool_result_tokens` row of the capture projection, each column
+/// spelled as text, so a rebuilt row is compared field for field.
+fn tool_result_rows(capture: &SqliteStore) -> Vec<Vec<String>> {
+    let rows = select(
+        capture,
+        "SELECT tool_result_id, session_id, tool_name, channel, \
+         CAST(output_tokens AS TEXT), tokenizer, basis, CAST(recorded_at AS TEXT), \
+         CAST(schema_version AS TEXT) FROM tool_result_tokens ORDER BY tool_result_id",
+        &[],
+    );
+    rows.iter()
+        .map(|row| (0..9).map(|i| row.get_text(i).unwrap()).collect())
+        .collect()
 }
 
 /// How many `memd_audit_event` and `serve_call_event` rows carry the serve's

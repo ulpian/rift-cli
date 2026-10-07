@@ -1,0 +1,3 @@
+{"basis":"in_process","channel":"search","id":"7777777777777777777777777777777777777777777777777777777777777777","output_tokens":64,"recorded_at":1755999992200,"schema_version":1,"session":"01JSHARDGOLDENA","tokenizer":"cl100k_base","tool":"Glob"}
+{"basis":"unmeasured","channel":"search","id":"8888888888888888888888888888888888888888888888888888888888888888","output_tokens":0,"recorded_at":1755999992800,"schema_version":1,"session":"01JSHARDGOLDENA","tokenizer":"cl100k_base","tool":"Bash"}
+{"basis":"reexecuted","channel":"search","id":"9999999999999999999999999999999999999999999999999999999999999999","output_tokens":310,"recorded_at":1755999993200,"schema_version":1,"session":"01JSHARDGOLDENB","tokenizer":"cl100k_base","tool":"exec_command"}
