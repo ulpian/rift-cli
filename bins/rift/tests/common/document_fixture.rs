@@ -953,6 +953,25 @@ pub(crate) fn seed_repo(tmp: &Path) -> std::path::PathBuf {
     repo
 }
 
+/// Give the gate's conversion a budget the figures do not depend on.
+///
+/// The warm pass converts under the worker's own thirty seconds, and a
+/// document it did not finish on a loaded machine is converted again when the
+/// session reads it — under the policy's quarter-second, which a debug build
+/// re-spawned on that machine misses, since that quarter-second includes the
+/// exec. The read then proceeds unconverted, nothing is amended, and a suite
+/// would be measuring the load. The budget changes when a conversion is given
+/// up, never what one says: it is outside the sidecar key.
+pub(crate) fn state_a_patient_budget(repo: &Path) {
+    let policies = repo.join(".rift").join("policies");
+    std::fs::create_dir_all(&policies).unwrap();
+    std::fs::write(
+        policies.join("serve.toml"),
+        "[doc]\nconvert_budget_ms = 30000\n",
+    )
+    .unwrap();
+}
+
 /// A path as a JSON string literal: a Windows path carries backslashes, which
 /// a raw `Display` splice turns into invalid escapes.
 pub(crate) fn json_str(path: &Path) -> String {

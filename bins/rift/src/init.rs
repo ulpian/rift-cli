@@ -25,10 +25,17 @@ const DEFAULT_CONFIG: &str = "# Rift project configuration (.rift/config.toml).\
 
 /// The `.rift/.gitignore` `init` writes where there is none. A path in a
 /// nested ignore file is relative to its directory, so `state/` here is
-/// `.rift/state/` and nothing else: the configuration, the policies and this
-/// file stay committable.
-const STATE_GITIGNORE: &str = "# Written by rift init: Rift's own state is never committed.\n\
-                               state/\n";
+/// `.rift/state/` and `agents/` is `.rift/agents/`, and nothing else: the
+/// configuration, the policies and this file stay committable.
+///
+/// The agent descriptors are ignored because each names this machine's `rift`
+/// binary, and set-up is per machine. Ignoring them never untracks one a
+/// repository already committed, and a committed one is still read.
+const RIFT_GITIGNORE: &str = "# Written by rift init: Rift's own state is never committed.\n\
+                              # Agent descriptors name this machine's rift binary; \
+                              each machine writes its own.\n\
+                              state/\n\
+                              agents/\n";
 
 /// What `init` found or did at `.rift/.gitignore`.
 ///
@@ -61,7 +68,9 @@ impl StateIgnore {
     /// The line `init`'s report owes, or `None` when there is nothing to say.
     fn report_line(self) -> Option<&'static str> {
         match self {
-            Self::Written => Some(".rift/.gitignore: written (git ignores .rift/state/)"),
+            Self::Written => {
+                Some(".rift/.gitignore: written (git ignores .rift/state/ and .rift/agents/)")
+            }
             Self::Kept => None,
             Self::KeptNotIgnoring => {
                 Some(".rift/.gitignore: kept as found; it does not ignore .rift/state/")
@@ -339,8 +348,15 @@ fn scaffold_config(canon: &Path) -> rift_core::Result<(PathBuf, bool)> {
     Ok((cfg, scaffolded))
 }
 
-/// Make git ignore `.rift/state/` by writing `.rift/.gitignore` where there
-/// is none, and say what was found where there is one.
+/// Make git ignore `.rift/state/` and `.rift/agents/` by writing
+/// `.rift/.gitignore` where there is none, and say what was found where there
+/// is one.
+///
+/// Only `.rift/state/` is checked in a file that was already there. A
+/// committed descriptor is not recommended but still works, while committed
+/// state is wrong; the older ignore file names `state/` alone, and warning
+/// about `agents/` on every `init` of such a repository would nag about a file
+/// Rift never rewrites.
 ///
 /// The create is exclusive (`create_new`), so neither a file somebody wrote
 /// nor one a concurrent `init` wrote a moment ago is truncated, and a symbolic
@@ -355,7 +371,7 @@ pub(crate) fn ignore_rift_state(canon: &Path) -> std::io::Result<StateIgnore> {
         .open(&path);
     match created {
         Ok(mut file) => {
-            file.write_all(STATE_GITIGNORE.as_bytes())?;
+            file.write_all(RIFT_GITIGNORE.as_bytes())?;
             return Ok(StateIgnore::Written);
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
@@ -857,8 +873,9 @@ mod tests {
         tmp
     }
 
-    /// The ignore file is written once, names `state/` and nothing else, and
-    /// a second call leaves the bytes it wrote exactly as they were.
+    /// The ignore file is written once, names `state/` and `agents/` and
+    /// nothing else, and a second call leaves the bytes it wrote exactly as
+    /// they were.
     #[test]
     fn the_ignore_file_is_written_once_and_a_second_init_leaves_it_alone() {
         let tmp = rift_dir();
@@ -869,7 +886,7 @@ mod tests {
             .lines()
             .filter(|line| !line.starts_with('#'))
             .collect();
-        assert_eq!(rules, ["state/"]);
+        assert_eq!(rules, ["state/", "agents/"]);
         assert_eq!(ignore_rift_state(tmp.path()).unwrap(), StateIgnore::Kept);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
     }

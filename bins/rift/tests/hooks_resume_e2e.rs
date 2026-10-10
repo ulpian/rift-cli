@@ -205,6 +205,27 @@ fn newer_uncheckpointed_work_turns_resume_into_a_refusal_that_force_overrides() 
     );
 }
 
+/// Resuming a checkpointed branch from another local branch switches the work
+/// tree onto it as a branch: HEAD names the branch afterwards, not a detached
+/// commit, and the restore completes. A checkout argv that put the branch after
+/// `--` asked git for a file of that name and failed the whole verb.
+#[test]
+fn resume_from_another_local_branch_checks_the_branch_out_and_stays_on_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = Resumable::archive(tmp.path());
+    git_in(&fx.repo, &["checkout", "-q", "-b", "elsewhere"]);
+
+    let (code, v) = fx.resume(&[&fx.branch]);
+
+    assert_eq!(code, 0, "resume switches branches: {v}");
+    assert_eq!(v["checkpoint_id"], fx.checkpoint_id, "{v}");
+    assert_eq!(
+        git_in(&fx.repo, &["symbolic-ref", "HEAD"]).trim(),
+        format!("refs/heads/{}", fx.branch),
+        "HEAD is on the resumed branch, not detached"
+    );
+}
+
 /// The resume refusal contracts, `--json` byte-locked (they are the NEW
 /// goldens this verb adds): an unknown branch, a branch with no checkpoint,
 /// and a dirty worktree each answer a typed, deterministic document.

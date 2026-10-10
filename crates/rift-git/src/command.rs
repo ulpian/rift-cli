@@ -43,17 +43,21 @@ pub fn validate_refspec(refspec: &str) -> Result<()> {
     Ok(())
 }
 
-/// The argv for `reset --hard <oid>` — note the `--` terminator so the oid can
-/// never be parsed as a flag.
+/// The argv for `reset --hard <oid>`. The oid goes before the `--`: git reads
+/// what follows the terminator as paths and refuses a hard reset with paths.
+/// [`validate_oid`] (hex only) is what keeps the oid from reading as a flag.
 #[must_use]
 pub fn reset_hard_argv(oid: &str) -> Vec<String> {
-    vec!["reset".into(), "--hard".into(), "--".into(), oid.into()]
+    vec!["reset".into(), "--hard".into(), oid.into(), "--".into()]
 }
 
-/// The argv for `checkout <refspec>` — `--`-terminated.
+/// The argv for `checkout <refspec>`. The refspec goes before the `--`, so git
+/// takes it as a revision (a branch stays checked out as a branch) and never
+/// as a path to restore; [`validate_refspec`] refuses a leading `-`, so it
+/// cannot read as a flag either.
 #[must_use]
 pub fn checkout_argv(refspec: &str) -> Vec<String> {
-    vec!["checkout".into(), "--".into(), refspec.into()]
+    vec!["checkout".into(), refspec.into(), "--".into()]
 }
 
 /// `git reset --hard <oid>` against `repo`'s exact worktree (validated, no shell).
@@ -253,14 +257,18 @@ mod tests {
         assert!(validate_oid("xyz").is_err());
     }
 
+    /// The revision sits before the `--`: git reads everything after the
+    /// terminator as a pathspec, so `checkout -- <branch>` restores a file
+    /// named like the branch and `reset --hard -- <oid>` is refused outright.
+    /// The terminator still closes the argv, so no path can follow unseen.
     #[test]
-    fn destructive_argv_is_double_dash_terminated() {
+    fn destructive_argv_names_the_revision_before_the_terminator() {
         let oid = "a".repeat(40);
-        let argv = reset_hard_argv(&oid);
-        assert_eq!(argv, vec!["reset", "--hard", "--", oid.as_str()]);
-        assert_eq!(checkout_argv("rift/x"), vec!["checkout", "--", "rift/x"]);
-        // the `--` precedes the untrusted value → it can't parse as a flag.
-        assert!(argv.iter().position(|a| a == "--").unwrap() < argv.len() - 1);
+        assert_eq!(
+            reset_hard_argv(&oid),
+            vec!["reset", "--hard", oid.as_str(), "--"]
+        );
+        assert_eq!(checkout_argv("rift/x"), vec!["checkout", "rift/x", "--"]);
     }
 
     /// A real repository with one commit and a linked worktree beside it.
@@ -287,6 +295,59 @@ mod tests {
         let linked = root.join("linked");
         git(&main, &["worktree", "add", "-q", linked.to_str().unwrap()]);
         linked
+    }
+
+    /// `git symbolic-ref HEAD` in `dir`: the branch HEAD is on, empty when detached.
+    #[cfg(feature = "gix")]
+    fn symbolic_head(dir: &std::path::Path) -> String {
+        let out = Command::new("git")
+            .args(["symbolic-ref", "-q", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn checking_out_a_branch_leaves_head_on_the_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let linked = repo_with_a_linked_worktree(tmp.path());
+        let repo = crate::discover(&linked).unwrap();
+        run_git(&repo, &["branch".into(), "side".into()]).unwrap();
+
+        git_checkout(&repo, "side").unwrap();
+
+        assert_eq!(symbolic_head(&linked), "refs/heads/side");
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn a_hard_reset_to_an_oid_puts_the_work_tree_back_at_that_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let linked = repo_with_a_linked_worktree(tmp.path());
+        let repo = crate::discover(&linked).unwrap();
+        let head = run_git_capture(&repo, &["rev-parse".into(), "HEAD".into()], &[]).unwrap();
+        let head = String::from_utf8(head).unwrap().trim().to_owned();
+        std::fs::write(linked.join("a.txt"), b"edited\n").unwrap();
+
+        git_reset_hard(&repo, &head).unwrap();
+
+        assert_eq!(std::fs::read(linked.join("a.txt")).unwrap(), b"one\n");
+    }
+
+    #[cfg(feature = "gix")]
+    #[test]
+    fn a_refspec_that_reads_as_a_flag_is_refused_before_git_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let linked = repo_with_a_linked_worktree(tmp.path());
+        let repo = crate::discover(&linked).unwrap();
+        let before = symbolic_head(&linked);
+
+        let res = git_checkout(&repo, "--detach");
+
+        assert!(matches!(res, Err(RiftError::Validity(_))), "{res:?}");
+        assert_eq!(symbolic_head(&linked), before, "HEAD did not move");
     }
 
     #[cfg(feature = "gix")]

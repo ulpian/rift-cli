@@ -190,8 +190,9 @@ every offender at once and leaving the repository as it found it.
 Two files in the checkout are yours and authoritative: `.rift/config.toml`
 (capture, redaction, retention) and `.rift/policies/serve.toml` (what Recall
 may serve, to whom, under what budget). The rest is Rift's:
-`.rift/agents/*.json`, one descriptor per wired agent; `.rift/state/`,
-per-checkout run state and adoption markers, which git ignores through the
+`.rift/agents/*.json`, one descriptor per wired agent, naming this machine's
+`rift` binary; `.rift/state/`, per-checkout run state and adoption markers;
+git ignores both through the
 `.rift/.gitignore` `init` writes where none exists — one it finds is kept as
 found, and when that one lets `.rift/state/` through, `init` says so in one
 line rather than edit it; the five hooks and their sidecar

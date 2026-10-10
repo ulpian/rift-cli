@@ -35,7 +35,7 @@ mod common;
 mod document_fixture;
 use document_fixture::{
     corpus, document_rows, hook, json_str, plant_the_documents, savings_json, seed_repo,
-    warm_the_family, Member,
+    state_a_patient_budget, warm_the_family, Member,
 };
 
 /// What one document cost, both ways.
@@ -490,24 +490,6 @@ fn the_doc_fixture_removes_at_least_ninety_percent_of_its_pool() {
         1,
         "one family made every one of these decisions: {savings}"
     );
-}
-
-/// Give the gate's conversion a budget the figures do not depend on.
-///
-/// The warm pass converts under the worker's own thirty seconds, and a
-/// document it did not finish on a loaded machine is converted again when the
-/// session reads it — under the policy's quarter-second, which a debug build
-/// re-spawned on that machine misses. The read then proceeds unconverted and
-/// the bar would be measuring the load. The budget changes when a conversion
-/// is given up, never what one says: it is outside the sidecar key.
-fn state_a_patient_budget(repo: &Path) {
-    let policies = repo.join(".rift").join("policies");
-    std::fs::create_dir_all(&policies).unwrap();
-    std::fs::write(
-        policies.join("serve.toml"),
-        "[doc]\nconvert_budget_ms = 30000\n",
-    )
-    .unwrap();
 }
 
 /// One `rift recall doc-read --json` call, as an agent with no amendment

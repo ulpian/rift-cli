@@ -92,11 +92,12 @@ fn a_cache_miss_converts_through_the_respawned_binary_within_the_deadline_or_fal
     // and the fallback is a refusal, never a panic and never a wait. Which of
     // the two happens depends on the machine, so the test asserts the property
     // that must hold on both, and nothing about the test's own clock. The
-    // converter's deadline starts once the spawn has returned and ends in a
-    // kill, so a stopwatch around the call measures how fast this machine
-    // execs and reaps a process, not the bound the converter keeps; that bound
-    // is the budget it carries, and a wait past it can only come back as the
-    // `deadline` refusal asserted here.
+    // converter's deadline starts before the spawn and the caller leaves when
+    // it falls, with the kill and the reap following on a worker thread, so a
+    // stopwatch around the call would measure how this machine schedules a
+    // thread, not the bound the converter keeps; that bound is the budget it
+    // carries, and a wait past it can only come back as the `deadline`
+    // refusal asserted here.
     assert_eq!(converter.budget(), DEFAULT_BUDGET);
     match converter.convert(CSV, "csv", &caps) {
         Ok(markdown) => assert!(markdown.text.contains("| alpha | 1 |"), "{markdown:?}"),

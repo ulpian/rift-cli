@@ -149,6 +149,15 @@ manifest entry — a fresh clone with committed descriptors, a wiped state
 directory, an install predating the manifest. Refusing those would strand users
 on files Rift produced, so other proofs exist, any one sufficient.
 
+**Committing descriptors is not recommended.**
+Each one names the `rift` binary of the machine that wrote it, and set-up is
+per machine, so each machine runs `rift init` or `rift enable` for itself.
+The `.rift/.gitignore` a new `rift init` writes names `agents/` beside
+`state/`, so fresh descriptors stay out of `git status`.
+A descriptor a repository already committed stays tracked and is still read,
+and an ignore file that is already there, the older one naming only `state/`
+included, is never rewritten.
+
 **For descriptors**, the document is recognised by *shape*: its key set is
 exactly the one Rift writes, `agent` matches this token, the binary path is
 absolute, and every hook entry is precisely `{verb, command}` spelled
