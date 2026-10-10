@@ -13,9 +13,15 @@
 //! hook path where the developer is waiting:
 //!
 //! - **The deadline is the parent's.** [`DEFAULT_BUDGET`] is 250 ms, measured
-//!   from before the spawn, and it bounds the caller's whole wait: the spawn,
-//!   the kill and the reap happen on a worker thread, and the caller leaves
-//!   when the budget does. The child is stopped by killing it rather than by
+//!   from before the spawn, and it bounds the caller's whole wait: the spawn
+//!   and the reap happen on a worker thread, and the caller leaves when the
+//!   budget does. A child that has spawned is dead when the caller leaves:
+//!   the caller kills it on its way out, because a hook exits its process
+//!   straight after and a thread does not outlive that, and the reap follows
+//!   on the worker. A child whose spawn is still in flight is killed when the
+//!   spawn returns; if the hook has exited by then, the child reads the end
+//!   of an empty document from a pipe whose writer died with the hook,
+//!   refuses it and exits. The child is stopped by killing it rather than by
 //!   asking it to stop. A parser wedged on a hostile file cannot be reasoned
 //!   with, and the read it was going to improve still has to happen.
 //! - **Every failure is one failure.** A missing helper, a deadline, a crash,
@@ -34,7 +40,7 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::{is_supported_extension, wire, ConvertCaps, DocConverter, DocError, Markdown};
@@ -99,7 +105,22 @@ struct Call {
     /// The instant before the spawn, which the deadline is measured from.
     started: Instant,
     budget: Duration,
+    /// Where the worker keeps the child, so the caller can kill it.
+    slot: Arc<Mutex<Slot>>,
     watch: Watch,
+}
+
+/// The child, shared between the worker that spawned it and the caller that
+/// may have to kill it on its way out.
+///
+/// The worker owns the reap: the caller only ever kills, so it never waits
+/// on a child, and the zombie a kill leaves is collected on the worker.
+#[derive(Default)]
+struct Slot {
+    child: Option<Child>,
+    /// The caller has left at the deadline: a child stored after this is
+    /// killed as it is stored.
+    abandoned: bool,
 }
 
 /// What a test can see of the reap that happens after the caller has left.
@@ -107,13 +128,17 @@ struct Call {
 /// Empty outside tests. Inside them, `hold` keeps the worker at the kill
 /// until the test lets it go, so the helper's being alive after the call
 /// returned is a fact rather than a race, and `reaped` reports the reap, so
-/// a test waits for that event instead of for a length of time.
+/// a test waits for that event instead of for a length of time. `spawned`
+/// reports the child's pid once it is in the [`Slot`], so a test can ask
+/// whether a child that existed at the return was still running.
 #[derive(Default)]
 struct Watch {
     #[cfg(test)]
     hold: Option<mpsc::Receiver<()>>,
     #[cfg(test)]
     reaped: Option<mpsc::Sender<()>>,
+    #[cfg(test)]
+    spawned: Option<mpsc::Sender<u32>>,
 }
 
 impl ChildProcessConverter {
@@ -183,10 +208,10 @@ impl ChildProcessConverter {
     /// system assesses a program it has not run before, and nothing can
     /// interrupt it. A deadline started after it, or a kill and reap done
     /// here after the deadline, would add both to what the developer waits.
-    /// So this thread waits on one channel for at most the budget and
-    /// leaves; the worker, whenever its spawn returns, finishes the call on
-    /// its own deadline, kills and reaps the child, and its answer goes
-    /// unread.
+    /// So this thread waits on one channel for at most the budget, kills the
+    /// child if one has spawned, and leaves; the worker, whenever its spawn
+    /// returns, finishes the call on its own deadline, kills and reaps the
+    /// child, and its answer goes unread.
     fn run(
         &self,
         bytes: &[u8],
@@ -195,6 +220,7 @@ impl ChildProcessConverter {
         watch: Watch,
     ) -> Result<Vec<u8>, DocError> {
         let started = Instant::now();
+        let slot = Arc::new(Mutex::new(Slot::default()));
         let call = Call {
             command: self.command(ext, caps),
             // Copied, because the worker may outlive this call.
@@ -202,6 +228,7 @@ impl ChildProcessConverter {
             ceiling: output_ceiling(caps),
             started,
             budget: self.budget,
+            slot: Arc::clone(&slot),
             watch,
         };
         let (sender, receiver) = mpsc::channel();
@@ -215,7 +242,10 @@ impl ChildProcessConverter {
         }
         match receiver.recv_timeout(self.budget.saturating_sub(started.elapsed())) {
             Ok(outcome) => outcome,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(DocError::Engine { code: DEADLINE }),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                abandon(&slot);
+                Err(DocError::Engine { code: DEADLINE })
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(DocError::Engine {
                 code: HELPER_BROKEN,
             }),
@@ -278,6 +308,7 @@ fn converse(call: Call) -> Result<Vec<u8>, DocError> {
         ceiling,
         started,
         budget,
+        slot,
         watch,
     } = call;
     let Ok(mut child) = command.spawn() else {
@@ -285,8 +316,10 @@ fn converse(call: Call) -> Result<Vec<u8>, DocError> {
             code: HELPER_MISSING,
         });
     };
-    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        reap(&mut child, watch);
+    let pipes = (child.stdin.take(), child.stdout.take());
+    keep(&slot, child, &watch);
+    let (Some(mut stdin), Some(stdout)) = pipes else {
+        reap(&slot, watch);
         return Err(DocError::Engine {
             code: HELPER_BROKEN,
         });
@@ -325,18 +358,63 @@ fn converse(call: Call) -> Result<Vec<u8>, DocError> {
     // Unconditionally, on every path: a helper that answered and then kept
     // running is as much of a problem as one that never answered, and the
     // exit status is not the channel this reads anyway.
-    reap(&mut child, watch);
+    reap(&slot, watch);
     outcome
 }
 
+/// The caller's way out at the deadline: one kill, and no wait.
+///
+/// The hook that called this exits its process once it has answered, and the
+/// worker thread dies with it, so a kill left to the worker could be lost and
+/// the child parsing a hostile document would outlive the hook. A child not
+/// yet in the slot is still being spawned; marking the slot abandoned has the
+/// worker kill it as it stores it.
+fn abandon(slot: &Mutex<Slot>) {
+    let mut slot = lock(slot);
+    slot.abandoned = true;
+    if let Some(child) = slot.child.as_mut() {
+        let _ = child.kill();
+    }
+}
+
+/// Put a freshly spawned child where the caller can kill it, killing it
+/// first if the caller has already left.
+fn keep(slot: &Mutex<Slot>, mut child: Child, watch: &Watch) {
+    let mut slot = lock(slot);
+    if slot.abandoned {
+        let _ = child.kill();
+    }
+    // Reported under the lock and after the kill, so a test that sees the
+    // pid after the caller left sees a child the caller's exit has settled.
+    #[cfg(test)]
+    if let Some(spawned) = &watch.spawned {
+        let _ = spawned.send(child.id());
+    }
+    #[cfg(not(test))]
+    let _ = watch;
+    slot.child = Some(child);
+}
+
+/// The slot, whether or not a thread panicked holding it: what it holds is a
+/// child to kill, and a kill is still right after a panic.
+fn lock(slot: &Mutex<Slot>) -> MutexGuard<'_, Slot> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Kill the helper and collect its exit, so that no call leaves a zombie.
-fn reap(child: &mut Child, watch: Watch) {
+///
+/// The kill may be the second, after the caller's; on a child that is
+/// already dead it does nothing.
+fn reap(slot: &Mutex<Slot>, watch: Watch) {
     #[cfg(test)]
     if let Some(hold) = &watch.hold {
         let _ = hold.recv();
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    let child = lock(slot).child.take();
+    if let Some(mut child) = child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     #[cfg(test)]
     if let Some(reaped) = watch.reaped {
         let _ = reaped.send(());
@@ -536,8 +614,8 @@ mod tests {
         );
         let (reaped, on_reaped) = mpsc::channel();
         let watch = Watch {
-            hold: None,
             reaped: Some(reaped),
+            ..Watch::default()
         };
         let result = ChildProcessConverter::at(helper)
             .with_budget(Duration::from_millis(120))
@@ -551,72 +629,89 @@ mod tests {
 
     /// The budget is the caller's whole wait: a helper that has not even
     /// begun its work when the deadline falls is abandoned there, and the
-    /// kill and the reap happen afterwards, off the caller's thread.
+    /// reap happens afterwards, off the caller's thread.
     ///
-    /// The stand-in's start is slow — it hands its pid through a fifo and
-    /// sleeps before it would read a byte — and the reaper is held at the
-    /// kill until the test lets it go, so "the call returned without waiting
-    /// for the helper" is judged by the helper still running at the return,
-    /// and "never a zombie" by its pid vanishing once the reap is reported.
+    /// The stand-in never reads a byte, and the reaper is held until the
+    /// test lets it go, so "the call returned without waiting for the reap"
+    /// is judged by the helper's pid still being in the process table at the
+    /// return — killed, but not yet collected — and "never a zombie" by that
+    /// pid vanishing once the reap is reported. A pid that had not arrived by
+    /// the return belongs to a spawn still in flight, and only its reap is
+    /// judged.
     #[cfg(unix)]
     #[test]
     fn a_helper_slow_to_start_is_abandoned_at_the_deadline_and_reaped_after_the_return() {
         let dir = scratch("slow-start");
-        let fifo = dir.join("helper.pid");
-        assert!(Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap()
-            .success());
-        let helper = stand_in(
-            &dir,
-            "rift-doc",
-            r#"echo $$ > "${0%/*}/helper.pid"; exec sleep 30"#,
-        );
+        let helper = stand_in(&dir, "rift-doc", "exec sleep 30");
         let (release, hold) = mpsc::channel();
         let (reaped, on_reaped) = mpsc::channel();
+        let (spawned, on_spawned) = mpsc::channel();
         let watch = Watch {
             hold: Some(hold),
             reaped: Some(reaped),
+            spawned: Some(spawned),
         };
         let result = ChildProcessConverter::at(helper)
             .with_budget(Duration::from_millis(120))
             .run(CSV, "csv", &ConvertCaps::default(), watch);
         assert_eq!(result, Err(DocError::Engine { code: DEADLINE }));
-        let events = first_of_pid_or_reap(fifo, on_reaped);
-        let Some(pid) = events.recv().unwrap() else {
-            panic!("the helper was reaped before the call returned");
-        };
-        assert!(
-            is_alive(&pid),
-            "the helper {pid} was not running at the return"
-        );
+        let at_return = on_spawned.try_recv().ok();
+        if let Some(pid) = at_return {
+            assert!(
+                is_alive(&pid.to_string()),
+                "the helper {pid} was reaped before the call returned"
+            );
+        }
         release.send(()).unwrap();
-        assert_eq!(events.recv().unwrap(), None, "the reap was never reported");
-        assert!(!is_alive(&pid), "the helper {pid} outlived its reap");
+        on_reaped.recv().unwrap();
+        let pid = at_return.unwrap_or_else(|| on_spawned.recv().unwrap());
+        assert!(
+            !is_alive(&pid.to_string()),
+            "the helper {pid} outlived its reap"
+        );
     }
 
-    /// One channel carrying whichever comes first: the pid the stand-in
-    /// writes into `fifo` (`Some`), or the reaper's report (`None`). A helper
-    /// killed before it wrote its pid never opens the fifo, so waiting on the
-    /// fifo alone would wait forever; the reap ends that wait instead.
+    /// A helper that has spawned is dead when the caller leaves, and only its
+    /// reap waits for the worker: the hook that called this exits the
+    /// process straight after, and a thread does not outlive that, so a kill
+    /// left to the worker could be lost with it and leave the one process
+    /// that parses hostile input running.
+    ///
+    /// Whether the spawn returned before the deadline is the machine's
+    /// business, not the test's. When the worker reported a pid by the
+    /// return, that helper must not be running while the reap is still held;
+    /// when it did not, the spawn was in flight, which this test does not
+    /// judge, and the reap alone is checked.
     #[cfg(unix)]
-    fn first_of_pid_or_reap(
-        fifo: PathBuf,
-        on_reaped: mpsc::Receiver<()>,
-    ) -> mpsc::Receiver<Option<String>> {
-        let (sender, events) = mpsc::channel();
-        let pid_sender = sender.clone();
-        std::thread::spawn(move || {
-            let pid = std::fs::read_to_string(fifo).unwrap();
-            let _ = pid_sender.send(Some(pid.trim().to_owned()));
-        });
-        std::thread::spawn(move || {
-            if on_reaped.recv().is_ok() {
-                let _ = sender.send(None);
-            }
-        });
-        events
+    #[test]
+    fn a_spawned_helper_is_not_running_when_the_call_returns_at_the_deadline() {
+        let dir = scratch("killed-at-return");
+        let helper = stand_in(
+            &dir,
+            "rift-doc",
+            r#"cat > /dev/null; exec sh -c 'echo $$ > "$0"; exec sleep 30' "${0%/*}/sleeper.pid""#,
+        );
+        let (release, hold) = mpsc::channel();
+        let (reaped, on_reaped) = mpsc::channel();
+        let (spawned, on_spawned) = mpsc::channel();
+        let watch = Watch {
+            hold: Some(hold),
+            reaped: Some(reaped),
+            spawned: Some(spawned),
+        };
+        let result = ChildProcessConverter::at(helper)
+            .with_budget(Duration::from_millis(120))
+            .run(CSV, "csv", &ConvertCaps::default(), watch);
+        assert_eq!(result, Err(DocError::Engine { code: DEADLINE }));
+        if let Ok(pid) = on_spawned.try_recv() {
+            assert!(
+                !is_running(&pid.to_string()),
+                "the helper {pid} was running when the call returned"
+            );
+        }
+        release.send(()).unwrap();
+        on_reaped.recv().unwrap();
+        assert_nothing_it_spawned_survives(&dir.join("sleeper.pid"));
     }
 
     /// The process that was sleeping when the deadline fell is gone.
@@ -638,7 +733,8 @@ mod tests {
         );
     }
 
-    /// Whether `pid` names a live process, by `kill -0`.
+    /// Whether `pid` is in the process table, by `kill -0`: a zombie counts,
+    /// so this says "not yet reaped", not "running"; see [`is_running`].
     #[cfg(unix)]
     fn is_alive(pid: &str) -> bool {
         Command::new("kill")
@@ -647,6 +743,24 @@ mod tests {
             .status()
             .unwrap()
             .success()
+    }
+
+    /// Whether `pid` is running: in the process table and not a zombie.
+    ///
+    /// `kill -0` cannot say this, because it succeeds on a zombie, and a
+    /// helper that was killed but not yet reaped is one. So the state `ps`
+    /// reports is read instead: a pid `ps` does not know, or one whose state
+    /// starts with `Z`, is not running.
+    #[cfg(unix)]
+    fn is_running(pid: &str) -> bool {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .stderr(Stdio::null())
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        let stat = stat.trim();
+        out.status.success() && !stat.is_empty() && !stat.starts_with('Z')
     }
 
     /// Windows has no `kill -0`, and the stand-in there is a wrapper whose kill

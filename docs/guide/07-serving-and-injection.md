@@ -587,11 +587,15 @@ ms, in a child process — `rift` re-spawned on a hidden route, so the deadline
 is enforced by killing it and a hostile document dies in another address
 space; past it the read runs untouched and the work is journaled for the
 detached worker, so the second read is a cached hit.
-The 250 ms is the hook's whole wait, measured from before the spawn: the spawn,
-the kill and the reap run on a thread of their own, because a first exec the
-system has to assess can take seconds under load and cannot be interrupted, and
-the hook leaves when the budget does while that thread reaps the child behind
-it.
+The 250 ms is the hook's whole wait, measured from before the spawn: the spawn
+and the reap run on a thread of their own, because a first exec the system has
+to assess can take seconds under load and cannot be interrupted, and the hook
+leaves when the budget does. A child that has spawned is dead when it leaves —
+the hook kills it on the way out, since the hook's process exits straight after
+and takes that thread with it — and the thread reaps it behind. A child whose
+spawn is still in flight is killed when the spawn returns; if the hook is gone
+by then, the child finds an empty document on a pipe whose writer died with
+the hook, refuses it and exits.
 
 **An amendment that does not take effect is caught, not assumed.** The executed
 tool input is compared afterwards with what Rift substituted; a mismatch — a
