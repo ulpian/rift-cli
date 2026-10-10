@@ -48,10 +48,12 @@ pub struct CheckpointFacts {
     /// That session's agent family (`claude-code`, `codex`, …), filtered to a
     /// label charset by whoever answers — this crate never prints it.
     pub agent: Option<String>,
-    /// The session's four recorded token classes, summed over its model calls.
+    /// The four token classes of the model calls this checkpoint froze: its
+    /// first session's calls since that session's previous checkpoint, up to
+    /// this one.
     pub tokens: Option<TokenClasses>,
-    /// Micro-USD over that session's current (non-superseded, open-valid) cost
-    /// facts. `None` when no fact rows exist — tokens without a priced bill
+    /// Micro-USD of those same calls under the current catalog quote. `None`
+    /// when no call in the window is priced — tokens without a priced bill
     /// stay tokens.
     pub cost_micros: Option<i64>,
 }
