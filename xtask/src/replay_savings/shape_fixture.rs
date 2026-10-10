@@ -15,7 +15,7 @@ use super::Options;
 
 /// The shapes naming a work-tree file, in the order their results shrink —
 /// the last two return the same bytes, so the tie falls to declaration order.
-const NAMED_IN_RANK_ORDER: [&str; 26] = [
+const NAMED_IN_RANK_ORDER: [&str; 25] = [
     "piped_into_filter:grep",
     "sed_script",
     "nl_or_bat_option",
@@ -24,7 +24,6 @@ const NAMED_IN_RANK_ORDER: [&str; 26] = [
     "sed_option",
     "several_paths",
     "search_flags",
-    "search_several_paths",
     "git_show",
     "git_diff",
     "git_log_patch_or_blame",
@@ -85,8 +84,8 @@ fn every_refused_shape_is_counted_once_and_ranked_by_its_tokens() {
         assert_eq!(row.all.calls, 1, "{}", shape.key());
         assert_eq!(row.named.calls, u64::from(named), "{}", shape.key());
     }
-    let (_, numbered) = rows[24];
-    let (_, option) = rows[25];
+    let (_, numbered) = rows[23];
+    let (_, option) = rows[24];
     assert_eq!(numbered, option, "the tie the declaration order breaks");
 }
 
@@ -101,8 +100,8 @@ fn the_shapes_add_up_to_the_two_invisible_bounds() {
         named, report.invisible_shell_named_file.tokens,
         "the tight one"
     );
-    assert_eq!(report.invisible_shell.calls, 28);
-    assert_eq!(report.invisible_shell_named_file.calls, 26);
+    assert_eq!(report.invisible_shell.calls, 27);
+    assert_eq!(report.invisible_shell_named_file.calls, 25);
 }
 
 #[test]
@@ -114,13 +113,13 @@ fn the_ranked_section_prints_under_the_invisible_lines_and_names_no_command() {
     let named = at("of them, naming a file this checkout has");
     assert!(lines[named + 1].starts_with("    refused, by shape"));
     assert!(lines[named + 2].starts_with("      piped_into_filter:grep "));
-    assert!(lines[named + 29].starts_with("      piped_from:cargo "));
-    assert!(lines[named + 30].contains("shell calls / of them recognised"));
+    assert!(lines[named + 28].starts_with("      piped_from:cargo "));
+    assert!(lines[named + 29].contains("shell calls / of them recognised"));
     let document: Value = serde_json::from_str(&render_json(&report)).unwrap();
     let rows = document["invisible_shell_read_shapes"].as_array().unwrap();
-    assert_eq!(rows.len(), 28);
+    assert_eq!(rows.len(), 27);
     assert_eq!(rows[0]["shape"], "piped_into_filter:grep");
-    assert_eq!(rows[27]["naming_a_work_tree_file"]["calls"], 0);
+    assert_eq!(rows[26]["naming_a_work_tree_file"]["calls"], 0);
     let rendered = [table, render_json(&report)];
     for text in &rendered {
         assert!(!text.contains(SENTINEL), "a prompt reached the output");

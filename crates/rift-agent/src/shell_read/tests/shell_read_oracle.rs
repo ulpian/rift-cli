@@ -272,7 +272,7 @@ fn search_non_paths(member: &[Token]) -> Vec<usize> {
     let Some((head, rest)) = member.split_first() else {
         return Vec::new();
     };
-    let value_letters = match bare_word(head) {
+    let value_letters = match bare_word(head).map(program) {
         Some("grep" | "egrep" | "fgrep") => GREP_VALUE_LETTERS,
         Some("rg") if rest.first().and_then(bare_word) != Some("--files") => RG_VALUE_LETTERS,
         _ => return Vec::new(),
@@ -320,7 +320,10 @@ fn value_option(option: &str, value_letters: &str) -> Option<(char, bool)> {
 }
 
 /// The directory a genuinely leading `cd` named, stepping over the `echo`
-/// and `printf` labels that may stand in front of it, each joined by `&&`.
+/// and `printf` labels that may stand in front of it, each joined by `&&` or
+/// `;`. A `cd` joined by `;` still names the directory every relative word
+/// after it is opened from whenever that `cd` succeeded, and when it failed
+/// the joined name is one no file answers to.
 fn leading_directory(tokens: &[Token]) -> Option<&str> {
     let mut rest = tokens;
     loop {
@@ -328,7 +331,7 @@ fn leading_directory(tokens: &[Token]) -> Option<&str> {
             .iter()
             .position(|token| !matches!(token, Token::Word { .. }))?;
         let (head, tail) = rest.split_at(end);
-        if tail.first() != Some(&Token::And) {
+        if !matches!(tail.first(), Some(Token::And | Token::Semi)) {
             return None;
         }
         let command = head.first().and_then(bare_word);
@@ -353,8 +356,19 @@ fn lists_implicitly(tokens: &[Token]) -> bool {
         .split(|token| !matches!(token, Token::Word { .. }))
         .any(|member| {
             let words: Vec<_> = member.iter().map(bare_word).collect();
-            words == [Some("rg"), Some("--files")]
+            matches!(words.as_slice(), [Some(rg), Some("--files")] if program(rg) == "rg")
         })
+}
+
+/// The program a search or listing command word runs: the word, or what
+/// follows `/bin/` or `/usr/bin/` in it — the two directories whose copies are
+/// the system's own. A `cd` and a label are read only bare, so the callers
+/// that ask about those never come here.
+fn program(word: &str) -> &str {
+    ["/usr/bin/", "/bin/"]
+        .into_iter()
+        .find_map(|dir| word.strip_prefix(dir))
+        .unwrap_or(word)
 }
 
 /// Whether a path is rooted, so a leading `cd` says nothing about it: a

@@ -1,7 +1,7 @@
 //! What is left alone: a shell that would do more than read, a composition
 //! the grammar does not spell, and the quoted separator that is data.
 
-use crate::shell_read::{recognise, ShellSpan};
+use crate::shell_read::{recognise, ShellSpan, MAX_CHAIN_READS};
 
 use super::{listing, read};
 
@@ -90,7 +90,6 @@ fn a_composition_the_grammar_does_not_spell_is_left_alone() {
         "cd crates",
         "cd crates && cd rift-core && cat src/lib.rs",
         "cat src/lib.rs && cd crates && cat src/main.rs",
-        "cd crates; cat src/lib.rs",
         "cd && cat src/lib.rs",
         "cd -P crates && cat src/lib.rs",
         "cd crates other && cat src/lib.rs",
@@ -207,8 +206,8 @@ fn a_count_with_a_sign_is_never_read_as_a_count() {
 /// Each line here is one step outside the flagged single-file search: a
 /// flag that reaches past the one file (a recursion, a pattern file, a
 /// glob), one that prints something other than the file's lines or their
-/// count (a file name, a part of a line, the lines that did not match), a second
-/// path or none, a context count that is not one, a long option, an option
+/// count (a file name, a part of a line, the lines that did not match), no
+/// path at all, a context count that is not one, a long option, an option
 /// written after the pattern — which one `grep` permutes and another reads
 /// as a file — and a pattern a search tool would take for an option.
 #[test]
@@ -226,7 +225,6 @@ fn a_search_flag_the_grammar_does_not_pin_is_left_alone() {
         // Something other than the file's lines.
         "grep -l needle src/lib.rs",
         "grep -cl needle src/lib.rs",
-        "grep -c needle src/lib.rs src/main.rs",
         "grep -rc needle src",
         "grep needle src/lib.rs -cv",
         "grep -L needle src/lib.rs",
@@ -235,9 +233,7 @@ fn a_search_flag_the_grammar_does_not_pin_is_left_alone() {
         "grep -v needle src/lib.rs",
         "grep -nv needle src/lib.rs",
         "rg -r x needle src/lib.rs",
-        // One path, not two and not none.
-        "grep -n needle src/lib.rs src/main.rs",
-        "grep -n -e needle src/lib.rs src/main.rs",
+        // A path, not none.
         "grep -n needle",
         "grep -n -e needle",
         "grep -n -e src/lib.rs",
@@ -281,8 +277,7 @@ fn a_search_flag_the_grammar_does_not_pin_is_left_alone() {
 ///
 /// The permuted spelling is read the way the search tool reads it, so each
 /// line here is one step outside that reading: a flag after the pattern
-/// that the set does not pin, a second path written after the options, a
-/// word after `--` that would have been an option before it, a pattern
+/// that the set does not pin, a word after `--` that would have been an option before it, a pattern
 /// after `--` that the tool would still not take for a file, and a quoted
 /// word that the tool reads as an option wherever it stands.
 #[test]
@@ -294,9 +289,6 @@ fn a_late_option_the_grammar_does_not_pin_is_left_alone() {
         "grep needle src/lib.rs -A -3",
         "grep needle src/lib.rs --line-number",
         "rg needle src/lib.rs -g '*.rs'",
-        "grep -n needle src/lib.rs -A 3 src/main.rs",
-        "grep needle -n src/lib.rs src/main.rs",
-        "grep -e needle src/lib.rs -n src/main.rs",
         "grep needle -- -n src/lib.rs",
         "grep -- needle src/lib.rs -n",
         "grep -n -- needle -- src/lib.rs",
@@ -311,4 +303,147 @@ fn a_late_option_the_grammar_does_not_pin_is_left_alone() {
             "{command:?} is not recognised"
         );
     }
+}
+
+/// **A `cd` joined by `;` stops exactly where the `&&` one does.**
+///
+/// The `;` admits the same one leading `cd` and nothing more: a second `cd`,
+/// one after a read, one with no directory, an option or two operands, a
+/// `cd` that ends the line, and the other joins a shell has — `||`, a
+/// background `&`, a line break — are each left alone.
+#[test]
+fn a_cd_joined_by_a_semicolon_is_admitted_only_at_the_front() {
+    for command in [
+        "cd crates; cd rift-core; cat src/lib.rs",
+        "cd crates; cd rift-core && cat src/lib.rs",
+        "cat src/lib.rs; cd crates; cat src/main.rs",
+        "cd; cat src/lib.rs",
+        "cd -P crates; cat src/lib.rs",
+        "cd crates other; cat src/lib.rs",
+        "cd crates;",
+        "cd crates; ",
+        "cd crates || cat src/lib.rs",
+        "cd crates & cat src/lib.rs",
+        "cd crates\ncat src/lib.rs",
+        "cd crates\n cat src/lib.rs",
+        "cd $HOME; cat src/lib.rs",
+        "cd ~/repo; cat src/lib.rs",
+        "cd crates; cargo test",
+        "cd crates; ls src && cat a.rs",
+        "cd crates;; cat src/lib.rs",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}
+
+/// **Only `/bin` and `/usr/bin` name a command, and only in the command
+/// position.**
+///
+/// Every other directory is one a user or a package manager writes, so a
+/// program found there is whatever was put there; a relative spelling, an
+/// empty name, a nested one or a path through `..` names no command the
+/// grammar knows. `cd` is a shell builtin, and the `/usr/bin/cd` a system
+/// ships runs in a child process and moves nobody, so it is never a leading
+/// `cd`. A label and the narrowing commands after a pipe keep their bare
+/// spelling.
+#[test]
+fn a_command_spelled_from_any_other_directory_is_left_alone() {
+    for command in [
+        "/usr/local/bin/sed -n '1,9p' src/lib.rs",
+        "/opt/homebrew/bin/grep -n needle src/lib.rs",
+        "/usr/local/bin/ggrep -n needle src/lib.rs",
+        "/usr/bin/ggrep -n needle src/lib.rs",
+        "./cat src/lib.rs",
+        "bin/cat src/lib.rs",
+        "usr/bin/cat src/lib.rs",
+        "/usr/bin/ src/lib.rs",
+        "/bin/ src/lib.rs",
+        "/usr/bin/x/cat src/lib.rs",
+        "/usr/bin/../bin/cat src/lib.rs",
+        "/usr//bin/cat src/lib.rs",
+        "//bin/cat src/lib.rs",
+        "/sbin/cat src/lib.rs",
+        "'/bin/cat' src/lib.rs",
+        "\"/usr/bin/sed\" -n '1,9p' src/lib.rs",
+        "/usr/bin/cd crates && cat src/lib.rs",
+        "/bin/cd crates && cat src/lib.rs",
+        "cat src/lib.rs | /usr/bin/head -n 5",
+        "cat src/lib.rs | /usr/bin/tail -5",
+        "/bin/echo hi && cat src/lib.rs",
+        "cat src/lib.rs && /usr/bin/printf x",
+        "/usr/bin/awk 'NR<5' src/lib.rs",
+        "/usr/bin/sed 's/a/b/' src/lib.rs",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}
+
+/// **Several named files are searched only as one search, whole.**
+///
+/// The several-file search stops where the one-file search does — no flag
+/// the set does not pin, wherever it stands — and at three places of its
+/// own: a narrowing pipe, which cuts the files' matches *joined* and so is a
+/// run of none of them; a file list past the cap on reads one line may make;
+/// and a word after the pattern that the tool would take for an option.
+#[test]
+fn a_several_file_search_stops_where_the_one_file_search_does() {
+    let over_the_cap = (0..=MAX_CHAIN_READS)
+        .map(|n| format!("f{n}.rs"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for command in [
+        "grep -n needle src/lib.rs src/main.rs | head -n 5",
+        "grep -n needle src/lib.rs src/main.rs | tail -5",
+        "rg -n needle src/lib.rs src/main.rs | head -n 5",
+        "grep -rn needle src/lib.rs src/main.rs",
+        "grep -ln needle src/lib.rs src/main.rs",
+        "grep -hn needle src/lib.rs src/main.rs",
+        "grep -Hn needle src/lib.rs src/main.rs",
+        "grep -vn needle src/lib.rs src/main.rs",
+        "grep -n needle src/lib.rs src/*.rs",
+        "grep -n needle src/lib.rs $FILE",
+        "grep -n needle src/lib.rs src/main.rs -l",
+        "grep -n needle src/lib.rs -- -v",
+        "grep -n needle src/lib.rs '-v'",
+        "grep -n -- needle src/lib.rs -b.rs",
+        "grep -n needle src/lib.rs src/main.rs > out.txt",
+        &format!("grep -n needle {over_the_cap}"),
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+}
+
+/// **A control character is no letter of a word, quoted or not.**
+///
+/// Above ASCII the word walk takes any character as part of a path, but
+/// U+0080 to U+009F are control codes a terminal acts on, not letters of a
+/// name anybody wrote; inside quotes they already end the recognition, and
+/// outside them they end it the same way.
+#[test]
+fn a_control_character_in_a_bare_word_is_left_alone() {
+    for command in [
+        "cat \u{90}a.rs",
+        "cat a\u{85}.rs",
+        "grep -n needle \u{9b}src/lib.rs",
+        "cd crates/&& grep -nee / n-ep \u{90}\u{7d1}a-e 5 2",
+        "cd \u{90}dir && cat a.rs",
+    ] {
+        assert!(
+            recognise(command).is_none(),
+            "{command:?} is not recognised"
+        );
+    }
+    assert!(
+        recognise("cat \u{e9}t\u{e9}.rs").is_some(),
+        "a letter is a letter"
+    );
 }

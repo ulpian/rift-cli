@@ -304,6 +304,9 @@ GNU `grep` and `rg` do). A `grep` that does not would misread such a line,
 which only moves a measurement, since a search can never decline a read; any
 later form that grants coverage from a late option must first establish which
 `grep` runs.
+A search may name several files (`grep -n x a.rs b.rs`): it opens those and no
+others, so it is one search of each, recognised with no coverage; narrowed by a
+pipe it is left alone, because the cut falls on the files' matches joined.
 A `sed -n` script may also print one line (`'Ap'`), credited like a range, or
 several runs joined by `;` (`'1,40p;90,120p'`), which is one read per run and
 is credited with nothing: the runs reach the window as one output that can
@@ -315,12 +318,19 @@ keeps it as written (`grep -n "a\|b"`). An escape the shell resolves (`\$`,
 `` \` ``, `\"`, `\\`), an expansion, and a quoted path that spells a glob, a
 `~` or a kept backslash are left alone. A quoted path is credited exactly as a
 bare one is.
+A read or listing command may be spelled from `/bin` or `/usr/bin`
+(`/usr/bin/sed -n '1,40p' a.rs`), the system's own copies, and reads exactly
+as the bare word; any other directory, and a `cd`, a label or a narrowing
+command spelled that way, is left alone.
 Above it sit exactly three **compositions**, each admitted
 because the lines it delivers still follow from the line itself:
 
 - a single leading `cd <dir> &&`, the directory bare or quoted, after which
   every relative path in the line is read from there (a rooted path is
-  untouched);
+  untouched). A `cd <dir>;` is the same `cd`: the reads after a `;` run even
+  when the `cd` fails, but it fails only where the directory cannot be
+  entered, so every path read from it then names a file nobody can open and
+  nothing is recorded;
 - one trailing `| head -N`, `| head -n N`, `| tail -N` or `| tail -n N` on a
   member that is one read, which narrows the run that member produced to a
   prefix or a suffix of it. A suffix is a *count from the end*, so it travels

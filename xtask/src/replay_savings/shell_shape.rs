@@ -43,8 +43,6 @@ pub enum Shape {
     SeveralPaths,
     /// `grep` or `rg` with a flag.
     SearchFlags,
-    /// `grep` or `rg` over several paths.
-    SearchSeveralPaths,
     /// `git show <rev>:<path>`.
     GitShowRevPath,
     /// `git show` of a commit.
@@ -175,7 +173,6 @@ impl Shape {
             Self::SedOption => "sed_option",
             Self::SeveralPaths => "several_paths",
             Self::SearchFlags => "search_flags",
-            Self::SearchSeveralPaths => "search_several_paths",
             Self::GitShowRevPath => "git_show_rev_path",
             Self::GitShow => "git_show",
             Self::GitDiff => "git_diff",
@@ -466,7 +463,6 @@ fn vocabulary_shape(name: &str, rest: &[Word]) -> Shape {
         "head" | "tail" => head_tail_shape(rest),
         "sed" => sed_shape(rest),
         "grep" | "egrep" | "fgrep" | "rg" if options > 0 => Shape::SearchFlags,
-        "grep" | "egrep" | "fgrep" | "rg" if operands > 2 => Shape::SearchSeveralPaths,
         _ if operands > 1 && !matches!(name, "grep" | "egrep" | "fgrep" | "rg") => {
             Shape::SeveralPaths
         }
@@ -658,7 +654,7 @@ mod tests {
         assert_eq!(shape_of("sed -n '1,5p' a b"), Shape::SeveralPaths);
         assert_eq!(shape_of("head -n 5 a b"), Shape::SeveralPaths);
         assert_eq!(shape_of("grep -l x a"), Shape::SearchFlags);
-        assert_eq!(shape_of("rg x a b"), Shape::SearchSeveralPaths);
+        assert_eq!(shape_of("grep -l x a b"), Shape::SearchFlags);
     }
 
     #[test]

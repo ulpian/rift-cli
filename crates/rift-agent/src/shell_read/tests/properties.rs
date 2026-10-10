@@ -257,6 +257,23 @@ const UNPINNED_SEARCH_FLAGS: &[&str] = &[
     "-",
 ];
 
+/// One line of every command family, each starting with its command word.
+const SPELLED_FROM_A_DIRECTORY: &[&str] = &[
+    "cat src/lib.rs",
+    "nl src/lib.rs",
+    "head -n 40 src/lib.rs",
+    "tail -n 40 src/lib.rs | head -n 5",
+    "sed -n '12,48p' src/lib.rs",
+    "grep -n needle src/lib.rs",
+    "egrep 'a|b' src/lib.rs",
+    "fgrep needle src/lib.rs",
+    "rg -n needle src/lib.rs",
+    "ls -la crates",
+    "find crates -name '*.rs'",
+    "rg --files",
+    "cat src/lib.rs && echo hi",
+];
+
 proptest::proptest! {
     /// ★ A run of pinned flags reads the same wherever it stands before
     /// `--`: in front of the pattern, between the pattern and the path, or
@@ -392,6 +409,73 @@ proptest::proptest! {
                 );
             }
         }
+    }
+
+    /// ★ A command word spelled from `/bin` or `/usr/bin` reads exactly as
+    /// the bare word, and spelled from any other directory it reads as
+    /// nothing at all.
+    #[test]
+    fn a_command_word_reads_the_same_only_from_a_system_directory(
+        base in proptest::sample::select(SPELLED_FROM_A_DIRECTORY),
+        system in proptest::sample::select(&["/bin/", "/usr/bin/"][..]),
+        other in proptest::sample::select(&[
+            "/usr/local/bin/", "/opt/homebrew/bin/", "./", "bin/", "/sbin/", "/usr/bin/x/",
+            "/usr/bin/../bin/", "//bin/", "/usr//bin/",
+        ][..]),
+    ) {
+        let bare = recognise(base);
+        proptest::prop_assert!(bare.is_some(), "{base:?} is a form of the grammar");
+        let spelled = format!("{system}{base}");
+        proptest::prop_assert_eq!(recognise(&spelled), bare, "{}", spelled);
+        let elsewhere = format!("{other}{base}");
+        proptest::prop_assert!(recognise(&elsewhere).is_none(), "{elsewhere:?}");
+    }
+
+    /// ★ A leading `cd` joined by `;` reads exactly as the one joined by
+    /// `&&`, whatever follows it — a form of the grammar, a chain of them, or
+    /// a line the grammar leaves alone.
+    #[test]
+    fn a_leading_cd_reads_the_same_joined_by_either_separator(
+        dir in proptest::sample::select(&["crates", "'my crate'", "/w/a", "C:/r", "$HOME", "~/r"][..]),
+        rest in proptest::collection::vec(token(), 1..4),
+        spaced in proptest::bool::ANY,
+    ) {
+        let rest = rest.join(" ");
+        let semicolon = if spaced { " ; " } else { ";" };
+        let joined_by_semicolon = format!("cd {dir}{semicolon}{rest}");
+        let joined_by_and = format!("cd {dir} && {rest}");
+        proptest::prop_assert_eq!(
+            crate::shell_read::recognise(&joined_by_semicolon),
+            crate::shell_read::recognise(&joined_by_and),
+            "{}", joined_by_semicolon
+        );
+    }
+
+    /// ★ A search with any run of pinned flags over any number of named
+    /// files, up to the cap, is one content search per file in the order
+    /// the line names them, and none grants coverage.
+    #[test]
+    fn a_pinned_search_over_named_files_is_one_search_per_file(
+        command in proptest::sample::select(&["grep", "egrep", "fgrep", "rg"][..]),
+        flags in proptest::collection::vec(proptest::sample::select(PINNED_SEARCH_FLAGS), 0..4),
+        count in 1_usize..=crate::shell_read::MAX_CHAIN_READS,
+    ) {
+        let pattern = if flags.iter().any(|flag| flag.ends_with("needle")) { "" } else { "needle" };
+        let paths: Vec<String> = (0..count).map(|n| format!("src/f{n}.rs")).collect();
+        let line = format!("{command} {} {pattern} {}", flags.join(" "), paths.join(" "));
+        let Some(ShellCall::Read(reads)) = recognise(&line) else {
+            return Err(proptest::test_runner::TestCaseError::fail(format!(
+                "{line:?} is a pinned search and was not recognised"
+            )));
+        };
+        let read_paths: Vec<&str> = reads.iter().map(|read| read.path.as_str()).collect();
+        proptest::prop_assert_eq!(read_paths, paths.iter().map(String::as_str).collect::<Vec<_>>());
+        for read in &reads {
+            proptest::prop_assert_eq!(read.span, crate::shell_read::ShellSpan::Matching);
+            proptest::prop_assert!(read.read_request().is_none());
+        }
+        let narrowed = format!("{line} | head -n 5");
+        proptest::prop_assert_eq!(recognise(&narrowed).is_some(), count == 1, "{}", narrowed);
     }
 
     /// ★ A recognised count is never signed.

@@ -59,6 +59,43 @@ fn a_leading_cd_puts_every_path_under_its_directory() {
     ]);
 }
 
+/// **A leading `cd` joined by `;` is the same `cd`.**
+///
+/// The two joins differ only when the `cd` fails, and a `cd` fails only
+/// where its directory cannot be entered — so every relative path read from
+/// it names a file nobody can open, and the caller that resolves it records
+/// nothing. Where the `cd` succeeds the lines are the `&&` lines exactly, so
+/// each one is read as its `&&` spelling is, labels and all, and a rooted
+/// path is still what it says it is.
+#[test]
+fn a_leading_cd_joined_by_a_semicolon_reads_as_the_and_join() {
+    for (semicolon, and) in [
+        ("cd crates; cat src/lib.rs", "cd crates && cat src/lib.rs"),
+        (
+            "cd '/w/my crate'; sed -n '1,40p' a.rs; sed -n '90,120p' b.rs",
+            "cd '/w/my crate' && sed -n '1,40p' a.rs; sed -n '90,120p' b.rs",
+        ),
+        (
+            "cd crates ; head -n 5 a.rs && grep -n x b.rs",
+            "cd crates && head -n 5 a.rs && grep -n x b.rs",
+        ),
+        (
+            "cd crates; echo '=== a ==='; cat a.rs",
+            "cd crates && echo '=== a ===' && cat a.rs",
+        ),
+        (
+            "echo start; cd crates; cat a.rs",
+            "echo start && cd crates && cat a.rs",
+        ),
+        ("cd crates;cat /etc/hosts", "cd crates && cat /etc/hosts"),
+        ("cd crates; ls src", "cd crates && ls src"),
+    ] {
+        assert!(recognise(and).is_some(), "{and:?}");
+        assert_eq!(recognise(semicolon), recognise(and), "{semicolon:?}");
+        assert_eq!(leading_cd(semicolon), leading_cd(and), "{semicolon:?}");
+    }
+}
+
 /// **The trailing narrowing pipe**, the second shape: a `| head -N` or a
 /// `| tail -N` in either spelling travels with the one read it follows,
 /// whatever span that read had.
@@ -332,6 +369,8 @@ fn the_witness_needs_a_complete_word_or_a_named_leading_directory() {
         ("a.rs", "cat a.rs|head -n 2"),
         ("my crate/a.rs", "cd 'my crate'&&cat a.rs"),
         ("dir/a.rs", "echo label&&cd dir/&&cat a.rs"),
+        ("dir/a.rs", "cd dir;cat a.rs"),
+        ("dir/a.rs", "echo label;cd dir;cat a.rs"),
         ("/a.rs", "cd dir&&cat /a.rs"),
         ("C:/a.rs", "cd dir&&cat C:/a.rs"),
         ("dir/1:a.rs", "cd dir&&cat 1:a.rs"),
@@ -344,6 +383,8 @@ fn the_witness_needs_a_complete_word_or_a_named_leading_directory() {
         ("invented/a.rs", "cat a.rs"),
         ("invented/.", "rg --files"),
         ("dir/a.rs", "cat first&&cd dir&&cat a.rs"),
+        ("dir/a.rs", "cat first;cd dir;cat a.rs"),
+        ("dir/a.rs", "cd dir|cat a.rs"),
         ("dir//a.rs", "cd dir&&cat /a.rs"),
         ("dir/C:/a.rs", "cd dir&&cat C:/a.rs"),
         ("a.rs", "cat larger-a.rs"),
