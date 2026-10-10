@@ -312,12 +312,14 @@ several runs joined by `;` (`'1,40p;90,120p'`), which is one read per run and
 is credited with nothing: the runs reach the window as one output that can
 pass the terminal threshold while each run's own slice stays under it.
 A quoted word is read as the word the shell passes: single quotes as their
-text, and double quotes as their text when they hold no `$`, backtick or `!`
-and every backslash in them comes before an ordinary character, so the shell
-keeps it as written (`grep -n "a\|b"`). An escape the shell resolves (`\$`,
-`` \` ``, `\"`, `\\`), an expansion, and a quoted path that spells a glob, a
-`~` or a kept backslash are left alone. A quoted path is credited exactly as a
-bare one is.
+text, and double quotes as their text when they hold no `$`, backtick or `!`,
+with every backslash before an ordinary character kept as written
+(`grep -n "a\|b"`) and an escaped `"` or `\\` taken as the one character it
+escapes (`grep -n "\"decision\""`); an escaped quote never closes the quote,
+so a separator after it stays in the pattern. Any other escape (`\$`,
+`` \` ``, a line break), an expansion, and a quoted path that spells a glob, a
+`~` or holds any backslash are left alone. A quoted path is credited exactly
+as a bare one is.
 A read or listing command may be spelled from `/bin` or `/usr/bin`
 (`/usr/bin/sed -n '1,40p' a.rs`), the system's own copies, and reads exactly
 as the bare word; any other directory, and a `cd`, a label or a narrowing

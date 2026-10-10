@@ -27,9 +27,15 @@ const COMMAND_WORDS: &[&str] = &[
 fn shell_would_act(command: &str) -> bool {
     const ACTIVE: &str = "<>$`\\(){}[]*?~!#\n\r";
     let mut open: Option<char> = None;
-    for c in command.chars() {
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
         match open {
             Some(quote) if c == quote => open = None,
+            // Inside double quotes a backslash takes the next character with
+            // it, so an escaped quote never closes the span.
+            Some('"') if c == '\\' => {
+                chars.next();
+            }
             Some(_) => {}
             None => {
                 if c == '\'' || c == '"' {
@@ -72,15 +78,24 @@ fn names_a_word(target: &str, words: &[&str]) -> bool {
 }
 
 /// The words of a line as a shell splits it: at a space or a tab outside a
-/// quote, with every quote mark taken off, so a quoted path with a space in it
-/// is one word. Written for this check alone; the grammar's own walk is not
-/// consulted.
+/// quote, with every quote mark taken off and an escaped `"` or `\\` inside
+/// double quotes taken as that one character, so a quoted path with a space
+/// in it is one word. Written for this check alone; the grammar's own walk is
+/// not consulted.
 fn shell_words(command: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut current: Option<String> = None;
     let mut open: Option<char> = None;
-    for c in command.chars() {
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
         match (open, c) {
+            (Some('"'), '\\') => {
+                let word = current.get_or_insert_with(String::new);
+                match chars.next_if(|next| matches!(next, '"' | '\\')) {
+                    Some(escaped) => word.push(escaped),
+                    None => word.push(c),
+                }
+            }
             (Some(mark), _) if c == mark => open = None,
             (None, '\'' | '"') => {
                 open = Some(c);

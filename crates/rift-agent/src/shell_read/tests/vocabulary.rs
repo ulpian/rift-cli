@@ -74,6 +74,12 @@ fn every_grammar_form_yields_the_pinned_range() {
             "grep -n \"a\\|b\" \"src/lib.rs\"",
             read(file, ShellSpan::Matching),
         ),
+        // An escaped `"` or `\` in a double-quoted pattern is the character
+        // it escapes.
+        (
+            "grep -n \"\\\"decision\\\"\" src/lib.rs",
+            read(file, ShellSpan::Matching),
+        ),
         // A command word spelled from the system's own directory is that
         // command.
         (

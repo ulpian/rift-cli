@@ -1,0 +1,1 @@
+grep -n "a\"; cat x" src/lib.rs && cat "src/a\"b.rs"
