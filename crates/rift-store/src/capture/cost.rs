@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use rift_core::Result;
 use rift_shadow_cost::{call_cost_micros, ClassPrices, TokenUsage};
 
+use super::usage_windows::{window_binds, WindowScope, CALL_IN_WINDOW, USAGE_WINDOWS_CTE};
 use crate::{CanonicalStore, Value};
 
 /// A `token_usage` row: the four token classes, 1:1 with a `model_call` but a
@@ -255,21 +256,78 @@ pub async fn session_usage_facts(
     Ok(out)
 }
 
-/// Which settled calls a current catalog quote includes.
+/// Which settled calls a current catalog quote includes, and what the quote
+/// is keyed by.
 #[derive(Debug, Clone, Copy)]
 pub enum CostQuoteScope<'a> {
-    /// Every settled call, grouped by session.
+    /// Every settled call, keyed by session.
     All,
-    /// The settled calls belonging to one projected session.
+    /// The settled calls belonging to one projected session, keyed by it.
     Session(&'a str),
-    /// Calls starting in the inclusive window, independent of session start.
+    /// Calls starting in the inclusive window, independent of session start,
+    /// keyed by session.
     Window(i64, i64),
+    /// The calls each checkpoint in scope froze — its usage window — keyed by
+    /// checkpoint id. An undated checkpoint has no window and no key.
+    CheckpointWindows(WindowScope<'a>),
+}
+
+/// The four token classes summed over the calls of one checkpoint's window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowTokens {
+    /// Uncached input tokens.
+    pub uncached_input: i64,
+    /// Cached input tokens.
+    pub cached_input: i64,
+    /// Cache-creation tokens.
+    pub cache_creation: i64,
+    /// Output tokens.
+    pub output: i64,
+}
+
+/// The token sum of every checkpoint in `scope` over the calls its usage
+/// window frames, keyed by checkpoint id, in one grouped query.
+///
+/// A checkpoint whose window holds no settled call is absent, as is an undated
+/// one: absence is "no calls known", never a zero. The calls are the ones
+/// [`quote_usage_costs`] prices under [`CostQuoteScope::CheckpointWindows`],
+/// through the same join, so tokens and money never count different calls.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn checkpoint_window_tokens(
+    store: &impl CanonicalStore,
+    scope: WindowScope<'_>,
+) -> Result<BTreeMap<String, WindowTokens>> {
+    let rows = store
+        .query(
+            &format!(
+                "{USAGE_WINDOWS_CTE}SELECT w.checkpoint_id, SUM(tu.uncached_input), \
+                 SUM(tu.cached_input), SUM(tu.cache_creation), SUM(tu.output) \
+                 FROM model_call mc JOIN token_usage tu ON tu.call_id = mc.call_id \
+                 {CALL_IN_WINDOW} GROUP BY w.checkpoint_id"
+            ),
+            &window_binds(scope),
+        )
+        .await?;
+    let mut out = BTreeMap::new();
+    for r in rows {
+        let tokens = WindowTokens {
+            uncached_input: r.get_i64(1)?,
+            cached_input: r.get_i64(2)?,
+            cache_creation: r.get_i64(3)?,
+            output: r.get_i64(4)?,
+        };
+        out.insert(r.get_text(0)?, tokens);
+    }
+    Ok(out)
 }
 
 /// Quote captured usage against the catalog belief supplied by the reader.
-/// Each call uses its own start as valid time and contributes exactly once.
-/// Sessions without any completely priced call are absent; priced zero is present.
-/// Two batched queries read usage and prices without creating durable quote state.
+/// Each call uses its own start as valid time and contributes exactly once to
+/// each key it falls under. Keys without any completely priced call are
+/// absent; priced zero is present. Two batched queries read usage and prices
+/// without creating durable quote state.
 ///
 /// # Errors
 /// [`rift_core::RiftError::Storage`] on query or malformed row failure.
@@ -278,26 +336,8 @@ pub async fn quote_usage_costs(
     scope: CostQuoteScope<'_>,
     belief_at: i64,
 ) -> Result<BTreeMap<String, i64>> {
-    let (predicate, binds) = match scope {
-        CostQuoteScope::All => ("1 = 1", Vec::new()),
-        CostQuoteScope::Session(id) => ("t.session_id = ?1", vec![Value::text(id)]),
-        CostQuoteScope::Window(start, end) => (
-            "mc.started_at >= ?1 AND mc.started_at <= ?2",
-            vec![Value::Int(start), Value::Int(end)],
-        ),
-    };
-    let calls = store
-        .query(
-            &format!(
-                "SELECT t.session_id, mc.model, mc.started_at, \
-        tu.uncached_input, tu.cached_input, tu.cache_creation, tu.output \
-        FROM model_call mc JOIN token_usage tu ON tu.call_id = mc.call_id \
-        JOIN turn t ON t.turn_id = mc.turn_id WHERE {predicate} \
-        ORDER BY mc.call_id"
-            ),
-            &binds,
-        )
-        .await?;
+    let (sql, binds) = quoted_calls(scope);
+    let calls = store.query(&sql, &binds).await?;
     let prices = quote_catalog(store, belief_at).await?;
     let mut resolved = BTreeMap::new();
     let mut totals = BTreeMap::<String, i64>::new();
@@ -328,6 +368,34 @@ pub async fn quote_usage_costs(
         *total = total.saturating_add(amount);
     }
     Ok(totals)
+}
+
+/// The calls a quote prices, keyed in column 0, with their binds: the scope's
+/// predicate over the call's own turn, or a checkpoint's usage window.
+fn quoted_calls(scope: CostQuoteScope<'_>) -> (String, Vec<Value>) {
+    const COLUMNS: &str = "mc.model, mc.started_at, \
+        tu.uncached_input, tu.cached_input, tu.cache_creation, tu.output \
+        FROM model_call mc JOIN token_usage tu ON tu.call_id = mc.call_id";
+    let (predicate, binds) = match scope {
+        CostQuoteScope::All => ("1 = 1", Vec::new()),
+        CostQuoteScope::Session(id) => ("t.session_id = ?1", vec![Value::text(id)]),
+        CostQuoteScope::Window(start, end) => (
+            "mc.started_at >= ?1 AND mc.started_at <= ?2",
+            vec![Value::Int(start), Value::Int(end)],
+        ),
+        CostQuoteScope::CheckpointWindows(windows) => {
+            let sql = format!(
+                "{USAGE_WINDOWS_CTE}SELECT w.checkpoint_id, {COLUMNS} {CALL_IN_WINDOW} \
+                 ORDER BY w.checkpoint_id, mc.call_id"
+            );
+            return (sql, window_binds(windows));
+        }
+    };
+    let sql = format!(
+        "SELECT t.session_id, {COLUMNS} JOIN turn t ON t.turn_id = mc.turn_id \
+         WHERE {predicate} ORDER BY mc.call_id"
+    );
+    (sql, binds)
 }
 
 struct QuotePrice {
@@ -755,5 +823,104 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// A dated checkpoint archiving `session` first.
+    async fn window_checkpoint(s: &crate::SqliteStore, id: &str, at: i64, session: &str) {
+        s.insert(
+            "checkpoint",
+            &[
+                "checkpoint_id",
+                "strategy",
+                "created_at",
+                "merkle_root",
+                "schema_version",
+            ],
+            &[
+                Value::text(id.to_owned()),
+                Value::text("manual-commit".to_owned()),
+                Value::Int(at),
+                Value::text("00".to_owned()),
+                Value::Int(1),
+            ],
+        )
+        .await
+        .unwrap();
+        let row = crate::capture::SessionInCheckpointRow {
+            checkpoint_id: id.into(),
+            session_id: session.into(),
+            ordinal: 0,
+            schema_version: 1,
+        };
+        crate::capture::record_session_in_checkpoint(s, &row)
+            .await
+            .unwrap();
+    }
+
+    /// Calls on both bounds of `ck-2`'s window `(100, 200]`, one past it and
+    /// one of another session inside it; each call's input count is its start.
+    async fn window_fixture() -> crate::SqliteStore {
+        let s = store();
+        quote_rates(&s, "base", 1_000_000, 0, None, 1).await;
+        for (session, turn, call, at) in [
+            ("s", 1, "at-first", 100),
+            ("s", 2, "inside", 150),
+            ("s", 3, "at-second", 200),
+            ("s", 4, "after", 201),
+            ("other", 1, "other-inside", 150),
+        ] {
+            settle(&s, session, turn, (call, "quoted", at)).await;
+        }
+        window_checkpoint(&s, "ck-1", 100, "s").await;
+        window_checkpoint(&s, "ck-2", 200, "s").await;
+        s
+    }
+
+    #[tokio::test]
+    async fn a_window_excludes_its_lower_bound_and_includes_its_upper_bound() {
+        let s = window_fixture().await;
+        let scope = WindowScope::Checkpoint("ck-2");
+        let tokens = checkpoint_window_tokens(&s, scope).await.unwrap();
+        let second = tokens.get("ck-2").map(|t| t.uncached_input);
+        assert_eq!(second, Some(150 + 200), "inside and at-second only");
+        assert_eq!(tokens.len(), 1, "the scope names one checkpoint");
+    }
+
+    #[tokio::test]
+    async fn a_sessions_first_window_takes_every_call_up_to_its_checkpoint() {
+        let s = window_fixture().await;
+        let tokens = checkpoint_window_tokens(&s, WindowScope::Every)
+            .await
+            .unwrap();
+        assert_eq!(tokens.get("ck-1").map(|t| t.uncached_input), Some(100));
+    }
+
+    #[tokio::test]
+    async fn the_window_token_sum_and_the_window_quote_count_the_same_calls() {
+        let s = window_fixture().await;
+        let tokens = checkpoint_window_tokens(&s, WindowScope::Every)
+            .await
+            .unwrap();
+        let scope = CostQuoteScope::CheckpointWindows(WindowScope::Every);
+        let quotes = quote_usage_costs(&s, scope, 1).await.unwrap();
+        assert_eq!(quotes.keys().collect::<Vec<_>>(), ["ck-1", "ck-2"]);
+        for (ck, amount) in &quotes {
+            // One micro-USD per token of every class at the fixture's one rate.
+            let summed = tokens
+                .get(ck)
+                .map(|t| t.uncached_input + t.cached_input + t.cache_creation + t.output);
+            assert_eq!(Some(*amount), summed, "{ck}");
+        }
+        let one = quote_usage_costs(
+            &s,
+            CostQuoteScope::CheckpointWindows(WindowScope::Checkpoint("ck-2")),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            one.into_iter().collect::<Vec<_>>(),
+            [("ck-2".to_owned(), 350 + 2 * 9)]
+        );
     }
 }

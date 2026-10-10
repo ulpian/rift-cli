@@ -5,12 +5,15 @@
 //! one line in depth against a whole file in breadth — and carry separate,
 //! separately versioned `--json` contracts.
 
+use std::collections::HashMap;
+
 use rift_core::{Result, RiftError};
-use rift_store::{CanonicalStore, SqliteStore, Value};
+use rift_store::capture::{checkpoint_usage_windows, checkpoint_window_tokens, WindowScope};
+use rift_store::{quote_usage_costs, CanonicalStore, CostQuoteScope, SqliteStore, Value};
 
 use super::blame::{blamed_spans, parse_line_range, LineRange};
 use super::render::answer;
-use super::resolve::{commit_claims, resolve, Reads, Resolved, Tag};
+use super::resolve::{commit_claims, resolve, CheckpointFacts, Reads, Resolved, Tag};
 use super::safe_text::{safe_excerpt, safe_path, short, Label};
 use super::worktree::UNKNOWN_WORKTREE;
 use crate::cli::{exit, Outcome};
@@ -201,7 +204,9 @@ pub(crate) fn prompt_from_shard(root: &std::path::Path, checkpoint_id: &str) -> 
     })
 }
 
-/// One session's recorded token totals and current catalog quote.
+/// Recorded token totals and their current catalog quote, over one session's
+/// calls: all of them for [`session_cost`], one checkpoint's usage window for
+/// [`checkpoint_cost`].
 #[derive(Clone, Debug, ::serde::Serialize)]
 pub(crate) struct CostView {
     pub(crate) session_id: String,
@@ -256,10 +261,49 @@ pub(crate) async fn session_cost(
     Ok(Some(view))
 }
 
+/// What the model calls a checkpoint froze cost: its first session's calls
+/// since that session's previous checkpoint, up to this one — the store's usage
+/// window, read through the same join the pull verbs' provenance reads, so
+/// `why` and a delta never disagree about a checkpoint's figure. `Ok(None)` when
+/// the checkpoint has no window (undated, or no session) or the window holds no
+/// settled call.
+///
+/// A session total under a checkpoint's name would read as what that change
+/// cost; [`session_cost`] stays for the callers that name a session.
+pub(super) async fn checkpoint_cost(
+    store: &SqliteStore,
+    checkpoint_id: &str,
+) -> Result<Option<CostView>> {
+    let scope = WindowScope::Checkpoint(checkpoint_id);
+    let Some(window) = checkpoint_usage_windows(store, scope)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    let Some(tokens) = checkpoint_window_tokens(store, scope)
+        .await?
+        .remove(checkpoint_id)
+    else {
+        return Ok(None);
+    };
+    let quotes =
+        quote_usage_costs(store, CostQuoteScope::CheckpointWindows(scope), i64::MAX).await?;
+    Ok(Some(CostView {
+        session_id: window.session_id,
+        uncached_input: tokens.uncached_input,
+        cached_input: tokens.cached_input,
+        cache_creation: tokens.cache_creation,
+        output: tokens.output,
+        amount_micros: quotes.get(checkpoint_id).copied(),
+    }))
+}
+
 /// `rift why <file>[:LINE]`: one line's full story — attribution, agent,
 /// model, checkpoint, session, commit, the REDACTED stored prompt, the
-/// originating session's four-class cost, and the policy-gated handle to
-/// ladder deeper. Reads only: stored `RedactedBytes` artifacts from the shard
+/// four-class cost of the calls the selected checkpoint froze, and the
+/// policy-gated handle to ladder deeper. Reads only: stored `RedactedBytes` artifacts from the shard
 /// (the redaction gate ran at capture; nothing is sealed here) and projection
 /// rows.
 pub(crate) async fn why(
@@ -286,7 +330,6 @@ pub(crate) async fn why(
         ));
     };
 
-    let session = row.sessions.first();
     let checkpoint = row.selection.as_ref().and_then(|sel| {
         res.facts.get(&sel.checkpoint_id).map(|f| {
             serde_json::json!({
@@ -302,10 +345,7 @@ pub(crate) async fn why(
         .selection
         .as_ref()
         .map(|sel| prompt_from_shard(root, &sel.checkpoint_id));
-    let cost = match session {
-        Some(s) => session_cost(store, &s.session_id).await?,
-        None => None,
-    };
+    let cost = cost_answer(store, row, &res.facts).await?;
     let file_handle = std::fs::read(root.join(&file))
         .ok()
         .map(|bytes| format!("file:{file}@sha256:{}", rift_shadow::sha256_hex(&[&bytes])));
@@ -364,6 +404,47 @@ fn answering_row(rows: &[Resolved], line: Option<usize>) -> Option<&Resolved> {
     }
 }
 
+/// What the cost paragraph answers, decided where the checkpoint's recorded
+/// time is known, so the renderer stays a pure function.
+enum CostAnswer {
+    /// No selected checkpoint with a session: the paragraph is silent.
+    Silent,
+    /// The selected checkpoint records no time, so no window frames its calls
+    /// and no figure is known — never a zero.
+    Undated,
+    /// The selected checkpoint's usage window, and what its calls cost —
+    /// `None` when the window holds no settled call.
+    Window {
+        checkpoint_id: String,
+        cost: Option<CostView>,
+    },
+}
+
+/// The cost answer for the answering row: the selected checkpoint's usage
+/// window when the checkpoint is dated and archives a session.
+async fn cost_answer(
+    store: &SqliteStore,
+    row: &Resolved,
+    facts: &HashMap<String, CheckpointFacts>,
+) -> Result<CostAnswer> {
+    let Some(selection) = row.selection.as_ref() else {
+        return Ok(CostAnswer::Silent);
+    };
+    if row.sessions.is_empty() {
+        return Ok(CostAnswer::Silent);
+    }
+    let checkpoint_id = selection.checkpoint_id.clone();
+    let dated = facts.get(&checkpoint_id).and_then(|f| f.created_at_ms);
+    if dated.is_none() {
+        return Ok(CostAnswer::Undated);
+    }
+    let cost = checkpoint_cost(store, &checkpoint_id).await?;
+    Ok(CostAnswer::Window {
+        checkpoint_id,
+        cost,
+    })
+}
+
 /// Everything [`render_why`] needs, resolved — so the rendering is a pure
 /// function a test can drive without a store, a repository, or a shard.
 struct WhyView<'a> {
@@ -372,7 +453,7 @@ struct WhyView<'a> {
     row: &'a Resolved,
     checkpoint: Option<serde_json::Value>,
     prompt: Option<ShardPrompt>,
-    cost: Option<CostView>,
+    cost: CostAnswer,
     file_handle: Option<String>,
     reads: Reads,
 }
@@ -412,7 +493,7 @@ fn render_why(v: &WhyView<'_>) -> Outcome {
         archived_in_of(checkpoint.as_ref())
     ));
     human.push_str(&prompt_block(prompt.as_ref()));
-    human.push_str(&cost_block(cost.as_ref(), !row.sessions.is_empty()));
+    human.push_str(&cost_block(cost));
     if let Some(h) = &file_handle {
         human.push_str(&format!(
             "  ladder deeper (policy-gated): rift recall retrieve-exact \"{h}\" --reason <why>\n"
@@ -435,7 +516,7 @@ fn render_why(v: &WhyView<'_>) -> Outcome {
         "sessions": row.sessions,
         "checkpoint": checkpoint,
         "prompt": prompt.as_ref().and_then(ShardPrompt::view).map(PromptView::to_json),
-        "cost": cost,
+        "cost": served_cost(cost),
         "handles": { "file": file_handle },
         "reads": reads,
     });
@@ -473,19 +554,29 @@ fn prompt_block(prompt: Option<&ShardPrompt>) -> String {
     }
 }
 
-/// The cost paragraph. `has_session` is what separates the two silences: a row
-/// with no originating session has nothing to say about cost, while a session
-/// whose turns recorded no model call is a fact worth printing.
-fn cost_block(cost: Option<&CostView>, has_session: bool) -> String {
-    let Some(c) = cost else {
-        return if has_session {
-            "  cost: no model calls recorded for the originating session\n".to_owned()
-        } else {
-            String::new()
-        };
+/// The cost paragraph, named after the checkpoint whose window it reads.
+///
+/// The three silences are worded apart: a row with no checkpoint session has
+/// nothing to say; an undated checkpoint has no window, which is unknown, not
+/// zero; a dated window with no settled call is a fact worth printing.
+fn cost_block(answer: &CostAnswer) -> String {
+    let (checkpoint_id, c) = match answer {
+        CostAnswer::Silent => return String::new(),
+        CostAnswer::Undated => {
+            return "  cost: unknown, the checkpoint records no time to bound its model calls\n"
+                .to_owned()
+        }
+        CostAnswer::Window { cost: None, .. } => {
+            return "  cost: no model calls recorded in this checkpoint's window\n".to_owned()
+        }
+        CostAnswer::Window {
+            checkpoint_id,
+            cost: Some(c),
+        } => (checkpoint_id, c),
     };
     format!(
-        "  cost (session {}): in {} / cached {} / cache-w {} / out {} tokens{}\n",
+        "  cost (checkpoint {}, session {}): in {} / cached {} / cache-w {} / out {} tokens{}\n",
+        short(checkpoint_id),
         Label::of(&c.session_id),
         c.uncached_input,
         c.cached_input,
@@ -497,6 +588,15 @@ fn cost_block(cost: Option<&CostView>, has_session: bool) -> String {
             m.rem_euclid(1_000_000)
         )),
     )
+}
+
+/// The `--json` cost object: the window's figures, or `null` for every
+/// silence — the same key and shape a whole-session figure had.
+fn served_cost(answer: &CostAnswer) -> Option<&CostView> {
+    match answer {
+        CostAnswer::Window { cost, .. } => cost.as_ref(),
+        CostAnswer::Silent | CostAnswer::Undated => None,
+    }
 }
 
 /// The `archived_in` value a rendered checkpoint object carries, as a human
@@ -616,7 +716,7 @@ mod tests {
             row: &row,
             checkpoint: None,
             prompt: Some(prompt),
-            cost: None,
+            cost: CostAnswer::Silent,
             file_handle: None,
             reads: Reads::default(),
         };
@@ -644,5 +744,138 @@ mod tests {
             without.human
         );
         assert_eq!(without.json["prompt"], serde_json::Value::Null);
+    }
+
+    /// One settled call of session `s`, alone in turn `ordinal`, priced at one
+    /// micro-USD per token by [`sibling_store`]'s catalog.
+    async fn sibling_call(store: &SqliteStore, ordinal: i64, at: i64, input: i64) {
+        let turn_id = format!("turn-{ordinal}");
+        let turn = rift_store::TurnRow {
+            turn_id: turn_id.clone(),
+            session_id: "s".into(),
+            ordinal,
+            started_at: at,
+            schema_version: 1,
+        };
+        rift_store::record_turn(store, &turn).await.unwrap();
+        let call = rift_store::ModelCallRow {
+            call_id: format!("call-{ordinal}"),
+            turn_id,
+            model: "m".into(),
+            started_at: at,
+            schema_version: 1,
+        };
+        rift_store::record_model_call(store, &call).await.unwrap();
+        let usage = rift_store::TokenUsageRow {
+            call_id: call.call_id,
+            uncached_input: input,
+            cached_input: 0,
+            cache_creation: 0,
+            output: 0,
+            counter_method: "provider_reported".into(),
+            schema_version: 1,
+        };
+        rift_store::record_token_usage(store, &usage).await.unwrap();
+    }
+
+    /// Session `s` checkpointed twice, at 100 (`ck-1`) and 200 (`ck-2`), with
+    /// a call in each window.
+    async fn sibling_store() -> SqliteStore {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store.create_canonical_schema().unwrap();
+        for class in ["uncached_input", "cached_input", "cache_creation", "output"] {
+            let price = rift_store::PriceTableRow {
+                price_id: class.into(),
+                model: "m".into(),
+                token_class: class.into(),
+                unit_price_micros: 1_000_000,
+                currency: "USD".into(),
+                valid_from: 0,
+                valid_to: None,
+                recorded_at: 0,
+                supersedes_id: None,
+                schema_version: 1,
+            };
+            rift_store::record_price(&store, &price).await.unwrap();
+        }
+        sibling_call(&store, 1, 50, 1_000).await;
+        sibling_call(&store, 2, 150, 20).await;
+        for (ck, at) in [("ck-1", 100), ("ck-2", 200)] {
+            let columns = [
+                "checkpoint_id",
+                "strategy",
+                "created_at",
+                "merkle_root",
+                "schema_version",
+            ];
+            let row = [
+                Value::text(ck.to_owned()),
+                Value::text("manual-commit".to_owned()),
+                Value::Int(at),
+                Value::text("00".to_owned()),
+                Value::Int(1),
+            ];
+            store.insert("checkpoint", &columns, &row).await.unwrap();
+            let sic = rift_store::SessionInCheckpointRow {
+                checkpoint_id: ck.into(),
+                session_id: "s".into(),
+                ordinal: 0,
+                schema_version: 1,
+            };
+            rift_store::record_session_in_checkpoint(&store, &sic)
+                .await
+                .unwrap();
+        }
+        store
+    }
+
+    #[tokio::test]
+    async fn why_over_a_checkpoint_with_an_earlier_sibling_prints_only_its_own_window() {
+        let store = sibling_store().await;
+        let row = Resolved {
+            span: Span {
+                start: 1,
+                end: 1,
+                commit: "c".repeat(40),
+                path: "a.rs".into(),
+            },
+            selection: Some(Selection {
+                checkpoint_id: "ck-2".into(),
+                basis: SelectionBasis::FileTouched,
+                considered: 1,
+                resolved: true,
+            }),
+            counts: None,
+            sessions: vec![crate::provenance::resolve::SessionRef {
+                session_id: "s".into(),
+                agent: Label::of("claude-code"),
+                model: Label::of("m"),
+            }],
+        };
+        let mut facts = HashMap::new();
+        let dated = CheckpointFacts {
+            created_at_ms: Some(200),
+            ..CheckpointFacts::default()
+        };
+        facts.insert("ck-2".to_owned(), dated);
+        let cost = cost_answer(&store, &row, &facts).await.unwrap();
+        let out = render_why(&WhyView {
+            file: "a.rs",
+            line: Some(1),
+            row: &row,
+            checkpoint: None,
+            prompt: None,
+            cost,
+            file_handle: None,
+            reads: Reads::default(),
+        });
+        assert!(
+            out.human
+                .contains("cost (checkpoint ck-2, session s): in 20 / cached 0"),
+            "{}",
+            out.human
+        );
+        assert_eq!(out.json["cost"]["uncached_input"], 20, "{}", out.json);
+        assert_eq!(out.json["cost"]["amount_micros"], 20, "{}", out.json);
     }
 }
