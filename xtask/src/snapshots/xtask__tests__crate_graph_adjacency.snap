@@ -34,7 +34,7 @@ rift-recall-search -> rift-agent, rift-config, rift-core
 rift-recall-serve -> rift-core, rift-recall-events, rift-recall-ledger, rift-recall-pack, rift-recall-policy, rift-recall-rank, rift-recall-substrate, rift-recall-types, rift-recall-validity, rift-store, rift-tokens
 rift-recall-substrate -> rift-core, rift-recall-types
 rift-recall-types -> rift-core
-rift-recall-validity -> rift-core, rift-recall-types
+rift-recall-validity -> rift-core, rift-recall-types, rift-tokens
 rift-registry -> rift-core
 rift-shadow -> rift-core, rift-git, rift-hashchain, rift-recall-substrate, rift-recall-types, rift-shadow-attribution, rift-shadow-cost, rift-shadow-hooks, rift-shadow-redact, rift-store
 rift-shadow-attribution -> rift-core, rift-git

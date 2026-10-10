@@ -90,17 +90,19 @@ figure is never presented as more exact than it is. It is also why the money
 side hedges: a byte-pair count with the general-purpose encoder is *not* the
 provider's billing tokenizer. Close, and honest about not being it.
 
-**Who counts through it today.** The serving dispatcher (measuring every
+**Who counts through it.** Every count goes through the one counting crate,
+with its provenance tag:
+the serving dispatcher (measuring every
 response payload at the accounting seam), the pack compiler (budgeting and
-re-measuring rendered packs), the delta ledger's changed-hunk budgeting, and the
+re-measuring rendered packs), the delta ledger's changed-hunk budgeting, the
 ingest-time backfill of
-[§8.12](#812-the-measured-baseline-repeated-and-avoidable-context).
-
-**One place that does not.** The validity crate sizes its internal trials with
-a local characters-over-four estimate
-(`crates/rift-recall-validity/src/envelope.rs:247-251`). It affects no published
-figure — those trials never charge, and what they shape is measured again at
-the seam — but "one counter everywhere" is the design, not yet the code.
+[§8.12](#812-the-measured-baseline-repeated-and-avoidable-context), and the
+validity plane's envelope builder, which charges the per-serve budget and fills
+each served envelope's `estimated_tokens_returned` with the same count, floored
+at one so an included artifact is never free
+(`crates/rift-recall-validity/src/envelope.rs`).
+The envelope carries no tag of its own; the `tokenizer` on the response that
+holds it is the basis of its figure as well.
 
 **The capture path counts nothing**, which is the other half of the same
 discipline. It records what the provider reported and, where an adapter reports
