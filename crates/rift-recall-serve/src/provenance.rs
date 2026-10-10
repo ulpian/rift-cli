@@ -1,12 +1,12 @@
 //! What a delta carries beside the change: when it happened, who made it, what
-//! the turn cost, and a handle to why.
+//! the checkpoint that recorded it cost, and a handle to why.
 //!
 //! A delta names a path, a hash, the changed sites and the shift, and that is
 //! enough to *apply* and not enough to *direct*: an agent deciding where to
 //! look next wants to know whether a change is an hour old or a month old,
 //! whether it came out of its own family's session or a human's editor, and
-//! what the turn that made it spent. Those facts are all recorded already —
-//! they were reachable only through `rift why`, `rift blame` and
+//! what the calls that checkpoint froze spent. Those facts are all recorded
+//! already — they were reachable only through `rift why`, `rift blame` and
 //! `rift checkpoint explain`, one file at a time, after the agent had already
 //! decided where to look.
 //!
