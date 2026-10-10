@@ -70,7 +70,10 @@ pub use verification::{
     record_verification_divergence, record_verification_run, record_verification_witness,
     VerificationDivergenceRow, VerificationRunRow, VerificationWitnessRow,
 };
-pub use watermarks::{latest_ingest_watermark, record_ingest_watermark, IngestWatermarkRow};
+pub use watermarks::{
+    latest_ingest_watermark, latest_ingest_watermark_with_position, record_ingest_watermark,
+    record_ingest_watermark_position, IngestWatermarkRow,
+};
 pub use worktrees::{
     record_checkpoint_worktree_if_new, record_session_worktree, SessionWorktreeRow,
 };
