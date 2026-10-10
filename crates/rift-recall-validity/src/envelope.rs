@@ -265,10 +265,17 @@ fn omission(validity: &Validity, basis_sha256: &str) -> (OmitReason, Option<Stri
     }
 }
 
-fn estimate_tokens(s: &str) -> u32 {
-    u32::try_from(s.chars().count() / 4)
-        .unwrap_or(u32::MAX)
-        .max(1)
+/// The cost an included text charges and declares, counted by
+/// [`rift_tokens::count`], the one counting authority, so a served envelope's
+/// figure and every other figure Rift reports share one tokenizer and one
+/// provenance tag ([`rift_tokens::provenance`], carried on the response that
+/// holds the envelope). A character-based guess here was a second estimator
+/// for the same number and undercounted punctuation and non-ASCII text.
+///
+/// The floor of one stays: an included artifact is never free, so even an
+/// empty digest consumes budget and cannot be served without bound.
+fn estimate_tokens(text: &str) -> u32 {
+    rift_tokens::count(text).max(1)
 }
 
 #[cfg(test)]
@@ -564,6 +571,67 @@ mod tests {
         assert_eq!(basis_sha256.as_deref(), Some("basis"));
         assert_eq!(env.estimated_tokens_returned, 0);
         assert_eq!(budget.remaining(), 3, "nothing was charged");
+    }
+
+    /// Punctuation and non-ASCII text, where a character-based guess and the
+    /// BPE part ways: the sample a second estimator would get wrong.
+    const DENSE_SAMPLE: &str = "fn é(){};// ✓✓✓ ÿ→ψ «ünïcödé» !=>>=<<= ¿¡";
+
+    fn exact_served(text: &str, budget: &mut Budget) -> Envelope {
+        envelope_for(
+            "f",
+            Trust::CodeFact,
+            "file:f@sha256:x",
+            "basis",
+            SeenStatus::NotSeenOrChanged,
+            &Validity::Degraded { key: "k".into() },
+            Some(text),
+            true,
+            budget,
+        )
+    }
+
+    #[test]
+    fn the_validity_cost_of_a_text_is_the_one_counters_figure() {
+        let env = exact_served(DENSE_SAMPLE, &mut Budget::new(1000));
+        let by_characters = u32::try_from(DENSE_SAMPLE.chars().count() / 4).unwrap();
+        let by_counter = rift_tokens::count(DENSE_SAMPLE);
+        assert!(matches!(env.state, ArtifactState::ExactIncluded { .. }));
+        assert_eq!(
+            (by_characters, by_counter),
+            (10, 30),
+            "the sample must tell the two apart"
+        );
+        assert_eq!(
+            env.estimated_tokens_returned, by_counter,
+            "counter {by_counter}, characters/4 {by_characters}"
+        );
+    }
+
+    #[test]
+    fn the_budget_is_charged_the_one_counters_figure() {
+        let mut budget = Budget::new(1000);
+        let env = exact_served(DENSE_SAMPLE, &mut budget);
+        let by_counter = rift_tokens::count(DENSE_SAMPLE);
+        assert_eq!(1000 - budget.remaining(), by_counter);
+        assert_eq!(env.estimated_tokens_returned, by_counter);
+
+        let (_s, _d, validity) = valid_summary_for(DENSE_SAMPLE);
+        let mut budget = Budget::new(1000);
+        let Validity::Valid(summary) = &validity else {
+            panic!("expected Valid");
+        };
+        let env = manifest_envelope(
+            "f",
+            Trust::CodeFact,
+            "file:f@sha256:x",
+            "x",
+            SeenStatus::NotSeenOrChanged,
+            Some(summary),
+            &mut budget,
+        );
+        assert_eq!(1000 - budget.remaining(), by_counter);
+        assert_eq!(env.estimated_tokens_returned, by_counter);
     }
 
     #[test]

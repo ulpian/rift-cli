@@ -444,17 +444,6 @@ claim is unavailable by rule, not by modesty.
 **Read more.** [08](08-cost-and-savings.md) §8.13,
 [17](17-invariants.md).
 
-### A second, cruder estimator lives in the validity plane
-
-*Honest limit.* Serving-side size checks use a characters-over-four
-approximation rather than the one counting crate. It is used for bounding, not
-billing — a cap decision, not a cost figure — but it is still a second
-estimator in a codebase that otherwise insists on one authority per number.
-Closing it means counting those trials through the same crate every other
-estimate goes through.
-
-**Read more.** [08](08-cost-and-savings.md).
-
 ### The savings share is real and its window is nearly empty
 
 *Honest limit.* The share of read tokens the levers avoided is computed one way
