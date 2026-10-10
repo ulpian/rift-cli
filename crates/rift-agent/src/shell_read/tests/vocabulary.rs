@@ -77,7 +77,8 @@ fn every_grammar_form_yields_the_pinned_range() {
 /// The second half of the specification: the spellings the grammar admits
 /// because each one still delivers what a form on the list does — a quote
 /// the shell resolves to a fixed word, a command word from the system's own
-/// directory, a search over several named files, a line pick in `awk`.
+/// directory, a search over several named files, a line pick in `awk` or
+/// after a pipe.
 #[test]
 fn every_spelling_beyond_the_list_yields_the_pinned_range() {
     let file = "src/lib.rs";
@@ -105,6 +106,15 @@ fn every_spelling_beyond_the_list_yields_the_pinned_range() {
         (
             "awk 'NR>=12 && NR<=48' src/lib.rs",
             read(file, ShellSpan::Lines { lo: 12, hi: 48 }),
+        ),
+        // A trailing line pick narrows the read it follows.
+        (
+            "cat src/lib.rs | sed -n '12,48p'",
+            ShellCall::Read(vec![super::narrowed(
+                file,
+                ShellSpan::WholeFile,
+                crate::shell_read::Narrowing::Pick { lo: 12, hi: 48 },
+            )]),
         ),
         // A search over several named files is a search of each of them.
         (
@@ -144,6 +154,10 @@ fn a_pinned_span_yields_the_range_a_record_is_written_from() {
     );
     assert_eq!(
         read_of("sed -n '12,48p' src/lib.rs"),
+        Some((file.clone(), ReadSpan::lines(12, HiKind::Explicit(48))))
+    );
+    assert_eq!(
+        read_of("cat src/lib.rs | sed -n '12,48p'"),
         Some((file, ReadSpan::lines(12, HiKind::Explicit(48))))
     );
     // A decorated print and a default window support no record at all, so

@@ -28,10 +28,12 @@
 //! one of those was a read of this repository that the journal never saw, and
 //! a read the journal never saw can never be declined and never counted. So
 //! three *composition* rules sit above the vocabulary — an optional leading
-//! `cd <dir> &&` (or `cd <dir>;`), a trailing `| head -N` or `| tail -N` on a read, and a chain
-//! of reads joined by `&&` or `;`. Each one is a shape whose delivered lines
-//! still follow from the line itself; a member the vocabulary does not spell
-//! still takes the whole command out of the grammar, exactly as before.
+//! `cd <dir> &&` (or `cd <dir>;`), a trailing `| head -N` or `| tail -N` on
+//! a read (or the line pick `| sed -n 'A,Bp'`, the same arithmetic with both
+//! ends stated), and a chain of reads joined by `&&` or `;`. Each one is a
+//! shape whose delivered lines still follow from the line itself; a member
+//! the vocabulary does not spell still takes the whole command out of the
+//! grammar, exactly as before.
 //!
 //! **A chain labels itself.** Measured again once those three landed, the
 //! largest shape still going unseen was a chain whose reads are separated by
@@ -47,7 +49,7 @@
 //!
 //! 1. **A non-match is never touched.** Every ambiguity — an option the list
 //!    does not name, a quote the grammar does not pin, a pipe into anything
-//!    but the two narrowing commands, a member that is not itself a read, a
+//!    but the three narrowing commands, a member that is not itself a read, a
 //!    character the shell would act on — ends in [`None`]. The cost of a
 //!    missed recognition is a saving; the cost of a wrong one is a decision
 //!    taken about content an agent never received.
@@ -140,21 +142,30 @@ pub enum ShellSpan {
     },
 }
 
-/// A trailing `| head -N` or `| tail -N` that narrows what a read delivered.
+/// A trailing `| head -N`, `| tail -N` or `| sed -n 'A,Bp'` that narrows
+/// what a read delivered.
 ///
-/// The two commands are in the grammar as *readers* already, and in this
+/// The three commands are in the grammar as *readers* already, and in this
 /// position they are doing the same arithmetic on the run of lines the member
 /// before them produced rather than on a file. That is why they are the only
-/// two pipe targets admitted: every other one — a `grep`, a `wc`, a pager —
-/// either changes what the lines are or hands the window something other than
-/// lines, and a member piped into one of those is not a read this module will
-/// name.
+/// pipe targets admitted: every other one — a `grep`, a `wc`, a pager, a
+/// `sed` that edits — either changes what the lines are or hands the window
+/// something other than lines, and a member piped into one of those is not a
+/// read this module will name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Narrowing {
     /// `| head -N`: the first `N` lines of the run that was produced.
     First(u32),
     /// `| tail -N`: the last `N` lines of it.
     Last(u32),
+    /// `| sed -n 'A,Bp'`, or `'Ap'` for one line: lines `A` to `B` of it,
+    /// counted from its own first line.
+    Pick {
+        /// The first line of the run kept.
+        lo: u32,
+        /// The last line of the run kept.
+        hi: u32,
+    },
 }
 
 /// A shell command line that read one file.
@@ -184,7 +195,7 @@ impl ShellRead {
     /// names, and no span here says "a count in from the end", so that cell is
     /// unknown even though both halves of it are pinned.
     fn delivered(&self) -> ReadSpan {
-        use Narrowing::{First, Last};
+        use Narrowing::{First, Last, Pick};
         // A count that reached here is at least one: the grammar refuses a
         // zero, and a command that prints nothing has read nothing.
         let back = |n: u32| n.saturating_sub(1);
@@ -217,6 +228,19 @@ impl ShellRead {
             (ShellSpan::Lines { lo, hi }, Some(Last(n))) => {
                 ReadSpan::lines(lo.max(hi.saturating_sub(back(n))), HiKind::Explicit(hi))
             }
+            // A pick is the same count from the run's own first line, so it
+            // has a reading wherever the run's first line is a number.
+            (ShellSpan::WholeFile, Some(Pick { lo, hi })) => picked((1, u32::MAX), (lo, hi)),
+            (ShellSpan::FromTop { limit: Some(m) }, Some(Pick { lo, hi })) => {
+                picked((1, m), (lo, hi))
+            }
+            (
+                ShellSpan::Lines {
+                    lo: first,
+                    hi: last,
+                },
+                Some(Pick { lo, hi }),
+            ) => picked((first, last), (lo, hi)),
             (ShellSpan::FromBottom { limit: Some(m) }, None) => ReadSpan::LastLines { count: m },
             (ShellSpan::FromBottom { limit: Some(m) }, Some(Last(n))) => {
                 ReadSpan::LastLines { count: m.min(n) }
@@ -226,7 +250,7 @@ impl ShellRead {
             // matched; a run among several is part of one output whose size
             // no member answers for. None of those is an interval of this
             // file a record may be written from.
-            (ShellSpan::FromBottom { limit: Some(_) }, Some(First(_)))
+            (ShellSpan::FromBottom { limit: Some(_) }, Some(First(_) | Pick { .. }))
             | (
                 ShellSpan::DecoratedWholeFile
                 | ShellSpan::FromTop { limit: None }
@@ -810,16 +834,58 @@ fn under(dir: Option<&str>, path: String) -> String {
 fn narrowing(piece: &str) -> Option<Narrowing> {
     let words = words(piece)?;
     let (head, rest) = words.split_first()?;
-    let count = match rest {
-        [n] => line_count_text(bare(n)?.strip_prefix('-')?)?,
-        [flag, n] if bare(flag) == Some("-n") => line_count(n)?,
-        _ => return None,
-    };
     match bare(head)? {
-        "head" => Some(Narrowing::First(count)),
-        "tail" => Some(Narrowing::Last(count)),
+        "head" => Some(Narrowing::First(narrowing_count(rest)?)),
+        "tail" => Some(Narrowing::Last(narrowing_count(rest)?)),
+        "sed" => line_pick(rest),
         _ => None,
     }
+}
+
+/// The count of a narrowing `head` or `tail`, in either spelling.
+fn narrowing_count(rest: &[Word]) -> Option<u32> {
+    match rest {
+        [n] => line_count_text(bare(n)?.strip_prefix('-')?),
+        [flag, n] if bare(flag) == Some("-n") => line_count(n),
+        _ => None,
+    }
+}
+
+/// A narrowing `sed -n 'A,Bp'`: one print element of the script `sed_read`
+/// takes, and nothing after it.
+///
+/// With no file after the script `sed` reads the pipe, and under `-n` it
+/// prints lines `A` to `B` of what came down it and nothing else — `head` and
+/// `tail` arithmetic with both ends stated. A file after the script would be
+/// read in place of the pipe, so there is none; a script of several elements
+/// prints several stretches no one narrowing names, so there is one.
+fn line_pick(rest: &[Word]) -> Option<Narrowing> {
+    let [flag, script] = rest else {
+        return None;
+    };
+    if bare(flag) != Some("-n") {
+        return None;
+    }
+    let (lo, hi) = sed_range(&pattern_arg(script)?)?;
+    Some(Narrowing::Pick { lo, hi })
+}
+
+/// Lines `lo` to `hi` of a run that is lines `first` to `last` of the file,
+/// as the span of the file they are.
+///
+/// The pick is cut at the run's own end, as `sed` stops where its input
+/// does. One that starts past that end printed nothing, and a command that
+/// prints nothing has read nothing, so it is unknown rather than an empty
+/// interval no span can spell.
+fn picked((first, last): (u32, u32), (lo, hi): (u32, u32)) -> ReadSpan {
+    let Some(start) = first.checked_add(lo.saturating_sub(1)) else {
+        return ReadSpan::Unknown;
+    };
+    let end = last.min(first.saturating_add(hi.saturating_sub(1)));
+    if start > end {
+        return ReadSpan::Unknown;
+    }
+    ReadSpan::lines(start, HiKind::Explicit(end))
 }
 
 /// What one member of a chain was, before a leading `cd` is applied to it.

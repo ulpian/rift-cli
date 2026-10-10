@@ -6,14 +6,15 @@
 //! about: the published vocabulary and the range each form supports, the
 //! three compositions and what each one reads, the labels a chain writes
 //! between its reads, the `sed` print scripts beyond one range, the line
-//! pick written in `awk`, the shapes left alone, the properties a generated
-//! line has to hold, and the witness the fuzz target checks every recognised
-//! target against. The helpers every file spells its expectations with live
-//! here.
+//! pick written in `awk`, the line pick after a pipe, the shapes left alone,
+//! the properties a generated line has to hold, and the witness the fuzz
+//! target checks every recognised target against. The helpers every file
+//! spells its expectations with live here.
 
 mod awk_line_pick;
 mod compositions;
 mod labels;
+mod piped_line_pick;
 mod properties;
 mod quoting;
 mod refusals;

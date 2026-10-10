@@ -348,7 +348,13 @@ because the lines it delivers still follow from the line itself:
   something else to the command, so the line is left alone. The one composition
   with no interval is the first `N` of the last `M`: its start is a number the
   file's length would have to supply, and no span says that, so it is unknown
-  and records nothing;
+  and records nothing.
+  A trailing `| sed -n 'A,Bp'` (or `'Ap'`) narrows the same way: lines `A` to
+  `B` of the run, cut at its end, so `sed -n '100,200p' a.rs | sed -n '1,10p'`
+  is lines 100 to 109.
+  A pick of a run counted from the end, or one that starts past the run and
+  prints nothing, is unknown; a `sed` without `-n`, with a second element or
+  with a file after the script is left alone;
 - members joined by `&&` or `;` in which **every** member is itself a
   recognised read, so one call yields several requests (a `cat a b` does too).
   A member that is an `echo` or a `printf` over plain operands is a **label**:
@@ -359,7 +365,7 @@ because the lines it delivers still follow from the line itself:
   unseen. A line that is labels and nothing else reads nothing and is not a
   read.
 
-Everything else is what it always was. A pipe into anything but those two
+Everything else is what it always was. A pipe into anything but those
 narrowing commands, a member that is neither a read nor a label, a label whose
 operand a shell would act on, a second `cd` or one that is not at the front, a
 listing standing among reads, a redirect, a glob, a variable, a substitution, a
