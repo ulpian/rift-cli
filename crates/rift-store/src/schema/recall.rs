@@ -597,6 +597,13 @@ const RECALL_TABLES: &[CanonicalTable] = &[
         primary_key: &["summary_id", "ordinal"],
         unique: NO_UNIQUE,
     },
+    // --- v17 additive (watermark positions) ------------------------------------
+    CanonicalTable {
+        name: "ingest_watermark_position",
+        columns: INGEST_WATERMARK_POSITION_COLUMNS,
+        primary_key: &["watermark_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// The two relations a serve key can live in: a schema-1 decision row, or a
@@ -725,6 +732,24 @@ const SUMMARY_TOKEN_COUNT_COLUMNS: &[Column] = &[
     Column::int("line_hi"),
     Column::int("tokens"), // raw, never calibrated
     Column::text_one_of("tokenizer", TOKEN_COUNT_BASES),
+    Column::int("schema_version"),
+];
+
+/// Columns for the v17 `ingest_watermark_position` relation: where in its
+/// dialect's walk the tip an `ingest_watermark` row names stood when the row
+/// was written.
+///
+/// A sparse companion keyed on the watermark row's own id rather than a new
+/// column: `ingest_watermark` shares one column list with the capture
+/// projection and was created by the frozen v6 body, so widening it would
+/// move a checksum every deployed `recall.db` holds. With the position kept,
+/// index warm resumes from a whole stream cursor, and the cursor's
+/// id-at-position check catches a stream rewritten under the index even when
+/// the tip itself survived the rewrite. No row is the fact "written before
+/// positions were kept", and the reader falls back to locating the tip.
+const INGEST_WATERMARK_POSITION_COLUMNS: &[Column] = &[
+    Column::text("watermark_id"), // FK: ingest_watermark(watermark_id)
+    Column::int("chain_seq"),     // 1-based position of the tip; never 0
     Column::int("schema_version"),
 ];
 

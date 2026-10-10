@@ -656,20 +656,6 @@ not surface it, though its data plane holds the number.
 
 **Read more.** [14](14-sync-readiness.md) §14.4.
 
-### One consumer does not persist its stream position
-
-*Honest limit.* The stream cursor pairs a chain position with a checkpoint
-identifier. One consumer does not persist the position, so the guard arm that
-would catch a rewritten stream by comparing positions cannot fire for it; what
-catches a rewrite there instead is presence — a recorded tip the walk no longer
-holds resolves to no cursor, the ingest falls back to a full pass, and says so. A
-full pass is *correct*, the apply being a set union over content-addressed rows,
-and merely slower, which is why the missing position is not an error. Closing it
-takes an additive column on a canonical relation: a deliberate schema decision on
-an append-only store, not a drive-by edit.
-
-**Read more.** [14](14-sync-readiness.md) §14.3.
-
 ### Bundle import is references-only
 
 *Never built.* Importing a bundle attaches its references. The store-side entry

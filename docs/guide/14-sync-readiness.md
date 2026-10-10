@@ -98,15 +98,19 @@ chain, **recall's index warm** over the substrate walk
 ([Chapter 6](06-recall.md)). It fails closed on two arms — a cursor **ahead** of
 the stream, and one whose position now holds a **different** checkpoint.
 
-**One honest caveat**, because "shared path" is easy to overclaim: index warm
-does not persist a position — it records the branch tip it reached and
-reconstructs the position from the current walk — so the position-mismatch arm
-cannot fire there. What catches a rewritten stream instead is **presence**: a
-recorded tip the walk no longer holds resolves to no cursor, so the ingest falls
-back to a full pass and says so, which is correct (the apply is a set-union over
-content-addressed rows) and merely slower. Persisting the position would need an
-additive column on a canonical relation, carried as an open item in
-[Chapter 18](18-known-gaps.md). The test
+**Both consumers persist a position.** Export carries its cursor in the bundle
+manifest. Index warm records the branch tip it reached and, beside it, the
+position that tip held in the walk, and resumes from that tip at that position.
+So the position-mismatch arm fires for index warm too, and it catches what
+presence alone cannot: a checkpoint sorted in *before* a tip that survived the
+rewrite. Locating the tip again would resume after its new place and never read
+the inserted checkpoint; the recorded position now names another checkpoint, so
+the ingest falls back to a full pass and counts it as a rewrite in its report.
+A full pass is correct (the apply is a set-union over content-addressed rows)
+and merely slower, which is why a rewrite is counted rather than refused. A
+watermark written before positions were kept has only its tip; for that row a
+recorded tip the walk no longer holds resolves to no cursor, and the ingest
+takes the same counted full pass. The test
 `the_index_warm_resumes_through_the_same_suffix_function_as_export` asserts the
 two consumers hand back the same tail for the same cursor.
 
