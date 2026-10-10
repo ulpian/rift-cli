@@ -29,7 +29,7 @@ mod common;
 mod document_fixture;
 use document_fixture::{
     document_rows, docx, hook, json_str, plant_the_documents, prose, savings_json, seed_repo,
-    warm_the_family, Member, Noise,
+    state_a_patient_budget, warm_the_family, Member, Noise,
 };
 
 /// One container, to watch a single amendment through each of its two
@@ -49,6 +49,7 @@ fn one_document() -> Member {
 /// A session that reads `member` once through the shipped binary, and the
 /// path Rift amended the call to.
 fn amended_read(repo: &Path, cache: &Path, member: &Member) -> String {
+    state_a_patient_budget(repo);
     plant_the_documents(repo, std::slice::from_ref(member));
     warm_the_family(repo, cache);
     let call = format!(
