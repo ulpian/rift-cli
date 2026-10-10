@@ -68,10 +68,31 @@ fn every_grammar_form_yields_the_pinned_range() {
         ),
         ("rg --files", listing(".", None)),
         ("rg --files crates", listing("crates", None)),
+    ];
+    assert_each_recognised(cases);
+}
+
+/// **Every spelling read beyond the published list, and its range.**
+///
+/// The second half of the specification: the spellings the grammar admits
+/// because each one still delivers what a form on the list does — a quote
+/// the shell resolves to a fixed word, a command word from the system's own
+/// directory, a search over several named files, a line pick in `awk` or
+/// after a pipe.
+#[test]
+fn every_spelling_beyond_the_list_yields_the_pinned_range() {
+    let file = "src/lib.rs";
+    let cases: &[(&str, ShellCall)] = &[
         // A quoted word is the word the shell passes, in a path as anywhere.
         ("cat 'src/lib.rs'", read(file, ShellSpan::WholeFile)),
         (
             "grep -n \"a\\|b\" \"src/lib.rs\"",
+            read(file, ShellSpan::Matching),
+        ),
+        // An escaped `"` or `\` in a double-quoted pattern is the character
+        // it escapes.
+        (
+            "grep -n \"\\\"decision\\\"\" src/lib.rs",
             read(file, ShellSpan::Matching),
         ),
         // A command word spelled from the system's own directory is that
@@ -81,6 +102,20 @@ fn every_grammar_form_yields_the_pinned_range() {
             read(file, ShellSpan::Lines { lo: 12, hi: 48 }),
         ),
         ("/bin/cat src/lib.rs", read(file, ShellSpan::WholeFile)),
+        // A line pick written in `awk` is the `sed` range it prints.
+        (
+            "awk 'NR>=12 && NR<=48' src/lib.rs",
+            read(file, ShellSpan::Lines { lo: 12, hi: 48 }),
+        ),
+        // A trailing line pick narrows the read it follows.
+        (
+            "cat src/lib.rs | sed -n '12,48p'",
+            ShellCall::Read(vec![super::narrowed(
+                file,
+                ShellSpan::WholeFile,
+                crate::shell_read::Narrowing::Pick { lo: 12, hi: 48 },
+            )]),
+        ),
         // A search over several named files is a search of each of them.
         (
             "grep -n needle src/lib.rs src/main.rs",
@@ -119,6 +154,10 @@ fn a_pinned_span_yields_the_range_a_record_is_written_from() {
     );
     assert_eq!(
         read_of("sed -n '12,48p' src/lib.rs"),
+        Some((file.clone(), ReadSpan::lines(12, HiKind::Explicit(48))))
+    );
+    assert_eq!(
+        read_of("cat src/lib.rs | sed -n '12,48p'"),
         Some((file, ReadSpan::lines(12, HiKind::Explicit(48))))
     );
     // A decorated print and a default window support no record at all, so

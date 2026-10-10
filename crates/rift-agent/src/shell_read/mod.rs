@@ -16,7 +16,9 @@
 //! this tree beside the adapter that reads it. A listing grammar of the same
 //! shape (`ls`, `find … -name`, `rg --files`) rounds it out. Recognising an
 //! exact match from a published list is not a parse of shell; anything the
-//! list does not spell is left alone.
+//! list does not spell is left alone — with one exception, a line pick
+//! written in `awk` (`awk 'NR>=A && NR<=B'`), which prints exactly what the
+//! listed `sed` range does and is read as that range.
 //!
 //! **The published list is the vocabulary, not the whole sentence.** Measured
 //! on this machine's own transcripts, an agent almost never writes one of
@@ -26,10 +28,12 @@
 //! one of those was a read of this repository that the journal never saw, and
 //! a read the journal never saw can never be declined and never counted. So
 //! three *composition* rules sit above the vocabulary — an optional leading
-//! `cd <dir> &&` (or `cd <dir>;`), a trailing `| head -N` or `| tail -N` on a read, and a chain
-//! of reads joined by `&&` or `;`. Each one is a shape whose delivered lines
-//! still follow from the line itself; a member the vocabulary does not spell
-//! still takes the whole command out of the grammar, exactly as before.
+//! `cd <dir> &&` (or `cd <dir>;`), a trailing `| head -N` or `| tail -N` on
+//! a read (or the line pick `| sed -n 'A,Bp'`, the same arithmetic with both
+//! ends stated), and a chain of reads joined by `&&` or `;`. Each one is a
+//! shape whose delivered lines still follow from the line itself; a member
+//! the vocabulary does not spell still takes the whole command out of the
+//! grammar, exactly as before.
 //!
 //! **A chain labels itself.** Measured again once those three landed, the
 //! largest shape still going unseen was a chain whose reads are separated by
@@ -45,7 +49,7 @@
 //!
 //! 1. **A non-match is never touched.** Every ambiguity — an option the list
 //!    does not name, a quote the grammar does not pin, a pipe into anything
-//!    but the two narrowing commands, a member that is not itself a read, a
+//!    but the three narrowing commands, a member that is not itself a read, a
 //!    character the shell would act on — ends in [`None`]. The cost of a
 //!    missed recognition is a saving; the cost of a wrong one is a decision
 //!    taken about content an agent never received.
@@ -138,21 +142,30 @@ pub enum ShellSpan {
     },
 }
 
-/// A trailing `| head -N` or `| tail -N` that narrows what a read delivered.
+/// A trailing `| head -N`, `| tail -N` or `| sed -n 'A,Bp'` that narrows
+/// what a read delivered.
 ///
-/// The two commands are in the grammar as *readers* already, and in this
+/// The three commands are in the grammar as *readers* already, and in this
 /// position they are doing the same arithmetic on the run of lines the member
 /// before them produced rather than on a file. That is why they are the only
-/// two pipe targets admitted: every other one — a `grep`, a `wc`, a pager —
-/// either changes what the lines are or hands the window something other than
-/// lines, and a member piped into one of those is not a read this module will
-/// name.
+/// pipe targets admitted: every other one — a `grep`, a `wc`, a pager, a
+/// `sed` that edits — either changes what the lines are or hands the window
+/// something other than lines, and a member piped into one of those is not a
+/// read this module will name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Narrowing {
     /// `| head -N`: the first `N` lines of the run that was produced.
     First(u32),
     /// `| tail -N`: the last `N` lines of it.
     Last(u32),
+    /// `| sed -n 'A,Bp'`, or `'Ap'` for one line: lines `A` to `B` of it,
+    /// counted from its own first line.
+    Pick {
+        /// The first line of the run kept.
+        lo: u32,
+        /// The last line of the run kept.
+        hi: u32,
+    },
 }
 
 /// A shell command line that read one file.
@@ -182,7 +195,7 @@ impl ShellRead {
     /// names, and no span here says "a count in from the end", so that cell is
     /// unknown even though both halves of it are pinned.
     fn delivered(&self) -> ReadSpan {
-        use Narrowing::{First, Last};
+        use Narrowing::{First, Last, Pick};
         // A count that reached here is at least one: the grammar refuses a
         // zero, and a command that prints nothing has read nothing.
         let back = |n: u32| n.saturating_sub(1);
@@ -215,6 +228,19 @@ impl ShellRead {
             (ShellSpan::Lines { lo, hi }, Some(Last(n))) => {
                 ReadSpan::lines(lo.max(hi.saturating_sub(back(n))), HiKind::Explicit(hi))
             }
+            // A pick is the same count from the run's own first line, so it
+            // has a reading wherever the run's first line is a number.
+            (ShellSpan::WholeFile, Some(Pick { lo, hi })) => picked((1, u32::MAX), (lo, hi)),
+            (ShellSpan::FromTop { limit: Some(m) }, Some(Pick { lo, hi })) => {
+                picked((1, m), (lo, hi))
+            }
+            (
+                ShellSpan::Lines {
+                    lo: first,
+                    hi: last,
+                },
+                Some(Pick { lo, hi }),
+            ) => picked((first, last), (lo, hi)),
             (ShellSpan::FromBottom { limit: Some(m) }, None) => ReadSpan::LastLines { count: m },
             (ShellSpan::FromBottom { limit: Some(m) }, Some(Last(n))) => {
                 ReadSpan::LastLines { count: m.min(n) }
@@ -224,7 +250,7 @@ impl ShellRead {
             // matched; a run among several is part of one output whose size
             // no member answers for. None of those is an interval of this
             // file a record may be written from.
-            (ShellSpan::FromBottom { limit: Some(_) }, Some(First(_)))
+            (ShellSpan::FromBottom { limit: Some(_) }, Some(First(_) | Pick { .. }))
             | (
                 ShellSpan::DecoratedWholeFile
                 | ShellSpan::FromTop { limit: None }
@@ -393,20 +419,22 @@ impl ShellCall {
 
 /// One word of a command line, and whether quotes produced it.
 ///
-/// The text is the word the shell passes, quotes taken off; that a quote
-/// produced it is kept because the positions differ in what they admit. A
-/// pattern, a `sed` script and a `cd` take any quoted word the walk below
-/// resolves; a path takes one only when it spells a file rather than a
-/// pattern; and every other position — a command word, an option, a count —
-/// takes none.
+/// The text is the word the shell passes, quotes taken off and escapes
+/// resolved; that a quote produced it is kept because the positions differ
+/// in what they admit. A pattern, a `sed` script and a `cd` take any quoted
+/// word the walk below resolves; a path takes one only when it spells a file
+/// rather than a pattern; and every other position — a command word, an
+/// option, a count — takes none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Word {
     text: String,
     quoted: bool,
-    /// Whether a backslash inside double quotes is part of the text: the
-    /// shell passes it as written, but a path spelled that way is one an
-    /// agent almost never means, so a path refuses it.
-    kept_backslash: bool,
+    /// Whether a backslash stood inside double quotes, kept as written or
+    /// escaping the character after it. The shell's word is exact either
+    /// way, but a path spelled with one is a path an agent almost never
+    /// means, and a label's command may read the text as an escape of its
+    /// own, so both positions refuse it.
+    backslash: bool,
 }
 
 /// Whether a character may appear in an unquoted word.
@@ -491,7 +519,7 @@ fn words(command: &str) -> Option<Vec<Word>> {
                         current = Some(Word {
                             text: c.to_string(),
                             quoted: false,
-                            kept_backslash: false,
+                            backslash: false,
                         });
                     }
                 }
@@ -511,16 +539,20 @@ fn words(command: &str) -> Option<Vec<Word>> {
 /// Inside single quotes every character is itself. Inside double quotes the
 /// shell still acts on `$` and a backtick, and a backslash escapes `$`, a
 /// backtick, `"`, `\` and a newline; before any other character it is kept
-/// as written. So a double-quoted word with no `$`, no backtick and only
-/// kept backslashes is exactly its text, and anything else is refused rather
-/// than resolved. A `!` is refused as well: an interactive shell expands it
-/// even inside double quotes, and this module cannot tell which shell it is.
-/// A control character ends the recognition in either kind of quote.
+/// as written. So a double-quoted word with no `$` and no backtick is its
+/// text with each escaped `"` and `\` taken as that one character and every
+/// other backslash kept — a resolution as fixed as the quote itself, which
+/// is what lets an agent's `grep -n "\"decision\""` in. The other three
+/// escapes stay refused: an escaped `$` or backtick is a spelling an agent's
+/// reads almost never use, and an escaped newline joins two lines. A `!` is
+/// refused as well: an interactive shell expands it even inside double
+/// quotes, and this module cannot tell which shell it is. A control character
+/// ends the recognition in either kind of quote.
 fn quoted_word(mark: char, chars: &mut std::str::Chars<'_>) -> Option<Word> {
     let mut word = Word {
         text: String::new(),
         quoted: true,
-        kept_backslash: false,
+        backslash: false,
     };
     while let Some(inner) = chars.next() {
         if inner == mark {
@@ -530,11 +562,20 @@ fn quoted_word(mark: char, chars: &mut std::str::Chars<'_>) -> Option<Word> {
             return None;
         }
         if mark == '"' {
-            let escapes = |next: char| matches!(next, '$' | '`' | '"' | '\\' | '\n');
             match inner {
                 '$' | '`' | '!' => return None,
-                '\\' if chars.clone().next().is_none_or(escapes) => return None,
-                '\\' => word.kept_backslash = true,
+                '\\' => {
+                    word.backslash = true;
+                    match chars.clone().next() {
+                        None | Some('$' | '`' | '\n') => return None,
+                        Some(escaped @ ('"' | '\\')) => {
+                            chars.next();
+                            word.text.push(escaped);
+                            continue;
+                        }
+                        Some(_) => (),
+                    }
+                }
                 _ => (),
             }
         }
@@ -554,12 +595,12 @@ fn bare(word: &Word) -> Option<&str> {
 /// A quoted one is the word the shell passes, which is what lets a path with a
 /// space in it be read. It is still refused when it spells what an agent
 /// almost certainly meant as something else — a glob or a `~` the quotes kept
-/// from expanding, or a backslash kept inside double quotes — because the
-/// shell would open a file by that literal name, and a read credited to it is
-/// one nobody intended.
+/// from expanding, or a backslash inside double quotes — because the shell
+/// would open a file by that literal name, and a read credited to it is one
+/// nobody intended.
 fn path_arg(word: &Word) -> Option<String> {
     let text = word.text.as_str();
-    let spells_a_pattern = word.kept_backslash || text.contains(['*', '?', '[', '~']);
+    let spells_a_pattern = word.backslash || text.contains(['*', '?', '[', '~']);
     if text.is_empty() || text.starts_with('-') || (word.quoted && spells_a_pattern) {
         return None;
     }
@@ -683,7 +724,8 @@ const PATTERN_FLAG: char = 'e';
 /// ever splitting inside a quote.
 ///
 /// Deliberately a *lexer* and not a parser: it knows only that a quote runs to
-/// its own closing mark and that everything outside one is text. A quote that
+/// its own closing mark — past an escaped one inside double quotes, as the
+/// shell reads it — and that everything outside one is text. A quote that
 /// never closes swallows the rest of the line, which yields a piece
 /// [`words`] refuses on the same grounds it always did — so the two halves
 /// agree without either one asking the other.
@@ -708,6 +750,12 @@ fn split_on<'a>(command: &'a str, seps: &[&str], limit: usize) -> Vec<&'a str> {
             Some(quote) => {
                 if c == quote {
                     open = None;
+                }
+                // An escaped character inside double quotes never closes
+                // one, so the split agrees with the word walk about where
+                // each quote ends.
+                if quote == '"' && c == '\\' {
+                    at += rest.chars().nth(1).map_or(0, char::len_utf8);
                 }
                 at += c.len_utf8();
             }
@@ -786,16 +834,58 @@ fn under(dir: Option<&str>, path: String) -> String {
 fn narrowing(piece: &str) -> Option<Narrowing> {
     let words = words(piece)?;
     let (head, rest) = words.split_first()?;
-    let count = match rest {
-        [n] => line_count_text(bare(n)?.strip_prefix('-')?)?,
-        [flag, n] if bare(flag) == Some("-n") => line_count(n)?,
-        _ => return None,
-    };
     match bare(head)? {
-        "head" => Some(Narrowing::First(count)),
-        "tail" => Some(Narrowing::Last(count)),
+        "head" => Some(Narrowing::First(narrowing_count(rest)?)),
+        "tail" => Some(Narrowing::Last(narrowing_count(rest)?)),
+        "sed" => line_pick(rest),
         _ => None,
     }
+}
+
+/// The count of a narrowing `head` or `tail`, in either spelling.
+fn narrowing_count(rest: &[Word]) -> Option<u32> {
+    match rest {
+        [n] => line_count_text(bare(n)?.strip_prefix('-')?),
+        [flag, n] if bare(flag) == Some("-n") => line_count(n),
+        _ => None,
+    }
+}
+
+/// A narrowing `sed -n 'A,Bp'`: one print element of the script `sed_read`
+/// takes, and nothing after it.
+///
+/// With no file after the script `sed` reads the pipe, and under `-n` it
+/// prints lines `A` to `B` of what came down it and nothing else — `head` and
+/// `tail` arithmetic with both ends stated. A file after the script would be
+/// read in place of the pipe, so there is none; a script of several elements
+/// prints several stretches no one narrowing names, so there is one.
+fn line_pick(rest: &[Word]) -> Option<Narrowing> {
+    let [flag, script] = rest else {
+        return None;
+    };
+    if bare(flag) != Some("-n") {
+        return None;
+    }
+    let (lo, hi) = sed_range(&pattern_arg(script)?)?;
+    Some(Narrowing::Pick { lo, hi })
+}
+
+/// Lines `lo` to `hi` of a run that is lines `first` to `last` of the file,
+/// as the span of the file they are.
+///
+/// The pick is cut at the run's own end, as `sed` stops where its input
+/// does. One that starts past that end printed nothing, and a command that
+/// prints nothing has read nothing, so it is unknown rather than an empty
+/// interval no span can spell.
+fn picked((first, last): (u32, u32), (lo, hi): (u32, u32)) -> ReadSpan {
+    let Some(start) = first.checked_add(lo.saturating_sub(1)) else {
+        return ReadSpan::Unknown;
+    };
+    let end = last.min(first.saturating_add(hi.saturating_sub(1)));
+    if start > end {
+        return ReadSpan::Unknown;
+    }
+    ReadSpan::lines(start, HiKind::Explicit(end))
 }
 
 /// What one member of a chain was, before a leading `cd` is applied to it.
@@ -819,8 +909,8 @@ enum Member {
 /// reaches this list only as a bare word or a whole-word quoted literal, and
 /// every way a shell could turn one of those into something else — `$`, a
 /// backtick, a backslash outside a single-quoted word, a redirect, a
-/// substitution — is a character no word may hold. A backslash kept inside
-/// double quotes is the one exception the walk admits, and a label refuses it
+/// substitution — is a character no word may hold. A backslash inside double
+/// quotes is the one exception the walk admits, and a label refuses it
 /// itself, because both commands may read it as an escape of their own.
 const LABEL_COMMANDS: &[&str] = &["echo", "printf"];
 
@@ -999,12 +1089,12 @@ fn recognise_simple(command: &str) -> Option<Member> {
     // quoted literal, which is the whole condition on a label. The count is
     // not one of the conditions — `echo` with no operands is the blank line an
     // agent puts between two reads, and it is the commonest label there is.
-    // A backslash kept inside double quotes is a word the shell passes as
-    // written, but `echo` and `printf` may each read it as an escape of their
-    // own, and a label that prints something other than its text is a shape
-    // nobody has measured.
+    // A backslash inside double quotes leaves a word the shell passes
+    // exactly, but `echo` and `printf` may each read the text as an escape of
+    // their own, and a label that prints something other than its text is a
+    // shape nobody has measured.
     if LABEL_COMMANDS.contains(&head_word) {
-        return (!rest.iter().any(|word| word.kept_backslash)).then_some(Member::Label);
+        return (!rest.iter().any(|word| word.backslash)).then_some(Member::Label);
     }
     let name = command_name(head_word);
     match name {
@@ -1015,6 +1105,7 @@ fn recognise_simple(command: &str) -> Option<Member> {
             one_read(path_arg(rest.last()?)?, span)
         }
         "sed" => sed_read(rest),
+        "awk" => awk_read(rest),
         "grep" => content_search(rest, GREP_FLAGS),
         "egrep" | "fgrep" => content_search(rest, GREP_VARIANT_FLAGS),
         "rg" => rg_call(rest),
@@ -1096,6 +1187,74 @@ fn sed_read(rest: &[Word]) -> Option<Member> {
                 .collect(),
         )),
     }
+}
+
+/// `awk 'NR>=A && NR<=B'`: the one `awk` program that is a line pick, and the
+/// only `awk` the grammar reads.
+///
+/// A pattern with no action prints every record it matches as it was read,
+/// and a record is a line, so this program prints lines `A` to `B` of the
+/// one file and nothing else — exactly what `sed -n 'A,Bp'` prints, and so
+/// the same span with the same coverage. It is not on the published list; it
+/// is admitted because no reading of it depends on the file's bytes, which
+/// is the condition every form here meets. Every other `awk` program is left
+/// alone, because what a program prints is the program's to decide.
+///
+/// The operand must be a file: `awk` reads one spelled `name=value` as an
+/// assignment, so a path holding `=` is refused, and a second file would
+/// carry the record count across, so there is exactly one.
+fn awk_read(rest: &[Word]) -> Option<Member> {
+    let [program, path] = rest else {
+        return None;
+    };
+    let (lo, hi) = awk_line_pick(&pattern_arg(program)?)?;
+    let path = path_arg(path)?;
+    if path.contains('=') {
+        return None;
+    }
+    one_read(path, ShellSpan::Lines { lo, hi })
+}
+
+/// The two line numbers of an `NR>=A && NR<=B` program, or [`None`] for any
+/// other program.
+///
+/// Spaces may stand between the program's tokens and nowhere inside one —
+/// `N R` is two variables to `awk`, and `> =` is no operator. A tab never
+/// reaches here: the quoted word that carries the program refuses every
+/// control character.
+fn awk_line_pick(program: &str) -> Option<(u32, u32)> {
+    let rest = awk_token(program, "NR")?;
+    let rest = awk_token(rest, ">=")?;
+    let (lo, rest) = awk_number(rest)?;
+    let rest = awk_token(rest, "&&")?;
+    let rest = awk_token(rest, "NR")?;
+    let rest = awk_token(rest, "<=")?;
+    let (hi, rest) = awk_number(rest)?;
+    let ends = rest.trim_start_matches(' ').is_empty();
+    (ends && lo >= 1 && hi >= lo).then_some((lo, hi))
+}
+
+/// The program after `token`, where `token` comes next after any spaces.
+fn awk_token<'a>(program: &'a str, token: &str) -> Option<&'a str> {
+    program.trim_start_matches(' ').strip_prefix(token)
+}
+
+/// The number that comes next after any spaces, and the program after it.
+///
+/// Plain digits, as every count here is, and with no leading zero: unlike
+/// `sed`, `gawk` reads a constant in the program's text that starts with `0`
+/// as octal, so `010` is eight to it and ten to the `awk` macOS ships, and a
+/// line pick whose lines depend on which `awk` runs is no line pick.
+fn awk_number(program: &str) -> Option<(u32, &str)> {
+    let program = program.trim_start_matches(' ');
+    let end = program
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(program.len());
+    let (number, rest) = program.split_at(end);
+    if number.starts_with('0') {
+        return None;
+    }
+    Some((digits(number)?, rest))
 }
 
 /// The `grep` family: a content search over the files the line names. It is

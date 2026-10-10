@@ -70,9 +70,9 @@ fn a_quoted_word_is_the_word_the_shell_passes() {
 /// **A double-quoted word the shell would compute, and a quoted path that
 /// spells a pattern, are left alone.**
 ///
-/// An escape the shell resolves inside double quotes (`\$`, `` \` ``, `\"`,
-/// `\\`), a backslash with nothing after it, an expansion, a `!`, and a
-/// quoted path with a glob or a `~` in it — each is a line whose word the
+/// An escaped `$`, backtick or line break inside double quotes, a backslash
+/// with nothing after it, an expansion, a `!`, and a quoted path with a
+/// glob, a `~` or any backslash in it — each is a line whose word the
 /// grammar would have to compute, or one whose path is not what the agent
 /// most likely meant, so none is named.
 #[test]
@@ -80,9 +80,14 @@ fn a_quoted_word_the_shell_would_compute_is_left_alone() {
     for command in [
         "grep \"a\\$b\" src/lib.rs",
         "grep \"a\\`b\" src/lib.rs",
-        "grep \"a\\\"b\" src/lib.rs",
-        "grep \"a\\\\b\" src/lib.rs",
+        "grep \"a\\\nb\" src/lib.rs",
         "grep \"ab\\\" src/lib.rs",
+        "cat \"src/a\\\"b.rs\"",
+        "cat \"src/a\\\\b.rs\"",
+        "grep needle \"src/a\\\"b.rs\"",
+        "echo \"\\\"a\\\"\" && cat src/lib.rs",
+        "grep \"a\\\"b src/lib.rs",
+        "grep \"a\\\"; cat src/lib.rs",
         "cat \"src/lib.rs\\\"",
         "grep \"a$b\" src/lib.rs",
         "grep \"a`id`b\" src/lib.rs",
@@ -105,6 +110,46 @@ fn a_quoted_word_the_shell_would_compute_is_left_alone() {
             "{command:?} is not recognised"
         );
     }
+}
+
+/// **An escaped `"` or `\\` inside double quotes is the one character it
+/// escapes.**
+///
+/// The shell resolves both the same way every time, so a pattern spelled
+/// with them is one fixed word, and the search it belongs to is recognised as
+/// any search is: with no coverage. An escaped quote does not close the
+/// quote, so a separator after it is part of the pattern and never splits
+/// the line.
+#[test]
+fn an_escaped_quote_or_backslash_is_the_character_it_escapes() {
+    let lib = "src/lib.rs";
+    assert_each_recognised(&[
+        (
+            "grep -n \"\\\"decision\\\"\" src/lib.rs",
+            read(lib, ShellSpan::Matching),
+        ),
+        ("grep \"a\\\\b\" src/lib.rs", read(lib, ShellSpan::Matching)),
+        (
+            "rg -n \"fn a\\(\\\"x\\\"\\|\\\"y\\\"\" src/lib.rs | head -n 5",
+            ShellCall::Read(vec![super::narrowed(
+                lib,
+                ShellSpan::Matching,
+                crate::shell_read::Narrowing::First(5),
+            )]),
+        ),
+        (
+            "grep -n \"a\\\"; cat x\" src/lib.rs && cat src/main.rs",
+            ShellCall::Read(vec![
+                super::member(lib, ShellSpan::Matching),
+                super::member("src/main.rs", ShellSpan::WholeFile),
+            ]),
+        ),
+        (
+            "cd \"my \\\"x\\\" dir\" && sed -n '1,5p' a.rs",
+            read("my \"x\" dir/a.rs", ShellSpan::Lines { lo: 1, hi: 5 }),
+        ),
+    ]);
+    assert_eq!(read_of("grep -n \"\\\"decision\\\"\" src/lib.rs"), None);
 }
 
 /// **A reference reading of one shell word, written from the POSIX rules
@@ -161,6 +206,17 @@ fn quoted_word() -> impl proptest::strategy::Strategy<Value = String> {
         .prop_map(|(mark, pieces)| format!("{mark}{}{mark}", pieces.concat()))
 }
 
+/// A double-quoted pattern built only of escapes the grammar resolves and
+/// of characters a shell would split on outside a quote.
+fn resolvable_pattern() -> impl proptest::strategy::Strategy<Value = String> {
+    let piece = proptest::sample::select(
+        &[
+            "a", " ", ";", "&&", "|", "'", "\\\"", "\\\\", "\\w", "\\|", "#",
+        ][..],
+    );
+    proptest::collection::vec(piece, 1..8).prop_map(|pieces| format!("\"{}\"", pieces.concat()))
+}
+
 use proptest::strategy::Strategy as _;
 
 proptest::proptest! {
@@ -185,5 +241,18 @@ proptest::proptest! {
             let expected = reference.as_deref().map(|r| if in_cd { under(r) } else { r.to_owned() });
             proptest::prop_assert_eq!(Some(reads[0].path.clone()), expected, "{}", command);
         }
+    }
+
+    /// ★ A pattern of resolvable escapes is one word wherever its quotes and
+    /// separators fall: the search it belongs to is read, and so is the read
+    /// chained after it — no more and no fewer.
+    #[test]
+    fn an_escaped_quote_never_moves_a_separator(pattern in resolvable_pattern()) {
+        let command = format!("grep -n {pattern} src/lib.rs && cat src/main.rs");
+        let expected = ShellCall::Read(vec![
+            super::member("src/lib.rs", ShellSpan::Matching),
+            super::member("src/main.rs", ShellSpan::WholeFile),
+        ]);
+        proptest::prop_assert_eq!(recognise(&command), Some(expected), "{}", command);
     }
 }
