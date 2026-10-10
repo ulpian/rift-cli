@@ -29,16 +29,18 @@
 )]
 
 use rift_recall_validity::trust::{
-    is_directive_shaped, neutral_inline_span, neutral_pushed_span, render_delta_frame,
-    render_delta_manifest, render_deny_frame, render_recovery_map, render_redirect_frame,
-    render_search_answer, role_marker_spellings, serialize_untrusted, EntryDetail, HeldEntry,
-    HeldVerdict, ManifestEntry, PathStatus, RoleDialect, SearchHit, MAX_PUSHED_SPAN, ROLE_MARKERS,
+    is_directive_shaped, neutral_inline_span, neutral_pushed_span, render_coordinator_reads_naming,
+    render_delta_frame, render_delta_manifest, render_deny_frame, render_recovery_map,
+    render_redirect_frame, render_search_answer, role_marker_spellings, serialize_untrusted,
+    CoordinatorRead, EntryDetail, HeldEntry, HeldVerdict, ManifestEntry, PathStatus, RoleDialect,
+    SearchHit, MAX_PUSHED_SPAN, ROLE_MARKERS,
 };
 use rift_recall_validity::{Extractor, LogExtractor};
 
 const CORPUS: &str = include_str!("../fixtures/injection_corpus.jsonl");
 const MANIFEST_CORPUS: &str = include_str!("../fixtures/injected_manifest_corpus.jsonl");
 const FRAME_CORPUS: &str = include_str!("../fixtures/frame_span_corpus.jsonl");
+const COORDINATOR_CORPUS: &str = include_str!("../fixtures/coordinator_row_corpus.jsonl");
 
 /// Where a generated counterexample is written — **pinned, not derived**.
 ///
@@ -138,15 +140,29 @@ fn frame_corpus() -> Vec<ManifestCase> {
     parse_corpus(FRAME_CORPUS)
 }
 
+/// One row of a coordinator's window journal, in the coordinator section's
+/// position: a path and a hash, either of which may be the hostile part.
+#[derive(serde::Deserialize)]
+struct CoordinatorCase {
+    path: String,
+    hash: String,
+    forbidden: Vec<String>,
+}
+
+fn coordinator_corpus() -> Vec<CoordinatorCase> {
+    parse_corpus(COORDINATOR_CORPUS)
+}
+
 /// A full content hash, so a frame built around a hostile span still renders
 /// everything it would render in production.
 const HASH: &str = "3f9a1c2e8b7d4f60a1c2e8b7d4f603f9a1c2e8b7d4f60a1c2e8b7d4f603f9a1c";
 
 /// Every frame a hostile span can reach, rendered with the span in each
 /// position it can occupy: the path of a declined read, a held file, a ranked
-/// hit, the source of a redirect, and the search pattern.
+/// hit, the source of a redirect, the search pattern, and a coordinator's
+/// read.
 ///
-/// One helper rather than five tests, because the claim is about the *set* of
+/// One helper rather than six tests, because the claim is about the *set* of
 /// pushed frames: a renderer added without a row here would be a channel with
 /// no corpus behind it, and `every_frame_is_replayed_by_the_corpus` fails when
 /// the count drifts.
@@ -192,6 +208,22 @@ fn frames_carrying(span: &str) -> Vec<String> {
         span,
     ));
     out.extend(render_redirect_frame(span, ".rift/state/doc/ab12cd34.md"));
+    out.extend(
+        render_coordinator_reads_naming(
+            &[
+                CoordinatorRead {
+                    path: "src/honest.rs",
+                    hash: HASH,
+                },
+                CoordinatorRead {
+                    path: span,
+                    hash: HASH,
+                },
+            ],
+            0,
+        )
+        .map(|(text, _)| text),
+    );
     out
 }
 
@@ -699,26 +731,75 @@ fn no_hostile_span_survives_a_reason_frame() {
 
 /// Every pushed frame this crate has is replayed by the corpus above.
 ///
-/// The count is the tripwire. A sixth frame added without a position in
+/// The count is the tripwire. A seventh frame added without a position in
 /// `frames_carrying` would be a channel into the model's context with no
 /// red-team row behind it, and nothing else in this file would notice.
 #[test]
 fn every_frame_is_replayed_by_the_corpus() {
     assert_eq!(
         frames_carrying("src/honest_but_hostile_neighbour.rs").len(),
-        5,
+        6,
         "a frame was added or removed without updating the corpus replay"
     );
     // A withheld span costs the entry, never the frame: the recovery map and
     // the search answer still render, as counters.
     let frames = frames_carrying("docs/日本語/README.md");
-    assert_eq!(frames.len(), 5);
+    assert_eq!(frames.len(), 6);
     assert!(
         frames
             .iter()
             .any(|f| f.contains("withheld as unsafe to inject")),
         "withholding inside a list must be counted: {frames:#?}"
     );
+}
+
+/// A coordinator's journal row is rendered into a subagent's context only
+/// when it is a checkout revision in the journal's own spelling.
+///
+/// The journal is a file an agent can write to, so the corpus is rows no gate
+/// wrote: an absolute path, a `..`, a control character, an instruction, a
+/// frame clause, a backslash spelling, and hashes that are not hex. Each is
+/// rendered beside an honest row, and the oracle is the corpus's own literal
+/// spans rather than the renderer's filter: none may appear, the hostile row
+/// is counted and never named, and the honest row still renders.
+#[test]
+fn no_hostile_coordinator_row_is_ever_rendered() {
+    // A hash no corpus row shares a prefix with, so the honest row's
+    // rendering can never contain a span a hostile row forbids.
+    let honest = "a".repeat(64);
+    let cases = coordinator_corpus();
+    assert!(
+        cases.len() >= 10,
+        "the coordinator corpus must be substantive"
+    );
+    for c in &cases {
+        assert!(
+            c.forbidden
+                .iter()
+                .all(|span| c.path.contains(span.as_str()) || c.hash.contains(span.as_str())),
+            "a row forbids a span it does not contain: {:?}",
+            c.path
+        );
+        let reads = [
+            CoordinatorRead {
+                path: "src/honest.rs",
+                hash: &honest,
+            },
+            CoordinatorRead {
+                path: &c.path,
+                hash: &c.hash,
+            },
+        ];
+        let (text, named) = render_coordinator_reads_naming(&reads, 0).expect("a line");
+        assert_eq!(named, vec![0], "a hostile row was named: {text}");
+        assert!(text.starts_with("[rift] "), "{text}");
+        assert!(text.contains("src/honest.rs@aaaaaaaaaaaaaaaa"), "{text}");
+        assert!(text.contains("1 withheld as unsafe to inject"), "{text}");
+        assert!(!text.contains('\n'), "{text}");
+        for span in &c.forbidden {
+            assert!(!text.contains(span.as_str()), "{span:?} leaked: {text}");
+        }
+    }
 }
 
 /// Documents carry directive text, and a converted document is served in

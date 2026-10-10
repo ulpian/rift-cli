@@ -72,6 +72,10 @@ pub struct Report {
     /// through, in the order of
     /// [`Inheritance::ALL`](super::inheritance::Inheritance::ALL).
     pub sibling_by_inheritance: [Tally; 4],
+    /// The same reads, where the revision was one the section the later
+    /// window opened with would have named: live in the spawning window's
+    /// journal at the spawn, and among the names that section has room for.
+    pub sibling_named_at_spawn: Tally,
     /// Repository-content reads of machine-written files, keyed by
     /// [`MachineFormat::key`](super::census::MachineFormat::key).
     pub machine_formats: BTreeMap<&'static str, CensusRow>,

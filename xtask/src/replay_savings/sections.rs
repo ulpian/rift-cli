@@ -75,13 +75,19 @@ pub(super) fn later_first_reads(report: &Report, denominator: u64) -> String {
     )
 }
 
-/// The sibling re-reads, one line per inheritance route.
+/// The sibling re-reads, one line per inheritance route, and across the
+/// routes the part the section a window opens with would have named.
 pub(super) fn sibling_classes(report: &Report, denominator: u64) -> String {
     let mut out = String::new();
     for class in Inheritance::ALL {
         let tally = inheritance_tally(report, class);
         out.push_str(&row(class.label(), tally, denominator));
     }
+    out.push_str(&row(
+        "    named at the spawn by the opening section",
+        report.sibling_named_at_spawn,
+        denominator,
+    ));
     out
 }
 
@@ -181,6 +187,10 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
         .and_then(Value::as_object_mut)
     {
         cross.insert("by_inheritance".to_owned(), inheritance_json(report));
+        cross.insert(
+            "named_at_spawn".to_owned(),
+            tally_json(report.sibling_named_at_spawn),
+        );
         cross.insert("reads".to_owned(), report.cross_window.calls.into());
     }
     map.insert("facts".to_owned(), facts_json(report));

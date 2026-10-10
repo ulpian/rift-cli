@@ -198,6 +198,12 @@ pub use rift_recall_validity::trust::{
 pub use self::verbs::summaries::current_outline_shape;
 pub use rift_recall_validity::OutlineShape;
 
+/// The section a subagent's window opens with, naming what its coordinator
+/// held at that instant, re-exported by the same route and for the same reason as
+/// [`render_recovery_map`]: one sealed renderer writes every pushed sentence,
+/// and this dispatcher is already its caller.
+pub use rift_recall_validity::trust::{render_coordinator_reads_naming, CoordinatorRead};
+
 pub use self::envelope::{
     exact_sha, grant_tagged_envelope, handle_display_path, injection_audit_envelope, omit_tag,
     provenance_trust,

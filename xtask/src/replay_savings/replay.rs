@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use super::bucket::Bucket;
 use super::classify::classify_reads;
 use super::history::History;
-use super::inheritance::{inheritance_of, leads, WindowLead};
+use super::inheritance::{inheritance_of, leads, opening_section, WindowLead, SPAWNING_TOOLS};
 use super::options::Options;
 use super::report::{finish, land, Report};
 use super::shell_shape::count_shape;
@@ -67,6 +67,10 @@ pub(super) struct TreeState {
     pub(super) spawners: BTreeSet<usize>,
     /// What a spawning window's first read of a `(path, revision)` returned.
     pub(super) first_texts: BTreeMap<(String, u32, usize), String>,
+    /// The windows each spawning call opened, by the call's id.
+    pub(super) spawned_by: BTreeMap<String, Vec<usize>>,
+    /// What the section each spawned window opens with would have named.
+    pub(super) opening_named: BTreeMap<usize, BTreeSet<(String, String)>>,
 }
 
 /// The settings every call in one replay is decided under, spelled once.
@@ -173,6 +177,7 @@ fn replay_tree(
     let path_refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     let mut tree = TreeState {
         leads: leads(&path_refs, &loaded),
+        spawned_by: spawned_by(&loaded),
         ..TreeState::default()
     };
     tree.spawners = tree.leads.iter().filter_map(|lead| lead.parent).collect();
@@ -254,6 +259,9 @@ fn replay_call(ctx: &mut Ctx<'_>, call: &Call) {
     if call.name == "Bash" {
         count_shell_call(ctx.report, call);
     }
+    if SPAWNING_TOOLS.contains(&call.name.as_str()) {
+        note_the_opening_section(ctx, &call.id);
+    }
     // A change first: a read in the same call is not a thing, and the revision
     // a later read is keyed by has to have moved before the read arrives.
     if let Some(edit) = ctx.replay.adapter.edit_request("PreToolUse", &native) {
@@ -289,6 +297,29 @@ fn replay_call(ctx: &mut Ctx<'_>, call: &Call) {
     }
     let seen = ctx.report.other_tools.entry(call.name.clone()).or_default();
     *seen = seen.saturating_add(1);
+}
+
+/// What the section each window this call spawned opens with would name: the
+/// spawning window's journal as it stands at the call.
+fn note_the_opening_section(ctx: &mut Ctx<'_>, call_id: &str) {
+    let Some(children) = ctx.tree.spawned_by.get(call_id) else {
+        return;
+    };
+    let named = opening_section(&ctx.state.journal);
+    for child in children {
+        ctx.tree.opening_named.insert(*child, named.clone());
+    }
+}
+
+/// The windows of a tree by the id of the call that spawned each.
+fn spawned_by(windows: &[Window]) -> BTreeMap<String, Vec<usize>> {
+    let mut out: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, window) in windows.iter().enumerate() {
+        if let Some(call_id) = &window.spawning_call {
+            out.entry(call_id.clone()).or_default().push(index);
+        }
+    }
+    out
 }
 
 /// Count one shell call, and whether the pinned grammar recognised it at all.
@@ -477,8 +508,20 @@ fn fold_cross_window(tree: &TreeState, limits: Limits, report: &mut Report) {
             if let Some(tally) = report.sibling_by_inheritance.get_mut(class.index()) {
                 tally.add(*tokens);
             }
+            if named_at_spawn(tree, *window, key, *revision) {
+                report.sibling_named_at_spawn.add(*tokens);
+            }
         }
     }
+}
+
+/// Whether the section window `window` opened with would have named this
+/// revision.
+fn named_at_spawn(tree: &TreeState, window: usize, key: &str, revision: u32) -> bool {
+    let Some(named) = tree.opening_named.get(&window) else {
+        return false;
+    };
+    named.contains(&(key.to_owned(), revision_hash(key, revision).to_hex()))
 }
 
 #[cfg(test)]
@@ -611,6 +654,72 @@ mod tests {
         );
     }
 
+    /// A sibling's re-read of the revision its coordinator read just before
+    /// the spawn is one the opening section would have named.
+    #[test]
+    fn a_reread_the_opening_section_would_have_named_is_counted_under_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcripts = tmp.path().join("transcripts");
+        let subagents = transcripts.join("sess-boot").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let main = [
+            json!({"type": "user", "message": {"role": "user", "content": "survey"}}),
+            tool_use("r1", "Read", &json!({"file_path": "/repo/src/lib.rs"})),
+            tool_result("r1", &numbered(60)),
+            tool_use("t1", "Agent", &json!({"prompt": "look around"})),
+        ];
+        let child = [
+            json!({"type": "user", "message": {"role": "user", "content": "look around"}}),
+            tool_use("r2", "Read", &json!({"file_path": "/repo/src/lib.rs"})),
+            tool_result("r2", &numbered(60)),
+        ];
+        write_lines(&transcripts.join("sess-boot.jsonl"), &main, "00:00");
+        write_lines(&subagents.join("agent-a.jsonl"), &child, "00:01");
+        std::fs::write(
+            subagents.join("agent-a.meta.json"),
+            json!({"toolUseId": "t1"}).to_string(),
+        )
+        .unwrap();
+        let mut opts = fixture(tmp.path());
+        opts.transcripts = transcripts;
+        let report = replay(&opts).unwrap();
+        assert_eq!(report.cross_window.calls, 1, "one sibling re-read");
+        assert_eq!(report.sibling_named_at_spawn, report.cross_window);
+    }
+
+    fn tool_use(id: &str, name: &str, input: &serde_json::Value) -> serde_json::Value {
+        json!({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": id, "name": name, "input": input}
+        ]}})
+    }
+
+    fn tool_result(id: &str, content: &str) -> serde_json::Value {
+        json!({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": id, "content": content}
+        ]}})
+    }
+
+    fn numbered(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("{i:>6}\u{2192}line {i} of plain prose text"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// One record per line, each stamped a second apart from `minute` on and
+    /// placed in `/repo`, as the client writes them.
+    fn write_lines(path: &std::path::Path, records: &[serde_json::Value], minute: &str) {
+        let mut out = String::new();
+        for (second, record) in records.iter().enumerate() {
+            let mut record = record.clone();
+            record["cwd"] = json!("/repo");
+            record["timestamp"] = json!(format!("2026-03-01T00:{minute}:{second:02}.000Z"));
+            out.push_str(&record.to_string());
+            out.push('\n');
+        }
+        std::fs::write(path, out).unwrap();
+    }
+
     #[test]
     fn the_fixture_pins_the_sibling_routes_and_where_its_facts_came_from() {
         let report = replayed();
@@ -627,6 +736,10 @@ mod tests {
         );
         assert_eq!(class(Inheritance::Paste), 0, "no prompt carries lines");
         assert_eq!(class(Inheritance::ByName), 0, "no prompt names the path");
+        assert_eq!(
+            report.sibling_named_at_spawn.calls, 0,
+            "no sidecar names the call that spawned the subagent, so no section is known"
+        );
         let routes = report.sibling_by_inheritance;
         assert_eq!(
             routes.iter().map(|tally| tally.calls).sum::<u64>(),

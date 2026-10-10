@@ -97,6 +97,7 @@ mod seen;
 
 use std::path::{Path, PathBuf};
 
+pub(crate) use coordinator::{coordinator_reads, CoordinatorRead};
 pub(crate) use denies::{deny_stands, ineffective_denies};
 pub(crate) use edits::{edit_facts, expected_write, prior_revision};
 pub(crate) use frozen::session_window_facts;

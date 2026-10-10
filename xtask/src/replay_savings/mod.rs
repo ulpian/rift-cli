@@ -102,7 +102,8 @@
 //! anything this build decides: the client's own declines beside this
 //! build's; the sibling re-reads split by the route a window could have
 //! inherited the bytes through ([`Inheritance`]), one count per later
-//! window's first read of a revision a sibling had read first; the reads of machine-written
+//! window's first read of a revision a sibling had read first, beside the part
+//! the section a subagent's window opens with would have named; the reads of machine-written
 //! files by path shape ([`MachineFormat`]); and the first sights by the size of
 //! the file read, with the first-contact floor of 400 lines or 16,384 bytes.
 //! `--artifact <dir>` writes the table and the document with the build, the

@@ -13,6 +13,7 @@
 mod agent;
 mod archive;
 mod audit;
+mod coordinator;
 mod doc_gate;
 mod gate;
 mod git;

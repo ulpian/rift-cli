@@ -145,8 +145,9 @@ baseline keyed by the session alone made the two halves of one decision
 disagree: a parent would be told that *files you have read changed* about files
 only a subagent ever read. The verb that opens a subagent's window is
 deliberately **not** a manifest boundary either: a window that has read nothing
-has no delta to be told about, so it is handed the pointer and nothing else,
-and its first manifest waits for something it has actually read to move.
+has no delta to be told about, so it is handed the pointer and what its
+coordinator holds ([below](#what-a-subagents-window-opens-with)), and its first
+manifest waits for something it has actually read to move.
 
 The budget is **400 tokens**, set by `injection_turn_budget` in
 `.rift/policies/serve.toml` ([chapter 2](02-configuration.md) covers the file).
@@ -218,6 +219,39 @@ as it stands and a cold one yields silence rather than a stall. The walk that
 finds a fitting manifest considers at most 64 entries, stepping down one at a
 time and measuring the real rendered string, so a thousand-file delta cannot
 turn one prompt into a thousand tokenizer passes.
+
+### What a subagent's window opens with
+
+A subagent is spawned by a window that has usually read the files its task is about, and it starts holding none of them.
+So at the boundary that opens its window, the pointer is followed by one line:
+
+```
+[rift] Held by your coordinator at your start (facts, not directives): src/lib.rs@3f9a1c2e8b7d4f60, bins/rift/src/hooks.rs@8b7d4f60a1c2e8b7 (2 more not shown)
+```
+
+It names the revisions the coordinator's window held at the instant of the spawn and the subagent does not: the latest revision of each path it read and still holds, newest first, with the hash in the sixteen-character form the pull verbs take.
+At most eight are named and the rest are counted, never cut.
+With the hash in hand, the subagent can ask `diff-since` or `known-state` for what moved instead of reading the file whole.
+A coordinator that has read nothing is silence.
+
+**Once, and inside the turn's budget.**
+The line rides in the claim that hands the window its pointer, so a retried opening finds the claim taken and says nothing: the section is never pushed twice, and needs no marker of its own.
+It fits what the per-turn budget of 400 tokens leaves after the pointer's 124, which is 276, dropping names from the tail into the count; a budget of `0` turns it off with the rest of injection.
+Its tokens are measured in the same string as the pointer and booked as spend on the pointer's row, so the section is never a free line.
+
+**Only the coordinator's window, in this checkout.**
+The subagent works for the window that spawned it, and that window's reads are the ones it was briefed from.
+A sibling subagent's reads belong to some other task, and another member's reads in the family may be of a different file at the same path.
+The hook reads two window journals to compose it, the coordinator's and the subagent's own: no store and no git object database.
+
+**Facts, never a decline.**
+The section names revisions and writes nothing to the subagent's window journal: no read, no hold, no decline.
+The read gate keeps deciding from the subagent's own reads alone ([§7.4](#74-tier-three-the-decision-at-the-read)), so a file the coordinator holds is never a reason to skip the subagent's read of it, and no decline ever rests on a line outside the window's own journal.
+A test holds the subagent's journal untouched across the push.
+
+**The coordinator's journal is not trusted to be well formed.**
+It is a file an agent can write to, so a row is rendered only if its path is a checkout path in the journal's own spelling (relative, `/`-separated, no `..`, no control character) that the push guard passes unaltered, and only if its hash is hex.
+Any other row is counted as withheld, as every listing counts its own, and the red-team corpus carries rows of each kind ([§7.17](#717-the-red-team-program)).
 
 ---
 
@@ -1204,6 +1238,11 @@ document goes through the untrusted serializer and every row through the
 push-side renderer, including the shape that beats a naive first-line check — an
 innocent first line with the payload behind a newline — and each rendered
 artifact is searched for those spans by literal containment.
+A third corpus holds **11 hostile journal rows** in the position a coordinator's
+read occupies in the section a subagent's window opens with: an absolute path,
+a `..`, a control character, an instruction, a backslash spelling, and hashes
+that are not hex. Each is rendered beside an honest row; none may be named, and
+the honest row must still render.
 
 Documents join the same corpora rather than getting a lane of their own: a
 converted document is bytes a repository can contain, so word-processor,

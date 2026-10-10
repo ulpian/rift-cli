@@ -40,8 +40,7 @@ pub(crate) struct CoordinatorRead {
 /// is about, and it starts holding none of them; this is the list of those
 /// files, by revision, so it can ask for what moved rather than read them
 /// whole. Its one consumer is the section a subagent's window is opened
-/// with, which is the boundary that would hand it over; until that section
-/// exists nothing calls this.
+/// with, which is the boundary that hands it over.
 ///
 /// **The coordinator's own window in the caller's checkout, and no other.**
 /// A subagent works for the window that spawned it, and that window's reads
@@ -60,13 +59,6 @@ pub(crate) struct CoordinatorRead {
 /// own spelling that the push guard passes unaltered; the loader has already
 /// dropped every row whose hash is not hex. The journal is a file an agent can
 /// write to, and every name returned here is bound for a model's context.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the section a subagent's window opens with, which has no caller yet"
-    )
-)]
 pub(crate) fn coordinator_reads(
     work_tree: &Path,
     session_id: &str,
