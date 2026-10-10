@@ -198,6 +198,11 @@ pub struct IngestReport {
     /// index: the recorded tip is gone, or its recorded position now holds
     /// another checkpoint. `full_pass - rewritten` is the cold starts.
     pub rewritten: usize,
+    /// Frozen window rows a window inherited from the window that started
+    /// it: valid, read, and not projected, because the window-row relation's
+    /// kinds are sealed by its migration. Counted so a rebuild says how many
+    /// valid rows its projection does not hold.
+    pub window_rows_inherited: usize,
 }
 
 /// Caller-supplied context for a production ingest run (the completeness
@@ -308,12 +313,13 @@ fn push_containment_rows(b: &mut Built, cid: &str, meta: &CheckpointMetadata) {
 /// writes). The cascade: Checkpoint → Sessions → ToolCalls → **FileRead
 /// extraction** → TokenUsage, with the typed edges. Each step below pushes its
 /// rows in cascade order, and the artifacts are read in the order their parse
-/// issues are reported.
+/// issues are reported. Beside the rows comes the count of inherited window
+/// runs it read and did not project.
 fn build_rows(
     reader: &impl SubstrateReader,
     shard: &CheckpointShard,
     opts: &IngestOptions,
-) -> Result<Built> {
+) -> Result<(Built, usize)> {
     let mut b = Built::default();
     let cid = shard.checkpoint_id.as_str();
 
@@ -373,8 +379,8 @@ fn build_rows(
     }
     b.serves = serve_audit::read_serves(reader, cid, &mut b.issues)?;
     let window_rows = window_journal::read_window_rows(reader, cid, &mut b.issues)?;
-    b.inserts.extend(window_rows);
-    Ok(b)
+    b.inserts.extend(window_rows.inserts);
+    Ok((b, window_rows.inherited))
 }
 
 /// Read one artifact of a checkpoint and parse it, appending its parse issues
@@ -665,7 +671,8 @@ pub(crate) async fn ingest_planned(
             report.skipped += 1;
             continue;
         }
-        let built = build_rows(reader, shard, opts)?;
+        let (built, inherited) = build_rows(reader, shard, opts)?;
+        report.window_rows_inherited += inherited;
         report.nodes += built.nodes;
         report.edges += built.edges;
         report.issues.extend(built.issues.iter().cloned());

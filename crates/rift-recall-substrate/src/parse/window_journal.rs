@@ -23,7 +23,9 @@ pub struct WindowJournalRow {
     pub window_key: String,
     /// The subagent the window belongs to, `None` for the session's own.
     pub subagent: Option<String>,
-    /// One of the eight kinds the artifact declares.
+    /// One of the eleven kinds the artifact declares: the eight a window's
+    /// own rows take, and the three `inherit:<class>` runs it was handed by
+    /// the window that started it.
     pub kind: String,
     /// The turn the row was written in.
     pub turn: u32,
@@ -106,11 +108,13 @@ fn window_journal_row(line: &[u8]) -> Result<WindowJournalRow, String> {
 }
 
 /// The members a window row's kind carries beside the five every row has,
-/// `None` for a kind the artifact does not declare. A `read` alone may carry
-/// `total_lines`, and an `edit` may lack `hash_old`.
+/// `None` for a kind the artifact does not declare. A `read` and an inherited
+/// run alone may carry `total_lines`, and an `edit` may lack `hash_old`.
 fn window_kind_members(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
-        "read" => Some(&["hash", "path", "range", "total_lines"]),
+        "read" | "inherit:fork" | "inherit:paste" | "inherit:by_name" => {
+            Some(&["hash", "path", "range", "total_lines"])
+        }
         "deny" | "observe" | "hold" | "prevented" => Some(&["hash", "path", "range"]),
         "expect" => Some(&["hash", "path"]),
         "edit" => Some(&["full", "hash_new", "hash_old", "path", "shift", "sites"]),
@@ -323,6 +327,34 @@ mod tests {
         let kinds: Vec<&str> = out.value.iter().map(|row| row.kind.as_str()).collect();
         assert_eq!(kinds, ["observe", "hold", "prevented", "expect"]);
         assert_eq!(out.value[3].range, None);
+    }
+
+    /// An inherited run parses under its class's token with the members a
+    /// read carries, exactly as the writer freezes it; a class the artifact
+    /// does not declare, or an inherited row with a member its kind does not
+    /// declare, is refused like any other.
+    #[test]
+    fn an_inherited_run_parses_and_an_undeclared_member_on_one_is_refused() {
+        let read = GOLDEN_WINDOW_JOURNAL.lines().next().unwrap();
+        let as_kind = |kind: &str| read.replace("\"read\"", &format!("\"{kind}\""));
+        let classes = ["inherit:fork", "inherit:paste", "inherit:by_name"];
+        let lines: Vec<String> = classes.iter().map(|kind| as_kind(kind)).collect();
+        let out = parse_window_journal(lines.join("\n").as_bytes(), "cp");
+        assert!(out.is_clean(), "{:?}", out.issues);
+        let kinds: Vec<&str> = out.value.iter().map(|row| row.kind.as_str()).collect();
+        assert_eq!(kinds, classes);
+        assert!(out
+            .value
+            .iter()
+            .all(|row| row.range == Some((1, 120)) && row.total_lines == Some(120)));
+
+        let mut extra: serde_json::Value =
+            serde_json::from_str(&as_kind("inherit:by_name")).unwrap();
+        extra["reason"] = "compact".into();
+        let refused = [extra.to_string(), as_kind("inherit:telepathy")];
+        let out = parse_window_journal(refused.join("\n").as_bytes(), "cp");
+        assert!(out.value.is_empty(), "{:?}", out.value);
+        assert_eq!(out.issues.len(), 2, "{:?}", out.issues);
     }
 
     /// Each shape outside the artifact's grammar is one issue naming its
