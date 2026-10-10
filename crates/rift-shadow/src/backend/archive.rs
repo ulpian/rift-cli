@@ -219,6 +219,10 @@ pub struct CheckpointArchive {
     /// map, which names only a session archived from another member and
     /// carries no subagent, basis or time.
     pub worktree_observations: Vec<super::ArchivedWorktreeObservation>,
+    /// Every measured tool result the session's capture recorded (empty ⇒ no
+    /// `tool_results.jsonl`) — the search half of the savings denominator,
+    /// which no read fact carries because a search resolves to no file.
+    pub tool_results: Vec<super::ArchivedToolResult>,
     /// The redacted raw capture (durable-blob proof of the gate).
     pub content: RedactedBytes,
     /// The redaction report for `redaction_report.json` (must be valid).
@@ -390,7 +394,7 @@ pub struct ArchivedReadFact {
 /// `TOKENIZER` and its `FALLBACK` estimate. Spelled here rather than imported
 /// because this crate does not depend on the tokenizer, and the archive needs
 /// only the names.
-const READ_TOKENIZERS: [&str; 2] = ["cl100k_base", "chars/4+1"];
+pub(super) const READ_TOKENIZERS: [&str; 2] = ["cl100k_base", "chars/4+1"];
 
 /// Serialize read facts exactly as the shard's `tool_calls.jsonl` freezes them
 /// (`None` when empty — the artifact is omitted, never written empty). Shared

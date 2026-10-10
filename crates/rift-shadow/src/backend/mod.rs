@@ -25,6 +25,7 @@ mod artifacts;
 mod fixtures;
 mod leaves;
 mod shard;
+mod tool_results;
 mod window;
 mod worktrees;
 
@@ -44,6 +45,9 @@ pub use artifacts::session_meta_json;
 pub use leaves::{
     shard_merkle_leaves, shard_merkle_root, DigestLeafBytes, SessionMetaLeaf, ShardLeafBytes,
     TaskLeafBytes,
+};
+pub use tool_results::{
+    session_tool_results, tool_results_jsonl_bytes, ArchivedToolResult, TOOL_RESULTS_SCHEMA_VERSION,
 };
 pub use window::{
     window_journal_jsonl_bytes, ArchivedWindowFact, ArchivedWindowRow, WindowSliceKind,

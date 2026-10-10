@@ -36,6 +36,9 @@ pub struct ShardLeafBytes<'a> {
     /// `tool_calls.jsonl` — the archived read facts, or `None` when the session
     /// captured none.
     pub tool_calls: Option<&'a [u8]>,
+    /// `tool_results.jsonl` — the session's measured tool results, or `None`
+    /// when it recorded none or was written before the artifact existed.
+    pub tool_results: Option<&'a [u8]>,
     /// `transcript.compact.jsonl` — the redacted deterministic compaction, or
     /// `None` when no transcript reached the archive.
     pub transcript_compact: Option<&'a [u8]>,
@@ -124,14 +127,16 @@ pub struct TaskLeafBytes<'a> {
 /// `tasks/<tool-use-id>/` subtree's artifacts (`metadata.json`, then the
 /// transcript pair when present — the task dir's own bytewise name order —
 /// tasks ordered by tool-use id), then `tool_calls.jsonl`, then
-/// `transcript.compact.jsonl`, then `transcript.jsonl`, then `usage.jsonl`,
+/// `tool_results.jsonl`, then `transcript.compact.jsonl`, then `transcript.jsonl`, then `usage.jsonl`,
 /// then `window_journal.jsonl` —
 /// which is the artifacts' bytewise **full-path** order (`serve_audit.jsonl`
 /// sits between `redaction_report.json` and `sessions/` because `r` < `s` at
 /// the first byte and again at the third; `session_worktrees.jsonl` sits
 /// between `serve_audit.jsonl` and `sessions.jsonl` because `r` < `s` at the
 /// third byte and `_` < `s` at the eighth; `tasks/…` sits between `sessions/`
-/// and `tool_calls.jsonl` because `'t','a' < 't','o'`; `usage.jsonl` and then
+/// and `tool_calls.jsonl` because `'t','a' < 't','o'`; `tool_results.jsonl`
+/// sits between `tool_calls.jsonl` and the transcript pair because `c` < `r`
+/// at the sixth byte and `o` < `r` at the second; `usage.jsonl` and then
 /// `window_journal.jsonl` trail because `t` < `u` < `w`, so each is appended
 /// to every sequence rather than inserted into one), the same order
 /// `NativeBackend::write_shard` sorts the tree into. One rule, and it makes
@@ -242,11 +247,13 @@ pub fn shard_merkle_leaves(bytes: &ShardLeafBytes<'_>) -> Vec<Sha256Id> {
 }
 
 /// The top-level artifacts that sort after the `tasks/` tree, in bytewise
-/// name order: `tool_calls.jsonl`, the transcript pair, `usage.jsonl`, then
-/// `window_journal.jsonl` (`t` < `u` < `w`), each one leaf when present.
+/// name order: `tool_calls.jsonl`, `tool_results.jsonl`, the transcript
+/// pair, `usage.jsonl`, then `window_journal.jsonl` (`t` < `u` < `w`), each
+/// one leaf when present.
 fn push_trailing_leaves(bytes: &ShardLeafBytes<'_>, leaves: &mut Vec<Sha256Id>) {
     let trailing = [
         bytes.tool_calls,
+        bytes.tool_results,
         bytes.transcript_compact,
         bytes.transcript_full,
         bytes.usage,
@@ -342,6 +349,7 @@ mod tests {
             redaction_report: report,
             serve_audit: None,
             session_worktrees: None,
+            tool_results: None,
             sessions: None,
             usage: None,
             window_journal: None,
@@ -535,6 +543,41 @@ mod tests {
         assert_eq!(shard_merkle_leaves(&with), inserted);
         assert!("serve_audit.jsonl" < "session_worktrees.jsonl");
         assert!("session_worktrees.jsonl" < "sessions.jsonl");
+    }
+
+    /// **The tool-result leaf sits between the read facts and the transcript
+    /// pair, and its absence changes nothing.** `tool_results.jsonl` sorts
+    /// after `tool_calls.jsonl` (`c` < `r`) and before `transcript.*` (`o` <
+    /// `r`), a middle insertion only a shard carrying it sees.
+    #[test]
+    fn a_tool_result_leaf_sits_between_the_reads_and_the_transcript_and_absence_changes_nothing() {
+        use rift_hashchain::leaf_hash;
+
+        let without = ShardLeafBytes {
+            content_redacted: b"c",
+            redaction_report: b"r",
+            tool_calls: Some(b"reads"),
+            transcript_compact: Some(b"compact"),
+            transcript_full: Some(b"full"),
+            ..ShardLeafBytes::default()
+        };
+        let old = vec![
+            leaf_hash(b"c"),
+            leaf_hash(b"r"),
+            leaf_hash(b"reads"),
+            leaf_hash(b"compact"),
+            leaf_hash(b"full"),
+        ];
+        assert_eq!(shard_merkle_leaves(&without), old, "old sequence");
+        let with = ShardLeafBytes {
+            tool_results: Some(b"results"),
+            ..without
+        };
+        let mut inserted = old;
+        inserted.insert(3, leaf_hash(b"results"));
+        assert_eq!(shard_merkle_leaves(&with), inserted);
+        assert!("tool_calls.jsonl" < "tool_results.jsonl");
+        assert!("tool_results.jsonl" < "transcript.compact.jsonl");
     }
 
     /// **The window-journal leaf is the last, and its absence changes

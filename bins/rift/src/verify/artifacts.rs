@@ -60,6 +60,10 @@ pub(super) struct NativeArtifacts {
     /// never observed and on every shard written before the artifact existed;
     /// absence re-derives the old root.
     pub(super) session_worktrees: Option<Vec<u8>>,
+    /// `tool_results.jsonl`, absent on every shard whose session recorded no
+    /// measured tool result and on every shard written before the artifact
+    /// existed; absence re-derives the old root.
+    pub(super) tool_results: Option<Vec<u8>>,
     pub(super) full: Option<Vec<u8>>,
     pub(super) transcript_compact: Option<Vec<u8>>,
     pub(super) transcript_full: Option<Vec<u8>>,
@@ -135,6 +139,7 @@ impl NativeArtifacts {
             sessions: reader.read_artifact(id, "sessions.jsonl")?,
             window_journal: reader.read_artifact(id, "window_journal.jsonl")?,
             session_worktrees: reader.read_artifact(id, "session_worktrees.jsonl")?,
+            tool_results: reader.read_artifact(id, "tool_results.jsonl")?,
             full: reader.read_artifact(id, "full.jsonl")?,
             // The writer's own name constants, so the two sides cannot drift.
             transcript_compact: reader.read_artifact(id, TRANSCRIPT_COMPACT_NAME)?,
@@ -188,6 +193,7 @@ impl NativeArtifacts {
             serve_audit: self.serve_audit.as_deref(),
             sessions: self.sessions.as_deref(),
             tool_calls: self.tool_calls.as_deref(),
+            tool_results: self.tool_results.as_deref(),
             transcript_compact: self.transcript_compact.as_deref(),
             transcript_full: self.transcript_full.as_deref(),
             usage: self.usage.as_deref(),

@@ -12,8 +12,9 @@ use rift_core::Sha256Id;
 use super::leaves::{DigestLeafBytes, SessionMetaLeaf, ShardLeafBytes, TaskLeafBytes};
 use super::{
     session_worktrees_jsonl_bytes, sessions_jsonl_bytes, shard_merkle_root, tool_calls_jsonl_bytes,
-    usage_jsonl_bytes, window_journal_jsonl_bytes, ArchivedTask, ArchivedTranscript,
-    CheckpointArchive, NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
+    tool_results_jsonl_bytes, usage_jsonl_bytes, window_journal_jsonl_bytes, ArchivedTask,
+    ArchivedTranscript, CheckpointArchive, NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME,
+    TRANSCRIPT_FULL_NAME,
 };
 use crate::sha256_hex;
 
@@ -37,6 +38,12 @@ pub(super) const SESSION_WORKTREES_NAME: &str = "session_worktrees.jsonl";
 /// leaf trails the sequence.
 pub(super) const USAGE_NAME: &str = "usage.jsonl";
 
+/// The shard name of the frozen tool results. It sorts after
+/// `tool_calls.jsonl` (`c` < `r` at the sixth byte) and before
+/// `transcript.compact.jsonl` (`o` < `r` at the second), which is where its
+/// leaf sits.
+pub(super) const TOOL_RESULTS_NAME: &str = "tool_results.jsonl";
+
 /// The shard name of the frozen window journals. It sorts after `usage.jsonl`
 /// (`u` < `w`), after every other top-level name, so its leaf is the last.
 pub(super) const WINDOW_JOURNAL_NAME: &str = "window_journal.jsonl";
@@ -56,6 +63,7 @@ impl CheckpointArchive {
         let full = self.full_jsonl();
         let report = self.redaction_report_json();
         let tool_calls = self.tool_calls_jsonl();
+        let tool_results = self.tool_results_jsonl();
         let usage = self.usage_jsonl();
         let sessions = self.sessions_jsonl();
         let session_worktrees = self.session_worktrees_jsonl();
@@ -95,6 +103,7 @@ impl CheckpointArchive {
             session_worktrees: session_worktrees.as_deref(),
             sessions: sessions.as_deref(),
             tool_calls: tool_calls.as_deref(),
+            tool_results: tool_results.as_deref(),
             transcript_compact: self.transcript.as_ref().map(|t| t.compact.as_slice()),
             transcript_full: self.transcript.as_ref().map(|t| t.full.as_slice()),
             usage: usage.as_deref(),
@@ -263,6 +272,14 @@ impl CheckpointArchive {
         session_worktrees_jsonl_bytes(&self.worktree_observations)
     }
 
+    /// Render `tool_results.jsonl` — one line per measured tool result.
+    /// `None` when there is none it can freeze (the artifact is omitted,
+    /// never written empty).
+    #[must_use]
+    pub fn tool_results_jsonl(&self) -> Option<Vec<u8>> {
+        tool_results_jsonl_bytes(&self.tool_results)
+    }
+
     /// Render `usage.jsonl` — one line per settled model call. `None` when
     /// the session settled none (the artifact is omitted, never written empty).
     #[must_use]
@@ -394,6 +411,9 @@ impl CheckpointArchive {
         }
         if let Some(tool_calls) = self.tool_calls_jsonl() {
             out.insert("tool_calls.jsonl".to_owned(), tool_calls);
+        }
+        if let Some(results) = self.tool_results_jsonl() {
+            out.insert(TOOL_RESULTS_NAME.to_owned(), results);
         }
         if let Some(serve_audit) = self.serve_audit_jsonl() {
             out.insert(SERVE_AUDIT_NAME.to_owned(), serve_audit.to_vec());
@@ -1083,6 +1103,7 @@ mod tests {
             redaction_report: &report,
             serve_audit: None,
             session_worktrees: None,
+            tool_results: None,
             sessions: None,
             usage: None,
             window_journal: None,
@@ -1118,6 +1139,7 @@ mod tests {
                 redaction_report: &report,
                 serve_audit: None,
                 session_worktrees: None,
+                tool_results: None,
                 sessions: None,
                 usage: None,
                 window_journal: None,
@@ -1198,6 +1220,7 @@ mod tests {
                 redaction_report: &a.redaction_report_json(),
                 serve_audit: None,
                 session_worktrees: None,
+                tool_results: None,
                 sessions: None,
                 usage: None,
                 window_journal: None,

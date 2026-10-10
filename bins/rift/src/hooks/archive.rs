@@ -212,8 +212,8 @@ pub(super) fn bind_session_outlines(
 }
 
 /// What the session captured beside its capture document: its read facts, its
-/// serves, its settled usage, its agent, its context windows' journal rows and
-/// its worktree observations.
+/// serves, its settled usage, its agent, its context windows' journal rows,
+/// its worktree observations and its measured tool results.
 ///
 /// The one reading both the trailer's prediction and the archive fold, so
 /// the two derive one checkpoint id from the same bytes. The prediction can
@@ -237,6 +237,7 @@ pub(super) fn session_facts_for_archive(
             rt, store, work_tree, agent, session,
         ),
         worktree_observations: worktree_observations_for_archive(rt, store, agent, session),
+        tool_results: tool_results_for_archive(rt, store, agent, session),
     })
 }
 
@@ -289,6 +290,21 @@ fn worktree_observations_for_archive(
         );
     }
     observations
+}
+
+/// The session's measured tool results, for the shard's `tool_results.jsonl`:
+/// the search half of the savings denominator. Cumulative like the read
+/// facts; a result outside the frozen shapes is left out by the writer.
+/// Best-effort: a query failure archives none rather than blocking the
+/// checkpoint.
+fn tool_results_for_archive(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    agent: &str,
+    session: &str,
+) -> Vec<rift_shadow::backend::ArchivedToolResult> {
+    let gathered = rift_shadow::backend::session_tool_results(store, agent, session);
+    rt.block_on(gathered).unwrap_or_default()
 }
 
 /// The session's settled model calls with their usage, mapped for the shard's

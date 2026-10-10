@@ -84,7 +84,7 @@ checkpoint branch under a path derived from its own id:
 <id[:2]>/<id[2:]>/
     content.redacted   content_hash.txt   full.jsonl   metadata.json
     redaction_report.json   serve_audit.jsonl   session_worktrees.jsonl   sessions.jsonl
-    tool_calls.jsonl
+    tool_calls.jsonl   tool_results.jsonl
     digest.failures.json  digest.intent.json  digest.log.json  digest.shape.json
     transcript.jsonl   transcript.compact.jsonl   usage.jsonl   window_journal.jsonl
     sessions/<index>/metadata.json      (per-session header; only when the checkpoint covers 2+ sessions)
@@ -108,6 +108,7 @@ and a version field nothing binds documents nothing.
 | `session_worktrees.jsonl` | where a covered session was seen, one line per distinct state: the worktree token, the member's name, whether it is linked, the branch, the subagent, how it was decided and when it was first seen — never the checkout's path or the head; absent when the session was never observed |
 | `sessions.jsonl` | the agent each covered session was captured from, one line per session: its native id and its agent's token; absent on a checkpoint written before it existed |
 | `tool_calls.jsonl` | the tool calls, reduced to identifiers: each read's call id, tool, path, content hash and token count, and, from checkpoints written after they were added, the call's instant, its turn, the revision's blob oid and the tokenizer that counted it |
+| `tool_results.jsonl` | the session's measured tool results, the search half of the savings denominator, one line each: the result's id, the session, the tool's name, the channel, the tokens, the tokenizer, how they were measured and when; absent when the session recorded none |
 | `transcript.*.jsonl` | the transcript: a full copy and a deterministic compact one |
 | `usage.jsonl` | the session's settled model calls, one line each: the four token classes, how they were counted, the model and the call's key; absent when none has settled |
 | `window_journal.jsonl` | every row the session's context windows held when it was archived — reads, declines, edits, evictions — one line each under its window's key; absent when they held none |
@@ -120,6 +121,15 @@ is what a verifier can re-derive. The redaction report is re-verified on every
 `rift verify`, and the artifact bridge refuses to project a checkpoint whose
 report is missing or invalid, so "this checkpoint went through the gate" is
 checkable rather than hopeful.
+
+The tool-results artifact carries what a search put in front of the model.
+A search returns repository content but resolves to no file, so no read line
+can hold it: every `tool_calls.jsonl` line names a path and a content hash,
+and the recall plane's reader requires both. It is a sibling file for that
+reason, and its lines carry identifiers, counts, an instant and closed words
+only: the channel, how the figure was measured, and the tokenizer, frozen as
+`withheld` when it is not one Rift records, as is a tool name that is not an
+identifier. Nothing the tool returned is in it.
 
 The sessions artifact says which agent each covered session came from.
 `metadata.json` names a session by its native id alone, and a rebuild keys every session row by agent and native id together, so without it a rebuild could only guess the agent, and it guessed one for every session.
@@ -226,8 +236,8 @@ exactly the order git sorts the tree into: `content.redacted`, the four
 `digest.*.json`, each line of `full.jsonl` as its own leaf,
 `redaction_report.json`, `serve_audit.jsonl`, `session_worktrees.jsonl`, `sessions.jsonl`, `sessions/<index>/metadata.json` (bytewise by index
 name, so "10" precedes "2"), `tasks/<id>/…` (bytewise by tool-use id),
-`tool_calls.jsonl`, then `transcript.compact.jsonl` and `transcript.jsonl`,
-`usage.jsonl`, and last `window_journal.jsonl`.
+`tool_calls.jsonl`, `tool_results.jsonl`, then `transcript.compact.jsonl` and
+`transcript.jsonl`, `usage.jsonl`, and last `window_journal.jsonl`.
 
 **Absence is the compatibility contract.** A checkpoint lacking an artifact
 derives, leaf for leaf, the sequence it would have derived before that artifact
@@ -241,6 +251,8 @@ So was `sessions.jsonl`, which lands after `serve_audit.jsonl` and before the
 So was `session_worktrees.jsonl`, which lands after `serve_audit.jsonl` and
 before `sessions.jsonl`, because `_` sorts before `s`: a middle insertion only a
 shard carrying it sees.
+So was `tool_results.jsonl`, which lands after `tool_calls.jsonl` (`c` < `r`)
+and before the transcript pair (`o` < `r`), and is never written empty.
 So was `usage.jsonl`, which sorts after every other name (`t` < `u`): its one
 leaf is appended to the sequence, never inserted into it, so no shard without
 it derives a different root.

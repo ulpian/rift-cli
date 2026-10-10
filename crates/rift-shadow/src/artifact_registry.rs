@@ -178,6 +178,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         sync_format_row: "Checkpoint metadata (`metadata.json`)",
     },
     ShardArtifact {
+        path: "tool_results.jsonl",
+        version: VersionField::PerLineSchemaVersion(crate::backend::TOOL_RESULTS_SCHEMA_VERSION),
+        sync_format_row: "Tool results (`tool_results.jsonl`)",
+    },
+    ShardArtifact {
         path: "transcript.compact.jsonl",
         version: VersionField::PerLineV(crate::transcript::COMPACT_SCHEMA_VERSION),
         sync_format_row: "Compact transcript (`transcript.compact.jsonl`)",
@@ -433,6 +438,32 @@ mod tests {
         let bytes = archive
             .session_worktrees_jsonl()
             .expect("the fixture freezes observations");
+        let versions: Vec<u64> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| json_version(line, "schema_version").expect("every line declares one"))
+            .collect();
+        assert_eq!(
+            versions,
+            vec![u64::from(want); 3],
+            "three lines, one version"
+        );
+    }
+
+    /// Every frozen tool-result line declares the line format the registry
+    /// names, read off the maximal fixture, whose lines the one writer
+    /// rendered.
+    #[test]
+    fn every_frozen_tool_result_line_declares_the_registered_schema_version() {
+        let Some(VersionField::PerLineSchemaVersion(want)) =
+            is_declared("tool_results.jsonl").map(|a| a.version)
+        else {
+            panic!("tool_results.jsonl is declared with a per-line schema_version");
+        };
+        let archive = crate::shard_fixture::every_artifact_archive().unwrap();
+        let bytes = archive
+            .tool_results_jsonl()
+            .expect("the fixture freezes tool results");
         let versions: Vec<u64> = bytes
             .split(|b| *b == b'\n')
             .filter(|line| !line.is_empty())
