@@ -68,6 +68,20 @@ fn every_grammar_form_yields_the_pinned_range() {
         ),
         ("rg --files", listing(".", None)),
         ("rg --files crates", listing("crates", None)),
+    ];
+    assert_each_recognised(cases);
+}
+
+/// **Every spelling read beyond the published list, and its range.**
+///
+/// The second half of the specification: the spellings the grammar admits
+/// because each one still delivers what a form on the list does — a quote
+/// the shell resolves to a fixed word, a command word from the system's own
+/// directory, a search over several named files.
+#[test]
+fn every_spelling_beyond_the_list_yields_the_pinned_range() {
+    let file = "src/lib.rs";
+    let cases: &[(&str, ShellCall)] = &[
         // A quoted word is the word the shell passes, in a path as anywhere.
         ("cat 'src/lib.rs'", read(file, ShellSpan::WholeFile)),
         (
