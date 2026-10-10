@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use rift_core::Result;
 use rift_shadow::hooks::AdapterRegistry;
 
+use super::coordinator::{coordinator_section, Opening};
 use super::doc_gate::DocAnswer;
 use super::gate::{gate_file, AUDIT_IDS};
 use super::ingest::try_ingest_agent_hook;
@@ -577,33 +578,14 @@ fn session_context_candidate_in(
             fallback: false,
         });
     }
-    if let Some(claim) = claim_injection(repo, &session, window.as_deref()) {
-        let text = crate::agent_help::session_pointer();
-        // The pointer is spend: measure it with the real tokenizer and record
-        // it against the same savings ledger the serves land in, keyed by the
-        // session that paid for it, so the estimate stays honest about what
-        // injection costs: no token class is exempt from accounting.
-        let attribution = super::audit::serve_attribution(
-            Some(&session),
-            Some(&crate::window_journal::key(&session, window.as_deref())),
-        );
-        record_injection_spend(
-            repo,
-            rift_tokens::count(&text),
-            &claim,
-            attribution.as_ref(),
-        );
-        return Some(ContextCandidate {
-            kind: ContextKind::SessionPointer,
-            text,
-            avoided_tokens: 0,
-            fallback: false,
-        });
+    if let Some(pointer) = claimed_pointer(repo, agent, verb, &session, window.as_deref()) {
+        return Some(pointer);
     }
     // A window that opens with nothing read has no delta to be told about, so
-    // the manifest tier does not run at the verb that opens one: a subagent
-    // whose pointer is already claimed (a retried hook) is answered with
-    // silence rather than with its parent's news.
+    // the manifest tier does not run at the verb that opens one: what such a
+    // window is told about its coordinator rode with its pointer, and a
+    // subagent whose pointer is already claimed (a retried hook) is answered
+    // with silence rather than with its parent's news twice.
     if window_opens_here(agent, verb) {
         return None;
     }
@@ -621,6 +603,74 @@ fn session_context_candidate_in(
         avoided_tokens: 0,
         fallback: false,
     })
+}
+
+/// The session pointer, when this window has not been handed one yet and this
+/// process wins the claim to hand it.
+///
+/// The claim is once per window, so whatever rides with the pointer is said
+/// once too: a retried hook finds the claim taken and says nothing at all.
+fn claimed_pointer(
+    repo: &Path,
+    agent: &rift_core::AgentId,
+    verb: &str,
+    session: &str,
+    window: Option<&str>,
+) -> Option<rift_recall_types::ContextCandidate> {
+    let claim = claim_injection(repo, session, window)?;
+    let text = opening_text(repo, agent, verb, session, window);
+    // The pointer is spend: measure it with the real tokenizer and record
+    // it against the same savings ledger the serves land in, keyed by the
+    // session that paid for it, so the estimate stays honest about what
+    // injection costs: no token class is exempt from accounting. The
+    // coordinator section is measured in the same string, so its tokens are
+    // spend on the same row.
+    let attribution = super::audit::serve_attribution(
+        Some(session),
+        Some(&crate::window_journal::key(session, window)),
+    );
+    record_injection_spend(
+        repo,
+        rift_tokens::count(&text),
+        &claim,
+        attribution.as_ref(),
+    );
+    Some(rift_recall_types::ContextCandidate {
+        kind: rift_recall_types::ContextKind::SessionPointer,
+        text,
+        avoided_tokens: 0,
+        fallback: false,
+    })
+}
+
+/// The pointer, and after it, at the boundary that opens a subagent's window,
+/// the section naming what its coordinator held at that instant.
+///
+/// Only there: the main thread's window has no coordinator, and every later
+/// boundary of a subagent's window is the manifest's, which speaks about what
+/// that window has read itself.
+fn opening_text(
+    repo: &Path,
+    agent: &rift_core::AgentId,
+    verb: &str,
+    session: &str,
+    window: Option<&str>,
+) -> String {
+    let pointer = crate::agent_help::session_pointer();
+    let (true, Some(window)) = (window_opens_here(agent, verb), window) else {
+        return pointer;
+    };
+    let opening = Opening {
+        repo,
+        agent,
+        verb,
+        session,
+        window,
+    };
+    match coordinator_section(&opening, &pointer) {
+        Some(section) => format!("{pointer}\n{section}"),
+        None => pointer,
+    }
 }
 
 /// Whether this boundary is the one that **opens** a context window rather than

@@ -16,6 +16,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use rift_agent::window_journal::{Journal, Line};
+use rift_core::Sha256Id;
 use serde_json::Value;
 
 use super::transcript::{Event, Window};
@@ -63,7 +65,7 @@ pub(super) struct WindowLead {
 }
 
 /// The tool names a client spawns a subagent window with.
-const SPAWNING_TOOLS: [&str; 2] = ["Agent", "Task"];
+pub(super) const SPAWNING_TOOLS: [&str; 2] = ["Agent", "Task"];
 
 impl Inheritance {
     /// Every class, in the order the table prints them.
@@ -168,6 +170,45 @@ pub(super) fn inheritance_of(
     Inheritance::None
 }
 
+/// The revisions the section a subagent's window opens with would name, read
+/// off the spawning window's journal at the instant of the spawn.
+///
+/// The latest revision of each path the journal still holds, newest first,
+/// through the shipped renderer, so its cap and its refusals are the
+/// section's own rather than a second statement of them. The subagent holds
+/// nothing at its spawn, so nothing is subtracted.
+pub(super) fn opening_section(journal: &Journal) -> BTreeSet<(String, String)> {
+    let mut latest: BTreeMap<&str, (usize, Sha256Id)> = BTreeMap::new();
+    for (order, line) in journal.live().iter().enumerate() {
+        if let Line::Read { path, hash, .. } = line {
+            latest.insert(path.as_str(), (order, *hash));
+        }
+    }
+    let mut newest_first: Vec<(&str, usize, Sha256Id)> = latest
+        .into_iter()
+        .map(|(path, (order, hash))| (path, order, hash))
+        .collect();
+    newest_first.sort_by_key(|(_, order, _)| std::cmp::Reverse(*order));
+    let hexes: Vec<String> = newest_first
+        .iter()
+        .map(|(_, _, hash)| hash.to_hex())
+        .collect();
+    let reads: Vec<rift_recall_validity::trust::CoordinatorRead<'_>> = newest_first
+        .iter()
+        .zip(&hexes)
+        .map(|((path, _, _), hash)| rift_recall_validity::trust::CoordinatorRead { path, hash })
+        .collect();
+    let Some((_, named)) = rift_recall_validity::trust::render_coordinator_reads_naming(&reads, 0)
+    else {
+        return BTreeSet::new();
+    };
+    named
+        .iter()
+        .filter_map(|at| newest_first.get(*at).zip(hexes.get(*at)))
+        .map(|((path, _, _), hex)| ((*path).to_owned(), hex.clone()))
+        .collect()
+}
+
 /// The text of a spawning call's input: its prompt, or every string it
 /// carries when it has no prompt field.
 fn input_text(input: &Value) -> String {
@@ -244,7 +285,51 @@ fn names_the_path(prompt: &str, key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{carries_a_run, names_the_path, without_gutter};
+    use rift_agent::window_journal::{EvictReason, Interval, Journal, Line};
+
+    use super::{carries_a_run, names_the_path, opening_section, without_gutter};
+
+    fn read(path: &str, seed: u8) -> Line {
+        Line::Read {
+            turn: 1,
+            path: path.to_owned(),
+            hash: rift_agent::content_sha256(&[seed]),
+            range: Interval::new(1, 9).unwrap(),
+            total_lines: 9,
+            at_ms: 0,
+        }
+    }
+
+    /// What a spawned window would be told: the spawning window's live reads,
+    /// the latest revision of each path, newest first, eight at most, and
+    /// nothing the section would refuse to name.
+    #[test]
+    fn the_opening_section_names_the_newest_live_revisions_it_can_name() {
+        let mut journal = Journal::default();
+        journal.push(read("src/evicted.rs", 0));
+        journal.push(Line::Evict {
+            turn: 1,
+            reason: EvictReason::Compact,
+            at_ms: 0,
+        });
+        for seed in 1..=9_u8 {
+            journal.push(read(&format!("src/m{seed}.rs"), seed));
+        }
+        journal.push(read("/etc/outside.rs", 10));
+        journal.push(read("src/m9.rs", 11));
+        let named = opening_section(&journal);
+        let named_as = |path: &str, seed: u8| {
+            (
+                path.to_owned(),
+                rift_agent::content_sha256(&[seed]).to_hex(),
+            )
+        };
+        let mut expected: Vec<(String, String)> = (2..=8_u8)
+            .map(|seed| named_as(&format!("src/m{seed}.rs"), seed))
+            .collect();
+        expected.push(named_as("src/m9.rs", 11));
+        assert_eq!(named, expected.into_iter().collect());
+    }
 
     #[test]
     fn a_paste_is_a_run_of_lines_without_the_gutter() {

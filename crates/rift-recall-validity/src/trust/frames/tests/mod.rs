@@ -3,8 +3,10 @@
 //! The production half stays one file (`../mod.rs`) because the intercept gate
 //! names it as the one renderer and reads it whole; the tests it once carried in
 //! a single trailing module are split here by what they are about: the wording
-//! and its bytes, the reason frames' behaviour, and the delta manifest's.
+//! and its bytes, the reason frames' behaviour, the delta manifest's, and the
+//! section a subagent's window opens with about its coordinator's reads.
 
+mod coordinator;
 mod manifest;
 mod reasons;
 mod wording;

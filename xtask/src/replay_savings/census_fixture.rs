@@ -169,6 +169,11 @@ fn the_census_pins_each_inheritance_route() {
         assert_eq!(class(Inheritance::Paste), 1, "paste wins over the name");
         assert_eq!(class(Inheritance::ByName), 1, "named only");
         assert_eq!(class(Inheritance::None), 1, "nothing handed down");
+        assert_eq!(
+            report.sibling_named_at_spawn.calls, 0,
+            "the shared revision is the oldest of eleven the coordinator read \
+             before the spawns, past the eight newest the section names"
+        );
         let routes = report.sibling_by_inheritance;
         assert_eq!(
             routes.iter().map(|tally| tally.calls).sum::<u64>(),

@@ -3,16 +3,17 @@
 //! frame as the model receives them.
 
 use super::super::{
-    neutral_inline_span, neutral_pushed_span, render_delta_frame, render_delta_manifest,
-    render_deny_frame, render_narrow_frame, render_recovery_map, render_redirect_frame,
-    render_search_answer, EntryDetail, HeldEntry, HeldVerdict, ManifestEntry, PathStatus,
-    SearchHit, CLAUSE_ALREADY_IN_CONTEXT, CLAUSE_CHANGED_AT, CLAUSE_CHANGED_ONLY, CLAUSE_CONVERTED,
-    CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST, CLAUSE_HELD_LIST, CLAUSE_IN_CONTEXT,
-    CLAUSE_IN_CONTEXT_WINDOW, CLAUSE_OTHERS_UNCHANGED, CLAUSE_PROVENANCE, CLAUSE_PULL,
-    CLAUSE_RANKED, CLAUSE_REPEAT, CLAUSE_SHAPE_NOW, CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED,
-    FRAME_DENY_OPENER, FRAME_HEADER_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER,
-    FRAME_NARROW_OPENER, FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED, FRAME_RECOVERY_OPENER,
-    FRAME_REDIRECT_OPENER, FRAME_SEARCH_OPENER, FRAME_WITHHELD_OPENER, WITHHELD_PATH,
+    neutral_inline_span, neutral_pushed_span, render_coordinator_reads_naming, render_delta_frame,
+    render_delta_manifest, render_deny_frame, render_narrow_frame, render_recovery_map,
+    render_redirect_frame, render_search_answer, CoordinatorRead, EntryDetail, HeldEntry,
+    HeldVerdict, ManifestEntry, PathStatus, SearchHit, CLAUSE_ALREADY_IN_CONTEXT,
+    CLAUSE_CHANGED_AT, CLAUSE_CHANGED_ONLY, CLAUSE_CONVERTED, CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST,
+    CLAUSE_HELD_LIST, CLAUSE_IN_CONTEXT, CLAUSE_IN_CONTEXT_WINDOW, CLAUSE_OTHERS_UNCHANGED,
+    CLAUSE_PROVENANCE, CLAUSE_PULL, CLAUSE_RANKED, CLAUSE_REPEAT, CLAUSE_SHAPE_NOW,
+    CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED, FRAME_COORDINATOR_OPENER, FRAME_DENY_OPENER,
+    FRAME_HEADER_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER, FRAME_NARROW_OPENER,
+    FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER,
+    FRAME_SEARCH_OPENER, FRAME_WITHHELD_OPENER, WITHHELD_PATH,
 };
 use super::{HASH, HASH2, SRC};
 use crate::trust::directive::is_directive_shaped;
@@ -32,6 +33,7 @@ const FRAME_OPENERS: &[&str] = &[
     FRAME_RECOVERY_OPENER,
     FRAME_SEARCH_OPENER,
     FRAME_REDIRECT_OPENER,
+    FRAME_COORDINATOR_OPENER,
     FRAME_LIST_OPENER,
     FRAME_OMITTED_OPENER,
     FRAME_WITHHELD_OPENER,
@@ -140,6 +142,15 @@ fn every_frame_rendered() -> String {
         render_search_answer(&[hit], 9, "respond.rs").expect("one hit"),
         render_redirect_frame("docs/report.docx", ".rift/state/doc/ab12cd34.md")
             .expect("a sidecar to name"),
+        render_coordinator_reads_naming(
+            &[CoordinatorRead {
+                path: SRC,
+                hash: HASH,
+            }],
+            0,
+        )
+        .expect("one read to name")
+        .0,
     ]
     .join("\n")
 }

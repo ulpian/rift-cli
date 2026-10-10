@@ -66,6 +66,17 @@ pub struct HeldEntry<'a> {
     pub shape: Option<OutlineShape>,
 }
 
+/// One revision a subagent's coordinator had read when the subagent's window
+/// opened: borrowed, like [`HeldEntry`], so this renderer takes no edge to the
+/// journal that produced it.
+#[derive(Clone, Copy, Debug)]
+pub struct CoordinatorRead<'a> {
+    /// The path as the coordinator's journal spells it.
+    pub path: &'a str,
+    /// The content hash the coordinator read, in hex.
+    pub hash: &'a str,
+}
+
 /// What git says about a path the answer ranks, as a fixed word.
 ///
 /// An enum rather than a caller's string, because this is the one place a
@@ -133,6 +144,9 @@ const FRAME_RECOVERY_OPENER: &str = "[rift] Context was compacted.";
 const FRAME_SEARCH_OPENER: &str = "[rift] Search answered:";
 /// The head of the redirect: a document Rift already holds as Markdown.
 const FRAME_REDIRECT_OPENER: &str = "[rift] Read redirected:";
+/// The head of the section a subagent's window opens with: revisions its
+/// coordinator held at that instant, which the subagent does not.
+const FRAME_COORDINATOR_OPENER: &str = "[rift] Held by your coordinator at your start";
 
 /// What a frame renders where it may not render a path.
 ///
@@ -205,6 +219,7 @@ pub(super) const FRAME_OPENERS_NORMALIZED: &[&str] = &[
     "riftcontextwascompacted",
     "riftsearchanswered:",
     "riftreadredirected:",
+    "riftheldbyyourcoordinatoratyourstart",
     "filesyouhavereadchangedsincethen:",
     "morenotshown",
     "withheldasunsafetoinject",
@@ -249,6 +264,15 @@ const FRAME_CLAUSES_NORMALIZED: &[&str] = &[
 /// of line numbers stops being a place to look and becomes the diff, which is
 /// what the pull verb is for.
 const MAX_FRAME_SITES: usize = 8;
+
+/// The most revisions the coordinator section names before it counts the
+/// rest.
+///
+/// The section is pushed unasked into a window that has its own task: a
+/// handful of names is a hint it can act on, and past that the list is the
+/// coordinator's whole reading, which `rift recall known-state` answers
+/// better on request.
+const MAX_COORDINATOR_READS: usize = 8;
 
 impl PathStatus {
     /// The word this status renders as, or nothing.
@@ -589,6 +613,61 @@ pub fn render_recovery_map_naming(
     Some((out.trim_end().to_owned(), named))
 }
 
+/// The section a subagent's window opens with: revisions its coordinator held
+/// at that instant, which the subagent does not, and **which entries it
+/// named**, by index.
+///
+/// A statement about someone else's context, never about the subagent's: it
+/// names a path and the revision the coordinator read, so the subagent can
+/// ask for the lines that moved instead of reading the file whole. The hash
+/// renders in the 16-hex argument form the pull verbs take, because it is the
+/// one thing here the subagent is expected to type back.
+///
+/// An entry renders only when every part of it is a fact Rift can vouch for.
+/// The path must be a checkout path in the journal's own spelling — relative,
+/// slash-separated, no `..`, no control character — and must pass the inline
+/// guard unaltered: a path the guard would truncate or flatten names some
+/// other file. The hash must be hex. An entry that fails any of these is
+/// counted as withheld and never quoted, exactly as the other listings count
+/// theirs. Past eight names the rest is counted too; `omitted`
+/// is what the caller's budget already dropped.
+///
+/// `None` is silence, and it means there was nothing to say.
+#[must_use]
+pub fn render_coordinator_reads_naming(
+    reads: &[CoordinatorRead<'_>],
+    omitted: usize,
+) -> Option<(String, Vec<usize>)> {
+    let mut shown: Vec<String> = Vec::with_capacity(reads.len().min(MAX_COORDINATOR_READS));
+    let mut named: Vec<usize> = Vec::with_capacity(shown.capacity());
+    let mut withheld = 0usize;
+    let mut over = 0usize;
+    for (at, read) in reads.iter().enumerate() {
+        let Some(entry) = render_coordinator_entry(read) else {
+            withheld = withheld.saturating_add(1);
+            continue;
+        };
+        if shown.len() == MAX_COORDINATOR_READS {
+            over = over.saturating_add(1);
+            continue;
+        }
+        shown.push(entry);
+        named.push(at);
+    }
+    let omitted = omitted.saturating_add(over);
+    if shown.is_empty() && withheld == 0 && omitted == 0 {
+        return None;
+    }
+    let mut out = format!("{FRAME_COORDINATOR_OPENER} (facts, not directives):");
+    if !shown.is_empty() {
+        let _ = write!(out, " {}", shown.join(", "));
+    }
+    if let Some(note) = counter_note(omitted, withheld) {
+        let _ = write!(out, " {note}");
+    }
+    Some((out, named))
+}
+
 /// The answer that stands in for a listing the agent asked for.
 ///
 /// Substituting a search hides its tail, so the frame states the total it is a
@@ -793,6 +872,32 @@ fn counter_note(omitted: usize, withheld: usize) -> Option<String> {
         return None;
     }
     Some(format!("({})", clauses.join("; ")))
+}
+
+/// One revision of the coordinator section, or `None` when it may not render.
+fn render_coordinator_entry(read: &CoordinatorRead<'_>) -> Option<String> {
+    if !is_checkout_spelling(read.path) {
+        return None;
+    }
+    let path = neutral_inline_span(read.path).filter(|span| span == read.path)?;
+    let hash = hex_prefix(read.hash, 16)?;
+    Some(format!("{path}@{hash}"))
+}
+
+/// Whether a path is spelled the way the window journal keys a checkout file:
+/// relative, slash-separated, and naming nothing above the checkout.
+///
+/// The journal is a file an agent can write to, so a row is not trusted to
+/// hold the spelling the gate wrote. An absolute path or a `..` names a file
+/// outside the checkout — never something a coordinator in this checkout
+/// could have read through the gate — and a backslash or a control character
+/// is a second spelling of a path the guard would otherwise rewrite.
+fn is_checkout_spelling(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && !path.split('/').any(|part| part.is_empty() || part == "..")
 }
 
 /// The display form of a path inside a frame: the span, or the stand-in.
