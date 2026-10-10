@@ -10,12 +10,12 @@
   "checkpoint_id": "8eeb6bff4031fd0e43fabafc80a05c29f4ca26123ebc008f9da98d454738bf4b",
   "costs": [
     {
-      "amount_micros": 312,
+      "amount_micros": 4812,
       "cache_creation": 0,
       "cached_input": 0,
-      "output": 8,
+      "output": 108,
       "session_id": "504c496d7cce81b87d15f8818163c6a3867fa60b0a8b520964939575c11c1ac5",
-      "uncached_input": 64
+      "uncached_input": 1064
     }
   ],
   "created_at_ms": 1756000200000,

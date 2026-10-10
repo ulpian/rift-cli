@@ -26,6 +26,7 @@ mod observations;
 mod sessions;
 mod tools;
 mod turns;
+mod usage_windows;
 mod verification;
 mod watermarks;
 mod worktrees;
@@ -35,8 +36,9 @@ pub use attribution::{
     AttributionRow,
 };
 pub use cost::{
-    effective_prices, quote_usage_costs, record_price, record_token_usage, session_usage_facts,
-    CostQuoteScope, EffectivePrices, PriceTableRow, SessionUsageFact, TokenUsageRow,
+    checkpoint_window_tokens, effective_prices, quote_usage_costs, record_price,
+    record_token_usage, session_usage_facts, CostQuoteScope, EffectivePrices, PriceTableRow,
+    SessionUsageFact, TokenUsageRow, WindowTokens,
 };
 pub use enablement::{
     latest_archive_ms, record_agent_enablement, record_agent_hook_event, record_archive_decision,
@@ -66,6 +68,7 @@ pub use turns::{
     turn_diff_hunks_for_session, ModelCallRow, TurnBoundaryFileRow, TurnBoundarySnapshotRow,
     TurnDiffHunkRow, TurnRow,
 };
+pub use usage_windows::{checkpoint_usage_windows, UsageWindow, WindowScope};
 pub use verification::{
     record_verification_divergence, record_verification_run, record_verification_witness,
     VerificationDivergenceRow, VerificationRunRow, VerificationWitnessRow,

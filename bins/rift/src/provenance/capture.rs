@@ -8,27 +8,32 @@ use std::collections::{BTreeMap, HashMap};
 
 use rift_core::Result;
 use rift_recall_types::{CheckpointFacts as ServedFacts, ProvenanceOracle, TokenClasses};
-use rift_store::{CanonicalStore, SqliteStore};
+use rift_store::capture::{checkpoint_window_tokens, WindowScope};
+use rift_store::{quote_usage_costs, CanonicalStore, CostQuoteScope, SqliteStore};
 
 /// The facts a pull verb's `provenance` object needs and the recall projection
 /// does not hold: when a checkpoint was recorded, which session and agent
-/// family took it, what that session's turns cost, and the subject of the
-/// commit a checkpoint anchored.
+/// family took it, what the model calls that checkpoint froze cost, and the
+/// subject of the commit a checkpoint anchored.
 ///
 /// **Resolved once, up front, and never lazily.** The serving handlers are
 /// `async` and the oracle they consult is not, so a lazy implementation would
 /// have to block on a store inside a running runtime. It is also the cheaper
 /// shape: the alternative is one round trip per manifest entry, and a manifest
-/// names up to 64 files. Four aggregate queries and one `git log` answer for
-/// the whole repository.
+/// names up to 64 files. Five queries and one `git log` answer for the whole
+/// repository, whatever the manifest's size: the recorded times, the first
+/// sessions, one grouped token sum over every checkpoint's usage window, and
+/// the quote's two batched reads.
 ///
-/// **Every query here is one the provenance verbs already run** — the dated
-/// checkpoint row and its sentinel classification from `checkpoint_facts`,
-/// the session/agent join from the same function, and the two sums from
-/// [`super::why::session_cost`], grouped by session instead of filtered to one.
-/// A second
-/// spelling of the same join is how two surfaces come to disagree about what a
-/// turn cost.
+/// **A checkpoint's figures are its usage window's**, never its session's
+/// totals: the calls its first session started since that session's previous
+/// checkpoint, up to this one ([`rift_store::capture::checkpoint_usage_windows`]).
+/// The object brackets a change by checkpoint, so a session total under a
+/// checkpoint's name would read as what that change cost. The token sum and the
+/// quote frame their calls through the one store-side window, which is also the
+/// one `rift why` reads — a second spelling of the join is how two surfaces
+/// come to disagree about what a checkpoint cost. An undated checkpoint has no
+/// window and carries neither figure.
 ///
 /// Every field is independently absent, and absence is **unknown**: a
 /// projection that will not open, a query that fails, a `git log` that cannot
@@ -38,17 +43,6 @@ pub(crate) struct CaptureProvenance {
     by_checkpoint: HashMap<String, ServedFacts>,
     /// Commit oid → its subject line, for the commits this checkout can see.
     subjects: HashMap<String, String>,
-}
-
-/// One session's totals, shared by every checkpoint that session appears in.
-#[derive(Clone, Debug, Default)]
-struct SessionTotals {
-    /// The agent family that ran the session, as the `session` row records it.
-    agent: Option<String>,
-    /// The session's four recorded token classes.
-    tokens: Option<TokenClasses>,
-    /// Current catalog quote in micro-USD.
-    cost_micros: Option<i64>,
 }
 
 /// How far back the commit-subject map reads.
@@ -76,26 +70,20 @@ impl CaptureProvenance {
         out
     }
 
-    /// The four aggregate reads, in one pass.
+    /// The aggregate reads, in one pass.
     ///
     /// A read that fails ends the pass, so everything after it is absent; the
     /// serve still answers, because the caller discards this result and the
     /// recall-side facts stand on their own.
     async fn read_projection(&mut self, store: &SqliteStore) -> Result<()> {
         self.read_recorded_times(store).await?;
-        let mut totals: HashMap<String, SessionTotals> = HashMap::new();
-        let first_session = read_first_sessions(store, &mut totals).await?;
-        read_token_totals(store, &mut totals).await?;
-        read_cost_totals(store, &mut totals).await?;
-        for (ck, (_, sid)) in first_session {
-            let t = totals.get(&sid).cloned().unwrap_or_default();
+        for (ck, first) in read_first_sessions(store).await? {
             let entry = self.by_checkpoint.entry(ck).or_default();
-            entry.agent = t.agent;
-            entry.tokens = t.tokens;
-            entry.cost_micros = t.cost_micros;
-            entry.session = Some(sid);
+            entry.agent = first.agent;
+            entry.session = Some(first.session_id);
         }
-        Ok(())
+        self.read_window_tokens(store).await?;
+        self.read_window_costs(store).await
     }
 
     /// WHEN each checkpoint was recorded.
@@ -111,6 +99,32 @@ impl CaptureProvenance {
             let (id, at) = (r.get_text(0)?, r.get_i64(1)?);
             self.by_checkpoint.entry(id).or_default().recorded_at_ms =
                 (at != rift_shadow::CREATED_AT_UNKNOWN).then_some(at);
+        }
+        Ok(())
+    }
+
+    /// WHAT EACH CHECKPOINT'S CALLS COST in tokens, one grouped query over
+    /// every usage window. A checkpoint with no window, or none of whose calls
+    /// settled, gets no entry and keeps its tokens absent.
+    async fn read_window_tokens(&mut self, store: &SqliteStore) -> Result<()> {
+        let sums = checkpoint_window_tokens(store, WindowScope::Every).await?;
+        for (ck, t) in sums {
+            self.by_checkpoint.entry(ck).or_default().tokens = Some(TokenClasses {
+                uncached_input: t.uncached_input,
+                cached_input: t.cached_input,
+                cache_creation: t.cache_creation,
+                output: t.output,
+            });
+        }
+        Ok(())
+    }
+
+    /// The current catalog quote of each checkpoint's window, preserving
+    /// unpriced absence.
+    async fn read_window_costs(&mut self, store: &SqliteStore) -> Result<()> {
+        let scope = CostQuoteScope::CheckpointWindows(WindowScope::Every);
+        for (ck, amount) in quote_usage_costs(store, scope, i64::MAX).await? {
+            self.by_checkpoint.entry(ck).or_default().cost_micros = Some(amount);
         }
         Ok(())
     }
@@ -160,14 +174,18 @@ impl ProvenanceOracle for CaptureProvenance {
     }
 }
 
+/// The session that took a checkpoint, and its agent family as the `session`
+/// row records it.
+struct FirstSession {
+    session_id: String,
+    agent: Option<String>,
+}
+
 /// WHO took each checkpoint: the first session by ordinal, the same one
-/// `rift why` reports. Returns checkpoint id → (ordinal, session id) and
-/// records each session's agent family on the way past.
-async fn read_first_sessions(
-    store: &SqliteStore,
-    totals: &mut HashMap<String, SessionTotals>,
-) -> Result<BTreeMap<String, (i64, String)>> {
-    let mut first_session: BTreeMap<String, (i64, String)> = BTreeMap::new();
+/// `rift why` reports and the one whose usage window the figures frame. A tie
+/// on ordinal breaks by session id, as the window does.
+async fn read_first_sessions(store: &SqliteStore) -> Result<BTreeMap<String, FirstSession>> {
+    let mut first: BTreeMap<String, (i64, FirstSession)> = BTreeMap::new();
     for r in store
         .query(
             "SELECT sic.checkpoint_id, sic.session_id, sic.ordinal, s.agent \
@@ -177,58 +195,17 @@ async fn read_first_sessions(
         )
         .await?
     {
-        let (ck, sid, ord) = (r.get_text(0)?, r.get_text(1)?, r.get_i64(2)?);
-        totals.entry(sid.clone()).or_default().agent = r.get_opt_text(3)?;
-        match first_session.get(&ck) {
-            Some((seen, _)) if *seen <= ord => {}
-            _ => {
-                first_session.insert(ck, (ord, sid));
-            }
+        let (ck, session_id, ordinal) = (r.get_text(0)?, r.get_text(1)?, r.get_i64(2)?);
+        let earlier = |(seen, held): &(i64, FirstSession)| {
+            (*seen, held.session_id.as_str()) <= (ordinal, session_id.as_str())
+        };
+        if first.get(&ck).is_some_and(earlier) {
+            continue;
         }
+        let agent = r.get_opt_text(3)?;
+        first.insert(ck, (ordinal, FirstSession { session_id, agent }));
     }
-    Ok(first_session)
-}
-
-/// WHAT EACH SESSION COST in tokens: `session_cost`'s join, grouped by session
-/// rather than filtered to one.
-async fn read_token_totals(
-    store: &SqliteStore,
-    totals: &mut HashMap<String, SessionTotals>,
-) -> Result<()> {
-    for r in store
-        .query(
-            "SELECT t.session_id, COALESCE(SUM(tu.uncached_input),0), \
-             COALESCE(SUM(tu.cached_input),0), COALESCE(SUM(tu.cache_creation),0), \
-             COALESCE(SUM(tu.output),0) \
-             FROM token_usage tu \
-             JOIN model_call mc ON mc.call_id = tu.call_id \
-             JOIN turn t ON t.turn_id = mc.turn_id \
-             GROUP BY t.session_id",
-            &[],
-        )
-        .await?
-    {
-        totals.entry(r.get_text(0)?).or_default().tokens = Some(TokenClasses {
-            uncached_input: r.get_i64(1)?,
-            cached_input: r.get_i64(2)?,
-            cache_creation: r.get_i64(3)?,
-            output: r.get_i64(4)?,
-        });
-    }
-    Ok(())
-}
-
-/// Current catalog quotes grouped by session, preserving unpriced absence.
-async fn read_cost_totals(
-    store: &SqliteStore,
-    totals: &mut HashMap<String, SessionTotals>,
-) -> Result<()> {
-    for (session, amount) in
-        rift_store::quote_usage_costs(store, rift_store::CostQuoteScope::All, i64::MAX).await?
-    {
-        totals.entry(session).or_default().cost_micros = Some(amount);
-    }
-    Ok(())
+    Ok(first.into_iter().map(|(ck, (_, s))| (ck, s)).collect())
 }
 
 #[cfg(test)]
@@ -315,14 +292,14 @@ mod tests {
         let store = SqliteStore::open_in_memory().unwrap();
         store.create_canonical_schema().unwrap();
         quote_fixture(&store).await;
+        checkpoint_of(&store, "ck", 10, "session").await;
         let mut before = Vec::new();
         for table in rift_store::canonical_tables() {
             before.push((table.name, store.count(table.name).await.unwrap()));
         }
-        let mut totals = HashMap::new();
-        read_cost_totals(&store, &mut totals).await.unwrap();
-        assert_eq!(totals.get("session").unwrap().cost_micros, Some(2000));
-        let why = crate::provenance::why::session_cost(&store, "session")
+        let served = projected(&store).await.checkpoint("ck").unwrap();
+        assert_eq!(served.cost_micros, Some(2000));
+        let why = crate::provenance::why::checkpoint_cost(&store, "ck")
             .await
             .unwrap()
             .unwrap();
@@ -331,5 +308,144 @@ mod tests {
         for (table, count) in before {
             assert_eq!(store.count(table).await.unwrap(), count);
         }
+    }
+
+    /// Every class priced at two micro-USD per token, believed from instant 1.
+    async fn flat_prices(s: &SqliteStore) {
+        for class in ["uncached_input", "cached_input", "cache_creation", "output"] {
+            rift_store::record_price(
+                s,
+                &rift_store::PriceTableRow {
+                    price_id: format!("flat-{class}"),
+                    model: "fixture-model".into(),
+                    token_class: class.into(),
+                    unit_price_micros: 2_000_000,
+                    currency: "USD".into(),
+                    valid_from: 0,
+                    valid_to: None,
+                    recorded_at: 1,
+                    supersedes_id: None,
+                    schema_version: 1,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    /// One settled call of `session`, alone in its turn, starting at `at`.
+    async fn settled_call(s: &SqliteStore, session: &str, call: &str, at: i64, input: i64) {
+        let turn = format!("turn-{call}");
+        let row = rift_store::TurnRow {
+            turn_id: turn.clone(),
+            session_id: session.into(),
+            ordinal: at,
+            started_at: at,
+            schema_version: 1,
+        };
+        rift_store::record_turn(s, &row).await.unwrap();
+        let mc = rift_store::ModelCallRow {
+            call_id: call.into(),
+            turn_id: turn,
+            model: "fixture-model".into(),
+            started_at: at,
+            schema_version: 1,
+        };
+        rift_store::record_model_call(s, &mc).await.unwrap();
+        let usage = rift_store::TokenUsageRow {
+            call_id: call.into(),
+            uncached_input: input,
+            cached_input: 0,
+            cache_creation: 0,
+            output: 0,
+            counter_method: "provider_reported".into(),
+            schema_version: 1,
+        };
+        rift_store::record_token_usage(s, &usage).await.unwrap();
+    }
+
+    /// A checkpoint recorded at `at` that archives `session` first.
+    async fn checkpoint_of(s: &SqliteStore, id: &str, at: i64, session: &str) {
+        s.insert(
+            "checkpoint",
+            &[
+                "checkpoint_id",
+                "strategy",
+                "created_at",
+                "merkle_root",
+                "schema_version",
+            ],
+            &[
+                rift_store::Value::text(id.to_owned()),
+                rift_store::Value::text("manual-commit".to_owned()),
+                rift_store::Value::Int(at),
+                rift_store::Value::text("00".to_owned()),
+                rift_store::Value::Int(1),
+            ],
+        )
+        .await
+        .unwrap();
+        let sic = rift_store::SessionInCheckpointRow {
+            checkpoint_id: id.into(),
+            session_id: session.into(),
+            ordinal: 0,
+            schema_version: 1,
+        };
+        rift_store::record_session_in_checkpoint(s, &sic)
+            .await
+            .unwrap();
+    }
+
+    /// One session, two dated checkpoints and an undated one, with calls
+    /// before, between and after them.
+    async fn two_checkpoint_fixture() -> SqliteStore {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.create_canonical_schema().unwrap();
+        flat_prices(&s).await;
+        for (call, at, input) in [
+            ("a", 50, 1_000),
+            ("b", 100, 1_000),
+            ("c", 150, 10_000),
+            ("d", 200, 10_000),
+            ("e", 300, 100_000),
+        ] {
+            settled_call(&s, "session", call, at, input).await;
+        }
+        checkpoint_of(&s, "ck-1", 100, "session").await;
+        checkpoint_of(&s, "ck-2", 200, "session").await;
+        checkpoint_of(&s, "ck-undated", rift_shadow::CREATED_AT_UNKNOWN, "session").await;
+        s
+    }
+
+    async fn projected(s: &SqliteStore) -> CaptureProvenance {
+        let mut out = CaptureProvenance {
+            by_checkpoint: HashMap::new(),
+            subjects: HashMap::new(),
+        };
+        out.read_projection(s).await.unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_carries_only_the_calls_since_its_sessions_previous_checkpoint() {
+        let s = two_checkpoint_fixture().await;
+        let oracle = projected(&s).await;
+        let first = oracle.checkpoint("ck-1").unwrap();
+        assert_eq!(first.tokens.map(|t| t.uncached_input), Some(2_000));
+        assert_eq!(first.cost_micros, Some(4_000));
+        let second = oracle.checkpoint("ck-2").unwrap();
+        assert_eq!(second.tokens.map(|t| t.uncached_input), Some(20_000));
+        assert_eq!(second.cost_micros, Some(40_000));
+        assert_eq!(second.session.as_deref(), Some("session"));
+    }
+
+    #[tokio::test]
+    async fn an_undated_checkpoint_carries_no_tokens_and_no_cost() {
+        let s = two_checkpoint_fixture().await;
+        let undated = projected(&s).await.checkpoint("ck-undated").unwrap();
+        assert_eq!(undated.session.as_deref(), Some("session"));
+        assert_eq!(undated.recorded_at_ms, None);
+        assert!(undated.tokens.is_none(), "{:?}", undated.tokens);
+        assert_eq!(undated.cost_micros, None);
     }
 }

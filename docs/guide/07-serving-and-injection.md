@@ -867,11 +867,11 @@ additionally names a `checkpoint` on a hunk when exactly one recorded hunk
 covers the window it is showing, and none when two do, because a window
 overlapping two recorded changes was established by neither alone.
 
-**Every figure names its denominator.** `token_usage` and `cost_micros` are the
-**originating session's** recorded totals — the same figures `rift why` prints,
-summed over its model calls and its non-superseded cost facts — not one turn's;
-[18](18-known-gaps.md) §18.6 carries that as a stated limit rather than leaving
-it to be inferred from a plausible-looking number.
+**Every figure names its denominator.** `token_usage` and `cost_micros` are the model calls the bracket's later end froze — `to`, or `from` when only that end exists — and nothing else.
+That is the checkpoint's first session's calls started after that session's previous checkpoint and no later than this one, so the window is whole turns of one session: a checkpoint is cut at a condense.
+`rift why` prints the same figures for a line that checkpoint answers, read through the same store-side window, with the money a current catalog quote of exactly the calls the tokens count.
+A session's total is never reported under a checkpoint's name, because the object brackets a change and a reader takes the figure for what that change cost.
+A checkpoint with no recorded time has no window, so its object carries neither key: unknown, never a zero.
 
 **Two sources, and no join between them.** The checkpoints and the anchor commit
 are recall-projection facts; *when*, *who* and *what it cost* come from the
@@ -1112,7 +1112,8 @@ parser-free window rule, never a claim about syntax — with unchanged runs
 elided as a count, the window rule named in the payload, and code-fact
 provenance only for tracked blobs — and, beside the lines, the `provenance`
 object of [§7.9](#79-the-pull-surface-ten-verbs): the checkpoints that bracket
-the change, who made it, what the turn cost, and `rift why` for the rest.
+the change, who made it, what the calls its checkpoint froze cost, and `rift why`
+for the rest.
 `doc-read` returns the Markdown sidecar,
 which is the position the read it replaces would have occupied. The rest of the
 gates are real and exercised with the room behind them still empty

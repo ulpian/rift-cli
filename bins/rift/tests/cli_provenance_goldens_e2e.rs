@@ -279,71 +279,97 @@ async fn seed_file_attribution(store: &SqliteStore, ck_x: &str, ck_y: &str) {
     }
 }
 
-/// One costed model call on Y's session — the turn, the call and the exact
-/// token counts `why` and `explain` report as cost.
+/// Y's session's costed calls: the one inside Y's window — the turn, the
+/// call and the exact token counts `why` reports as cost — and one started
+/// after Y was recorded, which belongs to no checkpoint yet and must stay out
+/// of every figure named after Y.
 async fn seed_costed_call(store: &SqliteStore) {
+    let in_window = SeededCall {
+        turn: ("turn-g3", 1),
+        call: "mc-g3",
+        at: LOCK_T_NEW - 3_000,
+        tokens: (64, 8),
+    };
+    seed_call(store, &in_window).await;
+    let after_y = SeededCall {
+        turn: ("turn-g3-late", 2),
+        call: "mc-g3-late",
+        at: LOCK_T_NEW + 2_000,
+        tokens: (1_000, 100),
+    };
+    seed_call(store, &after_y).await;
+}
+
+/// One settled model call on Y's session, alone in its turn.
+struct SeededCall {
+    /// The turn's id and ordinal.
+    turn: (&'static str, i64),
+    call: &'static str,
+    /// When the call started (epoch ms); its turn opens a second earlier.
+    at: i64,
+    /// Uncached input and output tokens.
+    tokens: (i64, i64),
+}
+
+/// Write one [`SeededCall`]: its turn, the call and its usage.
+async fn seed_call(store: &SqliteStore, seed: &SeededCall) {
+    let int = rift_store::Value::Int;
+    let turn_columns = [
+        "turn_id",
+        "session_id",
+        "ordinal",
+        "started_at",
+        "schema_version",
+    ];
+    let turn_values = [
+        text(seed.turn.0),
+        text(&session_row_id("01JG3LOCKB")),
+        int(seed.turn.1),
+        int(seed.at - 1_000),
+        int(1),
+    ];
     store
-        .insert(
-            "turn",
-            &[
-                "turn_id",
-                "session_id",
-                "ordinal",
-                "started_at",
-                "schema_version",
-            ],
-            &[
-                text("turn-g3"),
-                text(&session_row_id("01JG3LOCKB")),
-                rift_store::Value::Int(1),
-                rift_store::Value::Int(LOCK_T_NEW - 4_000),
-                rift_store::Value::Int(1),
-            ],
-        )
+        .insert("turn", &turn_columns, &turn_values)
         .await
         .unwrap();
+    let call_columns = [
+        "call_id",
+        "turn_id",
+        "model",
+        "started_at",
+        "schema_version",
+    ];
+    let call_values = [
+        text(seed.call),
+        text(seed.turn.0),
+        text("claude-sonnet-4-5"),
+        int(seed.at),
+        int(1),
+    ];
     store
-        .insert(
-            "model_call",
-            &[
-                "call_id",
-                "turn_id",
-                "model",
-                "started_at",
-                "schema_version",
-            ],
-            &[
-                text("mc-g3"),
-                text("turn-g3"),
-                text("claude-sonnet-4-5"),
-                rift_store::Value::Int(LOCK_T_NEW - 3_000),
-                rift_store::Value::Int(1),
-            ],
-        )
+        .insert("model_call", &call_columns, &call_values)
         .await
         .unwrap();
+    let usage_columns = [
+        "call_id",
+        "uncached_input",
+        "cached_input",
+        "cache_creation",
+        "output",
+        "counter_method",
+        "schema_version",
+    ];
+    let usage_values = [
+        text(seed.call),
+        int(seed.tokens.0),
+        int(0),
+        int(0),
+        int(seed.tokens.1),
+        text("exact"),
+        int(1),
+    ];
     store
-        .insert(
-            "token_usage",
-            &[
-                "call_id",
-                "uncached_input",
-                "cached_input",
-                "cache_creation",
-                "output",
-                "counter_method",
-                "schema_version",
-            ],
-            &[
-                text("mc-g3"),
-                rift_store::Value::Int(64),
-                rift_store::Value::Int(0),
-                rift_store::Value::Int(0),
-                rift_store::Value::Int(8),
-                text("exact"),
-                rift_store::Value::Int(1),
-            ],
-        )
+        .insert("token_usage", &usage_columns, &usage_values)
         .await
         .unwrap();
 }
@@ -416,6 +442,9 @@ fn the_populated_blame_why_explain_documents_are_byte_locked() {
     assert_eq!(w["prompt"]["text"], "wire the alpha parser", "{w}");
     assert_eq!(w["tag"], "mixed", "{w}");
     assert!(w["cost"].is_object(), "{w}");
+    // The call Y's session started after Y was recorded is outside Y's window,
+    // while `explain`, which names the session, still counts it.
+    assert_eq!(w["cost"]["uncached_input"], 64, "{w}");
     // The checkpoint's strategy token rides both documents:
     // a live archive says `manual-commit`; an imported transcript would say
     // `import`.
