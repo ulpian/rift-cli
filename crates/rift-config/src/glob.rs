@@ -100,24 +100,32 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
             Tok::Lit(c) => {
                 ndp[0] = false;
                 for j in 0..t.len() {
+                    #[cfg(test)]
+                    work::add(1);
                     ndp[j + 1] = dp[j] && t[j] == c;
                 }
             }
             Tok::AnyChar => {
                 ndp[0] = false;
                 for j in 0..t.len() {
+                    #[cfg(test)]
+                    work::add(1);
                     ndp[j + 1] = dp[j] && t[j] != b'/';
                 }
             }
             Tok::Star => {
                 ndp[0] = dp[0];
                 for j in 1..=t.len() {
+                    #[cfg(test)]
+                    work::add(1);
                     ndp[j] = dp[j] || (ndp[j - 1] && t[j - 1] != b'/');
                 }
             }
             Tok::DeepStar => {
                 ndp[0] = dp[0];
                 for j in 1..=t.len() {
+                    #[cfg(test)]
+                    work::add(1);
                     ndp[j] = dp[j] || ndp[j - 1];
                 }
             }
@@ -131,10 +139,37 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Instant;
+mod work {
+    //! A count of the cells the matcher's sweep visits, compiled into the test
+    //! build only.
+    //!
+    //! The property the matcher owes the policy gates is a work bound, not a
+    //! speed: a wall-clock limit says nothing under a loaded machine and
+    //! everything about the machine, while a count of inner-loop visits is the
+    //! same everywhere. Thread-local, so tests running in parallel never see
+    //! each other's steps.
 
-    use super::{glob_match, wildcard_count};
+    use std::cell::Cell;
+
+    thread_local! {
+        static STEPS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One call per inner-loop cell visit.
+    pub(super) fn add(n: u64) {
+        STEPS.with(|steps| steps.set(steps.get().saturating_add(n)));
+    }
+
+    /// The steps recorded on this thread since the last `take`, zeroing the
+    /// count.
+    pub(super) fn take() -> u64 {
+        STEPS.with(|steps| steps.replace(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{glob_match, tokenize, wildcard_count, work};
 
     #[test]
     fn literal_and_single_star() {
@@ -179,24 +214,57 @@ mod tests {
 
     /// The ReDoS-class input the naive recursive matcher choked on: k stars
     /// interleaved with literals against long, non-matching text is ~C(n,k)
-    /// work under backtracking (astronomically large here) but O(p·t) under
-    /// the DP sweep. The wall-clock bound is generous for CI noise; the real
-    /// assertion is that this returns at all.
+    /// work under backtracking but O(p·t) under the DP sweep. The verdict is
+    /// the count of cells the sweep visits, never a clock. The figures are
+    /// exact because the sweep visits every one of a row's `text.len()` cells
+    /// for each token it processes, and stops after the first row in which no
+    /// prefix is reachable: the first two calls process every token, the third
+    /// leaves after two (no `a` follows the leading `**` in that text).
     #[test]
-    fn adversarial_star_literal_pattern_is_fast() {
+    fn adversarial_star_literal_pattern_costs_one_sweep_per_token() {
         let pattern = "*a".repeat(15); // 15 stars, 15 literals
         let matching = "a".repeat(300);
         let non_matching = format!("{}b", "a".repeat(300));
-        let started = Instant::now();
-        assert!(glob_match(&pattern, &matching));
-        assert!(!glob_match(&pattern, &non_matching));
         let deep = format!("**{}", "a?*".repeat(20));
-        assert!(!glob_match(&deep, &"x/".repeat(200)));
+        let deep_text = "x/".repeat(200);
+        for (pattern, text, matches, cells) in [
+            (&pattern, &matching, true, 30 * 300),
+            (&pattern, &non_matching, false, 30 * 301),
+            (&deep, &deep_text, false, 2 * 400),
+        ] {
+            work::take();
+            assert_eq!(glob_match(pattern, text), matches);
+            let visited = work::take();
+            assert_eq!(visited, cells, "pattern={pattern:?}");
+            assert!(visited <= sweep_bound(pattern, text));
+        }
+    }
+
+    /// The count discriminates: the backtracking specification below, run
+    /// through the same counter on an input small enough to finish, already
+    /// takes far more steps than the sweep's bound for that input.
+    #[test]
+    fn a_backtracking_matcher_exceeds_the_sweep_bound() {
+        let pattern = "*a".repeat(6);
+        let text = format!("{}b", "a".repeat(30));
+        work::take();
+        assert!(!reference_matches(pattern.as_bytes(), text.as_bytes()));
+        let backtracking = work::take();
+        assert!(!glob_match(&pattern, &text));
+        let sweep = work::take();
+        let bound = sweep_bound(&pattern, &text);
+        assert!(sweep <= bound, "sweep {sweep} over bound {bound}");
         assert!(
-            started.elapsed().as_secs() < 5,
-            "matcher must be polynomial, took {:?}",
-            started.elapsed()
+            backtracking > 100 * bound,
+            "backtracking took {backtracking} steps against a bound of {bound}"
         );
+    }
+
+    /// `(tokens + 1) · (text.len() + 1)`: the polynomial ceiling the module
+    /// doc promises, independent of how the sweep happens to be written.
+    fn sweep_bound(pattern: &str, text: &str) -> u64 {
+        let tokens = tokenize(pattern.as_bytes()).len() as u64;
+        (tokens + 1) * (text.len() as u64 + 1)
     }
 
     #[test]
@@ -215,6 +283,7 @@ mod tests {
     /// proptest below checks the DP matcher agrees with it on small inputs
     /// (small enough that the reference cannot blow up).
     fn reference_matches(p: &[u8], t: &[u8]) -> bool {
+        work::add(1);
         if p.is_empty() {
             return t.is_empty();
         }

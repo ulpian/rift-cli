@@ -1405,24 +1405,33 @@ mod tests {
     }
 
     /// The hook-stop budget fix, stated as a test: a `Stop` payload is not
-    /// enriched at all, and in particular it does not wait out the transcript
-    /// quiet window on a transcript that was written a moment ago.
+    /// enriched at all, and the enrichment has no way to wait. Structure is
+    /// the guard for the second half, because a clock around one call only
+    /// measures the machine's load: the code of `hooks/ingest/enrich.rs`
+    /// (its comments set aside, since one still names the retired inline
+    /// settle) spells no settle, no sleep, no timed receive and no quiet
+    /// window.
     #[test]
-    fn a_stop_payload_is_not_enriched_and_does_not_wait() {
+    fn a_stop_payload_is_not_enriched_and_the_enrichment_cannot_wait() {
         let dir = tempfile::tempdir().unwrap();
         let transcript = native_transcript(dir.path());
         let mut raw = native_hook("Stop", &transcript);
         let before = raw.payload.clone();
-        let started = std::time::Instant::now();
         enrich_native_context(&mut raw);
-        let elapsed = started.elapsed();
         assert_eq!(
             raw.payload, before,
             "a Stop payload is passed through untouched"
         );
-        assert!(
-            elapsed < std::time::Duration::from_millis(rift_agent::settle::QUIET_WINDOW_MS),
-            "a Stop must not settle inline any more: took {elapsed:?}"
-        );
+        let code: String = include_str!("ingest/enrich.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in ["settle", "sleep", "recv_timeout", "QUIET_WINDOW"] {
+            assert!(
+                !code.contains(forbidden),
+                "the enrichment spells `{forbidden}`, which is how a hook would wait"
+            );
+        }
     }
 }
