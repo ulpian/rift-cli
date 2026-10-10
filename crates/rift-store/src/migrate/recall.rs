@@ -1,4 +1,4 @@
-//! The recall projection's migration set (`recall.db`): the sixteen
+//! The recall projection's migration set (`recall.db`): the seventeen
 //! checksum-locked SQL builders over the recall registry slices and their
 //! secondary indexes.
 //!
@@ -13,7 +13,7 @@ type RecallMigration = (&'static str, fn() -> String);
 
 /// Every recall migration's name and SQL builder, in version order: the
 /// position is the version, so a row appends and never moves.
-const RECALL_MIGRATIONS: [RecallMigration; 16] = [
+const RECALL_MIGRATIONS: [RecallMigration; 17] = [
     ("recall_core", recall_canonical_schema_sql),
     ("recall_outcome_labels", recall_outcome_label_schema_sql),
     ("recall_key_custody", recall_key_custody_schema_sql),
@@ -42,6 +42,10 @@ const RECALL_MIGRATIONS: [RecallMigration; 16] = [
         "recall_summary_token_counts",
         recall_summary_token_count_schema_sql,
     ),
+    (
+        "recall_ingest_watermark_positions",
+        recall_ingest_watermark_position_schema_sql,
+    ),
 ];
 
 /// The recall projection's migration set (applied to a fresh `recall.db`).
@@ -60,7 +64,8 @@ const RECALL_MIGRATIONS: [RecallMigration; 16] = [
 /// `memd_audit_pull_claim` record of what a pull's caller claimed to hold;
 /// version 15 adds the `n_window_row` relation a checkpoint's frozen window
 /// rows are read back into; version 16 adds the `summary_token_count` costs
-/// beside each bound outline.
+/// beside each bound outline; version 17 adds the `ingest_watermark_position`
+/// stream position beside each ingest watermark.
 #[must_use]
 pub fn recall_migrations() -> Vec<Migration> {
     RECALL_MIGRATIONS
@@ -471,6 +476,33 @@ fn recall_summary_token_count_schema_sql() -> String {
     sql
 }
 
+/// The v17 additive recall migration: the `ingest_watermark_position`
+/// relation, the stream position of the tip each ingest watermark names.
+///
+/// Found by name for the reason v13's relation is. No secondary index: the
+/// relation is read by its primary key, joined from the watermark row.
+fn recall_ingest_watermark_position_schema_sql() -> String {
+    let tables = || {
+        crate::schema::recall_canonical_tables()
+            .iter()
+            .filter(|table| table.name == "ingest_watermark_position")
+    };
+    let mut sql = String::new();
+    for table in tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    for table in tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,7 +648,19 @@ mod tests {
                 "summary_token_count_no_update",
                 "summary_token_count_no_delete",
             ],
-            &["n_window_row"],
+            &["n_window_row", "ingest_watermark_position"],
+        ),
+        (
+            "recall_ingest_watermark_positions",
+            &[
+                "CREATE TABLE IF NOT EXISTS ingest_watermark_position",
+                "ingest_watermark_position_no_update",
+                "ingest_watermark_position_no_delete",
+            ],
+            &[
+                "summary_token_count",
+                "CREATE TABLE IF NOT EXISTS ingest_watermark ",
+            ],
         ),
     ];
 
@@ -627,7 +671,7 @@ mod tests {
     #[test]
     fn every_recall_version_creates_only_its_own_relations() {
         let migs = recall_migrations();
-        assert_eq!(migs.len(), 16);
+        assert_eq!(migs.len(), 17);
         for (version, (name, creates, excludes)) in VERSION_CONTENTS.iter().enumerate() {
             assert_eq!(migs[version].name, *name);
             let sql = &migs[version].sql;
@@ -649,11 +693,11 @@ mod tests {
     fn recall_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &recall_migrations()).unwrap();
-        assert_eq!(out.applied, 16);
-        assert_eq!(out.high_water, 16);
+        assert_eq!(out.applied, 17);
+        assert_eq!(out.high_water, 17);
         let again = apply_migrations(&s, &recall_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 16);
+        assert_eq!(again.skipped, 17);
     }
 }
 
@@ -793,7 +837,7 @@ mod token_count_tests {
         let before = apply_migrations(&s, &migs[..15]).unwrap();
         assert_eq!(before.high_water, 15);
         assert_eq!(s.execute_raw(WINDOW_ROW).unwrap(), 1);
-        let after = apply_migrations(&s, &migs).unwrap();
+        let after = apply_migrations(&s, &migs[..16]).unwrap();
         assert_eq!(after.applied, 1);
         assert_eq!(after.high_water, 16);
         let kept: i64 = s
@@ -838,5 +882,52 @@ mod token_count_tests {
                 .unwrap(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod watermark_position_tests {
+    use super::*;
+    use crate::migrate::apply_migrations;
+    use crate::migrate::fixtures::store;
+
+    const ROW: &str = "INSERT INTO ingest_watermark_position \
+        (watermark_id, chain_seq, schema_version) VALUES ('w1', 2, 1)";
+
+    const WATERMARK: &str = "INSERT INTO ingest_watermark \
+        (watermark_id, branch, branch_tip, ingested_at, schema_version) \
+        VALUES ('w1', 'refs/heads/rift/checkpoints/v1', 'c2', 0, 1)";
+
+    /// A deployed `recall.db` gains the relation in place and keeps the
+    /// watermark rows it already holds; those rows simply have no position,
+    /// and index warm locates their tips as it always did. `rift-memd
+    /// rebuild` never takes this path: it destroys `recall.db` and re-ingests
+    /// from nothing, a cold full pass that writes every position afresh.
+    #[test]
+    fn a_store_at_the_previous_version_gains_the_position_relation_and_keeps_its_rows() {
+        let s = store();
+        let migs = recall_migrations();
+        let before = apply_migrations(&s, &migs[..16]).unwrap();
+        assert_eq!(before.high_water, 16);
+        assert_eq!(s.execute_raw(WATERMARK).unwrap(), 1);
+        let after = apply_migrations(&s, &migs).unwrap();
+        assert_eq!(after.applied, 1);
+        assert_eq!(after.high_water, 17);
+        let kept: i64 = s
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM ingest_watermark", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(kept, 1);
+        assert_eq!(s.execute_raw(ROW).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_position_row_can_be_neither_updated_nor_deleted() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        s.execute_raw(ROW).unwrap();
+        let update = s.execute_raw("UPDATE ingest_watermark_position SET chain_seq = 9");
+        let delete = s.execute_raw("DELETE FROM ingest_watermark_position");
+        assert!(matches!(update, Err(rift_core::RiftError::Immutability(_))));
+        assert!(matches!(delete, Err(rift_core::RiftError::Immutability(_))));
     }
 }

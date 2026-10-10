@@ -120,6 +120,14 @@ CREATE TABLE ingest_watermark (
   PRIMARY KEY (watermark_id)
 ) STRICT
 
+-- table ingest_watermark_position
+CREATE TABLE ingest_watermark_position (
+  watermark_id TEXT NOT NULL,
+  chain_seq INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (watermark_id)
+) STRICT
+
 -- table key_metadata
 CREATE TABLE key_metadata (
   key_id TEXT NOT NULL,
@@ -453,6 +461,12 @@ CREATE TRIGGER ingest_watermark_no_delete BEFORE DELETE ON ingest_watermark BEGI
 
 -- trigger ingest_watermark_no_update
 CREATE TRIGGER ingest_watermark_no_update BEFORE UPDATE ON ingest_watermark BEGIN SELECT RAISE(ABORT, 'rift: ingest_watermark is append-only (UPDATE forbidden)'); END
+
+-- trigger ingest_watermark_position_no_delete
+CREATE TRIGGER ingest_watermark_position_no_delete BEFORE DELETE ON ingest_watermark_position BEGIN SELECT RAISE(ABORT, 'rift: ingest_watermark_position is append-only (DELETE forbidden)'); END
+
+-- trigger ingest_watermark_position_no_update
+CREATE TRIGGER ingest_watermark_position_no_update BEFORE UPDATE ON ingest_watermark_position BEGIN SELECT RAISE(ABORT, 'rift: ingest_watermark_position is append-only (UPDATE forbidden)'); END
 
 -- trigger key_metadata_no_delete
 CREATE TRIGGER key_metadata_no_delete BEFORE DELETE ON key_metadata BEGIN SELECT RAISE(ABORT, 'rift: key_metadata is append-only (DELETE forbidden)'); END

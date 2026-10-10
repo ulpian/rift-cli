@@ -26,6 +26,7 @@ mod observations;
 mod sessions;
 mod tools;
 mod turns;
+mod usage_windows;
 mod verification;
 mod watermarks;
 mod worktrees;
@@ -35,8 +36,9 @@ pub use attribution::{
     AttributionRow,
 };
 pub use cost::{
-    effective_prices, quote_usage_costs, record_price, record_token_usage, session_usage_facts,
-    CostQuoteScope, EffectivePrices, PriceTableRow, SessionUsageFact, TokenUsageRow,
+    checkpoint_window_tokens, effective_prices, quote_usage_costs, record_price,
+    record_token_usage, session_usage_facts, CostQuoteScope, EffectivePrices, PriceTableRow,
+    SessionUsageFact, TokenUsageRow, WindowTokens,
 };
 pub use enablement::{
     latest_archive_ms, record_agent_enablement, record_agent_hook_event, record_archive_decision,
@@ -66,11 +68,15 @@ pub use turns::{
     turn_diff_hunks_for_session, ModelCallRow, TurnBoundaryFileRow, TurnBoundarySnapshotRow,
     TurnDiffHunkRow, TurnRow,
 };
+pub use usage_windows::{checkpoint_usage_windows, UsageWindow, WindowScope};
 pub use verification::{
     record_verification_divergence, record_verification_run, record_verification_witness,
     VerificationDivergenceRow, VerificationRunRow, VerificationWitnessRow,
 };
-pub use watermarks::{latest_ingest_watermark, record_ingest_watermark, IngestWatermarkRow};
+pub use watermarks::{
+    latest_ingest_watermark, latest_ingest_watermark_with_position, record_ingest_watermark,
+    record_ingest_watermark_position, IngestWatermarkRow,
+};
 pub use worktrees::{
     record_checkpoint_worktree_if_new, record_session_worktree, SessionWorktreeRow,
 };

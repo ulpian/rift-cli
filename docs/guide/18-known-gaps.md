@@ -256,34 +256,12 @@ The blob window itself is unchanged and still the first rung: measured on this
 repository, a committed revision inside it resolves in every case tried and
 94.2 % at its edge.
 
-**Read more.** [07](07-serving-and-injection.md) §7.4, §7.14,
+The same cause narrows the `provenance` object a pull verb attaches to a delta ([07](07-serving-and-injection.md) §7.9).
+Its bracket is looked up by revision, so the `to` end exists only where some session read the bytes the answer is about.
+An agent's own working edit is not a read, so on the freshest change the object usually carries `from` alone.
+
+**Read more.** [07](07-serving-and-injection.md) §7.4, §7.9, §7.14,
 [06](06-recall.md) §6.8, [02](02-configuration.md) §2.6.
-
-### A delta's provenance is anchored to a checkpoint, not to a turn
-
-*Honest limit.* Every delta a pull verb returns now carries when it happened,
-who made it and what it cost
-([07](07-serving-and-injection.md) §7.9). Two things about that object are
-narrower than they look, and both are visible in what it omits rather than in
-what it claims.
-
-The bracket is looked up **by revision**, so the `to` end — the checkpoint that
-recorded the bytes the answer is about — exists only where some session read
-those bytes. An agent's own working edit is not a read, so on the freshest
-change the object usually carries `from` alone. That is the same shape as the
-basis gap above and has the same cause: the projection knows what was read, and
-an edit nobody has re-read yet is not in it.
-
-And the four token classes and the cost are the **originating session's**
-recorded totals — the figure `rift why` prints — not the single turn's. The
-capture projection holds usage per model call, so a per-turn cut is available in
-principle; the join that would narrow it does not exist, and reporting a session
-total under a turn's name would be the kind of mislabelled denominator
-[08](08-cost-and-savings.md) §8.7 exists to prevent. Closing it is a narrower
-group-by, not new capture.
-
-**Read more.** [07](07-serving-and-injection.md) §7.9,
-[08](08-cost-and-savings.md) §8.6.
 
 ### The per-turn call ceiling binds per process
 
@@ -443,17 +421,6 @@ claim is unavailable by rule, not by modesty.
 
 **Read more.** [08](08-cost-and-savings.md) §8.13,
 [17](17-invariants.md).
-
-### A second, cruder estimator lives in the validity plane
-
-*Honest limit.* Serving-side size checks use a characters-over-four
-approximation rather than the one counting crate. It is used for bounding, not
-billing — a cap decision, not a cost figure — but it is still a second
-estimator in a codebase that otherwise insists on one authority per number.
-Closing it means counting those trials through the same crate every other
-estimate goes through.
-
-**Read more.** [08](08-cost-and-savings.md).
 
 ### The savings share is real and its window is nearly empty
 
@@ -666,20 +633,6 @@ accident. Queue depth is a status-verb and doctor fact only: the dashboard does
 not surface it, though its data plane holds the number.
 
 **Read more.** [14](14-sync-readiness.md) §14.4.
-
-### One consumer does not persist its stream position
-
-*Honest limit.* The stream cursor pairs a chain position with a checkpoint
-identifier. One consumer does not persist the position, so the guard arm that
-would catch a rewritten stream by comparing positions cannot fire for it; what
-catches a rewrite there instead is presence — a recorded tip the walk no longer
-holds resolves to no cursor, the ingest falls back to a full pass, and says so. A
-full pass is *correct*, the apply being a set union over content-addressed rows,
-and merely slower, which is why the missing position is not an error. Closing it
-takes an additive column on a canonical relation: a deliberate schema decision on
-an append-only store, not a drive-by edit.
-
-**Read more.** [14](14-sync-readiness.md) §14.3.
 
 ### Bundle import is references-only
 

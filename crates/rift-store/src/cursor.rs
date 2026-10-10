@@ -16,18 +16,19 @@
 //! **What is still NOT on this path, stated because a docstring that overclaimed
 //! is what this paragraph replaces:** the Canopy poller uses the projection
 //! watermark described below (a change detector, not a position — see the last
-//! section), and it is not migrated. And index warm's cursor is **reconstructed
-//! from `ingest_watermark`'s `(branch, branch_tip)` against the current walk**
-//! rather than persisted whole, because that relation has no column for a
-//! position and canonical schema is not this path's to extend. State the
-//! consequence exactly rather than let "shared" imply more than it buys: for
-//! that consumer the id-at-position arm of [`suffix_after_by`] cannot fire,
-//! because the position was derived from the id one line earlier. What catches
-//! a rewritten stream there is **presence** — a recorded tip the walk no longer
-//! holds resolves to no cursor at all, and the ingest falls back to a full pass
-//! and says so in its report. Persisting the position would make the third arm
-//! live for index warm too; that needs an additive column on a canonical
-//! relation, which is a schema change, not a change this module may make
+//! section), and it is not migrated.
+//!
+//! **Both consumers hold a persisted position.** Export carries its cursor whole
+//! in a bundle manifest; index warm records, beside each `ingest_watermark`
+//! row, the position its tip held in the walk (the companion relation
+//! `ingest_watermark_position`), and resumes from [`StreamCursor::at`] that
+//! position and tip. So the id-at-position arm of [`suffix_after_by`] fires for
+//! index warm too: a shard sorted in *before* a tip that survived moves the tip,
+//! the position now names another checkpoint, and the ingest takes a full pass
+//! and counts it as a rewrite — where locating the tip again would have resumed
+//! after its new place and never read the inserted shard. A watermark written
+//! before positions were kept has only its tip; for that row the ingest locates
+//! the tip with [`cursor_of`], and what catches a rewrite there is presence
 //! alone.
 //!
 //! # What orders the stream
@@ -278,8 +279,9 @@ pub fn cursor_of<T>(items: &[T], id: &str, id_of: impl Fn(&T) -> String) -> Opti
     })
 }
 
-/// The links **strictly after** `cursor` — the resume path, taken today by
-/// [`crate::bundle`] (see the module docs for what has not migrated onto it).
+/// The links **strictly after** `cursor` — the resume path over the stored
+/// chain, taken by [`crate::bundle`] (see the module docs for the consumers
+/// that share its body through [`suffix_after_by`]).
 ///
 /// The cursor is checked against the chain before any suffix is handed back, so
 /// the two ways a stale cursor could silently mis-resume both **fail closed**:
