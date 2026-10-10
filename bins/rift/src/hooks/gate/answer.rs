@@ -135,7 +135,9 @@ pub(super) fn spared_lines(
     match decision {
         Decision::Deny(DenyShape::Narrow { held, .. })
         | Decision::Observe(DenyShape::Narrow { held, .. }) => *held,
-        Decision::Allow | Decision::Deny(_) | Decision::Observe(_) => read.range,
+        Decision::Allow | Decision::Deny(_) | Decision::Observe(_) | Decision::Inherited { .. } => {
+            read.range
+        }
     }
 }
 /// The turn this window was last handed — or last authored — the bytes it is
@@ -236,10 +238,16 @@ pub(super) fn read_decision_audit(
     use rift_agent::window_journal::Decision;
     let lines = spared_lines(read, decision);
     let declined = matches!(decision, Decision::Deny(_));
+    // An inherited observation is an observed repeat like any other, under the
+    // tag of its class, so the relation can size each class apart.
+    let class_tag = match decision {
+        Decision::Inherited { class, .. } => Some(class.audit_tag().to_owned()),
+        _ => None,
+    };
     let decision = match decision {
         Decision::Allow => return None,
         Decision::Deny(_) => ServeAuditKind::ReadIntercepted,
-        Decision::Observe(_) => ServeAuditKind::ReadRepeatObserved,
+        Decision::Observe(_) | Decision::Inherited { .. } => ServeAuditKind::ReadRepeatObserved,
     };
     let twice = declined && booked;
     Some(ServeAudit {
@@ -256,7 +264,9 @@ pub(super) fn read_decision_audit(
             }),
         }),
         frame: frame.to_owned(),
-        tag: twice.then(|| rift_recall_serve::TAG_PREVENTED_FIRST.to_owned()),
+        tag: twice
+            .then(|| rift_recall_serve::TAG_PREVENTED_FIRST.to_owned())
+            .or(class_tag),
         total: None,
         declared_avoided: twice.then_some(0),
         // Not a name search: nothing here stood in for a listing.

@@ -42,7 +42,9 @@ pub(crate) struct CoordinatorRead {
 /// whole. Its one consumer is the section a subagent's window is opened
 /// with, which is the boundary that hands it over.
 ///
-/// **The coordinator's own window in the caller's checkout, and no other.**
+/// **The coordinator's own window in the caller's checkout, and no other** —
+/// the window whose spawning call the caller's opening claimed, which for a
+/// subagent started by another subagent is that subagent, not the main window.
 /// A subagent works for the window that spawned it, and that window's reads
 /// are the ones it was briefed from; a sibling subagent's reads, or another
 /// member's of the family, are bytes of some other task and, in another
@@ -65,14 +67,38 @@ pub(crate) fn coordinator_reads(
     agent_id: &str,
     since_ms: Option<u64>,
 ) -> Vec<CoordinatorRead> {
-    let coordinator = WindowJournal::open(work_tree, session_id, None).load();
-    let latest = latest_reads(&coordinator.journal, since_ms);
+    let main = WindowJournal::open(work_tree, session_id, None)
+        .load()
+        .journal;
+    let coordinator = match spawner_of(&main, agent_id) {
+        Some(spawner) => {
+            WindowJournal::open(work_tree, session_id, Some(&spawner))
+                .load()
+                .journal
+        }
+        None => main,
+    };
+    let latest = latest_reads(&coordinator, since_ms);
     if latest.is_empty() {
         // The common case, answered without reading the caller's own journal.
         return Vec::new();
     }
     let own = WindowJournal::open(work_tree, session_id, Some(agent_id)).load();
     unheld_by(&own.journal, latest)
+}
+
+/// The subagent window that spawned `agent_id`, when the opening's claim in
+/// the session's main journal names a spawn made from one — `None` when the
+/// main window spawned it, or when no spawn could be named and the main
+/// window, the only coordinator a claim-less window can have, stands in.
+fn spawner_of(main: &Journal, agent_id: &str) -> Option<String> {
+    let call = main.claim_of(agent_id)??;
+    main.lines().iter().find_map(|line| match line {
+        Line::Spawn {
+            call: c, spawner, ..
+        } if c == call => spawner.clone(),
+        _ => None,
+    })
 }
 
 /// The latest revision of each path the journal read and still holds, at or
@@ -302,6 +328,44 @@ mod tests {
                 assert!(reads.iter().all(|r| !r.path.contains(span)), "{case}");
             }
         }
+    }
+
+    /// A subagent started by another subagent is told what **that** subagent
+    /// held — the window its opening claimed a spawn from — and not what the
+    /// main window holds.
+    #[test]
+    fn a_nested_subagent_is_named_its_spawners_reads_not_the_main_windows() {
+        let repo = tempfile::tempdir().unwrap();
+        let spawn = Line::Spawn {
+            turn: 1,
+            call: "toolu_1".to_owned(),
+            prompt: "p-1".to_owned(),
+            agent_type: "Plan".to_owned(),
+            spawner: Some("agent-parent".to_owned()),
+            names: Vec::new(),
+            at_ms: 2,
+        };
+        let claim = Line::Claim {
+            turn: 1,
+            agent: "agent-7".to_owned(),
+            call: Some("toolu_1".to_owned()),
+            at_ms: 3,
+        };
+        write(
+            repo.path(),
+            None,
+            &[read(1, "src/main.rs", 1, 1, 9), spawn, claim],
+        );
+        write(
+            repo.path(),
+            Some("agent-parent"),
+            &[read(2, "src/a.rs", 2, 1, 9)],
+        );
+        let reads = coordinator_reads(repo.path(), "s-1", "agent-7", None);
+        assert_eq!(named(&reads), vec![("src/a.rs", hash(2))]);
+        // A window whose opening named no spawn keeps the main window.
+        let main = coordinator_reads(repo.path(), "s-1", "agent-8", None);
+        assert_eq!(named(&main), vec![("src/main.rs", hash(1))]);
     }
 
     #[test]

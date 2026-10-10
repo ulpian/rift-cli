@@ -22,6 +22,7 @@ use super::inheritance::{inheritance_of, leads, opening_section, WindowLead, SPA
 use super::options::Options;
 use super::report::{finish, land, Report};
 use super::shell_shape::count_shape;
+use super::spawn_link::{note_the_spawn, open_the_window, openings, Opening, PendingSpawn};
 use super::transcript::{load_window, tree_stems, tree_windows, Call, Event, Window};
 use super::worktree::{path_key, FileFacts, Worktree};
 
@@ -71,6 +72,10 @@ pub(super) struct TreeState {
     pub(super) spawned_by: BTreeMap<String, Vec<usize>>,
     /// What the section each spawned window opens with would have named.
     pub(super) opening_named: BTreeMap<usize, BTreeSet<(String, String)>>,
+    /// The spawn lines the session's main journal would hold.
+    pub(super) spawns: Vec<PendingSpawn>,
+    /// What each window's opening hook is handed, and whether it has opened.
+    pub(super) openings: Vec<Opening>,
 }
 
 /// The settings every call in one replay is decided under, spelled once.
@@ -178,6 +183,7 @@ fn replay_tree(
     let mut tree = TreeState {
         leads: leads(&path_refs, &loaded),
         spawned_by: spawned_by(&loaded),
+        openings: openings(&loaded),
         ..TreeState::default()
     };
     tree.spawners = tree.leads.iter().filter_map(|lead| lead.parent).collect();
@@ -204,6 +210,7 @@ fn replay_tree(
         let Some(state) = windows.get_mut(index) else {
             continue;
         };
+        open_the_window(state, &mut tree, report, index);
         let ctx = &mut Ctx {
             replay: settings,
             window: index,
@@ -261,6 +268,7 @@ fn replay_call(ctx: &mut Ctx<'_>, call: &Call) {
     }
     if SPAWNING_TOOLS.contains(&call.name.as_str()) {
         note_the_opening_section(ctx, &call.id);
+        note_the_spawn(ctx, call);
     }
     // A change first: a read in the same call is not a thing, and the revision
     // a later read is keyed by has to have moved before the read arrives.

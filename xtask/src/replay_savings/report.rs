@@ -76,6 +76,14 @@ pub struct Report {
     /// window opened with would have named: live in the spawning window's
     /// journal at the spawn, and among the names that section has room for.
     pub sibling_named_at_spawn: Tally,
+    /// Lines opening windows inherited from their spawners, by class, in the
+    /// order of `InheritClass::ALL`.
+    pub inherited_lines: [u64; 3],
+    /// Reads only an inherited line of a still-observed class would have
+    /// declined, which ran: each class's observed pool, in the same order.
+    pub inherited_observed: [Tally; 3],
+    /// How the spawns were linked to the windows they opened.
+    pub spawn_links: SpawnLinks,
     /// Repository-content reads of machine-written files, keyed by
     /// [`MachineFormat::key`](super::census::MachineFormat::key).
     pub machine_formats: BTreeMap<&'static str, CensusRow>,
@@ -178,6 +186,22 @@ impl Report {
             .tokens
             .saturating_sub(self.repo_content.tokens)
     }
+}
+
+/// How the replayed spawns were linked to the windows they opened, by the
+/// facts the opening hook is handed: the user prompt's id and the type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpawnLinks {
+    /// Spawning calls that carried a prompt id.
+    pub spawns: u64,
+    /// Subagent windows that opened with a prompt id and a type.
+    pub openings: u64,
+    /// Openings that claimed the spawn the client's sidecar names.
+    pub exact: u64,
+    /// Openings that claimed some other spawn: the figure that has to be zero.
+    pub wrong: u64,
+    /// Openings that claimed none, because none or several matched.
+    pub unnamed: u64,
 }
 
 /// A percentage, with `0 / 0` defined as `0` — the same guard every other

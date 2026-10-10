@@ -86,6 +86,9 @@ pub struct Effective {
     pub max_inline_hash_bytes: u64,
     /// Tokens a recovery map may cost.
     pub recovery_budget: u32,
+    /// How far a decline may rest on a subagent's lines inherited by name:
+    /// the repository's `inherit_by_name`, never above `read_deny`.
+    pub inherit_by_name: Mode,
 
     /// Adding a head limit to a content search that carries none.
     pub grep_cap: Mode,
@@ -190,6 +193,7 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
         min_slice_lines: interception.min_slice_lines,
         max_inline_hash_bytes: interception.max_inline_hash_bytes,
         recovery_budget: interception.recovery_budget,
+        inherit_by_name: interception.inherit_by_name.min(read_deny),
         grep_cap,
         grep_cap_off,
         search_answer,
@@ -573,5 +577,37 @@ mod tests {
         assert_eq!(loaded.source, ServePolicySource::Refused);
         let e = resolve(&loaded.policy, "claude-code", FULL);
         assert_eq!(every_lever(&e), [Mode::Off; 5]);
+    }
+
+    /// The inherited-by-name lever ships at `observe`, reads `enforce` only
+    /// where written, and is never above the read lever it qualifies: a
+    /// family capped to `observe`, a repository at `off` and an unreadable
+    /// file all hold it there or below.
+    #[test]
+    fn the_inherited_by_name_lever_is_never_above_the_read_lever() {
+        let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
+        assert_eq!(shipped.inherit_by_name, Mode::Observe);
+        let (written, _d) = load_src("[interception]\ninherit_by_name = \"enforce\"\n");
+        assert_eq!(
+            resolve(&written.policy, "claude-code", FULL).inherit_by_name,
+            Mode::Enforce
+        );
+        assert_eq!(
+            resolve(&written.policy, "codex", NO_CHANNEL).inherit_by_name,
+            Mode::Observe,
+            "a family whose reason channel no run confirmed"
+        );
+        let (shut, _d) =
+            load_src("[interception]\nmode = \"off\"\ninherit_by_name = \"enforce\"\n");
+        assert_eq!(
+            resolve(&shut.policy, "claude-code", FULL).inherit_by_name,
+            Mode::Off
+        );
+        let (unknown, _d) = load_src("[interception]\ninherit_by_name = \"always\"\n");
+        assert_eq!(unknown.source, ServePolicySource::Invalid);
+        assert_eq!(
+            resolve(&unknown.policy, "claude-code", FULL).inherit_by_name,
+            Mode::Off
+        );
     }
 }

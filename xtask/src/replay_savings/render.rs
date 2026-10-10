@@ -12,7 +12,7 @@ use super::classify::NarrowClass;
 use super::report::{share_percent, Report, Tally};
 use super::sections::{
     declined_by_the_client, extend_document, facts_header, first_sight_sizes, history_lines,
-    later_first_reads, machine_formats, refused_shapes, sibling_classes,
+    inherited_classes, later_first_reads, machine_formats, refused_shapes, sibling_classes,
 };
 use super::worktree::MAX_INLINE_HASH_BYTES;
 
@@ -261,6 +261,7 @@ fn what_is_left(report: &Report, denominator: u64) -> String {
     ));
     out.push_str(&later_first_reads(report, denominator));
     out.push_str(&sibling_classes(report, denominator));
+    out.push_str(&inherited_classes(report, denominator));
     out.push_str(&row(
         "reads after a non-write edit (not modelled)",
         report.verification_after_edit,

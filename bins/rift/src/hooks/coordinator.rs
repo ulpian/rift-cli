@@ -10,6 +10,13 @@
 //! Spoken once, at the boundary that opens the window, inside the claim that
 //! hands the window its pointer: a retried opening finds the claim taken and
 //! says nothing, so no marker of its own is needed.
+//!
+//! The two ends of a spawn — the line that links a subagent to the call that
+//! started it, and the lines it inherits through that link — are [`spawn`], a
+//! module of their own because they are the journal writes this composer
+//! never makes, run by the hook's journal step rather than by a boundary.
+
+mod spawn;
 
 use std::path::Path;
 
@@ -17,6 +24,8 @@ use rift_core::AgentId;
 
 use super::agent::{boundary_budget, boundary_ceiling};
 use crate::window_journal::{coordinator_reads, CoordinatorRead};
+
+pub(super) use self::spawn::{spawn_step, SpawnHook};
 
 /// The boundary a subagent's window opens at, gathered so the composer takes
 /// one argument rather than five.

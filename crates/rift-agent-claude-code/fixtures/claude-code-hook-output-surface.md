@@ -359,3 +359,75 @@ The two `UpdatedInput` forms are the whole of it: a `Read` whose path becomes a
 Rift-owned Markdown sidecar, and a `Grep` given the result cap it left out.
 Both add a field the caller omitted or point a read at bytes Rift produced;
 neither changes what the agent asked to do, and no deny ever carries one.
+
+## Artifact C — the hooks reference's common input fields
+
+    repository:     https://code.claude.com/docs/en/hooks
+    revision:       none published; the page carries no version or revision string
+    path:           /docs/en/hooks.md
+    sha256:         1ecadd63b50a0081ce6c59772d843fa62f720066e1773908f87f386871cbceca
+    retrieved:      2026-10-10
+    retrieved-from: https://code.claude.com/docs/en/hooks.md
+
+The reference moved hosts after artifact A was taken; its old address answers
+with a permanent redirect to this one. Re-verify exactly as for artifact A.
+These excerpts are the whole basis of one link Rift makes: the call that
+spawns a subagent and the subagent's opening are matched by the id of the user
+prompt both are made under, plus the subagent's type, and by nothing else.
+
+### Every hook carries the prompt being processed (upstream lines 726-733)
+
+```text
+### Common input fields
+
+Hook events receive these fields as JSON, in addition to event-specific fields documented in each [hook event](#hook-events) section. For command hooks, this JSON arrives via stdin. For HTTP hooks, it arrives as the POST request body.
+
+| Field | Description |
+| :- | :- |
+| `session_id` | Current session identifier |
+| `prompt_id` | UUID identifying the user prompt currently being processed. Matches the [`prompt.id` attribute on OpenTelemetry events](/docs/en/monitoring-usage#event-correlation-attributes), so you can correlate hook output with telemetry for a single prompt. Absent until the first user input |
+```
+
+### `SubagentStart` carries those fields, and fires again on a resume (upstream lines 2484, 2490)
+
+```text
+Runs when Claude spawns a subagent with the Agent tool, when Claude [resumes a subagent](/docs/en/sub-agents#resume-subagents), and each time an in-process [agent team](/docs/en/agent-teams) teammate handles a new message. Supports matchers to filter by agent type name. For built-in agents, this is the agent name like `general-purpose`, `Explore`, or `Plan`. For [custom subagents](/docs/en/sub-agents), this is the `name` field from the agent's frontmatter, not the filename.
+```
+
+```text
+In addition to the [common input fields](#common-input-fields), SubagentStart hooks receive `agent_id` with the unique identifier for the subagent and `agent_type` with the agent name that the matcher filters on.
+```
+
+Three facts, each one load-bearing. The spawning `PreToolUse` and the
+subagent's `SubagentStart` both carry `prompt_id`, the prompt **currently being
+processed** — the one the spawning call was made under, since a spawn is part
+of processing it — so the two ends share it. The opening carries the
+`agent_type` a matcher filters on, which is the type the spawning call asked
+for. And the verb fires again on a resume and on each message a teammate
+handles, so the opening claims once per window and a window that has opened
+before claims nothing.
+
+The pairing is exact only where one unclaimed spawn under that prompt asked
+for that type; two siblings started under one prompt with one type are never
+told apart, and neither inherits anything by name.
+
+```rift-input-fields
+verb=PreToolUse fields=prompt_id,tool_use_id,tool_input
+verb=SubagentStart fields=prompt_id,agent_id,agent_type
+```
+
+### Observation — the pairing on recorded sessions
+
+    observed:  2026-10-10 on this machine
+    corpus:    398 subagent windows of a frozen transcript corpus, 468 of the
+               live transcript directory
+    method:    each window's first record's `promptId` against the `promptId`
+               of the turn its spawning call was made in (named by the
+               client's own sidecar), and a claim by prompt id and type in the
+               order the windows opened
+    seen:      398 of 398 and 467 of 468 share the spawning turn's prompt id;
+               a claim names the spawning call in 395 of 398 and 462 of 468,
+               names none in the rest, and names a wrong call in 0
+
+It is a fact about one client and these sessions, not a contract; the replay
+publishes the same claim count over its corpus on every run.

@@ -361,6 +361,7 @@ from one table:
 | `max_inline_hash_bytes` | integer | `1048576` | The largest file hashed on the gate path; past it the read proceeds. |
 | `recovery_budget` | integer | `800` | Tokens a post-compaction recovery map may cost. |
 | `basis_ttl_days` | integer | `30` | How long a read-time basis snapshot is kept before `rift clean` collects it. |
+| `inherit_by_name` | `off` \| `observe` \| `enforce` | `observe` | How far a decline may rest on lines a subagent inherited because its spawning prompt named the path. Never above `mode` or the family's own cap; `off` inherits nothing. |
 | `[interception.agents]` | per-family modes | absent | An override per supported family: `claude-code`, `codex`, `antigravity`. |
 
 Three of those numbers are measurements rather than preferences. **96 KiB** is
@@ -374,6 +375,14 @@ moved from 24 when the frame grew its provenance handle
 ([07-serving-and-injection.md §7.4](07-serving-and-injection.md#74-tier-three-the-decision-at-the-read)). **1 MiB** is the ceiling on hashing while a person waits, and the
 same figure bounds a basis snapshot: past it nothing is diffed anyway, so
 keeping the bytes would be disk spent on an answer no caller can be given.
+
+`inherit_by_name` qualifies the same lever for one class of evidence: lines a
+subagent's window was not handed but was pointed at, because the prompt that
+spawned it named a path its spawner held
+([07-serving-and-injection.md §7.3](07-serving-and-injection.md#what-a-subagents-window-inherits)).
+It ships at `observe`, where those lines are written into the subagent's journal
+and sized, and no read is ever declined on them; `enforce` is a separate
+decision, taken when the observed pool says the class pays.
 
 `basis_ttl_days` governs the one durable artifact this lever leaves behind.
 The delta frame needs the revision a window holds, and a revision an agent

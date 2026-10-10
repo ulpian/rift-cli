@@ -8,7 +8,7 @@
 
 use rift_core::Sha256Id;
 
-use super::{EvictReason, Interval, Line, ResolvedRead};
+use super::{EvictReason, InheritClass, Interval, Line, ResolvedRead};
 use crate::{HiKind, ReadChannel, ReadRequest, ReadSpan};
 
 /// A hash with a distinguishable byte pattern, so a mixed-up hash in a
@@ -34,7 +34,7 @@ pub(super) fn held_hold(path: &str, seed: u8, lo: u32, hi: u32) -> Line {
 
 /// One line of every kind, for the assertions that walk them all.
 pub(super) fn one_of_each() -> Vec<Line> {
-    vec![
+    let mut lines = vec![
         Line::Read {
             turn: 2,
             path: "src/lib.rs".to_owned(),
@@ -56,6 +56,7 @@ pub(super) fn one_of_each() -> Vec<Line> {
             hash: hash(0x01),
             range: run(7, 7),
             at_ms: 13,
+            via: None,
         },
         Line::Expect {
             turn: 5,
@@ -88,7 +89,67 @@ pub(super) fn one_of_each() -> Vec<Line> {
             reason: EvictReason::PreCompact,
             at_ms: 17,
         },
+    ];
+    lines.extend(inheritance_rows());
+    lines
+}
+
+/// One of each line the inheritance between windows writes.
+fn inheritance_rows() -> Vec<Line> {
+    vec![
+        Line::Observe {
+            turn: 9,
+            path: "src/lib.rs".to_owned(),
+            hash: hash(0x40),
+            range: run(1, 30),
+            at_ms: 18,
+            via: Some(InheritClass::ByName),
+        },
+        inherited(InheritClass::ByName, "src/lib.rs", 0x40, 1, 900),
+        Line::Spawn {
+            turn: 10,
+            call: "toolu_01AbC".to_owned(),
+            prompt: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            agent_type: "my-plugin:reviewer".to_owned(),
+            spawner: Some("a0e79504".to_owned()),
+            names: vec!["src/lib.rs".to_owned(), "a b/c.rs".to_owned()],
+            at_ms: 20,
+        },
+        Line::Spawn {
+            turn: 10,
+            call: "toolu_01XyZ".to_owned(),
+            prompt: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            agent_type: "Explore".to_owned(),
+            spawner: None,
+            names: vec![],
+            at_ms: 21,
+        },
+        Line::Claim {
+            turn: 10,
+            agent: "a0e79504".to_owned(),
+            call: Some("toolu_01AbC".to_owned()),
+            at_ms: 22,
+        },
+        Line::Claim {
+            turn: 10,
+            agent: "a2f52a50".to_owned(),
+            call: None,
+            at_ms: 23,
+        },
     ]
+}
+
+/// An inherited line of `class` over a nine-hundred-line file.
+pub(super) fn inherited(class: InheritClass, path: &str, seed: u8, lo: u32, hi: u32) -> Line {
+    Line::Inherit {
+        turn: 1,
+        class,
+        path: path.to_owned(),
+        hash: hash(seed),
+        range: run(lo, hi),
+        total_lines: 900,
+        at_ms: 19,
+    }
 }
 
 /// A read line over a nine-hundred-line file, for the fixtures below.

@@ -180,6 +180,11 @@ pub struct InterceptionPolicy {
     pub recovery_budget: u32,
     /// How long a read-time basis snapshot is kept.
     pub basis_ttl_days: u32,
+    /// How far a decline may rest on lines a subagent's window inherited
+    /// because its spawning prompt named the path. Never above the read lever
+    /// it qualifies, and `observe` until its own pool says otherwise: the
+    /// window was pointed at those bytes, not handed them.
+    pub inherit_by_name: Mode,
     /// `[interception.agents]`.
     pub agents: AgentModes,
 }
@@ -193,6 +198,7 @@ impl Default for InterceptionPolicy {
             max_inline_hash_bytes: DEFAULT_MAX_INLINE_HASH_BYTES,
             recovery_budget: DEFAULT_RECOVERY_BUDGET,
             basis_ttl_days: DEFAULT_BASIS_TTL_DAYS,
+            inherit_by_name: Mode::Observe,
             agents: AgentModes::default(),
         }
     }

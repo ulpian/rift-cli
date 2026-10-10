@@ -99,6 +99,15 @@ pub enum WindowSliceKind {
     Hold,
     /// An action on the file stood in for a read of the run.
     Prevented,
+    /// The window inherited the run from the window that started it, because
+    /// it began from that window's history.
+    InheritFork,
+    /// The window inherited the run because the prompt that started it
+    /// carried the lines.
+    InheritPaste,
+    /// The window inherited the run because the prompt that started it named
+    /// the path, and the window that wrote it held these lines.
+    InheritByName,
 }
 
 impl ArchivedWindowFact {
@@ -120,6 +129,11 @@ impl ArchivedWindowRow {
                 WindowSliceKind::Observe => "observe",
                 WindowSliceKind::Hold => "hold",
                 WindowSliceKind::Prevented => "prevented",
+                // A closed `inherit:<class>` vocabulary: a class the journal
+                // learns later reaches no shard until it is spelled here.
+                WindowSliceKind::InheritFork => "inherit:fork",
+                WindowSliceKind::InheritPaste => "inherit:paste",
+                WindowSliceKind::InheritByName => "inherit:by_name",
             },
             Self::Expect { .. } => "expect",
             Self::Edit { .. } => "edit",
@@ -360,6 +374,26 @@ mod tests {
         let bytes = window_journal_jsonl_bytes(&[child]).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["subagent"], WITHHELD);
+    }
+
+    /// An inherited run freezes under its class's closed token, with the
+    /// file's length the way a read's does, and a shard that holds none keeps
+    /// the bytes it always had.
+    #[test]
+    fn an_inherited_run_freezes_under_its_class_token() {
+        let kinds = [
+            (WindowSliceKind::InheritFork, "inherit:fork"),
+            (WindowSliceKind::InheritPaste, "inherit:paste"),
+            (WindowSliceKind::InheritByName, "inherit:by_name"),
+        ];
+        for (kind, token) in kinds {
+            let fact = window_fact('a', 4, slice(kind, "src/a.rs"));
+            let bytes = window_journal_jsonl_bytes(&[fact]).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["kind"], token);
+            assert_eq!(value["total_lines"], 400);
+            assert_eq!(value["range"], serde_json::json!([1, 40]));
+        }
     }
 
     /// Whether `value` has `member`'s declared shape (an undeclared one has none).

@@ -10,7 +10,7 @@ mod compaction;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rift_agent::window_journal::{Interval, Line as JournalLine};
+use rift_agent::window_journal::{InheritClass, Interval, Line as JournalLine};
 
 use super::panes::WindowPane;
 use super::render::pad;
@@ -80,6 +80,23 @@ pub(super) struct RetryAfterDeny {
     pub(super) denies: u64,
     /// Of those, the ones re-issued inside the same turn.
     pub(super) retried: u64,
+}
+
+/// One class of inherited line, as this member's journals hold it: how many
+/// lines opening windows inherited, and the reads an inherited line alone
+/// would have declined, which ran because the class is not enforced.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(super) struct InheritedPool {
+    /// The class, as the journal spells it.
+    pub(super) class: &'static str,
+    /// Inherited lines written.
+    pub(super) lines: u64,
+    /// Reads they alone would have declined.
+    pub(super) reads: u64,
+    /// Those reads' measured tokens.
+    pub(super) tokens: u64,
+    /// Of those reads, the ones whose bytes could not be re-counted.
+    pub(super) unmeasured: u64,
 }
 
 /// What this member's window journals say about the window that is open.
@@ -304,7 +321,11 @@ fn fold_window(
                 fold_read(*turn, at, meter, &mut rolling, out);
             }
             JournalLine::Observe {
-                path, hash, range, ..
+                path,
+                hash,
+                range,
+                via: None,
+                ..
             } => fold_observe(
                 Slice {
                     path,
@@ -342,13 +363,10 @@ fn fold_window(
                     ..Storm::default()
                 });
             }
-            // None of these is a read, a decline or an emptying: an
-            // announcement and its booking are counted where the savings are,
-            // not in a report about the reads that happened.
-            JournalLine::Expect { .. }
-            | JournalLine::Edit { .. }
-            | JournalLine::Hold { .. }
-            | JournalLine::Prevented { .. } => (),
+            // Nothing else is a read, a decline or an emptying of this window's
+            // own: announcements are counted where the savings are, and the
+            // inherited classes by `inherited_pools`, never in this pool.
+            _ => (),
         }
     }
     for (frame, (denies, retried)) in retries {
@@ -533,6 +551,92 @@ fn member_windows(dir: &Path) -> Vec<(String, Vec<JournalLine>)> {
     out
 }
 
+/// Each class of inherited line's pool across this member's windows, every
+/// class listed whether or not it holds anything, in precedence order.
+///
+/// Kept apart from [`WindowJournals`]' own would-have-declined pool, which is
+/// a figure about the lines a window was handed: a read only an inherited
+/// line would have declined is a different lever's pool, and adding it to the
+/// first would price a class nobody enforces as if it were the read lever's.
+pub(super) fn inherited_pools(work_tree: &Path) -> Vec<InheritedPool> {
+    let mut pools: Vec<InheritedPool> = InheritClass::ALL
+        .iter()
+        .map(|class| InheritedPool {
+            class: class.as_str(),
+            lines: 0,
+            reads: 0,
+            tokens: 0,
+            unmeasured: 0,
+        })
+        .collect();
+    let mut meter = SliceMeter::new(work_tree);
+    for (_, lines) in member_windows(&crate::window_journal::dir(work_tree)) {
+        for line in &lines {
+            fold_inherited(line, &mut meter, &mut pools);
+        }
+    }
+    pools
+}
+
+/// Count one line into the pool of the class it is about, if it is about one.
+fn fold_inherited(line: &JournalLine, meter: &mut SliceMeter, pools: &mut [InheritedPool]) {
+    let pool_of = |pools: &mut [InheritedPool], class: InheritClass| {
+        pools
+            .iter_mut()
+            .position(|pool| pool.class == class.as_str())
+    };
+    match line {
+        JournalLine::Inherit { class, .. } => {
+            if let Some(pool) = pool_of(pools, *class).and_then(|at| pools.get_mut(at)) {
+                pool.lines = pool.lines.saturating_add(1);
+            }
+        }
+        JournalLine::Observe {
+            path,
+            hash,
+            range,
+            via: Some(class),
+            ..
+        } => {
+            let Some(pool) = pool_of(pools, *class).and_then(|at| pools.get_mut(at)) else {
+                return;
+            };
+            pool.reads = pool.reads.saturating_add(1);
+            let revision = hash.to_hex();
+            let at = Slice {
+                path,
+                revision: &revision,
+                range: *range,
+            };
+            match meter.measure(at) {
+                Some((_, tokens)) => pool.tokens = pool.tokens.saturating_add(tokens),
+                None => pool.unmeasured = pool.unmeasured.saturating_add(1),
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The inherited classes' own lines, one per class, under a heading that
+/// says no decline ever rested on them.
+pub(super) fn render_inherited(pools: &[InheritedPool]) -> String {
+    let mut out = String::from(
+        "inherited lines (observed; nothing is declined on them):
+",
+    );
+    for pool in pools {
+        out.push_str(&format!(
+            "  {}{} lines, {} reads would have been declined, {} tok ({} unmeasured)\n",
+            pad(pool.class, 10),
+            pool.lines,
+            pool.reads,
+            pool.tokens,
+            pool.unmeasured
+        ));
+    }
+    out
+}
+
 /// The window journals of the member `repo` is, judged against the caps this
 /// repository's own policy resolves for Claude Code.
 pub(super) fn member_window_journals(repo: &Path) -> WindowJournals {
@@ -630,7 +734,10 @@ fn line_at_ms(line: &JournalLine) -> i64 {
         | JournalLine::Edit { at_ms, .. }
         | JournalLine::Hold { at_ms, .. }
         | JournalLine::Prevented { at_ms, .. }
-        | JournalLine::Evict { at_ms, .. } => *at_ms,
+        | JournalLine::Evict { at_ms, .. }
+        | JournalLine::Inherit { at_ms, .. }
+        | JournalLine::Spawn { at_ms, .. }
+        | JournalLine::Claim { at_ms, .. } => *at_ms,
     };
     i64::try_from(ms).unwrap_or(i64::MAX)
 }
@@ -708,7 +815,7 @@ fn split_line(
             pane.reads = pane.reads.saturating_add(1);
             None
         }
-        JournalLine::Observe { .. } => {
+        JournalLine::Observe { via: None, .. } => {
             pane.observed = pane.observed.saturating_add(1);
             None
         }
@@ -735,7 +842,11 @@ fn split_line(
         | JournalLine::Edit { .. }
         | JournalLine::Evict { .. }
         | JournalLine::Hold { .. }
-        | JournalLine::Prevented { .. } => None,
+        | JournalLine::Prevented { .. }
+        | JournalLine::Observe { via: Some(_), .. }
+        | JournalLine::Inherit { .. }
+        | JournalLine::Spawn { .. }
+        | JournalLine::Claim { .. } => None,
     }
 }
 
@@ -805,6 +916,7 @@ mod tests {
             hash: revision_id(hash),
             range: Interval::new(lo, hi).unwrap(),
             at_ms: 2,
+            via: None,
         }
     }
 

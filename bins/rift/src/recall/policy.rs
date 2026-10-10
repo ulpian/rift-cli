@@ -103,12 +103,13 @@ pub(super) fn render_policy(out: &mut String, snapshot: &rift_recall_policy::Ser
     );
     let _ = writeln!(
         out,
-        "  interception  mode {}  max_slice_bytes {}  min_slice_lines {}  max_inline_hash_bytes {}  recovery_budget {}",
+        "  interception  mode {}  max_slice_bytes {}  min_slice_lines {}  max_inline_hash_bytes {}  recovery_budget {}  inherit_by_name {}",
         p.interception.mode.as_str(),
         p.interception.max_slice_bytes,
         p.interception.min_slice_lines,
         p.interception.max_inline_hash_bytes,
         p.interception.recovery_budget,
+        p.interception.inherit_by_name.as_str(),
     );
     let _ = writeln!(
         out,
@@ -216,6 +217,7 @@ pub(super) fn policy_json(snapshot: &rift_recall_policy::ServePolicySnapshot) ->
                 "agent": agent.as_str(),
                 "interception_requested": e.read_deny_requested.as_str(),
                 "interception": e.read_deny.as_str(),
+                "inherit_by_name": e.inherit_by_name.as_str(),
                 "search_answer": e.search_answer.as_str(),
                 "grep_cap": e.grep_cap.as_str(),
                 "doc_rewrite": e.doc_rewrite.as_str(),
@@ -233,6 +235,7 @@ pub(super) fn policy_json(snapshot: &rift_recall_policy::ServePolicySnapshot) ->
             "min_slice_lines": p.interception.min_slice_lines,
             "max_inline_hash_bytes": p.interception.max_inline_hash_bytes,
             "recovery_budget": p.interception.recovery_budget,
+            "inherit_by_name": p.interception.inherit_by_name.as_str(),
         },
         "search": {
             "mode": p.search.mode.as_str(),
@@ -430,7 +433,7 @@ mod tests {
         let (out, json) = status_policy(None);
         assert!(out.contains(".rift/policies/serve.toml: absent; defaults apply"));
         assert!(out.contains(
-            "interception  mode enforce  max_slice_bytes 98304  min_slice_lines 28  max_inline_hash_bytes 1048576  recovery_budget 800"
+            "interception  mode enforce  max_slice_bytes 98304  min_slice_lines 28  max_inline_hash_bytes 1048576  recovery_budget 800  inherit_by_name observe"
         ));
         assert!(out.contains(
             "search        mode enforce  grep_head_limit 40  glob_top_n 8  answer_budget_tokens 160"

@@ -113,6 +113,11 @@ pub(in crate::hooks) fn window_journal_step(
     let prevented = guarded_phase(t, "prevented_record", || {
         prevented_record(&registry, raw, git_dir, work_tree, &effective)
     });
+    // A SPAWN, from either end: the spawning call's line in the session's main
+    // journal, or the opening subagent's claim on it and what it inherits.
+    guarded_phase(t, "spawn_record", || {
+        spawn_record(&registry, raw, git_dir, work_tree, &effective);
+    });
     // A SEARCH is decided apart from both: it names no lines of a file and no
     // document, so nothing above it can have answered it.
     let searches = guarded_phase(t, "search_gate", || {
@@ -143,6 +148,31 @@ fn guarded_phase<T: Default>(
     t.phase(name, || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_default()
     })
+}
+
+/// Either end of a spawn, under the same lever every journal line is: a
+/// repository that switched reading off writes no spawn and no claim.
+fn spawn_record(
+    registry: &AdapterRegistry,
+    raw: &rift_shadow::hooks::RawHook,
+    git_dir: &Path,
+    work_tree: &Path,
+    effective: &rift_recall_policy::Effective,
+) {
+    if effective.read_deny == rift_recall_policy::Mode::Off {
+        return;
+    }
+    let window = registry
+        .get(&raw.agent)
+        .and_then(|adapter| adapter.facts(&raw.verb, &raw.payload).child_session);
+    super::coordinator::spawn_step(&super::coordinator::SpawnHook {
+        raw,
+        work_tree,
+        window: window.as_deref(),
+        by_name: effective.inherit_by_name,
+        turn: gate_turn(raw, git_dir),
+        at_ms: u64::try_from(raw.occurred_at_ms).unwrap_or_default(),
+    });
 }
 
 /// The gate itself, which the guard above is what keeps off the ingest's back.
@@ -400,6 +430,10 @@ fn gate_limits(effective: &rift_recall_policy::Effective) -> rift_agent::window_
         max_slice_bytes: usize::try_from(effective.max_slice_bytes)
             .unwrap_or(rift_agent::DEFAULT_MAX_SLICE_BYTES),
         min_slice_lines: effective.min_slice_lines,
+        inherit: rift_agent::window_journal::InheritModes {
+            by_name: gate_mode(effective.inherit_by_name),
+            ..rift_agent::window_journal::InheritModes::default()
+        },
         ..rift_agent::window_journal::Limits::default()
     }
 }
