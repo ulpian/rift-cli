@@ -77,7 +77,7 @@ fn every_grammar_form_yields_the_pinned_range() {
 /// The second half of the specification: the spellings the grammar admits
 /// because each one still delivers what a form on the list does — a quote
 /// the shell resolves to a fixed word, a command word from the system's own
-/// directory, a search over several named files.
+/// directory, a search over several named files, a line pick in `awk`.
 #[test]
 fn every_spelling_beyond_the_list_yields_the_pinned_range() {
     let file = "src/lib.rs";
@@ -101,6 +101,11 @@ fn every_spelling_beyond_the_list_yields_the_pinned_range() {
             read(file, ShellSpan::Lines { lo: 12, hi: 48 }),
         ),
         ("/bin/cat src/lib.rs", read(file, ShellSpan::WholeFile)),
+        // A line pick written in `awk` is the `sed` range it prints.
+        (
+            "awk 'NR>=12 && NR<=48' src/lib.rs",
+            read(file, ShellSpan::Lines { lo: 12, hi: 48 }),
+        ),
         // A search over several named files is a search of each of them.
         (
             "grep -n needle src/lib.rs src/main.rs",

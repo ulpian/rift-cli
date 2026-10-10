@@ -9,7 +9,7 @@ use crate::shell_read::{recognise, ShellCall};
 /// with one, and nowhere else.
 const COMMAND_WORDS: &[&str] = &[
     "cat", "nl", "bat", "batcat", "head", "tail", "sed", "grep", "egrep", "fgrep", "rg", "ls",
-    "find", "cd", "echo", "printf",
+    "find", "cd", "echo", "printf", "awk",
 ];
 
 /// **A second, independent reading of "the shell would act on this".**

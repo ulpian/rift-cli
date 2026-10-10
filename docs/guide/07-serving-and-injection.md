@@ -311,6 +311,11 @@ A `sed -n` script may also print one line (`'Ap'`), credited like a range, or
 several runs joined by `;` (`'1,40p;90,120p'`), which is one read per run and
 is credited with nothing: the runs reach the window as one output that can
 pass the terminal threshold while each run's own slice stays under it.
+One program outside the client's list is read too, because it is a line pick
+in disguise: `awk 'NR>=A && NR<=B' a.rs` prints exactly what
+`sed -n 'A,Bp' a.rs` prints, so it is that range with that credit; any other
+`awk` program, a number with a leading zero (which `gawk` reads as octal), an
+option, a second file or an operand holding `=` is left alone.
 A quoted word is read as the word the shell passes: single quotes as their
 text, and double quotes as their text when they hold no `$`, backtick or `!`,
 with every backslash before an ordinary character kept as written

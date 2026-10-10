@@ -16,7 +16,9 @@
 //! this tree beside the adapter that reads it. A listing grammar of the same
 //! shape (`ls`, `find … -name`, `rg --files`) rounds it out. Recognising an
 //! exact match from a published list is not a parse of shell; anything the
-//! list does not spell is left alone.
+//! list does not spell is left alone — with one exception, a line pick
+//! written in `awk` (`awk 'NR>=A && NR<=B'`), which prints exactly what the
+//! listed `sed` range does and is read as that range.
 //!
 //! **The published list is the vocabulary, not the whole sentence.** Measured
 //! on this machine's own transcripts, an agent almost never writes one of
@@ -518,9 +520,10 @@ fn words(command: &str) -> Option<Vec<Word>> {
 /// other backslash kept — a resolution as fixed as the quote itself, which
 /// is what lets an agent's `grep -n "\"decision\""` in. The other three
 /// escapes stay refused: an escaped `$` or backtick is a spelling an agent's
-/// reads almost never use, and an escaped newline joins two lines. A `!` is refused as well: an interactive shell expands
-/// it even inside double quotes, and this module cannot tell which shell it
-/// is. A control character ends the recognition in either kind of quote.
+/// reads almost never use, and an escaped newline joins two lines. A `!` is
+/// refused as well: an interactive shell expands it even inside double
+/// quotes, and this module cannot tell which shell it is. A control character
+/// ends the recognition in either kind of quote.
 fn quoted_word(mark: char, chars: &mut std::str::Chars<'_>) -> Option<Word> {
     let mut word = Word {
         text: String::new(),
@@ -1036,6 +1039,7 @@ fn recognise_simple(command: &str) -> Option<Member> {
             one_read(path_arg(rest.last()?)?, span)
         }
         "sed" => sed_read(rest),
+        "awk" => awk_read(rest),
         "grep" => content_search(rest, GREP_FLAGS),
         "egrep" | "fgrep" => content_search(rest, GREP_VARIANT_FLAGS),
         "rg" => rg_call(rest),
@@ -1117,6 +1121,74 @@ fn sed_read(rest: &[Word]) -> Option<Member> {
                 .collect(),
         )),
     }
+}
+
+/// `awk 'NR>=A && NR<=B'`: the one `awk` program that is a line pick, and the
+/// only `awk` the grammar reads.
+///
+/// A pattern with no action prints every record it matches as it was read,
+/// and a record is a line, so this program prints lines `A` to `B` of the
+/// one file and nothing else — exactly what `sed -n 'A,Bp'` prints, and so
+/// the same span with the same coverage. It is not on the published list; it
+/// is admitted because no reading of it depends on the file's bytes, which
+/// is the condition every form here meets. Every other `awk` program is left
+/// alone, because what a program prints is the program's to decide.
+///
+/// The operand must be a file: `awk` reads one spelled `name=value` as an
+/// assignment, so a path holding `=` is refused, and a second file would
+/// carry the record count across, so there is exactly one.
+fn awk_read(rest: &[Word]) -> Option<Member> {
+    let [program, path] = rest else {
+        return None;
+    };
+    let (lo, hi) = awk_line_pick(&pattern_arg(program)?)?;
+    let path = path_arg(path)?;
+    if path.contains('=') {
+        return None;
+    }
+    one_read(path, ShellSpan::Lines { lo, hi })
+}
+
+/// The two line numbers of an `NR>=A && NR<=B` program, or [`None`] for any
+/// other program.
+///
+/// Spaces may stand between the program's tokens and nowhere inside one —
+/// `N R` is two variables to `awk`, and `> =` is no operator. A tab never
+/// reaches here: the quoted word that carries the program refuses every
+/// control character.
+fn awk_line_pick(program: &str) -> Option<(u32, u32)> {
+    let rest = awk_token(program, "NR")?;
+    let rest = awk_token(rest, ">=")?;
+    let (lo, rest) = awk_number(rest)?;
+    let rest = awk_token(rest, "&&")?;
+    let rest = awk_token(rest, "NR")?;
+    let rest = awk_token(rest, "<=")?;
+    let (hi, rest) = awk_number(rest)?;
+    let ends = rest.trim_start_matches(' ').is_empty();
+    (ends && lo >= 1 && hi >= lo).then_some((lo, hi))
+}
+
+/// The program after `token`, where `token` comes next after any spaces.
+fn awk_token<'a>(program: &'a str, token: &str) -> Option<&'a str> {
+    program.trim_start_matches(' ').strip_prefix(token)
+}
+
+/// The number that comes next after any spaces, and the program after it.
+///
+/// Plain digits, as every count here is, and with no leading zero: unlike
+/// `sed`, `gawk` reads a constant in the program's text that starts with `0`
+/// as octal, so `010` is eight to it and ten to the `awk` macOS ships, and a
+/// line pick whose lines depend on which `awk` runs is no line pick.
+fn awk_number(program: &str) -> Option<(u32, &str)> {
+    let program = program.trim_start_matches(' ');
+    let end = program
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(program.len());
+    let (number, rest) = program.split_at(end);
+    if number.starts_with('0') {
+        return None;
+    }
+    Some((digits(number)?, rest))
 }
 
 /// The `grep` family: a content search over the files the line names. It is
