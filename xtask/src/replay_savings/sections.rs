@@ -244,6 +244,10 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
         "invisible_shell_read_shapes".to_owned(),
         refused_shapes_json(report),
     );
+    map.insert(
+        "first_contact".to_owned(),
+        super::first_contact::first_contact_json(report),
+    );
 }
 
 /// One inheritance route's tally.

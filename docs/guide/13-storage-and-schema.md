@@ -79,6 +79,21 @@ root for the reason [chapter 9](09-worktrees-and-families.md) gives: every
 member of a family already shares that directory, and a linked worktree must
 not re-take work its sibling has done.
 
+A third, smaller one sits beside them: `<common_dir>/rift-family/outline/`
+holds one file per bound outline, named `<sha256>-e<E>p<P>r<R>.outline` after
+the bytes' hash and the outline's extractor, policy and redaction versions.
+It is how the read gate learns, with no store open, that a file's outline is
+bound and what its first-contact frame may say
+([§7.4](07-serving-and-injection.md#a-first-read-of-a-large-file)).
+It is a copy, never a record: the outline and its token counts live in the
+recall projection's `summary_binding` and `summary_token_count`, the file is
+written from them by the one function both binding sites call, and a missing
+file is rebuilt from them by the next bind.
+Its grammar is closed — numbers, a kind from a fixed set and a name per line,
+under a 64 KiB ceiling — and a moved file names another key, so a stale entry
+cannot be read.
+No sweep collects old entries; each is a few hundred bytes.
+
 **The v15 `tool_result_tokens` relation is a new table rather than a widened
 old one**, for a reason worth stating because it looks like a column at first
 glance. `file_read_tokens` is keyed by `tool_call_id` and reached through

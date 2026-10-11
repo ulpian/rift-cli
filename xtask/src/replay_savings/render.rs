@@ -59,6 +59,10 @@ pub fn render_table(report: &Report) -> String {
     out.push_str(&what_is_left(report, denominator));
     out.push_str(&machine_formats(report, denominator));
     out.push_str(&first_sight_sizes(report, denominator));
+    out.push_str(&super::first_contact::first_contact_rows(
+        report,
+        denominator,
+    ));
     out.push_str(&the_constants(report));
     out.push_str(READING_IT);
     out

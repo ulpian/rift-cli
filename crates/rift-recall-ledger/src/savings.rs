@@ -67,8 +67,9 @@ use rift_recall_events::ServeChannel;
 use rift_store::{CanonicalStore, Value};
 
 pub use self::queries::{
-    audit_totals, decisions_by_family, reads_by_family, reads_by_family_and_tool,
-    tool_results_by_family, AuditTotals, Decisions, FamilyDecisions, FamilyReads,
+    audit_totals, decisions_by_family, first_contact_totals, reads_by_family,
+    reads_by_family_and_tool, tool_results_by_family, AuditTotals, Decisions, FamilyDecisions,
+    FamilyReads, FirstContactTotals,
 };
 
 /// The audit verb a **prevented** read is booked under — a read Rift caused
@@ -866,6 +867,102 @@ mod tests {
             .unwrap()
             .families
             .is_empty());
+    }
+
+    /// Two observed first contacts either side of 2,000, one answered one, and
+    /// a decline of another tag.
+    async fn audit_rows_by_reason() -> rift_store::SqliteStore {
+        let recall = rift_store::SqliteStore::open_in_memory().unwrap();
+        rift_store::apply_migrations(&recall, &rift_store::recall_migrations()).unwrap();
+        let rows = [
+            (
+                "o1",
+                "memd.read_repeat_observed",
+                "first_contact",
+                0,
+                0,
+                1_000,
+            ),
+            (
+                "o2",
+                "memd.read_repeat_observed",
+                "first_contact",
+                0,
+                0,
+                3_000,
+            ),
+            (
+                "d1",
+                "memd.read_intercepted",
+                "first_contact",
+                300,
+                4_000,
+                3_000,
+            ),
+            (
+                "x1",
+                "memd.read_intercepted",
+                "already_held",
+                90,
+                900,
+                3_000,
+            ),
+        ];
+        for (id, verb, reason, returned, avoided, at) in rows {
+            recall
+                .insert(
+                    "memd_audit_event",
+                    &[
+                        "audit_id",
+                        "verb",
+                        "handle",
+                        "reason",
+                        "tokens_returned",
+                        "tokens_avoided",
+                        "recorded_at",
+                        "schema_version",
+                    ],
+                    &[
+                        Value::text(id),
+                        Value::text(verb),
+                        Value::text("h"),
+                        Value::text(reason),
+                        Value::Int(returned),
+                        Value::Int(avoided),
+                        Value::Int(at),
+                        Value::Int(1),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+        recall
+    }
+
+    /// ★ The first-contact row counts the decisions under their own tag:
+    /// observed ones by count alone, answered ones with what they avoided and
+    /// cost, inside the window asked for, and no row of another tag.
+    #[test]
+    fn the_first_contact_row_counts_its_tag_and_nothing_else() {
+        block(async {
+            let recall = audit_rows_by_reason().await;
+            let all = first_contact_totals(&recall, None, "first_contact")
+                .await
+                .unwrap();
+            assert_eq!(
+                all,
+                FirstContactTotals {
+                    observed: 2,
+                    outlined: 1,
+                    avoided: 4_000,
+                    returned: 300,
+                }
+            );
+            let late = first_contact_totals(&recall, Some(2_000), "first_contact")
+                .await
+                .unwrap();
+            assert_eq!((late.observed, late.outlined), (1, 1));
+        });
     }
 
     /// A recall store holding two read-gate decisions of 100 avoided tokens,

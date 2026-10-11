@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use rift_core::Result;
-use rift_store::CanonicalStore;
+use rift_store::{CanonicalStore, Value};
 
 use super::{
     in_the_share, window, ChannelTokens, ClaimedByPulls, PREVENTED_VERB, UNATTRIBUTED_FAMILY,
@@ -101,6 +101,66 @@ pub async fn decisions_by_family(
         entry.prevented = entry.prevented.saturating_add(n(5));
     }
     Ok(out)
+}
+
+/// The first-contact decisions over one window, from the audit relation:
+/// the first reads the outline lever only observed, the ones it answered, and
+/// what the answered ones avoided and cost.
+///
+/// Read by the decisions' own tag, which is the caller's to name: this crate
+/// is below the one that spells it. Beside the share and never inside it —
+/// an observed first contact avoided nothing, and an answered one's figures
+/// are already in [`audit_totals`], so this only lets a surface say which
+/// part of them the outline lever is.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn first_contact_totals(
+    recall: &impl CanonicalStore,
+    since_ms: Option<i64>,
+    tag: &str,
+) -> Result<FirstContactTotals> {
+    let (clause, mut params) = since_ms.map_or_else(
+        || (String::new(), Vec::new()),
+        |ms| (" AND recorded_at >= ?2".to_owned(), vec![Value::Int(ms)]),
+    );
+    params.insert(0, Value::text(tag));
+    let rows = recall
+        .query(
+            &format!(
+                "SELECT verb, COUNT(*), COALESCE(SUM(tokens_avoided), 0), \
+                 COALESCE(SUM(tokens_returned), 0) \
+                 FROM memd_audit_event WHERE reason = ?1{clause} GROUP BY verb ORDER BY verb"
+            ),
+            &params,
+        )
+        .await?;
+    let mut out = FirstContactTotals::default();
+    for r in &rows {
+        let n = |i: usize| u64::try_from(r.get_i64(i).unwrap_or(0)).unwrap_or(0);
+        match r.get_text(0)?.as_str() {
+            "memd.read_intercepted" => {
+                out.outlined = out.outlined.saturating_add(n(1));
+                out.avoided = out.avoided.saturating_add(n(2));
+                out.returned = out.returned.saturating_add(n(3));
+            }
+            _ => out.observed = out.observed.saturating_add(n(1)),
+        }
+    }
+    Ok(out)
+}
+
+/// The first-contact decisions' counts and figures over one window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct FirstContactTotals {
+    /// First reads the lever would have answered, which ran.
+    pub observed: u64,
+    /// First reads answered with the file's outline.
+    pub outlined: u64,
+    /// What the answered ones avoided.
+    pub avoided: u64,
+    /// What their frames cost.
+    pub returned: u64,
 }
 
 /// The audit relation's three sums over one window.

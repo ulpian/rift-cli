@@ -9,7 +9,7 @@ use std::path::Path;
 
 use rift_core::{Result, RiftError};
 use rift_recall_ledger::audit::{pull_claim_totals, PullClaimTotals};
-use rift_recall_ledger::savings::Savings;
+use rift_recall_ledger::savings::{first_contact_totals, FirstContactTotals, Savings};
 use rift_recall_ledger::savings_window::{self, Boundary, Marker};
 use rift_store::SqliteStore;
 
@@ -503,6 +503,11 @@ pub(crate) fn savings(root: &Path, args: &SavingsArgs) -> Result<Outcome> {
         let claims = family_pull_claims(&report);
         human.push_str(&render_pull_claims(claims.as_ref()));
         json = with_pull_claims(json, claims.as_ref());
+        // Its own row, so the outline lever can be read, and taken out of the
+        // figure, apart from the re-reads the read gate declines.
+        let first_contact = family_first_contact(&report);
+        human.push_str(&render_first_contact(first_contact.as_ref()));
+        json = with_first_contact(json, first_contact.as_ref());
     }
     Ok(Outcome::ok(human.trim_end().to_owned(), json))
 }
@@ -515,6 +520,48 @@ fn family_pull_claims(report: &SavingsReport) -> Option<PullClaimTotals> {
     let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
     rt.block_on(pull_claim_totals(&store, report.window.cut_ms()))
         .ok()
+}
+
+/// The first-contact decisions over the report's window, read from the recall
+/// store under the lever's own tag.
+fn family_first_contact(report: &SavingsReport) -> Option<FirstContactTotals> {
+    let store = SqliteStore::open_read_only(Path::new(&report.recall_db)).ok()?;
+    let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
+    rt.block_on(first_contact_totals(
+        &store,
+        report.window.cut_ms(),
+        rift_recall_serve::TAG_FIRST_CONTACT,
+    ))
+    .ok()
+}
+
+/// The outline lever's line: how many first reads it observed, how many it
+/// answered, and what those avoided and cost. Already inside the figures
+/// above where it answered; never inside them where it only observed.
+fn render_first_contact(totals: Option<&FirstContactTotals>) -> String {
+    let Some(t) = totals else {
+        return "  first contact:         not recorded by this projection\n".to_owned();
+    };
+    format!(
+        "  first contact:         {} observed, {} outlined, {} tok avoided, {} tok of frames\n",
+        t.observed, t.outlined, t.avoided, t.returned
+    )
+}
+
+/// A document with the first-contact row added under one new key, `null`
+/// where the projection cannot say.
+fn with_first_contact(
+    mut json: serde_json::Value,
+    totals: Option<&FirstContactTotals>,
+) -> serde_json::Value {
+    let Some(map) = json.as_object_mut() else {
+        return json;
+    };
+    map.insert(
+        "first_contact".to_owned(),
+        serde_json::to_value(totals).unwrap_or_default(),
+    );
+    json
 }
 
 /// The one line that sets what pulls claimed beside what this family read,
@@ -1159,6 +1206,31 @@ mod pull_claim_tests {
             render_pull_claims(None),
             "  pull claims:           not recorded by this projection\n"
         );
+    }
+
+    /// The outline lever's row states what it observed, what it answered and
+    /// what those cost, under one additive key, and says so when the
+    /// projection cannot.
+    #[test]
+    fn the_first_contact_row_is_one_line_and_one_additive_key() {
+        let totals = FirstContactTotals {
+            observed: 12,
+            outlined: 0,
+            avoided: 0,
+            returned: 0,
+        };
+        assert_eq!(
+            render_first_contact(Some(&totals)),
+            "  first contact:         12 observed, 0 outlined, 0 tok avoided, 0 tok of frames\n"
+        );
+        assert_eq!(
+            render_first_contact(None),
+            "  first contact:         not recorded by this projection\n"
+        );
+        let before = serde_json::json!({ "overall": { "share_pct": 1.0 } });
+        let after = with_first_contact(before.clone(), Some(&totals));
+        assert_eq!(after["overall"], before["overall"]);
+        assert_eq!(after["first_contact"]["observed"], 12);
     }
 
     #[test]

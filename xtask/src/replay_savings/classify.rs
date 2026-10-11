@@ -194,6 +194,7 @@ pub(super) fn classify_reads(
         return;
     }
     count_the_members(ctx, call, requests, tokens);
+    note_the_follow_ups(ctx, call, requests, tokens);
     let format = count_machine_format(
         ctx.report,
         in_tree_paths(call, requests).iter().map(String::as_str),
@@ -249,6 +250,7 @@ pub(super) fn classify_reads(
     if bucket == Bucket::FirstSight {
         note_what_a_first_sight_was_of(ctx.report, format, blocker, tokens);
     }
+    note_the_outlines(ctx, &slots, bucket, tokens);
     note_an_inherited_observation(ctx.report, &slots, tokens);
     land(ctx.report, bucket, tokens);
 }
@@ -305,6 +307,49 @@ fn note_what_a_first_sight_was_of(
         resolved.file_bytes,
         tokens,
     );
+}
+
+/// A further read, by a window, of a file its first contact would have been
+/// answered with an outline for: the agent going back for lines.
+fn note_the_follow_ups(ctx: &mut Ctx<'_>, call: &Call, requests: &[ReadRequest], tokens: u64) {
+    for key in in_tree_paths(call, requests) {
+        if let Some(class) = ctx.state.outlined.remove(&key) {
+            ctx.report.first_contact.note_follow_up(class, tokens);
+            return;
+        }
+    }
+}
+
+/// Every read of a large outlinable revision binds its outline, and a
+/// one-read call that is a first sight is sized as the first contact the
+/// lever would have answered.
+fn note_the_outlines(ctx: &mut Ctx<'_>, slots: &[Slot], bucket: Bucket, tokens: u64) {
+    for slot in slots {
+        let Slot::Member(member) = slot else { continue };
+        let key = &member.resolved.key;
+        let Some(facts) = ctx.worktree.facts_at(ctx.state.commit, key).cloned() else {
+            continue;
+        };
+        let Some(outline) = facts.outline() else {
+            continue;
+        };
+        let first_contact = bucket == Bucket::FirstSight && slots.len() == 1;
+        let class = first_contact
+            .then(|| {
+                ctx.report.first_contact.note_first_sight(
+                    &member.resolved.read,
+                    outline,
+                    member.resolved.file_bytes,
+                    ctx.stamp,
+                    tokens,
+                )
+            })
+            .flatten();
+        ctx.report.first_contact.note_read(outline, ctx.stamp);
+        if let Some(class) = class {
+            ctx.state.outlined.insert(key.clone(), class);
+        }
+    }
 }
 
 /// Count what the call is made of, and whether it is the read that follows an

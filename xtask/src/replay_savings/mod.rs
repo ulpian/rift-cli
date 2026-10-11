@@ -128,6 +128,7 @@ mod census;
 mod census_fixture;
 mod classify;
 mod delivery;
+mod first_contact;
 mod history;
 mod inheritance;
 #[cfg(test)]
@@ -148,6 +149,7 @@ mod worktree;
 pub use artifact::{write_artifact, Provenance};
 pub use bucket::Bucket;
 pub use census::{CensusRow, FirstSightSizes, MachineFormat};
+pub use first_contact::FirstContactPool;
 pub use inheritance::Inheritance;
 pub use options::{parse_args, run, Options};
 pub use render::{render_json, render_table, SCHEMA_VERSION};
