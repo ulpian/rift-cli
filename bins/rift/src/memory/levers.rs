@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use rift_core::Result;
+use rift_recall_ledger::savings::{in_the_share, ClaimedByPulls};
 use rift_store::{CanonicalStore, SqliteStore};
 
 use super::render::{pad, share_of};
@@ -68,6 +69,18 @@ pub(super) struct PullsAfterInjection {
     pub(super) pulls: u64,
 }
 
+/// What [`channel_rows`] reads out of the channel relation in one pass.
+struct ChannelRows {
+    /// The per-family split.
+    families: Vec<FamilyLevers>,
+    /// Pull-after-injection, per family.
+    pulls: Vec<PullsAfterInjection>,
+    /// Skill-CLI calls with no injection inside the span before them.
+    pulls_without_injection: u64,
+    /// What the rows outside the share booked.
+    claimed: ClaimedByPulls,
+}
+
 /// What the audit relations say about every lever, for this family.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(super) struct Levers {
@@ -81,6 +94,9 @@ pub(super) struct Levers {
     pub(super) tokens_avoided: u64,
     /// Σ returned over the same relation — its spend side.
     pub(super) tokens_returned: u64,
+    /// What the pulls booked, from the channel relation: inside the two
+    /// totals above, and taken out of them before the share is divided.
+    pub(super) claimed_by_pulls: ClaimedByPulls,
     /// The per-family split, in the other relation's own figures.
     pub(super) families: Vec<FamilyLevers>,
     /// Pull-after-injection, per family.
@@ -102,6 +118,7 @@ impl Levers {
             kinds: Vec::new(),
             tokens_avoided: 0,
             tokens_returned: 0,
+            claimed_by_pulls: ClaimedByPulls::default(),
             families: Vec::new(),
             pulls: Vec::new(),
             pulls_without_injection: 0,
@@ -119,10 +136,19 @@ impl Levers {
     }
 
     /// The owner's figure: avoided ÷ (avoided + read), over everything since
-    /// the projection was reset. `None` when neither side has a token in it —
-    /// a share of nothing is not zero, it is unanswerable.
+    /// the projection was reset, with the pulls' claim taken out of the
+    /// numerator by the ledger's own rule. `None` when neither side has a
+    /// token in it — a share of nothing is not zero, it is unanswerable.
     pub(super) fn savings_share(&self, read_tokens: u64) -> Option<f64> {
-        share_of(self.tokens_avoided, read_tokens)
+        share_of(self.avoided_in_share(), read_tokens)
+    }
+
+    /// The audit relation's avoided total less what the pulls claimed.
+    fn avoided_in_share(&self) -> u64 {
+        let claimed = &self.claimed_by_pulls;
+        claimed
+            .in_share_of(self.tokens_avoided, self.tokens_returned)
+            .0
     }
 }
 
@@ -154,9 +180,7 @@ async fn audit_kinds(store: &SqliteStore) -> Result<Vec<LeverKind>> {
 /// The split counts EVERY row of the relation. The channel decides only what
 /// a row is to the pull figures beneath it — an injection to be pulled after,
 /// or a pull — never whether the family it names is credited with it.
-async fn channel_rows(
-    store: &SqliteStore,
-) -> Result<(Vec<FamilyLevers>, Vec<PullsAfterInjection>, u64)> {
+async fn channel_rows(store: &SqliteStore) -> Result<ChannelRows> {
     let rows = store
         .query(
             "SELECT channel, tool_name, tokens_returned, tokens_avoided, recorded_at \
@@ -167,6 +191,7 @@ async fn channel_rows(
     let mut families: BTreeMap<(String, String), FamilyLevers> = BTreeMap::new();
     let mut pulls: BTreeMap<String, PullsAfterInjection> = BTreeMap::new();
     let mut unattributed = 0u64;
+    let mut claimed = ClaimedByPulls::default();
     // The most recent injection, whoever it was for: a pull is credited to the
     // family whose injection it followed, and to no one when the nearest
     // injection is further back than the span.
@@ -197,6 +222,9 @@ async fn channel_rows(
         entry.rows = entry.rows.saturating_add(1);
         entry.tokens_returned = entry.tokens_returned.saturating_add(returned);
         entry.tokens_avoided = entry.tokens_avoided.saturating_add(avoided);
+        if !in_the_share(&channel) {
+            claimed.book(1, avoided, returned);
+        }
         if channel == "hook_inject" {
             // Only a step that pushes something is an injection to pull after;
             // a decline is an answer to a call the agent already made.
@@ -215,11 +243,12 @@ async fn channel_rows(
             _ => unattributed = unattributed.saturating_add(1),
         }
     }
-    Ok((
-        families.into_values().collect(),
-        pulls.into_values().collect(),
-        unattributed,
-    ))
+    Ok(ChannelRows {
+        families: families.into_values().collect(),
+        pulls: pulls.into_values().collect(),
+        pulls_without_injection: unattributed,
+        claimed,
+    })
 }
 
 /// The pull row for `family`, opened empty when the family has none yet.
@@ -272,7 +301,7 @@ async fn basis_availability(store: &SqliteStore) -> Result<(u64, u64)> {
 /// [`rift_core::RiftError::Storage`] on a query failure.
 pub(super) async fn levers(store: &SqliteStore, recall_db: String) -> Result<Levers> {
     let kinds = audit_kinds(store).await?;
-    let (families, pulls, pulls_without_injection) = channel_rows(store).await?;
+    let channel = channel_rows(store).await?;
     let (held_revisions, held_with_blob) = basis_availability(store).await?;
     let tokens_avoided = kinds.iter().map(|k| k.tokens_avoided).sum();
     let tokens_returned = kinds.iter().map(|k| k.tokens_returned).sum();
@@ -282,9 +311,10 @@ pub(super) async fn levers(store: &SqliteStore, recall_db: String) -> Result<Lev
         kinds,
         tokens_avoided,
         tokens_returned,
-        families,
-        pulls,
-        pulls_without_injection,
+        claimed_by_pulls: channel.claimed,
+        families: channel.families,
+        pulls: channel.pulls,
+        pulls_without_injection: channel.pulls_without_injection,
         held_revisions,
         held_with_blob,
     })
@@ -362,17 +392,30 @@ fn render_kinds(l: &Levers, read_tokens: u64, out: &mut String) {
         l.tokens_returned,
         l.net_tokens()
     ));
+    let avoided = l.avoided_in_share();
     let savings = l.savings_share(read_tokens).map_or_else(
         || "  savings: unanswerable — nothing was read and nothing was avoided\n".to_owned(),
         |share| {
             format!(
                 "  savings: avoided ÷ (avoided + read) = {share:.1}% ({} ÷ {})\n",
-                l.tokens_avoided,
-                l.tokens_avoided.saturating_add(read_tokens)
+                avoided,
+                avoided.saturating_add(read_tokens)
             )
         },
     );
     out.push_str(&savings);
+    out.push_str(&render_claimed(&l.claimed_by_pulls, "  "));
+}
+
+/// The pulls' claim, under a share and outside it, when there was a pull.
+pub(super) fn render_claimed(claimed: &ClaimedByPulls, indent: &str) -> String {
+    if claimed.decisions == 0 {
+        return String::new();
+    }
+    format!(
+        "{indent}claimed by pulls: {} avoided on {} pulls, {} returned (beside the share, not in it)\n",
+        claimed.tokens_avoided, claimed.decisions, claimed.tokens_returned
+    )
 }
 
 /// The channel relation's per-family rows, under a heading that says whose
@@ -575,6 +618,44 @@ mod tests {
             200,
             "and its figures are the channel relation's own"
         );
+    }
+
+    /// ★ **A pull moves the claimed line and never the report's share**: its
+    /// avoided tokens have no recorded read behind them. A decision on the
+    /// hook channel is in the share and moves it.
+    #[tokio::test]
+    async fn a_pull_moves_the_claimed_line_and_never_the_reports_share() {
+        let store = audit_store();
+        audit_row(&store, "a1", "memd.read_intercepted", 10, 100).await;
+        call_row(&store, "c1", "hook_inject", "claude-code:read-gate", 1_000).await;
+        let before = levers(&store, "db".to_owned()).await.expect("levers");
+        assert_eq!(before.savings_share(900), share_of(100, 900));
+
+        audit_row(&store, "a2", "memd.manifest_served", 10, 100).await;
+        call_row(&store, "c2", "skill_cli", "known-state", 2_000).await;
+        let after = levers(&store, "db".to_owned()).await.expect("levers");
+        assert_eq!(after.savings_share(900), before.savings_share(900));
+        let claimed = ClaimedByPulls {
+            decisions: 1,
+            tokens_avoided: 100,
+            tokens_returned: 10,
+        };
+        assert_eq!(after.claimed_by_pulls, claimed);
+        let rendered = render_levers(&after, 900);
+        assert!(
+            rendered.contains("= 10.0% (100 ÷ 1000)\n")
+                && rendered.contains(
+                    "  claimed by pulls: 100 avoided on 1 pulls, 10 returned (beside the share, not in it)\n"
+                ),
+            "{rendered}"
+        );
+        assert!(!render_levers(&before, 900).contains("claimed by pulls"));
+
+        audit_row(&store, "a3", "memd.read_intercepted", 10, 100).await;
+        call_row(&store, "c3", "hook_inject", "claude-code:read-gate", 3_000).await;
+        let moved = levers(&store, "db".to_owned()).await.expect("levers");
+        assert_eq!(moved.savings_share(900), share_of(200, 900));
+        assert_eq!(moved.claimed_by_pulls, claimed);
     }
 
     /// An observe-mode window that injects and declines nothing is honestly

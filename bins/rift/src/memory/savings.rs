@@ -223,11 +223,11 @@ fn render_window_line(r: &SavingsReport, out: &mut String) {
     ));
 }
 
-/// The figure itself, its denominator broken down by channel, and the two
-/// caveats every reader of it needs.
+/// The figure itself, what the pulls claimed beside it, its denominator
+/// broken down by channel, and the two caveats every reader of it needs.
 fn render_headline(s: &Savings, out: &mut String) {
     out.push_str(&format!(
-        "  overall:               {} ({} ÷ {})  [audit relation]\n",
+        "  overall:               {} ({} ÷ {})  [audit relation, pulls out]\n",
         fmt_share(s.share()),
         s.tokens_avoided,
         s.tokens_avoided.saturating_add(s.read_tokens)
@@ -235,6 +235,14 @@ fn render_headline(s: &Savings, out: &mut String) {
     out.push_str(&format!(
         "  of it prevented:       {} (reads that never happened, inside the figure above)\n",
         s.tokens_prevented
+    ));
+    // Under the share and never inside it: a pull's avoided tokens
+    // have no recorded read behind them, so they are a claim with nothing to
+    // divide by, and the line says what making the claim returned.
+    let pulls = &s.claimed_by_pulls;
+    out.push_str(&format!(
+        "  claimed by pulls:      {} avoided on {} pulls, {} returned (beside the share, not in it)\n",
+        pulls.tokens_avoided, pulls.decisions, pulls.tokens_returned
     ));
     // The denominator's own breakdown. It is repository content on any
     // channel, so it says which — and an absent figure prints as `n/a`, never
@@ -329,6 +337,8 @@ fn render_family_rows(s: &Savings, out: &mut String) {
 /// caller that would otherwise re-derive it.
 pub(crate) fn savings_json(r: &SavingsReport) -> serde_json::Value {
     let s = &r.savings;
+    let pulls = &s.claimed_by_pulls;
+    let (whole_avoided, whole_returned) = whole_totals(s);
     serde_json::json!({
         "definition": "avoided / (avoided + read), over the window in `window`",
         "projection_db": r.projection_db,
@@ -353,12 +363,21 @@ pub(crate) fn savings_json(r: &SavingsReport) -> serde_json::Value {
             "enforce_sessions": r.enforce_sessions,
         },
         "overall": {
+            // The share counts the decisions whose reads were measured
+            // (`in_share`); the pulls' bookings stand beside it under their
+            // own key, and the two add up to `tokens_avoided`.
             "share_pct": s.share(),
-            "tokens_avoided": s.tokens_avoided,
+            "tokens_avoided": whole_avoided,
+            "in_share": {
+                "tokens_avoided": s.tokens_avoided,
+                "tokens_returned": s.tokens_returned,
+                "honesty": s.honesty(),
+            },
+            "claimed_by_pulls": pulls,
             // The prevented part of `tokens_avoided`, never a second figure
             // beside it: a reader that added the two would double a saving.
             "tokens_prevented": s.tokens_prevented,
-            "tokens_returned": s.tokens_returned,
+            "tokens_returned": whole_returned,
             // The denominator: repository content on ANY channel, which is
             // file reads plus measured search results. `channels` is its
             // breakdown and sums to it exactly, so a reader can take a channel
@@ -374,7 +393,7 @@ pub(crate) fn savings_json(r: &SavingsReport) -> serde_json::Value {
             // denominator so a reader can see how much of the pool is missing
             // from it rather than assume none is.
             "reads_unmeasured": s.reads_unmeasured,
-            "honesty": s.honesty(),
+            "honesty": rift_recall_ledger::savings::honesty(whole_avoided, whole_returned),
             "sessions_with_reads": s.sessions_with_reads,
             // Reads the projection never froze a token count for. They are
             // rows of the denominator worth zero, so the share is over fewer
@@ -393,6 +412,19 @@ pub(crate) fn savings_json(r: &SavingsReport) -> serde_json::Value {
         "share_excluding_undenominated_pct": s.share_excluding_undenominated(),
         "excluded": s.excluded(),
     })
+}
+
+/// The audit relation's whole avoided and returned totals, pulls included.
+///
+/// The document's old keys carry these, so a reader of it from before the
+/// pulls left the share reads them unchanged; only `share_pct` moved, and
+/// `in_share` says over what.
+fn whole_totals(s: &Savings) -> (u64, u64) {
+    let pulls = &s.claimed_by_pulls;
+    (
+        s.tokens_avoided.saturating_add(pulls.tokens_avoided),
+        s.tokens_returned.saturating_add(pulls.tokens_returned),
+    )
 }
 
 /// The savings document with each inherited class's pool added under one
@@ -745,6 +777,11 @@ mod tests {
                 tokens_avoided: 1_000,
                 tokens_prevented: 120,
                 tokens_returned: 160,
+                claimed_by_pulls: rift_recall_ledger::savings::ClaimedByPulls {
+                    decisions: 2,
+                    tokens_avoided: 40_000,
+                    tokens_returned: 300,
+                },
                 read_tokens: 9_000,
                 // The denominator's breakdown, which sums to it exactly: a
                 // reader who takes a channel out is left with the rest.
@@ -819,8 +856,9 @@ savings — avoided ÷ (avoided + read), over the window named below
   window:                since the projection reset — every recorded row counts (no boundary marker)
   observe/enforce cut:   1700000000000 ms — first memd.read_intercepted row
   sessions:              observe 17 / enforce 12
-  overall:               10.0% (1000 ÷ 10000)  [audit relation]
+  overall:               10.0% (1000 ÷ 10000)  [audit relation, pulls out]
   of it prevented:       120 (reads that never happened, inside the figure above)
+  claimed by pulls:      40000 avoided on 2 pulls, 300 returned (beside the share, not in it)
   read tokens by channel: read tool 6000 / shell read 2000 / search 1000
   honesty:               avoided 1000 − returned 160 = 840
   n (sessions with reads): 3
@@ -930,6 +968,29 @@ per family (the relation that names one, joined to the projection by name):
         );
     }
 
+    /// ★ What the pulls claimed is published beside the share under its own
+    /// key, the share's own numerator under `in_share`, and every old key
+    /// keeps the audit relation's whole total: only `share_pct` moved.
+    #[test]
+    fn the_json_carries_the_pulls_claim_beside_the_share_and_outside_it() {
+        let json = savings_json(&locked_report());
+        let claimed = &json["overall"]["claimed_by_pulls"];
+        assert_eq!(
+            *claimed,
+            serde_json::json!({ "decisions": 2, "tokens_avoided": 40_000, "tokens_returned": 300 })
+        );
+        assert_eq!(json["overall"]["in_share"]["tokens_avoided"], 1_000);
+        assert_eq!(json["overall"]["in_share"]["honesty"], 840);
+        assert_eq!(json["overall"]["share_pct"], serde_json::json!(10.0));
+        // The old keys read as they always did: the audit relation's whole.
+        assert_eq!(json["overall"]["tokens_avoided"], 41_000);
+        assert_eq!(json["overall"]["tokens_returned"], 460);
+        assert_eq!(json["overall"]["honesty"], 40_540);
+        for key in ["families_share_pct", "share_excluding_undenominated_pct"] {
+            assert!(json[key].as_f64().is_some_and(|pct| pct < 50.0), "{key}");
+        }
+    }
+
     /// ★ A split nobody could make is **absent**, never a zero: a zero in
     /// `read_tool` would read as a measurement that no read arrived through a
     /// read tool, and the honesty ladder's bottom rung says a surface with no
@@ -937,10 +998,8 @@ per family (the relation that names one, joined to the projection by name):
     #[test]
     fn an_unsplit_denominator_publishes_absence_and_not_a_zero() {
         let unsplit = rift_recall_ledger::savings::assemble(
-            0,
-            0,
-            0,
-            &std::collections::BTreeMap::new(),
+            rift_recall_ledger::savings::AuditTotals::default(),
+            &rift_recall_ledger::savings::Decisions::default(),
             &std::collections::BTreeMap::from([(
                 "claude-code".to_owned(),
                 rift_recall_ledger::savings::FamilyReads {
@@ -1025,6 +1084,7 @@ savings window moved
                 tokens_avoided: 900,
                 tokens_prevented: 300,
                 tokens_returned: 100,
+                claimed_by_pulls: rift_recall_ledger::savings::ClaimedByPulls::default(),
                 read_tokens: 100,
                 channels: rift_recall_ledger::savings::ChannelTokens::default(),
                 reads_unmeasured: 0,

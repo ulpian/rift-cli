@@ -8,10 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use rift_core::Result;
+use rift_recall_ledger::savings::{in_the_share, ClaimedByPulls};
 use rift_store::{CanonicalStore, SqliteStore};
 
 use super::classes::{classify_reads, read_facts, ClassTotals, ReadClass, ReadFact};
 use super::journals::{empty_buckets, fold_split_journals, RetryAfterDeny, SliceBucket};
+use super::levers::render_claimed;
 use super::render::{fmt_share, pad, share_of};
 
 /// The verb whose FIRST row is the moment this repository stopped observing a
@@ -126,6 +128,9 @@ pub(super) struct WindowPane {
     pub(super) tokens_avoided: u64,
     /// Σ returned over that relation inside the window.
     pub(super) tokens_returned: u64,
+    /// What the window's pulls booked: inside the two totals above, and
+    /// taken out of them before the share is divided.
+    pub(super) claimed_by_pulls: ClaimedByPulls,
     /// Context windows of THIS member with a journal line inside it.
     pub(super) windows: u64,
     /// Journal lines inside it.
@@ -151,6 +156,7 @@ impl WindowPane {
             families: Vec::new(),
             tokens_avoided: 0,
             tokens_returned: 0,
+            claimed_by_pulls: ClaimedByPulls::default(),
             windows: 0,
             lines: 0,
             reads: 0,
@@ -172,10 +178,37 @@ impl WindowPane {
         rift_recall_ledger::savings::honesty(self.tokens_avoided, self.tokens_returned)
     }
 
-    /// The owner's figure for the window: avoided ÷ (avoided + read).
+    /// The owner's figure for the window: avoided ÷ (avoided + read), with
+    /// the pulls' claim taken out of the numerator by the ledger's own rule.
     pub(super) fn savings_share(&self) -> Option<f64> {
-        share_of(self.tokens_avoided, self.read_tokens())
+        share_of(self.avoided_in_share(), self.read_tokens())
     }
+
+    /// The audit relation's avoided total less what the pulls claimed.
+    fn avoided_in_share(&self) -> u64 {
+        let claimed = &self.claimed_by_pulls;
+        claimed
+            .in_share_of(self.tokens_avoided, self.tokens_returned)
+            .0
+    }
+}
+
+/// One row of the channel relation, with the family split out of its tool
+/// name and the ledger's answer to whether it is in the share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServeFact {
+    /// The family the tool name names.
+    family: String,
+    /// The hook step after the family, empty for a bare name.
+    step: String,
+    /// When it was recorded.
+    at: i64,
+    /// What it returned.
+    returned: u64,
+    /// What it booked as avoided.
+    avoided: u64,
+    /// [`in_the_share`] of its channel: a pull is not.
+    in_share: bool,
 }
 
 /// The post-reset data cut in two at the first booked decline.
@@ -232,16 +265,15 @@ async fn session_facts(store: &SqliteStore) -> Result<Vec<(String, i64, String)>
     Ok(out)
 }
 
-/// Every serving decision as `(family, step, recorded_at, returned, avoided)`,
-/// with the family split out of `tool_name` exactly as the per-family table
-/// above splits it.
+/// Every serving decision, with the family split out of `tool_name` exactly
+/// as the per-family table above splits it.
 ///
 /// # Errors
 /// [`rift_core::RiftError::Storage`] on a query failure.
-async fn serve_facts(store: &SqliteStore) -> Result<Vec<(String, String, i64, u64, u64)>> {
+async fn serve_facts(store: &SqliteStore) -> Result<Vec<ServeFact>> {
     let rows = store
         .query(
-            "SELECT tool_name, tokens_returned, tokens_avoided, recorded_at \
+            "SELECT tool_name, tokens_returned, tokens_avoided, recorded_at, channel \
              FROM serve_call_event ORDER BY recorded_at ASC, call_id ASC",
             &[],
         )
@@ -253,13 +285,14 @@ async fn serve_facts(store: &SqliteStore) -> Result<Vec<(String, String, i64, u6
             || (tool.clone(), String::new()),
             |(f, s)| (f.to_owned(), s.to_owned()),
         );
-        out.push((
+        out.push(ServeFact {
             family,
             step,
-            r.get_i64(3)?,
-            u64::try_from(r.get_i64(1)?).unwrap_or(0),
-            u64::try_from(r.get_i64(2)?).unwrap_or(0),
-        ));
+            at: r.get_i64(3)?,
+            returned: u64::try_from(r.get_i64(1)?).unwrap_or(0),
+            avoided: u64::try_from(r.get_i64(2)?).unwrap_or(0),
+            in_share: in_the_share(&r.get_text(4)?),
+        });
     }
     Ok(out)
 }
@@ -316,7 +349,7 @@ fn build_pane(
     sessions: &[(String, i64, String)],
     facts: &[ReadFact],
     classes: &[ReadClass],
-    serve: &[(String, String, i64, u64, u64)],
+    serve: &[ServeFact],
     audit: &[(String, i64, u64, u64)],
     cut: i64,
     enforced: bool,
@@ -356,11 +389,16 @@ fn build_pane(
             .or_default()
             .insert(f.session_id.clone());
     }
-    for (family, step, _, returned, avoided) in serve.iter().filter(|(.., at, _, _)| inside(*at)) {
-        let entry = row(&mut rows, family);
-        entry.tokens_avoided = entry.tokens_avoided.saturating_add(*avoided);
-        entry.tokens_returned = entry.tokens_returned.saturating_add(*returned);
-        match step.as_str() {
+    for fact in serve.iter().filter(|f| inside(f.at)) {
+        // A pull is no family's decision in the share: it joins the claim.
+        if !fact.in_share {
+            pane.claimed_by_pulls.book(1, fact.avoided, fact.returned);
+            continue;
+        }
+        let entry = row(&mut rows, &fact.family);
+        entry.tokens_avoided = entry.tokens_avoided.saturating_add(fact.avoided);
+        entry.tokens_returned = entry.tokens_returned.saturating_add(fact.returned);
+        match fact.step.as_str() {
             DECLINE_STEP => entry.declines = entry.declines.saturating_add(1),
             REPLACEMENT_STEP => entry.replacements = entry.replacements.saturating_add(1),
             FALLBACK_STEP => entry.fallbacks = entry.fallbacks.saturating_add(1),
@@ -483,12 +521,14 @@ fn render_pane_totals(p: &WindowPane, out: &mut String) {
         p.tokens_returned,
         p.net_tokens()
     ));
+    let avoided = p.avoided_in_share();
     out.push_str(&format!(
         "    savings: avoided ÷ (avoided + read) = {} ({} ÷ {})\n",
         fmt_share(p.savings_share()),
-        p.tokens_avoided,
-        p.tokens_avoided.saturating_add(p.read_tokens())
+        avoided,
+        avoided.saturating_add(p.read_tokens())
     ));
+    out.push_str(&render_claimed(&p.claimed_by_pulls, "    "));
     out.push_str(&format!(
         "    journals: {} windows, {} lines, {} reads, {} observed, {} declined\n",
         p.windows, p.lines, p.reads, p.observed, p.declined
@@ -610,13 +650,7 @@ mod tests {
             read_fact("s2", "codex", 610, "rev-b", 100),
         ];
         let classes = classify_reads(&facts);
-        let serve = vec![(
-            "claude-code".to_owned(),
-            "read-gate".to_owned(),
-            520,
-            20,
-            900,
-        )];
+        let serve = vec![serve_fact("claude-code:read-gate", 520, 900, true)];
         let observe = build_pane(&sessions, &facts, &classes, &serve, &audit, 500, false);
         let enforce = build_pane(&sessions, &facts, &classes, &serve, &audit, 500, true);
 
@@ -654,6 +688,52 @@ mod tests {
             (1700, 40),
             "both decline rows, and only the returned tokens booked with them"
         );
+    }
+
+    /// One serving decision of `avoided` tokens returning 20, under `tool`.
+    fn serve_fact(tool: &str, at: i64, avoided: u64, in_share: bool) -> ServeFact {
+        let (family, step) = tool.split_once(':').unwrap_or((tool, ""));
+        ServeFact {
+            family: family.to_owned(),
+            step: step.to_owned(),
+            at,
+            returned: 20,
+            avoided,
+            in_share,
+        }
+    }
+
+    /// ★ A pull in a window moves its claimed line and never its share, and
+    /// it is no family's row; a hook decision moves the share.
+    #[test]
+    fn a_pull_in_a_window_moves_the_claimed_line_and_not_the_share() {
+        let facts = vec![read_fact("s1", "claude-code", 10, "rev-a", 900)];
+        let classes = classify_reads(&facts);
+        let gate = ("memd.read_intercepted".to_owned(), 10, 20, 100);
+        let pull = ("memd.manifest_served".to_owned(), 20, 20, 5_000);
+        let hook = vec![serve_fact("claude-code:read-gate", 10, 100, true)];
+        let pane = |serve: &[ServeFact], audit: &[(String, i64, u64, u64)]| {
+            build_pane(&[], &facts, &classes, serve, audit, i64::MAX, false)
+        };
+        let before = pane(&hook, std::slice::from_ref(&gate));
+        assert_eq!(before.savings_share(), share_of(100, 900));
+
+        let mut serve = hook.clone();
+        serve.push(serve_fact("known-state", 20, 5_000, false));
+        let after = pane(&serve, &[gate.clone(), pull.clone()]);
+        assert_eq!(after.savings_share(), before.savings_share());
+        assert_eq!(after.claimed_by_pulls.tokens_avoided, 5_000);
+        assert!(after.families.iter().all(|f| f.family != "known-state"));
+        let mut out = String::new();
+        render_pane_totals(&after, &mut out);
+        assert!(
+            out.contains("(100 ÷ 1000)") && out.contains("claimed by pulls: 5000"),
+            "{out}"
+        );
+
+        serve.push(serve_fact("claude-code:read-gate", 30, 100, true));
+        let moved = pane(&serve, &[gate.clone(), pull, gate]);
+        assert_eq!(moved.savings_share(), share_of(200, 900));
     }
 
     /// ★ Sessions and the ids their client used are two counts, not one: a

@@ -12,11 +12,21 @@
 //! Two relations, never joined:
 //!
 //! * the **audit** relation (`memd_audit_event`) carries what every decision
-//!   avoided and returned. It names no family, so it is the whole-family
-//!   headline and nothing else.
+//!   avoided and returned. It names no family and no channel, so it is the
+//!   whole-family headline once the pulls are taken out of it, and nothing
+//!   else.
 //! * the **channel** relation (`serve_call_event`) is the only per-family axis
-//!   the serving side has (`tool_name` is `<family>:<step>`). Its figures are
+//!   the serving side has (`tool_name` is `<family>:<step>`), and the only
+//!   relation that says which channel a decision came through. Its figures are
 //!   its own.
+//!
+//! **Which decisions are in the share** is decided once, by [`in_the_share`]:
+//! the ones made on the channel that answers a read or a search the agent
+//! made. A pull answers a question about files and is credited with what
+//! reading them last cost, but no read the capture projection recorded stands
+//! behind that credit, so it has no denominator and a share over it would
+//! divide by its own numerator. Its avoided tokens are published beside the
+//! share as [`ClaimedByPulls`], never inside it.
 //!
 //! The read side of the denominator comes from a third store, the capture
 //! projection, keyed by the family's capture id. A family's share therefore
@@ -51,6 +61,7 @@
 use std::collections::BTreeMap;
 
 use rift_core::Result;
+use rift_recall_events::ServeChannel;
 use rift_store::{CanonicalStore, Value};
 
 /// The audit verb a **prevented** read is booked under — a read Rift caused
@@ -68,6 +79,22 @@ pub const PREVENTED_VERB: &str = "memd.read_prevented";
 /// stops those reads from being silently folded into a family that may not
 /// have made them.
 pub const UNATTRIBUTED_FAMILY: &str = "(unattributed)";
+
+/// Whether a decision recorded on `channel` is in the share — **the one
+/// definition every surface uses**.
+///
+/// The hook channel's decisions answer a read or a search the agent made, and
+/// the capture projection measures those on every channel the denominator
+/// counts, so each of them has a denominator its family measured. A pull,
+/// on the skill channel, books what reading the files it answered about last
+/// cost; nothing it displaced was a read the projection recorded, so its
+/// avoided tokens are claimed rather than measured against anything. A pull
+/// whose tool names a family is still a pull: the family's reads are the
+/// denominator of its hook decisions, not of a question it asked.
+#[must_use]
+pub fn in_the_share(channel: &str) -> bool {
+    channel == ServeChannel::HookInject.token()
+}
 
 /// `avoided ÷ (avoided + read)` as a percentage.
 ///
@@ -194,17 +221,56 @@ impl FamilyShare {
     }
 }
 
+/// What the pulls booked: published beside the share, never inside it.
+///
+/// A pull's avoided figure is the read cost of files it answered about, with
+/// no recorded read behind it ([`in_the_share`]), so it is a claim rather than
+/// a measurement and no rate here divides by it. It is counted with what the
+/// pulls returned, so a reader can see what the claim cost to make.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ClaimedByPulls {
+    /// The pulls made: rows of the channel relation on the skill channel.
+    pub decisions: u64,
+    /// What they booked as avoided.
+    pub tokens_avoided: u64,
+    /// What they returned.
+    pub tokens_returned: u64,
+}
+
+impl ClaimedByPulls {
+    /// Count `rows` decisions that are not [`in_the_share`] into the claim.
+    pub fn book(&mut self, rows: u64, avoided: u64, returned: u64) {
+        self.decisions = self.decisions.saturating_add(rows);
+        self.tokens_avoided = self.tokens_avoided.saturating_add(avoided);
+        self.tokens_returned = self.tokens_returned.saturating_add(returned);
+    }
+
+    /// The avoided and returned tokens of a whole total, pulls included,
+    /// that are in the share: what is left once this claim is taken out.
+    #[must_use]
+    pub fn in_share_of(&self, avoided: u64, returned: u64) -> (u64, u64) {
+        (
+            avoided.saturating_sub(self.tokens_avoided),
+            returned.saturating_sub(self.tokens_returned),
+        )
+    }
+}
+
 /// Every figure the savings share is composed of, for one repository family.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Savings {
-    /// Σ avoided over the audit relation — the headline numerator.
+    /// Σ avoided over the decisions in the share — the headline numerator:
+    /// the audit relation's total less what the pulls claimed.
     pub tokens_avoided: u64,
     /// The part of it that reads which never happened account for. **Inside
     /// `tokens_avoided`, not added to it** — the owner's figure is one
     /// figure, and this is the breakdown of it the honesty rule asks for.
     pub tokens_prevented: u64,
-    /// Σ returned over the same relation — the honesty gate's spend side.
+    /// Σ returned over the same decisions — the honesty gate's spend side.
     pub tokens_returned: u64,
+    /// What the pulls booked, beside the share and outside every figure
+    /// above.
+    pub claimed_by_pulls: ClaimedByPulls,
     /// Every repository-content token the capture projection holds, on every
     /// channel: file reads plus measured search results.
     pub read_tokens: u64,
@@ -221,9 +287,9 @@ pub struct Savings {
 }
 
 impl Savings {
-    /// The owner's figure: `avoided ÷ (avoided + read)` over everything since
-    /// the reset, as a percentage. `None` when nothing was read and nothing
-    /// avoided.
+    /// The owner's figure: `avoided ÷ (avoided + read)` over the decisions in
+    /// the share since the reset, as a percentage. `None` when nothing was
+    /// read and nothing avoided.
     #[must_use]
     pub fn share(&self) -> Option<f64> {
         share(self.tokens_avoided, self.read_tokens)
@@ -310,7 +376,7 @@ fn window(column: &str, since_ms: Option<i64>) -> (String, Vec<Value>) {
 pub async fn audit_totals(
     recall: &impl CanonicalStore,
     since_ms: Option<i64>,
-) -> Result<(u64, u64, u64)> {
+) -> Result<AuditTotals> {
     let (clause, params) = window("recorded_at", since_ms);
     let rows = recall
         .query(
@@ -328,49 +394,81 @@ pub async fn audit_totals(
             .and_then(|n| u64::try_from(n).ok())
             .unwrap_or(0)
     };
-    Ok((sum(0), sum(1), sum(2)))
+    Ok(AuditTotals {
+        avoided: sum(0),
+        returned: sum(1),
+        prevented: sum(2),
+    })
 }
 
-/// What each family decided, from the only relation that names one.
+/// What each family decided in the share, and what the pulls claimed, from
+/// the only relation that names a family and a channel.
 ///
-/// Every row of the relation counts, on either channel: a table built from the
-/// injection channel alone leaves a family's own skill-CLI calls out of the
-/// figures it is read for.
+/// Every row of the relation counts once, on one side of [`in_the_share`]: a
+/// decision in the share joins its family's row, and a pull joins the claimed
+/// line whatever its tool name says, so no avoided token is in a family's
+/// share and beside it as well.
 ///
 /// # Errors
 /// [`rift_core::RiftError::Storage`] on a query failure.
 pub async fn decisions_by_family(
     recall: &impl CanonicalStore,
     since_ms: Option<i64>,
-) -> Result<BTreeMap<String, FamilyDecisions>> {
+) -> Result<Decisions> {
     let (clause, params) = window("recorded_at", since_ms);
     let rows = recall
         .query(
             &format!(
-                "SELECT tool_name, COALESCE(SUM(tokens_avoided), 0), \
+                "SELECT channel, tool_name, COALESCE(SUM(tokens_avoided), 0), \
                  COALESCE(SUM(tokens_returned), 0), COUNT(*), \
                  COALESCE(SUM(CASE WHEN terminal_verb = '{PREVENTED_VERB}' \
                  THEN tokens_avoided ELSE 0 END), 0) \
-                 FROM serve_call_event{clause} GROUP BY tool_name ORDER BY tool_name ASC"
+                 FROM serve_call_event{clause} \
+                 GROUP BY channel, tool_name ORDER BY tool_name ASC, channel ASC"
             ),
             &params,
         )
         .await?;
-    let mut out: BTreeMap<String, FamilyDecisions> = BTreeMap::new();
+    let mut out = Decisions::default();
     for r in &rows {
-        let tool = r.get_text(0)?;
+        let channel = r.get_text(0)?;
+        let tool = r.get_text(1)?;
+        let n = |i: usize| u64::try_from(r.get_i64(i).unwrap_or(0)).unwrap_or(0);
+        if !in_the_share(&channel) {
+            out.pulls.book(n(4), n(2), n(3));
+            continue;
+        }
         // `<family>:<step>`; a name with no step is the family itself.
         let family = tool
             .split_once(':')
             .map_or(tool.clone(), |(f, _)| f.to_owned());
-        let entry = out.entry(family).or_default();
-        let n = |i: usize| u64::try_from(r.get_i64(i).unwrap_or(0)).unwrap_or(0);
-        entry.avoided = entry.avoided.saturating_add(n(1));
-        entry.returned = entry.returned.saturating_add(n(2));
-        entry.rows = entry.rows.saturating_add(n(3));
-        entry.prevented = entry.prevented.saturating_add(n(4));
+        let entry = out.families.entry(family).or_default();
+        entry.avoided = entry.avoided.saturating_add(n(2));
+        entry.returned = entry.returned.saturating_add(n(3));
+        entry.rows = entry.rows.saturating_add(n(4));
+        entry.prevented = entry.prevented.saturating_add(n(5));
     }
     Ok(out)
+}
+
+/// The audit relation's three sums over one window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AuditTotals {
+    /// Σ avoided, pulls included: the relation names no channel.
+    pub avoided: u64,
+    /// Σ returned, pulls included.
+    pub returned: u64,
+    /// The prevented part of `avoided`, inside it and never beside it.
+    pub prevented: u64,
+}
+
+/// The channel relation read on both sides of [`in_the_share`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Decisions {
+    /// Each family's decisions in the share, by family name.
+    pub families: BTreeMap<String, FamilyDecisions>,
+    /// Every pull, whichever name it was made under.
+    pub pulls: ClaimedByPulls,
 }
 
 /// What one family's rows of the channel relation add up to.
@@ -609,8 +707,7 @@ pub async fn compose_with(
     since_ms: Option<i64>,
     shell: Option<ShellClassifier<'_>>,
 ) -> Result<Savings> {
-    let (tokens_avoided, tokens_returned, tokens_prevented) =
-        audit_totals(recall, since_ms).await?;
+    let audit = audit_totals(recall, since_ms).await?;
     let decisions = decisions_by_family(recall, since_ms).await?;
     let reads = reads_by_family(projection, since_ms).await?;
     let results = tool_results_by_family(projection, since_ms).await?;
@@ -630,9 +727,7 @@ pub async fn compose_with(
         }
     };
     Ok(assemble(
-        tokens_avoided,
-        tokens_returned,
-        tokens_prevented,
+        audit,
         &decisions,
         &reads,
         &results,
@@ -640,23 +735,27 @@ pub async fn compose_with(
     ))
 }
 
-/// The pure half of [`compose`]: fold the two per-family maps into rows.
+/// The pure half of [`compose`]: fold the two per-family maps into rows, and
+/// take the pulls out of the audit relation's totals.
 ///
 /// Split out so the composition is testable without a store, and so the two
-/// maps are joined in exactly one place.
+/// maps are joined in exactly one place. The audit relation names no channel,
+/// so the share's numerator is its total less what the channel relation saw
+/// the pulls claim; a pull writes one row to each, so the two agree except
+/// where a boundary falls in the milliseconds between a pull's two writes.
 #[must_use]
-#[allow(clippy::too_many_arguments)] // one join, one argument per relation it reads
 pub fn assemble(
-    tokens_avoided: u64,
-    tokens_returned: u64,
-    tokens_prevented: u64,
-    decisions: &BTreeMap<String, FamilyDecisions>,
+    audit: AuditTotals,
+    decisions: &Decisions,
     reads: &BTreeMap<String, FamilyReads>,
     results: &BTreeMap<String, (ChannelTokens, u64)>,
     read_split: Option<&BTreeMap<String, (u64, u64)>>,
 ) -> Savings {
+    let claimed_by_pulls = decisions.pulls;
+    let (tokens_avoided, tokens_returned) =
+        claimed_by_pulls.in_share_of(audit.avoided, audit.returned);
     let mut families: BTreeMap<String, FamilyShare> = BTreeMap::new();
-    for (family, decided) in decisions {
+    for (family, decided) in &decisions.families {
         let entry = families.entry(family.clone()).or_default();
         entry.family.clone_from(family);
         entry.tokens_avoided = decided.avoided;
@@ -710,8 +809,9 @@ pub fn assemble(
     };
     Savings {
         tokens_avoided,
-        tokens_prevented,
+        tokens_prevented: audit.prevented,
         tokens_returned,
+        claimed_by_pulls,
         read_tokens,
         channels,
         reads_unmeasured: fold(|f| f.reads_unmeasured),
@@ -772,6 +872,7 @@ mod tests {
             tokens_avoided: 1_000,
             tokens_prevented: 0,
             tokens_returned: 0,
+            claimed_by_pulls: ClaimedByPulls::default(),
             read_tokens: 1_000,
             sessions_with_reads: 1,
             channels: ChannelTokens::default(),
@@ -820,7 +921,16 @@ mod tests {
             ("claude-code".to_owned(), read(9_000, 3)),
             ("(unattributed)".to_owned(), read(1_000, 1)),
         ]);
-        let s = assemble(1_100, 60, 250, &decisions, &reads, &BTreeMap::new(), None);
+        let audit = AuditTotals {
+            avoided: 1_100,
+            returned: 60,
+            prevented: 250,
+        };
+        let decisions = Decisions {
+            families: decisions,
+            pulls: ClaimedByPulls::default(),
+        };
+        let s = assemble(audit, &decisions, &reads, &BTreeMap::new(), None);
         assert_eq!(s.families.len(), 3, "three names across two relations");
         // The headline is the AUDIT relation's total, not the sum of rows.
         assert_eq!(s.tokens_avoided, 1_100);
@@ -984,15 +1094,11 @@ mod tests {
                 unmeasured: 1,
             })
         );
-        let s = assemble(
-            1_000,
-            0,
-            0,
-            &BTreeMap::new(),
-            &reads,
-            &BTreeMap::new(),
-            None,
-        );
+        let audit = AuditTotals {
+            avoided: 1_000,
+            ..AuditTotals::default()
+        };
+        let s = assemble(audit, &Decisions::default(), &reads, &BTreeMap::new(), None);
         assert_eq!(s.read_tokens, 9_000, "the unmeasured read adds nothing");
         assert_eq!(s.reads_unmeasured, 1, "…and is counted where it is visible");
         assert_eq!(s.families[0].reads_unmeasured, 1);
@@ -1016,13 +1122,21 @@ mod tests {
     #[tokio::test]
     async fn the_boundary_cuts_the_numerator_and_the_denominator_alike() {
         let recall = fixture_decisions_either_side_of_2_000().await;
-        assert_eq!(audit_totals(&recall, None).await.unwrap(), (200, 2, 0));
+        let totals = |avoided, returned| AuditTotals {
+            avoided,
+            returned,
+            prevented: 0,
+        };
+        assert_eq!(audit_totals(&recall, None).await.unwrap(), totals(200, 2));
         assert_eq!(
             audit_totals(&recall, Some(2_000)).await.unwrap(),
-            (100, 1, 0)
+            totals(100, 1)
         );
-        assert_eq!(audit_totals(&recall, Some(9_000)).await.unwrap(), (0, 0, 0));
-        let whole = decisions_by_family(&recall, None).await.unwrap();
+        assert_eq!(
+            audit_totals(&recall, Some(9_000)).await.unwrap(),
+            totals(0, 0)
+        );
+        let whole = decisions_by_family(&recall, None).await.unwrap().families;
         assert_eq!(
             whole.get("claude-code"),
             Some(&FamilyDecisions {
@@ -1032,7 +1146,10 @@ mod tests {
                 prevented: 0,
             })
         );
-        let cut = decisions_by_family(&recall, Some(2_000)).await.unwrap();
+        let cut = decisions_by_family(&recall, Some(2_000))
+            .await
+            .unwrap()
+            .families;
         assert_eq!(
             cut.get("claude-code"),
             Some(&FamilyDecisions {
@@ -1045,6 +1162,7 @@ mod tests {
         assert!(decisions_by_family(&recall, Some(9_000))
             .await
             .unwrap()
+            .families
             .is_empty());
     }
 
@@ -1172,14 +1290,161 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let (avoided, _, prevented) = audit_totals(&recall, None).await.unwrap();
-        assert_eq!(avoided, 500, "both rows are avoided tokens");
-        assert_eq!(prevented, 400, "and this much of it never ran");
-        let families = decisions_by_family(&recall, None).await.unwrap();
+        let audit = audit_totals(&recall, None).await.unwrap();
+        assert_eq!(audit.avoided, 500, "both rows are avoided tokens");
+        assert_eq!(audit.prevented, 400, "and this much of it never ran");
+        let families = decisions_by_family(&recall, None).await.unwrap().families;
         let cc = families.get("claude-code").expect("the deciding family");
         assert_eq!(cc.avoided, 500);
         assert_eq!(cc.prevented, 400);
     }
+    /// One decision, written to both relations the figure reads, on
+    /// `channel` and under `tool`.
+    async fn seed_decision(
+        recall: &rift_store::SqliteStore,
+        id: &str,
+        (channel, tool): (&str, &str),
+        (avoided, returned): (i64, i64),
+    ) {
+        let audit = &[
+            "audit_id",
+            "verb",
+            "handle",
+            "tokens_returned",
+            "tokens_avoided",
+            "recorded_at",
+            "schema_version",
+        ];
+        let row = [
+            Value::text(id),
+            Value::text("memd.manifest_served"),
+            Value::text("h"),
+            Value::Int(returned),
+            Value::Int(avoided),
+            Value::Int(1_000),
+            Value::Int(1),
+        ];
+        recall
+            .insert("memd_audit_event", audit, &row)
+            .await
+            .unwrap();
+        let call = &[
+            "call_id",
+            "channel",
+            "tool_name",
+            "terminal_verb",
+            "tokens_returned",
+            "tokens_avoided",
+            "recorded_at",
+            "schema_version",
+        ];
+        let row = [
+            Value::text(id),
+            Value::text(channel),
+            Value::text(tool),
+            Value::text("memd.manifest_served"),
+            Value::Int(returned),
+            Value::Int(avoided),
+            Value::Int(1_000),
+            Value::Int(1),
+        ];
+        recall.insert("serve_call_event", call, &row).await.unwrap();
+    }
+
+    /// Both stores of the pull fixtures: one hook decision of 1,000 avoided
+    /// tokens by `claude-code`, which the projection records reading 9,000.
+    async fn fixture_one_measured_family() -> (rift_store::SqliteStore, rift_store::SqliteStore) {
+        let recall = rift_store::SqliteStore::open_in_memory().unwrap();
+        rift_store::apply_migrations(&recall, &rift_store::recall_migrations()).unwrap();
+        let projection = rift_store::SqliteStore::open_in_memory().unwrap();
+        rift_store::apply_migrations(&projection, &rift_store::default_migrations()).unwrap();
+        seed_two_reads_one_unmeasured(&projection).await;
+        let hook = ("hook_inject", "claude-code:read-gate");
+        seed_decision(&recall, "gate", hook, (1_000, 10)).await;
+        (recall, projection)
+    }
+
+    /// **A pull's avoided tokens move the claimed line and never the share.**
+    /// A pull answers a question about files and is credited with what reading
+    /// them last cost; no read the capture projection recorded stands behind
+    /// it, so it has no denominator, and the share is a fraction over one.
+    #[tokio::test]
+    async fn a_pull_moves_the_claimed_line_and_leaves_the_share_unchanged() {
+        let (recall, projection) = fixture_one_measured_family().await;
+        let before = compose(&recall, &projection, None).await.unwrap();
+        assert_eq!(before.share(), share(1_000, 9_000));
+
+        let pull = ("skill_cli", "known-state");
+        seed_decision(&recall, "pull", pull, (500_000, 400)).await;
+        let after = compose(&recall, &projection, None).await.unwrap();
+        assert_eq!(after.share(), before.share(), "a pull is not in the share");
+        assert_eq!(after.tokens_avoided, 1_000);
+        assert_eq!(after.honesty(), before.honesty());
+        let claimed = ClaimedByPulls {
+            decisions: 1,
+            tokens_avoided: 500_000,
+            tokens_returned: 400,
+        };
+        assert_eq!(after.claimed_by_pulls, claimed, "it is claimed beside it");
+        assert!(after.families.iter().all(|f| f.family != "known-state"));
+
+        // A pull made under a family's name is still a pull.
+        let named = ("skill_cli", "claude-code:changed-hunks");
+        seed_decision(&recall, "named", named, (7_000, 0)).await;
+        let named = compose(&recall, &projection, None).await.unwrap();
+        assert_eq!(named.share(), before.share());
+        assert_eq!(named.claimed_by_pulls.decisions, 2);
+
+        // A read-channel decision is in it.
+        let hook = ("hook_inject", "claude-code:read-gate");
+        seed_decision(&recall, "gate-2", hook, (2_000, 20)).await;
+        let moved = compose(&recall, &projection, None).await.unwrap();
+        assert_eq!(
+            moved.share(),
+            share(3_000, 9_000),
+            "a read-channel decision is"
+        );
+        assert_eq!(moved.claimed_by_pulls, named.claimed_by_pulls);
+    }
+
+    /// The shape this repository's own stores were measured in: one pull verb
+    /// booking millions of avoided tokens on a few thousand returned, beside a
+    /// family whose reads were measured. The share is the measured family's,
+    /// about one percent, and the millions are the claimed line.
+    #[test]
+    fn a_large_pull_claim_reads_beside_a_one_percent_share() {
+        let gate = FamilyDecisions {
+            avoided: 25_946,
+            returned: 955,
+            rows: 7,
+            prevented: 0,
+        };
+        let pulls = ClaimedByPulls {
+            decisions: 19,
+            tokens_avoided: 4_919_280,
+            tokens_returned: 19_603,
+        };
+        let decisions = Decisions {
+            families: BTreeMap::from([("claude-code".to_owned(), gate)]),
+            pulls,
+        };
+        let audit = AuditTotals {
+            avoided: 25_946 + 4_919_280,
+            returned: 955 + 19_603,
+            prevented: 0,
+        };
+        let reads = BTreeMap::from([("claude-code".to_owned(), read(2_501_003, 11))]);
+        let s = assemble(audit, &decisions, &reads, &BTreeMap::new(), None);
+        let headline = s.share().expect("answerable");
+        assert!((headline - 1.0268).abs() < 1e-3, "{headline}");
+        assert_eq!(s.tokens_avoided, 25_946);
+        assert_eq!(s.honesty(), 24_991);
+        assert_eq!(s.claimed_by_pulls, pulls);
+        assert_eq!(s.families_share(), s.share());
+        assert_eq!(s.share_excluding_undenominated(), s.share());
+        assert!(s.excluded().is_empty(), "a pull is not a family");
+    }
+
     fn block<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .build()
@@ -1218,13 +1483,13 @@ mod tests {
                       Value::Int(*avoided), Value::Int(1_000), Value::Int(1)],
                 )).unwrap();
             }
-            let (avoided, _, prevented) = block(audit_totals(&recall, None)).unwrap();
-            proptest::prop_assert!(prevented <= avoided);
-            let families = block(decisions_by_family(&recall, None)).unwrap();
-            for decided in families.values() {
+            let audit = block(audit_totals(&recall, None)).unwrap();
+            proptest::prop_assert!(audit.prevented <= audit.avoided);
+            let decisions = block(decisions_by_family(&recall, None)).unwrap();
+            for decided in decisions.families.values() {
                 proptest::prop_assert!(decided.prevented <= decided.avoided);
             }
-            let composed = assemble(avoided, 0, prevented, &families, &BTreeMap::new(), &BTreeMap::new(), None);
+            let composed = assemble(audit, &decisions, &BTreeMap::new(), &BTreeMap::new(), None);
             proptest::prop_assert!(composed.tokens_prevented <= composed.tokens_avoided);
             for f in &composed.families {
                 proptest::prop_assert!(f.tokens_prevented <= f.tokens_avoided);

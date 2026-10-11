@@ -315,6 +315,7 @@ per session:
             ],
             tokens_avoided: 900,
             tokens_returned: 160,
+            claimed_by_pulls: rift_recall_ledger::savings::ClaimedByPulls::default(),
             families: vec![FamilyLevers {
                 family: "claude-code".to_owned(),
                 step: "read-gate".to_owned(),
