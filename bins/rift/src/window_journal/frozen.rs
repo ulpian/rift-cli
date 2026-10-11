@@ -185,7 +185,11 @@ fn archived_window_row(line: &Line) -> Option<ArchivedWindowRow> {
         },
         // An outline line is written only where the first-contact lever acts,
         // which it does not below enforce; its frozen kind arrives with it.
-        Line::Outline { .. } | Line::Spawn { .. } | Line::Claim { .. } => return None,
+        // A family line freezes with the vocabulary the checkpoint grammar
+        // gives it, which arrives with its kinds; until then it stays local.
+        Line::Outline { .. } | Line::Spawn { .. } | Line::Claim { .. } | Line::Family { .. } => {
+            return None
+        }
     })
 }
 
@@ -212,7 +216,8 @@ fn line_at_ms(line: &Line) -> u64 {
         | Line::Evict { at_ms, .. }
         | Line::Inherit { at_ms, .. }
         | Line::Spawn { at_ms, .. }
-        | Line::Claim { at_ms, .. } => *at_ms,
+        | Line::Claim { at_ms, .. }
+        | Line::Family { at_ms, .. } => *at_ms,
     }
 }
 

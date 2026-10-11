@@ -738,7 +738,8 @@ fn line_at_ms(line: &JournalLine) -> i64 {
         | JournalLine::Evict { at_ms, .. }
         | JournalLine::Inherit { at_ms, .. }
         | JournalLine::Spawn { at_ms, .. }
-        | JournalLine::Claim { at_ms, .. } => *at_ms,
+        | JournalLine::Claim { at_ms, .. }
+        | JournalLine::Family { at_ms, .. } => *at_ms,
     };
     i64::try_from(ms).unwrap_or(i64::MAX)
 }
@@ -848,7 +849,8 @@ fn split_line(
         | JournalLine::Outline { .. }
         | JournalLine::Inherit { .. }
         | JournalLine::Spawn { .. }
-        | JournalLine::Claim { .. } => None,
+        | JournalLine::Claim { .. }
+        | JournalLine::Family { .. } => None,
     }
 }
 

@@ -82,13 +82,23 @@
 //! in. [`housekeeping`] counts a checkout's journals and sweeps the ones it has
 //! finished with. [`frozen`] reads a session's windows for the checkpoint
 //! that freezes them, on the archive path and never on a decision's.
-//! [`coordinator`] is the one question asked of a window that is not the
-//! caller's: what a subagent's coordinator has read that the subagent does not
-//! hold, named as a hint and never counted as coverage.
+//! [`coordinator`] and [`family`] are the two questions asked of windows that
+//! are not the caller's: what a subagent's coordinator has read that the
+//! subagent does not hold, named as a hint and never counted as coverage; and
+//! which other windows of the family are live, read for the one decline that
+//! may rest on what they hold.
 
 mod coordinator;
 mod denies;
 mod edits;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by the read gate's family check, which arrives with the decision itself"
+    )
+)]
+mod family;
 mod fold;
 mod frozen;
 mod housekeeping;

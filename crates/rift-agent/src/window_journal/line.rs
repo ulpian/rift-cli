@@ -9,6 +9,7 @@
 use rift_core::Sha256Id;
 use serde_json::{json, Map, Value};
 
+use super::family::{family_line_from, insert_family_fields, FamilyRoute};
 use super::inherit::{class_at, inherited_line_from, insert_inherited_fields, InheritClass};
 use super::{Interval, LINE_VERSION};
 
@@ -293,6 +294,36 @@ pub enum Line {
         /// When the line was written, in milliseconds.
         at_ms: u64,
     },
+    /// **A read declined once because another live window of the family
+    /// holds these bytes**, with the cheaper route the decline carried — or,
+    /// below `enforce`, would have carried.
+    ///
+    /// Not coverage: the window was handed an outline or a list of runs, not
+    /// the lines. One per revision in a window: every later read of it is
+    /// admitted, and one inside the offered runs is the follow-up the
+    /// decline promised. A kind of its own, so a binary that predates it
+    /// drops the row rather than reading a decline of lines the window held.
+    Family {
+        /// The turn the call was made in.
+        turn: u32,
+        /// The file, in the one spelling coverage is keyed by.
+        path: String,
+        /// The revision the bytes hashed to.
+        hash: Sha256Id,
+        /// The lines that were asked for.
+        range: Interval,
+        /// What the decline handed the window instead.
+        route: FamilyRoute,
+        /// The runs the frame named as the reads to make instead.
+        offered: Vec<Interval>,
+        /// Whether the decline was made, or only recorded.
+        acted: bool,
+        /// The size of the frame in bytes, sent or not: what an observed
+        /// decline would have cost, measured without a tokenizer.
+        frame_bytes: u32,
+        /// When the line was written, in milliseconds.
+        at_ms: u64,
+    },
     /// The context window stopped holding what it had been given.
     Evict {
         /// The turn the signal arrived in.
@@ -321,6 +352,7 @@ impl Line {
             Self::Inherit { .. } => "inherit",
             Self::Spawn { .. } => "spawn",
             Self::Claim { .. } => "claim",
+            Self::Family { .. } => "family",
         }
     }
 
@@ -339,7 +371,8 @@ impl Line {
             | Self::Evict { turn, .. }
             | Self::Inherit { turn, .. }
             | Self::Spawn { turn, .. }
-            | Self::Claim { turn, .. } => *turn,
+            | Self::Claim { turn, .. }
+            | Self::Family { turn, .. } => *turn,
         }
     }
 
@@ -415,6 +448,7 @@ impl Line {
             Self::Inherit { .. } | Self::Spawn { .. } | Self::Claim { .. } => {
                 insert_inherited_fields(self, object);
             }
+            Self::Family { .. } => insert_family_fields(self, object),
         }
     }
 
@@ -504,8 +538,23 @@ impl Line {
                 reason: EvictReason::from_str(text_at(object, "reason")?)?,
                 at_ms,
             }),
-            kind => inherited_line_from(kind, object, turn, at_ms),
+            kind => linking_line_from(kind, object, turn, at_ms),
         }
+    }
+}
+
+/// The line one of the kinds whose grammar lives beside the decision it
+/// serves states — inheritance between windows, and a decline resting on
+/// another window — or `None` for a kind no module knows.
+fn linking_line_from(
+    kind: &str,
+    object: &Map<String, Value>,
+    turn: u32,
+    at_ms: u64,
+) -> Option<Line> {
+    match kind {
+        "family" => family_line_from(object, turn, at_ms),
+        kind => inherited_line_from(kind, object, turn, at_ms),
     }
 }
 
@@ -708,6 +757,10 @@ mod tests {
                             | "by"
                             | "names"
                             | "agent"
+                            | "route"
+                            | "runs"
+                            | "acted"
+                            | "frame_bytes"
                     ),
                     "an unexpected field {key} in {row}"
                 );

@@ -27,6 +27,7 @@
 
 mod decision;
 mod delivery;
+mod family;
 mod first_contact;
 mod holds;
 mod inherit;
@@ -42,6 +43,7 @@ pub use self::decision::{
     decide, record, Decision, DenyShape, EditEcho, Limits, Mode, NARROW_MIN_HELD_LINES, NARROW_MODE,
 };
 pub use self::delivery::{reconcile_delivery, Reconcile, ResolvedRead, StatedDelivery};
+pub use self::family::{family_coverage, FamilyRoute, MAX_FAMILY_RUNS};
 pub use self::first_contact::{decide_first_contact, FirstContactFloor, FIRST_CONTACT_MODE};
 pub use self::holds::{DenyKey, HeldFile, StandingHold};
 pub use self::inherit::{

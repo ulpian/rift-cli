@@ -8,7 +8,7 @@
 
 use rift_core::Sha256Id;
 
-use super::{EvictReason, InheritClass, Interval, Line, ResolvedRead};
+use super::{EvictReason, FamilyRoute, InheritClass, Interval, Line, ResolvedRead};
 use crate::{HiKind, ReadChannel, ReadRequest, ReadSpan};
 
 /// A hash with a distinguishable byte pattern, so a mixed-up hash in a
@@ -135,6 +135,17 @@ fn inheritance_rows() -> Vec<Line> {
             agent: "a2f52a50".to_owned(),
             call: None,
             at_ms: 23,
+        },
+        Line::Family {
+            turn: 11,
+            path: "src/lib.rs".to_owned(),
+            hash: hash(0x40),
+            range: run(1, 900),
+            route: FamilyRoute::Outline,
+            offered: vec![run(1, 40), run(120, 300)],
+            acted: false,
+            frame_bytes: 812,
+            at_ms: 24,
         },
     ]
 }
