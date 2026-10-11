@@ -25,6 +25,9 @@ pub(super) struct Call {
     /// transcript, `tool_response` on the wire the hook reads. It is what the
     /// delivery statement of [`stated_delivery`] is built from.
     pub(super) response: Option<Value>,
+    /// The id of the user prompt the call was made under: the `prompt_id` the
+    /// hook on the call is handed.
+    pub(super) prompt_id: Option<String>,
 }
 
 /// One replayable event in a window, in the order it happened.
@@ -47,6 +50,9 @@ pub(super) struct Window {
     /// The id of the tool call that spawned this window, from the sidecar the
     /// client writes beside a subagent's transcript.
     pub(super) spawning_call: Option<String>,
+    /// The user prompt a subagent's window opened under and its type, from its
+    /// first record and the sidecar: the two facts its opening hook is handed.
+    pub(super) opened_under: Option<(String, String)>,
 }
 
 /// How a window's transcript begins, and every record identity it holds —
@@ -137,7 +143,11 @@ pub(super) fn load_window(path: &Path) -> Result<Window, String> {
     }
     let (results, responses) = collect_results(&records);
     let mut events = Vec::new();
+    let mut prompt_id: Option<String> = None;
     for (stamp, at, record) in &records {
+        if let Some(id) = record.get("promptId").and_then(Value::as_str) {
+            prompt_id = Some(id.to_owned());
+        }
         if is_eviction(record) {
             events.push((stamp.clone(), *at, Event::Evict));
             continue;
@@ -167,6 +177,7 @@ pub(super) fn load_window(path: &Path) -> Result<Window, String> {
                     cwd: cwd.clone(),
                     result: results.get(id).cloned(),
                     response: responses.get(id).cloned(),
+                    prompt_id: prompt_id.clone(),
                 })),
             ));
         }
@@ -175,6 +186,7 @@ pub(super) fn load_window(path: &Path) -> Result<Window, String> {
         events,
         lead: lead_of(&records),
         spawning_call: spawning_call(path),
+        opened_under: opened_under(path, &records),
     })
 }
 
@@ -242,6 +254,19 @@ fn spawning_call(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(sidecar).ok()?;
     let meta: Value = serde_json::from_str(&text).ok()?;
     meta.get(SIDECAR_TOOL_USE_ID)?.as_str().map(str::to_owned)
+}
+
+/// The prompt id a subagent's first record carries and the type its sidecar
+/// names, or `None` for a window without both.
+fn opened_under(path: &Path, records: &[(String, usize, Value)]) -> Option<(String, String)> {
+    let sidecar = path.with_extension("meta.json");
+    let meta: Value = serde_json::from_str(&std::fs::read_to_string(sidecar).ok()?).ok()?;
+    let agent_type = meta.get("agentType")?.as_str()?.to_owned();
+    let prompt = records
+        .iter()
+        .find_map(|(_, _, record)| record.get("promptId")?.as_str())?
+        .to_owned();
+    Some((prompt, agent_type))
 }
 
 /// The window files of one session tree: the main session, then each subagent.

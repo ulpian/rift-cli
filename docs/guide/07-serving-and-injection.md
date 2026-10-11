@@ -241,17 +241,48 @@ Its tokens are measured in the same string as the pointer and booked as spend on
 
 **Only the coordinator's window, in this checkout.**
 The subagent works for the window that spawned it, and that window's reads are the ones it was briefed from.
+For a subagent started by another subagent, that window is the spawning subagent, never the session's main window: the opening finds which through the claim described below, and a window whose opening could name no spawn falls back to the main window.
 A sibling subagent's reads belong to some other task, and another member's reads in the family may be of a different file at the same path.
 The hook reads two window journals to compose it, the coordinator's and the subagent's own: no store and no git object database.
 
 **Facts, never a decline.**
 The section names revisions and writes nothing to the subagent's window journal: no read, no hold, no decline.
-The read gate keeps deciding from the subagent's own reads alone ([§7.4](#74-tier-three-the-decision-at-the-read)), so a file the coordinator holds is never a reason to skip the subagent's read of it, and no decline ever rests on a line outside the window's own journal.
-A test holds the subagent's journal untouched across the push.
+The read gate keeps deciding from the subagent's own journal alone ([§7.4](#74-tier-three-the-decision-at-the-read)), so a file the coordinator holds is never a reason to skip the subagent's read of it, and no decline ever rests on a line outside the window's own journal.
+A test holds the subagent's journal untouched across the push; what the journal does hold at the opening is the inheritance below, written by the journal step, not by the section.
 
 **The coordinator's journal is not trusted to be well formed.**
 It is a file an agent can write to, so a row is rendered only if its path is a checkout path in the journal's own spelling (relative, `/`-separated, no `..`, no control character) that the push guard passes unaltered, and only if its hash is hex.
 Any other row is counted as withheld, as every listing counts its own, and the red-team corpus carries rows of each kind ([§7.17](#717-the-red-team-program)).
+
+### What a subagent's window inherits
+
+The section above tells a subagent what its coordinator holds; it changes no decision.
+Inheritance is the other half: lines the coordinator held become lines in the subagent's **own** window journal, marked with the class of evidence they rest on, so the read gate can weigh them — and, at the shipped levers, never declines on them.
+
+**Three classes, and how far each is trusted.**
+*Paste* is lines the spawning prompt carried itself; *by name* is lines of a path the spawning prompt named, which the spawner held; *fork* is everything a window holds because it began from its spawner's own history.
+Each class has a mode.
+Fork and paste are fixed at `observe`, and nothing writes them yet: no client this build knows signals that a subagent began from its spawner's history, and the paste class is not measured on the hook path.
+By name has the repository's lever, `[interception] inherit_by_name`, `observe` by default and never above `mode` ([02-configuration.md](02-configuration.md#the-read-gate-interception)).
+
+**The link, from the two ends of a spawn.**
+The opening hook carries no prompt: only the subagent's id and type and the id of the user prompt being processed.
+So the spawning call — whose hook carries its own call id, that prompt id, the type it asks for and the prompt — writes a `spawn` line into the session's main journal, naming the spawning window and the paths it holds that the prompt names; the prompt itself is scanned in memory and never written.
+The opening then writes a `claim` line beside it, naming the one unclaimed spawn under its prompt id and type.
+Exactly one or none: a window's own spawn line always exists before it opens, and a window only ever claims a spawn it found alone, so a sole match is always its own, and two siblings started under one prompt with one type are never told apart.
+The opening claims once per window; a resumed subagent, or a teammate taking a new message, fires the same verb, finds its claim or its own lines, and claims nothing more.
+On recorded sessions the claim named the spawning call for 395 of 398 subagent windows and named a wrong one for none; the replay publishes the same count on its corpus.
+
+**What lands, and what a read of it does.**
+When the claim names a spawn that named paths, the spawner's live reads of those paths are copied into the subagent's journal as `inherit` lines of class `by_name`, at most 256.
+A line inherited by a class at `observe` is never coverage: a read only it would have declined runs, the window records the read it was handed and beside it an `observe` line marked with the class, and the audit relation books the observation under `inherited:by_name`.
+Only a class at `enforce` counts as coverage, and then a decline rests on lines in the window's own journal, inherited ones included and marked; the one-decline-per-key rule bounds it as it bounds every other.
+The savings report carries one line per class — lines inherited, reads they alone would have declined, their tokens — beside the figure and never inside it, since an observed class avoided nothing.
+
+**What it costs at a spawn.**
+The spawning call reads the spawner's journal and matches the prompt, at most 256 KiB of it, against the paths that journal holds: no file is opened, hashed or tokenized.
+The opening reads the main journal, the subagent's own and the spawner's, and appends a claim and its inherited lines.
+Nothing on either path opens a store or loads the tokenizer.
 
 ---
 

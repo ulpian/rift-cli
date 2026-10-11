@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use rift_agent::window_journal::{Interval, Line};
+use rift_agent::window_journal::{InheritClass, Interval, Line};
 use rift_shadow::backend::{ArchivedWindowFact, ArchivedWindowRow, WindowSliceKind};
 
 use super::{key, WindowJournal};
@@ -100,19 +100,23 @@ fn journal_window_facts(
         .journal
         .lines()
         .iter()
-        .map(|line| ArchivedWindowFact {
-            window: window.clone(),
-            subagent: subagent.map(str::to_owned),
-            turn: line.turn(),
-            at: line_at_ms(line),
-            row: archived_window_row(line),
+        .filter_map(|line| {
+            Some(ArchivedWindowFact {
+                window: window.clone(),
+                subagent: subagent.map(str::to_owned),
+                turn: line.turn(),
+                at: line_at_ms(line),
+                row: archived_window_row(line)?,
+            })
         })
         .collect()
 }
 
 /// The row a journal line freezes as: its kind and that kind's own members,
-/// spelled in the shard's grammar rather than the journal's.
-fn archived_window_row(line: &Line) -> ArchivedWindowRow {
+/// spelled in the shard's grammar rather than the journal's — or `None` for
+/// the spawn and claim lines, which link two windows' journals at run time
+/// and are a fact about neither window's context.
+fn archived_window_row(line: &Line) -> Option<ArchivedWindowRow> {
     let slice = |kind, path: &str, hash: &rift_core::Sha256Id, range: &Interval, total| {
         ArchivedWindowRow::Slice {
             kind,
@@ -122,7 +126,7 @@ fn archived_window_row(line: &Line) -> ArchivedWindowRow {
             total_lines: total,
         }
     };
-    match line {
+    Some(match line {
         Line::Read {
             path,
             hash,
@@ -130,6 +134,20 @@ fn archived_window_row(line: &Line) -> ArchivedWindowRow {
             total_lines,
             ..
         } => slice(WindowSliceKind::Read, path, hash, range, Some(*total_lines)),
+        Line::Inherit {
+            class,
+            path,
+            hash,
+            range,
+            total_lines,
+            ..
+        } => slice(
+            inherited_kind(*class),
+            path,
+            hash,
+            range,
+            Some(*total_lines),
+        ),
         Line::Deny {
             path, hash, range, ..
         } => slice(WindowSliceKind::Deny, path, hash, range, None),
@@ -165,6 +183,16 @@ fn archived_window_row(line: &Line) -> ArchivedWindowRow {
         Line::Evict { reason, .. } => ArchivedWindowRow::Evict {
             reason: reason.as_str().to_owned(),
         },
+        Line::Spawn { .. } | Line::Claim { .. } => return None,
+    })
+}
+
+/// The frozen kind an inherited run of each class is spelled as.
+const fn inherited_kind(class: InheritClass) -> WindowSliceKind {
+    match class {
+        InheritClass::Fork => WindowSliceKind::InheritFork,
+        InheritClass::Paste => WindowSliceKind::InheritPaste,
+        InheritClass::ByName => WindowSliceKind::InheritByName,
     }
 }
 
@@ -178,7 +206,10 @@ fn line_at_ms(line: &Line) -> u64 {
         | Line::Prevented { at_ms, .. }
         | Line::Expect { at_ms, .. }
         | Line::Edit { at_ms, .. }
-        | Line::Evict { at_ms, .. } => *at_ms,
+        | Line::Evict { at_ms, .. }
+        | Line::Inherit { at_ms, .. }
+        | Line::Spawn { at_ms, .. }
+        | Line::Claim { at_ms, .. } => *at_ms,
     }
 }
 
@@ -262,6 +293,48 @@ mod tests {
                 (child, Some(CHILD), "read"),
             ]
         );
+    }
+
+    /// An inherited run freezes under its class's token with the file's
+    /// length, while the spawn and claim lines that linked the windows stay
+    /// run state and reach no shard — and they are not counted as refused.
+    #[test]
+    fn an_inherited_run_freezes_and_the_link_rows_do_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, store) = projection(tmp.path());
+        let own = WindowJournal::open(tmp.path(), SESSION, None);
+        own.append(&Line::Spawn {
+            turn: 1,
+            call: "toolu_1".to_owned(),
+            prompt: "p-1".to_owned(),
+            agent_type: "Explore".to_owned(),
+            spawner: None,
+            names: vec!["src/a.rs".to_owned()],
+            at_ms: 1,
+        })
+        .unwrap();
+        own.append(&Line::Claim {
+            turn: 1,
+            agent: CHILD.to_owned(),
+            call: Some("toolu_1".to_owned()),
+            at_ms: 2,
+        })
+        .unwrap();
+        let read = read(1, "src/a.rs", 1, 1, 40);
+        let inherited =
+            rift_agent::window_journal::inherited_from_read(&read, InheritClass::ByName, 1, 3)
+                .unwrap();
+        WindowJournal::open(tmp.path(), SESSION, Some(CHILD))
+            .append(&inherited)
+            .unwrap();
+        let facts = session_window_facts(&rt, &store, tmp.path(), "claude-code", SESSION);
+        let kinds: Vec<&str> = facts.iter().map(|f| f.row.kind()).collect();
+        assert_eq!(kinds, ["inherit:by_name"]);
+        let bytes = rift_shadow::backend::window_journal_jsonl_bytes(&facts).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["total_lines"], 400);
+        assert_eq!(value["range"], serde_json::json!([1, 40]));
+        assert_eq!(value["subagent"], CHILD);
     }
 
     /// A row with a revision that is not hex never parses; a row whose path is

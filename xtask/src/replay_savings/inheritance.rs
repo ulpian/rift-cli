@@ -272,7 +272,7 @@ fn without_gutter(line: &str) -> &str {
 }
 
 /// Whether `prompt` names `key` with no name character on either side of it.
-fn names_the_path(prompt: &str, key: &str) -> bool {
+pub(super) fn names_the_path(prompt: &str, key: &str) -> bool {
     let is_name_char = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
     prompt.match_indices(key).any(|(at, _)| {
         let before = prompt.get(..at).and_then(|head| head.chars().next_back());

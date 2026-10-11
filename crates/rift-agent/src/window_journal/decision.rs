@@ -5,6 +5,7 @@
 //! agent waits. Everything it consults is a pure query over rows, and this is
 //! where those queries meet the mode and the family's channel.
 
+use super::inherit::{enforced_view, inherited_observation, InheritClass, InheritModes};
 use super::{
     narrowing, Interval, Journal, Line, Narrowing, ResolvedRead, DEFAULT_MAX_DELIVERED_BYTES,
     DEFAULT_MAX_SHELL_DELIVERED_BYTES,
@@ -131,6 +132,10 @@ pub struct Limits {
     /// shipped decision rather than of a copy of it; with the field at
     /// [`Mode::Off`] the same replay reproduces the build without narrowing.
     pub narrow_mode: Mode,
+    /// How far a decision may lean on each class of line this window
+    /// inherited from the window that started it. Below `enforce` a class is
+    /// never coverage; it only sizes what declining on it would be worth.
+    pub inherit: InheritModes,
 }
 
 impl Default for Limits {
@@ -142,6 +147,7 @@ impl Default for Limits {
             max_delivered_bytes: DEFAULT_MAX_DELIVERED_BYTES,
             max_shell_delivered_bytes: DEFAULT_MAX_SHELL_DELIVERED_BYTES,
             narrow_mode: NARROW_MODE,
+            inherit: InheritModes::default(),
         }
     }
 }
@@ -184,6 +190,15 @@ pub enum Decision {
     Observe(DenyShape),
     /// Decline it once, with this to say for it.
     Deny(DenyShape),
+    /// Let it run: only a line this window inherited, of a class still
+    /// observed, would have declined it, in this shape. The record sizes that
+    /// class; nothing about the call changes.
+    Inherited {
+        /// What the decline would have said.
+        shape: DenyShape,
+        /// The class of inherited line it would have rested on.
+        class: InheritClass,
+    },
 }
 
 /// Whether a family's channel is one a decline may travel on: an explanation
@@ -293,8 +308,35 @@ fn shape_of(
 /// they are small enough to hash inline, and whether the path resolves inside
 /// the work tree are the caller's checks: they need the file, and this module
 /// never opens one.
+///
+/// A line this window inherited counts as coverage only while its class is at
+/// `enforce` in [`Limits::inherit`]. A read only a still-observed class would
+/// have declined comes back [`Decision::Inherited`]: it runs, and its record
+/// sizes the class.
 #[must_use]
 pub fn decide(
+    read: &ResolvedRead,
+    journal: &Journal,
+    mode: Mode,
+    channel: Option<Channel>,
+    echo: EditEcho,
+    slice_bytes: usize,
+    limits: Limits,
+) -> Decision {
+    let enforced = enforced_view(journal, limits);
+    let held = enforced.as_ref().unwrap_or(journal);
+    let own = decide_held(read, held, mode, channel, echo, slice_bytes, limits);
+    if own != Decision::Allow || mode == Mode::Off {
+        return own;
+    }
+    inherited_observation(journal, limits, |view, asked| {
+        decide_held(read, view, mode, channel, echo, slice_bytes, asked)
+    })
+    .unwrap_or(own)
+}
+
+/// [`decide`] over the lines that count as held, inherited lines aside.
+fn decide_held(
     read: &ResolvedRead,
     journal: &Journal,
     mode: Mode,
@@ -396,15 +438,16 @@ pub fn record(
     at_ms: u64,
 ) -> Line {
     match decision {
-        Decision::Allow | Decision::Observe(DenyShape::Narrow { .. }) => {
-            delivered(read, slice_bytes, limits, turn, at_ms)
-        }
+        Decision::Allow
+        | Decision::Observe(DenyShape::Narrow { .. })
+        | Decision::Inherited { .. } => delivered(read, slice_bytes, limits, turn, at_ms),
         Decision::Observe(_) => Line::Observe {
             turn,
             path: read.path.clone(),
             hash: read.hash,
             range: read.range,
             at_ms,
+            via: None,
         },
         Decision::Deny(_) => Line::Deny {
             turn,

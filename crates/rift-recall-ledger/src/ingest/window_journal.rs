@@ -45,8 +45,27 @@ const COLUMNS: [&str; 19] = [
 /// The `schema_version` every row is written at.
 const SCHEMA_VERSION: i64 = 1;
 
+/// The prefix of the kinds a window's inherited runs are frozen under.
+const INHERITED_KIND_PREFIX: &str = "inherit:";
+
+/// One checkpoint's frozen window rows: the inserts, and how many valid
+/// inherited runs were read and not inserted.
+pub(super) struct WindowRows {
+    /// The `n_window_row` inserts.
+    pub(super) inserts: Vec<PendingInsert>,
+    /// Inherited runs that parsed, counted and skipped.
+    pub(super) inherited: usize,
+}
+
 /// Read and validate one checkpoint's frozen window rows as inserts; an
 /// absent artifact reads as none, exactly as a shard written before it.
+///
+/// An inherited run is validated like every other row and then counted, not
+/// inserted. The relation's kind vocabulary is fixed by the migration that
+/// created it, and a relation whose vocabulary moves under rows already
+/// written is no longer the record those rows were checked against — so the
+/// store keeps its sealed list, the parse keeps the artifact's, and the count
+/// says how many valid rows the projection does not hold.
 ///
 /// # Errors
 /// Propagates [`SubstrateReader::read_artifact`] read errors.
@@ -54,10 +73,19 @@ pub(super) fn read_window_rows(
     reader: &impl SubstrateReader,
     cid: &str,
     issues: &mut Vec<ParseIssue>,
-) -> Result<Vec<PendingInsert>> {
+) -> Result<WindowRows> {
     let rows = super::read_parsed(reader, cid, ARTIFACT, parse::parse_window_journal, issues)?;
     let rows = rows.unwrap_or_default();
-    Ok(rows.iter().map(|row| window_row_insert(cid, row)).collect())
+    let (inherited, own): (Vec<&WindowJournalRow>, Vec<&WindowJournalRow>) = rows
+        .iter()
+        .partition(|row| row.kind.starts_with(INHERITED_KIND_PREFIX));
+    Ok(WindowRows {
+        inserts: own
+            .into_iter()
+            .map(|row| window_row_insert(cid, row))
+            .collect(),
+        inherited: inherited.len(),
+    })
 }
 
 /// The `n_window_row` insert for one frozen row, written by checkpoint `cid`.
@@ -235,6 +263,32 @@ mod tests {
         block(ingest(&cold, &rebuilt)).unwrap();
         assert_eq!(window_rows(&cold), rows, "a second pass writes nothing");
         assert_eq!(block(cold.count("n_window_row")).unwrap(), 4);
+    }
+
+    /// ★ An inherited run, frozen exactly as the writer freezes one, parses
+    /// with no issue and is counted and skipped: the projection holds no row
+    /// for it, and the read and the observation beside it land as before.
+    #[test]
+    fn an_inherited_run_is_counted_and_skipped_and_its_neighbours_land() {
+        let (w, old) = (hex('a'), hex('b'));
+        let lines = vec![
+            session_lines()[0].clone(),
+            format!(
+                r#"{{"at":2,"hash":"{old}","kind":"inherit:by_name","path":"src/a.rs","range":[1,40],"schema_version":1,"total_lines":40,"turn":1,"window":"{w}"}}"#
+            ),
+            format!(
+                r#"{{"at":3,"hash":"{old}","kind":"observe","path":"src/a.rs","range":[1,40],"schema_version":1,"turn":2,"window":"{w}"}}"#
+            ),
+        ];
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_artifact("c1", ARTIFACT, &artifact(&lines));
+        let store = recall_store();
+        let report = block(ingest(&store, &sub)).unwrap();
+        assert!(report.issues.is_empty(), "{:?}", report.issues);
+        assert_eq!(report.window_rows_inherited, 1);
+        let kinds: Vec<String> = window_rows(&store).into_iter().map(|(k, ..)| k).collect();
+        assert_eq!(kinds, ["read", "observe"]);
     }
 
     /// A checkpoint without the artifact projects the rows it always did and

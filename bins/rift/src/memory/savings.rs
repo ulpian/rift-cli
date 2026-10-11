@@ -16,7 +16,9 @@ use rift_store::SqliteStore;
 use crate::cli::{Outcome, SavingsArgs, SavingsCmd};
 
 use super::classes::is_shell_tool;
-use super::journals::{member_window_journals, Compaction};
+use super::journals::{
+    inherited_pools, member_window_journals, render_inherited, Compaction, InheritedPool,
+};
 use super::panes::{family_enforce_split, WindowPane};
 use super::render::{fmt_share, pad};
 
@@ -393,6 +395,18 @@ pub(crate) fn savings_json(r: &SavingsReport) -> serde_json::Value {
     })
 }
 
+/// The savings document with each inherited class's pool added under one
+/// additive key, so a reader of the old document reads it unchanged.
+fn with_inherited(mut json: serde_json::Value, pools: &[InheritedPool]) -> serde_json::Value {
+    if let Some(object) = json.as_object_mut() {
+        object.insert(
+            "inherited".to_owned(),
+            serde_json::to_value(pools).unwrap_or_default(),
+        );
+    }
+    json
+}
+
 /// The savings document with this member's compaction account added under
 /// one new key.
 ///
@@ -442,9 +456,15 @@ pub(crate) fn savings(root: &Path, args: &SavingsArgs) -> Result<Outcome> {
     let report = savings_report_for(root, request)?;
     // The journals are this member's own run state, read through the same
     // entry point the reread report reads them by.
-    let windows = member_window_journals(&crate::worktree_root(root));
+    let member = crate::worktree_root(root);
+    let windows = member_window_journals(&member);
+    let inherited = inherited_pools(&member);
     let mut human = render_savings(&report);
     let mut json = with_compaction(savings_json(&report), &windows.compaction);
+    // Its own line, beside the figure and never inside it: an inherited class
+    // below `enforce` declines nothing, so it has no avoided tokens to add.
+    human.push_str(&render_inherited(&inherited));
+    json = with_inherited(json, &inherited);
     // Beside the figure, never inside it: the claims explain how much of the
     // pull credit was claimed, and change none of it.
     if report.note.is_none() {

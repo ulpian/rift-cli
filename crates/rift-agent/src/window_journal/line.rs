@@ -9,6 +9,7 @@
 use rift_core::Sha256Id;
 use serde_json::{json, Map, Value};
 
+use super::inherit::{class_at, inherited_line_from, insert_inherited_fields, InheritClass};
 use super::{Interval, LINE_VERSION};
 
 /// Why a context window stopped holding what it had been given.
@@ -130,6 +131,11 @@ pub enum Line {
         range: Interval,
         /// When the line was written, in milliseconds.
         at_ms: u64,
+        /// The class of inherited line the decision would have rested on, or
+        /// `None` when it rested on this window's own lines. Its own field
+        /// rather than its own kind, so a binary that predates it still reads
+        /// the row as the observation it is.
+        via: Option<InheritClass>,
     },
     /// **Rift told this window it holds these lines of this revision.**
     ///
@@ -206,6 +212,67 @@ pub enum Line {
         /// When the line was written, in milliseconds.
         at_ms: u64,
     },
+    /// **Lines this window holds because the window that started it held
+    /// them**, marked with the class of evidence that says so.
+    ///
+    /// Never coverage by itself: a decision treats it as coverage only while
+    /// its class's lever is at `enforce`, and below that it only sizes what
+    /// the class would be worth. A kind of its own rather than a marked
+    /// `read`, because a binary that predates it drops a kind it does not
+    /// know and would otherwise read the row as lines this window was handed.
+    Inherit {
+        /// The turn the window was opened in.
+        turn: u32,
+        /// What the inheritance rests on.
+        class: InheritClass,
+        /// The file, in the one spelling coverage is keyed by.
+        path: String,
+        /// The revision the spawning window held.
+        hash: Sha256Id,
+        /// The lines it held of that revision.
+        range: Interval,
+        /// How many lines the file had.
+        total_lines: u32,
+        /// When the line was written, in milliseconds.
+        at_ms: u64,
+    },
+    /// **A window started a subagent with this call**, written into the
+    /// session's main journal so the subagent's opening can find it.
+    ///
+    /// Identifiers only: the call, the user prompt it was made under, the
+    /// subagent type, the spawning window, and the paths of what the spawner
+    /// held that its prompt names — never the prompt itself.
+    Spawn {
+        /// The turn the call was made in.
+        turn: u32,
+        /// The spawning tool call's id.
+        call: String,
+        /// The id of the user prompt the call was made under.
+        prompt: String,
+        /// The subagent type the call asked for.
+        agent_type: String,
+        /// The spawning window's agent id; `None` for the session's own.
+        spawner: Option<String>,
+        /// Paths the spawner held whose names the spawning prompt carries.
+        names: Vec<String>,
+        /// When the line was written, in milliseconds.
+        at_ms: u64,
+    },
+    /// **A subagent's window opened**, and the spawn it is the answer to, in
+    /// the session's main journal beside the spawn lines it is matched with.
+    ///
+    /// Written once per window, whether or not a spawn could be named: a
+    /// window that opens again finds its own claim and claims nothing more.
+    Claim {
+        /// The turn the window opened in.
+        turn: u32,
+        /// The subagent's agent id.
+        agent: String,
+        /// The spawn it answers, when exactly one could be named.
+        call: Option<String>,
+        /// When the line was written, in milliseconds.
+        at_ms: u64,
+    },
     /// The context window stopped holding what it had been given.
     Evict {
         /// The turn the signal arrived in.
@@ -230,6 +297,9 @@ impl Line {
             Self::Expect { .. } => "expect",
             Self::Edit { .. } => "edit",
             Self::Evict { .. } => "evict",
+            Self::Inherit { .. } => "inherit",
+            Self::Spawn { .. } => "spawn",
+            Self::Claim { .. } => "claim",
         }
     }
 
@@ -244,7 +314,10 @@ impl Line {
             | Self::Prevented { turn, .. }
             | Self::Expect { turn, .. }
             | Self::Edit { turn, .. }
-            | Self::Evict { turn, .. } => *turn,
+            | Self::Evict { turn, .. }
+            | Self::Inherit { turn, .. }
+            | Self::Spawn { turn, .. }
+            | Self::Claim { turn, .. } => *turn,
         }
     }
 
@@ -259,6 +332,12 @@ impl Line {
         object.insert("k".to_owned(), json!(self.kind()));
         object.insert("t".to_owned(), json!(self.turn()));
         self.insert_fields(&mut object);
+        if let Self::Observe {
+            via: Some(class), ..
+        } = self
+        {
+            object.insert("c".to_owned(), json!(class.as_str()));
+        }
         Value::Object(object).to_string()
     }
 
@@ -337,6 +416,9 @@ impl Line {
                 object.insert("reason".to_owned(), json!(reason.as_str()));
                 object.insert("at".to_owned(), json!(at_ms));
             }
+            Self::Inherit { .. } | Self::Spawn { .. } | Self::Claim { .. } => {
+                insert_inherited_fields(self, object);
+            }
         }
     }
 
@@ -379,6 +461,7 @@ impl Line {
                 hash: hash_at(object, "h")?,
                 range: range_at(object)?,
                 at_ms,
+                via: class_at(object).ok()?,
             }),
             "hold" => Some(Self::Hold {
                 turn,
@@ -418,7 +501,7 @@ impl Line {
                 reason: EvictReason::from_str(text_at(object, "reason")?)?,
                 at_ms,
             }),
-            _ => None,
+            kind => inherited_line_from(kind, object, turn, at_ms),
         }
     }
 }
@@ -454,13 +537,13 @@ fn insert_change(
 }
 
 /// A string field, or `None` when it is absent or not a string.
-fn text_at<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+pub(super) fn text_at<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     object.get(key)?.as_str()
 }
 
 /// A line-number-sized field, or `None` when it is absent, not a number, or
 /// larger than a line number can be.
-fn u32_at(object: &Map<String, Value>, key: &str) -> Option<u32> {
+pub(super) fn u32_at(object: &Map<String, Value>, key: &str) -> Option<u32> {
     u32::try_from(object.get(key)?.as_u64()?).ok()
 }
 
@@ -473,7 +556,7 @@ fn u64_at(object: &Map<String, Value>, key: &str) -> Option<u64> {
 ///
 /// Uppercase is refused even though it would parse, because a journal with two
 /// spellings of one hash has two coverage sets for one revision.
-fn hash_at(object: &Map<String, Value>, key: &str) -> Option<Sha256Id> {
+pub(super) fn hash_at(object: &Map<String, Value>, key: &str) -> Option<Sha256Id> {
     let text = text_at(object, key)?;
     if text.len() != 64
         || !text
@@ -486,7 +569,7 @@ fn hash_at(object: &Map<String, Value>, key: &str) -> Option<Sha256Id> {
 }
 
 /// The `lo`/`hi` pair of a read-shaped row, as a run.
-fn range_at(object: &Map<String, Value>) -> Option<Interval> {
+pub(super) fn range_at(object: &Map<String, Value>) -> Option<Interval> {
     Interval::new(u32_at(object, "lo")?, u32_at(object, "hi")?)
 }
 
@@ -569,6 +652,13 @@ mod tests {
                             | "shift"
                             | "full"
                             | "reason"
+                            | "c"
+                            | "call"
+                            | "prompt"
+                            | "type"
+                            | "by"
+                            | "names"
+                            | "agent"
                     ),
                     "an unexpected field {key} in {row}"
                 );

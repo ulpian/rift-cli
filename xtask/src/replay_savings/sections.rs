@@ -8,6 +8,7 @@
 //! like every other surface of the command: class names and counts, never a
 //! path or a prompt.
 
+use rift_agent::window_journal::InheritClass;
 use serde_json::{json, Map, Value};
 
 use super::bucket::Bucket;
@@ -87,6 +88,42 @@ pub(super) fn sibling_classes(report: &Report, denominator: u64) -> String {
         "    named at the spawn by the opening section",
         report.sibling_named_at_spawn,
         denominator,
+    ));
+    out
+}
+
+/// What the opening windows inherited and what each class would have
+/// declined, which ran because no class is enforced, and how the spawns were
+/// linked to the windows they opened.
+pub(super) fn inherited_classes(report: &Report, denominator: u64) -> String {
+    let mut out = String::new();
+    for (at, class) in InheritClass::ALL.into_iter().enumerate() {
+        let lines = report.inherited_lines.get(at).copied().unwrap_or_default();
+        out.push_str(&format!(
+            "  {:<48}{:>9}\n",
+            format!("  inherited by {}: lines at the spawn", class.as_str()),
+            commas(lines)
+        ));
+        out.push_str(&row(
+            "    reads it alone would decline (observed)",
+            report
+                .inherited_observed
+                .get(at)
+                .copied()
+                .unwrap_or_default(),
+            denominator,
+        ));
+    }
+    let links = report.spawn_links;
+    out.push_str(&format!(
+        "  {:<48}{:>9}\n",
+        "  spawns linked by prompt id and type, exactly",
+        format!("{} of {}", commas(links.exact), commas(links.openings))
+    ));
+    out.push_str(&format!(
+        "  {:<48}{:>9}\n",
+        "    linked to the wrong spawn",
+        commas(links.wrong)
     ));
     out
 }
@@ -193,6 +230,7 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
         );
         cross.insert("reads".to_owned(), report.cross_window.calls.into());
     }
+    map.insert("inheritance".to_owned(), inherited_json(report));
     map.insert("facts".to_owned(), facts_json(report));
     map.insert(
         "machine_format_reads".to_owned(),
@@ -232,6 +270,34 @@ fn inheritance_json(report: &Report) -> Value {
         );
     }
     Value::Object(map)
+}
+
+/// Each inherited class's lines and observed pool, and the spawn links.
+fn inherited_json(report: &Report) -> Value {
+    let mut classes = Map::new();
+    for (at, class) in InheritClass::ALL.into_iter().enumerate() {
+        let lines = report.inherited_lines.get(at).copied().unwrap_or_default();
+        let observed = report
+            .inherited_observed
+            .get(at)
+            .copied()
+            .unwrap_or_default();
+        classes.insert(
+            class.as_str().to_owned(),
+            json!({ "lines": lines, "observed": tally_json(observed) }),
+        );
+    }
+    let links = report.spawn_links;
+    json!({
+        "classes": classes,
+        "spawn_links": {
+            "spawns": links.spawns,
+            "openings": links.openings,
+            "exact": links.exact,
+            "wrong": links.wrong,
+            "unnamed": links.unnamed,
+        },
+    })
 }
 
 /// Where the path facts came from.

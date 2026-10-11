@@ -18,6 +18,7 @@ use super::census::{
 use super::delivery::{stated_delivery, PERSISTED_OUTPUT};
 use super::replay::{revision_hash, Ctx, Replay};
 use super::report::{land, Report};
+use super::spawn_link::class_index;
 use super::transcript::Call;
 use super::worktree::{path_key, FileFacts};
 
@@ -248,7 +249,29 @@ pub(super) fn classify_reads(
     if bucket == Bucket::FirstSight {
         note_what_a_first_sight_was_of(ctx.report, format, blocker, tokens);
     }
+    note_an_inherited_observation(ctx.report, &slots, tokens);
     land(ctx.report, bucket, tokens);
+}
+
+/// Count a call every member of which only an inherited line would have
+/// declined in the pool of the first member's class.
+fn note_an_inherited_observation(report: &mut Report, slots: &[Slot], tokens: u64) {
+    let mut classes = slots.iter().map(|slot| match slot {
+        Slot::Member(member) => match member.decision {
+            Some(Decision::Inherited { class, .. }) => Some(class),
+            _ => None,
+        },
+        Slot::Blocked(_) => None,
+    });
+    let Some(Some(class)) = classes.next() else {
+        return;
+    };
+    if classes.any(|other| other.is_none()) {
+        return;
+    }
+    if let Some(pool) = report.inherited_observed.get_mut(class_index(class)) {
+        pool.add(tokens);
+    }
 }
 
 /// The paths of a call's reads that name something inside the work tree, in
@@ -703,7 +726,9 @@ fn bucket_of(
                 Bucket::ObservedNotDeclined
             }
         }
-        Decision::Allow => {
+        // An inherited observation ran exactly as an allowed read does: its
+        // own pool is counted beside the buckets, never in one of them.
+        Decision::Allow | Decision::Inherited { .. } => {
             if held_before && already_declined {
                 Bucket::RepeatAfterDecline
             } else if held_before {

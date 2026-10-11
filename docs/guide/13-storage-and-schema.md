@@ -543,6 +543,8 @@ Per-commit diff facts come from git history rather than from a shard.
 Sessions whose shards were written before the usage artifact existed carry no usage, so their session, usage and cost rows live only in a projection that holds them.
 Those have their own verb, `rift backfill`, which is why §13.11's read-only open exists: the set-aside file must be readable without being created, migrated or modified.
 Outline bindings and their token counts are not in the shard either: they are derived from a file's bytes, so a rebuilt recall projection holds none until the next condense of a session that read the file binds it again.
+A window's inherited runs are in the shard but are not rebuilt: the ingest validates each `inherit:fork`, `inherit:paste` and `inherit:by_name` line of `window_journal.jsonl`, counts it in its report's `window_rows_inherited`, and writes no `n_window_row` for it, because that relation's kinds are sealed by the migration that created it.
+If a `recall.db` reader needs a window's inherited coverage, the rows get a companion relation of their own, `n_window_inherit`, beside `n_window_row`.
 
 And the standing exception: **governance records are not rebuildable.** Serve
 audit rows, outcome labels, evaluation runs and key metadata record what this

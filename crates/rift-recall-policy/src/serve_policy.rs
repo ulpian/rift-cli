@@ -28,6 +28,7 @@ min_slice_lines = 28           # under this a reason frame costs more than the r
 max_inline_hash_bytes = 1048576 # 1 MiB: larger files are never hashed on the gate path
 recovery_budget = 800          # tokens a post-compaction recovery map may cost
 basis_ttl_days = 30            # a read-time basis snapshot is collected after this
+inherit_by_name = "observe"    # a subagent's lines of a path its spawning prompt named; never above mode
 
 # Per-family overrides. Each is capped by what that family's pinned rows allow:
 # a family whose reason channel no recorded run has confirmed resolves to

@@ -222,6 +222,16 @@ pub(super) fn gate_record_members(
             pass.turn,
             pass.at_ms,
         ));
+        // A read only an inherited line would have declined ran, and the line
+        // above credits what it delivered; this one sizes the class it rested on.
+        if let Some(observed) = rift_agent::window_journal::record_inheritance(
+            &member.read,
+            &member.decision,
+            pass.turn,
+            pass.at_ms,
+        ) {
+            let _ = pass.journal.append(&observed);
+        }
         // A cross-checked read whose own result states its delivery: the line
         // just written credits the window with what the size rule could vouch
         // for, and this moves it to what the client says actually arrived.

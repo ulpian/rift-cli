@@ -919,6 +919,55 @@ mod pinned_output_surface {
         );
     }
 
+    /// **Both ends of a spawn are pinned to carry the prompt being
+    /// processed.** The link a subagent's opening makes to the call that
+    /// spawned it rests on nothing else, so the fields it reads are a block
+    /// of the pin, the excerpts above it are the published page's own words,
+    /// and the page they come from is pinned by digest like the others.
+    #[test]
+    fn both_ends_of_a_spawn_are_pinned_to_carry_the_prompt_id() {
+        let block = FIXTURE
+            .split("```rift-input-fields")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("the pin states the input fields a spawn link reads");
+        let fields = |verb: &str| -> Vec<&str> {
+            block
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(&format!("verb={verb} fields=")))
+                .unwrap_or_else(|| panic!("no input fields pinned for {verb}"))
+                .split(',')
+                .collect()
+        };
+        assert!(fields("PreToolUse").contains(&"prompt_id"));
+        assert!(fields("PreToolUse").contains(&"tool_use_id"));
+        assert!(fields("SubagentStart").contains(&"prompt_id"));
+        assert!(fields("SubagentStart").contains(&"agent_type"));
+        assert!(FIXTURE.contains(
+            "| `prompt_id` | UUID identifying the user prompt currently being processed."
+        ));
+        assert!(FIXTURE.contains(
+            "In addition to the [common input fields](#common-input-fields), SubagentStart hooks receive `agent_id`"
+        ));
+        // The input-field artifact is the last one the pin states.
+        let last = |field: &str| {
+            let needle = format!("{field}:");
+            FIXTURE
+                .lines()
+                .filter(|line| line.trim().starts_with(&needle))
+                .count()
+                .saturating_sub(1)
+        };
+        assert_eq!(
+            provenance("repository", last("repository")),
+            "https://code.claude.com/docs/en/hooks"
+        );
+        assert_digest("sha256", last("sha256"), 64);
+        assert!(provenance("retrieved-from", last("retrieved-from"))
+            .ends_with(provenance("path", last("path"))));
+        assert!(ClaudeCodeAdapter.verbs().contains(&"SubagentStart"));
+    }
+
     /// A row on a verb this adapter never registers is a pin that reads as
     /// coverage and delivers none: the hook would never fire to answer on it.
     #[test]

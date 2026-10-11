@@ -141,6 +141,7 @@ mod sections;
 mod shape_fixture;
 mod shell_lex;
 mod shell_shape;
+mod spawn_link;
 mod transcript;
 mod worktree;
 

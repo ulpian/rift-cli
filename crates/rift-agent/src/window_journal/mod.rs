@@ -28,6 +28,7 @@
 mod decision;
 mod delivery;
 mod holds;
+mod inherit;
 mod intervals;
 mod line;
 mod narrowing;
@@ -41,6 +42,10 @@ pub use self::decision::{
 };
 pub use self::delivery::{reconcile_delivery, Reconcile, ResolvedRead, StatedDelivery};
 pub use self::holds::{DenyKey, HeldFile, StandingHold};
+pub use self::inherit::{
+    inherited_from_read, is_ident, record_inheritance, InheritClass, InheritModes, FORK_MODE,
+    MAX_SPAWN_NAMES, PASTE_MODE,
+};
 pub use self::intervals::{Interval, IntervalSet};
 pub use self::line::{EvictReason, Line};
 pub use self::narrowing::{narrowing, Narrowing};
@@ -472,6 +477,7 @@ mod tests {
                 hash: hash(3),
                 range: run(1, 40),
                 at_ms: 20,
+                via: None,
             },
         ]);
         assert_eq!(journal.standing_hold("src/lib.rs"), None);
@@ -485,6 +491,7 @@ mod tests {
                 hash: hash(3),
                 range: run(1, 40),
                 at_ms: 20,
+                via: None,
             },
         ]);
         assert!(elsewhere.standing_hold("src/lib.rs").is_some());

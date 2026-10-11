@@ -199,7 +199,9 @@ fn touched(line: &Line) -> Option<(&str, u64)> {
         | Line::Edit { path, at_ms, .. }
         | Line::Hold { path, at_ms, .. }
         | Line::Prevented { path, at_ms, .. } => Some((path.as_str(), *at_ms)),
-        Line::Evict { .. } => None,
+        // Inherited rows are a claim the spawner made, and spawn and claim
+        // rows link windows: none of them is something this window touched.
+        Line::Evict { .. } | Line::Inherit { .. } | Line::Spawn { .. } | Line::Claim { .. } => None,
     }
 }
 
@@ -375,6 +377,7 @@ mod tests {
                     hash: hash(3),
                     range,
                     at_ms: 20,
+                    via: None,
                 }
                 .to_json_line(),
                 Line::Expect {
