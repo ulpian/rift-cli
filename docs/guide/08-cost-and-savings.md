@@ -134,8 +134,9 @@ A slice of the seed, in dollars per million tokens:
 | `claude-opus-5` | $5.00 | $0.50 | $6.25 | $25.00 |
 | `claude-fable-5-1` | $10.00 | $0.25 | $12.50 | $50.00 |
 | `claude-sonnet-5` | $2.00 | $0.20 | $2.50 | $10.00 |
+| `claude-opus-5-5` | $4.00 | $0.20 | $5.00 | $20.00 |
 
-Every class is transcribed from the provider's page, rather than derived from a multiplier: `claude-fable-5-1` reads its cache at a fortieth of its input rate, where the other two models use a tenth.
+Every class is transcribed from the provider's page, rather than derived from a multiplier: `claude-fable-5-1` reads its cache at a fortieth of its input rate and `claude-opus-5-5` at a twentieth, where the other two models use a tenth.
 The one-hour cache-write class is outside this seed because the usage path records no one-hour writes.
 
 The Sonnet rows show both time axes working.
@@ -145,7 +146,9 @@ Resolution prefers the later `recorded_at`, so the current belief prices both ep
 Nothing is updated.
 
 A model the page does not list gets no row; `rift doctor` names it instead (below).
-Neither `claude-opus-5-5` nor `Gemini 3.7 Flash (Low)` has a seeded price.
+`claude-opus-5-5` was named there until its four rows were appended in a migration of their own.
+They are valid from the start of valid time, so usage captured before them quotes at their rates once a reader's belief includes them, with no rebuild and no cost fact rewritten.
+`Gemini 3.7 Flash (Low)` still has no seeded price.
 
 Two rules keep the catalog honest. **All four classes or nothing**: resolution
 returns a result only when every class has a row, so a partially-priced model
@@ -618,9 +621,8 @@ frame, because a cost figure that tweens reads as if it were changing.
 `rift doctor` says so under its `prices` heading: how many models the captured calls named, then one line per model the catalog cannot price now, with its call count, in a stable order:
 
 ```text
-  prices:         3 model(s) observed, 2 without a price
+  prices:         3 model(s) observed, 1 without a price
     Gemini 3.7 Flash (Low): 12 call(s) — their usage is recorded, and no cost is derived until the catalog prices this model
-    claude-opus-5-5: 8 call(s) — their usage is recorded, and no cost is derived until the catalog prices this model
 ```
 
 When every observed model prices, the heading says so and nothing follows it.

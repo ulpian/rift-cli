@@ -118,8 +118,8 @@ mod tests {
 
     use super::*;
 
-    /// 2026-10-01T00:00:00Z, after every seeded price was recorded.
-    const NOW: i64 = 1_790_812_800_000;
+    /// 2026-10-12T00:00:00Z, after every seeded price was recorded.
+    const NOW: i64 = 1_791_763_200_000;
 
     /// A migrated projection holding `calls` captured calls per model.
     fn projection_with_calls(dir: &Path, calls: &[(&str, usize)]) -> SqliteStore {
@@ -161,14 +161,56 @@ mod tests {
         println!("{human}");
         assert_eq!(
             human,
-            "\n  prices:         3 model(s) observed, 2 without a price\
+            "\n  prices:         3 model(s) observed, 1 without a price\
              \n    Gemini 3.7 Flash (Low): 12 call(s) — their usage is recorded, and no \
-             cost is derived until the catalog prices this model\
-             \n    claude-opus-5-5: 8 call(s) — their usage is recorded, and no cost is \
-             derived until the catalog prices this model"
+             cost is derived until the catalog prices this model"
         );
         assert_eq!(json["unpriced"][0]["model"], "Gemini 3.7 Flash (Low)");
-        assert_eq!(json["unpriced"][1]["calls"], 8);
+        assert_eq!(json["unpriced"][0]["calls"], 12);
+        assert_eq!(json["unpriced"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// The models a coverage reading names, in order.
+    fn unpriced_names(store: &SqliteStore) -> Vec<String> {
+        let coverage = runtime()
+            .unwrap()
+            .block_on(price_coverage(store, NOW))
+            .unwrap();
+        coverage.unpriced.into_iter().map(|it| it.model).collect()
+    }
+
+    /// A projection at the version before the Opus 5.5 append names the model
+    /// as unpriced; the append alone takes it off the list, and the model with
+    /// no published row stays on it.
+    #[test]
+    fn the_opus_5_5_append_takes_the_model_off_the_unpriced_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let migrations = rift_store::default_migrations();
+        let previous = migrations.len() - 1;
+        let store = SqliteStore::open(tmp.path().join("p.db")).unwrap();
+        rift_store::apply_migrations(&store, &migrations[..previous]).unwrap();
+        let rt = runtime().unwrap();
+        for (idx, model) in ["claude-opus-5-5", "Gemini 3.7 Flash (Low)"]
+            .iter()
+            .enumerate()
+        {
+            let row = ModelCallRow {
+                call_id: format!("call-{idx}"),
+                turn_id: "turn-1".to_owned(),
+                model: (*model).to_owned(),
+                started_at: NOW,
+                schema_version: 1,
+            };
+            rt.block_on(record_model_call(&store, &row)).unwrap();
+        }
+        assert_eq!(
+            unpriced_names(&store),
+            ["Gemini 3.7 Flash (Low)", "claude-opus-5-5"]
+        );
+
+        let upgrade = rift_store::apply_migrations(&store, &migrations).unwrap();
+        assert_eq!(upgrade.applied, 1);
+        assert_eq!(unpriced_names(&store), ["Gemini 3.7 Flash (Low)"]);
     }
 
     #[test]
@@ -195,6 +237,12 @@ mod tests {
     fn a_fable_5_1_call_costs_what_the_published_rates_give() {
         let tmp = tempfile::tempdir().unwrap();
         let store = projection_with_calls(tmp.path(), &[]);
+        assert_eq!(project_one_call(&store, "claude-fable-5-1"), Some(285_000));
+    }
+
+    /// Projects one call of `model` with usage in all four classes through the
+    /// live projector and reads back the cost it persisted.
+    fn project_one_call(store: &SqliteStore, model: &str) -> Option<i64> {
         let event = CanonicalEvent {
             schema_version: 1,
             session: "session-1".to_owned(),
@@ -206,7 +254,7 @@ mod tests {
             payload_sha256: Sha256Id::from_bytes([7; 32]),
         };
         let facts = PayloadFacts {
-            model: Some("claude-fable-5-1".to_owned()),
+            model: Some(model.to_owned()),
             ..PayloadFacts::default()
         };
         let context = ProjectionCtx {
@@ -220,14 +268,21 @@ mod tests {
             output: Some(2_000),
         };
         let rt = runtime().unwrap();
-        rt.block_on(project_usage(&store, &event, &facts, context, &usage, NOW))
+        rt.block_on(project_usage(store, &event, &facts, context, &usage, NOW))
             .unwrap();
         let session_row = rift_shadow::ids::session_row_id(context.agent, &event.session);
         let call_id = rift_shadow::ids::model_call_id(&session_row, 1, 1);
-        assert_eq!(
-            rt.block_on(rift_store::current_cost_micros(&store, &call_id))
-                .unwrap(),
-            Some(285_000)
-        );
+        rt.block_on(rift_store::current_cost_micros(store, &call_id))
+            .unwrap()
+    }
+
+    /// The live projector prices an Opus 5.5 call at the appended rates:
+    /// 1,000 × $4 + 200,000 × $0.20 + 10,000 × $5 + 2,000 × $20, per
+    /// million, is 134,000 micro-USD.
+    #[test]
+    fn an_opus_5_5_call_costs_what_the_appended_rates_give() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = projection_with_calls(tmp.path(), &[]);
+        assert_eq!(project_one_call(&store, "claude-opus-5-5"), Some(134_000));
     }
 }

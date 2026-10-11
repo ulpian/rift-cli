@@ -1258,13 +1258,13 @@ Verbs:
       --file <PATH>            A file currently in focus; repeat for several (at least one required)
       --error <SIGNATURE>      An error signature currently in play; repeatable
       --known-hash <SHA256>    A content hash you already hold; repeatable (drives `known_unchanged`)
-      --token-budget <TOKENS>  Token ceiling for the response (clamped to the per-turn budget)
+      --token-budget <TOKENS>  Token ceiling for the response (binds per invocation: one call, not accumulated across calls or a turn)
       --cross-branch <REASON>  Widen containment past this checkout's branch, with an audited reason
 
   rift recall diff-since [options] --json
       Changed vs unchanged files, given the content hashes you already hold
       --known-hash <SHA256>    A content hash you already hold; repeatable. With none, everything reads as changed — which is the honest answer for an agent holding nothing
-      --token-budget <TOKENS>  Token ceiling for the response (clamped to the per-turn budget)
+      --token-budget <TOKENS>  Token ceiling for the response (binds per invocation: one call, not accumulated across calls or a turn)
       --cross-branch <REASON>  Widen containment past this checkout's branch, with an audited reason
 
   rift recall file-if-changed <PATH> [options] --json
@@ -1280,7 +1280,7 @@ Verbs:
       --task <TEXT>            What you are trying to do right now (required unless you name a path and `--known-hash`)
       --file <PATH>            A file currently in focus; repeat for several (required unless you name a path and `--known-hash`)
       --error <SIGNATURE>      An error signature currently in play; repeatable
-      --token-budget <TOKENS>  Token ceiling for the response (clamped to the per-turn budget)
+      --token-budget <TOKENS>  Token ceiling for the response (binds per invocation: one call, not accumulated across calls or a turn)
       --cross-branch <REASON>  Widen containment past this checkout's branch, with an audited reason
 
   rift recall read-summary <PATH> [options] --json
@@ -1306,7 +1306,7 @@ Verbs:
       --file <PATH>            A file currently in focus; repeat for several (at least one required)
       --error <SIGNATURE>      An error signature currently in play; repeatable
       --known-hash <SHA256>    A content hash you already hold; repeatable (drives `known_unchanged`)
-      --token-budget <TOKENS>  Token ceiling for the response (clamped to the per-turn budget)
+      --token-budget <TOKENS>  Token ceiling for the response (binds per invocation: one call, not accumulated across calls or a turn)
       --cross-branch <REASON>  Widen containment past this checkout's branch, with an audited reason
 
   rift recall doc-read <PATH> --json

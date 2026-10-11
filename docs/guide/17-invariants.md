@@ -709,9 +709,11 @@ its floor.
 ### 31. Tests inject the clock, the randomness and the identity
 
 **Rule.** A test injects its time source, its random source and its identity
-source rather than reading the real ones. No test reaches the network.
+source rather than reading the real ones. No test reaches the network, and a test may
+read the wall clock only to bound a wait or to seed a fixture, never to decide
+its verdict.
 
-**Why.** A suite that reads the wall clock fails at midnight, in another
+**Why.** A suite whose verdicts depend on the wall clock fails at midnight, in another
 timezone, or on a slow machine, and each failure teaches the team to re-run
 rather than look. Determinism also makes golden fixtures possible: the same
 inputs must produce the same bytes.
