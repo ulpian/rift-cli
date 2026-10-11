@@ -45,7 +45,7 @@ from a trigger created alongside the table (§13.4).
 
 | File | Keyed by | Holds | Tables | Migrations |
 |---|---|---|---|---|
-| `~/.cache/rift/<family-id>/projection.db` | the family's capture identity | sessions, turns, model and tool calls, file revisions, attribution, token usage and cost, hook audit, checkpoint integrity, worktree provenance, measured tool results | 47 | 17 |
+| `~/.cache/rift/<family-id>/projection.db` | the family's capture identity | sessions, turns, model and tool calls, file revisions, attribution, token usage and cost, hook audit, checkpoint integrity, worktree provenance, measured tool results | 47 | 18 |
 | `~/.cache/rift/<recall-id>/recall.db` | the family's *recall* identity | the delta model's derived graph plus governance records: serve audit, serve calls and sessions, outcome labels, metric snapshots, evaluation runs, key metadata | 31 | 16 |
 | `~/.cache/rift/canopy/ui-state.db` | nothing — machine-global | dashboard state spanning repositories: project catalogue, feature toggles, per-project layouts, profiles, membership, theme slots, startup pin | 8 | 5 |
 

@@ -436,8 +436,8 @@ mod tests {
     async fn applies_pending_migrations_in_order() {
         let s = store();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
-        assert_eq!(out.applied, 17);
-        assert_eq!(out.high_water, 17);
+        assert_eq!(out.applied, 18);
+        assert_eq!(out.high_water, 18);
         // canonical tables exist (insert succeeds)
         s.insert(
             "session",
@@ -471,12 +471,12 @@ mod tests {
         let out = apply_migrations_on(&s, &default_migrations())
             .await
             .unwrap();
-        assert_eq!(out.applied, 17);
-        assert_eq!(out.high_water, 17);
+        assert_eq!(out.applied, 18);
+        assert_eq!(out.high_water, 18);
         // The sync runner sees everything applied (same _migrations ledger).
         let again = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 17);
+        assert_eq!(again.skipped, 18);
         // And the tamper lock holds through the seam.
         let mut edited = default_migrations();
         edited[1].sql.push_str("\n-- tampered");
@@ -514,7 +514,7 @@ mod tests {
             let rest = apply_migrations(&s, &migs).unwrap();
             proptest::prop_assert_eq!(rest.skipped, split);
             proptest::prop_assert_eq!(rest.applied, migs.len() - split);
-            proptest::prop_assert_eq!(rest.high_water, 17);
+            proptest::prop_assert_eq!(rest.high_water, 18);
 
             let fresh = store();
             apply_migrations(&fresh, &migs).unwrap();
@@ -529,7 +529,7 @@ mod tests {
         apply_migrations(&s, &default_migrations()).unwrap();
         let out = apply_migrations(&s, &default_migrations()).unwrap();
         assert_eq!(out.applied, 0);
-        assert_eq!(out.skipped, 17);
+        assert_eq!(out.skipped, 18);
     }
 
     #[test]
@@ -631,7 +631,7 @@ mod tests {
         let migs: i64 = again
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0)))
             .unwrap();
-        assert_eq!(migs, 17);
+        assert_eq!(migs, 18);
     }
 
     /// The filesystem control: a projection opened through the standard

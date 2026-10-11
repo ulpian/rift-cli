@@ -1,5 +1,5 @@
 //! The capture projection's migration set (`projection.db`): the price seeds,
-//! the sixteen checksum-locked SQL builders and the identity backfill that
+//! the seventeen checksum-locked SQL builders and the identity backfill that
 //! runs on open.
 //!
 //! A separate module because every builder here is frozen once shipped: the
@@ -118,6 +118,28 @@ INSERT INTO price_table (price_id, model, token_class, unit_price_micros, curren
   ('v16seed-claude-sonnet-5-output-std',          'claude-sonnet-5',  'output',         10000000, 'USD', 1788220800000, NULL, 1789603200000, 'm515seed-claude-sonnet-5-output-std', 1);
 ";
 
+/// The Opus 5.5 price append: one model a projection was found calling with
+/// no price on file, at the provider's first-party rates as the owner
+/// confirmed them: $4 input, $20 output, $0.20 cache read and $5 five-minute
+/// cache write (1.25× input) per MTok. Its cache read is 0.05× input, half the
+/// usual tenth, so it is transcribed rather than derived from a multiplier.
+///
+/// `valid_from = 0`, like every other seeded row: the rate held before the
+/// first captured call, so usage already on file quotes at it as soon as a
+/// reader's belief includes this row, with no rebuild and no cost fact
+/// rewritten. `recorded_at` is the acceptance date, 2026-10-11T00:00:00Z,
+/// fixed for migration byte-stability.
+///
+/// Not here: `Gemini 3.7 Flash (Low)`, which no published rate prices yet;
+/// `rift doctor` keeps naming it.
+const PRICE_SEED_OPUS_5_5_SQL: &str = "\
+INSERT INTO price_table (price_id, model, token_class, unit_price_micros, currency, valid_from, valid_to, recorded_at, supersedes_id, schema_version) VALUES
+  ('v18seed-claude-opus-5-5-uncached_input', 'claude-opus-5-5', 'uncached_input',  4000000, 'USD', 0, NULL, 1791676800000, NULL, 1),
+  ('v18seed-claude-opus-5-5-cached_input',   'claude-opus-5-5', 'cached_input',     200000, 'USD', 0, NULL, 1791676800000, NULL, 1),
+  ('v18seed-claude-opus-5-5-cache_creation', 'claude-opus-5-5', 'cache_creation',  5000000, 'USD', 0, NULL, 1791676800000, NULL, 1),
+  ('v18seed-claude-opus-5-5-output',         'claude-opus-5-5', 'output',         20000000, 'USD', 0, NULL, 1791676800000, NULL, 1);
+";
+
 /// The default migration set: meta tables, the canonical schema, the identity
 /// relations, the turn-boundary relations (+ price seed), the projection-meta
 /// table (the rebuild epoch), read-token estimates, the System
@@ -125,12 +147,12 @@ INSERT INTO price_table (price_id, model, token_class, unit_price_micros, curren
 /// checkpoint↔commit and verification-witness linkages, the v13
 /// `imported_checkpoint` durable-claim relation, the v14
 /// worktree-provenance relations, the v15 tool-result tokens, the v16
-/// observed-model price append and the v17 relation for observations a
-/// leading `cd` decided.
+/// observed-model price append, the v17 relation for observations a
+/// leading `cd` decided and the v18 Opus 5.5 price append.
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
     // One row per version, in order; a new version is a new last row.
-    let set: [(u32, &'static str, String); 17] = [
+    let set: [(u32, &'static str, String); 18] = [
         (1, "init_meta", META_SQL.to_string()),
         (2, "canonical_core", canonical_schema_sql()),
         (3, "capture_identity", capture_identity_schema_sql()),
@@ -192,6 +214,11 @@ pub fn default_migrations() -> Vec<Migration> {
             capture_price_seed_observed_sql(),
         ),
         (17, "capture_worktree_cd", capture_worktree_cd_schema_sql()),
+        (
+            18,
+            "capture_price_seed_opus_5_5",
+            capture_price_seed_opus_5_5_sql(),
+        ),
     ];
     set.into_iter()
         .map(|(version, name, sql)| Migration { version, name, sql })
@@ -451,6 +478,12 @@ fn capture_worktree_cd_tables() -> &'static [crate::schema::CanonicalTable] {
     }
 }
 
+/// The v18 additive capture migration: the Opus 5.5 prices (see
+/// `PRICE_SEED_OPUS_5_5_SQL`). Insert-only, like v8 and v16.
+fn capture_price_seed_opus_5_5_sql() -> String {
+    PRICE_SEED_OPUS_5_5_SQL.to_string()
+}
+
 /// Render one additive capture migration from a registry slice: DDL + guard
 /// triggers + the per-table `_schema_version` seed rows.
 fn capture_slice_sql(tables: &'static [crate::schema::CanonicalTable]) -> String {
@@ -560,15 +593,70 @@ mod tests {
         assert_eq!(opus.cache_creation, 6_250_000);
         assert_eq!(opus.output, 25_000_000);
 
-        for unpriced in ["claude-opus-5-5", "Gemini 3.7 Flash (Low)"] {
-            assert!(
-                crate::effective_prices(&s, unpriced, now, now)
-                    .await
-                    .unwrap()
-                    .is_none(),
-                "{unpriced} has no published row, so none is invented"
-            );
-        }
+        assert!(
+            crate::effective_prices(&s, "Gemini 3.7 Flash (Low)", now, now)
+                .await
+                .unwrap()
+                .is_none(),
+            "a model with no published row gets none invented"
+        );
+    }
+
+    /// The Opus 5.5 append prices all four classes at the confirmed rates for
+    /// a belief held from its recording on, from the start of valid time, so
+    /// usage captured before the append quotes at them too.
+    #[tokio::test]
+    async fn opus_5_5_prices_at_the_appended_rates_from_its_recording_on() {
+        let s = store();
+        apply_migrations(&s, &default_migrations()).unwrap();
+        let recorded = 1_791_676_800_000_i64; // 2026-10-11T00:00:00Z
+        let first_call = 1_791_072_000_000_i64; // 2026-10-04T00:00:00Z
+
+        let opus = crate::effective_prices(&s, "claude-opus-5-5", first_call, recorded)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(opus.uncached_input, 4_000_000);
+        assert_eq!(opus.cached_input, 200_000);
+        assert_eq!(opus.cache_creation, 5_000_000);
+        assert_eq!(opus.output, 20_000_000);
+
+        let earlier_belief =
+            crate::effective_prices(&s, "claude-opus-5-5", first_call, recorded - 1)
+                .await
+                .unwrap();
+        assert!(earlier_belief.is_none(), "no belief before the recording");
+    }
+
+    /// A projection at the previous version takes the append as the one new
+    /// migration, and the appended rows refuse an UPDATE and a DELETE like
+    /// every other price row.
+    #[tokio::test]
+    async fn the_opus_5_5_append_upgrades_the_previous_version_and_stays_immutable() {
+        let s = store();
+        let migrations = default_migrations();
+        let previous = migrations.len() - 1;
+        apply_migrations(&s, &migrations[..previous]).unwrap();
+        let upgrade = apply_migrations(&s, &migrations).unwrap();
+        assert_eq!(upgrade.applied, 1);
+        assert_eq!(upgrade.skipped, previous);
+
+        let refused = |sql: &str| s.with_conn(|c| c.execute(sql, [])).is_err();
+        assert!(refused(
+            "UPDATE price_table SET unit_price_micros = 1 \
+             WHERE price_id = 'v18seed-claude-opus-5-5-output'"
+        ));
+        assert!(refused(
+            "DELETE FROM price_table WHERE price_id = 'v18seed-claude-opus-5-5-output'"
+        ));
+        let rows = crate::CanonicalStore::query_opt_i64(
+            &s,
+            "SELECT COUNT(*) FROM price_table WHERE model = 'claude-opus-5-5'",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows, Some(4));
     }
 
     /// The corrected standard rate for `claude-sonnet-5` wins by transaction
@@ -707,6 +795,12 @@ mod tests {
             checksum_hex(&capture_price_seed_observed_sql()),
             "30fd2335439b59009c54ff1cf33f5f4b61f7e6ed7c639f5536388051cdffd85f",
             "capture_price_seed_observed (v16) migration SQL changed — frozen once shipped"
+        );
+        // v18, pinned from its FIRST commit, like v11 and v13 through v16.
+        assert_eq!(
+            checksum_hex(&capture_price_seed_opus_5_5_sql()),
+            "92a4289729def2a86e95d2c41431dd00f87a25ce329424c0c573d2f0a064c88d",
+            "capture_price_seed_opus_5_5 (v18) migration SQL changed — frozen once shipped"
         );
     }
 
@@ -1075,7 +1169,8 @@ mod worktree_cd_tests {
         apply_migrations(&store, through_v16).unwrap();
         assert!(!has_cd_relation(&store), "v16 has no such relation");
 
-        let outcome = apply_migrations(&store, &all).unwrap();
+        let (through_v17, _) = all.split_at(17);
+        let outcome = apply_migrations(&store, through_v17).unwrap();
         assert_eq!((outcome.applied, outcome.skipped), (1, 16));
         assert!(has_cd_relation(&store));
     }
