@@ -16,6 +16,7 @@ mod answer;
 mod delivery;
 mod file;
 mod members;
+mod outline_cache;
 mod prevented;
 
 use std::path::Path;
@@ -32,6 +33,12 @@ pub(in crate::hooks) use self::answer::GateOutcome;
 pub(crate) use self::answer::AUDIT_IDS;
 pub(crate) use self::file::payload_cwd;
 pub(in crate::hooks) use self::file::{gate_file, gate_rel_path};
+pub(in crate::hooks) use self::outline_cache::{
+    write_outline_cache, CachedDefinition, CachedOutline,
+};
+
+#[cfg(test)]
+pub(in crate::hooks) use self::outline_cache::outline_cache_dir;
 
 /// What this hook does about the window journal, if anything.
 pub(crate) enum GateStep {

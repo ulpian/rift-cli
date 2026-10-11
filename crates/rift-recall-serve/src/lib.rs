@@ -198,6 +198,16 @@ pub use rift_recall_validity::trust::{
 pub use self::verbs::summaries::current_outline_shape;
 pub use rift_recall_validity::OutlineShape;
 
+/// The outline grammar the read gate's outline cache is written and read in:
+/// the closed kind set, the path classes, the versions a binding is keyed by,
+/// and the read-back of a valid summary's outline. Re-exported so the binary
+/// writes the cache from the outline the projection holds and reads it back
+/// by the same rules, with no second grammar.
+pub use rift_recall_validity::{
+    is_markdown_path, is_outlinable_path, outline_definitions, outline_shape, outline_versions,
+    DefinitionKind, Validity,
+};
+
 /// The section a subagent's window opens with, naming what its coordinator
 /// held at that instant, re-exported by the same route and for the same reason as
 /// [`render_recovery_map`]: one sealed renderer writes every pushed sentence,

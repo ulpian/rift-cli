@@ -53,7 +53,8 @@ pub use command::{
     validate_oid, validate_refspec,
 };
 pub use discovery::{
-    discover, gitdir_text_path, is_gitdir, list_worktrees, repo_id_for, LinkedWorktree, RepoPaths,
+    discover, gitdir_text_path, is_gitdir, list_worktrees, read_common_dir, repo_id_for,
+    LinkedWorktree, RepoPaths,
 };
 pub use family::{
     family_members, family_of, remint, resolve_family, Family, FamilyMember, FamilyState,

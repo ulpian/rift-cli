@@ -11,7 +11,7 @@ use std::path::Path;
 
 use rift_core::Result;
 
-use super::archive::{archive_now, condense_queued, level_projection};
+use super::archive::{archive_now, bind_and_cache_outlines, condense_queued, level_projection};
 use super::audit::{attribute_serve_job, read_identified_bytes, serve_audit_job};
 use super::git::{capture_guarded, effective_config, state_from_token, strategy_kind};
 use super::recovery::hook_number;
@@ -927,6 +927,16 @@ fn count_read_tokens_job(
             "read tokens: the bytes read at {rel_path} are no longer available to count"
         )));
     };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    // The outline of what was just read, bound now rather than at condense so
+    // the family's next first read of these bytes can be answered with it.
+    // Its own counts and refusals; it never fails the count below.
+    let read = [(rel_path.to_owned(), content_sha256.to_owned())];
+    t.phase("bind_outline", || {
+        bind_and_cache_outlines(&rt, &repo.work_tree, &read)
+    });
     if rift_tokens::provenance() != rift_tokens::TOKENIZER {
         // Only real BPE figures persist; the chars/4 fallback never lands.
         return Ok(());
@@ -940,9 +950,6 @@ fn count_read_tokens_job(
     let store = t.phase("open_projection", || {
         rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
     })?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .map_err(rift_core::RiftError::from)?;
     rt.block_on(rift_store::record_file_read_tokens(
         &store,
         tool_call_id,
@@ -960,6 +967,50 @@ mod refused_job_tests;
 mod tests {
     use super::*;
     use crate::agent_queue::{AgentJob, IntervalArchive, IntervalReason, JobKind};
+
+    /// ★ The job that counts a read binds the outline of what was read and
+    /// caches it for the read gate, before anything about the count can fail.
+    #[test]
+    fn the_read_count_job_binds_and_caches_the_outline_of_what_was_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        rift_git::test_support::fake_repo(root).unwrap();
+        let body = "fn alpha() {\n    1\n}\n\nfn beta() {\n    2\n}\n";
+        std::fs::write(root.join("lib.rs"), body).unwrap();
+        let sha = rift_recall_substrate::worktree::sha256_hex(body.as_bytes());
+        let job = AgentJob {
+            schema_version: 1,
+            work_tree: root.to_path_buf(),
+            queued_at_ms: 1_700_000_000_000,
+            attempts: 0,
+            kind: JobKind::ReadTokens {
+                tool_call_id: "0".repeat(64),
+                rel_path: "lib.rs".to_owned(),
+                content_sha256: sha.clone(),
+                blob_oid: rift_recall_substrate::worktree::git_blob_oid(body.as_bytes()),
+                lines: None,
+                schema_version: 1,
+            },
+        };
+        // Whatever becomes of the count row, the outline is already bound.
+        let _ = run_job_kind(
+            &crate::hooktime::HookTimer::from_env("test"),
+            &root.join(".git"),
+            &job,
+        );
+        let common_dir = rift_git::discover(root).unwrap().common_dir;
+        let cached = crate::hooks::gate::outline_cache_dir(&common_dir)
+            .join(format!("{sha}-e3p1r1.outline"));
+        let text = std::fs::read_to_string(&cached).expect("the outline is cached");
+        assert!(
+            text.starts_with("rift-outline 1\nclass code\nshape 7 "),
+            "{text}"
+        );
+        assert!(
+            text.contains(" alpha\n") && text.contains(" beta\n"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn a_session_condense_without_a_recall_projection_archives_once() {

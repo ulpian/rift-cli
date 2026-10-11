@@ -244,7 +244,12 @@ fn parse_gitdir_file(dot_git: &Path, base: &Path) -> Result<PathBuf> {
 
 /// Read `<git_dir>/commondir` (a path, relative to `git_dir`) → the common dir.
 /// Absent → the git_dir is its own common dir (a non-worktree gitdir).
-fn read_common_dir(git_dir: &Path) -> PathBuf {
+///
+/// Public because a hook decision needs the family's directory and has only
+/// the git dir in hand: one small file read, where [`discover`] would walk
+/// the work tree as well.
+#[must_use]
+pub fn read_common_dir(git_dir: &Path) -> PathBuf {
     match std::fs::read_to_string(git_dir.join("commondir")) {
         Ok(rel) => {
             let rel = rel.trim();

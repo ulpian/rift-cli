@@ -13,6 +13,7 @@ use super::audit::session_serve_lines;
 use super::git::{effective_config, session_raw_capture, state_from_token, strategy_kind};
 use super::{now_ms, projection_db_at};
 
+pub(super) use self::outlines::bind_and_cache_outlines;
 use self::outlines::bind_session_outlines;
 
 /// One archive of one commit, with what its caller opened for it: every step

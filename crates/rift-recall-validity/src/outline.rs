@@ -1,6 +1,7 @@
 //! The code outline the file-shape digest prints: one line per top-level
 //! definition with its kind, its name and the lines its block spans, under
-//! the file's line and byte counts.
+//! the file's line and byte counts. A Markdown file is outlined the same way
+//! with its headings as the definitions ([`markdown`]).
 //!
 //! A module of its own because three readers need the same grammar: the
 //! extractor that writes the outline, the writer that counts the tokens of
@@ -14,6 +15,8 @@
 //! name unless it sits at column zero in the shape of a definition, and even
 //! then only identifier characters survive into the outline.
 
+mod markdown;
+
 use core::fmt::Write as _;
 
 use crate::summary::ValidSummary;
@@ -25,6 +28,11 @@ const CODE_EXTENSIONS: &[&str] = &[
     "rs", "py", "pyi", "go", "js", "jsx", "mjs", "cjs", "ts", "tsx", "java", "kt", "kts", "swift",
     "rb", "scala",
 ];
+
+/// The extensions whose files are outlined by heading. A heading is the one
+/// structure a Markdown file states about itself in a form a line scan reads
+/// exactly, so it is the document's counterpart of a top-level definition.
+const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown"];
 
 /// The words that open a definition, and the kind each one names.
 const KEYWORDS: &[(&str, DefinitionKind)] = &[
@@ -108,6 +116,8 @@ pub enum DefinitionKind {
     Static,
     /// A macro.
     Macro,
+    /// A Markdown heading of this level, one to six.
+    Heading(u8),
 }
 
 /// One top-level definition: its kind, its name and the lines its block spans.
@@ -159,7 +169,25 @@ impl DefinitionKind {
             Self::Const => "const",
             Self::Static => "static",
             Self::Macro => "macro",
+            Self::Heading(1) => "h1",
+            Self::Heading(2) => "h2",
+            Self::Heading(3) => "h3",
+            Self::Heading(4) => "h4",
+            Self::Heading(5) => "h5",
+            Self::Heading(_) => "h6",
         }
+    }
+
+    /// The kind an outline line's first word names, from the closed set
+    /// [`DefinitionKind::as_str`] writes, or `None` for any other word.
+    #[must_use]
+    pub fn from_label(word: &str) -> Option<Self> {
+        let headings = (1..=6).map(Self::Heading);
+        KEYWORDS
+            .iter()
+            .map(|(_, kind)| *kind)
+            .chain(headings)
+            .find(|kind| kind.as_str() == word)
     }
 
     fn from_word(word: &str) -> Option<Self> {
@@ -197,15 +225,29 @@ impl Definition {
 }
 
 impl FileOutline {
-    /// The outline of a code file, or `None` for a path that is not code or
-    /// bytes that are not UTF-8: such a file gets no summary at all.
+    /// The outline of a code or Markdown file, or `None` for a path that is
+    /// neither or bytes that are not UTF-8: such a file gets no summary at
+    /// all.
     #[must_use]
     pub fn of(path: &str, source: &[u8]) -> Option<Self> {
-        if !is_code_path(path) {
+        if !is_outlinable_path(path) {
             return None;
         }
         let text = core::str::from_utf8(source).ok()?;
+        if is_markdown_path(path) {
+            return Some(Self::of_markdown(text));
+        }
         Some(Self::of_text(text))
+    }
+
+    /// The heading outline of Markdown `text`.
+    pub(crate) fn of_markdown(text: &str) -> Self {
+        let lines: Vec<&str> = text.lines().collect();
+        Self {
+            lines: u32::try_from(lines.len()).unwrap_or(u32::MAX),
+            bytes: u64::try_from(text.len()).unwrap_or(u64::MAX),
+            definitions: markdown::headings(&lines),
+        }
     }
 
     /// The outline of `text`, whatever file it came from.
@@ -277,14 +319,31 @@ impl FileOutline {
     }
 }
 
-/// Whether a path's extension is one the outline is written for.
+/// Whether a path's extension is one the code outline is written for.
 #[must_use]
 pub fn is_code_path(path: &str) -> bool {
+    extension_of(path).is_some_and(|extension| CODE_EXTENSIONS.contains(&extension))
+}
+
+/// Whether a path's extension is one the heading outline is written for.
+#[must_use]
+pub fn is_markdown_path(path: &str) -> bool {
+    extension_of(path).is_some_and(|extension| MARKDOWN_EXTENSIONS.contains(&extension))
+}
+
+/// Whether a path gets an outline at all: code by definition, Markdown by
+/// heading. The one test the binder, the serving gate and the outline cache
+/// share, so a file one of them outlines is never one another refuses.
+#[must_use]
+pub fn is_outlinable_path(path: &str) -> bool {
+    is_code_path(path) || is_markdown_path(path)
+}
+
+/// The extension of a path's last component, when it has a stem as well.
+fn extension_of(path: &str) -> Option<&str> {
     let name = path.rsplit('/').next().unwrap_or(path);
-    let Some((stem, extension)) = name.rsplit_once('.') else {
-        return false;
-    };
-    !stem.is_empty() && CODE_EXTENSIONS.contains(&extension)
+    let (stem, extension) = name.rsplit_once('.')?;
+    (!stem.is_empty()).then_some(extension)
 }
 
 /// The text of lines `first..=last` (1-based) of `text`, newlines included —
@@ -350,6 +409,37 @@ pub fn outline_shape(summary: &ValidSummary) -> Option<OutlineShape> {
     })
 }
 
+/// The definitions a valid summary's outline lists, in file order, or `None`
+/// when the summary is not an outline in this grammar.
+///
+/// Takes a [`ValidSummary`] for [`outline_shape`]'s reason. The read is the
+/// grammar [`FileOutline::render`] writes and nothing looser: a line that does
+/// not parse refuses the whole outline, so a reader never holds half of one.
+#[must_use]
+pub fn outline_definitions(summary: &ValidSummary) -> Option<Vec<Definition>> {
+    let digest = core::str::from_utf8(summary.digest()).ok()?;
+    let mut lines = digest.lines();
+    shape_line_of(lines.next()?)?;
+    lines.map(parsed_definition).collect()
+}
+
+/// One definition line read back into the definition it was written from.
+fn parsed_definition(line: &str) -> Option<Definition> {
+    let (kind, rest) = line.split_once(' ')?;
+    let (name, range) = rest.rsplit_once(' ')?;
+    let (lo, hi) = range.strip_prefix('L')?.split_once("-L")?;
+    let is_number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if name.is_empty() || !is_number(lo) || !is_number(hi) {
+        return None;
+    }
+    Some(Definition {
+        kind: DefinitionKind::from_label(kind)?,
+        name: name.to_owned(),
+        first_line: lo.parse().ok()?,
+        last_line: hi.parse().ok()?,
+    })
+}
+
 /// `line` when it is an outline's shape line.
 fn shape_line_of(line: &str) -> Option<&str> {
     let mut parts = line.split(", ");
@@ -370,10 +460,7 @@ fn shape_line_of(line: &str) -> Option<&str> {
 fn definition_line(line: &str) -> Option<(&'static str, &str)> {
     let (kind, rest) = line.split_once(' ')?;
     let (_, range) = rest.rsplit_once(' ')?;
-    let kind = KEYWORDS
-        .iter()
-        .map(|(_, k)| k.as_str())
-        .find(|word| *word == kind)?;
+    let kind = DefinitionKind::from_label(kind)?.as_str();
     let (lo, hi) = range.strip_prefix('L')?.split_once("-L")?;
     let is_number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     if !is_number(lo) || !is_number(hi) {
