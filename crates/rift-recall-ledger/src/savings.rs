@@ -237,6 +237,25 @@ pub struct ClaimedByPulls {
     pub tokens_returned: u64,
 }
 
+impl ClaimedByPulls {
+    /// Count `rows` decisions that are not [`in_the_share`] into the claim.
+    pub fn book(&mut self, rows: u64, avoided: u64, returned: u64) {
+        self.decisions = self.decisions.saturating_add(rows);
+        self.tokens_avoided = self.tokens_avoided.saturating_add(avoided);
+        self.tokens_returned = self.tokens_returned.saturating_add(returned);
+    }
+
+    /// The avoided and returned tokens of a whole total, pulls included,
+    /// that are in the share: what is left once this claim is taken out.
+    #[must_use]
+    pub fn in_share_of(&self, avoided: u64, returned: u64) -> (u64, u64) {
+        (
+            avoided.saturating_sub(self.tokens_avoided),
+            returned.saturating_sub(self.tokens_returned),
+        )
+    }
+}
+
 /// Every figure the savings share is composed of, for one repository family.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Savings {
@@ -416,10 +435,7 @@ pub async fn decisions_by_family(
         let tool = r.get_text(1)?;
         let n = |i: usize| u64::try_from(r.get_i64(i).unwrap_or(0)).unwrap_or(0);
         if !in_the_share(&channel) {
-            let pulls = &mut out.pulls;
-            pulls.tokens_avoided = pulls.tokens_avoided.saturating_add(n(2));
-            pulls.tokens_returned = pulls.tokens_returned.saturating_add(n(3));
-            pulls.decisions = pulls.decisions.saturating_add(n(4));
+            out.pulls.book(n(4), n(2), n(3));
             continue;
         }
         // `<family>:<step>`; a name with no step is the family itself.
@@ -736,6 +752,8 @@ pub fn assemble(
     read_split: Option<&BTreeMap<String, (u64, u64)>>,
 ) -> Savings {
     let claimed_by_pulls = decisions.pulls;
+    let (tokens_avoided, tokens_returned) =
+        claimed_by_pulls.in_share_of(audit.avoided, audit.returned);
     let mut families: BTreeMap<String, FamilyShare> = BTreeMap::new();
     for (family, decided) in &decisions.families {
         let entry = families.entry(family.clone()).or_default();
@@ -790,13 +808,9 @@ pub fn assemble(
         search: fold(|f| f.channels.search),
     };
     Savings {
-        tokens_avoided: audit
-            .avoided
-            .saturating_sub(claimed_by_pulls.tokens_avoided),
+        tokens_avoided,
         tokens_prevented: audit.prevented,
-        tokens_returned: audit
-            .returned
-            .saturating_sub(claimed_by_pulls.tokens_returned),
+        tokens_returned,
         claimed_by_pulls,
         read_tokens,
         channels,
