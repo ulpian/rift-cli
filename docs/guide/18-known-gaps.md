@@ -511,6 +511,44 @@ and is not re-denominated to the reads the gate can see.
 **Read more.** [08](08-cost-and-savings.md) §8.13,
 [07](07-serving-and-injection.md) §7.4.
 
+### A subagent inherits only from the window that spawned it, and only by name
+
+*Honest limit.* A subagent's window inherits lines from the window that spawned
+it and from no other, and of the three classes only one writes them: **by
+name**, the lines the spawner held of a path the spawning prompt names. That
+class runs at `observe`, so it declines nothing. On the recorded corpus it
+put 49 lines into subagent windows at their spawns, and on its own would have
+declined 6 reads: 8,967 tokens, 0.14 % of repository content.
+
+The other two classes write no lines, each for its own reason. **Fork** — lines
+a window holds because it began from its spawner's history — has no instance on
+Claude Code, because a fresh subagent holds none of its spawner's bytes, and
+copying the spawner's lines would record lines the subagent never saw.
+**Paste** — lines the spawning prompt carried itself — is parked, because the recorded pastes long enough to matter
+are few and come from files the prompt does not name, against a hashing pass
+that every spawn would pay.
+
+The class that does write is exact because its link is. The spawning call and
+the subagent's opening share the prompt id and the subagent type; on the
+corpus that link named the spawning call for 395 of 398 openings and a wrong
+one for none. The same link is why two siblings of one type, started under one
+prompt, inherit nothing by name: neither can be told from the other, so
+neither claims a spawn.
+
+The limit is what the spawn chain does not reach. Most of the later reads
+naming a path the prompt names are of a path the spawner held no line of,
+while another window of the family had read it. Inheriting those
+would put lines into a window that no window in its spawn chain ever held. That
+is a decision about what a subagent may be taken to know, it has not been
+taken, and it is the owner's to take; nothing in this build makes it.
+
+Closing what is observed takes the `inherit_by_name` lever at `enforce`,
+flipped per family on the observed pool and on what `xtask dogfood`'s
+comparison shows, which is what every lever's flip rests on.
+
+**Read more.** [07](07-serving-and-injection.md) §7.3,
+[08](08-cost-and-savings.md) §8.13.
+
 ### A PDF's saving is excluded rather than estimated
 
 *Honest limit.* Every document format's native cost is a **declared** baseline
