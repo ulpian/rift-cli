@@ -35,6 +35,7 @@ inherit_by_name = "observe"    # a subagent's lines of a path its spawning promp
 first_contact = "observe"      # a first read of a large file answered with its outline, once; never above mode
 first_contact_min_lines = 400  # a file this long, or
 first_contact_min_bytes = 16384 # this large, is large enough to outline
+decline_family_held = "observe" # a read another live window holds, declined once with a cheaper route; never above mode
 
 # Per-family overrides. Each is capped by what that family's pinned rows allow:
 # a family whose reason channel no recorded run has confirmed resolves to

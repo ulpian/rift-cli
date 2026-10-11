@@ -821,8 +821,9 @@ fn frame_for(
                 since,
             )
         }
-        // The first contact is replayed on its own rows, never decided here.
-        DenyShape::Outlined => None,
+        // The first contact and the family-held decline are replayed on rows
+        // of their own, never decided here.
+        DenyShape::Outlined | DenyShape::Family { .. } => None,
         DenyShape::Narrow {
             held: run,
             read: rest,

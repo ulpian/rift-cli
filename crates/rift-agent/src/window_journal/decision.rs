@@ -5,6 +5,7 @@
 //! agent waits. Everything it consults is a pure query over rows, and this is
 //! where those queries meet the mode and the family's channel.
 
+use super::family::{family_line, FamilyRoute};
 use super::inherit::{enforced_view, inherited_observation, InheritClass, InheritModes};
 use super::{
     narrowing, Interval, Journal, Line, Narrowing, ResolvedRead, DEFAULT_MAX_DELIVERED_BYTES,
@@ -183,6 +184,17 @@ pub enum DenyShape {
     /// reads it names and the identical repeat allowed. The frame comes from
     /// the outline the caller found, not from anything this journal holds.
     Outlined,
+    /// The window holds nothing of this revision, and another live window of
+    /// the repository does: the decline carries a cheaper route to the bytes
+    /// and admits every later read of them.
+    Family {
+        /// What the decline hands the window instead.
+        route: FamilyRoute,
+        /// The runs it names as the reads to make instead.
+        offered: Vec<Interval>,
+        /// The frame's size in bytes, sent or not.
+        frame_bytes: u32,
+    },
 }
 
 /// What is to be done about a read-shaped call.
@@ -449,7 +461,9 @@ pub fn record(
 ) -> Line {
     match decision {
         Decision::Allow
-        | Decision::Observe(DenyShape::Narrow { .. } | DenyShape::Outlined)
+        | Decision::Observe(
+            DenyShape::Narrow { .. } | DenyShape::Outlined | DenyShape::Family { .. },
+        )
         | Decision::Inherited { .. } => delivered(read, slice_bytes, limits, turn, at_ms),
         Decision::Observe(_) => Line::Observe {
             turn,
@@ -459,6 +473,11 @@ pub fn record(
             at_ms,
             via: None,
         },
+        Decision::Deny(DenyShape::Family {
+            route,
+            offered,
+            frame_bytes,
+        }) => family_line(read, *route, offered, *frame_bytes, true, turn, at_ms),
         Decision::Deny(DenyShape::Outlined) => Line::Outline {
             turn,
             path: read.path.clone(),

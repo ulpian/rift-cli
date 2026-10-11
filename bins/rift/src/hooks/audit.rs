@@ -150,7 +150,7 @@ pub(super) fn serve_audit_envelopes(
 fn serve_audit_step(kind: crate::agent_queue::ServeAuditKind) -> &'static str {
     use crate::agent_queue::ServeAuditKind as K;
     match kind {
-        K::ReadIntercepted | K::ReadRepeatObserved => "read-gate",
+        K::ReadIntercepted | K::ReadRepeatObserved | K::ReadFollowUp => "read-gate",
         // Its own step, not the read gate's: the per-family table is read for
         // what each lever is worth, and a figure folded into another lever's
         // step is a figure nobody can separate again.
@@ -165,11 +165,12 @@ fn serve_audit_step(kind: crate::agent_queue::ServeAuditKind) -> &'static str {
 fn serve_audit_default_tag(kind: crate::agent_queue::ServeAuditKind) -> &'static str {
     use crate::agent_queue::ServeAuditKind as K;
     use rift_recall_serve::{
-        TAG_ALREADY_HELD, TAG_CONVERT_DEADLINE, TAG_DECLARED_BASELINE, TAG_PREVENTED,
-        TAG_PREVENTED_OBSERVED,
+        TAG_ALREADY_HELD, TAG_CONVERT_DEADLINE, TAG_DECLARED_BASELINE, TAG_FAMILY_FOLLOW_UP,
+        TAG_PREVENTED, TAG_PREVENTED_OBSERVED,
     };
     match kind {
         K::ReadIntercepted | K::ReadRepeatObserved => TAG_ALREADY_HELD,
+        K::ReadFollowUp => TAG_FAMILY_FOLLOW_UP,
         K::ReadPrevented => TAG_PREVENTED,
         K::ReadPreventedObserved => TAG_PREVENTED_OBSERVED,
         K::DocRewritten => TAG_DECLARED_BASELINE,
@@ -225,12 +226,38 @@ fn serve_audit_figures(
     if audit.decision == crate::agent_queue::ServeAuditKind::SearchAnswered {
         return search_figures(work_tree, audit, returned);
     }
+    if audit.decision == crate::agent_queue::ServeAuditKind::ReadFollowUp {
+        return follow_up_figures(work_tree, audit, returned);
+    }
     let Some(basis) = audit.basis.as_ref() else {
         return (returned, 0, None);
     };
     match audit_slice_tokens(work_tree, basis) {
         Some(avoided) => (returned, avoided, None),
         None => (returned, 0, Some(TAG_BASIS_UNAVAILABLE)),
+    }
+}
+
+/// What a read charged against an earlier decline books: the bytes it
+/// delivered, measured, as **returned**, and nothing avoided.
+///
+/// Returned rather than a negative avoided figure, because a row is never
+/// edited and a figure is never below zero: every surface nets avoided less
+/// returned, so the cost lands on the same line as the credit it qualifies.
+/// Bytes that can no longer be identified book nothing and say so — the cost
+/// is then missing, which this tag is what makes visible.
+fn follow_up_figures(
+    work_tree: &Path,
+    audit: &crate::agent_queue::ServeAudit,
+    frame: u32,
+) -> (u32, u32, Option<&'static str>) {
+    use rift_recall_serve::TAG_BASIS_UNAVAILABLE;
+    let Some(basis) = audit.basis.as_ref() else {
+        return (frame, 0, Some(TAG_BASIS_UNAVAILABLE));
+    };
+    match audit_slice_tokens(work_tree, basis) {
+        Some(read) => (frame.saturating_add(read), 0, None),
+        None => (frame, 0, Some(TAG_BASIS_UNAVAILABLE)),
     }
 }
 
@@ -371,7 +398,7 @@ pub(super) fn serve_audit_event(
         .or_else(|| audit.tag.clone())
         .unwrap_or_else(|| serve_audit_default_tag(audit.decision).to_owned());
     match audit.decision {
-        K::ReadIntercepted => MemdEvent::ReadIntercepted {
+        K::ReadIntercepted | K::ReadFollowUp => MemdEvent::ReadIntercepted {
             handle,
             reason,
             estimated_tokens_returned,
@@ -676,6 +703,32 @@ mod serve_audit_tests {
             "the family and the step"
         );
         assert_eq!((call_returned, call_avoided), (returned, avoided));
+    }
+
+    /// ★ A read of bytes a family decline was credited with books what it
+    /// delivered as **returned**, measured, and nothing avoided — in both
+    /// relations, under its own tag — so every net of avoided less returned
+    /// takes it off the decline it is charged against.
+    #[test]
+    fn a_family_follow_up_books_the_measured_slice_as_returned_and_nothing_avoided() {
+        assert_eq!(rift_tokens::provenance(), rift_tokens::TOKENIZER);
+        let (tmp, basis, body) = checkout(60);
+        let audit = ServeAudit {
+            tag: Some(rift_recall_serve::TAG_FAMILY_FOLLOW_UP.to_owned()),
+            ..decision(ServeAuditKind::ReadFollowUp, Some(basis), "")
+        };
+        let slice: String = body.split_inclusive('\n').take(10).collect();
+        let (audit_rows, call_rows) = book(tmp.path(), &audit);
+        assert_eq!(audit_rows.len(), 1);
+        let (verb, handle, reason, returned, avoided) = &audit_rows[0];
+        assert_eq!(verb, "memd.read_intercepted");
+        assert!(handle.ends_with(":L1-10"), "{handle}");
+        assert_eq!(reason, rift_recall_serve::TAG_FAMILY_FOLLOW_UP);
+        assert_eq!(*returned, i64::from(rift_tokens::count(&slice)));
+        assert!(*returned > 0);
+        assert_eq!(*avoided, 0);
+        assert_eq!(call_rows[0].1, "claude-code:read-gate");
+        assert_eq!((call_rows[0].2, call_rows[0].3), (*returned, 0));
     }
 
     /// The same read, recorded and not acted on: the pool is counted in

@@ -200,6 +200,11 @@ pub struct InterceptionPolicy {
     pub first_contact_min_lines: u32,
     /// The fewest bytes a file has for `first_contact` to consider it.
     pub first_contact_min_bytes: u64,
+    /// Declining once a read of bytes another live window of the repository
+    /// holds, with a cheaper route to them. Never above the read lever, and
+    /// `observe` until its own pool says otherwise: the decline rests on a
+    /// window other than the one being declined.
+    pub decline_family_held: Mode,
     /// `[interception.agents]`.
     pub agents: AgentModes,
 }
@@ -217,6 +222,7 @@ impl Default for InterceptionPolicy {
             first_contact: Mode::Observe,
             first_contact_min_lines: DEFAULT_FIRST_CONTACT_MIN_LINES,
             first_contact_min_bytes: DEFAULT_FIRST_CONTACT_MIN_BYTES,
+            decline_family_held: Mode::Observe,
             agents: AgentModes::default(),
         }
     }

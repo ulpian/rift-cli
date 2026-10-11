@@ -51,14 +51,18 @@ pub(super) fn first_contact_answer(
         return None;
     }
     let cached = load_outline_cache(pass.git_dir, &read.path, read.hash)?;
-    let frame = outline_frame(&cached, read)?;
+    let frame = with_outlined_read(&cached, read, rift_recall_serve::render_outline_frame)?;
     let travels = matches!(decision, Decision::Deny(_)).then_some(frame);
     Some((decision, travels))
 }
 
-/// The frame the sealed renderer writes for this read from the cached
-/// outline, or `None` when it has nothing to name.
-fn outline_frame(cached: &CachedOutline, read: &ResolvedRead) -> Option<String> {
+/// What `render` makes of this read's cached outline, as the sealed renderer
+/// is handed it: one construction for every frame an outline is sent in.
+pub(super) fn with_outlined_read<T>(
+    cached: &CachedOutline,
+    read: &ResolvedRead,
+    render: impl FnOnce(&rift_recall_serve::OutlinedRead<'_>) -> T,
+) -> T {
     let entries: Vec<rift_recall_serve::OutlineEntry<'_>> = cached
         .entries
         .iter()
@@ -71,7 +75,7 @@ fn outline_frame(cached: &CachedOutline, read: &ResolvedRead) -> Option<String> 
         })
         .collect();
     let hash = read.hash.to_hex();
-    rift_recall_serve::render_outline_frame(&rift_recall_serve::OutlinedRead {
+    render(&rift_recall_serve::OutlinedRead {
         path: &read.path,
         hash: &hash,
         lines: cached.lines,

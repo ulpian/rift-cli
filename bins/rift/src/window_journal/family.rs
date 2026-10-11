@@ -68,11 +68,11 @@ pub(crate) struct SiblingJournals {
 
 /// One checkout of the family: where its journals and its sessions are.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Checkout {
+struct Checkout {
     /// The checkout directory, under which its journals live.
-    pub(crate) work_tree: PathBuf,
+    work_tree: PathBuf,
     /// Its git dir, under which its sessions' caches live.
-    pub(crate) git_dir: PathBuf,
+    git_dir: PathBuf,
 }
 
 /// A journal recent enough to be a live window's, not yet read.
@@ -134,7 +134,7 @@ pub(crate) fn live_sibling_journals(query: &FamilyQuery<'_>) -> SiblingJournals 
 /// work tree and each linked worktree whose checkout still exists — found from
 /// the git dir's own files without running git. The caller's checkout alone
 /// when the family cannot be read.
-pub(crate) fn family_checkouts(work_tree: &Path, git_dir: &Path) -> Vec<Checkout> {
+fn family_checkouts(work_tree: &Path, git_dir: &Path) -> Vec<Checkout> {
     let own = Checkout {
         work_tree: work_tree.to_path_buf(),
         git_dir: git_dir.to_path_buf(),

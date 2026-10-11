@@ -14,6 +14,7 @@
 
 mod answer;
 mod delivery;
+mod family;
 mod file;
 mod first_contact;
 mod members;

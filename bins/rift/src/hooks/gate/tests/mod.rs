@@ -12,6 +12,7 @@ mod denies;
 #[cfg(feature = "doc")]
 mod documents;
 mod evictions;
+mod family;
 mod fixtures;
 mod narrows;
 mod outlines;

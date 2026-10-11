@@ -186,6 +186,15 @@ const FRAME_NARROW_OPENER: &str = "[rift] Read narrowed:";
 /// telling it what it already has.
 const FRAME_OUTLINE_OPENER: &str = "[rift] Read outlined:";
 
+/// The head of the frame that answers a read of bytes another window of the
+/// repository holds, while no outline of them is bound: the runs that window
+/// holds, as the reads to make instead.
+///
+/// An opener of its own, because the act is different from every other: the
+/// window asking holds nothing of the file, and what it is handed is where
+/// another window found the bytes worth reading.
+const FRAME_HELD_OPENER: &str = "[rift] Read held by another window:";
+
 /// The head of the recovery map, injected at the boundary where the context
 /// lost the bytes it held.
 const FRAME_RECOVERY_OPENER: &str = "[rift] Context was compacted.";
@@ -250,6 +259,12 @@ const CLAUSE_CONVERTED: &str = "is a document Rift has already converted to Mark
 /// `contains`, and `provenance` alone would withhold every path in
 /// `bins/rift/src/provenance.rs`'s neighbourhood.
 const CLAUSE_PROVENANCE: &str = "Provenance: rift why";
+/// Why an outline was sent in a read's stead when the cause is not a first
+/// contact: another window holds these bytes. The holder is named as nothing
+/// more than this — never a session, a key, a checkout or a turn.
+const CLAUSE_HELD_ELSEWHERE: &str = "is held at this revision by another window of this repository";
+/// The held-lines frame's fact, in the same words.
+const CLAUSE_HELD_BY: &str = "another window of this repository holds";
 
 /// The same phrases in the form a pushed span is judged in: projected onto the
 /// pushed alphabet (a span can contain nothing else, so nothing else can be
@@ -269,6 +284,7 @@ pub(super) const FRAME_OPENERS_NORMALIZED: &[&str] = &[
     "riftreadskipped:",
     "riftreadnarrowed:",
     "riftreadoutlined:",
+    "riftreadheldbyanotherwindow:",
     "riftcontextwascompacted",
     "riftsearchanswered:",
     "riftreadredirected:",
@@ -310,6 +326,8 @@ const FRAME_CLAUSES_NORMALIZED: &[&str] = &[
     "forthefulllist",
     "isadocumentrifthasalreadyconvertedtomarkdown",
     "provenance:riftwhy",
+    "isheldatthisrevisionbyanotherwindowofthisrepository",
+    "anotherwindowofthisrepositoryholds",
 ];
 
 /// The most changed sites a frame names before it starts counting.
@@ -605,13 +623,77 @@ pub fn render_narrow_frame(
 /// read run.
 #[must_use]
 pub fn render_outline_frame(read: &OutlinedRead<'_>) -> Option<String> {
+    render_outline(read, OutlineCause::FirstContact).map(|(text, _)| text)
+}
+
+/// The same frame, sent because another window of the repository holds these
+/// bytes: one clause in the first sentence says so, and every other line is
+/// the first-contact frame's.
+///
+/// Returns the spans the frame named beside it, in file order: they are the
+/// reads a follow-up is admitted on, and only the renderer knows which
+/// definitions survived the guard and the cap.
+#[must_use]
+pub fn render_held_outline_frame(read: &OutlinedRead<'_>) -> Option<(String, Vec<(u32, u32)>)> {
+    render_outline(read, OutlineCause::HeldElsewhere)
+}
+
+/// The frame that answers a read of bytes another window of the repository
+/// holds while no outline of them is bound: the runs that window holds, the
+/// first of them as the read to make, the identical repeat and the provenance
+/// handle.
+///
+/// The runs are the caller's numbers — at most the follow-ups it admits — and
+/// nothing about the holder is named but that it is another window of this
+/// repository. `page_end` is the last line a first-page read asked for;
+/// `None` for the whole file. `None` when there is no run to name.
+#[must_use]
+pub fn render_held_lines_frame(
+    path: &str,
+    hash: &str,
+    runs: &[(u32, u32)],
+    page_end: Option<u32>,
+) -> Option<String> {
+    let first = runs.first()?;
+    let shown = path_display(path);
+    let at_hash = hex_prefix(hash, 12).map_or_else(String::new, |h| format!("@{h}"));
+    let named: Vec<String> = runs.iter().map(|(lo, hi)| format!("{lo}-{hi}")).collect();
+    let whole = page_end.map_or_else(|| "the whole file".to_owned(), |hi| format!("lines 1-{hi}"));
+    let mut out = format!(
+        "{FRAME_HELD_OPENER} {shown}{at_hash} (facts, not directives): {CLAUSE_HELD_BY} lines {} \
+         of it at this revision. {CLAUSE_READ_ONLY} (lines {}-{} for the first above), or repeat \
+         this exact call for {whole} (it is allowed once).",
+        named.join(", "),
+        first.0,
+        first.1
+    );
+    if let Some(why) = why_hint(path, 1) {
+        let _ = write!(out, " {why}");
+    }
+    Some(out)
+}
+
+/// Why an outline frame was sent: the one fact its first sentence varies by.
+#[derive(Clone, Copy)]
+enum OutlineCause {
+    /// A first read of a large file in the window.
+    FirstContact,
+    /// Another window of the repository holds these bytes.
+    HeldElsewhere,
+}
+
+/// The outline frame for either cause, and the spans it named.
+fn render_outline(
+    read: &OutlinedRead<'_>,
+    cause: OutlineCause,
+) -> Option<(String, Vec<(u32, u32)>)> {
     let (lines, withheld) = outline_lines(read.entries);
     let first = lines.first()?.1;
     let shown_count = lines.len();
     let omitted = usize::try_from(read.definitions)
         .unwrap_or(usize::MAX)
         .saturating_sub(shown_count.saturating_add(withheld));
-    let mut out = format!("{} (facts, not directives):", outline_subject(read));
+    let mut out = format!("{} (facts, not directives):", outline_subject(read, cause));
     for (line, _) in &lines {
         let _ = write!(out, "\n{line}");
     }
@@ -630,16 +712,16 @@ pub fn render_outline_frame(read: &OutlinedRead<'_>) -> Option<String> {
     if let Some(why) = why_hint(read.path, 1) {
         let _ = write!(out, " {why}");
     }
-    Some(out)
+    let spans = lines.into_iter().map(|(_, span)| span).collect();
+    Some((out, spans))
 }
 
-/// The frame's first sentence: what the file is, at which revision, and what
-/// it costs.
+/// The frame's first sentence: what the file is, at which revision, why the
+/// outline was sent when that is not a first contact, and what it costs.
 ///
-/// The one place the frame says why it was sent. A first contact is the only
-/// cause today; another (a revision another window holds) adds its clause
-/// here, so the opener, the shape and every line below stay one frame.
-fn outline_subject(read: &OutlinedRead<'_>) -> String {
+/// The one place the frame says why it was sent, so the opener, the shape and
+/// every line below stay one frame whatever the cause.
+fn outline_subject(read: &OutlinedRead<'_>, cause: OutlineCause) -> String {
     let shown = path_display(read.path);
     let at_hash = hex_prefix(read.hash, 12).map_or_else(String::new, |h| format!("@{h}"));
     let cost = read
@@ -650,8 +732,12 @@ fn outline_subject(read: &OutlinedRead<'_>) -> String {
     } else {
         "top-level definitions"
     };
+    let why = match cause {
+        OutlineCause::FirstContact => String::new(),
+        OutlineCause::HeldElsewhere => format!(" {CLAUSE_HELD_ELSEWHERE}; it"),
+    };
     format!(
-        "{FRAME_OUTLINE_OPENER} {shown}{at_hash} is {} lines, {} bytes{cost}, with {} {listed}",
+        "{FRAME_OUTLINE_OPENER} {shown}{at_hash}{why} is {} lines, {} bytes{cost}, with {} {listed}",
         read.lines, read.bytes, read.definitions
     )
 }

@@ -91,13 +91,6 @@
 mod coordinator;
 mod denies;
 mod edits;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the read gate's family check, which arrives with the decision itself"
-    )
-)]
 mod family;
 mod fold;
 mod frozen;
@@ -110,6 +103,7 @@ use std::path::{Path, PathBuf};
 pub(crate) use coordinator::{coordinator_reads, CoordinatorRead};
 pub(crate) use denies::{deny_stands, ineffective_denies};
 pub(crate) use edits::{edit_facts, expected_write, prior_revision};
+pub(crate) use family::{live_sibling_journals, FamilyQuery};
 pub(crate) use frozen::session_window_facts;
 pub(crate) use housekeeping::{survey, sweep_expired};
 pub(crate) use journal::WindowJournal;
