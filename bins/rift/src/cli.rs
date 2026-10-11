@@ -295,7 +295,7 @@ pub(crate) struct RecallRankedArgs {
     /// A content hash you already hold; repeatable (drives `known_unchanged`).
     #[arg(long = "known-hash", value_name = "SHA256")]
     pub(crate) known_hashes: Vec<String>,
-    /// Token ceiling for the response (clamped to the per-turn budget).
+    /// Token ceiling for the response (binds per invocation: one call, not accumulated across calls or a turn).
     #[arg(long, value_name = "TOKENS")]
     pub(crate) token_budget: Option<u32>,
     // The reason is audited two ways: a fixed neutral tag in
@@ -334,7 +334,7 @@ pub(crate) struct RecallHunksArgs {
     /// An error signature currently in play; repeatable.
     #[arg(long = "error", value_name = "SIGNATURE")]
     pub(crate) errors: Vec<String>,
-    /// Token ceiling for the response (clamped to the per-turn budget).
+    /// Token ceiling for the response (binds per invocation: one call, not accumulated across calls or a turn).
     #[arg(long, value_name = "TOKENS")]
     pub(crate) token_budget: Option<u32>,
     // The reason is audited two ways: a fixed neutral tag in
@@ -354,7 +354,7 @@ pub(crate) struct RecallDeltaArgs {
     /// as changed — which is the honest answer for an agent holding nothing.
     #[arg(long = "known-hash", value_name = "SHA256")]
     pub(crate) known_hashes: Vec<String>,
-    /// Token ceiling for the response (clamped to the per-turn budget).
+    /// Token ceiling for the response (binds per invocation: one call, not accumulated across calls or a turn).
     #[arg(long, value_name = "TOKENS")]
     pub(crate) token_budget: Option<u32>,
     // The reason is audited two ways: a fixed neutral tag in

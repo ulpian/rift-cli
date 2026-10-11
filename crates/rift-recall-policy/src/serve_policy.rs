@@ -17,6 +17,9 @@ use crate::{AgentModes, DocPolicy, InterceptionPolicy, Mode, SearchPolicy};
 /// value outside its range, or TOML that does not parse means the file does not
 /// say what the operator permitted, and every lever below goes `off`.
 pub const SERVE_POLICY_TEMPLATE: &str = r#"# Rift serving policy. Absent = these defaults; unreadable = every lever off.
+#
+# The pull ceilings (the token, item, byte and list caps on `rift recall`) bind per
+# invocation: they bound one call and do not accumulate across calls or a turn.
 
 # Declining a re-read of a range this session's journal proves the context still
 # holds. `observe` reaches the decision and records it without touching the
