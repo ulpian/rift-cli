@@ -68,8 +68,8 @@ Prefer the task runner; it is the single source of truth for common workflows:
 ./skills.sh run -- status   # run the rift binary with args
 ```
 
-Raw cargo equivalents work too. CI declares fourteen required jobs plus a
-release build: single-leg `fmt` and `clippy -D warnings`; `test` across
+Raw cargo equivalents work too. CI declares fifteen required jobs, the release
+build among them: single-leg `fmt` and `clippy -D warnings`; `test` across
 macOS/Linux/Windows (fail-fast off); an `msrv` build; `coverage` (≥85% line +
 ≥75% branch workspace-wide, ≥95% line for the crates listed in
 `ci/security-crates.txt`, enforced by `xtask check-coverage`); `security`
@@ -211,8 +211,9 @@ reviewable adjacency list.
   [`docs/guide/02-configuration.md`](docs/guide/02-configuration.md) for the
   state-roots table.
 - **Determinism in tests:** inject the clock/RNG/identity (`UlidSource`,
-  `CryptoRng` via explicit nonces, `IdentitySource`). No test reads the wall clock
-  or network.
+  `CryptoRng` via explicit nonces, `IdentitySource`). No test reads the network,
+  and no assertion depends on the wall clock: a test may read it only to bound a
+  wait or to seed a fixture, never to decide its verdict.
 - **Modal-surface parity (Canopy).** Anything drawn as a centered modal frame
   — an `Overlay` *or* a mode stage over the shared modal geometry —
   carries the shared close X (`modal_close_rect`, top-right; a mode's X closes
