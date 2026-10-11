@@ -92,7 +92,7 @@ file is rebuilt from them by the next bind.
 Its grammar is closed — numbers, a kind from a fixed set and a name per line,
 under a 64 KiB ceiling — and a moved file names another key, so a stale entry
 cannot be read.
-No sweep collects old entries; each is a few hundred bytes.
+`rift clean` collects entries by age under the basis snapshots' TTL (`basis_ttl_days`, the same lever's run state), touching only names it writes in that directory: an entry collected while still useful costs one first contact answered by the read, and the next read of those bytes rebuilds it from the projection.
 
 **The v15 `tool_result_tokens` relation is a new table rather than a widened
 old one**, for a reason worth stating because it looks like a column at first
