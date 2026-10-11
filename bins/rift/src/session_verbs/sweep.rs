@@ -201,6 +201,9 @@ struct CleanReport {
     /// and never an answer — the blob route is untouched and the file is
     /// still in the checkout.
     bases: rift_recall_serve::basis_store::SweepReport,
+    /// The family's outline cache files past their age: copies the next read
+    /// of the same bytes rebuilds from the projection.
+    outlines: usize,
 }
 
 /// Collect every transient past its TTL, in the order the report reads them.
@@ -245,6 +248,7 @@ fn swept_transients(
         search_answers,
         documents: swept_documents(repo, ttl_days, now, dry_run).unwrap_or_default(),
         bases: swept_bases(repo, ttl_days, now, dry_run).unwrap_or_default(),
+        outlines: swept_outlines(repo, ttl_days, now, dry_run),
     }
 }
 
@@ -338,6 +342,7 @@ impl CleanReport {
         let search_windows = self.search_windows;
         let search_answers = self.search_answers;
         let basis_snapshots = self.bases.expired;
+        let outlines = self.outlines;
         let orphan_basis_metas = self.bases.orphan_metas;
         format!(
             "clean ({mode}): {} shadow ref(s) pruned ({} kept inside TTL), \
@@ -350,7 +355,8 @@ impl CleanReport {
              {search_windows} ended search conversation(s) and {search_answers} \
              unpriced answer(s) removed, \
              {basis_snapshots} expired basis snapshot(s) and {orphan_basis_metas} \
-             orphan snapshot record(s) removed\n  \
+             orphan snapshot record(s) removed, {outlines} expired outline cache file(s) \
+             removed\n  \
              canonical refs and the chain: untouched",
             self.pruned_refs.len(),
             self.kept_refs,
@@ -377,6 +383,7 @@ impl CleanReport {
             "expired_basis_snapshots": self.bases.expired,
             "orphan_basis_metas": self.bases.orphan_metas,
             "swept_basis_tmp_files": self.bases.swept_tmps,
+            "expired_outline_cache_files": self.outlines,
             "ttl_days": self.ttl_days,
         })
     }
@@ -428,6 +435,27 @@ fn swept_bases(
             i64::from(ttl_days) * 86_400_000,
             dry_run,
         ),
+    )
+}
+
+/// The family's outline cache files, collected by age under the basis
+/// snapshots' TTL — the same lever's run state, and the same rule of the more
+/// conservative of the two TTLs that have a claim.
+///
+/// Age is a safe bound because each file is a content-addressed copy the next
+/// read of the same bytes rebuilds from the projection; only the outline
+/// directory under the family's common dir is read.
+fn swept_outlines(repo: &rift_git::RepoPaths, ttl_days: u32, now_ms: i64, dry_run: bool) -> usize {
+    let ttl_days = ttl_days.max(
+        rift_recall_policy::ServePolicy::load(&repo.work_tree.join(".rift"))
+            .interception
+            .basis_ttl_days,
+    );
+    crate::hooks::sweep_outline_cache(
+        &repo.common_dir,
+        now_ms,
+        i64::from(ttl_days) * 86_400_000,
+        dry_run,
     )
 }
 

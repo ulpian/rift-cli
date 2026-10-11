@@ -99,6 +99,7 @@ fn gate_narrowing_enforced(
     let window_key = crate::window_journal::key(&raw.session, None);
     let pass = GatePass {
         step: GateStep::Decide,
+        git_dir: &git_dir,
         held: &held,
         journal: &journal,
         window_key: &window_key,

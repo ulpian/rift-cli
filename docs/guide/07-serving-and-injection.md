@@ -571,10 +571,58 @@ Past both rungs the answer is an honest `basis_unavailable` and the read
 proceeds. Availability is a published rate with a fallback ladder, never an
 assumption.
 
+### A first read of a large file
+
+Every decision above is about bytes the window already holds.
+The first read of a revision is not, and it is the largest pool left: the first
+sight of a file in a window is the read no other lever acts on.
+`[interception] first_contact` is the lever that may answer one with the file's
+**bound outline** instead — the map of the file the worker already keeps — once,
+with the identical repeat allowed.
+
+A read is a first contact when the window holds nothing of that revision, it
+starts at line one (the whole file, or a first page of at least 95 lines), the
+file is code or Markdown, and it has at least 400 lines or 16,384 bytes.
+A read from the middle of a file names the lines it wants, and no outline is
+cheaper than those lines, so it is never one.
+A Markdown file is outlined by heading: each ATX heading spans the lines up to
+the next heading of its level or a higher one, fenced blocks are skipped, and a
+heading's text is cut to the alphabet a frame renders.
+
+The outline must be **bound for these exact bytes**, and the gate learns that
+without opening a store.
+When the detached worker counts a read, it binds the outline of what was read —
+and the catch-up at condense binds anything it missed — and copies the outline
+and its stored token counts into one small file under the family's common
+directory, named by the bytes' hash and the outline's versions
+([13-storage-and-schema.md §13.2](13-storage-and-schema.md#132-three-stores)).
+The gate reads that file by the hash it already computed; a file that is not
+there is a miss, and a miss is a read that runs.
+
+The frame opens `[rift] Read outlined:` and states the file's lines, bytes and
+whole cost, then the costliest twelve definitions with their lines and their
+stored costs, then the narrower read (`Read only the lines you need`), the
+identical repeat (allowed once) and the provenance handle.
+Every definition name goes through the inline guard; one it withholds is
+counted, never quoted, and an outline with nothing left to name sends no frame.
+At its cap the frame costs 379 tokens on long names; the first-page floor of 95
+lines is that cost at four tokens a line, held by a test beside the renderer's
+golden.
+
+**In observe, nothing is sent.**
+The read runs, the window is credited with what it was handed, and the row the
+worker writes names the slice under the `first_contact` tag, with no frame and
+no claimed saving.
+The build caps the lever at `observe` whatever the policy says.
+An answered outline, when the lever acts, leaves an `outline` journal line —
+not coverage, since the window was handed the outline rather than the file —
+and it counts as the one answer per request, so the repeat runs.
+
 ### Nothing on this path opens a store
 
 The decision runs while a person waits, so its whole cost is a hash under a
-ceiling plus one small file read. No projection is opened, **no tokenizer is
+ceiling plus one small file read — two for a first contact, whose outline is a
+second small file named by the same hash. No projection is opened, **no tokenizer is
 initialised** — the two most expensive things a Rift process can do — and the
 audit row is journaled to the detached worker, which counts the declined
 slice's tokens with the real tokenizer and writes both audit relations

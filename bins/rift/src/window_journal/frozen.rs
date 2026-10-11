@@ -183,7 +183,9 @@ fn archived_window_row(line: &Line) -> Option<ArchivedWindowRow> {
         Line::Evict { reason, .. } => ArchivedWindowRow::Evict {
             reason: reason.as_str().to_owned(),
         },
-        Line::Spawn { .. } | Line::Claim { .. } => return None,
+        // An outline line is written only where the first-contact lever acts,
+        // which it does not below enforce; its frozen kind arrives with it.
+        Line::Outline { .. } | Line::Spawn { .. } | Line::Claim { .. } => return None,
     })
 }
 
@@ -202,6 +204,7 @@ fn line_at_ms(line: &Line) -> u64 {
         Line::Read { at_ms, .. }
         | Line::Deny { at_ms, .. }
         | Line::Observe { at_ms, .. }
+        | Line::Outline { at_ms, .. }
         | Line::Hold { at_ms, .. }
         | Line::Prevented { at_ms, .. }
         | Line::Expect { at_ms, .. }

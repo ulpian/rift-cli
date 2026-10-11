@@ -44,7 +44,7 @@ pub(crate) use archive::{
 pub(crate) use audit::append_memd_audit;
 #[cfg(feature = "search")]
 pub(crate) use gate::payload_cwd;
-pub(crate) use gate::{gate_step, gate_turn, GateStep, AUDIT_IDS};
+pub(crate) use gate::{gate_step, gate_turn, sweep_outline_cache, GateStep, AUDIT_IDS};
 #[cfg(feature = "search")]
 pub(crate) use git::effective_config;
 pub(crate) use install::{

@@ -15,6 +15,8 @@
 //! * `closed-rewrite-forms` — every tool-call rewrite is one of three pinned forms.
 //! * `family-keyed-caches` — a cache is keyed by the repository family, never
 //!   by which checkout happened to be open.
+//! * `one-cache-read` — the decision path reads one family cache, through one
+//!   named function, keyed by the common dir and the content address.
 //! * `regions-at-boundaries` — no hook and no detached worker reaches the
 //!   writer of a Rift-managed region.
 //! * `load-bearing` — not built; see [`load_bearing`].
@@ -31,6 +33,7 @@
 //! chosen so a screen errs toward reporting: an ambiguous shape is a finding,
 //! not an exemption.
 
+mod cache_read;
 mod channels;
 mod chokepoint;
 mod family_caches;
@@ -45,6 +48,7 @@ use std::path::Path;
 
 use crate::ci_meta::tracked_paths;
 
+pub use cache_read::one_cache_read;
 pub use channels::pinned_channels;
 pub use chokepoint::one_gate_chokepoint;
 pub use family_caches::family_keyed_caches;
@@ -88,6 +92,7 @@ pub fn run_all(root: &Path) -> Result<Vec<Leg>, String> {
         one_reason_renderer(root)?,
         closed_rewrite_forms(root)?,
         family_keyed_caches(root)?,
+        one_cache_read(root)?,
         regions_at_boundaries(root)?,
         load_bearing(),
     ])
@@ -147,7 +152,7 @@ mod tests {
                 leg.violations
             );
         }
-        assert_eq!(legs.len(), 8, "every leg reports, built or not");
+        assert_eq!(legs.len(), 9, "every leg reports, built or not");
     }
 
     /// The two call-graph walks are dispatched by the runner, not only

@@ -105,6 +105,9 @@ fn gate_frame(
                 since,
             )
         }
+        // Its frame needs the outline the cache holds, so it is composed where
+        // the cache is read, and never here.
+        DenyShape::Outlined => None,
         DenyShape::Narrow {
             held: run,
             read: rest,
@@ -235,13 +238,16 @@ pub(super) fn read_decision_audit(
     call_id: String,
 ) -> Option<crate::agent_queue::ServeAudit> {
     use crate::agent_queue::{AuditBasis, AuditLines, ServeAudit, ServeAuditKind};
-    use rift_agent::window_journal::Decision;
+    use rift_agent::window_journal::{Decision, DenyShape};
     let lines = spared_lines(read, decision);
     let declined = matches!(decision, Decision::Deny(_));
     // An inherited observation is an observed repeat like any other, under the
     // tag of its class, so the relation can size each class apart.
     let class_tag = match decision {
         Decision::Inherited { class, .. } => Some(class.audit_tag().to_owned()),
+        Decision::Observe(DenyShape::Outlined) | Decision::Deny(DenyShape::Outlined) => {
+            Some(rift_recall_serve::TAG_FIRST_CONTACT.to_owned())
+        }
         _ => None,
     };
     let decision = match decision {

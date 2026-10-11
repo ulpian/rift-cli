@@ -27,6 +27,7 @@
 
 mod decision;
 mod delivery;
+mod first_contact;
 mod holds;
 mod inherit;
 mod intervals;
@@ -41,6 +42,7 @@ pub use self::decision::{
     decide, record, Decision, DenyShape, EditEcho, Limits, Mode, NARROW_MIN_HELD_LINES, NARROW_MODE,
 };
 pub use self::delivery::{reconcile_delivery, Reconcile, ResolvedRead, StatedDelivery};
+pub use self::first_contact::{decide_first_contact, FirstContactFloor, FIRST_CONTACT_MODE};
 pub use self::holds::{DenyKey, HeldFile, StandingHold};
 pub use self::inherit::{
     inherited_from_read, is_ident, record_inheritance, InheritClass, InheritModes, FORK_MODE,
@@ -296,13 +298,15 @@ impl Journal {
     }
 
     /// Whether this exact request has already been declined once since the
-    /// context window last lost what it held.
+    /// context window last lost what it held — with a reason, or with the
+    /// file's outline in its stead.
     #[must_use]
     pub fn denied(&self, key: &DenyKey) -> bool {
         self.live().iter().any(|line| {
             matches!(
                 line,
-                Line::Deny { path, hash, range, .. } if key.matches(path, *hash, *range)
+                Line::Deny { path, hash, range, .. } | Line::Outline { path, hash, range, .. }
+                    if key.matches(path, *hash, *range)
             )
         })
     }
@@ -384,6 +388,7 @@ impl Journal {
                 Line::Read { path: p, .. }
                 | Line::Observe { path: p, .. }
                 | Line::Deny { path: p, .. }
+                | Line::Outline { path: p, .. }
                 | Line::Prevented { path: p, .. }
                     if p == path =>
                 {

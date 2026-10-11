@@ -107,14 +107,7 @@ fn the_outline_is_a_fixed_function_of_the_bytes() {
 
 #[test]
 fn a_file_that_is_not_code_or_not_text_gets_no_outline() {
-    for path in [
-        "README.md",
-        "Cargo.toml",
-        "notes.txt",
-        "Makefile",
-        "src/.rs",
-        "a.rs.bak",
-    ] {
+    for path in ["Cargo.toml", "notes.txt", "Makefile", "src/.rs", "a.rs.bak"] {
         assert!(FileOutline::of(path, b"fn a() {}\n").is_none(), "{path}");
     }
     assert!(FileOutline::of("src/a.rs", &[0xff, 0xfe, b'f', b'n']).is_none());
@@ -226,17 +219,110 @@ fn a_valid_outline_states_its_shape_and_any_other_digest_states_none() {
     assert_eq!(outline_shape(&valid(&[0xff, 0xfe])), None);
 }
 
+const MARKDOWN: &str = "# Guide
+
+Intro text.
+
+## Install
+
+Run it:
+
+```sh
+# not a heading
+## nor this
+```
+
+### Detail ###
+text
+
+## Use, and more (see `x`)
+More.
+Setext
+------
+";
+
+#[test]
+fn a_markdown_outline_names_each_heading_with_the_lines_up_to_the_next_heading_of_its_level() {
+    let outline = FileOutline::of("docs/guide.md", MARKDOWN.as_bytes()).unwrap();
+    assert_eq!(
+        rendered(&outline),
+        [
+            format!("20 lines, {} bytes, 4 top-level defs", MARKDOWN.len()),
+            "h1 Guide L1-L20".to_owned(),
+            "h2 Install L5-L15".to_owned(),
+            "h3 Detail L14-L15".to_owned(),
+            "h2 Use and more see x L17-L20".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_hash_inside_a_fenced_block_or_a_setext_underline_is_not_a_heading() {
+    let text = FileOutline::of("a.md", MARKDOWN.as_bytes())
+        .unwrap()
+        .render();
+    for absent in ["not a heading", "nor this", "Setext"] {
+        assert!(!text.contains(absent), "{absent} in {text}");
+    }
+    let tilde = "~~~~\n# inside\n~~~\n# still inside\n~~~~\n# after\n";
+    let outline = FileOutline::of("b.markdown", tilde.as_bytes()).unwrap();
+    assert_eq!(
+        rendered(&outline).get(1..),
+        Some(&["h1 after L6-L6".to_owned()][..])
+    );
+}
+
+#[test]
+fn only_a_real_atx_opener_is_a_heading() {
+    let source = "#hashtag\n    # indented code\n   ### Three spaces\n####### seven\n#\n# ##\n";
+    let outline = FileOutline::of("c.md", source.as_bytes()).unwrap();
+    assert_eq!(
+        rendered(&outline).get(1..),
+        Some(&["h3 Three spaces L3-L4".to_owned()][..])
+    );
+}
+
+#[test]
+fn markdown_and_code_are_outlined_and_nothing_else_is() {
+    for path in ["README.md", "docs/a.markdown", "src/lib.rs", "web/app.tsx"] {
+        assert!(is_outlinable_path(path), "{path}");
+    }
+    for path in ["Cargo.toml", "notes.txt", ".md", "a.md.bak", "Makefile"] {
+        assert!(!is_outlinable_path(path), "{path}");
+    }
+    assert!(is_markdown_path("README.md"));
+    assert!(!is_markdown_path("src/lib.rs"));
+}
+
+#[test]
+fn a_bound_outline_reads_back_as_the_definitions_it_was_written_from() {
+    for (path, source) in [("docs/guide.md", MARKDOWN), ("src/thing.rs", RUST)] {
+        let outline = FileOutline::of(path, source.as_bytes()).unwrap();
+        let summary = valid(outline.render().as_bytes());
+        assert_eq!(
+            outline_definitions(&summary).as_deref(),
+            Some(outline.definitions()),
+            "{path}"
+        );
+    }
+    assert_eq!(outline_definitions(&valid(b"2x error: boom\n")), None);
+    let unnamed = unnamed_outline(&FileOutline::of_markdown(MARKDOWN).render()).unwrap();
+    assert!(unnamed.ends_with("#4 h2 L17-L20"), "{unnamed}");
+}
+
 proptest::proptest! {
-    /// Whatever the bytes, a path whose extension is not a code extension
-    /// gets no outline, so no summary of it can ever be bound.
+    /// Whatever the bytes, a path whose extension is neither a code nor a
+    /// Markdown extension gets no outline, so no summary of it can ever be
+    /// bound.
     #[test]
-    fn no_path_outside_the_code_extensions_gets_an_outline(
+    fn no_path_outside_the_outlined_extensions_gets_an_outline(
         stem in "[a-z]{1,8}",
         extension in "[a-z]{0,5}",
         source in proptest::collection::vec(proptest::num::u8::ANY, 0..64),
     ) {
         let path = format!("{stem}.{extension}");
         proptest::prop_assume!(!CODE_EXTENSIONS.contains(&extension.as_str()));
+        proptest::prop_assume!(!MARKDOWN_EXTENSIONS.contains(&extension.as_str()));
         proptest::prop_assert!(FileOutline::of(&path, &source).is_none());
         proptest::prop_assert!(FileOutline::of(&stem, &source).is_none());
     }

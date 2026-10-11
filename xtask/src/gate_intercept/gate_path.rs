@@ -37,7 +37,7 @@ pub(super) const GATE_CRATES: [&str; 2] = ["bins/rift/src/", "crates/rift-agent/
 /// the agent waits, and it is the part this leg walks.
 ///
 /// A root that no longer exists is a hard error, not a smaller walk.
-const GATE_ROOTS: [&str; 11] = [
+pub(super) const GATE_ROOTS: [&str; 11] = [
     "window_journal_step",
     "read_gate",
     "doc_gate",

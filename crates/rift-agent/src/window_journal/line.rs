@@ -137,6 +137,26 @@ pub enum Line {
         /// the row as the observation it is.
         via: Option<InheritClass>,
     },
+    /// A first read of a large file answered once with the file's bound
+    /// outline instead of its lines.
+    ///
+    /// Not coverage: the window was handed the outline, not the file, so a
+    /// later read of these lines is decided as one the window does not hold.
+    /// A kind of its own rather than a `deny`, because what it answered with
+    /// is a different act, and a binary that predates it drops a kind it does
+    /// not know rather than reading it as a decline of lines the window held.
+    Outline {
+        /// The turn the call was made in.
+        turn: u32,
+        /// The file, in the one spelling coverage is keyed by.
+        path: String,
+        /// The revision the bytes hashed to.
+        hash: Sha256Id,
+        /// The lines that were asked for.
+        range: Interval,
+        /// When the line was written, in milliseconds.
+        at_ms: u64,
+    },
     /// **Rift told this window it holds these lines of this revision.**
     ///
     /// Written where Rift pushes a statement about held state into the
@@ -292,6 +312,7 @@ impl Line {
             Self::Read { .. } => "read",
             Self::Deny { .. } => "deny",
             Self::Observe { .. } => "observe",
+            Self::Outline { .. } => "outline",
             Self::Hold { .. } => "hold",
             Self::Prevented { .. } => "prevented",
             Self::Expect { .. } => "expect",
@@ -310,6 +331,7 @@ impl Line {
             Self::Read { turn, .. }
             | Self::Deny { turn, .. }
             | Self::Observe { turn, .. }
+            | Self::Outline { turn, .. }
             | Self::Hold { turn, .. }
             | Self::Prevented { turn, .. }
             | Self::Expect { turn, .. }
@@ -359,37 +381,11 @@ impl Line {
                 object.insert("n".to_owned(), json!(total_lines));
                 object.insert("at".to_owned(), json!(at_ms));
             }
-            Self::Deny {
-                path,
-                hash,
-                range,
-                at_ms,
-                ..
-            }
-            | Self::Observe {
-                path,
-                hash,
-                range,
-                at_ms,
-                ..
-            }
-            | Self::Hold {
-                path,
-                hash,
-                range,
-                at_ms,
-                ..
-            }
-            | Self::Prevented {
-                path,
-                hash,
-                range,
-                at_ms,
-                ..
-            } => {
-                insert_slice(object, path, *hash, *range);
-                object.insert("at".to_owned(), json!(at_ms));
-            }
+            Self::Deny { .. }
+            | Self::Observe { .. }
+            | Self::Outline { .. }
+            | Self::Hold { .. }
+            | Self::Prevented { .. } => insert_bare_slice(self, object),
             Self::Expect {
                 path, hash, at_ms, ..
             } => {
@@ -463,6 +459,13 @@ impl Line {
                 at_ms,
                 via: class_at(object).ok()?,
             }),
+            "outline" => Some(Self::Outline {
+                turn,
+                path: text_at(object, "p")?.to_owned(),
+                hash: hash_at(object, "h")?,
+                range: range_at(object)?,
+                at_ms,
+            }),
             "hold" => Some(Self::Hold {
                 turn,
                 path: text_at(object, "p")?.to_owned(),
@@ -504,6 +507,52 @@ impl Line {
             kind => inherited_line_from(kind, object, turn, at_ms),
         }
     }
+}
+
+/// The fields of a line that is about one slice and carries nothing past it:
+/// the slice and the moment. The kinds whose rows are exactly that share the
+/// one spelling.
+fn insert_bare_slice(line: &Line, object: &mut Map<String, Value>) {
+    let (Line::Deny {
+        path,
+        hash,
+        range,
+        at_ms,
+        ..
+    }
+    | Line::Observe {
+        path,
+        hash,
+        range,
+        at_ms,
+        ..
+    }
+    | Line::Outline {
+        path,
+        hash,
+        range,
+        at_ms,
+        ..
+    }
+    | Line::Hold {
+        path,
+        hash,
+        range,
+        at_ms,
+        ..
+    }
+    | Line::Prevented {
+        path,
+        hash,
+        range,
+        at_ms,
+        ..
+    }) = line
+    else {
+        return;
+    };
+    insert_slice(object, path, *hash, *range);
+    object.insert("at".to_owned(), json!(at_ms));
 }
 
 /// The file, the revision and the run: the three fields every line about a

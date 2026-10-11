@@ -25,8 +25,9 @@ pub use directive::{
 pub use frames::{
     neutral_inline_span, render_coordinator_reads_naming, render_delta_frame,
     render_delta_manifest, render_delta_manifest_naming, render_deny_frame, render_narrow_frame,
-    render_recovery_map, render_recovery_map_naming, render_redirect_frame, render_search_answer,
-    CoordinatorRead, HeldEntry, HeldVerdict, PathStatus, SearchHit,
+    render_outline_frame, render_recovery_map, render_recovery_map_naming, render_redirect_frame,
+    render_search_answer, CoordinatorRead, HeldEntry, HeldVerdict, OutlineEntry, OutlinedRead,
+    PathStatus, SearchHit, MAX_OUTLINE_FRAME_DEFINITIONS, OUTLINE_FRAME_MIN_PAGE_LINES,
 };
 pub use manifest::{EntryDetail, ManifestEntry};
 pub use pushed::{neutral_pushed_span, MAX_PUSHED_SPAN};

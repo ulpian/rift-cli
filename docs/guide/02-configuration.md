@@ -362,6 +362,9 @@ from one table:
 | `recovery_budget` | integer | `800` | Tokens a post-compaction recovery map may cost. |
 | `basis_ttl_days` | integer | `30` | How long a read-time basis snapshot is kept before `rift clean` collects it. |
 | `inherit_by_name` | `off` \| `observe` \| `enforce` | `observe` | How far a decline may rest on lines a subagent inherited because its spawning prompt named the path. Never above `mode` or the family's own cap; `off` inherits nothing. |
+| `first_contact` | `off` \| `observe` \| `enforce` | `observe` | How far a window's first read of a large file may be answered with the file's bound outline instead, once. Never above `mode` or the family's own cap. |
+| `first_contact_min_lines` | integer | `400` | A file this long is large enough for `first_contact`. |
+| `first_contact_min_bytes` | integer | `16384` | A file this large is large enough for `first_contact`; either floor is enough. |
 | `[interception.agents]` | per-family modes | absent | An override per supported family: `claude-code`, `codex`, `antigravity`. |
 
 Three of those numbers are measurements rather than preferences. **96 KiB** is
@@ -383,6 +386,17 @@ spawned it named a path its spawner held
 It ships at `observe`, where those lines are written into the subagent's journal
 and sized, and no read is ever declined on them; `enforce` is a separate
 decision, taken when the observed pool says the class pays.
+
+`first_contact` is the one key here about a read the window does **not** hold
+([07-serving-and-injection.md §7.4](07-serving-and-injection.md#a-first-read-of-a-large-file)).
+It ships at `observe`: the first read of a large code or Markdown file whose
+outline is bound is decided and recorded, sized under its own tag, and runs
+exactly as written.
+The build caps it at `observe` whatever the table says, so `enforce` here sends
+nothing yet; the move is a separate decision, taken when the observed pool and
+the paired evaluation say the frame pays.
+The two floors are provisional: the replay's first-contact rows and the
+observe period's histogram re-set them.
 
 `basis_ttl_days` governs the one durable artifact this lever leaves behind.
 The delta frame needs the revision a window holds, and a revision an agent

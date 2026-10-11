@@ -111,6 +111,15 @@ pub(super) fn render_policy(out: &mut String, snapshot: &rift_recall_policy::Ser
         p.interception.recovery_budget,
         p.interception.inherit_by_name.as_str(),
     );
+    // Its own line rather than more columns on the one above, so a reader
+    // matching that line by its text still finds it.
+    let _ = writeln!(
+        out,
+        "  first contact first_contact {}  first_contact_min_lines {}  first_contact_min_bytes {}",
+        p.interception.first_contact.as_str(),
+        p.interception.first_contact_min_lines,
+        p.interception.first_contact_min_bytes,
+    );
     let _ = writeln!(
         out,
         "  search        mode {}  grep_head_limit {}  glob_top_n {}  answer_budget_tokens {}",
@@ -218,6 +227,7 @@ pub(super) fn policy_json(snapshot: &rift_recall_policy::ServePolicySnapshot) ->
                 "interception_requested": e.read_deny_requested.as_str(),
                 "interception": e.read_deny.as_str(),
                 "inherit_by_name": e.inherit_by_name.as_str(),
+                "first_contact": e.first_contact.as_str(),
                 "search_answer": e.search_answer.as_str(),
                 "grep_cap": e.grep_cap.as_str(),
                 "doc_rewrite": e.doc_rewrite.as_str(),
@@ -236,6 +246,9 @@ pub(super) fn policy_json(snapshot: &rift_recall_policy::ServePolicySnapshot) ->
             "max_inline_hash_bytes": p.interception.max_inline_hash_bytes,
             "recovery_budget": p.interception.recovery_budget,
             "inherit_by_name": p.interception.inherit_by_name.as_str(),
+            "first_contact": p.interception.first_contact.as_str(),
+            "first_contact_min_lines": p.interception.first_contact_min_lines,
+            "first_contact_min_bytes": p.interception.first_contact_min_bytes,
         },
         "search": {
             "mode": p.search.mode.as_str(),
@@ -435,6 +448,9 @@ mod tests {
         assert!(out.contains(".rift/policies/serve.toml: absent; defaults apply"));
         assert!(out.contains(
             "interception  mode enforce  max_slice_bytes 98304  min_slice_lines 28  max_inline_hash_bytes 1048576  recovery_budget 800  inherit_by_name observe"
+        ));
+        assert!(out.contains(
+            "first contact first_contact observe  first_contact_min_lines 400  first_contact_min_bytes 16384"
         ));
         assert!(out.contains(
             "search        mode enforce  grep_head_limit 40  glob_top_n 8  answer_budget_tokens 160"

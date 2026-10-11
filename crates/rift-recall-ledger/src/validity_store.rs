@@ -12,7 +12,8 @@
 //! worktree hasher's output); the binding's `bound_oid` is the same SHA-256, so
 //! the bind-time and check-time comparators line up.
 //!
-//! [`put_file_outline`] is the one writer of a code file's outline: it binds
+//! [`put_file_outline`] is the one writer of a file's outline — a code file's
+//! by definition, a Markdown file's by heading: it binds
 //! the outline through [`put_summary`] and writes the raw token count of each
 //! definition and of the whole file beside it in `summary_token_count`, so a
 //! surface that prints what a definition costs never starts a tokenizer.
@@ -20,15 +21,15 @@
 use rift_core::{RedactedBytes, Result, RiftError};
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_validity::{
-    classify, is_code_path, line_span, outline_versions, summary_key, BlobResolver, FileOutline,
-    SummaryBinding, SummaryVersions, Validity, WorktreeSnapshot,
+    classify, is_outlinable_path, line_span, outline_versions, summary_key, BlobResolver,
+    FileOutline, SummaryBinding, SummaryVersions, Validity, WorktreeSnapshot,
 };
 use rift_store::{CanonicalStore, ColumnCipher, Value};
 use sha2::{Digest, Sha256};
 
 use crate::graph::{file_revision_id, Built};
 
-/// A code file a writer binds an outline of: its path and redacted bytes,
+/// A code or Markdown file a writer binds an outline of: its path and redacted bytes,
 /// the serve-policy version the binding key carries, and the serve policy's
 /// verdict on the path. The extractor and redaction versions are the
 /// outline's own ([`outline_versions`]), so the serve-time loader names the
@@ -147,7 +148,7 @@ pub struct OutlineBindCounts {
     /// The serve policy denies the path or marks it sensitive, or the
     /// redaction gate masked part of the file.
     pub refused: u32,
-    /// Not a code file, or not UTF-8.
+    /// Neither a code nor a Markdown file, or not UTF-8.
     pub not_code: u32,
     /// Past [`MAX_OUTLINE_SOURCE_BYTES`].
     pub oversize: u32,
@@ -304,14 +305,15 @@ pub async fn put_summary(
     Ok(key)
 }
 
-/// Bind a code file's outline and store its token counts beside it, or do
-/// nothing for a file that is not code or that the serve policy refuses.
+/// Bind a file's outline and store its token counts beside it, or do
+/// nothing for a file that is neither code nor Markdown, or that the serve
+/// policy refuses.
 ///
 /// The detached worker is the caller: it counts with the real tokenizer and
 /// hands the counts in, so neither this crate nor any hook decision starts
 /// one. Every write is insert-or-ignore, so binding the same bytes twice is a
 /// no-op. `Ok(None)` is the answer for a path the policy denies or marks
-/// sensitive, a path outside the code extensions, or bytes that are not
+/// sensitive, a path outside the outlined extensions, or bytes that are not
 /// UTF-8: no binding, no counts.
 ///
 /// # Errors
@@ -456,7 +458,7 @@ async fn put_token_count(store: &impl CanonicalStore, key: &str, count: &TokenCo
     Ok(())
 }
 
-/// Outline every code file the session read whose bytes on disk are still a
+/// Outline every code and Markdown file the session read whose bytes on disk are still a
 /// revision it read, and count what happened to each path.
 ///
 /// `reads` are `(path, content_sha256)` pairs, repeats allowed; each path is
@@ -510,7 +512,7 @@ async fn outline_step(
     read_shas: &[&str],
     budget_left: bool,
 ) -> OutlineStep {
-    if !is_code_path(path) {
+    if !is_outlinable_path(path) {
         return OutlineStep::NotCode;
     }
     if std::path::Path::new(path).is_absolute() || (batch.refuses_path)(path) {

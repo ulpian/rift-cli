@@ -107,6 +107,13 @@ pub const DEFAULT_MAX_SLICE_BYTES: u64 = 96 * 1024;
 /// reword that grows the frame reds that test. A floor left behind a grown
 /// frame is a lever quietly declining the reads it makes more expensive.
 pub const DEFAULT_MIN_SLICE_LINES: u32 = 28;
+/// The fewest lines a file has for its first read to be answered with its
+/// outline. Provisional, as is [`DEFAULT_FIRST_CONTACT_MIN_BYTES`]: the observe
+/// histogram re-sets both.
+pub const DEFAULT_FIRST_CONTACT_MIN_LINES: u32 = 400;
+/// The fewest bytes a file has for its first read to be answered with its
+/// outline; either floor is enough.
+pub const DEFAULT_FIRST_CONTACT_MIN_BYTES: u64 = 16_384;
 /// The largest file hashed inline on the gate path; past it the read proceeds.
 pub const DEFAULT_MAX_INLINE_HASH_BYTES: u64 = 1024 * 1024;
 /// Tokens a recovery map may cost after a compaction.
@@ -185,6 +192,14 @@ pub struct InterceptionPolicy {
     /// it qualifies, and `observe` until its own pool says otherwise: the
     /// window was pointed at those bytes, not handed them.
     pub inherit_by_name: Mode,
+    /// Answering the first read of a large file in a window with the file's
+    /// bound outline, once. Never above the read lever, and `observe` until
+    /// its own pool and the paired evaluation say otherwise.
+    pub first_contact: Mode,
+    /// The fewest lines a file has for `first_contact` to consider it.
+    pub first_contact_min_lines: u32,
+    /// The fewest bytes a file has for `first_contact` to consider it.
+    pub first_contact_min_bytes: u64,
     /// `[interception.agents]`.
     pub agents: AgentModes,
 }
@@ -199,6 +214,9 @@ impl Default for InterceptionPolicy {
             recovery_budget: DEFAULT_RECOVERY_BUDGET,
             basis_ttl_days: DEFAULT_BASIS_TTL_DAYS,
             inherit_by_name: Mode::Observe,
+            first_contact: Mode::Observe,
+            first_contact_min_lines: DEFAULT_FIRST_CONTACT_MIN_LINES,
+            first_contact_min_bytes: DEFAULT_FIRST_CONTACT_MIN_BYTES,
             agents: AgentModes::default(),
         }
     }

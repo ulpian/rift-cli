@@ -178,11 +178,11 @@ fn a_file_the_redaction_gate_masked_binds_its_cleared_bytes_and_never_resolves_v
 }
 
 proptest::proptest! {
-    /// A file outside the code extensions never binds, whatever its bytes:
-    /// no binding row and no count row.
+    /// A file outside the outlined extensions never binds, whatever its
+    /// bytes: no binding row and no count row.
     #[test]
-    fn no_file_outside_the_code_extensions_binds(
-        name in "[a-z]{1,8}\\.(md|toml|txt|json|yaml|lock|cfg)",
+    fn no_file_outside_the_outlined_extensions_binds(
+        name in "[a-z]{1,8}\\.(toml|txt|json|yaml|lock|cfg)",
         source in proptest::collection::vec(0u8..255, 0..64),
     ) {
         let store = open_store();
@@ -244,17 +244,16 @@ fn a_batch_binds_what_the_session_read_and_counts_everything_else() {
     assert_eq!(
         counts,
         OutlineBindCounts {
-            bound: 1,
+            bound: 2,
             changed: 2,
             refused: 2,
-            not_code: 1,
             ..OutlineBindCounts::default()
         }
     );
-    assert_eq!(rows(&store, "summary_binding"), 1);
+    assert_eq!(rows(&store, "summary_binding"), 2);
     let again = block(bind_read_outlines(&store, &PlainCipher, &batch, &reads));
-    assert_eq!((again.bound, again.already_bound), (0, 1));
-    assert_eq!(rows(&store, "summary_token_count"), 3);
+    assert_eq!((again.bound, again.already_bound), (0, 2));
+    assert_eq!(rows(&store, "summary_token_count"), 5);
 }
 
 #[test]

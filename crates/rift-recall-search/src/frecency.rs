@@ -195,6 +195,7 @@ fn touched(line: &Line) -> Option<(&str, u64)> {
         Line::Read { path, at_ms, .. }
         | Line::Deny { path, at_ms, .. }
         | Line::Observe { path, at_ms, .. }
+        | Line::Outline { path, at_ms, .. }
         | Line::Expect { path, at_ms, .. }
         | Line::Edit { path, at_ms, .. }
         | Line::Hold { path, at_ms, .. }

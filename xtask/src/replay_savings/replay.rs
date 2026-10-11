@@ -98,6 +98,9 @@ pub(super) struct WindowState {
     /// The commit this window's path facts come from, when the run was given
     /// a history and the window began after one.
     pub(super) commit: Option<usize>,
+    /// Files this window's first contact would have been answered with an
+    /// outline for, by the class it was counted in, until it reads them again.
+    pub(super) outlined: BTreeMap<String, usize>,
 }
 
 /// Everything one call is replayed against: the settings it is decided under,
@@ -110,6 +113,8 @@ pub(super) struct Ctx<'a> {
     pub(super) replay: &'a Replay<'a>,
     /// Which window of the session tree made the call.
     pub(super) window: usize,
+    /// When the call was made, as the transcript stamped it.
+    pub(super) stamp: &'a str,
     /// That window's own journal and turn.
     pub(super) state: &'a mut WindowState,
     /// What the session tree carries across its windows.
@@ -206,7 +211,7 @@ fn replay_tree(
         }
     }
     merged.sort_by(|a, b| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2)));
-    for (_, index, _, event) in merged {
+    for (stamp, index, _, event) in merged {
         let Some(state) = windows.get_mut(index) else {
             continue;
         };
@@ -214,6 +219,7 @@ fn replay_tree(
         let ctx = &mut Ctx {
             replay: settings,
             window: index,
+            stamp: &stamp,
             state,
             tree: &mut tree,
             worktree,

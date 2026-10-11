@@ -8,6 +8,7 @@
 
 mod coordinator;
 mod manifest;
+mod outline;
 mod reasons;
 mod wording;
 

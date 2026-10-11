@@ -100,7 +100,7 @@ fn read_summary_answers_with_the_stored_outline_its_key_and_versions() {
     assert_eq!(result["handle"], json!(format!("file:{PATH}@sha256:{sha}")));
     assert_eq!(
         result["versions"],
-        json!({ "extractor": 2, "policy": 1, "redaction": 1 })
+        json!({ "extractor": 3, "policy": 1, "redaction": 1 })
     );
     assert!(resp.estimated_tokens_avoided > 0, "{}", resp.payload);
 }
@@ -133,7 +133,7 @@ fn a_binding_under_an_older_extractor_is_not_bound_and_a_lost_digest_is_unavaila
     let req = asking(Vec::new());
     let old = serve(&store, &checkout.reader(), ToolName::ReadSummary, &req);
     assert_eq!(old.payload["result"]["reason"], json!("not_bound"));
-    plant_binding(&store, 2);
+    plant_binding(&store, 3);
     let lost = serve(&store, &checkout.reader(), ToolName::ReadSummary, &req);
     assert_eq!(
         lost.payload["result"],
@@ -159,7 +159,7 @@ fn known_state_includes_the_summary_of_a_file_the_caller_does_not_hold() {
     );
     assert_eq!(entry["summary"], json!(OUTLINE));
     assert_eq!(entry["summary_key"], json!(key));
-    assert_eq!(entry["versions"]["extractor"], json!(2));
+    assert_eq!(entry["versions"]["extractor"], json!(3));
     assert_eq!(
         before.payload["envelopes"][0]["state"],
         json!("available_by_handle")

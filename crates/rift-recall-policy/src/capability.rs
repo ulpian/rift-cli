@@ -89,6 +89,13 @@ pub struct Effective {
     /// How far a decline may rest on a subagent's lines inherited by name:
     /// the repository's `inherit_by_name`, never above `read_deny`.
     pub inherit_by_name: Mode,
+    /// How far the first read of a large file may be answered with its bound
+    /// outline: the repository's `first_contact`, never above `read_deny`.
+    pub first_contact: Mode,
+    /// The fewest lines a file has for `first_contact` to consider it.
+    pub first_contact_min_lines: u32,
+    /// The fewest bytes a file has for `first_contact` to consider it.
+    pub first_contact_min_bytes: u64,
 
     /// Adding a head limit to a content search that carries none.
     pub grep_cap: Mode,
@@ -194,6 +201,9 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
         max_inline_hash_bytes: interception.max_inline_hash_bytes,
         recovery_budget: interception.recovery_budget,
         inherit_by_name: interception.inherit_by_name.min(read_deny),
+        first_contact: interception.first_contact.min(read_deny),
+        first_contact_min_lines: interception.first_contact_min_lines,
+        first_contact_min_bytes: interception.first_contact_min_bytes,
         grep_cap,
         grep_cap_off,
         search_answer,
@@ -577,6 +587,50 @@ mod tests {
         assert_eq!(loaded.source, ServePolicySource::Refused);
         let e = resolve(&loaded.policy, "claude-code", FULL);
         assert_eq!(every_lever(&e), [Mode::Off; 5]);
+    }
+
+    /// The first-contact lever ships at `observe` with its two floors, reads
+    /// what is written, and is never above the read lever: a family whose
+    /// channel no run confirmed, a repository at `off` and an unreadable file
+    /// all hold it there or below, and a value it does not know shuts it.
+    #[test]
+    fn the_first_contact_lever_ships_observing_and_is_never_above_the_read_lever() {
+        let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
+        assert_eq!(
+            (
+                shipped.first_contact,
+                shipped.first_contact_min_lines,
+                shipped.first_contact_min_bytes
+            ),
+            (Mode::Observe, 400, 16_384)
+        );
+        let (written, _d) = load_src(
+            "[interception]\nfirst_contact = \"enforce\"\nfirst_contact_min_lines = 600\n\
+             first_contact_min_bytes = 20000\n",
+        );
+        let e = resolve(&written.policy, "claude-code", FULL);
+        assert_eq!(
+            (
+                e.first_contact,
+                e.first_contact_min_lines,
+                e.first_contact_min_bytes
+            ),
+            (Mode::Enforce, 600, 20_000)
+        );
+        assert_eq!(
+            resolve(&written.policy, "codex", NO_CHANNEL).first_contact,
+            Mode::Observe
+        );
+        let (shut, _d) = load_src("[interception]\nmode = \"off\"\nfirst_contact = \"enforce\"\n");
+        assert_eq!(
+            resolve(&shut.policy, "claude-code", FULL).first_contact,
+            Mode::Off
+        );
+        let (unknown, _d) = load_src("[interception]\nfirst_contact = \"always\"\n");
+        assert_eq!(
+            resolve(&unknown.policy, "claude-code", FULL).first_contact,
+            Mode::Off
+        );
     }
 
     /// The inherited-by-name lever ships at `observe`, reads `enforce` only

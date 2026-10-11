@@ -64,16 +64,18 @@ impl Extractor for LogExtractor {
 /// and byte counts, then each top-level definition's kind, name and
 /// block-expanded lines.
 ///
-/// Version 2: version 1 printed the counts and a marker tally only. The bump
-/// is what keeps a version-1 binding from ever being served as an outline,
-/// since the version is part of the binding key.
+/// Version 3: version 1 printed the counts and a marker tally only, and
+/// version 2 outlined code alone. Each bump is what keeps an older binding
+/// from ever being served as the current outline — a version-2 binding is
+/// never taken for one that knows Markdown headings — since the version is
+/// part of the binding key.
 pub struct FileShapeExtractor;
 impl Extractor for FileShapeExtractor {
     fn kind(&self) -> ExtractorKind {
         ExtractorKind::FileShape
     }
     fn version(&self) -> u32 {
-        2
+        3
     }
     fn extract(&self, source: &[u8]) -> Vec<u8> {
         FileOutline::of_text(&String::from_utf8_lossy(source))
@@ -444,10 +446,11 @@ FAILED tests/test_x.py::test_y - AssertionError\n\
 
     #[test]
     fn a_file_shape_binding_from_before_the_outline_is_never_found_as_one() {
-        // The outline is version 2. A version-1 binding of the same bytes sits
-        // under another key, so a lookup for the outline cannot land on the
-        // old marker tally.
-        assert_eq!(FileShapeExtractor.version(), 2);
+        // The outline is version 3: version 2 outlined code only, so a binding
+        // made before Markdown was outlined is never taken for one that knows
+        // headings. A version-1 binding of the same bytes sits under another
+        // key, so a lookup for the outline cannot land on the old marker tally.
+        assert_eq!(FileShapeExtractor.version(), 3);
         let dg = MemoryDigestStore::default();
         let store = SummaryStore::new();
         let source = b"fn a() {}\n";

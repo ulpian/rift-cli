@@ -19,6 +19,9 @@ pub(crate) fn deny_stands(journal: &Journal, key: &DenyKey) -> bool {
     journal.live().iter().rev().find_map(|line| match line {
         Line::Deny {
             path, hash, range, ..
+        }
+        | Line::Outline {
+            path, hash, range, ..
         } if key.matches(path, *hash, *range) => Some(true),
         Line::Read {
             path, hash, range, ..
@@ -41,6 +44,9 @@ pub(crate) fn ineffective_denies(journal: &Journal) -> usize {
     for line in journal.lines() {
         match line {
             Line::Deny {
+                path, hash, range, ..
+            }
+            | Line::Outline {
                 path, hash, range, ..
             } => standing.push(DenyKey {
                 path: path.clone(),

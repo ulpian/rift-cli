@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use rift_agent::window_journal::Interval;
 
+use super::first_contact::{outline_facts, OutlineFacts};
 use super::history::{Blob, History};
 
 /// The largest file the gate will hash inline, and so the largest file a
@@ -63,6 +64,9 @@ pub(super) fn path_key(raw: &str, cwd: Option<&str>) -> Option<String> {
 pub(super) struct FileFacts {
     /// The byte length of each line, the newline included.
     line_bytes: Vec<u32>,
+    /// The outline the worker would bind, for a file large enough for the
+    /// first-contact lever.
+    outline: Option<std::sync::Arc<OutlineFacts>>,
 }
 
 impl FileFacts {
@@ -76,6 +80,12 @@ impl FileFacts {
     /// How many bytes the file holds.
     pub(super) fn total_bytes(&self) -> u64 {
         self.line_bytes.iter().map(|n| u64::from(*n)).sum()
+    }
+
+    /// The outline the worker would bind, where the file is large enough for
+    /// the first-contact lever to consider it.
+    pub(super) fn outline(&self) -> Option<&OutlineFacts> {
+        self.outline.as_deref()
     }
 
     /// How many bytes the lines `lo..=hi` amount to.
@@ -186,7 +196,7 @@ impl Worktree {
             Blob::Present(bytes) => {
                 self.source.resolved_at_a_commit =
                     self.source.resolved_at_a_commit.saturating_add(1);
-                facts_of(&bytes)
+                facts_of(&bytes, key)
             }
             Blob::Absent => {
                 let now = self.facts(key).cloned();
@@ -222,12 +232,12 @@ fn read_facts(root: &Path, key: &str) -> Option<FileFacts> {
         return None;
     }
     let bytes = std::fs::read(&path).ok()?;
-    facts_of(&bytes)
+    facts_of(&bytes, key)
 }
 
 /// One file's facts from its bytes, refusing what the gate refuses: a file too
 /// large to hash inline, or one that is not text.
-fn facts_of(bytes: &[u8]) -> Option<FileFacts> {
+fn facts_of(bytes: &[u8], key: &str) -> Option<FileFacts> {
     let too_large = u64::try_from(bytes.len()).map_or(true, |n| n > MAX_INLINE_HASH_BYTES);
     if too_large || bytes.contains(&0) {
         return None;
@@ -237,6 +247,7 @@ fn facts_of(bytes: &[u8]) -> Option<FileFacts> {
             .split_inclusive(|byte| *byte == b'\n')
             .map(|line| u32::try_from(line.len()).unwrap_or(u32::MAX))
             .collect(),
+        outline: outline_facts(key, bytes),
     })
 }
 

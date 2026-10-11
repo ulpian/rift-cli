@@ -15,7 +15,9 @@
 mod answer;
 mod delivery;
 mod file;
+mod first_contact;
 mod members;
+mod outline_cache;
 mod prevented;
 
 use std::path::Path;
@@ -32,6 +34,13 @@ pub(in crate::hooks) use self::answer::GateOutcome;
 pub(crate) use self::answer::AUDIT_IDS;
 pub(crate) use self::file::payload_cwd;
 pub(in crate::hooks) use self::file::{gate_file, gate_rel_path};
+pub(crate) use self::outline_cache::sweep_outline_cache;
+pub(in crate::hooks) use self::outline_cache::{
+    write_outline_cache, CachedDefinition, CachedOutline,
+};
+
+#[cfg(test)]
+pub(in crate::hooks) use self::outline_cache::outline_cache_dir;
 
 /// What this hook does about the window journal, if anything.
 pub(crate) enum GateStep {
@@ -187,9 +196,8 @@ pub(in crate::hooks) fn read_gate(
     effective: &rift_recall_policy::Effective,
 ) -> GateOutcome {
     let quiet = GateOutcome::default();
-    // A lever nobody is holding decides nothing and records nothing: an
-    // unreadable policy and an explicit `off` both land here, and the journal
-    // this repository never asked for is never written.
+    // A lever nobody is holding decides and records nothing: an unreadable
+    // policy and an explicit `off` both land here, and no journal is written.
     if effective.read_deny == rift_recall_policy::Mode::Off || raw.session.is_empty() {
         return quiet;
     }
@@ -241,6 +249,7 @@ pub(in crate::hooks) fn read_gate(
     let window_key = crate::window_journal::key(&raw.session, facts.child_session.as_deref());
     let pass = GatePass {
         step,
+        git_dir,
         held: &held,
         journal: &journal,
         window_key: &window_key,

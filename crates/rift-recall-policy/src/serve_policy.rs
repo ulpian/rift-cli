@@ -32,6 +32,9 @@ max_inline_hash_bytes = 1048576 # 1 MiB: larger files are never hashed on the ga
 recovery_budget = 800          # tokens a post-compaction recovery map may cost
 basis_ttl_days = 30            # a read-time basis snapshot is collected after this
 inherit_by_name = "observe"    # a subagent's lines of a path its spawning prompt named; never above mode
+first_contact = "observe"      # a first read of a large file answered with its outline, once; never above mode
+first_contact_min_lines = 400  # a file this long, or
+first_contact_min_bytes = 16384 # this large, is large enough to outline
 
 # Per-family overrides. Each is capped by what that family's pinned rows allow:
 # a family whose reason channel no recorded run has confirmed resolves to

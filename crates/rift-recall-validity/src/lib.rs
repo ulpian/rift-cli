@@ -41,8 +41,8 @@ pub use extract::{
 };
 pub use handle::{resolve_handle, BlobResolver, Resolved};
 pub use outline::{
-    is_code_path, line_span, outline_shape, unnamed_outline, Definition, DefinitionKind,
-    FileOutline, OutlineShape,
+    is_code_path, is_markdown_path, is_outlinable_path, line_span, outline_definitions,
+    outline_shape, unnamed_outline, Definition, DefinitionKind, FileOutline, OutlineShape,
 };
 pub use summary::{
     classify, resolve, summary_key, DigestStore, MemoryDigestStore, SummaryBinding, SummaryStore,

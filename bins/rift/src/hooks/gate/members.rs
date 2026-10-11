@@ -10,6 +10,7 @@ use std::path::Path;
 use super::answer::{gate_answer, journal_decision, spared_lines};
 use super::delivery::{gate_delivery_is_actionable, reconcile_stated_delivery};
 use super::file::{gate_resolve, GateFile};
+use super::first_contact::first_contact_answer;
 use super::{gate_edit_echo, gate_mode, GateStep};
 
 /// The facts every member of one call is decided and recorded against.
@@ -23,6 +24,9 @@ use super::{gate_edit_echo, gate_mode, GateStep};
 pub(super) struct GatePass<'a> {
     /// Which step of the gate this call is at.
     pub(super) step: GateStep,
+    /// The git dir the hook runs against, from which the family's outline
+    /// cache is found.
+    pub(super) git_dir: &'a Path,
     /// The window's lines as they stood when the call arrived.
     pub(super) held: &'a rift_agent::window_journal::Journal,
     /// The journal those lines are appended to.
@@ -132,6 +136,14 @@ pub(super) fn gate_decide_members(
         };
         let (decision, frame, _) =
             gate_answer(pass.held, &read, decision, pass.limits.context_lines);
+        // A read the window does not hold may still be a first contact.
+        let (decision, frame) = match (&pass.step, &decision) {
+            (GateStep::Decide, rift_agent::window_journal::Decision::Allow) => {
+                first_contact_answer(raw, effective, pass, &file, &read)
+                    .unwrap_or((decision, frame))
+            }
+            _ => (decision, frame),
+        };
         members.push(GateMember {
             file,
             read,

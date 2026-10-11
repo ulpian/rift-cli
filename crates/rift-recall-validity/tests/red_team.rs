@@ -30,12 +30,13 @@
 
 use rift_recall_validity::trust::{
     is_directive_shaped, neutral_inline_span, neutral_pushed_span, render_coordinator_reads_naming,
-    render_delta_frame, render_delta_manifest, render_deny_frame, render_recovery_map,
-    render_redirect_frame, render_search_answer, role_marker_spellings, serialize_untrusted,
-    CoordinatorRead, EntryDetail, HeldEntry, HeldVerdict, ManifestEntry, PathStatus, RoleDialect,
-    SearchHit, MAX_PUSHED_SPAN, ROLE_MARKERS,
+    render_delta_frame, render_delta_manifest, render_deny_frame, render_outline_frame,
+    render_recovery_map, render_redirect_frame, render_search_answer, role_marker_spellings,
+    serialize_untrusted, CoordinatorRead, EntryDetail, HeldEntry, HeldVerdict, ManifestEntry,
+    PathStatus, RoleDialect, SearchHit, MAX_PUSHED_SPAN, ROLE_MARKERS,
 };
-use rift_recall_validity::{Extractor, LogExtractor};
+use rift_recall_validity::trust::{OutlineEntry, OutlinedRead};
+use rift_recall_validity::{DefinitionKind, Extractor, LogExtractor};
 
 const CORPUS: &str = include_str!("../fixtures/injection_corpus.jsonl");
 const MANIFEST_CORPUS: &str = include_str!("../fixtures/injected_manifest_corpus.jsonl");
@@ -208,6 +209,7 @@ fn frames_carrying(span: &str) -> Vec<String> {
         span,
     ));
     out.extend(render_redirect_frame(span, ".rift/state/doc/ab12cd34.md"));
+    out.extend(outline_frame_carrying(span));
     out.extend(
         render_coordinator_reads_naming(
             &[
@@ -225,6 +227,39 @@ fn frames_carrying(span: &str) -> Vec<String> {
         .map(|(text, _)| text),
     );
     out
+}
+
+/// The first-contact outline, with the span as the file read and as the name
+/// of a definition beside an honest one: a name is a span of a file somebody
+/// else may have written, so it is judged as a path is.
+fn outline_frame_carrying(span: &str) -> Option<String> {
+    let definitions = [
+        OutlineEntry {
+            kind: DefinitionKind::Function,
+            name: "honest",
+            first_line: 1,
+            last_line: 40,
+            tokens: Some(300),
+        },
+        OutlineEntry {
+            kind: DefinitionKind::Heading(2),
+            name: span,
+            first_line: 41,
+            last_line: 90,
+            tokens: Some(400),
+        },
+    ];
+    render_outline_frame(&OutlinedRead {
+        path: span,
+        hash: HASH,
+        lines: 900,
+        bytes: 30_000,
+        whole_tokens: Some(7_000),
+        definitions: 2,
+        markdown: false,
+        entries: &definitions,
+        page_end: None,
+    })
 }
 
 #[test]
@@ -738,13 +773,13 @@ fn no_hostile_span_survives_a_reason_frame() {
 fn every_frame_is_replayed_by_the_corpus() {
     assert_eq!(
         frames_carrying("src/honest_but_hostile_neighbour.rs").len(),
-        6,
+        7,
         "a frame was added or removed without updating the corpus replay"
     );
     // A withheld span costs the entry, never the frame: the recovery map and
     // the search answer still render, as counters.
     let frames = frames_carrying("docs/日本語/README.md");
-    assert_eq!(frames.len(), 6);
+    assert_eq!(frames.len(), 7);
     assert!(
         frames
             .iter()
