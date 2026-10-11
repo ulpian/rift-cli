@@ -776,6 +776,8 @@ fn frame_for(
                 since,
             )
         }
+        // The first contact is replayed on its own rows, never decided here.
+        DenyShape::Outlined => None,
         DenyShape::Narrow {
             held: run,
             read: rest,

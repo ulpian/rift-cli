@@ -730,6 +730,7 @@ fn line_at_ms(line: &JournalLine) -> i64 {
         JournalLine::Read { at_ms, .. }
         | JournalLine::Deny { at_ms, .. }
         | JournalLine::Observe { at_ms, .. }
+        | JournalLine::Outline { at_ms, .. }
         | JournalLine::Expect { at_ms, .. }
         | JournalLine::Edit { at_ms, .. }
         | JournalLine::Hold { at_ms, .. }
@@ -844,6 +845,7 @@ fn split_line(
         | JournalLine::Hold { .. }
         | JournalLine::Prevented { .. }
         | JournalLine::Observe { via: Some(_), .. }
+        | JournalLine::Outline { .. }
         | JournalLine::Inherit { .. }
         | JournalLine::Spawn { .. }
         | JournalLine::Claim { .. } => None,

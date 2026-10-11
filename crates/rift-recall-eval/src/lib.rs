@@ -37,9 +37,11 @@ use rift_recall_pack::{compile, EvidenceRef, PackRequest, SectionEntry, Sensitiv
 use rift_recall_types::{ArtifactState, Envelope, Handle, Trust};
 
 mod intercepted;
+mod outlined;
 mod record;
 mod served;
 pub use intercepted::{corpus_honesty_figures, replay_intercepted, CONDITION as INTERCEPTED};
+pub use outlined::{outline_frame_for, outlined_corpus, replay_outlined, CONDITION as OUTLINED};
 pub use record::{
     deterministic_corpus, render_report, run_id, seeded_regression_runs, EvalRunRecord,
 };

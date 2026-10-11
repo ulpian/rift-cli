@@ -133,6 +133,14 @@ pub use rift_recall_validity::trust::{
 /// edge is added, and no second renderer is created.
 pub use rift_recall_validity::trust::{render_delta_frame, render_deny_frame, render_narrow_frame};
 
+/// The first-contact frame, re-exported by the same route and for the same
+/// reason as [`render_deny_frame`]: the binary supplies the outline it read
+/// from its cache, and the sealed renderer writes every word of the sentence.
+pub use rift_recall_validity::trust::{
+    render_outline_frame, OutlineEntry, OutlinedRead, MAX_OUTLINE_FRAME_DEFINITIONS,
+    OUTLINE_FRAME_MIN_PAGE_LINES,
+};
+
 /// The document redirect's frame, re-exported by the same route and for the
 /// same reason as [`render_deny_frame`].
 ///
@@ -204,8 +212,8 @@ pub use rift_recall_validity::OutlineShape;
 /// writes the cache from the outline the projection holds and reads it back
 /// by the same rules, with no second grammar.
 pub use rift_recall_validity::{
-    is_markdown_path, is_outlinable_path, outline_definitions, outline_shape, outline_versions,
-    DefinitionKind, Validity,
+    is_markdown_path, is_outlinable_path, line_span, outline_definitions, outline_shape,
+    outline_versions, DefinitionKind, FileOutline, Validity,
 };
 
 /// The section a subagent's window opens with, naming what its coordinator
@@ -287,6 +295,12 @@ pub const TOOL_SURFACE: &[ToolName] = &[
 /// Re-exported from the pack crate's closed [`rift_recall_pack::CostNote`]
 /// vocabulary so the two surfaces can never drift.
 pub const COST_NOTE: &str = rift_recall_pack::COST_NOTE;
+
+/// The neutral tag on a read decision about a first contact: the first read
+/// of a large file in a window, which the file's bound outline would answer.
+/// Its own tag, so every surface can size the class, and take it out of a
+/// figure, apart from the re-reads the read gate declines.
+pub const TAG_FIRST_CONTACT: &str = "first_contact";
 
 /// The neutral tag on a document verb that had nothing to hand over yet: the
 /// family holds no sidecar for these bytes, and the conversion is owed.

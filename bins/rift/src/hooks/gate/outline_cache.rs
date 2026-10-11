@@ -57,6 +57,9 @@ pub(in crate::hooks) struct CachedOutline {
     pub(in crate::hooks) entries: Vec<CachedDefinition>,
 }
 
+/// A field the cache grammar does not admit.
+struct OutsideGrammar;
+
 /// One definition of a cached outline.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::hooks) struct CachedDefinition {
@@ -88,6 +91,28 @@ fn outline_cache_name(content_sha256: &str) -> String {
         "{content_sha256}-e{}p{}r{}.outline",
         versions.extractor_version, versions.policy_version, versions.redaction_version
     )
+}
+
+/// The cached outline of `rel_path` at `hash`, or `None` — a miss — when no
+/// file holds one, the file is past its ceiling, or a line of it is not in
+/// the grammar.
+///
+/// The decision path's one read for a first contact: the common dir from
+/// the git dir's own pointer file, then one bounded file read. No store, no
+/// tokenizer, no walk of the work tree.
+pub(in crate::hooks) fn load_outline_cache(
+    git_dir: &Path,
+    rel_path: &str,
+    hash: rift_core::Sha256Id,
+) -> Option<CachedOutline> {
+    let common_dir = rift_git::read_common_dir(git_dir);
+    let file = outline_cache_dir(&common_dir).join(outline_cache_name(&hash.to_hex()));
+    let meta = std::fs::symlink_metadata(&file).ok()?;
+    if !meta.is_file() || meta.len() > MAX_OUTLINE_CACHE_BYTES as u64 {
+        return None;
+    }
+    let text = std::fs::read_to_string(&file).ok()?;
+    parse_outline_cache(&text, rift_recall_serve::is_markdown_path(rel_path))
 }
 
 /// Write `outline` as the cached outline of the revision `content_sha256`,
@@ -149,6 +174,69 @@ fn count_field(count: Option<u32>) -> String {
     count.map_or_else(|| "-".to_owned(), |n| n.to_string())
 }
 
+/// Read a cache file back, or `None` when any line is outside the grammar or
+/// its class is not the path's.
+pub(in crate::hooks) fn parse_outline_cache(text: &str, markdown: bool) -> Option<CachedOutline> {
+    let mut lines = text.lines();
+    if lines.next()? != HEADER {
+        return None;
+    }
+    let class = lines.next()?.strip_prefix("class ")?;
+    if class != if markdown { "markdown" } else { "code" } {
+        return None;
+    }
+    let shape: Vec<&str> = lines.next()?.strip_prefix("shape ")?.split(' ').collect();
+    let [lines_field, bytes_field, definitions_field, whole_field] = shape.as_slice() else {
+        return None;
+    };
+    let entries = lines.map(parse_definition).collect::<Option<Vec<_>>>()?;
+    Some(CachedOutline {
+        markdown,
+        lines: number(lines_field)?,
+        bytes: number(bytes_field)?,
+        definitions: number(definitions_field)?,
+        whole_tokens: optional_count(whole_field).ok()?,
+        entries,
+    })
+}
+
+/// One `def` line: kind, first line, last line, count, then the name.
+fn parse_definition(line: &str) -> Option<CachedDefinition> {
+    let mut fields = line.strip_prefix("def ")?.splitn(5, ' ');
+    let kind = DefinitionKind::from_label(fields.next()?)?;
+    let first_line = number(fields.next()?)?;
+    let last_line = number(fields.next()?)?;
+    let tokens = optional_count(fields.next()?).ok()?;
+    let name = fields.next()?;
+    if name.is_empty() || name.chars().any(char::is_control) || first_line > last_line {
+        return None;
+    }
+    Some(CachedDefinition {
+        kind,
+        name: name.to_owned(),
+        first_line,
+        last_line,
+        tokens,
+    })
+}
+
+/// A field of ASCII digits, parsed; anything else is outside the grammar.
+fn number<T: std::str::FromStr>(field: &str) -> Option<T> {
+    if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    field.parse().ok()
+}
+
+/// A count field: `Ok(None)` for `-`, `Ok(Some(n))` for a number, and
+/// `Err` for anything else.
+fn optional_count(field: &str) -> Result<Option<u32>, OutsideGrammar> {
+    if field == "-" {
+        return Ok(None);
+    }
+    number(field).map(Some).ok_or(OutsideGrammar)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +287,50 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 1, "no staged file is left behind: {names:?}");
+    }
+
+    /// A Markdown outline is never read for a code path, nor the reverse.
+    #[test]
+    fn a_cached_outline_of_the_other_class_is_a_miss() {
+        let text = render_outline_cache(&outline());
+        assert!(parse_outline_cache(&text, false).is_some());
+        assert!(parse_outline_cache(&text, true).is_none());
+    }
+
+    /// Any line outside the grammar refuses the whole file.
+    #[test]
+    fn a_cache_file_outside_the_grammar_is_a_miss() {
+        let good = render_outline_cache(&outline());
+        for bad in [
+            good.replace(HEADER, "rift-outline 2"),
+            good.replace("shape 637", "shape six"),
+            good.replace("def impl", "def ignore"),
+            good.replace(" 129 141 ", " 141 129 "),
+            format!("{good}def fn 1 2 3\n"),
+            format!("{good}say fn 1 2 3 x\n"),
+            good.replace("5704", "+5704"),
+        ] {
+            assert!(parse_outline_cache(&bad, false).is_none(), "{bad}");
+        }
+    }
+
+    /// ★ What the worker writes is what the gate reads, under the content
+    /// hash and the outline's versions, through the git dir's own pointer to
+    /// the family's common directory.
+    #[test]
+    fn a_cached_outline_reads_back_exactly_under_its_content_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_dir = tmp.path().join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let hash = rift_agent::content_sha256(b"the bytes");
+        write_outline_cache(&git_dir, &hash.to_hex(), &outline()).unwrap();
+        assert_eq!(
+            load_outline_cache(&git_dir, "src/a.rs", hash),
+            Some(outline())
+        );
+        let other = rift_agent::content_sha256(b"other bytes");
+        assert_eq!(load_outline_cache(&git_dir, "src/a.rs", other), None);
+        assert_eq!(load_outline_cache(&git_dir, "docs/a.md", hash), None);
     }
 
     /// A writer stops adding definitions at the ceiling, and the shape line

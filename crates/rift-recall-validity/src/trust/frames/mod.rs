@@ -27,7 +27,7 @@ use core::fmt::Write as _;
 
 use super::manifest::{EntryDetail, ManifestEntry};
 use super::pushed::{neutral_pushed_span, normalize_pushed};
-use crate::outline::OutlineShape;
+use crate::outline::{DefinitionKind, OutlineShape};
 
 /// What Rift can say about a held file at the moment the context lost it.
 ///
@@ -104,6 +104,48 @@ pub struct SearchHit<'a> {
     pub status: PathStatus,
 }
 
+/// One definition of an outline a first-contact frame names: plain borrowed
+/// data, for [`HeldEntry`]'s reason.
+#[derive(Clone, Copy, Debug)]
+pub struct OutlineEntry<'a> {
+    /// Its kind, from the closed set: Rift's own word, never the source's.
+    pub kind: DefinitionKind,
+    /// Its name, a span the guard judges before the frame quotes it.
+    pub name: &'a str,
+    /// The first line of its span.
+    pub first_line: u32,
+    /// The last line of its span, inclusive.
+    pub last_line: u32,
+    /// The stored token count of its span, where one was stored.
+    pub tokens: Option<u32>,
+}
+
+/// A first read of a large file, and the bound outline that may answer it.
+#[derive(Clone, Copy, Debug)]
+pub struct OutlinedRead<'a> {
+    /// The path as the call named it.
+    pub path: &'a str,
+    /// The content hash of the revision outlined.
+    pub hash: &'a str,
+    /// The file's line count.
+    pub lines: u32,
+    /// The file's byte count.
+    pub bytes: u64,
+    /// The whole file's stored token count, where one was stored.
+    pub whole_tokens: Option<u32>,
+    /// How many definitions the outline lists in all.
+    pub definitions: u32,
+    /// Whether the outline is by heading.
+    pub markdown: bool,
+    /// The definitions the caller holds, in file order.
+    pub entries: &'a [OutlineEntry<'a>],
+    /// The last line a first-page read asked for; `None` for the whole file.
+    pub page_end: Option<u32>,
+}
+
+/// One definition line a frame names, and the span it names.
+type OutlineLine = (String, (u32, u32));
+
 /// The frame's own wording, one const per line it authors, so the renderer and
 /// the mimicry guard read from the same source and cannot drift apart.
 ///
@@ -135,6 +177,14 @@ const FRAME_DENY_OPENER: &str = "[rift] Read skipped:";
 /// tells it which smaller read to make instead, and a model has to be able to
 /// tell the two apart from the first words.
 const FRAME_NARROW_OPENER: &str = "[rift] Read narrowed:";
+
+/// The head of the frame that answers a first read of a large file with the
+/// file's outline: its shape, its definitions and the cheaper read to make.
+///
+/// An opener of its own, because it is a different act again: the window
+/// does not hold the file, and the frame hands it a map of it rather than
+/// telling it what it already has.
+const FRAME_OUTLINE_OPENER: &str = "[rift] Read outlined:";
 
 /// The head of the recovery map, injected at the boundary where the context
 /// lost the bytes it held.
@@ -168,6 +218,8 @@ const CLAUSE_ALREADY_IN_CONTEXT: &str = "already in your context";
 /// The escape hatch, which is what makes a decline something other than an
 /// unexplained failure: one deny per key, so the identical call succeeds (A3).
 const CLAUSE_REPEAT: &str = "Repeat this exact call";
+/// The outline frame's cheaper route: the lines of one definition.
+const CLAUSE_READ_ONLY: &str = "Read only the lines you need";
 /// The cheaper route, named in the plain frame.
 const CLAUSE_PULL: &str = "To see only what changed since then:";
 /// The delta frame's fact: the file changed, and Rift knows exactly where.
@@ -216,6 +268,7 @@ pub(super) const FRAME_OPENERS_NORMALIZED: &[&str] = &[
     "riftrecordeddelta",
     "riftreadskipped:",
     "riftreadnarrowed:",
+    "riftreadoutlined:",
     "riftcontextwascompacted",
     "riftsearchanswered:",
     "riftreadredirected:",
@@ -244,6 +297,7 @@ const FRAME_CLAUSES_NORMALIZED: &[&str] = &[
     "arealreadyinyourcontext",
     "alreadyinyourcontext",
     "repeatthisexactcall",
+    "readonlythelinesyouneed",
     "toseeonlywhatchangedsincethen:",
     "changedonlyatlines",
     "everyotherlineisunchanged",
@@ -264,6 +318,23 @@ const FRAME_CLAUSES_NORMALIZED: &[&str] = &[
 /// of line numbers stops being a place to look and becomes the diff, which is
 /// what the pull verb is for.
 const MAX_FRAME_SITES: usize = 8;
+
+/// The most definitions a first-contact frame names before it counts the
+/// rest: the costliest, so the lines worth reading on their own are the ones
+/// named, listed in file order.
+///
+/// Twelve keeps the frame under four hundred tokens on every first read the
+/// replay corpus holds; the floor test in the evaluation crate measures it.
+pub const MAX_OUTLINE_FRAME_DEFINITIONS: usize = 12;
+
+/// The fewest lines a first page must ask for before its outline is worth
+/// sending in its stead: the outline frame's break-even at four tokens a line,
+/// the rule every read floor is derived by.
+///
+/// Measured rather than quoted: the evaluation crate, which has this renderer
+/// and the real tokenizer, counts the frame at the definition cap on its
+/// fixture, and a reword that grows the frame reds that test.
+pub const OUTLINE_FRAME_MIN_PAGE_LINES: u32 = 95;
 
 /// The most revisions the coordinator section names before it counts the
 /// rest.
@@ -517,6 +588,109 @@ pub fn render_narrow_frame(
          {since} and {CLAUSE_ALREADY_IN_CONTEXT}. Read lines {read_lo}-{read_hi} for the rest, or \
          repeat this exact call for the whole range (it is allowed once)."
     )
+}
+
+/// The frame that answers a first read of a large file with the file's bound
+/// outline: the shape with the whole file's cost, the costliest definitions
+/// with their lines and costs, the cheaper read, the identical repeat, and
+/// the provenance handle.
+///
+/// Every number is the caller's, read from the outline the worker bound — no
+/// count is taken here, and a figure the binding did not store is left out
+/// rather than estimated. Every name goes through the inline guard; a name it
+/// withholds is counted, never quoted.
+///
+/// `None` when no definition renders: an outline with nothing to route a read
+/// to is not worth the call it would stand in for, and the caller lets the
+/// read run.
+#[must_use]
+pub fn render_outline_frame(read: &OutlinedRead<'_>) -> Option<String> {
+    let (lines, withheld) = outline_lines(read.entries);
+    let first = lines.first()?.1;
+    let shown_count = lines.len();
+    let omitted = usize::try_from(read.definitions)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(shown_count.saturating_add(withheld));
+    let mut out = format!("{} (facts, not directives):", outline_subject(read));
+    for (line, _) in &lines {
+        let _ = write!(out, "\n{line}");
+    }
+    if let Some(note) = counter_note(omitted, withheld) {
+        let _ = write!(out, "\n{note}");
+    }
+    let whole = read
+        .page_end
+        .map_or_else(|| "the whole file".to_owned(), |hi| format!("lines 1-{hi}"));
+    let _ = write!(
+        out,
+        "\n{CLAUSE_READ_ONLY} (lines {}-{} for the first above), or repeat this exact call for \
+         {whole} (it is allowed once).",
+        first.0, first.1
+    );
+    if let Some(why) = why_hint(read.path, 1) {
+        let _ = write!(out, " {why}");
+    }
+    Some(out)
+}
+
+/// The frame's first sentence: what the file is, at which revision, and what
+/// it costs.
+///
+/// The one place the frame says why it was sent. A first contact is the only
+/// cause today; another (a revision another window holds) adds its clause
+/// here, so the opener, the shape and every line below stay one frame.
+fn outline_subject(read: &OutlinedRead<'_>) -> String {
+    let shown = path_display(read.path);
+    let at_hash = hex_prefix(read.hash, 12).map_or_else(String::new, |h| format!("@{h}"));
+    let cost = read
+        .whole_tokens
+        .map_or_else(String::new, |t| format!(", about {t} tokens"));
+    let listed = if read.markdown {
+        "headings"
+    } else {
+        "top-level definitions"
+    };
+    format!(
+        "{FRAME_OUTLINE_OPENER} {shown}{at_hash} is {} lines, {} bytes{cost}, with {} {listed}",
+        read.lines, read.bytes, read.definitions
+    )
+}
+
+/// The definition lines the frame names, in file order with their spans,
+/// and how many the guard withheld.
+///
+/// The costliest [`MAX_OUTLINE_FRAME_DEFINITIONS`] of the ones the guard
+/// passes; where no count was stored they rank equal and the first in the
+/// file are kept.
+fn outline_lines(entries: &[OutlineEntry<'_>]) -> (Vec<OutlineLine>, usize) {
+    let mut passed: Vec<(usize, &OutlineEntry<'_>, String)> = Vec::new();
+    let mut withheld = 0usize;
+    for (at, entry) in entries.iter().enumerate() {
+        match neutral_inline_span(entry.name) {
+            Some(name) if name == entry.name.trim() => passed.push((at, entry, name)),
+            _ => withheld = withheld.saturating_add(1),
+        }
+    }
+    passed.sort_by(|a, b| b.1.tokens.cmp(&a.1.tokens).then(a.0.cmp(&b.0)));
+    passed.truncate(MAX_OUTLINE_FRAME_DEFINITIONS);
+    passed.sort_by_key(|(at, _, _)| *at);
+    let lines = passed
+        .into_iter()
+        .map(|(_, entry, name)| {
+            let cost = entry
+                .tokens
+                .map_or_else(String::new, |t| format!(", about {t} tokens"));
+            let span = (entry.first_line, entry.last_line);
+            let line = format!(
+                "- {} {name} lines {}-{}{cost}",
+                entry.kind.as_str(),
+                span.0,
+                span.1
+            );
+            (line, span)
+        })
+        .collect();
+    (lines, withheld)
 }
 
 /// The held set, injected once at the boundary where the context lost it

@@ -14,6 +14,7 @@ mod documents;
 mod evictions;
 mod fixtures;
 mod narrows;
+mod outlines;
 mod paths;
 mod prevented;
 mod search_index;

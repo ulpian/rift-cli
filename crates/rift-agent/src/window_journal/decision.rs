@@ -178,6 +178,11 @@ pub enum DenyShape {
         /// instead.
         read: Interval,
     },
+    /// The window holds nothing of this revision, and the file is large: the
+    /// file's bound outline stands in for the first read, with the cheaper
+    /// reads it names and the identical repeat allowed. The frame comes from
+    /// the outline the caller found, not from anything this journal holds.
+    Outlined,
 }
 
 /// What is to be done about a read-shaped call.
@@ -392,7 +397,7 @@ fn decide_narrow(
 }
 
 /// Act on a decline that passed every gate but the last three, or record it.
-fn act_on(
+pub(super) fn act_on(
     shape: DenyShape,
     mode: Mode,
     pays_for_itself: bool,
@@ -418,6 +423,11 @@ fn act_on(
 /// [`Limits::max_delivered_bytes`] cannot be vouched for past its first line
 /// whatever the tool was asked for, so that is all it is credited with.
 ///
+/// **An observed outline leaves a `read`** for the same reason as an observed
+/// narrowing below: the call ran and handed the window the lines. An answered
+/// one leaves an `outline`, which is not coverage — the window was handed the
+/// outline, not the file.
+///
 /// **An observed narrowing leaves a `read`**, exactly the line an allowed call
 /// leaves. Unlike a plain or a delta observation, the call that runs hands the
 /// window lines it did not hold, and an `observe` line is not coverage: it
@@ -439,7 +449,7 @@ pub fn record(
 ) -> Line {
     match decision {
         Decision::Allow
-        | Decision::Observe(DenyShape::Narrow { .. })
+        | Decision::Observe(DenyShape::Narrow { .. } | DenyShape::Outlined)
         | Decision::Inherited { .. } => delivered(read, slice_bytes, limits, turn, at_ms),
         Decision::Observe(_) => Line::Observe {
             turn,
@@ -448,6 +458,13 @@ pub fn record(
             range: read.range,
             at_ms,
             via: None,
+        },
+        Decision::Deny(DenyShape::Outlined) => Line::Outline {
+            turn,
+            path: read.path.clone(),
+            hash: read.hash,
+            range: read.range,
+            at_ms,
         },
         Decision::Deny(_) => Line::Deny {
             turn,
