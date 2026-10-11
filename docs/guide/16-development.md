@@ -297,9 +297,11 @@ after the run.
 
 ## 16.7 Determinism in tests
 
-A test reading the wall clock, the network, or the machine it runs on eventually
+A test reading the network, the wall clock, or the machine it runs on eventually
 fails for a reason unrelated to the change that triggered it, so the workspace
-injects those inputs.
+injects those inputs. No test reads the network, and no assertion depends on the
+wall clock: a test may read it only to bound a wait or to seed a fixture, never
+to decide its verdict.
 
 **Identifiers.** `UlidSource` (`crates/rift-core/src/id.rs`) is a one-method
 trait yielding the next strictly-increasing identifier. Production uses

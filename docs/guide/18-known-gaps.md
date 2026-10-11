@@ -778,12 +778,12 @@ drifting apart.
 *Honest limit.* The determinism convention says to inject the clock. There is
 exactly one clock trait in the workspace, local to the dashboard's splash
 sequence; elsewhere determinism comes from injecting identifiers and randomness
-and from not asserting on time. Relatedly, "no test reads the wall clock" holds
-for **assertions** — several tests read it for poll deadlines and a handful of
-fixtures seed from it, but no assertion depends on either. The convention as
-written is stronger than the code; the property that matters does hold. Closing
-it takes either a workspace clock seam or a convention statement scoped to
-assertions, and the second is closer to the truth.
+and from not asserting on time. Relatedly, the convention is that a test may read
+the wall clock only to bound a wait or to seed a fixture, never to decide its
+verdict — and that is what the code does: several tests read it for poll
+deadlines and a handful of fixtures seed from it, but no assertion depends on
+either. What is missing is a workspace clock seam, which would let those waits
+and seeds be injected too.
 
 **Read more.** [16](16-development.md),
 [17](17-invariants.md).
