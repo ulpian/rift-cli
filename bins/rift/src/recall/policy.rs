@@ -337,6 +337,7 @@ mod tests {
                 tokens_avoided: 1_000,
                 tokens_prevented: 0,
                 tokens_returned: 160,
+                claimed_by_pulls: rift_recall_ledger::savings::ClaimedByPulls::default(),
                 read_tokens: 9_000,
                 channels: rift_recall_ledger::savings::ChannelTokens::default(),
                 reads_unmeasured: 0,

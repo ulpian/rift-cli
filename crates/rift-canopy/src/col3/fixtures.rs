@@ -141,6 +141,9 @@ pub(super) fn share_fixture(overall: Option<f64>) -> SavingsData {
             by_family: Some(10.0),
             excluding: Some(5.3),
             excluded: vec!["codex".to_owned()],
+            claimed_pulls: 0,
+            claimed_avoided: 0,
+            claimed_returned: 0,
             families: vec![
                 FamilyShareRow {
                     family: "claude-code".to_owned(),

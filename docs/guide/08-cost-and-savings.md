@@ -229,6 +229,11 @@ Each response names the rule it was booked under as `avoided_basis` beside the f
 A pull that stated hashes also writes one `memd_audit_pull_claim` row beside its audit row, keyed by the audit row's id, counting the revisions the caller named, how many of them this family recorded reading, and how many no recorded read accounts for; `rift savings` and the reread report print the sums as `pull claims:`, and the row is written just after the audit row rather than in one transaction, so a write cut short loses only this row.
 Audit rows written before this rule keep the figures they were booked with; the relation is append-only and nothing is re-booked.
 
+Even a pull booked under that rule is a **claim**, not a measurement.
+Its baseline is what reading the files last cost, and nothing it displaced is a read the capture projection recorded, so a share over it would divide by its own numerator.
+A pull therefore never enters the savings share of [§8.7](#87-the-honesty-ladder): the share counts only the decisions made on the hook channel, which answer a read or a search the projection measures, and every pull's avoided tokens are published **beside** it as `claimed by pulls`, with how many pulls there were and what they returned.
+A pull made under a family's name is still a pull: that family's reads are the denominator of its hook decisions, not of a question it asked.
+
 Two properties follow. **Avoided is net, not gross**: the figure subtracts what
 the response cost, since publishing the gross baseline would double-count
 against the denominator of any savings percentage from the same rows. That is
@@ -351,6 +356,8 @@ pool nobody could measure:
 "overall": {
   "share_pct": 3.1,
   "tokens_avoided": 41230,
+  "in_share": { "tokens_avoided": 41230, "tokens_returned": 5120, "honesty": 36110 },
+  "claimed_by_pulls": { "decisions": 0, "tokens_avoided": 0, "tokens_returned": 0 },
   "tokens_prevented": 8800,
   "tokens_returned": 5120,
   "read_tokens": 1289430,
@@ -462,9 +469,13 @@ else.
 
 The rate to quote when someone asks what the levers are worth is **the savings
 share**, `avoided ÷ (avoided + read)` since the
-last window boundary, where the numerator comes from the audit relation alone
-and the denominator adds the read tokens the capture projection recorded over
-the same window. One computation produces it for every surface — the command
+last window boundary, where the numerator is the audit relation's avoided
+tokens less what the pulls claimed, and the denominator adds the read tokens
+the capture projection recorded over the same window.
+**The share counts only the decisions whose denominator the family measured**: the hook channel's, which answer a read or a search the projection records.
+A pull's avoided tokens have no such read behind them ([§8.6](#86-what-avoided-actually-measures)), so they stand beside the share as `claimed by pulls` — the pulls, what they booked and what they returned — and never inside it, nor inside the honesty figure printed beside it, the bars or the dollars that are read from the same numerator.
+They used to be inside it, and on this repository they were nearly all of it: one pull verb booked millions of avoided tokens on a few thousand returned, and the headline read two thirds where the measured share is about one percent.
+One computation produces it for every surface — the command
 line, the status block and the dashboard headline read the same function — and it
 publishes a second variant that drops families with decisions and no captured
 reads, naming them, because a family that decides and is never observed reading
@@ -533,8 +544,10 @@ number it breaks down is worse than no breakdown at all.
 Beside it goes the **honesty figure**, `avoided − returned` over the same rows.
 It is the standing per-class test: a lever whose frames, maps and sidecars cost
 more than the reads they displaced is not a saving, and a class that fails it
-is turned off by data rather than defended. On this repository the figure is
-positive by roughly ten thousand tokens since the reset — and the share itself
+is turned off by data rather than defended. On this repository, with the
+pulls' claims beside it rather than in it, the figure is negative by about
+twelve thousand tokens over the whole record — the frames and maps cost more
+than the reads the hook channel displaced — and the share itself
 is small (about 1 % overall, 3 % over the window in which the levers acted), on
 a window holding three captured reads. Both are published with their `n`
 attached, unrounded and never re-denominated, because the honest reading is
@@ -647,7 +660,7 @@ missing price, and `~$0.00` beside a real saving reads as a measurement.
 ## 8.10 The savings headline in Canopy
 
 The dashboard's Recall panel headline reads
-`saved 110.8M tokens · 1.4% · ~$803.11` — the tokens the plane avoided, then
+`saved 110.8M tokens · 1.4% · ~$803.11` — the tokens the decisions in the share avoided, then
 **the share of [§8.7](#87-the-honesty-ladder)**, to one decimal because that is
 how `rift savings` prints it, then the dollar estimate. Every figure on the
 card comes from one window resolution: the period button's trailing cut
@@ -656,6 +669,7 @@ composed with the family's boundary marker, handed to the same
 serve count and the modal cannot cover different periods. The bars under it
 are the window's read and avoided tokens on one shared scale; dollars reach
 the card through the headline and nowhere else.
+What the pulls claimed is in none of them: the modal draws it on its own line under the share, saying it is beside the share and not in it, and draws no line for a window that held no pull.
 
 The headline is the card's one door: any cell of the line opens a read-only
 breakdown overlay carrying the disclosed basis in full — net tokens avoided
@@ -688,7 +702,10 @@ classes' treemap.
 
 `rift savings` prints the share of [§8.7](#87-the-honesty-ladder): overall and
 per family, with the honesty figure, the reads it could not weigh, the window
-it covers and the excluding variant beside it. Reading is read-only, and it
+it covers and the excluding variant beside it.
+Under the share it prints `claimed by pulls:` — what the pulls booked, how many there were and what they returned — and `--json` carries the same three figures as `overall.claimed_by_pulls`.
+The document is additive: `overall.share_pct` is the share, its numerator and honesty figure are under `overall.in_share`, and the keys a reader already had — `tokens_avoided`, `tokens_returned`, `honesty` — keep the audit relation's whole totals, which are `in_share` plus `claimed_by_pulls`.
+Reading is read-only, and it
 says so when a family has decisions and no reads rather than printing a 100 %
 it cannot defend.
 

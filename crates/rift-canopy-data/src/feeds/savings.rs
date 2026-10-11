@@ -169,6 +169,9 @@ fn read_savings_share(root: &Path, path: &str, card: &CardWindow) -> ShareData {
         by_family: savings.families_share(),
         excluding: savings.share_excluding_undenominated(),
         excluded: savings.excluded().into_iter().map(str::to_owned).collect(),
+        claimed_pulls: savings.claimed_by_pulls.decisions,
+        claimed_avoided: savings.claimed_by_pulls.tokens_avoided,
+        claimed_returned: savings.claimed_by_pulls.tokens_returned,
         families: savings
             .families
             .iter()
@@ -569,8 +572,12 @@ mod tests {
         let RecallView::Data(sd) = savings else {
             panic!("expected savings data");
         };
-        let expected = rift_recall_ledger::savings::share(1_000, 9_000);
+        // The fixture's second event is a pull: its 400 avoided tokens are
+        // claimed beside the share, and only the read-channel 600 are in it.
+        let expected = rift_recall_ledger::savings::share(600, 9_000);
         assert_eq!(sd.share.overall, expected);
+        assert_eq!(sd.share.avoided_tokens, 600);
+        assert_eq!((sd.share.claimed_pulls, sd.share.claimed_avoided), (1, 400));
         assert_eq!(sd.share.read_tokens, 9_000);
         assert_eq!(sd.share.sessions_with_reads, 1);
         assert!(
@@ -597,9 +604,11 @@ mod tests {
         let RecallView::Data(sd) = savings else {
             panic!("expected savings data");
         };
-        assert_eq!(sd.share.avoided_tokens, 2_000);
+        // The 1,500 of the second event were a pull's, beside the share and
+        // out of every figure the card draws from it.
+        assert_eq!(sd.share.avoided_tokens, 500);
         assert_eq!(
-            sd.by_worktree.family_only, 2_000,
+            sd.by_worktree.family_only, 500,
             "the axis decomposes the same total"
         );
         let RecallView::Data(cd) = calls else {
@@ -639,7 +648,9 @@ mod tests {
         );
         seed_price(&store, &rt, "claude-opus-4-8", 5_000_000);
         seed_price(&store, &rt, "claude-fable-5", 10_000_000);
-        seed_recall_db(root.path(), &proj, &[(1_000, 600_000), (2_000, 400_000)]);
+        // One read-channel event: the fixture's odd events are pulls, which
+        // no dollar figure prices.
+        seed_recall_db(root.path(), &proj, &[(1_000, 1_000_000)]);
 
         let FeedPayload::Recall { savings, .. } =
             compute_recall(root.path(), &proj, USD_NOW, RecallWindow::AllTime).payload
@@ -886,9 +897,14 @@ mod tests {
             (1_000_000, 0, 0, 0),
         );
         seed_price(&store, &rt, "claude-opus-4-8", 5_000_000);
-        // Two serves, each returned=10 (the fixture's fixed cost): net
-        // avoided is 1_000_000; gross would be 1_000_020.
-        seed_recall_db(root.path(), &proj, &[(1_000, 600_000), (2_000, 400_000)]);
+        // Two read-channel serves, each returned=10 (the fixture's fixed
+        // cost), either side of a pull that avoided nothing: net avoided is
+        // 1_000_000; gross would be 1_000_020.
+        seed_recall_db(
+            root.path(),
+            &proj,
+            &[(1_000, 600_000), (2_000, 0), (3_000, 400_000)],
+        );
 
         let FeedPayload::Recall { savings, .. } =
             compute_recall(root.path(), &proj, USD_NOW, RecallWindow::AllTime).payload
@@ -1030,7 +1046,11 @@ mod tests {
         rift_store::open_migrated(&decoy, &rift_store::recall_migrations()).unwrap();
 
         // Real serves land under the recall id.
-        seed_recall_db(root.path(), &proj, &[(1_000, 500), (2_000, 700)]);
+        seed_recall_db(
+            root.path(),
+            &proj,
+            &[(1_000, 500), (2_000, 0), (3_000, 700)],
+        );
         seed_one_read(root.path(), &proj, "claude-code", 9_000);
 
         let FeedPayload::Recall { savings, calls, .. } =
@@ -1080,8 +1100,17 @@ mod tests {
     fn the_headline_is_the_shared_share_and_never_a_second_ratio() {
         let root = tempfile::tempdir().unwrap();
         let proj = make_project(root.path(), "p");
-        // seed_recall_db fixes tokens_returned = 10 per event.
-        seed_recall_db(root.path(), &proj, &[(1_000, 90), (2_000, 40), (3_000, 20)]);
+        // seed_recall_db fixes tokens_returned = 10 per event, and its odd
+        // events are pulls, here booking nothing: their 20 returned tokens
+        // are the claimed line's, not the honesty figure's.
+        let events = [
+            (1_000, 90),
+            (2_000, 0),
+            (3_000, 40),
+            (4_000, 0),
+            (5_000, 20),
+        ];
+        seed_recall_db(root.path(), &proj, &events);
         seed_one_read(root.path(), &proj, "claude-code", 850);
         let FeedPayload::Recall {
             savings: RecallView::Data(sd),

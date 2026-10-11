@@ -136,11 +136,16 @@ mod tests {
         seed_recall_db(
             root.path(),
             &proj,
+            // The fixture's odd events are pulls, outside the share: each
+            // one here books nothing, so the headline is the even events'.
             &[
                 (USD_NOW - 40 * day, 5_000), // outside every narrow window
-                (USD_NOW - 10 * day, 700),   // inside 30d only
-                (USD_NOW - 3 * day, 200),    // inside 30d and 7d
-                (USD_NOW - 60_000, 90),      // inside all three
+                (USD_NOW - 40 * day, 0),
+                (USD_NOW - 10 * day, 700), // inside 30d only
+                (USD_NOW - 10 * day, 0),
+                (USD_NOW - 3 * day, 200), // inside 30d and 7d
+                (USD_NOW - 3 * day, 0),
+                (USD_NOW - 60_000, 90), // inside all three
             ],
         );
         seed_one_read(root.path(), &proj, "claude-code", 9_000);
@@ -254,9 +259,12 @@ mod tests {
         seed_recall_db(
             root.path(),
             &proj,
+            // The middle event is a pull booking nothing: the fixture's odd
+            // events are outside the share.
             &[
                 (USD_NOW - 10 * day, 5_000), // before the marker
-                (USD_NOW - 60_000, 90),      // after it
+                (USD_NOW - 10 * day, 0),
+                (USD_NOW - 60_000, 90), // after it
             ],
         );
         seed_one_read(root.path(), &proj, "claude-code", 9_000);

@@ -69,12 +69,15 @@ pub struct ShareData {
     /// than the whole record. `None` is the whole record — the wording the
     /// card has always used — so an absent field reads as it always did.
     pub window: Option<String>,
-    /// The headline share, over the audit relation. `None` is unanswerable —
-    /// nothing read and nothing avoided — and the headline draws no percentage.
+    /// The headline share, over the decisions whose reads were measured.
+    /// `None` is unanswerable — nothing read and nothing avoided — and the
+    /// headline draws no percentage.
     pub overall: Option<f64>,
-    /// Avoided minus returned over the same relation.
+    /// Avoided minus returned over the same decisions.
     pub honesty: i64,
-    /// The numerator: Σ avoided over the audit relation, in tokens.
+    /// The numerator: Σ avoided over the decisions in the share, in tokens.
+    /// The pulls' bookings are not in it, so the bars and the dollars, which
+    /// are read from it, are not either.
     ///
     /// It is carried beside [`Self::read_tokens`] rather than re-derived from
     /// [`Self::overall`] and the read side, because the share is a rounded
@@ -101,6 +104,14 @@ pub struct ShareData {
     pub excluding: Option<f64>,
     /// Those families, named so the exclusion is auditable.
     pub excluded: Vec<String>,
+    /// How many pulls the window holds. Their avoided tokens are claimed
+    /// rather than measured — no recorded read stands behind them — so the
+    /// modal draws them beside the share and nothing on the card counts them.
+    pub claimed_pulls: u64,
+    /// What those pulls booked as avoided.
+    pub claimed_avoided: u64,
+    /// What those pulls returned.
+    pub claimed_returned: u64,
     /// The per-family rows the modal draws.
     pub families: Vec<FamilyShareRow>,
 }
@@ -277,6 +288,7 @@ pub fn savings_share_lines(share: &ShareData) -> Vec<String> {
             share.sessions_with_reads
         ),
     ];
+    lines.extend(claimed_lines(share));
     // The hole in the denominator, named. A read whose token count was never
     // frozen is a row in the denominator's set worth zero tokens, so the share
     // is over fewer measured reads than its `n` suggests. It is counted here
@@ -293,6 +305,21 @@ pub fn savings_share_lines(share: &ShareData) -> Vec<String> {
     lines.push(String::new());
     lines.extend(SHARE_JOIN_NOTE.iter().map(|line| (*line).to_owned()));
     lines
+}
+
+/// What the pulls claimed, under the share and outside it, when the window
+/// holds any: a pull's avoided tokens have no recorded read to divide by.
+fn claimed_lines(share: &ShareData) -> Vec<String> {
+    if share.claimed_pulls == 0 {
+        return Vec::new();
+    }
+    vec![
+        format!(
+            "claimed by pulls     {} tok on {} pulls, {} returned",
+            share.claimed_avoided, share.claimed_pulls, share.claimed_returned
+        ),
+        "                     (beside the share, not in it)".to_owned(),
+    ]
 }
 
 /// The per-family table: its header, then one row per family — share,
@@ -508,6 +535,25 @@ mod tests {
         // Reachable with no dollar figure at all: the headline is the door
         // on every project whose models carry no seeded price.
         assert!(body.contains("no dollar figure"), "{body}");
+    }
+
+    /// The pulls' claim is drawn under the share and says it is outside it;
+    /// a window with no pull draws no line rather than a zero.
+    #[test]
+    fn the_modal_sets_the_pulls_claim_beside_the_share() {
+        let mut sd = share_fixture(Some(10.0));
+        let quiet = usd_breakdown_lines(&sd).join("\n");
+        assert!(!quiet.contains("claimed by pulls"), "{quiet}");
+        sd.share.claimed_pulls = 19;
+        sd.share.claimed_avoided = 4_919_280;
+        sd.share.claimed_returned = 19_603;
+        let body = usd_breakdown_lines(&sd).join("\n");
+        assert!(
+            body.contains("overall              10.0%\n")
+                && body.contains("claimed by pulls     4919280 tok on 19 pulls, 19603 returned")
+                && body.contains("(beside the share, not in it)"),
+            "{body}"
+        );
     }
 
     /// **The card names the period it is reporting.** A person who moved the
