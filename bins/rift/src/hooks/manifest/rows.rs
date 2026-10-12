@@ -157,7 +157,7 @@ fn held_rows(
     // And the ladder's second rung, which is the one that answers for a
     // revision the window edited after reading: the blob route reaches
     // nothing for it, and this manifest would say `(changed)` with no
-    // lines — the gap §18.6 of the guide records.
+    // lines.
     let snapshots = basis_snapshots_at(repo);
     let mut rows = Vec::with_capacity(moved.len());
     for (file, bytes) in moved {

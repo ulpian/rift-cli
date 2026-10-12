@@ -390,8 +390,7 @@ pub fn held_diff_of(basis: &Basis, current: &[u8]) -> RedactedDiff {
 /// can only ever say less. Asking the cheaper, exact rung first means a
 /// committed revision is answered exactly as it always was and the snapshot
 /// answers only the revisions that had no basis at all — an agent's own
-/// uncommitted edit, which is the gap in `docs/guide/18-known-gaps.md` §18.6
-/// that this rung exists to close.
+/// uncommitted edit, which is the case this rung exists for.
 ///
 /// **Opens a store**, so it belongs to the turns on which one is already open
 /// and never to the gate path.
