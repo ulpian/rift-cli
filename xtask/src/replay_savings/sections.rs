@@ -252,6 +252,22 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
         "family_held".to_owned(),
         super::family_held::family_held_json(report),
     );
+    map.insert(
+        "first_sight_split".to_owned(),
+        super::first_sight_split::first_sight_split_json(report),
+    );
+    map.insert(
+        "by_name_split".to_owned(),
+        super::by_name_split::by_name_json(report),
+    );
+    map.insert(
+        "post_compaction".to_owned(),
+        super::post_compaction::post_compaction_json(report),
+    );
+    map.insert(
+        "pull_answers".to_owned(),
+        super::pull_answers::pull_json(report),
+    );
 }
 
 /// One inheritance route's tally.

@@ -16,11 +16,16 @@ use rift_core::Sha256Id;
 use serde_json::{json, Value};
 
 use super::bucket::Bucket;
+use super::by_name_split::ByNameOrigin;
 use super::classify::classify_reads;
 use super::family_held::{fold_family, FamilyLog};
+use super::file_order::FileOrder;
 use super::history::History;
-use super::inheritance::{inheritance_of, leads, opening_section, WindowLead, SPAWNING_TOOLS};
+use super::inheritance::{
+    inheritance_of, leads, opening_section, Inheritance, WindowLead, SPAWNING_TOOLS,
+};
 use super::options::Options;
+use super::pull_answers::pull_invocations;
 use super::report::{finish, land, Report};
 use super::shell_shape::count_shape;
 use super::spawn_link::{note_the_spawn, open_the_window, openings, Opening, PendingSpawn};
@@ -79,6 +84,11 @@ pub(super) struct TreeState {
     pub(super) openings: Vec<Opening>,
     /// What the family-held rows are folded from.
     pub(super) family: FamilyLog,
+    /// What the spawner handed down for each first read, by the window that
+    /// made it, the path and the revision.
+    pub(super) by_name_origin: BTreeMap<(usize, String, u32), ByNameOrigin>,
+    /// The windows in file order, and what was noted of their calls.
+    pub(super) order: FileOrder,
 }
 
 /// The settings every call in one replay is decided under, spelled once.
@@ -192,6 +202,7 @@ fn replay_tree(
         leads: leads(&path_refs, &loaded),
         spawned_by: spawned_by(&loaded),
         openings: openings(&loaded),
+        order: FileOrder::of(&loaded),
         ..TreeState::default()
     };
     tree.spawners = tree.leads.iter().filter_map(|lead| lead.parent).collect();
@@ -235,6 +246,7 @@ fn replay_tree(
         tree.family.note_journal_lines(index, lines, &stamp);
     }
     fold_cross_window(&tree, settings.limits, report);
+    tree.order.fold(report);
     let journals: Vec<&Journal> = windows.iter().map(|w| &w.journal).collect();
     fold_family(&tree.family, &journals, &mut report.family_held);
     Ok(())
@@ -280,6 +292,7 @@ fn replay_call(ctx: &mut Ctx<'_>, call: &Call) {
     }
     if call.name == "Bash" {
         count_shell_call(ctx.report, call);
+        note_the_pulls(ctx, call, &text, tokens);
     }
     if SPAWNING_TOOLS.contains(&call.name.as_str()) {
         note_the_opening_section(ctx, &call.id);
@@ -320,6 +333,24 @@ fn replay_call(ctx: &mut Ctx<'_>, call: &Call) {
     }
     let seen = ctx.report.other_tools.entry(call.name.clone()).or_default();
     *seen = seen.saturating_add(1);
+}
+
+/// Count the lookup verbs a shell call really ran, and keep the answer of one
+/// run in the family for the reads that may follow it.
+fn note_the_pulls(ctx: &mut Ctx<'_>, call: &Call, text: &str, tokens: u64) {
+    let Some(command) = call.input.get("command").and_then(Value::as_str) else {
+        return;
+    };
+    if !command.contains("recall") && !command.contains("memory") {
+        return;
+    }
+    let found = pull_invocations(command, call.cwd.as_deref());
+    if found.is_empty() {
+        return;
+    }
+    if let Some(answer) = ctx.report.pulls.note_call(&found, text, tokens) {
+        ctx.tree.order.note_answer(ctx.window, &call.id, answer);
+    }
 }
 
 /// What the section each window this call spawned opens with would name: the
@@ -528,6 +559,14 @@ fn fold_cross_window(tree: &TreeState, limits: Limits, report: &mut Report) {
                     .map(String::as_str)
             });
             let class = inheritance_of(lead, parent_text, key, min_lines);
+            if class == Inheritance::ByName {
+                let origin = tree
+                    .by_name_origin
+                    .get(&(*window, key.clone(), *revision))
+                    .copied()
+                    .unwrap_or_default();
+                report.by_name_split.note(origin, *tokens);
+            }
             if let Some(tally) = report.sibling_by_inheritance.get_mut(class.index()) {
                 tally.add(*tokens);
             }

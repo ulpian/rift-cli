@@ -9,16 +9,19 @@ use rift_agent::window_journal::{
     self, Decision, DenyShape, EditEcho, EvictReason, Interval, Journal, Limits, Line, Mode,
     Narrowing, Reconcile, ResolvedRead, StatedDelivery,
 };
-use rift_agent::ReadRequest;
+use rift_agent::{HiKind, ReadRequest, ReadSpan};
 
 use super::bucket::Bucket;
+use super::by_name_split::ByNameOrigin;
 use super::census::{
     count_first_sight_size, count_machine_format, count_machine_format_first_sight, MachineFormat,
 };
 use super::delivery::{stated_delivery, PERSISTED_OUTPUT};
+use super::file_order::ReadNote;
+use super::first_sight_split::Sight;
 use super::replay::{revision_hash, Ctx, Replay};
 use super::report::{land, Report};
-use super::spawn_link::class_index;
+use super::spawn_link::{class_index, handed_down};
 use super::transcript::Call;
 use super::worktree::{path_key, FileFacts};
 
@@ -45,6 +48,9 @@ struct Resolved {
     file_bytes: u64,
     /// What the pre-call step credited before any result arrived.
     recorded: Interval,
+    /// Whether the request named no end and began at line 1: a read without a
+    /// limit.
+    unranged: bool,
 }
 
 /// One read of a call that may perform several: resolved, and decided where
@@ -250,6 +256,7 @@ pub(super) fn classify_reads(
     if bucket == Bucket::FirstSight {
         note_what_a_first_sight_was_of(ctx.report, format, blocker, tokens);
     }
+    note_the_slots(ctx, call, &slots, bucket, tokens);
     note_the_outlines(ctx, &slots, bucket, tokens);
     note_the_family(ctx, &slots, bucket, tokens);
     note_an_inherited_observation(ctx.report, &slots, tokens);
@@ -308,6 +315,69 @@ fn note_what_a_first_sight_was_of(
         resolved.file_bytes,
         tokens,
     );
+}
+
+/// Count a first sight in the class the two floors and the request put it in.
+fn note_the_sight_split(report: &mut Report, slots: &[Slot], tokens: u64) {
+    let members: Vec<Option<Sight<'_>>> = slots
+        .iter()
+        .map(|slot| match slot {
+            Slot::Blocked(_) => None,
+            Slot::Member(member) => {
+                let resolved = &member.resolved;
+                Some(Sight {
+                    key: &resolved.key,
+                    lines: u64::from(resolved.read.total_lines),
+                    bytes: resolved.file_bytes,
+                    unranged: resolved.unranged,
+                    from_line_one: resolved.read.range.lo == 1,
+                })
+            }
+        })
+        .collect();
+    report.first_sight_split.note(&members, tokens);
+}
+
+/// Note a repository-content read call for the rows folded in each window's
+/// file order: the paths it names, the channel and what it returned.
+fn note_the_read_for_order(ctx: &mut Ctx<'_>, call: &Call, requests: &[ReadRequest], tokens: u64) {
+    ctx.tree.order.note_read(
+        ctx.window,
+        &call.id,
+        ReadNote {
+            paths: in_tree_paths(call, requests),
+            shell: call.name == "Bash",
+            tokens,
+            ..ReadNote::default()
+        },
+    );
+}
+
+/// What the resolved members of a call say about the rows added after the
+/// buckets: the class of a first sight, and which reads resolved to a line
+/// count and which of those took the whole file.
+fn note_the_slots(ctx: &mut Ctx<'_>, call: &Call, slots: &[Slot], bucket: Bucket, tokens: u64) {
+    if bucket == Bucket::FirstSight {
+        note_the_sight_split(ctx.report, slots, tokens);
+    }
+    note_the_resolved_reads(ctx, call, slots);
+}
+
+/// Note which of a call's reads the replay resolved to a line count, and
+/// which of those took the file from line 1 through its last line.
+fn note_the_resolved_reads(ctx: &mut Ctx<'_>, call: &Call, slots: &[Slot]) {
+    for slot in slots {
+        let Slot::Member(member) = slot else { continue };
+        let read = &member.resolved.read;
+        ctx.tree
+            .order
+            .note_resolved(ctx.window, &call.id, &member.resolved.key);
+        if read.range.lo <= 1 && read.range.hi >= read.total_lines {
+            ctx.tree
+                .order
+                .note_whole(ctx.window, &call.id, &member.resolved.key);
+        }
+    }
 }
 
 /// A further read, by a window, of a file its first contact would have been
@@ -380,8 +450,9 @@ fn note_the_family(ctx: &mut Ctx<'_>, slots: &[Slot], bucket: Bucket, tokens: u6
         .note_family_candidate(ctx.window, ctx.stamp, read, tokens, facts);
 }
 
-/// Count what the call is made of, and whether it is the read that follows an
-/// edit this harness declines to model as coverage.
+/// Count what the call is made of, whether it is the read that follows an
+/// edit this harness declines to model as coverage, and note it for the rows
+/// folded in each window's file order.
 fn count_the_members(ctx: &mut Ctx<'_>, call: &Call, requests: &[ReadRequest], tokens: u64) {
     if requests.len() > 1 {
         ctx.report.calls_with_several_reads = ctx.report.calls_with_several_reads.saturating_add(1);
@@ -399,6 +470,7 @@ fn count_the_members(ctx: &mut Ctx<'_>, call: &Call, requests: &[ReadRequest], t
     if verified {
         ctx.report.verification_after_edit.add(tokens);
     }
+    note_the_read_for_order(ctx, call, requests, tokens);
 }
 
 /// Turn every decline on a call that is not declined as a whole back into an
@@ -597,6 +669,14 @@ fn note_a_first_sight(ctx: &mut Ctx<'_>, blocker: Option<&Slot>, text: &str, tok
     };
     let key = member.resolved.key.clone();
     let revision = member.resolved.revision;
+    let origin = ByNameOrigin::of(
+        matches!(member.decision, Some(Decision::Inherited { .. })),
+        handed_down(ctx.tree, ctx.window, &key),
+    );
+    ctx.tree
+        .by_name_origin
+        .entry((ctx.window, key.clone(), revision))
+        .or_insert(origin);
     if ctx.tree.spawners.contains(&ctx.window) {
         ctx.tree
             .first_texts
@@ -670,6 +750,13 @@ fn resolve_member(ctx: &mut Ctx<'_>, call: &Call, request: &ReadRequest, text: &
         slice_bytes,
         file_bytes,
         recorded,
+        unranged: matches!(
+            request.span,
+            ReadSpan::Lines {
+                lo: 1,
+                hi_kind: HiKind::DefaultWindow(_)
+            }
+        ),
     };
     // Past the size a delivery can be vouched for: the gate reaches no
     // decision and writes nothing, and the member's only route to coverage is
