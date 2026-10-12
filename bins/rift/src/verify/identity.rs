@@ -5,7 +5,7 @@
 //! a file — the shard's path and its subtree names are not in any artifact —
 //! and they are the ones a review comes back to.
 
-use super::artifacts::{NativeArtifacts, ShardHeader};
+use super::artifacts::{NativeArtifacts, ShardHeader, TaskArtifactBytes};
 use super::verdict::Verdict;
 
 /// **The checkpoint-id pass** — the binding a tamperer cannot recompute.
@@ -99,6 +99,7 @@ pub(super) fn task_subtree_pass(
                 t.tool_use_id
             )));
         }
+        found.extend(task_transcript_digest(id, t, doc.as_ref()));
         let input = doc
             .as_ref()
             .and_then(|v| v.get("input_tokens"))
@@ -121,6 +122,41 @@ pub(super) fn task_subtree_pass(
         )));
     }
     found
+}
+
+/// A collected subagent transcript's own binding: the `bytes` and `sha256`
+/// its metadata records must describe the `transcript.jsonl` beside it, and a
+/// metadata that records them over a subtree with no transcript is a claim
+/// about bytes the shard does not hold.
+///
+/// The Merkle root already refuses an edited subtree; this pass is what names
+/// which subtree, so a tampered subagent transcript is reported as itself
+/// rather than only as a checkpoint whose id no longer addresses it. A task
+/// written before collection records neither member and owes nothing here.
+fn task_transcript_digest(
+    id: &str,
+    t: &TaskArtifactBytes,
+    doc: Option<&serde_json::Value>,
+) -> Option<Verdict> {
+    let recorded = doc
+        .and_then(|v| v.get("sha256"))
+        .and_then(serde_json::Value::as_str);
+    let size = doc
+        .and_then(|v| v.get("bytes"))
+        .and_then(serde_json::Value::as_u64);
+    if recorded.is_none() && size.is_none() {
+        return None;
+    }
+    let held = t.transcript_full.as_deref().unwrap_or_default();
+    let agrees = t.transcript_full.is_some()
+        && recorded == Some(rift_shadow::sha256_hex(&[held]).as_str())
+        && size == u64::try_from(held.len()).ok();
+    (!agrees).then(|| {
+        Verdict::Tamper(format!(
+            "{id}: task subtree '{}' transcript.jsonl does not match its recorded sha256",
+            t.tool_use_id
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -404,6 +440,7 @@ mod tests {
             input_tokens: Some(120),
             output_tokens: Some(34),
             transcript: None,
+            provenance: None,
         }
         .metadata_json();
         let task_leaves = [TaskLeafBytes {
@@ -1257,6 +1294,112 @@ mod tests {
         assert!(
             matches!(shard_passes(&edited).unwrap().worst, Verdict::Tamper(_)),
             "an edited token count must not verify"
+        );
+    }
+
+    /// A shard carrying one collected subagent transcript, as the archive
+    /// writes it, with `tamper` applied to the stored `transcript.jsonl`.
+    fn collected_task_shard(tamper: impl Fn(&mut Vec<u8>)) -> MemorySubstrate {
+        use rift_shadow::backend::{
+            shard_merkle_root, ShardLeafBytes, TaskLeafBytes, TaskProvenance, TaskTranscriptState,
+            ROOT_BOUND_ID_MIN_CANON_VERSION,
+        };
+        let content = b"parent capture".as_slice();
+        let report = fixture_report();
+        let raw = rift_core::SecretBytes::new(b"{\"type\":\"user\",\"text\":\"sub\"}\n".to_vec());
+        let packs = rift_shadow::redact::RulePackSet::builtin();
+        let (pair, _) = rift_shadow::archived_transcript(&raw, 0, &packs).unwrap();
+        let (full, compact) = (
+            pair.full.as_slice().to_vec(),
+            pair.compact.as_slice().to_vec(),
+        );
+        let task_meta = rift_shadow::backend::ArchivedTask {
+            tool_use_id: "toolu_s".to_owned(),
+            agent_id: "a1".to_owned(),
+            started_at_ms: 4,
+            ended_at_ms: 8,
+            input_tokens: None,
+            output_tokens: None,
+            transcript: Some(pair),
+            provenance: Some(TaskProvenance {
+                subagent_type: Some("Explore".into()),
+                parent_session: FIXTURE_SESSION.into(),
+                worktree: None,
+                spawn_matched: true,
+                transcript: TaskTranscriptState::Sealed,
+            }),
+        }
+        .metadata_json();
+        let task_leaves = [TaskLeafBytes {
+            tool_use_id: "toolu_s",
+            metadata: &task_meta,
+            transcript_compact: Some(&compact),
+            transcript_full: Some(&full),
+        }];
+        let leaves = ShardLeafBytes {
+            content_redacted: content,
+            full_jsonl: None,
+            redaction_report: report.as_bytes(),
+            serve_audit: None,
+            sessions: None,
+            usage: None,
+            window_journal: None,
+            session_worktrees: None,
+            tool_results: None,
+            tool_calls: None,
+            transcript_compact: None,
+            transcript_full: None,
+            tasks: &task_leaves,
+            session_metas: &[],
+            digests: rift_shadow::backend::DigestLeafBytes::default(),
+        };
+        let root = shard_merkle_root(&leaves).to_hex();
+        let id = rift_shadow::condense::checkpoint_ids_for_shard(
+            &[FIXTURE_SESSION.to_owned()],
+            ROOT_BOUND_ID_MIN_CANON_VERSION,
+            &leaves,
+        )
+        .remove(0);
+        let mut stored = full.clone();
+        tamper(&mut stored);
+        MemorySubstrate::local()
+            .with_shard(shard(&id, None, 1))
+            .with_artifact(&id, "redaction_report.json", report.as_bytes())
+            .with_artifact(&id, "content.redacted", content)
+            .with_artifact(&id, "tasks/toolu_s/metadata.json", &task_meta)
+            .with_artifact(&id, "tasks/toolu_s/transcript.compact.jsonl", &compact)
+            .with_artifact(&id, "tasks/toolu_s/transcript.jsonl", &stored)
+            .with_artifact(
+                &id,
+                "metadata.json",
+                format!(
+                    r#"{{"canon_version":{ROOT_BOUND_ID_MIN_CANON_VERSION},"strategy":"manual-commit","merkle_root":"{root}","sessions":["{FIXTURE_SESSION}"],"tasks":["toolu_s"]}}"#
+                )
+                .as_bytes(),
+            )
+    }
+
+    /// One byte changed in a collected subagent transcript fails verify, and
+    /// the finding names the subtree rather than only the checkpoint.
+    #[test]
+    fn a_one_byte_tamper_in_a_subagent_transcript_names_its_subtree() {
+        let honest = shard_passes(&collected_task_shard(|_| ())).unwrap();
+        assert!(
+            matches!(honest.worst, Verdict::Ok),
+            "honest: {:?}",
+            honest.worst
+        );
+        let flipped = shard_passes(&collected_task_shard(|b| b[0] ^= 1)).unwrap();
+        assert!(
+            matches!(&flipped.worst, Verdict::Tamper(m) if m.contains("task subtree 'toolu_s' transcript.jsonl")),
+            "{:?}",
+            flipped.worst
+        );
+        let dropped = shard_passes(&collected_task_shard(Vec::clear)).unwrap();
+        assert!(
+            matches!(dropped.worst, Verdict::Tamper(_)),
+            "{:?}",
+            dropped.worst
         );
     }
 }

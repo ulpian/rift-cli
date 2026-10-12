@@ -85,5 +85,6 @@ pub(super) fn task(id: &str) -> ArchivedTask {
         input_tokens: None,
         output_tokens: None,
         transcript: None,
+        provenance: None,
     }
 }

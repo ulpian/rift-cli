@@ -539,3 +539,54 @@ async fn a_worktree_member_the_reader_refuses_is_named_and_writes_nothing() {
         r.parse_notes
     );
 }
+
+/// A shard listing two subagent subtrees, one of whose metadata does not parse.
+fn substrate_with_tasks(id: &str) -> MemorySubstrate {
+    MemorySubstrate::local()
+        .with_shard(shard(id, 0))
+        .with_artifact(id, "redaction_report.json", valid_report().as_bytes())
+        .with_artifact(
+            id,
+            "metadata.json",
+            format!(
+                r#"{{"strategy":"manual-commit","merkle_root":"{}","sessions":["native-1"],"tasks":["toolu_a","toolu_b","toolu_c"]}}"#,
+                "d".repeat(64)
+            )
+            .as_bytes(),
+        )
+        .with_artifact(id, "full.jsonl", full_jsonl().as_bytes())
+        .with_artifact(
+            id,
+            "tasks/toolu_a/metadata.json",
+            br#"{"schema_version":1,"tool_use_id":"toolu_a","agent_id":"a1","spawn":"matched"}"#,
+        )
+        .with_artifact(
+            id,
+            "tasks/toolu_b/metadata.json",
+            br#"{"schema_version":1,"tool_use_id":"toolu_b","agent_id":"a2","spawn":"unmatched"}"#,
+        )
+        .with_artifact(id, "tasks/toolu_c/metadata.json", b"{not json")
+}
+
+/// A rebuild parses and counts the subagent subtrees a shard lists — the same
+/// count from every wiped projection — and an unreadable one is a parse issue,
+/// not a subtree.
+#[tokio::test]
+async fn a_rebuild_counts_the_same_task_subtrees_from_a_wiped_projection() {
+    let sub = substrate_with_tasks(&shard_id(7));
+    let mut counts = Vec::new();
+    for _ in 0..2 {
+        let report = ingest_from_substrate(&store(), &sub, "repo", "claude-code", 1)
+            .await
+            .unwrap();
+        assert_eq!(report.shards_projected, 1);
+        assert!(report.parse_issues >= 1, "the broken subtree is named");
+        assert!(
+            report.render().contains("task subtrees: 2"),
+            "{}",
+            report.render()
+        );
+        counts.push(report.task_subtrees);
+    }
+    assert_eq!(counts, [2, 2]);
+}

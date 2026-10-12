@@ -512,6 +512,7 @@ mod tests {
             input_tokens: None,
             output_tokens: None,
             transcript: None,
+            provenance: None,
         }
         .metadata_json()
     }
