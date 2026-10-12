@@ -365,6 +365,7 @@ from one table:
 | `first_contact` | `off` \| `observe` \| `enforce` | `observe` | How far a window's first read of a large file may be answered with the file's bound outline instead, once. Never above `mode` or the family's own cap. |
 | `first_contact_min_lines` | integer | `400` | A file this long is large enough for `first_contact`. |
 | `first_contact_min_bytes` | integer | `16384` | A file this large is large enough for `first_contact`; either floor is enough. |
+| `decline_family_held` | `off` \| `observe` \| `enforce` | `observe` | How far a read of bytes another live window of the repository holds may be declined once, with the file's outline or the held runs as the cheaper route. Never above `mode` or the family's own cap. |
 | `[interception.agents]` | per-family modes | absent | An override per supported family: `claude-code`, `codex`, `antigravity`. |
 
 Three of those numbers are measurements rather than preferences. **96 KiB** is
@@ -397,6 +398,15 @@ nothing yet; the move is a separate decision, taken when the observed pool and
 the paired evaluation say the frame pays.
 The two floors are provisional: the replay's first-contact rows and the
 observe period's histogram re-set them.
+
+`decline_family_held` is the other key about a read the window does not
+hold: one whose bytes another live window of the repository holds at this
+revision ([07-serving-and-injection.md §7.4](07-serving-and-injection.md#a-read-another-window-holds)).
+It ships at `observe`: the read runs, and what the decline would have been —
+its route, the runs it would have offered and the frame's size — is recorded
+and sized under its own tags.
+`enforce` declines once, never without a cheaper route, and charges every
+later read of those bytes against the decline.
 
 `basis_ttl_days` governs the one durable artifact this lever leaves behind.
 The delta frame needs the revision a window holds, and a revision an agent

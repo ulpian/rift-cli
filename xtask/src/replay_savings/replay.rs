@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 
 use super::bucket::Bucket;
 use super::classify::classify_reads;
+use super::family_held::{fold_family, FamilyLog};
 use super::history::History;
 use super::inheritance::{inheritance_of, leads, opening_section, WindowLead, SPAWNING_TOOLS};
 use super::options::Options;
@@ -76,6 +77,8 @@ pub(super) struct TreeState {
     pub(super) spawns: Vec<PendingSpawn>,
     /// What each window's opening hook is handed, and whether it has opened.
     pub(super) openings: Vec<Opening>,
+    /// What the family-held rows are folded from.
+    pub(super) family: FamilyLog,
 }
 
 /// The settings every call in one replay is decided under, spelled once.
@@ -192,6 +195,8 @@ fn replay_tree(
         ..TreeState::default()
     };
     tree.spawners = tree.leads.iter().filter_map(|lead| lead.parent).collect();
+    let parents: Vec<Option<usize>> = tree.leads.iter().map(|lead| lead.parent).collect();
+    tree.family = FamilyLog::new(&path_refs, &parents);
     let mut windows: Vec<WindowState> = Vec::new();
     // One order over every window of the tree, so a revision advanced in
     // one window is the revision the next window's read is keyed by.
@@ -226,8 +231,12 @@ fn replay_tree(
             report,
         };
         replay_event(ctx, event);
+        let lines = windows.get(index).map_or(0, |w| w.journal.lines().len());
+        tree.family.note_lines(index, lines, &stamp);
     }
     fold_cross_window(&tree, settings.limits, report);
+    let journals: Vec<&Journal> = windows.iter().map(|w| &w.journal).collect();
+    fold_family(&tree.family, &journals, &mut report.family_held);
     Ok(())
 }
 

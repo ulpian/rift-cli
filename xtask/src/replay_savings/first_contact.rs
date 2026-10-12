@@ -66,12 +66,17 @@ pub struct FirstContactPool {
     followed: [Tally; 4],
 }
 
-/// The outline facts of a file large enough for the lever, or `None`.
-pub(super) fn outline_facts(key: &str, bytes: &[u8]) -> Option<Arc<OutlineFacts>> {
+/// Whether a file is large enough for the first-contact lever.
+pub(super) fn is_large(bytes: &[u8]) -> bool {
     let lines = bytes.split_inclusive(|b| *b == b'\n').count();
-    let large = u64::try_from(lines).unwrap_or(u64::MAX) >= FIRST_CONTACT_LINES
-        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) >= FIRST_CONTACT_BYTES;
-    if !large || !is_outlinable_path(key) {
+    u64::try_from(lines).unwrap_or(u64::MAX) >= FIRST_CONTACT_LINES
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) >= FIRST_CONTACT_BYTES
+}
+
+/// The outline facts of an outlinable file, whatever its size — the outline
+/// the worker binds at any read of it — or `None`.
+pub(super) fn outline_facts(key: &str, bytes: &[u8]) -> Option<Arc<OutlineFacts>> {
+    if !is_outlinable_path(key) {
         return None;
     }
     let outline = FileOutline::of(key, bytes)?;
@@ -163,6 +168,16 @@ impl FirstContactPool {
 
 /// The frame the sealed renderer would have sent for this read.
 fn frame_of(read: &ResolvedRead, facts: &OutlineFacts) -> Option<String> {
+    with_outlined_read(read, facts, render_outline_frame)
+}
+
+/// What `render` makes of this read's outline, as the sealed renderer is
+/// handed it: one construction for every frame an outline is sent in.
+pub(super) fn with_outlined_read<T>(
+    read: &ResolvedRead,
+    facts: &OutlineFacts,
+    render: impl FnOnce(&OutlinedRead<'_>) -> T,
+) -> T {
     let entries: Vec<OutlineEntry<'_>> = facts
         .outline
         .definitions()
@@ -177,7 +192,7 @@ fn frame_of(read: &ResolvedRead, facts: &OutlineFacts) -> Option<String> {
         })
         .collect();
     let hash = read.hash.to_hex();
-    render_outline_frame(&OutlinedRead {
+    render(&OutlinedRead {
         path: &read.path,
         hash: &hash,
         lines: facts.outline.lines(),
@@ -309,7 +324,10 @@ mod tests {
         let body = big_file();
         let facts = outline_facts("src/big.rs", body.as_bytes()).expect("a large code file");
         assert!(outline_facts("src/big.toml", body.as_bytes()).is_none());
-        assert!(outline_facts("src/small.rs", b"fn a() {}\n").is_none());
+        // Every outlinable file has an outline the worker binds; only a large
+        // one is a first contact.
+        assert!(outline_facts("src/small.rs", b"fn a() {}\n").is_some());
+        assert!(!is_large(b"fn a() {}\n") && is_large(body.as_bytes()));
         let mut pool = FirstContactPool::default();
         pool.note_read(&facts, "2026-01-01T00:00:05Z");
         let whole = read(1, HiKind::DefaultWindow(HiKind::END_OF_FILE));

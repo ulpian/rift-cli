@@ -78,12 +78,37 @@ pub enum ArchivedWindowRow {
         /// Whether the window provably holds every line of the new revision.
         full: bool,
     },
+    /// A read declined once — or, unacted, only recorded — because another
+    /// live window of the repository held the revision, with the route the
+    /// decline carried.
+    FamilyHeld {
+        /// What the decline handed the window instead of the lines.
+        route: WindowFamilyRoute,
+        /// The repository-relative path, `/`-spelled.
+        path: String,
+        /// The revision (64 hex).
+        hash: String,
+        /// The run that was asked for, `[lo, hi]`, 1-based and inclusive.
+        range: (u32, u32),
+        /// Whether the decline was made, or only recorded.
+        acted: bool,
+    },
     /// The window stopped holding what it had been given.
     Evict {
         /// Which signal emptied it (`pre_compact`, `compact`, `clear`, `resume`,
         /// `post_compact` or `truncate`).
         reason: String,
     },
+}
+
+/// What a family decline handed the window, in a
+/// [`ArchivedWindowRow::FamilyHeld`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFamilyRoute {
+    /// The file's bound outline.
+    Outline,
+    /// The runs the other windows held.
+    Held,
 }
 
 /// What happened to a run of lines, in a [`ArchivedWindowRow::Slice`].
@@ -134,6 +159,12 @@ impl ArchivedWindowRow {
                 WindowSliceKind::InheritFork => "inherit:fork",
                 WindowSliceKind::InheritPaste => "inherit:paste",
                 WindowSliceKind::InheritByName => "inherit:by_name",
+            },
+            // A closed `family_held:<route>` vocabulary, as the inherited
+            // runs have theirs.
+            Self::FamilyHeld { route, .. } => match route {
+                WindowFamilyRoute::Outline => "family_held:outline",
+                WindowFamilyRoute::Held => "family_held:held",
             },
             Self::Expect { .. } => "expect",
             Self::Edit { .. } => "edit",
@@ -223,6 +254,18 @@ fn insert_window_row(
         ArchivedWindowRow::Expect { path, hash } => {
             put("path", json!(frozen_path(path)?));
             put("hash", json!(frozen_hash(hash)?));
+        }
+        ArchivedWindowRow::FamilyHeld {
+            path,
+            hash,
+            range,
+            acted,
+            ..
+        } => {
+            put("path", json!(frozen_path(path)?));
+            put("hash", json!(frozen_hash(hash)?));
+            put("range", json!([range.0, range.1]));
+            put("acted", json!(acted));
         }
         ArchivedWindowRow::Edit {
             path,
@@ -396,6 +439,49 @@ mod tests {
         }
     }
 
+    /// A family decline freezes under its route's closed token with the run
+    /// that was asked for and whether it was made, and nothing else.
+    #[test]
+    fn a_family_decline_freezes_under_its_route_token() {
+        for (route, token, acted) in [
+            (WindowFamilyRoute::Outline, "family_held:outline", true),
+            (WindowFamilyRoute::Held, "family_held:held", false),
+        ] {
+            let row = ArchivedWindowRow::FamilyHeld {
+                route,
+                path: "src/a.rs".to_owned(),
+                hash: hex('e'),
+                range: (1, 900),
+                acted,
+            };
+            let bytes = window_journal_jsonl_bytes(&[window_fact('a', 4, row)]).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["kind"], token);
+            assert_eq!(value["range"], serde_json::json!([1, 900]));
+            assert_eq!(value["acted"], acted);
+            let members: Vec<&str> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                members,
+                [
+                    "acted",
+                    "at",
+                    "hash",
+                    "kind",
+                    "path",
+                    "range",
+                    "schema_version",
+                    "turn",
+                    "window"
+                ]
+            );
+        }
+    }
+
     /// Whether `value` has `member`'s declared shape (an undeclared one has none).
     fn has_declared_shape(member: &str, value: &serde_json::Value) -> bool {
         let pair = |v: &serde_json::Value| v.as_array().is_some_and(|a| a.len() == 2);
@@ -403,10 +489,10 @@ mod tests {
         match member {
             "window" | "hash" | "hash_new" | "hash_old" => is_lower_hex64(text),
             "path" => frozen_path(text).is_some(),
-            "kind" => ["read", "hold", "edit", "evict"].contains(&text),
+            "kind" => ["read", "hold", "edit", "evict", "family_held:held"].contains(&text),
             "reason" => WINDOW_EVICT_REASONS.contains(&text),
             "subagent" => identifier_or_withheld(text) == text,
-            "full" => value.is_boolean(),
+            "full" | "acted" => value.is_boolean(),
             "range" => pair(value),
             "sites" => value.as_array().is_some_and(|runs| runs.iter().all(pair)),
             "shift" => value.is_i64(),
@@ -429,18 +515,29 @@ mod tests {
                     total_lines: Some(9),
                 }
             }),
-            (text, hash, any::<i64>(), any::<bool>()).prop_map(|(path, hash, shift, full)| {
-                let (hash_old, sites) = (Some(hash.clone()), vec![(1, 2)]);
-                ArchivedWindowRow::Edit {
-                    path,
-                    hash_old,
-                    hash_new: hash,
-                    sites,
-                    shift,
-                    full,
+            (text, hash.clone(), any::<i64>(), any::<bool>()).prop_map(
+                |(path, hash, shift, full)| {
+                    let (hash_old, sites) = (Some(hash.clone()), vec![(1, 2)]);
+                    ArchivedWindowRow::Edit {
+                        path,
+                        hash_old,
+                        hash_new: hash,
+                        sites,
+                        shift,
+                        full,
+                    }
                 }
-            }),
+            ),
             text.prop_map(|reason| ArchivedWindowRow::Evict { reason }),
+            (text, hash, any::<(u32, u32)>(), any::<bool>()).prop_map(
+                |(path, hash, range, acted)| ArchivedWindowRow::FamilyHeld {
+                    route: WindowFamilyRoute::Held,
+                    path,
+                    hash,
+                    range,
+                    acted,
+                }
+            ),
         ]
     }
 

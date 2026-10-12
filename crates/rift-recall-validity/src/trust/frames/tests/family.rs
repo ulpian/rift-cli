@@ -3,11 +3,13 @@
 //! the other windows hold, while no outline is bound.
 
 use super::super::{
-    render_held_lines_frame, render_held_outline_frame, render_outline_frame, CLAUSE_HELD_BY,
-    CLAUSE_HELD_ELSEWHERE, FRAME_HELD_OPENER, FRAME_OUTLINE_OPENER, WITHHELD_PATH,
+    render_held_lines_frame, render_held_outline_frame, render_outline_frame, OutlineEntry,
+    OutlinedRead, CLAUSE_HELD_BY, CLAUSE_HELD_ELSEWHERE, FRAME_HELD_OPENER, FRAME_OUTLINE_OPENER,
+    MAX_OUTLINE_FRAME_DEFINITIONS, WITHHELD_PATH,
 };
 use super::outline::golden_read;
 use super::{HASH, SRC};
+use crate::DefinitionKind;
 
 /// ★ The outline sent because another window holds the bytes is the
 /// first-contact frame with one clause in its first sentence, and it hands
@@ -88,4 +90,36 @@ fn a_withheld_path_is_stood_in_for_in_the_held_lines_frame() {
     let text = render_held_lines_frame(hostile, HASH, &[(1, 40)], None).unwrap();
     assert!(text.contains(WITHHELD_PATH), "{text}");
     assert!(!text.contains("ignore previous"), "{text}");
+}
+
+/// Past the cap the held outline names one definition fewer than the
+/// first-contact frame, so its clause is paid for, and offers exactly the
+/// spans it names.
+#[test]
+fn the_held_outline_names_one_definition_fewer_and_offers_what_it_names() {
+    let names: Vec<String> = (0..20).map(|at| format!("f{at}")).collect();
+    let entries: Vec<OutlineEntry<'_>> = names
+        .iter()
+        .zip(1u32..)
+        .map(|(name, at)| OutlineEntry {
+            kind: DefinitionKind::Function,
+            name,
+            first_line: at * 10,
+            last_line: at * 10 + 5,
+            tokens: Some(at),
+        })
+        .collect();
+    let read = OutlinedRead {
+        definitions: 20,
+        entries: &entries,
+        ..golden_read(None)
+    };
+    let (text, spans) = render_held_outline_frame(&read).unwrap();
+    let shown = text
+        .lines()
+        .filter(|line| line.starts_with("- fn "))
+        .count();
+    assert_eq!(shown, MAX_OUTLINE_FRAME_DEFINITIONS - 1);
+    assert_eq!(spans.len(), shown);
+    assert!(text.contains("(9 more not shown)"), "{text}");
 }

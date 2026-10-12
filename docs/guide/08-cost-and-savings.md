@@ -708,6 +708,9 @@ it covers and the excluding variant beside it.
 Under the share it prints `claimed by pulls:` — what the pulls booked, how many there were and what they returned — and `--json` carries the same three figures as `overall.claimed_by_pulls`.
 It also prints `first contact:` — the first reads of large files the outline lever observed, the ones it answered, and what those avoided and cost — and `--json` carries them as `first_contact`.
 The row is the `first_contact` tag read back out of the audit relation: an observed first contact avoided nothing and is counted by number alone, and an answered one's figures are already inside the totals above, so the row only says which part of them the outline lever is and lets a reader take it out.
+It prints `family held:` the same way — the reads another live window held that the lever observed and declined, what the declines avoided, what their frames cost, what was read of those bytes afterwards, and the net — and `--json` carries them as `family_held`.
+The reads afterwards are rows of their own under `family_held:followup`, booked as tokens returned and never as a negative saving, so every net in this chapter already takes them off; the row's `net` is the declines' share of it.
+The replay prints the same lever's pool by route: the first sights another live window held, net of the frame each route would have sent and of the window's own later reads of the bytes.
 The document is additive: `overall.share_pct` is the share, its numerator and honesty figure are under `overall.in_share`, and the keys a reader already had — `tokens_avoided`, `tokens_returned`, `honesty` — keep the audit relation's whole totals, which are `in_share` plus `claimed_by_pulls`.
 Reading is read-only, and it
 says so when a family has decisions and no reads rather than printing a 100 %

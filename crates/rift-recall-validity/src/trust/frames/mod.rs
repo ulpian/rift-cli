@@ -345,6 +345,12 @@ const MAX_FRAME_SITES: usize = 8;
 /// replay corpus holds; the floor test in the evaluation crate measures it.
 pub const MAX_OUTLINE_FRAME_DEFINITIONS: usize = 12;
 
+/// The same cap for the outline sent because another window holds the
+/// bytes: one fewer, because the clause that says so costs about what a
+/// definition line does, and the frame keeps the same four-hundred-token
+/// ceiling on the replay corpus's largest outlines.
+const MAX_HELD_OUTLINE_FRAME_DEFINITIONS: usize = MAX_OUTLINE_FRAME_DEFINITIONS - 1;
+
 /// The fewest lines a first page must ask for before its outline is worth
 /// sending in its stead: the outline frame's break-even at four tokens a line,
 /// the rule every read floor is derived by.
@@ -687,7 +693,11 @@ fn render_outline(
     read: &OutlinedRead<'_>,
     cause: OutlineCause,
 ) -> Option<(String, Vec<(u32, u32)>)> {
-    let (lines, withheld) = outline_lines(read.entries);
+    let cap = match cause {
+        OutlineCause::FirstContact => MAX_OUTLINE_FRAME_DEFINITIONS,
+        OutlineCause::HeldElsewhere => MAX_HELD_OUTLINE_FRAME_DEFINITIONS,
+    };
+    let (lines, withheld) = outline_lines(read.entries, cap);
     let first = lines.first()?.1;
     let shown_count = lines.len();
     let omitted = usize::try_from(read.definitions)
@@ -745,10 +755,9 @@ fn outline_subject(read: &OutlinedRead<'_>, cause: OutlineCause) -> String {
 /// The definition lines the frame names, in file order with their spans,
 /// and how many the guard withheld.
 ///
-/// The costliest [`MAX_OUTLINE_FRAME_DEFINITIONS`] of the ones the guard
-/// passes; where no count was stored they rank equal and the first in the
-/// file are kept.
-fn outline_lines(entries: &[OutlineEntry<'_>]) -> (Vec<OutlineLine>, usize) {
+/// The costliest `cap` of the ones the guard passes; where no count was
+/// stored they rank equal and the first in the file are kept.
+fn outline_lines(entries: &[OutlineEntry<'_>], cap: usize) -> (Vec<OutlineLine>, usize) {
     let mut passed: Vec<(usize, &OutlineEntry<'_>, String)> = Vec::new();
     let mut withheld = 0usize;
     for (at, entry) in entries.iter().enumerate() {
@@ -758,7 +767,7 @@ fn outline_lines(entries: &[OutlineEntry<'_>]) -> (Vec<OutlineLine>, usize) {
         }
     }
     passed.sort_by(|a, b| b.1.tokens.cmp(&a.1.tokens).then(a.0.cmp(&b.0)));
-    passed.truncate(MAX_OUTLINE_FRAME_DEFINITIONS);
+    passed.truncate(cap);
     passed.sort_by_key(|(at, _, _)| *at);
     let lines = passed
         .into_iter()

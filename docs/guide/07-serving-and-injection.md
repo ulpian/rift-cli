@@ -618,11 +618,72 @@ An answered outline, when the lever acts, leaves an `outline` journal line —
 not coverage, since the window was handed the outline rather than the file —
 and it counts as the one answer per request, so the repeat runs.
 
+### A read another window holds
+
+A window that holds nothing of a revision may be asking for bytes another live
+window of the same repository already holds — a subagent reading a file its
+coordinator, or a sibling, read minutes earlier.
+`[interception] decline_family_held` is the lever that may decline such a read
+once, and only with a **cheaper route** to the same bytes: never a bare
+refusal.
+
+The read must be a whole-file read or a first page of at least 95 lines; a read
+from the middle of a file names the lines it wants, and runs.
+The window must hold nothing of the revision, and must not have been declined
+on these grounds for this revision already.
+Then the other windows are read — the journals of every checkout of the family
+([09-worktrees-and-families.md §9.5](09-worktrees-and-families.md#95-what-is-shared-and-what-stays-put)),
+and only those of **live** windows: a window whose session cache says it is
+working and was written within the idle-sweep floor, and whose own journal was
+written within that floor too.
+A window with no opening marker, or one whose marker names another window, is
+not live.
+The newest sixteen journals written within the floor are examined, and no more
+than a mebibyte of their bytes is read; at that bound a release build reads
+them in about 19 ms.
+What the live windows hold of this revision — what each was handed or wrote,
+never what it inherited — is the ground the decline rests on.
+
+The route is chosen in one order.
+Where an outline is bound for these exact bytes, the decline carries the
+first-contact frame with one clause added to its first sentence:
+`[rift] Read outlined: <path>@<hash> is held at this revision by another window of this repository; it is …`,
+naming at most eleven definitions so the clause is paid for, inside 400 tokens
+on the replay corpus's largest outlines.
+Where none is, and the other windows hold part of the request in at most
+sixteen runs, the frame is `[rift] Read held by another window:` and names
+those runs as the reads to make — about 100 tokens.
+Where the other windows hold all of the request and no outline is bound, there
+is nothing cheaper to offer, and the read runs.
+Neither frame names the holder beyond "another window of this repository": no
+session, no key, no checkout and no turn.
+Every name in them goes through the inline guard, and a row in another window's
+journal that is not a well-formed line of this revision is never read as one.
+
+**One decline per revision, and every later read is admitted.**
+The decision leaves a `family` line in the window's journal: the request, the
+route, the runs offered, whether it was acted on, and the frame's size in bytes.
+It is not coverage.
+A later read of the revision in that window is never declined on these grounds
+again: one inside the offered runs is the follow-up the decline promised; one
+outside them, the identical repeat included, runs too.
+Each is charged: the worker books what it delivered, measured, as tokens
+returned under `family_held:followup`, so the decline's credit is the request
+less its frame less every read charged against it since.
+
+**In observe, nothing is sent.**
+The read runs and the window is credited with it; the `family` line beside it
+records what the decline would have been, and the row the worker writes names
+the slice under `family_held:outline` or `family_held:held` with no frame and
+no claimed saving.
+
 ### Nothing on this path opens a store
 
 The decision runs while a person waits, so its whole cost is a hash under a
 ceiling plus one small file read — two for a first contact, whose outline is a
-second small file named by the same hash. No projection is opened, **no tokenizer is
+second small file named by the same hash, and for a read another window holds
+the bounded walk of the other windows' journals, their markers and their
+session caches, which are files of the same run state. No projection is opened, **no tokenizer is
 initialised** — the two most expensive things a Rift process can do — and the
 audit row is journaled to the detached worker, which counts the declined
 slice's tokens with the real tokenizer and writes both audit relations

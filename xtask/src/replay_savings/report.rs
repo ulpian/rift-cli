@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use super::bucket::Bucket;
 use super::census::{CensusRow, FirstSightSizes};
+use super::family_held::FamilyHeldPool;
 use super::first_contact::FirstContactPool;
 use super::shell_shape::{Shape, ShapeRow};
 use super::worktree::FactsSource;
@@ -92,6 +93,9 @@ pub struct Report {
     pub first_sight_sizes: FirstSightSizes,
     /// The first sights the outline lever would have answered.
     pub first_contact: FirstContactPool,
+    /// The first sights another live window held, which a family decline
+    /// would have answered.
+    pub family_held: FamilyHeldPool,
     /// Where the path facts came from.
     pub facts: FactsSource,
     /// Shell calls that look like reads and that the grammar does not

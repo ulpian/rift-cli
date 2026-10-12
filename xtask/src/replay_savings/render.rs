@@ -63,6 +63,7 @@ pub fn render_table(report: &Report) -> String {
         report,
         denominator,
     ));
+    out.push_str(&super::family_held::family_held_rows(report, denominator));
     out.push_str(&the_constants(report));
     out.push_str(READING_IT);
     out

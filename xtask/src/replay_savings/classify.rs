@@ -251,6 +251,7 @@ pub(super) fn classify_reads(
         note_what_a_first_sight_was_of(ctx.report, format, blocker, tokens);
     }
     note_the_outlines(ctx, &slots, bucket, tokens);
+    note_the_family(ctx, &slots, bucket, tokens);
     note_an_inherited_observation(ctx.report, &slots, tokens);
     land(ctx.report, bucket, tokens);
 }
@@ -350,6 +351,33 @@ fn note_the_outlines(ctx: &mut Ctx<'_>, slots: &[Slot], bucket: Bucket, tokens: 
             ctx.state.outlined.insert(key.clone(), class);
         }
     }
+}
+
+/// Every read that ran, for the family-held follow-ups, and a one-read call
+/// that is a first sight as a read a family decline may have answered.
+fn note_the_family(ctx: &mut Ctx<'_>, slots: &[Slot], bucket: Bucket, tokens: u64) {
+    if bucket == Bucket::Declined {
+        return;
+    }
+    for slot in slots {
+        if let Slot::Member(member) = slot {
+            let read = &member.resolved.read;
+            ctx.tree
+                .family
+                .note_read(ctx.window, ctx.stamp, read, tokens);
+        }
+    }
+    let (Bucket::FirstSight, [Slot::Member(member)]) = (bucket, slots) else {
+        return;
+    };
+    let facts = ctx
+        .worktree
+        .facts_at(ctx.state.commit, &member.resolved.key)
+        .and_then(|facts| facts.bound_outline().cloned());
+    let read = &member.resolved.read;
+    ctx.tree
+        .family
+        .note_first_sight(ctx.window, ctx.stamp, read, tokens, facts);
 }
 
 /// Count what the call is made of, and whether it is the read that follows an
