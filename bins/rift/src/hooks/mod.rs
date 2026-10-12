@@ -21,6 +21,7 @@ mod ingest;
 mod install;
 mod manifest;
 mod recovery;
+mod subagent_claims;
 mod sweep;
 mod worker;
 

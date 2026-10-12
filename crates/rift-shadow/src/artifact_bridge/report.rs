@@ -34,6 +34,11 @@ pub struct BridgeReport {
     /// `captured_event` rows actually inserted (0 on a re-run or over a
     /// hook-fed projection — the dual-source set-union no-op).
     pub events_inserted: usize,
+    /// `tasks/<tool-use-id>/` subtrees the projected shards list whose
+    /// metadata parsed — subagent transcripts sealed inside their parent
+    /// checkpoint. Counted, never stored: the shard is their record, and the
+    /// projection holds no row for them.
+    pub task_subtrees: usize,
     /// Lenient-parse issues encountered (enumerated, not fatal).
     pub parse_issues: usize,
     /// What those issues **were**, for the ones a human can act on — bounded by
@@ -83,6 +88,11 @@ impl BridgeReport {
             "  events: {} derived, {} inserted",
             self.events_derived, self.events_inserted
         );
+        // Printed only when a walk met a subtree, so a taskless walk renders
+        // exactly as it always has.
+        if self.task_subtrees > 0 {
+            let _ = writeln!(s, "  task subtrees: {}", self.task_subtrees);
+        }
         let _ = writeln!(s, "  parse issues: {}", self.parse_issues);
         for n in &self.parse_notes {
             let _ = writeln!(s, "  note: {n}");

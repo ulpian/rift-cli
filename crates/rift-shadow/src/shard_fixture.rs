@@ -143,6 +143,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
             input_tokens: Some(800),
             output_tokens: Some(24),
             transcript: Some(task_transcript),
+            provenance: None,
         }],
         // `None`, deliberately, though the fixture HAS a literal clock: a
         // recorded time would add `created_at` to `metadata.json` and move the

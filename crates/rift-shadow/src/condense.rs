@@ -1271,6 +1271,7 @@ mod tests {
             input_tokens: Some(120),
             output_tokens: Some(34),
             transcript: None,
+            provenance: None,
         };
 
         let archived = condense(

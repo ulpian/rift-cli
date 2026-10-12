@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use rift_core::RedactedBytes;
 
 use super::artifacts::{canonical_json, insert_compact_boundary};
+use super::tasks::TaskProvenance;
 
 /// One archived canonical event, carrying exactly the fields a `full.jsonl` line
 /// records (content addresses, never re-derived). Mirrors
@@ -327,6 +328,10 @@ pub struct ArchivedTask {
     /// artifacts already through the redaction gate, same proof-by-type as the
     /// parent's [`CheckpointArchive::transcript`].
     pub transcript: Option<ArchivedTranscript>,
+    /// Where the transcript came from, when the archive collected the task
+    /// from the agent's own files. `None` writes none of its members, so a
+    /// task built without it keeps the metadata it always had.
+    pub provenance: Option<TaskProvenance>,
 }
 
 impl ArchivedTask {
@@ -356,6 +361,9 @@ impl ArchivedTask {
         // pair (present only when the artifacts are).
         if let Some(t) = &self.transcript {
             insert_compact_boundary(&mut obj, t);
+        }
+        if let Some(p) = &self.provenance {
+            p.insert(&mut obj, self.transcript.as_ref());
         }
         canonical_json(&serde_json::Value::Object(obj))
     }

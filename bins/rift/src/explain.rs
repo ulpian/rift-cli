@@ -187,6 +187,10 @@ pub(crate) async fn checkpoint_explain(
         Depth::Full => walker.as_ref().and_then(|w| transcript_of(w, &id)),
         _ => None,
     };
+    let subagents = walker
+        .as_ref()
+        .map(|w| subagents_of(w, &id, meta.as_ref()))
+        .unwrap_or_default();
     Ok(render(&View {
         id,
         depth,
@@ -199,6 +203,7 @@ pub(crate) async fn checkpoint_explain(
         costs,
         transcript,
         worktree,
+        subagents,
     }))
 }
 
@@ -276,6 +281,58 @@ fn transcript_of(walker: &ShardWalker, id: &str) -> Option<(&'static str, Vec<u8
         })
 }
 
+/// One subagent transcript the checkpoint sealed, as its
+/// `tasks/<tool-use-id>/metadata.json` records it.
+struct SubagentRow {
+    tool_use_id: Label,
+    agent_id: Label,
+    subagent_type: Option<Label>,
+    /// The sealed `transcript.jsonl`'s size; `None` when none was sealed.
+    bytes: Option<u64>,
+    /// Why no transcript was sealed (`missing`, `unreadable`, `unsealed`).
+    absent: Option<Label>,
+}
+
+/// The subagents the shard's own task list names, each read from its subtree's
+/// metadata. A task listed with no readable metadata is still listed, by name.
+fn subagents_of(
+    walker: &ShardWalker,
+    id: &str,
+    meta: Option<&serde_json::Value>,
+) -> Vec<SubagentRow> {
+    let listed = meta
+        .and_then(|m| m.get("tasks"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str);
+    listed
+        .map(|tool_use_id| {
+            let doc: Option<serde_json::Value> = walker
+                .read_artifact_any(id, &format!("tasks/{tool_use_id}/metadata.json"))
+                .ok()
+                .flatten()
+                .and_then(|b| serde_json::from_slice(&b).ok());
+            let text = |k: &str| {
+                doc.as_ref()
+                    .and_then(|d| d.get(k))
+                    .and_then(serde_json::Value::as_str)
+                    .map(Label::of)
+            };
+            SubagentRow {
+                tool_use_id: Label::of(tool_use_id),
+                agent_id: text("agent_id").unwrap_or_else(|| Label::of("?")),
+                subagent_type: text("subagent_type"),
+                bytes: doc
+                    .as_ref()
+                    .and_then(|d| d.get("bytes"))
+                    .and_then(serde_json::Value::as_u64),
+                absent: text("task_transcript"),
+            }
+        })
+        .collect()
+}
+
 /// One session the checkpoint recorded, label-filtered for the terminal.
 struct SessionRow {
     session_id: String,
@@ -338,6 +395,8 @@ struct View {
     /// answered `unknown` merely because the shard is elsewhere would be
     /// reporting its own reach as a fact about the archive.
     worktree: Option<Label>,
+    /// The subagent transcripts the shard sealed.
+    subagents: Vec<SubagentRow>,
 }
 
 /// The first 12 characters of an id.
@@ -359,6 +418,7 @@ fn render(v: &View) -> Outcome {
     digest_summary_line(v, &mut human);
     if v.depth != Depth::Short {
         body_lines(v, &mut human);
+        subagent_lines(v, &mut human);
     }
     if let Some((name, bytes)) = &v.transcript {
         human.push_str(&format!("  transcript ({name}):\n"));
@@ -388,7 +448,10 @@ fn render(v: &View) -> Outcome {
         "costs": v.costs,
         "transcript_rendered": v.transcript.is_some(),
     });
-    Outcome::ok(human.trim_end().to_owned(), json)
+    Outcome::ok(
+        human.trim_end().to_owned(),
+        with_subagents(json, &v.subagents),
+    )
 }
 
 /// The metadata header: anchor, strategy, canon, creation time.
@@ -490,6 +553,49 @@ fn body_lines(v: &View, human: &mut String) {
     }
 }
 
+/// The document with its `subagents` member, present only when the shard
+/// sealed one: a checkpoint without subagents renders the document it always
+/// did, byte for byte.
+fn with_subagents(mut json: serde_json::Value, subagents: &[SubagentRow]) -> serde_json::Value {
+    if subagents.is_empty() {
+        return json;
+    }
+    let rows: Vec<serde_json::Value> = subagents
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "tool_use_id": s.tool_use_id, "agent_id": s.agent_id,
+                "subagent_type": s.subagent_type, "bytes": s.bytes,
+                "task_transcript": s.absent,
+            })
+        })
+        .collect();
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("subagents".into(), rows.into());
+    }
+    json
+}
+
+/// One line per sealed subagent: its spawn, agent, type and size, or why no
+/// transcript was sealed.
+fn subagent_lines(v: &View, human: &mut String) {
+    for s in &v.subagents {
+        let size = match (s.bytes, &s.absent) {
+            (Some(n), _) => format!("{n} bytes"),
+            (None, Some(why)) => format!("transcript {why}"),
+            (None, None) => "no transcript".to_owned(),
+        };
+        human.push_str(&format!(
+            "  subagent {}  agent {}  {}  {size}\n",
+            s.tool_use_id,
+            s.agent_id,
+            s.subagent_type
+                .as_ref()
+                .map_or_else(|| "?".to_owned(), ToString::to_string),
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +643,7 @@ mod tests {
             attribution: vec![("a.rs".into(), 1, 2, 900)],
             costs: vec![],
             transcript: None,
+            subagents: vec![],
         };
         let out = render(&v);
         assert!(
@@ -559,6 +666,56 @@ mod tests {
         assert_eq!(normal.json["transcript_rendered"], false);
     }
 
+    /// The subagents a shard sealed are listed with their sizes, a lost one by
+    /// why, and a hostile type cannot reach the terminal raw; a checkpoint with
+    /// none renders no member at all.
+    #[test]
+    fn explain_lists_each_sealed_subagent_with_its_size() {
+        let v = View {
+            id: "ab".repeat(32),
+            depth: Depth::Normal,
+            meta: None,
+            created_at: None,
+            sessions: vec![],
+            worktree: None,
+            digests: vec![],
+            prompt: None,
+            attribution: vec![],
+            costs: vec![],
+            transcript: None,
+            subagents: vec![
+                SubagentRow {
+                    tool_use_id: Label::of("toolu_a"),
+                    agent_id: Label::of("a1"),
+                    subagent_type: Some(Label::of("Ex\u{1b}[31mplore")),
+                    bytes: Some(1234),
+                    absent: None,
+                },
+                SubagentRow {
+                    tool_use_id: Label::of("a2"),
+                    agent_id: Label::of("a2"),
+                    subagent_type: None,
+                    bytes: None,
+                    absent: Some(Label::of("missing")),
+                },
+            ],
+        };
+        let out = render(&v);
+        assert!(
+            out.human.contains("subagent toolu_a  agent a1"),
+            "{}",
+            out.human
+        );
+        assert!(out.human.contains("1234 bytes") && out.human.contains("transcript missing"));
+        assert!(!out.human.contains('\u{1b}'));
+        assert_eq!(out.json["subagents"][0]["bytes"], 1234);
+        let none = render(&View {
+            subagents: vec![],
+            ..v
+        });
+        assert!(none.json.get("subagents").is_none());
+    }
+
     /// Worktree provenance at this verb's renderer: the member rides the document as
     /// a top-level fact and the header prints it as `archived_in`, while a
     /// checkpoint the projection has no row for reads `unknown` — never `main`,
@@ -577,6 +734,7 @@ mod tests {
             attribution: vec![],
             costs: vec![],
             transcript: None,
+            subagents: vec![],
         };
         let named = render(&base);
         assert!(
