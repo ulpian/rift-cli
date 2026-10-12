@@ -213,7 +213,7 @@ mod tests {
     /// A rewritten digest writer emitting a different key order, a different
     /// field set or a different `schema_version` satisfies it exactly as well as
     /// this one does, which is why `schema_version` could go from 1 to 7 with
-    /// the whole suite green. It was also the only place item 6's byte-stability
+    /// the whole suite green. It was also the only place the digest's byte-stability
     /// claim was defended.
     ///
     /// The oracle is the maximal fixture's frozen artifacts: the same four

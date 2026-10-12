@@ -597,7 +597,7 @@ mod tests {
         );
         assert!(
             !unknown.human.contains("archived_in: main"),
-            "absence is not the main work tree (D6): {}",
+            "absence is not the main work tree: {}",
             unknown.human
         );
         assert_eq!(unknown.json["worktree"], serde_json::Value::Null);

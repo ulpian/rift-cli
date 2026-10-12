@@ -15,7 +15,7 @@
 //! recorded here:
 //! * **No `git reset`, ever.** the legacy backend's help text says resume "will reset your
 //!   Git status" past un-checkpointed commits; its tag code does not, and Rift
-//!   does not either. The safety rail (PRD item 6) is a warning + confirm
+//!   does not either. The safety rail is a warning + confirm
 //!   (`--force` in non-interactive runs): newer commits stay exactly where
 //!   they are.
 //! * **The picker never hangs a pipe.** Without a TTY it prints the resumable
@@ -178,7 +178,7 @@ async fn resume_branch(
             serde_json::json!({ "error": "no_checkpoint", "branch": branch }),
         ));
     };
-    // Safety rail (PRD item 6): un-checkpointed work above the checkpoint is
+    // Safety rail: un-checkpointed work above the checkpoint is
     // named, and the resume proceeds only on an explicit yes. Nothing is ever
     // reset — the newer commits stay.
     if walk.newer_work > 0 && !force && !confirm_older_checkpoint(walk.newer_work, &found.commit) {

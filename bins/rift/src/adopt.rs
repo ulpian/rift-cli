@@ -590,7 +590,7 @@ mod tests {
     /// comparisons rather than as an absence of code.
     ///
     /// **Git hooks** are the family's, installed by `rift init`; an adoption
-    /// that re-pointed them is the D2 defect wearing a new hat. **Tracked
+    /// that re-pointed them would fork the family's capture all over again. **Tracked
     /// files** — `.agents/hooks.json`, the Recall skill regions — belong to the
     /// repository, and a git hook that dirties the tree the user just created
     /// is not a repair. Both are planted STALE here, so a writer would show up

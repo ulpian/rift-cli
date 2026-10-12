@@ -160,7 +160,7 @@ pub(super) async fn anchored_checkpoints(
         .unwrap_or_default()
 }
 
-/// The fetch ladder (PRD item 1): local read → checkpoint remote → origin
+/// The fetch ladder: local read → checkpoint remote → origin
 /// full — re-reading after each rung, stopping at the first that answers.
 /// Every remote rung skips gracefully when its remote is not configured, so
 /// a local-only repository resolves fully offline.

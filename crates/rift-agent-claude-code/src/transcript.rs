@@ -359,7 +359,7 @@ mod offset_tests {
         .to_string()
     }
 
-    /// The whole point of item 6: the checkpoint's window and the session's
+    /// The whole point of the boundary: the checkpoint's window and the session's
     /// total are different numbers, and the boundary decides which.
     #[test]
     fn the_checkpoint_window_and_the_session_total_are_kept_distinct() {
@@ -374,7 +374,7 @@ mod offset_tests {
         assert_eq!(usage.session.output, Some(321));
         assert_ne!(
             usage.checkpoint, usage.session,
-            "collapsing the two scopes is the defect item 6 names"
+            "collapsing the two scopes is the defect this test pins"
         );
         assert_eq!(usage.next_offset, transcript.len() as u64);
     }

@@ -5,7 +5,7 @@
 //! # Nothing here decides a pack's vocabulary
 //!
 //! `PackKind`, the per-kind layout table, the section vocabulary and the
-//! placement invariants all landed with item 5 and are not re-decided here.
+//! placement invariants are decided in `rift-recall-pack`, not here.
 //! This module's only job is to hand facts to sealed constructors: every line
 //! in the compiled pack exists because a `SectionEntry::*` constructor produced
 //! it, which is what makes "no un-neutralized content can be in a pack" a

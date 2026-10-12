@@ -208,7 +208,7 @@ impl<'a> Planes<'a> {
     ///
     /// The recall path was the retired per-PATH derivation, called here on a
     /// product read. From the main work tree that answers the family's own
-    /// recall id (the family adopts main's, D1), so nothing looked wrong;
+    /// recall id (the family adopts main's), so nothing looked wrong;
     /// from a **linked member** it named a store nothing writes, and
     /// `dispatch`, `recap`, `review` and `investigate` reported
     /// `available: false` over a ledger that was there all along. That is the

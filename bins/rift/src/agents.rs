@@ -172,7 +172,7 @@ fn enabled_outcome(enabled: &Enabled<'_>) -> Outcome {
     // The native hook file, when this agent has one Rift writes. Named from the
     // installer's table rather than from a `== "codex"` test: now that
     // Claude Code has one as well, and an enable that wires a file without
-    // saying so is how D12 stayed invisible for nineteen days.
+    // saying so is how a missing writer once stayed invisible for weeks.
     let native_hook_line =
         rift_agent_install::native::hook_file(agent_token).map_or_else(String::new, |relative| {
             format!(

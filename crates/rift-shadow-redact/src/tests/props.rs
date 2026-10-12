@@ -445,7 +445,7 @@ proptest::proptest! {
     ///    [`spaced_pii_password_strategy`] before this property could ever
     ///    have failed on it.
     /// 5. **A detector whose id one of the frozen lists already declares**
-    ///    moves both sides together again — item 2's mechanism reached
+    ///    moves both sides together again — entry 2's mechanism reached
     ///    through the id instead of through the table. [`main_proposes`] is
     ///    handed an id and the pack set and nothing else, so it passes the
     ///    collision on the id alone and the reference adopts a detector
