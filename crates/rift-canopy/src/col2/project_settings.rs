@@ -431,7 +431,7 @@ pub struct ProjectSetupPlan {
     pub tool_call_capture: bool,
     /// Provider token-usage capture starts enabled.
     pub token_usage_capture: bool,
-    /// Raw transcript capture starts off.
+    /// Raw transcript retrieval starts on.
     pub raw_transcripts: bool,
     /// Selected adapter tokens.
     pub integrations: Vec<String>,

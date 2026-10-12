@@ -142,7 +142,7 @@ impl EffectiveConfig {
             allow_models: sorted_unique(cfg.models.allow.clone()),
             deny_models: sorted_unique(cfg.models.deny.clone()),
             sensitive_paths: sensitive,
-            raw_transcripts: cfg.capture.raw_transcripts,
+            raw_transcripts: cfg.capture.raw_transcripts_enabled(),
             capture_tool_calls: cfg.capture.tool_calls,
             capture_token_usage: cfg.capture.token_usage,
             checkpoint_strategy: cfg.capture.checkpoint_strategy,
@@ -282,7 +282,7 @@ impl EffectiveConfig {
         self.allow_models.is_empty() || self.allow_models.iter().any(|g| glob_match(g, model))
     }
 
-    /// Whether raw-transcript retrieval is enabled (secure default: false).
+    /// Whether raw-transcript retrieval is enabled (default: true).
     #[must_use]
     pub fn raw_transcripts_enabled(&self) -> bool {
         self.raw_transcripts
@@ -425,10 +425,14 @@ fn glob_problem(g: &str, where_: &str) -> Option<String> {
     None
 }
 
-/// The capture section: raw transcripts only with the risk acknowledged, a
-/// known checkpoint strategy, and a schedule interval of at least a minute.
+/// The capture section: raw transcripts written on only with the risk
+/// acknowledged, a known checkpoint strategy, and a schedule interval of at
+/// least a minute. The acknowledgement guards the file that writes the option
+/// on, so a reviewer who sees it switched back on in a repository that had it
+/// off sees an acknowledgement; the shipped default, on and unwritten, needs
+/// none, or every file silent on the option would be invalid.
 fn check_capture(cfg: &RiftConfig, errors: &mut Vec<String>) {
-    if cfg.capture.raw_transcripts && !cfg.capture.acknowledge_risk {
+    if cfg.capture.raw_transcripts == Some(true) && !cfg.capture.acknowledge_risk {
         errors.push("capture.raw_transcripts requires capture.acknowledge_risk = true".to_string());
     }
     if !CHECKPOINT_STRATEGIES.contains(&cfg.capture.checkpoint_strategy.as_str()) {

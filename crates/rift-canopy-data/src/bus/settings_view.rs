@@ -531,7 +531,7 @@ mod tests {
         assert!(view.settings[3].enabled, "native search default is on");
         assert!(view.settings[4].enabled, "tool capture default is on");
         assert!(view.settings[5].enabled, "token capture default is on");
-        assert!(!view.settings[6].enabled, "raw transcripts default off");
+        assert!(view.settings[6].enabled, "raw transcripts default on");
         assert_eq!(
             view.integrations
                 .iter()
@@ -862,6 +862,10 @@ mod tests {
         assert!(!search.enabled);
         assert_eq!(search.detail, None);
         assert!(!row(ProjectSettingId::ToolCallCapture).enabled);
+        assert!(
+            !row(ProjectSettingId::RawTranscripts).enabled,
+            "a config that writes raw transcripts off shows them off"
+        );
     }
 
     #[test]
