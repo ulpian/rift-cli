@@ -25,7 +25,7 @@ Rift makes AI-assisted engineering **legible, recoverable, and cheaper**:
   Settings** modal rather than separate dashboard panels.
 
 > **Scope.** This repo is the **local toolchain**. Rift Cloud (encrypted sync,
-> web dashboard, forecasting) is a future, separately-built surface — every
+> web dashboard, forecasting) is a separately built surface — every
 > local decision is made *sync-ready* so Cloud is additive, never a rewrite.
 
 ## Two non-negotiables
@@ -47,17 +47,18 @@ Rift makes AI-assisted engineering **legible, recoverable, and cheaper**:
 | `rift-hashchain` | SHA-256 leaves, Merkle roots, the checkpoint chain, inclusion proofs. |
 | `rift-store` | Append-only store (rusqlite reference impl; **Turso** is the production target), migration engine, integrity chain, bitemporal cost facts, column encryption. |
 | `rift-shadow*` | Capture: the native checkpoint archive, the two-pass redaction gate, hooks/canonical events + state machine, line attribution + confidence, the four-class cost model. |
-| `rift-recall-*` | Recall plane: content-addressed handles + the four-state envelope, hash-bound validity, ledger metrics, task-aware ranking, the context-pack compiler, serving policy, `memd.*` events, the bounded hook/skill surface, the substrate reader. |
+| `rift-recall-*` | Recall plane: handles + the four-state envelope, hash-bound validity, ledger metrics, task-aware ranking, the context-pack compiler, serving policy, `memd.*` events, the bounded hook/skill surface, the substrate reader. |
 | `rift-canopy` / `rift-canopy-data` | The dashboard behind a `RenderBackend` seam plus its policy, native-adapter, and status projections. |
 | `rift-agent*` | The native integration SDK and adapters for supported coding agents. |
 | `rift-nic-gauge` | Read-only context-window utilization data for Canopy; it is not a project setting. |
+| `rift-git` / `rift-registry` / `rift-tokens` | Native git plumbing and worktree discovery; the machine-global project registry; the one token-counting authority. |
 | `bins/rift`, `bins/rift-memd` | The `rift` entrypoint and the recall binary. |
 
 ## Build & run
 
 ```bash
 cargo build --workspace
-cargo test  --workspace          # ~220 tests
+cargo test  --workspace
 cargo run -p rift -- status      # CLI subcommand
 cargo run -p rift               # launch Canopy
 cargo run -p rift -- viewer      # read-only checkpoint/Recall inspection
@@ -74,22 +75,20 @@ that one process, and `rift recall` keeps the recall projection fresh on its
 own. `rift-memd` is the separate projection binary (`metrics`, `rebuild`,
 `status`, `doctor`, `eval`) — it reports the measured baseline and rebuilds the
 projection from git, so it must stay out of the hook-path binary (size cap; no
-network crate in the shipped graph). **Distribution requirement:** the
-downloadable build's CLI installer wizard must offer, as an optional step, to
-also download and install `rift-memd`. No packaging or installer exists yet.
+network crate in the shipped graph).
 
 ### Automatic Total Recall setup
 
 `rift init` also enables Recall and safely provisions validated native project
 wiring for detected agents. This alpha captures Claude Code, Codex and
-Antigravity. Coming soon: Gemini CLI, Cursor, Copilot CLI, OpenCode, Factory
-Droid and Ollama — all nine stay in the shared adapter registry, so every
-integration keeps its row in listings and Project Settings. None of the six is
-wired for capture, for two different reasons: five of them declare verb
-surfaces the real agents never send, so an install that appeared to succeed
-would capture nothing; the sixth is simply outside this alpha's scope. Either
-way Rift refuses to enable them rather than half-wire them — a refusal is
-honest about what will be recorded, a half-wired integration is not. The
+Antigravity. Gemini CLI, Cursor, Copilot CLI, OpenCode, Factory Droid and
+Ollama are not wired for capture, yet all nine stay in the shared adapter
+registry, so every integration keeps its row in listings and Project Settings.
+The reasons differ: five of the six declare verb surfaces the real agents never
+send, so an install that appeared to succeed would capture nothing; the sixth
+is outside this alpha's scope. Either way Rift refuses to enable them rather
+than half-wire them — a refusal is honest about what is recorded, a half-wired
+integration is not. The
 supported set is not prose: it is the `ALPHA_AGENTS` constant in
 `rift-shadow-hooks` that the refusal itself reads, so what this paragraph
 claims and what the code does are the same list. Use `rift init --no-recall`
@@ -164,8 +163,10 @@ hooks or re-mints an identity as a side effect.
 - [AGENTS.md](AGENTS.md) — condensed cross-tool guidance; `.agents/` holds
   per-agent overrides.
 - [SECURITY.md](SECURITY.md) — threat model + reporting.
-- [Recall setup](docs/recall-setup.md) — native hook and CLI-skill configuration
-  for Claude Code, Codex, and Antigravity.
+- [The guide](docs/guide/00-start-here.md) — what each plane does and why each
+  standing decision was made; [agent integrations](docs/guide/10-agent-integrations.md)
+  covers native hook and CLI-skill configuration for Claude Code, Codex, and
+  Antigravity.
 
 ## License
 

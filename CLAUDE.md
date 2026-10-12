@@ -11,9 +11,9 @@ and projects a memory-delta graph that lets agents retrieve *deltas* instead of
 re-reading the world.
 
 This repo implements the local Rift toolchain. Rift Cloud
-(sync, web dashboard, forecasting) is a future, separately-built surface — out
-of scope here, but every local decision is made *sync-ready*, so Cloud can be
-additive rather than a rewrite.
+(sync, web dashboard, forecasting) is a separately built surface, out of scope here;
+every local decision is made *sync-ready*, so Cloud can be additive rather than
+a rewrite.
 
 The written guide to this toolchain is **tracked** at `docs/guide/` — start at
 [`docs/guide/00-start-here.md`](docs/guide/00-start-here.md), which maps the
@@ -33,7 +33,7 @@ The three product planes and their storage substrate:
 | **rift-canopy** | The terminal dashboard — the `rift` entrypoint (3-column grid, nic-gauge, slash palette, project-settings modal) behind a `RenderBackend` seam. |
 | **rift-agent\*** | Native project integrations for Claude Code, Codex, Gemini CLI, Antigravity, Cursor, Copilot CLI, OpenCode, Factory Droid, and Ollama. |
 | **rift-nic-gauge** | Read-only context-% data for Canopy; not a project setting. |
-| **Turso** | SQLite-compatible async store for the rebuildable projection (behind the `CanonicalStore` seam; a `rusqlite` reference impl ships today). |
+| **Turso** | SQLite-compatible async store for the rebuildable projection (behind the `CanonicalStore` seam; a `rusqlite` reference impl ships). |
 
 ## Two hard constraints (carried into every change)
 
@@ -120,6 +120,7 @@ crates/
   rift-registry     the machine-global project registry (config-dir resolver)
   rift-agent*       the agent SDK + nine native per-agent adapters
   rift-nic-gauge    read-only context-window utilization data for Canopy
+  rift-tokens       the one token-counting authority
 bins/
   rift              the `rift` entrypoint (Canopy + subcommands)
   rift-memd         rift-total-recall projection binary (metrics | rebuild |
@@ -143,10 +144,8 @@ reviewable adjacency list.
   `RenderBackend` (the ASCII fallback is always available; the first-party
   terminal backend plugs in behind the `xre` feature). The *logic* is
   implemented and tested behind the seam; the external engine plugs in without
-  touching callers. The recall stdio transport and its dependency were deleted
-  when serving moved to hook injection and CLI skills; the `ServeDispatcher`
-  behind it is transport-independent and was untouched — it now feeds those two
-  channels.
+  touching callers. The `ServeDispatcher` is transport-independent and feeds the
+  two serving channels, hook injection and CLI skills.
 - **The redaction gate is one-way and total.** Raw bytes are `SecretBytes`
   (local-only, zeroized, no `Debug`). Durable writes accept only `RedactedBytes`,
   whose buffer is private and whose sole constructor (`RedactedBytes::seal`) is
