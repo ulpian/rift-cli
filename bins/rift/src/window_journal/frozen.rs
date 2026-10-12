@@ -12,8 +12,10 @@
 
 use std::path::Path;
 
-use rift_agent::window_journal::{InheritClass, Interval, Line};
-use rift_shadow::backend::{ArchivedWindowFact, ArchivedWindowRow, WindowSliceKind};
+use rift_agent::window_journal::{FamilyRoute, InheritClass, Interval, Line};
+use rift_shadow::backend::{
+    ArchivedWindowFact, ArchivedWindowRow, WindowFamilyRoute, WindowSliceKind,
+};
 
 use super::{key, WindowJournal};
 
@@ -185,7 +187,35 @@ fn archived_window_row(line: &Line) -> Option<ArchivedWindowRow> {
         },
         // An outline line is written only where the first-contact lever acts,
         // which it does not below enforce; its frozen kind arrives with it.
+        Line::Family { .. } => return family_held_row(line),
         Line::Outline { .. } | Line::Spawn { .. } | Line::Claim { .. } => return None,
+    })
+}
+
+/// The row a family line freezes as: its route's kind, the run asked for and
+/// whether it was acted on. The runs it offered and its frame's size are run
+/// state, and stay where they were written.
+fn family_held_row(line: &Line) -> Option<ArchivedWindowRow> {
+    let Line::Family {
+        route,
+        path,
+        hash,
+        range,
+        acted,
+        ..
+    } = line
+    else {
+        return None;
+    };
+    Some(ArchivedWindowRow::FamilyHeld {
+        route: match route {
+            FamilyRoute::Outline => WindowFamilyRoute::Outline,
+            FamilyRoute::Held => WindowFamilyRoute::Held,
+        },
+        path: path.clone(),
+        hash: hash.to_hex(),
+        range: (range.lo, range.hi),
+        acted: *acted,
     })
 }
 
@@ -212,7 +242,8 @@ fn line_at_ms(line: &Line) -> u64 {
         | Line::Evict { at_ms, .. }
         | Line::Inherit { at_ms, .. }
         | Line::Spawn { at_ms, .. }
-        | Line::Claim { at_ms, .. } => *at_ms,
+        | Line::Claim { at_ms, .. }
+        | Line::Family { at_ms, .. } => *at_ms,
     }
 }
 
@@ -338,6 +369,35 @@ mod tests {
         assert_eq!(value["total_lines"], 400);
         assert_eq!(value["range"], serde_json::json!([1, 40]));
         assert_eq!(value["subagent"], CHILD);
+    }
+
+    /// A family line freezes under its route's token with whether it was
+    /// acted on; the runs it offered and the frame's size stay run state.
+    #[test]
+    fn a_family_line_freezes_under_its_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, store) = projection(tmp.path());
+        WindowJournal::open(tmp.path(), SESSION, None)
+            .append(&Line::Family {
+                turn: 2,
+                path: "src/a.rs".to_owned(),
+                hash: hash(1),
+                range: Interval::new(1, 400).unwrap(),
+                route: FamilyRoute::Held,
+                offered: vec![Interval::new(10, 20).unwrap()],
+                acted: false,
+                frame_bytes: 300,
+                at_ms: 5,
+            })
+            .unwrap();
+        let facts = session_window_facts(&rt, &store, tmp.path(), "claude-code", SESSION);
+        let kinds: Vec<&str> = facts.iter().map(|f| f.row.kind()).collect();
+        assert_eq!(kinds, ["family_held:held"]);
+        let bytes = rift_shadow::backend::window_journal_jsonl_bytes(&facts).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["acted"], false);
+        assert_eq!(value["range"], serde_json::json!([1, 400]));
+        assert!(value.get("runs").is_none() && value.get("frame_bytes").is_none());
     }
 
     /// A row with a revision that is not hex never parses; a row whose path is

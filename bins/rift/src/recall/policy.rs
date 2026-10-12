@@ -122,6 +122,11 @@ pub(super) fn render_policy(out: &mut String, snapshot: &rift_recall_policy::Ser
     );
     let _ = writeln!(
         out,
+        "  family held   decline_family_held {}",
+        p.interception.decline_family_held.as_str(),
+    );
+    let _ = writeln!(
+        out,
         "  search        mode {}  grep_head_limit {}  glob_top_n {}  answer_budget_tokens {}",
         p.search.mode.as_str(),
         p.search.grep_head_limit,
@@ -228,6 +233,7 @@ pub(super) fn policy_json(snapshot: &rift_recall_policy::ServePolicySnapshot) ->
                 "interception": e.read_deny.as_str(),
                 "inherit_by_name": e.inherit_by_name.as_str(),
                 "first_contact": e.first_contact.as_str(),
+                "decline_family_held": e.decline_family_held.as_str(),
                 "search_answer": e.search_answer.as_str(),
                 "grep_cap": e.grep_cap.as_str(),
                 "doc_rewrite": e.doc_rewrite.as_str(),
@@ -249,6 +255,7 @@ pub(super) fn policy_json(snapshot: &rift_recall_policy::ServePolicySnapshot) ->
             "first_contact": p.interception.first_contact.as_str(),
             "first_contact_min_lines": p.interception.first_contact_min_lines,
             "first_contact_min_bytes": p.interception.first_contact_min_bytes,
+            "decline_family_held": p.interception.decline_family_held.as_str(),
         },
         "search": {
             "mode": p.search.mode.as_str(),
@@ -452,6 +459,8 @@ mod tests {
         assert!(out.contains(
             "first contact first_contact observe  first_contact_min_lines 400  first_contact_min_bytes 16384"
         ));
+        assert!(out.contains("family held   decline_family_held observe"));
+        assert_eq!(json["interception"]["decline_family_held"], "observe");
         assert!(out.contains(
             "search        mode enforce  grep_head_limit 40  glob_top_n 8  answer_budget_tokens 160"
         ));

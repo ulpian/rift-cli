@@ -82,13 +82,16 @@
 //! in. [`housekeeping`] counts a checkout's journals and sweeps the ones it has
 //! finished with. [`frozen`] reads a session's windows for the checkpoint
 //! that freezes them, on the archive path and never on a decision's.
-//! [`coordinator`] is the one question asked of a window that is not the
-//! caller's: what a subagent's coordinator has read that the subagent does not
-//! hold, named as a hint and never counted as coverage.
+//! [`coordinator`] and [`family`] are the two questions asked of windows that
+//! are not the caller's: what a subagent's coordinator has read that the
+//! subagent does not hold, named as a hint and never counted as coverage; and
+//! which other windows of the family are live, read for the one decline that
+//! may rest on what they hold.
 
 mod coordinator;
 mod denies;
 mod edits;
+mod family;
 mod fold;
 mod frozen;
 mod housekeeping;
@@ -100,6 +103,7 @@ use std::path::{Path, PathBuf};
 pub(crate) use coordinator::{coordinator_reads, CoordinatorRead};
 pub(crate) use denies::{deny_stands, ineffective_denies};
 pub(crate) use edits::{edit_facts, expected_write, prior_revision};
+pub(crate) use family::{live_sibling_journals, FamilyQuery};
 pub(crate) use frozen::session_window_facts;
 pub(crate) use housekeeping::{survey, sweep_expired};
 pub(crate) use journal::WindowJournal;
@@ -129,7 +133,7 @@ pub(crate) const MAX_EDIT_SITES: usize = 32;
 /// Per checkout by design: the bytes at a path differ between members of a
 /// worktree family, and coverage is a claim about bytes. The directory is
 /// under the ignored run-state root, so nothing here is ever committed.
-pub(crate) fn dir(work_tree: &Path) -> PathBuf {
+pub(crate) fn journal_dir(work_tree: &Path) -> PathBuf {
     work_tree.join(".rift").join("state").join("reads")
 }
 
@@ -153,7 +157,7 @@ pub(crate) fn key(session_id: &str, agent_id: Option<&str>) -> String {
 /// A 64-character lowercase-hex key, and nothing else — the shape every file
 /// this module owns is named with, and the screen every sweep applies before
 /// it removes anything.
-pub(super) fn is_key(s: &str) -> bool {
+pub(super) fn is_journal_key(s: &str) -> bool {
     s.len() == 64
         && s.chars()
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
@@ -192,7 +196,7 @@ mod tests {
         assert_ne!(parent, child);
         assert_eq!(parent, key("session-1", None), "the key is a function");
         assert_eq!(parent.len(), 64, "a key names a file");
-        assert!(is_key(&parent) && is_key(&child));
+        assert!(is_journal_key(&parent) && is_journal_key(&child));
         // The key is exactly the documented derivation, not merely some hash
         // of the two parts: session, a zero byte, then the agent or nothing.
         assert_eq!(

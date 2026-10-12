@@ -560,6 +560,8 @@ Those have their own verb, `rift backfill`, which is why §13.11's read-only ope
 Outline bindings and their token counts are not in the shard either: they are derived from a file's bytes, so a rebuilt recall projection holds none until the next condense of a session that read the file binds it again.
 A window's inherited runs are in the shard but are not rebuilt: the ingest validates each `inherit:fork`, `inherit:paste` and `inherit:by_name` line of `window_journal.jsonl`, counts it in its report's `window_rows_inherited`, and writes no `n_window_row` for it, because that relation's kinds are sealed by the migration that created it.
 If a `recall.db` reader needs a window's inherited coverage, the rows get a companion relation of their own, `n_window_inherit`, beside `n_window_row`.
+A read declined because another live window held the bytes is frozen the same way, as `family_held:outline` or `family_held:held` with its path, revision, the run asked for and whether it was acted on; the ingest validates and counts each in `window_rows_family_held` and writes no row.
+If a `recall.db` reader needs those declines, they get their own companion relation, `n_window_family`.
 
 And the standing exception: **governance records are not rebuildable.** Serve
 audit rows, outcome labels, evaluation runs and key metadata record what this

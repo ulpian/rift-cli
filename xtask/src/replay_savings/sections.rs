@@ -248,6 +248,10 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
         "first_contact".to_owned(),
         super::first_contact::first_contact_json(report),
     );
+    map.insert(
+        "family_held".to_owned(),
+        super::family_held::family_held_json(report),
+    );
 }
 
 /// One inheritance route's tally.

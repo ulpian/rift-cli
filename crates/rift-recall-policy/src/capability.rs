@@ -96,6 +96,10 @@ pub struct Effective {
     pub first_contact_min_lines: u32,
     /// The fewest bytes a file has for `first_contact` to consider it.
     pub first_contact_min_bytes: u64,
+    /// How far a read another live window of the repository holds may be
+    /// declined with a cheaper route: the repository's `decline_family_held`,
+    /// never above `read_deny`.
+    pub decline_family_held: Mode,
 
     /// Adding a head limit to a content search that carries none.
     pub grep_cap: Mode,
@@ -204,6 +208,7 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
         first_contact: interception.first_contact.min(read_deny),
         first_contact_min_lines: interception.first_contact_min_lines,
         first_contact_min_bytes: interception.first_contact_min_bytes,
+        decline_family_held: interception.decline_family_held.min(read_deny),
         grep_cap,
         grep_cap_off,
         search_answer,
@@ -629,6 +634,41 @@ mod tests {
         let (unknown, _d) = load_src("[interception]\nfirst_contact = \"always\"\n");
         assert_eq!(
             resolve(&unknown.policy, "claude-code", FULL).first_contact,
+            Mode::Off
+        );
+    }
+
+    /// The family-held lever ships at `observe`, reads what is written, and is
+    /// never above the read lever: a family whose channel no run confirmed, a
+    /// repository at `off` and a value it does not know all hold it there or
+    /// below.
+    #[test]
+    fn the_family_held_lever_ships_observing_and_is_never_above_the_read_lever() {
+        let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
+        assert_eq!(shipped.decline_family_held, Mode::Observe);
+        let (written, _d) = load_src("[interception]\ndecline_family_held = \"enforce\"\n");
+        assert_eq!(
+            resolve(&written.policy, "claude-code", FULL).decline_family_held,
+            Mode::Enforce
+        );
+        assert_eq!(
+            resolve(&written.policy, "codex", NO_CHANNEL).decline_family_held,
+            Mode::Observe
+        );
+        let (off, _d) = load_src("[interception]\ndecline_family_held = \"off\"\n");
+        assert_eq!(
+            resolve(&off.policy, "claude-code", FULL).decline_family_held,
+            Mode::Off
+        );
+        let (shut, _d) =
+            load_src("[interception]\nmode = \"off\"\ndecline_family_held = \"enforce\"\n");
+        assert_eq!(
+            resolve(&shut.policy, "claude-code", FULL).decline_family_held,
+            Mode::Off
+        );
+        let (unknown, _d) = load_src("[interception]\ndecline_family_held = \"always\"\n");
+        assert_eq!(
+            resolve(&unknown.policy, "claude-code", FULL).decline_family_held,
             Mode::Off
         );
     }

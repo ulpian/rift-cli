@@ -48,20 +48,26 @@ const SCHEMA_VERSION: i64 = 1;
 /// The prefix of the kinds a window's inherited runs are frozen under.
 const INHERITED_KIND_PREFIX: &str = "inherit:";
 
-/// One checkpoint's frozen window rows: the inserts, and how many valid
-/// inherited runs were read and not inserted.
+/// The prefix of the kinds a decline resting on another window is frozen
+/// under.
+const FAMILY_HELD_KIND_PREFIX: &str = "family_held:";
+
+/// One checkpoint's frozen window rows: the inserts, and how many valid rows
+/// of the kinds the relation does not hold were read and not inserted.
 pub(super) struct WindowRows {
     /// The `n_window_row` inserts.
     pub(super) inserts: Vec<PendingInsert>,
     /// Inherited runs that parsed, counted and skipped.
     pub(super) inherited: usize,
+    /// Family-held declines that parsed, counted and skipped.
+    pub(super) family_held: usize,
 }
 
 /// Read and validate one checkpoint's frozen window rows as inserts; an
 /// absent artifact reads as none, exactly as a shard written before it.
 ///
-/// An inherited run is validated like every other row and then counted, not
-/// inserted. The relation's kind vocabulary is fixed by the migration that
+/// An inherited run and a family-held decline are validated like every other
+/// row and then counted, not inserted. The relation's kind vocabulary is fixed by the migration that
 /// created it, and a relation whose vocabulary moves under rows already
 /// written is no longer the record those rows were checked against — so the
 /// store keeps its sealed list, the parse keeps the artifact's, and the count
@@ -76,15 +82,19 @@ pub(super) fn read_window_rows(
 ) -> Result<WindowRows> {
     let rows = super::read_parsed(reader, cid, ARTIFACT, parse::parse_window_journal, issues)?;
     let rows = rows.unwrap_or_default();
-    let (inherited, own): (Vec<&WindowJournalRow>, Vec<&WindowJournalRow>) = rows
+    let (inherited, rest): (Vec<&WindowJournalRow>, Vec<&WindowJournalRow>) = rows
         .iter()
         .partition(|row| row.kind.starts_with(INHERITED_KIND_PREFIX));
+    let (family_held, own): (Vec<&WindowJournalRow>, Vec<&WindowJournalRow>) = rest
+        .into_iter()
+        .partition(|row| row.kind.starts_with(FAMILY_HELD_KIND_PREFIX));
     Ok(WindowRows {
         inserts: own
             .into_iter()
             .map(|row| window_row_insert(cid, row))
             .collect(),
         inherited: inherited.len(),
+        family_held: family_held.len(),
     })
 }
 
@@ -289,6 +299,32 @@ mod tests {
         assert_eq!(report.window_rows_inherited, 1);
         let kinds: Vec<String> = window_rows(&store).into_iter().map(|(k, ..)| k).collect();
         assert_eq!(kinds, ["read", "observe"]);
+    }
+
+    /// ★ A family-held decline, frozen exactly as the writer freezes one,
+    /// parses with no issue and is counted and skipped; its neighbours land.
+    #[test]
+    fn a_family_held_decline_is_counted_and_skipped_and_its_neighbours_land() {
+        let (w, old) = (hex('a'), hex('b'));
+        let lines = vec![
+            session_lines()[0].clone(),
+            format!(
+                r#"{{"acted":false,"at":2,"hash":"{old}","kind":"family_held:outline","path":"src/a.rs","range":[1,40],"schema_version":1,"turn":1,"window":"{w}"}}"#
+            ),
+            format!(
+                r#"{{"acted":true,"at":3,"hash":"{old}","kind":"family_held:held","path":"src/a.rs","range":[1,40],"schema_version":1,"turn":2,"window":"{w}"}}"#
+            ),
+        ];
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_artifact("c1", ARTIFACT, &artifact(&lines));
+        let store = recall_store();
+        let report = block(ingest(&store, &sub)).unwrap();
+        assert!(report.issues.is_empty(), "{:?}", report.issues);
+        assert_eq!(report.window_rows_family_held, 2);
+        assert_eq!(report.window_rows_inherited, 0);
+        let kinds: Vec<String> = window_rows(&store).into_iter().map(|(k, ..)| k).collect();
+        assert_eq!(kinds, ["read"]);
     }
 
     /// A checkpoint without the artifact projects the rows it always did and

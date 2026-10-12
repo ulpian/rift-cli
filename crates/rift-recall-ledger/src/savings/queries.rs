@@ -150,6 +150,105 @@ pub async fn first_contact_totals(
     Ok(out)
 }
 
+/// The decisions that rested on another live window of the family, over one
+/// window of time: the ones only observed, the ones made with what they
+/// avoided and what their frames cost, and the reads charged against them
+/// afterwards.
+///
+/// Read by the decisions' own tags, which are the caller's to name. Beside
+/// the share and never inside it: an answered decline's figures and its
+/// follow-ups' costs are already in [`audit_totals`], so this only lets a
+/// surface say which part of them this lever is, net of what it cost.
+///
+/// # Errors
+/// [`rift_core::RiftError::Storage`] on a query failure.
+pub async fn family_held_totals(
+    recall: &impl CanonicalStore,
+    since_ms: Option<i64>,
+    tags: FamilyHeldTags<'_>,
+) -> Result<FamilyHeldTotals> {
+    let (clause, mut params) = since_ms.map_or_else(
+        || (String::new(), Vec::new()),
+        |ms| (" AND recorded_at >= ?4".to_owned(), vec![Value::Int(ms)]),
+    );
+    let [outline, held] = tags.routes;
+    params.splice(
+        0..0,
+        [
+            Value::text(outline),
+            Value::text(held),
+            Value::text(tags.follow_up),
+        ],
+    );
+    let rows = recall
+        .query(
+            &format!(
+                "SELECT reason, verb, COUNT(*), COALESCE(SUM(tokens_avoided), 0), \
+                 COALESCE(SUM(tokens_returned), 0) \
+                 FROM memd_audit_event WHERE reason IN (?1, ?2, ?3){clause} \
+                 GROUP BY reason, verb ORDER BY reason, verb"
+            ),
+            &params,
+        )
+        .await?;
+    let mut out = FamilyHeldTotals::default();
+    for r in &rows {
+        let n = |i: usize| u64::try_from(r.get_i64(i).unwrap_or(0)).unwrap_or(0);
+        let follow_up = r.get_text(0)? == tags.follow_up;
+        match (follow_up, r.get_text(1)?.as_str()) {
+            (true, _) => {
+                out.follow_ups = out.follow_ups.saturating_add(n(2));
+                out.follow_up_tokens = out.follow_up_tokens.saturating_add(n(4));
+            }
+            (false, "memd.read_intercepted") => {
+                out.declined = out.declined.saturating_add(n(2));
+                out.avoided = out.avoided.saturating_add(n(3));
+                out.frames = out.frames.saturating_add(n(4));
+            }
+            (false, _) => out.observed = out.observed.saturating_add(n(2)),
+        }
+    }
+    Ok(out)
+}
+
+/// The tags [`family_held_totals`] reads: one per route a decline carried,
+/// and the one its follow-ups are charged under.
+#[derive(Clone, Copy, Debug)]
+pub struct FamilyHeldTags<'a> {
+    /// The two routes' tags.
+    pub routes: [&'a str; 2],
+    /// The follow-ups' tag.
+    pub follow_up: &'a str,
+}
+
+/// The family-held decisions' counts and figures over one window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct FamilyHeldTotals {
+    /// Reads a family decline would have answered, which ran.
+    pub observed: u64,
+    /// Reads declined, with the cheaper route.
+    pub declined: u64,
+    /// What the declined ones avoided.
+    pub avoided: u64,
+    /// What their frames cost.
+    pub frames: u64,
+    /// Reads charged against a decline afterwards.
+    pub follow_ups: u64,
+    /// What those reads delivered.
+    pub follow_up_tokens: u64,
+}
+
+impl FamilyHeldTotals {
+    /// What the declines kept out of context: avoided, less the frames and
+    /// every read charged against them since — never below zero.
+    #[must_use]
+    pub const fn net_kept(&self) -> u64 {
+        self.avoided
+            .saturating_sub(self.frames)
+            .saturating_sub(self.follow_up_tokens)
+    }
+}
+
 /// The first-contact decisions' counts and figures over one window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct FirstContactTotals {

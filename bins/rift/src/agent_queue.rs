@@ -389,6 +389,11 @@ pub(crate) enum ServeAuditKind {
     ReadIntercepted,
     /// The same decision, recorded and not acted on.
     ReadRepeatObserved,
+    /// A read that ran of bytes a decline of the same window had already
+    /// been credited with sparing — a follow-up the decline offered, or any
+    /// other read of them since. What it delivered is that decline's cost,
+    /// booked as its own row and never as a change to the decline's.
+    ReadFollowUp,
     /// A read Rift had already made unnecessary was never made: the window
     /// acted on a file Rift told it that it holds, without reading it again.
     ReadPrevented,

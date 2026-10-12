@@ -176,6 +176,17 @@ checkout's raw capture is per checkout for the same reason.
 descriptors, the adoption marker, injection markers, manifest baselines
 ([02-configuration.md](02-configuration.md) has the full table).
 
+That split is also why a read another window of the family holds is found
+member by member.
+Each checkout's window journals stay under its own `.rift/state/reads/`, each
+window's opening marker under its `.rift/state/injection/`, and each session's
+cache in its own git directory; the read gate finds the members from git's own
+files — the common directory's `worktrees/*/gitdir` entries and its config,
+without running git — and reads each member's run state where it lives.
+A window counts only while it is live, by its session's cache and its own
+journal's age, so a member that has gone quiet grounds nothing
+([07-serving-and-injection.md §7.4](07-serving-and-injection.md#a-read-another-window-holds)).
+
 The one exception is **the push queue**, whose reasoning is the test for
 anything else that might move: a queue entry names a **reference**, and
 references live in the object store the whole family already shares. Per

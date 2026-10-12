@@ -23,9 +23,10 @@ pub struct WindowJournalRow {
     pub window_key: String,
     /// The subagent the window belongs to, `None` for the session's own.
     pub subagent: Option<String>,
-    /// One of the eleven kinds the artifact declares: the eight a window's
-    /// own rows take, and the three `inherit:<class>` runs it was handed by
-    /// the window that started it.
+    /// One of the thirteen kinds the artifact declares: the eight a window's
+    /// own rows take, the three `inherit:<class>` runs it was handed by the
+    /// window that started it, and the two `family_held:<route>` declines
+    /// that rested on another live window of the repository.
     pub kind: String,
     /// The turn the row was written in.
     pub turn: u32,
@@ -49,6 +50,8 @@ pub struct WindowJournalRow {
     pub full: Option<bool>,
     /// Which signal emptied the window, on an `evict`.
     pub reason: Option<String>,
+    /// Whether a family decline was made rather than only recorded.
+    pub acted: Option<bool>,
 }
 
 /// Parse `window_journal.jsonl`: one frozen context-window row per line.
@@ -117,6 +120,7 @@ fn window_kind_members(kind: &str) -> Option<&'static [&'static str]> {
         }
         "deny" | "observe" | "hold" | "prevented" => Some(&["hash", "path", "range"]),
         "expect" => Some(&["hash", "path"]),
+        "family_held:outline" | "family_held:held" => Some(&["acted", "hash", "path", "range"]),
         "edit" => Some(&["full", "hash_new", "hash_old", "path", "shift", "sites"]),
         "evict" => Some(&["reason"]),
         _ => None,
@@ -163,6 +167,13 @@ fn put_window_kind_members(
                 return Ok(());
             }
             row.range = Some(run_of(line.get("range"))?);
+            if kind.starts_with("family_held:") {
+                let Some(acted) = line.get("acted").and_then(Value::as_bool) else {
+                    return Err("no boolean acted".to_owned());
+                };
+                row.acted = Some(acted);
+                return Ok(());
+            }
             if line.contains_key("total_lines") {
                 row.total_lines = Some(u32_member(line, "total_lines")?);
             }
@@ -355,6 +366,43 @@ mod tests {
         let out = parse_window_journal(refused.join("\n").as_bytes(), "cp");
         assert!(out.value.is_empty(), "{:?}", out.value);
         assert_eq!(out.issues.len(), 2, "{:?}", out.issues);
+    }
+
+    /// A family decline parses under its route's token with the run asked
+    /// for and whether it was made; a route the artifact does not declare, a
+    /// missing or non-boolean `acted`, or a file length on one is refused.
+    #[test]
+    fn a_family_decline_parses_and_its_shape_is_held() {
+        let read = GOLDEN_WINDOW_JOURNAL.lines().next().unwrap();
+        let as_family = |kind: &str, acted: serde_json::Value| {
+            let mut value: serde_json::Value = serde_json::from_str(read).unwrap();
+            let object = value.as_object_mut().unwrap();
+            object.remove("total_lines");
+            object.insert("kind".to_owned(), kind.into());
+            object.insert("acted".to_owned(), acted);
+            value.to_string()
+        };
+        let lines = [
+            as_family("family_held:outline", true.into()),
+            as_family("family_held:held", false.into()),
+        ];
+        let out = parse_window_journal(lines.join("\n").as_bytes(), "cp");
+        assert!(out.is_clean(), "{:?}", out.issues);
+        let acted: Vec<Option<bool>> = out.value.iter().map(|row| row.acted).collect();
+        assert_eq!(acted, [Some(true), Some(false)]);
+        assert!(out.value.iter().all(|row| row.range == Some((1, 120))));
+
+        let mut with_length: serde_json::Value =
+            serde_json::from_str(&as_family("family_held:held", true.into())).unwrap();
+        with_length["total_lines"] = 120.into();
+        let refused = [
+            as_family("family_held:delta", true.into()),
+            as_family("family_held:held", "yes".into()),
+            with_length.to_string(),
+        ];
+        let out = parse_window_journal(refused.join("\n").as_bytes(), "cp");
+        assert!(out.value.is_empty(), "{:?}", out.value);
+        assert_eq!(out.issues.len(), 3, "{:?}", out.issues);
     }
 
     /// Each shape outside the artifact's grammar is one issue naming its

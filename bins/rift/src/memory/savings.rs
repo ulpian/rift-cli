@@ -9,7 +9,10 @@ use std::path::Path;
 
 use rift_core::{Result, RiftError};
 use rift_recall_ledger::audit::{pull_claim_totals, PullClaimTotals};
-use rift_recall_ledger::savings::{first_contact_totals, FirstContactTotals, Savings};
+use rift_recall_ledger::savings::{
+    family_held_totals, first_contact_totals, FamilyHeldTags, FamilyHeldTotals, FirstContactTotals,
+    Savings,
+};
 use rift_recall_ledger::savings_window::{self, Boundary, Marker};
 use rift_store::SqliteStore;
 
@@ -508,6 +511,11 @@ pub(crate) fn savings(root: &Path, args: &SavingsArgs) -> Result<Outcome> {
         let first_contact = family_first_contact(&report);
         human.push_str(&render_first_contact(first_contact.as_ref()));
         json = with_first_contact(json, first_contact.as_ref());
+        // Its own row for the same reason, and net of what it cost: the
+        // frames and every read charged against a decline since.
+        let family_held = family_held(&report);
+        human.push_str(&render_family_held(family_held.as_ref()));
+        json = with_family_held(json, family_held.as_ref());
     }
     Ok(Outcome::ok(human.trim_end().to_owned(), json))
 }
@@ -533,6 +541,66 @@ fn family_first_contact(report: &SavingsReport) -> Option<FirstContactTotals> {
         rift_recall_serve::TAG_FIRST_CONTACT,
     ))
     .ok()
+}
+
+/// The family-held decisions over the report's window, read from the recall
+/// store under the lever's own tags.
+fn family_held(report: &SavingsReport) -> Option<FamilyHeldTotals> {
+    use rift_agent::window_journal::FamilyRoute;
+    let store = SqliteStore::open_read_only(Path::new(&report.recall_db)).ok()?;
+    let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
+    let tags = FamilyHeldTags {
+        routes: [
+            FamilyRoute::Outline.audit_tag(),
+            FamilyRoute::Held.audit_tag(),
+        ],
+        follow_up: rift_recall_serve::TAG_FAMILY_FOLLOW_UP,
+    };
+    rt.block_on(family_held_totals(&store, report.window.cut_ms(), tags))
+        .ok()
+}
+
+/// The family-held lever's line: how many reads it observed, how many it
+/// declined, what those avoided, what their frames and the reads charged
+/// against them cost, and the net. Already inside the figures above where it
+/// declined; never inside them where it only observed.
+fn render_family_held(totals: Option<&FamilyHeldTotals>) -> String {
+    let Some(t) = totals else {
+        return "  family held:           not recorded by this projection\n".to_owned();
+    };
+    format!(
+        "  family held:           {} observed, {} declined, {} tok avoided, {} tok of frames, \
+         {} tok read after, {} tok net\n",
+        t.observed,
+        t.declined,
+        t.avoided,
+        t.frames,
+        t.follow_up_tokens,
+        t.net_kept()
+    )
+}
+
+/// A document with the family-held row added under one new key, `null` where
+/// the projection cannot say.
+fn with_family_held(
+    mut json: serde_json::Value,
+    totals: Option<&FamilyHeldTotals>,
+) -> serde_json::Value {
+    let Some(map) = json.as_object_mut() else {
+        return json;
+    };
+    let value = totals.map(|t| {
+        let mut value = serde_json::to_value(t).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("net".to_owned(), serde_json::json!(t.net_kept()));
+        }
+        value
+    });
+    map.insert(
+        "family_held".to_owned(),
+        value.unwrap_or(serde_json::Value::Null),
+    );
+    json
 }
 
 /// The outline lever's line: how many first reads it observed, how many it
@@ -1231,6 +1299,35 @@ mod pull_claim_tests {
         let after = with_first_contact(before.clone(), Some(&totals));
         assert_eq!(after["overall"], before["overall"]);
         assert_eq!(after["first_contact"]["observed"], 12);
+    }
+
+    /// The family-held row states what it observed and declined, what those
+    /// avoided and cost, what was read after, and the net, under one additive
+    /// key, and says so when the projection cannot.
+    #[test]
+    fn the_family_held_row_is_one_line_and_one_additive_key() {
+        let totals = FamilyHeldTotals {
+            observed: 3,
+            declined: 1,
+            avoided: 5_000,
+            frames: 90,
+            follow_ups: 1,
+            follow_up_tokens: 700,
+        };
+        assert_eq!(
+            render_family_held(Some(&totals)),
+            "  family held:           3 observed, 1 declined, 5000 tok avoided, 90 tok of frames, \
+             700 tok read after, 4210 tok net\n"
+        );
+        assert_eq!(
+            render_family_held(None),
+            "  family held:           not recorded by this projection\n"
+        );
+        let before = serde_json::json!({ "overall": { "share_pct": 1.0 } });
+        let after = with_family_held(before.clone(), Some(&totals));
+        assert_eq!(after["overall"], before["overall"]);
+        assert_eq!(after["family_held"]["net"], 4_210);
+        assert!(with_family_held(before, None)["family_held"].is_null());
     }
 
     #[test]

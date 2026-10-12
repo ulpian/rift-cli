@@ -67,9 +67,9 @@ use rift_recall_events::ServeChannel;
 use rift_store::{CanonicalStore, Value};
 
 pub use self::queries::{
-    audit_totals, decisions_by_family, first_contact_totals, reads_by_family,
+    audit_totals, decisions_by_family, family_held_totals, first_contact_totals, reads_by_family,
     reads_by_family_and_tool, tool_results_by_family, AuditTotals, Decisions, FamilyDecisions,
-    FamilyReads, FirstContactTotals,
+    FamilyHeldTags, FamilyHeldTotals, FamilyReads, FirstContactTotals,
 };
 
 /// The audit verb a **prevented** read is booked under — a read Rift caused
@@ -963,6 +963,109 @@ mod tests {
                 .unwrap();
             assert_eq!((late.observed, late.outlined), (1, 1));
         });
+    }
+
+    /// ★ The family-held row counts its own tags: an observed decline by count
+    /// alone, an answered one with what it avoided and cost, and the reads
+    /// charged against it with what they delivered — net of both, inside the
+    /// window asked for.
+    #[test]
+    fn the_family_held_row_nets_the_frames_and_the_follow_ups() {
+        block(async {
+            let recall = rift_store::SqliteStore::open_in_memory().unwrap();
+            rift_store::apply_migrations(&recall, &rift_store::recall_migrations()).unwrap();
+            let rows = [
+                (
+                    "o1",
+                    "memd.read_repeat_observed",
+                    "family_held:outline",
+                    0,
+                    0,
+                    1_000,
+                ),
+                (
+                    "d1",
+                    "memd.read_intercepted",
+                    "family_held:held",
+                    90,
+                    5_000,
+                    3_000,
+                ),
+                (
+                    "f1",
+                    "memd.read_intercepted",
+                    "family_held:followup",
+                    700,
+                    0,
+                    3_500,
+                ),
+                (
+                    "x1",
+                    "memd.read_intercepted",
+                    "first_contact",
+                    300,
+                    4_000,
+                    3_000,
+                ),
+            ];
+            insert_reasoned_rows(&recall, &rows).await;
+            let tags = FamilyHeldTags {
+                routes: ["family_held:outline", "family_held:held"],
+                follow_up: "family_held:followup",
+            };
+            let all = family_held_totals(&recall, None, tags).await.unwrap();
+            assert_eq!(
+                all,
+                FamilyHeldTotals {
+                    observed: 1,
+                    declined: 1,
+                    avoided: 5_000,
+                    frames: 90,
+                    follow_ups: 1,
+                    follow_up_tokens: 700,
+                }
+            );
+            assert_eq!(all.net_kept(), 5_000 - 90 - 700);
+            let late = family_held_totals(&recall, Some(2_000), tags)
+                .await
+                .unwrap();
+            assert_eq!((late.observed, late.declined, late.follow_ups), (0, 1, 1));
+        });
+    }
+
+    /// Write audit rows of `(id, verb, reason, returned, avoided, at)`.
+    async fn insert_reasoned_rows(
+        recall: &rift_store::SqliteStore,
+        rows: &[(&str, &str, &str, i64, i64, i64)],
+    ) {
+        for (id, verb, reason, returned, avoided, at) in rows {
+            recall
+                .insert(
+                    "memd_audit_event",
+                    &[
+                        "audit_id",
+                        "verb",
+                        "handle",
+                        "reason",
+                        "tokens_returned",
+                        "tokens_avoided",
+                        "recorded_at",
+                        "schema_version",
+                    ],
+                    &[
+                        Value::text(*id),
+                        Value::text(*verb),
+                        Value::text("h"),
+                        Value::text(*reason),
+                        Value::Int(*returned),
+                        Value::Int(*avoided),
+                        Value::Int(*at),
+                        Value::Int(1),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
     }
 
     /// A recall store holding two read-gate decisions of 100 avoided tokens,

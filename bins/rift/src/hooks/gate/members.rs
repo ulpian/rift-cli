@@ -7,8 +7,9 @@
 
 use std::path::Path;
 
-use super::answer::{gate_answer, journal_decision, spared_lines};
+use super::answer::{gate_answer, journal_decision, journal_family_follow_up, spared_lines};
 use super::delivery::{gate_delivery_is_actionable, reconcile_stated_delivery};
+use super::family::family_answer;
 use super::file::{gate_resolve, GateFile};
 use super::first_contact::first_contact_answer;
 use super::{gate_edit_echo, gate_mode, GateStep};
@@ -136,10 +137,12 @@ pub(super) fn gate_decide_members(
         };
         let (decision, frame, _) =
             gate_answer(pass.held, &read, decision, pass.limits.context_lines);
-        // A read the window does not hold may still be a first contact.
+        // A read the window does not hold may still be held by another live
+        // window of the family, or be a first contact.
         let (decision, frame) = match (&pass.step, &decision) {
             (GateStep::Decide, rift_agent::window_journal::Decision::Allow) => {
-                first_contact_answer(raw, effective, pass, &file, &read)
+                family_answer(raw, work_tree, effective, pass, &read)
+                    .or_else(|| first_contact_answer(raw, effective, pass, &file, &read))
                     .unwrap_or((decision, frame))
             }
             _ => (decision, frame),
@@ -226,36 +229,10 @@ pub(super) fn gate_record_members(
             member.read.hash,
             spared_lines(&member.read, &member.decision),
         );
-        let _ = pass.journal.append(&rift_agent::window_journal::record(
-            &member.read,
-            &member.decision,
-            member.slice_bytes,
-            pass.limits,
-            pass.turn,
-            pass.at_ms,
-        ));
-        // A read only an inherited line would have declined ran, and the line
-        // above credits what it delivered; this one sizes the class it rested on.
-        if let Some(observed) = rift_agent::window_journal::record_inheritance(
-            &member.read,
-            &member.decision,
-            pass.turn,
-            pass.at_ms,
-        ) {
-            let _ = pass.journal.append(&observed);
-        }
-        // A cross-checked read whose own result states its delivery: the line
-        // just written credits the window with what the size rule could vouch
-        // for, and this moves it to what the client says actually arrived.
-        reconcile_stated_delivery(
-            pass.journal,
-            &member.read,
-            pass.stated,
-            member.slice_bytes,
-            pass.limits,
-            pass.turn,
-            pass.at_ms,
-        );
+        journal_member_lines(member, pass);
+        // A read that ran of bytes a family decline of this window was
+        // credited with: what it delivered is that decline's cost.
+        journaled |= journal_follow_up(git_dir, work_tree, raw, member, pass);
         // The decision is recorded in the window's own journal either way; what
         // is journaled here is the accounting the worker owes for it, the
         // frame included — a row that books what a decline avoided and says
@@ -273,6 +250,85 @@ pub(super) fn gate_record_members(
         );
     }
     journaled
+}
+
+/// The lines one member's decision leaves in the window's journal: the record
+/// itself, and the observation beside it where the decision rested on
+/// something other than the window's own lines.
+fn journal_member_lines(member: &GateMember, pass: &GatePass<'_>) {
+    let _ = pass.journal.append(&rift_agent::window_journal::record(
+        &member.read,
+        &member.decision,
+        member.slice_bytes,
+        pass.limits,
+        pass.turn,
+        pass.at_ms,
+    ));
+    // A read only an inherited line, or only another window's holding, would
+    // have declined ran, and the line above credits what it delivered; these
+    // size the class it rested on.
+    let beside = [
+        rift_agent::window_journal::record_inheritance(
+            &member.read,
+            &member.decision,
+            pass.turn,
+            pass.at_ms,
+        ),
+        rift_agent::window_journal::record_family(
+            &member.read,
+            &member.decision,
+            pass.turn,
+            pass.at_ms,
+        ),
+    ];
+    for line in beside.into_iter().flatten() {
+        let _ = pass.journal.append(&line);
+    }
+    // A cross-checked read whose own result states its delivery: the line
+    // just written credits the window with what the size rule could vouch
+    // for, and this moves it to what the client says actually arrived.
+    reconcile_stated_delivery(
+        pass.journal,
+        &member.read,
+        pass.stated,
+        member.slice_bytes,
+        pass.limits,
+        pass.turn,
+        pass.at_ms,
+    );
+}
+
+/// Journal the cost of a read that ran of bytes a family decline of this
+/// window was credited with, and say whether anything was journaled.
+///
+/// Decided on the call, never on its result: the result of the same read is
+/// the same read, and charging it twice would undercount the decline.
+fn journal_follow_up(
+    git_dir: &Path,
+    work_tree: &Path,
+    raw: &rift_shadow::hooks::RawHook,
+    member: &GateMember,
+    pass: &GatePass<'_>,
+) -> bool {
+    let ran = !matches!(
+        member.decision,
+        rift_agent::window_journal::Decision::Deny(_)
+    );
+    if !matches!(pass.step, GateStep::Decide) || !ran {
+        return false;
+    }
+    let Some(lines) = rift_agent::window_journal::family_follow_up(&member.read, pass.held) else {
+        return false;
+    };
+    journal_family_follow_up(
+        git_dir,
+        work_tree,
+        raw,
+        &member.read,
+        &member.file.blob_oid,
+        lines,
+        pass.window_key,
+    )
 }
 
 /// The channel a decline of this `(family, verb)` would travel on, if the

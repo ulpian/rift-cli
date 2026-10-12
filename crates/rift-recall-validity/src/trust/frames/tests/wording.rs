@@ -4,17 +4,18 @@
 
 use super::super::{
     neutral_inline_span, neutral_pushed_span, render_coordinator_reads_naming, render_delta_frame,
-    render_delta_manifest, render_deny_frame, render_narrow_frame, render_outline_frame,
-    render_recovery_map, render_redirect_frame, render_search_answer, CoordinatorRead, EntryDetail,
-    HeldEntry, HeldVerdict, ManifestEntry, PathStatus, SearchHit, CLAUSE_ALREADY_IN_CONTEXT,
-    CLAUSE_CHANGED_AT, CLAUSE_CHANGED_ONLY, CLAUSE_CONVERTED, CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST,
+    render_delta_manifest, render_deny_frame, render_held_lines_frame, render_held_outline_frame,
+    render_narrow_frame, render_outline_frame, render_recovery_map, render_redirect_frame,
+    render_search_answer, CoordinatorRead, EntryDetail, HeldEntry, HeldVerdict, ManifestEntry,
+    PathStatus, SearchHit, CLAUSE_ALREADY_IN_CONTEXT, CLAUSE_CHANGED_AT, CLAUSE_CHANGED_ONLY,
+    CLAUSE_CONVERTED, CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST, CLAUSE_HELD_BY, CLAUSE_HELD_ELSEWHERE,
     CLAUSE_HELD_LIST, CLAUSE_IN_CONTEXT, CLAUSE_IN_CONTEXT_WINDOW, CLAUSE_OTHERS_UNCHANGED,
     CLAUSE_PROVENANCE, CLAUSE_PULL, CLAUSE_RANKED, CLAUSE_READ_ONLY, CLAUSE_REPEAT,
     CLAUSE_SHAPE_NOW, CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED, FRAME_COORDINATOR_OPENER,
-    FRAME_DENY_OPENER, FRAME_HEADER_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER,
-    FRAME_NARROW_OPENER, FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED, FRAME_OUTLINE_OPENER,
-    FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER, FRAME_SEARCH_OPENER, FRAME_WITHHELD_OPENER,
-    WITHHELD_PATH,
+    FRAME_DENY_OPENER, FRAME_HEADER_OPENER, FRAME_HELD_OPENER, FRAME_HINT_OPENER,
+    FRAME_LIST_OPENER, FRAME_NARROW_OPENER, FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED,
+    FRAME_OUTLINE_OPENER, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER, FRAME_SEARCH_OPENER,
+    FRAME_WITHHELD_OPENER, WITHHELD_PATH,
 };
 use super::{HASH, HASH2, SRC};
 use crate::trust::directive::is_directive_shaped;
@@ -32,6 +33,7 @@ const FRAME_OPENERS: &[&str] = &[
     FRAME_DENY_OPENER,
     FRAME_NARROW_OPENER,
     FRAME_OUTLINE_OPENER,
+    FRAME_HELD_OPENER,
     FRAME_RECOVERY_OPENER,
     FRAME_SEARCH_OPENER,
     FRAME_REDIRECT_OPENER,
@@ -65,6 +67,8 @@ const FRAME_CLAUSES: &[&str] = &[
     CLAUSE_FULL_LIST,
     CLAUSE_CONVERTED,
     CLAUSE_PROVENANCE,
+    CLAUSE_HELD_ELSEWHERE,
+    CLAUSE_HELD_BY,
 ];
 
 /// The openers are the renderer's own consts, so a reworded frame cannot
@@ -155,6 +159,10 @@ fn every_frame_rendered() -> String {
         .expect("one read to name")
         .0,
         render_outline_frame(&super::outline::golden_read(None)).expect("an outline to name"),
+        render_held_outline_frame(&super::outline::golden_read(None))
+            .expect("a held outline to name")
+            .0,
+        render_held_lines_frame(SRC, HASH, &[(1, 40)], None).expect("a held run to name"),
     ]
     .join("\n")
 }

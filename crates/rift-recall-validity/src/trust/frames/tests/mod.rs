@@ -7,6 +7,7 @@
 //! section a subagent's window opens with about its coordinator's reads.
 
 mod coordinator;
+mod family;
 mod manifest;
 mod outline;
 mod reasons;

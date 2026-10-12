@@ -141,6 +141,12 @@ pub use rift_recall_validity::trust::{
     OUTLINE_FRAME_MIN_PAGE_LINES,
 };
 
+/// The two frames a read another window of the repository holds is answered
+/// with — its outline with the clause that says why, or the runs that window
+/// holds — re-exported by the same route and for the same reason as
+/// [`render_deny_frame`].
+pub use rift_recall_validity::trust::{render_held_lines_frame, render_held_outline_frame};
+
 /// The document redirect's frame, re-exported by the same route and for the
 /// same reason as [`render_deny_frame`].
 ///
@@ -301,6 +307,12 @@ pub const COST_NOTE: &str = rift_recall_pack::COST_NOTE;
 /// Its own tag, so every surface can size the class, and take it out of a
 /// figure, apart from the re-reads the read gate declines.
 pub const TAG_FIRST_CONTACT: &str = "first_contact";
+
+/// The neutral tag on a read of bytes a family decline of the same window had
+/// been credited with: the read ran, and what it delivered is that decline's
+/// cost. Its own tag so the row is told from the decline it is charged
+/// against, and so every surface can net the two.
+pub const TAG_FAMILY_FOLLOW_UP: &str = "family_held:followup";
 
 /// The neutral tag on a document verb that had nothing to hand over yet: the
 /// family holds no sidecar for these bytes, and the conversion is owed.

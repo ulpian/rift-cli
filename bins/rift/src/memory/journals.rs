@@ -489,7 +489,7 @@ pub(super) fn window_journals(
     max_slice_bytes: u64,
     min_slice_lines: u32,
 ) -> WindowJournals {
-    let dir = crate::window_journal::dir(work_tree);
+    let dir = crate::window_journal::journal_dir(work_tree);
     let shown = dir.display().to_string();
     // A directory this member cannot read is a NOTE with the reason, not a
     // silent zero: an empty pool and an unreadable one are different facts.
@@ -570,7 +570,7 @@ pub(super) fn inherited_pools(work_tree: &Path) -> Vec<InheritedPool> {
         })
         .collect();
     let mut meter = SliceMeter::new(work_tree);
-    for (_, lines) in member_windows(&crate::window_journal::dir(work_tree)) {
+    for (_, lines) in member_windows(&crate::window_journal::journal_dir(work_tree)) {
         for line in &lines {
             fold_inherited(line, &mut meter, &mut pools);
         }
@@ -738,7 +738,8 @@ fn line_at_ms(line: &JournalLine) -> i64 {
         | JournalLine::Evict { at_ms, .. }
         | JournalLine::Inherit { at_ms, .. }
         | JournalLine::Spawn { at_ms, .. }
-        | JournalLine::Claim { at_ms, .. } => *at_ms,
+        | JournalLine::Claim { at_ms, .. }
+        | JournalLine::Family { at_ms, .. } => *at_ms,
     };
     i64::try_from(ms).unwrap_or(i64::MAX)
 }
@@ -756,7 +757,7 @@ pub(super) fn fold_split_journals(
 ) {
     let cut = boundary_ms.unwrap_or(i64::MAX);
     let mut meter = SliceMeter::new(work_tree);
-    for (_, lines) in member_windows(&crate::window_journal::dir(work_tree)) {
+    for (_, lines) in member_windows(&crate::window_journal::journal_dir(work_tree)) {
         let mut retries: BTreeMap<(bool, &'static str), (u64, u64)> = BTreeMap::new();
         let (mut in_observe, mut in_enforce) = (false, false);
         for (i, line) in lines.iter().enumerate() {
@@ -848,7 +849,8 @@ fn split_line(
         | JournalLine::Outline { .. }
         | JournalLine::Inherit { .. }
         | JournalLine::Spawn { .. }
-        | JournalLine::Claim { .. } => None,
+        | JournalLine::Claim { .. }
+        | JournalLine::Family { .. } => None,
     }
 }
 

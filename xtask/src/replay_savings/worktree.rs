@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use rift_agent::window_journal::Interval;
 
-use super::first_contact::{outline_facts, OutlineFacts};
+use super::first_contact::{is_first_contact_size, outline_facts, OutlineFacts};
 use super::history::{Blob, History};
 
 /// The largest file the gate will hash inline, and so the largest file a
@@ -64,9 +64,10 @@ pub(super) fn path_key(raw: &str, cwd: Option<&str>) -> Option<String> {
 pub(super) struct FileFacts {
     /// The byte length of each line, the newline included.
     line_bytes: Vec<u32>,
-    /// The outline the worker would bind, for a file large enough for the
-    /// first-contact lever.
+    /// The outline the worker would bind at a read of the file.
     outline: Option<std::sync::Arc<OutlineFacts>>,
+    /// Whether the file is large enough for the first-contact lever.
+    large: bool,
 }
 
 impl FileFacts {
@@ -85,7 +86,16 @@ impl FileFacts {
     /// The outline the worker would bind, where the file is large enough for
     /// the first-contact lever to consider it.
     pub(super) fn outline(&self) -> Option<&OutlineFacts> {
+        if !self.large {
+            return None;
+        }
         self.outline.as_deref()
+    }
+
+    /// The outline the worker binds at any read of the file, whatever its
+    /// size: the one a decline resting on another window's read may carry.
+    pub(super) fn outline_bound_at_any_read(&self) -> Option<&std::sync::Arc<OutlineFacts>> {
+        self.outline.as_ref()
     }
 
     /// How many bytes the lines `lo..=hi` amount to.
@@ -248,6 +258,7 @@ fn facts_of(bytes: &[u8], key: &str) -> Option<FileFacts> {
             .map(|line| u32::try_from(line.len()).unwrap_or(u32::MAX))
             .collect(),
         outline: outline_facts(key, bytes),
+        large: is_first_contact_size(bytes),
     })
 }
 

@@ -50,8 +50,8 @@ pub use tool_results::{
     session_tool_results, tool_results_jsonl_bytes, ArchivedToolResult, TOOL_RESULTS_SCHEMA_VERSION,
 };
 pub use window::{
-    window_journal_jsonl_bytes, ArchivedWindowFact, ArchivedWindowRow, WindowSliceKind,
-    WINDOW_JOURNAL_SCHEMA_VERSION,
+    window_journal_jsonl_bytes, ArchivedWindowFact, ArchivedWindowRow, WindowFamilyRoute,
+    WindowSliceKind, WINDOW_JOURNAL_SCHEMA_VERSION,
 };
 pub use worktrees::{
     session_worktree_observations, session_worktrees_jsonl_bytes, ArchivedWorktreeObservation,

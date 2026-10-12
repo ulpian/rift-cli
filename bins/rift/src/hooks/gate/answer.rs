@@ -105,9 +105,9 @@ fn gate_frame(
                 since,
             )
         }
-        // Its frame needs the outline the cache holds, so it is composed where
-        // the cache is read, and never here.
-        DenyShape::Outlined => None,
+        // Their frames need the outline the cache holds or the runs other
+        // windows hold, so they are composed where those are read, never here.
+        DenyShape::Outlined | DenyShape::Family { .. } => None,
         DenyShape::Narrow {
             held: run,
             read: rest,
@@ -196,6 +196,56 @@ pub(super) fn journal_decision(
     }) else {
         return false;
     };
+    enqueue_audit(git_dir, work_tree, raw, audit, window_key)
+}
+
+/// Journal the cost a read that ran owes the family decline it is charged
+/// against: the lines of it the decline had been credited with sparing, to be
+/// counted by the worker and booked as returned, never as avoided.
+pub(super) fn journal_family_follow_up(
+    git_dir: &Path,
+    work_tree: &Path,
+    raw: &rift_shadow::hooks::RawHook,
+    read: &rift_agent::window_journal::ResolvedRead,
+    blob_oid: &str,
+    lines: rift_agent::window_journal::Interval,
+    window_key: &str,
+) -> bool {
+    use crate::agent_queue::{AuditBasis, AuditLines, ServeAudit, ServeAuditKind};
+    use rift_core::UlidSource as _;
+    let audit = ServeAudit {
+        call_id: AUDIT_IDS.next_ulid().to_hex(),
+        decision: ServeAuditKind::ReadFollowUp,
+        agent: raw.agent.as_str().to_owned(),
+        basis: Some(AuditBasis {
+            rel_path: read.path.clone(),
+            content_sha256: read.hash.to_hex(),
+            blob_oid: blob_oid.to_owned(),
+            lines: Some(AuditLines {
+                lo: lines.lo,
+                hi: lines.hi,
+            }),
+        }),
+        frame: String::new(),
+        tag: Some(rift_recall_serve::TAG_FAMILY_FOLLOW_UP.to_owned()),
+        total: None,
+        declared_avoided: None,
+        shape: None,
+        session: None,
+        window: None,
+    };
+    enqueue_audit(git_dir, work_tree, raw, audit, window_key)
+}
+
+/// Hand one accounting row to the detached worker, attributed to the session
+/// and window that decided it.
+fn enqueue_audit(
+    git_dir: &Path,
+    work_tree: &Path,
+    raw: &rift_shadow::hooks::RawHook,
+    audit: crate::agent_queue::ServeAudit,
+    window_key: &str,
+) -> bool {
     crate::agent_queue::enqueue(
         git_dir,
         &crate::agent_queue::AgentJob {
@@ -248,6 +298,8 @@ pub(super) fn read_decision_audit(
         Decision::Observe(DenyShape::Outlined) | Decision::Deny(DenyShape::Outlined) => {
             Some(rift_recall_serve::TAG_FIRST_CONTACT.to_owned())
         }
+        Decision::Observe(DenyShape::Family { route, .. })
+        | Decision::Deny(DenyShape::Family { route, .. }) => Some(route.audit_tag().to_owned()),
         _ => None,
     };
     let decision = match decision {

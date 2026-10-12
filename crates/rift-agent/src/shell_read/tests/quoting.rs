@@ -193,17 +193,18 @@ fn posix_word(word: &str) -> Option<String> {
 /// The pieces one quoted word is built from: every character that means
 /// something inside a quote, and some that do not.
 fn quoted_word() -> impl proptest::strategy::Strategy<Value = String> {
-    let piece = proptest::sample::select(
-        &[
-            "a", "b.rs", "/", " ", "\\", "\\|", "\\w", "\\$", "\\\"", "\\\\", "\\`", "$", "`", "!",
-            "'", "\"", "*", "~", "-", "|", ";",
-        ][..],
-    );
-    (
-        proptest::sample::select(&["'", "\""][..]),
-        proptest::collection::vec(piece, 1..6),
-    )
-        .prop_map(|(mark, pieces)| format!("{mark}{}{mark}", pieces.concat()))
+    const PIECES: [&str; 21] = [
+        "a", "b.rs", "/", " ", "\\", "\\|", "\\w", "\\$", "\\\"", "\\\\", "\\`", "$", "`", "!",
+        "'", "\"", "*", "~", "-", "|", ";",
+    ];
+    // The enclosing mark is not a piece of its own word: a bare `'` inside
+    // `'…'` (or `"` inside `"…"`) ends the word there, and what follows is a
+    // second word. The other mark stays, since it is literal inside.
+    proptest::sample::select(&["'", "\""][..]).prop_flat_map(|mark| {
+        let inside: Vec<&'static str> = PIECES.into_iter().filter(|piece| *piece != mark).collect();
+        proptest::collection::vec(proptest::sample::select(inside), 1..6)
+            .prop_map(move |pieces| format!("{mark}{}{mark}", pieces.concat()))
+    })
 }
 
 /// A double-quoted pattern built only of escapes the grammar resolves and
