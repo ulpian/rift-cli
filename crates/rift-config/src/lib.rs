@@ -13,7 +13,7 @@
 //! same secure defaults, supply-chain-clean.
 //!
 //! Loading is **strict**: unknown keys are hard errors (a typo cannot silently
-//! disable a redactor), the dangerous `raw_transcripts` toggle requires an
+//! disable a redactor), a `raw_transcripts = true` written out requires an
 //! explicit `acknowledge_risk`, built-in sensitive paths are unioned in and
 //! cannot be dropped, and validation **aggregates** every problem at once.
 #![forbid(unsafe_code)]
@@ -86,7 +86,10 @@ mod tests {
     fn loads_minimal_config() {
         let eff = parse("schema_version = 1\n[project]\nname = \"demo\"\n").unwrap();
         assert_eq!(eff.project_name(), "demo");
-        assert!(!eff.raw_transcripts_enabled());
+        assert!(
+            eff.raw_transcripts_enabled(),
+            "raw transcripts are on by default"
+        );
         assert!(eff.captures_tool_calls());
     }
 
@@ -194,7 +197,7 @@ mod tests {
     fn missing_rift_dir_yields_secure_defaults() {
         let dir = std::env::temp_dir().join("rift-config-absent-xyz");
         let eff = EffectiveConfig::load(&dir).unwrap();
-        assert!(!eff.raw_transcripts_enabled());
+        assert!(eff.raw_transcripts_enabled());
         assert!(eff.is_sensitive_path("project/.env"));
         assert!(eff.is_sensitive_path("a/b/id_rsa"));
     }
@@ -466,13 +469,14 @@ mod tests {
 
     /// Fingerprints already stamped into events and summary bindings must keep
     /// matching, so the preimage keeps the fixed entropy line the retired key
-    /// once contributed.
+    /// once contributed. The pinned value moves only with a real policy
+    /// change: it last moved when raw transcripts became on by default.
     #[test]
     fn the_default_policy_fingerprint_is_unchanged_by_the_retired_redaction_keys() {
         let default = EffectiveConfig::secure_default().unwrap();
         assert_eq!(
             default.policy_hash().to_string(),
-            "066a7fcd223f7f05e64dc6a473993795f7f41ff398a2d87988d5a7c88d1671f4"
+            "b700dc637f25407f23c5e3f378fceb2350fe01fe0482e2300c8381e0cd7b79b2"
         );
     }
 
@@ -486,6 +490,33 @@ mod tests {
         )
         .unwrap();
         assert!(ok.raw_transcripts_enabled());
+    }
+
+    #[test]
+    fn a_config_that_writes_raw_transcripts_off_keeps_them_off() {
+        let off = parse(
+            "schema_version=1\n[project]\nname=\"x\"\n[capture]\nraw_transcripts=false\nacknowledge_risk=false\n",
+        )
+        .unwrap();
+        assert!(!off.raw_transcripts_enabled());
+        let bare =
+            parse("schema_version=1\n[project]\nname=\"x\"\n[capture]\nraw_transcripts=false\n")
+                .unwrap();
+        assert!(!bare.raw_transcripts_enabled());
+    }
+
+    /// The acknowledgement guards a file that writes the option on, not the
+    /// shipped default: a file silent on the option is on and valid whatever
+    /// it says about the acknowledgement.
+    #[test]
+    fn the_default_raw_transcripts_need_no_acknowledgement() {
+        let silent =
+            parse("schema_version=1\n[project]\nname=\"x\"\n[capture]\nacknowledge_risk=false\n")
+                .unwrap();
+        assert!(silent.raw_transcripts_enabled());
+        assert!(EffectiveConfig::secure_default()
+            .unwrap()
+            .raw_transcripts_enabled());
     }
 
     #[test]

@@ -339,10 +339,25 @@ mod tests {
             p.decide_exact("tool.out", Trust::ToolOutputUntrusted, Some("any reason")),
             AuditDecision::Deny(OmitReason::PolicyDeniedExact)
         );
+        let off = capture_config(false);
         assert_eq!(
-            p.decide_exact("chat", Trust::TranscriptUntrusted, Some("any reason")),
+            PolicyEngine::new(&off).decide_exact(
+                "chat",
+                Trust::TranscriptUntrusted,
+                Some("any reason")
+            ),
             AuditDecision::Deny(OmitReason::PolicyDeniedExact)
         );
+    }
+
+    #[test]
+    fn a_default_config_serves_transcripts_on_every_path() {
+        let cfg = config();
+        let p = PolicyEngine::new(&cfg).with_serve_policy(ServePolicy::default());
+        assert!(matches!(
+            p.decide_exact("chat", Trust::TranscriptUntrusted, Some("audit")),
+            AuditDecision::Allow { .. }
+        ));
     }
 
     #[test]

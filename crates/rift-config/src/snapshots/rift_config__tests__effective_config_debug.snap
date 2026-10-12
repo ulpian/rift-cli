@@ -26,7 +26,7 @@ EffectiveConfig {
         "**/id_rsa",
         "secrets/**",
     ],
-    raw_transcripts: false,
+    raw_transcripts: true,
     capture_tool_calls: true,
     capture_token_usage: true,
     checkpoint_strategy: "manual-commit",
@@ -37,6 +37,6 @@ EffectiveConfig {
     ],
     feature_total_recall: true,
     legacy_search_key: false,
-    policy_hash: Blake3Id(86002fd562f835811b9a32ebd8b79be99d7f0a4fa5f038a86f9dc6644ab1e1a3),
+    policy_hash: Blake3Id(faefa7c7e4883781bb3fd3dce0dee704714e8089a9c21b2814dedd7d939adbf2),
     policy_source: Declared,
 }
