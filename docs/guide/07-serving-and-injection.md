@@ -247,7 +247,7 @@ The hook reads two window journals to compose it, the coordinator's and the suba
 
 **Facts, never a decline.**
 The section names revisions and writes nothing to the subagent's window journal: no read, no hold, no decline.
-The read gate keeps deciding from the subagent's own journal alone ([§7.4](#74-tier-three-the-decision-at-the-read)), so a file the coordinator holds is never a reason to skip the subagent's read of it, and no decline ever rests on a line outside the window's own journal.
+The read gate decides from the subagent's own journal, inherited lines in it marked, and for the one family-held decline from the live windows' journals it reads as files ([§7.4](#74-tier-three-the-decision-at-the-read)); that decline always carries a cheaper route and admits the follow-up, never a bare refusal. The opening itself creates no hold and no decline, so a file the coordinator holds is not skipped by this section.
 A test holds the subagent's journal untouched across the push; what the journal does hold at the opening is the inheritance below, written by the journal step, not by the section.
 
 **The coordinator's journal is not trusted to be well formed.**
@@ -276,7 +276,7 @@ On recorded sessions the claim named the spawning call for 395 of 398 subagent w
 **What lands, and what a read of it does.**
 When the claim names a spawn that named paths, the spawner's live reads of those paths are copied into the subagent's journal as `inherit` lines of class `by_name`, at most 256.
 A line inherited by a class at `observe` is never coverage: a read only it would have declined runs, the window records the read it was handed and beside it an `observe` line marked with the class, and the audit relation books the observation under `inherited:by_name`.
-Only a class at `enforce` counts as coverage, and then a decline rests on lines in the window's own journal, inherited ones included and marked; the one-decline-per-key rule bounds it as it bounds every other.
+Only a class at `enforce` counts as coverage, and then a decline rests on lines in the window's own journal, inherited ones included and marked, or, for the one family-held decline, on the live sibling journals read as files, with a cheaper route and an admitted follow-up; the one-decline-per-key rule bounds it as it bounds every other.
 The savings report carries one line per class — lines inherited, reads they alone would have declined, their tokens — beside the figure and never inside it, since an observed class avoided nothing.
 
 **What it costs at a spawn.**
