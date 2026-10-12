@@ -12,7 +12,7 @@ use std::path::Path;
 use rift_core::Result;
 
 use super::archive::{archive_now, bind_and_cache_outlines, condense_queued, level_projection};
-use super::audit::{attribute_serve_job, read_identified_bytes, serve_audit_job};
+use super::audit::{attribute_serve_job, serve_audit_job};
 use super::git::{capture_guarded, effective_config, state_from_token, strategy_kind};
 use super::recovery::hook_number;
 use super::{flag, now_ms, projection_db_at};
@@ -902,13 +902,20 @@ pub(super) fn line_slice(text: &str, lo: u32, hi: u32) -> String {
     out
 }
 
-/// The deferred BPE count of one read, moved off the hook path in 2026-08 to
-/// stay inside the git-latency budget: count the bytes whose identity the job names — the
-/// working file if its SHA-256 still matches, else the git blob by oid — and
-/// append the `file_read_tokens` row at the read's own `tool_call` id.
-/// Insert-or-ignore, so a redelivered job writes no second row. Bytes that
-/// match neither source are not counted under a guessed identity: the read
-/// stays unmeasured ("measured or absent"), said once.
+/// The deferred BPE count of one read, moved off the hook path to stay inside
+/// the git-latency budget: count the bytes of the revision the
+/// read recorded — the working file while its SHA-256 still matches, else the
+/// git blob by oid, else the family's basis snapshot, each verified against
+/// the recorded hash — and append the `file_read_tokens` row at the read's own
+/// `tool_call` id. Insert-or-ignore, so a redelivered job writes no second row.
+///
+/// Where no source holds those bytes any more the job is done, not failed:
+/// the read stays unmeasured ("measured or absent"), and it is counted as
+/// unmeasured once because that count is the read's own `tool_reads_file` row
+/// with no `file_read_tokens` row beside it — nothing is written, so a
+/// redelivery cannot count it twice. Retrying would only re-ask sources that
+/// already said the revision is gone, and a hook has nothing to tell the
+/// developer about it, so the worker's own log is the one place it is said.
 fn count_read_tokens_job(
     t: &crate::hooktime::HookTimer,
     job: &crate::agent_queue::AgentJob,
@@ -921,11 +928,13 @@ fn count_read_tokens_job(
 ) -> Result<()> {
     let repo = rift_git::discover(&job.work_tree)?;
     let Some(bytes) = t.phase("read_bytes", || {
-        read_identified_bytes(&repo.work_tree, rel_path, content_sha256, blob_oid)
+        reads::recorded_revision_bytes(&repo.work_tree, rel_path, content_sha256, blob_oid)
     }) else {
-        return Err(rift_core::RiftError::validity(format!(
-            "read tokens: the bytes read at {rel_path} are no longer available to count"
-        )));
+        tracing::debug!(
+            path = rel_path,
+            "read tokens: the recorded revision is gone; the read stays unmeasured"
+        );
+        return Ok(());
     };
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()

@@ -16,9 +16,9 @@ mod common;
 #[path = "common/hooks_fixture.rs"]
 mod hooks_fixture;
 use hooks_fixture::{
-    agent_hook, agent_read_hook, capture_queue_leg, checkpoint_shards, doctor_fix_json,
-    doctor_json, git_in, rev_parse, run_rift_capture, run_rift_in, run_rift_stdout,
-    seed_live_session_repo, session_phase, sync_env, DetachedHooks,
+    agent_hook, agent_read_hook, capture_queue_leg, checkpoint_shards, doctor_fix_json, git_in,
+    rev_parse, run_rift_capture, run_rift_in, run_rift_stdout, seed_live_session_repo,
+    session_phase, sync_env, DetachedHooks,
 };
 
 // --- the deferred settle -----------------------------------------------------
@@ -569,10 +569,11 @@ async fn a_reads_token_count_lands_from_the_worker_at_the_reads_own_row() {
 
 /// A count is a count of the bytes the agent READ. When the working file has
 /// moved on by the time the worker runs, the bytes are taken from the git
-/// blob the fact named — and when neither source still has them, nothing is
-/// counted under a guessed identity: the job is kept and said once.
+/// blob the fact named — and when no source still has them, nothing is
+/// counted under a guessed identity: the job is done, the read is unmeasured
+/// once, nothing is left for a hook to say, and a redelivery changes nothing.
 #[tokio::test]
-async fn the_worker_counts_the_bytes_the_fact_named_or_nothing() {
+async fn the_worker_counts_the_bytes_the_fact_named_or_leaves_the_read_unmeasured_once() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
     let cache = tmp.path().join("cache");
@@ -598,6 +599,7 @@ async fn the_worker_counts_the_bytes_the_fact_named_or_nothing() {
         &blob_oid,
     );
     let vanished = "b".repeat(64);
+    record_vanished_read(&cache, &repo, &vanished).await;
     plant_read_tokens_job(&repo, &vanished, &"f".repeat(64), &"0".repeat(40));
 
     let doc = doctor_fix_json(&repo, &env);
@@ -609,34 +611,84 @@ async fn the_worker_counts_the_bytes_the_fact_named_or_nothing() {
         )],
         "counted from the blob the fact named, not the file that moved on"
     );
+    assert_vanished_read_settled(&cache, &repo, &vanished, &doc, "first").await;
+
+    plant_read_tokens_job(&repo, &vanished, &"f".repeat(64), &"0".repeat(40));
+    let doc = doctor_fix_json(&repo, &env);
+    assert_vanished_read_settled(&cache, &repo, &vanished, &doc, "redelivered").await;
+}
+
+/// The capture rows of the read `call` of `a.txt` at a revision no source
+/// holds, as the projector records a read before any count exists.
+async fn record_vanished_read(cache: &Path, repo: &Path, call: &str) {
+    let repo_id = rift_git::repo_id_for(repo).unwrap();
+    let store =
+        rift_store::open_capture_projection(rift_store::projection_db_under(cache, &repo_id))
+            .unwrap();
+    let turn = rift_store::TurnRow {
+        turn_id: "vanished-turn".to_owned(),
+        session_id: "vanished-session".to_owned(),
+        ordinal: 0,
+        started_at: 1,
+        schema_version: 1,
+    };
+    let tool_call = rift_store::ToolCallRow {
+        tool_call_id: call.to_owned(),
+        turn_id: "vanished-turn".to_owned(),
+        tool_name: "Read".to_owned(),
+        started_at: 1,
+        schema_version: 1,
+    };
+    let revision = rift_store::FileRevisionRow {
+        file_revision_id: "vanished-revision".to_owned(),
+        path: "a.txt".to_owned(),
+        blob_oid: "0".repeat(40),
+        content_sha256: "f".repeat(64),
+        schema_version: 1,
+    };
+    rift_store::record_turn(&store, &turn).await.unwrap();
+    rift_store::record_tool_call(&store, &tool_call)
+        .await
+        .unwrap();
+    rift_store::record_file_revision(&store, &revision)
+        .await
+        .unwrap();
+    rift_store::record_tool_reads_file(&store, call, "vanished-revision")
+        .await
+        .unwrap();
+}
+
+/// After a drain of the vanished read's job: nothing pending, no queue file,
+/// no note for a hook to print, no count row, and the read unmeasured once.
+async fn assert_vanished_read_settled(
+    cache: &Path,
+    repo: &Path,
+    call: &str,
+    doc: &serde_json::Value,
+    delivery: &str,
+) {
+    let queue = capture_queue_leg(doc);
+    assert_eq!(queue["agent_jobs"]["pending"], 0, "{delivery}: {queue}");
+    assert_eq!(queue["notes"], serde_json::json!([]), "{delivery}: {queue}");
+    let queued = std::fs::read_dir(repo.join(".git").join("rift-agent-queue"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .count();
+    assert_eq!(queued, 0, "{delivery}: the job is consumed, not kept");
     assert!(
-        read_token_rows(&cache, &repo, &vanished).await.is_empty(),
-        "bytes nobody can produce are not counted under a guessed identity"
+        read_token_rows(cache, repo, call).await.is_empty(),
+        "{delivery}: bytes nobody can produce are not counted under a guessed identity"
     );
-    // The `--fix` run's own report: the sweep drained first, so its queue leg
-    // sees the kept job and the note (which doctor's soak leg then says and
-    // consumes, exactly once).
-    let queue = capture_queue_leg(&doc);
-    assert_eq!(
-        queue["agent_jobs"]["pending"], 1,
-        "kept for a retry: {queue}"
-    );
-    assert!(
-        queue["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n.as_str().unwrap().contains("no longer available")),
-        "and said once: {queue}"
-    );
-    let doc = doctor_json(&repo, &env);
-    let queue = capture_queue_leg(&doc);
-    assert_eq!(queue["agent_jobs"]["pending"], 1, "still owed: {queue}");
-    assert_eq!(
-        queue["notes"],
-        serde_json::json!([]),
-        "said once, not twice"
-    );
+    let repo_id = rift_git::repo_id_for(repo).unwrap();
+    let store =
+        rift_store::open_capture_projection(rift_store::projection_db_under(cache, &repo_id))
+            .unwrap();
+    let reads = rift_recall_ledger::savings::reads_by_family(&store, None)
+        .await
+        .unwrap();
+    let unmeasured: u64 = reads.values().map(|family| family.unmeasured).sum();
+    assert_eq!(unmeasured, 1, "{delivery}: the read is unmeasured once");
 }
 
 /// A read-tokens job in the agent queue, exactly as the hook journals one:

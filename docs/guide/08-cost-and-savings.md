@@ -383,6 +383,8 @@ split between the read tool and the shell is made from the families' own
 pinned tool tables, and a surface that does not hold them publishes `null` for
 both halves rather than a zero that reads like a measurement.
 
+A read's count is taken over the bytes of the revision it recorded — the working file while it still hashes to that revision, else the git blob, else the family's basis snapshot rehashed against it — and a read none of the three still holds is unmeasured once, with no retry and nothing said by a hook.
+
 Each measured row also records the **basis** of its count — `reexecuted` where
 the worker ran the search again and counted the real output, `in_process`
 where it matched the query with Rift's own index or content matcher and
