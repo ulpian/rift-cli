@@ -123,21 +123,28 @@
 
 mod artifact;
 mod bucket;
+mod by_name_split;
 mod census;
 #[cfg(test)]
 mod census_fixture;
 mod classify;
 mod delivery;
 mod family_held;
+mod file_order;
 mod first_contact;
+mod first_sight_split;
 mod history;
 mod inheritance;
 #[cfg(test)]
 mod narrow_fixture;
 mod options;
+mod post_compaction;
+mod pull_answers;
 mod render;
 mod replay;
 mod report;
+#[cfg(test)]
+mod rows_fixture;
 mod sections;
 #[cfg(test)]
 mod shape_fixture;
@@ -149,11 +156,15 @@ mod worktree;
 
 pub use artifact::{write_artifact, Provenance};
 pub use bucket::Bucket;
+pub use by_name_split::ByNameSplit;
 pub use census::{CensusRow, FirstSightSizes, MachineFormat};
 pub use family_held::FamilyHeldPool;
 pub use first_contact::FirstContactPool;
+pub use first_sight_split::FirstSightSplit;
 pub use inheritance::Inheritance;
 pub use options::{parse_args, run, Options};
+pub use post_compaction::PostCompaction;
+pub use pull_answers::PullPool;
 pub use render::{render_json, render_table, SCHEMA_VERSION};
 pub use replay::replay;
 pub use report::{share_percent, Report, Tally};

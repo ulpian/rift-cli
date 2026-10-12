@@ -7,9 +7,13 @@
 use std::collections::BTreeMap;
 
 use super::bucket::Bucket;
+use super::by_name_split::ByNameSplit;
 use super::census::{CensusRow, FirstSightSizes};
 use super::family_held::FamilyHeldPool;
 use super::first_contact::FirstContactPool;
+use super::first_sight_split::FirstSightSplit;
+use super::post_compaction::PostCompaction;
+use super::pull_answers::PullPool;
 use super::shell_shape::{Shape, ShapeRow};
 use super::worktree::FactsSource;
 
@@ -96,6 +100,14 @@ pub struct Report {
     /// The first sights another live window held, which a family decline
     /// would have answered.
     pub family_held: FamilyHeldPool,
+    /// The first sights cut by the two first-contact floors.
+    pub first_sight_split: FirstSightSplit,
+    /// Reading after a compaction.
+    pub post_compaction: PostCompaction,
+    /// The pull verbs run from a shell.
+    pub pulls: PullPool,
+    /// The by-name sibling re-reads cut by what the spawner handed down.
+    pub by_name_split: ByNameSplit,
     /// Where the path facts came from.
     pub facts: FactsSource,
     /// Shell calls that look like reads and that the grammar does not

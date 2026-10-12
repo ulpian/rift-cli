@@ -34,3 +34,9 @@ A run is therefore taken over a frozen copy of the transcript directory rather t
 The declined share — and every row derived from it — is an estimated upper bound on what the build would have kept out of context, never a claim that the reads would have happened, as the table's own "Reading it" paragraph says.
 Searches are in the denominator and the journal never declines one, so the read-only share is the larger of the two rates.
 The sections that size later levers — the client's own declines, the sibling re-reads by inheritance route, the machine-format census and the first-sight sizes — measure pools, not savings.
+So do the four that follow the first-contact and family-held rows, each also a key of the document:
+
+- *first sight, split by the two floors* cuts the first-sight bucket into six classes that add up to it: under both floors, large and not code (Markdown beneath it), large code read whole, large code from line 1, large code from mid-file, and calls of several reads or one that could not be read.
+- *by name, cut by what the spawner handed down* cuts the by-name sibling re-reads into three that add up to the by-name row: the spawner held no line of the path, the read went beyond the lines handed down, and the handed-down lines covered it.
+- *after a compaction* counts compactions (a boundary and its summary record are one), the reads in the three turns after one, and the reads of a path held before it by channel and by distance in turns, in each window's file order.
+- *pull answers* counts the lookup verbs actually run from a shell, by verb, with the runs in a scratch repository and the requests for help apart, and the reads of a path an answer named.

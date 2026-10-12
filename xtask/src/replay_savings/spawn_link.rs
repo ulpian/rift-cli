@@ -35,6 +35,8 @@ pub(super) struct Opening {
     under: Option<(String, String)>,
     call: Option<String>,
     opened: bool,
+    /// The spawn this window claimed at its opening, by position.
+    linked: Option<usize>,
 }
 
 /// Every window's opening facts, in tree order.
@@ -45,6 +47,7 @@ pub(super) fn openings(windows: &[Window]) -> Vec<Opening> {
             under: window.opened_under.clone(),
             call: window.spawning_call.clone(),
             opened: false,
+            linked: None,
         })
         .collect()
 }
@@ -101,11 +104,10 @@ pub(super) fn open_the_window(
     let truth = opening.call.clone();
     let links = &mut report.spawn_links;
     links.openings = links.openings.saturating_add(1);
-    let mut matching = tree
-        .spawns
-        .iter_mut()
-        .filter(|spawn| !spawn.claimed && spawn.prompt == prompt && spawn.agent_type == agent_type);
-    let (Some(sole), None) = (matching.next(), matching.next()) else {
+    let mut matching = tree.spawns.iter_mut().enumerate().filter(|(_, spawn)| {
+        !spawn.claimed && spawn.prompt == prompt && spawn.agent_type == agent_type
+    });
+    let (Some((at, sole)), None) = (matching.next(), matching.next()) else {
         links.unnamed = links.unnamed.saturating_add(1);
         return;
     };
@@ -122,6 +124,24 @@ pub(super) fn open_the_window(
     for row in &sole.rows {
         state.journal.push(row.clone());
     }
+    if let Some(opening) = tree.openings.get_mut(index) {
+        opening.linked = Some(at);
+    }
+}
+
+/// Whether the spawn `window` opened under left an inherited line for `key`:
+/// the spawner held some of the path and its prompt named it.
+pub(super) fn handed_down(tree: &TreeState, window: usize, key: &str) -> bool {
+    tree.openings
+        .get(window)
+        .and_then(|opening| opening.linked)
+        .and_then(|at| tree.spawns.get(at))
+        .is_some_and(|spawn| {
+            spawn
+                .rows
+                .iter()
+                .any(|line| matches!(line, Line::Inherit { path, .. } if path == key))
+        })
 }
 
 /// Where a class sits in the report's per-class arrays.
