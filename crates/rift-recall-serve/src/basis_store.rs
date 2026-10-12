@@ -10,8 +10,7 @@
 //! git object store, so a revision that was never committed had no basis at
 //! all. That is exactly the revision an agent is most likely to be holding: it
 //! read the file, then it (or the developer) edited it, and the next read of
-//! it ran at full price with `(changed)` and no lines
-//! (`docs/guide/18-known-gaps.md` §18.6).
+//! it ran at full price with `(changed)` and no lines.
 //!
 //! So the bytes of a revision a read recorded are kept here, and the basis
 //! ladder becomes: the git blob, then this snapshot, then `basis_unavailable`.
