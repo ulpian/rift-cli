@@ -23,11 +23,11 @@ use crate::hooks::projection_db_at;
 /// hook, and neither is anything a decision needs — the ladder this feeds is
 /// consulted where a store is already open.
 ///
-/// The same identity ladder as
-/// [`count_read_tokens_job`](super::count_read_tokens_job): the working file
-/// while its hash still matches, else the git blob, else nothing at all. A
-/// snapshot is a claim that these were the bytes the window read, and bytes
-/// that match neither source are not that.
+/// The first two rungs of the identity ladder
+/// [`count_read_tokens_job`](super::count_read_tokens_job) reads through: the
+/// working file while its hash still matches, else the git blob, else nothing
+/// at all. A snapshot is a claim that these were the bytes the window read,
+/// and bytes that match neither source are not that.
 ///
 /// Five things end the job with nothing recorded, and each is a saving
 /// forgone rather than a wrong answer: a revision the family already holds, a
@@ -101,6 +101,47 @@ pub(in crate::hooks) fn snapshot_basis_job(
         captured_at_ms: job.queued_at_ms,
     };
     t.phase("write_snapshot", || store.put(&sealed.redacted, &meta))
+}
+
+/// The bytes of the revision a read recorded, from the first source that
+/// still holds **exactly** them: the working file while its SHA-256 is still
+/// the recorded one, the git blob by its oid, then the family's basis
+/// snapshot of that revision.
+///
+/// Every source is keyed by the recorded hash and every answer is verified
+/// against it, so the current file's bytes are never counted under a
+/// revision they are not. The snapshot is rehashed rather than trusted by its
+/// name: a snapshot whose mask changed a byte hashes to something else, and
+/// bytes that are not the revision measure nothing about it.
+pub(super) fn recorded_revision_bytes(
+    work_tree: &Path,
+    rel_path: &str,
+    content_sha256: &str,
+    blob_oid: &str,
+) -> Option<Vec<u8>> {
+    match read_identified_bytes(work_tree, rel_path, content_sha256, blob_oid) {
+        Some(bytes) => Some(bytes),
+        None => snapshot_revision_bytes(work_tree, content_sha256),
+    }
+}
+
+/// The basis snapshot of `content_sha256`, only where its bytes still hash to
+/// that key.
+fn snapshot_revision_bytes(work_tree: &Path, content_sha256: &str) -> Option<Vec<u8>> {
+    let family = crate::family::try_at(work_tree)?;
+    let store = rift_recall_serve::basis_store::BasisStore::for_family(&family.common_dir);
+    if !store.holds(content_sha256) {
+        return None;
+    }
+    let bytes = std::fs::read(store.bytes_path(content_sha256)).ok()?;
+    // The store holds redacted bytes, so a revision whose snapshot had a
+    // secret masked never rehashes to its content key and stays unmeasured.
+    // That is the verify rule working, not a defect: masked bytes are not the
+    // revision, and a count over them would be a count of something else.
+    if rift_shadow::sha256_hex(&[&bytes]) != content_sha256 {
+        return None;
+    }
+    Some(bytes)
 }
 
 /// The deferred measurement of one search: run it again, read-only, and
@@ -221,4 +262,196 @@ fn masked_line_runs(raw: &[u8], redacted: &[u8]) -> Vec<(u32, u32)> {
         }
     }
     runs
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use rift_store::CanonicalStore as _;
+
+    use super::snapshot_basis_job;
+    use crate::agent_queue::{AgentJob, JobKind};
+
+    /// The revision a read recorded; the file is edited after it.
+    const READ_BODY: &str = "fn alpha() {\n    1\n}\n";
+
+    /// What the working file holds by the time the worker counts: longer, so
+    /// a count over it cannot pass for a count over the recorded revision.
+    const EDITED_BODY: &str =
+        "fn alpha() {\n    1\n}\n\nfn beta(x: u32) -> u32 {\n    x * 2 + 7\n}\n";
+
+    fn read_tokens_job(work_tree: &Path, tool_call_id: &str) -> AgentJob {
+        AgentJob {
+            schema_version: 1,
+            work_tree: work_tree.to_path_buf(),
+            queued_at_ms: 1_700_000_000_000,
+            attempts: 0,
+            kind: JobKind::ReadTokens {
+                tool_call_id: tool_call_id.to_owned(),
+                rel_path: "lib.rs".to_owned(),
+                content_sha256: rift_recall_substrate::worktree::sha256_hex(READ_BODY.as_bytes()),
+                blob_oid: rift_recall_substrate::worktree::git_blob_oid(READ_BODY.as_bytes()),
+                lines: None,
+                schema_version: 1,
+            },
+        }
+    }
+
+    /// A repository whose `lib.rs` was read as [`READ_BODY`] and edited
+    /// since; the revision was never committed, so no git blob holds it.
+    fn edited_after_read() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("lib.rs"), EDITED_BODY).unwrap();
+        tmp
+    }
+
+    /// Keep [`READ_BODY`] in the family's basis store, the way the worker's
+    /// snapshot job does while the file still holds it.
+    fn snapshot_read_body(work_tree: &Path) {
+        std::fs::write(work_tree.join("lib.rs"), READ_BODY).unwrap();
+        let job = read_tokens_job(work_tree, "unused");
+        let timer = crate::hooktime::HookTimer::from_env("test");
+        let sha = rift_recall_substrate::worktree::sha256_hex(READ_BODY.as_bytes());
+        let oid = rift_recall_substrate::worktree::git_blob_oid(READ_BODY.as_bytes());
+        snapshot_basis_job(&timer, &job, "lib.rs", &sha, &oid).unwrap();
+        std::fs::write(work_tree.join("lib.rs"), EDITED_BODY).unwrap();
+    }
+
+    /// Queue `job` and drain it once, as the worker does; says whether its
+    /// queue file is still there.
+    fn drain_once(work_tree: &Path, job: &AgentJob) -> bool {
+        let git_dir = work_tree.join(".git");
+        let path = crate::agent_queue::enqueue(&git_dir, job).unwrap();
+        let timer = crate::hooktime::HookTimer::from_env("test");
+        let landed = super::super::run_agent_job(&timer, &git_dir, &path, job);
+        assert_eq!(landed, super::super::Landed::Nothing);
+        path.exists()
+    }
+
+    fn projection(work_tree: &Path) -> rift_store::SqliteStore {
+        let db = crate::hooks::projection_db_at(work_tree).unwrap();
+        rift_store::open_capture_projection(db).unwrap()
+    }
+
+    /// Every `file_read_tokens` figure recorded at `tool_call_id`.
+    fn recorded_tokens(work_tree: &Path, tool_call_id: &str) -> Vec<i64> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let rows = rt
+            .block_on(projection(work_tree).query(
+                "SELECT input_tokens FROM file_read_tokens WHERE tool_call_id = ?1",
+                &[rift_store::Value::text(tool_call_id.to_owned())],
+            ))
+            .unwrap();
+        rows.iter().map(|r| r.get_i64(0).unwrap()).collect()
+    }
+
+    /// The capture rows of one read of `lib.rs` at `tool_call_id`, as the
+    /// projector records them before any count exists.
+    fn record_the_read(work_tree: &Path, tool_call_id: &str) {
+        let store = projection(work_tree);
+        let blob_oid = rift_recall_substrate::worktree::git_blob_oid(READ_BODY.as_bytes());
+        let revision = rift_store::FileRevisionRow {
+            file_revision_id: "fr-read".to_owned(),
+            path: "lib.rs".to_owned(),
+            blob_oid,
+            content_sha256: rift_recall_substrate::worktree::sha256_hex(READ_BODY.as_bytes()),
+            schema_version: 1,
+        };
+        let turn = rift_store::TurnRow {
+            turn_id: "turn".to_owned(),
+            session_id: "session".to_owned(),
+            ordinal: 0,
+            started_at: 1,
+            schema_version: 1,
+        };
+        let call = rift_store::ToolCallRow {
+            tool_call_id: tool_call_id.to_owned(),
+            turn_id: "turn".to_owned(),
+            tool_name: "Read".to_owned(),
+            started_at: 1,
+            schema_version: 1,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            rift_store::record_turn(&store, &turn).await.unwrap();
+            rift_store::record_tool_call(&store, &call).await.unwrap();
+            rift_store::record_file_revision(&store, &revision)
+                .await
+                .unwrap();
+            rift_store::record_tool_reads_file(&store, tool_call_id, "fr-read")
+                .await
+                .unwrap();
+        });
+    }
+
+    /// How many reads the savings report counts as unmeasured.
+    fn reads_unmeasured(work_tree: &Path) -> u64 {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let reads = rt
+            .block_on(rift_recall_ledger::savings::reads_by_family(
+                &projection(work_tree),
+                None,
+            ))
+            .unwrap();
+        reads.values().map(|family| family.unmeasured).sum()
+    }
+
+    /// ★ A read whose file moved on after it is counted over the bytes it
+    /// recorded, which the basis snapshot still holds — never over the file
+    /// as it is now.
+    #[test]
+    fn an_edited_read_is_counted_over_the_snapshot_of_the_revision_it_recorded() {
+        let tmp = edited_after_read();
+        let work_tree = tmp.path();
+        snapshot_read_body(work_tree);
+        let call = "a".repeat(64);
+
+        let kept = drain_once(work_tree, &read_tokens_job(work_tree, &call));
+
+        assert!(!kept, "the job is done");
+        let recorded = i64::from(rift_tokens::count(READ_BODY));
+        assert_ne!(recorded, i64::from(rift_tokens::count(EDITED_BODY)));
+        assert_eq!(recorded_tokens(work_tree, &call), vec![recorded]);
+    }
+
+    /// ★ A read whose revision no source holds any more is done, not failed:
+    /// no row, one unmeasured read, nothing for a hook to say, and a
+    /// redelivery changes none of it.
+    #[test]
+    fn a_read_whose_revision_is_gone_everywhere_is_unmeasured_once_and_said_nowhere() {
+        let tmp = edited_after_read();
+        let work_tree = tmp.path();
+        let call = "b".repeat(64);
+        record_the_read(work_tree, &call);
+        let job = read_tokens_job(work_tree, &call);
+
+        for delivery in ["first", "redelivered"] {
+            let kept = drain_once(work_tree, &job);
+
+            assert!(
+                !kept,
+                "the {delivery} job is consumed, not kept for a retry"
+            );
+            let git_dir = work_tree.join(".git");
+            assert_eq!(
+                crate::agent_queue::job_file_count(&git_dir),
+                0,
+                "{delivery}"
+            );
+            assert!(
+                crate::capture_queue::take_errors(&git_dir).is_empty(),
+                "the {delivery} job leaves nothing for a hook to print"
+            );
+            assert!(recorded_tokens(work_tree, &call).is_empty(), "{delivery}");
+            assert_eq!(reads_unmeasured(work_tree), 1, "{delivery}");
+        }
+    }
 }
