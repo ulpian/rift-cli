@@ -21,6 +21,7 @@
 //! * `fuzzy_matcher` — the matcher's pin still keeps its reads in bounds.
 //! * `ceilings` — no tracked `.rs` file over 1,500 lines and no function over
 //!   80, read by a lexer that masks comments and strings first.
+//! * `guide_size` — the tracked guide stays within its byte ceiling.
 //! * `ignores` — every `#[ignore]` carries its reason.
 //! * `cache_root` — the `rift` binary resolves its cache root in one function,
 //!   the one its test build redirects to a temp directory.
@@ -38,6 +39,7 @@ mod ceilings;
 mod deleted_paths;
 mod fuzz;
 mod fuzzy_matcher;
+mod guide_size;
 mod ignores;
 mod lints;
 mod network;
@@ -53,6 +55,7 @@ pub use ceilings::{ceilings_hold, Measured};
 pub use deleted_paths::deleted_paths_stay_deleted;
 pub use fuzz::fuzz_targets_all_run_in_ci;
 pub use fuzzy_matcher::fuzzy_matcher_reads_within_bounds;
+pub use guide_size::{guide_within_ceiling, GUIDE_BYTE_CEILING};
 pub use ignores::every_ignore_carries_a_reason;
 pub use lints::{
     lint_table_matches_baseline, no_blanket_allow_at_crate_root, unsafe_only_in_sanctioned_modules,
@@ -83,6 +86,8 @@ pub struct MetaReport {
     pub ignores: usize,
     /// `bins/rift/src/` files the cache-root screen read.
     pub cache_root_files: usize,
+    /// Bytes in the tracked guide, measured against its ceiling.
+    pub guide_bytes: u64,
     /// Everything any screen objects to. Empty means `ci-meta` passes.
     pub violations: Vec<String>,
 }
@@ -200,11 +205,14 @@ pub fn run_all(root: &Path) -> Result<MetaReport, String> {
     v.extend(bare);
     let (cache_root_files, resolved) = one_cache_root_in_the_rift_binary(root)?;
     v.extend(resolved);
+    let (guide_bytes, oversized_guide) = guide_within_ceiling(root)?;
+    v.extend(oversized_guide);
     Ok(MetaReport {
         vocabulary_files,
         ceilings,
         ignores,
         cache_root_files,
+        guide_bytes,
         violations: v,
     })
 }

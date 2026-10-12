@@ -10,7 +10,7 @@
 //!   deleted paths staying deleted, no retired program vocabulary in any
 //!   tracked path or byte, no network crate in the binaries' default-resolved
 //!   graph, no `.rs` file over 1,500 lines or function over 80, no bare
-//!   `#[ignore]`).
+//!   `#[ignore]`, the tracked guide within its byte ceiling).
 //! * `gate-intercept` — the read-only guard on the read-interception surface;
 //!   one leg per property, each named on its own output line.
 //! * `dogfood` — the scripted-session savings reading, played through the
@@ -70,11 +70,14 @@ fn main() -> Result<(), String> {
             fail_with(&report.violations, "ci-meta")?;
             println!(
                 "ci-meta: all checks pass ({} tracked files screened for retired vocabulary; \
-                 {} .rs files and {} functions under the ceilings; {} #[ignore]s with a reason)",
+                 {} .rs files and {} functions under the ceilings; {} #[ignore]s with a reason; \
+                 guide {} of {} bytes)",
                 report.vocabulary_files,
                 report.ceilings.files,
                 report.ceilings.functions,
-                report.ignores
+                report.ignores,
+                report.guide_bytes,
+                xtask::ci_meta::GUIDE_BYTE_CEILING
             );
             Ok(())
         }

@@ -72,7 +72,7 @@ deleted while CI stays green.
 
 `cargo run -p xtask -- ci-meta` reads the repository (source, the git index, the
 resolved dependency tree); it runs no tests, opens no database, reaches no
-network. Its seventeen checks each return violations; any fails the command:
+network. Its eighteen checks each return violations; any fails the command:
 
 1. **Required jobs present**, so deleting a job is a visible diff.
 2. **Read-only workflow permissions**: no `write` scope.
@@ -87,10 +87,11 @@ network. Its seventeen checks each return violations; any fails the command:
 11. **The conformance job runs exactly the declared suites.**
 12. **The fuzzy matcher keeps the feature that holds its vectorised backends inside their bytes**.
 13. **Deleted paths stay deleted**: on disk, in the index, or unignored, so a bulk `git add -A` cannot resurrect one.
-14. **The vocabulary screen**: planning shorthand in any tracked path or content, with no exclusions (this guide is in the corpus) and failing on a scan of nothing. The fix is words, never an exclusion. `docs/` is *excluded* from the redaction false-positive census (a prose corpus full of hashes would swamp it) and *included* here: two questions, two corpora ([04](04-redaction-and-secrets.md)).
+14. **The vocabulary screen**: planning shorthand in any tracked path or content, with no exclusions (this guide is in the corpus) and failing on a scan of nothing. The short id shapes are screened only over this guide and the root documents, because elsewhere they collide with hashes, benchmark arms and fixtures. The fix is words, never an exclusion. `docs/` is *excluded* from the redaction false-positive census (a prose corpus full of hashes would swamp it) and *included* here: two questions, two corpora ([04](04-redaction-and-secrets.md)).
 15. **Size ceilings**: no tracked `.rs` file over 1,500 lines or function over 80, tests and `xtask` included, comments and strings masked.
 16. **An `#[ignore]` carries its reason.**
 17. **One cache root in the `rift` binary** (`family::cache_root`, one temp directory per test process), so a unit test cannot write into the developer's real cache.
+18. **The guide stays within 400 KiB**: the byte length of every tracked file under `docs/guide/`, refused on a scan that found none. A chapter that grows replaces older text, or raises the ceiling in a diff a reviewer reads.
 
 `xtask gate-intercept` is the read-interception guard: eight read-only text screens over the tracked tree, no build. They hold that one
 file composes a hook response, the answered channels are a reviewable list, no
