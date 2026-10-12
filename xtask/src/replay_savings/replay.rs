@@ -232,7 +232,7 @@ fn replay_tree(
         };
         replay_event(ctx, event);
         let lines = windows.get(index).map_or(0, |w| w.journal.lines().len());
-        tree.family.note_lines(index, lines, &stamp);
+        tree.family.note_journal_lines(index, lines, &stamp);
     }
     fold_cross_window(&tree, settings.limits, report);
     let journals: Vec<&Journal> = windows.iter().map(|w| &w.journal).collect();

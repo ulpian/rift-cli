@@ -364,7 +364,7 @@ fn note_the_family(ctx: &mut Ctx<'_>, slots: &[Slot], bucket: Bucket, tokens: u6
             let read = &member.resolved.read;
             ctx.tree
                 .family
-                .note_read(ctx.window, ctx.stamp, read, tokens);
+                .note_ran_read(ctx.window, ctx.stamp, read, tokens);
         }
     }
     let (Bucket::FirstSight, [Slot::Member(member)]) = (bucket, slots) else {
@@ -373,11 +373,11 @@ fn note_the_family(ctx: &mut Ctx<'_>, slots: &[Slot], bucket: Bucket, tokens: u6
     let facts = ctx
         .worktree
         .facts_at(ctx.state.commit, &member.resolved.key)
-        .and_then(|facts| facts.bound_outline().cloned());
+        .and_then(|facts| facts.outline_bound_at_any_read().cloned());
     let read = &member.resolved.read;
     ctx.tree
         .family
-        .note_first_sight(ctx.window, ctx.stamp, read, tokens, facts);
+        .note_family_candidate(ctx.window, ctx.stamp, read, tokens, facts);
 }
 
 /// Count what the call is made of, and whether it is the read that follows an

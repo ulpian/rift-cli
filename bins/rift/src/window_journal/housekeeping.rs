@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{dir, ineffective_denies, is_key, WindowJournal};
+use super::{ineffective_denies, is_journal_key, journal_dir, WindowJournal};
 
 /// What one checkout's window journals amount to, for the operator diagnostic.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -39,7 +39,7 @@ enum Kind {
 /// quietly filling up with rows nobody can read is visible before anyone
 /// wonders why nothing is ever declined.
 pub(crate) fn survey(work_tree: &Path) -> Survey {
-    let root = dir(work_tree);
+    let root = journal_dir(work_tree);
     let mut keys = std::collections::BTreeSet::new();
     let mut snapshots = 0usize;
     for (name, _) in entries(work_tree) {
@@ -110,7 +110,7 @@ pub(crate) fn sweep_expired(work_tree: &Path, now_ms: i64, ttl_ms: i64, dry_run:
 
 /// The `(file name, path)` pairs directly in this checkout's journal directory.
 fn entries(work_tree: &Path) -> Vec<(String, PathBuf)> {
-    std::fs::read_dir(dir(work_tree))
+    std::fs::read_dir(journal_dir(work_tree))
         .into_iter()
         .flatten()
         .filter_map(std::result::Result::ok)
@@ -128,15 +128,16 @@ fn entries(work_tree: &Path) -> Vec<(String, PathBuf)> {
 /// module did not write — the screen that keeps the sweep to its own files.
 fn classify(name: &str) -> Option<(String, Kind)> {
     if let Some(stem) = name.strip_suffix(".jsonl") {
-        if is_key(stem) {
+        if is_journal_key(stem) {
             return Some((stem.to_owned(), Kind::Live));
         }
         let (key, ordinal) = stem.strip_suffix(".rolled")?.rsplit_once('.')?;
-        return (is_key(key) && ordinal.parse::<u64>().is_ok())
+        return (is_journal_key(key) && ordinal.parse::<u64>().is_ok())
             .then(|| (key.to_owned(), Kind::Rolled));
     }
     let (key, ordinal) = name.strip_suffix(".snapshot.json")?.rsplit_once('.')?;
-    (is_key(key) && ordinal.parse::<u64>().is_ok()).then(|| (key.to_owned(), Kind::Snapshot))
+    (is_journal_key(key) && ordinal.parse::<u64>().is_ok())
+        .then(|| (key.to_owned(), Kind::Snapshot))
 }
 
 #[cfg(test)]
@@ -173,7 +174,7 @@ mod tests {
         let live = WindowJournal::open(&root, "a-session-in-progress", None);
         live.append(&read(1, "b.rs", 1, 1, 10)).unwrap();
         // Something this module did not write, in the same directory.
-        let stranger = dir(&root).join("notes.txt");
+        let stranger = journal_dir(&root).join("notes.txt");
         std::fs::write(&stranger, b"not ours").unwrap();
 
         for path in [

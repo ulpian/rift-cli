@@ -15,7 +15,7 @@ use rift_agent::window_journal::{Journal, Line};
 use super::fold::{
     absorb_file, absorb_row, emptied, merge, read_snapshot, Accounted, SNAPSHOT_SCHEMA,
 };
-use super::{dir, key, MAX_APPEND_BYTES};
+use super::{journal_dir, key, MAX_APPEND_BYTES};
 
 /// How many rows a live file may hold before it is folded.
 pub(crate) const MAX_LIVE_LINES: usize = 4_096;
@@ -58,7 +58,7 @@ impl WindowJournal {
     /// creates nothing; the first append makes the directory.
     pub(crate) fn open(work_tree: &Path, session_id: &str, agent_id: Option<&str>) -> Self {
         Self {
-            dir: dir(work_tree),
+            dir: journal_dir(work_tree),
             key: key(session_id, agent_id),
         }
     }

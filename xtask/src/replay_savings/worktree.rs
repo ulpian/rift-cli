@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use rift_agent::window_journal::Interval;
 
-use super::first_contact::{is_large, outline_facts, OutlineFacts};
+use super::first_contact::{is_first_contact_size, outline_facts, OutlineFacts};
 use super::history::{Blob, History};
 
 /// The largest file the gate will hash inline, and so the largest file a
@@ -94,7 +94,7 @@ impl FileFacts {
 
     /// The outline the worker binds at any read of the file, whatever its
     /// size: the one a decline resting on another window's read may carry.
-    pub(super) fn bound_outline(&self) -> Option<&std::sync::Arc<OutlineFacts>> {
+    pub(super) fn outline_bound_at_any_read(&self) -> Option<&std::sync::Arc<OutlineFacts>> {
         self.outline.as_ref()
     }
 
@@ -258,7 +258,7 @@ fn facts_of(bytes: &[u8], key: &str) -> Option<FileFacts> {
             .map(|line| u32::try_from(line.len()).unwrap_or(u32::MAX))
             .collect(),
         outline: outline_facts(key, bytes),
-        large: is_large(bytes),
+        large: is_first_contact_size(bytes),
     })
 }
 

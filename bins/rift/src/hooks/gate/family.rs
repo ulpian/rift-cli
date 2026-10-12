@@ -16,7 +16,7 @@ use rift_agent::window_journal::{
     Interval, IntervalSet, ResolvedRead, MAX_FAMILY_RUNS,
 };
 
-use super::first_contact::with_outlined_read;
+use super::first_contact::with_cached_outline;
 use super::gate_mode;
 use super::members::{deny_channel, GatePass};
 use super::outline_cache::load_outline_cache;
@@ -86,7 +86,7 @@ fn live_family_coverage(work_tree: &Path, pass: &GatePass<'_>, read: &ResolvedRe
 fn family_route(git_dir: &Path, read: &ResolvedRead, holders: &IntervalSet) -> Option<Offer> {
     if let Some(cached) = load_outline_cache(git_dir, &read.path, read.hash) {
         let (frame, spans) =
-            with_outlined_read(&cached, read, rift_recall_serve::render_held_outline_frame)?;
+            with_cached_outline(&cached, read, rift_recall_serve::render_held_outline_frame)?;
         let offered = spans
             .into_iter()
             .filter_map(|(lo, hi)| Interval::new(lo, hi))

@@ -165,7 +165,7 @@ fn a_subagent_window_opens_once_with_its_coordinators_reads() {
         "agent_id": CHILD,
     })
     .to_string();
-    let journal = crate::window_journal::dir(repo.path()).join(format!(
+    let journal = crate::window_journal::journal_dir(repo.path()).join(format!(
         "{}.jsonl",
         crate::window_journal::key(SESSION, Some(CHILD))
     ));

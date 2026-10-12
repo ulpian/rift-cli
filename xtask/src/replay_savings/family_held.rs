@@ -23,7 +23,7 @@ use rift_recall_validity::trust::{
 };
 use serde_json::{json, Value};
 
-use super::first_contact::{with_outlined_read, OutlineFacts};
+use super::first_contact::{with_outline_facts, OutlineFacts};
 use super::history::unix_seconds;
 use super::render::{commas, row};
 use super::report::{Report, Tally};
@@ -113,14 +113,14 @@ impl FamilyLog {
 
     /// The lines `window`'s journal holds now were all written by `stamp` at
     /// the latest: the ones the last event added are stamped with it.
-    pub(super) fn note_lines(&mut self, window: usize, lines: usize, stamp: &str) {
+    pub(super) fn note_journal_lines(&mut self, window: usize, lines: usize, stamp: &str) {
         if let Some(stamps) = self.stamps.get_mut(window) {
             stamps.resize(lines.max(stamps.len()), stamp.to_owned());
         }
     }
 
     /// A read that ran.
-    pub(super) fn note_read(
+    pub(super) fn note_ran_read(
         &mut self,
         window: usize,
         stamp: &str,
@@ -137,7 +137,7 @@ impl FamilyLog {
     }
 
     /// A first sight of a one-read call.
-    pub(super) fn note_first_sight(
+    pub(super) fn note_family_candidate(
         &mut self,
         window: usize,
         stamp: &str,
@@ -179,7 +179,7 @@ fn case_of(log: &FamilyLog, journals: &[&Journal], candidate: &Candidate) -> Opt
         return None;
     }
     let outline_frame = candidate.facts.as_ref().and_then(|facts| {
-        with_outlined_read(read, facts, render_held_outline_frame)
+        with_outline_facts(read, facts, render_held_outline_frame)
             .map(|(frame, _)| u64::from(rift_tokens::count(&frame)))
     });
     let held_frame = held_runs(read, &holders).and_then(|runs| {
@@ -227,7 +227,7 @@ fn live_holders(log: &FamilyLog, journals: &[&Journal], candidate: &Candidate) -
             matches!(line, Line::Read { path, hash, .. } if *path == read.path && *hash == read.hash)
         });
         if !touches
-            || !is_live(
+            || !is_holder_live(
                 log,
                 window,
                 stamps.get(before.wrapping_sub(1)),
@@ -249,7 +249,7 @@ fn live_holders(log: &FamilyLog, journals: &[&Journal], candidate: &Candidate) -
 /// Whether a window is live at `stamp`: a session's own window always is
 /// while its tree is worked in; a subagent's while its journal's last line
 /// was written within the floor.
-fn is_live(log: &FamilyLog, window: usize, last: Option<&String>, stamp: &str) -> bool {
+fn is_holder_live(log: &FamilyLog, window: usize, last: Option<&String>, stamp: &str) -> bool {
     if !log.subagent.get(window).copied().unwrap_or(true) {
         return true;
     }
@@ -270,7 +270,7 @@ fn is_subagent_file(path: &Path) -> bool {
 impl FamilyHeldPool {
     /// Each route's figures: the outline where one is bound, the held runs
     /// where none is, and the read that runs otherwise.
-    fn figures(&self) -> [RouteFigures; 3] {
+    fn route_figures(&self) -> [RouteFigures; 3] {
         let mut out = [RouteFigures::default(); 3];
         for case in &self.cases {
             let (route, frame) = match (case.outline_frame, case.held_frame) {
@@ -300,7 +300,7 @@ impl FamilyHeldPool {
 impl RouteFigures {
     /// What a decline on this route would have kept out of context: the
     /// reads it answered, less the frames and every later read of the bytes.
-    fn net(self) -> Tally {
+    fn net_kept(self) -> Tally {
         Tally {
             calls: self.pool.calls,
             tokens: self
@@ -318,7 +318,7 @@ pub(super) fn family_held_rows(report: &Report, denominator: u64) -> String {
         "\n  family held: first sights another live window held (observed; net of the frame and \
          the follow-ups)\n",
     );
-    let figures = report.family_held.figures();
+    let figures = report.family_held.route_figures();
     for ((_, label), f) in ROUTES.iter().zip(figures) {
         out.push_str(&row(label, f.pool, denominator));
         if f.frames > 0 {
@@ -326,7 +326,7 @@ pub(super) fn family_held_rows(report: &Report, denominator: u64) -> String {
                 "  net of frames (max {} tok) and follow-ups",
                 commas(f.frame_max)
             );
-            out.push_str(&row(&net_label, f.net(), denominator));
+            out.push_str(&row(&net_label, f.net_kept(), denominator));
         }
         out.push_str(&row(
             "  followed by another read",
@@ -339,7 +339,7 @@ pub(super) fn family_held_rows(report: &Report, denominator: u64) -> String {
 
 /// The same rows for the machine-readable document.
 pub(super) fn family_held_json(report: &Report) -> Value {
-    let figures = report.family_held.figures();
+    let figures = report.family_held.route_figures();
     let mut map = serde_json::Map::new();
     for ((key, _), f) in ROUTES.iter().zip(figures) {
         map.insert(
@@ -353,7 +353,7 @@ pub(super) fn family_held_json(report: &Report) -> Value {
                 "follow_up_tokens": f.follow_ups.tokens,
                 // Only a route that declines keeps anything out; the read
                 // that runs nets nothing.
-                "net_tokens": if f.frames > 0 { f.net().tokens } else { 0 },
+                "net_tokens": if f.frames > 0 { f.net_kept().tokens } else { 0 },
             }),
         );
     }
@@ -401,10 +401,10 @@ mod tests {
             Journal::from_lines(vec![held(100, 160)]),
             Journal::default(),
         ];
-        log.note_lines(0, 1, "2026-09-01T10:00:00Z");
-        log.note_first_sight(1, subagent_reads_at, &read(1, 900), 5_000, None);
-        log.note_read(1, subagent_reads_at, &read(1, 900), 5_000);
-        log.note_read(1, "2026-09-01T11:30:00Z", &read(100, 160), 700);
+        log.note_journal_lines(0, 1, "2026-09-01T10:00:00Z");
+        log.note_family_candidate(1, subagent_reads_at, &read(1, 900), 5_000, None);
+        log.note_ran_read(1, subagent_reads_at, &read(1, 900), 5_000);
+        log.note_ran_read(1, "2026-09-01T11:30:00Z", &read(100, 160), 700);
         (log, journals)
     }
 
@@ -417,12 +417,12 @@ mod tests {
         let refs: Vec<&Journal> = journals.iter().collect();
         let mut pool = FamilyHeldPool::default();
         fold_family(&log, &refs, &mut pool);
-        let [outline, held, runs] = pool.figures();
+        let [outline, held, runs] = pool.route_figures();
         assert_eq!((outline.pool.calls, runs.pool.calls), (0, 0));
         assert_eq!(held.pool.tokens, 5_000);
         assert_eq!(held.follow_ups.tokens, 700);
         assert!(held.frames > 0);
-        assert_eq!(held.net().tokens, 5_000 - held.frames - 700);
+        assert_eq!(held.net_kept().tokens, 5_000 - held.frames - 700);
 
         let (log, journals) = tree("2026-09-01T09:00:00Z");
         let refs: Vec<&Journal> = journals.iter().collect();
@@ -444,8 +444,8 @@ mod tests {
         let refs: Vec<&Journal> = journals.iter().collect();
         for (at, cases) in [("2026-09-01T10:04:59Z", 1), ("2026-09-01T10:05:01Z", 0)] {
             let mut log = FamilyLog::new(&[main, child], &[None, Some(0)]);
-            log.note_lines(1, 1, "2026-09-01T10:00:00Z");
-            log.note_first_sight(0, at, &read(1, 900), 5_000, None);
+            log.note_journal_lines(1, 1, "2026-09-01T10:00:00Z");
+            log.note_family_candidate(0, at, &read(1, 900), 5_000, None);
             let mut pool = FamilyHeldPool::default();
             fold_family(&log, &refs, &mut pool);
             assert_eq!(pool.cases.len(), cases, "{at}");

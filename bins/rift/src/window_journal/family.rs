@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use rift_agent::window_journal::Journal;
 
-use super::{dir, is_key, key, WindowJournal};
+use super::{is_journal_key, journal_dir, key, WindowJournal};
 
 /// The most journals of other windows one decision reads.
 pub(crate) const MAX_SIBLING_JOURNALS: usize = 16;
@@ -121,7 +121,7 @@ pub(crate) fn live_sibling_journals(query: &FamilyQuery<'_>) -> SiblingJournals 
             continue;
         }
         let journal = WindowJournal {
-            dir: dir(&checkout.work_tree),
+            dir: journal_dir(&checkout.work_tree),
             key: candidate.key,
         };
         out.bytes = bytes;
@@ -160,7 +160,7 @@ fn family_checkouts(work_tree: &Path, git_dir: &Path) -> Vec<Checkout> {
 /// each with every byte its files hold.
 fn recent_journals(at: usize, checkout: &Checkout, query: &FamilyQuery<'_>) -> Vec<Candidate> {
     let mut files: BTreeMap<String, (Option<u64>, u64)> = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(dir(&checkout.work_tree)) else {
+    let Ok(entries) = std::fs::read_dir(journal_dir(&checkout.work_tree)) else {
         return Vec::new();
     };
     for entry in entries.flatten() {
@@ -171,13 +171,13 @@ fn recent_journals(at: usize, checkout: &Checkout, query: &FamilyQuery<'_>) -> V
         let Ok(meta) = entry.metadata() else {
             continue;
         };
-        if !is_key(window) || window == query.own_key || !meta.is_file() {
+        if !is_journal_key(window) || window == query.own_key || !meta.is_file() {
             continue;
         }
         let slot = files.entry(window.to_owned()).or_default();
         slot.1 = slot.1.saturating_add(meta.len());
         if rest == "jsonl" {
-            slot.0 = modified_ms(&meta);
+            slot.0 = journal_written_ms(&meta);
         }
     }
     files
@@ -198,7 +198,7 @@ fn recent_journals(at: usize, checkout: &Checkout, query: &FamilyQuery<'_>) -> V
 }
 
 /// A file's modification time in milliseconds since the epoch.
-fn modified_ms(meta: &std::fs::Metadata) -> Option<u64> {
+fn journal_written_ms(meta: &std::fs::Metadata) -> Option<u64> {
     let since = meta
         .modified()
         .ok()?

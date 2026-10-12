@@ -179,7 +179,7 @@ mod tests {
         assert!(human.contains("window journals: none"), "{human}");
         assert_eq!(json["windows"], 0);
 
-        let reads = window_journal::dir(tmp.path());
+        let reads = window_journal::journal_dir(tmp.path());
         std::fs::create_dir_all(&reads).unwrap();
         std::fs::write(
             reads.join(format!("{}.jsonl", window_journal::key("s", None))),

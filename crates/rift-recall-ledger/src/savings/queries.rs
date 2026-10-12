@@ -242,7 +242,7 @@ impl FamilyHeldTotals {
     /// What the declines kept out of context: avoided, less the frames and
     /// every read charged against them since — never below zero.
     #[must_use]
-    pub const fn net(&self) -> u64 {
+    pub const fn net_kept(&self) -> u64 {
         self.avoided
             .saturating_sub(self.frames)
             .saturating_sub(self.follow_up_tokens)

@@ -67,7 +67,7 @@ pub struct FirstContactPool {
 }
 
 /// Whether a file is large enough for the first-contact lever.
-pub(super) fn is_large(bytes: &[u8]) -> bool {
+pub(super) fn is_first_contact_size(bytes: &[u8]) -> bool {
     let lines = bytes.split_inclusive(|b| *b == b'\n').count();
     u64::try_from(lines).unwrap_or(u64::MAX) >= FIRST_CONTACT_LINES
         || u64::try_from(bytes.len()).unwrap_or(u64::MAX) >= FIRST_CONTACT_BYTES
@@ -168,15 +168,15 @@ impl FirstContactPool {
 
 /// The frame the sealed renderer would have sent for this read.
 fn frame_of(read: &ResolvedRead, facts: &OutlineFacts) -> Option<String> {
-    with_outlined_read(read, facts, render_outline_frame)
+    with_outline_facts(read, facts, render_outline_frame)
 }
 
 /// What `render` makes of this read's outline, as the sealed renderer is
 /// handed it: one construction for every frame an outline is sent in.
-pub(super) fn with_outlined_read<T>(
+pub(super) fn with_outline_facts<T>(
     read: &ResolvedRead,
     facts: &OutlineFacts,
-    render: impl FnOnce(&OutlinedRead<'_>) -> T,
+    outline_renderer: impl FnOnce(&OutlinedRead<'_>) -> T,
 ) -> T {
     let entries: Vec<OutlineEntry<'_>> = facts
         .outline
@@ -192,7 +192,7 @@ pub(super) fn with_outlined_read<T>(
         })
         .collect();
     let hash = read.hash.to_hex();
-    render(&OutlinedRead {
+    outline_renderer(&OutlinedRead {
         path: &read.path,
         hash: &hash,
         lines: facts.outline.lines(),
@@ -327,7 +327,7 @@ mod tests {
         // Every outlinable file has an outline the worker binds; only a large
         // one is a first contact.
         assert!(outline_facts("src/small.rs", b"fn a() {}\n").is_some());
-        assert!(!is_large(b"fn a() {}\n") && is_large(body.as_bytes()));
+        assert!(!is_first_contact_size(b"fn a() {}\n") && is_first_contact_size(body.as_bytes()));
         let mut pool = FirstContactPool::default();
         pool.note_read(&facts, "2026-01-01T00:00:05Z");
         let whole = read(1, HiKind::DefaultWindow(HiKind::END_OF_FILE));

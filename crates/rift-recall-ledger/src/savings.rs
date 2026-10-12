@@ -1025,7 +1025,7 @@ mod tests {
                     follow_up_tokens: 700,
                 }
             );
-            assert_eq!(all.net(), 5_000 - 90 - 700);
+            assert_eq!(all.net_kept(), 5_000 - 90 - 700);
             let late = family_held_totals(&recall, Some(2_000), tags)
                 .await
                 .unwrap();

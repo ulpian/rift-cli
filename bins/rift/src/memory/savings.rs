@@ -576,7 +576,7 @@ fn render_family_held(totals: Option<&FamilyHeldTotals>) -> String {
         t.avoided,
         t.frames,
         t.follow_up_tokens,
-        t.net()
+        t.net_kept()
     )
 }
 
@@ -592,7 +592,7 @@ fn with_family_held(
     let value = totals.map(|t| {
         let mut value = serde_json::to_value(t).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
-            object.insert("net".to_owned(), serde_json::json!(t.net()));
+            object.insert("net".to_owned(), serde_json::json!(t.net_kept()));
         }
         value
     });
