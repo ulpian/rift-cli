@@ -74,6 +74,10 @@ pub fn render_table(report: &Report) -> String {
         denominator,
     ));
     out.push_str(&super::pull_answers::pull_rows(report, denominator));
+    out.push_str(&super::no_line_count_split::no_line_count_rows(
+        report,
+        denominator,
+    ));
     out.push_str(&the_constants(report));
     out.push_str(READING_IT);
     out

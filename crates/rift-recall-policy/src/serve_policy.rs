@@ -73,6 +73,12 @@ ttl_days = 30                  # an unused sidecar is collected after this
 /// the delta — the agent pulls detail with the verbs the manifest names.
 pub const DEFAULT_INJECTION_TURN_BUDGET: u32 = 400;
 
+/// The globs raw-transcript retrieval is allowed on when the policy is silent:
+/// every path. Raw transcripts are on by default; the project config's
+/// `capture.raw_transcripts` is the switch that turns them off, and a written
+/// list here narrows them while that switch is on.
+pub(crate) const DEFAULT_RAW_TRANSCRIPT_GLOBS: &[&str] = &["**"];
+
 /// The serve-policy overlay loaded at server start: path globs never served, the
 /// per-path raw-transcript allow-list, and the per-turn injection ceiling.
 /// `fail_closed` is set when a policy file is present but unparseable — the
@@ -82,7 +88,8 @@ pub const DEFAULT_INJECTION_TURN_BUDGET: u32 = 400;
 pub struct ServePolicy {
     /// Path globs that are never served (not even by handle).
     pub denied_paths: Vec<String>,
-    /// Path globs for which raw transcript retrieval is explicitly enabled.
+    /// Path globs on which raw transcript retrieval is allowed while the
+    /// project config's `capture.raw_transcripts` is on.
     pub raw_transcript_globs: Vec<String>,
     /// Fail-closed: policy present but unparseable → deny all exact retrieval.
     pub fail_closed: bool,
@@ -141,8 +148,10 @@ pub struct ServePolicySnapshot {
 struct ServePolicyFile {
     #[serde(default)]
     denied_paths: Vec<String>,
+    /// Absent means every path (`DEFAULT_RAW_TRANSCRIPT_GLOBS`); a written list, `[]`
+    /// included, replaces it.
     #[serde(default)]
-    raw_transcript_globs: Vec<String>,
+    raw_transcript_globs: Option<Vec<String>>,
     /// Absent means "the default", not "zero" — hence `Option`, so an operator
     /// who writes `injection_turn_budget = 0` gets injection **off** rather
     /// than silently getting 400.
@@ -166,7 +175,7 @@ impl Default for ServePolicy {
     fn default() -> Self {
         Self {
             denied_paths: Vec::new(),
-            raw_transcript_globs: Vec::new(),
+            raw_transcript_globs: default_raw_transcript_globs(),
             fail_closed: false,
             injection_turn_budget: DEFAULT_INJECTION_TURN_BUDGET,
             interception: InterceptionPolicy::default(),
@@ -178,7 +187,7 @@ impl Default for ServePolicy {
 
 impl ServePolicy {
     /// Load `.rift/policies/serve.toml`. **Absent** → the permissive default (no
-    /// extra denies, transcripts still off, injection at
+    /// extra denies, transcripts on every path, injection at
     /// [`DEFAULT_INJECTION_TURN_BUDGET`]). **Present but unparseable** →
     /// [`ServePolicy::fail_closed`] (deny all exact retrieval, W-fail-closed).
     ///
@@ -192,8 +201,35 @@ impl ServePolicy {
 }
 
 /// Read the Recall overlay without following repository-shippable links.
+///
+/// Raw transcripts never get wider on a failure: when the project config
+/// beside the overlay is present and does not load, or was refused, the
+/// overlay allows no raw transcript. The check lives here rather than with the
+/// config because callers fall back to the default config, whose option is on,
+/// and every engine that serves a repository applies this overlay.
 #[must_use]
 pub fn load_serve_policy(rift_dir: &Path) -> ServePolicySnapshot {
+    let mut snapshot = load_overlay(rift_dir);
+    if !project_config_applies(rift_dir) {
+        snapshot.policy.raw_transcript_globs = Vec::new();
+    }
+    snapshot
+}
+
+/// Whether the project config loads and is the one in force: absent counts,
+/// since its defaults are then the declared policy; a parse or validation
+/// failure, or a refused file, does not.
+fn project_config_applies(rift_dir: &Path) -> bool {
+    match rift_config::EffectiveConfig::load(rift_dir) {
+        Ok(config) => !matches!(
+            config.policy_source(),
+            rift_config::PolicySource::Refused(_)
+        ),
+        Err(_) => false,
+    }
+}
+
+fn load_overlay(rift_dir: &Path) -> ServePolicySnapshot {
     let path = rift_dir.join("policies").join("serve.toml");
     match owned_policy_bytes(rift_dir, &path) {
         OwnedPolicy::Absent => ServePolicySnapshot {
@@ -278,7 +314,9 @@ fn ranges_are_coherent(file: &ServePolicyFile) -> bool {
 fn policy_from_file(file: ServePolicyFile) -> ServePolicy {
     ServePolicy {
         denied_paths: file.denied_paths,
-        raw_transcript_globs: file.raw_transcript_globs,
+        raw_transcript_globs: file
+            .raw_transcript_globs
+            .unwrap_or_else(default_raw_transcript_globs),
         fail_closed: false,
         injection_turn_budget: file
             .injection_turn_budget
@@ -287,6 +325,13 @@ fn policy_from_file(file: ServePolicyFile) -> ServePolicy {
         search: file.search,
         doc: file.doc,
     }
+}
+
+pub(crate) fn default_raw_transcript_globs() -> Vec<String> {
+    DEFAULT_RAW_TRANSCRIPT_GLOBS
+        .iter()
+        .map(|glob| (*glob).to_owned())
+        .collect()
 }
 
 /// The policy Rift holds when it cannot read the one on disk: no exact
@@ -373,6 +418,97 @@ mod tests {
         let sp = ServePolicy::load(dir.path());
         assert!(sp.fail_closed);
         assert_eq!(sp.injection_turn_budget, 0);
+    }
+
+    /// Raw transcripts are on by default: an absent file and an absent key
+    /// both allow every path, and the capture switch in the project config is
+    /// what turns them off.
+    #[test]
+    fn an_absent_policy_allows_raw_transcripts_on_every_path() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            ServePolicy::load(dir.path()).raw_transcript_globs,
+            vec!["**"]
+        );
+        assert_eq!(ServePolicy::default().raw_transcript_globs, vec!["**"]);
+        let (silent, _d) = load_src("denied_paths = []\n");
+        assert_eq!(silent.policy.raw_transcript_globs, vec!["**"]);
+    }
+
+    /// A written list is the operator's narrowing and replaces the default,
+    /// and an empty list is the serve-side opt-out.
+    #[test]
+    fn a_written_transcript_glob_list_replaces_the_default() {
+        let (narrowed, _d) = load_src("raw_transcript_globs = [\"logs/**\"]\n");
+        assert_eq!(narrowed.policy.raw_transcript_globs, vec!["logs/**"]);
+        let (opted_out, _d) = load_src("raw_transcript_globs = []\n");
+        assert!(opted_out.policy.raw_transcript_globs.is_empty());
+    }
+
+    /// An unreadable policy allows no raw transcript, whatever the default.
+    #[test]
+    fn a_fail_closed_policy_allows_no_raw_transcript() {
+        let (invalid, _d) = load_src("raw_transcript_globs = \"**\"\n");
+        assert_eq!(invalid.source, ServePolicySource::Invalid);
+        assert!(invalid.policy.raw_transcript_globs.is_empty());
+    }
+
+    /// A `.rift` holding only the given `config.toml`.
+    fn rift_dir_with_config(config: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), config).unwrap();
+        dir
+    }
+
+    /// Raw transcripts never get wider on a failure: a project config that is
+    /// present and does not load leaves no transcript allowed, whether it
+    /// wrote the option off or never named it, because a caller that falls
+    /// back to the default config would otherwise read the default's on.
+    #[test]
+    fn a_config_that_does_not_load_allows_no_raw_transcript() {
+        for config in [
+            "schema_version = 99\n[project]\nname = \"x\"\n[capture]\nraw_transcripts = false\n",
+            "schema_version = 99\n[project]\nname = \"x\"\n",
+            "not toml at all",
+        ] {
+            let dir = rift_dir_with_config(config);
+            let loaded = load_serve_policy(dir.path());
+            assert!(loaded.policy.raw_transcript_globs.is_empty(), "{config}");
+            assert!(
+                !loaded.policy.fail_closed,
+                "the other levers keep their policy"
+            );
+        }
+    }
+
+    #[test]
+    fn a_config_that_loads_without_the_key_allows_every_path() {
+        let dir = rift_dir_with_config("schema_version = 1\n[project]\nname = \"x\"\n");
+        assert_eq!(
+            ServePolicy::load(dir.path()).raw_transcript_globs,
+            vec!["**"]
+        );
+    }
+
+    /// A refused config is one Rift would not read (a symlink, or something
+    /// that is not a regular file); the config loader then hands back the
+    /// defaults, and raw transcripts stay off rather than read them.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_config_allows_no_raw_transcript() {
+        let linked = tempfile::tempdir().unwrap();
+        let target = linked.path().join("elsewhere.toml");
+        std::fs::write(&target, "schema_version = 1\n[project]\nname = \"x\"\n").unwrap();
+        std::os::unix::fs::symlink(&target, linked.path().join("config.toml")).unwrap();
+        assert!(ServePolicy::load(linked.path())
+            .raw_transcript_globs
+            .is_empty());
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("config.toml")).unwrap();
+        assert!(ServePolicy::load(directory.path())
+            .raw_transcript_globs
+            .is_empty());
     }
 
     /// Load a policy source through the real file path, so every test below

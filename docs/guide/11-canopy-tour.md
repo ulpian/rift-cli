@@ -202,7 +202,8 @@ and the hint row `j/k move · enter/space apply · pgup/pgdn scroll · esc/x clo
   ([02-configuration.md](02-configuration.md)): on writes `enforce`, off writes
   `off`, and a declared `observe` shows as on until you toggle it.
 - **Capture**, three: tool calls, token usage, raw transcripts. Raw transcripts
-  always need a separate acknowledgement of what retaining them means.
+  are on unless written off; switching them back on also writes the
+  acknowledgement of what retaining them means.
 - **Security / Policy**, read-only: policy validity, sensitive paths in effect,
   redactor packs ([04-redaction-and-secrets.md](04-redaction-and-secrets.md)).
 - **Integrations**, every adapter in registry order with what was detected and what

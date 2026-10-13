@@ -186,15 +186,18 @@ pub struct PathPolicy {
     pub sensitive_paths: Vec<String>,
 }
 
-/// Capture policy. Raw-transcript retrieval is **off** unless explicitly enabled
-/// *and* acknowledged (secure default).
+/// Capture policy. Raw-transcript retrieval is **on** unless the file writes it
+/// off; a transcript is still served through the untrusted frame, behind the
+/// serve overlay's denied paths and the sensitive paths' reason.
 #[derive(Debug, Clone, ::serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePolicy {
-    /// Enable raw-transcript retrieval (dangerous; requires `acknowledge_risk`).
+    /// Raw-transcript retrieval as the file writes it; absent is on. Kept as
+    /// written rather than defaulted so the acknowledgement can guard a file
+    /// that switches it on without guarding the shipped default.
     #[serde(default)]
-    pub raw_transcripts: bool,
-    /// Required `true` sibling when `raw_transcripts` is enabled.
+    pub raw_transcripts: Option<bool>,
+    /// Required `true` sibling when the file writes `raw_transcripts = true`.
     #[serde(default)]
     pub acknowledge_risk: bool,
     /// Capture tool calls.
@@ -243,6 +246,12 @@ fn default_idle_sweep_minutes() -> std::num::NonZeroU32 {
 }
 
 impl CapturePolicy {
+    /// Whether raw-transcript retrieval is on: as written, else on.
+    #[must_use]
+    pub fn raw_transcripts_enabled(&self) -> bool {
+        self.raw_transcripts.unwrap_or(true)
+    }
+
     /// The idle sweep's floor in milliseconds.
     #[must_use]
     pub fn idle_sweep_ms(&self) -> i64 {
@@ -253,7 +262,7 @@ impl CapturePolicy {
 impl Default for CapturePolicy {
     fn default() -> Self {
         Self {
-            raw_transcripts: false,
+            raw_transcripts: None,
             acknowledge_risk: false,
             tool_calls: true,
             token_usage: true,

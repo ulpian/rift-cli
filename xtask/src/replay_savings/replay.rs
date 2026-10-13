@@ -24,6 +24,7 @@ use super::history::History;
 use super::inheritance::{
     inheritance_of, leads, opening_section, Inheritance, WindowLead, SPAWNING_TOOLS,
 };
+use super::no_line_count_split::WorkingTree;
 use super::options::Options;
 use super::pull_answers::pull_invocations;
 use super::report::{finish, land, Report};
@@ -89,6 +90,8 @@ pub(super) struct TreeState {
     pub(super) by_name_origin: BTreeMap<(usize, String, u32), ByNameOrigin>,
     /// The windows in file order, and what was noted of their calls.
     pub(super) order: FileOrder,
+    /// The working tree the transcript proves.
+    pub(super) working: WorkingTree,
 }
 
 /// The settings every call in one replay is decided under, spelled once.
@@ -441,6 +444,7 @@ fn apply_edit(ctx: &mut Ctx<'_>, edit: &rift_agent::EditRequest, call: &Call) {
     let Some(key) = path_key(&edit.path, call.cwd.as_deref()) else {
         return;
     };
+    ctx.tree.working.note_change(call, &key);
     let before = ctx.tree.written_lines.get(&key).copied().or_else(|| {
         ctx.worktree
             .facts_at(ctx.state.commit, &key)

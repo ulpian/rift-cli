@@ -137,6 +137,9 @@ mod history;
 mod inheritance;
 #[cfg(test)]
 mod narrow_fixture;
+#[cfg(test)]
+mod no_line_count_fixture;
+mod no_line_count_split;
 mod options;
 mod post_compaction;
 mod pull_answers;
@@ -162,6 +165,7 @@ pub use family_held::FamilyHeldPool;
 pub use first_contact::FirstContactPool;
 pub use first_sight_split::FirstSightSplit;
 pub use inheritance::Inheritance;
+pub use no_line_count_split::NoLineCountSplit;
 pub use options::{parse_args, run, Options};
 pub use post_compaction::PostCompaction;
 pub use pull_answers::PullPool;

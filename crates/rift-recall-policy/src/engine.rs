@@ -7,6 +7,7 @@
 use rift_config::EffectiveConfig;
 use rift_recall_types::{OmitReason, Trust};
 
+use crate::serve_policy::default_raw_transcript_globs;
 use crate::ServePolicy;
 
 /// The serve-policy semantics version ([`PolicyEngine::version`]): part of the
@@ -83,9 +84,10 @@ impl NonEmptyReason {
 }
 
 /// The serving policy engine, parameterized by the effective project config plus
-/// the recall-serving policy (denied paths + raw-transcript allow-list). The
-/// extra lists default empty — **fail-closed**: no denied paths beyond the
-/// config's sensitive handling, and raw transcripts disabled.
+/// the recall-serving policy (denied paths + raw-transcript allow-list). Without
+/// an overlay it holds the overlay's defaults: no denied paths beyond the
+/// config's sensitive handling, and raw transcripts on every path while the
+/// config's `capture.raw_transcripts` is on.
 pub struct PolicyEngine<'a> {
     config: &'a EffectiveConfig,
     denied_paths: Vec<String>,
@@ -94,13 +96,13 @@ pub struct PolicyEngine<'a> {
 }
 
 impl<'a> PolicyEngine<'a> {
-    /// Wrap an effective config (no extra denied paths; transcripts disabled).
+    /// Wrap an effective config under the overlay's defaults.
     #[must_use]
     pub fn new(config: &'a EffectiveConfig) -> Self {
         Self {
             config,
             denied_paths: Vec::new(),
-            raw_transcript_globs: Vec::new(),
+            raw_transcript_globs: default_raw_transcript_globs(),
             fail_closed: false,
         }
     }
@@ -122,8 +124,8 @@ impl<'a> PolicyEngine<'a> {
         self
     }
 
-    /// Add path globs for which raw transcript retrieval is explicitly enabled
-    /// (still trust-checked + audited). Empty = transcripts off (the default).
+    /// Replace the path globs raw transcript retrieval is allowed on (still
+    /// trust-checked + audited, and only while the config's switch is on).
     #[must_use]
     pub fn with_raw_transcript_globs(mut self, globs: Vec<String>) -> Self {
         self.raw_transcript_globs = globs;
@@ -182,9 +184,21 @@ impl<'a> PolicyEngine<'a> {
         let Some(p) = normalize_rel(path) else {
             return false;
         };
-        self.raw_transcript_globs
+        self.effective_raw_transcript_globs()
             .iter()
             .any(|g| rift_config::glob_match(g, &p))
+    }
+
+    /// The one place the project config's `capture.raw_transcripts` is read:
+    /// off empties the allow-list whatever the overlay wrote, and on leaves the
+    /// overlay's list (every path, unless the overlay narrowed it). The overlay
+    /// cannot widen past the switch, so a repository that wrote the option off
+    /// keeps it off.
+    fn effective_raw_transcript_globs(&self) -> &[String] {
+        if !self.config.raw_transcripts_enabled() {
+            return &[];
+        }
+        &self.raw_transcript_globs
     }
 
     /// The compaction policy for a path (Conservative for sensitive paths).
@@ -325,10 +339,25 @@ mod tests {
             p.decide_exact("tool.out", Trust::ToolOutputUntrusted, Some("any reason")),
             AuditDecision::Deny(OmitReason::PolicyDeniedExact)
         );
+        let off = capture_config(false);
         assert_eq!(
-            p.decide_exact("chat", Trust::TranscriptUntrusted, Some("any reason")),
+            PolicyEngine::new(&off).decide_exact(
+                "chat",
+                Trust::TranscriptUntrusted,
+                Some("any reason")
+            ),
             AuditDecision::Deny(OmitReason::PolicyDeniedExact)
         );
+    }
+
+    #[test]
+    fn a_default_config_serves_transcripts_on_every_path() {
+        let cfg = config();
+        let p = PolicyEngine::new(&cfg).with_serve_policy(ServePolicy::default());
+        assert!(matches!(
+            p.decide_exact("chat", Trust::TranscriptUntrusted, Some("audit")),
+            AuditDecision::Allow { .. }
+        ));
     }
 
     #[test]
@@ -351,20 +380,109 @@ mod tests {
         );
     }
 
+    /// A project config whose capture section writes the raw-transcript
+    /// option one way or the other.
+    fn capture_config(raw_transcripts: bool) -> EffectiveConfig {
+        EffectiveConfig::from_toml_str(&format!(
+            "schema_version = 1\n[project]\nname = \"x\"\n[capture]\nraw_transcripts = {raw_transcripts}\nacknowledge_risk = {raw_transcripts}\n"
+        ))
+        .unwrap()
+    }
+
     #[test]
-    fn transcript_off_by_default_on_unless_enabled() {
-        let cfg = config();
-        let off = PolicyEngine::new(&cfg);
-        assert_eq!(
-            off.decide_exact("log/x", Trust::TranscriptUntrusted, Some("audit")),
-            AuditDecision::Deny(OmitReason::PolicyDeniedExact),
-            "transcripts are off by default"
-        );
-        let on = PolicyEngine::new(&cfg).with_raw_transcript_globs(vec!["log/**".to_string()]);
+    fn the_capture_option_on_serves_transcripts_under_the_default_globs() {
+        let cfg = capture_config(true);
+        let p = PolicyEngine::new(&cfg).with_serve_policy(ServePolicy::default());
+        assert!(p.raw_transcript_allowed("anything/at/all.jsonl"));
         assert!(matches!(
-            on.decide_exact("log/x", Trust::TranscriptUntrusted, Some("audit")),
+            p.decide_exact("log/x", Trust::TranscriptUntrusted, Some("audit")),
             AuditDecision::Allow { .. }
         ));
+        assert!(PolicyEngine::new(&cfg).raw_transcript_allowed("log/x"));
+    }
+
+    #[test]
+    fn the_capture_option_off_refuses_every_transcript_whatever_the_globs() {
+        let cfg = capture_config(false);
+        let p = PolicyEngine::new(&cfg).with_raw_transcript_globs(vec!["**".to_string()]);
+        assert!(!p.raw_transcript_allowed("log/x"));
+        assert_eq!(
+            p.decide_exact("log/x", Trust::TranscriptUntrusted, Some("audit")),
+            AuditDecision::Deny(OmitReason::PolicyDeniedExact),
+            "written off stays off"
+        );
+    }
+
+    /// The fallback callers take when the project config does not load is the
+    /// default config, whose option is on; the overlay loaded from the same
+    /// `.rift` is what keeps transcripts off.
+    #[test]
+    fn a_fallback_to_the_default_config_after_a_failed_load_serves_no_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "schema_version = 99\n[project]\nname = \"x\"\n",
+        )
+        .unwrap();
+        assert!(EffectiveConfig::load(dir.path()).is_err());
+        let fallback = config();
+        let p = PolicyEngine::new(&fallback).with_serve_policy(ServePolicy::load(dir.path()));
+        assert_eq!(
+            p.decide_exact("log/x", Trust::TranscriptUntrusted, Some("audit")),
+            AuditDecision::Deny(OmitReason::PolicyDeniedExact)
+        );
+    }
+
+    #[test]
+    fn written_globs_narrow_transcripts_while_the_option_is_on() {
+        let cfg = capture_config(true);
+        let p = PolicyEngine::new(&cfg).with_raw_transcript_globs(vec!["log/**".to_string()]);
+        assert!(matches!(
+            p.decide_exact("log/x", Trust::TranscriptUntrusted, Some("audit")),
+            AuditDecision::Allow { .. }
+        ));
+        assert_eq!(
+            p.decide_exact("notes/x", Trust::TranscriptUntrusted, Some("audit")),
+            AuditDecision::Deny(OmitReason::PolicyDeniedExact)
+        );
+    }
+
+    /// Allowing transcripts relaxes one step of the precedence and no other:
+    /// a denied path, untrusted tool output, a missing reason, a sensitive
+    /// path and an unreadable policy all still decide first.
+    #[test]
+    fn transcripts_on_never_outrank_a_deny_a_sensitive_path_or_tool_output() {
+        let cfg = capture_config(true);
+        let p = PolicyEngine::new(&cfg).with_denied_paths(vec!["**/vault/**".to_string()]);
+        let transcript = Trust::TranscriptUntrusted;
+        assert_eq!(
+            p.decide_exact("app/vault/t.jsonl", transcript, Some("audit")),
+            AuditDecision::Deny(OmitReason::PolicyDeniedExact)
+        );
+        assert_eq!(
+            p.decide_exact("log/x", Trust::ToolOutputUntrusted, Some("audit")),
+            AuditDecision::Deny(OmitReason::PolicyDeniedExact)
+        );
+        assert_eq!(
+            p.decide_exact("log/x", transcript, None),
+            AuditDecision::Deny(OmitReason::PolicyDeniedExact)
+        );
+        assert_eq!(
+            p.decide_exact("config/.env", transcript, None),
+            AuditDecision::Deny(OmitReason::SensitivePathRequiresReason)
+        );
+        match p.decide_exact("config/.env", transcript, Some("audit")) {
+            AuditDecision::Allow { sensitive, .. } => assert!(sensitive),
+            other => panic!("expected an audited sensitive grant, got {other:?}"),
+        }
+        let closed = PolicyEngine::new(&cfg).with_serve_policy(ServePolicy {
+            fail_closed: true,
+            ..ServePolicy::default()
+        });
+        assert_eq!(
+            closed.decide_exact("log/x", transcript, Some("audit")),
+            AuditDecision::Deny(OmitReason::PolicyDeniedExact)
+        );
     }
 
     #[test]
@@ -416,7 +534,7 @@ mod tests {
         assert_eq!(sp.denied_paths, vec!["**/vault/**".to_string()]);
         assert_eq!(sp.raw_transcript_globs, vec!["logs/**".to_string()]);
 
-        let cfg = config();
+        let cfg = capture_config(true);
         let p = PolicyEngine::new(&cfg).with_serve_policy(sp);
         assert!(p.is_denied_path("app/vault/key"));
         assert!(p.raw_transcript_allowed("logs/session.jsonl"));
@@ -492,7 +610,7 @@ mod tests {
 
     #[test]
     fn a_transcript_path_that_escapes_the_root_is_never_allowed_raw() {
-        let cfg = config();
+        let cfg = capture_config(true);
         let p = PolicyEngine::new(&cfg).with_raw_transcript_globs(vec!["logs/**".to_string()]);
         assert!(p.raw_transcript_allowed("logs/session.jsonl"));
         assert!(
