@@ -281,7 +281,7 @@ pub struct ArchivedTranscript {
     pub compact_start: usize,
     /// The tool results this transcript names as spilled to a file of their
     /// own, each sealed beside it under `tool-results/` or accounted for by a
-    /// closed word ([`super::spills`]). Empty when it names none, which keeps
+    /// closed word ([`super::SpillState`]). Empty when it names none, which keeps
     /// the shard every spill-less transcript always wrote.
     pub spills: Vec<ArchivedSpill>,
 }
