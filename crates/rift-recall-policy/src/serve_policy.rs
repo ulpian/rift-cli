@@ -201,8 +201,35 @@ impl ServePolicy {
 }
 
 /// Read the Recall overlay without following repository-shippable links.
+///
+/// Raw transcripts never get wider on a failure: when the project config
+/// beside the overlay is present and does not load, or was refused, the
+/// overlay allows no raw transcript. The check lives here rather than with the
+/// config because callers fall back to the default config, whose option is on,
+/// and every engine that serves a repository applies this overlay.
 #[must_use]
 pub fn load_serve_policy(rift_dir: &Path) -> ServePolicySnapshot {
+    let mut snapshot = load_overlay(rift_dir);
+    if !project_config_applies(rift_dir) {
+        snapshot.policy.raw_transcript_globs = Vec::new();
+    }
+    snapshot
+}
+
+/// Whether the project config loads and is the one in force: absent counts,
+/// since its defaults are then the declared policy; a parse or validation
+/// failure, or a refused file, does not.
+fn project_config_applies(rift_dir: &Path) -> bool {
+    match rift_config::EffectiveConfig::load(rift_dir) {
+        Ok(config) => !matches!(
+            config.policy_source(),
+            rift_config::PolicySource::Refused(_)
+        ),
+        Err(_) => false,
+    }
+}
+
+fn load_overlay(rift_dir: &Path) -> ServePolicySnapshot {
     let path = rift_dir.join("policies").join("serve.toml");
     match owned_policy_bytes(rift_dir, &path) {
         OwnedPolicy::Absent => ServePolicySnapshot {
@@ -424,6 +451,64 @@ mod tests {
         let (invalid, _d) = load_src("raw_transcript_globs = \"**\"\n");
         assert_eq!(invalid.source, ServePolicySource::Invalid);
         assert!(invalid.policy.raw_transcript_globs.is_empty());
+    }
+
+    /// A `.rift` holding only the given `config.toml`.
+    fn rift_dir_with_config(config: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), config).unwrap();
+        dir
+    }
+
+    /// Raw transcripts never get wider on a failure: a project config that is
+    /// present and does not load leaves no transcript allowed, whether it
+    /// wrote the option off or never named it, because a caller that falls
+    /// back to the default config would otherwise read the default's on.
+    #[test]
+    fn a_config_that_does_not_load_allows_no_raw_transcript() {
+        for config in [
+            "schema_version = 99\n[project]\nname = \"x\"\n[capture]\nraw_transcripts = false\n",
+            "schema_version = 99\n[project]\nname = \"x\"\n",
+            "not toml at all",
+        ] {
+            let dir = rift_dir_with_config(config);
+            let loaded = load_serve_policy(dir.path());
+            assert!(loaded.policy.raw_transcript_globs.is_empty(), "{config}");
+            assert!(
+                !loaded.policy.fail_closed,
+                "the other levers keep their policy"
+            );
+        }
+    }
+
+    #[test]
+    fn a_config_that_loads_without_the_key_allows_every_path() {
+        let dir = rift_dir_with_config("schema_version = 1\n[project]\nname = \"x\"\n");
+        assert_eq!(
+            ServePolicy::load(dir.path()).raw_transcript_globs,
+            vec!["**"]
+        );
+    }
+
+    /// A refused config is one Rift would not read (a symlink, or something
+    /// that is not a regular file); the config loader then hands back the
+    /// defaults, and raw transcripts stay off rather than read them.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_config_allows_no_raw_transcript() {
+        let linked = tempfile::tempdir().unwrap();
+        let target = linked.path().join("elsewhere.toml");
+        std::fs::write(&target, "schema_version = 1\n[project]\nname = \"x\"\n").unwrap();
+        std::os::unix::fs::symlink(&target, linked.path().join("config.toml")).unwrap();
+        assert!(ServePolicy::load(linked.path())
+            .raw_transcript_globs
+            .is_empty());
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("config.toml")).unwrap();
+        assert!(ServePolicy::load(directory.path())
+            .raw_transcript_globs
+            .is_empty());
     }
 
     /// Load a policy source through the real file path, so every test below

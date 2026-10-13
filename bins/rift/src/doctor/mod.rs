@@ -38,7 +38,9 @@ use health::doctor_integration_health;
 use prices::doctor_unpriced_models;
 use queues::{doctor_capture_queue, doctor_push_queue, doctor_session_sweep};
 use set_asides::doctor_recall_set_asides;
-use setup::{doctor_memory_chain, doctor_retired_config_keys, doctor_sibling_tool_hooks};
+use setup::{
+    doctor_config_load, doctor_memory_chain, doctor_retired_config_keys, doctor_sibling_tool_hooks,
+};
 use stores::{doctor_basis_store, doctor_document_store, doctor_window_journals};
 use worktrees::{
     doctor_orphan_projections, doctor_phantom_gitdirs, doctor_prunable_worktrees,
@@ -107,6 +109,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("integration_health", doctor_integration_health(root));
     report.leg("worktree_wiring", doctor_worktree_wiring(root, repair));
     report.leg("window_journals", doctor_window_journals(root));
+    report.leg("config_load", doctor_config_load(root));
     report.leg("retired_config_keys", doctor_retired_config_keys(root));
     report.leg("document_store", doctor_document_store(root));
     report.leg("basis_store", doctor_basis_store(root));

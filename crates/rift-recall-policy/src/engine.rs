@@ -413,6 +413,26 @@ mod tests {
         );
     }
 
+    /// The fallback callers take when the project config does not load is the
+    /// default config, whose option is on; the overlay loaded from the same
+    /// `.rift` is what keeps transcripts off.
+    #[test]
+    fn a_fallback_to_the_default_config_after_a_failed_load_serves_no_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "schema_version = 99\n[project]\nname = \"x\"\n",
+        )
+        .unwrap();
+        assert!(EffectiveConfig::load(dir.path()).is_err());
+        let fallback = config();
+        let p = PolicyEngine::new(&fallback).with_serve_policy(ServePolicy::load(dir.path()));
+        assert_eq!(
+            p.decide_exact("log/x", Trust::TranscriptUntrusted, Some("audit")),
+            AuditDecision::Deny(OmitReason::PolicyDeniedExact)
+        );
+    }
+
     #[test]
     fn written_globs_narrow_transcripts_while_the_option_is_on() {
         let cfg = capture_config(true);
