@@ -28,7 +28,7 @@ pub const MAX_LINE_HASH_FILE_BYTES: usize = 1024 * 1024;
 /// matched line a claim is the run it sits in and the revision's SHA-256 the
 /// file was read at, never this value alone. Stable across versions, because
 /// cache files outlive the binary that wrote them; a change here is a new
-/// [`MAGIC`].
+/// magic at the head of the cache file.
 #[must_use]
 pub fn line_hash(bytes: &[u8]) -> u64 {
     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);

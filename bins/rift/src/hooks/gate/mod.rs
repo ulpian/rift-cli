@@ -20,6 +20,7 @@ mod first_contact;
 mod linehash_cache;
 mod members;
 mod outline_cache;
+mod output_match;
 mod prevented;
 
 use std::path::Path;
@@ -28,6 +29,7 @@ use rift_shadow::hooks::AdapterRegistry;
 
 use self::delivery::stated_delivery;
 use self::members::{gate_decide_members, gate_record_members, settle_whole_call, GatePass};
+use self::output_match::output_match_record;
 use self::prevented::prevented_record;
 use super::doc_gate::{doc_gate, DocAnswer};
 use super::ingest::edit_record;
@@ -124,6 +126,12 @@ pub(in crate::hooks) fn window_journal_step(
     // not.
     let prevented = guarded_phase(t, "prevented_record", || {
         prevented_record(&registry, raw, git_dir, work_tree, &effective)
+    });
+    // WHAT A TERMINAL RESULT SHOWED the window, whatever its command line
+    // was: the lines of the named files found in the delivered output. It
+    // records and decides nothing, so it never touches the answer above.
+    guarded_phase(t, "output_match", || {
+        output_match_record(&registry, raw, git_dir, work_tree, &policy, &effective)
     });
     // A SPAWN, from either end: the spawning call's line in the session's main
     // journal, or the opening subagent's claim on it and what it inherits.

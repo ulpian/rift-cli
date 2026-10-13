@@ -81,9 +81,8 @@ pub(in crate::hooks) fn cache_window_line_hashes(
     let mut seen = std::collections::BTreeSet::new();
     let mut written = 0usize;
     for line in loaded.journal.lines() {
-        let (path, hash) = match line {
-            Line::Matched { path, hash, .. } | Line::Read { path, hash, .. } => (path, hash),
-            _ => continue,
+        let (Line::Matched { path, hash, .. } | Line::Read { path, hash, .. }) = line else {
+            continue;
         };
         if seen.len() >= MAX_CATCH_UP {
             break;
