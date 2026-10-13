@@ -568,7 +568,7 @@ mod tests {
         );
     }
 
-    /// D13. A managed link whose target is gone is still ours: it is healed in
+    /// A managed link whose target is gone is still ours: it is healed in
     /// place, never renamed aside as if a user had put it there.
     ///
     /// Portable on purpose, because the claim is: on Unix the dangling entry is

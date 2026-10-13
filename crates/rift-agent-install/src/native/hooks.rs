@@ -377,7 +377,7 @@ mod tests {
         (path, installed)
     }
 
-    /// **D12: the Claude Code hook fragment had no live writer.**
+    /// **The Claude Code hook fragment once had no live writer.**
     ///
     /// The legacy whole-set installer was the only emitter of
     /// `hook_fragment(ClaudeCode, …)`, and its last product caller went away in

@@ -18,7 +18,7 @@
 //! * Minting **adopts** the main work tree's historical ids rather than
 //!   deriving new ones, so every projection and recall database already on
 //!   disk is adopted in place: no row moves, no checksum changes, no rebuild.
-//! * The main work tree is **proven, never guessed** (D2 rules a/b/c below). A
+//! * The main work tree is **proven, never guessed** (rules a/b/c below). A
 //!   vantage that cannot prove it mints **nothing** — the alternative is a
 //!   `post-checkout` inside a brand-new member minting an identity over
 //!   `…/.git/worktrees` and orphaning the real projection forever.
@@ -161,7 +161,7 @@ pub enum MintPolicy {
 pub enum UnmintedReason {
     /// No manifest, and the caller passed [`MintPolicy::Never`].
     MintNotAllowed,
-    /// No manifest, minting was allowed, and none of the D2 rules could prove
+    /// No manifest, minting was allowed, and none of the main-resolution rules could prove
     /// the main work tree from this vantage. Nothing was written. The first
     /// `rift init` or verb run from the main work tree mints.
     MainUnprovable,
@@ -367,7 +367,7 @@ fn parent_is_main(canonical_common_dir: &Path) -> Option<PathBuf> {
     (resolved == canonical_common_dir).then(|| parent.to_path_buf())
 }
 
-/// Resolve the main work tree by the D2 rules, in order. **Pure**: it reads the
+/// Resolve the main work tree by the proof rules, in order. **Pure**: it reads the
 /// filesystem and never writes.
 fn resolve_main(paths: &RepoPaths, canonical_common_dir: &Path) -> MainResolution {
     if vantage_is_main(paths, canonical_common_dir) {
@@ -676,7 +676,7 @@ pub enum RemintMode {
 ///
 /// # Errors
 /// [`RiftError::Validity`] when [`RemintMode::AdoptMain`] is asked for and no
-/// D2 rule can prove the main work tree from this vantage; [`RiftError::Io`] on
+/// main-resolution rule can prove the main work tree from this vantage; [`RiftError::Io`] on
 /// a filesystem failure.
 pub fn remint(paths: &RepoPaths, mode: RemintMode, reason: &str) -> Result<Family> {
     remint_under(|k| std::env::var(k).ok(), paths, mode, reason)

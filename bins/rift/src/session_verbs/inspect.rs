@@ -149,7 +149,7 @@ fn session_lines(rows: &[serde_json::Value]) -> String {
             Label::of(&text("model")),
             text("state"),
             // Absence renders through the shared constant, so this column and
-            // the dashboard's badge say `unknown` with the same word (D6).
+            // the dashboard's badge say `unknown` with the same word.
             r.get("worktree")
                 .and_then(serde_json::Value::as_str)
                 .map_or_else(

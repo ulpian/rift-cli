@@ -169,7 +169,7 @@ fn hooks_report(
 /// installs one.** Provisioning is `rift init`'s act; a diagnosis that wired
 /// capture into a checkout nobody asked to wire would be the same class of
 /// side effect this whole rule removes. Rift has been here when one of the
-/// entries is managed — a dangling managed link included (D13), and an entry
+/// entries is managed — a dangling managed link included, and an entry
 /// under a retired name too — or when the family has recorded a binary.
 fn rift_has_been_here(
     dir: &std::path::Path,

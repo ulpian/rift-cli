@@ -951,7 +951,7 @@ mod tests {
         );
     }
 
-    /// **Item 6 must not widen the trailer divergence.** The shape digest
+    /// **The digest leaf must not widen the trailer divergence.** The shape digest
     /// derives from read facts, which BOTH hooks see — so the trailer
     /// prediction stays EXACT for a fact-carrying, transcript-less session
     /// even though its shard now carries a digest leaf. (The transcript-side

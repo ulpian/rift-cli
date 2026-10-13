@@ -170,7 +170,8 @@ mod tests {
     }
 
     /// A user's hook that can still RUN is still theirs — the never-clobber
-    /// rule is untouched by D13, and this is the line between the two.
+    /// rule is untouched by the dangling-link arm, and this is the line between
+    /// the two.
     #[cfg(unix)]
     #[test]
     fn a_live_unmarked_link_is_a_user_hook_and_is_chained_aside() {
@@ -190,7 +191,7 @@ mod tests {
         );
     }
 
-    /// The D13 second arm is **narrow on purpose**, and until this test nothing
+    /// The dangling-link arm is **narrow on purpose**, and until this test nothing
     /// held its edges. Every symlink fixture in the tree named its target
     /// `rift`, so `&& target.file_name() == "rift"` could be deleted and the
     /// whole suite stayed green while the claim widened from "one of ours from

@@ -535,7 +535,7 @@ fn window_verbs_spread_over_both_arms(f: &Family) {
     }
 }
 
-/// Verb 8, `rift session list|info|show` — the observation side of D4, with
+/// Verb 8, `rift session list|info|show` — the observation side of session provenance, with
 /// the `--json` twin of the two session shapes so the surfaces cannot drift.
 fn session_verbs_label_both_arms(f: &Family, named_session: &str, old_session: &str) {
     let (code, out, err) = rift(f, &f.member, &["session", "list"]);

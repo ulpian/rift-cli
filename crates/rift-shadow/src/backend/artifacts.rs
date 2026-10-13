@@ -921,7 +921,7 @@ mod tests {
         assert_eq!(n.writer().structural_count(), 5);
     }
 
-    /// **The compat twin, stated the same honest way as item 4's:** a shard
+    /// **The compat twin, stated just as plainly:** a shard
     /// carrying no digest artifact derives, leaf for leaf, the sequence it
     /// derived before digests existed — and a digest-less archive is exactly
     /// one with neither transcript nor read facts, which is every

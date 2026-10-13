@@ -621,7 +621,7 @@ mod tests {
         assert!(text.contains("worktrees   unknown"), "{text}");
         assert!(
             !text.contains("worktrees   main"),
-            "absence is never the main work tree (D6): {text}"
+            "absence is never the main work tree: {text}"
         );
         let rows = RecapRows {
             facts: &facts,
