@@ -12,6 +12,7 @@ use super::census::{CensusRow, FirstSightSizes};
 use super::family_held::FamilyHeldPool;
 use super::first_contact::FirstContactPool;
 use super::first_sight_split::FirstSightSplit;
+use super::no_line_count_split::NoLineCountSplit;
 use super::post_compaction::PostCompaction;
 use super::pull_answers::PullPool;
 use super::shell_shape::{Shape, ShapeRow};
@@ -108,6 +109,9 @@ pub struct Report {
     pub pulls: PullPool,
     /// The by-name sibling re-reads cut by what the spawner handed down.
     pub by_name_split: ByNameSplit,
+    /// The "no name or line count" bucket split by what the transcript proves
+    /// about the working tree, and by file size.
+    pub no_line_count_split: NoLineCountSplit,
     /// Where the path facts came from.
     pub facts: FactsSource,
     /// Shell calls that look like reads and that the grammar does not
