@@ -6,6 +6,8 @@
 mod outlines;
 mod spills;
 mod tasks;
+#[cfg(test)]
+mod test_corpus;
 
 use std::path::{Path, PathBuf};
 

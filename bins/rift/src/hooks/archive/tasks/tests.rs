@@ -173,22 +173,13 @@ fn an_unchanged_session_collects_byte_identical_tasks() {
     assert_eq!(once, twice);
 }
 
-/// The redaction corpus over a subagent file: every seeded secret and PII row
-/// is masked in both sealed artifacts, as it is in the main transcript.
+/// The seeded secret corpus over a subagent file: every row is masked in both
+/// sealed artifacts, as it is in the main transcript.
 #[test]
 fn the_redaction_corpus_leaves_nothing_verbatim_in_a_subagent_transcript() {
-    const CORPUS: [&str; 8] = [
-        "AKIAIOSFODNN7EXAMPLE",
-        "ghp_1234567890abcdefghijklmnopqrstuvwxyzAB",
-        "123-45-6789",
-        "+1-415-555-0199",
-        "4111 1111 1111 1111",
-        "alice@example.com",
-        "xoxb-123456789012-1234567890123-abcdefghijklmnopqrstuvwx",
-        "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ",
-    ];
+    let corpus = super::super::test_corpus::seeded_secrets();
     let s = Session::new(&launched("toolu_a", "a1"));
-    let body: String = CORPUS
+    let body: String = corpus
         .iter()
         .map(|secret| line("2026-10-11T10:00:01Z", &format!("value {secret} here")))
         .collect();
@@ -197,8 +188,8 @@ fn the_redaction_corpus_leaves_nothing_verbatim_in_a_subagent_transcript() {
     let pair = tasks[0].transcript.as_ref().unwrap();
     for artifact in [pair.full.as_slice(), pair.compact.as_slice()] {
         let text = String::from_utf8_lossy(artifact);
-        for secret in CORPUS {
-            assert!(!text.contains(secret), "{secret} survived: {text}");
+        for secret in &corpus {
+            assert!(!text.contains(secret.as_str()), "{secret} survived: {text}");
         }
     }
 }

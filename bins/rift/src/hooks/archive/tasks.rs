@@ -293,7 +293,7 @@ fn seal_task(
     let (transcript, state, (started, ended)) = match c.read {
         Ok(bytes) => {
             let instants = time_span(&bytes);
-            match seal(src, bytes, &c.path) {
+            match seal_through_gate(src, bytes, &c.path) {
                 Some(t) => (Some(t), TaskTranscriptState::Sealed, instants),
                 None => (None, TaskTranscriptState::Unsealed, instants),
             }
@@ -323,7 +323,11 @@ fn seal_task(
 /// A refusal is said and recorded as `unsealed`, never dropped in silence.
 /// The spills it names are sealed beside it; they live in the parent
 /// session's directory, so they are contained by the parent's address.
-fn seal(src: &TaskSources<'_>, bytes: Vec<u8>, path: &Path) -> Option<ArchivedTranscript> {
+fn seal_through_gate(
+    src: &TaskSources<'_>,
+    bytes: Vec<u8>,
+    path: &Path,
+) -> Option<ArchivedTranscript> {
     let raw = rift_core::SecretBytes::new(bytes);
     match rift_shadow::archived_transcript(&raw, 0, src.packs) {
         Ok((mut pair, _)) => {

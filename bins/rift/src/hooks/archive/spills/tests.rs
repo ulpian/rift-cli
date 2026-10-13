@@ -118,30 +118,22 @@ fn a_sixty_thousand_character_spill_is_sealed_whole() {
 /// The seeded secret corpus, buried in a spill, never survives the seal.
 #[test]
 fn a_secret_inside_a_spill_is_redacted() {
-    let google = format!("AIza{}", "a".repeat(35));
+    let secrets = super::super::test_corpus::seeded_secrets();
     let zwsp = '\u{200B}';
-    let secrets = [
-        "AKIAIOSFODNN7EXAMPLE",
-        "ghp_0123456789abcdef0123456789abcdef0123",
-        "sk_live_0123456789abcdef0123",
-        "xoxb-0123456789-abcdefghij",
-        google.as_str(),
-        "Zx9Qw3eR7tY2uI8oP1aS5dF6gH0jK4lZ3xC7vB9nM2qWeRt",
-        "sb_secret_aBcDaBcDaBcDaBcDaBcDaBcD",
-        "sk-ant-api03-aBcDaBcDaBcDaBcDaBcD",
-        "github_pat_aBcDaBcDaBcDaBcDaBcDaBcD",
-    ];
     let s = Session::new();
     let mut raw = sixty_k();
-    for secret in secrets {
+    for secret in &secrets {
         raw.extend_from_slice(format!("export TOKEN={secret} # line\n").as_bytes());
     }
     raw.extend_from_slice(format!("key=AKIA{zwsp}IOSFODNN7{zwsp}EXAMPLE end\n").as_bytes());
     let address = s.spill_file("bsecret.txt", &raw);
     let spills = s.spills(&structured("toolu_sec", &address));
     let text = String::from_utf8_lossy(body(&spills[0])).into_owned();
-    for secret in secrets {
-        assert!(!text.contains(secret), "{secret} survived the seal");
+    for secret in &secrets {
+        assert!(
+            !text.contains(secret.as_str()),
+            "{secret} survived the seal"
+        );
     }
     assert!(!text.contains("AKIAIOSFODNN7EXAMPLE"));
     assert!(text.contains("[REDACTED"), "the gate ran");
