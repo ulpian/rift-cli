@@ -35,6 +35,7 @@ mod intervals;
 mod line;
 mod matched;
 mod narrowing;
+pub mod output_match;
 
 use rift_core::Sha256Id;
 

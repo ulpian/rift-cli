@@ -17,6 +17,7 @@ mod delivery;
 mod family;
 mod file;
 mod first_contact;
+mod linehash_cache;
 mod members;
 mod outline_cache;
 mod prevented;
@@ -35,6 +36,7 @@ pub(in crate::hooks) use self::answer::GateOutcome;
 pub(crate) use self::answer::AUDIT_IDS;
 pub(crate) use self::file::payload_cwd;
 pub(in crate::hooks) use self::file::{gate_file, gate_rel_path};
+pub(in crate::hooks) use self::linehash_cache::{linehash_cache_dir, linehash_cache_name};
 pub(crate) use self::outline_cache::sweep_outline_cache;
 pub(in crate::hooks) use self::outline_cache::{
     write_outline_cache, CachedDefinition, CachedOutline,
