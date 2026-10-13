@@ -15,11 +15,13 @@ mod archive;
 mod audit;
 mod coordinator;
 mod doc_gate;
+mod family_state;
 mod gate;
 mod git;
 mod ingest;
 mod install;
 mod manifest;
+mod originals;
 mod recovery;
 mod subagent_claims;
 mod sweep;
@@ -52,6 +54,7 @@ pub(crate) use install::{
     effective_hooks_dir, family_sites, hook_names, install_family_hooks, report_lines,
 };
 pub(crate) use manifest::seed_manifest_baseline;
+pub(crate) use originals::{spooled_sessions, SpooledSession};
 pub(crate) use recovery::basis_snapshots_at;
 pub(crate) use sweep::{family_sweep_floor, sweep_stale_sessions, SessionSweep};
 pub(crate) use worker::drain_capture_queue;

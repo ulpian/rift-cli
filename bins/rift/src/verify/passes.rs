@@ -37,6 +37,10 @@ pub(super) struct ShardPasses {
     /// bytes. A non-zero count here therefore means real legacy history —
     /// never a stripped label.
     pub(super) pre_rift: usize,
+    /// Replaced ranges of held substitutions whose revision this run did not
+    /// read: counted, so a rewrite verify could not fully check is visible
+    /// rather than passed.
+    pub(super) held_unchecked: usize,
     /// The worst finding.
     pub(super) worst: Verdict,
 }
@@ -51,6 +55,7 @@ impl ShardPasses {
             checked: 0,
             vacuous_era: 0,
             pre_rift: 0,
+            held_unchecked: 0,
             worst: Verdict::Ok,
         }
     }
@@ -70,6 +75,7 @@ pub(super) fn shard_passes(reader: &impl SubstrateReader) -> Result<ShardPasses>
         checked: 0,
         vacuous_era: 0,
         pre_rift: 0,
+        held_unchecked: 0,
         worst: Verdict::Ok,
     };
     for shard in &reader.checkpoints()? {
@@ -146,9 +152,12 @@ fn native_shard_passes(
     let native = NativeArtifacts::read(reader, id, &header)?;
 
     let spills = super::spills::spill_digest_pass(id, &native.spills);
+    let originals = super::originals::original_passes(id, &native);
+    found.held_unchecked += originals.held_unchecked;
     for v in task_subtree_pass(id, &header, &native)
         .into_iter()
         .chain(spills)
+        .chain(originals.verdicts)
     {
         found.worst.keep_worse(v);
     }

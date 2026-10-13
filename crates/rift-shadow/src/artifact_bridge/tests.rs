@@ -651,3 +651,63 @@ async fn a_rebuild_counts_the_same_spills_from_a_wiped_projection() {
     }
     assert_eq!(counts, [(2, 1), (2, 1)]);
 }
+
+/// A shard whose session transcript sealed one original and recorded one
+/// unsealed, and whose subtree sealed an orphan; `toolu_c`'s body was edited
+/// after the seal.
+fn substrate_with_originals(id: &str) -> MemorySubstrate {
+    let digest = |b: &[u8]| crate::sha256_hex(&[b]);
+    let own = format!(
+        r#"[{{"bytes":3,"form":"folded_output","line":1,"replaced":[],"rewritten":"folded_output","sha256":"{}","tool_use_id":"toolu_a"}},{{"original":"original_unsealed","replaced":[],"tool_use_id":"toolu_u"}},{{"bytes":3,"sha256":"{}","tool_use_id":"toolu_c"}}]"#,
+        digest(b"aaa"),
+        digest(b"ccc"),
+    );
+    MemorySubstrate::local()
+        .with_shard(shard(id, 0))
+        .with_artifact(id, "redaction_report.json", valid_report().as_bytes())
+        .with_artifact(
+            id,
+            "metadata.json",
+            format!(
+                r#"{{"strategy":"manual-commit","merkle_root":"{}","sessions":["native-1"],"originals":{own},"tasks":["toolu_t"]}}"#,
+                "d".repeat(64)
+            )
+            .as_bytes(),
+        )
+        .with_artifact(id, "full.jsonl", full_jsonl().as_bytes())
+        .with_artifact(id, "tool-originals/toolu_a.json", b"aaa")
+        .with_artifact(id, "tool-originals/toolu_c.json", b"cc!")
+        .with_artifact(
+            id,
+            "tasks/toolu_t/metadata.json",
+            format!(
+                r#"{{"schema_version":1,"tool_use_id":"toolu_t","agent_id":"a1","originals":[{{"bytes":3,"original":"original_line_absent","sha256":"{}","tool_use_id":"toolu_in"}}]}}"#,
+                digest(b"iii")
+            )
+            .as_bytes(),
+        )
+        .with_artifact(id, "tasks/toolu_t/tool-originals/toolu_in.json", b"iii")
+}
+
+/// A rebuild counts the originals beside both transcripts — the same from
+/// every wiped projection, the orphan among the sealed — names an unsealed
+/// one, and turns a body that no longer matches its digest into a parse issue.
+#[tokio::test]
+async fn a_rebuild_counts_the_same_originals_from_a_wiped_projection() {
+    let sub = substrate_with_originals(&shard_id(9));
+    let mut counts = Vec::new();
+    for _ in 0..2 {
+        let report = ingest_from_substrate(&store(), &sub, "repo", "claude-code", 1)
+            .await
+            .unwrap();
+        assert_eq!(report.shards_projected, 1);
+        assert!(report.parse_issues >= 1, "the edited body is named");
+        assert!(
+            report.render().contains("originals: 2 sealed, 1 unsealed"),
+            "{}",
+            report.render()
+        );
+        counts.push((report.originals_sealed, report.originals_unsealed));
+    }
+    assert_eq!(counts, [(2, 1), (2, 1)]);
+}

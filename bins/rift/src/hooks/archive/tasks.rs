@@ -31,6 +31,7 @@ use rift_shadow::backend::{
 use rift_shadow::redact::RulePackSet;
 
 use super::super::subagent_claims::{is_safe_id, read_claims};
+use super::originals::Spool;
 use super::spills;
 
 /// What one archive collects a session's subagent transcripts from.
@@ -46,6 +47,9 @@ pub(super) struct TaskSources<'a> {
     /// The session transcript's address, as the session cache remembers it:
     /// the root its subagents' files and every spill are found under.
     pub(super) main: Option<PathBuf>,
+    /// The session's spooled originals, sealed beside the subagent
+    /// transcripts that record their calls; `None` seals none.
+    pub(super) spool: Option<&'a Spool>,
 }
 
 /// One subagent file the archive will try to seal.
@@ -87,6 +91,7 @@ impl<'a> TaskSources<'a> {
             packs,
             observations: &facts.worktree_observations,
             main: main_transcript_path(git_dir, session_id),
+            spool: None,
         }
     }
 }
@@ -322,7 +327,8 @@ fn seal_task(
 /// pair is re-derived at every archive, so its compaction starts at line 0.
 /// A refusal is said and recorded as `unsealed`, never dropped in silence.
 /// The spills it names are sealed beside it; they live in the parent
-/// session's directory, so they are contained by the parent's address.
+/// session's directory, so they are contained by the parent's address. So
+/// are the spooled originals of the calls it records.
 fn seal_through_gate(
     src: &TaskSources<'_>,
     bytes: Vec<u8>,
@@ -334,6 +340,9 @@ fn seal_through_gate(
             if let Some(main) = &src.main {
                 pair.spills =
                     spills::of_transcript(main, src.session_id, src.packs, raw.as_slice());
+            }
+            if let Some(spool) = src.spool {
+                pair.originals = spool.claimed_by(raw.as_slice(), pair.full.as_slice());
             }
             Some(pair)
         }

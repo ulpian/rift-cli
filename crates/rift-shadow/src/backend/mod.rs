@@ -24,8 +24,11 @@ mod artifacts;
 #[cfg(test)]
 mod fixtures;
 mod leaves;
+mod originals;
+pub mod rewrite;
 mod shard;
 mod spills;
+mod spool;
 mod tasks;
 mod tool_results;
 mod window;
@@ -45,10 +48,12 @@ pub use archive::{
 pub(crate) use artifacts::rfc3339_utc_ms;
 pub use artifacts::session_meta_json;
 pub use leaves::{
-    shard_merkle_leaves, shard_merkle_root, DigestLeafBytes, SessionMetaLeaf, ShardLeafBytes,
-    SpillLeafBytes, TaskLeafBytes,
+    shard_merkle_leaves, shard_merkle_root, DigestLeafBytes, OriginalLeafBytes, SessionMetaLeaf,
+    ShardLeafBytes, SpillLeafBytes, TaskLeafBytes,
 };
+pub use originals::{ArchivedOriginal, OriginalState, ORIGINALS_DIR, ORIGINAL_SUFFIX};
 pub use spills::{ArchivedSpill, SpillState, SPILLS_DIR, SPILL_SUFFIX};
+pub use spool::{parse_spool_record, SpoolHeader, SPOOL_RECORD_VERSION};
 pub use tasks::{TaskProvenance, TaskTranscriptState, TaskWorktree};
 pub use tool_results::{
     session_tool_results, tool_results_jsonl_bytes, ArchivedToolResult, TOOL_RESULTS_SCHEMA_VERSION,

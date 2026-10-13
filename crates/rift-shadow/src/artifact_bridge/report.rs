@@ -46,6 +46,12 @@ pub struct BridgeReport {
     /// Spills the manifests record as lost (`spill_missing` and the rest of
     /// the closed vocabulary): named by the shard, sealed nowhere.
     pub spills_lost: usize,
+    /// Originals of rewritten results the manifests list whose sealed body
+    /// read back with its recorded digest — orphans included, since an
+    /// orphan's body is sealed too. Counted, never stored.
+    pub originals_sealed: usize,
+    /// Originals the manifests record with no body (`original_unsealed`).
+    pub originals_unsealed: usize,
     /// Lenient-parse issues encountered (enumerated, not fatal).
     pub parse_issues: usize,
     /// What those issues **were**, for the ones a human can act on — bounded by
@@ -106,6 +112,13 @@ impl BridgeReport {
                 s,
                 "  spills: {} sealed, {} recorded lost",
                 self.spills_sealed, self.spills_lost
+            );
+        }
+        if self.originals_sealed + self.originals_unsealed > 0 {
+            let _ = writeln!(
+                s,
+                "  originals: {} sealed, {} unsealed",
+                self.originals_sealed, self.originals_unsealed
             );
         }
         let _ = writeln!(s, "  parse issues: {}", self.parse_issues);

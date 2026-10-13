@@ -25,6 +25,7 @@ mod artifacts;
 mod identity;
 mod merkle;
 mod order;
+mod originals;
 mod passes;
 mod projection;
 mod source;
@@ -243,6 +244,7 @@ async fn run_async(
         shards_checked: outcome.shards.checked,
         vacuous_era_shards: outcome.shards.vacuous_era,
         pre_rift_shards: outcome.shards.pre_rift,
+        held_unchecked: outcome.shards.held_unchecked,
         source: outcome.label,
         verdict: worse(worse(outcome.order, chain_verdict), outcome.shards.worst),
     };
@@ -538,6 +540,7 @@ mod tests {
                 transcript_full: None,
                 tasks: &[],
                 spills: &[],
+                originals: &[],
                 session_metas: &[],
                 digests: rift_shadow::backend::DigestLeafBytes::default(),
             },
@@ -610,6 +613,7 @@ mod tests {
             transcript_full: None,
             tasks: &[],
             spills: &[],
+            originals: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         })
@@ -638,6 +642,7 @@ mod tests {
             transcript_full: None,
             tasks: &[],
             spills: &[],
+            originals: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };
@@ -712,6 +717,7 @@ mod tests {
             transcript_full: None,
             tasks: &task_leaves,
             spills: &[],
+            originals: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };

@@ -186,6 +186,7 @@ pub fn archived_transcript(
             compact: compact.redacted,
             compact_start: compacted.compact_transcript_start,
             spills: Vec::new(),
+            originals: Vec::new(),
         },
         compacted.raw_lines,
     ))
@@ -199,6 +200,23 @@ pub fn archived_transcript(
 /// # Errors
 /// [`rift_core::RiftError`] if redaction fails.
 pub fn sealed_spill(
+    raw: &SecretBytes,
+    packs: &rift_shadow_redact::RulePackSet,
+) -> Result<rift_core::RedactedBytes> {
+    Ok(rift_shadow_redact::redact_with(raw, packs)?.redacted)
+}
+
+/// Seal one spooled original — the record of a tool result a hook rewrote,
+/// read back from the spool as [`SecretBytes`] — through the same gate, with
+/// the same packs, as the transcript it is sealed beside. The spool already
+/// holds redacted bytes, so this is a second pass: idempotent on every sample
+/// measured, and the stricter of the two when the repository's packs changed
+/// in between. No sealed blob of an earlier shard is reused; every archive
+/// passes the gate again, through its one constructor.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if redaction fails.
+pub fn sealed_original(
     raw: &SecretBytes,
     packs: &rift_shadow_redact::RulePackSet,
 ) -> Result<rift_core::RedactedBytes> {
