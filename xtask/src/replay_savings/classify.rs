@@ -19,6 +19,7 @@ use super::census::{
 use super::delivery::{stated_delivery, PERSISTED_OUTPUT};
 use super::file_order::ReadNote;
 use super::first_sight_split::Sight;
+use super::no_line_count_split::note_the_working_tree;
 use super::replay::{revision_hash, Ctx, Replay};
 use super::report::{land, Report};
 use super::spawn_link::{class_index, handed_down};
@@ -233,22 +234,16 @@ pub(super) fn classify_reads(
     // Which member stopped the call being declined, taken before the downgrade
     // below turns the held members into allowed ones — afterwards nothing on
     // the call declines and the question has no answer.
-    let blocker = slots.iter().position(|slot| !slot.declines());
+    let blocker_at = slots.iter().position(|slot| !slot.declines());
     if !wholly_declined {
         downgrade_the_declines(ctx.report, &mut slots);
     }
     record_the_decisions(ctx, &slots);
     reconcile_with_the_statement(ctx, call, &mut slots);
     // Phase five: the one bucket this call is counted in.
-    let blocker = blocker.and_then(|at| slots.get(at));
+    let blocker = blocker_at.and_then(|at| slots.get(at));
     let bucket = bucket_for_the_call(wholly_declined, text, blocker);
-    if bucket == Bucket::Declined {
-        ctx.report.declined.add(tokens);
-        charge_the_reason_frames(ctx.report, &slots);
-    }
-    if bucket.declinable() {
-        ctx.report.declinable.add(tokens);
-    }
+    count_the_decline(ctx.report, bucket, &slots, tokens);
     note_the_narrowing(ctx.report, bucket, blocker, &slots, tokens);
     if matches!(bucket, Bucket::FirstSight | Bucket::CreditedFromStatement) {
         note_a_first_sight(ctx, blocker, text, tokens);
@@ -260,7 +255,20 @@ pub(super) fn classify_reads(
     note_the_outlines(ctx, &slots, bucket, tokens);
     note_the_family(ctx, &slots, bucket, tokens);
     note_an_inherited_observation(ctx.report, &slots, tokens);
+    note_the_working_tree(ctx, call, requests, blocker_at, bucket, text, tokens);
     land(ctx.report, bucket, tokens);
+}
+
+/// Count a call in the declined and the declinable pools where it is in
+/// either, and charge the frames a decline travels with.
+fn count_the_decline(report: &mut Report, bucket: Bucket, slots: &[Slot], tokens: u64) {
+    if bucket == Bucket::Declined {
+        report.declined.add(tokens);
+        charge_the_reason_frames(report, slots);
+    }
+    if bucket.declinable() {
+        report.declinable.add(tokens);
+    }
 }
 
 /// Count a call every member of which only an inherited line would have

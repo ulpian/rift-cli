@@ -268,6 +268,10 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
         "pull_answers".to_owned(),
         super::pull_answers::pull_json(report),
     );
+    map.insert(
+        "no_line_count_split".to_owned(),
+        super::no_line_count_split::no_line_count_json(report),
+    );
 }
 
 /// One inheritance route's tally.
