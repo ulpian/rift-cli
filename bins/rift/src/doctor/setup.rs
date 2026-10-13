@@ -43,6 +43,33 @@ pub(super) fn doctor_retired_config_keys(repo: &Path) -> (String, serde_json::Va
     )
 }
 
+/// A project config that is present and not applied: one that does not load,
+/// or one Rift refused to read. Every other surface degrades to the defaults
+/// quietly, so this is where a developer learns their policy is not running.
+/// The load error is never printed: a TOML parse error quotes the line it
+/// failed on.
+pub(super) fn doctor_config_load(repo: &Path) -> (String, serde_json::Value) {
+    let reason = match rift_config::EffectiveConfig::load(&repo.join(".rift")) {
+        Err(_) => ".rift/config.toml does not load",
+        Ok(config) => match config.policy_source().diagnostic() {
+            Some(diagnostic) => diagnostic,
+            None => {
+                return (
+                    String::new(),
+                    serde_json::json!({ "notice": serde_json::Value::Null }),
+                )
+            }
+        },
+    };
+    let notice = format!(
+        "{reason}; the declared policy is not applied and raw transcripts are off until it is repaired"
+    );
+    (
+        format!("\n  config:         {notice}"),
+        serde_json::json!({ "notice": notice }),
+    )
+}
+
 /// The two files Rift's own native installer writes and reads a Claude Code
 /// hook table into, relative to a repository.
 ///
@@ -518,6 +545,49 @@ mod tests {
         let (human, json) = doctor_retired_config_keys(&broken);
         assert!(human.is_empty(), "{human}");
         assert_eq!(json["notice"], serde_json::Value::Null);
+    }
+
+    /// A config that is present but not applied is named, with what that
+    /// costs, and never by quoting the file; a config that loads, or none at
+    /// all, says nothing.
+    #[test]
+    fn doctor_names_a_config_that_does_not_load_or_was_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_with = |name: &str, config: Option<&str>| {
+            let repo = tmp.path().join(name);
+            std::fs::create_dir_all(repo.join(".rift")).unwrap();
+            if let Some(config) = config {
+                std::fs::write(repo.join(".rift/config.toml"), config).unwrap();
+            }
+            repo
+        };
+        let broken = repo_with(
+            "broken",
+            Some("schema_version = 99\nsecret = \"hunter2\"\n"),
+        );
+        let (human, json) = doctor_config_load(&broken);
+        assert!(human.contains(".rift/config.toml does not load"), "{human}");
+        assert!(human.contains("raw transcripts are off"), "{human}");
+        assert!(!human.contains("hunter2"), "never quotes the file: {human}");
+        assert!(human.contains(json["notice"].as_str().unwrap()), "{human}");
+
+        let refused = repo_with("refused", None);
+        std::fs::create_dir(refused.join(".rift/config.toml")).unwrap();
+        let (human, _) = doctor_config_load(&refused);
+        assert!(human.contains("not a regular file"), "{human}");
+        assert!(human.contains("raw transcripts are off"), "{human}");
+
+        for repo in [
+            repo_with(
+                "valid",
+                Some("schema_version = 1\n[project]\nname = \"t\"\n"),
+            ),
+            repo_with("absent", None),
+        ] {
+            let (human, json) = doctor_config_load(&repo);
+            assert_eq!(human, "");
+            assert_eq!(json["notice"], serde_json::Value::Null);
+        }
     }
 
     /// Only a file Rift cannot manage as written earns an action line; an
