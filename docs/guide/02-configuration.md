@@ -46,17 +46,22 @@ Project Settings or `rift recall init` (`--no-recall` skips it).
 |---|---|---|
 | `tool_calls` | `true` | Capture tool-call events. |
 | `token_usage` | `true` | Capture provider-reported token usage. |
-| `raw_transcripts` | `false` | Allow raw-transcript retrieval. |
-| `acknowledge_risk` | `false` | Required `true` companion to `raw_transcripts`. |
+| `raw_transcripts` | `true` | Allow raw-transcript retrieval; `false` turns it off whatever `serve.toml` says. |
+| `acknowledge_risk` | `false` | Required `true` companion when a file writes `raw_transcripts = true`. |
 | `checkpoint_strategy` | `"manual-commit"` | Base archiving strategy. |
 | `schedule_interval_minutes` | `30` | Interval for `scheduled` (≥ 1). |
 | `idle_sweep_minutes` | `5` | How long a live session may go without a hook before the idle sweep condenses and ends it (≥ 1). |
 
-**Raw transcripts take two keys.** `raw_transcripts = true` without
-`acknowledge_risk = true` is a validation error: it is the one setting that can
-hand an agent unredacted developer text, so a reviewer sees an acknowledgement,
-not a boolean. Switching it off clears the acknowledgement in the same edit, so a
-stale `true` cannot re-arm it.
+**Raw transcripts are on unless written off.** An absent `raw_transcripts` is
+`true`, and a written `false` turns retrieval off for every path. A file that
+writes `raw_transcripts = true` must also write `acknowledge_risk = true`, or it
+is a validation error: a reviewer who sees the option switched back on sees an
+acknowledgement, not a boolean. Switching it off clears the acknowledgement in
+the same edit, so a stale `true` cannot re-arm it. A `.rift/config.toml` that
+fails to load or is refused gives no raw transcripts at all, and `rift doctor`
+names that case. A transcript still leaves only through the untrusted frame,
+and a denied path, a sensitive path's reason and the audit record still decide
+first ([07](07-serving-and-injection.md) §7.13).
 
 **Strategies:** `manual-commit`, `on-pr`, `scheduled`, `policy-driven`
 ([03-capture.md](03-capture.md)). Policy-driven archiving composes *on top* of
@@ -175,7 +180,7 @@ you delete is a key you never wrote.
 | Key | Default | Meaning |
 |---|---|---|
 | `denied_paths` | `[]` | Globs never served — not even by handle. |
-| `raw_transcript_globs` | `[]` | Globs where raw-transcript retrieval is permitted, if enabled at all. |
+| `raw_transcript_globs` | `["**"]` | Globs where raw-transcript retrieval is permitted while `capture.raw_transcripts` is on; a written list, `[]` included, replaces the default. |
 | `injection_turn_budget` | `400` | Token ceiling for one turn's injected manifest; `0` disables per-turn injection. |
 
 **The injection budget.** 400 is small on purpose: a manifest is a *pointer at a

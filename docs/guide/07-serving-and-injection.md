@@ -275,7 +275,9 @@ diffed against, it would name a change that never happened and serve the live
 bytes the gate removed. So a hunk touching a masked run is `(changed)`,
 `changed-hunks` refuses its lines under `source_deleted_or_redacted`, and a mask
 that moved line numbers is never snapshotted. With no basis the read proceeds:
-losing a snapshot costs a delta frame, never an answer.
+losing a snapshot costs a delta frame, never an answer. A revision, to Rift, is
+the SHA-256 of the bytes as the window read them, so an unchanged re-read is
+declined whether git has committed those bytes, staged them or never seen them.
 
 ### A first read of a large file
 
