@@ -262,7 +262,7 @@ fn a_narrowing_pipe_cuts_the_range_the_member_produced() {
     for (command, expected) in cases {
         assert_eq!(
             read_of(command),
-            Some((file.clone(), *expected)),
+            Some((file.clone(), expected.clone())),
             "{command}"
         );
     }

@@ -147,6 +147,15 @@ fn inheritance_rows() -> Vec<Line> {
             frame_bytes: 812,
             at_ms: 24,
         },
+        Line::Matched {
+            turn: 12,
+            path: "src/lib.rs".to_owned(),
+            hash: hash(0x40),
+            runs: vec![run(1, 40), run(120, 121)],
+            total_lines: 900,
+            member: 2,
+            at_ms: 25,
+        },
     ]
 }
 

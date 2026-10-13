@@ -188,7 +188,13 @@ fn archived_window_row(line: &Line) -> Option<ArchivedWindowRow> {
         // An outline line is written only where the first-contact lever acts,
         // which it does not below enforce; its frozen kind arrives with it.
         Line::Family { .. } => return family_held_row(line),
-        Line::Outline { .. } | Line::Spawn { .. } | Line::Claim { .. } => return None,
+        // A matched line is coverage learned from output, and the frozen
+        // vocabulary has no kind for it yet. Only the run-state journal holds
+        // it, so it books nothing a rebuild could lose while its lever stays
+        // below enforce.
+        Line::Outline { .. } | Line::Spawn { .. } | Line::Claim { .. } | Line::Matched { .. } => {
+            return None
+        }
     })
 }
 
@@ -243,7 +249,8 @@ fn line_at_ms(line: &Line) -> u64 {
         | Line::Inherit { at_ms, .. }
         | Line::Spawn { at_ms, .. }
         | Line::Claim { at_ms, .. }
-        | Line::Family { at_ms, .. } => *at_ms,
+        | Line::Family { at_ms, .. }
+        | Line::Matched { at_ms, .. } => *at_ms,
     }
 }
 

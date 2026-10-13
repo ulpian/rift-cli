@@ -127,6 +127,11 @@ pub(super) fn render_policy(out: &mut String, snapshot: &rift_recall_policy::Ser
     );
     let _ = writeln!(
         out,
+        "  output match  recognise_by_output {}",
+        p.interception.recognise_by_output.as_str(),
+    );
+    let _ = writeln!(
+        out,
         "  search        mode {}  grep_head_limit {}  glob_top_n {}  answer_budget_tokens {}",
         p.search.mode.as_str(),
         p.search.grep_head_limit,
@@ -234,6 +239,7 @@ pub(super) fn policy_json(snapshot: &rift_recall_policy::ServePolicySnapshot) ->
                 "inherit_by_name": e.inherit_by_name.as_str(),
                 "first_contact": e.first_contact.as_str(),
                 "decline_family_held": e.decline_family_held.as_str(),
+                "recognise_by_output": p.interception.recognise_by_output.min(e.read_deny).as_str(),
                 "search_answer": e.search_answer.as_str(),
                 "grep_cap": e.grep_cap.as_str(),
                 "doc_rewrite": e.doc_rewrite.as_str(),
@@ -256,6 +262,7 @@ pub(super) fn policy_json(snapshot: &rift_recall_policy::ServePolicySnapshot) ->
             "first_contact_min_lines": p.interception.first_contact_min_lines,
             "first_contact_min_bytes": p.interception.first_contact_min_bytes,
             "decline_family_held": p.interception.decline_family_held.as_str(),
+            "recognise_by_output": p.interception.recognise_by_output.as_str(),
         },
         "search": {
             "mode": p.search.mode.as_str(),
@@ -461,6 +468,8 @@ mod tests {
         ));
         assert!(out.contains("family held   decline_family_held observe"));
         assert_eq!(json["interception"]["decline_family_held"], "observe");
+        assert!(out.contains("output match  recognise_by_output observe"));
+        assert_eq!(json["interception"]["recognise_by_output"], "observe");
         assert!(out.contains(
             "search        mode enforce  grep_head_limit 40  glob_top_n 8  answer_budget_tokens 160"
         ));
