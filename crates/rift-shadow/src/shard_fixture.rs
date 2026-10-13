@@ -116,6 +116,82 @@ fn fixture_spill(
     })
 }
 
+/// One original of the fixture: the spill text's record through the gate,
+/// in `state`, folded over its first two lines.
+fn fixture_original(
+    id: &str,
+    state: crate::backend::OriginalState,
+    stdout: &str,
+    packs: &rift_shadow_redact::RulePackSet,
+) -> Result<crate::backend::ArchivedOriginal> {
+    use crate::backend::rewrite::{
+        original_record_json, LineRange, RewriteForm, Rewritten, Stream,
+    };
+    use crate::backend::{ArchivedOriginal, OriginalState};
+    let record = SecretBytes::new(original_record_json(stdout, "", false));
+    let present = state == OriginalState::Sealed;
+    Ok(ArchivedOriginal {
+        tool_use_id: id.to_owned(),
+        agent_id: None,
+        form: Some(RewriteForm::FoldedOutput),
+        replaced: vec![LineRange {
+            stream: Stream::Stdout,
+            start: 0,
+            end: 2,
+        }],
+        line: present.then_some(4),
+        rewritten: present.then_some(Rewritten::Delivered(RewriteForm::FoldedOutput)),
+        state,
+        body: Some(crate::transcript::sealed_original(&record, packs)?),
+    })
+}
+
+/// The session transcript pair and the subagent's, through the real
+/// compactor and the same gate, each carrying the spills and originals sealed
+/// beside it.
+fn fixture_transcripts(
+    packs: &rift_shadow_redact::RulePackSet,
+) -> Result<(
+    crate::backend::ArchivedTranscript,
+    crate::backend::ArchivedTranscript,
+)> {
+    let raw = SecretBytes::new(input("raw.jsonl")?);
+    let (mut transcript, _raw_lines) = crate::transcript::archived_transcript(&raw, 0, packs)?;
+    // A spilled tool output beside each transcript, through the same gate,
+    // and one the session named but whose file was gone: every row of the
+    // `spills` manifest's vocabulary a reader must parse, sealed or lost.
+    let spill = SecretBytes::new(input("spill.txt")?);
+    transcript.spills = vec![
+        fixture_spill("toolu_01SPILLFIXTURE", Some(&spill), packs)?,
+        fixture_spill("toolu_01SPILLGONE", None, packs)?,
+    ];
+
+    // The subagent's own pair, archived into its subtree.
+    let task_raw = SecretBytes::new(input("task_raw.jsonl")?);
+    let (mut task_transcript, _) = crate::transcript::archived_transcript(&task_raw, 0, packs)?;
+    task_transcript.spills = vec![fixture_spill("toolu_01TASKSPILL", Some(&spill), packs)?];
+    // The original of a rewritten result beside each transcript, and one
+    // orphan the session spooled whose line no transcript holds: every row of
+    // the `originals` manifest a reader must parse, matched or orphaned.
+    let original_text = String::from_utf8_lossy(spill.as_slice()).into_owned();
+    let (sealed, orphan) = (
+        crate::backend::OriginalState::Sealed,
+        crate::backend::OriginalState::LineAbsent,
+    );
+    transcript.originals = vec![
+        fixture_original("toolu_01BASHA", sealed, &original_text, packs)?,
+        fixture_original("toolu_01ORPHAN", orphan, &original_text, packs)?,
+    ];
+    task_transcript.originals = vec![fixture_original(
+        "toolu_01TASKORIGINAL",
+        sealed,
+        &original_text,
+        packs,
+    )?];
+
+    Ok((transcript, task_transcript))
+}
+
 /// **The maximal archive**: every artifact the registry declares, produced by
 /// the same functions the post-commit condense path calls.
 ///
@@ -130,22 +206,8 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
     let capture = SecretBytes::new(input("capture.txt")?);
     let redacted = rift_shadow_redact::redact_with(&capture, &packs)?;
 
-    // The session transcript pair, through the real compactor + the same gate.
-    let raw = SecretBytes::new(input("raw.jsonl")?);
-    let (mut transcript, _raw_lines) = crate::transcript::archived_transcript(&raw, 0, &packs)?;
-    // A spilled tool output beside each transcript, through the same gate,
-    // and one the session named but whose file was gone: every row of the
-    // `spills` manifest's vocabulary a reader must parse, sealed or lost.
-    let spill = SecretBytes::new(input("spill.txt")?);
-    transcript.spills = vec![
-        fixture_spill("toolu_01SPILLFIXTURE", Some(&spill), &packs)?,
-        fixture_spill("toolu_01SPILLGONE", None, &packs)?,
-    ];
-
-    // The subagent's own pair, archived into its subtree.
-    let task_raw = SecretBytes::new(input("task_raw.jsonl")?);
-    let (mut task_transcript, _) = crate::transcript::archived_transcript(&task_raw, 0, &packs)?;
-    task_transcript.spills = vec![fixture_spill("toolu_01TASKSPILL", Some(&spill), &packs)?];
+    // The session's pair and its subagent's, each with what it seals beside it.
+    let (transcript, task_transcript) = fixture_transcripts(&packs)?;
 
     let mut archive = CheckpointArchive {
         repo: PathBuf::from("/shard-goldens"),

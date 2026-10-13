@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use rift_core::RedactedBytes;
 
 use super::artifacts::{canonical_json, insert_compact_boundary};
+use super::originals::ArchivedOriginal;
 use super::spills::ArchivedSpill;
 use super::tasks::TaskProvenance;
 
@@ -284,6 +285,11 @@ pub struct ArchivedTranscript {
     /// closed word ([`super::SpillState`]). Empty when it names none, which keeps
     /// the shard every spill-less transcript always wrote.
     pub spills: Vec<ArchivedSpill>,
+    /// The originals of the rewritten results this transcript records, each
+    /// sealed beside it under `tool-originals/` or accounted for by a closed
+    /// word ([`super::OriginalState`]). Empty when nothing was rewritten,
+    /// which keeps the shard every unrewritten transcript always wrote.
+    pub originals: Vec<ArchivedOriginal>,
 }
 
 /// One subagent task archived **inside** the parent checkpoint: a

@@ -48,6 +48,7 @@ impl Session {
             packs: &RulePackSet::builtin(),
             observations,
             main: Some(self.main.clone()),
+            spool: None,
         })
     }
 }

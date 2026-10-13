@@ -51,6 +51,10 @@ pub(crate) struct VerifySummary {
     /// Shards of the pre-Rift dialect (read from the legacy ref — never a
     /// native shard with a stripped label), exempt from every native-only pass.
     pub(crate) pre_rift_shards: usize,
+    /// Replaced ranges of held substitutions whose revision was not read
+    /// (`held_unchecked`): the delivered frame and every other line were
+    /// checked, the held lines themselves were not.
+    pub(crate) held_unchecked: usize,
     /// Which authoritative source was used.
     pub(crate) source: &'static str,
     /// The worst finding.

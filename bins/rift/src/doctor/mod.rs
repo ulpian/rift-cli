@@ -7,7 +7,8 @@
 //! `git_hooks` the hooks git runs and the binary they name, `health` whether
 //! each wired agent's capture is arriving, `worktrees` the family's members,
 //! `family` the recorded identity against the one its minting rule derives,
-//! `queues` the work each member still owes, `set_asides` the recall
+//! `queues` the work each member still owes, `spool` the originals of
+//! rewritten results still spooled, `set_asides` the recall
 //! projections a rebuild set aside, `prices` the observed models the price
 //! catalog cannot price. This file assembles the report
 //! in the order the legs print.
@@ -20,6 +21,7 @@ mod prices;
 mod queues;
 mod set_asides;
 mod setup;
+mod spool;
 mod stores;
 mod worktrees;
 
@@ -41,6 +43,7 @@ use set_asides::doctor_recall_set_asides;
 use setup::{
     doctor_config_load, doctor_memory_chain, doctor_retired_config_keys, doctor_sibling_tool_hooks,
 };
+use spool::doctor_original_spool;
 use stores::{doctor_basis_store, doctor_document_store, doctor_window_journals};
 use worktrees::{
     doctor_orphan_projections, doctor_phantom_gitdirs, doctor_prunable_worktrees,
@@ -113,6 +116,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("retired_config_keys", doctor_retired_config_keys(root));
     report.leg("document_store", doctor_document_store(root));
     report.leg("basis_store", doctor_basis_store(root));
+    report.leg("original_spool", doctor_original_spool(root));
     report.leg("recall_set_asides", doctor_recall_set_asides(root));
     report.leg("sibling_tool_hooks", doctor_sibling_tool_hooks(root));
     report.json.insert("fix".to_owned(), serde_json::json!(fix));

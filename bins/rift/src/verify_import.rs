@@ -58,7 +58,8 @@ fn verdict_outcome(summary: &verify::VerifySummary) -> Outcome {
             serde_json::json!({ "verify": "ok", "checkpoints": summary.checkpoints,
                                 "shards_checked": summary.shards_checked,
                                 "vacuous_era_shards": summary.vacuous_era_shards,
-                                "pre_rift_shards": summary.pre_rift_shards }),
+                                "pre_rift_shards": summary.pre_rift_shards,
+                                "held_unchecked": summary.held_unchecked }),
         ),
         Verdict::Tamper(d) => Outcome::coded(
             1,
@@ -101,6 +102,13 @@ fn verify_exemptions(summary: &verify::VerifySummary) -> String {
         notes.push(format!(
             "{} are the pre-Rift dialect and are exempt from the native passes",
             summary.pre_rift_shards
+        ));
+    }
+    if summary.held_unchecked > 0 {
+        notes.push(format!(
+            "{} rewritten range(s) are held substitutions whose held revision was not read \
+             (held_unchecked)",
+            summary.held_unchecked
         ));
     }
     if notes.is_empty() {

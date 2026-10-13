@@ -48,6 +48,7 @@ pub(super) fn checkpoint_id_pass(
     let task_leaves = native.task_leaves();
     let session_meta_leaves = native.session_meta_leaves();
     let spill_leaves = super::spills::leaves(&native.spills);
+    let original_leaves = super::originals::leaves(&native.originals);
     let candidates = rift_shadow::condense::checkpoint_ids_for_shard(
         sessions,
         canon_version,
@@ -57,6 +58,7 @@ pub(super) fn checkpoint_id_pass(
             &task_leaves,
             &session_meta_leaves,
             &spill_leaves,
+            &original_leaves,
         ),
     );
     // An empty candidate set is `checkpoint_ids_for_shard`'s "no era rule
@@ -224,6 +226,7 @@ mod tests {
                     digest_log: None,
                     digest_shape: None,
                     spills: Vec::new(),
+                    originals: Vec::new(),
                 },
                 sub.read_artifact(&id, "redaction_report.json")
                     .unwrap()
@@ -336,6 +339,7 @@ mod tests {
             transcript_full: None,
             tasks: &[],
             spills: &[],
+            originals: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         })
@@ -473,6 +477,7 @@ mod tests {
             transcript_full: None,
             tasks: &task_leaves,
             spills: &[],
+            originals: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };
@@ -582,6 +587,7 @@ mod tests {
                 transcript_full: None,
                 tasks: &[],
                 spills: &[],
+                originals: &[],
                 session_metas: &[],
                 digests: DigestLeafBytes {
                     shape: Some(&shape),
@@ -645,6 +651,7 @@ mod tests {
                 transcript_full: None,
                 tasks: &[],
                 spills: &[],
+                originals: &[],
                 session_metas: &[],
                 digests: DigestLeafBytes {
                     shape: Some(shape_bytes),
@@ -783,6 +790,7 @@ mod tests {
                     digest_log: None,
                     digest_shape: None,
                     spills: Vec::new(),
+                    originals: Vec::new(),
                 },
                 forged
                     .read_artifact(&id, "redaction_report.json")
@@ -831,6 +839,7 @@ mod tests {
             transcript_full: Some(tfull),
             tasks: &[],
             spills: &[],
+            originals: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };
@@ -919,6 +928,7 @@ mod tests {
                 transcript_full: None,
                 tasks: &[],
                 spills: &[],
+                originals: &[],
                 session_metas: &[],
                 digests: rift_shadow::backend::DigestLeafBytes::default(),
             })
@@ -985,6 +995,7 @@ mod tests {
             transcript_full: None,
             tasks: &[],
             spills: &[],
+            originals: &[],
             session_metas: &meta_leaves,
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };
@@ -1354,21 +1365,9 @@ mod tests {
         }];
         let leaves = ShardLeafBytes {
             content_redacted: content,
-            full_jsonl: None,
             redaction_report: report.as_bytes(),
-            serve_audit: None,
-            sessions: None,
-            usage: None,
-            window_journal: None,
-            session_worktrees: None,
-            tool_results: None,
-            tool_calls: None,
-            transcript_compact: None,
-            transcript_full: None,
             tasks: &task_leaves,
-            spills: &[],
-            session_metas: &[],
-            digests: rift_shadow::backend::DigestLeafBytes::default(),
+            ..ShardLeafBytes::default()
         };
         let root = shard_merkle_root(&leaves).to_hex();
         let id = rift_shadow::condense::checkpoint_ids_for_shard(

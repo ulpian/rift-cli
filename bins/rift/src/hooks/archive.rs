@@ -3,11 +3,12 @@
 //! projection levelling and soak accrual that keep the binary of record
 //! honest. Separate because it is the one place a checkpoint is minted.
 
+mod originals;
 mod outlines;
 mod spills;
 mod tasks;
 #[cfg(test)]
-mod test_corpus;
+pub(super) mod test_corpus;
 
 use std::path::{Path, PathBuf};
 
@@ -113,12 +114,18 @@ pub(super) fn archive_in_git_hook(
     report_pack_notes(&notes);
     // A session-end/sweep condense archives the transcript too — same source,
     // same boundary discipline as the post-commit worker.
-    let transcript = session_transcript(&repo.git_dir, session, &packs);
-    let (transcript, transcript_raw_lines) = match transcript {
+    let spool = originals::Spool::load(&repo.common_dir, session, &packs);
+    let transcript = session_transcript(&repo.git_dir, session, &packs, &spool);
+    let (mut transcript, transcript_raw_lines) = match transcript {
         Some((pair, raw_lines)) => (Some(pair), Some(raw_lines)),
         None => (None, None),
     };
-    let tasks = tasks::session_tasks(&TaskSources::of(&repo.git_dir, session, &packs, &facts));
+    let sources = TaskSources {
+        spool: Some(&spool),
+        ..TaskSources::of(&repo.git_dir, session, &packs, &facts)
+    };
+    let mut tasks = tasks::session_tasks(&sources);
+    spool.attach_orphans(transcript.as_mut(), &mut tasks);
 
     let archived = rt.block_on(rift_shadow::run_decision(
         &native, store, work_tree, session, &raw, decision, commit, now, facts, &packs, transcript,
@@ -1009,15 +1016,20 @@ fn run_archive(
     // sealed once per artifact. Best-effort like the capture itself: a missing
     // or unreadable file archives a transcript-less checkpoint, never an error,
     // because the agent owns that file and may have moved or pruned it.
+    let spool = originals::Spool::load(&repo.common_dir, session_id, &packs);
     let transcript = t.phase("archive_transcript", || {
-        session_transcript(&repo.git_dir, session_id, &packs)
+        session_transcript(&repo.git_dir, session_id, &packs, &spool)
     });
-    let (transcript, transcript_raw_lines) = match transcript {
+    let (mut transcript, transcript_raw_lines) = match transcript {
         Some((pair, raw_lines)) => (Some(pair), Some(raw_lines)),
         None => (None, None),
     };
-    let sources = TaskSources::of(&repo.git_dir, session_id, &packs, &facts);
-    let tasks = t.phase("archive_tasks", || tasks::session_tasks(&sources));
+    let sources = TaskSources {
+        spool: Some(&spool),
+        ..TaskSources::of(&repo.git_dir, session_id, &packs, &facts)
+    };
+    let mut tasks = t.phase("archive_tasks", || tasks::session_tasks(&sources));
+    spool.attach_orphans(transcript.as_mut(), &mut tasks);
 
     let archived = t.phase("archive_native", || {
         rt.block_on(rift_shadow::archive_and_capture_with(
@@ -1079,6 +1091,7 @@ fn session_transcript(
     git_dir: &Path,
     session_id: &str,
     packs: &rift_shadow::redact::RulePackSet,
+    spool: &originals::Spool,
 ) -> Option<(rift_shadow::backend::ArchivedTranscript, u64)> {
     let path = PathBuf::from(
         rift_shadow::hooks::read_cache(git_dir, session_id)
@@ -1095,6 +1108,7 @@ fn session_transcript(
     match rift_shadow::archived_transcript(&raw, start_line, packs) {
         Ok((mut pair, raw_lines)) => {
             pair.spills = spills::of_transcript(&path, session_id, packs, raw.as_slice());
+            pair.originals = spool.claimed_by(raw.as_slice(), pair.full.as_slice());
             Some((pair, u64::try_from(raw_lines).unwrap_or(u64::MAX)))
         }
         Err(e) => {

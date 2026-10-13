@@ -163,6 +163,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         sync_format_row: "Subagent task metadata (`tasks/<id>/metadata.json`)",
     },
     ShardArtifact {
+        path: "tasks/<id>/tool-originals/<id>.json",
+        version: VersionField::None,
+        sync_format_row: "Rewritten result original (`tool-originals/<id>.json`)",
+    },
+    ShardArtifact {
         path: "tasks/<id>/tool-results/<id>.txt",
         version: VersionField::None,
         sync_format_row: "Spilled tool output (`tool-results/<id>.txt`)",
@@ -176,6 +181,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         path: "tasks/<id>/transcript.jsonl",
         version: VersionField::None,
         sync_format_row: "Capture document (`content.redacted`)",
+    },
+    ShardArtifact {
+        path: "tool-originals/<id>.json",
+        version: VersionField::None,
+        sync_format_row: "Rewritten result original (`tool-originals/<id>.json`)",
     },
     ShardArtifact {
         path: "tool-results/<id>.txt",
@@ -602,6 +612,8 @@ mod tests {
             "tool-results/toolu_1.json",
             "tool-results/deeper/toolu_1.txt",
             "tasks/t1/tool-results/../x.txt",
+            "tool-originals/toolu_1.txt",
+            "tool-originals/a.b.json",
             "",
         ] {
             assert!(
@@ -619,6 +631,8 @@ mod tests {
             "sessions/10/metadata.json",
             "tool-results/toolu_1.txt",
             "tasks/t1/tool-results/toolu_1.txt",
+            "tool-originals/toolu_1.json",
+            "tasks/t1/tool-originals/toolu_1.json",
         ] {
             assert!(is_declared(path).is_some(), "{path} is declared");
         }

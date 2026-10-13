@@ -96,6 +96,7 @@ impl CheckpointArchive {
             })
             .collect();
         let spill_leaves = self.spill_leaves();
+        let original_leaves = self.original_leaves();
         shard_merkle_root(&ShardLeafBytes {
             content_redacted: self.content.as_slice(),
             full_jsonl: full.as_deref(),
@@ -111,6 +112,7 @@ impl CheckpointArchive {
             window_journal: window_journal.as_deref(),
             tasks: &task_leaves,
             spills: &spill_leaves,
+            originals: &original_leaves,
             session_metas: &session_meta_leaves,
             digests: DigestLeafBytes {
                 failures: digest_failures.as_deref(),
@@ -470,6 +472,7 @@ impl CheckpointArchive {
             }
         }
         self.insert_spill_artifacts(&mut out);
+        self.insert_original_artifacts(&mut out);
         out
     }
 
@@ -623,6 +626,7 @@ pub(super) fn insert_compact_boundary(
         transcript.compact_start.into(),
     );
     super::spills::insert_spill_manifest(obj, &transcript.spills);
+    super::originals::insert_original_manifest(obj, &transcript.originals);
 }
 
 /// Serialize a JSON value to canonical bytes: `serde_json`'s default `Map` is a
@@ -1116,6 +1120,7 @@ mod tests {
             transcript_full: None,
             tasks: &[],
             spills: &[],
+            originals: &[],
             session_metas: &[],
             digests: DigestLeafBytes::default(),
         });
@@ -1153,6 +1158,7 @@ mod tests {
                 transcript_full: None,
                 tasks: &[],
                 spills: &[],
+                originals: &[],
                 session_metas: &[],
                 digests: DigestLeafBytes::default(),
             }),
@@ -1235,6 +1241,7 @@ mod tests {
                 transcript_full: None,
                 tasks: &[],
                 spills: &[],
+                originals: &[],
                 session_metas: &[],
                 digests: DigestLeafBytes::default(),
             },

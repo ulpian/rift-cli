@@ -23,6 +23,7 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         let transcripts = archive.transcript.iter();
         for t in transcripts.chain(archive.tasks.iter().filter_map(|t| t.transcript.as_ref())) {
             super::spills::validate_spills(&t.spills)?;
+            super::originals::validate_originals(&t.originals)?;
         }
         let mut entries = self.write_top_level_blobs(archive)?;
         if let Some(sessions_entry) = self.write_session_trees(archive)? {
@@ -144,7 +145,29 @@ impl<W: NativeGitWrite> NativeBackend<W> {
     ) -> Result<()> {
         entries.push(self.durable_entry(TRANSCRIPT_COMPACT_NAME, &transcript.compact)?);
         entries.push(self.durable_entry(TRANSCRIPT_FULL_NAME, &transcript.full)?);
+        self.push_original_tree(transcript, entries)?;
         self.push_spill_tree(transcript, entries)
+    }
+
+    /// Write a transcript's sealed originals as the `tool-originals` tree
+    /// beside it, through the durable path like the pair. Nothing is written
+    /// when none was sealed, so an unrewritten transcript's tree is exactly
+    /// what it always was.
+    fn push_original_tree(
+        &self,
+        transcript: &ArchivedTranscript,
+        entries: &mut Vec<TreeWriteEntry>,
+    ) -> Result<()> {
+        let mut files = Vec::new();
+        for (original, body) in transcript.sealed_originals() {
+            files.push(self.durable_entry(&original.file_name(), body)?);
+        }
+        if files.is_empty() {
+            return Ok(());
+        }
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        entries.push(self.tree_entry(super::ORIGINALS_DIR.into(), &files)?);
+        Ok(())
     }
 
     /// Write a transcript's sealed spills as the `tool-results` tree beside

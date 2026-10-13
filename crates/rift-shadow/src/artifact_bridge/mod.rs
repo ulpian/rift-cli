@@ -18,6 +18,7 @@
 mod created_at;
 mod events;
 mod facts;
+mod originals;
 mod reads;
 #[cfg(test)]
 mod reads_tests;
@@ -260,6 +261,7 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
     count_task_subtrees(ctx.sub, report, id, &metadata)?;
     if let Some(bytes) = &metadata_bytes {
         spills::count_spills(ctx.sub, report, id, None, bytes)?;
+        originals::count_originals(ctx.sub, report, id, None, bytes)?;
     }
     let agents = read_session_agents(ctx, report, id)?;
     record_sessions(ctx, id, &metadata, &agents).await?;
@@ -283,7 +285,8 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
 }
 
 /// Parse and count the shard's `tasks/<tool-use-id>/` subtrees, enumerated
-/// from its own task list, and the spills each one's manifest lists. Nothing
+/// from its own task list, and the spills and originals each one's manifest
+/// lists. Nothing
 /// is stored: a subagent transcript's record is the subtree itself, and a
 /// rebuild only proves it still reads.
 fn count_task_subtrees(
@@ -303,6 +306,7 @@ fn count_task_subtrees(
             report.task_subtrees += 1;
         }
         spills::count_spills(sub, report, id, Some(task), &bytes)?;
+        originals::count_originals(sub, report, id, Some(task), &bytes)?;
     }
     Ok(())
 }

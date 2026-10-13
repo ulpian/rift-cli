@@ -11,7 +11,7 @@
 //! detectors' coverage is that crate's to prove.
 
 /// The vendor-key rows, each a shape the built-in packs must mask.
-pub(super) fn seeded_secrets() -> Vec<String> {
+pub(in crate::hooks) fn seeded_secrets() -> Vec<String> {
     vec![
         "AKIAIOSFODNN7EXAMPLE".to_owned(),
         "ghp_0123456789abcdef0123456789abcdef0123".to_owned(),
