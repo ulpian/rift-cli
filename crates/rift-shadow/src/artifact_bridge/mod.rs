@@ -28,6 +28,7 @@ mod resume_tests;
 mod sessions;
 #[cfg(test)]
 mod sessions_tests;
+mod spills;
 #[cfg(test)]
 mod tests;
 mod tool_results;
@@ -256,6 +257,10 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
     if let Some((header, _)) = &chained {
         record_chain_facts(ctx.store, report, header, prev).await?;
     }
+    count_task_subtrees(ctx.sub, report, id, &metadata)?;
+    if let Some(bytes) = &metadata_bytes {
+        spills::count_spills(ctx.sub, report, id, None, bytes)?;
+    }
     let agents = read_session_agents(ctx, report, id)?;
     record_sessions(ctx, id, &metadata, &agents).await?;
     project_full_events(ctx, report, id).await?;
@@ -274,6 +279,31 @@ async fn ingest_shard<S: CanonicalStore, R: SubstrateReader>(
         seal_checkpoint(ctx.store, header, *root, prev).await?;
     }
     report.shards_projected += 1;
+    Ok(())
+}
+
+/// Parse and count the shard's `tasks/<tool-use-id>/` subtrees, enumerated
+/// from its own task list, and the spills each one's manifest lists. Nothing
+/// is stored: a subagent transcript's record is the subtree itself, and a
+/// rebuild only proves it still reads.
+fn count_task_subtrees(
+    sub: &impl SubstrateReader,
+    report: &mut BridgeReport,
+    id: &str,
+    metadata: &CheckpointMetadata,
+) -> Result<()> {
+    for task in &metadata.tasks {
+        let Some(bytes) = sub.read_artifact(id, &format!("tasks/{task}/metadata.json"))? else {
+            report.parse_issues += 1;
+            continue;
+        };
+        let parsed = parse::parse_task_metadata(&bytes, id);
+        report.parse_issues += parsed.issues.len();
+        if parsed.issues.is_empty() {
+            report.task_subtrees += 1;
+        }
+        spills::count_spills(sub, report, id, Some(task), &bytes)?;
+    }
     Ok(())
 }
 

@@ -158,6 +158,7 @@ fn capture_into_projection(
         return Ok(());
     }
     bind_hook_identity(t, &rt, &store, work_tree);
+    super::subagent_claims::record_claim(git_dir, raw);
     let run = CapturedHook {
         t,
         rt: &rt,

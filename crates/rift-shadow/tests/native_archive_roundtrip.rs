@@ -96,6 +96,7 @@ fn a_task_subtree_roundtrips_and_the_root_rederives_from_read_back_bytes() {
         input_tokens: Some(120),
         output_tokens: Some(34),
         transcript: Some(pair),
+        provenance: None,
     };
     let mut archive = archive_with_transcript(tmp.path(), b"parent capture", None);
     archive.tasks = vec![task];
@@ -203,6 +204,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
         tasks: &[],
+        spills: &[],
         session_metas: &[],
         digests: DigestLeafBytes::default(),
     };

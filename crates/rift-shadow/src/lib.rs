@@ -67,7 +67,8 @@ pub use parity::{
 pub use project::{ReadContent, TokenEstimate};
 pub use soak::{SoakEvidence, SOAK_MIN_CONSECUTIVE_CLEAN};
 pub use transcript::{
-    archived_transcript, compact_jsonl, CompactTranscript, COMPACT_SCHEMA_VERSION, MAX_INLINE_CHARS,
+    archived_transcript, compact_jsonl, sealed_spill, CompactTranscript, COMPACT_SCHEMA_VERSION,
+    MAX_INLINE_CHARS,
 };
 pub use turn_boundary::{attribution_preview, capture_boundary, enrich_attribution, Boundary};
 

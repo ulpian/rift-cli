@@ -13,8 +13,10 @@ sessions.jsonl
 sessions/0/metadata.json
 sessions/1/metadata.json
 tasks/toolu_01TASKFIXTURE/metadata.json
+tasks/toolu_01TASKFIXTURE/tool-results/toolu_01TASKSPILL.txt
 tasks/toolu_01TASKFIXTURE/transcript.compact.jsonl
 tasks/toolu_01TASKFIXTURE/transcript.jsonl
+tool-results/toolu_01SPILLFIXTURE.txt
 tool_calls.jsonl
 tool_results.jsonl
 transcript.compact.jsonl

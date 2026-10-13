@@ -43,8 +43,14 @@ pub(super) fn strict_merkle_pass(
     };
     let task_leaves = native.task_leaves();
     let session_meta_leaves = native.session_meta_leaves();
-    let derived =
-        shard_merkle_root(&native.leaves(content, report, &task_leaves, &session_meta_leaves));
+    let spill_leaves = super::spills::leaves(&native.spills);
+    let derived = shard_merkle_root(&native.leaves(
+        content,
+        report,
+        &task_leaves,
+        &session_meta_leaves,
+        &spill_leaves,
+    ));
     Ok(match recorded_root(reader, id)? {
         Some(recorded) if recorded == derived => None,
         Some(_) => Some(Verdict::Tamper(format!(

@@ -4,6 +4,10 @@
 //! honest. Separate because it is the one place a checkpoint is minted.
 
 mod outlines;
+mod spills;
+mod tasks;
+#[cfg(test)]
+mod test_corpus;
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +19,7 @@ use super::{now_ms, projection_db_at};
 
 pub(super) use self::outlines::bind_and_cache_outlines;
 use self::outlines::bind_session_outlines;
+use self::tasks::TaskSources;
 
 /// One archive of one commit, with what its caller opened for it: every step
 /// after the open reads these rather than reopening them.
@@ -113,24 +118,11 @@ pub(super) fn archive_in_git_hook(
         Some((pair, raw_lines)) => (Some(pair), Some(raw_lines)),
         None => (None, None),
     };
+    let tasks = tasks::session_tasks(&TaskSources::of(&repo.git_dir, session, &packs, &facts));
 
     let archived = rt.block_on(rift_shadow::run_decision(
-        &native,
-        store,
-        work_tree,
-        session,
-        &raw,
-        decision,
-        commit,
-        now,
-        facts,
-        &packs,
-        transcript,
-        // No hook payload carries subagent task artifacts yet: the SubagentStop
-        // wire reaches the event stream (GitFact), but nothing collects a
-        // per-task transcript address for the worker to read. A known gap,
-        // deliberately left open — the archive layer beneath is complete.
-        Vec::new(),
+        &native, store, work_tree, session, &raw, decision, commit, now, facts, &packs, transcript,
+        tasks,
     ));
     if let (Ok(Some(_)), Some(lines)) = (&archived, transcript_raw_lines) {
         record_transcript_progress(&repo.git_dir, session, lines, now);
@@ -1024,6 +1016,8 @@ fn run_archive(
         Some((pair, raw_lines)) => (Some(pair), Some(raw_lines)),
         None => (None, None),
     };
+    let sources = TaskSources::of(&repo.git_dir, session_id, &packs, &facts);
+    let tasks = t.phase("archive_tasks", || tasks::session_tasks(&sources));
 
     let archived = t.phase("archive_native", || {
         rt.block_on(rift_shadow::archive_and_capture_with(
@@ -1039,7 +1033,7 @@ fn run_archive(
             facts,
             &packs,
             transcript,
-            Vec::new(),
+            tasks,
         ))
     });
     if let (Ok(Some(_)), Some(lines)) = (&archived, transcript_raw_lines) {
@@ -1086,18 +1080,23 @@ fn session_transcript(
     session_id: &str,
     packs: &rift_shadow::redact::RulePackSet,
 ) -> Option<(rift_shadow::backend::ArchivedTranscript, u64)> {
-    let path = rift_shadow::hooks::read_cache(git_dir, session_id)
-        .ok()
-        .flatten()?
-        .transcript_path?;
-    let bytes = std::fs::read(path).ok()?;
+    let path = PathBuf::from(
+        rift_shadow::hooks::read_cache(git_dir, session_id)
+            .ok()
+            .flatten()?
+            .transcript_path?,
+    );
+    let bytes = std::fs::read(&path).ok()?;
     let raw = rift_core::SecretBytes::new(bytes);
     let start_line = rift_shadow::hooks::read_transcript_progress(git_dir, session_id)
         .ok()
         .flatten()
         .map_or(0usize, |p| usize::try_from(p.raw_lines).unwrap_or(0));
     match rift_shadow::archived_transcript(&raw, start_line, packs) {
-        Ok((pair, raw_lines)) => Some((pair, u64::try_from(raw_lines).unwrap_or(u64::MAX))),
+        Ok((mut pair, raw_lines)) => {
+            pair.spills = spills::of_transcript(&path, session_id, packs, raw.as_slice());
+            Some((pair, u64::try_from(raw_lines).unwrap_or(u64::MAX)))
+        }
         Err(e) => {
             // A redaction failure must not lose the checkpoint: the capture
             // still archives; only the transcript is withheld, loudly.

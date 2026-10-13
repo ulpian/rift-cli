@@ -56,6 +56,12 @@ pub struct ShardLeafBytes<'a> {
     /// irrelevant: [`shard_merkle_leaves`] orders by tool-use id itself, so
     /// the writer and the verifier cannot feed one function two orders.
     pub tasks: &'a [TaskLeafBytes<'a>],
+    /// The sealed spilled tool outputs of the session's transcript and of
+    /// every task's, flat: [`SpillLeafBytes::task`] says which transcript
+    /// each sits beside. Order here is irrelevant, as for [`Self::tasks`].
+    /// A spill whose task is not listed in [`Self::tasks`] contributes no
+    /// leaf; both sides build them only from listed tasks.
+    pub spills: &'a [SpillLeafBytes<'a>],
     /// The `sessions/<index>/metadata.json` bytes of a **multi-session**
     /// checkpoint, or empty for the single-session shape —
     /// a single-session shard writes NO session dirs, so every existing
@@ -115,6 +121,21 @@ pub struct TaskLeafBytes<'a> {
     pub transcript_full: Option<&'a [u8]>,
 }
 
+/// One sealed spill's leaf bytes — `tool-results/<tool-use-id>.txt` beside
+/// the session's transcript, or `tasks/<task>/tool-results/<tool-use-id>.txt`
+/// beside a subagent's. Built by the writer from what it is about to commit
+/// and by `rift verify` from what it read back, enumerated by the `spills`
+/// manifest on the metadata document beside the transcript.
+#[derive(Debug, Clone, Copy)]
+pub struct SpillLeafBytes<'a> {
+    /// The task subtree the spill sits in, `None` for the session's own.
+    pub task: Option<&'a str>,
+    /// The spilled call's id — the file's stem and the leaf *order* key.
+    pub tool_use_id: &'a str,
+    /// The sealed bytes.
+    pub body: &'a [u8],
+}
+
 /// A checkpoint's ordered Merkle leaves: **the shard's content artifacts in
 /// canonical (git-tree) name order, with `full.jsonl` expanded to one leaf per
 /// archived event line.**
@@ -124,9 +145,10 @@ pub struct TaskLeafBytes<'a> {
 /// `serve_audit.jsonl`, then `session_worktrees.jsonl`, then `sessions.jsonl`,
 /// then each
 /// `sessions/<index>/metadata.json`, then each
-/// `tasks/<tool-use-id>/` subtree's artifacts (`metadata.json`, then the
-/// transcript pair when present — the task dir's own bytewise name order —
-/// tasks ordered by tool-use id), then `tool_calls.jsonl`, then
+/// `tasks/<tool-use-id>/` subtree's artifacts (`metadata.json`, then its
+/// sealed spills, then the transcript pair when present — the task dir's own
+/// bytewise name order — tasks ordered by tool-use id), then the session's
+/// sealed spills under `tool-results/`, then `tool_calls.jsonl`, then
 /// `tool_results.jsonl`, then `transcript.compact.jsonl`, then `transcript.jsonl`, then `usage.jsonl`,
 /// then `window_journal.jsonl` —
 /// which is the artifacts' bytewise **full-path** order (`serve_audit.jsonl`
@@ -235,6 +257,9 @@ pub fn shard_merkle_leaves(bytes: &ShardLeafBytes<'_>) -> Vec<Sha256Id> {
     tasks.sort_by(|a, b| a.tool_use_id.as_bytes().cmp(b.tool_use_id.as_bytes()));
     for t in tasks {
         leaves.push(rift_hashchain::leaf_hash(t.metadata));
+        // `tool-results/` sorts between `metadata.json` and the transcript
+        // pair (`m` < `t`, then `o` < `r`).
+        push_spill_leaves(bytes.spills, Some(t.tool_use_id), &mut leaves);
         if let Some(compact) = t.transcript_compact {
             leaves.push(rift_hashchain::leaf_hash(compact));
         }
@@ -242,8 +267,27 @@ pub fn shard_merkle_leaves(bytes: &ShardLeafBytes<'_>) -> Vec<Sha256Id> {
             leaves.push(rift_hashchain::leaf_hash(full_transcript));
         }
     }
+    // `tool-results/` sorts after `tasks/` (`a` < `o`) and before
+    // `tool_calls.jsonl` (`-` < `_` at the fifth byte).
+    push_spill_leaves(bytes.spills, None, &mut leaves);
     push_trailing_leaves(bytes, &mut leaves);
     leaves
+}
+
+/// The sealed spills beside one transcript, in the bytewise order git sorts
+/// their file names into — the name with its suffix, since `a.txt` and
+/// `a-b.txt` order differently from `a` and `a-b`.
+fn push_spill_leaves(
+    spills: &[SpillLeafBytes<'_>],
+    task: Option<&str>,
+    leaves: &mut Vec<Sha256Id>,
+) {
+    let file = |s: &SpillLeafBytes<'_>| format!("{}{}", s.tool_use_id, super::SPILL_SUFFIX);
+    let mut beside: Vec<&SpillLeafBytes<'_>> = spills.iter().filter(|s| s.task == task).collect();
+    beside.sort_by_cached_key(|s| file(s).into_bytes());
+    for s in beside {
+        leaves.push(rift_hashchain::leaf_hash(s.body));
+    }
 }
 
 /// The top-level artifacts that sort after the `tasks/` tree, in bytewise
@@ -357,6 +401,7 @@ mod tests {
             transcript_compact: None,
             transcript_full: None,
             tasks: &[],
+            spills: &[],
             session_metas: &[],
             digests: DigestLeafBytes::default(),
         };

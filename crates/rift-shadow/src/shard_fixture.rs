@@ -95,6 +95,27 @@ pub fn input(name: &str) -> Result<Vec<u8>> {
     })
 }
 
+/// One spill of the fixture: sealed through the gate when it has bytes,
+/// recorded `spill_missing` when it has none.
+fn fixture_spill(
+    id: &str,
+    raw: Option<&SecretBytes>,
+    packs: &rift_shadow_redact::RulePackSet,
+) -> Result<crate::backend::ArchivedSpill> {
+    use crate::backend::{ArchivedSpill, SpillState};
+    let body = raw
+        .map(|r| crate::transcript::sealed_spill(r, packs))
+        .transpose()?;
+    Ok(ArchivedSpill {
+        tool_use_id: id.to_owned(),
+        state: body
+            .as_ref()
+            .map_or(SpillState::Missing, |_| SpillState::Sealed),
+        body,
+        source_bytes: None,
+    })
+}
+
 /// **The maximal archive**: every artifact the registry declares, produced by
 /// the same functions the post-commit condense path calls.
 ///
@@ -111,11 +132,20 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
 
     // The session transcript pair, through the real compactor + the same gate.
     let raw = SecretBytes::new(input("raw.jsonl")?);
-    let (transcript, _raw_lines) = crate::transcript::archived_transcript(&raw, 0, &packs)?;
+    let (mut transcript, _raw_lines) = crate::transcript::archived_transcript(&raw, 0, &packs)?;
+    // A spilled tool output beside each transcript, through the same gate,
+    // and one the session named but whose file was gone: every row of the
+    // `spills` manifest's vocabulary a reader must parse, sealed or lost.
+    let spill = SecretBytes::new(input("spill.txt")?);
+    transcript.spills = vec![
+        fixture_spill("toolu_01SPILLFIXTURE", Some(&spill), &packs)?,
+        fixture_spill("toolu_01SPILLGONE", None, &packs)?,
+    ];
 
     // The subagent's own pair, archived into its subtree.
     let task_raw = SecretBytes::new(input("task_raw.jsonl")?);
-    let (task_transcript, _) = crate::transcript::archived_transcript(&task_raw, 0, &packs)?;
+    let (mut task_transcript, _) = crate::transcript::archived_transcript(&task_raw, 0, &packs)?;
+    task_transcript.spills = vec![fixture_spill("toolu_01TASKSPILL", Some(&spill), &packs)?];
 
     let mut archive = CheckpointArchive {
         repo: PathBuf::from("/shard-goldens"),
@@ -143,6 +173,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
             input_tokens: Some(800),
             output_tokens: Some(24),
             transcript: Some(task_transcript),
+            provenance: None,
         }],
         // `None`, deliberately, though the fixture HAS a literal clock: a
         // recorded time would add `created_at` to `metadata.json` and move the

@@ -143,9 +143,13 @@ fn native_shard_passes(
     use rift_shadow::backend::STRICT_MERKLE_MIN_CANON_VERSION;
 
     let header = shard_header(reader, id)?;
-    let native = NativeArtifacts::read(reader, id, &header.tasks, header.sessions.len())?;
+    let native = NativeArtifacts::read(reader, id, &header)?;
 
-    for v in task_subtree_pass(id, &header, &native) {
+    let spills = super::spills::spill_digest_pass(id, &native.spills);
+    for v in task_subtree_pass(id, &header, &native)
+        .into_iter()
+        .chain(spills)
+    {
         found.worst.keep_worse(v);
     }
 

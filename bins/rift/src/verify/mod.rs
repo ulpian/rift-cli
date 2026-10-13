@@ -28,6 +28,7 @@ mod order;
 mod passes;
 mod projection;
 mod source;
+mod spills;
 mod verdict;
 
 use rift_core::Result;
@@ -536,6 +537,7 @@ mod tests {
                 transcript_compact: None,
                 transcript_full: None,
                 tasks: &[],
+                spills: &[],
                 session_metas: &[],
                 digests: rift_shadow::backend::DigestLeafBytes::default(),
             },
@@ -607,6 +609,7 @@ mod tests {
             transcript_compact: None,
             transcript_full: None,
             tasks: &[],
+            spills: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         })
@@ -634,6 +637,7 @@ mod tests {
             transcript_compact: None,
             transcript_full: None,
             tasks: &[],
+            spills: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };
@@ -684,6 +688,7 @@ mod tests {
             input_tokens: None,
             output_tokens: None,
             transcript: None,
+            provenance: None,
         }
         .metadata_json();
         let task_leaves = [TaskLeafBytes {
@@ -706,6 +711,7 @@ mod tests {
             transcript_compact: None,
             transcript_full: None,
             tasks: &task_leaves,
+            spills: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };

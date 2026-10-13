@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use rift_core::RedactedBytes;
 
 use super::artifacts::{canonical_json, insert_compact_boundary};
+use super::spills::ArchivedSpill;
+use super::tasks::TaskProvenance;
 
 /// One archived canonical event, carrying exactly the fields a `full.jsonl` line
 /// records (content addresses, never re-derived). Mirrors
@@ -277,6 +279,11 @@ pub struct ArchivedTranscript {
     /// ([`crate::transcript::CompactTranscript::compact_transcript_start`]);
     /// rounds toward inclusion, recorded in `metadata.json`.
     pub compact_start: usize,
+    /// The tool results this transcript names as spilled to a file of their
+    /// own, each sealed beside it under `tool-results/` or accounted for by a
+    /// closed word ([`super::SpillState`]). Empty when it names none, which keeps
+    /// the shard every spill-less transcript always wrote.
+    pub spills: Vec<ArchivedSpill>,
 }
 
 /// One subagent task archived **inside** the parent checkpoint: a
@@ -327,6 +334,10 @@ pub struct ArchivedTask {
     /// artifacts already through the redaction gate, same proof-by-type as the
     /// parent's [`CheckpointArchive::transcript`].
     pub transcript: Option<ArchivedTranscript>,
+    /// Where the transcript came from, when the archive collected the task
+    /// from the agent's own files. `None` writes none of its members, so a
+    /// task built without it keeps the metadata it always had.
+    pub provenance: Option<TaskProvenance>,
 }
 
 impl ArchivedTask {
@@ -356,6 +367,9 @@ impl ArchivedTask {
         // pair (present only when the artifacts are).
         if let Some(t) = &self.transcript {
             insert_compact_boundary(&mut obj, t);
+        }
+        if let Some(p) = &self.provenance {
+            p.insert(&mut obj, self.transcript.as_ref());
         }
         canonical_json(&serde_json::Value::Object(obj))
     }
