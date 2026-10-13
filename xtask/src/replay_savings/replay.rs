@@ -31,6 +31,7 @@ use super::report::{finish, land, Report};
 use super::shell_shape::count_shape;
 use super::spawn_link::{note_the_spawn, open_the_window, openings, Opening, PendingSpawn};
 use super::transcript::{load_window, tree_stems, tree_windows, Call, Event, Window};
+use super::uncommitted_declines::note_an_edit;
 use super::worktree::{path_key, FileFacts, Worktree};
 
 /// The command words that mean a shell call was probably reading a file.
@@ -117,6 +118,10 @@ pub(super) struct WindowState {
     /// Files this window's first contact would have been answered with an
     /// outline for, by the class it was counted in, until it reads them again.
     pub(super) outlined: BTreeMap<String, usize>,
+    /// The journal of files no commit holds, kept apart from the one above so
+    /// the rows built on that one read the same: it is fed only by what the
+    /// transcript proves of a file's bytes.
+    pub(super) uncommitted: Journal,
 }
 
 /// Everything one call is replayed against: the settings it is decided under,
@@ -261,11 +266,13 @@ fn replay_event(ctx: &mut Ctx<'_>, event: Event) {
         Event::Turn => ctx.state.turn = ctx.state.turn.saturating_add(1),
         Event::Evict => {
             ctx.report.evictions = ctx.report.evictions.saturating_add(1);
-            ctx.state.journal.push(Line::Evict {
+            let line = Line::Evict {
                 turn: ctx.state.turn,
                 reason: EvictReason::Compact,
                 at_ms: 0,
-            });
+            };
+            ctx.state.uncommitted.push(line.clone());
+            ctx.state.journal.push(line);
         }
         Event::Call(call) => replay_call(ctx, &call),
     }
@@ -444,7 +451,7 @@ fn apply_edit(ctx: &mut Ctx<'_>, edit: &rift_agent::EditRequest, call: &Call) {
     let Some(key) = path_key(&edit.path, call.cwd.as_deref()) else {
         return;
     };
-    ctx.tree.working.note_change(call, &key);
+    note_an_edit(ctx, call, &key);
     let before = ctx.tree.written_lines.get(&key).copied().or_else(|| {
         ctx.worktree
             .facts_at(ctx.state.commit, &key)

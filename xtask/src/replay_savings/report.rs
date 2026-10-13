@@ -16,6 +16,7 @@ use super::no_line_count_split::NoLineCountSplit;
 use super::post_compaction::PostCompaction;
 use super::pull_answers::PullPool;
 use super::shell_shape::{Shape, ShapeRow};
+use super::uncommitted_declines::UncommittedDeclines;
 use super::worktree::FactsSource;
 
 /// How many calls landed somewhere, and the tokens their results returned.
@@ -112,6 +113,9 @@ pub struct Report {
     /// The "no name or line count" bucket split by what the transcript proves
     /// about the working tree, and by file size.
     pub no_line_count_split: NoLineCountSplit,
+    /// Of that split's unchanged re-reads, the ones the gate would decline,
+    /// and why each of the others is not.
+    pub uncommitted: UncommittedDeclines,
     /// Where the path facts came from.
     pub facts: FactsSource,
     /// Shell calls that look like reads and that the grammar does not

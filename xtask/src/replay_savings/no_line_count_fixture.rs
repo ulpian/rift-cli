@@ -253,3 +253,118 @@ fn a_range_joins_known_bytes_and_an_edit_that_misses_forgets_them() {
         Standing::Reread
     );
 }
+
+/// Replay one transcript of `records` and read the document back.
+fn replayed(records: &[Value]) -> (super::report::Report, Value) {
+    let tmp = tempfile::tempdir().unwrap();
+    let transcripts = tmp.path().join("transcripts");
+    write_transcript(&transcripts, records);
+    let mut opts = fixture(tmp.path());
+    opts.transcripts = transcripts;
+    let report = replay(&opts).unwrap();
+    let doc: Value = serde_json::from_str(&render_json(&report)).unwrap();
+    (report, doc)
+}
+
+/// A prompt, then each file read in order, whole.
+fn whole_reads(file: &str, bodies: &[&[String]]) -> Vec<Value> {
+    let mut out = vec![json!({"type": "user", "message": {"role": "user", "content": "go"}})];
+    for (at, body) in bodies.iter().enumerate() {
+        out.extend(read(
+            &format!("r{at}"),
+            &json!({"file_path": file}),
+            &numbered(body, 1),
+        ));
+    }
+    out
+}
+
+/// The credit the gate model gave, and each reason it withheld the rest.
+fn uncommitted(doc: &Value, key: &str) -> u64 {
+    doc["no_line_count_split"]["uncommitted_declines"][key]["calls"]
+        .as_u64()
+        .unwrap()
+}
+
+/// ★ An unchanged re-read of a file no commit holds is declined, as the gate
+/// declines it, and pays its reason frame.
+#[test]
+fn an_unchanged_uncommitted_reread_is_declined() {
+    let plain = body(30, "line 3 of plain prose text");
+    let (report, doc) = replayed(&whole_reads("/repo/scratch/a.md", &[&plain, &plain]));
+    assert_eq!(report.declined.calls, 1, "the second read: {doc}");
+    assert_eq!(report.declinable.calls, 1);
+    assert_eq!(uncommitted(&doc, "credited"), 1);
+    assert!(report.frame_tokens > 0, "the decline pays its frame");
+    assert_eq!(
+        report.bucket(Bucket::NoLineCount).calls,
+        2,
+        "the bucket and its split are as they were"
+    );
+}
+
+/// A re-read after the bytes moved is a delta, not a held read: no credit.
+#[test]
+fn a_changed_uncommitted_reread_is_not_declined() {
+    let plain = body(30, "line 3 of plain prose text");
+    let moved = body(30, "line 3, moved by another hand");
+    let (report, doc) = replayed(&whole_reads("/repo/scratch/a.md", &[&plain, &moved]));
+    assert_eq!(report.declined.calls, 0, "{doc}");
+    assert_eq!(uncommitted(&doc, "credited"), 0);
+}
+
+/// A re-read of a range never joined to a whole copy has no bytes to compare
+/// against: no credit.
+#[test]
+fn a_reread_with_no_bytes_in_the_transcript_is_not_declined() {
+    let plain = body(40, "line 3 of plain prose text");
+    let input = json!({"file_path": "/repo/scratch/a.md", "offset": 1, "limit": 35});
+    let mut records = vec![json!({"type": "user", "message": {"role": "user", "content": "go"}})];
+    records.extend(read("r0", &input, &numbered(&plain[..35], 1)));
+    records.extend(read("r1", &input, &numbered(&plain[..35], 1)));
+    let (report, doc) = replayed(&records);
+    assert_eq!(report.declined.calls, 0, "{doc}");
+    assert_eq!(doc["no_line_count_split"]["unknown_reread"]["calls"], 1);
+}
+
+/// The gate declines a read once per key: the third identical read runs, and
+/// is not counted as a second decline.
+#[test]
+fn a_second_decline_on_the_same_key_is_not_counted() {
+    let plain = body(30, "line 3 of plain prose text");
+    let (report, doc) = replayed(&whole_reads(
+        "/repo/scratch/a.md",
+        &[&plain, &plain, &plain],
+    ));
+    assert_eq!(report.declined.calls, 1, "{doc}");
+    assert_eq!(uncommitted(&doc, "credited"), 1);
+    assert_eq!(uncommitted(&doc, "key_already_declined"), 1);
+}
+
+/// A file past the inline-hash cap is never hashed by the gate, so it is
+/// never held.
+#[test]
+fn a_file_over_the_hashing_cap_is_not_credited() {
+    let wide: Vec<String> = (1..=1990)
+        .map(|i| format!("{i} {}", "x".repeat(600)))
+        .collect();
+    let (report, doc) = replayed(&whole_reads("/repo/scratch/wide.md", &[&wide, &wide]));
+    assert_eq!(report.declined.calls, 0, "{doc}");
+    assert_eq!(uncommitted(&doc, "over_hash_cap"), 1);
+}
+
+/// What a compaction emptied is no longer held, though the bytes are known.
+#[test]
+fn a_reread_after_a_compaction_is_not_held() {
+    let plain = body(30, "line 3 of plain prose text");
+    let mut records = whole_reads("/repo/scratch/a.md", &[&plain]);
+    records.push(json!({"type": "system", "subtype": "compact_boundary"}));
+    records.extend(read(
+        "r9",
+        &json!({"file_path": "/repo/scratch/a.md"}),
+        &numbered(&plain, 1),
+    ));
+    let (report, doc) = replayed(&records);
+    assert_eq!(report.declined.calls, 0, "{doc}");
+    assert_eq!(uncommitted(&doc, "emptied_by_compaction"), 1);
+}

@@ -155,6 +155,7 @@ mod shell_lex;
 mod shell_shape;
 mod spawn_link;
 mod transcript;
+mod uncommitted_declines;
 mod worktree;
 
 pub use artifact::{write_artifact, Provenance};
