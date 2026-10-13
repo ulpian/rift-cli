@@ -31,6 +31,7 @@ use rift_shadow::backend::{
 use rift_shadow::redact::RulePackSet;
 
 use super::super::subagent_claims::{is_safe_id, read_claims};
+use super::spills;
 
 /// What one archive collects a session's subagent transcripts from.
 pub(super) struct TaskSources<'a> {
@@ -42,6 +43,9 @@ pub(super) struct TaskSources<'a> {
     pub(super) packs: &'a RulePackSet,
     /// The session's worktree observations, subagents' included.
     pub(super) observations: &'a [ArchivedWorktreeObservation],
+    /// The session transcript's address, as the session cache remembers it:
+    /// the root its subagents' files and every spill are found under.
+    pub(super) main: Option<PathBuf>,
 }
 
 /// One subagent file the archive will try to seal.
@@ -82,6 +86,7 @@ impl<'a> TaskSources<'a> {
             session_id,
             packs,
             observations: &facts.worktree_observations,
+            main: main_transcript_path(git_dir, session_id),
         }
     }
 }
@@ -145,13 +150,13 @@ impl SpawnIndex {
 
 /// Every subagent transcript of the session, sealed as tasks.
 pub(super) fn session_tasks(src: &TaskSources<'_>) -> Vec<ArchivedTask> {
-    let main = main_transcript_path(src.git_dir, src.session_id);
-    let candidates = candidates(src, main.as_deref());
+    let main = src.main.as_deref();
+    let candidates = candidates(src, main);
     if candidates.is_empty() {
         return Vec::new();
     }
     let mut index = SpawnIndex::default();
-    if let Some(bytes) = main.as_deref().and_then(|m| std::fs::read(m).ok()) {
+    if let Some(bytes) = main.and_then(|m| std::fs::read(m).ok()) {
         index.scan(&bytes);
     }
     for c in &candidates {
@@ -251,7 +256,7 @@ fn read_transcript(path: &Path) -> Result<Vec<u8>, TaskTranscriptState> {
 
 /// Whether two metadata reads describe one file.
 #[cfg(unix)]
-fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+pub(super) fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt as _;
     a.dev() == b.dev() && a.ino() == b.ino()
 }
@@ -259,7 +264,7 @@ fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
 /// Off unix there is no inode to compare; the opened handle must at least be
 /// a regular file.
 #[cfg(not(unix))]
-fn same_file(_a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+pub(super) fn same_file(_a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     b.file_type().is_file()
 }
 
@@ -288,7 +293,7 @@ fn seal_task(
     let (transcript, state, (started, ended)) = match c.read {
         Ok(bytes) => {
             let instants = time_span(&bytes);
-            match seal(bytes, src.packs, &c.path) {
+            match seal(src, bytes, &c.path) {
                 Some(t) => (Some(t), TaskTranscriptState::Sealed, instants),
                 None => (None, TaskTranscriptState::Unsealed, instants),
             }
@@ -316,10 +321,18 @@ fn seal_task(
 /// The file through the same gate as the main transcript, whole: a task's
 /// pair is re-derived at every archive, so its compaction starts at line 0.
 /// A refusal is said and recorded as `unsealed`, never dropped in silence.
-fn seal(bytes: Vec<u8>, packs: &RulePackSet, path: &Path) -> Option<ArchivedTranscript> {
+/// The spills it names are sealed beside it; they live in the parent
+/// session's directory, so they are contained by the parent's address.
+fn seal(src: &TaskSources<'_>, bytes: Vec<u8>, path: &Path) -> Option<ArchivedTranscript> {
     let raw = rift_core::SecretBytes::new(bytes);
-    match rift_shadow::archived_transcript(&raw, 0, packs) {
-        Ok((pair, _)) => Some(pair),
+    match rift_shadow::archived_transcript(&raw, 0, src.packs) {
+        Ok((mut pair, _)) => {
+            if let Some(main) = &src.main {
+                pair.spills =
+                    spills::of_transcript(main, src.session_id, src.packs, raw.as_slice());
+            }
+            Some(pair)
+        }
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "subagent transcript not sealed");
             None

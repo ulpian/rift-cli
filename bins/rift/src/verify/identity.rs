@@ -47,10 +47,17 @@ pub(super) fn checkpoint_id_pass(
     };
     let task_leaves = native.task_leaves();
     let session_meta_leaves = native.session_meta_leaves();
+    let spill_leaves = super::spills::leaves(&native.spills);
     let candidates = rift_shadow::condense::checkpoint_ids_for_shard(
         sessions,
         canon_version,
-        &native.leaves(content, report, &task_leaves, &session_meta_leaves),
+        &native.leaves(
+            content,
+            report,
+            &task_leaves,
+            &session_meta_leaves,
+            &spill_leaves,
+        ),
     );
     // An empty candidate set is `checkpoint_ids_for_shard`'s "no era rule
     // grants this shard an id at all" — a session set the rules refuse
@@ -216,6 +223,7 @@ mod tests {
                     digest_intent: None,
                     digest_log: None,
                     digest_shape: None,
+                    spills: Vec::new(),
                 },
                 sub.read_artifact(&id, "redaction_report.json")
                     .unwrap()
@@ -327,6 +335,7 @@ mod tests {
             transcript_compact: None,
             transcript_full: None,
             tasks: &[],
+            spills: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         })
@@ -463,6 +472,7 @@ mod tests {
             transcript_compact: None,
             transcript_full: None,
             tasks: &task_leaves,
+            spills: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };
@@ -571,6 +581,7 @@ mod tests {
                 transcript_compact: None,
                 transcript_full: None,
                 tasks: &[],
+                spills: &[],
                 session_metas: &[],
                 digests: DigestLeafBytes {
                     shape: Some(&shape),
@@ -633,6 +644,7 @@ mod tests {
                 transcript_compact: None,
                 transcript_full: None,
                 tasks: &[],
+                spills: &[],
                 session_metas: &[],
                 digests: DigestLeafBytes {
                     shape: Some(shape_bytes),
@@ -770,6 +782,7 @@ mod tests {
                     digest_intent: None,
                     digest_log: None,
                     digest_shape: None,
+                    spills: Vec::new(),
                 },
                 forged
                     .read_artifact(&id, "redaction_report.json")
@@ -817,6 +830,7 @@ mod tests {
             transcript_compact: Some(compact),
             transcript_full: Some(tfull),
             tasks: &[],
+            spills: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };
@@ -904,6 +918,7 @@ mod tests {
                 transcript_compact: None,
                 transcript_full: None,
                 tasks: &[],
+                spills: &[],
                 session_metas: &[],
                 digests: rift_shadow::backend::DigestLeafBytes::default(),
             })
@@ -969,6 +984,7 @@ mod tests {
             transcript_compact: None,
             transcript_full: None,
             tasks: &[],
+            spills: &[],
             session_metas: &meta_leaves,
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };
@@ -1350,6 +1366,7 @@ mod tests {
             transcript_compact: None,
             transcript_full: None,
             tasks: &task_leaves,
+            spills: &[],
             session_metas: &[],
             digests: rift_shadow::backend::DigestLeafBytes::default(),
         };

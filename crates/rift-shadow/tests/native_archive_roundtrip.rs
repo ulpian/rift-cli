@@ -204,6 +204,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
         transcript_compact: transcript_compact.as_deref(),
         transcript_full: transcript_full.as_deref(),
         tasks: &[],
+        spills: &[],
         session_metas: &[],
         digests: DigestLeafBytes::default(),
     };

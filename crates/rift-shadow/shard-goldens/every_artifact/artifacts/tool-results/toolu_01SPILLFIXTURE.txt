@@ -1,0 +1,3 @@
+spilled tool output, line one
+export AWS_KEY=[REDACTED:vendor]
+spilled tool output, last line

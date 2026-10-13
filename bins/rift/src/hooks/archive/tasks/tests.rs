@@ -47,6 +47,7 @@ impl Session {
             session_id: SESSION,
             packs: &RulePackSet::builtin(),
             observations,
+            main: Some(self.main.clone()),
         })
     }
 }
@@ -282,4 +283,37 @@ fn a_claimed_symlink_or_non_jsonl_address_is_never_read() {
     assert_eq!(tasks.len(), 1, "the non-.jsonl claim is no candidate");
     assert_eq!(meta(&tasks[0])["agent_id"], "a1");
     assert_eq!(meta(&tasks[0])["task_transcript"], "unreadable");
+}
+
+/// A spill a subagent's result names lands beside that subagent's
+/// transcript, in its own subtree's manifest, though the file sits in the
+/// parent session's `tool-results` directory where the client keeps it.
+#[test]
+fn a_spill_named_by_a_subagent_lands_in_its_subtree() {
+    let s = Session::new(&launched("toolu_a", "a1"));
+    let results = s.subagents.parent().unwrap().join("tool-results");
+    std::fs::create_dir_all(&results).unwrap();
+    let file = results.join("bsub01.txt");
+    std::fs::write(&file, "subagent spill AKIAIOSFODNN7EXAMPLE\n").unwrap();
+    let envelope = format!(
+        "<persisted-output>\nOutput too large (34.8KB). Full output saved to: {}\n\nPreview (first 2KB):\nsub",
+        file.display()
+    );
+    let result = serde_json::json!({
+        "type": "user", "isSidechain": true, "agentId": "a1",
+        "message": { "role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "toolu_inner_read",
+            "content": [{ "type": "text", "text": envelope }],
+        }]},
+    });
+    s.subagent("a1", &format!("{result}\n"));
+    let tasks = s.tasks(&[]);
+    let spills = &tasks[0].transcript.as_ref().unwrap().spills;
+    assert_eq!(spills.len(), 1);
+    assert_eq!(spills[0].tool_use_id, "toolu_inner_read");
+    let body = String::from_utf8_lossy(spills[0].body.as_ref().unwrap().as_slice()).into_owned();
+    assert!(body.starts_with("subagent spill") && !body.contains("AKIAIOSFODNN7EXAMPLE"));
+    let m = meta(&tasks[0]);
+    assert_eq!(m["spills"][0]["tool_use_id"], "toolu_inner_read", "{m}");
+    assert_eq!(m["spills"][0]["bytes"], body.len());
 }

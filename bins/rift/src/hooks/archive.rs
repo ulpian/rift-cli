@@ -4,6 +4,7 @@
 //! honest. Separate because it is the one place a checkpoint is minted.
 
 mod outlines;
+mod spills;
 mod tasks;
 
 use std::path::{Path, PathBuf};
@@ -1077,18 +1078,23 @@ fn session_transcript(
     session_id: &str,
     packs: &rift_shadow::redact::RulePackSet,
 ) -> Option<(rift_shadow::backend::ArchivedTranscript, u64)> {
-    let path = rift_shadow::hooks::read_cache(git_dir, session_id)
-        .ok()
-        .flatten()?
-        .transcript_path?;
-    let bytes = std::fs::read(path).ok()?;
+    let path = PathBuf::from(
+        rift_shadow::hooks::read_cache(git_dir, session_id)
+            .ok()
+            .flatten()?
+            .transcript_path?,
+    );
+    let bytes = std::fs::read(&path).ok()?;
     let raw = rift_core::SecretBytes::new(bytes);
     let start_line = rift_shadow::hooks::read_transcript_progress(git_dir, session_id)
         .ok()
         .flatten()
         .map_or(0usize, |p| usize::try_from(p.raw_lines).unwrap_or(0));
     match rift_shadow::archived_transcript(&raw, start_line, packs) {
-        Ok((pair, raw_lines)) => Some((pair, u64::try_from(raw_lines).unwrap_or(u64::MAX))),
+        Ok((mut pair, raw_lines)) => {
+            pair.spills = spills::of_transcript(&path, session_id, packs, raw.as_slice());
+            Some((pair, u64::try_from(raw_lines).unwrap_or(u64::MAX)))
+        }
         Err(e) => {
             // A redaction failure must not lose the checkpoint: the capture
             // still archives; only the transcript is withheld, loudly.

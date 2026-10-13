@@ -185,9 +185,24 @@ pub fn archived_transcript(
             full: full.redacted,
             compact: compact.redacted,
             compact_start: compacted.compact_transcript_start,
+            spills: Vec::new(),
         },
         compacted.raw_lines,
     ))
+}
+
+/// Seal one spilled tool output — the file a transcript line names as holding
+/// the result it only previews — through the same gate, with the same packs,
+/// as the transcript that names it. Not compacted: a spill is the result's
+/// own bytes, and the compact transcript already elides results.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if redaction fails.
+pub fn sealed_spill(
+    raw: &SecretBytes,
+    packs: &rift_shadow_redact::RulePackSet,
+) -> Result<rift_core::RedactedBytes> {
+    Ok(rift_shadow_redact::redact_with(raw, packs)?.redacted)
 }
 
 /// The compaction of one slice: its lines and what it could not read.

@@ -163,6 +163,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         sync_format_row: "Subagent task metadata (`tasks/<id>/metadata.json`)",
     },
     ShardArtifact {
+        path: "tasks/<id>/tool-results/<id>.txt",
+        version: VersionField::None,
+        sync_format_row: "Spilled tool output (`tool-results/<id>.txt`)",
+    },
+    ShardArtifact {
         path: "tasks/<id>/transcript.compact.jsonl",
         version: VersionField::PerLineV(crate::transcript::COMPACT_SCHEMA_VERSION),
         sync_format_row: "Compact transcript (`transcript.compact.jsonl`)",
@@ -171,6 +176,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         path: "tasks/<id>/transcript.jsonl",
         version: VersionField::None,
         sync_format_row: "Capture document (`content.redacted`)",
+    },
+    ShardArtifact {
+        path: "tool-results/<id>.txt",
+        version: VersionField::None,
+        sync_format_row: "Spilled tool output (`tool-results/<id>.txt`)",
     },
     ShardArtifact {
         path: "tool_calls.jsonl",
@@ -209,9 +219,10 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
 ///
 /// The two variable components are matched structurally rather than by glob:
 /// `tasks/<anything-without-a-slash>/<declared name>` and
-/// `sessions/<anything-without-a-slash>/<declared name>`. A third directory
-/// level does not exist in a shard tree and is therefore refused — which is the
-/// point, since an undeclared path is exactly what a planted artifact is.
+/// `sessions/<anything-without-a-slash>/<declared name>`, and a spill's
+/// `<id>.txt` is a dot-free stem with that suffix. A directory level the table
+/// does not declare is refused — which is the point, since an undeclared path
+/// is exactly what a planted artifact is.
 #[must_use]
 pub fn is_declared(path: &str) -> Option<&'static ShardArtifact> {
     SHARD_ARTIFACTS
@@ -230,6 +241,11 @@ fn matches_pattern(pattern: &str, path: &str) -> bool {
             (Some(w), Some(g)) => {
                 let ok = if w == "<id>" || w == "<index>" {
                     !g.is_empty() && g != "." && g != ".."
+                } else if let Some(suffix) = w.strip_prefix("<id>") {
+                    // A file named by an id: a non-empty stem, no dot of its
+                    // own, then the declared suffix.
+                    g.strip_suffix(suffix)
+                        .is_some_and(|stem| !stem.is_empty() && !stem.contains('.'))
                 } else {
                     w == g
                 };
@@ -581,6 +597,11 @@ mod tests {
             "tasks/../metadata.json",
             "sessions/0/transcript.jsonl",
             "sessions/metadata.json",
+            "tool-results/.txt",
+            "tool-results/a.b.txt",
+            "tool-results/toolu_1.json",
+            "tool-results/deeper/toolu_1.txt",
+            "tasks/t1/tool-results/../x.txt",
             "",
         ] {
             assert!(
@@ -596,6 +617,8 @@ mod tests {
             "tasks/t1/transcript.compact.jsonl",
             "sessions/0/metadata.json",
             "sessions/10/metadata.json",
+            "tool-results/toolu_1.txt",
+            "tasks/t1/tool-results/toolu_1.txt",
         ] {
             assert!(is_declared(path).is_some(), "{path} is declared");
         }

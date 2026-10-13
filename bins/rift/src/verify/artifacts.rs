@@ -8,6 +8,8 @@
 use rift_core::Result;
 use rift_recall_substrate::SubstrateReader;
 
+use super::spills::{SpillBytes, SpillClaim};
+
 /// The header both era-dependent passes read, parsed from `metadata.json` once.
 pub(super) struct ShardHeader {
     /// The canonicalization epoch the shard declares, or **0** when the field
@@ -30,6 +32,10 @@ pub(super) struct ShardHeader {
     /// The recorded `task_tokens` rollup `(input, output)`, when present —
     /// re-summed against the task subtrees' own metadata below.
     pub(super) task_tokens: Option<(u64, u64)>,
+    /// The sealed spills the session transcript's `spills` manifest claims —
+    /// the reader's enumeration of `tool-results/`; empty on every shard
+    /// whose transcript named none.
+    pub(super) spills: Vec<SpillClaim>,
 }
 
 /// The content artifacts a native shard writes and both native passes read.
@@ -82,6 +88,9 @@ pub(super) struct NativeArtifacts {
     pub(super) digest_intent: Option<Vec<u8>>,
     pub(super) digest_log: Option<Vec<u8>>,
     pub(super) digest_shape: Option<Vec<u8>>,
+    /// The sealed spills beside the session transcript and beside every
+    /// task's, flat, each enumerated by its own transcript's manifest.
+    pub(super) spills: Vec<SpillBytes>,
 }
 
 /// One task subtree's artifact bytes as read back out of the shard.
@@ -103,10 +112,12 @@ impl NativeArtifacts {
     pub(super) fn read(
         reader: &impl SubstrateReader,
         id: &str,
-        task_ids: &[String],
-        session_count: usize,
+        header: &ShardHeader,
     ) -> Result<Self> {
         use rift_shadow::backend::{TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME};
+        let (task_ids, session_count) = (&header.tasks, header.sessions.len());
+        let own = header.spills.clone();
+        let mut spills = super::spills::read(reader, id, None, own)?;
         let mut session_metas = Vec::new();
         if session_count >= 2 {
             for i in 0..session_count {
@@ -120,11 +131,15 @@ impl NativeArtifacts {
         }
         let mut tasks = Vec::with_capacity(task_ids.len());
         for tid in task_ids {
+            let metadata = reader
+                .read_artifact(id, &format!("tasks/{tid}/metadata.json"))?
+                .unwrap_or_default();
+            let doc = serde_json::from_slice::<serde_json::Value>(&metadata).ok();
+            let claims = super::spills::claims(doc.as_ref());
+            spills.extend(super::spills::read(reader, id, Some(tid), claims)?);
             tasks.push(TaskArtifactBytes {
                 tool_use_id: tid.clone(),
-                metadata: reader
-                    .read_artifact(id, &format!("tasks/{tid}/metadata.json"))?
-                    .unwrap_or_default(),
+                metadata,
                 transcript_compact: reader
                     .read_artifact(id, &format!("tasks/{tid}/{TRANSCRIPT_COMPACT_NAME}"))?,
                 transcript_full: reader
@@ -150,6 +165,7 @@ impl NativeArtifacts {
             digest_intent: reader.read_artifact(id, rift_shadow::digest::DIGEST_INTENT_NAME)?,
             digest_log: reader.read_artifact(id, rift_shadow::digest::DIGEST_LOG_NAME)?,
             digest_shape: reader.read_artifact(id, rift_shadow::digest::DIGEST_SHAPE_NAME)?,
+            spills,
         })
     }
 
@@ -185,6 +201,7 @@ impl NativeArtifacts {
         report: &'a [u8],
         tasks: &'a [rift_shadow::backend::TaskLeafBytes<'a>],
         session_metas: &'a [rift_shadow::backend::SessionMetaLeaf<'a>],
+        spills: &'a [rift_shadow::backend::SpillLeafBytes<'a>],
     ) -> rift_shadow::backend::ShardLeafBytes<'a> {
         rift_shadow::backend::ShardLeafBytes {
             content_redacted: content,
@@ -200,6 +217,7 @@ impl NativeArtifacts {
             window_journal: self.window_journal.as_deref(),
             session_worktrees: self.session_worktrees.as_deref(),
             tasks,
+            spills,
             session_metas,
             digests: rift_shadow::backend::DigestLeafBytes {
                 failures: self.digest_failures.as_deref(),
@@ -222,6 +240,7 @@ pub(super) fn shard_header(reader: &impl SubstrateReader, id: &str) -> Result<Sh
             sessions: Vec::new(),
             tasks: Vec::new(),
             task_tokens: None,
+            spills: Vec::new(),
         });
     };
     let meta = parse::parse_metadata(&bytes, id).value;
@@ -249,5 +268,6 @@ pub(super) fn shard_header(reader: &impl SubstrateReader, id: &str) -> Result<Sh
         sessions: meta.sessions,
         tasks,
         task_tokens,
+        spills: super::spills::claims(doc.as_ref()),
     })
 }

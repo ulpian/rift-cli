@@ -20,6 +20,10 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         // Refuse malformed task sets BEFORE any object write: a tool-use id is
         // a git tree name, and a duplicate would be two entries with one name.
         validate_task_set(&archive.tasks)?;
+        let transcripts = archive.transcript.iter();
+        for t in transcripts.chain(archive.tasks.iter().filter_map(|t| t.transcript.as_ref())) {
+            super::spills::validate_spills(&t.spills)?;
+        }
         let mut entries = self.write_top_level_blobs(archive)?;
         if let Some(sessions_entry) = self.write_session_trees(archive)? {
             entries.push(sessions_entry);
@@ -140,6 +144,27 @@ impl<W: NativeGitWrite> NativeBackend<W> {
     ) -> Result<()> {
         entries.push(self.durable_entry(TRANSCRIPT_COMPACT_NAME, &transcript.compact)?);
         entries.push(self.durable_entry(TRANSCRIPT_FULL_NAME, &transcript.full)?);
+        self.push_spill_tree(transcript, entries)
+    }
+
+    /// Write a transcript's sealed spills as the `tool-results` tree beside
+    /// it. CAPTURE, like the pair: each body is `RedactedBytes` and takes the
+    /// durable path. Nothing is written when no body was sealed, so a
+    /// spill-less transcript's tree is exactly what it always was.
+    fn push_spill_tree(
+        &self,
+        transcript: &ArchivedTranscript,
+        entries: &mut Vec<TreeWriteEntry>,
+    ) -> Result<()> {
+        let mut files = Vec::new();
+        for (spill, body) in transcript.sealed_spills() {
+            files.push(self.durable_entry(&spill.file_name(), body)?);
+        }
+        if files.is_empty() {
+            return Ok(());
+        }
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        entries.push(self.tree_entry(super::SPILLS_DIR.into(), &files)?);
         Ok(())
     }
 

@@ -31,6 +31,7 @@ pub(super) fn transcript_of(raw: &[u8]) -> ArchivedTranscript {
         full: redacted_of(raw),
         compact: redacted_of(compacted.compact().as_slice()),
         compact_start: compacted.compact_transcript_start,
+        spills: Vec::new(),
     }
 }
 

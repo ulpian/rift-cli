@@ -25,6 +25,7 @@ mod artifacts;
 mod fixtures;
 mod leaves;
 mod shard;
+mod spills;
 mod tasks;
 mod tool_results;
 mod window;
@@ -45,8 +46,9 @@ pub(crate) use artifacts::rfc3339_utc_ms;
 pub use artifacts::session_meta_json;
 pub use leaves::{
     shard_merkle_leaves, shard_merkle_root, DigestLeafBytes, SessionMetaLeaf, ShardLeafBytes,
-    TaskLeafBytes,
+    SpillLeafBytes, TaskLeafBytes,
 };
+pub use spills::{ArchivedSpill, SpillState, SPILLS_DIR, SPILL_SUFFIX};
 pub use tasks::{TaskProvenance, TaskTranscriptState, TaskWorktree};
 pub use tool_results::{
     session_tool_results, tool_results_jsonl_bytes, ArchivedToolResult, TOOL_RESULTS_SCHEMA_VERSION,

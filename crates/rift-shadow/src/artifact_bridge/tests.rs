@@ -590,3 +590,64 @@ async fn a_rebuild_counts_the_same_task_subtrees_from_a_wiped_projection() {
     }
     assert_eq!(counts, [2, 2]);
 }
+
+/// A shard whose session transcript sealed one spill and lost one, and whose
+/// one subtree sealed another; `toolu_c`'s body was edited after the seal.
+fn substrate_with_spills(id: &str) -> MemorySubstrate {
+    let digest = |b: &[u8]| crate::sha256_hex(&[b]);
+    let own = format!(
+        r#"[{{"bytes":3,"sha256":"{}","tool_use_id":"toolu_a"}},{{"spill":"spill_missing","tool_use_id":"toolu_gone"}},{{"bytes":3,"sha256":"{}","tool_use_id":"toolu_c"}}]"#,
+        digest(b"aaa"),
+        digest(b"ccc"),
+    );
+    MemorySubstrate::local()
+        .with_shard(shard(id, 0))
+        .with_artifact(id, "redaction_report.json", valid_report().as_bytes())
+        .with_artifact(
+            id,
+            "metadata.json",
+            format!(
+                r#"{{"strategy":"manual-commit","merkle_root":"{}","sessions":["native-1"],"spills":{own},"tasks":["toolu_t"]}}"#,
+                "d".repeat(64)
+            )
+            .as_bytes(),
+        )
+        .with_artifact(id, "full.jsonl", full_jsonl().as_bytes())
+        .with_artifact(id, "tool-results/toolu_a.txt", b"aaa")
+        .with_artifact(id, "tool-results/toolu_c.txt", b"cc!")
+        .with_artifact(
+            id,
+            "tasks/toolu_t/metadata.json",
+            format!(
+                r#"{{"schema_version":1,"tool_use_id":"toolu_t","agent_id":"a1","spills":[{{"bytes":3,"sha256":"{}","tool_use_id":"toolu_in"}}]}}"#,
+                digest(b"iii")
+            )
+            .as_bytes(),
+        )
+        .with_artifact(id, "tasks/toolu_t/tool-results/toolu_in.txt", b"iii")
+}
+
+/// A rebuild counts the spills beside both transcripts — the same from every
+/// wiped projection — names a recorded loss as lost, and turns a body that no
+/// longer matches its digest into a parse issue rather than a spill.
+#[tokio::test]
+async fn a_rebuild_counts_the_same_spills_from_a_wiped_projection() {
+    let sub = substrate_with_spills(&shard_id(8));
+    let mut counts = Vec::new();
+    for _ in 0..2 {
+        let report = ingest_from_substrate(&store(), &sub, "repo", "claude-code", 1)
+            .await
+            .unwrap();
+        assert_eq!(report.shards_projected, 1);
+        assert!(report.parse_issues >= 1, "the edited body is named");
+        assert!(
+            report
+                .render()
+                .contains("spills: 2 sealed, 1 recorded lost"),
+            "{}",
+            report.render()
+        );
+        counts.push((report.spills_sealed, report.spills_lost));
+    }
+    assert_eq!(counts, [(2, 1), (2, 1)]);
+}

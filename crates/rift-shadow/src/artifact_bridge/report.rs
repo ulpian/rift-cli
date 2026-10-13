@@ -39,6 +39,13 @@ pub struct BridgeReport {
     /// checkpoint. Counted, never stored: the shard is their record, and the
     /// projection holds no row for them.
     pub task_subtrees: usize,
+    /// Spilled tool outputs the projected shards' manifests list whose sealed
+    /// body read back with its recorded digest — beside the session
+    /// transcript or a subagent's. Counted, never stored, like the subtrees.
+    pub spills_sealed: usize,
+    /// Spills the manifests record as lost (`spill_missing` and the rest of
+    /// the closed vocabulary): named by the shard, sealed nowhere.
+    pub spills_lost: usize,
     /// Lenient-parse issues encountered (enumerated, not fatal).
     pub parse_issues: usize,
     /// What those issues **were**, for the ones a human can act on — bounded by
@@ -92,6 +99,14 @@ impl BridgeReport {
         // exactly as it always has.
         if self.task_subtrees > 0 {
             let _ = writeln!(s, "  task subtrees: {}", self.task_subtrees);
+        }
+        // The same rule for spills: a spill-less walk renders as it always has.
+        if self.spills_sealed + self.spills_lost > 0 {
+            let _ = writeln!(
+                s,
+                "  spills: {} sealed, {} recorded lost",
+                self.spills_sealed, self.spills_lost
+            );
         }
         let _ = writeln!(s, "  parse issues: {}", self.parse_issues);
         for n in &self.parse_notes {

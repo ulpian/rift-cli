@@ -22,6 +22,8 @@
 //! `provenance`). `--json` carries no transcript bytes at all — agents ladder
 //! through policy-gated handles, not through this envelope.
 
+mod spills;
+
 use rift_core::{Result, RiftError};
 use rift_recall_substrate::{
     build_checkpoint_catalogue, resolve_explicit_target, GixSubstrate, ResolutionKind, ShardWalker,
@@ -191,6 +193,10 @@ pub(crate) async fn checkpoint_explain(
         .as_ref()
         .map(|w| subagents_of(w, &id, meta.as_ref()))
         .unwrap_or_default();
+    let spills = walker
+        .as_ref()
+        .map(|w| spills::spills_of(w, &id, meta.as_ref()))
+        .unwrap_or_default();
     Ok(render(&View {
         id,
         depth,
@@ -204,6 +210,7 @@ pub(crate) async fn checkpoint_explain(
         transcript,
         worktree,
         subagents,
+        spills,
     }))
 }
 
@@ -397,6 +404,8 @@ struct View {
     worktree: Option<Label>,
     /// The subagent transcripts the shard sealed.
     subagents: Vec<SubagentRow>,
+    /// The spilled tool outputs its transcripts named.
+    spills: Vec<spills::SpillRow>,
 }
 
 /// The first 12 characters of an id.
@@ -419,6 +428,7 @@ fn render(v: &View) -> Outcome {
     if v.depth != Depth::Short {
         body_lines(v, &mut human);
         subagent_lines(v, &mut human);
+        spills::spill_lines(&v.spills, &mut human);
     }
     if let Some((name, bytes)) = &v.transcript {
         human.push_str(&format!("  transcript ({name}):\n"));
@@ -450,7 +460,7 @@ fn render(v: &View) -> Outcome {
     });
     Outcome::ok(
         human.trim_end().to_owned(),
-        with_subagents(json, &v.subagents),
+        spills::with_spills(with_subagents(json, &v.subagents), &v.spills),
     )
 }
 
@@ -644,6 +654,7 @@ mod tests {
             costs: vec![],
             transcript: None,
             subagents: vec![],
+            spills: vec![],
         };
         let out = render(&v);
         assert!(
@@ -699,6 +710,7 @@ mod tests {
                     absent: Some(Label::of("missing")),
                 },
             ],
+            spills: vec![],
         };
         let out = render(&v);
         assert!(
@@ -711,6 +723,7 @@ mod tests {
         assert_eq!(out.json["subagents"][0]["bytes"], 1234);
         let none = render(&View {
             subagents: vec![],
+            spills: vec![],
             ..v
         });
         assert!(none.json.get("subagents").is_none());
@@ -735,6 +748,7 @@ mod tests {
             costs: vec![],
             transcript: None,
             subagents: vec![],
+            spills: vec![],
         };
         let named = render(&base);
         assert!(
