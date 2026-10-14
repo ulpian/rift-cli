@@ -25,7 +25,8 @@ const PHANTOM_SCAN_SKIP: &[&str] = &["target", "node_modules", ".git"];
 struct PhantomGitdir {
     /// The directory itself — what the printed `rm -rf` line names.
     path: std::path::PathBuf,
-    /// How many session-cache files it swallowed (`rift-sessions/*.json`).
+    /// How many session-cache files it swallowed (`rift-sessions/*.json`, the
+    /// name an older binary wrote them under).
     /// Non-zero means captured work was written under a second identity.
     sessions: usize,
 }
@@ -33,7 +34,10 @@ struct PhantomGitdir {
 /// Session-cache files under a gitdir — the evidence a phantom actually took
 /// capture, rather than merely existing.
 fn phantom_session_count(git_dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(git_dir.join("rift-sessions")) else {
+    // A phantom is no member of any family, so its sessions only ever lived
+    // in the git dir's old tree.
+    let sessions = rift_shadow::hooks::run_state::RunRoot::Sessions.legacy_under(git_dir);
+    let Ok(entries) = std::fs::read_dir(sessions) else {
         return 0;
     };
     entries
@@ -151,19 +155,21 @@ pub(super) fn doctor_prunable_worktrees(repo: &Path) -> (String, serde_json::Val
         return (String::new(), serde_json::json!({ "readable": false }));
     };
     let members = rift_git::family_members(&paths);
+    let (run_human, run_json) = run_state_leftovers(&members);
     let gone: Vec<&rift_git::FamilyMember> = members.iter().filter(|m| m.prunable).collect();
     if gone.is_empty() {
         return (
-            String::new(),
-            serde_json::json!({ "members": members.len(), "prunable": 0 }),
+            run_human,
+            serde_json::json!({ "members": members.len(), "prunable": 0, "run_state": run_json }),
         );
     }
-    let mut human = format!(
+    let mut human = run_human;
+    human.push_str(&format!(
         "\n  worktrees:      {} of {} member(s) have no checkout left \
          (rift never prunes one)",
         gone.len(),
         members.len()
-    );
+    ));
     for m in &gone {
         human.push_str(&format!("\n    {} → {}", m.name, m.work_tree.display()));
     }
@@ -171,6 +177,7 @@ pub(super) fn doctor_prunable_worktrees(repo: &Path) -> (String, serde_json::Val
     let json = serde_json::json!({
         "members": members.len(),
         "prunable": gone.len(),
+        "run_state": run_json,
         "pruned": false,
         "found": gone
             .iter()
@@ -182,6 +189,52 @@ pub(super) fn doctor_prunable_worktrees(repo: &Path) -> (String, serde_json::Val
             .collect::<Vec<_>>(),
     });
     (human, json)
+}
+
+/// Run state still in a member's git dir: files from before the move, or
+/// files an older binary — still installed as a hook — wrote after it.
+///
+/// The second is the finding that matters. The move takes what it finds on
+/// every resolution, so the files themselves are never lost; what the line
+/// says is that a stale binary of record is still running, and every write
+/// it makes reads no session the new tree holds.
+fn run_state_leftovers(members: &[rift_git::FamilyMember]) -> (String, serde_json::Value) {
+    let mut human = String::new();
+    let mut found = Vec::new();
+    for member in members.iter().filter(|m| !m.prunable) {
+        let Some(left) = crate::family::run_state::leftovers(&member.git_dir) else {
+            continue;
+        };
+        if left.files == 0 && left.late_writes == 0 {
+            continue;
+        }
+        let writing = left.old_binary_writing();
+        let place = member.git_dir.join("rift-*");
+        if writing {
+            human.push_str(&format!(
+                "\n  run state:      an old binary is still writing {} ({} file(s) there, \
+                 {} moved since) — rebuild the binary of record and run `rift doctor --fix`",
+                place.display(),
+                left.files,
+                left.late_writes
+            ));
+        } else {
+            human.push_str(&format!(
+                "\n  run state:      {} file(s) left in {} from before the move; \
+                 the next hook moves them",
+                left.files,
+                place.display()
+            ));
+        }
+        found.push(serde_json::json!({
+            "member": member.name,
+            "git_dir": member.git_dir.display().to_string(),
+            "files": left.files,
+            "moved_since": left.late_writes,
+            "old_binary_writing": writing,
+        }));
+    }
+    (human, serde_json::Value::Array(found))
 }
 
 /// Which members of this family are wired for the agents the family enabled —
@@ -577,5 +630,37 @@ mod tests {
         let (human, json) = doctor_phantom_gitdirs(&repo, true);
         assert!(human.is_empty(), "{human}");
         assert_eq!(json["phantoms"], 0);
+    }
+
+    /// Run state found in a member's git dir is reported: before the move as
+    /// leftovers the next hook takes, after it as an older binary still
+    /// writing there — including when this process already moved its write.
+    #[test]
+    fn doctor_reports_run_state_left_in_the_git_dir_and_an_old_binary_writing_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&repo).unwrap();
+        crate::family::resolve_at(&repo).unwrap();
+        let legacy = git_dir.join("rift-agent-queue");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("tokens-a.json"), b"{}").unwrap();
+        let (human, json) = doctor_prunable_worktrees(&repo);
+        assert!(human.contains("1 file(s) left in"), "{human}");
+        assert_eq!(json["run_state"][0]["old_binary_writing"], false);
+
+        // The first resolution moves and marks; an old hook writes again.
+        let moved = crate::agent_queue::queue_dir(&git_dir);
+        assert!(moved.join("tokens-a.json").is_file());
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("tokens-b.json"), b"{}").unwrap();
+        let (human, json) = doctor_prunable_worktrees(&repo);
+        assert!(human.contains("an old binary is still writing"), "{human}");
+        assert_eq!(json["run_state"][0]["files"], 1);
+
+        // Moved by the next resolution, the finding still stands.
+        crate::agent_queue::queue_dir(&git_dir);
+        let (human, json) = doctor_prunable_worktrees(&repo);
+        assert!(human.contains("an old binary is still writing"), "{human}");
+        assert_eq!(json["run_state"][0]["moved_since"], 1);
     }
 }

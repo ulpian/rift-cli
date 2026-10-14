@@ -1,7 +1,7 @@
 //! End-to-end: **the session verbs and `rift doctor` read the whole repository
 //! family, from any member.**
 //!
-//! Session caches stay under each member's own gitdir by design (they are a
+//! Session caches stay per member by design (they are a
 //! session's private working state, and the credit discriminator
 //! scopes them). That makes every family-wide question a question about a SET
 //! of gitdirs, and the readers here asked it of one: `repo.work_tree` plus
@@ -214,14 +214,16 @@ fn session_list_from_a_member_includes_mains_sessions() {
     start_session(&f, &f.main, "01MAINSESSION");
     start_session(&f, &f.member, "01MEMBERSESSION");
     assert!(
-        f.main
-            .join(".git/rift-sessions/01MAINSESSION.json")
+        common::sessions_dir(&f.main.join(".git"), &f.cache)
+            .join("01MAINSESSION.json")
             .is_file(),
-        "main's journal entry is under the common dir"
+        "main's journal entry is in the main member's run state"
     );
     assert!(
-        f.admin.join("rift-sessions/01MEMBERSESSION.json").is_file(),
-        "the member's is under its own admin dir"
+        common::sessions_dir(&f.admin, &f.cache)
+            .join("01MEMBERSESSION.json")
+            .is_file(),
+        "the member's is in its own member's run state"
     );
 
     // The vantage that was broken: from the member, main's journal was never
@@ -271,7 +273,10 @@ fn session_list_from_a_member_includes_mains_sessions() {
     // come from the projection. A member reading its OWN per-path projection
     // would find nothing there; reading the family's, it still finds main's
     // session.
-    std::fs::remove_file(f.main.join(".git/rift-sessions/01MAINSESSION.json")).unwrap();
+    std::fs::remove_file(
+        common::sessions_dir(&f.main.join(".git"), &f.cache).join("01MAINSESSION.json"),
+    )
+    .unwrap();
     let after = listed_ids(&json(&f, &f.member, &["--json", "session", "list"]));
     assert!(
         after.contains(&"01MAINSESSION".to_owned()),
@@ -345,16 +350,16 @@ fn resume_picker_lists_every_members_stopped_sessions() {
 /// Age a member's session cache so the sweep sees it as crashed: a cache is
 /// rewritten on every prompt, tool call and turn end, so one still claiming a
 /// live phase after a full idle window means the agent is gone.
-fn age_session(git_dir: &Path, id: &str, updated_at_ms: i64) {
-    let path = git_dir.join("rift-sessions").join(format!("{id}.json"));
+fn age_session(git_dir: &Path, cache: &Path, id: &str, updated_at_ms: i64) {
+    let path = common::sessions_dir(git_dir, cache).join(format!("{id}.json"));
     let mut cache: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     cache["updated_at_ms"] = serde_json::json!(updated_at_ms);
     std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
 }
 
-fn session_state(git_dir: &Path, id: &str) -> String {
-    let path = git_dir.join("rift-sessions").join(format!("{id}.json"));
+fn session_state(git_dir: &Path, cache: &Path, id: &str) -> String {
+    let path = common::sessions_dir(git_dir, cache).join(format!("{id}.json"));
     let cache: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     cache["state"].as_str().unwrap_or_default().to_owned()
 }
@@ -377,7 +382,7 @@ fn doctor_sweeps_stale_sessions_in_every_member() {
     std::fs::write(f.member.join("w.txt"), "work\n").unwrap();
     git_in(&f.member, &["add", "w.txt"]);
     git_in(&f.member, &["commit", "-q", "-m", "member work"]);
-    age_session(&f.admin, "01STALEMEMBER", 1_700_000_000_000);
+    age_session(&f.admin, &f.cache, "01STALEMEMBER", 1_700_000_000_000);
 
     // REPORT, from MAIN: the member's crashed session is a finding here, and
     // main's own live session is not.
@@ -394,7 +399,7 @@ fn doctor_sweeps_stale_sessions_in_every_member() {
         "the member's crashed session is a finding from main, and main's live one is not: {doc}"
     );
     assert_eq!(
-        session_state(&f.admin, "01STALEMEMBER"),
+        session_state(&f.admin, &f.cache, "01STALEMEMBER"),
         "active",
         "a report-only doctor finalizes nothing"
     );
@@ -415,12 +420,12 @@ fn doctor_sweeps_stale_sessions_in_every_member() {
         "both members were swept: {fixed}"
     );
     assert_ne!(
-        session_state(&f.admin, "01STALEMEMBER"),
+        session_state(&f.admin, &f.cache, "01STALEMEMBER"),
         "active",
         "the crashed session was swept in the member, from main: {fixed}"
     );
     assert_eq!(
-        session_state(&f.main.join(".git"), "01MAINSESSION"),
+        session_state(&f.main.join(".git"), &f.cache, "01MAINSESSION"),
         "active",
         "a session inside its idle window is untouched: {fixed}"
     );
@@ -535,7 +540,7 @@ fn a_stale_session_in_a_removed_worktree_is_named_stranded_not_promised_a_fix() 
     let f = family();
     start_session(&f, &f.main, "01MAINSESSION");
     start_session(&f, &f.member, "01GONEMEMBER");
-    age_session(&f.admin, "01GONEMEMBER", 1_700_000_000_000);
+    age_session(&f.admin, &f.cache, "01GONEMEMBER", 1_700_000_000_000);
     std::fs::remove_dir_all(&f.member).unwrap();
 
     let doc = json(&f, &f.main, &["--json", "doctor"]);
@@ -567,7 +572,7 @@ fn a_stale_session_in_a_removed_worktree_is_named_stranded_not_promised_a_fix() 
         "and the gone one is skipped, not reported unreadable: {fixed}"
     );
     assert_eq!(
-        session_state(&f.admin, "01GONEMEMBER"),
+        session_state(&f.admin, &f.cache, "01GONEMEMBER"),
         "active",
         "nothing condensed it, and nothing deleted its journal"
     );
@@ -596,7 +601,7 @@ fn the_vantages_own_queue_is_never_reported_as_a_siblings() {
     git_in(&f.main, &["add", "c.txt"]);
     git_in(&f.main, &["commit", "-q", "-m", "main work"]);
     let commit = git_in(&f.main, &["rev-parse", "HEAD"]).trim().to_owned();
-    let dir = f.main.join(".git").join("rift-capture-queue");
+    let dir = common::capture_queue_dir(&f.main.join(".git"), &f.cache);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join(format!("{commit}.json")),

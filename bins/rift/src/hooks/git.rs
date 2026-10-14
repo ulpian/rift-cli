@@ -269,7 +269,11 @@ fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
     let repo = t.phase("discover", || rift_git::discover(&start))?;
     let Some(sess) = t
         .phase("live_sessions", || {
-            live_sessions_for(&repo.git_dir, &repo.common_dir, &repo.work_tree)
+            live_sessions_for(
+                &crate::family::run_state::sessions_dir(&repo.git_dir),
+                &crate::family::run_state::sessions_dir(&repo.common_dir),
+                &repo.work_tree,
+            )
         })?
         .into_iter()
         .next()
@@ -431,10 +435,13 @@ fn on_pr_archive(git_dir: Option<&str>) -> Result<()> {
     if cfg.checkpoint_strategy() != "on-pr" {
         return Ok(());
     }
-    let Some(sess) = live_sessions_for(&repo.git_dir, &repo.common_dir, &repo.work_tree)?
-        .into_iter()
-        .next()
-    else {
+    let Some(sess) = live_sessions_for(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        &crate::family::run_state::sessions_dir(&repo.common_dir),
+        &repo.work_tree,
+    )?
+    .into_iter()
+    .next() else {
         return Ok(());
     };
     let reader = rift_git::GixBlobReader::open(&repo.work_tree)?;
@@ -510,7 +517,11 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
     };
     let sess = t
         .phase("live_sessions", || {
-            live_sessions_for(&repo.git_dir, &repo.common_dir, &repo.work_tree)
+            live_sessions_for(
+                &crate::family::run_state::sessions_dir(&repo.git_dir),
+                &crate::family::run_state::sessions_dir(&repo.common_dir),
+                &repo.work_tree,
+            )
         })?
         .into_iter()
         .next();

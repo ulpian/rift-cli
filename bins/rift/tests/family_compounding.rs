@@ -293,7 +293,9 @@ fn family() -> Family {
         divergent: root.join("divergent"),
         home,
     };
-    let sessions = main.join(".git").join("rift-sessions");
+    // Seeded where an older binary would have left them: the binary's next
+    // resolution moves each one, and the move removes the old directory.
+    let sessions = common::seed_sessions_dir(&main.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
 
     // Session one reads ALPHA; C1 condenses it into k1.
@@ -305,6 +307,7 @@ fn family() -> Family {
     fork_the_divergent_member(&fixture);
 
     // Session two reads BETA; C2 condenses it into k2.
+    std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(sessions.join("swt-two.json"), journal("swt-two")).unwrap();
     fixture.agent_read(&main, "swt-two", BETA);
     commit(&fixture, "notes/two.txt", "two\n", "work two");

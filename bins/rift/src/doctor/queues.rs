@@ -438,7 +438,11 @@ fn stranded_and_behind_lines(stranded: usize, behind: &[String]) -> String {
 fn cache_defects(journal: &[session_verbs::MemberJournal]) -> (Vec<String>, Vec<String>) {
     let torn = journal
         .iter()
-        .flat_map(|j| rift_shadow::hooks::torn_caches(&j.member.git_dir))
+        .flat_map(|j| {
+            rift_shadow::hooks::torn_caches(&crate::family::run_state::sessions_dir(
+                &j.member.git_dir,
+            ))
+        })
         .collect();
     let unreadable = journal
         .iter()
@@ -459,7 +463,7 @@ fn cache_defect_lines(torn: &[String], unreadable: &[String]) -> String {
     if !torn.is_empty() {
         lines.push_str(&format!(
             "\n    rift defect:  {} session cache(s) found unreadable and moved aside \
-             (rift-sessions/*.json.torn-*) — Rift's own write error, not yours; each \
+             (sessions/*.json.torn-*) — Rift's own write error, not yours; each \
              session was re-opened and capture continued",
             torn.len()
         ));

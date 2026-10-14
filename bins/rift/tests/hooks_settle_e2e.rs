@@ -126,12 +126,9 @@ async fn settled_usage(
 
 /// The `.usage` sidecar the hook path owns: `(byte_offset, settled_turn)`.
 fn usage_sidecar(repo: &Path, session: &str) -> (u64, u32) {
-    let raw = std::fs::read_to_string(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join(format!("{session}.usage")),
-    )
-    .expect("the hook path wrote its usage sidecar");
+    let raw =
+        std::fs::read_to_string(hooks_fixture::sessions_of(repo).join(format!("{session}.usage")))
+            .expect("the hook path wrote its usage sidecar");
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     (
         v["byte_offset"].as_u64().unwrap(),
@@ -210,12 +207,8 @@ async fn the_doctor_sweep_settles_the_last_turn_of_a_session_no_hook_will_end() 
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
     // The seeded live session is not this test's; the sweep must see one.
-    std::fs::remove_file(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join("e2e-live-1.json"),
-    )
-    .unwrap();
+    std::fs::remove_file(common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json"))
+        .unwrap();
     let cache = tmp.path().join("cache");
     let env = [
         ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
@@ -231,10 +224,7 @@ async fn the_doctor_sweep_settles_the_last_turn_of_a_session_no_hook_will_end() 
 
     // The agent is gone: back-date the session's last touch past the idle
     // window so the sweep finalizes it. Only the stamp changes.
-    let cache_file = repo
-        .join(".git")
-        .join("rift-sessions")
-        .join(format!("{session}.json"));
+    let cache_file = hooks_fixture::sessions_of(&repo).join(format!("{session}.json"));
     let mut v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache_file).unwrap()).unwrap();
     v["updated_at_ms"] = serde_json::json!(0);
@@ -272,7 +262,7 @@ async fn the_doctor_sweep_settles_the_last_turn_of_a_session_no_hook_will_end() 
 /// `condensed-<sha256(session)>` done-marker, and whether any job is still
 /// queued.
 fn agent_queue_state(repo: &Path, session: &str) -> (bool, usize) {
-    let dir = repo.join(".git").join("rift-agent-queue");
+    let dir = hooks_fixture::agent_queue_of(repo);
     let marker = dir.join(format!(
         "condensed-{}",
         rift_shadow::sha256_hex(&[session.as_bytes()])
@@ -288,7 +278,7 @@ fn agent_queue_state(repo: &Path, session: &str) -> (bool, usize) {
 /// A hand-written session-end condense job, exactly as the hook journals it —
 /// what a worker killed before it ran leaves behind.
 fn plant_condense_job(repo: &Path, session: &str) {
-    let dir = repo.join(".git").join("rift-agent-queue");
+    let dir = hooks_fixture::agent_queue_of(repo);
     std::fs::create_dir_all(&dir).unwrap();
     let repo_id = rift_git::repo_id_for(repo).unwrap().to_string();
     let job = serde_json::json!({
@@ -319,12 +309,8 @@ fn plant_condense_job(repo: &Path, session: &str) {
 async fn a_session_end_returns_and_the_detached_worker_condenses_and_settles() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
-    std::fs::remove_file(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join("e2e-live-1.json"),
-    )
-    .unwrap();
+    std::fs::remove_file(common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json"))
+        .unwrap();
     let cache = tmp.path().join("cache");
     let env = [
         ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
@@ -346,7 +332,7 @@ async fn a_session_end_returns_and_the_detached_worker_condenses_and_settles() {
     let (code, _) = hooks.run(&repo, &args, &body.to_string(), &env);
     assert_eq!(code, 0, "a capture hook never fails the agent");
     assert!(
-        repo.join(".git").join("rift-agent-queue").is_dir(),
+        hooks_fixture::agent_queue_of(&repo).is_dir(),
         "the hook left a durable record of the condense it owes"
     );
 
@@ -389,10 +375,8 @@ fn doctor_drains_a_killed_workers_session_end_job() {
         ("RIFT_CAPTURE_SYNC", "1"),
     ];
     // The hook's own half ran: the machine is in `ending`, touched just now.
-    let cache_file = repo
-        .join(".git")
-        .join("rift-sessions")
-        .join("e2e-live-1.json");
+    // No binary has run yet, so the seeded cache is still where it was seeded.
+    let cache_file = common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json");
     let mut v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache_file).unwrap()).unwrap();
     v["state"] = serde_json::json!("ending");
@@ -670,7 +654,7 @@ async fn assert_vanished_read_settled(
     let queue = capture_queue_leg(doc);
     assert_eq!(queue["agent_jobs"]["pending"], 0, "{delivery}: {queue}");
     assert_eq!(queue["notes"], serde_json::json!([]), "{delivery}: {queue}");
-    let queued = std::fs::read_dir(repo.join(".git").join("rift-agent-queue"))
+    let queued = std::fs::read_dir(hooks_fixture::agent_queue_of(repo))
         .unwrap()
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
@@ -694,7 +678,7 @@ async fn assert_vanished_read_settled(
 /// A read-tokens job in the agent queue, exactly as the hook journals one:
 /// the read `call` over `a.txt` at `sha`, whose bytes the git blob `oid` holds.
 fn plant_read_tokens_job(repo: &Path, call: &str, sha: &str, oid: &str) {
-    let dir = repo.join(".git").join("rift-agent-queue");
+    let dir = hooks_fixture::agent_queue_of(repo);
     std::fs::create_dir_all(&dir).unwrap();
     let job = serde_json::json!({
         "schema_version": 1,

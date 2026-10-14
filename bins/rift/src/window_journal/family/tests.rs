@@ -117,7 +117,7 @@ fn set_written(file: &Path, written_ms: u64) {
 /// A session's cache in one checkout's git dir, in `state`, last written at
 /// `updated_ms`.
 fn session(at: &Checkout, session: &str, state: &str, updated_ms: u64) {
-    let dir = rift_shadow::hooks::session_cache::sessions_dir(&at.git_dir);
+    let dir = crate::family::run_state::sessions_dir(&at.git_dir);
     std::fs::create_dir_all(&dir).unwrap();
     let cache = serde_json::json!({
         "schema": 1,

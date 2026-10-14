@@ -27,9 +27,6 @@ use std::path::{Path, PathBuf};
 
 use rift_core::{Result, RiftError};
 
-/// The journal directory under `<git_dir>` (sibling of `rift-capture-queue`).
-const QUEUE_DIR: &str = "rift-agent-queue";
-
 /// One journaled job: what the worker needs to do it later.
 ///
 /// Unknown fields are ignored on read, for the reason `capture_queue`'s entry
@@ -465,8 +462,12 @@ pub(crate) struct AuditLines {
 }
 
 /// The journal directory for `git_dir`.
+///
+/// The member's run directory under the family's cache directory, resolved
+/// (and moved out of the git dir on the first resolution) by
+/// [`crate::family::run_state`]; every path in this module derives from it.
 pub(crate) fn queue_dir(git_dir: &Path) -> PathBuf {
-    git_dir.join(QUEUE_DIR)
+    crate::family::run_state::agent_queue_dir(git_dir)
 }
 
 /// Whether `s` is lowercase hex of exactly `len` characters — the only shape

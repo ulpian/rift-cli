@@ -365,7 +365,11 @@ fn idle_and_live(
 ) -> Result<(Vec<SessionCache>, Vec<SessionCache>)> {
     use rift_shadow::hooks::session_cache::{is_idle_past, live_sessions_for};
 
-    let mut sessions = live_sessions_for(&repo.git_dir, &repo.common_dir, &repo.work_tree)?;
+    let mut sessions = live_sessions_for(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        &crate::family::run_state::sessions_dir(&repo.common_dir),
+        &repo.work_tree,
+    )?;
     // `rift session stop ID` finalizes one session; the others are not even
     // looked at, so a targeted stop can never sweep a neighbour.
     if let Some(target) = only {
@@ -392,7 +396,7 @@ fn finalize_idle_session(ctx: &SweepCtx<'_>, cache: &SessionCache, sweep: &mut S
     if cache.state != SessionState::Ending.as_str() {
         let timed_out = ctx.rt.block_on(rift_shadow::bridge::timeout_idle_session(
             &ctx.store,
-            &ctx.repo.git_dir,
+            &crate::family::run_state::sessions_dir(&ctx.repo.git_dir),
             &id,
             ctx.now,
         ));
@@ -477,7 +481,7 @@ fn settle_last_turn(ctx: &SweepCtx<'_>, cache: &SessionCache) {
         .rt
         .block_on(rift_shadow::bridge::settle_closed_turn_usage(
             &ctx.store,
-            &ctx.repo.git_dir,
+            &crate::family::run_state::sessions_dir(&ctx.repo.git_dir),
             &cache.session_id,
             &cache.agent,
             &ctx.repo_id,
@@ -527,7 +531,7 @@ fn mark_swept_condensed(ctx: &SweepCtx<'_>, cache: &SessionCache) -> bool {
     ctx.rt
         .block_on(rift_shadow::bridge::mark_condense_done(
             &ctx.store,
-            &ctx.repo.git_dir,
+            &crate::family::run_state::sessions_dir(&ctx.repo.git_dir),
             &cache.session_id,
             &cache.agent,
             ctx.now,
@@ -544,7 +548,7 @@ mod tests {
 
     /// An `active` session cache last touched at `updated_at_ms`.
     fn seed_session(git_dir: &Path, id: &str, updated_at_ms: i64) {
-        let sessions = git_dir.join("rift-sessions");
+        let sessions = crate::family::run_state::sessions_dir(git_dir);
         std::fs::create_dir_all(&sessions).unwrap();
         std::fs::write(
             sessions.join(format!("{id}.json")),

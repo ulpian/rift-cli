@@ -1072,7 +1072,10 @@ fn record_transcript_progress(git_dir: &Path, session_id: &str, raw_lines: u64, 
         raw_lines,
         updated_at_ms: now,
     };
-    if let Err(e) = rift_shadow::hooks::write_transcript_progress(git_dir, &progress) {
+    if let Err(e) = rift_shadow::hooks::write_transcript_progress(
+        &crate::family::run_state::sessions_dir(git_dir),
+        &progress,
+    ) {
         tracing::warn!(error = %e, "transcript progress not recorded");
     }
 }
@@ -1094,17 +1097,23 @@ fn session_transcript(
     spool: &originals::Spool,
 ) -> Option<(rift_shadow::backend::ArchivedTranscript, u64)> {
     let path = PathBuf::from(
-        rift_shadow::hooks::read_cache(git_dir, session_id)
-            .ok()
-            .flatten()?
-            .transcript_path?,
+        rift_shadow::hooks::read_cache(
+            &crate::family::run_state::sessions_dir(git_dir),
+            session_id,
+        )
+        .ok()
+        .flatten()?
+        .transcript_path?,
     );
     let bytes = std::fs::read(&path).ok()?;
     let raw = rift_core::SecretBytes::new(bytes);
-    let start_line = rift_shadow::hooks::read_transcript_progress(git_dir, session_id)
-        .ok()
-        .flatten()
-        .map_or(0usize, |p| usize::try_from(p.raw_lines).unwrap_or(0));
+    let start_line = rift_shadow::hooks::read_transcript_progress(
+        &crate::family::run_state::sessions_dir(git_dir),
+        session_id,
+    )
+    .ok()
+    .flatten()
+    .map_or(0usize, |p| usize::try_from(p.raw_lines).unwrap_or(0));
     match rift_shadow::archived_transcript(&raw, start_line, packs) {
         Ok((mut pair, raw_lines)) => {
             pair.spills = spills::of_transcript(&path, session_id, packs, raw.as_slice());
@@ -1244,7 +1253,11 @@ mod projection_replacement_tests {
     fn queue_condense(repo: &rift_git::RepoPaths) -> PathBuf {
         let family = crate::family::resolve_at(&repo.work_tree).unwrap();
         let cache = rift_shadow::hooks::SessionCache::new("s-busy", "claude-code", "ending", 1);
-        rift_shadow::hooks::write_cache(&repo.git_dir, &cache).unwrap();
+        rift_shadow::hooks::write_cache(
+            &crate::family::run_state::sessions_dir(&repo.git_dir),
+            &cache,
+        )
+        .unwrap();
         let job = crate::agent_queue::AgentJob {
             schema_version: 1,
             work_tree: repo.work_tree.clone(),

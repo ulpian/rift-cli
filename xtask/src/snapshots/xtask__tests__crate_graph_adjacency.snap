@@ -21,7 +21,7 @@ rift-core -> (none)
 rift-crypto -> rift-core
 rift-git -> rift-core
 rift-hashchain -> rift-core
-rift-memd -> rift-config, rift-core, rift-git, rift-recall-eval, rift-recall-events, rift-recall-ledger, rift-recall-policy, rift-recall-serve, rift-recall-substrate, rift-recall-types, rift-store
+rift-memd -> rift-config, rift-core, rift-git, rift-recall-eval, rift-recall-events, rift-recall-ledger, rift-recall-policy, rift-recall-serve, rift-recall-substrate, rift-recall-types, rift-shadow-hooks, rift-store
 rift-nic-gauge -> rift-core
 rift-recall-doc -> rift-core
 rift-recall-eval -> rift-config, rift-core, rift-recall-events, rift-recall-ledger, rift-recall-pack, rift-recall-policy, rift-recall-serve, rift-recall-substrate, rift-recall-types, rift-store, rift-tokens

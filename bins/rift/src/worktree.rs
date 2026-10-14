@@ -139,8 +139,8 @@ fn rows(root: &Path) -> Result<(rift_git::RepoPaths, Vec<Row>)> {
             0
         } else {
             rift_shadow::hooks::session_cache::live_sessions_for(
-                &member.git_dir,
-                &paths.common_dir,
+                &crate::family::run_state::sessions_dir(&member.git_dir),
+                &crate::family::run_state::sessions_dir(&paths.common_dir),
                 &member.work_tree,
             )
             .map_or(0, |v| v.len())

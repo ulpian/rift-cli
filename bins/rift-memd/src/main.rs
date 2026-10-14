@@ -34,6 +34,7 @@ use rift_recall_ledger::production::Pass;
 use rift_recall_ledger::{doctor as graph_doctor, outcome};
 use rift_recall_substrate::{worktree, Dialect, GixSubstrate, SubstrateReader};
 use rift_recall_types::{NoAncestry, Scope};
+use rift_shadow_hooks::run_state::{self, RunRoot};
 use rift_store::{recall_migrations, CanonicalStore, SqliteStore};
 
 #[derive(Parser)]
@@ -202,6 +203,25 @@ fn family_at(repo: &Path) -> Result<Family> {
 /// Propagates [`family_at`].
 pub(crate) fn recall_db_path(repo: &Path) -> Result<PathBuf> {
     Ok(rift_store::recall_db_for_family(&family_at(repo)?))
+}
+
+/// The sessions directory `repo`'s checkout keeps its phase hints in: the
+/// family's run state once the member's run state was moved there, its git
+/// dir before. Read-only; the move belongs to the `rift` binary, never to a
+/// reporter.
+///
+/// # Errors
+/// Propagates [`family_at`].
+fn member_sessions(repo: &Path) -> Result<PathBuf> {
+    let family = family_at(repo)?;
+    let paths = rift_git::discover(repo)?;
+    let family_dir = rift_store::default_projection_dir(&family.family_id);
+    let member = run_state::member_dir(&family_dir, &paths.work_tree);
+    Ok(run_state::dir_for_read(
+        RunRoot::Sessions,
+        &member,
+        &paths.git_dir,
+    ))
 }
 
 /// Open (creating + migrating) the recall.db projection for `repo`.
@@ -383,7 +403,7 @@ async fn doctor(repo: &Path) -> Result<()> {
     let walker = sub.walker();
     let checkpoints = sub.checkpoints()?;
     let dialects = walker.present_dialects();
-    let sessions = walker.session_index()?;
+    let sessions = walker.session_index(&member_sessions(repo)?)?;
     let mut shadow_count = 0usize;
     for d in [Dialect::Rift, Dialect::Legacy] {
         shadow_count += walker.shadow_refs(d)?.len();

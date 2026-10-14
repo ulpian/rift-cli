@@ -312,8 +312,8 @@ Hook gates ask only for the projection: a running hook is its own proof.
 | `.rift/state/` | `native-integrations.json` (ownership fingerprints), `project-setup.json`, `adoption.json`, `injection/` and `manifest/` (per-window markers), `search/index.bin` (path index). | Yes — each costs a regeneration; without the integrations file fragments read as unowned. |
 | `.rift/state/reads/` | One append-only file per window: ranges handed, declines, write hashes, evictions. Never content. | Yes — costs declines, never a wrong decision. |
 | `.rift/state/doc/`, `doc/w/<window>/`, `search/w/<window>/` | This member's view of the family's sidecars; what a window was told about documents or did about searches. | Yes — at most one repeated redirect, bound or answer. |
-| `<git_dir>/rift-sessions/` | Session ownership markers and usage sidecars. | Yes; live sessions lose attribution context. |
-| `<git_dir>/rift-capture-queue/`, `rift-agent-queue/` | Commits awaiting condensing; agent-hook events for the detached worker. | No — pending capture work. |
+| `~/.cache/rift/<family-id>/run/<member>/sessions/` | Session caches, ownership markers, usage and transcript sidecars, subagent claims. `<member>` is the checkout's 12-hex worktree token. An older binary kept these in `<git_dir>/rift-sessions/`; a newer one moves them on its first run. | Yes; live sessions lose attribution context. |
+| `~/.cache/rift/<family-id>/run/<member>/capture-queue/`, `agent-queue/` | Commits awaiting condensing; agent-hook events for the detached worker (formerly `<git_dir>/rift-capture-queue/`, `rift-agent-queue/`). | No — pending capture work. |
 | `<common_dir>/hooks/` | The five git hooks, as links, plus markers. | No — capture stops. |
 | `<common_dir>/rift-family/` | `family.json` (minted identity: **never hand-edit**), `family.history.jsonl` (the audit trail), `binary.json` (the hooks' binary), `savings-window.json` (the `rift savings reset` boundary). | Only `binary.json` and `savings-window.json`. |
 | `<common_dir>/rift-push-queue/` | References waiting to be shipped. | No. |

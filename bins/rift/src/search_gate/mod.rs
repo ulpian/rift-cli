@@ -355,8 +355,9 @@ mod tests {
     pub(super) fn indexed(files: &[(&str, &str)]) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("a work tree");
         let root = tmp.path();
-        for dir in [".git/rift-agent-queue", ".rift/state/reads"] {
-            std::fs::create_dir_all(root.join(dir)).expect("the skeleton");
+        let queue = crate::agent_queue::queue_dir(&root.join(".git"));
+        for dir in [queue, root.join(".rift/state/reads")] {
+            std::fs::create_dir_all(dir).expect("the skeleton");
         }
         for (rel, body) in files {
             let path = root.join(rel);

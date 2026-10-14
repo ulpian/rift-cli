@@ -62,7 +62,7 @@ fn seed_repo(tmp: &Path) -> PathBuf {
     std::fs::write(repo.join("README.md"), "prose\n").unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "seed"]);
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
         sessions.join("glob-1.json"),

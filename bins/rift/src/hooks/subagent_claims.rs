@@ -2,7 +2,7 @@
 //! the subagent's own transcript is, kept until the archive reads it.
 //!
 //! Run state, not a record (Q37.3): one small file per subagent at
-//! `<git_dir>/rift-sessions/<session>.subagents/<agent_id>.json`, holding an
+//! `<sessions>/<session>.subagents/<agent_id>.json` in the member's run state, holding an
 //! address and a type and no fact the sealed shard will not hold. One file per
 //! subagent rather than a member of the session cache because subagents stop
 //! concurrently, and the cache is rewritten whole by every hook: two stops
@@ -129,7 +129,7 @@ fn claims_dir(git_dir: &Path, session: &str) -> Option<PathBuf> {
     if !rift_shadow::hooks::is_safe_session_id(session) {
         return None;
     }
-    let sessions = rift_shadow::hooks::session_cache::sessions_dir(git_dir);
+    let sessions = crate::family::run_state::sessions_dir(git_dir);
     Some(sessions.join(format!("{session}.{CLAIMS_SUFFIX}")))
 }
 

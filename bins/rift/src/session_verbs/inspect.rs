@@ -235,13 +235,13 @@ pub(crate) async fn info(
     use rift_shadow::hooks::session_cache::{cache_path, read_cache};
     let repo = rift_git::discover(root)?;
     let now = crate::hooks::now_ms();
-    let read = read_cache(&repo.git_dir, reference);
-    let fallback =
-        if read.is_err() && cache_path(&repo.git_dir, reference).is_ok_and(|p| p.exists()) {
-            CACHE_UNREADABLE
-        } else {
-            "archived"
-        };
+    let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
+    let read = read_cache(&sessions, reference);
+    let fallback = if read.is_err() && cache_path(&sessions, reference).is_ok_and(|p| p.exists()) {
+        CACHE_UNREADABLE
+    } else {
+        "archived"
+    };
     let journal = read.ok().flatten();
     let Some(row_id) = projection_row_id(store, journal.as_ref(), reference).await? else {
         return Ok(Outcome::coded(

@@ -25,8 +25,6 @@ use std::path::{Path, PathBuf};
 
 use rift_core::{Result, RiftError};
 
-/// The queue directory under `<git_dir>` (sibling of `rift-sessions`).
-const QUEUE_DIR: &str = "rift-capture-queue";
 /// The worker's mutual-exclusion file inside the queue directory.
 const LOCK_FILE: &str = ".lock";
 /// How long a lock may live before a later worker steals it. A worker killed
@@ -78,8 +76,12 @@ pub(crate) struct QueueEntry {
 pub(crate) const MAX_ATTEMPTS: u32 = 3;
 
 /// The queue directory for `git_dir`.
+///
+/// The member's run directory under the family's cache directory, resolved
+/// (and moved out of the git dir on the first resolution) by
+/// [`crate::family::run_state`]; every path in this module derives from it.
 pub(crate) fn queue_dir(git_dir: &Path) -> PathBuf {
-    git_dir.join(QUEUE_DIR)
+    crate::family::run_state::capture_queue_dir(git_dir)
 }
 
 /// Whether `oid` is a full **lowercase**-hex commit id.

@@ -52,8 +52,11 @@ pub(super) fn open_turn(work_tree: &Path, session: &str, ordinal: u32) {
     );
     cache.current_turn_ordinal = ordinal;
     cache.turn_open = true;
-    rift_shadow::hooks::session_cache::write_cache(&git_dir, &cache)
-        .expect("the boundary is recorded");
+    rift_shadow::hooks::session_cache::write_cache(
+        &crate::family::run_state::sessions_dir(&git_dir),
+        &cache,
+    )
+    .expect("the boundary is recorded");
 }
 
 /// A `Read` of `path`, as the pinned fields spell one.

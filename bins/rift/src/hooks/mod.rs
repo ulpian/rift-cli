@@ -489,7 +489,8 @@ mod tests {
     /// under test is the production one.
     pub(in crate::hooks) fn seed_cache(git_dir: &Path, session: &str) {
         let cache = rift_shadow::hooks::SessionCache::new(session, "claude-code", "active", 1);
-        rift_shadow::hooks::write_cache(git_dir, &cache).unwrap();
+        rift_shadow::hooks::write_cache(&crate::family::run_state::sessions_dir(git_dir), &cache)
+            .unwrap();
     }
 
     /// The observation is content-addressed over the STATE, so a
@@ -517,15 +518,22 @@ mod tests {
         // worktree provenance existed — the
         // DATABASE still refuses the duplicate: the memo is speed, the id is
         // correctness.
-        let mut cache = rift_shadow::hooks::read_cache(&repo.git_dir, "s1")
-            .unwrap()
-            .unwrap();
+        let mut cache = rift_shadow::hooks::read_cache(
+            &crate::family::run_state::sessions_dir(&repo.git_dir),
+            "s1",
+        )
+        .unwrap()
+        .unwrap();
         assert!(
             cache.last_worktree.is_some(),
             "the memo records what landed"
         );
         cache.last_worktree = None;
-        rift_shadow::hooks::write_cache(&repo.git_dir, &cache).unwrap();
+        rift_shadow::hooks::write_cache(
+            &crate::family::run_state::sessions_dir(&repo.git_dir),
+            &cache,
+        )
+        .unwrap();
         assert!(
             !observe_worktree(&rt, &store, &repo, None, None, "s1", &row_id, None, 3_000).unwrap(),
             "INSERT OR IGNORE on the state's own id"
@@ -719,10 +727,8 @@ mod tests {
         assert_eq!(repo.work_tree, linked);
         // And the session dir it implies can actually be created — the whole
         // point of the fix.
-        std::fs::create_dir_all(rift_shadow::hooks::session_cache::sessions_dir(
-            &repo.git_dir,
-        ))
-        .expect("session state is writable in a linked worktree");
+        std::fs::create_dir_all(crate::family::run_state::sessions_dir(&repo.git_dir))
+            .expect("session state is writable in a linked worktree");
     }
 
     #[test]
@@ -766,7 +772,7 @@ mod tests {
     /// keep separate session state, and share exactly one thing — the hooks.
     #[test]
     fn worktree_isolation_splits_session_state_and_shares_the_hooks_dir() {
-        use rift_shadow::hooks::session_cache::sessions_dir;
+        use crate::family::run_state::sessions_dir;
         let tmp = tempfile::tempdir().unwrap();
         let (main, linked) = repo_with_linked_worktree(tmp.path());
         let (a, b) = (capture_repo(&main).unwrap(), capture_repo(&linked).unwrap());

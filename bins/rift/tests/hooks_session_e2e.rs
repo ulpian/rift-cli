@@ -208,10 +208,7 @@ fn attach_adopts_a_session_idempotently_and_amend_needs_an_explicit_yes() {
     );
     // Adopted: the journal now records the session as ended work.
     let journal = std::fs::read_to_string(
-        fx.repo
-            .join(".git")
-            .join("rift-sessions")
-            .join("oob-1.json"),
+        common::sessions_dir(&fx.repo.join(".git"), &fx.cache).join("oob-1.json"),
     )
     .expect("attach adopted the session into the journal");
     assert!(journal.contains(r#""state": "ended""#), "{journal}");

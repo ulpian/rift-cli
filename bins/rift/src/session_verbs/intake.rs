@@ -51,7 +51,12 @@ pub(crate) fn attach(
             serde_json::json!({ "error": "unborn_head" }),
         ));
     };
-    let journal = read_cache(&repo.git_dir, session_id).ok().flatten();
+    let journal = read_cache(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        session_id,
+    )
+    .ok()
+    .flatten();
     let candidates = transcript_candidates(journal.as_ref(), agent, &repo.work_tree, session_id);
     let Some(transcript_path) = candidates.iter().find(|p| p.exists()).cloned() else {
         return Ok(refuse_missing_transcript(session_id, &candidates));
@@ -181,14 +186,17 @@ fn adopt_as_ended(
     agent.clone_into(&mut cache.agent);
     cache.updated_at_ms = now;
     cache.transcript_path = Some(transcript_path.display().to_string());
-    write_cache(&repo.git_dir, &cache)?;
+    write_cache(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        &cache,
+    )?;
     Ok(())
 }
 
 /// Drop the compaction-progress sidecar, so attach archives the WHOLE
 /// transcript every time.
 ///
-/// The sidecar (`<git_dir>/rift-sessions/<id>.transcript`) is
+/// The sidecar (`<sessions>/<id>.transcript`) is
 /// worker-transient state for LIVE hook flows, and honoring it here would
 /// make a re-attach compact from a shifted boundary — an empty or
 /// truncated pair, a different content-derived id — instead of no-ooping
@@ -197,9 +205,7 @@ fn adopt_as_ended(
 /// across a re-attach.
 fn forget_compaction_progress(git_dir: &Path, session_id: &str) {
     let _ = std::fs::remove_file(
-        git_dir
-            .join("rift-sessions")
-            .join(format!("{session_id}.transcript")),
+        crate::family::run_state::sessions_dir(git_dir).join(format!("{session_id}.transcript")),
     );
 }
 

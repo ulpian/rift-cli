@@ -35,7 +35,8 @@ fn holder(work_tree: &std::path::Path, session: &str, state: &str, runs: &[(u32,
     let marker = serde_json::json!({ "schema_version": 1, "session": session, "agent_id": null });
     std::fs::write(markers.join(format!("{key}.json")), marker.to_string()).unwrap();
     let cache = rift_shadow::hooks::session_cache::SessionCache::new(session, "codex", state, NOW);
-    rift_shadow::hooks::session_cache::write_cache(&work_tree.join(".git"), &cache).unwrap();
+    let sessions = crate::family::run_state::sessions_dir(&work_tree.join(".git"));
+    rift_shadow::hooks::session_cache::write_cache(&sessions, &cache).unwrap();
 }
 
 /// Bind an outline of `src.rs` as the worker would, for the bytes it holds.

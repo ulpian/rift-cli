@@ -35,12 +35,8 @@ fn doctor_finalizes_the_crashed_session_and_leaves_its_live_neighbour() {
     let repo = seed_live_session_repo(tmp.path());
     // The seeded repo already carries one live session; remove it so the two
     // below are the whole population.
-    std::fs::remove_file(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join("e2e-live-1.json"),
-    )
-    .unwrap();
+    std::fs::remove_file(common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json"))
+        .unwrap();
     // The idle window is 24 h, so "now" and "the epoch" are unambiguous
     // regardless of when this test runs.
     seed_session(&repo, "crashed-1", 0);
@@ -138,10 +134,7 @@ fn the_deferral_line_names_this_repos_true_cause() {
 /// input is this recorded number, never the clock, so a fixture can age a
 /// session by a day without sleeping for one or reaching for a fake clock.
 fn set_session_touched(repo: &Path, id: &str, updated_at_ms: i64) {
-    let path = repo
-        .join(".git")
-        .join("rift-sessions")
-        .join(format!("{id}.json"));
+    let path = hooks_fixture::sessions_of(repo).join(format!("{id}.json"));
     let mut cache: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     cache["updated_at_ms"] = serde_json::json!(updated_at_ms);
@@ -365,12 +358,8 @@ fn a_session_end_that_archived_still_closes_immediately() {
 fn a_deferred_sweep_keeps_the_live_session_first_and_retries_later() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo_unborn(tmp.path());
-    std::fs::remove_file(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join("e2e-live-1.json"),
-    )
-    .unwrap();
+    std::fs::remove_file(common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json"))
+        .unwrap();
     seed_session(&repo, "crashed-1", 0);
     seed_session(&repo, "current-1", now_ms());
     let cache = tmp.path().join("cache");
@@ -396,7 +385,8 @@ fn a_deferred_sweep_keeps_the_live_session_first_and_retries_later() {
 
     // THE REGRESSION: the deferred session is still live (it is `ending`), but
     // it must not be the one the next archive attributes against.
-    let live = rift_shadow::hooks::session_cache::live_sessions(&repo.join(".git")).unwrap();
+    let live = rift_shadow::hooks::session_cache::live_sessions(&hooks_fixture::sessions_of(&repo))
+        .unwrap();
     let order: Vec<&str> = live.iter().map(|c| c.session_id.as_str()).collect();
     assert_eq!(
         order,

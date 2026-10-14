@@ -20,7 +20,10 @@ pub(crate) fn stop(root: &Path, target: Option<&str>) -> Result<Outcome> {
     use rift_shadow::hooks::session_cache::read_cache;
     let repo = rift_git::discover(root)?;
     if let Some(id) = target {
-        match read_cache(&repo.git_dir, id).ok().flatten() {
+        match read_cache(&crate::family::run_state::sessions_dir(&repo.git_dir), id)
+            .ok()
+            .flatten()
+        {
             None => {
                 return Ok(Outcome::coded(
                     exit::PRECONDITION,
@@ -126,7 +129,10 @@ fn close_idle_caches(root: &Path, now: i64, target: Option<&str>) -> Result<Vec<
     let mut closed = Vec::new();
     for mut cache in caches {
         "ended".clone_into(&mut cache.state);
-        write_cache(&repo.git_dir, &cache)?;
+        write_cache(
+            &crate::family::run_state::sessions_dir(&repo.git_dir),
+            &cache,
+        )?;
         closed.push(cache.session_id);
     }
     Ok(closed)
@@ -576,6 +582,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("repo");
         let git_dir = rift_git::test_support::fake_repo(&root).unwrap();
+        let git_dir = crate::family::run_state::sessions_dir(&git_dir);
         let cache = |id: &str, updated_at_ms: i64| {
             SessionCache::new(id, "claude-code", "idle", updated_at_ms)
         };

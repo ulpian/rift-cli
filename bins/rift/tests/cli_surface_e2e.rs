@@ -487,7 +487,7 @@ fn record_vscode_codex_session(home: &Path, repo: &Path) {
          \"source\":\"vscode\",\"cli_version\":\"0.155.0-alpha.16.3\"}}\n",
     )
     .unwrap();
-    let sessions = repo.join(".git/rift-sessions");
+    let sessions = common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     let cache = serde_json::json!({
         "schema": 1, "session_id": "s1", "state": "ended", "agent": "codex",

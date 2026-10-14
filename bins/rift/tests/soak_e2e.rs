@@ -123,7 +123,7 @@ fn git_out(dir: &Path, args: &[&str]) -> String {
 /// One live native-hook session in the repository's journal — the same JSON
 /// `common/hooks_fixture.rs`'s seeder writes, with the id and stamp supplied.
 fn seed_session(repo: &Path, id: &str, updated_at_ms: i64) {
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
         sessions.join(format!("{id}.json")),

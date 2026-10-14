@@ -31,6 +31,9 @@ rift-recall-policy = { version = "0.0.1", path = "../../crates/rift-recall-polic
 rift-recall-substrate = { version = "0.0.1", path = "../../crates/rift-recall-substrate" }
 rift-recall-types = { version = "0.0.1", path = "../../crates/rift-recall-types" }
 rift-config = { version = "0.0.1", path = "../../crates/rift-config" }
+# The run-state layout: where a member's session phase hints live once moved
+# out of the git dir, read by `doctor` without moving anything.
+rift-shadow-hooks = { version = "0.0.1", path = "../../crates/rift-shadow-hooks" }
 # The recall.db projection (a separate store from the capture projection.db).
 rift-store = { version = "0.0.1", path = "../../crates/rift-store" }
 clap = { workspace = true }

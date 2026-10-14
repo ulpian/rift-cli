@@ -214,7 +214,7 @@ const SHADOW_BRANCH_EVENT_COLUMNS: &[Column] = &[
 // ----- Hook / lifecycle audit ----------------------------------------------
 
 // Session state transitions as event rows (current phase = latest row). The
-// `.git/rift-sessions/<id>.json` file is a cache of this; these rows are truth.
+// `<sessions>/<id>.json` run-state file is a cache of this; these rows are truth.
 const SESSION_TRANSITION_COLUMNS: &[Column] = &[
     Column::text("transition_id"),
     Column::text("session_id"), // FK: session

@@ -9,8 +9,9 @@
 //! terminal — the data plane only supplies the facts.
 //!
 //! `Running` derives from the **real per-session cache** the capture hooks
-//! maintain (`<git_dir>/rift-sessions/*.json`), not from recent file noise: the
-//! old `.rift/session.phase` reader and its recency proxy are gone.
+//! maintain (`<sessions>/*.json` in each member's run state), not from recent
+//! file noise: the old `.rift/session.phase` reader and its recency proxy are
+//! gone.
 
 use crate::{ProjectStatus, StatusError};
 

@@ -47,7 +47,7 @@ fn the_detached_worker_archives_after_the_hook_has_already_returned() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
     let cache = tmp.path().join("cache");
-    let queue = repo.join(".git").join("rift-capture-queue");
+    let queue = common::capture_queue_dir(&repo.join(".git"), &cache);
 
     let hooks = DetachedHooks::default();
     let (code, stderr) = hooks.run(
@@ -135,7 +135,7 @@ fn a_direct_hook_link_spawns_the_worker_binary_not_another_hook() {
     let (code, _) = hooks.output(cmd, "");
     assert_eq!(code, 0, "the direct hook never blocks git");
 
-    let queue = git_dir.join("rift-capture-queue");
+    let queue = common::capture_queue_dir(&git_dir, &cache);
     let entries_left = || {
         std::fs::read_dir(&queue)
             .map(|d| {
@@ -287,16 +287,17 @@ fn agent_hook_never_fails_agent_on_bad_input() {
     assert_eq!(code2, 0);
 }
 
-/// **The leak mechanism, pinned in a THROWAWAY repo.** An
-/// agent hook resolves its repository from the process cwd, and the session
-/// journal lives under the DISCOVERED git dir — so a `RIFT_CACHE_DIR`
-/// redirect alone never isolated it. This is the exact spawn shape that wrote
-/// fixture session `01JE2E` into the real repository's journal (whence the
-/// real post-commit hook archived it as shard `51/4865…`), aimed here at a
-/// tempdir repo: the journal entry must land under the REPO's git dir, and
-/// nothing session-named may land under the cache root.
+/// **The journal follows the discovered repository's family.** An agent hook
+/// resolves its repository from the process cwd, and the session journal
+/// lives in that repository's run state under the cache root — so the cwd
+/// still decides WHICH family records the session (the exact spawn shape that
+/// once wrote fixture session `01JE2E` into the real repository's journal,
+/// whence the real post-commit hook archived it as shard `51/4865…`), and
+/// the cache redirect decides WHERE. Aimed here at a tempdir repo: the entry
+/// lands in the family's run state under the redirected root, and nothing
+/// session-named is left in the repository's git dir.
 #[test]
-fn the_session_journal_follows_the_discovered_repo_not_the_cache_redirect() {
+fn the_session_journal_follows_the_discovered_repos_family_into_the_cache_redirect() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -317,11 +318,10 @@ fn the_session_journal_follows_the_discovered_repo_not_the_cache_redirect() {
     assert_eq!(code, 0);
 
     assert!(
-        repo.join(".git")
-            .join("rift-sessions")
+        common::sessions_dir(&repo.join(".git"), &cache)
             .join("01JRNLPIN.json")
             .exists(),
-        "the journal entry follows the discovered repo's git dir"
+        "the journal entry follows the discovered repo's family"
     );
     fn names_under(dir: &Path, needle: &str, hits: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -339,13 +339,11 @@ fn the_session_journal_follows_the_discovered_repo_not_the_cache_redirect() {
             }
         }
     }
-    let mut cache_hits = Vec::new();
-    names_under(&cache, "01JRNLPIN", &mut cache_hits);
+    let mut git_dir_hits = Vec::new();
+    names_under(&repo.join(".git"), "01JRNLPIN", &mut git_dir_hits);
     assert!(
-        cache_hits.is_empty(),
-        "the cache redirect does not receive the journal — cwd isolation is \
-         what isolates it, which is why every spawn pins a hermetic cwd: \
-         {cache_hits:?}"
+        git_dir_hits.is_empty(),
+        "the git dir keeps no run state of the session: {git_dir_hits:?}"
     );
 }
 

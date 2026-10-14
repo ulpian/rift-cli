@@ -46,7 +46,7 @@ impl ArchivedTranscript {
         // The cache carries the path the way a hook payload would have left it,
         // the turn still open, touched now so the idle sweep sees it live.
         std::fs::write(
-            repo.join(".git").join("rift-sessions").join("e2e-live-1.json"),
+            common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json"),
             format!(
                 r#"{{"schema":1,"session_id":"e2e-live-1","state":"active","agent":"claude-code","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":{},"native_id_map":{{}},"transcript_path":{}}}"#,
                 now_ms(),
@@ -174,10 +174,7 @@ fn a_real_archive_carries_the_compact_transcript() {
     // The worker recorded its progress boundary for the NEXT checkpoint:
     // two non-empty raw lines consumed.
     let progress = std::fs::read_to_string(
-        fx.repo
-            .join(".git")
-            .join("rift-sessions")
-            .join("e2e-live-1.transcript"),
+        common::sessions_dir(&fx.repo.join(".git"), &fx.cache).join("e2e-live-1.transcript"),
     )
     .unwrap();
     assert!(
@@ -883,14 +880,15 @@ impl Scheduled {
         let args = ["hooks", "worker", "--git-dir", git_dir.to_str().unwrap()];
         let (code, _) = self.hooks.run(&self.repo, &args, "", &self.detached_env());
         assert_eq!(code, 0);
+        let queue = common::capture_queue_dir(&git_dir, &self.cache);
         let drained = || {
             agent_jobs_named(&self.repo, "archive-").is_empty()
-                && std::fs::read_dir(git_dir.join("rift-capture-queue"))
+                && std::fs::read_dir(&queue)
                     .into_iter()
                     .flatten()
                     .flatten()
                     .all(|e| e.path().extension().is_none_or(|x| x != "json"))
-                && !git_dir.join("rift-capture-queue").join(".lock").exists()
+                && !queue.join(".lock").exists()
         };
         self.hooks.await_workers(drained);
         assert!(drained(), "a worker drained the journal");

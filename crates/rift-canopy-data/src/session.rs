@@ -1,5 +1,8 @@
 //! The live-session signal: a **local, lenient, total** reader over
-//! the capture hooks' per-session cache, `<git_dir>/rift-sessions/*.json`.
+//! the capture hooks' per-session cache, `<sessions>/*.json`, where
+//! `<sessions>` is the member's sessions directory in the family's run state
+//! (`member_sessions` resolves it, and reads the git dir's old tree only for
+//! a member not moved yet).
 //!
 //! The writer is `rift-shadow-hooks` (`session_cache.rs`, SCHEMA 1: `schema`,
 //! `session_id`, `state`, `agent`, `current_turn_ordinal`, `turn_open`,
@@ -18,10 +21,10 @@
 //!
 //! # The family read and the worktree discriminator
 //!
-//! Session caches stay **per gitdir** by design (family identity: they are a
+//! Session caches stay **per member** by design (family identity: they are a
 //! session's private working state), so a question about a repository FAMILY —
 //! "is anything running anywhere in it?" — has to be asked of every member's
-//! gitdir, which is [`family_sessions`]. That read must credit each session
+//! sessions directory, which is [`family_sessions`]. That read must credit each session
 //! **once**, or the family row would double-count every cache that a member and
 //! the shared registry can both see, and a member row could be credited with a
 //! session driven in a sibling.
@@ -38,15 +41,12 @@
 //! detectors take that type.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rift_canopy::{LiveSessions, SessionsRead};
-use rift_git::FamilyMember;
-use rift_shadow_hooks::session_cache::{read_cache, SessionCache};
-
-/// Directory (under the git dir) holding per-session cache files — the
-/// mirrored half of the writer's contract.
-pub(crate) const SESSIONS_DIR: &str = "rift-sessions";
+use rift_git::{FamilyMember, FamilyState, MintPolicy};
+use rift_shadow_hooks::run_state::{self, RunRoot};
+use rift_shadow_hooks::session_cache::{read_cache, work_tree_of, SessionCache};
 
 /// A cache file larger than this is treated as corrupt (the writer emits
 /// hundreds of bytes; anything huge is not ours).
@@ -118,10 +118,38 @@ pub fn active_sessions(git_dir: &Path, now_ms: i64) -> SessionsRead {
 /// about which sessions are live.
 #[must_use]
 pub fn sessions_detail(git_dir: &Path, now_ms: i64) -> SessionsDetail {
-    match read_live_caches(git_dir, now_ms) {
+    let sessions = match work_tree_of(git_dir) {
+        Some(work_tree) => member_sessions(git_dir, &work_tree),
+        None => RunRoot::Sessions.legacy_under(git_dir),
+    };
+    match read_live_caches(&sessions, now_ms) {
         DirRead::Corrupt => CORRUPT_DETAIL,
         DirRead::Ok(caches) => finish(&caches),
     }
+}
+
+/// The sessions directory of the member checked out at `work_tree`, whose
+/// git dir is `git_dir`: in its family's run state under this machine's cache
+/// root once the member was moved there, in the git dir before.
+///
+/// One tree per member, never both: this reader moves nothing, so until the
+/// `rift` binary has moved a member, the git dir is where its hooks write.
+/// No recorded family (outside a repository, or before `rift init`) leaves
+/// the git dir as the member's only tree.
+pub(crate) fn member_sessions(git_dir: &Path, work_tree: &Path) -> PathBuf {
+    let cache_root = rift_store::resolve_cache_root(|key| std::env::var(key).ok());
+    member_sessions_under(&cache_root, git_dir, work_tree)
+}
+
+/// [`member_sessions`] under an explicit cache root.
+fn member_sessions_under(cache_root: &Path, git_dir: &Path, work_tree: &Path) -> PathBuf {
+    let Ok((_, FamilyState::Minted(family))) = rift_git::family_of(work_tree, MintPolicy::Never)
+    else {
+        return RunRoot::Sessions.legacy_under(git_dir);
+    };
+    let family_dir = rift_store::projection_dir_under(cache_root, &family.family_id);
+    let member = run_state::member_dir(&family_dir, work_tree);
+    run_state::dir_for_read(RunRoot::Sessions, &member, git_dir)
 }
 
 /// A family's members with the vantage's own place in the list.
@@ -207,7 +235,7 @@ pub fn family_sessions(members: &[FamilyMember], now_ms: i64) -> FamilySessions 
     // claim does.
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for (index, member) in members.iter().enumerate() {
-        match read_live_caches(&member.git_dir, now_ms) {
+        match read_live_caches(&member_sessions(&member.git_dir, &member.work_tree), now_ms) {
             DirRead::Corrupt => {
                 if let Some(flag) = corrupt.get_mut(index) {
                     *flag = true;
@@ -255,8 +283,8 @@ pub(crate) fn family_journal(members: &[FamilyMember]) -> Vec<SessionCache> {
     let mut seen = BTreeSet::new();
     let mut sessions = Vec::new();
     for member in members {
-        let dir = member.git_dir.join(SESSIONS_DIR);
-        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let dir = member_sessions(&member.git_dir, &member.work_tree);
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let name = entry.file_name();
             let Some(stem) = name
                 .to_string_lossy()
@@ -265,7 +293,7 @@ pub(crate) fn family_journal(members: &[FamilyMember]) -> Vec<SessionCache> {
             else {
                 continue;
             };
-            let Ok(Some(cache)) = read_cache(&member.git_dir, &stem) else {
+            let Ok(Some(cache)) = read_cache(&dir, &stem) else {
                 continue;
             };
             if seen.insert(cache.session_id.clone()) {
@@ -331,9 +359,8 @@ const CORRUPT_DETAIL: SessionsDetail = SessionsDetail {
 /// A missing directory is an empty read; a directory that exists but cannot be
 /// listed, a file that cannot be read, one over [`MAX_CACHE_BYTES`] and one
 /// whose bytes are not a cache at all are all [`DirRead::Corrupt`].
-fn read_live_caches(git_dir: &Path, now_ms: i64) -> DirRead {
-    let dir = git_dir.join(SESSIONS_DIR);
-    let entries = match std::fs::read_dir(&dir) {
+fn read_live_caches(sessions: &Path, now_ms: i64) -> DirRead {
+    let entries = match std::fs::read_dir(sessions) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DirRead::Ok(Vec::new()),
         Err(_) => return DirRead::Corrupt, // exists but unlistable
@@ -472,7 +499,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn write_cache(dir: &Path, name: &str, body: &str) {
-        let d = dir.join(SESSIONS_DIR);
+        let d = dir.join("rift-sessions");
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join(format!("{name}.json")), body).unwrap();
     }
@@ -524,6 +551,39 @@ mod tests {
                 false,
             ),
         ]
+    }
+
+    /// A member with a recorded family reads the git dir's old tree until it
+    /// is marked moved, and only the new tree after: one tree per read, and a
+    /// reader left on the old path would read nothing once the move is done.
+    #[test]
+    fn a_moved_member_is_read_from_its_run_state_and_never_from_its_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&repo).unwrap();
+        let paths = rift_git::discover(&repo).unwrap();
+        let FamilyState::Minted(family) =
+            rift_git::resolve_family(&paths, MintPolicy::Allow).unwrap()
+        else {
+            panic!("the fixture's family is minted");
+        };
+        let cache_root = tmp.path().join("cache");
+        let legacy = git_dir.join("rift-sessions");
+        assert_eq!(member_sessions_under(&cache_root, &git_dir, &repo), legacy);
+
+        let family_dir = rift_store::projection_dir_under(&cache_root, &family.family_id);
+        let member = run_state::member_dir(&family_dir, &repo);
+        run_state::create_private_dir(&member).unwrap();
+        std::fs::write(member.join(run_state::MOVED_MARKER), b"").unwrap();
+        let moved = member_sessions_under(&cache_root, &git_dir, &repo);
+        assert_eq!(moved, RunRoot::Sessions.under(&member));
+        write_cache(&git_dir, "left-behind", &cache_json("active", 900));
+        std::fs::create_dir_all(&moved).unwrap();
+        std::fs::write(moved.join("s.json"), cache_json("active", 950)).unwrap();
+        match read_live_caches(&moved, 1_000) {
+            DirRead::Ok(caches) => assert_eq!(caches.len(), 1, "the new tree alone"),
+            DirRead::Corrupt => panic!("the new tree reads"),
+        }
     }
 
     fn count(detail: &SessionsDetail) -> u16 {
@@ -816,7 +876,7 @@ mod tests {
     fn non_json_extensions_are_ignored() {
         // The writer's own temp files (`.<id>.tmp`) must not read as corrupt.
         let tmp = tempfile::tempdir().unwrap();
-        let d = tmp.path().join(SESSIONS_DIR);
+        let d = tmp.path().join("rift-sessions");
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join(".s1.tmp"), b"\xff\xfe partial write").unwrap();
         write_cache(tmp.path(), "ok", &cache_json("active", 990));
@@ -841,7 +901,7 @@ mod tests {
         #[test]
         fn query_is_total_over_arbitrary_file(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
             let tmp = tempfile::tempdir().unwrap();
-            let d = tmp.path().join(SESSIONS_DIR);
+            let d = tmp.path().join("rift-sessions");
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("x.json"), &bytes).unwrap();
             let _ = active_sessions(tmp.path(), 1_000);

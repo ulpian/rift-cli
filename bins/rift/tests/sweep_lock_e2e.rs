@@ -40,10 +40,10 @@ const LONG_AGO_MS: i64 = 1_783_000_000_000;
 struct HeldLock(PathBuf);
 
 impl HeldLock {
-    /// Write the lock file exactly as a running worker does: its path under
-    /// the member's own git dir, the acquisition time as its body.
-    fn take(git_dir: &Path) -> Self {
-        let dir = git_dir.join("rift-capture-queue");
+    /// Write the lock file exactly as a running worker does: its path in
+    /// the member's own capture queue, the acquisition time as its body.
+    fn take(git_dir: &Path, cache: &Path) -> Self {
+        let dir = common::capture_queue_dir(git_dir, cache);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".lock");
         std::fs::write(&path, now_ms().to_string()).unwrap();
@@ -59,9 +59,9 @@ impl Drop for HeldLock {
 
 /// Plant the queue entry `post-commit` leaves for the detached worker: HEAD,
 /// condensed for `session`.
-fn queue_head(git_dir: &Path, work_tree: &Path, session: &str) {
+fn queue_head(git_dir: &Path, cache: &Path, work_tree: &Path, session: &str) {
     let commit = rev_parse(work_tree, "HEAD");
-    let dir = git_dir.join("rift-capture-queue");
+    let dir = common::capture_queue_dir(git_dir, cache);
     std::fs::create_dir_all(&dir).unwrap();
     let entry = serde_json::json!({
         "schema_version": 1,
@@ -162,9 +162,9 @@ fn a_doctor_sweep_beside_a_worker_holding_the_lock_leaves_the_commit_to_that_wor
     let cache = tmp.path().join("cache");
     let git_dir = repo.join(".git");
     seed_session(&repo, LIVE_SESSION, LONG_AGO_MS);
-    queue_head(&git_dir, &repo, LIVE_SESSION);
+    queue_head(&git_dir, &cache, &repo, LIVE_SESSION);
 
-    let lock = HeldLock::take(&git_dir);
+    let lock = HeldLock::take(&git_dir, &cache);
     let doc = doctor_fix_json(&repo, &sync_env(&cache));
     let sessions = sessions_leg(&doc);
     assert_eq!(
@@ -194,7 +194,7 @@ fn a_doctor_sweep_beside_a_held_lock_names_the_lock_as_the_only_cause() {
     let cache = tmp.path().join("cache");
     seed_session(&repo, LIVE_SESSION, LONG_AGO_MS);
 
-    let lock = HeldLock::take(&repo.join(".git"));
+    let lock = HeldLock::take(&repo.join(".git"), &cache);
     let doc = doctor_fix_json(&repo, &sync_env(&cache));
     let sessions = sessions_leg(&doc);
     assert_eq!(
@@ -228,7 +228,7 @@ fn a_targeted_stop_beside_a_held_lock_defers_the_session_in_the_usual_shape() {
 
     common::provision_here(&repo, &cache);
 
-    let lock = HeldLock::take(&git_dir);
+    let lock = HeldLock::take(&git_dir, &cache);
     let args = ["session", "stop", LIVE_SESSION, "--json"];
     let doc = rift_json(&repo, &args, &sync_env(&cache));
     assert_eq!(doc["deferred"], serde_json::json!([LIVE_SESSION]), "{doc}");
@@ -255,9 +255,7 @@ fn a_tail_sweep_leaves_a_sibling_whose_own_worker_holds_its_lock() {
     let main = seed_live_session_repo(tmp.path());
     let cache = tmp.path().join("cache");
     std::fs::remove_file(
-        main.join(".git")
-            .join("rift-sessions")
-            .join(format!("{LIVE_SESSION}.json")),
+        common::seed_sessions_dir(&main.join(".git")).join(format!("{LIVE_SESSION}.json")),
     )
     .unwrap();
     let member = tmp.path().join("member");
@@ -270,9 +268,9 @@ fn a_tail_sweep_leaves_a_sibling_whose_own_worker_holds_its_lock() {
     let admin = main.join(".git").join("worktrees").join("member");
     seed_member_session(&admin, "member-idle");
 
-    let lock = HeldLock::take(&admin);
+    let lock = HeldLock::take(&admin, &cache);
     run_worker(&main, &main.join(".git"), &cache);
-    assert_eq!(member_phase(&admin, "member-idle"), "active");
+    assert_eq!(member_phase(&admin, &cache, "member-idle"), "active");
     assert!(
         chain_ids(&main).is_empty(),
         "nothing was archived beside the worker"
@@ -280,13 +278,13 @@ fn a_tail_sweep_leaves_a_sibling_whose_own_worker_holds_its_lock() {
 
     drop(lock);
     run_worker(&member, &admin, &cache);
-    assert_eq!(member_phase(&admin, "member-idle"), "ended");
+    assert_eq!(member_phase(&admin, &cache, "member-idle"), "ended");
     assert_chain_is_the_branch(&main);
 }
 
 /// An idle session in a linked member's own journal.
 fn seed_member_session(admin: &Path, id: &str) {
-    let sessions = admin.join("rift-sessions");
+    let sessions = common::seed_sessions_dir(admin);
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
         sessions.join(format!("{id}.json")),
@@ -300,9 +298,9 @@ fn seed_member_session(admin: &Path, id: &str) {
 }
 
 /// The state of one session in a linked member's journal.
-fn member_phase(admin: &Path, id: &str) -> String {
-    let raw =
-        std::fs::read_to_string(admin.join("rift-sessions").join(format!("{id}.json"))).unwrap();
+fn member_phase(admin: &Path, cache: &Path, id: &str) -> String {
+    let sessions = common::sessions_dir(admin, cache);
+    let raw = std::fs::read_to_string(sessions.join(format!("{id}.json"))).unwrap();
     serde_json::from_str::<serde_json::Value>(&raw).unwrap()["state"]
         .as_str()
         .unwrap()

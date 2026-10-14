@@ -368,7 +368,7 @@ pub(crate) fn gate_step(
 /// inside one turn and what a window held before it lost it.
 ///
 /// The store-free source is the transient session cache the ingest layer
-/// already keeps beside the git dir (`<git_dir>/rift-sessions/<session>.json`):
+/// already keeps in the member's run state (`<sessions>/<session>.json`):
 /// a small JSON file whose `current_turn_ordinal` a prompt submission advances
 /// at the turn boundary, well before any tool call of that turn reaches this
 /// gate. Reading it is one `read` call — no store, no tokenizer, no
@@ -385,10 +385,13 @@ pub(crate) fn gate_turn(raw: &rift_shadow::hooks::RawHook, git_dir: &Path) -> u3
     if let Some(turn) = raw.turn {
         return turn;
     }
-    rift_shadow::hooks::session_cache::read_cache(git_dir, &raw.session)
-        .ok()
-        .flatten()
-        .map_or(0, |cache| cache.current_turn_ordinal)
+    rift_shadow::hooks::session_cache::read_cache(
+        &crate::family::run_state::sessions_dir(git_dir),
+        &raw.session,
+    )
+    .ok()
+    .flatten()
+    .map_or(0, |cache| cache.current_turn_ordinal)
 }
 
 /// How far interception may go here, for this family, as the repository's own

@@ -305,15 +305,12 @@ async fn an_agent_hook_fired_in_a_linked_worktree_lands_in_the_family_projection
 
     // Per-worktree state is the opposite case and stays split: a
     // session lives in one checkout at a time.
-    // …its session state lands under its own admin dir.
+    // …its session state lands in its own member's run state.
     let linked_admin = main.join(".git").join("worktrees").join("linked");
-    assert!(linked_admin
-        .join("rift-sessions")
+    assert!(common::sessions_dir(&linked_admin, &cache)
         .join("01LINKEDSESSION.json")
         .is_file());
-    assert!(!main
-        .join(".git")
-        .join("rift-sessions")
+    assert!(!common::sessions_dir(&main.join(".git"), &cache)
         .join("01LINKEDSESSION.json")
         .exists());
 }
@@ -398,7 +395,7 @@ fn session_start_in(cwd: &Path, session: &str, env: &[(&str, &str)]) {
 /// rule that is unreachable today is exactly the rule that must already be right
 /// on the day something makes it reachable.
 fn seed_shared_session(common_git: &Path, id: &str, work_tree: &Path, updated_at_ms: i64) {
-    let sessions = common_git.join("rift-sessions");
+    let sessions = common::seed_sessions_dir(common_git);
     std::fs::create_dir_all(&sessions).unwrap();
     let wt = std::fs::canonicalize(work_tree).unwrap();
     std::fs::write(
@@ -420,7 +417,7 @@ fn a_worktree_adopts_only_the_shared_session_that_names_it() {
     let main = seed_live_session_repo(tmp.path());
     // The seeder leaves a session of its own in the shared registry; this test
     // is about which registry a LINKED worktree reads, so start it clean.
-    let shared = main.join(".git").join("rift-sessions");
+    let shared = common::seed_sessions_dir(&main.join(".git"));
     std::fs::remove_dir_all(&shared).ok();
 
     let wt_a = tmp.path().join("wt-a");

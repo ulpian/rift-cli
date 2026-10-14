@@ -25,7 +25,7 @@ pub(crate) trait WakeWatcher: Send {
     fn watch(&mut self, root: &Path, wake: Sender<WorkerMsg>) -> Result<(), String>;
 
     /// Point the second, **narrow** watch at the ACTIVE project's family's
-    /// session-cache dirs (`<git_dir>/rift-sessions` per member, the rebuild-epoch rule
+    /// session-cache dirs (each member's sessions directory, the rebuild-epoch rule
     /// amendment as the family view widens it) — the one class of change the
     /// cache-root watch cannot see. An empty slice unwatches everything.
     ///

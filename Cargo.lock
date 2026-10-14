@@ -3259,6 +3259,7 @@ dependencies = [
  "rift-recall-serve",
  "rift-recall-substrate",
  "rift-recall-types",
+ "rift-shadow-hooks",
  "rift-store",
  "serde_json",
  "sha2",

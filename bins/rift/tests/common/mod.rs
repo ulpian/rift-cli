@@ -3,9 +3,11 @@
 //! **Why this exists.** The agent-hook surface
 //! (`rift hooks <agent> <verb>`) resolves its repository from the process
 //! working directory (`capture_repo` walks up from cwd), and the session
-//! journal lives under the DISCOVERED git dir — `.git/rift-sessions/…`, or
-//! the per-worktree admin dir for a linked worktree. `RIFT_CACHE_DIR` never
-//! covered it: the cache redirect isolates the projection, not the journal.
+//! journal used to live under the DISCOVERED git dir — `.git/rift-sessions/…`,
+//! or the per-worktree admin dir for a linked worktree — where
+//! `RIFT_CACHE_DIR` never covered it. It now lives in the family's run state
+//! under the cache root ([`run_state_dir`]), but the class below is still
+//! the cwd's to close: the family is the cwd's repository's.
 //! A `SessionStart` spawned by this suite without a pinned cwd inherited the
 //! test runner's cwd inside the real repository, wrote `01JE2E.json` into the
 //! real per-worktree journal, and the next real `git commit`'s post-commit
@@ -188,6 +190,79 @@ pub(crate) fn provision_here(repo: &Path, cache_root: &Path) {
     std::fs::create_dir_all(db.parent().expect("the projection has a directory"))
         .expect("create the projection directory");
     drop(rift_store::open_capture_projection(&db).expect("the projection opens"));
+}
+
+/// Where the binary under test keeps `root` of the member whose git dir is
+/// `git_dir`, given the cache root it was handed: the family's run state,
+/// `<cache_root>/rift/<family_id>/run/<member>/`.
+///
+/// Mints the family when the fixture has not yet, exactly as the binary's
+/// first resolution would, so a fixture may seed run state before the first
+/// spawn.
+#[allow(dead_code)] // the run-state suites only; this module is shared
+pub(crate) fn run_state_dir(
+    git_dir: &Path,
+    cache_root: &Path,
+    root: rift_shadow::hooks::run_state::RunRoot,
+) -> PathBuf {
+    let git_dir = git_dir.canonicalize().expect("the git dir resolves");
+    let work_tree = rift_shadow::hooks::session_cache::work_tree_of(&git_dir)
+        .expect("the git dir names a work tree");
+    // From the git dir when the checkout is gone, as the binary resolves it.
+    let paths = rift_git::discover(&work_tree)
+        .or_else(|_| rift_git::discover(&git_dir))
+        .expect("a repository");
+    let state =
+        rift_git::family::resolve_family_under(|_| None, &paths, rift_git::MintPolicy::Allow)
+            .expect("the family resolves");
+    let rift_git::FamilyState::Minted(family) = state else {
+        unreachable!("the family at {} cannot be minted", work_tree.display());
+    };
+    let family_dir = rift_store::projection_dir_under(cache_root, &family.family_id);
+    root.under(&rift_shadow::hooks::run_state::member_dir(
+        &family_dir,
+        &work_tree,
+    ))
+}
+
+/// Where a fixture seeds session caches before the binary under test has
+/// run: the git dir's old tree, `<git_dir>/rift-sessions`, which is where an
+/// older binary would have left them. The binary's first resolution of the
+/// member moves them into [`sessions_dir`], so every suite that seeds here
+/// also drives the move; a read after a run goes to [`sessions_dir`].
+#[allow(dead_code)] // the seeding suites only; this module is shared
+pub(crate) fn seed_sessions_dir(git_dir: &Path) -> PathBuf {
+    rift_shadow::hooks::run_state::RunRoot::Sessions.legacy_under(git_dir)
+}
+
+/// [`run_state_dir`] for the session caches.
+#[allow(dead_code)] // the run-state suites only; this module is shared
+pub(crate) fn sessions_dir(git_dir: &Path, cache_root: &Path) -> PathBuf {
+    run_state_dir(
+        git_dir,
+        cache_root,
+        rift_shadow::hooks::run_state::RunRoot::Sessions,
+    )
+}
+
+/// [`run_state_dir`] for the agent-hook job journal.
+#[allow(dead_code)] // the run-state suites only; this module is shared
+pub(crate) fn agent_queue_dir(git_dir: &Path, cache_root: &Path) -> PathBuf {
+    run_state_dir(
+        git_dir,
+        cache_root,
+        rift_shadow::hooks::run_state::RunRoot::AgentQueue,
+    )
+}
+
+/// [`run_state_dir`] for the post-commit capture queue.
+#[allow(dead_code)] // the run-state suites only; this module is shared
+pub(crate) fn capture_queue_dir(git_dir: &Path, cache_root: &Path) -> PathBuf {
+    run_state_dir(
+        git_dir,
+        cache_root,
+        rift_shadow::hooks::run_state::RunRoot::CaptureQueue,
+    )
 }
 
 /// Recursively collect `.rs` files under `dir` that contain `needle`.

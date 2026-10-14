@@ -943,7 +943,7 @@ pub(crate) fn seed_repo(tmp: &Path) -> std::path::PathBuf {
     std::fs::write(repo.join("a.txt"), "one\n").unwrap();
     git(&["add", "a.txt"]);
     git(&["commit", "-q", "-m", "seed"]);
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = super::common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
         sessions.join("doc-1.json"),

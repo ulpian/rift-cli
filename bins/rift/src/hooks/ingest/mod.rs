@@ -137,7 +137,7 @@ fn capture_into_projection(
             raw,
             registry,
             &store,
-            git_dir,
+            &crate::family::run_state::sessions_dir(git_dir),
             agent,
             &repo_id,
             now_ms(),
@@ -258,7 +258,7 @@ fn settle_after_ingest(
         run.rt
             .block_on(rift_shadow::bridge::settle_closed_turn_usage(
                 run.store,
-                &run.repo.git_dir,
+                &crate::family::run_state::sessions_dir(&run.repo.git_dir),
                 &run.raw.session,
                 owner,
                 run.repo_id,

@@ -352,7 +352,7 @@ pub(crate) fn seed_repo(tmp: &Path, files: &[GenFile]) -> PathBuf {
         "schema_version = 1\n[project]\nname = \"searches\"\n[features]\ntotal_recall = false\n",
     )
     .unwrap();
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = super::common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     for session in [SESSION_OFF, SESSION_ON] {
         std::fs::write(

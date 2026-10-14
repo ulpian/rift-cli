@@ -178,7 +178,7 @@ pub(super) fn session_tasks(src: &TaskSources<'_>) -> Vec<ArchivedTask> {
 
 /// The session transcript's address, as the session cache remembers it.
 fn main_transcript_path(git_dir: &Path, session_id: &str) -> Option<PathBuf> {
-    rift_shadow::hooks::read_cache(git_dir, session_id)
+    rift_shadow::hooks::read_cache(&crate::family::run_state::sessions_dir(git_dir), session_id)
         .ok()
         .flatten()?
         .transcript_path

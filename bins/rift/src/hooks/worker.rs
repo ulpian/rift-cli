@@ -710,8 +710,8 @@ fn condense_agent_job(
     if crate::agent_queue::is_condensed(&repo.git_dir, session) {
         return Ok(None);
     }
-    if read_cache(&repo.git_dir, session)?.is_some_and(|c| c.state == SessionState::Ended.as_str())
-    {
+    let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
+    if read_cache(&sessions, session)?.is_some_and(|c| c.state == SessionState::Ended.as_str()) {
         return Ok(None);
     }
     let reader = t.phase("gix_open", || {
@@ -733,7 +733,7 @@ fn condense_agent_job(
     let _ = t.phase("settle_usage", || {
         rt.block_on(rift_shadow::bridge::settle_closed_turn_usage(
             &store,
-            &repo.git_dir,
+            &sessions,
             session,
             agent,
             repo_id,
@@ -764,11 +764,7 @@ fn condense_agent_job(
         return Ok(None);
     };
     let _ = rt.block_on(rift_shadow::bridge::mark_condense_done(
-        &store,
-        &repo.git_dir,
-        session,
-        agent,
-        now,
+        &store, &sessions, session, agent, now,
     ));
     crate::agent_queue::mark_condensed(&repo.git_dir, session);
     linehash::cache_window_line_hashes(&repo.work_tree, &repo.common_dir, session);
@@ -858,7 +854,11 @@ fn owed_interval_decision(
     use rift_shadow::hooks::session_cache::read_cache;
     use rift_shadow::hooks::strategy::{decide, TriggerCtx};
 
-    let Some(cache) = read_cache(&repo.git_dir, &archive.session_id)? else {
+    let Some(cache) = read_cache(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        &archive.session_id,
+    )?
+    else {
         return Ok(None);
     };
     let cfg = effective_config(&repo.work_tree);
@@ -976,6 +976,9 @@ fn count_read_tokens_job(
 
 #[cfg(test)]
 mod refused_job_tests;
+
+#[cfg(test)]
+mod run_state_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1283,7 +1286,11 @@ mod tests {
         let repo = rift_git::discover(root).unwrap();
         let family = crate::family::resolve_at(root).unwrap();
         let cache = rift_shadow::hooks::SessionCache::new(session, "claude-code", "ending", 1);
-        rift_shadow::hooks::write_cache(&repo.git_dir, &cache).unwrap();
+        rift_shadow::hooks::write_cache(
+            &crate::family::run_state::sessions_dir(&repo.git_dir),
+            &cache,
+        )
+        .unwrap();
         let job = AgentJob {
             schema_version: 1,
             work_tree: root.to_owned(),

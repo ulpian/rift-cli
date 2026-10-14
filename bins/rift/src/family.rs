@@ -10,6 +10,8 @@
 //! `rift doctor --fix` prints the command instead of running it, because a
 //! recorded identity that can change as a side effect is not a record.
 
+pub(crate) mod run_state;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};

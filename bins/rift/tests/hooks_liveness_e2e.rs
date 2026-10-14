@@ -55,11 +55,7 @@ impl Fixture {
 
     /// The session's cache, as a document.
     fn cache_of(&self, session: &str) -> serde_json::Value {
-        let path = self
-            .repo
-            .join(".git")
-            .join("rift-sessions")
-            .join(format!("{session}.json"));
+        let path = self.sessions_dir().join(format!("{session}.json"));
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
@@ -68,11 +64,7 @@ impl Fixture {
     fn set_cache_field(&self, session: &str, field: &str, value: serde_json::Value) {
         let mut cache = self.cache_of(session);
         cache[field] = value;
-        let path = self
-            .repo
-            .join(".git")
-            .join("rift-sessions")
-            .join(format!("{session}.json"));
+        let path = self.sessions_dir().join(format!("{session}.json"));
         std::fs::write(path, serde_json::to_vec(&cache).unwrap()).unwrap();
     }
 
@@ -122,7 +114,7 @@ impl Fixture {
     }
 
     fn sessions_dir(&self) -> PathBuf {
-        self.repo.join(".git").join("rift-sessions")
+        common::sessions_dir(&self.repo.join(".git"), &self.cache)
     }
 
     /// The file names in the sessions directory that a hook moved aside.
