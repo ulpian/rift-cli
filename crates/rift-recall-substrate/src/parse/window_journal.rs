@@ -23,10 +23,11 @@ pub struct WindowJournalRow {
     pub window_key: String,
     /// The subagent the window belongs to, `None` for the session's own.
     pub subagent: Option<String>,
-    /// One of the thirteen kinds the artifact declares: the eight a window's
+    /// One of the fourteen kinds the artifact declares: the eight a window's
     /// own rows take, the three `inherit:<class>` runs it was handed by the
-    /// window that started it, and the two `family_held:<route>` declines
-    /// that rested on another live window of the repository.
+    /// window that started it, the two `family_held:<route>` declines that
+    /// rested on another live window of the repository, and `matched`, the
+    /// lines a terminal result was found to carry.
     pub kind: String,
     /// The turn the row was written in.
     pub turn: u32,
@@ -42,7 +43,8 @@ pub struct WindowJournalRow {
     pub range: Option<(u32, u32)>,
     /// The file's length, which only a read records.
     pub total_lines: Option<u32>,
-    /// An edit's `[lo, hi]` runs, as their canonical JSON array text.
+    /// An edit's `[lo, hi]` runs, or a `matched` row's, as their canonical
+    /// JSON array text.
     pub sites: Option<String>,
     /// How many lines an edit grew the file by, negative when it shrank.
     pub shift: Option<i64>,
@@ -123,6 +125,7 @@ fn window_kind_members(kind: &str) -> Option<&'static [&'static str]> {
         "family_held:outline" | "family_held:held" => Some(&["acted", "hash", "path", "range"]),
         "edit" => Some(&["full", "hash_new", "hash_old", "path", "shift", "sites"]),
         "evict" => Some(&["reason"]),
+        "matched" => Some(&["basis", "hash", "member", "path", "runs", "total_lines"]),
         _ => None,
     }
 }
@@ -160,6 +163,7 @@ fn put_window_kind_members(
             };
             (row.shift, row.full) = (Some(shift), Some(full));
         }
+        "matched" => put_matched_members(line, row)?,
         kind => {
             row.path = Some(path_member(line)?);
             row.content_sha256 = Some(hash_member(line, "hash")?);
@@ -180,6 +184,48 @@ fn put_window_kind_members(
         }
     }
     Ok(())
+}
+
+/// The members of a `matched` row: the basis it was booked on, the file, the
+/// revision, its length, the member of the command line, and its runs.
+///
+/// The member is checked and not stored: the row's key is its canonical
+/// bytes, so the member is carried by the key, and the relation has no
+/// column for it.
+fn put_matched_members(
+    line: &Map<String, Value>,
+    row: &mut WindowJournalRow,
+) -> Result<(), String> {
+    if line.get("basis").and_then(Value::as_str) != Some("output_matched") {
+        return Err("a basis the artifact does not declare".to_owned());
+    }
+    row.path = Some(path_member(line)?);
+    row.content_sha256 = Some(hash_member(line, "hash")?);
+    row.total_lines = Some(u32_member(line, "total_lines")?);
+    u32_member(line, "member")?;
+    row.sites = Some(matched_runs_member(line)?);
+    Ok(())
+}
+
+/// A `matched` row's runs: one to sixty-four, each 1-based, sorted and
+/// disjoint, re-serialized as the canonical JSON array the relation stores.
+fn matched_runs_member(line: &Map<String, Value>) -> Result<String, String> {
+    let Some(runs) = line.get("runs").and_then(Value::as_array) else {
+        return Err("no runs array".to_owned());
+    };
+    if runs.is_empty() || runs.len() > 64 {
+        return Err("a runs array of no runs or too many".to_owned());
+    }
+    let mut out: Vec<[u32; 2]> = Vec::with_capacity(runs.len());
+    for run in runs {
+        let (lo, hi) = run_of(Some(run))?;
+        let after_last = out.last().is_none_or(|[_, last]| *last < lo);
+        if lo == 0 || hi < lo || !after_last {
+            return Err("runs that are not sorted, disjoint and 1-based".to_owned());
+        }
+        out.push([lo, hi]);
+    }
+    serde_json::to_string(&out).map_err(|err| redact_err(&err))
 }
 
 /// A hash member: 64 lowercase hex, the one spelling a window key and a
@@ -408,6 +454,39 @@ mod tests {
     /// Each shape outside the artifact's grammar is one issue naming its
     /// line, the walk goes on to the good line after them, and no issue
     /// repeats a byte of the line it refused.
+    /// ★ A matched row parses with its runs as the relation stores them, and
+    /// one with another basis, runs out of order or a member that is not a
+    /// number is refused.
+    #[test]
+    fn a_matched_row_parses_and_its_shape_is_held() {
+        let read = GOLDEN_WINDOW_JOURNAL.lines().next().unwrap();
+        let mut matched: serde_json::Value = serde_json::from_str(read).unwrap();
+        let members = matched.as_object_mut().unwrap();
+        members.remove("range");
+        members.insert("kind".to_owned(), "matched".into());
+        members.insert("runs".to_owned(), serde_json::json!([[1, 40], [90, 95]]));
+        members.insert("member".to_owned(), 2.into());
+        members.insert("basis".to_owned(), "output_matched".into());
+        let out = parse_window_journal(matched.to_string().as_bytes(), "cp");
+        assert!(out.issues.is_empty(), "{:?}", out.issues);
+        let row = &out.value[0];
+        assert_eq!(row.kind, "matched");
+        assert_eq!(row.sites.as_deref(), Some("[[1,40],[90,95]]"));
+        assert_eq!(row.total_lines, Some(120));
+        for (member, value) in [
+            ("basis", serde_json::json!("output_guessed")),
+            ("runs", serde_json::json!([[90, 95], [1, 40]])),
+            ("runs", serde_json::json!([])),
+            ("member", serde_json::json!("two")),
+            ("range", serde_json::json!([1, 2])),
+        ] {
+            let mut bad = matched.clone();
+            bad[member] = value;
+            let out = parse_window_journal(bad.to_string().as_bytes(), "cp");
+            assert!(out.value.is_empty(), "accepted {member}");
+        }
+    }
+
     #[test]
     fn a_window_line_outside_the_grammar_is_a_named_issue_and_skipped() {
         let read = GOLDEN_WINDOW_JOURNAL.lines().next().unwrap();

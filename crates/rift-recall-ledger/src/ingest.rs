@@ -207,6 +207,9 @@ pub struct IngestReport {
     /// window of the repository: valid, read, and not projected, for the same
     /// reason, until a reader of the projection needs them.
     pub window_rows_family_held: usize,
+    /// Frozen window rows that record lines a terminal result was found to
+    /// carry: valid, read, and not projected, for the same reason.
+    pub window_rows_matched: usize,
 }
 
 /// Caller-supplied context for a production ingest run (the completeness
@@ -318,12 +321,12 @@ fn push_containment_rows(b: &mut Built, cid: &str, meta: &CheckpointMetadata) {
 /// extraction** → TokenUsage, with the typed edges. Each step below pushes its
 /// rows in cascade order, and the artifacts are read in the order their parse
 /// issues are reported. Beside the rows come the counts of inherited window
-/// runs and family-held declines it read and did not project.
+/// runs, family-held declines and matched lines it read and did not project.
 fn build_rows(
     reader: &impl SubstrateReader,
     shard: &CheckpointShard,
     opts: &IngestOptions,
-) -> Result<(Built, (usize, usize))> {
+) -> Result<(Built, (usize, usize, usize))> {
     let mut b = Built::default();
     let cid = shard.checkpoint_id.as_str();
 
@@ -384,7 +387,14 @@ fn build_rows(
     b.serves = serve_audit::read_serves(reader, cid, &mut b.issues)?;
     let window_rows = window_journal::read_window_rows(reader, cid, &mut b.issues)?;
     b.inserts.extend(window_rows.inserts);
-    Ok((b, (window_rows.inherited, window_rows.family_held)))
+    Ok((
+        b,
+        (
+            window_rows.inherited,
+            window_rows.family_held,
+            window_rows.matched,
+        ),
+    ))
 }
 
 /// Read one artifact of a checkpoint and parse it, appending its parse issues
@@ -675,9 +685,10 @@ pub(crate) async fn ingest_planned(
             report.skipped += 1;
             continue;
         }
-        let (built, (inherited, family_held)) = build_rows(reader, shard, opts)?;
+        let (built, (inherited, family_held, matched)) = build_rows(reader, shard, opts)?;
         report.window_rows_inherited += inherited;
         report.window_rows_family_held += family_held;
+        report.window_rows_matched += matched;
         report.nodes += built.nodes;
         report.edges += built.edges;
         report.issues.extend(built.issues.iter().cloned());
