@@ -23,6 +23,12 @@ const WINDOW_EVICT_REASONS: [&str; 6] = [
     "truncate",
 ];
 
+/// The most runs one frozen `matched` line carries, as the journal writes it.
+const MAX_MATCHED_RUNS: usize = 64;
+
+/// The basis a frozen `matched` line names.
+const OUTPUT_MATCHED: &str = "output_matched";
+
 /// One row of one context window's journal, as `window_journal.jsonl` freezes
 /// it: identifiers, hashes, `/`-spelled repository paths, counts and closed
 /// tokens only — a row that cannot be spelled in those shapes is refused whole.
@@ -92,6 +98,21 @@ pub enum ArchivedWindowRow {
         range: (u32, u32),
         /// Whether the decline was made, or only recorded.
         acted: bool,
+    },
+    /// Lines of one revision a terminal result was found to carry, booked to
+    /// one member of the command line.
+    Matched {
+        /// The repository-relative path, `/`-spelled.
+        path: String,
+        /// The revision (64 hex).
+        hash: String,
+        /// The runs, `[lo, hi]` each, sorted and disjoint, at most sixty-four
+        /// of them, as the journal writes one row.
+        runs: Vec<(u32, u32)>,
+        /// The file's length.
+        total_lines: u32,
+        /// The member of the command line the runs were aligned to.
+        member: u32,
     },
     /// The window stopped holding what it had been given.
     Evict {
@@ -168,6 +189,7 @@ impl ArchivedWindowRow {
             },
             Self::Expect { .. } => "expect",
             Self::Edit { .. } => "edit",
+            Self::Matched { .. } => "matched",
             Self::Evict { .. } => "evict",
         }
     }
@@ -285,6 +307,20 @@ fn insert_window_row(
             put("shift", json!(shift));
             put("full", json!(full));
         }
+        ArchivedWindowRow::Matched {
+            path,
+            hash,
+            runs,
+            total_lines,
+            member,
+        } => {
+            put("path", json!(frozen_path(path)?));
+            put("hash", json!(frozen_hash(hash)?));
+            put("runs", json!(frozen_runs(runs)?));
+            put("total_lines", json!(total_lines));
+            put("member", json!(member));
+            put("basis", json!(OUTPUT_MATCHED));
+        }
         ArchivedWindowRow::Evict { reason } => {
             if !WINDOW_EVICT_REASONS.contains(&reason.as_str()) {
                 return None;
@@ -303,6 +339,23 @@ fn frozen_path(path: &str) -> Option<&str> {
         return None;
     }
     Some(path)
+}
+
+/// `runs` when they are one to [`MAX_MATCHED_RUNS`] runs of 1-based lines,
+/// sorted and disjoint, as `[lo, hi]` pairs.
+fn frozen_runs(runs: &[(u32, u32)]) -> Option<Vec<[u32; 2]>> {
+    if runs.is_empty() || runs.len() > MAX_MATCHED_RUNS {
+        return None;
+    }
+    let mut out: Vec<[u32; 2]> = Vec::with_capacity(runs.len());
+    for (lo, hi) in runs {
+        let after_last = out.last().is_none_or(|[_, last]| last < lo);
+        if *lo == 0 || hi < lo || !after_last {
+            return None;
+        }
+        out.push([*lo, *hi]);
+    }
+    Some(out)
 }
 
 /// `hash` when it is a revision: 64 lowercase hex digits.
@@ -482,6 +535,37 @@ mod tests {
         }
     }
 
+    /// ★ A matched line freezes with its runs, the file's length, its member
+    /// and its basis; runs out of order or past the cap refuse the row.
+    #[test]
+    fn a_matched_line_freezes_with_its_runs_and_basis() {
+        let matched = |runs: Vec<(u32, u32)>| ArchivedWindowRow::Matched {
+            path: "src/a.rs".to_owned(),
+            hash: hex('e'),
+            runs,
+            total_lines: 900,
+            member: 2,
+        };
+        let bytes =
+            window_journal_jsonl_bytes(&[window_fact('a', 4, matched(vec![(1, 40), (90, 95)]))])
+                .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["kind"], "matched");
+        assert_eq!(value["runs"], serde_json::json!([[1, 40], [90, 95]]));
+        assert_eq!(value["basis"], "output_matched");
+        assert_eq!(value["member"], 2);
+        assert_eq!(value["total_lines"], 900);
+        for bad in [
+            vec![],
+            vec![(90, 95), (1, 40)],
+            vec![(0, 3)],
+            (1..=65).map(|n| (n * 2, n * 2)).collect(),
+        ] {
+            let fact = window_fact('a', 4, matched(bad));
+            assert!(!fact.is_freezable());
+        }
+    }
+
     /// Whether `value` has `member`'s declared shape (an undeclared one has none).
     fn has_declared_shape(member: &str, value: &serde_json::Value) -> bool {
         let pair = |v: &serde_json::Value| v.as_array().is_some_and(|a| a.len() == 2);
@@ -489,14 +573,26 @@ mod tests {
         match member {
             "window" | "hash" | "hash_new" | "hash_old" => is_lower_hex64(text),
             "path" => frozen_path(text).is_some(),
-            "kind" => ["read", "hold", "edit", "evict", "family_held:held"].contains(&text),
+            "kind" => [
+                "read",
+                "hold",
+                "edit",
+                "evict",
+                "family_held:held",
+                "matched",
+            ]
+            .contains(&text),
+            "basis" => text == OUTPUT_MATCHED,
+            "runs" => value
+                .as_array()
+                .is_some_and(|runs| !runs.is_empty() && runs.iter().all(pair)),
             "reason" => WINDOW_EVICT_REASONS.contains(&text),
             "subagent" => identifier_or_withheld(text) == text,
             "full" | "acted" => value.is_boolean(),
             "range" => pair(value),
             "sites" => value.as_array().is_some_and(|runs| runs.iter().all(pair)),
             "shift" => value.is_i64(),
-            "at" | "schema_version" | "total_lines" | "turn" => value.is_u64(),
+            "at" | "schema_version" | "total_lines" | "turn" | "member" => value.is_u64(),
             _ => false,
         }
     }
@@ -529,7 +625,7 @@ mod tests {
                 }
             ),
             text.prop_map(|reason| ArchivedWindowRow::Evict { reason }),
-            (text, hash, any::<(u32, u32)>(), any::<bool>()).prop_map(
+            (text, hash.clone(), any::<(u32, u32)>(), any::<bool>()).prop_map(
                 |(path, hash, range, acted)| ArchivedWindowRow::FamilyHeld {
                     route: WindowFamilyRoute::Held,
                     path,
@@ -538,6 +634,19 @@ mod tests {
                     acted,
                 }
             ),
+            (
+                text,
+                hash,
+                proptest::collection::vec(any::<(u32, u32)>(), 0..4),
+                any::<u32>()
+            )
+                .prop_map(|(path, hash, runs, member)| ArchivedWindowRow::Matched {
+                    path,
+                    hash,
+                    runs,
+                    total_lines: 9,
+                    member,
+                }),
         ]
     }
 
