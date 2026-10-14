@@ -13,6 +13,7 @@ use super::family_held::FamilyHeldPool;
 use super::first_contact::FirstContactPool;
 use super::first_sight_split::FirstSightSplit;
 use super::no_line_count_split::NoLineCountSplit;
+use super::output_recognition::OutputRecognition;
 use super::post_compaction::PostCompaction;
 use super::pull_answers::PullPool;
 use super::shell_shape::{Shape, ShapeRow};
@@ -116,6 +117,8 @@ pub struct Report {
     /// Of that split's unchanged re-reads, the ones the gate would decline,
     /// and why each of the others is not.
     pub uncommitted: UncommittedDeclines,
+    /// What the output match would have booked from every shell result.
+    pub output_recognition: OutputRecognition,
     /// Where the path facts came from.
     pub facts: FactsSource,
     /// Shell calls that look like reads and that the grammar does not

@@ -26,6 +26,7 @@ use super::inheritance::{
 };
 use super::no_line_count_split::WorkingTree;
 use super::options::Options;
+use super::output_recognition::{fold_the_output, match_the_output, Before, OutputHoldings};
 use super::pull_answers::pull_invocations;
 use super::report::{finish, land, Report};
 use super::shell_shape::count_shape;
@@ -93,6 +94,8 @@ pub(super) struct TreeState {
     pub(super) order: FileOrder,
     /// The working tree the transcript proves.
     pub(super) working: WorkingTree,
+    /// What the output match would have shown each window.
+    pub(super) output: OutputHoldings,
 }
 
 /// The settings every call in one replay is decided under, spelled once.
@@ -273,8 +276,14 @@ fn replay_event(ctx: &mut Ctx<'_>, event: Event) {
             };
             ctx.state.uncommitted.push(line.clone());
             ctx.state.journal.push(line);
+            ctx.tree.output.evict(ctx.window);
         }
-        Event::Call(call) => replay_call(ctx, &call),
+        Event::Call(call) => {
+            let before = Before::of(ctx.report);
+            let matched = match_the_output(ctx, &call);
+            replay_call(ctx, &call);
+            fold_the_output(ctx, &call, &before, matched);
+        }
     }
 }
 

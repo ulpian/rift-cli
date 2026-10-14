@@ -272,6 +272,10 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
         "no_line_count_split".to_owned(),
         super::no_line_count_split::no_line_count_json(report),
     );
+    map.insert(
+        "output_recognition".to_owned(),
+        super::output_recognition_rows::output_recognition_json(report),
+    );
 }
 
 /// One inheritance route's tally.

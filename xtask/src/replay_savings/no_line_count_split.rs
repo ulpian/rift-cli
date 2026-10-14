@@ -257,6 +257,13 @@ impl WorkingTree {
         }
     }
 
+    /// The text the transcript proves for `key` under `cwd`, where it proves
+    /// a complete copy of the bytes.
+    pub(super) fn proven_text(&self, cwd: &str, key: &str) -> Option<&str> {
+        let known = self.files.get(&(cwd.to_owned(), key.to_owned()))?;
+        known.as_ref().map(|known| known.text.as_str())
+    }
+
     /// The shape of the bytes the model holds for a file, where it holds them.
     pub(super) fn shape(&self, call: &Call, key: &str) -> Option<Shape> {
         let slot = (call.cwd.clone().unwrap_or_default(), key.to_owned());

@@ -78,6 +78,9 @@ pub fn render_table(report: &Report) -> String {
         report,
         denominator,
     ));
+    out.push_str(&super::output_recognition_rows::output_recognition_rows(
+        report,
+    ));
     out.push_str(&the_constants(report));
     out.push_str(READING_IT);
     out
