@@ -1459,3 +1459,6 @@ mod tests {
 
 #[cfg(test)]
 mod retry_tests;
+
+#[cfg(test)]
+mod recovery_tests;

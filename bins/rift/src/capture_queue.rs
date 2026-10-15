@@ -367,8 +367,21 @@ impl QueueLock {
         std::fs::canonicalize(git_dir).is_ok_and(|path| path == self.git_dir)
     }
 
+    /// Ordinary work requires absence of any recovery hold, without parsing it.
+    pub(crate) fn check_recovery_hold(&self) -> Result<()> {
+        match self
+            .git_dir
+            .join(".rift-capture-recovery.hold")
+            .symlink_metadata()
+        {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(deferred("capture recovery hold is present or unavailable")),
+        }
+    }
+
     pub(crate) fn check_path(&self, path: &Path) -> Result<()> {
         self.check_current()?;
+        self.check_recovery_hold()?;
         if legacy_barrier(self.git_dir()) {
             return Err(deferred("legacy ownership remains unresolved"));
         }

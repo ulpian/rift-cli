@@ -361,6 +361,11 @@ open-file lock at its canonical Git directory. Elapsed time never releases a liv
 owner. Legacy lock markers defer work until a controlled handoff; the new owner
 file does not exclude older installed workers.
 
+An owner-controlled recovery hold keeps normal worker execution, migration,
+and owned ticket removal or retry owed. Hooks may still queue new work. Any
+hold entry, or uncertainty about its absence, blocks those normal mutations;
+its age never expires it.
+
 Queue context includes the full payload apart from its attempt counter. An
 identical context stays queued without resetting retries; a changed session,
 worktree or queue time remains separate. Migration removes an old ticket only

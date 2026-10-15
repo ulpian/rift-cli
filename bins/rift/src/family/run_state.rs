@@ -187,6 +187,9 @@ impl Merge<'_> {
         self.owner
             .check_current()
             .map_err(|_| std::io::Error::other("member owner changed"))?;
+        self.owner
+            .check_recovery_hold()
+            .map_err(|_| std::io::Error::other("capture recovery hold blocks migration"))?;
         self.mover.check_current()
     }
 
@@ -429,6 +432,9 @@ pub(crate) fn adopt_owned(
             "migration owner does not match member",
         ));
     }
+    owner
+        .check_recovery_hold()
+        .map_err(|_| std::io::Error::other("capture recovery hold blocks migration"))?;
     let Some(mover) = MoveLock::take(ctx.run_root, ctx.now_ms)? else {
         return Ok(MoveReport {
             busy: true,
@@ -562,6 +568,7 @@ fn repeatable_request(
 /// Readiness shares the already-held member guard; it never reacquires it.
 pub(crate) fn prepare_owned(owner: &crate::capture_queue::QueueLock) -> rift_core::Result<()> {
     owner.check_current()?;
+    owner.check_recovery_hold()?;
     let git_dir = owner.git_dir();
     if let Some(located) = locate(git_dir) {
         let ctx = MoveCtx {
