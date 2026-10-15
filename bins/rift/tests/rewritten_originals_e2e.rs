@@ -54,7 +54,8 @@ fn output(tag: &str) -> String {
 
 /// The text the hook delivered in place of `stdout`.
 fn folded(stdout: &str) -> String {
-    render_folded(ResultText { stdout, stderr: "" }, &CUT)
+    let fold_line = |n: u32| format!("[rift fold: {n} lines elided]");
+    render_folded(ResultText { stdout, stderr: "" }, &CUT, fold_line)
         .unwrap()
         .0
 }

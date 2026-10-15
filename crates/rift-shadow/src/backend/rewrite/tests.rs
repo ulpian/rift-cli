@@ -20,6 +20,11 @@ fn err(start: u32, end: u32) -> LineRange {
     }
 }
 
+/// A fold line as a rewriter might word one; the words are the test's own.
+fn fold(n: u32) -> String {
+    format!("[rift fold: {n} more lines like the one above]")
+}
+
 /// Each closed vocabulary round-trips through its words and admits nothing
 /// else.
 #[test]
@@ -52,9 +57,10 @@ fn every_closed_word_round_trips_and_nothing_else_parses() {
 #[test]
 fn a_fold_replaces_each_range_with_one_line_and_keeps_the_rest_verbatim() {
     let original = text("a\nb\nc\nd\ne\n", "w1\nw2\nw3");
-    let (stdout, stderr) = render_folded(original, &[out(1, 3), out(4, 5), err(0, 2)]).unwrap();
-    assert_eq!(stdout, "a\n[rift fold: 2 lines]\nd\n[rift fold: 1 lines]\n");
-    assert_eq!(stderr, "[rift fold: 2 lines]\nw3");
+    let (stdout, stderr) =
+        render_folded(original, &[out(1, 3), out(4, 5), err(0, 2)], fold).unwrap();
+    assert_eq!(stdout, format!("a\n{}\nd\n{}\n", fold(2), fold(1)));
+    assert_eq!(stderr, format!("{}\nw3", fold(2)));
     assert_eq!(
         check_rendering(
             RewriteForm::FoldedOutput,
@@ -93,7 +99,7 @@ fn ranges_that_do_not_fit_their_original_are_refused() {
         vec![err(0, 2)],
     ] {
         assert!(!ranges_fit(original, &bad), "{bad:?}");
-        assert!(render_folded(original, &bad).is_none());
+        assert!(render_folded(original, &bad, fold).is_none());
     }
     let too_many: Vec<LineRange> = (0..=MAX_REPLACED_RANGES)
         .map(|i| out(u32::try_from(i).unwrap(), u32::try_from(i).unwrap() + 1))
@@ -104,6 +110,25 @@ fn ranges_that_do_not_fit_their_original_are_refused() {
         check_rendering(RewriteForm::FoldedOutput, original, original, &[]),
         RenderCheck::Mismatch
     );
+}
+
+/// A fold line whose words do not read back as its own count is refused at
+/// render, so a bad frames text cannot become a fold the checker would then
+/// misread; the original goes through unchanged instead.
+#[test]
+fn a_fold_line_that_does_not_read_back_its_count_is_refused() {
+    let original = text("a\nb\nc\nd", "");
+    let ranges = [out(1, 3)];
+    assert!(render_folded(original, &ranges, fold).is_some());
+    let bad_lines: [fn(u32) -> String; 4] = [
+        |_| "[rift fold: 9 more lines like the one above]".to_owned(),
+        |_| "[rift fold: some lines]".to_owned(),
+        |n| format!("folded {n} lines"),
+        |n| format!("[rift fold: {n} more lines]\nsecond"),
+    ];
+    for bad in bad_lines {
+        assert!(render_folded(original, &ranges, bad).is_none());
+    }
 }
 
 /// A held substitution keeps the rest verbatim and puts one held frame per
@@ -138,6 +163,81 @@ fn a_held_substitution_is_counted_unchecked_and_a_wrong_line_mismatches() {
             RenderCheck::Mismatch,
             "{wrong}"
         );
+    }
+}
+
+/// A fold verifies by its shape and its count, whatever its words; a wrong
+/// count, a broken opener or closer, or an altered kept line does not.
+#[test]
+fn a_fold_is_held_to_its_shape_and_count_not_its_words() {
+    let original = text("a\nb\nc\nd", "");
+    let ranges = [out(1, 3)];
+    let check = |delivered: &str| {
+        check_rendering(
+            RewriteForm::FoldedOutput,
+            original,
+            text(delivered, ""),
+            &ranges,
+        )
+    };
+    for honest in [
+        "[rift fold: 2]",
+        "[rift fold: 2 lines]",
+        "[rift fold: 2 more lines like the one above]",
+        "[rift fold: 2 lines [b, c] folded]",
+    ] {
+        assert_eq!(
+            check(&format!("a\n{honest}\nd")),
+            RenderCheck::Matches,
+            "{honest}"
+        );
+    }
+    for forged in [
+        "a\n[rift fold: 3 lines]\nd",
+        "a\n[rift fold: 1 lines]\nd",
+        "a\n[rift fold:2 lines]\nd",
+        "a\n{rift fold: 2 lines]\nd",
+        "a\n[rift fold: 2 lines] ok\nd",
+        "a\n[rift fold: 2 lines\nd",
+        "a\n[rift fold: 2lines]\nd",
+        "a\n[rift fold: 2 lines]\nD",
+        "A\n[rift fold: 2 lines]\nd",
+        "a\n[rift fold: 2 lines]\nd\n",
+        "a\nb\nc\nd",
+    ] {
+        assert_eq!(check(forged), RenderCheck::Mismatch, "{forged}");
+    }
+}
+
+/// The predicate reads the count out of a whole fold line, and the closer is
+/// the line's last character, so a `]` inside the words is the words'.
+#[test]
+fn the_fold_predicate_reads_the_count_and_only_a_whole_line() {
+    assert_eq!(parse_fold_line("[rift fold: 12]"), Some(12));
+    assert_eq!(parse_fold_line("[rift fold: 12 lines]"), Some(12));
+    assert_eq!(parse_fold_line("[rift fold: 3 lines [x] cut]"), Some(3));
+    assert_eq!(parse_fold_line("[rift fold: 3 ]"), Some(3));
+    for not in [
+        "[rift fold: 3 lines] cut",
+        "[rift fold: 3 lines]\n",
+        "[rift fold: 3\nlines]",
+        "[rift fold: ]",
+        "[rift fold:  3 lines]",
+        "[rift fold: +3 lines]",
+        "[rift fold: 4294967296 lines]",
+        "[Rift fold: 3 lines]",
+    ] {
+        assert_eq!(parse_fold_line(not), None, "{not:?}");
+    }
+}
+
+proptest::proptest! {
+    /// Any words without a newline round-trip through the predicate with the
+    /// count preserved.
+    #[test]
+    fn any_words_without_a_newline_keep_their_count(n in 1u32.., words in "[^\n]*") {
+        let line = format!("{FOLD_OPEN}{n} {words}]");
+        proptest::prop_assert_eq!(parse_fold_line(&line), Some(n));
     }
 }
 
@@ -200,5 +300,60 @@ fn an_original_record_is_canonical_and_parses_back() {
     assert_eq!(
         parse_original_record(br#"{"interrupted":true,"stderr":"","stdout":"","x":1}"#),
         None
+    );
+}
+
+#[test]
+fn a_stateful_fold_callback_cannot_emit_unchecked_text() {
+    let original = text("a\nb\nc\nd", "");
+    let ranges = [out(1, 3)];
+    let calls = std::cell::Cell::new(0);
+    let (stdout, stderr) = render_folded(original, &ranges, |n| {
+        let call = calls.get();
+        calls.set(call + 1);
+        if call == 0 {
+            fold(n)
+        } else {
+            "unchecked output\nsecond line".to_owned()
+        }
+    })
+    .unwrap();
+    assert_eq!(
+        check_rendering(
+            RewriteForm::FoldedOutput,
+            original,
+            text(&stdout, &stderr),
+            &ranges
+        ),
+        RenderCheck::Matches,
+        "the emitted fold must be the bytes that passed validation: {stdout}"
+    );
+    assert_eq!(calls.get(), ranges.len());
+}
+
+#[test]
+fn validated_markers_keep_range_order_across_both_streams() {
+    let original = text("a\nb\nc\n", "w\nx\ny\n");
+    let ranges = [err(1, 2), out(0, 2), err(2, 3)];
+    let calls = std::cell::Cell::new(0);
+    let (stdout, stderr) = render_folded(original, &ranges, |n| {
+        calls.set(calls.get() + 1);
+        format!("[rift fold: {n} marker {}]", calls.get())
+    })
+    .unwrap();
+    assert_eq!(calls.get(), ranges.len());
+    assert_eq!(stdout, "[rift fold: 2 marker 2]\nc\n");
+    assert_eq!(
+        stderr,
+        "w\n[rift fold: 1 marker 1]\n[rift fold: 1 marker 3]\n"
+    );
+    assert_eq!(
+        check_rendering(
+            RewriteForm::FoldedOutput,
+            original,
+            text(&stdout, &stderr),
+            &ranges
+        ),
+        RenderCheck::Matches
     );
 }

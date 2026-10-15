@@ -1,7 +1,6 @@
 use rift_recall_substrate::MemorySubstrate;
 use rift_shadow::backend::rewrite::{
-    fold_line, original_record_json, render_folded, LineRange, ResultText, RewriteForm, Rewritten,
-    Stream,
+    original_record_json, render_folded, LineRange, ResultText, RewriteForm, Rewritten, Stream,
 };
 use rift_shadow::backend::{
     shard_merkle_root, ArchivedOriginal, ArchivedTask, ArchivedTranscript, DigestLeafBytes,
@@ -35,6 +34,11 @@ fn result_line(call: &str, stdout: &str) -> String {
     .to_string()
 }
 
+/// A fold line as a rewriter might word one; the words are the test's own.
+fn fold_line(n: u32) -> String {
+    format!("[rift fold: {n} lines elided]")
+}
+
 fn folded() -> String {
     render_folded(
         ResultText {
@@ -42,6 +46,7 @@ fn folded() -> String {
             stderr: "",
         },
         &CUT,
+        fold_line,
     )
     .unwrap()
     .0
@@ -276,6 +281,51 @@ fn a_delivered_text_that_is_not_the_rendering_fails() {
         "{:?}",
         out.worst
     );
+}
+
+/// The fold line's words are the rewriter's: verify holds the line to its
+/// shape and its count, and every kept line to the original.
+#[test]
+fn a_fold_verifies_by_shape_and_count_whatever_its_words() {
+    let fold = |line: &str| format!("keep 0\n{line}\nkeep 3");
+    for honest in [
+        "[rift fold: 2 more lines like the one above]",
+        "[rift fold: 2]",
+        "[rift fold: 2 lines [cut] here]",
+    ] {
+        let spec = Spec {
+            delivered: fold(honest),
+            ..Spec::default()
+        };
+        let out = shard_passes(&originals_shard(&spec)).unwrap();
+        assert!(
+            matches!(out.worst, Verdict::Ok),
+            "{honest}: {:?}",
+            out.worst
+        );
+    }
+    for forged in [
+        fold("[rift fold: 3 more lines like the one above]"),
+        fold("[rift fold: 1 line]"),
+        fold("[rift fold:2 lines]"),
+        fold("(rift fold: 2 lines]"),
+        fold("[rift fold: 2 lines] "),
+        fold("[rift fold: 2 lines"),
+        fold("[rift fold: two lines]"),
+        "keep 0\n[rift fold: 2 lines elided]\nkeep 3 altered".to_owned(),
+    ] {
+        let spec = Spec {
+            delivered: forged.clone(),
+            ..Spec::default()
+        };
+        let out = shard_passes(&originals_shard(&spec)).unwrap();
+        assert!(
+            matches!(&out.worst, Verdict::Tamper(m)
+                if m.contains(&format!("tool-originals/{FOLDED}.json")) && m.contains("transcript.jsonl line 0")),
+            "{forged}: {:?}",
+            out.worst
+        );
+    }
 }
 
 /// A Rift marker delivered on a line no manifest entry names is a rewrite

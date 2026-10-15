@@ -73,7 +73,8 @@ fn result_line(call: &str, stdout: &str) -> String {
 /// The folded text a hook delivers for `stdout`.
 fn folded(stdout: &str) -> String {
     let text = ResultText { stdout, stderr: "" };
-    render_folded(text, &FOLD).unwrap().0
+    let fold_line = |n: u32| format!("[rift fold: {n} lines elided]");
+    render_folded(text, &FOLD, fold_line).unwrap().0
 }
 
 fn sealed_pair(raw: &str) -> (Vec<u8>, ArchivedTranscript) {

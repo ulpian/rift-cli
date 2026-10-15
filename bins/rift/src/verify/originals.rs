@@ -9,7 +9,11 @@
 //! * **Rendering.** The delivered text on the transcript line the entry names
 //!   must be the form's rendering of the original
 //!   ([`rift_shadow::backend::rewrite::check_rendering`]), or the original
-//!   itself when the entry says `spooled_not_delivered`. A held substitution's
+//!   itself when the entry says `spooled_not_delivered`. A fold is held to its
+//!   shape, not its words: every fold line passes
+//!   [`rift_shadow::backend::rewrite::parse_fold_line`], its count equals the
+//!   length of the range it stands for, and every line outside the ranges is
+//!   verbatim. A held substitution's
 //!   replaced lines need the held revision, which this pass does not read:
 //!   each such range is counted `held_unchecked`, reported, never passed.
 //! * **The reverse.** A transcript line whose delivered text carries a Rift
