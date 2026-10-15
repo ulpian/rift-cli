@@ -39,6 +39,8 @@ pub(super) struct ShardHeader {
     pub(super) spills: Vec<SpillClaim>,
     /// The session transcript's `originals` manifest, every entry.
     pub(super) originals: Vec<OriginalClaim>,
+    /// The session transcript's redaction-fallback counts, zero when absent.
+    pub(super) fallback: super::fallback::Checked,
 }
 
 /// The content artifacts a native shard writes and both native passes read.
@@ -255,6 +257,7 @@ pub(super) fn shard_header(reader: &impl SubstrateReader, id: &str) -> Result<Sh
             task_tokens: None,
             spills: Vec::new(),
             originals: Vec::new(),
+            fallback: Ok(super::fallback::Recorded::default()),
         });
     };
     let meta = parse::parse_metadata(&bytes, id).value;
@@ -284,5 +287,6 @@ pub(super) fn shard_header(reader: &impl SubstrateReader, id: &str) -> Result<Sh
         task_tokens,
         spills: super::spills::claims(doc.as_ref()),
         originals: super::originals::claims(doc.as_ref()),
+        fallback: super::fallback::parent_counts(doc.as_ref()),
     })
 }

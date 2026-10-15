@@ -91,6 +91,17 @@ would be an opinion, a compaction is arithmetic, and a verifier can re-derive it
 redaction report is re-verified on every `rift verify`, and the artifact bridge
 refuses a checkpoint whose report is missing.
 
+Fallback counts live in `redaction_report.json` for the parent transcript pair,
+with a checked mirror in parent metadata, and in each task's metadata for that
+pair. Missing both keys means zero; a present pair must contain u32 integers,
+positive fallback lines, and no more placeholders than lines. Malformed counts or
+a contradictory parent mirror are structure findings. Removing recorded
+placeholder lines is a redaction finding: the sealed pair must hold at least the
+recorded number, because literal placeholder records can already occur in input.
+`rift doctor` names affected checkpoints and unreadable or inconsistent count
+facts, reading the bound report and task metadata once per pair; doctor alone
+does not certify their Merkle root or checkpoint identity.
+
 The sibling artifacts (from `sessions.jsonl` down) are separate files, not
 `metadata.json` members, because `metadata.json` is in `content_hash.txt`'s preimage
 and the digest's definition does not move. Each is built at archive time from

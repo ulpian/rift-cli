@@ -33,6 +33,7 @@ pub(super) fn transcript_of(raw: &[u8]) -> ArchivedTranscript {
         compact_start: compacted.compact_transcript_start,
         spills: Vec::new(),
         originals: Vec::new(),
+        redaction_fallback: super::RedactionFallback::default(),
     }
 }
 

@@ -325,7 +325,9 @@ fn seal_task(
 
 /// The file through the same gate as the main transcript, whole: a task's
 /// pair is re-derived at every archive, so its compaction starts at line 0.
-/// A refusal is said and recorded as `unsealed`, never dropped in silence.
+/// A refusal would be said and recorded as `unsealed`, never dropped in
+/// silence; the gate refuses no input since a line it cannot settle is sealed
+/// flat or replaced by a placeholder record, so the word is unreachable here.
 /// The spills it names are sealed beside it; they live in the parent
 /// session's directory, so they are contained by the parent's address. So
 /// are the spooled originals of the calls it records.

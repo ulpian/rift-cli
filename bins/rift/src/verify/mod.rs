@@ -22,6 +22,7 @@
 //! report in.
 
 mod artifacts;
+pub(crate) mod fallback;
 mod identity;
 mod merkle;
 mod order;

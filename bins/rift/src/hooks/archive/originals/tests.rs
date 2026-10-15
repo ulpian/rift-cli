@@ -252,3 +252,69 @@ fn a_linked_record_is_never_followed() {
     assert_eq!(linked.state, OriginalState::SpoolCorrupt);
     assert!(linked.body.is_none());
 }
+
+#[test]
+fn changed_packs_cannot_turn_a_fallback_record_into_a_sealed_original() {
+    let repo = repo();
+    spool(&repo, MAIN_CALL, None, "REDACTED notes\none\ntwo\nthree");
+    let packs = RulePackSet::builtin()
+        .with_vendor_pattern("osc", r"^\[?REDACTED", "acme@1")
+        .unwrap();
+    let spool = Spool::load(&repo.paths.common_dir, SESSION, &packs);
+    let record = spool
+        .records
+        .iter()
+        .find(|r| r.tool_use_id == MAIN_CALL)
+        .unwrap();
+    assert_eq!(record.state, OriginalState::Unsealed);
+    assert!(record.body.is_none());
+    let (_, mut pair) = sealed_pair("{}\n");
+    spool.attach_orphans(Some(&mut pair), &mut []);
+    let meta = rift_shadow::backend::ArchivedTask {
+        tool_use_id: "task".into(),
+        agent_id: "a1".into(),
+        started_at_ms: 1,
+        ended_at_ms: 2,
+        input_tokens: None,
+        output_tokens: None,
+        transcript: Some(pair),
+        provenance: None,
+    }
+    .metadata_json();
+    let meta: serde_json::Value = serde_json::from_slice(&meta).unwrap();
+    assert_eq!(meta["originals"][0]["original"], "original_unsealed");
+    assert!(meta["originals"][0].get("sha256").is_none());
+    assert!(session_spool_dir(&repo.paths.common_dir, SESSION)
+        .join(format!("{MAIN_CALL}{SPOOL_SUFFIX}"))
+        .exists());
+}
+
+#[test]
+fn corrupt_spool_evidence_stays_corrupt_when_its_content_needs_fallback() {
+    let repo = repo();
+    spool(&repo, MAIN_CALL, None, "REDACTED notes\none\ntwo\nthree");
+    let path = session_spool_dir(&repo.paths.common_dir, SESSION)
+        .join(format!("{MAIN_CALL}{SPOOL_SUFFIX}"));
+    let bytes = std::fs::read(&path).unwrap();
+    let split = bytes.iter().position(|b| *b == b'\n').unwrap();
+    let mut header: serde_json::Value = serde_json::from_slice(&bytes[..split]).unwrap();
+    header["sha256"] = "0".repeat(64).into();
+    let mut corrupt = serde_json::to_vec(&header).unwrap();
+    corrupt.extend_from_slice(&bytes[split..]);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, corrupt).unwrap();
+    let packs = RulePackSet::builtin()
+        .with_vendor_pattern("osc", r"^\[?REDACTED", "acme@1")
+        .unwrap();
+    let spool = Spool::load(&repo.paths.common_dir, SESSION, &packs);
+    let record = spool
+        .records
+        .iter()
+        .find(|r| r.tool_use_id == MAIN_CALL)
+        .unwrap();
+    assert_eq!(record.state, OriginalState::SpoolCorrupt);
+    let body = record.body.as_ref().unwrap();
+    assert!(rift_shadow::redact::is_fallback_placeholder(
+        std::str::from_utf8(body.as_slice()).unwrap()
+    ));
+}

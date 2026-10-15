@@ -378,3 +378,31 @@ mod unix {
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn a_fallback_record_cannot_be_spooled_as_an_original() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = repo(tmp.path());
+    let policy = tmp.path().join(".rift/policies/redactors");
+    std::fs::create_dir_all(&policy).unwrap();
+    std::fs::write(
+        policy.join("acme.toml"),
+        r#"schema_version = 1
+name = "acme"
+version = "2026.08.0"
+[[rules]]
+id = "osc"
+regex = '^\[?REDACTED'
+"#,
+    )
+    .unwrap();
+    let (family, window) = (family(), window());
+    assert_eq!(
+        spool_untimed(
+            &site(&repo, &family, &window, CALL),
+            &original("REDACTED ssn=\n123456789", "")
+        ),
+        Err(SpoolRefusal::Unsealed)
+    );
+    assert!(!spooled(&repo, CALL).exists());
+}

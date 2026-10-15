@@ -2,15 +2,10 @@
 //! all delimited the same way, each a fixpoint of the pipeline that emits it,
 //! and never counted twice by `mask`.
 
-use std::collections::BTreeMap;
-
 use super::fixtures::{masked_with, pack};
 use crate::marks::mask;
 use crate::span::{MatchedAgainst, Span};
-use crate::{
-    pii_placeholders, sha256, DetectorClass, RedactionReport, RulePackSet, PLACEHOLDER_CLOSE,
-    PLACEHOLDER_OPEN,
-};
+use crate::{pii_placeholders, DetectorClass, RulePackSet, PLACEHOLDER_CLOSE, PLACEHOLDER_OPEN};
 
 /// Every placeholder this crate can emit, longest first.
 fn every_placeholder() -> Vec<&'static str> {
@@ -145,15 +140,7 @@ fn mask_is_pinned_by_value_because_the_reference_calls_it() {
         ],
         "the PII placeholder family moved"
     );
-    let mut report = RedactionReport {
-        total_spans: 0,
-        by_detector: BTreeMap::new(),
-        by_class: BTreeMap::new(),
-        bytes_masked: 0,
-        allowlisted: 0,
-        rule_pack_versions: Vec::new(),
-        input_sha256: sha256(b""),
-    };
+    let mut report = crate::jsonl::blank_report();
     let span = |start: usize, end: usize, id: &str| Span {
         start,
         end,

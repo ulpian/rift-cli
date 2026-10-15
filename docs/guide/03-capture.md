@@ -250,6 +250,11 @@ open for writing and the tokenizer, so a hook never does it: an archive made in 
 including one drained under `RIFT_CAPTURE_SYNC`, binds nothing and the next worker
 condense does. A failed binding is counted and never fails the condense.
 
+A rule that cannot reach the bounded redaction fixpoint costs the affected
+records and their required context. Failed parsed records become fixed fallback
+records; failed flat runs also replace lines whose protection depends on their
+neighbours, preserving safe independent lines ([§4.6](04-redaction-and-secrets.md#46-the-json-aware-walker)).
+
 ### When does a condense happen?
 
 The per-repository **strategy** ([02](02-configuration.md)) is another pure function of

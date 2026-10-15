@@ -45,8 +45,10 @@
 //! secret. All regexes are linear-time (`regex` crate, which cannot compile a
 //! backreference at all), and the detect→mask loop is bounded by `MAX_PASSES`
 //! and fails closed rather than looping — so a hostile input cannot wedge the
-//! pipeline. The bound is the load-bearing half and it is
-//! exercised by `an_oscillating_rule_is_bounded_and_fails_safe`; the regex half
+//! pipeline. Failing closed is per line: the line is sealed flat, or replaced
+//! by a placeholder record, and the rest of the document is sealed as usual.
+//! The bound is the load-bearing half and it is
+//! exercised by `an_oscillating_rule_is_bounded_and_seals_a_placeholder`; the regex half
 //! is enforced by the compiler, since a backreference pattern never builds.
 //!
 //! The pipeline is one module per concern: `span` is what a detector proposes,
@@ -66,6 +68,7 @@
 
 mod builtin_tables;
 mod entropy;
+mod fallback;
 mod jsonl;
 mod marks;
 mod packs;
@@ -86,6 +89,7 @@ use crate::builtin_tables::builtin_shape_tables;
 use crate::marks::{mask, select_spans};
 use crate::span::Span;
 
+pub use crate::fallback::{count_fallback_placeholders, is_fallback_placeholder};
 pub use crate::packs::{PackRule, PackSample, PackSpec, PackWarning};
 pub(crate) use crate::shapes::{
     is_card_pan, is_e164_phone, is_exit_code_phone, is_labelled_taxpayer_id, is_nanp_phone,
@@ -255,6 +259,23 @@ pub struct RedactionReport {
     pub rule_pack_versions: Vec<String>,
     /// SHA-256 of the raw input (for recompute-verify).
     pub input_sha256: Sha256Id,
+    /// Lines the per-line fallback sealed because a detect→mask fixpoint did
+    /// not converge within its pass bound: sealed as flat text, or replaced by
+    /// a placeholder record. Zero on the normal path, and then not serialized,
+    /// so every report written before the fallback reads the same.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub redaction_flat_fallback: u32,
+    /// The subset of [`Self::redaction_flat_fallback`] replaced to close a
+    /// failed decoded record or preserve detector context, using the record
+    /// [`is_fallback_placeholder`] recognises.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub redaction_fallback_placeholders: u32,
+}
+
+/// `serde`'s skip predicate for a counter that is absent at zero.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// The result of redaction: the sealed bytes and the counts-only report.
@@ -296,12 +317,19 @@ pub fn redact(raw: &SecretBytes) -> Result<RedactionOutput> {
 /// would also be seen by a re-redaction, and stability is exactly the
 /// idempotence the gate promises. `MAX_PASSES` is the fail-safe for a rule
 /// that oscillates instead of settling
-/// (`an_oscillating_rule_is_bounded_and_fails_safe`).
+/// (`an_oscillating_rule_is_bounded_and_seals_a_placeholder`).
+///
+/// **Non-convergence closes the affected record and context.** Failed parsed
+/// values become fixed records in their original physical line slots. Failed
+/// flat runs retain the protection selected in full context on every bounded
+/// pass before independently safe sub-runs seal. Probes do not affect counts.
+/// Every re-seal still runs all detectors; arbitrary vendor rules can transform
+/// a fallback record, so fallback output need not be byte-idempotent.
 ///
 /// # Errors
-/// [`RiftError`] on internal failure, including an input whose masking does
-/// not stabilize within `MAX_PASSES` (fail-safe: no partially-redacted bytes
-/// are ever returned).
+/// None for any input: every outcome of the fixpoint is a sealed document.
+/// The `Result` is the gate's stated contract with its callers, kept so a
+/// future failure mode has a channel that is not a panic.
 pub fn redact_with(raw: &SecretBytes, packs: &RulePackSet) -> Result<RedactionOutput> {
     let input_sha256 = sha256(raw.as_slice());
     let text = normalize(raw.as_slice());
@@ -313,8 +341,10 @@ pub fn redact_with(raw: &SecretBytes, packs: &RulePackSet) -> Result<RedactionOu
         allowlisted: 0,
         rule_pack_versions: packs.version_set(),
         input_sha256,
+        redaction_flat_fallback: 0,
+        redaction_fallback_placeholders: 0,
     };
-    let masked = jsonl::redact_content(&text, packs, &mut report)?;
+    let masked = jsonl::redact_content(&text, packs, &mut report);
     let redacted_sha256 = sha256(masked.as_bytes());
     let provenance = RedactionProvenance {
         rule_pack_versions: packs.version_set(),
@@ -352,9 +382,21 @@ fn redact_fragment(
     packs: &RulePackSet,
     report: &mut RedactionReport,
 ) -> Result<String> {
+    redact_fragment_observed(fragment, packs, report, |_, _| {})
+}
+
+/// Run the same bounded selector with a private observer before each mask.
+/// The observer keeps only fallback provenance, never returned transcript bytes.
+fn redact_fragment_observed(
+    fragment: &str,
+    packs: &RulePackSet,
+    report: &mut RedactionReport,
+    mut observe: impl FnMut(&str, &[Span]),
+) -> Result<String> {
     let mut text = fragment.to_string();
     for _ in 0..MAX_PASSES {
-        let (chosen, allowlisted) = subtract_allowlisted(&text, packs, select_spans(&text, packs));
+        let (chosen, allowlisted) = effective_spans(&text, packs);
+        observe(&text, &chosen);
         let masked = mask(&text, &chosen, report);
         if masked == text {
             report.allowlisted = report.allowlisted.saturating_add(allowlisted);
@@ -365,6 +407,10 @@ fn redact_fragment(
     Err(RiftError::Other(format!(
         "redaction did not stabilize within {MAX_PASSES} passes"
     )))
+}
+
+fn effective_spans(text: &str, packs: &RulePackSet) -> (Vec<Span>, u32) {
+    subtract_allowlisted(text, packs, select_spans(text, packs))
 }
 
 /// The allowlist is subtract-only: drop the spans whose exact value is

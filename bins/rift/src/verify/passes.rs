@@ -153,11 +153,13 @@ fn native_shard_passes(
 
     let spills = super::spills::spill_digest_pass(id, &native.spills);
     let originals = super::originals::original_passes(id, &native);
+    let fallback = super::fallback::fallback_pass(id, header.fallback, &native, report);
     found.held_unchecked += originals.held_unchecked;
     for v in task_subtree_pass(id, &header, &native)
         .into_iter()
         .chain(spills)
         .chain(originals.verdicts)
+        .chain(fallback)
     {
         found.worst.keep_worse(v);
     }

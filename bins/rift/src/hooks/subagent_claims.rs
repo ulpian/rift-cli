@@ -105,7 +105,7 @@ fn claim_of(payload: &serde_json::Value) -> Option<SubagentClaim> {
 /// Whether `id` may name a file and a shard subtree: ASCII letters, digits,
 /// `_` and `-`, bounded. Shared with the archive, whose subtree names the same
 /// rule guards.
-pub(super) fn is_safe_id(id: &str) -> bool {
+pub(crate) fn is_safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_BYTES
         && id

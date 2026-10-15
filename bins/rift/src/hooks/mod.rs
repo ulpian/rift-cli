@@ -23,7 +23,7 @@ mod install;
 mod manifest;
 mod originals;
 mod recovery;
-mod subagent_claims;
+pub(crate) mod subagent_claims;
 mod sweep;
 mod worker;
 

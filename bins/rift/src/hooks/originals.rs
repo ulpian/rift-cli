@@ -275,8 +275,13 @@ fn redact_original(
     let raw = SecretBytes::new(original_record_json(text.stdout, text.stderr, interrupted));
     let (packs, _notes) = crate::redactor_packs::capture_rule_packs(work_tree);
     rift_shadow::redact::redact_with(&raw, &packs)
-        .map(|out| out.redacted)
         .map_err(|_| SpoolRefusal::Unsealed)
+        .and_then(|out| {
+            rift_shadow::backend::rewrite::parse_original_record(out.redacted.as_slice())
+                .filter(|(_, _, actual)| *actual == interrupted)
+                .map(|_| out.redacted)
+                .ok_or(SpoolRefusal::Unsealed)
+        })
 }
 
 /// The session's spool directory, created owner-only where missing, every

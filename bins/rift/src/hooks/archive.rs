@@ -1112,8 +1112,12 @@ fn session_transcript(
             Some((pair, u64::try_from(raw_lines).unwrap_or(u64::MAX)))
         }
         Err(e) => {
-            // A redaction failure must not lose the checkpoint: the capture
-            // still archives; only the transcript is withheld, loudly.
+            // Unreachable for any transcript since the gate became total: a
+            // line it cannot settle is sealed flat or replaced by a
+            // placeholder record and counted on the pair, so redaction no
+            // longer refuses a transcript. The arm stays because the gate's
+            // signature is fallible; were it taken, the capture would still
+            // archive and the withholding would be said.
             tracing::warn!(error = %e, "transcript could not be sealed; archiving without it");
             None
         }

@@ -8,7 +8,9 @@
 //! each wired agent's capture is arriving, `worktrees` the family's members,
 //! `family` the recorded identity against the one its minting rule derives,
 //! `queues` the work each member still owes, `spool` the originals of
-//! rewritten results still spooled, `set_asides` the recall
+//! rewritten results still spooled, `redaction` the checkpoints whose
+//! transcripts the redaction gate sealed by its per-line fallback,
+//! `set_asides` the recall
 //! projections a rebuild set aside, `prices` the observed models the price
 //! catalog cannot price. This file assembles the report
 //! in the order the legs print.
@@ -19,6 +21,7 @@ mod git_hooks;
 pub(crate) mod health;
 mod prices;
 mod queues;
+mod redaction;
 mod set_asides;
 mod setup;
 mod spool;
@@ -39,6 +42,7 @@ use git_hooks::{doctor_binary_of_record, doctor_hooks_target};
 use health::doctor_integration_health;
 use prices::doctor_unpriced_models;
 use queues::{doctor_capture_queue, doctor_push_queue, doctor_session_sweep};
+use redaction::doctor_redaction_fallback;
 use set_asides::doctor_recall_set_asides;
 use setup::{
     doctor_config_load, doctor_memory_chain, doctor_retired_config_keys, doctor_sibling_tool_hooks,
@@ -117,6 +121,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("document_store", doctor_document_store(root));
     report.leg("basis_store", doctor_basis_store(root));
     report.leg("original_spool", doctor_original_spool(root));
+    report.leg("redaction_fallback", doctor_redaction_fallback(root));
     report.leg("recall_set_asides", doctor_recall_set_asides(root));
     report.leg("sibling_tool_hooks", doctor_sibling_tool_hooks(root));
     report.json.insert("fix".to_owned(), serde_json::json!(fix));

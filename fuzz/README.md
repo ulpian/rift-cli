@@ -27,6 +27,7 @@ the input to the seed corpus.
 | `run_hook` | `rift_shadow_hooks` stdin envelope + full entrypoint | **live** |
 | `redact` | `rift_shadow_redact` transcript redaction | **live** |
 | `redact_jsonl` | `rift_shadow_redact`'s JSON walker, fed structure rather than noise | **live** |
+| `redact_fallback` | `rift_shadow_redact`'s per-line fallback, under packs that never settle | **live** |
 | `diff` | `rift_shadow_attribution` unified-diff parse | **live** |
 | `checkpoint_artifact` | `rift_recall_substrate::parse` (all five shard entrypoints) | **live** |
 | `mcp_request` | `rift_recall_serve::decode_request` (target name frozen: renaming it discards the accumulated corpus) | **live** |

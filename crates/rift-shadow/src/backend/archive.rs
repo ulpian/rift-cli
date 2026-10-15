@@ -290,6 +290,34 @@ pub struct ArchivedTranscript {
     /// word ([`super::OriginalState`]). Empty when nothing was rewritten,
     /// which keeps the shard every unrewritten transcript always wrote.
     pub originals: Vec<ArchivedOriginal>,
+    /// The lines of this pair the redaction gate sealed by its per-line
+    /// fallback, summed over both artifacts; recorded on the metadata
+    /// document beside the pair only when non-zero.
+    pub redaction_fallback: RedactionFallback,
+}
+
+/// What the redaction gate's per-line fallback cost one transcript pair: the
+/// lines it sealed flat or replaced because a fixpoint did not converge, and
+/// how many of those it replaced with a placeholder record. Counts only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RedactionFallback {
+    /// `redaction_flat_fallback`: every line the fallback sealed.
+    pub lines: u32,
+    /// `redaction_fallback_placeholders`: the subset replaced by a record.
+    pub placeholders: u32,
+}
+
+impl RedactionFallback {
+    /// The two reports' counts, summed: one per artifact of the pair.
+    #[must_use]
+    pub fn of(reports: &[&rift_shadow_redact::RedactionReport]) -> Self {
+        reports.iter().fold(Self::default(), |acc, r| Self {
+            lines: acc.lines.saturating_add(r.redaction_flat_fallback),
+            placeholders: acc
+                .placeholders
+                .saturating_add(r.redaction_fallback_placeholders),
+        })
+    }
 }
 
 /// One subagent task archived **inside** the parent checkpoint: a
