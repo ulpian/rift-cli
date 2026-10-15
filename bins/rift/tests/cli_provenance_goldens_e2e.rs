@@ -133,6 +133,7 @@ fn archive_for(
     )
     .unwrap();
     let mut archive = CheckpointArchive {
+        boundary_gaps: None,
         repo: repo.to_path_buf(),
         commit: String::new(),
         checkpoint_id: String::new(),

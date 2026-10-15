@@ -25,6 +25,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "bundle_e2e/boundary_gaps.rs"]
+mod boundary_gaps;
 mod common;
 use common::rift_cmd;
 

@@ -509,3 +509,41 @@ fn unsupported_or_corrupt_stored_facts_refuse_reads_and_replay_without_repair() 
         assert_eq!(facts(&store, &rt), before);
     }
 }
+
+#[test]
+fn whole_batch_preflight_is_read_only_for_absent_partial_complete_and_conflicting_sets() {
+    for case in 0..5 {
+        let store = store();
+        let rt = runtime();
+        let expected = batch(1500, vec![ticket(1), ticket(2)]);
+        match case {
+            1 => {
+                rt.block_on(append_ticket(&store, expected.gap_id(), &ticket(1)))
+                    .unwrap();
+            }
+            2 => {
+                rt.block_on(record_boundary_gap_batch(&store, &expected))
+                    .unwrap();
+            }
+            3 => {
+                rt.block_on(append_ticket(&store, expected.gap_id(), &ticket(99)))
+                    .unwrap();
+            }
+            4 => {
+                rt.block_on(append_batch(&store, &expected)).unwrap();
+            }
+            _ => {}
+        }
+        let before = facts(&store, &rt);
+        assert_eq!(
+            rt.block_on(check_boundary_gap_batch(&store, &expected))
+                .is_ok(),
+            case < 3
+        );
+        assert_eq!(
+            facts(&store, &rt),
+            before,
+            "preflight never appends or completes facts"
+        );
+    }
+}

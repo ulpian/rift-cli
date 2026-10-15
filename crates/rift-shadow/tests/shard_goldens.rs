@@ -147,15 +147,20 @@ fn every_emitted_artifact_is_declared_in_the_registry() {
 
 /// **And the fixture is maximal**, so the guard above is not vacuously true of
 /// a fixture that happens to emit three files. Every registry row is matched by
-/// something this shard actually writes; a row nothing exercises would mean the
+/// something the ordinary or separate optional fixture actually writes; a row
+/// nothing exercises would mean the
 /// frozen bytes cover less than the table claims.
 #[test]
 fn the_fixture_exercises_every_declared_artifact() {
     let live = every_artifact_archive()
         .expect("the maximal fixture builds")
         .artifact_map();
+    let present = rift_shadow::parity::boundary_gap_fixture_archive()
+        .unwrap()
+        .artifact_map();
     let matched: BTreeSet<&str> = live
         .keys()
+        .chain(present.keys())
         .filter_map(|p| is_declared(p).map(|row| row.path))
         .collect();
     let missing: Vec<&str> = SHARD_ARTIFACTS
@@ -303,5 +308,31 @@ fn a_subagent_session_keeps_its_own_subtree_and_rolls_up_to_the_parent() {
     assert!(
         compact.contains(&format!("\"id\":\"{id}\"")) && compact.contains("\"name\":\"Task\""),
         "the dispatch that created the subagent survives the parent's compaction"
+    );
+}
+
+#[test]
+fn the_separate_present_gap_fixture_pins_exact_bytes_and_declares_every_path() {
+    let archive = rift_shadow::parity::boundary_gap_fixture_archive().unwrap();
+    let artifacts = archive.artifact_map();
+    let expected = concat!(
+        r#"{"batch":{"evidence_sha256":"2222222222222222222222222222222222222222222222222222222222222222","gap_id":"41ee68ff6bec15553e5a399a27b56a7cca839cd024ecd21a0469c341cd21d9b0","member_key":"1111111111111111111111111111111111111111111111111111111111111111","reason":"uncaptured-backlog","recorded_at":1500,"repo_id":"repo-1","schema_version":1,"selection_sha256":"7befeea2bbcd241de610e8f572200e84b5d1adb5cdffe828a529750e323e2f5a","ticket_count":1,"tickets":[{"attempts":2,"boundary":"end","captured_at":1000,"context_sha256":"4444444444444444444444444444444444444444444444444444444444444444","head_oid":"7777777777777777777777777777777777777777","queued_at":1200,"schema_version":1,"session_key":"6666666666666666666666666666666666666666666666666666666666666666","source_key":"3333333333333333333333333333333333333333333333333333333333333333","ticket_sha256":"5555555555555555555555555555555555555555555555555555555555555555","turn_ordinal":7}]},"carrier_session_key":"96614c72db5966fc3d9485134eeb57a3644fb26d37061b16ad05f1c7e1bdc6da","schema_version":1}"#,
+        "\n"
+    );
+    assert_eq!(
+        artifacts.get("turn_boundary_gaps.jsonl").unwrap(),
+        expected.as_bytes()
+    );
+    for path in artifacts.keys() {
+        assert!(
+            is_declared(path).is_some(),
+            "undeclared present-fixture path: {path}"
+        );
+    }
+    assert_eq!(
+        rift_core::boundary_gap::decode_checked(expected.as_bytes())
+            .unwrap()
+            .len(),
+        1
     );
 }

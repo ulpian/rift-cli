@@ -38,7 +38,7 @@ pub use attribution::{
     attribution_for_key, attribution_hunks_for_key, confidence_to_milli, record_attribution,
     record_attribution_hunk, AttributionHunkRow, AttributionRow,
 };
-pub use boundary_gaps::{boundary_gap_batch, record_boundary_gap_batch};
+pub use boundary_gaps::{boundary_gap_batch, check_boundary_gap_batch, record_boundary_gap_batch};
 pub use boundary_kind::{
     record_turn_boundary_file_with_kind, regular_turn_boundary_files_for_session_path,
     turn_boundary_file_kinds_for_snapshot, unproven_turn_hunk_paths, BoundaryFileKind,

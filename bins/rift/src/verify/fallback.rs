@@ -10,6 +10,15 @@ use rift_recall_substrate::SubstrateReader;
 use super::artifacts::NativeArtifacts;
 use super::verdict::Verdict;
 
+/// Preserve absence separately from malformed or non-object parent metadata.
+pub(super) fn header_counts(header: &super::artifacts::ShardHeader) -> Checked {
+    if header.metadata_bytes.is_none() {
+        Ok(Recorded::default())
+    } else {
+        parent_counts(header.doc.as_ref())
+    }
+}
+
 /// What one metadata document records about its transcript pair's fallback.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Recorded {

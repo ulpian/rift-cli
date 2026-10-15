@@ -64,7 +64,7 @@ fn verdicts(reader: &MemorySubstrate) -> Vec<Verdict> {
     let native = NativeArtifacts::read(reader, ID, &header).unwrap();
     fallback_pass(
         ID,
-        header.fallback,
+        crate::verify::fallback::header_counts(&header),
         &native,
         reader
             .read_artifact(ID, "redaction_report.json")
@@ -410,9 +410,14 @@ fn task_fallback_counts_are_typed_and_bound_by_their_metadata_leaf() {
         .read_artifact(&id, "redaction_report.json")
         .unwrap()
         .unwrap();
-    assert!(fallback_pass(&id, header.fallback, &native, Some(&report))
-        .iter()
-        .any(|v| matches!(v, Verdict::Structure(_))));
+    assert!(fallback_pass(
+        &id,
+        crate::verify::fallback::header_counts(&header),
+        &native,
+        Some(&report)
+    )
+    .iter()
+    .any(|v| matches!(v, Verdict::Structure(_))));
     assert!(
         matches!(crate::verify::passes::shard_passes(&changed).unwrap().worst,
         Verdict::Tamper(why) if why.contains("Merkle root"))

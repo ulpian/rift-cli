@@ -469,6 +469,54 @@ pub fn fixture_archive(name: &str) -> CheckpointArchive {
     }
 }
 
+/// Separate optional-audit fixture; ordinary committed anchors stay unchanged.
+///
+/// # Errors
+/// Refuses inconsistent literal checked fixture inputs.
+pub fn boundary_gap_fixture_archive() -> rift_core::Result<CheckpointArchive> {
+    use rift_core::boundary_gap::{
+        BoundaryEdge, ContextDigest, EvidenceDigest, GapBatch, GapEnvelope, GapTicket,
+        GapTicketFields, MemberKey, SessionKey, SourceKey, TicketDigest,
+    };
+    let mut archive = two_turn_archive();
+    let native = archive
+        .sessions
+        .first()
+        .ok_or_else(|| rift_core::RiftError::validity("gap fixture session absent"))?
+        .clone();
+    archive
+        .session_agents
+        .insert(native.clone(), "claude-code".into());
+    let ticket = GapTicket::new(GapTicketFields {
+        source_key: SourceKey::parse_hex(&"33".repeat(32))?,
+        context_digest: ContextDigest::parse_hex(&"44".repeat(32))?,
+        ticket_digest: TicketDigest::parse_hex(&"55".repeat(32))?,
+        session_key: SessionKey::parse_hex(&"66".repeat(32))?,
+        turn_ordinal: 7,
+        boundary: BoundaryEdge::End,
+        head_oid: Some("77".repeat(20)),
+        captured_at: 1000,
+        queued_at: 1200,
+        attempts: 2,
+    })?;
+    let batch = GapBatch::new(
+        rift_core::RepoId::new("repo-1")?,
+        MemberKey::parse_hex(&"11".repeat(32))?,
+        EvidenceDigest::parse_hex(&"22".repeat(32))?,
+        1500,
+        vec![ticket],
+    )?;
+    let carrier =
+        SessionKey::parse_hex(&rift_core::capture_session_row_id("claude-code", &native))?;
+    archive.boundary_gaps = Some(crate::backend::FrozenBoundaryGaps::new(vec![
+        GapEnvelope::new(carrier, batch),
+    ])?);
+    archive.checkpoint_id = archive
+        .derived_checkpoint_id()
+        .ok_or_else(|| rift_core::RiftError::validity("gap fixture checkpoint absent"))?;
+    Ok(archive)
+}
+
 /// Every fixture name the harness/anchors cover.
 #[must_use]
 pub fn fixture_names() -> &'static [&'static str] {
@@ -505,6 +553,7 @@ fn empty_archive() -> CheckpointArchive {
     )
     .unwrap_or_else(|_| "0".repeat(64));
     CheckpointArchive {
+        boundary_gaps: None,
         repo: PathBuf::from("/parity-sandbox"),
         commit: "0".repeat(40),
         checkpoint_id,
@@ -577,6 +626,7 @@ fn two_turn_archive() -> CheckpointArchive {
     ];
     let content = empty_content();
     CheckpointArchive {
+        boundary_gaps: None,
         repo: PathBuf::from("/parity-sandbox"),
         commit: "1".repeat(40),
         checkpoint_id: "ab".to_string() + &"cd".repeat(31),
@@ -804,6 +854,7 @@ mod tests {
             })
             .collect();
         CheckpointArchive {
+            boundary_gaps: None,
             repo: PathBuf::from("/parity-sandbox"),
             commit: format!("{commit_byte:02x}").repeat(20),
             checkpoint_id: format!("{commit_byte:02x}").repeat(32),

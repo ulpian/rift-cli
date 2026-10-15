@@ -165,6 +165,7 @@ pub(super) fn session_facts_for_archive(
     session: &str,
 ) -> Result<rift_shadow::SessionFacts> {
     Ok(rift_shadow::SessionFacts {
+        boundary_gaps: None,
         read_facts: read_facts_for_archive(rt, store, agent, session),
         serve_audit: serve_audit_for_archive(rt, work_tree, session)?,
         usage: usage_facts_for_archive(rt, store, agent, session),

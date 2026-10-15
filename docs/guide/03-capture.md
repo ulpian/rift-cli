@@ -236,6 +236,12 @@ importable or projectable), the transcript and its compaction, the tool calls
 including files read, and four mechanical digests; [05](05-ledger-and-verification.md)
 walks the anatomy.
 
+An optional `turn_boundary_gaps.jsonl` records a checked repository/member recovery
+assertion. A genuine checkpoint session carries it; other subject session digests
+create no sessions, usage, lifecycle or attribution facts. Its commitments describe
+source provenance, not destination paths, possession of old bytes or permission to
+retire queued work. It does not restore missing historical observations.
+
 **The compaction is deterministic, not a summary**: tool calls reduce to identifiers,
 file reads to handles, no model runs in capture, and the "intent and outcome" slot is
 your redacted prompt plus mechanical outcome facts. **Re-condensing an unchanged session is a no-op.** Each subagent gets its own subtree, its tokens roll up to the
@@ -414,8 +420,11 @@ any without a valid redaction report, re-derives events from the shard's own tra
 through the same writers and identity derivations as the live path, and advances an
 append-only watermark. Git is the record, so the bridge's view wins and the hook path is
 an optimisation over it. `rift rebuild` runs it (delete `projection.db` first for a
-from-scratch rebuild; over a live projection it is a set-union no-op). Hooks alone cannot
-be authoritative: they miss sessions run before installation. The bridge never reads raw session bytes.
+from-scratch rebuild; ordinary existing checkpoints are skipped). A present recovery
+audit is authenticated and its exact projection rechecked even for an existing
+checkpoint. Refusal preserves that checkpoint and adds no unauthenticated gap
+facts. Hooks alone cannot be authoritative: they miss sessions run before
+installation. The bridge never reads raw session bytes.
 
 A read-only importer lands another tool's checkpoints under their own chain era, never as
 a chain anchor ([05](05-ledger-and-verification.md)).

@@ -20,6 +20,7 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         // Refuse malformed task sets BEFORE any object write: a tool-use id is
         // a git tree name, and a duplicate would be two entries with one name.
         validate_task_set(&archive.tasks)?;
+        super::boundary_gaps::validate_archive(archive)?;
         let transcripts = archive.transcript.iter();
         for t in transcripts.chain(archive.tasks.iter().filter_map(|t| t.transcript.as_ref())) {
             super::spills::validate_spills(&t.spills)?;
@@ -98,6 +99,9 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         if let Some(window_journal) = archive.window_journal_jsonl() {
             let name = super::artifacts::WINDOW_JOURNAL_NAME;
             entries.push(self.structural_entry(name, &window_journal)?);
+        }
+        if let Some(gaps) = &archive.boundary_gaps {
+            entries.push(self.structural_entry(super::BOUNDARY_GAPS_NAME, gaps.as_bytes())?);
         }
         self.push_digest_entries(archive, &mut entries)?;
         Ok(entries)

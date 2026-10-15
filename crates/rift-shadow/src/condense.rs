@@ -38,6 +38,8 @@ pub type CheckpointId = String;
 /// the hook and the shard. A new fact is a field here and nowhere else.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionFacts {
+    /// Checked repository recovery audit carried by this genuine session.
+    pub boundary_gaps: Option<crate::backend::FrozenBoundaryGaps>,
     /// The session's captured read facts (`tool_calls.jsonl`).
     pub read_facts: Vec<crate::backend::ArchivedReadFact>,
     /// The session's frozen serve envelopes, already canonical, validated,
@@ -263,6 +265,7 @@ fn archive_for_id(
     facts: SessionFacts,
 ) -> CheckpointArchive {
     CheckpointArchive {
+        boundary_gaps: facts.boundary_gaps,
         repo: std::path::PathBuf::new(),
         commit: String::new(),
         checkpoint_id: String::new(),
@@ -676,6 +679,7 @@ mod tests {
             .unwrap()
             .redacted;
         let mut archive = CheckpointArchive {
+            boundary_gaps: None,
             repo: std::path::PathBuf::from("/tmp/r"),
             commit: "abc123".to_owned(),
             checkpoint_id: String::new(),
@@ -846,6 +850,7 @@ mod tests {
         const MEASURED_ID: &str =
             "f62a493024792e8f4dc540579c3389e2b4f8826be45d3f51ebb336a4424cf960";
         let leaves = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: b"",
             ..ShardLeafBytes::default()
         };
@@ -965,6 +970,7 @@ mod tests {
         let raw = SecretBytes::new(b"capture".to_vec());
         let packs = RulePackSet::builtin();
         let facts = SessionFacts {
+            boundary_gaps: None,
             read_facts: vec![crate::backend::ArchivedReadFact {
                 tool_use_id: "t1".into(),
                 tool_name: "Read".into(),
@@ -1021,6 +1027,7 @@ mod tests {
             lines.push('\n');
         }
         SessionFacts {
+            boundary_gaps: None,
             read_facts: Vec::new(),
             serve_audit: Some(lines.into_bytes()),
             usage: Vec::new(),
@@ -1085,6 +1092,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_serve_audit_is_the_same_as_none() {
         let empty = SessionFacts {
+            boundary_gaps: None,
             read_facts: Vec::new(),
             serve_audit: Some(Vec::new()),
             usage: Vec::new(),
@@ -1122,6 +1130,7 @@ mod tests {
             })
             .collect();
         SessionFacts {
+            boundary_gaps: None,
             usage,
             ..SessionFacts::default()
         }
@@ -1161,6 +1170,7 @@ mod tests {
         let raw = SecretBytes::new(b"capture".to_vec());
         let packs = RulePackSet::builtin();
         let named = SessionFacts {
+            boundary_gaps: None,
             agent: Some("codex".to_owned()),
             ..SessionFacts::default()
         };
@@ -1196,6 +1206,7 @@ mod tests {
             row: evict,
         };
         let journaled = SessionFacts {
+            boundary_gaps: None,
             window_journal: vec![row],
             ..SessionFacts::default()
         };
@@ -1216,6 +1227,7 @@ mod tests {
         let raw = SecretBytes::new(b"capture".to_vec());
         let packs = RulePackSet::builtin();
         let searched = SessionFacts {
+            boundary_gaps: None,
             tool_results: vec![crate::backend::ArchivedToolResult {
                 id: "a".repeat(64),
                 session: SESSION.to_owned(),

@@ -21,9 +21,11 @@
 
 mod archive;
 mod artifacts;
+pub mod boundary_gaps;
 #[cfg(test)]
 mod fixtures;
 mod leaves;
+pub mod native_read;
 mod originals;
 pub mod rewrite;
 mod shard;
@@ -48,6 +50,7 @@ pub use archive::{
 #[cfg(test)]
 pub(crate) use artifacts::rfc3339_utc_ms;
 pub use artifacts::session_meta_json;
+pub use boundary_gaps::{FrozenBoundaryGaps, BOUNDARY_GAPS_NAME};
 pub use leaves::{
     shard_merkle_leaves, shard_merkle_root, DigestLeafBytes, OriginalLeafBytes, SessionMetaLeaf,
     ShardLeafBytes, SpillLeafBytes, TaskLeafBytes,

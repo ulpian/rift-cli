@@ -179,6 +179,8 @@ impl WorktreeLabel {
 /// purpose so redacted bytes never reach a log line.
 #[derive(Clone)]
 pub struct CheckpointArchive {
+    /// Frozen checked recovery audit, absent on ordinary archives.
+    pub boundary_gaps: Option<super::FrozenBoundaryGaps>,
     /// The repo root the archive belongs to.
     pub repo: PathBuf,
     /// The anchoring working-tree commit oid (hex).

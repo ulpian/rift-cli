@@ -98,6 +98,10 @@ impl CheckpointArchive {
         let spill_leaves = self.spill_leaves();
         let original_leaves = self.original_leaves();
         shard_merkle_root(&ShardLeafBytes {
+            boundary_gaps: self
+                .boundary_gaps
+                .as_ref()
+                .map(super::FrozenBoundaryGaps::as_bytes),
             content_redacted: self.content.as_slice(),
             full_jsonl: full.as_deref(),
             redaction_report: &report,
@@ -434,6 +438,7 @@ impl CheckpointArchive {
             );
             out.insert(TRANSCRIPT_FULL_NAME.to_owned(), t.full.as_slice().to_vec());
         }
+        self.insert_boundary_gap_artifact(&mut out);
         if let Some(usage) = self.usage_jsonl() {
             out.insert(USAGE_NAME.to_owned(), usage);
         }
@@ -854,6 +859,7 @@ mod tests {
             })
             .collect();
         let leaves = shard_merkle_leaves(&ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: b"c",
             redaction_report: b"r",
             session_metas: &metas,
@@ -910,6 +916,7 @@ mod tests {
         // bytewise position — after content_hash.txt, before full.jsonl),
         // then report, then tool_calls.
         let leaves = shard_merkle_leaves(&ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: with_facts.content.as_slice(),
             redaction_report: &report,
             tool_calls: Some(&tool_calls),
@@ -933,6 +940,7 @@ mod tests {
         // artifacts minus the digest leaf address a different path.
         let with_digest_root = with_facts.merkle_root();
         let without_digest_root = shard_merkle_root(&ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: with_facts.content.as_slice(),
             redaction_report: &report,
             tool_calls: Some(&tool_calls),
@@ -966,6 +974,7 @@ mod tests {
         let report = bare.redaction_report_json();
         assert_eq!(
             shard_merkle_leaves(&ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: bare.content.as_slice(),
                 redaction_report: &report,
                 ..ShardLeafBytes::default()
@@ -1126,6 +1135,7 @@ mod tests {
         let full = a.full_jsonl().unwrap();
         let report = a.redaction_report_json();
         let leaves = shard_merkle_leaves(&ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: a.content.as_slice(),
             full_jsonl: Some(&full),
             redaction_report: &report,
@@ -1164,6 +1174,7 @@ mod tests {
         terminated.push(b'\n');
         assert_eq!(
             shard_merkle_root(&ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: a.content.as_slice(),
                 full_jsonl: Some(&terminated),
                 redaction_report: &report,
@@ -1247,6 +1258,7 @@ mod tests {
             &a.sessions,
             NATIVE_CANON_VERSION,
             &ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: a.content.as_slice(),
                 full_jsonl: None,
                 redaction_report: &a.redaction_report_json(),

@@ -184,6 +184,7 @@ fn originals_shard(spec: &Spec) -> MemorySubstrate {
         own_bodies.iter().map(|b| leaf(None, b)).collect();
     original_leaves.extend(inner_bodies.iter().map(|b| leaf(Some(TASK), b)));
     let leaves = ShardLeafBytes {
+        boundary_gaps: None,
         content_redacted: CONTENT,
         redaction_report: report.as_bytes(),
         transcript_compact: Some(own.compact.as_slice()),

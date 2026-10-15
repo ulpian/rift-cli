@@ -31,25 +31,10 @@ pub async fn record_boundary_gap_batch(
     store: &impl CanonicalStore,
     batch: &GapBatch,
 ) -> Result<bool> {
-    if let Some(parent) = parent_row(store, batch.gap_id()).await? {
-        let existing = decode_parent(parent, load_tickets(store, batch.gap_id()).await?)?;
-        return if existing == *batch {
-            Ok(false)
-        } else {
-            Err(inconsistent())
-        };
-    }
-    let existing = load_tickets(store, batch.gap_id()).await?;
-    let expected: BTreeMap<_, _> = batch
-        .tickets()
-        .iter()
-        .map(|ticket| (ticket.source_key(), ticket))
-        .collect();
-    for member in &existing {
-        if expected.get(&member.source_key()).copied() != Some(member) {
-            return Err(inconsistent());
-        }
-    }
+    let existing = match preflight(store, batch).await? {
+        ExistingGap::Complete => return Ok(false),
+        ExistingGap::Parentless(existing) => existing,
+    };
     let present: BTreeMap<_, _> = existing
         .iter()
         .map(|ticket| (ticket.source_key(), ticket))
@@ -77,6 +62,43 @@ pub async fn record_boundary_gap_batch(
         return Err(inconsistent());
     }
     Ok(inserted)
+}
+
+enum ExistingGap {
+    Complete,
+    Parentless(Vec<GapTicket>),
+}
+
+/// Check a complete matching parent or an exact expected parentless subset.
+/// This read-only preflight appends nothing and grants no retirement authority.
+///
+/// # Errors
+/// Refuses storage errors or any divergent, extra, malformed or incomplete parent.
+pub async fn check_boundary_gap_batch(store: &impl CanonicalStore, batch: &GapBatch) -> Result<()> {
+    preflight(store, batch).await.map(|_| ())
+}
+
+async fn preflight(store: &impl CanonicalStore, batch: &GapBatch) -> Result<ExistingGap> {
+    if let Some(parent) = parent_row(store, batch.gap_id()).await? {
+        let existing = decode_parent(parent, load_tickets(store, batch.gap_id()).await?)?;
+        return if existing == *batch {
+            Ok(ExistingGap::Complete)
+        } else {
+            Err(inconsistent())
+        };
+    }
+    let existing = load_tickets(store, batch.gap_id()).await?;
+    let expected: BTreeMap<_, _> = batch
+        .tickets()
+        .iter()
+        .map(|ticket| (ticket.source_key(), ticket))
+        .collect();
+    for member in &existing {
+        if expected.get(&member.source_key()).copied() != Some(member) {
+            return Err(inconsistent());
+        }
+    }
+    Ok(ExistingGap::Parentless(existing))
 }
 
 /// Read one complete checked projection batch, including exact membership.

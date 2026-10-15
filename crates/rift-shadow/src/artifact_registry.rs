@@ -213,6 +213,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         sync_format_row: "Capture document (`content.redacted`)",
     },
     ShardArtifact {
+        path: "turn_boundary_gaps.jsonl",
+        version: VersionField::PerLineSchemaVersion(1),
+        sync_format_row: "Boundary recovery audit (`turn_boundary_gaps.jsonl`)",
+    },
+    ShardArtifact {
         path: "usage.jsonl",
         version: VersionField::PerLineSchemaVersion(crate::backend::USAGE_SCHEMA_VERSION),
         sync_format_row: "Usage (`usage.jsonl`)",

@@ -12,6 +12,42 @@ use rift_recall_substrate::{GixSubstrate, SubstrateReader};
 use rift_shadow::backend::{CheckpointArchive, DigestLeafBytes, RedactionReportView};
 use rift_shadow::{fixture_archive, NativeBackend, ShadowBackend};
 
+struct MovingNativeTip {
+    source: GixSubstrate,
+    repo: std::path::PathBuf,
+    second_tip: String,
+    switched: std::cell::Cell<bool>,
+}
+
+impl SubstrateReader for MovingNativeTip {
+    fn is_local_only(&self) -> bool {
+        self.source.is_local_only()
+    }
+    fn checkpoints(&self) -> rift_core::Result<Vec<rift_recall_substrate::CheckpointShard>> {
+        self.source.checkpoints()
+    }
+    fn blob(&self, id: &str) -> rift_core::Result<Option<Vec<u8>>> {
+        self.source.blob(id)
+    }
+    fn read_artifact(&self, id: &str, rel: &str) -> rift_core::Result<Option<Vec<u8>>> {
+        self.source.read_artifact(id, rel)
+    }
+    fn read_native_artifact(&self, id: &str, rel: &str) -> rift_core::Result<Option<Vec<u8>>> {
+        if rel == "full.jsonl" {
+            origin_git(
+                &self.repo,
+                &[
+                    "update-ref",
+                    rift_recall_substrate::Dialect::Rift.checkpoint_ref(),
+                    &self.second_tip,
+                ],
+            );
+            self.switched.set(true);
+        }
+        self.source.read_native_artifact(id, rel)
+    }
+}
+
 /// Init a real git repo with a deterministic default branch.
 fn init_repo(dir: &Path) {
     let ok = std::process::Command::new("git")
@@ -140,6 +176,7 @@ fn a_task_subtree_roundtrips_and_the_root_rederives_from_read_back_bytes() {
         transcript_full: Some(&task_full),
     }];
     let derived = shard_merkle_root(&ShardLeafBytes {
+        boundary_gaps: None,
         content_redacted: &content,
         redaction_report: &report,
         tasks: &task_leaves,
@@ -191,6 +228,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
     let session_worktrees = read("session_worktrees.jsonl");
     let tool_results = read("tool_results.jsonl");
     let leaves = ShardLeafBytes {
+        boundary_gaps: None,
         content_redacted: &content,
         full_jsonl: full.as_deref(),
         redaction_report: &report,
@@ -229,6 +267,7 @@ fn the_recorded_root_is_re_derivable_from_the_shard_as_written() {
     let mut tampered = content.clone();
     tampered.push(b'x');
     let after = shard_merkle_root(&ShardLeafBytes {
+        boundary_gaps: None,
         content_redacted: &tampered,
         ..leaves
     });
@@ -308,6 +347,7 @@ fn a_seeded_secret_never_reaches_any_native_artifact() {
     ))
     .unwrap();
     let archive = CheckpointArchive {
+        boundary_gaps: None,
         repo: tmp.path().to_path_buf(),
         commit: "2".repeat(40),
         checkpoint_id: "cc".to_string() + &"dd".repeat(31),
@@ -375,6 +415,7 @@ fn archive_with_transcript(
 ) -> CheckpointArchive {
     let out = rift_shadow_redact::redact(&SecretBytes::new(capture.to_vec())).unwrap();
     let mut archive = CheckpointArchive {
+        boundary_gaps: None,
         repo: repo.to_path_buf(),
         commit: "3".repeat(40),
         checkpoint_id: String::new(),
@@ -728,4 +769,498 @@ fn git_env(dir: &Path, index: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+fn origin_gap_archive() -> CheckpointArchive {
+    use rift_core::boundary_gap::*;
+    let mut archive = fixture_archive("two_turn");
+    let native = archive.sessions.first().unwrap().clone();
+    archive
+        .session_agents
+        .insert(native.clone(), "claude-code".into());
+    let ticket = GapTicket::new(GapTicketFields {
+        source_key: SourceKey::parse_hex(&"11".repeat(32)).unwrap(),
+        context_digest: ContextDigest::parse_hex(&"22".repeat(32)).unwrap(),
+        ticket_digest: TicketDigest::parse_hex(&"33".repeat(32)).unwrap(),
+        session_key: SessionKey::parse_hex(&"44".repeat(32)).unwrap(),
+        turn_ordinal: 1,
+        boundary: BoundaryEdge::End,
+        head_oid: None,
+        captured_at: 10,
+        queued_at: 20,
+        attempts: 0,
+    })
+    .unwrap();
+    let batch = GapBatch::new(
+        rift_core::RepoId::new("source-repo").unwrap(),
+        MemberKey::parse_hex(&"55".repeat(32)).unwrap(),
+        EvidenceDigest::parse_hex(&"66".repeat(32)).unwrap(),
+        30,
+        vec![ticket],
+    )
+    .unwrap();
+    let carrier =
+        SessionKey::parse_hex(&rift_core::capture_session_row_id("claude-code", &native)).unwrap();
+    archive.boundary_gaps = Some(
+        rift_shadow::backend::FrozenBoundaryGaps::new(vec![GapEnvelope::new(carrier, batch)])
+            .unwrap(),
+    );
+    archive.checkpoint_id = archive.derived_checkpoint_id().unwrap();
+    archive
+}
+
+fn origin_git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_INDEX_FILE", dir.join("origin-private-index"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", dir.join("absent-config"))
+        .env("GIT_AUTHOR_NAME", "Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.test")
+        .env("GIT_COMMITTER_NAME", "Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.test")
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+#[tokio::test]
+async fn a_native_gap_cannot_authenticate_a_required_leaf_from_only_the_legacy_origin() {
+    use rift_recall_substrate::Dialect;
+    use rift_store::{CanonicalStore, SqliteStore};
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let archive = origin_gap_archive();
+    native_backend(tmp.path())
+        .archive_checkpoint(&archive)
+        .unwrap();
+    let sub = GixSubstrate::open(tmp.path()).unwrap();
+    let control = SqliteStore::open_in_memory().unwrap();
+    control.create_canonical_schema().unwrap();
+    let positive = rift_shadow::ingest_from_substrate(&control, &sub, "repo", "claude-code", 100)
+        .await
+        .unwrap();
+    assert_eq!((positive.shards_projected, positive.refused.len()), (1, 0));
+    let id = &archive.checkpoint_id;
+    let metadata = sub.read_artifact(id, "metadata.json").unwrap().unwrap();
+    let full = sub.read_artifact(id, "full.jsonl").unwrap().unwrap();
+    let native_ref = Dialect::Rift.checkpoint_ref();
+    let original = origin_git(tmp.path(), &["rev-parse", native_ref]);
+    origin_git(
+        tmp.path(),
+        &["update-ref", Dialect::Legacy.checkpoint_ref(), &original],
+    );
+    origin_git(tmp.path(), &["read-tree", native_ref]);
+    let leaf = format!("{}/{}/full.jsonl", &id[..2], &id[2..]);
+    assert!(
+        origin_git(tmp.path(), &["ls-tree", "-r", "--name-only", native_ref])
+            .lines()
+            .any(|path| path == leaf),
+        "the required native leaf exists before removal"
+    );
+    origin_git(tmp.path(), &["update-index", "--force-remove", &leaf]);
+    let tree = origin_git(tmp.path(), &["write-tree"]);
+    let changed = origin_git(
+        tmp.path(),
+        &["commit-tree", &tree, "-m", "fixture missing native leaf"],
+    );
+    origin_git(tmp.path(), &["update-ref", native_ref, &changed]);
+    let hybrid = GixSubstrate::open(tmp.path()).unwrap();
+    assert_eq!(hybrid.checkpoints().unwrap()[0].dialect, Dialect::Rift);
+    assert_eq!(hybrid.checkpoints().unwrap()[0].checkpoint_id, *id);
+    assert_eq!(
+        hybrid.read_artifact(id, "metadata.json").unwrap().unwrap(),
+        metadata
+    );
+    assert_eq!(
+        hybrid.read_artifact(id, "full.jsonl").unwrap().unwrap(),
+        full
+    );
+    assert!(
+        !origin_git(tmp.path(), &["ls-tree", "-r", "--name-only", native_ref])
+            .lines()
+            .any(|p| p == leaf)
+    );
+    let store = SqliteStore::open_in_memory().unwrap();
+    store.create_canonical_schema().unwrap();
+    let actual = rift_shadow::ingest_from_substrate(&store, &hybrid, "repo", "claude-code", 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            actual.shards_projected,
+            actual.refused.len(),
+            store.count("checkpoint").await.unwrap(),
+            store.count("turn_boundary_gap_batch").await.unwrap(),
+            store.count("turn_boundary_gap_ticket").await.unwrap()
+        ),
+        (0, 1, 0, 0, 0),
+        "a complete root must come from the native origin alone"
+    );
+}
+
+fn incomplete_native_tip(repo: &Path, original: &str, id: &str, missing: &str) -> String {
+    origin_git(repo, &["read-tree", original]);
+    let path = format!("{}/{}/{missing}", &id[..2], &id[2..]);
+    assert!(
+        origin_git(repo, &["ls-tree", "-r", "--name-only", original])
+            .lines()
+            .any(|p| p == path)
+    );
+    origin_git(repo, &["update-index", "--force-remove", &path]);
+    let tree = origin_git(repo, &["write-tree"]);
+    origin_git(
+        repo,
+        &[
+            "commit-tree",
+            &tree,
+            "-m",
+            "fixture incomplete native snapshot",
+        ],
+    )
+}
+
+fn assert_native_tip_membership(
+    repo: &Path,
+    original: &str,
+    tip: &str,
+    id: &str,
+    missing: &str,
+    present: &str,
+) {
+    let prefix = format!("{}/{}", &id[..2], &id[2..]);
+    let names = origin_git(repo, &["ls-tree", "-r", "--name-only", tip]);
+    assert!(!names.lines().any(|p| p == format!("{prefix}/{missing}")));
+    assert!(names.lines().any(|p| p == format!("{prefix}/{present}")));
+    for name in [
+        "metadata.json",
+        "turn_boundary_gaps.jsonl",
+        "redaction_report.json",
+        present,
+    ] {
+        let actual = origin_git(repo, &["rev-parse", &format!("{tip}:{prefix}/{name}")]);
+        let expected = origin_git(repo, &["rev-parse", &format!("{original}:{prefix}/{name}")]);
+        assert_eq!(actual, expected, "unchanged native {name}");
+    }
+}
+
+async fn incomplete_tip_refuses_with_a_fresh_reader(repo: &Path, tip: &str) {
+    use rift_recall_substrate::Dialect;
+    use rift_store::{CanonicalStore, SqliteStore};
+    origin_git(repo, &["update-ref", Dialect::Rift.checkpoint_ref(), tip]);
+    let source = GixSubstrate::open(repo).unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+    store.create_canonical_schema().unwrap();
+    let report = rift_shadow::ingest_from_substrate(&store, &source, "repo", "claude-code", 100)
+        .await
+        .unwrap();
+    assert_eq!((report.shards_projected, report.refused.len()), (0, 1));
+    for table in [
+        "checkpoint",
+        "turn_boundary_gap_batch",
+        "turn_boundary_gap_ticket",
+        "session",
+        "capture_session_identity",
+        "captured_event",
+    ] {
+        assert_eq!(store.count(table).await.unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn a_gap_cannot_be_assembled_across_two_incomplete_native_tips() {
+    use rift_recall_substrate::Dialect;
+    use rift_store::{CanonicalStore, SqliteStore};
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let archive = origin_gap_archive();
+    native_backend(tmp.path())
+        .archive_checkpoint(&archive)
+        .unwrap();
+    let complete = GixSubstrate::open(tmp.path()).unwrap();
+    let control = SqliteStore::open_in_memory().unwrap();
+    control.create_canonical_schema().unwrap();
+    let report =
+        rift_shadow::ingest_from_substrate(&control, &complete, "repo", "claude-code", 100)
+            .await
+            .unwrap();
+    assert_eq!((report.shards_projected, report.refused.len()), (1, 0));
+    let native_ref = Dialect::Rift.checkpoint_ref();
+    let original = origin_git(tmp.path(), &["rev-parse", native_ref]);
+    let id = &archive.checkpoint_id;
+    let a = incomplete_native_tip(tmp.path(), &original, id, "full.jsonl");
+    let b = incomplete_native_tip(tmp.path(), &original, id, "content.redacted");
+    assert_ne!(a, b);
+    assert_native_tip_membership(
+        tmp.path(),
+        &original,
+        &a,
+        id,
+        "full.jsonl",
+        "content.redacted",
+    );
+    assert_native_tip_membership(
+        tmp.path(),
+        &original,
+        &b,
+        id,
+        "content.redacted",
+        "full.jsonl",
+    );
+    incomplete_tip_refuses_with_a_fresh_reader(tmp.path(), &a).await;
+    incomplete_tip_refuses_with_a_fresh_reader(tmp.path(), &b).await;
+    origin_git(tmp.path(), &["update-ref", native_ref, &a]);
+    let moving = MovingNativeTip {
+        source: GixSubstrate::open(tmp.path()).unwrap(),
+        repo: tmp.path().to_owned(),
+        second_tip: b.clone(),
+        switched: false.into(),
+    };
+    let store = SqliteStore::open_in_memory().unwrap();
+    store.create_canonical_schema().unwrap();
+    let report = rift_shadow::ingest_from_substrate(&store, &moving, "repo", "claude-code", 100)
+        .await
+        .unwrap();
+    assert!(moving.switched.get());
+    assert_eq!(origin_git(tmp.path(), &["rev-parse", native_ref]), b);
+    eprintln!(
+        "GAP_NATIVE_TIP_FIXTURE {}",
+        serde_json::json!({"checkpoint_id":id,"complete_tip":original,"first_tip_missing_full":a,"second_tip_missing_content":b})
+    );
+    assert_eq!(
+        (report.shards_projected, report.refused.len()),
+        (0, 1),
+        "neither immutable native tip contains the authenticated complete shard"
+    );
+    for table in [
+        "checkpoint",
+        "turn_boundary_gap_batch",
+        "turn_boundary_gap_ticket",
+        "session",
+        "capture_session_identity",
+        "captured_event",
+    ] {
+        assert_eq!(store.count(table).await.unwrap(), 0);
+    }
+}
+
+fn legacy_native_root_and_ids(source: &impl SubstrateReader, id: &str) -> (String, Vec<String>) {
+    use rift_shadow::backend::native_read::{shard_header, NativeArtifacts};
+    let header = shard_header(source, id).unwrap();
+    let native = NativeArtifacts::read(source, id, &header).unwrap();
+    let report = source
+        .read_artifact(id, "redaction_report.json")
+        .unwrap()
+        .unwrap();
+    let tasks = native.task_leaves();
+    let sessions = native.session_meta_leaves();
+    let spills = rift_shadow::backend::native_read::manifests::spill_leaves(&native.spills);
+    let originals =
+        rift_shadow::backend::native_read::manifests::original_leaves(&native.originals);
+    let leaves = native.leaves(
+        native.content.as_deref().unwrap(),
+        &report,
+        &tasks,
+        &sessions,
+        &spills,
+        &originals,
+    );
+    (
+        rift_shadow::backend::shard_merkle_root(&leaves).to_hex(),
+        rift_shadow::condense::checkpoint_ids_for_shard(&header.sessions, 3, &leaves),
+    )
+}
+
+#[test]
+fn deleting_a_writer_emitted_empty_original_refuses_gap_binding_despite_unchanged_hashes() {
+    use rift_recall_substrate::Dialect;
+    use rift_shadow::backend::native_read::load_native_boundary_gaps;
+    use rift_shadow::backend::{ArchivedOriginal, OriginalState};
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let mut archive = origin_gap_archive();
+    let packs = rift_shadow_redact::RulePackSet::builtin();
+    // An empty body can be gated and written by the typed backend, but is NOT
+    // a valid owned original envelope. This is only a content/presence proof,
+    // never a positive claim about CLI original-result rendering.
+    let empty =
+        rift_shadow::transcript::sealed_original(&SecretBytes::new(vec![]), &packs).unwrap();
+    assert!(rift_shadow::backend::rewrite::parse_original_record(empty.as_slice()).is_none());
+    let (mut pair, _) = rift_shadow::archived_transcript(
+        &SecretBytes::new(br#"{"type":"user","message":"safe"}"#.to_vec()),
+        0,
+        &packs,
+    )
+    .unwrap();
+    pair.originals.push(ArchivedOriginal {
+        tool_use_id: "empty".into(),
+        agent_id: None,
+        form: None,
+        replaced: vec![],
+        line: None,
+        rewritten: None,
+        state: OriginalState::Sealed,
+        body: Some(empty),
+    });
+    archive.transcript = Some(pair);
+    archive.checkpoint_id = archive.derived_checkpoint_id().unwrap();
+    native_backend(tmp.path())
+        .archive_checkpoint(&archive)
+        .unwrap();
+    let present = GixSubstrate::open(tmp.path()).unwrap();
+    let id = &archive.checkpoint_id;
+    assert_eq!(
+        present
+            .read_native_artifact(id, "tool-originals/empty.json")
+            .unwrap(),
+        Some(vec![])
+    );
+    let shard = present.checkpoints().unwrap().remove(0);
+    let gap = archive.boundary_gaps.as_ref().unwrap().as_bytes();
+    assert!(load_native_boundary_gaps(&present, &shard, gap).is_ok());
+    let binding = legacy_native_root_and_ids(&present, id);
+    assert_eq!(binding, (archive.merkle_root().to_hex(), vec![id.clone()]));
+    let original = origin_git(tmp.path(), &["rev-parse", Dialect::Rift.checkpoint_ref()]);
+    let missing_tip = incomplete_native_tip(tmp.path(), &original, id, "tool-originals/empty.json");
+    assert_native_tip_membership(
+        tmp.path(),
+        &original,
+        &missing_tip,
+        id,
+        "tool-originals/empty.json",
+        "full.jsonl",
+    );
+    origin_git(
+        tmp.path(),
+        &["update-ref", Dialect::Rift.checkpoint_ref(), &missing_tip],
+    );
+    let missing = GixSubstrate::open(tmp.path()).unwrap();
+    assert_eq!(
+        missing
+            .read_native_artifact(id, "tool-originals/empty.json")
+            .unwrap(),
+        None
+    );
+    assert_eq!(legacy_native_root_and_ids(&missing, id), binding);
+    assert!(load_native_boundary_gaps(&missing, &shard, gap).is_err());
+}
+
+#[test]
+fn native_snapshot_pins_initial_absence_or_a_complete_tree_until_reader_reopen() {
+    use rift_recall_substrate::Dialect;
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let archive = origin_gap_archive();
+    let id = &archive.checkpoint_id;
+    let absent = GixSubstrate::open(tmp.path()).unwrap();
+    assert_eq!(absent.read_native_artifact(id, "full.jsonl").unwrap(), None);
+    native_backend(tmp.path())
+        .archive_checkpoint(&archive)
+        .unwrap();
+    assert_eq!(absent.read_native_artifact(id, "full.jsonl").unwrap(), None);
+    assert_eq!(
+        absent.read_artifact(id, "full.jsonl").unwrap(),
+        archive.full_jsonl()
+    );
+    assert_eq!(absent.checkpoints().unwrap().len(), 1);
+    let pinned = GixSubstrate::open(tmp.path()).unwrap();
+    assert_eq!(
+        pinned.read_native_artifact(id, "full.jsonl").unwrap(),
+        archive.full_jsonl()
+    );
+    let original = origin_git(tmp.path(), &["rev-parse", Dialect::Rift.checkpoint_ref()]);
+    let missing = incomplete_native_tip(tmp.path(), &original, id, "full.jsonl");
+    origin_git(
+        tmp.path(),
+        &["update-ref", Dialect::Rift.checkpoint_ref(), &missing],
+    );
+    assert_eq!(
+        pinned.read_native_artifact(id, "full.jsonl").unwrap(),
+        archive.full_jsonl()
+    );
+    assert_eq!(pinned.read_artifact(id, "full.jsonl").unwrap(), None);
+    let reopened = GixSubstrate::open(tmp.path()).unwrap();
+    assert_eq!(
+        reopened.read_native_artifact(id, "full.jsonl").unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_gap_carried_only_by_the_legacy_ref_cannot_claim_native_authentication() {
+    use rift_recall_substrate::Dialect;
+    use rift_store::{CanonicalStore, SqliteStore};
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let archive = origin_gap_archive();
+    native_backend(tmp.path())
+        .archive_checkpoint(&archive)
+        .unwrap();
+    let native = GixSubstrate::open(tmp.path()).unwrap();
+    let control = SqliteStore::open_in_memory().unwrap();
+    control.create_canonical_schema().unwrap();
+    let positive =
+        rift_shadow::ingest_from_substrate(&control, &native, "repo", "claude-code", 100)
+            .await
+            .unwrap();
+    assert_eq!((positive.shards_projected, positive.refused.len()), (1, 0));
+    let id = &archive.checkpoint_id;
+    let metadata = native.read_native_artifact(id, "metadata.json").unwrap();
+    let gap = native
+        .read_native_artifact(id, "turn_boundary_gaps.jsonl")
+        .unwrap();
+    let original = origin_git(tmp.path(), &["rev-parse", Dialect::Rift.checkpoint_ref()]);
+    origin_git(
+        tmp.path(),
+        &["update-ref", Dialect::Legacy.checkpoint_ref(), &original],
+    );
+    origin_git(
+        tmp.path(),
+        &["update-ref", "-d", Dialect::Rift.checkpoint_ref()],
+    );
+    let legacy = GixSubstrate::open(tmp.path()).unwrap();
+    assert_eq!(
+        legacy.checkpoints().unwrap().first().unwrap().dialect,
+        Dialect::Legacy
+    );
+    assert_eq!(legacy.read_artifact(id, "metadata.json").unwrap(), metadata);
+    assert_eq!(
+        legacy
+            .read_artifact(id, "turn_boundary_gaps.jsonl")
+            .unwrap(),
+        gap
+    );
+    assert_eq!(
+        legacy.read_native_artifact(id, "metadata.json").unwrap(),
+        None
+    );
+    let store = SqliteStore::open_in_memory().unwrap();
+    store.create_canonical_schema().unwrap();
+    let report = rift_shadow::ingest_from_substrate(&store, &legacy, "repo", "claude-code", 100)
+        .await
+        .unwrap();
+    assert_eq!((report.shards_projected, report.refused.len()), (0, 1));
+    for table in [
+        "checkpoint",
+        "turn_boundary_gap_batch",
+        "turn_boundary_gap_ticket",
+        "session",
+        "capture_session_identity",
+        "captured_event",
+    ] {
+        assert_eq!(store.count(table).await.unwrap(), 0);
+    }
 }

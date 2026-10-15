@@ -9,7 +9,7 @@ fn store() -> SqliteStore {
     s
 }
 
-fn valid_report() -> String {
+pub(super) fn valid_report() -> String {
     format!(
         r#"{{"total_spans":1,"rule_pack_versions":["builtin@1"],"input_sha256":"{}"}}"#,
         "c".repeat(64)

@@ -82,6 +82,12 @@ pub(super) fn shard_passes(reader: &impl SubstrateReader) -> Result<ShardPasses>
         let id = shard.checkpoint_id.as_str();
         found.checked += 1;
 
+        let gap = reader.read_artifact(id, rift_shadow::backend::BOUNDARY_GAPS_NAME)?;
+        if let Some(gap) = gap {
+            super::boundary_gaps::present_gap_pass(reader, shard, &gap, &mut found)?;
+            continue;
+        }
+
         // Redaction re-verification: the report must exist and be valid.
         let report_bytes = reader.read_artifact(id, "redaction_report.json")?;
         found
@@ -106,7 +112,7 @@ pub(super) fn shard_passes(reader: &impl SubstrateReader) -> Result<ShardPasses>
             found.pre_rift += 1;
             continue;
         }
-        native_shard_passes(reader, id, report_bytes.as_deref(), &mut found)?;
+        native_shard_passes(reader, id, report_bytes.as_deref(), None, &mut found)?;
     }
     Ok(found)
 }
@@ -117,7 +123,7 @@ pub(super) fn shard_passes(reader: &impl SubstrateReader) -> Result<ShardPasses>
 /// A malformed report is a STRUCTURE finding and an invalid one a REDACTION
 /// finding, because the first says the artifact cannot be read and the second
 /// says it was read and disagrees.
-fn redaction_report_pass(id: &str, report: Option<&[u8]>) -> Verdict {
+pub(super) fn redaction_report_pass(id: &str, report: Option<&[u8]>) -> Verdict {
     use rift_recall_substrate::parse;
 
     let Some(bytes) = report else {
@@ -140,20 +146,29 @@ fn redaction_report_pass(id: &str, report: Option<&[u8]>) -> Verdict {
 /// Takes the tally rather than returning one because the vacuous-era count is
 /// part of the finding: an accepted era is counted where it is accepted, not
 /// re-derived by a caller reading the same header a second time.
-fn native_shard_passes(
+pub(super) fn native_shard_passes(
     reader: &impl SubstrateReader,
     id: &str,
     report: Option<&[u8]>,
+    gap: Option<Vec<u8>>,
     found: &mut ShardPasses,
 ) -> Result<()> {
     use rift_shadow::backend::STRICT_MERKLE_MIN_CANON_VERSION;
 
     let header = shard_header(reader, id)?;
-    let native = NativeArtifacts::read(reader, id, &header)?;
+    let native = NativeArtifacts::read_with_gap(reader, id, &header, gap)?;
+    if let Some(verdict) = super::boundary_gaps::gap_pass(id, &header, &native, report) {
+        found.worst.keep_worse(verdict);
+    }
 
     let spills = super::spills::spill_digest_pass(id, &native.spills);
     let originals = super::originals::original_passes(id, &native);
-    let fallback = super::fallback::fallback_pass(id, header.fallback, &native, report);
+    let fallback = super::fallback::fallback_pass(
+        id,
+        super::fallback::header_counts(&header),
+        &native,
+        report,
+    );
     found.held_unchecked += originals.held_unchecked;
     for v in task_subtree_pass(id, &header, &native)
         .into_iter()

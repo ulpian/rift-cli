@@ -15,6 +15,7 @@
 //! measured tool results and the shard's own clock each live in a module of their own so a new shard
 //! artifact lands beside the concern it feeds.
 
+mod boundary_gaps;
 mod created_at;
 mod events;
 mod facts;
@@ -188,19 +189,29 @@ pub async fn ingest_dialect(
     // too, so the first shard this walk opens links to the same predecessor a
     // full walk would give it.
     let mut last_parseable: Option<Sha256Id> = None;
+    let mut gap_refused = false;
     for shard in &shards {
         let id = shard.checkpoint_id.as_str();
         let parsed_id = Sha256Id::parse_hex(id).ok();
         let prev = last_parseable;
         last_parseable = parsed_id.or(last_parseable);
-        if projected.contains(id) {
+        let gap = sub.read_artifact(id, crate::backend::BOUNDARY_GAPS_NAME)?;
+        if projected.contains(id) && gap.is_none() {
             report.shards_skipped += 1;
             continue;
         }
-        ingest_shard(&ctx, &mut report, id, parsed_id, prev).await?;
+        if let Some(gap) = gap {
+            if !boundary_gaps::ingest_gap(&ctx, &mut report, shard, parsed_id, prev, gap).await? {
+                gap_refused = true;
+            }
+        } else {
+            ingest_shard(&ctx, &mut report, id, parsed_id, prev).await?;
+        }
     }
 
-    advance_watermark(&ctx, &mut report, &shards).await?;
+    if !gap_refused {
+        advance_watermark(&ctx, &mut report, &shards).await?;
+    }
     Ok(report)
 }
 
@@ -353,3 +364,6 @@ async fn advance_watermark<S: CanonicalStore, R>(
     report.tip = Some(tip);
     Ok(())
 }
+
+#[cfg(test)]
+mod boundary_gaps_tests;
