@@ -55,6 +55,7 @@ pub(crate) use capture::{
     capture_model_observation_tables, capture_projection_meta_tables, capture_read_tokens_tables,
     capture_system_tables, capture_tool_result_tables, capture_turn_boundary_tables,
     capture_v1_tables, capture_verification_witness_tables, capture_worktree_tables,
+    BOUNDARY_OBSERVATION_TABLE,
 };
 pub use recall::{
     recall_canonical_table, recall_canonical_tables, EVAL_RUN_CONDITIONS, EVAL_RUN_VERDICTS,

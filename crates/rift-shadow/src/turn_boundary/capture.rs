@@ -1,15 +1,13 @@
-//! The write side: observe the working set at a turn boundary, diff each file
-//! against the previous boundary, and persist the append-only boundary rows.
+//! Bounded current-byte collection associated with a journaled boundary event.
+//! Event time is separate from the later non-atomic collection-attempt audit.
 
 use std::collections::BTreeMap;
 
 use rift_core::Result;
 use rift_git::{BlobReader, RepoPaths, TreeEntryKind};
-use rift_shadow_attribution::{diff_attributable, Hunk};
 use rift_store::{
-    record_turn_boundary_file_with_kind, record_turn_boundary_snapshot, record_turn_diff_hunk,
-    turn_boundary_file_kinds_for_snapshot, BoundaryFileKind, CanonicalStore, TurnBoundaryFileRow,
-    TurnBoundarySnapshotRow, TurnDiffHunkRow,
+    record_turn_boundary_collection, BoundaryCollectionInterval, BoundaryFileKind, CanonicalStore,
+    TurnBoundaryFileRow, TurnBoundarySnapshotRow,
 };
 
 use super::{observation, Boundary};
@@ -24,14 +22,12 @@ struct BoundaryCtx<'a, S, R> {
     session_row: &'a str,
     turn_ordinal: u32,
     boundary: Boundary,
-    /// The boundary's own instant: the snapshot row's `captured_at`, and the
-    /// line a working file's modification time is held against.
+    /// The journaled event's instant, independent of collection time.
     captured_at_ms: i64,
     /// The previous boundary's state, `path → blob_oid`.
     prev: &'a BTreeMap<String, String>,
     /// HEAD's tree, `path → blob_oid` (empty without a HEAD commit).
     head_tree: &'a BTreeMap<String, String>,
-    prev_kinds: &'a BTreeMap<String, BoundaryFileKind>,
     head_kinds: Option<&'a BTreeMap<String, TreeEntryKind>>,
 }
 
@@ -61,19 +57,11 @@ enum Observation {
     Dropped,
 }
 
-/// Capture one turn boundary: snapshot the working set and persist the closed
-/// window's H_i/A_i hunks. Idempotent per `(session, ordinal, boundary)`.
-///
-/// Three phases, in this order: observe the working set, diff each file
-/// against the previous boundary (its hunk rows land as the walk reaches it),
-/// then persist the snapshot row and its file rows.
-///
-/// `head_commit` and `captured_at_ms` are the boundary's own: the commit
-/// `HEAD` named and the instant the hook that closed the boundary ran. The
-/// detached worker takes the snapshot later, so the observation is held to
-/// that instant rather than to the moment it runs — a path written after it
-/// is unknown to this boundary (see `observe_boundary_path`), and a commit
-/// made since does not hide the paths it took out of the working set.
+/// Collect bounded current bytes for a journaled turn-boundary event.
+/// The hook's HEAD and captured_at identify the event, not when these bytes
+/// were read. A separate collection-attempt interval records the later work.
+/// No actor-labelled closed-window hunks are inferred from these observations.
+/// Existing snapshot keys are never filled or given new provenance on retry.
 ///
 /// # Errors
 /// [`rift_core::RiftError`] on a git or storage failure (callers at the hook
@@ -90,8 +78,46 @@ pub async fn capture_boundary(
     boundary: Boundary,
     captured_at_ms: i64,
 ) -> Result<()> {
+    capture_boundary_with_clock(
+        store,
+        repo,
+        reader,
+        head_commit,
+        agent,
+        native_session,
+        turn_ordinal,
+        boundary,
+        captured_at_ms,
+        boundary_collection_time,
+    )
+    .await
+}
+
+/// Capture bounded current bytes with an injected collection-attempt clock.
+/// The event timestamp and this non-atomic collection interval are distinct.
+/// Neither establishes event-time bytes or authorship.
+///
+/// # Errors
+/// A storage, clock, git or interval-validation failure.
+#[allow(clippy::too_many_arguments)]
+pub async fn capture_boundary_with_clock(
+    store: &impl CanonicalStore,
+    repo: &RepoPaths,
+    reader: &impl BlobReader,
+    head_commit: Option<&str>,
+    agent: &str,
+    native_session: &str,
+    turn_ordinal: u32,
+    boundary: Boundary,
+    captured_at_ms: i64,
+    mut clock: impl FnMut() -> Result<i64>,
+) -> Result<()> {
+    let started_at = clock()?;
     let session_row = ids::session_row_id(agent, native_session);
-    let (prev, prev_kinds) = previous_observation(store, &session_row).await?;
+    let prev = super::last_boundary(store, &session_row)
+        .await?
+        .map(|(_, files)| files)
+        .unwrap_or_default();
     let committed = paths_committed_since(reader, repo, head_commit)?;
     let paths = working_set(repo, &prev, committed)?;
     let head_tree = head_tree_oids(reader, head_commit, &paths)?;
@@ -109,14 +135,13 @@ pub async fn capture_boundary(
         captured_at_ms,
         prev: &prev,
         head_tree: &head_tree,
-        prev_kinds: &prev_kinds,
         head_kinds: head_kinds.as_ref(),
     };
 
     let mut observed: Vec<ObservedFile> = Vec::new();
     let mut fresh: Vec<FreshFile> = Vec::new();
     for path in &paths {
-        match observe_boundary_path(&ctx, path).await? {
+        match observe_boundary_path(&ctx, path)? {
             Observation::Kept(file) => observed.push(file),
             Observation::Fresh(file) => fresh.push(file),
             Observation::Dropped => (),
@@ -124,29 +149,31 @@ pub async fn capture_boundary(
     }
     observed.extend(address_fresh_files(&ctx, fresh)?);
     observed.sort_by(|a, b| a.path.cmp(&b.path));
-    persist_boundary(&ctx, observed).await
-}
-
-async fn previous_observation(
-    store: &impl CanonicalStore,
-    session: &str,
-) -> Result<(BTreeMap<String, String>, BTreeMap<String, BoundaryFileKind>)> {
-    let Some((snapshot, files)) = super::last_boundary(store, session).await? else {
-        return Ok((BTreeMap::new(), BTreeMap::new()));
+    let interval = BoundaryCollectionInterval {
+        started_at,
+        finished_at: clock()?,
     };
-    let kinds = turn_boundary_file_kinds_for_snapshot(store, &snapshot.snapshot_id).await?;
-    Ok((files, kinds))
+    persist_boundary(&ctx, observed, interval).await
 }
 
-/// The observation set: everything currently differing from HEAD, plus every
-/// path the previous boundary observed (a file reverted since then still
-/// needs its closing diff), plus every path a commit since the boundary
-/// changed. Sorted and deduplicated.
+/// Read the checked system clock for one boundary collection attempt.
 ///
-/// Rift's own state under `.rift/state/` is never part of it: it is neither a
-/// person's edit nor an agent's, and observing it would copy Rift's files into
-/// the user's object store at every boundary. The status call leaves it out,
-/// and a path an older boundary anchored there is dropped here.
+/// # Errors
+/// The clock predates the Unix epoch or cannot fit epoch milliseconds.
+pub fn boundary_collection_time() -> Result<i64> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| rift_core::RiftError::storage("boundary collection clock predates epoch"))?;
+    i64::try_from(elapsed.as_millis())
+        .map_err(|_| rift_core::RiftError::storage("boundary collection clock overflows"))
+}
+
+/// Collect current paths differing from HEAD, previously observed paths, and
+/// paths changed by commits since the event's HEAD. Sort and deduplicate them
+/// before observing their current bytes.
+///
+/// Rift's own `.rift/state/` paths are excluded from both status and inherited
+/// paths so collection never copies those files into the user's object store.
 fn working_set(
     repo: &RepoPaths,
     prev: &BTreeMap<String, String>,
@@ -160,17 +187,11 @@ fn working_set(
     Ok(paths)
 }
 
-/// The paths a commit made since the boundary changed: they differ between
-/// the boundary's `HEAD` and the one the work tree has now.
+/// Find paths differing between the event's HEAD and the current HEAD.
 ///
-/// The status call compares the work tree with the current `HEAD`, so a file
-/// the boundary saw edited and a later commit took in reads as clean there.
-/// Adding back every path the two commits disagree on keeps the observation
-/// the boundary's own; a path that was not part of it reads unchanged against
-/// the boundary's tree and drops out by the unchanged-file rule. Nothing is
-/// listed while `HEAD` has not moved, which is every boundary the worker
-/// reaches before the next commit, nor when the current `HEAD` cannot be read
-/// from the ref files, where nothing says it moved.
+/// Include these paths even when current status calls them clean, then apply
+/// the normal current-observation selection. Return no extra paths when HEAD
+/// has not moved or its current ref cannot be read.
 fn paths_committed_since(
     reader: &impl BlobReader,
     repo: &RepoPaths,
@@ -232,144 +253,51 @@ fn head_tree_oids(
         .collect())
 }
 
-/// Observe one path: record the closed window's hunks for it and say what
-/// the boundary state keeps for it.
-///
-/// ★ A PATH WRITTEN AFTER THE BOUNDARY IS UNKNOWN TO IT. The snapshot is
-/// taken by the detached worker, after the hook that closed the boundary,
-/// and the bytes on disk by then may already carry the next window's edits.
-/// Diffing them would credit an edit to the window that closed before it was
-/// made: an agent's first edit after a prompt would be booked as the human's.
-/// So a file whose modification time is after the boundary's instant (or a
-/// missing file whose directory changed after it) is treated as an unreadable
-/// anchor is: no hunk row for this window, and its current bytes anchor the
-/// next one. What that costs is the path's H_i/A_i split for the window this
-/// boundary closes, and the late edit itself, which lands in no window; a
-/// commit of the path then replays to `unknown` rather than to a writer — a
-/// blank, where the alternative is a false author in an append-only table.
-async fn observe_boundary_path<S: CanonicalStore, R: BlobReader>(
+/// Collect this path now, retaining the current kind even for equal bytes.
+/// Mtime is not event-time evidence. No closed-window writer is inferred.
+fn observe_boundary_path<S: CanonicalStore, R: BlobReader>(
     ctx: &BoundaryCtx<'_, S, R>,
     path: &str,
 ) -> Result<Observation> {
     let read = observation::observe(&ctx.repo.work_tree, path);
-    let late = read.modified_ms.is_some_and(|ms| ms > ctx.captured_at_ms);
     let kind = read.kind;
     let cur = read.bytes;
-    let fresh = |bytes: Vec<u8>| {
-        Observation::Fresh(FreshFile {
-            path: path.to_owned(),
-            bytes,
-            kind,
-        })
-    };
-    if late || !regular_window(ctx, path, kind) {
-        return Ok(fresh(cur));
+    if let Some(oid) = ctx.prev.get(path) {
+        if ctx.reader.read_blob(oid)?.as_deref() == Some(cur.as_slice()) {
+            return Ok(unchanged_observation(ctx, path, &cur, kind));
+        }
     }
-    let Some(prev_bytes) = window_anchor(ctx, path)? else {
-        // The file is still OBSERVED — only the diff is unknowable. Its
-        // current bytes go to the object store and into the boundary
-        // state, so the next window has a readable anchor and the
-        // blindness lasts exactly one window instead of orphaning the
-        // path forever. (When the content matches HEAD again, the fresh
-        // oid IS the HEAD oid — content addressing — so the path drops out
-        // of the state by the existing unchanged-file rule.)
-        return Ok(fresh(cur));
-    };
-
-    if cur == prev_bytes {
-        return Ok(unchanged_observation(ctx, path, &cur));
-    }
-
-    // The closed window's hunks for this file (binary/oversize → no hunks,
-    // the file still joins the boundary state).
-    if let Some(hunks) = diff_attributable(&prev_bytes, &cur) {
-        record_window_hunks(ctx, path, &hunks).await?;
-    }
-
-    // The file's bytes at this boundary go into the local object store; the
-    // projection gets only the addresses.
-    Ok(fresh(cur))
+    Ok(Observation::Fresh(FreshFile {
+        path: path.to_owned(),
+        bytes: cur,
+        kind,
+    }))
 }
 
-/// Type-less historical anchors remain unknown for one window. A regular
-/// anchor recorded now restores coverage for the next one. Links retain
-/// their payloads without attributing target spellings as edited source.
-fn regular_window<S, R>(
+/// Reuse a verified equal-byte OID with the current observed kind. Only a
+/// current regular file matching explicitly regular HEAD can leave the set.
+fn unchanged_observation<S, R>(
     ctx: &BoundaryCtx<'_, S, R>,
     path: &str,
-    current: BoundaryFileKind,
-) -> bool {
-    if !matches!(
-        current,
-        BoundaryFileKind::Regular | BoundaryFileKind::Absent
-    ) {
-        return false;
-    }
-    if ctx.prev.contains_key(path) {
-        return matches!(
-            ctx.prev_kinds.get(path),
-            Some(BoundaryFileKind::Regular | BoundaryFileKind::Absent)
-        );
-    }
-    ctx.head_kinds
-        .is_some_and(|kinds| !matches!(kinds.get(path), Some(TreeEntryKind::Link)))
-}
-
-/// The bytes this window's diff starts from: the previous boundary's anchor,
-/// else HEAD's blob, else empty for a path HEAD does not have.
-///
-/// ★ ABSENCE IS NOT EMPTINESS — the WRITE side of the rule the replay in
-/// `enrich` already follows.
-///
-/// `read_blob` answers `None` for a blob that is gone. Turn-boundary
-/// anchors are unreachable objects written by `hash-object -w`, so git
-/// may collect them at any time, and a HEAD blob can be missing from a
-/// partial clone. An earlier `unwrap_or_default()` turned that `None`
-/// into empty bytes, which reads as "the file did not exist at the
-/// anchor" — so an UNTOUCHED file diffs as a whole-file creation and a
-/// phantom hunk lands in append-only `turn_diff_hunk`, crediting every
-/// line of it to whoever's window is closing. Downstream cannot catch
-/// it: on an added file the replay base is 0, so the length check that
-/// guards the replay is satisfied by construction.
-///
-/// `None` here therefore means the window's diff is UNKNOWABLE, and the
-/// honest record of an unknowable diff is no row at all.
-///
-/// Absent-from-the-tree is a DIFFERENT fact and stays an empty
-/// baseline: a path missing from HEAD genuinely did not exist, and its
-/// creation is a real edit this window is entitled to record.
-fn window_anchor<S, R: BlobReader>(
-    ctx: &BoundaryCtx<'_, S, R>,
-    path: &str,
-) -> Result<Option<Vec<u8>>> {
-    match ctx.prev.get(path) {
-        Some(oid) => ctx.reader.read_blob(oid),
-        None => match ctx.head_tree.get(path) {
-            Some(oid) => ctx.reader.read_blob(oid),
-            None => Ok(Some(Vec::new())),
-        },
-    }
-}
-
-/// Unchanged within this window; still part of the boundary state if it
-/// differs from HEAD (so the next window diffs against it), under the
-/// previous boundary's oid.
-fn unchanged_observation<S, R>(ctx: &BoundaryCtx<'_, S, R>, path: &str, cur: &[u8]) -> Observation {
+    cur: &[u8],
+    kind: BoundaryFileKind,
+) -> Observation {
     let Some(prev_oid) = ctx.prev.get(path) else {
         return Observation::Dropped;
     };
-    if ctx.head_tree.get(path) == Some(prev_oid) {
+    if kind == BoundaryFileKind::Regular
+        && ctx
+            .head_kinds
+            .is_some_and(|kinds| kinds.get(path) == Some(&TreeEntryKind::Regular))
+        && ctx.head_tree.get(path) == Some(prev_oid)
+    {
         return Observation::Dropped;
     }
     Observation::Kept(ObservedFile {
         path: path.to_owned(),
         blob_oid: prev_oid.clone(),
         content_sha256: sha256_hex_of(cur),
-        kind: ctx
-            .prev_kinds
-            .get(path)
-            .copied()
-            .unwrap_or(BoundaryFileKind::Unknown),
+        kind,
     })
 }
 
@@ -396,80 +324,40 @@ fn address_fresh_files<S, R: BlobReader>(
         .collect()
 }
 
-/// Append the closed window's hunks for one file, in diff order.
-async fn record_window_hunks<S: CanonicalStore, R>(
-    ctx: &BoundaryCtx<'_, S, R>,
-    path: &str,
-    hunks: &[Hunk],
-) -> Result<()> {
-    for h in hunks {
-        record_turn_diff_hunk(ctx.store, &turn_diff_hunk_row(ctx, path, h)).await?;
-    }
-    Ok(())
-}
-
-/// The `turn_diff_hunk` row for one hunk of the window this boundary closes.
-fn turn_diff_hunk_row<S, R>(ctx: &BoundaryCtx<'_, S, R>, path: &str, h: &Hunk) -> TurnDiffHunkRow {
-    let edit_kind = ctx.boundary.edit_kind();
-    TurnDiffHunkRow {
-        hunk_id: ids::turn_diff_hunk_id(
-            ctx.session_row,
-            ctx.turn_ordinal,
-            edit_kind,
-            path,
-            h.old_start,
-            h.old_len,
-            h.new_start,
-            h.new_len,
-        ),
-        session_id: ctx.session_row.to_owned(),
-        turn_ordinal: i64::from(ctx.turn_ordinal),
-        edit_kind: edit_kind.to_owned(),
-        path: path.to_owned(),
-        old_start: i64::from(h.old_start),
-        old_len: i64::from(h.old_len),
-        new_start: i64::from(h.new_start),
-        new_len: i64::from(h.new_len),
-        schema_version: 1,
-    }
-}
-
-/// Persist the boundary: its snapshot row first, then one file row per
-/// observed path, in path order.
+/// Insert a new observation set and append its collection audit last.
 async fn persist_boundary<S: CanonicalStore, R>(
     ctx: &BoundaryCtx<'_, S, R>,
     observed: Vec<ObservedFile>,
+    interval: BoundaryCollectionInterval,
 ) -> Result<()> {
     let snapshot_id =
         ids::turn_boundary_snapshot_id(ctx.session_row, ctx.turn_ordinal, ctx.boundary.as_str());
-    record_turn_boundary_snapshot(
-        ctx.store,
-        &TurnBoundarySnapshotRow {
-            snapshot_id: snapshot_id.clone(),
-            session_id: ctx.session_row.to_owned(),
-            turn_ordinal: i64::from(ctx.turn_ordinal),
-            boundary: ctx.boundary.as_str().to_owned(),
-            actor: ctx.boundary.actor().to_owned(),
-            worktree_hash: worktree_hash(&observed),
-            captured_at: ctx.captured_at_ms,
-            schema_version: 1,
-        },
-    )
-    .await?;
-    for file in observed {
-        record_turn_boundary_file_with_kind(
-            ctx.store,
-            &TurnBoundaryFileRow {
-                snapshot_id: snapshot_id.clone(),
-                path: file.path.clone(),
-                blob_oid: file.blob_oid,
-                content_sha256: file.content_sha256,
-                schema_version: 1,
-            },
-            file.kind,
-        )
-        .await?;
-    }
+    let snapshot = TurnBoundarySnapshotRow {
+        snapshot_id: snapshot_id.clone(),
+        session_id: ctx.session_row.to_owned(),
+        turn_ordinal: i64::from(ctx.turn_ordinal),
+        boundary: ctx.boundary.as_str().to_owned(),
+        actor: ctx.boundary.actor().to_owned(),
+        worktree_hash: worktree_hash(&observed),
+        captured_at: ctx.captured_at_ms,
+        schema_version: 1,
+    };
+    let files: Vec<_> = observed
+        .into_iter()
+        .map(|file| {
+            (
+                TurnBoundaryFileRow {
+                    snapshot_id: snapshot_id.clone(),
+                    path: file.path,
+                    blob_oid: file.blob_oid,
+                    content_sha256: file.content_sha256,
+                    schema_version: 1,
+                },
+                file.kind,
+            )
+        })
+        .collect();
+    record_turn_boundary_collection(ctx.store, &snapshot, &files, interval).await?;
     Ok(())
 }
 
@@ -512,6 +400,38 @@ mod tests {
     use super::*;
     use rift_git::{BlobReader, GixBlobReader, RepoPaths, TreeEntry};
     use rift_store::{turn_diff_hunks_for_session, SqliteStore};
+
+    #[allow(clippy::too_many_arguments)]
+    async fn capture_boundary(
+        store: &impl rift_store::CanonicalStore,
+        repo: &RepoPaths,
+        reader: &impl BlobReader,
+        head: Option<&str>,
+        agent: &str,
+        native: &str,
+        ordinal: u32,
+        boundary: Boundary,
+        at: i64,
+    ) -> Result<()> {
+        let mut tick = at + 60_000;
+        super::capture_boundary_with_clock(
+            store,
+            repo,
+            reader,
+            head,
+            agent,
+            native,
+            ordinal,
+            boundary,
+            at,
+            || {
+                let current = tick;
+                tick += 1;
+                Ok(current)
+            },
+        )
+        .await
+    }
 
     const AGENT: &str = "claude-code";
     const NATIVE: &str = "sess-b";
@@ -591,6 +511,44 @@ mod tests {
         s
     }
 
+    async fn assert_latest_observation(
+        s: &SqliteStore,
+        r: &Collected,
+        path: &str,
+        bytes: &[u8],
+        boundary: Boundary,
+        at: i64,
+    ) {
+        let snapshot =
+            rift_store::latest_turn_boundary_snapshot(s, &ids::session_row_id(AGENT, NATIVE))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(snapshot.boundary, boundary.as_str());
+        assert_eq!(snapshot.captured_at, at);
+        let files = rift_store::turn_boundary_files_for_snapshot(s, &snapshot.snapshot_id)
+            .await
+            .unwrap();
+        let file = files.iter().find(|f| f.path == path).unwrap();
+        assert_eq!(r.read_blob(&file.blob_oid).unwrap().unwrap(), bytes);
+        let kinds = rift_store::turn_boundary_file_kinds_for_snapshot(s, &snapshot.snapshot_id)
+            .await
+            .unwrap();
+        assert_eq!(kinds.get(path), Some(&BoundaryFileKind::Regular));
+        let audit = rift_store::turn_boundary_observation_for_snapshot(s, &snapshot.snapshot_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audit.interval,
+            BoundaryCollectionInterval {
+                started_at: at + 60_000,
+                finished_at: at + 60_001
+            }
+        );
+        assert_eq!(audit.worktree_hash, snapshot.worktree_hash);
+    }
+
     /// Every hunk row the session recorded, as `(edit_kind, path, old_start,
     /// old_len, new_start, new_len)` — the shape a `blame` answer is built from.
     async fn hunks(s: &SqliteStore) -> Vec<(String, String, i64, i64, i64, i64)> {
@@ -621,18 +579,8 @@ mod tests {
             .collect()
     }
 
-    /// ★ THE PHANTOM HUNK. Two `start` boundaries with the file untouched on
-    /// disk between them, and the first boundary's anchor blob collected in
-    /// between.
-    ///
-    /// With `read_blob(..)?.unwrap_or_default()` the absent anchor reads as
-    /// EMPTY, so the unchanged file diffs as a whole-file creation and a
-    /// `human added.txt 0 0 -> 0 2` row lands in append-only `turn_diff_hunk`
-    /// for a file nobody edited. Restoring `unwrap_or_default()` at either read
-    /// site reds this test.
-    ///
-    /// The second half matters as much: the file must still be ANCHORED by the
-    /// new boundary, or refusing the hunk would blind every later window too.
+    /// An unreadable previous object cannot supply bytes. Re-address the actual
+    /// current buffer and retain its exact OID, without claiming any writer.
     #[tokio::test]
     async fn a_collected_anchor_writes_no_hunk_and_still_anchors_the_next_window() {
         let tmp = tempfile::tempdir().unwrap();
@@ -661,14 +609,11 @@ mod tests {
             .find(|(p, _)| p == "added.txt")
             .map(|(_, o)| o.clone())
             .expect("added.txt is anchored by the first boundary");
-        // Turn 0 legitimately records the file's creation (it is absent from
-        // HEAD). That row is real; the question is whether turn 1 invents a
-        // SECOND one out of an unreadable anchor.
+        // Fixture-known creation still supplies no production writer proof.
         let after_turn_0 = hunks(&s).await;
-        assert_eq!(
-            after_turn_0,
-            vec![("human".into(), "added.txt".into(), 0, 0, 0, 2)],
-            "the creation itself is a real fact"
+        assert!(
+            after_turn_0.is_empty(),
+            "observed creation does not identify its writer"
         );
 
         // Turn 1 opens with that anchor COLLECTED and the file untouched.
@@ -711,15 +656,14 @@ mod tests {
         assert_eq!(fresh, oid, "same bytes, same oid");
         assert!(
             reader(tmp.path(), &[]).read_blob(&fresh).unwrap().is_some(),
-            "the anchor object is back in the store — the next window can diff"
+            "the exact current buffer is readable again; no writer is inferred"
         );
     }
 
-    /// The healthy path, so the refusal above cannot be met by refusing
-    /// everything: two boundaries over two REAL edits record exactly those two
-    /// edits, on the right side of the human/agent split.
+    /// Two collections preserve both exact buffers, kinds and audit intervals.
+    /// Fixture-known actors do not become production attribution facts.
     #[tokio::test]
-    async fn two_boundaries_over_real_edits_record_exactly_those_edits() {
+    async fn two_boundaries_over_real_edits_record_exact_observations_without_authorship() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = repo_with_a_commit(tmp.path());
         let head = git(tmp.path(), &["rev-parse", "HEAD"]);
@@ -741,6 +685,16 @@ mod tests {
         .await
         .unwrap();
 
+        assert_latest_observation(
+            &s,
+            &reader(tmp.path(), &[]),
+            "a.txt",
+            b"one\ntwo\nthree\n",
+            Boundary::Start,
+            AFTER_THE_EDITS,
+        )
+        .await;
+
         // The agent appended another during the turn.
         std::fs::write(tmp.path().join("a.txt"), b"one\ntwo\nthree\nfour\n").unwrap();
         capture_boundary(
@@ -757,35 +711,21 @@ mod tests {
         .await
         .unwrap();
 
-        let recorded = hunks(&s).await;
-        assert_eq!(
-            recorded.len(),
-            2,
-            "one hunk per closed window, no more: {recorded:?}"
-        );
-        assert_eq!(recorded[0].0, "human", "the pre-turn edit is the human's");
-        assert_eq!(recorded[0].1, "a.txt");
-        assert_eq!(recorded[1].0, "agent", "the in-turn edit is the agent's");
-        assert_eq!(recorded[1].1, "a.txt");
-        // Each window added exactly one line to a file that had one more each time.
-        assert_eq!(
-            (recorded[0].3, recorded[0].5),
-            (0, 1),
-            "window 1 inserted one line and removed none"
-        );
-        assert_eq!(
-            (recorded[1].3, recorded[1].5),
-            (0, 1),
-            "window 2 inserted one line and removed none"
-        );
+        assert!(hunks(&s).await.is_empty());
+        assert_latest_observation(
+            &s,
+            &reader(tmp.path(), &[]),
+            "a.txt",
+            b"one\ntwo\nthree\nfour\n",
+            Boundary::End,
+            LATER_STILL,
+        )
+        .await;
     }
 
-    /// A file whose HEAD blob is unreadable is the same class: the baseline for
-    /// its FIRST window comes from the HEAD tree, and defaulting a collected
-    /// HEAD blob to empty credits the whole file to whoever's window is open.
-    /// This is the second `unwrap_or_default()` at the same site.
+    /// An unavailable HEAD object does not hide the bounded current buffer.
     #[tokio::test]
-    async fn a_collected_head_blob_is_absence_too() {
+    async fn a_collected_head_blob_does_not_hide_current_regular_observation() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = repo_with_a_commit(tmp.path());
         let head = git(tmp.path(), &["rev-parse", "HEAD"]);
@@ -819,11 +759,10 @@ mod tests {
         );
     }
 
-    /// A genuinely new file (absent from HEAD, not merely unreadable) still
-    /// records its creation. Absence-of-the-blob and absence-from-the-tree are
-    /// different facts and only one of them is a refusal.
+    /// A new regular file still yields its exact current bytes and audit.
+    /// Its absence from HEAD does not establish who created it.
     #[tokio::test]
-    async fn a_file_absent_from_head_still_records_its_creation() {
+    async fn a_file_absent_from_head_still_records_its_observed_bytes() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = repo_with_a_commit(tmp.path());
         let head = git(tmp.path(), &["rev-parse", "HEAD"]);
@@ -844,14 +783,15 @@ mod tests {
         .await
         .unwrap();
 
-        let recorded = hunks(&s).await;
-        assert_eq!(recorded.len(), 1, "the creation is one hunk: {recorded:?}");
-        assert_eq!(recorded[0].0, "human");
-        assert_eq!(recorded[0].1, "new.txt");
-        assert_eq!(
-            (recorded[0].3, recorded[0].5),
-            (0, 2),
-            "two lines created out of nothing"
-        );
+        assert!(hunks(&s).await.is_empty());
+        assert_latest_observation(
+            &s,
+            &reader(tmp.path(), &[]),
+            "new.txt",
+            b"alpha\nbeta\n",
+            Boundary::Start,
+            AFTER_THE_EDITS,
+        )
+        .await;
     }
 }

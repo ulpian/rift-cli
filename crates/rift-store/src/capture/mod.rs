@@ -18,6 +18,7 @@
 
 mod attribution;
 mod boundary_kind;
+mod boundary_observation;
 mod cost;
 mod enablement;
 mod files;
@@ -33,12 +34,17 @@ mod watermarks;
 mod worktrees;
 
 pub use attribution::{
-    confidence_to_milli, record_attribution, record_attribution_hunk, AttributionHunkRow,
-    AttributionRow,
+    attribution_for_key, attribution_hunks_for_key, confidence_to_milli, record_attribution,
+    record_attribution_hunk, AttributionHunkRow, AttributionRow,
 };
 pub use boundary_kind::{
     record_turn_boundary_file_with_kind, regular_turn_boundary_files_for_session_path,
     turn_boundary_file_kinds_for_snapshot, unproven_turn_hunk_paths, BoundaryFileKind,
+};
+pub use boundary_observation::{
+    bounded_turn_boundary_observation, record_turn_boundary_collection,
+    turn_boundary_observation_for_snapshot, BoundaryCollectionInterval, BoundaryObservationRow,
+    BoundedBoundaryObservation,
 };
 pub use cost::{
     checkpoint_window_tokens, effective_prices, quote_usage_costs, record_price,

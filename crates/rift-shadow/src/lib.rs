@@ -70,7 +70,10 @@ pub use transcript::{
     archived_transcript, compact_jsonl, sealed_spill, CompactTranscript, COMPACT_SCHEMA_VERSION,
     MAX_INLINE_CHARS,
 };
-pub use turn_boundary::{attribution_preview, capture_boundary, enrich_attribution, Boundary};
+pub use turn_boundary::{
+    attribution_preview, boundary_collection_time, capture_boundary, capture_boundary_with_clock,
+    enrich_attribution, Boundary,
+};
 
 use rift_core::{Result, SecretBytes, Sha256Id};
 use rift_shadow_hooks::{dispatch, AdapterRegistry, CanonicalEvent, EventLeaf, RawHook};

@@ -39,6 +39,12 @@ compares the database against it, so a disagreement means the database is wrong 
 somebody edited git. Losing the database is an inconvenience; losing the git refs is
 data loss ([Chapter 14](14-sync-readiness.md)).
 
+Boundary file-kind and collection-attempt companions are local projection facts.
+Checkpoint shards do not transport them, so clone and rebuild cannot restore this
+evidence. Event and collection timestamps, and successful structural verification,
+do not establish historical authorship. Existing stored attributions may be
+incorrect; preserving or retrying those rows does not correct them.
+
 | Ref | Holds | Pushed? |
 |---|---|---|
 | `rift/<short-commit>-<worktree-hash>` | in-progress, **un-redacted** session state | never |

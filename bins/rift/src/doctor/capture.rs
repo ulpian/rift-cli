@@ -34,7 +34,7 @@ pub(super) fn doctor_turn_boundaries(
                           WHERE b.session_id = s.session_id AND b.boundary = 'start'), \
                         (SELECT COUNT(*) FROM turn_boundary_snapshot b \
                           WHERE b.session_id = s.session_id AND b.boundary = 'end') \
-                 FROM session s ORDER BY s.session_id",
+                 FROM session s ORDER BY s.session_id LIMIT 128",
                 &[],
             )
             .await
@@ -71,8 +71,84 @@ pub(super) fn doctor_turn_boundaries(
             "session_id": session_id, "agent": agent, "starts": starts, "ends": ends,
         }));
     }
-    let head = format!("\n  turn boundaries: {covered} session(s) with boundaries, {bare} without");
-    (head + &human, serde_json::json!({ "sessions": sessions }))
+    let head = format!("\n  turn boundaries (sample up to 128 sessions): {covered} with boundaries, {bare} without");
+    let audit = rt
+        .block_on(collection_coverage(&store))
+        .unwrap_or_else(|_| serde_json::json!({ "readable": false, "authorship": "unavailable" }));
+    (head + &human + &collection_summary(&audit)
+        + "\n    collection facts do not establish authorship; historical attributions are not revalidated",
+        serde_json::json!({ "sessions": sessions, "session_sample_limit": 128, "collection": audit }))
+}
+
+fn collection_summary(audit: &serde_json::Value) -> String {
+    let number = |key| audit.get(key).and_then(serde_json::Value::as_i64);
+    let (Some(events), Some(missing), Some(invalid)) = (
+        number("boundary_events"),
+        number("missing_audit"),
+        number("inconsistent_metadata"),
+    ) else {
+        return "\n    collection audit: unreadable".to_owned();
+    };
+    let available = events - missing - invalid;
+    let checked = number("file_sets_checked").unwrap_or(0);
+    let limited = number("file_sets_limited").unwrap_or(0);
+    let inconsistent = audit
+        .get("inconsistent_sample")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    format!("\n    collection metadata: {events} events, {available} available, {missing} missing, {invalid} inconsistent; file-set samples: {checked} checked, {limited} limited, {inconsistent} inconsistent (at most 4 sets, 128 rows each)")
+}
+
+/// Bounded diagnostic: metadata aggregates plus at most four small file sets.
+/// This is not a global integrity scan and never reads blob/transcript bytes.
+async fn collection_coverage(
+    store: &rift_store::SqliteStore,
+) -> rift_core::Result<serde_json::Value> {
+    use rift_store::CanonicalStore as _;
+    let totals = store.query(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN o.snapshot_id IS NULL THEN 1 ELSE 0 END), 0), \
+         COALESCE(SUM(CASE WHEN o.snapshot_id IS NOT NULL AND (o.worktree_hash != s.worktree_hash \
+           OR o.collection_started_at < 0 OR o.collection_finished_at < o.collection_started_at \
+           OR o.schema_version != 1 OR s.schema_version != 1) THEN 1 ELSE 0 END), 0) \
+         FROM turn_boundary_snapshot s LEFT JOIN turn_boundary_observation o ON o.snapshot_id = s.snapshot_id", &[],
+    ).await?;
+    let counts = totals
+        .first()
+        .ok_or_else(|| rift_core::RiftError::storage("boundary audit aggregate absent"))?;
+    let (checked, limited, inconsistent) = bounded_collection_sample(store).await?;
+    Ok(serde_json::json!({
+        "readable": true, "boundary_events": counts.get_i64(0)?, "missing_audit": counts.get_i64(1)?,
+        "inconsistent_metadata": counts.get_i64(2)?, "file_set_sample_limit": 4,
+        "file_rows_per_sample_limit": 128, "file_sets_checked": checked, "file_sets_limited": limited,
+        "inconsistent_sample": inconsistent, "authorship": "unavailable",
+        "historical_attributions_revalidated": false, "global_file_set_validation": false,
+    }))
+}
+
+async fn bounded_collection_sample(
+    store: &rift_store::SqliteStore,
+) -> rift_core::Result<(i64, i64, Vec<String>)> {
+    use rift_store::CanonicalStore as _;
+    let sample = store
+        .query(
+            "SELECT snapshot_id FROM turn_boundary_observation ORDER BY snapshot_id LIMIT 4",
+            &[],
+        )
+        .await?;
+    let (mut checked, mut limited) = (0, 0);
+    let mut inconsistent = Vec::new();
+    for row in sample {
+        let id = row.get_text(0)?;
+        match rift_store::bounded_turn_boundary_observation(store, &id, 128).await {
+            Ok(rift_store::BoundedBoundaryObservation::Limited) => limited += 1,
+            Ok(rift_store::BoundedBoundaryObservation::Observed(_)) => checked += 1,
+            Ok(rift_store::BoundedBoundaryObservation::Missing) | Err(_) => {
+                checked += 1;
+                inconsistent.push(id);
+            }
+        }
+    }
+    Ok((checked, limited, inconsistent))
 }
 
 /// The first 12 characters of a session row id — enough to recognise.
@@ -558,5 +634,109 @@ mod tests {
             assert_eq!(last.checkpoint_id, "newer", "the newest run's divergence");
             assert!(last.render().contains("checkpoint newer"));
         });
+    }
+}
+#[cfg(test)]
+mod boundary_audit_tests {
+    use super::*;
+    use rift_store::{CanonicalStore as _, SqliteStore, TurnBoundarySnapshotRow, Value};
+
+    fn store() -> SqliteStore {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.create_canonical_schema().unwrap();
+        s
+    }
+
+    fn snapshot(id: &str) -> TurnBoundarySnapshotRow {
+        TurnBoundarySnapshotRow {
+            snapshot_id: id.into(),
+            session_id: id.into(),
+            turn_ordinal: 0,
+            boundary: "start".into(),
+            actor: "human".into(),
+            captured_at: 10,
+            worktree_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .into(),
+            schema_version: 1,
+        }
+    }
+
+    async fn collection(s: &SqliteStore, id: &str) {
+        assert!(rift_store::record_turn_boundary_collection(
+            s,
+            &snapshot(id),
+            &[],
+            rift_store::BoundaryCollectionInterval {
+                started_at: 30,
+                finished_at: 31,
+            },
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn collection_coverage_reports_missing_audit_without_authority_or_repair() {
+        let s = store();
+        collection(&s, "paired").await;
+        rift_store::record_turn_boundary_snapshot(&s, &snapshot("legacy"))
+            .await
+            .unwrap();
+        let report = collection_coverage(&s).await.unwrap();
+        assert_eq!(report["boundary_events"], 2);
+        assert_eq!(report["missing_audit"], 1);
+        assert_eq!(report["file_sets_checked"], 1);
+        assert_eq!(report["authorship"], "unavailable");
+        assert_eq!(report["historical_attributions_revalidated"], false);
+        assert_eq!(report["global_file_set_validation"], false);
+    }
+
+    #[tokio::test]
+    async fn collection_coverage_names_an_inconsistent_sample_without_blob_reads() {
+        let s = store();
+        collection(&s, "paired").await;
+        s.insert(
+            "turn_boundary_file_kind",
+            &["snapshot_id", "path", "kind", "schema_version"],
+            &[
+                Value::text("paired"),
+                Value::text("orphan"),
+                Value::text("link"),
+                Value::Int(1),
+            ],
+        )
+        .await
+        .unwrap();
+        let report = collection_coverage(&s).await.unwrap();
+        assert_eq!(report["inconsistent_sample"], serde_json::json!(["paired"]));
+        assert_eq!(report["authorship"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn collection_coverage_limits_file_sets_and_reports_the_limit() {
+        let s = store();
+        for i in 0..5 {
+            collection(&s, &format!("sample-{i}")).await;
+        }
+        for i in 0..129 {
+            rift_store::record_turn_boundary_file(
+                &s,
+                &rift_store::TurnBoundaryFileRow {
+                    snapshot_id: "sample-0".into(),
+                    path: format!("file-{i}"),
+                    blob_oid: "blob".into(),
+                    content_sha256: "hash".into(),
+                    schema_version: 1,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let report = collection_coverage(&s).await.unwrap();
+        assert_eq!(report["file_sets_limited"], 1);
+        assert_eq!(report["file_sets_checked"], 3);
+        assert_eq!(report["file_set_sample_limit"], 4);
+        assert_eq!(report["file_rows_per_sample_limit"], 128);
+        assert_eq!(report["global_file_set_validation"], false);
     }
 }

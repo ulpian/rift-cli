@@ -1,9 +1,5 @@
-//! What a boundary snapshot leaves out, and what it costs: Rift's own state
-//! never enters the working set, a boundary with nothing to observe never
-//! lists HEAD's tree, a path written after the boundary's instant is unknown
-//! to it, and a commit made since the boundary does not hide what it saw.
-//! Driven through the real [`capture_boundary`] over a real repository, like
-//! the tests beside the function.
+//! Current bounded collections keep event time separate from read time.
+//! State paths stay excluded; mtimes do not certify historical writers.
 
 use std::cell::Cell;
 use std::path::Path;
@@ -16,12 +12,47 @@ use rift_store::{
     SqliteStore, TurnBoundaryFileRow, TurnBoundarySnapshotRow,
 };
 
-use super::{capture_boundary, previous_state, Boundary};
+use super::{previous_state, Boundary};
 use crate::ids;
 
 #[cfg(unix)]
 #[path = "capture_link_tests.rs"]
 mod links;
+
+#[path = "temporal_tests.rs"]
+mod temporal;
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_boundary(
+    store: &impl rift_store::CanonicalStore,
+    repo: &RepoPaths,
+    reader: &impl BlobReader,
+    head: Option<&str>,
+    agent: &str,
+    native: &str,
+    ordinal: u32,
+    boundary: Boundary,
+    at: i64,
+) -> Result<()> {
+    let mut tick = at + 60_000;
+    super::capture_boundary_with_clock(
+        store,
+        repo,
+        reader,
+        head,
+        agent,
+        native,
+        ordinal,
+        boundary,
+        at,
+        || {
+            let current = tick;
+            tick += 1;
+            Ok(current)
+        },
+    )
+    .await
+}
 
 const AGENT: &str = "claude-code";
 const NATIVE: &str = "sess-own-state";
@@ -138,6 +169,69 @@ async fn hunk_paths(s: &SqliteStore) -> Vec<(String, String)> {
     rows.into_iter().map(|r| (r.edit_kind, r.path)).collect()
 }
 
+#[tokio::test]
+async fn equal_empty_bytes_do_not_hide_regular_absent_regular_kind_changes() {
+    use rift_store::{
+        latest_turn_boundary_snapshot, turn_boundary_file_kinds_for_snapshot,
+        turn_boundary_files_for_snapshot, BoundaryFileKind,
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, head) = repo_with_a_commit(tmp.path());
+    let s = store();
+    let r = reader(tmp.path());
+    let path = tmp.path().join("a.txt");
+    let session = ids::session_row_id(AGENT, NATIVE);
+    let mut kinds = Vec::new();
+    for (ordinal, boundary, exists) in [
+        (0, Boundary::Start, true),
+        (0, Boundary::End, false),
+        (1, Boundary::Start, true),
+    ] {
+        if exists {
+            std::fs::write(&path, b"").unwrap();
+            stamp(&path, BEFORE_INSTANT);
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+        capture_boundary(
+            &s,
+            &repo,
+            &r,
+            Some(&head),
+            AGENT,
+            NATIVE,
+            ordinal,
+            boundary,
+            AFTER_THE_EDITS,
+        )
+        .await
+        .unwrap();
+        let snapshot = latest_turn_boundary_snapshot(&s, &session)
+            .await
+            .unwrap()
+            .unwrap();
+        let rows = turn_boundary_files_for_snapshot(&s, &snapshot.snapshot_id)
+            .await
+            .unwrap();
+        let file = rows.iter().find(|file| file.path == "a.txt").unwrap();
+        assert_eq!(r.read_blob(&file.blob_oid).unwrap().unwrap(), b"");
+        let current = turn_boundary_file_kinds_for_snapshot(&s, &snapshot.snapshot_id)
+            .await
+            .unwrap();
+        kinds.push(*current.get("a.txt").unwrap());
+    }
+    assert_eq!(
+        kinds,
+        vec![
+            BoundaryFileKind::Regular,
+            BoundaryFileKind::Absent,
+            BoundaryFileKind::Regular,
+        ],
+        "equal bytes permit OID reuse, never reuse of a stale file kind"
+    );
+}
+
 /// The paths the session's latest boundary anchors.
 async fn anchored_paths(s: &SqliteStore) -> Vec<String> {
     let session = ids::session_row_id(AGENT, NATIVE);
@@ -193,11 +287,7 @@ async fn rift_state_files_are_neither_recorded_nor_written_while_a_user_file_bes
 
     capture(&s, &repo, &reader(tmp.path()), &head, Boundary::Start).await;
 
-    assert_eq!(
-        hunk_paths(&s).await,
-        vec![("human".to_owned(), "new.txt".to_owned())],
-        "only the user's file is a human edit"
-    );
+    assert!(hunk_paths(&s).await.is_empty());
     assert_eq!(anchored_paths(&s).await, vec!["new.txt".to_owned()]);
     assert!(
         !object_exists(tmp.path(), &state_oid),
@@ -252,10 +342,8 @@ fn system_time(epoch_ms: i64) -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::from_millis(epoch_ms.unsigned_abs())
 }
 
-/// A file edited before the boundary's instant is the closing window's; one
-/// edited after it — by whoever's window came next, before the worker took
-/// the snapshot — is unknown to the boundary: no hunk for it, and its
-/// current bytes anchor the next window instead.
+/// Both old and later mtimes are insufficient writer evidence. The current
+/// buffers remain observed and audited without any actor-labelled hunks.
 #[tokio::test]
 async fn a_file_written_after_the_boundary_instant_records_no_hunk_for_that_window() {
     let tmp = tempfile::tempdir().unwrap();
@@ -280,23 +368,19 @@ async fn a_file_written_after_the_boundary_instant_records_no_hunk_for_that_wind
     .await
     .unwrap();
 
-    assert_eq!(
-        hunk_paths(&s).await,
-        vec![("human".to_owned(), "new.txt".to_owned())],
-        "only the file written before the instant is the human's"
+    assert!(
+        hunk_paths(&s).await.is_empty(),
+        "neither mtime proves a writer"
     );
     assert_eq!(
         anchored_paths(&s).await,
         vec!["a.txt".to_owned(), "new.txt".to_owned()],
-        "the late file still anchors the next window"
+        "both current buffers remain observable without writer claims"
     );
 }
 
-/// A tracked file deleted after the boundary's instant changed its directory
-/// after it, and is unknown to the boundary rather than a deletion it saw.
-///
-/// Unix only for the fixture's sake: std opens a directory to set its time
-/// only where a directory can be opened as a file.
+/// The current missing file is observed as Absent. Event-time contents and
+/// the writer of a deletion remain unproved.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_file_deleted_after_the_boundary_instant_records_no_deletion_for_that_window() {
@@ -326,11 +410,10 @@ async fn a_file_deleted_after_the_boundary_instant_records_no_deletion_for_that_
     assert_eq!(hunk_paths(&s).await, Vec::new());
 }
 
-/// A commit made between the boundary and the snapshot takes the boundary's
-/// edits out of `git status`; the snapshot still observes them against the
-/// boundary's own `HEAD`, as a snapshot taken at the boundary would have.
+/// A path committed since the queued HEAD is still collected at its current
+/// contents. This does not reconstruct what existed at the event time.
 #[tokio::test]
-async fn a_commit_made_after_the_boundary_does_not_hide_what_the_boundary_saw() {
+async fn a_commit_since_the_event_does_not_hide_current_observed_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, head) = repo_with_a_commit(tmp.path());
     std::fs::write(tmp.path().join("a.txt"), b"one\ntwo\nthree\n").unwrap();
@@ -339,8 +422,5 @@ async fn a_commit_made_after_the_boundary_does_not_hide_what_the_boundary_saw() 
 
     capture(&s, &repo, &reader(tmp.path()), &head, Boundary::End).await;
 
-    assert_eq!(
-        hunk_paths(&s).await,
-        vec![("agent".to_owned(), "a.txt".to_owned())]
-    );
+    assert!(hunk_paths(&s).await.is_empty());
 }

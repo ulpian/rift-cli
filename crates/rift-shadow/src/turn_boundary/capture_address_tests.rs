@@ -31,7 +31,6 @@ fn multiple_regular_buffers_are_addressed_without_storing_replacement_disk_bytes
         captured_at_ms: 0,
         prev: &empty,
         head_tree: &empty,
-        prev_kinds: &BTreeMap::new(),
         head_kinds: None,
     };
     let addressed = address_fresh_files(&ctx, fresh).unwrap();
@@ -77,7 +76,6 @@ fn replacing_a_path_with_a_link_before_addressing_never_writes_target_bytes() {
         captured_at_ms: 0,
         prev: &empty,
         head_tree: &empty,
-        prev_kinds: &BTreeMap::new(),
         head_kinds: None,
     };
     let files = address_fresh_files(

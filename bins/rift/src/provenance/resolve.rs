@@ -465,6 +465,87 @@ mod tests {
     use crate::provenance::blame::{spans, BlamedLine};
     use crate::provenance::tests::oid;
 
+    fn recovery_capture(agent: bool) -> rift_shadow::attribution::CommitCapture {
+        use rift_git::{MemoryBlobReader, TreeEntry};
+        use rift_shadow::attribution::{capture_commit, HunkAttribution, LineAttribution};
+        let reader = MemoryBlobReader::new()
+            .with_blob("old", b"one\nBASE\n")
+            .with_blob("new", b"one\nCHANGED\n")
+            .with_tree(
+                "parent",
+                vec![TreeEntry {
+                    path: "f.rs".into(),
+                    blob_oid: "old".into(),
+                }],
+            )
+            .with_tree(
+                "commit",
+                vec![TreeEntry {
+                    path: "f.rs".into(),
+                    blob_oid: "new".into(),
+                }],
+            )
+            .with_parent("commit", "parent");
+        let mut capture = capture_commit(&reader, "commit").unwrap();
+        let f = &mut capture.files[0];
+        f.attribution = if agent {
+            LineAttribution {
+                agent_lines: 1,
+                ..Default::default()
+            }
+        } else {
+            LineAttribution {
+                unknown_lines: 1,
+                ..Default::default()
+            }
+        };
+        f.hunk_categories = vec![HunkAttribution {
+            hunk_ordinal: 0,
+            new_start: 1,
+            new_len: 1,
+            category: if agent { "agent_added" } else { "unknown" }.into(),
+            line_count: 1,
+        }];
+        f.method_version = if agent {
+            "turn-replay@1"
+        } else {
+            "commit-diff@1"
+        }
+        .into();
+        capture
+    }
+
+    #[test]
+    fn recovery_conflict_is_refused_while_the_public_reader_retains_historical_counts() {
+        runtime().block_on(async {
+            let s = SqliteStore::open_in_memory().unwrap();
+            s.create_canonical_schema().unwrap();
+            let original = recovery_capture(true);
+            rift_shadow::persist_commit_capture(&s, &original, Some("fixed-checkpoint"))
+                .await.unwrap();
+            let before = file_counts(&s, "fixed-checkpoint", "f.rs").await.unwrap();
+            assert_eq!(before.unwrap().agent_added, 1);
+            assert_eq!(Tag::of(before.as_ref()), Tag::Ai);
+            rift_shadow::persist_commit_capture(&s, &original, Some("fixed-checkpoint"))
+                .await.unwrap();
+            assert_eq!(file_counts(&s, "fixed-checkpoint", "f.rs").await.unwrap(), before);
+            assert_eq!(s.count("attribution_hunk").await.unwrap(), 1);
+            let retry = rift_shadow::persist_commit_capture(
+                &s, &recovery_capture(false), Some("fixed-checkpoint"),
+            ).await;
+            let counts = file_counts(&s, "fixed-checkpoint", "f.rs").await.unwrap();
+            let details = s.query("SELECT category, line_count FROM attribution_hunk ORDER BY category", &[])
+                .await.unwrap();
+            let tag = Tag::of(counts.as_ref());
+            eprintln!("public recovery: result={retry:?}; counts={counts:?}; tag={tag:?}; details={details:?}");
+            assert!(retry.is_err(), "a changed recomputation must be visibly refused");
+            assert_eq!(counts, before, "refusal does not repair historical counts");
+            assert_eq!(tag, Tag::Ai, "the original historical public result is retained");
+            assert_eq!(details.len(), 1, "no conflicting Unknown category appended");
+            assert_eq!(details[0].get_text(0).unwrap(), "agent_added");
+        });
+    }
+
     /// A projection holding two checkpoints: a sentinel-dated one that
     /// RECORDED touching `f.rs`, and a real-dated one that did not.
     async fn sentinel_and_dated_store() -> SqliteStore {

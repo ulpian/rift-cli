@@ -259,7 +259,7 @@ mod tests {
         let before = store.query(checksum_sql, &[]).await.unwrap()[0]
             .get_text(0)
             .unwrap();
-        let result = crate::apply_migrations(&store, &migrations).unwrap();
+        let result = crate::apply_migrations(&store, &migrations[..19]).unwrap();
         assert_eq!(
             (result.applied, result.skipped, result.high_water),
             (1, 18, 19)

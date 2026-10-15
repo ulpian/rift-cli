@@ -7,6 +7,72 @@ use std::os::unix::fs::symlink;
 use super::*;
 
 #[tokio::test]
+async fn a_link_payload_equal_to_previous_head_bytes_keeps_current_kind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, _) = repo_with_a_commit(tmp.path());
+    std::fs::write(tmp.path().join("a.txt"), b"target").unwrap();
+    git(tmp.path(), &["commit", "-qam", "regular target spelling"]);
+    let head = git(tmp.path(), &["rev-parse", "HEAD"]);
+    let oid = git(tmp.path(), &["rev-parse", "HEAD:a.txt"]);
+    let s = store();
+    let session = ids::session_row_id(AGENT, NATIVE);
+    let snapshot_id = ids::turn_boundary_snapshot_id(&session, 0, "start");
+    record_turn_boundary_snapshot(
+        &s,
+        &TurnBoundarySnapshotRow {
+            snapshot_id: snapshot_id.clone(),
+            session_id: session.clone(),
+            turn_ordinal: 0,
+            boundary: "start".into(),
+            actor: "human".into(),
+            worktree_hash: "legacy".into(),
+            captured_at: 0,
+            schema_version: 1,
+        },
+    )
+    .await
+    .unwrap();
+    rift_store::record_turn_boundary_file_with_kind(
+        &s,
+        &TurnBoundaryFileRow {
+            snapshot_id,
+            path: "a.txt".into(),
+            blob_oid: oid,
+            content_sha256: crate::sha256_hex(&[b"target"]),
+            schema_version: 1,
+        },
+        rift_store::BoundaryFileKind::Regular,
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(tmp.path().join("a.txt")).unwrap();
+    symlink("target", tmp.path().join("a.txt")).unwrap();
+    capture(&s, &repo, &reader(tmp.path()), &head, Boundary::End).await;
+    let latest = rift_store::latest_turn_boundary_snapshot(&s, &session)
+        .await
+        .unwrap()
+        .unwrap();
+    let kinds = rift_store::turn_boundary_file_kinds_for_snapshot(&s, &latest.snapshot_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        kinds.get("a.txt"),
+        Some(&rift_store::BoundaryFileKind::Link)
+    );
+    let files = rift_store::turn_boundary_files_for_snapshot(&s, &latest.snapshot_id)
+        .await
+        .unwrap();
+    let file = files.iter().find(|file| file.path == "a.txt").unwrap();
+    assert_eq!(
+        reader(tmp.path())
+            .read_blob(&file.blob_oid)
+            .unwrap()
+            .unwrap(),
+        b"target"
+    );
+}
+
+#[tokio::test]
 async fn link_payloads_are_anchored_without_reading_their_targets() {
     let tmp = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -44,7 +110,7 @@ async fn link_payloads_are_anchored_without_reading_their_targets() {
 }
 
 #[tokio::test]
-async fn a_link_to_regular_transition_is_unknown_then_regular_edits_resume() {
+async fn a_link_to_regular_transition_preserves_current_observations() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, head) = repo_with_a_commit(tmp.path());
     symlink("a.txt", tmp.path().join("new")).unwrap();
@@ -68,14 +134,21 @@ async fn a_link_to_regular_transition_is_unknown_then_regular_edits_resume() {
     )
     .await
     .unwrap();
+    assert!(hunk_paths(&s).await.is_empty());
+    let state = previous_state(&s, &ids::session_row_id(AGENT, NATIVE))
+        .await
+        .unwrap();
     assert_eq!(
-        hunk_paths(&s).await,
-        vec![("human".to_owned(), "new".to_owned())]
+        reader(tmp.path())
+            .read_blob(state.get("new").unwrap())
+            .unwrap()
+            .unwrap(),
+        b"regular\nedit\n"
     );
 }
 
 #[tokio::test]
-async fn a_head_link_is_a_known_link_baseline_even_without_a_previous_boundary() {
+async fn a_head_link_does_not_hide_a_current_regular_observation() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, _) = repo_with_a_commit(tmp.path());
     symlink("a.txt", tmp.path().join("tracked-link")).unwrap();
@@ -89,9 +162,16 @@ async fn a_head_link_is_a_known_link_baseline_even_without_a_previous_boundary()
     assert!(hunk_paths(&s).await.is_empty());
     std::fs::write(tmp.path().join("tracked-link"), b"regular\nedit\n").unwrap();
     capture(&s, &repo, &reader(tmp.path()), &head, Boundary::End).await;
+    assert!(hunk_paths(&s).await.is_empty());
+    let state = previous_state(&s, &ids::session_row_id(AGENT, NATIVE))
+        .await
+        .unwrap();
     assert_eq!(
-        hunk_paths(&s).await,
-        vec![("agent".to_owned(), "tracked-link".to_owned())]
+        reader(tmp.path())
+            .read_blob(state.get("tracked-link").unwrap())
+            .unwrap()
+            .unwrap(),
+        b"regular\nedit\n"
     );
 }
 
@@ -150,10 +230,7 @@ async fn a_legacy_anchor_without_kind_does_not_guess_its_prior_type() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        hunk_paths(&s).await,
-        vec![("human".to_owned(), "a.txt".to_owned())]
-    );
+    assert!(hunk_paths(&s).await.is_empty());
 }
 
 #[tokio::test]

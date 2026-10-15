@@ -17,7 +17,6 @@ const MAX_COMPONENTS: usize = 128;
 
 pub(super) struct WorkingFile {
     pub bytes: Vec<u8>,
-    pub modified_ms: Option<i64>,
     pub kind: BoundaryFileKind,
 }
 
@@ -39,7 +38,6 @@ pub(super) fn observe(work_tree: &Path, rel: &str) -> WorkingFile {
 fn observe_with(work_tree: &Path, rel: &str, mut at: impl FnMut(Phase)) -> WorkingFile {
     read_checked(work_tree, rel, &mut at).unwrap_or(WorkingFile {
         bytes: Vec::new(),
-        modified_ms: None,
         kind: BoundaryFileKind::Unknown,
     })
 }
@@ -95,7 +93,6 @@ fn read_checked(
     }
     Ok(WorkingFile {
         bytes,
-        modified_ms: modified_ms(&after),
         kind: if before.file_type().is_symlink() {
             BoundaryFileKind::Link
         } else {
@@ -218,7 +215,6 @@ fn missing(work_tree: &Path, parents: &[(OsString, Dir)], name: &OsStr) -> io::R
     }
     Ok(WorkingFile {
         bytes: Vec::new(),
-        modified_ms: modified_ms(&parent.dir_metadata()?),
         kind: BoundaryFileKind::Absent,
     })
 }
@@ -231,15 +227,6 @@ fn open_root(work_tree: &Path) -> io::Result<Dir> {
     let name = work_tree.file_name().ok_or_else(refused)?;
     let parent = Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
     parent.open_dir_nofollow(name)
-}
-
-fn modified_ms(meta: &Metadata) -> Option<i64> {
-    let duration = meta
-        .modified()
-        .ok()?
-        .duration_since(cap_std::time::SystemTime::from_std(std::time::UNIX_EPOCH))
-        .ok()?;
-    i64::try_from(duration.as_millis()).ok()
 }
 
 fn refused() -> io::Error {

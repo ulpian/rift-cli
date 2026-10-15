@@ -46,7 +46,7 @@ dispatch table, so name and behaviour cannot drift apart.
 
 | Hook | What Rift does |
 |---|---|
-| `prepare-commit-msg` | Adds the `Rift-Checkpoint` and `Rift-Attribution` trailers when a session is live; never rejects. |
+| `prepare-commit-msg` | Adds the `Rift-Checkpoint` trailer when a session is live and preserves an existing attribution trailer; never rejects. |
 | `commit-msg` | Normalizes those trailers idempotently; never rejects. |
 | `post-commit` | The main capture beat: records the commit and session, hands heavy work to a detached worker. |
 | `pre-push` | Refuses Rift's internal refs, signals "work is leaving" for `on-pr`, drains the push queue. |
@@ -321,11 +321,11 @@ Four jobs do not fit a hook. **The session-end condense** measured about 648 ms 
 median. **Counting a read file's tokens** measured about 102 ms on 120 lines because the
 tokenizer takes about 234 ms to initialise. **The `scheduled` archive** redacts a whole
 multi-megabyte transcript; on the hook it outlasted the client's timeout and was
-restarted by the next hook, so the checkpoint never landed. **The turn-boundary snapshot** (diffing every path that differs from `HEAD` against the
-previous boundary) costs a `git status` plus a read and diff per changed path; the hook
-records only `HEAD` and the instant, and the worker snapshots as of that instant, so a
-late edit costs that file's human/agent split for one window rather than crediting the
-wrong one.
+restarted by the next hook, so the checkpoint never landed. **Turn-boundary collection**
+costs a `git status`, bounded reads and object writes for changed paths. The hook
+records a boundary event's `HEAD` and time. The worker later collects current bytes;
+a separate collection-attempt interval records that later work. Collection is not
+an atomic snapshot and does not reconstruct bytes at the event time.
 
 Turn-boundary capture preserves a symlink's target spelling without reading its
 referent. Rift trusts the directories above the configured worktree root; the root
@@ -336,11 +336,12 @@ captured bytes, so a replaced path cannot redirect a second read.
 
 Append-only companion facts distinguish regular files, links, confirmed absence and
 unknown observations. A boundary without a file-kind fact supplies no type evidence.
-Capture can record supported regular edits after recording a fresh regular-file
-baseline, while attribution and previews stay unknown when the file's recorded edit
-history lacks compatible kind facts. Existing stored rows remain unchanged. Kind
-facts share the existing boundary rows' projection-only lifecycle; checkpoint shards
-do not carry them.
+File-kind and collection facts describe observations. They do not establish who
+wrote the changes. Rift does not record closed-window hunks that assign those
+changes to a writer. Commit-diff attribution stays unchanged, and Rift generates
+no new attribution preview percentages from these observations. Existing stored attributions remain unchanged and may be
+incorrect; a retry does not repair them. Kind and collection facts share the existing
+boundary rows' projection-only lifecycle; checkpoint shards do not carry them.
 
 With no daemon, the hook writes what is owed to a job journal under the git directory
 (identifier-only jobs, the file name being the job's identity so a redelivered hook

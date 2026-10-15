@@ -152,7 +152,7 @@ INSERT INTO price_table (price_id, model, token_class, unit_price_micros, curren
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
     // One row per version, in order; a new version is a new last row.
-    let set: [(u32, &'static str, String); 19] = [
+    let set: [(u32, &'static str, String); 20] = [
         (1, "init_meta", META_SQL.to_string()),
         (2, "canonical_core", canonical_schema_sql()),
         (3, "capture_identity", capture_identity_schema_sql()),
@@ -224,6 +224,7 @@ pub fn default_migrations() -> Vec<Migration> {
             "capture_boundary_file_kind",
             capture_boundary_file_kind_schema_sql(),
         ),
+        (20, "capture_boundary_observation", observation_schema_sql()),
     ];
     set.into_iter()
         .map(|(version, name, sql)| Migration { version, name, sql })
@@ -500,6 +501,14 @@ fn capture_boundary_file_kind_schema_sql() -> String {
     capture_slice_sql(capture_boundary_file_kind_tables())
 }
 
+fn capture_boundary_observation_tables() -> &'static [crate::schema::CanonicalTable] {
+    std::slice::from_ref(&crate::schema::BOUNDARY_OBSERVATION_TABLE)
+}
+
+fn observation_schema_sql() -> String {
+    capture_slice_sql(capture_boundary_observation_tables())
+}
+
 /// Render one additive capture migration from a registry slice: DDL + guard
 /// triggers + the per-table `_schema_version` seed rows.
 fn capture_slice_sql(tables: &'static [crate::schema::CanonicalTable]) -> String {
@@ -517,6 +526,46 @@ fn capture_slice_sql(tables: &'static [crate::schema::CanonicalTable]) -> String
         ));
     }
     sql
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use crate::migrate::{apply_migrations, checksum_hex};
+    use crate::SqliteStore;
+
+    #[test]
+    fn a_v19_projection_gains_only_v20_and_keeps_all_prior_checksums() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        let all = default_migrations();
+        apply_migrations(&s, &all[..19]).unwrap();
+        let prior = s
+            .with_conn(|conn| {
+                let mut query =
+                    conn.prepare("SELECT version, checksum FROM _migrations ORDER BY version")?;
+                let rows = query
+                    .query_map([], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>();
+                rows
+            })
+            .unwrap();
+        let outcome = apply_migrations(&s, &all).unwrap();
+        assert_eq!(
+            (outcome.applied, outcome.skipped, outcome.high_water),
+            (1, 19, 20)
+        );
+        for ((version, before), migration) in prior.iter().zip(&all) {
+            assert_eq!(*version, i64::from(migration.version));
+            assert_eq!(before, &checksum_hex(&migration.sql));
+        }
+        assert!(s
+            .with_conn(|conn| conn
+                .prepare("SELECT * FROM turn_boundary_observation")
+                .map(|_| ()))
+            .is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -906,6 +955,11 @@ mod tests {
             "v19 capture_boundary_file_kind",
             capture_boundary_file_kind_tables(),
             "turn_boundary_file_kind",
+        ));
+        slices.push((
+            "v20 capture_boundary_observation",
+            capture_boundary_observation_tables(),
+            "turn_boundary_observation",
         ));
         let n_sliced_tables: usize = slices.iter().map(|(_, tables, _)| tables.len()).sum();
         assert_eq!(

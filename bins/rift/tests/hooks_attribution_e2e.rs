@@ -1,6 +1,6 @@
 //! End-to-end: attribution through the shipped binary — the stored rows agree
 //! with a recompute from primary sources, and a populated pipeline answers
-//! `blame`, `why` and `explain` with a coverage floor.
+//! `blame`, `why` and `explain` while unproved authorship stays unknown.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -28,31 +28,8 @@ struct StoredAttribution {
     conf: i64,
 }
 
-/// **The populated pipeline, end to end, through the shipped binary** — the
-/// stand-in for real usage, since no gate may wait on it. Two sequential agent
-/// sessions with turn-boundary snapshots, a transcript-carrying prompt, agent
-/// AND human edits, three real hook-pair commits, and the ids the query
-/// surface is asked about.
-///
-/// The assessment that prompted it measured `SUM(agent_added) = 0` over the
-/// owner's real projection: turn-boundary snapshots existed for 2 of 61
-/// historical sessions and the enricher rightly refuses to invent anchors, so
-/// on real data the verbs returned nothing and no test noticed. This fixture
-/// holds the anchors PRESENT — the shape capture produces since the boundary
-/// hooks landed — and the tests over it assert the pipeline POPULATES.
-///
-/// Building this fixture MEASURED a second root cause of "the verbs return
-/// nothing on real data", distinct from the missing snapshots: the predicted
-/// trailer is derived pre-commit from an archive carrying NO transcript,
-/// while the landed shard of a transcript-carrying session includes its
-/// transcript and digests in the content-addressed id — so on exactly those
-/// sessions (every real Claude Code session reports `transcript_path`) the
-/// trailer names an id that never lands, and a trailer-only claims walk
-/// answered `unknown` for every line. `explain`'s commit-ish resolver had
-/// always unioned the commit's claims with the catalogue's ANCHOR link;
-/// blame/why now union the same way through `checkpoint_commit`, and the
-/// blame test pins both halves: the claim still records what the commit says,
-/// the selection resolves to the shard that exists.
+/// Two sessions, three commits and recorded prompts/checkpoint associations.
+/// Test-authored edits are fixture premises, not production writer evidence.
 struct PopulatedPipeline {
     repo: PathBuf,
     cache: PathBuf,
@@ -81,11 +58,8 @@ impl PopulatedPipeline {
             ckpt1, ckpt2,
             "unchanged capture predicts the same trailer id"
         );
-        // The human edits BETWEEN SESSIONS — the commonest human shape: the
-        // agent session ended, the developer keeps typing. Nothing observes the
-        // keystrokes; the NEXT session's first prompt snapshot diffs the
-        // worktree against HEAD and records the delta as the closing human
-        // window.
+        // Fixture edits between sessions remain ordinary captured bytes.
+        // Session association does not establish who wrote those changes.
         append_to(
             &repo.join("parser.txt"),
             "human refactor line six\nhuman refactor line seven\n",
@@ -126,17 +100,8 @@ impl PopulatedPipeline {
     }
 }
 
-/// The attribution exit criterion, closed on the resume fixture's repo: the
-/// STORED attribution rows agree with a **recomputation from
-/// primary sources** — the same commit diffed again, the same session's
-/// turn-boundary rows replayed again, by this test rather than by the archive
-/// that persisted them — and `blame` surfaces those same stored rows.
-///
-/// The fixture is the fake agent doing real work: a prompt opens turn 1, the
-/// "agent" edits the committed file between the turn's boundary hooks, the
-/// turn closes, and the real hook pair commits + archives. Deliberately
-/// transcript-less, so the predicted trailer is exact and `blame` can walk
-/// commit → trailer → checkpoint.
+/// Stored attribution agrees with the exact commit-diff recomputation and
+/// public blame output; current observations cannot supply missing writers.
 #[test]
 fn stored_attribution_agrees_with_blame_and_a_recompute_from_primary_sources() {
     let tmp = tempfile::tempdir().unwrap();
@@ -154,10 +119,10 @@ fn stored_attribution_agrees_with_blame_and_a_recompute_from_primary_sources() {
     // STORED: the attribution rows exactly as the archive persisted them.
     let stored = rt.block_on(stored_attribution(&store, &predicted));
     assert_eq!(stored.path, "a.txt");
-    assert!(
-        stored.agent >= 2,
-        "the plant bit: the agent's two lines are attributed (got {})",
-        stored.agent
+    assert_eq!(
+        (stored.agent, stored.human, stored.hma),
+        (0, 0, 0),
+        "observed buffers do not establish their writers"
     );
 
     // RECOMPUTED: the same math, re-run here over the primary sources.
@@ -195,7 +160,10 @@ fn stored_attribution_agrees_with_blame_and_a_recompute_from_primary_sources() {
     assert_eq!(span["attribution"]["agent_added"], stored.agent, "{b}");
     assert_eq!(span["attribution"]["human_added"], stored.human, "{b}");
     assert_eq!(span["attribution"]["confidence_milli"], stored.conf, "{b}");
-    assert_eq!(span["tag"], "ai", "two agent lines, no human edit: {b}");
+    assert_eq!(
+        span["tag"], "unknown",
+        "current observations cannot prove authorship: {b}"
+    );
 }
 
 /// The fake agent doing real work: a prompt opens turn 1, the "agent" edits
@@ -266,9 +234,8 @@ async fn stored_attribution(
     }
 }
 
-/// The same commit diffed again and the same session's turn-boundary rows
-/// replayed again, by this test rather than by the archive that persisted
-/// them: `a.txt`'s recomputed attribution.
+/// Recompute the exact commit diff and verify that stored observations do
+/// not modify its original attribution, confidence, categories or method.
 async fn recomputed_attribution(
     store: &rift_store::SqliteStore,
     repo: &Path,
@@ -276,9 +243,11 @@ async fn recomputed_attribution(
 ) -> rift_shadow::attribution::FileChange {
     let reader = rift_git::GixBlobReader::open(repo).unwrap();
     let mut capture = rift_shadow::attribution::capture_commit(&reader, anchor).unwrap();
+    let before = format!("{capture:?}");
     rift_shadow::enrich_attribution(store, &reader, "claude-code", "e2e-live-1", &mut capture)
         .await
         .unwrap();
+    assert_eq!(format!("{capture:?}"), before);
     capture
         .files
         .into_iter()
@@ -286,17 +255,9 @@ async fn recomputed_attribution(
         .expect("the edited file is in the recomputed capture")
 }
 
-/// Session 1, driven as capture drives it. Turn 1: the agent writes
-/// `parser.txt` between boundaries and the hook pair commits it. Between
-/// turns, inside the session, the human appends lines 4-5 to `parser.txt` —
-/// the file the session has ALREADY committed once — so turn 2's Start
-/// boundary observes the delta as the human window H_2. (Until the replay fix
-/// landed, this fixture deliberately kept `parser.txt` out of the second
-/// commit: a file committed mid-session replayed its consumed hunks again and
-/// blamed `unknown`. Now it is the un-shaped case this fixture exists to
-/// hold.) Turn 2: the agent writes `util.txt`, and the commit carries BOTH the
-/// agent's `util.txt` and the human's `parser.txt` delta. Returns the two
-/// predicted trailer ids.
+/// Two hook-pair commits in one session: parser creation, then a parser
+/// append and util creation. Fixture actors are known to the test; production
+/// records the bytes and checkpoints without inferring those writers.
 fn session_one(repo: &Path, tmp: &Path, env: &[(&str, &str)]) -> (String, String) {
     // A real transcript for session 1, in the dialect shape the compactor
     // models; its prompt line is what `why`/`explain` must serve back.
@@ -424,23 +385,22 @@ fn span_shape(doc: &serde_json::Value) -> Vec<(i64, i64, String)> {
         .collect()
 }
 
-/// BLAME: the mixed file answers agent AND human spans, in order, each bound
-/// to the checkpoint whose commit wrote it — and THE DIVERGENCE is pinned
-/// where it lives. Session 1 carried a transcript, so its predicted trailer
-/// (derived pre-commit from an archive with no transcript) names an id that
-/// never landed: the claim in the document still records it, and the
-/// SELECTION resolves through the projection's anchor link to the shard that
-/// really exists. Session 2 archived no transcript, so its trailer and its
-/// shard agree and the union is a no-op.
+/// Unknown-writer spans still resolve to the exact recorded checkpoints and
+/// sessions. Transcript-backed predicted IDs may diverge from landed IDs;
+/// resolving that association does not establish authorship.
 #[test]
-fn blame_over_the_mixed_file_binds_each_span_to_the_shard_that_wrote_it() {
+fn blame_binds_unknown_writer_spans_to_their_recorded_checkpoints() {
     let tmp = tempfile::tempdir().unwrap();
     let px = PopulatedPipeline::build(tmp.path());
     let parser_doc = px.blame("parser.txt");
     let spans = parser_doc["spans"].as_array().unwrap();
     assert_eq!(
         span_shape(&parser_doc),
-        [(1, 3, "ai"), (4, 5, "human"), (6, 7, "human")].map(|(s, e, t)| (s, e, t.to_owned())),
+        [(1, 3, "unknown"), (4, 5, "unknown"), (6, 7, "unknown")].map(|(s, e, t)| (
+            s,
+            e,
+            t.to_owned()
+        )),
         "{parser_doc}"
     );
     let resolved1 = spans[0]["selection"]["checkpoint_id"]
@@ -462,12 +422,7 @@ fn blame_over_the_mixed_file_binds_each_span_to_the_shard_that_wrote_it() {
         "a transcript-less session's trailer IS the landed shard: {parser_doc}"
     );
 
-    // The sessions resolve on their own spans — the agent's lines to session
-    // 1's first shard, the mid-session human lines to session 1's SECOND
-    // shard (a file committed mid-session replays only the hunks after its
-    // parent, so those two lines are credited to the human instead of
-    // degrading the file to unknown), the between-sessions human window to
-    // the session that OBSERVED it.
+    // Preserve session/checkpoint associations independently of writer claims.
     assert_eq!(
         spans[0]["sessions"][0]["session_id"], px.sid1,
         "{parser_doc}"
@@ -480,39 +435,26 @@ fn blame_over_the_mixed_file_binds_each_span_to_the_shard_that_wrote_it() {
         spans[1]["selection"]["checkpoint_id"], resolved1,
         "the mid-session lines resolve to session 1's second shard: {parser_doc}"
     );
-    assert_eq!(spans[1]["attribution"]["human_added"], 2, "{parser_doc}");
-    assert!(
-        spans[1]["attribution"]["confidence_milli"]
-            .as_i64()
-            .is_some_and(|c| c > 0),
-        "a replayed human window carries confidence: {parser_doc}"
-    );
+    assert_eq!(spans[1]["attribution"]["human_added"], 0, "{parser_doc}");
+    assert_eq!(spans[1]["attribution"]["agent_added"], 0, "{parser_doc}");
     assert_eq!(
         spans[2]["sessions"][0]["session_id"], px.sid2,
         "{parser_doc}"
     );
 }
 
-/// **The populated pipeline, end to end, through the shipped binary** — the
-/// stand-in for real usage, since no gate may wait on it. The assessment that
-/// prompted it measured `SUM(agent_added) = 0` over a real projection:
-/// turn-boundary snapshots existed for 2 of 61 historical sessions and the
-/// enricher rightly refuses to invent anchors, so on real data the verbs
-/// returned nothing and no test noticed. This fixture holds the anchors
-/// PRESENT and asserts a COVERAGE RATIO at exact counts: 6 spans across the
-/// fixture's three files, 5 of them — every line written under capture —
-/// resolve to a known actor; the pre-capture seed line stays honestly unknown.
-/// Floor stated as a fraction, not as "> 0": had the pipeline lost its anchors
-/// (the 2-of-61 shape), this reads 1/6 and reds.
+/// Keep all six spans and their checkpoint, session, and prompt associations
+/// through the shipped binary. Current-byte observations establish none of
+/// their writers, so every span remains Unknown.
 #[test]
-fn the_populated_pipeline_answers_blame_why_explain_with_a_coverage_floor() {
+fn the_populated_pipeline_keeps_unsupported_authorship_unknown() {
     let tmp = tempfile::tempdir().unwrap();
     let px = PopulatedPipeline::build(tmp.path());
     let parser_doc = px.blame("parser.txt");
     let util_doc = px.blame("util.txt");
     assert_eq!(
         span_shape(&util_doc),
-        [(1, 2, "ai"), (3, 3, "ai")].map(|(s, e, t)| (s, e, t.to_owned())),
+        [(1, 2, "unknown"), (3, 3, "unknown")].map(|(s, e, t)| (s, e, t.to_owned())),
         "{util_doc}"
     );
     let uspans = util_doc["spans"].as_array().unwrap();
@@ -536,27 +478,20 @@ fn the_populated_pipeline_answers_blame_why_explain_with_a_coverage_floor() {
         .flat_map(|d| d["spans"].as_array().unwrap())
         .collect();
     let known = all_spans.iter().filter(|s| s["tag"] != "unknown").count();
-    assert_eq!((all_spans.len(), known), (6, 5));
-    assert!(
-        known * 4 >= all_spans.len() * 3,
-        "coverage floor 3/4 broken: {known} of {} spans resolve",
-        all_spans.len()
-    );
+    assert_eq!((all_spans.len(), known), (6, 0));
 }
 
-/// WHY: an agent line resolves to its checkpoint, its session, and the STORED
-/// redacted prompt — non-null, extracted, and byte-served from the shard the
-/// archive wrote. A HUMAN line tells its own story: the session that observed
-/// the edit, the human tag, and — because that session archived no transcript
-/// — an honest null prompt rather than a guess.
+/// Recorded prompts and checkpoint/session associations remain available
+/// even when the file writer is Unknown. A transcript-less session yields a
+/// null prompt rather than an invented explanation.
 #[test]
-fn why_serves_the_stored_prompt_for_an_agent_line_and_an_honest_null_for_a_human_one() {
+fn why_serves_recorded_prompts_while_authorship_remains_unknown() {
     let tmp = tempfile::tempdir().unwrap();
     let px = PopulatedPipeline::build(tmp.path());
     let resolved1 = px.resolved_checkpoint("parser.txt", 0);
 
     let why_ai = px.why("parser.txt:2");
-    assert_eq!(why_ai["tag"], "ai", "{why_ai}");
+    assert_eq!(why_ai["tag"], "unknown", "{why_ai}");
     assert_eq!(
         why_ai["selection"]["checkpoint_id"],
         resolved1.as_str(),
@@ -570,7 +505,7 @@ fn why_serves_the_stored_prompt_for_an_agent_line_and_an_honest_null_for_a_human
     assert_eq!(why_ai["prompt"]["extracted"], true, "{why_ai}");
 
     let w4 = px.why("parser.txt:6");
-    assert_eq!(w4["tag"], "human", "{w4}");
+    assert_eq!(w4["tag"], "unknown", "{w4}");
     assert_eq!(w4["selection"]["checkpoint_id"], px.ckpt3.as_str(), "{w4}");
     assert_eq!(w4["sessions"][0]["session_id"], px.sid2, "{w4}");
     assert_eq!(w4["prompt"], serde_json::Value::Null, "{w4}");
@@ -606,12 +541,10 @@ fn explain_affirms_the_prompt_over_the_shard_blame_resolved() {
     );
 }
 
-/// The stored splits are non-zero on BOTH axes — the assessment's finding was
-/// `SUM(agent_added) = 0` on real data; this fixture is the counter-proof
-/// through the same tables — and every checkpoint row carries the capture
-/// event's own time, the writer fix observed at the projection layer.
+/// Fresh attribution remains Unknown despite real captured buffers/audits;
+/// checkpoint event dates remain recorded and are not writer evidence.
 #[test]
-fn the_stored_splits_are_non_zero_on_both_axes_and_every_checkpoint_row_is_dated() {
+fn stored_authorship_is_unknown_despite_observed_buffers_and_dated_checkpoints() {
     let tmp = tempfile::tempdir().unwrap();
     let px = PopulatedPipeline::build(tmp.path());
     let repo_id = rift_git::repo_id_for(&px.repo).unwrap();
@@ -628,14 +561,18 @@ fn the_stored_splits_are_non_zero_on_both_axes_and_every_checkpoint_row_is_dated
         ))
         .unwrap();
     let (agent_sum, human_sum) = (sums[0].get_i64(0).unwrap(), sums[0].get_i64(1).unwrap());
-    assert!(
-        agent_sum >= 6,
-        "agent lines across both sessions: {agent_sum}"
+    assert_eq!(
+        (agent_sum, human_sum),
+        (0, 0),
+        "no authorship from observations"
     );
+    assert!(rt.block_on(store.count("turn_boundary_file")).unwrap() > 0);
     assert!(
-        human_sum >= 4,
-        "the mid-session and between-sessions human lines: {human_sum}"
+        rt.block_on(store.count("turn_boundary_observation"))
+            .unwrap()
+            > 0
     );
+    assert_eq!(rt.block_on(store.count("turn_diff_hunk")).unwrap(), 0);
 
     let times = rt
         .block_on(store.query(
@@ -653,12 +590,20 @@ fn the_stored_splits_are_non_zero_on_both_axes_and_every_checkpoint_row_is_dated
 
 /// DOCTOR's per-session turn-boundary coverage: session 1 fired two prompts
 /// and two Stops, and every one landed as its own boundary snapshot — the
-/// count that, at zero, is the blame-unknown signature.
+/// count describes event coverage, never proof of file writers.
 #[test]
 fn doctor_counts_every_turn_boundary_the_first_session_fired() {
     let tmp = tempfile::tempdir().unwrap();
     let px = PopulatedPipeline::build(tmp.path());
     let d = doctor_json(&px.repo, &px.env());
+    assert_eq!(
+        d["turn_boundaries"]["collection"]["authorship"], "unavailable",
+        "{d}"
+    );
+    assert_eq!(
+        d["turn_boundaries"]["collection"]["historical_attributions_revalidated"], false,
+        "{d}"
+    );
     let s1 = d["turn_boundaries"]["sessions"]
         .as_array()
         .unwrap()

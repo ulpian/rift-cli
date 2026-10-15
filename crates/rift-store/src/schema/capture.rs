@@ -838,7 +838,23 @@ const TABLES: &[CanonicalTable] = &[
         columns: TURN_BOUNDARY_FILE_KIND_COLUMNS,
         primary_key: &["snapshot_id", "path"],
         unique: NO_UNIQUE,
-    },
+    }, // v20: collection audit only, never event-time or authorship proof.
+    BOUNDARY_OBSERVATION_TABLE,
+];
+
+pub(crate) const BOUNDARY_OBSERVATION_TABLE: CanonicalTable = CanonicalTable {
+    name: "turn_boundary_observation",
+    columns: TURN_BOUNDARY_OBSERVATION_COLUMNS,
+    primary_key: &["snapshot_id"],
+    unique: NO_UNIQUE,
+};
+
+const TURN_BOUNDARY_OBSERVATION_COLUMNS: &[Column] = &[
+    Column::text("snapshot_id"),
+    Column::text("worktree_hash"),
+    Column::int("collection_started_at"),
+    Column::int("collection_finished_at"),
+    Column::int("schema_version"),
 ];
 
 const TURN_BOUNDARY_FILE_KIND_COLUMNS: &[Column] = &[
@@ -1277,6 +1293,23 @@ mod tests {
                 assert_ne!(a.name, b.name, "duplicate table {}", a.name);
             }
         }
+    }
+
+    #[test]
+    fn boundary_collection_attempt_has_an_append_only_registry_entry() {
+        let table =
+            canonical_table("turn_boundary_observation").expect("audit relation registered");
+        assert_eq!(table.primary_key, &["snapshot_id"]);
+        assert_eq!(
+            table.columns.iter().map(|c| c.name).collect::<Vec<_>>(),
+            vec![
+                "snapshot_id",
+                "worktree_hash",
+                "collection_started_at",
+                "collection_finished_at",
+                "schema_version",
+            ]
+        );
     }
 
     #[test]

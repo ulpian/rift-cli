@@ -1,24 +1,34 @@
 //! The turn-boundary snapshot a hook journaled, taken by the detached worker.
 //!
 //! Separate from the drain because it is the one job whose answer depends on
-//! *when* it describes: the snapshot is held to the boundary's own instant and
-//! `HEAD`, which the hook recorded, not to the moment the worker runs.
+//! when the event was journaled versus when bytes were collected. The hook's
+//! HEAD/time identify the event; the collection interval audits later current
+//! bytes and cannot establish event-time content or historical writers.
 
 use rift_core::Result;
 
 use crate::agent_queue::{AgentJob, BoundaryEdge, BoundarySnapshot};
 use crate::hooks::projection_db_at;
 
-/// Take one journaled boundary snapshot: the same capture the hook once ran
-/// inline, given the hook's `HEAD` and instant.
+/// Collect bounded current bytes associated with a journaled boundary event.
+/// The event HEAD/time remain separate from the later collection audit.
 ///
 /// A failure goes back to the drain, which keeps the job and counts the
-/// attempt (or drops it on a refused row): the boundary is then missing from
-/// the session, which the replay already reads as an unanchored window.
+/// attempt (or drops it on a refused row). Missing or incomplete observations
+/// stay missing; neither successful collection nor retry certifies authorship.
 pub(super) fn boundary_snapshot_job(
     t: &crate::hooktime::HookTimer,
     job: &AgentJob,
     snapshot: &BoundarySnapshot,
+) -> Result<()> {
+    boundary_snapshot_job_with_clock(t, job, snapshot, rift_shadow::boundary_collection_time)
+}
+
+fn boundary_snapshot_job_with_clock(
+    t: &crate::hooktime::HookTimer,
+    job: &AgentJob,
+    snapshot: &BoundarySnapshot,
+    clock: impl FnMut() -> Result<i64>,
 ) -> Result<()> {
     let repo = rift_git::discover(&job.work_tree)?;
     let reader = t.phase("gix_open", || {
@@ -32,7 +42,7 @@ pub(super) fn boundary_snapshot_job(
         .build()
         .map_err(rift_core::RiftError::from)?;
     t.phase(phase_name(snapshot.boundary), || {
-        rt.block_on(rift_shadow::capture_boundary(
+        rt.block_on(rift_shadow::capture_boundary_with_clock(
             &store,
             &repo,
             &reader,
@@ -42,6 +52,7 @@ pub(super) fn boundary_snapshot_job(
             snapshot.ordinal,
             snapshot.boundary.boundary(),
             snapshot.captured_at_ms,
+            clock,
         ))
     })
 }
@@ -81,8 +92,9 @@ mod tests {
 
     const SESSION: &str = "s-boundary";
     const AGENT: &str = "claude-code";
-    /// An instant after every edit these fixtures make, fixed so no verdict
-    /// reads the clock: 2100-01-01.
+    /// Fixed event time for fixtures. Direct collection tests inject separate
+    /// read intervals; drain tests use the production clock without comparing
+    /// it to this synthetic event time: 2100-01-01.
     const AFTER_THE_EDITS: i64 = 4_102_444_800_000;
 
     /// A committed checkout whose family is minted, with `a.txt` edited and
@@ -152,6 +164,8 @@ mod tests {
              FROM turn_boundary_file ORDER BY 1",
             "SELECT hunk_id || '|' || edit_kind || '|' || path || '|' || old_start || '|' \
              || old_len || '|' || new_start || '|' || new_len FROM turn_diff_hunk ORDER BY 1",
+            "SELECT snapshot_id || '|' || worktree_hash || '|' || collection_started_at || '|' \
+             || collection_finished_at FROM turn_boundary_observation ORDER BY 1",
         ];
         let mut lines = Vec::new();
         for sql in queries {
@@ -179,7 +193,13 @@ mod tests {
             panic!("a boundary job");
         };
         let t = crate::hooktime::HookTimer::new("test", false);
-        boundary_snapshot_job(&t, &job, snapshot).unwrap();
+        let mut worker_tick = AFTER_THE_EDITS + 60_000;
+        boundary_snapshot_job_with_clock(&t, &job, snapshot, || {
+            let at = worker_tick;
+            worker_tick += 1;
+            Ok(at)
+        })
+        .unwrap();
         let db = crate::family::projection_db(checkout.path()).unwrap();
         let worker = boundary_rows(&rift_store::SqliteStore::open_read_only(&db).unwrap());
 
@@ -189,7 +209,8 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        rt.block_on(rift_shadow::capture_boundary(
+        let mut inline_tick = AFTER_THE_EDITS + 60_000;
+        rt.block_on(rift_shadow::capture_boundary_with_clock(
             &inline,
             &repo,
             &reader,
@@ -199,14 +220,19 @@ mod tests {
             1,
             rift_shadow::Boundary::Start,
             AFTER_THE_EDITS,
+            || {
+                let at = inline_tick;
+                inline_tick += 1;
+                Ok(at)
+            },
         ))
         .unwrap();
 
         assert_eq!(worker, boundary_rows(&inline));
         assert_eq!(
             worker.len(),
-            5,
-            "one snapshot, two files, two hunks: {worker:?}"
+            4,
+            "one event, two current files, one collection audit, no actor hunks: {worker:?}"
         );
     }
 
@@ -259,6 +285,74 @@ mod tests {
         assert_eq!(
             order,
             ["boundary_end", "boundary_start", "enrich_attribution"]
+        );
+        // Drain uses the checked production clock. Validate the audit shape,
+        // without comparing real collection time to the synthetic event time.
+        let store = rift_store::open_capture_projection(
+            crate::family::projection_db(checkout.path()).unwrap(),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let id = rift_shadow::ids::session_row_id(AGENT, SESSION);
+        let last = rt
+            .block_on(rift_store::latest_turn_boundary_snapshot(&store, &id))
+            .unwrap()
+            .unwrap();
+        let audit = rt
+            .block_on(rift_store::turn_boundary_observation_for_snapshot(
+                &store,
+                &last.snapshot_id,
+            ))
+            .unwrap()
+            .unwrap();
+        assert!(audit.interval.started_at >= 0);
+        assert!(audit.interval.finished_at >= audit.interval.started_at);
+    }
+
+    #[test]
+    fn collection_clock_failure_or_reversal_does_not_persist_an_event_or_audit() {
+        use rift_store::CanonicalStore as _;
+        let checkout = tempfile::tempdir().unwrap();
+        let (_, head) = edited_checkout(checkout.path());
+        let job = snapshot_job(
+            checkout.path(),
+            &head,
+            1,
+            BoundaryEdge::Start,
+            AFTER_THE_EDITS,
+        );
+        let JobKind::BoundarySnapshot(snapshot) = &job.kind else {
+            panic!("boundary fixture");
+        };
+        let t = crate::hooktime::HookTimer::new("test", false);
+        assert!(boundary_snapshot_job_with_clock(&t, &job, snapshot, || Err(
+            rift_core::RiftError::storage("fixture collection clock unavailable")
+        ),)
+        .is_err());
+        let mut at = 30;
+        assert!(boundary_snapshot_job_with_clock(&t, &job, snapshot, || {
+            let current = at;
+            at -= 1;
+            Ok(current)
+        })
+        .is_err());
+        let store = rift_store::open_capture_projection(
+            crate::family::projection_db(checkout.path()).unwrap(),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert_eq!(
+            rt.block_on(store.count("turn_boundary_snapshot")).unwrap(),
+            0
+        );
+        assert_eq!(
+            rt.block_on(store.count("turn_boundary_observation"))
+                .unwrap(),
+            0
         );
     }
 
