@@ -58,6 +58,7 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 # `rift hooks <agent> <verb>` parses the stdin-JSON capture contract.
 serde_json = { workspace = true }
+blake3 = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 # The command-line surface: clap-derive tree, exit codes, --json contract.

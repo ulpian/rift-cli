@@ -17,6 +17,7 @@ use rift_core::Result;
 use rift_recall_ledger::attribution::{
     append_attributed_serve, attribute_booked_serve, ServeAttribution,
 };
+use rift_store::CanonicalStore as _;
 
 use super::now_ms;
 
@@ -47,10 +48,16 @@ pub(super) fn serve_audit_job(
 ) -> Result<()> {
     let repo = rift_git::discover(&job.work_tree)?;
     let event = t.phase("audit_count", || serve_audit_event(&repo.work_tree, audit));
-    let db = crate::family::recall_db(&repo.work_tree)?;
-    let store = t.phase("open_recall", || {
-        rift_store::open_migrated(&db, &rift_store::recall_migrations())
+    let db = crate::family::recall_db(&repo.work_tree).map_err(|error| {
+        crate::capture_queue::proof_read(error, "serve proof-store location is unavailable")
     })?;
+    let store = t
+        .phase("open_recall", || {
+            rift_store::open_migrated(&db, &rift_store::recall_migrations())
+        })
+        .map_err(|error| {
+            crate::capture_queue::proof_read(error, "serve prior-key proof is unavailable")
+        })?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
@@ -58,7 +65,14 @@ pub(super) fn serve_audit_job(
     // still records when the agent's turn spent (or saved) the tokens.
     let (audited, called) = serve_audit_envelopes(&event, audit, job.queued_at_ms);
     let attribution = serve_attribution(audit.session.as_deref(), audit.window.as_deref());
+    let expected = [
+        expected_serve_row(&audited, job.queued_at_ms)?,
+        expected_serve_row(&called, job.queued_at_ms)?,
+    ];
     rt.block_on(async {
+        for row in &expected {
+            row.require_absent(&store).await?;
+        }
         for envelope in [audited, called] {
             append_attributed_serve(
                 &store,
@@ -67,6 +81,15 @@ pub(super) fn serve_audit_job(
                 attribution.as_ref(),
             )
             .await?;
+        }
+        for row in &expected {
+            row.require_exact(&store).await?;
+        }
+        if let Some(attribution) = &attribution {
+            require_serve_attribution(&store, &expected[0].key, "memd_audit_event", attribution)
+                .await?;
+            require_serve_attribution(&store, &expected[1].key, "serve_call_event", attribution)
+                .await?;
         }
         Ok(())
     })
@@ -87,22 +110,171 @@ pub(super) fn attribute_serve_job(
         return Ok(());
     };
     let repo = rift_git::discover(&job.work_tree)?;
-    let db = crate::family::recall_db(&repo.work_tree)?;
-    let Some(store) = t.phase("open_recall", || {
-        rift_store::open_existing_migrated(&db, &rift_store::recall_migrations())
-    })?
+    let db = crate::family::recall_db(&repo.work_tree).map_err(|error| {
+        crate::capture_queue::proof_read(error, "serve proof-store location is unavailable")
+    })?;
+    let Some(store) = t
+        .phase("open_recall", || {
+            rift_store::open_existing_migrated(&db, &rift_store::recall_migrations())
+        })
+        .map_err(|error| {
+            crate::capture_queue::proof_read(error, "serve attribution proof is unavailable")
+        })?
     else {
         return Ok(());
     };
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
-    rt.block_on(attribute_booked_serve(
-        &store,
-        &claim.audit_id,
-        &claim.call_id,
-        &attribution,
-    ))
+    rt.block_on(async {
+        for key in [&claim.audit_id, &claim.call_id] {
+            let rows = store
+                .query(
+                    "SELECT serve_key FROM memd_audit_session WHERE serve_key = ?1",
+                    &[rift_store::Value::text(key)],
+                )
+                .await
+                .map_err(|error| {
+                    crate::capture_queue::proof_read(
+                        error,
+                        "serve attribution prior-key proof is unavailable",
+                    )
+                })?;
+            if !rows.is_empty() {
+                return Err(crate::capture_queue::deferred(
+                    "serve attribution input is already recorded without complete job proof",
+                ));
+            }
+        }
+        attribute_booked_serve(&store, &claim.audit_id, &claim.call_id, &attribution).await?;
+        for (key, relation) in [
+            (&claim.audit_id, "memd_audit_event"),
+            (&claim.call_id, "serve_call_event"),
+        ] {
+            require_serve_attribution(&store, key, relation, &attribution).await?;
+        }
+        Ok(())
+    })
+}
+
+/// Expected immutable facts derived from the job's own rendered envelope.
+struct ExpectedServeRow {
+    key: String,
+    query: &'static str,
+    row: rift_store::Row,
+}
+
+impl ExpectedServeRow {
+    async fn require_absent(&self, store: &rift_store::SqliteStore) -> Result<()> {
+        let rows = store
+            .query(self.query, &[rift_store::Value::text(&self.key)])
+            .await
+            .map_err(|error| {
+                crate::capture_queue::proof_read(error, "serve persisted-row proof is unavailable")
+            })?;
+        if !rows.is_empty() {
+            return Err(crate::capture_queue::deferred(
+                "serve key lacks complete replay input proof",
+            ));
+        }
+        let associations = store
+            .query(
+                "SELECT serve_key FROM memd_audit_session WHERE serve_key = ?1",
+                &[rift_store::Value::text(&self.key)],
+            )
+            .await
+            .map_err(|error| {
+                crate::capture_queue::proof_read(
+                    error,
+                    "serve association prior-key proof is unavailable",
+                )
+            })?;
+        if !associations.is_empty() {
+            return Err(crate::capture_queue::deferred(
+                "serve key has an existing association without exact input proof",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn require_exact(&self, store: &rift_store::SqliteStore) -> Result<()> {
+        let rows = store
+            .query(self.query, &[rift_store::Value::text(&self.key)])
+            .await
+            .map_err(|error| {
+                crate::capture_queue::proof_read(error, "serve persisted-row proof is unavailable")
+            })?;
+        if rows != [self.row.clone()] {
+            return Err(crate::capture_queue::deferred(
+                "serve key conflicts with actual persisted facts",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn json_field<'a>(object: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    object.get(name).unwrap_or(&serde_json::Value::Null)
+}
+
+fn expected_serve_row(envelope: &str, now: i64) -> Result<ExpectedServeRow> {
+    use rift_store::Value;
+    let env: serde_json::Value = serde_json::from_str(envelope)
+        .map_err(|_| crate::capture_queue::deferred("serve envelope is unavailable"))?;
+    let key = json_field(&env, "idempotency_key")
+        .as_str()
+        .ok_or_else(|| crate::capture_queue::deferred("serve key is unavailable"))?
+        .to_owned();
+    let verb = Value::text(json_field(&env, "verb").as_str().unwrap_or_default());
+    let payload = json_field(&env, "payload");
+    let optional = |value: &serde_json::Value| value.as_str().map_or(Value::Null, Value::text);
+    let count = |value: &serde_json::Value| Value::Int(value.as_i64().unwrap_or(0));
+    let (query, values) = if json_field(&env, "schema").as_u64() == Some(4) {
+        let call = json_field(&env, "serve_call");
+        ("SELECT call_id, channel, tool_name, terminal_verb, tokens_returned, tokens_avoided, recorded_at, schema_version FROM serve_call_event WHERE call_id = ?1",
+            vec![Value::text(&key), optional(json_field(call, "channel")), optional(json_field(call, "tool_name")), verb,
+                count(json_field(call, "tokens_returned")), count(json_field(call, "tokens_avoided")), count(json_field(call, "recorded_at")), Value::Int(1)])
+    } else {
+        let handle = payload
+            .get("handle")
+            .or_else(|| payload.get("target"))
+            .unwrap_or(&serde_json::Value::Null);
+        ("SELECT audit_id, verb, handle, reason, tokens_returned, tokens_avoided, recorded_at, schema_version FROM memd_audit_event WHERE audit_id = ?1",
+            vec![Value::text(&key), verb, optional(handle), optional(json_field(payload, "reason")),
+                count(json_field(payload, "estimated_tokens_returned")), count(json_field(payload, "estimated_tokens_avoided")), Value::Int(now), Value::Int(1)])
+    };
+    Ok(ExpectedServeRow {
+        key,
+        query,
+        row: rift_store::Row::new(values),
+    })
+}
+
+async fn require_serve_attribution(
+    store: &rift_store::SqliteStore,
+    key: &str,
+    relation: &str,
+    attribution: &ServeAttribution,
+) -> Result<()> {
+    use rift_store::Value;
+    let rows = store.query("SELECT serve_key, relation, session_id, window_key, schema_version FROM memd_audit_session WHERE serve_key = ?1 AND relation = ?2",
+        &[Value::text(key), Value::text(relation)]).await.map_err(|error| crate::capture_queue::proof_read(error, "serve attribution readback is unavailable"))?;
+    let expected = rift_store::Row::new(vec![
+        Value::text(key),
+        Value::text(relation),
+        Value::text(&attribution.session_id),
+        attribution
+            .window_key
+            .as_deref()
+            .map_or(Value::Null, Value::text),
+        Value::Int(1),
+    ]);
+    if rows != [expected] {
+        return Err(crate::capture_queue::deferred(
+            "serve attribution is absent or conflicts",
+        ));
+    }
+    Ok(())
 }
 
 /// The attribution a hook-side serve is written with: its session when the
@@ -899,5 +1071,245 @@ mod serve_audit_tests {
         let (rows, _) = book(tmp.path(), &audit);
         assert_eq!(rows[0].2, rift_recall_serve::TAG_BASIS_UNAVAILABLE);
         assert_eq!(rows[0].4, 0);
+    }
+
+    fn queued_audit_job(
+        work_tree: &Path,
+        kind: crate::agent_queue::JobKind,
+        at: i64,
+    ) -> crate::agent_queue::AgentJob {
+        crate::agent_queue::AgentJob {
+            schema_version: 1,
+            work_tree: work_tree.to_path_buf(),
+            queued_at_ms: at,
+            attempts: 0,
+            kind,
+        }
+    }
+
+    fn attribution_rows(work_tree: &Path) -> Vec<Vec<String>> {
+        let db = crate::family::recall_db(work_tree).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(store.query(
+            "SELECT serve_key, relation, session_id, COALESCE(window_key, '') FROM memd_audit_session ORDER BY relation, serve_key", &[],
+        )).unwrap().iter().map(|row| (0..4).map(|n| row.get_text(n).unwrap()).collect()).collect()
+    }
+
+    fn drain_audit_job(job: &crate::agent_queue::AgentJob) -> std::path::PathBuf {
+        let git_dir = job.work_tree.join(".git");
+        let path = crate::agent_queue::enqueue(&git_dir, job).unwrap();
+        super::super::worker::drain_jobs(git_dir.to_str(), super::super::worker::LockWait::None);
+        path
+    }
+
+    fn audit_collision_setup() -> (tempfile::TempDir, ServeAudit, Vec<Vec<String>>) {
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        let mut audit = decision(ServeAuditKind::ReadPreventedObserved, None, "");
+        audit.session = Some("session-a".into());
+        let first = queued_audit_job(
+            tmp.path(),
+            crate::agent_queue::JobKind::ServeAudit(audit.clone()),
+            1000,
+        );
+        assert!(
+            !drain_audit_job(&first).exists(),
+            "fresh A completes before B is queued"
+        );
+        let rows = attribution_rows(tmp.path());
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row[2] == "session-a"));
+        (tmp, audit, rows)
+    }
+
+    fn canonical_audit_facts(work_tree: &Path) -> Vec<Vec<rift_store::Row>> {
+        let db = crate::family::recall_db(work_tree).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        [
+            "SELECT * FROM memd_audit_event ORDER BY audit_id",
+            "SELECT * FROM serve_call_event ORDER BY call_id",
+            "SELECT * FROM memd_audit_session ORDER BY relation, serve_key",
+        ]
+        .iter()
+        .map(|sql| rt.block_on(store.query(sql, &[])).unwrap())
+        .collect()
+    }
+
+    fn assert_audit_collision_retained(job: &crate::agent_queue::AgentJob, rows: &[Vec<String>]) {
+        let facts = canonical_audit_facts(&job.work_tree);
+        let git_dir = job.work_tree.join(".git");
+        let path = crate::agent_queue::enqueue(&git_dir, job).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            crate::agent_queue::jobs(&git_dir).len(),
+            1,
+            "B is the sole owed context"
+        );
+        for _ in 0..2 {
+            super::super::worker::drain_jobs(
+                git_dir.to_str(),
+                super::super::worker::LockWait::None,
+            );
+            assert_eq!(canonical_audit_facts(&job.work_tree), facts);
+            assert!(path.exists(), "conflicting B remains owed");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(crate::agent_queue::read_job(&path).unwrap().1.attempts, 0);
+            assert_eq!(attribution_rows(&job.work_tree), rows);
+        }
+    }
+
+    #[test]
+    fn pending_context_serve_audit_cannot_consume_another_session_after_a_completed() {
+        let (tmp, mut audit, rows) = audit_collision_setup();
+        audit.session = Some("session-b".into());
+        let second = queued_audit_job(
+            tmp.path(),
+            crate::agent_queue::JobKind::ServeAudit(audit),
+            2000,
+        );
+        assert_audit_collision_retained(&second, &rows);
+    }
+
+    #[test]
+    fn pending_context_attribute_serve_cannot_consume_a_conflicting_completed_claim() {
+        let (tmp, audit, rows) = audit_collision_setup();
+        let audit_id = rows
+            .iter()
+            .find(|row| row[1] == "memd_audit_event")
+            .unwrap()[0]
+            .clone();
+        let claim = crate::agent_queue::ServeClaim {
+            session: "session-b".into(),
+            window: None,
+            call_id: audit.call_id,
+            audit_id,
+        };
+        let second = queued_audit_job(
+            tmp.path(),
+            crate::agent_queue::JobKind::AttributeServe(claim),
+            2000,
+        );
+        assert_audit_collision_retained(&second, &rows);
+    }
+    #[test]
+    fn unavailable_audit_proof_retains_both_job_kinds_across_two_actual_drains() {
+        for attributed in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            rift_git::test_support::fake_repo(tmp.path()).unwrap();
+            let git_dir = tmp.path().join(".git");
+            let db = crate::family::recall_db(tmp.path()).unwrap();
+            std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+            std::fs::write(&db, b"unreadable-audit-proof-store").unwrap();
+            let kind = if attributed {
+                crate::agent_queue::JobKind::AttributeServe(crate::agent_queue::ServeClaim {
+                    session: "s-proof".into(),
+                    window: None,
+                    call_id: "a".repeat(32),
+                    audit_id: "b".repeat(64),
+                })
+            } else {
+                crate::agent_queue::JobKind::ServeAudit(decision(
+                    ServeAuditKind::ReadPreventedObserved,
+                    None,
+                    "",
+                ))
+            };
+            let job = queued_audit_job(tmp.path(), kind, 1000);
+            let path = crate::agent_queue::enqueue(&git_dir, &job).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let capture = rift_store::open_capture_projection(
+                crate::hooks::projection_db_at(tmp.path()).unwrap(),
+            )
+            .unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let checkpoints = rt
+                .block_on(capture.query("SELECT * FROM checkpoint ORDER BY checkpoint_id", &[]))
+                .unwrap();
+            for _ in 0..2 {
+                super::super::worker::drain_jobs(
+                    git_dir.to_str(),
+                    super::super::worker::LockWait::None,
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                assert_eq!(crate::agent_queue::read_job(&path).unwrap().1.attempts, 0);
+                // The unavailable recall store remains byte-identical; no row
+                // can be inspected or claimed from its malformed bytes.
+                assert_eq!(std::fs::read(&db).unwrap(), b"unreadable-audit-proof-store");
+                assert_eq!(
+                    rt.block_on(
+                        capture.query("SELECT * FROM checkpoint ORDER BY checkpoint_id", &[])
+                    )
+                    .unwrap(),
+                    checkpoints
+                );
+            }
+        }
+    }
+    fn orphan_association_refuses_new_event(call_orphan: bool, attributed: bool) {
+        let (tmp, mut audit, _) = audit_collision_setup();
+        audit.call_id = "e".repeat(32);
+        audit.session = attributed.then(|| "new-session".into());
+        let event = serve_audit_event(tmp.path(), &audit);
+        let (decision, call) = serve_audit_envelopes(&event, &audit, 2000);
+        let expected =
+            expected_serve_row(if call_orphan { &call } else { &decision }, 2000).unwrap();
+        let db = crate::family::recall_db(tmp.path()).unwrap();
+        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt
+            .block_on(store.insert_or_ignore(
+                "memd_audit_session",
+                &[
+                    "serve_key",
+                    "relation",
+                    "session_id",
+                    "window_key",
+                    "schema_version"
+                ],
+                &[
+                    rift_store::Value::text(&expected.key),
+                    rift_store::Value::text(if call_orphan {
+                        "serve_call_event"
+                    } else {
+                        "memd_audit_event"
+                    }),
+                    rift_store::Value::text("orphan-session"),
+                    rift_store::Value::Null,
+                    rift_store::Value::Int(1)
+                ]
+            ))
+            .unwrap());
+        let rows = attribution_rows(tmp.path());
+        assert_eq!(
+            rows.len(),
+            3,
+            "completed A associations plus canonical orphan"
+        );
+        let job = queued_audit_job(
+            tmp.path(),
+            crate::agent_queue::JobKind::ServeAudit(audit),
+            2000,
+        );
+        assert_audit_collision_retained(&job, &rows);
+    }
+
+    #[test]
+    fn an_orphan_audit_association_cannot_be_activated_by_an_unattributed_event() {
+        orphan_association_refuses_new_event(false, false);
+    }
+
+    #[test]
+    fn an_orphan_call_association_cannot_conflict_with_a_new_attributed_event() {
+        orphan_association_refuses_new_event(true, true);
     }
 }

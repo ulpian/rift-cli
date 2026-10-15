@@ -6,6 +6,7 @@
 
 mod boundary;
 pub(in crate::hooks) mod linehash;
+mod ownership;
 mod reads;
 
 use std::path::Path;
@@ -59,6 +60,7 @@ enum Landed {
 struct Drained {
     condensed: Vec<(String, String)>,
     minted: bool,
+    ready: bool,
 }
 
 /// How the levelling at a drain's tail ended. Every arm is a value: a drain
@@ -110,19 +112,7 @@ pub(super) fn drain_queues(git_dir: Option<&str>, wait: LockWait) -> Result<Vec<
         return Ok(Vec::new());
     };
     let git_dir = Path::new(git_dir);
-    // Another worker is already draining: it will take these entries too, so a
-    // second drain would only duplicate idempotent work and its git writes.
-    let Some(_lock) = acquire_queue_lock(git_dir, wait) else {
-        return Ok(Vec::new());
-    };
-    let t = crate::hooktime::HookTimer::from_env("capture-worker");
-    let drained = drain_locked(&t, git_dir);
-    let swept = super::sweep::sweep_idle_family(git_dir, now_ms(), None);
-    if drained.minted || !swept.condensed_checkpoints.is_empty() {
-        let levelled = level_after_condense(git_dir);
-        tracing::debug!(?levelled, "projection levelled after a condense");
-    }
-    Ok(drained.condensed)
+    Ok(drain_owned_passes(git_dir, wait, true).condensed)
 }
 
 /// [`drain_queues`] without the idle sweep at its tail: the drain the
@@ -137,37 +127,26 @@ pub(super) fn drain_jobs(git_dir: Option<&str>, wait: LockWait) -> Vec<(String, 
     let Some(git_dir) = git_dir.map(Path::new) else {
         return Vec::new();
     };
-    match acquire_queue_lock(git_dir, wait) {
-        Some(_lock) => {
-            let t = crate::hooktime::HookTimer::from_env("capture-worker");
-            drain_locked(&t, git_dir).condensed
-        }
-        None => Vec::new(),
-    }
+    drain_owned_passes(git_dir, wait, false).condensed
 }
 
 /// Every job and queued commit, drained under the lock the caller holds.
 ///
 /// Within a pass every journaled job runs before any queued commit, in the
 /// journal's order. That is what keeps a turn's boundary snapshots ahead of
-/// the commit whose attribution replays them, and a turn's end ahead of the
+/// commit processing, and a turn's end ahead of the
 /// next turn's start.
-fn drain_locked(t: &crate::hooktime::HookTimer, git_dir: &Path) -> Drained {
+fn drain_locked(
+    t: &crate::hooktime::HookTimer,
+    git_dir: &Path,
+    owner: &crate::capture_queue::QueueLock,
+    attempted: &mut std::collections::BTreeSet<std::path::PathBuf>,
+) -> Drained {
     let mut drained = Drained::default();
-    let now = now_ms();
-    // Under the lock, on the same clock reading the lock decision used: a temp
-    // file older than the lock-steal age is the corpse of a write that died
-    // before its rename, and nothing else in the queue will ever remove it.
-    let swept = crate::capture_queue::sweep_stale_tmps(git_dir, now);
-    if swept > 0 {
-        tracing::debug!(swept, "removed stale capture-queue temp files");
+    if crate::family::run_state::prepare_owned(owner).is_err() {
+        return drained;
     }
-    // A job attempted once in this drain is not attempted again by it: a
-    // failed job is re-journaled with its count raised, and re-finding it on
-    // the next pass would spend every retry it has inside one worker — the
-    // retry is the NEXT worker's or the doctor's, after whatever failed has
-    // had a chance to change.
-    let mut attempted = std::collections::BTreeSet::new();
+    drained.ready = true;
     loop {
         let agent_jobs: Vec<_> = crate::agent_queue::jobs(git_dir)
             .into_iter()
@@ -181,7 +160,7 @@ fn drain_locked(t: &crate::hooktime::HookTimer, git_dir: &Path) -> Drained {
             return drained;
         }
         for (path, job) in agent_jobs {
-            match run_agent_job(t, git_dir, &path, &job) {
+            match run_agent_job(t, git_dir, &path, &job, owner) {
                 Landed::Nothing => (),
                 Landed::Checkpoint => drained.minted = true,
                 Landed::Condensed(session, checkpoint) => {
@@ -191,14 +170,70 @@ fn drain_locked(t: &crate::hooktime::HookTimer, git_dir: &Path) -> Drained {
             }
         }
         for (path, entry) in commits {
-            match condense_queued(t, git_dir, &entry, &path) {
-                Ok(()) => crate::capture_queue::remove(&path),
-                Err(e) if projection_busy(&e) => (),
+            let result = ownership::validate_capture(owner, &path, &entry)
+                .and_then(|()| condense_queued(t, git_dir, &entry, &path));
+            match result {
+                Ok(()) => {
+                    let _ = crate::capture_queue::remove_owned(&path, owner);
+                }
+                Err(e) if projection_busy(&e) || crate::capture_queue::is_deferred(&e) => (),
                 Err(e) => {
-                    crate::capture_queue::record_failure(&path, &entry, git_dir, &e.to_string());
+                    let _ = crate::capture_queue::record_failure_owned(
+                        &path,
+                        &entry,
+                        &e.to_string(),
+                        owner,
+                    );
                 }
             }
         }
+    }
+}
+
+/// Recheck after releasing ownership so a producer that saw the old owner
+/// busy still gets a pass. Already attempted paths never trigger reacquisition.
+fn drain_owned_passes(git_dir: &Path, wait: LockWait, sweep: bool) -> Drained {
+    let mut all = Drained::default();
+    let Some(mut owner) = acquire_queue_lock(git_dir, wait) else {
+        return all;
+    };
+    let t = crate::hooktime::HookTimer::from_env("capture-worker");
+    let mut attempted = std::collections::BTreeSet::new();
+    loop {
+        let pass = drain_locked(&t, git_dir, &owner, &mut attempted);
+        all.minted |= pass.minted;
+        all.condensed.extend(pass.condensed);
+        if !pass.ready {
+            return all;
+        }
+        all.ready = true;
+        if sweep {
+            let swept = super::sweep::sweep_idle_family(&owner, now_ms(), None);
+            all.minted |= !swept.condensed_checkpoints.is_empty();
+        }
+        if all.minted && crate::family::run_state::prepare_owned(&owner).is_ok() {
+            let levelled = level_after_condense(git_dir);
+            tracing::debug!(?levelled, "projection levelled under queue owner");
+        }
+        #[cfg(test)]
+        run_state_tests::pause_before_owner_release();
+        drop(owner);
+        let pending = crate::agent_queue::jobs(git_dir)
+            .into_iter()
+            .map(|(path, _)| path)
+            .chain(
+                crate::capture_queue::entries(git_dir)
+                    .into_iter()
+                    .map(|(path, _)| path),
+            )
+            .any(|path| !attempted.contains(&path));
+        if !pending {
+            return all;
+        }
+        let Some(next) = acquire_queue_lock(git_dir, LockWait::None) else {
+            return all;
+        };
+        owner = next;
     }
 }
 
@@ -253,31 +288,60 @@ fn run_agent_job(
     git_dir: &Path,
     path: &Path,
     job: &crate::agent_queue::AgentJob,
+    owner: &crate::capture_queue::QueueLock,
 ) -> Landed {
-    match run_job_kind(t, git_dir, job) {
+    let result = ownership::validate_job(owner, path, job)
+        .and_then(|context| run_job_kind(t, git_dir, job, owner, &context));
+    match result {
         Ok(landed) => {
-            crate::agent_queue::remove(path);
+            let _ = crate::capture_queue::remove_owned(path, owner);
             landed
+        }
+        Err(e) if crate::capture_queue::is_deferred(&e) => {
+            if let Some(reason) = crate::capture_queue::defer_reason(&e) {
+                crate::capture_queue::mark_note(
+                    git_dir,
+                    &crate::agent_queue::note_key(job),
+                    &format!("{}: {reason}", crate::agent_queue::note_key(job)),
+                );
+            }
+            Landed::Nothing
         }
         Err(e) if projection_busy(&e) => Landed::Nothing,
         Err(e @ rift_core::RiftError::ConstraintRefused { .. }) => {
             let key = crate::agent_queue::note_key(job);
             crate::capture_queue::mark_note(git_dir, &key, &format!("{e} (dropped)"));
-            crate::agent_queue::remove(path);
+            let _ = crate::capture_queue::remove_owned(path, owner);
             Landed::Nothing
         }
         Err(e) => {
-            crate::agent_queue::record_failure(path, job, git_dir, &e.to_string());
+            let _ = crate::agent_queue::record_failure_owned(path, job, &e.to_string(), owner);
             Landed::Nothing
         }
     }
 }
 
+/// The move a hook asked for. The drain already moved before it listed this
+/// job; moving again takes whatever an older binary wrote since, and costs a
+/// `stat` otherwise.
+fn move_run_state_job(owner: &crate::capture_queue::QueueLock) -> Result<Landed> {
+    crate::family::run_state::prepare_owned(owner)?;
+    Ok(Landed::Nothing)
+}
+
+fn landed_condense(pair: Option<(String, String)>) -> Landed {
+    pair.map_or(Landed::Nothing, |(session, checkpoint)| {
+        Landed::Condensed(session, checkpoint)
+    })
+}
+
 /// The work of one journaled job, by its kind.
 fn run_job_kind(
     t: &crate::hooktime::HookTimer,
-    git_dir: &Path,
+    _git_dir: &Path,
     job: &crate::agent_queue::AgentJob,
+    owner: &crate::capture_queue::QueueLock,
+    context: &serde_json::Value,
 ) -> Result<Landed> {
     use crate::agent_queue::JobKind;
 
@@ -286,11 +350,8 @@ fn run_job_kind(
             session_id,
             agent,
             repo_id,
-        } => condense_agent_job(t, job, session_id, agent, repo_id).map(|condensed| {
-            condensed.map_or(Landed::Nothing, |(session, checkpoint)| {
-                Landed::Condensed(session, checkpoint)
-            })
-        }),
+        } => condense_agent_job(t, job, session_id, agent, repo_id, owner, context)
+            .map(landed_condense),
         JobKind::Archive(archive) => interval_archive_job(t, job, archive).map(landed_if),
         JobKind::ReadTokens {
             tool_call_id,
@@ -320,8 +381,10 @@ fn run_job_kind(
             content_sha256,
         } => convert_document_job(t, job, rel_path, content_sha256).map(|()| Landed::Nothing),
         JobKind::DocSweep => sweep_documents_job(t, job).map(|()| Landed::Nothing),
-        JobKind::SweepIdle { floor_ms } => Ok(sweep_idle_job(t, git_dir, job, *floor_ms)),
+        JobKind::SweepIdle { floor_ms } => Ok(sweep_idle_job(t, owner, job, *floor_ms)),
+        JobKind::MoveRunState => move_run_state_job(owner),
         JobKind::BoundarySnapshot(snapshot) => {
+            ownership::require_new_boundary(job, snapshot)?;
             boundary::boundary_snapshot_job(t, job, snapshot).map(|()| Landed::Nothing)
         }
         JobKind::BasisSnapshot {
@@ -373,12 +436,12 @@ fn projection_busy(error: &(dyn std::error::Error + 'static)) -> bool {
 /// next pass, which is what the tail sweep of every drain is.
 fn sweep_idle_job(
     t: &crate::hooktime::HookTimer,
-    git_dir: &Path,
+    owner: &crate::capture_queue::QueueLock,
     job: &crate::agent_queue::AgentJob,
     floor_ms: i64,
 ) -> Landed {
     let swept = t.phase("sweep_idle", || {
-        super::sweep::sweep_idle_family(git_dir, job.queued_at_ms, Some(floor_ms))
+        super::sweep::sweep_idle_family(owner, job.queued_at_ms, Some(floor_ms))
     });
     landed_if(!swept.condensed_checkpoints.is_empty())
 }
@@ -689,10 +752,9 @@ fn owe_idle_sweep(git_dir: &Path, work_tree: &Path) -> bool {
 /// that used to run inside the hook itself; only *when* it runs
 /// changed, and the clock it reads is the job's queue time.
 ///
-/// Idempotent by two doors: the journal's done-marker (a redelivered
-/// `SessionEnd`, or a worker killed between the archive and its `remove`)
-/// and the cache phase (a session already `ended` owes nothing). A missing
-/// HEAD is an error, so the job is kept and marked: the sweep is the retry.
+/// Completion requires an exact-context marker and an existing checkpoint.
+/// A legacy done marker or ended cache cannot prove that this delivery ran;
+/// those deliveries stay owed. Missing input proof does not spend retries.
 ///
 /// Returns `(session_id, checkpoint_id)` when it condensed.
 fn condense_agent_job(
@@ -701,19 +763,17 @@ fn condense_agent_job(
     session: &str,
     agent: &str,
     repo_id: &str,
+    owner: &crate::capture_queue::QueueLock,
+    context: &serde_json::Value,
 ) -> Result<Option<(String, String)>> {
-    use rift_shadow::hooks::session_cache::read_cache;
     use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason};
-    use rift_shadow::hooks::SessionState;
 
     let repo = rift_git::discover(&job.work_tree)?;
-    if crate::agent_queue::is_condensed(&repo.git_dir, session) {
+    if ownership::completed_condense(owner, context, &repo.work_tree)? {
         return Ok(None);
     }
     let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
-    if read_cache(&sessions, session)?.is_some_and(|c| c.state == SessionState::Ended.as_str()) {
-        return Ok(None);
-    }
+    ownership::require_condense_input(&repo.git_dir, &sessions, session)?;
     let reader = t.phase("gix_open", || {
         rift_git::GixBlobReader::open(&repo.work_tree)
     })?;
@@ -763,9 +823,10 @@ fn condense_agent_job(
     let Some(checkpoint) = checkpoint else {
         return Ok(None);
     };
-    let _ = rt.block_on(rift_shadow::bridge::mark_condense_done(
+    rt.block_on(rift_shadow::bridge::mark_condense_done(
         &store, &sessions, session, agent, now,
-    ));
+    ))?;
+    ownership::record_condense(owner, context, &repo.work_tree, checkpoint.as_str())?;
     crate::agent_queue::mark_condensed(&repo.git_dir, session);
     linehash::cache_window_line_hashes(&repo.work_tree, &repo.common_dir, session);
     Ok(Some((session.to_owned(), checkpoint.as_str().to_owned())))
@@ -787,7 +848,9 @@ fn interval_archive_job(
     archive: &crate::agent_queue::IntervalArchive,
 ) -> Result<bool> {
     archive_if_still_owed(t, job, archive).map_err(|e| {
-        if matches!(e, rift_core::RiftError::ProjectionBusy { .. }) {
+        if matches!(e, rift_core::RiftError::ProjectionBusy { .. })
+            || crate::capture_queue::is_deferred(&e)
+        {
             return e;
         }
         rift_core::RiftError::Other(format!(
@@ -814,14 +877,18 @@ fn archive_if_still_owed(
     let Some(commit) = t.phase("head_hex", || reader.head_hex())? else {
         return Ok(false);
     };
-    let store = t.phase("open_projection", || {
-        rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
-    })?;
+    let store = t
+        .phase("open_projection", || {
+            rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
+        })
+        .map_err(|error| ownership::proof_read(error, "interval history is unavailable"))?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
     let Some(decision) = owed_interval_decision(&rt, &store, &repo, job, archive)? else {
-        return Ok(false);
+        return Err(crate::capture_queue::deferred(
+            "interval completion lacks exact delivery proof",
+        ));
     };
     // A deferred interval archive changes no lifecycle: the session stays
     // live, and the checkpoint moves the next interval's start.
@@ -857,12 +924,15 @@ fn owed_interval_decision(
     let Some(cache) = read_cache(
         &crate::family::run_state::sessions_dir(&repo.git_dir),
         &archive.session_id,
-    )?
+    )
+    .map_err(|error| ownership::proof_read(error, "interval session input is unreadable"))?
     else {
         return Ok(None);
     };
     let cfg = effective_config(&repo.work_tree);
-    let last = rt.block_on(rift_store::latest_archive_ms(store, &archive.session_id))?;
+    let last = rt
+        .block_on(rift_store::latest_archive_ms(store, &archive.session_id))
+        .map_err(|error| ownership::proof_read(error, "interval archive history is unreadable"))?;
     let decision = decide(
         strategy_kind(cfg.checkpoint_strategy()),
         &TriggerCtx {
@@ -929,6 +999,20 @@ fn count_read_tokens_job(
     schema_version: i64,
 ) -> Result<()> {
     let repo = rift_git::discover(&job.work_tree)?;
+    let store = t
+        .phase("open_projection", || {
+            rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
+        })
+        .map_err(|error| ownership::proof_read(error, "token prior-key proof is unavailable"))?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    ownership::require_new_token_key(
+        &store,
+        &rt,
+        "SELECT tool_call_id FROM file_read_tokens WHERE tool_call_id = ?1",
+        tool_call_id,
+    )?;
     let Some(bytes) = t.phase("read_bytes", || {
         reads::recorded_revision_bytes(&repo.work_tree, rel_path, content_sha256, blob_oid)
     }) else {
@@ -938,9 +1022,6 @@ fn count_read_tokens_job(
         );
         return Ok(());
     };
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .map_err(rift_core::RiftError::from)?;
     // The outline of what was just read, bound now rather than at condense so
     // the family's next first read of these bytes can be answered with it.
     // Its own counts and refusals; it never fails the count below.
@@ -961,16 +1042,18 @@ fn count_read_tokens_job(
         Some((lo, hi)) => std::borrow::Cow::Owned(line_slice(&text, lo, hi)),
     };
     let tokens = t.phase("count", || rift_tokens::count(&text));
-    let store = t.phase("open_projection", || {
-        rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
-    })?;
-    rt.block_on(rift_store::record_file_read_tokens(
+    let inserted = rt.block_on(rift_store::record_file_read_tokens(
         &store,
         tool_call_id,
         tokens,
         rift_tokens::TOKENIZER,
         schema_version,
     ))?;
+    if !inserted {
+        return Err(crate::capture_queue::deferred(
+            "token key was concurrently recorded",
+        ));
+    }
     Ok(())
 }
 
@@ -1014,6 +1097,8 @@ mod tests {
             &crate::hooktime::HookTimer::from_env("test"),
             &root.join(".git"),
             &job,
+            &crate::capture_queue::acquire_owner(&root.join(".git")).unwrap(),
+            &crate::capture_queue::delivery::context(&serde_json::to_value(&job).unwrap()).unwrap(),
         );
         let common_dir = rift_git::discover(root).unwrap().common_dir;
         let cached = crate::hooks::gate::outline_cache_dir(&common_dir)
@@ -1085,7 +1170,11 @@ mod tests {
         }
         drop(guard);
         assert!(drain_jobs(Some(git_dir), LockWait::None).is_empty());
-        assert!(!path.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(crate::agent_queue::read_job(&path).unwrap().1.attempts, 0);
+        assert!(crate::capture_queue::peek_errors(&repo.git_dir)
+            .iter()
+            .any(|note| note.contains("interval completion lacks exact delivery proof")));
     }
 
     #[test]
@@ -1277,7 +1366,10 @@ mod tests {
 
     /// A committed checkout with one session in `ending` and its session-end
     /// condense journaled, as the `SessionEnd` hook leaves them.
-    fn queue_session_end(root: &Path, session: &str) -> (rift_git::RepoPaths, std::path::PathBuf) {
+    pub(super) fn queue_session_end(
+        root: &Path,
+        session: &str,
+    ) -> (rift_git::RepoPaths, std::path::PathBuf) {
         fixture_git(root, &["init", "--quiet"]);
         fixture_git(
             root,
@@ -1306,7 +1398,7 @@ mod tests {
         (repo, path)
     }
 
-    fn fixture_git(root: &Path, args: &[&str]) -> String {
+    pub(super) fn fixture_git(root: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .args(["-c", "user.name=Fixture", "-c", "user.email=fixture-id"])
             .args(["-c", "core.hooksPath=/dev/null"])
@@ -1324,11 +1416,9 @@ mod tests {
         String::from_utf8(output.stdout).unwrap()
     }
 
-    /// An interval archive that cannot run is kept for the next worker with
-    /// its attempt counted, and the note it leaves for the doctor names whose
-    /// interval archive it was.
+    /// A missing checkout leaves an unchanged delivery without an execution attempt.
     #[test]
-    fn a_failed_interval_archive_is_kept_and_its_note_names_the_session() {
+    fn a_gone_interval_checkout_stays_owed_without_spending_an_attempt() {
         let git_dir = tempfile::tempdir().unwrap();
         let job = AgentJob {
             schema_version: 1,
@@ -1342,19 +1432,30 @@ mod tests {
             }),
         };
         let path = crate::agent_queue::enqueue(git_dir.path(), &job).unwrap();
+        let before = std::fs::read(&path).unwrap();
         let t = crate::hooktime::HookTimer::new("test", false);
         assert_eq!(
-            run_agent_job(&t, git_dir.path(), &path, &job),
+            run_agent_job(
+                &t,
+                git_dir.path(),
+                &path,
+                &job,
+                &crate::capture_queue::acquire_owner(git_dir.path()).unwrap()
+            ),
             Landed::Nothing
         );
         let (_, kept) = crate::agent_queue::jobs(git_dir.path()).pop().unwrap();
-        assert_eq!(kept.attempts, 1, "kept, with the attempt counted");
+        assert_eq!(kept.attempts, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
         let notes = crate::capture_queue::peek_errors(git_dir.path());
         assert!(
             notes
                 .iter()
-                .any(|n| n.contains("interval archive of session s-1")),
+                .any(|n| n.contains("job repository is unavailable")),
             "{notes:?}"
         );
     }
 }
+
+#[cfg(test)]
+mod retry_tests;

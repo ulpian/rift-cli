@@ -85,9 +85,8 @@ pub(super) fn doctor_push_queue(repo: &Path, fix: bool) -> (String, serde_json::
 /// a sibling's), so the only process that ever drains a member's queue is one
 /// running in that member, and a member whose checkout is gone has no such
 /// process, ever again. Doctor is the pass that runs from somewhere else. A
-/// sibling whose entries name a missing work tree condenses commit-only
-/// (`hooks::WORKTREE_MISSING_COMMIT_ONLY`); nothing here decides that, the
-/// worker does.
+/// sibling whose entries name an unavailable checkout retains that work as
+/// owed: unavailable input cannot certify execution or completion.
 ///
 /// The said-once markers (a failed condense, a pack that will not compile, a
 /// turn-boundary snapshot that failed) are OBSERVED without consumption: the
@@ -182,7 +181,7 @@ impl AgentJobs {
             return String::new();
         }
         let mut line = format!(
-            "\n  agent jobs:     {} awaiting the worker (safe --fix drains them)",
+            "\n  agent jobs:     {} owed job(s) (safe --fix attempts ready work; unproved inputs remain pending)",
             self.pending
         );
         if self.unreadable > 0 {
@@ -215,7 +214,7 @@ impl SiblingQueue {
                 String::new()
             },
             if self.prunable {
-                " — its checkout is gone, so these condense commit-only"
+                " — its checkout is unavailable; queued work remains owed"
             } else {
                 ""
             }
@@ -534,7 +533,7 @@ fn sessions_behind_their_events(
 /// Best-effort by construction — outside a repository, or with no projection
 /// yet, this leg reports nothing rather than failing the diagnosis. A member
 /// whose checkout is gone is not swept (there is no tree to archive against;
-/// its queued work degrades commit-only in the capture-queue leg) and a member
+/// its queued work stays owed in the capture-queue leg) and a member
 /// that cannot be swept is counted rather than allowed to fail the pass.
 pub(super) fn doctor_session_sweep(repo: &Path, fix: bool) -> (String, serde_json::Value) {
     let Ok(paths) = rift_git::discover(repo) else {
@@ -742,5 +741,61 @@ mod tests {
             members[0].git_dir,
             "so the comparison every leg makes has to go through vantage_git_dir"
         );
+    }
+
+    #[test]
+    fn doctor_reports_retained_input_uncertainty_without_spending_an_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        let git_dir = tmp.path().join(".git");
+        let store = rift_store::open_capture_projection(
+            crate::hooks::projection_db_at(tmp.path()).unwrap(),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let call = "a".repeat(64);
+        assert!(rt
+            .block_on(rift_store::record_file_read_tokens(
+                &store,
+                &call,
+                1,
+                rift_tokens::TOKENIZER,
+                1
+            ))
+            .unwrap());
+        let job = agent_queue::AgentJob {
+            schema_version: 1,
+            work_tree: tmp.path().to_path_buf(),
+            queued_at_ms: 1000,
+            attempts: 0,
+            kind: agent_queue::JobKind::ReadTokens {
+                tool_call_id: call,
+                rel_path: "unavailable.rs".into(),
+                content_sha256: "b".repeat(64),
+                blob_oid: "c".repeat(40),
+                lines: Some((2, 2)),
+                schema_version: 1,
+            },
+        };
+        let path = agent_queue::enqueue(&git_dir, &job).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        hooks::drain_capture_queue(git_dir.to_str()).unwrap();
+        let expected_note = format!(
+            "{}: token input cannot be proven from the existing row",
+            agent_queue::note_key(&job)
+        );
+        for _ in 0..2 {
+            let (_, report) = doctor_capture_queue(tmp.path(), false);
+            assert!(report["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|note| note == &expected_note));
+            assert!(report["agent_jobs"]["pending"].as_u64().unwrap() >= 1);
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(agent_queue::read_job(&path).unwrap().1.attempts, 0);
+        }
     }
 }

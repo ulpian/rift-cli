@@ -6,7 +6,7 @@
 //! [`classify_shadow`] is a second belt that rejects any remote name. There is no
 //! fetch path and no network in the substrate.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use rift_core::{Result, RiftError};
 
@@ -140,13 +140,13 @@ impl ShardWalker {
     /// deterministic `SessionEntry` list keyed by `session_id`. A session present
     /// only as a phase hint (or only as a tag) is still included.
     ///
-    /// The hints are read from `sessions`, the member's sessions directory,
-    /// which the caller resolves: it lives in the family's run state, which
-    /// this crate cannot locate.
+    /// The hints are read from `sessions`, the member's sessions directories
+    /// in dual-read order, which the caller resolves: they live in the
+    /// family's run state, which this crate cannot locate.
     ///
     /// # Errors
     /// [`RiftError::Substrate`] on a read failure.
-    pub fn session_index(&self, sessions: &Path) -> Result<Vec<SessionEntry>> {
+    pub fn session_index(&self, sessions: &[PathBuf]) -> Result<Vec<SessionEntry>> {
         use std::collections::BTreeMap;
         let mut entries: BTreeMap<String, SessionEntry> = BTreeMap::new();
         for dialect in [Dialect::Rift, Dialect::Legacy] {

@@ -134,7 +134,7 @@ fn the_deferral_line_names_this_repos_true_cause() {
 /// input is this recorded number, never the clock, so a fixture can age a
 /// session by a day without sleeping for one or reaching for a fake clock.
 fn set_session_touched(repo: &Path, id: &str, updated_at_ms: i64) {
-    let path = hooks_fixture::sessions_of(repo).join(format!("{id}.json"));
+    let path = common::read_path(&hooks_fixture::sessions_of(repo), &format!("{id}.json"));
     let mut cache: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     cache["updated_at_ms"] = serde_json::json!(updated_at_ms);

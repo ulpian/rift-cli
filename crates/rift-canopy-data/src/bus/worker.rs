@@ -485,6 +485,9 @@ fn session_dirs_for(path: &str) -> Vec<PathBuf> {
         .iter()
         .filter(|m| !m.prunable)
         .map(|m| crate::session::member_sessions(&m.git_dir, &m.work_tree))
+        // An unmoved member is watched in both trees: a new hook writes the
+        // new one while an older binary still writes the old one.
+        .flat_map(|dir| rift_shadow_hooks::run_state::read_dirs(&dir))
         .collect()
 }
 

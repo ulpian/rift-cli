@@ -348,24 +348,25 @@ no new attribution preview percentages from these observations. Existing stored 
 incorrect; a retry does not repair them. Kind and collection facts share the existing
 boundary rows' projection-only lifecycle; checkpoint shards do not carry them.
 
-With no daemon, the hook writes what is owed to a job journal under the git directory
-(identifier-only jobs, the file name being the job's identity so a redelivered hook
-overwrites its own), spawns one detached one-shot child with its streams going nowhere
-(so it never writes over git's terminal) and does not wait. The child drains under one
-lock until a pass finds nothing. **`rift doctor` is the backstop**: its sweep drains the
-journal *first*, since a condense nobody finished is what it exists to rescue. The path
-index walk rides the same journal; an index nobody rebuilt is merely absent, so the
-agent's own tools run.
+With no daemon, the hook writes an identifier-only job into its checkout's family
+run state, spawns one detached child with its streams going nowhere, and does not
+wait. Doctor can attempt the pending work too. Each checkout’s worker holds an
+open-file lock at its canonical Git directory. Elapsed time never releases a live
+owner. Legacy lock markers defer work until a controlled handoff; the new owner
+file does not exclude older installed workers.
 
-A job carries **identifiers only**, never capture bytes, so the worker re-reads those
-bytes or none; it re-asks the strategy under its lock, so a commit in between is not
-followed by a second checkpoint. Three properties hold it together. The entry is
-**durable before the spawn**, so a worker that never starts leaves the job for the next
-worker or doctor run (inputs durable, outputs idempotent appends). Failure is **bounded
-and loud once**: after a bounded number of attempts a marker channel reports it until it
-stops being true, named by the *next* commit; a job whose row the schema refuses is
-dropped at once, since no retry can change a refusal. And **a session claims to be ended
-only when a checkpoint exists**: a failed archive leaves it `ending`, retryable.
+Queue context includes the full payload apart from its attempt counter. An
+identical context stays queued without resetting retries; a changed session,
+worktree or queue time remains separate. Migration removes an old ticket only
+when its complete payload, including attempts, matches the installed copy.
+Actual execution failures have three attempts. Ownership barriers and unproved
+input or completion facts stay owed without spending that budget, and doctor
+reports the available reason.
+
+An exact-context condense marker also names an existing checkpoint. Legacy
+markers, ended caches and token counts without their original inputs cannot
+certify a retry, so some work remains pending. A session claims to be ended only
+when a checkpoint exists.
 
 `RIFT_CAPTURE_SYNC=1` drains inline (tests, CI); it changes **who** drains, never
 **whether**.

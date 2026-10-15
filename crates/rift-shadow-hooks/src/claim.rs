@@ -112,7 +112,11 @@ pub fn claim_session_agent(sessions: &Path, session_id: &str, agent: &str) -> Cl
         return Claim::Unavailable;
     }
     // The common case is a session already claimed, so look before leaping.
-    if let Some(owner) = read_owner(&path) {
+    // The first claim may still sit in an unmoved member's old tree.
+    let standing = path
+        .file_name()
+        .map(|name| crate::run_state::read_path(sessions, &name.to_string_lossy()));
+    if let Some(owner) = standing.as_deref().and_then(read_owner) {
         return if owner == agent {
             Claim::Won
         } else {
@@ -189,7 +193,11 @@ fn publish_marker(dir: &Path, path: &Path, agent: &str) -> Option<bool> {
 /// The agent that owns `session_id`, if the session has been claimed.
 #[must_use]
 pub fn session_owner(sessions: &Path, session_id: &str) -> Option<String> {
-    read_owner(&claim_path(sessions, session_id)?)
+    let path = claim_path(sessions, session_id)?;
+    read_owner(&crate::run_state::read_path(
+        sessions,
+        &path.file_name()?.to_string_lossy(),
+    ))
 }
 
 /// The bytes a marker holds for `agent`, at the current schema version.

@@ -30,8 +30,10 @@ fn read_journal(
     let dir = crate::family::run_state::sessions_dir(git_dir);
     let mut sessions = Vec::new();
     let mut unreadable = Vec::new();
-    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-        let name = entry.file_name();
+    for path in rift_shadow::hooks::run_state::list(&dir) {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         let Some(stem) = name
             .to_string_lossy()
             .strip_suffix(".json")

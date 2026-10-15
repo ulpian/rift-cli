@@ -1,21 +1,19 @@
 //! The turn-boundary snapshot a hook journaled, taken by the detached worker.
 //!
-//! Separate from the drain because it is the one job whose answer depends on
-//! when the event was journaled versus when bytes were collected. The hook's
-//! HEAD/time identify the event; the collection interval audits later current
-//! bytes and cannot establish event-time content or historical writers.
+//! The hook's HEAD/time identify the event; the collection interval audits
+//! later current bytes and cannot establish event-time content or writers.
+//! Queue ownership controls mutation, not historical authorship.
 
 use rift_core::Result;
 
 use crate::agent_queue::{AgentJob, BoundaryEdge, BoundarySnapshot};
 use crate::hooks::projection_db_at;
 
-/// Collect bounded current bytes associated with a journaled boundary event.
+/// Collect bounded current bytes for queued boundary metadata under the owner.
 /// The event HEAD/time remain separate from the later collection audit.
-///
-/// A failure goes back to the drain, which keeps the job and counts the
-/// attempt (or drops it on a refused row). Missing or incomplete observations
-/// stay missing; neither successful collection nor retry certifies authorship.
+/// Execution failures return to the bounded retry path; unavailable admission
+/// evidence stays owed without spending execution attempts. Missing or incomplete
+/// observations stay missing; neither collection nor retry certifies authorship.
 pub(super) fn boundary_snapshot_job(
     t: &crate::hooktime::HookTimer,
     job: &AgentJob,
@@ -272,7 +270,13 @@ mod tests {
         crate::agent_queue::enqueue(&repo.git_dir, &end).unwrap();
 
         let t = crate::hooktime::HookTimer::new("test", true);
-        drain_locked(&t, &repo.git_dir);
+        let owner = crate::capture_queue::acquire_owner(&repo.git_dir).unwrap();
+        drain_locked(
+            &t,
+            &repo.git_dir,
+            &owner,
+            &mut std::collections::BTreeSet::new(),
+        );
 
         let order: Vec<&str> = t
             .records()
@@ -356,21 +360,85 @@ mod tests {
         );
     }
 
-    /// A journaled boundary the worker cannot take (its checkout is gone) is
-    /// kept with the attempt counted, like every other job.
+    /// A missing checkout leaves the original boundary delivery unattempted.
     #[test]
-    fn a_boundary_job_that_fails_is_kept_with_its_attempt_counted() {
+    fn a_gone_boundary_checkout_stays_owed_without_spending_an_attempt() {
         let git_dir = tempfile::tempdir().unwrap();
         let gone = git_dir.path().join("gone");
         let job = snapshot_job(&gone, "0".repeat(40).as_str(), 1, BoundaryEdge::End, 1);
         let path = crate::agent_queue::enqueue(git_dir.path(), &job).unwrap();
+        let before = std::fs::read(&path).unwrap();
         let t = crate::hooktime::HookTimer::new("test", false);
 
         assert_eq!(
-            run_agent_job(&t, git_dir.path(), &path, &job),
+            run_agent_job(
+                &t,
+                git_dir.path(),
+                &path,
+                &job,
+                &crate::capture_queue::acquire_owner(git_dir.path()).unwrap()
+            ),
             Landed::Nothing
         );
         let (_, kept) = crate::agent_queue::jobs(git_dir.path()).pop().unwrap();
-        assert_eq!(kept.attempts, 1);
+        assert_eq!(kept.attempts, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    #[test]
+    fn an_admitted_boundary_blob_write_failure_spends_exactly_three_attempts() {
+        use rift_store::CanonicalStore as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, head) = edited_checkout(tmp.path());
+        let mut obstruction = None;
+        for candidate in 0..256 {
+            let bytes = format!("fresh boundary payload {candidate}\n");
+            let oid = rift_recall_substrate::worktree::git_blob_oid(bytes.as_bytes());
+            let fanout = repo.common_dir.join("objects").join(&oid[..2]);
+            if !fanout.exists() {
+                std::fs::write(tmp.path().join("new.txt"), bytes).unwrap();
+                std::fs::write(&fanout, b"blob-write-obstruction").unwrap();
+                obstruction = Some(fanout);
+                break;
+            }
+        }
+        let obstruction = obstruction.expect("unused fanout in bounded fixture");
+        let job = snapshot_job(tmp.path(), &head, 1, BoundaryEdge::Start, 1);
+        let path = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();
+        let crate::agent_queue::JobKind::BoundarySnapshot(snapshot) = &job.kind else {
+            panic!("boundary fixture")
+        };
+        crate::hooks::worker::ownership::require_new_boundary(&job, snapshot).unwrap();
+        let db = projection_db_at(tmp.path()).unwrap();
+        let store = rift_store::open_capture_projection(&db).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let facts = || {
+            rt.block_on(store.query(
+                "SELECT * FROM turn_boundary_snapshot ORDER BY snapshot_id",
+                &[],
+            ))
+            .unwrap()
+        };
+        let before = facts();
+        for attempt in 1..=crate::capture_queue::MAX_ATTEMPTS {
+            crate::hooks::worker::drain_jobs(
+                repo.git_dir.to_str(),
+                crate::hooks::worker::LockWait::None,
+            );
+            if attempt < crate::capture_queue::MAX_ATTEMPTS {
+                assert_eq!(
+                    crate::agent_queue::read_job(&path).unwrap().1.attempts,
+                    attempt
+                );
+            } else {
+                assert!(!path.exists());
+            }
+            assert_eq!(
+                std::fs::read(&obstruction).unwrap(),
+                b"blob-write-obstruction"
+            );
+            assert_eq!(facts(), before);
+        }
     }
 }

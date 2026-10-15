@@ -235,6 +235,14 @@ pub(crate) fn seed_sessions_dir(git_dir: &Path) -> PathBuf {
     rift_shadow::hooks::run_state::RunRoot::Sessions.legacy_under(git_dir)
 }
 
+/// The file a reader of `dir` (a run-state directory) reads for `name`, as
+/// the binary reads it: the new tree's, or the old tree's while the member is
+/// unmoved and only it has the file.
+#[allow(dead_code)] // the run-state suites only; this module is shared
+pub(crate) fn read_path(dir: &Path, name: &str) -> PathBuf {
+    rift_shadow::hooks::run_state::read_path(dir, name)
+}
+
 /// [`run_state_dir`] for the session caches.
 #[allow(dead_code)] // the run-state suites only; this module is shared
 pub(crate) fn sessions_dir(git_dir: &Path, cache_root: &Path) -> PathBuf {

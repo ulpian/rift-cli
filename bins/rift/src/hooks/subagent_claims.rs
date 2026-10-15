@@ -64,11 +64,10 @@ pub(super) fn read_claims(
     session: &str,
 ) -> std::collections::BTreeMap<String, SubagentClaim> {
     let mut out = std::collections::BTreeMap::new();
-    let Some(entries) = claims_dir(git_dir, session).and_then(|d| std::fs::read_dir(d).ok()) else {
+    let Some(dir) = claims_dir(git_dir, session) else {
         return out;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in rift_shadow::hooks::run_state::list(&dir) {
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }

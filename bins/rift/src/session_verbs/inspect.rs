@@ -232,12 +232,12 @@ pub(crate) async fn info(
     root: &Path,
     reference: &str,
 ) -> Result<Outcome> {
-    use rift_shadow::hooks::session_cache::{cache_path, read_cache};
+    use rift_shadow::hooks::session_cache::read_cache;
     let repo = rift_git::discover(root)?;
     let now = crate::hooks::now_ms();
     let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
     let read = read_cache(&sessions, reference);
-    let fallback = if read.is_err() && cache_path(&sessions, reference).is_ok_and(|p| p.exists()) {
+    let fallback = if read.is_err() {
         CACHE_UNREADABLE
     } else {
         "archived"
@@ -370,5 +370,53 @@ mod tests {
         ] {
             assert_eq!(human_age(ms), expected, "human_age({ms})");
         }
+    }
+
+    #[tokio::test]
+    async fn pending_context_bad_legacy_cache_is_unreadable_not_archived() {
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        let git_dir = tmp.path().join(".git");
+        let sessions = crate::family::run_state::sessions_dir(&git_dir);
+        let member = sessions.parent().unwrap();
+        rift_shadow::hooks::run_state::record_git_dir(member, &git_dir).unwrap();
+        rift_shadow::hooks::run_state::record_work_tree(member, tmp.path()).unwrap();
+        std::fs::create_dir_all(&sessions).unwrap();
+        let native = "legacy-info-unreadable";
+        let old = rift_shadow::hooks::run_state::RunRoot::Sessions.legacy_under(&git_dir);
+        std::fs::create_dir_all(&old).unwrap();
+        let path = rift_shadow::hooks::session_cache::cache_path(&old, native).unwrap();
+        std::fs::write(&path, b"{bad json").unwrap();
+        assert!(!rift_shadow::hooks::run_state::is_moved(member));
+        assert!(rift_shadow::hooks::session_cache::read_cache(&sessions, native).is_err());
+        let store = rift_store::SqliteStore::open_in_memory().unwrap();
+        store.create_canonical_schema().unwrap();
+        let row_id = rift_core::capture_session_row_id("claude-code", native);
+        rift_store::record_session(
+            &store,
+            &rift_store::SessionRow {
+                session_id: row_id.clone(),
+                agent: "claude-code".into(),
+                model_primary: String::new(),
+                repo_id: "repo".into(),
+                started_at: 1000,
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        rift_store::record_capture_session_identity(
+            &store,
+            &rift_store::CaptureSessionIdentityRow {
+                session_id: row_id,
+                agent: "claude-code".into(),
+                native_session_id: native.into(),
+                schema_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let outcome = info(&store, tmp.path(), native).await.unwrap();
+        assert_eq!(outcome.json["state"], CACHE_UNREADABLE);
     }
 }

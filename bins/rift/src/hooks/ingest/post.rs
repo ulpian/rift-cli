@@ -20,15 +20,10 @@ use crate::hooks::now_ms;
 /// for the detached worker. Returns whether any is owed — the caller then
 /// sees the worker dispatched, once, with whatever else this hook journaled.
 ///
-/// The snapshot itself (a `git status`, a read and a diff per changed path,
-/// a batched object write) measured past the agent-hook budget and grows with
-/// what the user has left dirty, so the hook keeps only what the worker
-/// cannot recover later: the commit `HEAD` names, read from the ref files
-/// (`rift_git::head_state` — no git process, no object database), and the
-/// boundary's instant. The worker observes the working set as of that instant.
-///
-/// A boundary already journaled is left as it is, so a redelivered hook owes
-/// the snapshot its first delivery asked for, on that delivery's instant.
+/// The hook records the queued HEAD and boundary event time. The worker later
+/// collects current bounded working-tree bytes; these are observations, not
+/// proof of bytes at the event time or of who wrote them. Identical complete
+/// deliveries keep their retained attempts. Changed context stays separate.
 ///
 /// Takes the RESOLVED work tree (never the process cwd: a hook's cwd is not
 /// guaranteed to be the repository). A journaling failure is **said once**
@@ -63,11 +58,8 @@ pub(super) fn snapshot_boundaries(
     true
 }
 
-/// Journal one job unless a job of its identity is already pending.
+/// Publish the complete delivery context without replacing a pending context.
 fn journal_once(repo: &rift_git::RepoPaths, kind: JobKind, queued_at_ms: i64) -> Result<()> {
-    if crate::agent_queue::is_queued(&repo.git_dir, &kind) {
-        return Ok(());
-    }
     crate::agent_queue::enqueue(
         &repo.git_dir,
         &AgentJob {
@@ -91,9 +83,7 @@ fn note_boundary_failure(git_dir: &Path, session: &str, e: &rift_core::RiftError
     crate::capture_queue::mark_note(
         git_dir,
         &key,
-        &format!(
-            "turn-boundary snapshot failed; the session's H_i/A_i windows are incomplete ({e})"
-        ),
+        &format!("turn-boundary collection could not be journaled ({e})"),
     );
 }
 
@@ -253,7 +243,7 @@ mod tests {
     /// A boundary journaled twice keeps the job and the instant of its first
     /// delivery: the redelivery owes the same snapshot, of the same moment.
     #[test]
-    fn a_redelivered_boundary_keeps_its_first_instant() {
+    fn identical_boundary_context_keeps_attempts_and_changed_instants_remain_owed() {
         let checkout = tempfile::tempdir().unwrap();
         let initialized = std::process::Command::new("git")
             .args(["init", "--quiet"])
@@ -274,11 +264,42 @@ mod tests {
         };
 
         journal_once(&repo, kind(100), 100).unwrap();
+        let initial = crate::agent_queue::jobs(&repo.git_dir);
+        assert_eq!(initial.len(), 1);
+        let owner = crate::capture_queue::acquire_owner(&repo.git_dir).unwrap();
+        assert!(crate::agent_queue::record_failure_owned(
+            &initial[0].0,
+            &initial[0].1,
+            "fixture execution failure",
+            &owner
+        )
+        .unwrap());
+        let retained = std::fs::read(&initial[0].0).unwrap();
+        journal_once(&repo, kind(100), 100).unwrap();
+        assert_eq!(
+            std::fs::read(&initial[0].0).unwrap(),
+            retained,
+            "identical full context never resets attempts"
+        );
+        assert_eq!(
+            crate::agent_queue::read_job(&initial[0].0)
+                .unwrap()
+                .1
+                .attempts,
+            1
+        );
         journal_once(&repo, kind(200), 200).unwrap();
-
         let jobs = crate::agent_queue::jobs(&repo.git_dir);
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].1.kind, kind(100));
-        assert_eq!(jobs[0].1.queued_at_ms, 100);
+        assert_eq!(
+            jobs.len(),
+            2,
+            "changed event and queue instants are separate owed contexts"
+        );
+        assert!(jobs
+            .iter()
+            .any(|(_, job)| job.kind == kind(100) && job.queued_at_ms == 100 && job.attempts == 1));
+        assert!(jobs
+            .iter()
+            .any(|(_, job)| job.kind == kind(200) && job.queued_at_ms == 200 && job.attempts == 0));
     }
 }

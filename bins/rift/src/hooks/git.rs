@@ -650,7 +650,7 @@ pub(super) fn capture_sync_note() -> String {
 ///
 /// A spawn failure is silent by design: the entry is already durable, so the
 /// work is deferred to the next hook, never lost.
-pub(super) fn spawn_capture_worker(git_dir: &Path) {
+pub(crate) fn spawn_capture_worker(git_dir: &Path) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };

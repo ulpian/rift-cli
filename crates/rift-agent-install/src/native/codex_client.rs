@@ -86,11 +86,10 @@ fn sessions_of(families: &Path, work_tree: &Path, git_dir: &Path) -> Option<Path
 /// The newest Codex session cached in `sessions` that names its session
 /// file: `(updated_at_ms, file)`.
 fn newest_codex_session(sessions: &Path) -> Option<(i64, PathBuf)> {
-    let entries = std::fs::read_dir(sessions).ok()?;
-    let caches: Vec<_> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
+    let caches: Vec<_> = run_state::list(sessions)
+        .iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_string_lossy().into_owned();
             let session_id = name.strip_suffix(".json")?.to_owned();
             session_cache::read_cache(sessions, &session_id)
                 .ok()
@@ -254,5 +253,44 @@ mod tests {
             &torn,
         );
         assert_eq!(observed_codex_client_among(&families, tmp.path()), None);
+    }
+
+    #[test]
+    fn an_unmoved_split_registry_selects_the_newest_client_with_new_name_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let families = tmp.path().join("families");
+        let repo = tmp.path().join("repo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let member = run_state::member_dir(&families.join("family"), &repo);
+        run_state::record_git_dir(&member, &git_dir).unwrap();
+        run_state::record_work_tree(&member, &repo).unwrap();
+        let new = RunRoot::Sessions.under(&member);
+        let old = RunRoot::Sessions.legacy_under(&git_dir);
+        let terminal = tmp.path().join("terminal.jsonl");
+        let editor = tmp.path().join("editor.jsonl");
+        rollout(&terminal, "codex_exec", "0.1.0");
+        rollout(&editor, "codex_vscode", "0.2.0");
+        session(&new, "new", "codex", 10, &editor);
+        session(&old, "old", "codex", 20, &terminal);
+        assert!(!run_state::is_moved(&member));
+        assert_eq!(
+            observed_codex_client_among(&families, &repo),
+            Some(CodexClient {
+                surface: CodexSurface::Terminal,
+                version: Some("0.1.0".into()),
+            }),
+            "newest distinct old-tree session remains visible"
+        );
+        session(&old, "same", "codex", 100, &terminal);
+        session(&new, "same", "codex", 30, &editor);
+        assert_eq!(
+            observed_codex_client_among(&families, &repo),
+            Some(CodexClient {
+                surface: CodexSurface::VsCode,
+                version: Some("0.2.0".into()),
+            }),
+            "new copy shadows the same old filename before newest selection"
+        );
     }
 }

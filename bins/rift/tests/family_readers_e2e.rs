@@ -351,7 +351,7 @@ fn resume_picker_lists_every_members_stopped_sessions() {
 /// rewritten on every prompt, tool call and turn end, so one still claiming a
 /// live phase after a full idle window means the agent is gone.
 fn age_session(git_dir: &Path, cache: &Path, id: &str, updated_at_ms: i64) {
-    let path = common::sessions_dir(git_dir, cache).join(format!("{id}.json"));
+    let path = common::read_path(&common::sessions_dir(git_dir, cache), &format!("{id}.json"));
     let mut cache: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     cache["updated_at_ms"] = serde_json::json!(updated_at_ms);
@@ -359,7 +359,7 @@ fn age_session(git_dir: &Path, cache: &Path, id: &str, updated_at_ms: i64) {
 }
 
 fn session_state(git_dir: &Path, cache: &Path, id: &str) -> String {
-    let path = common::sessions_dir(git_dir, cache).join(format!("{id}.json"));
+    let path = common::read_path(&common::sessions_dir(git_dir, cache), &format!("{id}.json"));
     let cache: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     cache["state"].as_str().unwrap_or_default().to_owned()
 }

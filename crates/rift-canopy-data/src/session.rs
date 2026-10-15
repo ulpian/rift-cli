@@ -284,8 +284,10 @@ pub(crate) fn family_journal(members: &[FamilyMember]) -> Vec<SessionCache> {
     let mut sessions = Vec::new();
     for member in members {
         let dir = member_sessions(&member.git_dir, &member.work_tree);
-        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let name = entry.file_name();
+        for path in run_state::list(&dir) {
+            let Some(name) = path.file_name() else {
+                continue;
+            };
             let Some(stem) = name
                 .to_string_lossy()
                 .strip_suffix(".json")
@@ -360,18 +362,17 @@ const CORRUPT_DETAIL: SessionsDetail = SessionsDetail {
 /// listed, a file that cannot be read, one over [`MAX_CACHE_BYTES`] and one
 /// whose bytes are not a cache at all are all [`DirRead::Corrupt`].
 fn read_live_caches(sessions: &Path, now_ms: i64) -> DirRead {
-    let entries = match std::fs::read_dir(sessions) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DirRead::Ok(Vec::new()),
-        Err(_) => return DirRead::Corrupt, // exists but unlistable
+    let Ok(paths) = run_state::list_checked(sessions) else {
+        return DirRead::Corrupt;
     };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
+    // The dual read: an unmoved member's caches are read from the old tree
+    // until the new tree has its own.
+    for path in paths {
         if path.extension().is_none_or(|e| e != "json") {
             continue; // tmp files / strays are not cache entries
         }
-        if entry.metadata().is_ok_and(|m| m.len() > MAX_CACHE_BYTES) {
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_CACHE_BYTES) {
             return DirRead::Corrupt; // size cap: not plausibly ours
         }
         let Ok(bytes) = std::fs::read(&path) else {
@@ -496,6 +497,30 @@ fn parse_cache(bytes: &[u8]) -> Option<CacheFacts> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_broken_unmoved_fallback_is_not_a_quiet_empty_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_dir = tmp.path().join("repo/.git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let member = tmp.path().join("cache/run/member");
+        run_state::record_work_tree(&member, &git_dir).unwrap();
+        run_state::record_git_dir(&member, &git_dir).unwrap();
+        let sessions = run_state::RunRoot::Sessions.under(&member);
+        std::fs::create_dir_all(&sessions).unwrap();
+        let legacy = run_state::RunRoot::Sessions.legacy_under(&git_dir);
+        std::fs::write(&legacy, b"a file cannot be a session registry").unwrap();
+        assert!(!run_state::is_moved(&member));
+        assert_eq!(
+            run_state::read_dirs(&sessions),
+            vec![sessions.clone(), legacy]
+        );
+        assert!(matches!(
+            read_live_caches(&sessions, 1_000),
+            DirRead::Corrupt
+        ));
+    }
+
     use proptest::prelude::*;
 
     fn write_cache(dir: &Path, name: &str, body: &str) {

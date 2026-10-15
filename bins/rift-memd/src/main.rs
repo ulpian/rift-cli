@@ -403,7 +403,7 @@ async fn doctor(repo: &Path) -> Result<()> {
     let walker = sub.walker();
     let checkpoints = sub.checkpoints()?;
     let dialects = walker.present_dialects();
-    let sessions = walker.session_index(&member_sessions(repo)?)?;
+    let sessions = walker.session_index(&run_state::read_dirs(&member_sessions(repo)?))?;
     let mut shadow_count = 0usize;
     for d in [Dialect::Rift, Dialect::Legacy] {
         shadow_count += walker.shadow_refs(d)?.len();

@@ -12,9 +12,14 @@
 //! so each member owns its own directory, and the main work tree's directory
 //! is the shared registry a linked member consults.
 //!
-//! This module only names paths. The one-time move out of the git dir belongs
-//! to the binary that resolves families; readers that do not move anything ask
-//! [`dir_for_read`], which answers one tree per member and never both.
+//! This module names paths and reads through them. The move out of the git
+//! dir belongs to the binary's worker and verbs, never to a hook. Until a
+//! member is marked moved, every read is a **dual read**, file by file: the
+//! new tree first, the git dir's old tree when the new one lacks that file
+//! ([`read_path`], [`list`]). One file is never read from both trees, and
+//! writes go to the new tree only, so a write made before the move stands
+//! after it. A member whose run directory records nothing yet (no new binary
+//! has resolved it) has only its old tree ([`dir_for_read`]).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -35,6 +40,13 @@ const RUN_DIR: &str = "run";
 /// and a git dir could answer that from its own shape. A run directory cannot,
 /// so the member records it once, when its directory is created.
 const WORK_TREE_FILE: &str = "work_tree";
+/// The file a member's run directory records its git dir in: where its old
+/// tree is, for the dual read before the move.
+const GIT_DIR_FILE: &str = "git_dir";
+/// What a file preserved beside the one that stood is renamed to:
+/// `<name>.late-<ms>`. No reader takes it for run state, because every
+/// reader selects by an extension this suffix replaces.
+const LATE_MARKER: &str = ".late-";
 
 /// More than one family holds a member under one checkout's token.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,15 +194,113 @@ pub fn is_moved(member: &Path) -> bool {
     member.join(MOVED_MARKER).exists()
 }
 
-/// Where a reader that moves nothing finds `root` for this member: the new
-/// tree once the member is marked moved, the git dir's before. One tree per
-/// member, never both, so no decision reads a session from each.
+/// Where a reader that resolves no family finds `root` for this member: the
+/// new tree once a new binary has recorded the member — read through
+/// [`read_path`] and [`list`], which fall back to the old tree file by file
+/// until the member is marked moved — and the git dir's old tree before.
 #[must_use]
 pub fn dir_for_read(root: RunRoot, member: &Path, git_dir: &Path) -> PathBuf {
-    if is_moved(member) {
+    if is_moved(member) || recorded_git_dir(member).is_some() {
         return root.under(member);
     }
     root.legacy_under(git_dir)
+}
+
+/// The old-tree directory a read of `dir` falls back to: `dir` is a
+/// directory inside a recorded member's run directory (a root, or a
+/// directory within one such as a session's subagent claims), and the
+/// member is not marked moved. `None` otherwise.
+#[must_use]
+pub fn fallback_dir(dir: &Path) -> Option<PathBuf> {
+    for member in dir.ancestors().skip(1).take(2) {
+        let Some(git_dir) = recorded_git_dir(member) else {
+            continue;
+        };
+        if is_moved(member) {
+            return None;
+        }
+        let rel = dir.strip_prefix(member).ok()?;
+        let mut parts = rel.components();
+        let first = parts.next()?.as_os_str();
+        let root = RunRoot::ALL.into_iter().find(|r| first == r.dir_name())?;
+        return Some(root.legacy_under(&git_dir).join(parts.as_path()));
+    }
+    None
+}
+
+/// The file a reader of `dir` reads for `name`: the new tree's when it has
+/// one, the old tree's while the member is unmoved and only it has one, and
+/// the new tree's (absent) path otherwise.
+#[must_use]
+pub fn read_path(dir: &Path, name: &str) -> PathBuf {
+    let primary = dir.join(name);
+    if primary.symlink_metadata().is_ok() {
+        return primary;
+    }
+    match fallback_dir(dir) {
+        Some(old) if old.join(name).symlink_metadata().is_ok() => old.join(name),
+        _ => primary,
+    }
+}
+
+/// The directories a reader of `dir` lists: `dir`, then its old tree while
+/// the member is unmoved.
+#[must_use]
+pub fn read_dirs(dir: &Path) -> Vec<PathBuf> {
+    std::iter::once(dir.to_path_buf())
+        .chain(fallback_dir(dir))
+        .collect()
+}
+
+/// Every entry a reader of `dir` sees, by path: the new tree's entries, then
+/// the old tree's whose names the new tree lacks — each name once, from one
+/// tree. Sorted by name.
+#[must_use]
+pub fn list(dir: &Path) -> Vec<PathBuf> {
+    let mut seen = std::collections::BTreeMap::new();
+    for source in read_dirs(dir) {
+        let Ok(entries) = std::fs::read_dir(&source) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen.entry(entry.file_name())
+                .or_insert_with(|| entry.path());
+        }
+    }
+    seen.into_values().collect()
+}
+
+/// List the complete dual-read view without hiding an unreadable registry.
+///
+/// # Errors
+/// Any directory or entry read failure except an absent registry.
+pub fn list_checked(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut seen = std::collections::BTreeMap::new();
+    for source in read_dirs(dir) {
+        let entries = match std::fs::read_dir(source) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            seen.entry(entry.file_name())
+                .or_insert_with(|| entry.path());
+        }
+    }
+    Ok(seen.into_values().collect())
+}
+
+/// Whether a file name is a copy preserved beside the one that stood.
+#[must_use]
+pub fn is_late(name: &str) -> bool {
+    name.contains(LATE_MARKER)
+}
+
+/// The name a file is preserved under beside the one that stood.
+#[must_use]
+pub fn late_name(name: &str, now_ms: i64) -> String {
+    format!("{name}{LATE_MARKER}{now_ms}")
 }
 
 /// Record the member's canonical work tree in its run directory, creating the
@@ -206,6 +316,33 @@ pub fn record_work_tree(member: &Path, work_tree: &Path) -> std::io::Result<()> 
     create_private_dir(member)?;
     let canonical = canonical_through_ancestor(work_tree);
     std::fs::write(path, canonical.to_string_lossy().as_bytes())
+}
+
+/// Record the member's git dir in its run directory: where the dual read
+/// finds the old tree. Rewritten only when it differs (a moved checkout).
+///
+/// # Errors
+/// Any I/O error creating the directory or writing the file.
+pub fn record_git_dir(member: &Path, git_dir: &Path) -> std::io::Result<()> {
+    if recorded_git_dir(member).as_deref() == Some(git_dir) {
+        return Ok(());
+    }
+    create_private_dir(member)?;
+    std::fs::write(
+        member.join(GIT_DIR_FILE),
+        git_dir.to_string_lossy().as_bytes(),
+    )
+}
+
+/// The git dir a member's run directory recorded, if it recorded one.
+#[must_use]
+pub fn recorded_git_dir(member: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(member.join(GIT_DIR_FILE)).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(text))
 }
 
 /// The work tree a member's run directory recorded, if it recorded one.
@@ -317,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reader_reads_the_git_dir_until_the_member_is_marked_moved() {
+    fn a_reader_reads_the_old_tree_until_a_new_binary_has_recorded_the_member() {
         let tmp = tempfile::tempdir().unwrap();
         let member = tmp.path().join("run").join("abc");
         let git_dir = tmp.path().join(".git");
@@ -325,12 +462,54 @@ mod tests {
             dir_for_read(RunRoot::Sessions, &member, &git_dir),
             git_dir.join("rift-sessions")
         );
-        create_private_dir(&member).unwrap();
-        std::fs::write(member.join(MOVED_MARKER), b"").unwrap();
+        record_git_dir(&member, &git_dir).unwrap();
         assert_eq!(
             dir_for_read(RunRoot::Sessions, &member, &git_dir),
             member.join("sessions")
         );
+    }
+
+    /// Before the move each file is read from the new tree when it is there
+    /// and from the old tree when only the old tree has it — never one name
+    /// from both — and the marker ends the fallback.
+    #[test]
+    fn an_unmoved_member_is_read_file_by_file_new_tree_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = tmp.path().join("run").join("abc");
+        let git_dir = tmp.path().join(".git");
+        record_git_dir(&member, &git_dir).unwrap();
+        let new = RunRoot::Sessions.under(&member);
+        let old = RunRoot::Sessions.legacy_under(&git_dir);
+        for (dir, name, body) in [
+            (&new, "both.json", "new"),
+            (&old, "both.json", "old"),
+            (&old, "old-only.json", "old"),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        let read = |name: &str| std::fs::read_to_string(read_path(&new, name)).unwrap();
+        assert_eq!(read("both.json"), "new");
+        assert_eq!(read("old-only.json"), "old");
+        assert_eq!(
+            list(&new),
+            [new.join("both.json"), old.join("old-only.json")]
+        );
+        let nested = new.join("s.subagents");
+        assert_eq!(fallback_dir(&nested), Some(old.join("s.subagents")));
+
+        std::fs::write(member.join(MOVED_MARKER), b"").unwrap();
+        assert_eq!(fallback_dir(&new), None);
+        assert_eq!(read_path(&new, "old-only.json"), new.join("old-only.json"));
+        assert_eq!(list(&new), [new.join("both.json")]);
+    }
+
+    #[test]
+    fn a_preserved_late_file_is_named_so_no_reader_selects_it() {
+        let late = late_name("s1.json", 7);
+        assert!(is_late(&late));
+        assert_ne!(Path::new(&late).extension(), Some("json".as_ref()));
+        assert!(!is_late("s1.json"));
     }
 
     #[test]

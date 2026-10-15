@@ -749,7 +749,8 @@ pub(crate) fn checkpoint_ref_exists(repo: &Path) -> bool {
 
 /// The state of one session cache on disk.
 pub(crate) fn session_phase(repo: &Path, id: &str) -> String {
-    let raw = std::fs::read_to_string(sessions_of(repo).join(format!("{id}.json"))).unwrap();
+    let path = super::common::read_path(&sessions_of(repo), &format!("{id}.json"));
+    let raw = std::fs::read_to_string(path).unwrap();
     serde_json::from_str::<serde_json::Value>(&raw).unwrap()["state"]
         .as_str()
         .unwrap()
@@ -898,12 +899,10 @@ pub(crate) fn archived_reasons(repo: &Path, cache: &Path, session: &str) -> Vec<
 /// The job files in this checkout's agent-hook journal whose names start
 /// with `prefix`, by name.
 pub(crate) fn agent_jobs_named(repo: &Path, prefix: &str) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(agent_queue_of(repo))
+    let mut names: Vec<String> = rift_shadow::hooks::run_state::list(&agent_queue_of(repo))
         .into_iter()
-        .flatten()
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|x| x == "json"))
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|path| path.extension().is_some_and(|x| x == "json"))
+        .filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
         .filter(|name| name.starts_with(prefix))
         .collect();
     names.sort();

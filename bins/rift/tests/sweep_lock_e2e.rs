@@ -9,11 +9,10 @@
 //! whose lock is held to the worker holding it, whose own tail sweep reaches
 //! the same sessions.
 //!
-//! The interleaving is made deterministic rather than raced: the fixture
-//! writes the lock file a running worker writes (stamped now, because the
-//! binary reads a lock older than its stale-writer bound as abandoned), runs
-//! the sweep beside it, then releases it and runs the real worker to
-//! completion. No step waits on a detached process.
+//! The fixture holds the actual open-file owner lock, runs the candidate CLI
+//! sweep beside it, then drops the descriptor and runs the worker to completion.
+//! This controls the interleaving without a detached-process timing guess; it
+//! does not prove a handoff from an older installed image.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -21,14 +20,14 @@
     clippy::panic
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 #[allow(dead_code)] // The hooks suites share these builders; each file uses a subset.
 #[path = "common/hooks_fixture.rs"]
 mod hooks_fixture;
 use hooks_fixture::{
-    doctor_fix_json, git_in, now_ms, rev_parse, rift_json, run_rift_stdout, seed_live_session_repo,
+    doctor_fix_json, git_in, rev_parse, rift_json, run_rift_stdout, seed_live_session_repo,
     seed_session, session_phase, sessions_leg, sync_env, LIVE_SESSION,
 };
 
@@ -37,23 +36,30 @@ use hooks_fixture::{
 const LONG_AGO_MS: i64 = 1_783_000_000_000;
 
 /// A worker's capture-queue lock under `git_dir`, held until dropped.
-struct HeldLock(PathBuf);
-
-impl HeldLock {
-    /// Write the lock file exactly as a running worker does: its path in
-    /// the member's own capture queue, the acquisition time as its body.
-    fn take(git_dir: &Path, cache: &Path) -> Self {
-        let dir = common::capture_queue_dir(git_dir, cache);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(".lock");
-        std::fs::write(&path, now_ms().to_string()).unwrap();
-        Self(path)
-    }
+struct HeldLock {
+    _file: std::fs::File,
 }
 
-impl Drop for HeldLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+impl HeldLock {
+    fn take(git_dir: &Path, _cache: &Path) -> Self {
+        let path = std::fs::canonicalize(git_dir)
+            .unwrap()
+            .join(".rift-capture-owner.lock");
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            options.share_mode(3);
+        }
+        let file = options.open(path).unwrap();
+        file.try_lock().unwrap();
+        Self { _file: file }
     }
 }
 
@@ -204,7 +210,10 @@ fn a_doctor_sweep_beside_a_held_lock_names_the_lock_as_the_only_cause() {
     );
     let (code, human) = run_rift_stdout(&repo, &["doctor", "--fix"], &sync_env(&cache));
     assert_eq!(code, 0, "{human}");
-    let deferred: Vec<&str> = human.lines().filter(|l| l.contains("deferred")).collect();
+    let deferred: Vec<&str> = human
+        .lines()
+        .filter(|line| line.trim_start().starts_with("deferred:"))
+        .collect();
     assert_eq!(deferred.len(), 1, "one line per cause present: {human}");
     let line = deferred[0];
     assert!(line.contains("worker-holds-lock"), "{line}");
@@ -300,7 +309,7 @@ fn seed_member_session(admin: &Path, id: &str) {
 /// The state of one session in a linked member's journal.
 fn member_phase(admin: &Path, cache: &Path, id: &str) -> String {
     let sessions = common::sessions_dir(admin, cache);
-    let raw = std::fs::read_to_string(sessions.join(format!("{id}.json"))).unwrap();
+    let raw = std::fs::read_to_string(common::read_path(&sessions, &format!("{id}.json"))).unwrap();
     serde_json::from_str::<serde_json::Value>(&raw).unwrap()["state"]
         .as_str()
         .unwrap()

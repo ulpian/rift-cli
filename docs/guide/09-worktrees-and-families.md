@@ -92,12 +92,19 @@ exists under both identities; the only state that needs you) or `unprovable`.
 
 The split is by *what the state describes*. **Family state** lives in the common directory: git
 hooks, manifest and history, the binary of record, the queue of references waiting to be shipped,
-and the document sidecars. **Per-checkout progress** stays in each member's git directory (session
-ownership caches, the capture and agent-event queues), because a session lives in one checkout at a
-time and work in A must never be credited to a commit in B. **Working-tree state**
+and the document sidecars. **Per-checkout progress** lives under the family's cache directory
+at `run/<member>/` (session ownership caches and the capture and agent-event queues), because a
+session lives in one checkout at a time and work in A must never be credited to a commit in B. **Working-tree state**
 stays in the checkout's `.rift/` ([02-configuration.md](02-configuration.md)), and the read gate
 finds sibling members from git's own files
 ([07-serving-and-injection.md §7.4](07-serving-and-injection.md#a-read-another-window-holds)).
+
+Run-state readers use the new directory first and the unmoved legacy directory
+for missing names. Queue migration and sweeps require the matching checkout owner
+and a ready migration. Conflicting tickets remain visible debt. Private queue
+publication stages remain as evidence of unfinished publication and are never
+deleted merely for being old. File contents are synced, but directory updates
+are not guaranteed to survive power loss.
 
 **The push queue** is the exception, and its reasoning is the test for anything else that might
 move: an entry names a **reference**, and references live in the object store the family shares.

@@ -361,7 +361,10 @@ pub fn write_usage_progress(sessions: &Path, p: &UsageProgress) -> Result<()> {
 /// [`RiftError::Io`] on a filesystem failure, [`RiftError::Validity`] on a
 /// malformed file or unsafe session id.
 pub fn read_usage_progress(sessions: &Path, session_id: &str) -> Result<Option<UsageProgress>> {
-    match std::fs::read(usage_progress_path(sessions, session_id)?) {
+    match std::fs::read(dual_read(
+        sessions,
+        &usage_progress_path(sessions, session_id)?,
+    )) {
         Ok(bytes) => {
             let p = serde_json::from_slice(&bytes)
                 .map_err(|e| RiftError::validity(format!("usage progress parse: {e}")))?;
@@ -394,7 +397,10 @@ pub fn read_transcript_progress(
     sessions: &Path,
     session_id: &str,
 ) -> Result<Option<TranscriptProgress>> {
-    match std::fs::read(transcript_progress_path(sessions, session_id)?) {
+    match std::fs::read(dual_read(
+        sessions,
+        &transcript_progress_path(sessions, session_id)?,
+    )) {
         Ok(bytes) => {
             let p = serde_json::from_slice(&bytes)
                 .map_err(|e| RiftError::validity(format!("transcript progress parse: {e}")))?;
@@ -484,7 +490,7 @@ pub fn write_cache(sessions: &Path, c: &SessionCache) -> Result<()> {
 /// is an error rather than "no session": the caller must defer the hook, not
 /// carry on and open a second session under a name it could not address.
 pub fn read_cache(sessions: &Path, session_id: &str) -> Result<Option<SessionCache>> {
-    match std::fs::read(cache_path(sessions, session_id)?) {
+    match std::fs::read(dual_read(sessions, &cache_path(sessions, session_id)?)) {
         Ok(bytes) => {
             let c = serde_json::from_slice(&bytes)
                 .map_err(|e| RiftError::validity(format!("session cache parse: {e}")))?;
@@ -522,7 +528,9 @@ pub fn read_cache(sessions: &Path, session_id: &str) -> Result<Option<SessionCac
 /// must defer the hook, exactly as with [`read_cache`]. [`RiftError::Io`] on a
 /// filesystem failure other than the file being absent.
 pub fn read_cache_or_repair(sessions: &Path, session_id: &str, now_ms: i64) -> Result<CacheRead> {
-    let path = cache_path(sessions, session_id)?;
+    // The torn cache is moved aside where it was read, so an unmoved
+    // member's old-tree cache is moved aside in the old tree.
+    let path = dual_read(sessions, &cache_path(sessions, session_id)?);
     sweep_dead_writer_temps(sessions, session_id, now_ms);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -546,12 +554,10 @@ pub fn read_cache_or_repair(sessions: &Path, session_id: &str, now_ms: i64) -> R
 /// defect. Empty when the directory is absent or unlistable.
 #[must_use]
 pub fn torn_caches(sessions: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(sessions) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+    let mut names: Vec<String> = crate::run_state::list(sessions)
+        .iter()
+        .filter_map(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| name.contains(TORN_MARKER))
         .collect();
     names.sort();
@@ -660,14 +666,11 @@ pub fn live_sessions_for(
 /// [`RiftError::Io`] only if the sessions directory exists but cannot be listed.
 pub fn live_sessions(sessions: &Path) -> Result<Vec<SessionCache>> {
     const LIVE: &[&str] = &["active", "compacting", "ending"];
-    let entries = match std::fs::read_dir(sessions) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
-    };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
+    for path in crate::run_state::list_checked(sessions)? {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         let Some(stem) = name
             .to_string_lossy()
             .strip_suffix(".json")
@@ -689,6 +692,16 @@ pub fn live_sessions(sessions: &Path) -> Result<Vec<SessionCache>> {
             .then(a.session_id.cmp(&b.session_id))
     });
     Ok(out)
+}
+
+/// The file a reader of `sessions` reads for `path`, one of its files: the
+/// dual read of [`crate::run_state::read_path`], so an unmoved member's
+/// caches are read from the old tree until the new tree has its own.
+fn dual_read(sessions: &Path, path: &Path) -> PathBuf {
+    match path.file_name() {
+        Some(name) => crate::run_state::read_path(sessions, &name.to_string_lossy()),
+        None => path.to_path_buf(),
+    }
 }
 
 /// Publish `json` at `path` whole: written to a temp file of this writer's
@@ -782,6 +795,26 @@ fn modified_ms(path: &Path) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_broken_unmoved_fallback_is_not_a_quiet_empty_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_dir = tmp.path().join("repo/.git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let member = tmp.path().join("cache/run/member");
+        crate::run_state::record_work_tree(&member, &git_dir).unwrap();
+        crate::run_state::record_git_dir(&member, &git_dir).unwrap();
+        let sessions = crate::run_state::RunRoot::Sessions.under(&member);
+        std::fs::create_dir_all(&sessions).unwrap();
+        let legacy = crate::run_state::RunRoot::Sessions.legacy_under(&git_dir);
+        std::fs::write(&legacy, b"a file cannot be a session registry").unwrap();
+        assert!(!crate::run_state::is_moved(&member));
+        assert_eq!(
+            crate::run_state::read_dirs(&sessions),
+            vec![sessions.clone(), legacy]
+        );
+        assert!(live_sessions(&sessions).is_err());
+    }
 
     #[test]
     fn round_trips_through_disk() {
