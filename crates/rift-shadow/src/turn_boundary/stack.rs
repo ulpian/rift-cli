@@ -4,10 +4,10 @@
 use std::collections::BTreeMap;
 
 use rift_core::Result;
-use rift_git::BlobReader;
+use rift_git::{BlobReader, TreeEntryKind};
 use rift_shadow_attribution::replay::TurnEdit;
 use rift_shadow_attribution::Actor;
-use rift_store::{turn_boundary_files_for_session_path, CanonicalStore, TurnDiffHunkRow};
+use rift_store::{regular_turn_boundary_files_for_session_path, CanonicalStore, TurnDiffHunkRow};
 
 /// The position of one recorded hunk in a session's replay order: the turn
 /// it closed, then the window kind in the store's own order (`human`/`start`
@@ -55,11 +55,15 @@ pub(super) async fn rebase_on_parent(
     session_row: &str,
     f: &rift_shadow_attribution::FileChange,
     keyed: Vec<(StackKey, TurnEdit)>,
+    parent_kind: Option<TreeEntryKind>,
 ) -> Result<(Vec<TurnEdit>, Option<u32>)> {
     let mut keyed = keyed;
     let mut parent_len = None;
-    if let Some(base_oid) = f.base_blob_oid.as_deref() {
-        let observed = turn_boundary_files_for_session_path(store, session_row, &f.path).await?;
+    if let (Some(base_oid), Some(TreeEntryKind::Regular)) =
+        (f.base_blob_oid.as_deref(), parent_kind)
+    {
+        let observed =
+            regular_turn_boundary_files_for_session_path(store, session_row, &f.path).await?;
         if let Some(watermark) = consumed_through(&observed, base_oid) {
             keyed = stack_after(keyed, watermark);
             parent_len = reader.read_blob(base_oid)?.as_deref().map(line_count);

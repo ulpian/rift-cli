@@ -2,14 +2,23 @@
 //!
 //! Attribution needs to read file bytes at commit/turn boundaries **without a
 //! checkout** — the pure diff engine in `rift-shadow-attribution` consumes byte
-//! pairs, and this is the seam that produces them. [`BlobReader`] exposes exactly
-//! three operations (read a blob by oid, list a commit's tree, find a commit's
-//! first parent); `gix` types never cross it — ids leave as hex `String`s, blobs
+//! pairs, and this is the seam that produces them. [`BlobReader`] exposes blob
+//! bytes, committed tree entries and their kinds, and first-parent lookup;
+//! `gix` types never cross it — ids leave as hex `String`s, blobs
 //! as `Vec<u8>`. The production [`GixBlobReader`] (behind the `gix` feature) opens
 //! a repo for object access only; [`MemoryBlobReader`] is the offline test double
 //! so the producer can be unit-tested with no repository.
 
 use rift_core::Result;
+
+/// The on-disk kind represented by a committed blob entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeEntryKind {
+    /// A regular or executable file.
+    Regular,
+    /// A symbolic link whose blob contains its target spelling.
+    Link,
+}
 
 /// One `(path, blob_oid)` entry in a commit's tree (blobs only; full path from the
 /// tree root, `/`-joined).
@@ -25,6 +34,19 @@ pub struct TreeEntry {
 /// "diff the bytes" — implemented over a real repo ([`GixBlobReader`]) or in memory
 /// ([`MemoryBlobReader`]) so attribution capture stays testable offline.
 pub trait BlobReader {
+    /// Committed file kinds, including links, for the requested paths.
+    /// `None` means this reader cannot establish kinds; an absent map key
+    /// means the commit has no file there. Older readers remain unknown.
+    ///
+    /// # Errors
+    /// [`rift_core::RiftError`] on an object-read failure.
+    fn tree_entry_kinds_for(
+        &self,
+        _commit_hex: &str,
+        _paths: &[String],
+    ) -> Result<Option<std::collections::BTreeMap<String, TreeEntryKind>>> {
+        Ok(None)
+    }
     /// Fetch an immutable blob by hex object id. `None` if absent or not a blob.
     ///
     /// # Errors
@@ -70,6 +92,7 @@ pub trait BlobReader {
 pub struct MemoryBlobReader {
     blobs: std::collections::HashMap<String, Vec<u8>>,
     trees: std::collections::HashMap<String, Vec<TreeEntry>>,
+    kinds: std::collections::HashMap<String, std::collections::BTreeMap<String, TreeEntryKind>>,
     parents: std::collections::HashMap<String, String>,
 }
 
@@ -94,6 +117,18 @@ impl MemoryBlobReader {
         self
     }
 
+    /// Register explicitly known file kinds. Omitting this fixture leaves
+    /// kinds unknown; a legacy blob list does not establish link types.
+    #[must_use]
+    pub fn with_tree_kinds(
+        mut self,
+        commit_hex: &str,
+        kinds: std::collections::BTreeMap<String, TreeEntryKind>,
+    ) -> Self {
+        self.kinds.insert(commit_hex.to_owned(), kinds);
+        self
+    }
+
     /// Register a commit's first parent.
     #[must_use]
     pub fn with_parent(mut self, commit_hex: &str, parent_hex: &str) -> Self {
@@ -104,6 +139,19 @@ impl MemoryBlobReader {
 }
 
 impl BlobReader for MemoryBlobReader {
+    fn tree_entry_kinds_for(
+        &self,
+        commit_hex: &str,
+        paths: &[String],
+    ) -> Result<Option<std::collections::BTreeMap<String, TreeEntryKind>>> {
+        Ok(self.kinds.get(commit_hex).map(|kinds| {
+            kinds
+                .iter()
+                .filter(|(path, _)| paths.contains(path))
+                .map(|(path, kind)| (path.clone(), *kind))
+                .collect()
+        }))
+    }
     fn read_blob(&self, oid_hex: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.blobs.get(oid_hex).cloned())
     }
@@ -130,7 +178,7 @@ mod gix_reader {
 
     use rift_core::{Result, RiftError};
 
-    use super::{BlobReader, TreeEntry};
+    use super::{BlobReader, TreeEntry, TreeEntryKind};
 
     /// The production [`BlobReader`]: opens a repository for **object access only**
     /// (no index, worktree, checkout, or network). `gix` types stay inside.
@@ -209,6 +257,34 @@ mod gix_reader {
     }
 
     impl BlobReader for GixBlobReader {
+        fn tree_entry_kinds_for(
+            &self,
+            commit_hex: &str,
+            paths: &[String],
+        ) -> Result<Option<std::collections::BTreeMap<String, TreeEntryKind>>> {
+            let Some(commit) = self.commit(commit_hex)? else {
+                return Ok(None);
+            };
+            let tree = commit
+                .tree()
+                .map_err(|e| RiftError::substrate(format!("read tree: {e}")))?;
+            let mut kinds = std::collections::BTreeMap::new();
+            for path in paths {
+                let entry = tree
+                    .lookup_entry(path.split('/').map(str::as_bytes))
+                    .map_err(|e| RiftError::substrate(format!("look up tree entry: {e}")))?;
+                let Some(entry) = entry else { continue };
+                let kind = if entry.mode().is_link() {
+                    TreeEntryKind::Link
+                } else if entry.mode().is_blob() {
+                    TreeEntryKind::Regular
+                } else {
+                    continue;
+                };
+                kinds.insert(path.clone(), kind);
+            }
+            Ok(Some(kinds))
+        }
         fn read_blob(&self, oid_hex: &str) -> Result<Option<Vec<u8>>> {
             let Ok(oid) = gix::ObjectId::from_hex(oid_hex.as_bytes()) else {
                 return Ok(None);
@@ -425,5 +501,25 @@ mod tests {
         );
         let memory = MemoryBlobReader::new().with_tree("c", listed.clone());
         assert_eq!(memory.tree_entries_for("c", &paths).unwrap(), listed);
+    }
+    #[test]
+    fn a_memory_reader_distinguishes_missing_type_knowledge_from_absence() {
+        let paths = vec!["regular".to_owned(), "link".to_owned(), "absent".to_owned()];
+        let legacy = MemoryBlobReader::new();
+        assert_eq!(legacy.tree_entry_kinds_for("c", &paths).unwrap(), None);
+        let kinds = std::collections::BTreeMap::from([
+            ("regular".to_owned(), TreeEntryKind::Regular),
+            ("link".to_owned(), TreeEntryKind::Link),
+        ]);
+        let reader = legacy.with_tree_kinds("c", kinds.clone());
+        assert_eq!(
+            reader.tree_entry_kinds_for("c", &paths).unwrap(),
+            Some(kinds)
+        );
+        assert!(reader
+            .tree_entry_kinds_for("c", &["absent".to_owned()])
+            .unwrap()
+            .unwrap()
+            .is_empty());
     }
 }

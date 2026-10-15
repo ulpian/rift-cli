@@ -832,6 +832,20 @@ const TABLES: &[CanonicalTable] = &[
         primary_key: &["observation_id"],
         unique: NO_UNIQUE,
     },
+    // v19: sparse knowledge, never inferred from legacy blob contents.
+    CanonicalTable {
+        name: "turn_boundary_file_kind",
+        columns: TURN_BOUNDARY_FILE_KIND_COLUMNS,
+        primary_key: &["snapshot_id", "path"],
+        unique: NO_UNIQUE,
+    },
+];
+
+const TURN_BOUNDARY_FILE_KIND_COLUMNS: &[Column] = &[
+    Column::text("snapshot_id"),
+    Column::text("path"),
+    Column::text_one_of("kind", &["regular", "link", "absent", "unknown"]),
+    Column::int("schema_version"),
 ];
 
 /// Columns for the v11 `checkpoint_commit` linkage.
@@ -1335,9 +1349,9 @@ mod worktree_cd_tests {
             names(SESSION_WORKTREE_COLUMNS)
         );
         assert_eq!(
-            TABLES.last().map(|t| t.name),
+            TABLES.get(CAPTURE_TOOL_RESULT_TABLE_COUNT).map(|t| t.name),
             Some("session_worktree_cd"),
-            "the v17 relation is the end of the registry"
+            "the v17 relation stays at its shipped registry position"
         );
     }
 }

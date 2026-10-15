@@ -65,6 +65,9 @@ exceptions = [
   # allow; it sits in an exception only because the allow list is deliberately
   # never widened. Scoped to this one crate.
   { name = "notify", allow = ["CC0-1.0"] },
+  # Windows handle-relative filesystem support through cap-primitives.
+  # Review this SPDX exception again if the resolved winx version changes.
+  { crate = "winx@0.36.4", allow = ["Apache-2.0 WITH LLVM-exception"] },
 ]
 
 [sources]

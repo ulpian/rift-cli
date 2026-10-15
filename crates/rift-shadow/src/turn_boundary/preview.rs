@@ -4,7 +4,9 @@ use rift_core::Result;
 use rift_shadow_attribution::replay::{replay, TurnEdit};
 use rift_shadow_attribution::Actor;
 use rift_shadow_hooks::trailers::AttributionSummary;
-use rift_store::{turn_boundary_counts, turn_diff_hunks_for_session, CanonicalStore};
+use rift_store::{
+    turn_boundary_counts, turn_diff_hunks_for_session, unproven_turn_hunk_paths, CanonicalStore,
+};
 
 use super::stack::edit_stacks;
 use crate::ids;
@@ -26,10 +28,14 @@ pub async fn attribution_preview(
         return Ok(None);
     }
     let (starts, ends) = turn_boundary_counts(store, &session_row).await?;
+    let unproven = unproven_turn_hunk_paths(store, &session_row).await?;
 
     let mut agent_lines: u64 = 0;
     let mut human_lines: u64 = 0;
-    for (_path, keyed) in edit_stacks(&rows) {
+    for (path, keyed) in edit_stacks(&rows) {
+        if unproven.contains(&path) {
+            continue;
+        }
         // The preview is pre-commit: there is no parent to rebase on yet, so
         // the whole stack replays and the keys are not needed.
         let edits: Vec<TurnEdit> = keyed.into_iter().map(|(_, e)| e).collect();

@@ -19,6 +19,10 @@ use rift_store::{
 use super::{capture_boundary, previous_state, Boundary};
 use crate::ids;
 
+#[cfg(unix)]
+#[path = "capture_link_tests.rs"]
+mod links;
+
 const AGENT: &str = "claude-code";
 const NATIVE: &str = "sess-own-state";
 const STATE_FILE: &str = ".rift/state/injection/x.json";
@@ -39,6 +43,13 @@ struct CountingReader {
 }
 
 impl BlobReader for CountingReader {
+    fn tree_entry_kinds_for(
+        &self,
+        commit: &str,
+        paths: &[String],
+    ) -> Result<Option<std::collections::BTreeMap<String, rift_git::TreeEntryKind>>> {
+        self.inner.tree_entry_kinds_for(commit, paths)
+    }
     fn read_blob(&self, oid_hex: &str) -> Result<Option<Vec<u8>>> {
         self.inner.read_blob(oid_hex)
     }

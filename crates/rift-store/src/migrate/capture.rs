@@ -152,7 +152,7 @@ INSERT INTO price_table (price_id, model, token_class, unit_price_micros, curren
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
     // One row per version, in order; a new version is a new last row.
-    let set: [(u32, &'static str, String); 18] = [
+    let set: [(u32, &'static str, String); 19] = [
         (1, "init_meta", META_SQL.to_string()),
         (2, "canonical_core", canonical_schema_sql()),
         (3, "capture_identity", capture_identity_schema_sql()),
@@ -218,6 +218,11 @@ pub fn default_migrations() -> Vec<Migration> {
             18,
             "capture_price_seed_opus_5_5",
             capture_price_seed_opus_5_5_sql(),
+        ),
+        (
+            19,
+            "capture_boundary_file_kind",
+            capture_boundary_file_kind_schema_sql(),
         ),
     ];
     set.into_iter()
@@ -482,6 +487,17 @@ fn capture_worktree_cd_tables() -> &'static [crate::schema::CanonicalTable] {
 /// `PRICE_SEED_OPUS_5_5_SQL`). Insert-only, like v8 and v16.
 fn capture_price_seed_opus_5_5_sql() -> String {
     PRICE_SEED_OPUS_5_5_SQL.to_string()
+}
+
+fn capture_boundary_file_kind_tables() -> &'static [crate::schema::CanonicalTable] {
+    match crate::schema::canonical_table("turn_boundary_file_kind") {
+        Some(table) => std::slice::from_ref(table),
+        None => &[],
+    }
+}
+
+fn capture_boundary_file_kind_schema_sql() -> String {
+    capture_slice_sql(capture_boundary_file_kind_tables())
 }
 
 /// Render one additive capture migration from a registry slice: DDL + guard
@@ -885,7 +901,12 @@ mod tests {
     /// checksum-locked SQL on every deployed projection.
     #[test]
     fn capture_registry_growth_lands_past_frozen_boundaries() {
-        let slices = shipped_capture_slices();
+        let mut slices = shipped_capture_slices().to_vec();
+        slices.push((
+            "v19 capture_boundary_file_kind",
+            capture_boundary_file_kind_tables(),
+            "turn_boundary_file_kind",
+        ));
         let n_sliced_tables: usize = slices.iter().map(|(_, tables, _)| tables.len()).sum();
         assert_eq!(
             n_sliced_tables,

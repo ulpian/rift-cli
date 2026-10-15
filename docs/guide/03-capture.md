@@ -327,6 +327,21 @@ records only `HEAD` and the instant, and the worker snapshots as of that instant
 late edit costs that file's human/agent split for one window rather than crediting the
 wrong one.
 
+Turn-boundary capture preserves a symlink's target spelling without reading its
+referent. Rift trusts the directories above the configured worktree root; the root
+and every repository-relative component are opened without following links. Regular
+reads are capped at 5 MiB; directories, special files, unstable replacements and
+larger files produce unknown observations. The object writer receives only the
+captured bytes, so a replaced path cannot redirect a second read.
+
+Append-only companion facts distinguish regular files, links, confirmed absence and
+unknown observations. A boundary without a file-kind fact supplies no type evidence.
+Capture can record supported regular edits after recording a fresh regular-file
+baseline, while attribution and previews stay unknown when the file's recorded edit
+history lacks compatible kind facts. Existing stored rows remain unchanged. Kind
+facts share the existing boundary rows' projection-only lifecycle; checkpoint shards
+do not carry them.
+
 With no daemon, the hook writes what is owed to a job journal under the git directory
 (identifier-only jobs, the file name being the job's identity so a redelivered hook
 overwrites its own), spawns one detached one-shot child with its streams going nowhere

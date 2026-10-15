@@ -45,7 +45,7 @@ pub mod identity;
 pub mod test_support;
 #[cfg(feature = "gix")]
 pub use blob::GixBlobReader;
-pub use blob::{BlobReader, MemoryBlobReader, TreeEntry};
+pub use blob::{BlobReader, MemoryBlobReader, TreeEntry, TreeEntryKind};
 pub use child_path::{child_process_path, display_path};
 pub use command::{
     changed_worktree_paths, changed_worktree_paths_outside_rift_state, checkout_argv, git_checkout,

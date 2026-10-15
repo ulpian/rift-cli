@@ -1,16 +1,19 @@
 //! The commit side: replay the session's recorded windows plus the still-open
 //! one and replace a commit's all-`unknown` attribution with the split.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rift_core::Result;
-use rift_git::BlobReader;
+use rift_git::{BlobReader, TreeEntryKind};
 use rift_shadow_attribution::replay::{committed_writers, replay, TurnEdit};
 use rift_shadow_attribution::{
     attribute, confidence, diff_attributable, factors_from_signals, Actor, CommitCapture,
     FileChange, HunkAttribution,
 };
-use rift_store::{turn_boundary_counts, turn_diff_hunks_for_session, CanonicalStore};
+use rift_store::{
+    turn_boundary_counts, turn_boundary_file_kinds_for_snapshot, turn_diff_hunks_for_session,
+    unproven_turn_hunk_paths, BoundaryFileKind, CanonicalStore,
+};
 
 use super::stack::{edit_stacks, line_count, rebase_on_parent, StackKey};
 use super::{last_boundary, METHOD_VERSION};
@@ -23,6 +26,8 @@ struct SessionRecord {
     stacks: BTreeMap<String, Vec<(StackKey, TurnEdit)>>,
     /// The last boundary's content map, `path → blob_oid`.
     boundary_state: BTreeMap<String, String>,
+    boundary_kinds: BTreeMap<String, BoundaryFileKind>,
+    unproven: BTreeSet<String>,
     /// `None` = the boundary record contradicts itself (a dropped hook), so no
     /// final window is synthesized at all for any file in this capture.
     pending_actor: Option<Actor>,
@@ -35,6 +40,8 @@ struct FileReplayCtx<'a, S, R> {
     reader: &'a R,
     session_row: &'a str,
     boundary_state: &'a BTreeMap<String, String>,
+    boundary_kinds: &'a BTreeMap<String, BoundaryFileKind>,
+    parent_kinds: &'a BTreeMap<String, TreeEntryKind>,
     pending_actor: Option<Actor>,
     coverage: f64,
 }
@@ -67,20 +74,39 @@ pub async fn enrich_attribution(
     let SessionRecord {
         mut stacks,
         boundary_state,
+        boundary_kinds,
+        unproven,
         pending_actor,
         coverage,
     } = record;
+    let paths: Vec<_> = capture.files.iter().map(|f| f.path.clone()).collect();
+    let Some(current_kinds) = reader.tree_entry_kinds_for(&capture.commit_id, &paths)? else {
+        return Ok(());
+    };
+    let parent_kinds = match reader.parent_of(&capture.commit_id)? {
+        Some(parent) => reader.tree_entry_kinds_for(&parent, &paths)?,
+        None => Some(BTreeMap::new()),
+    };
+    let Some(parent_kinds) = parent_kinds else {
+        return Ok(());
+    };
     let ctx = FileReplayCtx {
         store,
         reader,
         session_row: &session_row,
         boundary_state: &boundary_state,
+        boundary_kinds: &boundary_kinds,
+        parent_kinds: &parent_kinds,
         pending_actor,
         coverage,
     };
 
     for f in &mut capture.files {
-        if !f.attributable {
+        if !f.attributable
+            || unproven.contains(&f.path)
+            || current_kinds.get(&f.path) != Some(&TreeEntryKind::Regular)
+            || parent_kinds.get(&f.path) == Some(&TreeEntryKind::Link)
+        {
             continue;
         }
         let keyed = stacks.remove(&f.path).unwrap_or_default();
@@ -105,6 +131,12 @@ async fn load_session_record(
         .as_ref()
         .map(|(_, files)| files.clone())
         .unwrap_or_default();
+    let boundary_kinds = match &last {
+        Some((snapshot, _)) => {
+            turn_boundary_file_kinds_for_snapshot(store, &snapshot.snapshot_id).await?
+        }
+        None => BTreeMap::new(),
+    };
     if rows.is_empty() && boundary_state.is_empty() {
         return Ok(None);
     }
@@ -116,6 +148,8 @@ async fn load_session_record(
     Ok(Some(SessionRecord {
         stacks,
         boundary_state,
+        boundary_kinds,
+        unproven: unproven_turn_hunk_paths(store, session_row).await?,
         pending_actor,
         coverage: boundary_coverage(starts, ends),
     }))
@@ -139,11 +173,26 @@ async fn enrich_file<S: CanonicalStore, R: BlobReader>(
     f: &mut FileChange,
     keyed: Vec<(StackKey, TurnEdit)>,
 ) -> Result<()> {
-    let (mut edits, parent_len) =
-        rebase_on_parent(ctx.store, ctx.reader, ctx.session_row, f, keyed).await?;
+    let (mut edits, parent_len) = rebase_on_parent(
+        ctx.store,
+        ctx.reader,
+        ctx.session_row,
+        f,
+        keyed,
+        ctx.parent_kinds.get(&f.path).copied(),
+    )
+    .await?;
     // An anchor is only usable if the window it opens has a known owner: a
     // contradictory boundary record (`pending_actor == None`) makes the
     // anchor bytes readable but the authorship unknowable.
+    if ctx.boundary_state.contains_key(&f.path)
+        && !matches!(
+            ctx.boundary_kinds.get(&f.path),
+            Some(BoundaryFileKind::Regular | BoundaryFileKind::Absent)
+        )
+    {
+        return Ok(());
+    }
     let anchored = ctx.boundary_state.contains_key(&f.path) && ctx.pending_actor.is_some();
     // ★ NEVER INVENT AN ANCHOR. Recorded hunks and a usable boundary anchor
     // are the only two things that tie a committed line to a writer. With
@@ -337,7 +386,7 @@ mod tests {
     use rift_git::{MemoryBlobReader, TreeEntry};
     use rift_shadow_attribution::capture_commit;
     use rift_store::{
-        record_turn_boundary_file, record_turn_boundary_snapshot, record_turn_diff_hunk,
+        record_turn_boundary_file_with_kind, record_turn_boundary_snapshot, record_turn_diff_hunk,
         SqliteStore, TurnBoundaryFileRow, TurnBoundarySnapshotRow, TurnDiffHunkRow,
     };
 
@@ -378,12 +427,32 @@ mod tests {
                 ],
             )
             .with_parent("c1", "c0")
+            .with_tree_kinds(
+                "c0",
+                BTreeMap::from([("a.txt".to_owned(), TreeEntryKind::Regular)]),
+            )
+            .with_tree_kinds(
+                "c1",
+                ["a.txt", "other.txt", "added.txt"]
+                    .into_iter()
+                    .map(|path| (path.to_owned(), TreeEntryKind::Regular))
+                    .collect(),
+            )
     }
 
     /// Record the given boundaries in order; the anchor file `(path, blob_oid)`
     /// is attached to the LAST one recorded — the snapshot the ordered read
     /// selects, so the actor and the anchor always come from the same row.
     async fn seed(s: &SqliteStore, boundaries: &[(u32, Boundary)], anchor: (&str, &str)) {
+        seed_with_kind(s, boundaries, anchor, BoundaryFileKind::Regular).await;
+    }
+
+    async fn seed_with_kind(
+        s: &SqliteStore,
+        boundaries: &[(u32, Boundary)],
+        anchor: (&str, &str),
+        kind: BoundaryFileKind,
+    ) {
         let session_row = ids::session_row_id(AGENT, NATIVE);
         let mut last = String::new();
         for (ordinal, b) in boundaries {
@@ -405,7 +474,7 @@ mod tests {
             .unwrap();
             last = snapshot_id;
         }
-        record_turn_boundary_file(
+        record_turn_boundary_file_with_kind(
             s,
             &TurnBoundaryFileRow {
                 snapshot_id: last,
@@ -414,6 +483,7 @@ mod tests {
                 content_sha256: "sha".into(),
                 schema_version: 1,
             },
+            kind,
         )
         .await
         .unwrap();
@@ -458,15 +528,16 @@ mod tests {
         )
         .await
         .unwrap();
-        record_turn_boundary_file(
+        record_turn_boundary_file_with_kind(
             s,
             &TurnBoundaryFileRow {
-                snapshot_id,
+                snapshot_id: snapshot_id.clone(),
                 path: path.to_owned(),
                 blob_oid: blob_oid.to_owned(),
                 content_sha256: "sha".into(),
                 schema_version: 1,
             },
+            BoundaryFileKind::Regular,
         )
         .await
         .unwrap();
@@ -517,6 +588,18 @@ mod tests {
             .with_tree("c2", vec![entry("a.txt", "A3")])
             .with_parent("c1", "c0")
             .with_parent("c2", "c1")
+            .with_tree_kinds(
+                "c0",
+                BTreeMap::from([("a.txt".to_owned(), TreeEntryKind::Regular)]),
+            )
+            .with_tree_kinds(
+                "c1",
+                BTreeMap::from([("a.txt".to_owned(), TreeEntryKind::Regular)]),
+            )
+            .with_tree_kinds(
+                "c2",
+                BTreeMap::from([("a.txt".to_owned(), TreeEntryKind::Regular)]),
+            )
     }
 
     /// The session's full hunk stack for the shape above, with the boundary
@@ -740,37 +823,23 @@ mod tests {
         .unwrap();
     }
 
-    /// ★ WHY THE PHANTOM HAD TO BE STOPPED AT THE WRITE SIDE, pinned as a fact
-    /// rather than argued.
-    ///
-    /// **This test passes before and after the `capture_boundary` fix** — it is
-    /// not a regression guard for it, and does not pretend to be. What it pins
-    /// is the blast radius: once a whole-file hunk EXISTS as a file's only
-    /// recorded edit, the replay has no way to tell it from a real one and
-    /// answers `human = 2` under `turn-replay@1` on a file the session never
-    /// observed. The downstream length check cannot save it either, because an
-    /// added file's replay base is 0, so the fabricated authorship has the
-    /// right length by construction.
-    ///
-    /// A false author in an append-only table is permanent. That is why the
-    /// refusal belongs where the row is written, not where it is read.
+    /// Old referent-derived hunks remain immutable, but cannot acquire new
+    /// certification through a sibling's typed regular anchor. This fixture
+    /// deliberately has no kind evidence for added.txt's stored legacy hunk.
     #[tokio::test]
-    async fn a_phantom_whole_file_hunk_becomes_a_false_blame_answer() {
+    async fn a_legacy_untyped_phantom_hunk_cannot_be_recertified_by_a_typed_sibling() {
         let s = store();
         seed(&s, &[(0, Boundary::Start)], ("a.txt", "A0")).await;
         seed_hunk(&s, 0, "human", "added.txt", (0, 0, 0, 2)).await;
 
         let c = enrich(&s, &reader()).await;
         let f = file(&c, "added.txt");
-        assert_eq!(
-            f.attribution.human_lines, 2,
-            "a phantom hunk is believed in full"
-        );
-        assert_eq!(f.attribution.unknown_lines, 0);
-        assert_eq!(
-            f.method_version, METHOD_VERSION,
-            "and it is stamped as a replayed answer, indistinguishable from a real one"
-        );
+        assert_refused(&c, "added.txt");
+        assert_eq!(f.attribution.unknown_lines, 2);
+        assert!(crate::turn_boundary::attribution_preview(&s, AGENT, NATIVE)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     /// A file no boundary observed keeps zero counts and the commit stub, in the
@@ -792,6 +861,100 @@ mod tests {
         for f in &c.files {
             assert_refused(&c, &f.path);
         }
+    }
+
+    #[tokio::test]
+    async fn a_refused_empty_anchor_cannot_credit_the_final_window() {
+        let s = store();
+        seed_with_kind(
+            &s,
+            &[(0, Boundary::Start)],
+            ("added.txt", "EMPTY"),
+            BoundaryFileKind::Unknown,
+        )
+        .await;
+        let r = reader().with_blob("EMPTY", b"");
+        let capture = enrich(&s, &r).await;
+        assert_refused(&capture, "added.txt");
+        assert_eq!(file(&capture, "added.txt").attribution.unknown_lines, 2);
+    }
+
+    #[tokio::test]
+    async fn a_link_payload_that_equals_source_bytes_is_not_a_source_anchor() {
+        let s = store();
+        seed_with_kind(
+            &s,
+            &[(0, Boundary::Start)],
+            ("a.txt", "A0"),
+            BoundaryFileKind::Link,
+        )
+        .await;
+        assert_refused(&enrich(&s, &reader()).await, "a.txt");
+    }
+
+    #[tokio::test]
+    async fn committed_and_parent_link_modes_cannot_be_replayed_as_regular_source() {
+        for commit in ["c0", "c1"] {
+            let s = store();
+            seed(&s, &[(0, Boundary::Start)], ("a.txt", "A0")).await;
+            let r = reader().with_tree_kinds(
+                commit,
+                BTreeMap::from([("a.txt".to_owned(), TreeEntryKind::Link)]),
+            );
+            assert_refused(&enrich(&s, &r).await, "a.txt");
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_and_commit_skip_a_whole_file_when_any_hunk_epoch_is_unproven() {
+        let s = store();
+        seed_mid_session(&s, "A1").await;
+        seed_hunk(&s, 3, "human", "a.txt", (0, 0, 0, 1)).await;
+        assert!(crate::turn_boundary::attribution_preview(&s, AGENT, NATIVE)
+            .await
+            .unwrap()
+            .is_none());
+        let r = mid_session_reader();
+        let mut capture = capture_commit(&r, "c2").unwrap();
+        enrich_attribution(&s, &r, AGENT, NATIVE, &mut capture)
+            .await
+            .unwrap();
+        assert_refused(&capture, "a.txt");
+        assert_eq!(file(&capture, "a.txt").attribution.unknown_lines, 2);
+    }
+
+    #[tokio::test]
+    async fn preview_keeps_the_exact_supported_regular_window_counts() {
+        let s = store();
+        seed_mid_session(&s, "A1").await;
+        let preview = crate::turn_boundary::attribution_preview(&s, AGENT, NATIVE)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((preview.agent_pct, preview.human_pct), (75, 25));
+    }
+
+    #[tokio::test]
+    async fn a_known_link_gap_cannot_be_bridged_by_later_regular_hunks() {
+        let s = store();
+        seed_with_kind(
+            &s,
+            &[(0, Boundary::Start)],
+            ("a.txt", "A0"),
+            BoundaryFileKind::Link,
+        )
+        .await;
+        seed_mid_session(&s, "A1").await;
+        assert!(crate::turn_boundary::attribution_preview(&s, AGENT, NATIVE)
+            .await
+            .unwrap()
+            .is_none());
+        let r = mid_session_reader();
+        let mut capture = capture_commit(&r, "c2").unwrap();
+        enrich_attribution(&s, &r, AGENT, NATIVE, &mut capture)
+            .await
+            .unwrap();
+        assert_refused(&capture, "a.txt");
     }
 
     /// The derivation refuses every contradiction and decides only the two

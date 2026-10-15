@@ -63,6 +63,7 @@ mod capture;
 #[cfg(test)]
 mod capture_tests;
 mod enrich;
+mod observation;
 mod preview;
 mod stack;
 
@@ -147,6 +148,7 @@ async fn last_boundary(
 
 /// The previous boundary's content map (`path → blob_oid`), or empty if this is
 /// the session's first boundary. The capture side needs the bytes only.
+#[cfg(test)]
 async fn previous_state(
     store: &impl CanonicalStore,
     session_row: &str,

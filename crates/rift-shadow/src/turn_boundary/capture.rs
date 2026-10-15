@@ -2,18 +2,17 @@
 //! against the previous boundary, and persist the append-only boundary rows.
 
 use std::collections::BTreeMap;
-use std::io::Read as _;
-use std::path::Path;
 
 use rift_core::Result;
-use rift_git::{BlobReader, RepoPaths};
+use rift_git::{BlobReader, RepoPaths, TreeEntryKind};
 use rift_shadow_attribution::{diff_attributable, Hunk};
 use rift_store::{
-    record_turn_boundary_file, record_turn_boundary_snapshot, record_turn_diff_hunk,
-    CanonicalStore, TurnBoundaryFileRow, TurnBoundarySnapshotRow, TurnDiffHunkRow,
+    record_turn_boundary_file_with_kind, record_turn_boundary_snapshot, record_turn_diff_hunk,
+    turn_boundary_file_kinds_for_snapshot, BoundaryFileKind, CanonicalStore, TurnBoundaryFileRow,
+    TurnBoundarySnapshotRow, TurnDiffHunkRow,
 };
 
-use super::{previous_state, Boundary};
+use super::{observation, Boundary};
 use crate::ids;
 
 /// Everything one boundary capture reads while it walks the working set.
@@ -32,6 +31,8 @@ struct BoundaryCtx<'a, S, R> {
     prev: &'a BTreeMap<String, String>,
     /// HEAD's tree, `path → blob_oid` (empty without a HEAD commit).
     head_tree: &'a BTreeMap<String, String>,
+    prev_kinds: &'a BTreeMap<String, BoundaryFileKind>,
+    head_kinds: Option<&'a BTreeMap<String, TreeEntryKind>>,
 }
 
 /// One file as this boundary observed it: the `turn_boundary_file` row to be.
@@ -39,24 +40,15 @@ struct ObservedFile {
     path: String,
     blob_oid: String,
     content_sha256: String,
-}
-
-/// One working file as the walk read it: its bytes, and when it was last
-/// written, both from the one open handle.
-struct WorkingFile {
-    bytes: Vec<u8>,
-    /// Epoch milliseconds; `None` where the platform reports no time.
-    modified_ms: Option<i64>,
+    kind: BoundaryFileKind,
 }
 
 /// A file whose current bytes still need an address in the object store.
-/// Gathered over the whole walk so one git process writes them all.
+/// Only this buffer is written; no worktree path is reopened.
 struct FreshFile {
     path: String,
     bytes: Vec<u8>,
-    /// Whether the bytes were read from a file; a deleted or unreadable path
-    /// is observed as empty bytes, which git cannot read from disk.
-    on_disk: bool,
+    kind: BoundaryFileKind,
 }
 
 /// What the walk makes of one path.
@@ -99,10 +91,14 @@ pub async fn capture_boundary(
     captured_at_ms: i64,
 ) -> Result<()> {
     let session_row = ids::session_row_id(agent, native_session);
-    let prev = previous_state(store, &session_row).await?;
+    let (prev, prev_kinds) = previous_observation(store, &session_row).await?;
     let committed = paths_committed_since(reader, repo, head_commit)?;
     let paths = working_set(repo, &prev, committed)?;
     let head_tree = head_tree_oids(reader, head_commit, &paths)?;
+    let head_kinds = match head_commit {
+        Some(head) if !paths.is_empty() => reader.tree_entry_kinds_for(head, &paths)?,
+        _ => Some(BTreeMap::new()),
+    };
     let ctx = BoundaryCtx {
         store,
         repo,
@@ -113,6 +109,8 @@ pub async fn capture_boundary(
         captured_at_ms,
         prev: &prev,
         head_tree: &head_tree,
+        prev_kinds: &prev_kinds,
+        head_kinds: head_kinds.as_ref(),
     };
 
     let mut observed: Vec<ObservedFile> = Vec::new();
@@ -127,6 +125,17 @@ pub async fn capture_boundary(
     observed.extend(address_fresh_files(&ctx, fresh)?);
     observed.sort_by(|a, b| a.path.cmp(&b.path));
     persist_boundary(&ctx, observed).await
+}
+
+async fn previous_observation(
+    store: &impl CanonicalStore,
+    session: &str,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, BoundaryFileKind>)> {
+    let Some((snapshot, files)) = super::last_boundary(store, session).await? else {
+        return Ok((BTreeMap::new(), BTreeMap::new()));
+    };
+    let kinds = turn_boundary_file_kinds_for_snapshot(store, &snapshot.snapshot_id).await?;
+    Ok((files, kinds))
 }
 
 /// The observation set: everything currently differing from HEAD, plus every
@@ -242,18 +251,18 @@ async fn observe_boundary_path<S: CanonicalStore, R: BlobReader>(
     ctx: &BoundaryCtx<'_, S, R>,
     path: &str,
 ) -> Result<Observation> {
-    let read = worktree_file(&ctx.repo.work_tree, path);
-    let late = written_after(ctx, path, read.as_ref());
-    let on_disk = read.is_some();
-    let cur = read.map(|file| file.bytes).unwrap_or_default();
+    let read = observation::observe(&ctx.repo.work_tree, path);
+    let late = read.modified_ms.is_some_and(|ms| ms > ctx.captured_at_ms);
+    let kind = read.kind;
+    let cur = read.bytes;
     let fresh = |bytes: Vec<u8>| {
         Observation::Fresh(FreshFile {
             path: path.to_owned(),
             bytes,
-            on_disk,
+            kind,
         })
     };
-    if late {
+    if late || !regular_window(ctx, path, kind) {
         return Ok(fresh(cur));
     }
     let Some(prev_bytes) = window_anchor(ctx, path)? else {
@@ -280,6 +289,30 @@ async fn observe_boundary_path<S: CanonicalStore, R: BlobReader>(
     // The file's bytes at this boundary go into the local object store; the
     // projection gets only the addresses.
     Ok(fresh(cur))
+}
+
+/// Type-less historical anchors remain unknown for one window. A regular
+/// anchor recorded now restores coverage for the next one. Links retain
+/// their payloads without attributing target spellings as edited source.
+fn regular_window<S, R>(
+    ctx: &BoundaryCtx<'_, S, R>,
+    path: &str,
+    current: BoundaryFileKind,
+) -> bool {
+    if !matches!(
+        current,
+        BoundaryFileKind::Regular | BoundaryFileKind::Absent
+    ) {
+        return false;
+    }
+    if ctx.prev.contains_key(path) {
+        return matches!(
+            ctx.prev_kinds.get(path),
+            Some(BoundaryFileKind::Regular | BoundaryFileKind::Absent)
+        );
+    }
+    ctx.head_kinds
+        .is_some_and(|kinds| !matches!(kinds.get(path), Some(TreeEntryKind::Link)))
 }
 
 /// The bytes this window's diff starts from: the previous boundary's anchor,
@@ -332,53 +365,35 @@ fn unchanged_observation<S, R>(ctx: &BoundaryCtx<'_, S, R>, path: &str, cur: &[u
         path: path.to_owned(),
         blob_oid: prev_oid.clone(),
         content_sha256: sha256_hex_of(cur),
+        kind: ctx
+            .prev_kinds
+            .get(path)
+            .copied()
+            .unwrap_or(BoundaryFileKind::Unknown),
     })
 }
 
 /// Write every fresh file's bytes to the local object store and observe them
 /// under the oids git returns.
 ///
-/// The files read from disk go to git in one batch. git reads them again, so
-/// an oid is kept only when the object holds exactly the bytes this boundary
-/// diffed; a file edited between the two reads, a path the batch could not
-/// carry and a deleted file are written one at a time from those bytes, as
-/// every file once was. A failed batch is no failed boundary for the same
-/// reason: each file still gets its own write.
+/// Only observed bytes reach git. Reopening worktree paths here would race
+/// replacements and follow links before any returned-object check could help.
 fn address_fresh_files<S, R: BlobReader>(
     ctx: &BoundaryCtx<'_, S, R>,
     fresh: Vec<FreshFile>,
 ) -> Result<Vec<ObservedFile>> {
-    let on_disk: Vec<&str> = fresh
-        .iter()
-        .filter(|f| f.on_disk)
-        .map(|f| f.path.as_str())
-        .collect();
-    let batch: BTreeMap<String, String> = match rift_git::hash_files_write(ctx.repo, &on_disk) {
-        Ok(oids) => on_disk.iter().map(|p| (*p).to_owned()).zip(oids).collect(),
-        Err(_) => BTreeMap::new(),
-    };
     fresh
         .into_iter()
         .map(|file| {
-            let blob_oid = match batch.get(&file.path) {
-                Some(oid) if object_holds(ctx.reader, oid, &file.bytes) => oid.clone(),
-                _ => rift_git::hash_object_write(ctx.repo, &file.bytes)?,
-            };
+            let blob_oid = rift_git::hash_object_write(ctx.repo, &file.bytes)?;
             Ok(ObservedFile {
                 content_sha256: sha256_hex_of(&file.bytes),
                 path: file.path,
                 blob_oid,
+                kind: file.kind,
             })
         })
         .collect()
-}
-
-/// Whether the object store holds exactly `bytes` under `oid`.
-fn object_holds(reader: &impl BlobReader, oid: &str, bytes: &[u8]) -> bool {
-    match reader.read_blob(oid) {
-        Ok(Some(stored)) => stored == bytes,
-        Ok(None) | Err(_) => false,
-    }
 }
 
 /// Append the closed window's hunks for one file, in diff order.
@@ -442,15 +457,16 @@ async fn persist_boundary<S: CanonicalStore, R>(
     )
     .await?;
     for file in observed {
-        record_turn_boundary_file(
+        record_turn_boundary_file_with_kind(
             ctx.store,
             &TurnBoundaryFileRow {
                 snapshot_id: snapshot_id.clone(),
-                path: file.path,
+                path: file.path.clone(),
                 blob_oid: file.blob_oid,
                 content_sha256: file.content_sha256,
                 schema_version: 1,
             },
+            file.kind,
         )
         .await?;
     }
@@ -469,57 +485,13 @@ fn worktree_hash(observed: &[ObservedFile]) -> String {
     sha256_hex_of(&acc)
 }
 
-/// Read one worktree file, `None` when deleted or unreadable; the walk treats
-/// an absent file as empty bytes.
-///
-/// The modification time comes from the handle the bytes are read through,
-/// so the time and the bytes describe one file even when the path is
-/// replaced between the two.
-fn worktree_file(work_tree: &Path, rel: &str) -> Option<WorkingFile> {
-    let mut file = std::fs::File::open(work_tree.join(rel)).ok()?;
-    let modified = file.metadata().ok().and_then(|meta| meta.modified().ok());
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    Some(WorkingFile {
-        bytes,
-        modified_ms: modified.and_then(epoch_ms),
-    })
-}
-
-/// Whether the path was written after the boundary's instant: the file's own
-/// modification time, or, for a file that is gone, the time of the nearest
-/// directory above it that still exists — a deletion changes its directory
-/// and nothing else.
-fn written_after<S, R>(ctx: &BoundaryCtx<'_, S, R>, rel: &str, read: Option<&WorkingFile>) -> bool {
-    let modified_ms = match read {
-        Some(file) => file.modified_ms,
-        None => nearest_directory_modified_ms(&ctx.repo.work_tree, rel),
-    };
-    modified_ms.is_some_and(|ms| ms > ctx.captured_at_ms)
-}
-
-/// The modification time of the nearest existing directory above `rel`,
-/// never looking above the work tree.
-fn nearest_directory_modified_ms(work_tree: &Path, rel: &str) -> Option<i64> {
-    let path = work_tree.join(rel);
-    let dir = path
-        .ancestors()
-        .skip(1)
-        .take_while(|dir| dir.starts_with(work_tree))
-        .find(|dir| dir.is_dir())?;
-    let modified = std::fs::metadata(dir).ok()?.modified().ok()?;
-    epoch_ms(modified)
-}
-
-/// A file time as epoch milliseconds; `None` before the epoch.
-fn epoch_ms(time: std::time::SystemTime) -> Option<i64> {
-    let since = time.duration_since(std::time::UNIX_EPOCH).ok()?;
-    i64::try_from(since.as_millis()).ok()
-}
-
 fn sha256_hex_of(bytes: &[u8]) -> String {
     crate::sha256_hex(&[bytes])
 }
+
+#[cfg(test)]
+#[path = "capture_address_tests.rs"]
+mod addressing_tests;
 
 /// [`capture_boundary`]'s first tests — driven through the REAL function
 /// against a REAL git repository, with only the [`BlobReader`] seam faking a
@@ -536,6 +508,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    use super::super::previous_state;
     use super::*;
     use rift_git::{BlobReader, GixBlobReader, RepoPaths, TreeEntry};
     use rift_store::{turn_diff_hunks_for_session, SqliteStore};
@@ -558,6 +531,13 @@ mod tests {
     }
 
     impl BlobReader for Collected {
+        fn tree_entry_kinds_for(
+            &self,
+            commit: &str,
+            paths: &[String],
+        ) -> Result<Option<BTreeMap<String, rift_git::TreeEntryKind>>> {
+            self.inner.tree_entry_kinds_for(commit, paths)
+        }
         fn read_blob(&self, oid_hex: &str) -> Result<Option<Vec<u8>>> {
             if self.hidden.contains(oid_hex) {
                 return Ok(None);

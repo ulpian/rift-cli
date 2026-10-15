@@ -29,6 +29,8 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 # Per-repo serialized checkpoint archival (deferred off the git critical path).
 tokio = { workspace = true }
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
