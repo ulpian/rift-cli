@@ -28,6 +28,7 @@
     )
 )]
 
+pub mod boundary_gap;
 pub mod checkpoint_id;
 mod error;
 pub mod event;

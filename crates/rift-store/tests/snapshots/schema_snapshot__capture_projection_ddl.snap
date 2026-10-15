@@ -5,6 +5,9 @@ expression: schema_dump(&default_migrations())
 -- index idx_agent_hook_event_identity
 CREATE INDEX idx_agent_hook_event_identity ON agent_hook_event(agent, session_id) WHERE session_id IS NOT NULL
 
+-- index idx_turn_boundary_gap_context
+CREATE INDEX idx_turn_boundary_gap_context ON turn_boundary_gap_ticket(context_sha256, gap_id)
+
 -- table _migrations
 CREATE TABLE _migrations (
 version    INTEGER PRIMARY KEY,
@@ -515,6 +518,37 @@ CREATE TABLE turn_boundary_file_kind (
   PRIMARY KEY (snapshot_id, path)
 ) STRICT
 
+-- table turn_boundary_gap_batch
+CREATE TABLE turn_boundary_gap_batch (
+  gap_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  member_key TEXT NOT NULL,
+  selection_sha256 TEXT NOT NULL,
+  evidence_sha256 TEXT NOT NULL,
+  ticket_count INTEGER NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  reason TEXT NOT NULL CHECK (reason IN ('uncaptured-backlog')),
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (gap_id)
+) STRICT
+
+-- table turn_boundary_gap_ticket
+CREATE TABLE turn_boundary_gap_ticket (
+  gap_id TEXT NOT NULL,
+  source_key TEXT NOT NULL,
+  context_sha256 TEXT NOT NULL,
+  ticket_sha256 TEXT NOT NULL,
+  session_key TEXT NOT NULL,
+  turn_ordinal INTEGER NOT NULL,
+  boundary TEXT NOT NULL CHECK (boundary IN ('start', 'end')),
+  head_oid TEXT,
+  captured_at INTEGER NOT NULL,
+  queued_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (gap_id, source_key)
+) STRICT
+
 -- table turn_boundary_observation
 CREATE TABLE turn_boundary_observation (
   snapshot_id TEXT NOT NULL,
@@ -837,6 +871,18 @@ CREATE TRIGGER turn_boundary_file_no_delete BEFORE DELETE ON turn_boundary_file 
 
 -- trigger turn_boundary_file_no_update
 CREATE TRIGGER turn_boundary_file_no_update BEFORE UPDATE ON turn_boundary_file BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_file is append-only (UPDATE forbidden)'); END
+
+-- trigger turn_boundary_gap_batch_no_delete
+CREATE TRIGGER turn_boundary_gap_batch_no_delete BEFORE DELETE ON turn_boundary_gap_batch BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_gap_batch is append-only (DELETE forbidden)'); END
+
+-- trigger turn_boundary_gap_batch_no_update
+CREATE TRIGGER turn_boundary_gap_batch_no_update BEFORE UPDATE ON turn_boundary_gap_batch BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_gap_batch is append-only (UPDATE forbidden)'); END
+
+-- trigger turn_boundary_gap_ticket_no_delete
+CREATE TRIGGER turn_boundary_gap_ticket_no_delete BEFORE DELETE ON turn_boundary_gap_ticket BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_gap_ticket is append-only (DELETE forbidden)'); END
+
+-- trigger turn_boundary_gap_ticket_no_update
+CREATE TRIGGER turn_boundary_gap_ticket_no_update BEFORE UPDATE ON turn_boundary_gap_ticket BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_gap_ticket is append-only (UPDATE forbidden)'); END
 
 -- trigger turn_boundary_observation_no_delete
 CREATE TRIGGER turn_boundary_observation_no_delete BEFORE DELETE ON turn_boundary_observation BEGIN SELECT RAISE(ABORT, 'rift: turn_boundary_observation is append-only (DELETE forbidden)'); END

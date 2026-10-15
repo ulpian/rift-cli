@@ -93,9 +93,9 @@ pub use capture::{
     VerificationRunRow, VerificationWitnessRow,
 };
 pub use capture::{
-    bounded_turn_boundary_observation, record_turn_boundary_collection,
-    turn_boundary_observation_for_snapshot, BoundaryCollectionInterval, BoundaryObservationRow,
-    BoundedBoundaryObservation,
+    boundary_gap_batch, bounded_turn_boundary_observation, record_boundary_gap_batch,
+    record_turn_boundary_collection, turn_boundary_observation_for_snapshot,
+    BoundaryCollectionInterval, BoundaryObservationRow, BoundedBoundaryObservation,
 };
 pub use crypto::{
     decrypt_column, encrypt_column, ColumnCipher, DekCipher, KeyStore, MemoryKeyStore, PlainCipher,

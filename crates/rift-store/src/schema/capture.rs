@@ -5,6 +5,9 @@
 
 use super::{CanonicalTable, Column, NO_UNIQUE};
 
+mod boundary_gaps;
+pub(crate) use boundary_gaps::{BOUNDARY_GAP_CONTEXT_INDEX_SQL, BOUNDARY_GAP_TABLES};
+
 // --- The registry of canonical tables -------------------------------------
 // All hashes/oids are stored as lowercase hex `TEXT` (matching the integrity
 // store's `Sha256Id::to_hex`/`parse_hex`); timestamps are epoch-ms `INTEGER`.
@@ -840,6 +843,8 @@ const TABLES: &[CanonicalTable] = &[
         unique: NO_UNIQUE,
     }, // v20: collection audit only, never event-time or authorship proof.
     BOUNDARY_OBSERVATION_TABLE,
+    boundary_gaps::BATCH,
+    boundary_gaps::TICKET,
 ];
 
 pub(crate) const BOUNDARY_OBSERVATION_TABLE: CanonicalTable = CanonicalTable {
