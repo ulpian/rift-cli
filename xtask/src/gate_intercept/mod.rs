@@ -11,6 +11,9 @@
 //! * `pinned-channels` — the channels Rift answers on are reviewable as a list.
 //! * `no-store-on-gate-path` — the decision path opens no store and loads no
 //!   tokenizer.
+//! * `no-store-in-destructors` — no destructor in a hook-path crate opens a
+//!   store or loads the tokenizer, read directly rather than by reachability,
+//!   since a destructor's caller is the scope its value dies in.
 //! * `one-reason-renderer` — one module writes the sentences a model reads.
 //! * `closed-rewrite-forms` — every tool-call rewrite is one of three pinned forms.
 //! * `family-keyed-caches` — a cache is keyed by the repository family, never
@@ -37,6 +40,7 @@
 mod cache_read;
 mod channels;
 mod chokepoint;
+mod destructors;
 mod family_caches;
 mod gate_path;
 mod managed_regions;
@@ -52,6 +56,7 @@ use crate::ci_meta::tracked_paths;
 pub use cache_read::one_cache_read;
 pub use channels::pinned_channels;
 pub use chokepoint::one_gate_chokepoint;
+pub use destructors::no_store_in_destructors;
 pub use family_caches::family_keyed_caches;
 pub use gate_path::no_store_on_gate_path;
 pub use managed_regions::regions_at_boundaries;
@@ -90,6 +95,7 @@ pub fn run_all(root: &Path) -> Result<Vec<Leg>, String> {
         one_gate_chokepoint(root)?,
         pinned_channels(root)?,
         no_store_on_gate_path(root)?,
+        no_store_in_destructors(root)?,
         one_reason_renderer(root)?,
         closed_rewrite_forms(root)?,
         family_keyed_caches(root)?,
@@ -153,24 +159,22 @@ mod tests {
                 leg.violations
             );
         }
-        assert_eq!(legs.len(), 9, "every leg reports, built or not");
+        assert_eq!(legs.len(), 10, "every leg reports, built or not");
     }
 
-    /// The two call-graph walks are dispatched by the runner, not only
-    /// callable: their planting tests call the walks directly, so they would
-    /// stay green with a leg dropped from the command.
+    /// The two call-graph walks and the destructor screen are dispatched by
+    /// the runner, not only callable: their planting tests call the screens
+    /// directly, so they would stay green with a leg dropped from the command.
     #[test]
-    fn the_runner_dispatches_both_call_graph_walks() {
+    fn the_runner_dispatches_the_call_graph_walks_and_the_destructor_screen() {
         let legs = run_all(&crate::workspace_root()).expect("every leg runs");
-        assert!(
-            legs.iter().any(|leg| leg.name == "no-store-on-gate-path"),
-            "{:?}",
-            legs.iter().map(|leg| leg.name).collect::<Vec<_>>()
-        );
-        assert!(
-            legs.iter().any(|leg| leg.name == "regions-at-boundaries"),
-            "{:?}",
-            legs.iter().map(|leg| leg.name).collect::<Vec<_>>()
-        );
+        let names: Vec<&str> = legs.iter().map(|leg| leg.name).collect();
+        for expected in [
+            "no-store-on-gate-path",
+            "no-store-in-destructors",
+            "regions-at-boundaries",
+        ] {
+            assert!(names.contains(&expected), "{expected}: {names:?}");
+        }
     }
 }

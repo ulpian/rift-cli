@@ -75,7 +75,7 @@ pub(super) const GATE_ROOTS: [&str; 11] = [
 /// child the binary re-spawns (`doc_helper`): a parser wedged on a hostile
 /// file inside the hook process could not be killed, and a container that
 /// decompresses past memory would take the hook with it.
-const FORBIDDEN_ON_GATE_PATH: [&str; 9] = [
+pub(super) const FORBIDDEN_ON_GATE_PATH: [&str; 9] = [
     "open_migrated",
     "open_capture_projection",
     "recall_db",
@@ -124,7 +124,9 @@ pub fn no_store_on_gate_path(root: &Path) -> Result<Leg, String> {
 /// uses to check the walk still arrives where it should. A tightening that
 /// quietly empties the walk is a green gate that guards nothing, so the
 /// waypoints are asserted rather than assumed.
-fn screen_gate_path(corpus: &[(String, String)]) -> Result<(Leg, BTreeSet<String>), String> {
+pub(super) fn screen_gate_path(
+    corpus: &[(String, String)],
+) -> Result<(Leg, BTreeSet<String>), String> {
     let fns = production_fns(corpus);
     if let Some(root_fn) = missing_root(&fns, &GATE_ROOTS) {
         return Err(format!(
@@ -351,7 +353,7 @@ pub(super) fn production_fns(corpus: &[(String, String)]) -> Vec<FnBody> {
 
 /// The line ranges of every `impl … Drop for …` block in `masked`, counted
 /// the way a definition's site is.
-fn drop_impl_lines(masked: &str) -> Vec<std::ops::RangeInclusive<usize>> {
+pub(super) fn drop_impl_lines(masked: &str) -> Vec<std::ops::RangeInclusive<usize>> {
     let bytes = masked.as_bytes();
     let mut out = Vec::new();
     for at in token_offsets(masked, "impl") {
@@ -388,7 +390,7 @@ fn drop_impl_lines(masked: &str) -> Vec<std::ops::RangeInclusive<usize>> {
 /// Read from the whole parent, not its production half: the declaration is
 /// itself the column-zero marker the production cut stops at. A parent that
 /// is not in the corpus ends the climb, and the file is walked.
-fn declared_for_tests(corpus: &[(String, String)]) -> BTreeSet<&str> {
+pub(super) fn declared_for_tests(corpus: &[(String, String)]) -> BTreeSet<&str> {
     let masked: BTreeMap<&str, String> = corpus
         .iter()
         .map(|(rel, text)| (rel.as_str(), mask_code(text)))
