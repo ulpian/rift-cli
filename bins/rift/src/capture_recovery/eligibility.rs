@@ -14,7 +14,7 @@
 #[cfg(unix)]
 mod cache;
 #[cfg(all(test, unix))]
-mod fixtures;
+pub(in crate::capture_recovery) mod fixtures;
 #[cfg(all(test, unix))]
 mod query_tests;
 mod rows;

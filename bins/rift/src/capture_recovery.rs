@@ -15,6 +15,8 @@ mod eligibility;
 #[cfg(unix)]
 mod files;
 pub(crate) mod hold;
+#[cfg(unix)]
+mod inventory;
 pub(crate) mod pins;
 pub(crate) mod plan;
 
