@@ -48,11 +48,11 @@ fn lines(text: &str, lo: usize, hi: usize) -> String {
         .collect()
 }
 
-/// Run the step on a `PostToolUse` of `payload` under `policy`.
+/// Run the step on a `PostToolUse` of `payload` under `effective`.
 fn record(
     work_tree: &Path,
     payload: serde_json::Value,
-    policy: &rift_recall_policy::ServePolicy,
+    effective: &rift_recall_policy::Effective,
 ) -> Vec<Line> {
     let raw = hook("claude-code", "PostToolUse", "s-out", payload);
     output_match_record(
@@ -60,8 +60,7 @@ fn record(
         &raw,
         &work_tree.join(".git"),
         work_tree,
-        policy,
-        &observing(),
+        effective,
     );
     lines_of(work_tree, "s-out", None)
 }
@@ -95,11 +94,7 @@ fn an_unrecognised_chain_books_each_member_its_own_lines() {
     stdout.push_str("=== b ===\n");
     stdout.push_str("7:let b_7 = compute_b(7);\n21:let b_21 = compute_b(21);\n");
     let command = "cd sub && awk 'NR>=4 && NR<=13' ../a.rs | cat; echo '=== b ==='; grep -n 'b_7\\|b_21' b.rs";
-    let rows = record(
-        root,
-        bash(root, command, &stdout),
-        &rift_recall_policy::ServePolicy::default(),
-    );
+    let rows = record(root, bash(root, command, &stdout), &observing());
     assert_eq!(
         matched(&rows),
         [
@@ -124,7 +119,7 @@ fn a_search_over_a_named_directory_books_the_files_it_printed() {
     let rows = record(
         root,
         bash(root, "grep -rn compute_b sub/ | head", stdout),
-        &rift_recall_policy::ServePolicy::default(),
+        &observing(),
     );
     assert_eq!(
         matched(&rows),
@@ -142,14 +137,10 @@ fn output_no_member_names_books_nothing() {
     let rows = record(
         root,
         bash(root, "cargo run -q --example dump", &stdout),
-        &rift_recall_policy::ServePolicy::default(),
+        &observing(),
     );
     assert!(matched(&rows).is_empty(), "{rows:?}");
-    let rows = record(
-        root,
-        bash(root, "cd sub && cat ../a.rs", ""),
-        &rift_recall_policy::ServePolicy::default(),
-    );
+    let rows = record(root, bash(root, "cd sub && cat ../a.rs", ""), &observing());
     assert!(matched(&rows).is_empty(), "a silent member books nothing");
 }
 
@@ -160,17 +151,12 @@ fn an_off_lever_a_spilled_result_or_another_family_writes_nothing() {
     let tmp = checkout();
     let root = tmp.path();
     let stdout = lines(&source("a"), 1, 20);
-    let mut off = rift_recall_policy::ServePolicy::default();
-    off.interception.recognise_by_output = rift_recall_policy::Mode::Off;
+    let mut off = observing();
+    off.recognise_by_output = rift_recall_policy::Mode::Off;
     assert!(matched(&record(root, bash(root, "cat a.rs | cat", &stdout), &off)).is_empty());
     let mut spilled = bash(root, "cat a.rs | cat", &stdout);
     spilled["tool_response"]["persistedOutputPath"] = serde_json::json!("/tmp/x.txt");
-    assert!(matched(&record(
-        root,
-        spilled,
-        &rift_recall_policy::ServePolicy::default()
-    ))
-    .is_empty());
+    assert!(matched(&record(root, spilled, &observing())).is_empty());
     let raw = hook(
         "codex",
         "PostToolUse",
@@ -182,7 +168,6 @@ fn an_off_lever_a_spilled_result_or_another_family_writes_nothing() {
         &raw,
         &root.join(".git"),
         root,
-        &rift_recall_policy::ServePolicy::default(),
         &observing(),
     ));
 }
@@ -209,7 +194,70 @@ fn the_hook_reads_the_cache_the_worker_wrote() {
     let rows = record(
         root,
         bash(root, "cat a.rs | cat", &lines(&planted, 2, 9)),
-        &rift_recall_policy::ServePolicy::default(),
+        &observing(),
     );
     assert_eq!(matched(&rows), [(0, "a.rs".to_owned(), vec![(2, 9)])]);
+}
+
+/// Run the whole journal step for `raw` under the repository's own policy
+/// file, as a hook does; the decline it composed, if any.
+fn step(work_tree: &Path, raw: &rift_shadow::hooks::RawHook) -> Option<String> {
+    let (mut decline, mut document, mut search) = (None, None, None);
+    crate::hooks::gate::window_journal_step(
+        &crate::hooktime::HookTimer::new("test", false),
+        raw,
+        &work_tree.join(".git"),
+        work_tree,
+        &mut decline,
+        &mut document,
+        &mut search,
+    );
+    decline
+}
+
+/// A checkout whose serve policy enforces reads for Claude Code, with the
+/// output lever written at `mode`.
+fn checkout_recognising(mode: &str) -> tempfile::TempDir {
+    let tmp = checkout();
+    let policies = tmp.path().join(".rift/policies");
+    std::fs::create_dir_all(&policies).unwrap();
+    std::fs::write(
+        policies.join("serve.toml"),
+        format!(
+            "[interception]\nmode = \"enforce\"\nmin_slice_lines = 1\n\
+             recognise_by_output = \"{mode}\"\n[interception.agents]\nclaude-code = \"enforce\"\n"
+        ),
+    )
+    .unwrap();
+    tmp
+}
+
+/// ★ The lever decides as it reads: lines a `Bash` result showed are a
+/// reason to decline a `Read` of exactly them where the repository wrote
+/// `enforce`, and none where it wrote `observe`.
+#[test]
+fn a_read_of_lines_a_command_showed_is_declined_only_where_the_lever_enforces() {
+    for (mode, declined) in [("enforce", true), ("observe", false)] {
+        let tmp = checkout_recognising(mode);
+        let root = tmp.path();
+        let shown = hook(
+            "claude-code",
+            "PostToolUse",
+            "s-out",
+            bash(root, "sed -n 4,13p a.rs | cat", &lines(&source("a"), 4, 13)),
+        );
+        step(root, &shown);
+        assert_eq!(
+            matched(&lines_of(root, "s-out", None)),
+            [(0, "a.rs".to_owned(), vec![(4, 13)])],
+            "{mode}"
+        );
+        let read = hook(
+            "claude-code",
+            "PreToolUse",
+            "s-out",
+            super::fixtures::read_call(&root.join("a.rs"), Some(4), Some(10)),
+        );
+        assert_eq!(step(root, &read).is_some(), declined, "{mode}");
+    }
 }

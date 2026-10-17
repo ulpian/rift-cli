@@ -58,21 +58,15 @@ struct Candidates {
 }
 
 /// Record what a Claude Code `Bash` result showed this window, under the
-/// lever `recognise_by_output` caps at the read lever. Says whether a row
-/// was written.
+/// resolved lever `recognise_by_output`. Says whether a row was written.
 pub(super) fn output_match_record(
     registry: &rift_shadow::hooks::AdapterRegistry,
     raw: &rift_shadow::hooks::RawHook,
     git_dir: &Path,
     work_tree: &Path,
-    policy: &rift_recall_policy::ServePolicy,
     effective: &rift_recall_policy::Effective,
 ) -> bool {
-    let mode = policy
-        .interception
-        .recognise_by_output
-        .min(effective.read_deny);
-    if mode == rift_recall_policy::Mode::Off || raw.session.is_empty() {
+    if effective.recognise_by_output == rift_recall_policy::Mode::Off || raw.session.is_empty() {
         return false;
     }
     let Some(adapter) = registry.get(&raw.agent) else {

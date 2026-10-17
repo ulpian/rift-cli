@@ -131,7 +131,7 @@ pub(in crate::hooks) fn window_journal_step(
     // was: the lines of the named files found in the delivered output. It
     // records and decides nothing, so it never touches the answer above.
     guarded_phase(t, "output_match", || {
-        output_match_record(&registry, raw, git_dir, work_tree, &policy, &effective)
+        output_match_record(&registry, raw, git_dir, work_tree, &effective)
     });
     // A SPAWN, from either end: the spawning call's line in the session's main
     // journal, or the opening subagent's claim on it and what it inherits.
@@ -454,6 +454,7 @@ fn gate_limits(effective: &rift_recall_policy::Effective) -> rift_agent::window_
             by_name: gate_mode(effective.inherit_by_name),
             ..rift_agent::window_journal::InheritModes::default()
         },
+        matched: gate_mode(effective.recognise_by_output),
         ..rift_agent::window_journal::Limits::default()
     }
 }

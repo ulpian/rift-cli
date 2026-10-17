@@ -128,7 +128,7 @@ pub(super) fn render_policy(out: &mut String, snapshot: &rift_recall_policy::Ser
     let _ = writeln!(
         out,
         "  output match  recognise_by_output {}",
-        p.interception.recognise_by_output.as_str(),
+        recognise_by_output_in_effect(p).as_str(),
     );
     let _ = writeln!(
         out,
@@ -171,6 +171,21 @@ pub(super) fn render_policy(out: &mut String, snapshot: &rift_recall_policy::Ser
             cap_note(&e),
         );
     }
+}
+
+/// The furthest any family's decisions may lean on output-matched lines:
+/// the resolved lever, read lever's cap applied, never the written value —
+/// a line that printed what the file asked for would say `enforce` over a
+/// repository whose reads are `off`.
+fn recognise_by_output_in_effect(p: &rift_recall_policy::ServePolicy) -> rift_recall_policy::Mode {
+    ALPHA_FAMILIES
+        .iter()
+        .map(|agent| {
+            rift_recall_policy::resolve(p, agent.as_str(), family_capability(agent))
+                .recognise_by_output
+        })
+        .max()
+        .unwrap_or(rift_recall_policy::Mode::Off)
 }
 
 /// One line per family with its savings share, under the overall figure.
@@ -239,7 +254,7 @@ pub(super) fn policy_json(snapshot: &rift_recall_policy::ServePolicySnapshot) ->
                 "inherit_by_name": e.inherit_by_name.as_str(),
                 "first_contact": e.first_contact.as_str(),
                 "decline_family_held": e.decline_family_held.as_str(),
-                "recognise_by_output": p.interception.recognise_by_output.min(e.read_deny).as_str(),
+                "recognise_by_output": e.recognise_by_output.as_str(),
                 "search_answer": e.search_answer.as_str(),
                 "grep_cap": e.grep_cap.as_str(),
                 "doc_rewrite": e.doc_rewrite.as_str(),
@@ -470,6 +485,15 @@ mod tests {
         assert_eq!(json["interception"]["decline_family_held"], "observe");
         assert!(out.contains("output match  recognise_by_output observe"));
         assert_eq!(json["interception"]["recognise_by_output"], "observe");
+        let (shut, shut_json) = status_policy(Some(
+            "[interception]\nmode = \"off\"\nrecognise_by_output = \"enforce\"\n",
+        ));
+        assert!(
+            shut.contains("output match  recognise_by_output off"),
+            "the line prints the mode in effect, not the one written:\n{shut}"
+        );
+        assert_eq!(shut_json["interception"]["recognise_by_output"], "enforce");
+        assert_eq!(shut_json["agents"][0]["recognise_by_output"], "off");
         assert!(out.contains(
             "search        mode enforce  grep_head_limit 40  glob_top_n 8  answer_budget_tokens 160"
         ));

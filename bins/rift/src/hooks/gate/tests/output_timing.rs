@@ -104,7 +104,6 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 fn the_output_match_fits_the_hook_budget() {
     let (tmp, files) = corpus_checkout();
     let root = tmp.path();
-    let policy = rift_recall_policy::ServePolicy::default();
     let registry = AdapterRegistry::with_builtin();
     let mut report = String::from("| band (chars) | n | p50 ms | p95 ms | max ms | rows written |\n|---|---|---|---|---|---|\n");
     for chars in BANDS {
@@ -131,7 +130,6 @@ fn the_output_match_fits_the_hook_budget() {
                     &raw,
                     &root.join(".git"),
                     root,
-                    &policy,
                     &observing(),
                 ));
                 times.push(start.elapsed().as_secs_f64() * 1000.0);
