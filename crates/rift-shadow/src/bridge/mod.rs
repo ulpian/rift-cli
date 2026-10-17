@@ -21,6 +21,8 @@ mod fixtures;
 #[cfg(test)]
 mod liveness_tests;
 mod reads;
+#[cfg(test)]
+mod receipt_id_tests;
 mod session;
 #[cfg(test)]
 mod settle_tests;
@@ -334,16 +336,34 @@ fn receipt_for(ctx: &IngestCtx<'_>, events: &[CanonicalEvent]) -> HookReceipt {
 /// row and a distinct payload gets its own. A session-less receipt is filed
 /// at turn `"0"`.
 fn receipt_id(agent: &str, raw: &RawHook, turn: &str, payload_hash: &str) -> String {
+    hook_receipt_id(agent, &raw.verb, &raw.session, turn, payload_hash)
+}
+
+/// The ONE receipt-address formula, over scalars: `sha256(owner ‖ 0x00 ‖ verb
+/// ‖ 0x00 ‖ native session ‖ 0x00 ‖ decimal turn ‖ 0x00 ‖ lowercase payload
+/// sha)`, hex. The ingest's wrapper above writes rows with it; the recovery
+/// classifier re-derives a receipt's address from a captured event with it, so
+/// the two can never drift. `turn` is the decimal text the row was written
+/// with (`"0"` for a session-less receipt), passed through rather than
+/// re-parsed; `payload_sha256` is the 64-hex digest as stored.
+#[must_use]
+pub fn hook_receipt_id(
+    owner_agent: &str,
+    verb: &str,
+    native_session: &str,
+    turn: &str,
+    payload_sha256: &str,
+) -> String {
     sha256_hex(&[
-        agent.as_bytes(),
+        owner_agent.as_bytes(),
         b"\0",
-        raw.verb.as_bytes(),
+        verb.as_bytes(),
         b"\0",
-        raw.session.as_bytes(),
+        native_session.as_bytes(),
         b"\0",
         turn.as_bytes(),
         b"\0",
-        payload_hash.as_bytes(),
+        payload_sha256.as_bytes(),
     ])
 }
 
