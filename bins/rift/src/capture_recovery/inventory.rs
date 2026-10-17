@@ -322,9 +322,8 @@ impl Reader<'_, '_> {
         if !self.aliases.insert((identity.dev, identity.ino)) {
             return Err(Refusal::SourceAlias);
         }
-        let context = crate::capture_queue::delivery::context(&decoded.full)
-            .and_then(|context| crate::capture_queue::delivery::encode(&context))
-            .map_err(|_| Refusal::TicketMalformed)?;
+        let context_sha256 =
+            codec::context_sha256(&decoded).map_err(|_| Refusal::TicketMalformed)?;
         let context_id = crate::capture_queue::delivery::context_id(&decoded.full)
             .map_err(|_| Refusal::TicketMalformed)?;
         Ok(Some(Source {
@@ -332,7 +331,7 @@ impl Reader<'_, '_> {
             identity,
             raw_length: read.metadata.len(),
             ticket_sha256: format!("{:x}", Sha256::digest(&read.bytes)),
-            context_sha256: format!("{:x}", Sha256::digest(&context)),
+            context_sha256,
             context_id,
             attempts: facts.attempts,
             queued_at_ms: facts.queued_at_ms,

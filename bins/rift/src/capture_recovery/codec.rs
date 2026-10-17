@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use super::{PinError, PinResult};
 
@@ -51,6 +52,15 @@ pub(super) fn decode(name: &OsStr, bytes: &[u8]) -> PinResult<Decoded> {
         context,
         attempts,
     })
+}
+
+/// `sha256(delivery::encode(delivery::context(full)))`, lowercase hex: the one
+/// context-digest formula the inventory freezes and every pin is checked by.
+pub(super) fn context_sha256(decoded: &Decoded) -> PinResult<String> {
+    let context = crate::capture_queue::delivery::context(&decoded.full)
+        .and_then(|context| crate::capture_queue::delivery::encode(&context))
+        .map_err(|_| PinError)?;
+    Ok(format!("{:x}", Sha256::digest(&context)))
 }
 
 pub(super) fn wire_decode<T: serde::de::DeserializeOwned>(
