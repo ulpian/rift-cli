@@ -542,7 +542,7 @@ mod tests {
         assert_eq!(fallback_dir(&new), None);
         assert_eq!(fallback_dir(&new.join("s.subagents")), None);
         assert_eq!(read_path(&new, "gone.json"), new.join("gone.json"));
-        assert_eq!(read_dirs(&new), [new.clone()]);
+        assert_eq!(read_dirs(&new), std::slice::from_ref(&new));
         assert_eq!(list_entries(&new), [new.join("s.json")]);
     }
 
