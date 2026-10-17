@@ -31,6 +31,8 @@ fn simultaneous_os_lock_contenders_hold_at_most_one_move_owner() {
 pub(super) enum MigrationPausePoint {
     TargetAbsent,
     QueuePublished,
+    SessionPublished,
+    BeforeMarker,
 }
 
 type MigrationPause = (MigrationPausePoint, Box<dyn FnOnce()>);
@@ -511,7 +513,11 @@ fn a_copy_across_volumes_keeps_the_mode_and_unlinks_the_source() {
     set_mode(&source, 0o600);
     let target = tmp.path().join("elsewhere").join("job.json");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-    copy_across(&source, &target).unwrap();
+    let owner = crate::capture_queue::acquire_owner(tmp.path()).unwrap();
+    copy_across(&source, &target, &|| {
+        super::Admission::Ordinary(&owner).check_io()
+    })
+    .unwrap();
     assert!(!source.exists());
     assert_eq!(std::fs::read(&target).unwrap(), b"{\"a\":1}");
     assert_eq!(mode(&target), 0o600);
@@ -873,3 +879,5 @@ fn session_temporary_files_keep_the_existing_fresh_and_stale_policy() {
     adopt(&trees.ctx(written + rift_shadow::hooks::STALE_WRITER_MS)).unwrap();
     assert!(!path.exists());
 }
+
+mod recovery;

@@ -53,5 +53,31 @@ pub(super) fn decode(name: &OsStr, bytes: &[u8]) -> PinResult<Decoded> {
     })
 }
 
+pub(super) fn wire_decode<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    cap: usize,
+) -> super::WireResult<T> {
+    if cap > MAX_BYTES || bytes.len() > cap {
+        return Err(super::WireError);
+    }
+    let unique = crate::capture_queue::delivery::decode(bytes).map_err(|_| super::WireError)?;
+    serde_json::from_value(unique).map_err(|_| super::WireError)
+}
+
+pub(super) fn wire_encode<T: serde::Serialize>(
+    value: &T,
+    cap: usize,
+) -> super::WireResult<Vec<u8>> {
+    if cap > MAX_BYTES {
+        return Err(super::WireError);
+    }
+    let value = serde_json::to_value(value).map_err(|_| super::WireError)?;
+    let bytes = crate::capture_queue::delivery::encode(&value).map_err(|_| super::WireError)?;
+    if bytes.len() > cap {
+        return Err(super::WireError);
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests;

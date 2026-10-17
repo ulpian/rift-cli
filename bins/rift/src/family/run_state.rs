@@ -109,11 +109,42 @@ struct Located {
     work_tree: PathBuf,
 }
 
+/// Both paths share ownership and readiness; only exact hold admission differs.
+#[derive(Clone, Copy)]
+enum Admission<'a> {
+    Ordinary(&'a crate::capture_queue::QueueLock),
+    Recovery(&'a crate::capture_recovery::hold::OwnHold<'a>),
+}
+
+impl<'a> Admission<'a> {
+    fn owner(self) -> &'a crate::capture_queue::QueueLock {
+        match self {
+            Self::Ordinary(owner) => owner,
+            Self::Recovery(hold) => hold.owner(),
+        }
+    }
+
+    fn check(self) -> rift_core::Result<()> {
+        self.owner().check_current()?;
+        match self {
+            Self::Ordinary(owner) => owner.check_recovery_hold(),
+            Self::Recovery(hold) => hold.check_current().map_err(|_| {
+                crate::capture_queue::deferred("recovery hold admission is unavailable")
+            }),
+        }
+    }
+
+    fn check_io(self) -> std::io::Result<()> {
+        self.check()
+            .map_err(|_| std::io::Error::other("member ownership or hold admission is unavailable"))
+    }
+}
+
 /// The merge rules of one root.
 struct Merge<'a> {
     now_ms: i64,
     root: RunRoot,
-    owner: &'a crate::capture_queue::QueueLock,
+    admission: Admission<'a>,
     mover: &'a MoveLock,
 }
 
@@ -184,12 +215,7 @@ impl Drop for MoveLock {
 
 impl Merge<'_> {
     fn check_owners(&self) -> std::io::Result<()> {
-        self.owner
-            .check_current()
-            .map_err(|_| std::io::Error::other("member owner changed"))?;
-        self.owner
-            .check_recovery_hold()
-            .map_err(|_| std::io::Error::other("capture recovery hold blocks migration"))?;
+        self.admission.check_io()?;
         self.mover.check_current()
     }
 
@@ -211,6 +237,7 @@ impl Merge<'_> {
             let target = to.join(entry.file_name());
             if kind.is_dir() {
                 self.dir(&source, &target, report)?;
+                self.check_owners()?;
                 let _ = std::fs::remove_dir(&source);
                 continue;
             }
@@ -232,6 +259,7 @@ impl Merge<'_> {
         name: &str,
         report: &mut MoveReport,
     ) -> std::io::Result<()> {
+        self.check_owners()?;
         if !matches!(self.root, RunRoot::Sessions)
             && (is_in_flight(name)
                 || name
@@ -249,6 +277,7 @@ impl Merge<'_> {
                 self.now_ms.saturating_sub(written) >= rift_shadow::hooks::STALE_WRITER_MS
             });
             if dead {
+                self.check_owners()?;
                 let _ = std::fs::remove_file(source);
             }
             return Ok(());
@@ -258,7 +287,7 @@ impl Merge<'_> {
         }
         #[cfg(test)]
         tests::pause_migration(tests::MigrationPausePoint::TargetAbsent);
-        match move_file(source, target) {
+        match move_file(source, target, &|| self.check_owners()) {
             Ok(()) => report.moved += 1,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 self.settle_both(source, target, name, report)?;
@@ -292,6 +321,7 @@ impl Merge<'_> {
         #[cfg(test)]
         tests::pause_migration(tests::MigrationPausePoint::QueuePublished);
         if installed != source {
+            self.check_owners()?;
             ignore_not_found(std::fs::remove_file(source))?;
             if fresh {
                 report.moved += 1;
@@ -312,13 +342,14 @@ impl Merge<'_> {
         report: &mut MoveReport,
     ) -> std::io::Result<()> {
         if same_bytes(source, target) {
+            self.check_owners()?;
             ignore_not_found(std::fs::remove_file(source))?;
             report.superseded += 1;
             return Ok(());
         }
         loop {
             let late = free_late_path(target, name, self.now_ms);
-            match move_file(source, &late) {
+            match move_file(source, &late, &|| self.check_owners()) {
                 Ok(()) => {
                     report.preserved += 1;
                     break;
@@ -427,14 +458,17 @@ pub(crate) fn adopt_owned(
     ctx: &MoveCtx<'_>,
     owner: &crate::capture_queue::QueueLock,
 ) -> std::io::Result<MoveReport> {
+    adopt_with(ctx, Admission::Ordinary(owner))
+}
+
+fn adopt_with(ctx: &MoveCtx<'_>, admission: Admission<'_>) -> std::io::Result<MoveReport> {
+    let owner = admission.owner();
     if !owner.matches_git_dir(ctx.git_dir) || owner.check_current().is_err() {
         return Err(std::io::Error::other(
             "migration owner does not match member",
         ));
     }
-    owner
-        .check_recovery_hold()
-        .map_err(|_| std::io::Error::other("capture recovery hold blocks migration"))?;
+    admission.check_io()?;
     let Some(mover) = MoveLock::take(ctx.run_root, ctx.now_ms)? else {
         return Ok(MoveReport {
             busy: true,
@@ -454,7 +488,7 @@ pub(crate) fn adopt_owned(
         let merge = Merge {
             now_ms: ctx.now_ms,
             root,
-            owner,
+            admission,
             mover: &mover,
         };
         if !matches!(root, RunRoot::Sessions) {
@@ -469,6 +503,7 @@ pub(crate) fn adopt_owned(
         }
         let from = root.legacy_under(ctx.git_dir);
         merge.dir(&from, &target, &mut report)?;
+        merge.check_owners()?;
         let _ = std::fs::remove_dir(&from);
         if !matches!(root, RunRoot::Sessions) && !queue_paths(&from)?.is_empty() {
             report.busy = true;
@@ -476,10 +511,10 @@ pub(crate) fn adopt_owned(
     }
     report.busy |= queue_conflict(ctx)?;
     if !marked && !report.busy {
+        #[cfg(test)]
+        tests::pause_migration(tests::MigrationPausePoint::BeforeMarker);
         mover.check_current()?;
-        owner
-            .check_current()
-            .map_err(|_| std::io::Error::other("member owner changed"))?;
+        admission.check_io()?;
         write_marker(ctx.member, ctx.now_ms)?;
     }
     Ok(report)
@@ -567,9 +602,25 @@ fn repeatable_request(
 
 /// Readiness shares the already-held member guard; it never reacquires it.
 pub(crate) fn prepare_owned(owner: &crate::capture_queue::QueueLock) -> rift_core::Result<()> {
-    owner.check_current()?;
-    owner.check_recovery_hold()?;
-    let git_dir = owner.git_dir();
+    prepare_with(Admission::Ordinary(owner))
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called by the CFX-4 recovery controller (eligibility → selection → retirement), not yet wired"
+    )
+)]
+pub(crate) fn prepare_recovery(
+    hold: &crate::capture_recovery::hold::OwnHold<'_>,
+) -> rift_core::Result<()> {
+    prepare_with(Admission::Recovery(hold))
+}
+
+fn prepare_with(admission: Admission<'_>) -> rift_core::Result<()> {
+    admission.check()?;
+    let git_dir = admission.owner().git_dir();
     if let Some(located) = locate(git_dir) {
         let ctx = MoveCtx {
             git_dir,
@@ -577,7 +628,7 @@ pub(crate) fn prepare_owned(owner: &crate::capture_queue::QueueLock) -> rift_cor
             member: &located.member,
             now_ms: crate::hooks::now_ms(),
         };
-        let report = adopt_owned(&ctx, owner)
+        let report = adopt_with(&ctx, admission)
             .map_err(|_| crate::capture_queue::deferred("run-state migration is unresolved"))?;
         if report.busy {
             return Err(crate::capture_queue::deferred(
@@ -613,9 +664,13 @@ pub(crate) fn prepare_owned(owner: &crate::capture_queue::QueueLock) -> rift_cor
             if crate::capture_queue::delivery::is_versioned(&path, &stem, &value)? {
                 continue;
             }
+            admission.check()?;
             let installed = crate::capture_queue::delivery::publish_exact(&dir, &stem, &value)
                 .map_err(|_| crate::capture_queue::deferred("queue migration contexts conflict"))?;
+            #[cfg(test)]
+            tests::pause_migration(tests::MigrationPausePoint::QueuePublished);
             if installed != path {
+                admission.check()?;
                 std::fs::remove_file(path)?;
             }
         }
@@ -806,17 +861,32 @@ fn write_marker(member: &Path, now_ms: i64) -> std::io::Result<()> {
 /// Install without clobbering: a hard link on one volume, or a private synced
 /// copy across volumes, then unlink the source. Both preserve mode. Directory
 /// updates are not guaranteed durable across power loss.
-fn move_file(source: &Path, target: &Path) -> std::io::Result<()> {
+fn move_file(
+    source: &Path,
+    target: &Path,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    check()?;
     match std::fs::hard_link(source, target) {
-        Ok(()) => ignore_not_found(std::fs::remove_file(source)),
+        Ok(()) => {
+            #[cfg(test)]
+            tests::pause_migration(tests::MigrationPausePoint::SessionPublished);
+            check()?;
+            ignore_not_found(std::fs::remove_file(source))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-            copy_across(source, target)
+            copy_across(source, target, check)
         }
         Err(error) => Err(error),
     }
 }
 
-fn copy_across(source: &Path, target: &Path) -> std::io::Result<()> {
+fn copy_across(
+    source: &Path,
+    target: &Path,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    check()?;
     let parent = target
         .parent()
         .ok_or_else(|| std::io::Error::other("move has no parent"))?;
@@ -840,10 +910,15 @@ fn copy_across(source: &Path, target: &Path) -> std::io::Result<()> {
             output.set_permissions(input.metadata()?.permissions())?;
             std::io::copy(&mut input, &mut output)?;
             output.sync_all()?;
+            check()?;
             std::fs::hard_link(&staging, target)?;
+            #[cfg(test)]
+            tests::pause_migration(tests::MigrationPausePoint::SessionPublished);
+            check()?;
             ignore_not_found(std::fs::remove_file(source))
         })();
         drop(output);
+        check()?;
         let _ = std::fs::remove_file(staging);
         return result;
     }
