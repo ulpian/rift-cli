@@ -50,7 +50,10 @@ pub(super) fn screen_marker_literals(
     let mut pinned = 0_usize;
     let mut screened = 0_usize;
     for (rel, text) in corpus {
-        if rel == renderer || is_test_surface(rel) || rel.ends_with("/tests.rs") {
+        // A file named `tests.rs` or `<subject>_tests.rs` is a `#[cfg(test)]`
+        // module split out of its parent, so its whole text is the test half
+        // `production_half` would have cut from an inline module.
+        if rel == renderer || is_test_surface(rel) || is_test_module_file(rel) {
             continue;
         }
         screened += 1;
@@ -81,6 +84,11 @@ pub(super) fn screen_marker_literals(
         pinned,
         screened,
     })
+}
+
+/// Whether `rel` names a test module kept in a file of its own.
+fn is_test_module_file(rel: &str) -> bool {
+    rel.ends_with("/tests.rs") || rel.ends_with("_tests.rs")
 }
 
 /// The two spellings of the marker, assembled so this file never matches
@@ -254,8 +262,9 @@ mod tests {
         );
     }
 
-    /// A comment quoting the marker, a test module, a test file and the
-    /// renderer itself are all outside the screen.
+    /// A comment quoting the marker, a test module, a test file (named
+    /// `tests.rs` or `<subject>_tests.rs`) and the renderer itself are all
+    /// outside the screen.
     #[test]
     fn comments_tests_and_the_renderer_are_not_screened() {
         let commented = "/// Writes `[rift] x` nowhere.\nfn f() {}\n";
@@ -265,6 +274,10 @@ mod tests {
             ("bins/rift/src/a.rs".to_owned(), commented.to_owned()),
             ("bins/rift/src/b.rs".to_owned(), tested.to_owned()),
             ("bins/rift/src/c/tests.rs".to_owned(), WRITER.to_owned()),
+            (
+                "bins/rift/src/c/emission_tests.rs".to_owned(),
+                WRITER.to_owned(),
+            ),
             (RENDERER.to_owned(), WRITER.to_owned()),
         ];
         let screen = screen_marker_literals(&files, RENDERER, "").expect("the screen runs");

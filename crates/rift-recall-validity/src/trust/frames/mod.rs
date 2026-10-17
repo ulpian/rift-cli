@@ -206,6 +206,17 @@ const FRAME_REDIRECT_OPENER: &str = "[rift] Read redirected:";
 /// The head of the section a subagent's window opens with: revisions its
 /// coordinator held at that instant, which the subagent does not.
 const FRAME_COORDINATOR_OPENER: &str = "[rift] Held by your coordinator at your start";
+/// The head of the prepared result Antigravity's persistent-message channel
+/// hands back for a read Rift declined: the reason frame, re-announced.
+///
+/// Its own opener and not [`FRAME_DENY_OPENER`], because the model meets it in
+/// a different position: not as the tool result of the declined call but as a
+/// message of its own, so the line has to say what it is a message about.
+const FRAME_PREPARED_OPENER: &str = "[rift] Prepared result for the declined unchanged read:";
+/// The head of the bounded read plan that answers an Antigravity
+/// `ContentOffset` probe, whose coverage semantics Rift cannot verify: the
+/// landmarks to read by line span instead.
+const FRAME_PLAN_OPENER: &str = "[rift] Bounded structural read plan for";
 
 /// What a frame renders where it may not render a path.
 ///
@@ -289,6 +300,8 @@ pub(super) const FRAME_OPENERS_NORMALIZED: &[&str] = &[
     "riftsearchanswered:",
     "riftreadredirected:",
     "riftheldbyyourcoordinatoratyourstart",
+    "riftpreparedresultforthedeclinedunchangedread:",
+    "riftboundedstructuralreadplanfor",
     "filesyouhavereadchangedsincethen:",
     "morenotshown",
     "withheldasunsafetoinject",
@@ -1002,6 +1015,39 @@ pub fn render_redirect_frame(source: &str, sidecar: &str) -> Option<String> {
          content, plain text. {CLAUSE_REPEAT} if you still need the original file (it is \
          allowed once)."
     ))
+}
+
+/// The prepared result for a read Rift declined, as Antigravity's documented
+/// persistent-message fallback delivers it: the reason frame the agent would
+/// have received as the tool result, under a head that says so.
+///
+/// `reason` is a frame this module already rendered, so it goes through no
+/// guard a second time. The sentence moved here from the hook binary
+/// byte-for-byte, so that the opener joins the forgery guard and no other
+/// file spells it; the goldens pin the bytes.
+#[must_use]
+pub fn render_prepared_result(reason: &str) -> String {
+    format!("{FRAME_PREPARED_OPENER}\n{reason}")
+}
+
+/// The bounded plan that answers an Antigravity `ContentOffset` probe: the
+/// raw call ran, because what an offset covers is unverified, and the plan
+/// names the landmarks (heading lines, or fixed spans when a file has none) to
+/// read by explicit line span instead of probing further.
+///
+/// Moved here byte-for-byte from the hook binary for the same reason as
+/// [`render_prepared_result`]: one module writes the sentences a model reads.
+/// The path and the landmarks render as the caller hands them, as the sentence
+/// did before the move; routing them through the chokepoint is a behaviour
+/// change and is not this one.
+#[must_use]
+pub fn render_structural_read_plan(rel_path: &str, landmarks: &[String]) -> String {
+    format!(
+        "{FRAME_PLAN_OPENER} `{rel_path}`. ContentOffset request/result semantics are \
+         unverified, so the raw call ran untouched. Use explicit line spans around these \
+         landmarks instead of probing more offsets:\n{}",
+        landmarks.join("\n")
+    )
 }
 
 /// Neutralize one span for rendering **inside** a frame line, or withhold it.

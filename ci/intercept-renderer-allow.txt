@@ -18,5 +18,6 @@
 # so this list shrinks with the sites it covers.
 
 bins/rift/src/verify/originals.rs::missing_originals  parse-only | Scans a sealed transcript for lines carrying the marker, to find a delivered rewrite that has no sealed original; it writes nothing a model reads.
+crates/rift-shadow/src/backend/rewrite.rs::FOLD_OPEN  parse-only | Recognises a fold line by its opening in `parse_fold_line`, which `is_fold_line` and `render_folded` consult; since the integration merge nothing in this crate renders one (`fold_line` is gone, the caller supplies the text), so the opener is read, never written.
 crates/rift-shadow/src/backend/rewrite.rs::HELD_FRAME_OPEN  parse-only | Recognises a held frame by its opening in `is_held_frame`; the frame itself is written by the renderer.
 xtask/src/dogfood/measure.rs::RIFT_MARKER  parse-only | The dogfood measurer searches a client's own log for lines Rift wrote, to count denials and retries.

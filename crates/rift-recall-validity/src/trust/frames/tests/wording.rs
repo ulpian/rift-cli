@@ -5,17 +5,18 @@
 use super::super::{
     neutral_inline_span, neutral_pushed_span, render_coordinator_reads_naming, render_delta_frame,
     render_delta_manifest, render_deny_frame, render_held_lines_frame, render_held_outline_frame,
-    render_narrow_frame, render_outline_frame, render_recovery_map, render_redirect_frame,
-    render_search_answer, CoordinatorRead, EntryDetail, HeldEntry, HeldVerdict, ManifestEntry,
-    PathStatus, SearchHit, CLAUSE_ALREADY_IN_CONTEXT, CLAUSE_CHANGED_AT, CLAUSE_CHANGED_ONLY,
-    CLAUSE_CONVERTED, CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST, CLAUSE_HELD_BY, CLAUSE_HELD_ELSEWHERE,
-    CLAUSE_HELD_LIST, CLAUSE_IN_CONTEXT, CLAUSE_IN_CONTEXT_WINDOW, CLAUSE_OTHERS_UNCHANGED,
-    CLAUSE_PROVENANCE, CLAUSE_PULL, CLAUSE_RANKED, CLAUSE_READ_ONLY, CLAUSE_REPEAT,
-    CLAUSE_SHAPE_NOW, CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED, FRAME_COORDINATOR_OPENER,
-    FRAME_DENY_OPENER, FRAME_HEADER_OPENER, FRAME_HELD_OPENER, FRAME_HINT_OPENER,
-    FRAME_LIST_OPENER, FRAME_NARROW_OPENER, FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED,
-    FRAME_OUTLINE_OPENER, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER, FRAME_SEARCH_OPENER,
-    FRAME_WITHHELD_OPENER, WITHHELD_PATH,
+    render_narrow_frame, render_outline_frame, render_prepared_result, render_recovery_map,
+    render_redirect_frame, render_search_answer, render_structural_read_plan, CoordinatorRead,
+    EntryDetail, HeldEntry, HeldVerdict, ManifestEntry, PathStatus, SearchHit,
+    CLAUSE_ALREADY_IN_CONTEXT, CLAUSE_CHANGED_AT, CLAUSE_CHANGED_ONLY, CLAUSE_CONVERTED,
+    CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST, CLAUSE_HELD_BY, CLAUSE_HELD_ELSEWHERE, CLAUSE_HELD_LIST,
+    CLAUSE_IN_CONTEXT, CLAUSE_IN_CONTEXT_WINDOW, CLAUSE_OTHERS_UNCHANGED, CLAUSE_PROVENANCE,
+    CLAUSE_PULL, CLAUSE_RANKED, CLAUSE_READ_ONLY, CLAUSE_REPEAT, CLAUSE_SHAPE_NOW,
+    CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED, FRAME_COORDINATOR_OPENER, FRAME_DENY_OPENER,
+    FRAME_HEADER_OPENER, FRAME_HELD_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER,
+    FRAME_NARROW_OPENER, FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED, FRAME_OUTLINE_OPENER,
+    FRAME_PLAN_OPENER, FRAME_PREPARED_OPENER, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER,
+    FRAME_SEARCH_OPENER, FRAME_WITHHELD_OPENER, WITHHELD_PATH,
 };
 use super::{HASH, HASH2, SRC};
 use crate::trust::directive::is_directive_shaped;
@@ -38,6 +39,8 @@ const FRAME_OPENERS: &[&str] = &[
     FRAME_SEARCH_OPENER,
     FRAME_REDIRECT_OPENER,
     FRAME_COORDINATOR_OPENER,
+    FRAME_PREPARED_OPENER,
+    FRAME_PLAN_OPENER,
     FRAME_LIST_OPENER,
     FRAME_OMITTED_OPENER,
     FRAME_WITHHELD_OPENER,
@@ -163,6 +166,8 @@ fn every_frame_rendered() -> String {
             .expect("a held outline to name")
             .0,
         render_held_lines_frame(SRC, HASH, &[(1, 40)], None).expect("a held run to name"),
+        render_prepared_result(&render_deny_frame(SRC, HASH, 1, 40, Some(3))),
+        render_structural_read_plan(SRC, &["L1 # Goal".to_owned()]),
     ]
     .join("\n")
 }
@@ -305,6 +310,13 @@ const ANSWER: &str = "\
 Repeat this exact call for the full list.";
 /// The redirect's bytes.
 const REDIRECT: &str = "[rift] Read redirected: docs/report.docx is a document Rift has already converted to Markdown. Read .rift/state/doc/ab12cd34.md instead: same content, plain text. Repeat this exact call if you still need the original file (it is allowed once).";
+/// The prepared result's bytes: the deny frame under its own head.
+const PREPARED: &str = "[rift] Prepared result for the declined unchanged read:\n[rift] Read skipped: src/lib.rs@sha256:3f9a1c2e8b7d lines 1-40 are unchanged since your read in turn 3 and are already in your context. Repeat this exact call if you still need it (it is allowed once). To see only what changed since then: rift recall changed-hunks src/lib.rs --known-hash 3f9a1c2e8b7d4f60 --json Provenance: rift why src/lib.rs:1 --json";
+/// The structural read plan's bytes.
+const PLAN: &str = "\
+[rift] Bounded structural read plan for `src/lib.rs`. ContentOffset request/result semantics are unverified, so the raw call ran untouched. Use explicit line spans around these landmarks instead of probing more offsets:
+L1 # Goal
+L3 ## First gate";
 
 #[test]
 fn the_deny_frame_is_golden() {
@@ -384,11 +396,31 @@ fn the_redirect_frame_is_golden() {
     assert_eq!(REDIRECT.len(), 243);
 }
 
+/// The prepared result is the deny frame re-announced, byte for byte, under
+/// a head of its own: the bytes the hook binary wrote before the sentence
+/// moved into the renderer.
+#[test]
+fn the_prepared_result_is_golden() {
+    assert_eq!(render_prepared_result(DENY), PREPARED);
+    assert_eq!(PREPARED.len(), 409);
+}
+
+/// The plan's bytes, landmarks one to a line after the head, as the hook
+/// binary wrote them before the sentence moved into the renderer.
+#[test]
+fn the_structural_read_plan_is_golden() {
+    let landmarks = ["L1 # Goal".to_owned(), "L3 ## First gate".to_owned()];
+    assert_eq!(render_structural_read_plan(SRC, &landmarks), PLAN);
+    assert_eq!(PLAN.len(), 246);
+}
+
 /// Every one of them is a fact sheet, not an instruction, and carries no
 /// placeholder an agent would have to fill in itself.
 #[test]
 fn every_golden_frame_is_an_ascii_fact_sheet() {
-    for frame in [DENY, NARROW, DELTA, RECOVERY, ANSWER, REDIRECT] {
+    for frame in [
+        DENY, NARROW, DELTA, RECOVERY, ANSWER, REDIRECT, PREPARED, PLAN,
+    ] {
         for line in frame.lines() {
             assert!(
                 !is_directive_shaped(line) && !is_directive_shaped(line.trim_start_matches("- ")),

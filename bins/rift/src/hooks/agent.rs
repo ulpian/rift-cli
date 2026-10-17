@@ -394,10 +394,9 @@ fn antigravity_content_offset_plan(
             lo = hi.saturating_add(1);
         }
     }
-    Some(format!(
-        "[rift] Bounded structural read plan for `{}`. ContentOffset request/result semantics are unverified, so the raw call ran untouched. Use explicit line spans around these landmarks instead of probing more offsets:\n{}",
-        file.rel_path,
-        landmarks.join("\n")
+    Some(rift_recall_serve::render_structural_read_plan(
+        &file.rel_path,
+        &landmarks,
     ))
 }
 
@@ -451,7 +450,7 @@ pub(super) fn arm_agent_replacement(
         arm_pending_replacement(
             work_tree,
             raw,
-            &format!("[rift] Prepared result for the declined unchanged read:\n{reason}"),
+            &rift_recall_serve::render_prepared_result(reason),
         );
     } else if let Some(plan) = antigravity_content_offset_plan(work_tree, raw) {
         arm_pending_replacement(work_tree, raw, &plan);

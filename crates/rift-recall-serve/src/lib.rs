@@ -228,6 +228,12 @@ pub use rift_recall_validity::{
 /// and this dispatcher is already its caller.
 pub use rift_recall_validity::trust::{render_coordinator_reads_naming, CoordinatorRead};
 
+/// Antigravity's two persistent-message sentences — the prepared result for a
+/// declined read and the bounded `ContentOffset` plan — re-exported by the same
+/// route and for the same reason: the hook binary calls them, and only the
+/// sealed renderer writes them.
+pub use rift_recall_validity::trust::{render_prepared_result, render_structural_read_plan};
+
 pub use self::envelope::{
     exact_sha, grant_tagged_envelope, handle_display_path, injection_audit_envelope, omit_tag,
     provenance_trust,
