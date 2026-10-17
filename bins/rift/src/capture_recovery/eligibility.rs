@@ -58,7 +58,7 @@ pub(crate) const MAX_VERBS: usize = 64;
 const OWNER_TOKENS: [&str; 3] = ["claude-code", "codex", "antigravity"];
 
 /// Why a classification is not eligible, as a static identifier.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Reason {
     #[cfg_attr(unix, expect(dead_code, reason = "the non-Unix loader's one answer"))]
     PlatformUnsupported,
@@ -136,6 +136,9 @@ impl From<Refusal> for Verdict {
 /// Identifiers and digests only: never a payload, a path or a clock.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Eligible {
+    /// SHA-256 of the exact cache bytes this verdict was decided on: audit
+    /// evidence for a reservation, never a freshness condition.
+    pub(crate) cache_sha256: String,
     pub(crate) session_row: String,
     pub(crate) turn_id: String,
     pub(crate) snapshot_id: String,
@@ -199,6 +202,7 @@ pub(crate) struct Budget {
 /// The semantic facts of one session cache; everything else is discarded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CacheProjection {
+    pub(crate) cache_sha256: String,
     pub(crate) schema: u32,
     pub(crate) session_id: String,
     pub(crate) agent: String,
@@ -464,7 +468,10 @@ pub(crate) fn classify_boundary(
         return Verdict::Unavailable(Reason::EvidenceIncomplete);
     };
     match classify_canonical(expect, canonical) {
-        Ok(eligible) => Verdict::Eligible(eligible),
+        Ok(mut eligible) => {
+            eligible.cache_sha256.clone_from(&cache.cache_sha256);
+            Verdict::Eligible(eligible)
+        }
         Err(refusal) => refusal.into(),
     }
 }
@@ -514,6 +521,7 @@ fn classify_canonical(expect: &Expectation<'_>, c: &Canonical) -> Result<Eligibl
     let receipt = check_receipt(expect, c, &event)?;
     check_snapshots(expect, c)?;
     Ok(Eligible {
+        cache_sha256: String::new(),
         session_row: expect.session_row.clone(),
         turn_id: expect.turn_id.clone(),
         snapshot_id: expect.snapshot_id.clone(),

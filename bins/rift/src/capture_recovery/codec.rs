@@ -168,7 +168,7 @@ pub(super) fn recovery_gate(decoded: &Decoded, work_tree: &Path) -> PinResult<Sh
     }))
 }
 
-fn is_git_oid(value: &str) -> bool {
+pub(super) fn is_git_oid(value: &str) -> bool {
     value.len() == 40
         && value
             .bytes()

@@ -52,10 +52,12 @@ pub(super) fn read_projection(
 /// The structural parse the queue shares, then the cache's own shape; the
 /// transcript address, the id map and the memo are discarded here.
 fn project(bytes: &[u8]) -> Result<CacheProjection, Reason> {
+    use sha2::{Digest as _, Sha256};
     let value = crate::capture_queue::delivery::decode_unique_value(bytes)
         .map_err(|_| Reason::CacheMalformed)?;
     let cache: SessionCache = serde_json::from_value(value).map_err(|_| Reason::CacheMalformed)?;
     Ok(CacheProjection {
+        cache_sha256: format!("{:x}", Sha256::digest(bytes)),
         schema: cache.schema,
         session_id: cache.session_id,
         agent: cache.agent,
