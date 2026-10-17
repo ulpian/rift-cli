@@ -390,7 +390,7 @@ mod tests {
     fn options(clients: Vec<Client>, compare: bool, bypass_shell: bool) -> Options {
         Options {
             clients,
-            sessions: 2,
+            sessions: Some(2),
             out: None,
             keep: false,
             compare,

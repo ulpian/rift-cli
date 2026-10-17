@@ -1,4 +1,4 @@
-//! How a run happens: one session played, one client's ten, and the whole
+//! How a run happens: one session played, one client's set, and the whole
 //! command from the refusal under CI to the swept checkouts.
 
 use std::path::{Path, PathBuf};
@@ -262,7 +262,10 @@ impl Played {
 pub fn run(root: &Path, opts: &Options) -> Result<(), String> {
     refuse_under_ci()?;
     let all = load_sessions(&root.join(SESSIONS_DIR))?;
-    let sessions: Vec<Session> = all.into_iter().take(opts.sessions).collect();
+    let sessions: Vec<Session> = all
+        .into_iter()
+        .take(opts.sessions.unwrap_or(usize::MAX))
+        .collect();
     let stamp = utc_stamp(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

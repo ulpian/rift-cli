@@ -1,7 +1,7 @@
 //! `cargo run -p xtask -- dogfood` — the scripted-session savings reading.
 //!
 //! A developer with Claude Code, Codex and Antigravity installed can play a
-//! fixed set of ten short sessions through each client and read one table:
+//! fixed set of short sessions through each client and read one table:
 //! what the read levers were worth on that sample. Everything the harness
 //! needs is in the tree — the prompts are versioned beside this module — so
 //! two developers who run it play the same sessions.

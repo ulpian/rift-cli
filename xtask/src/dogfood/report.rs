@@ -66,7 +66,7 @@ pub struct SessionOutcome {
     pub error: Option<String>,
 }
 
-/// Everything one client's ten sessions produced.
+/// Everything one client's sessions produced.
 #[derive(Clone, Debug)]
 pub struct ClientRun {
     /// The client.
@@ -324,7 +324,7 @@ pub fn report_json(runs: &[ClientRun], stamp: &str, enforced: &[Lever]) -> serde
     serde_json::json!({
         "kind": "dogfood-reading",
         "definition": "avoided / (avoided + read) over a fixed scripted sample, per client",
-        "caveat": "a reading over ten scripted sessions through real clients — \
+        "caveat": "a reading over the scripted sessions through real clients — \
                    non-deterministic, not a gate, and not the class-sized fixture",
         "stamp": stamp,
         "levers_enforced": enforced.iter().map(|lever| lever.key()).collect::<Vec<_>>(),

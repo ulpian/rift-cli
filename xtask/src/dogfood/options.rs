@@ -85,8 +85,10 @@ impl Lever {
 pub struct Options {
     /// The clients to play, in table order.
     pub clients: Vec<Client>,
-    /// How many of the scripted sessions to play, from the first.
-    pub sessions: usize,
+    /// How many of the scripted sessions to play, from the first. `None`
+    /// plays every session that ships, so a session added to the tree is
+    /// played without the line having to count them.
+    pub sessions: Option<usize>,
     /// Where the scratch checkouts and logs go. `None` means the default
     /// under the home directory, stamped with the run's own UTC instant.
     pub out: Option<PathBuf>,
@@ -117,7 +119,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                          [--sessions N] [--out DIR] [--keep] [--compare [--bypass-shell]] \
                          [--enforce <lever>[,<lever>…]]";
     let mut clients = None;
-    let mut sessions = 10usize;
+    let mut sessions = None;
     let mut out = None;
     let mut keep = false;
     let mut compare = false;
@@ -136,9 +138,11 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 at += 2;
             }
             "--sessions" => {
-                sessions = value("--sessions")?
-                    .parse()
-                    .map_err(|_| format!("dogfood: --sessions wants a number\n{USAGE}"))?;
+                sessions = Some(
+                    value("--sessions")?
+                        .parse()
+                        .map_err(|_| format!("dogfood: --sessions wants a number\n{USAGE}"))?,
+                );
                 at += 2;
             }
             "--out" => {
@@ -165,7 +169,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         }
     }
     let clients = clients.ok_or_else(|| format!("dogfood: --client is required\n{USAGE}"))?;
-    if sessions == 0 {
+    if sessions == Some(0) {
         return Err(format!("dogfood: --sessions must be at least 1\n{USAGE}"));
     }
     // The shell arm is read beside the on arm, so without the calibration
@@ -208,7 +212,7 @@ mod tests {
         .collect();
         let opts = parse_args(&args).unwrap();
         assert_eq!(opts.clients, ALL_CLIENTS.to_vec());
-        assert_eq!(opts.sessions, 3);
+        assert_eq!(opts.sessions, Some(3));
         assert_eq!(opts.out, Some(PathBuf::from("/o")));
         assert!(opts.keep);
         assert!(!opts.compare, "one arm unless the line asks for two");
@@ -222,7 +226,7 @@ mod tests {
         assert!(!both.keep, "the two flags are independent");
         let one = parse_args(&["--client".to_owned(), "codex".to_owned()]).unwrap();
         assert_eq!(one.clients, vec![Client::Codex]);
-        assert_eq!(one.sessions, 10);
+        assert_eq!(one.sessions, None, "every session that ships");
         assert!(!one.keep);
         assert!(parse_args(&[]).is_err(), "--client is required");
         assert!(
