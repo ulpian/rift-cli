@@ -8,7 +8,7 @@
 //! — a parse error never leaks the bytes that caused it.
 
 /// Strict checked repository recovery-audit artifact; unlike ordinary parsers,
-/// one invalid record refuses the entire stream.
+/// one invalid record refuses the whole stream.
 pub mod boundary_gaps;
 mod window_journal;
 

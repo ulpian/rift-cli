@@ -57,7 +57,7 @@ pub async fn record_boundary_gap_batch(
     }
     let inserted = append_batch(store, batch).await?;
     // An insert-ignore loser must compare the winning parent's full value,
-    // including original recorded time, plus the entire actual member set.
+    // including original recorded time, plus the whole actual member set.
     if boundary_gap_batch(store, batch.gap_id()).await?.as_ref() != Some(batch) {
         return Err(inconsistent());
     }

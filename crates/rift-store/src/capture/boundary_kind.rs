@@ -105,7 +105,7 @@ pub async fn turn_boundary_file_kinds_for_snapshot(
 }
 
 /// Paths whose recorded hunk epoch has no compatible kind evidence. Skip
-/// each entire file when deriving attribution rather than splice an edit
+/// each whole file when deriving attribution rather than splice an edit
 /// stack across an unknowable historical window.
 ///
 /// # Errors

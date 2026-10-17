@@ -22,7 +22,7 @@ struct SessionAgent {
     session: String,
 }
 
-/// Decode an entire present artifact; no invalid line is skipped.
+/// Decode a whole present artifact; no invalid line is skipped.
 ///
 /// # Errors
 /// Refuses unsupported, malformed, over-bound or inconsistent input.
