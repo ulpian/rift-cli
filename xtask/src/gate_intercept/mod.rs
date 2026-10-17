@@ -113,12 +113,20 @@ pub fn run_all(root: &Path) -> Result<Vec<Leg>, String> {
 /// # Errors
 /// If `git ls-files` fails or a tracked file cannot be read.
 fn rust_corpus(root: &Path) -> Result<Vec<(String, String)>, String> {
+    rust_corpus_under(root, &["crates/", "bins/"])
+}
+
+/// Every tracked `.rs` file under one of `prefixes`, as `(path, text)`.
+///
+/// # Errors
+/// If `git ls-files` fails, a tracked file cannot be read, or nothing matches.
+fn rust_corpus_under(root: &Path, prefixes: &[&str]) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     for rel in tracked_paths(root)? {
         let is_rust = Path::new(&rel)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"));
-        if !is_rust || !(rel.starts_with("crates/") || rel.starts_with("bins/")) {
+        if !is_rust || !prefixes.iter().any(|prefix| rel.starts_with(prefix)) {
             continue;
         }
         let text = std::fs::read_to_string(root.join(&rel))
