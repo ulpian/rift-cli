@@ -132,10 +132,10 @@ fn doctor_findings_have_broken_fixtures_and_safe_fixes() {
         d["capture_queue"]["pending"].as_i64().unwrap_or(0) >= 1,
         "the queue entry is a finding: {d}"
     );
-    let journal = std::fs::read_to_string(common::read_path(
-        &hooks_fixture::sessions_of(&repo),
-        "e2e-live-1.json",
-    ))
+    // Where it was seeded: a report-only doctor moves no run state either.
+    let journal = std::fs::read_to_string(
+        common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json"),
+    )
     .unwrap();
     assert!(
         journal.contains(r#""state":"active""#) || journal.contains(r#""state": "active""#),
