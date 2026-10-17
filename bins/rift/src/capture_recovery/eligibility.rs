@@ -79,6 +79,7 @@ pub(crate) enum Reason {
     CacheSession,
     CacheAgent,
     CacheWorkTree,
+    CacheWorkTreeUnknown,
     CachePhase,
     CacheNotCurrent,
     CacheEdge,
@@ -266,6 +267,7 @@ impl Reason {
             Self::CacheSession => "cache-session",
             Self::CacheAgent => "cache-agent",
             Self::CacheWorkTree => "cache-work-tree",
+            Self::CacheWorkTreeUnknown => "cache-work-tree-unknown",
             Self::CachePhase => "cache-phase",
             Self::CacheNotCurrent => "cache-not-current",
             Self::CacheEdge => "cache-edge",
@@ -468,8 +470,8 @@ pub(crate) fn classify_boundary(
 }
 
 /// Present, schema 1, the exact native session, the exact owner among the
-/// closed tokens, the admitted work tree (absent is unknown, never current),
-/// Active, the queued ordinal above zero, and the edge's own open/closed
+/// closed tokens, the admitted work tree (absent is UNKNOWN evidence, so
+/// unavailable; a different tree was read whole and is unsupported), Active, the queued ordinal above zero, and the edge's own open/closed
 /// relation. Nothing about memos, hashes or clocks.
 fn check_cache(expect: &Expectation<'_>, cache: &CacheProjection) -> Result<(), Refusal> {
     if cache.schema != 1 {
@@ -481,8 +483,12 @@ fn check_cache(expect: &Expectation<'_>, cache: &CacheProjection) -> Result<(), 
     if cache.agent != expect.owner || !OWNER_TOKENS.contains(&cache.agent.as_str()) {
         return Err(Refusal::Unsupported(Reason::CacheAgent));
     }
-    if cache.work_tree.as_deref() != Some(expect.work_tree) {
-        return Err(Refusal::Unsupported(Reason::CacheWorkTree));
+    match cache.work_tree.as_deref() {
+        None => return Err(Refusal::Unavailable(Reason::CacheWorkTreeUnknown)),
+        Some(tree) if tree != expect.work_tree => {
+            return Err(Refusal::Unsupported(Reason::CacheWorkTree))
+        }
+        Some(_) => (),
     }
     if cache.state != "active" {
         return Err(Refusal::Unsupported(Reason::CachePhase));
@@ -953,10 +959,18 @@ pub(crate) async fn load_evidence(
         .iter()
         .map(|candidate| CandidateKey::of(candidate.snapshot))
         .collect();
-    let cache_keys: BTreeSet<(String, String)> = keys
+    // A candidate whose context identity is not the queue's spends nothing:
+    // it is refused before its cache is opened or a query is addressed.
+    let valid: Vec<&CandidateKey> = keys
+        .iter()
+        .zip(candidates)
+        .filter(|(_, candidate)| is_context_id(candidate.context_id))
+        .map(|(key, _)| key)
+        .collect();
+    let cache_keys: BTreeSet<(String, String)> = valid
         .iter()
         .filter(|key| key.pre_verdict().is_none())
-        .map(CandidateKey::cache_key)
+        .map(|key| key.cache_key())
         .collect();
     if cache_keys.len() > MAX_CACHE_KEYS {
         return Err(Reason::CacheKeysOverflow);
@@ -975,8 +989,11 @@ pub(crate) async fn load_evidence(
         }
         state.caches.insert(key, read);
     }
-    let current: BTreeSet<&CandidateKey> =
-        keys.iter().filter(|key| state.is_current(key)).collect();
+    let current: BTreeSet<&CandidateKey> = valid
+        .iter()
+        .copied()
+        .filter(|key| state.is_current(key))
+        .collect();
     Budget::preflight(current.len())?;
     sessions
         .recheck()
