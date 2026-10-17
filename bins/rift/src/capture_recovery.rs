@@ -11,6 +11,7 @@
 )]
 
 mod codec;
+mod eligibility;
 #[cfg(unix)]
 mod files;
 pub(crate) mod hold;
