@@ -130,6 +130,9 @@ mod census_fixture;
 mod classify;
 mod delivery;
 mod family_held;
+mod family_held_uncommitted;
+#[cfg(test)]
+mod family_held_uncommitted_fixture;
 mod file_order;
 mod first_contact;
 mod first_sight_split;
@@ -165,6 +168,7 @@ pub use bucket::Bucket;
 pub use by_name_split::ByNameSplit;
 pub use census::{CensusRow, FirstSightSizes, MachineFormat};
 pub use family_held::FamilyHeldPool;
+pub use family_held_uncommitted::UncommittedFamilyHeld;
 pub use first_contact::FirstContactPool;
 pub use first_sight_split::FirstSightSplit;
 pub use inheritance::Inheritance;

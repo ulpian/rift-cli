@@ -64,6 +64,9 @@ pub fn render_table(report: &Report) -> String {
         denominator,
     ));
     out.push_str(&super::family_held::family_held_rows(report, denominator));
+    out.push_str(
+        &super::family_held_uncommitted::family_held_uncommitted_rows(report, denominator),
+    );
     out.push_str(&super::first_sight_split::first_sight_split_rows(
         report,
         denominator,

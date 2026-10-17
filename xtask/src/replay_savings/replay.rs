@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use super::bucket::Bucket;
 use super::by_name_split::ByNameOrigin;
 use super::classify::classify_reads;
-use super::family_held::{fold_family, FamilyLog};
+use super::family_held::{case_keys, fold_family, fold_uncommitted_family, FamilyLog};
 use super::file_order::FileOrder;
 use super::history::History;
 use super::inheritance::{
@@ -87,6 +87,8 @@ pub(super) struct TreeState {
     pub(super) openings: Vec<Opening>,
     /// What the family-held rows are folded from.
     pub(super) family: FamilyLog,
+    /// The same, over the journal of files no commit holds.
+    pub(super) uncommitted_family: FamilyLog,
     /// What the spawner handed down for each first read, by the window that
     /// made it, the path and the revision.
     pub(super) by_name_origin: BTreeMap<(usize, String, u32), ByNameOrigin>,
@@ -219,6 +221,7 @@ fn replay_tree(
     tree.spawners = tree.leads.iter().filter_map(|lead| lead.parent).collect();
     let parents: Vec<Option<usize>> = tree.leads.iter().map(|lead| lead.parent).collect();
     tree.family = FamilyLog::new(&path_refs, &parents);
+    tree.uncommitted_family = FamilyLog::for_uncommitted(&path_refs, &parents);
     let mut windows: Vec<WindowState> = Vec::new();
     // One order over every window of the tree, so a revision advanced in
     // one window is the revision the next window's read is keyed by.
@@ -253,14 +256,37 @@ fn replay_tree(
             report,
         };
         replay_event(ctx, event);
-        let lines = windows.get(index).map_or(0, |w| w.journal.lines().len());
-        tree.family.note_journal_lines(index, lines, &stamp);
+        note_the_journals(&mut tree, &windows, index, &stamp);
     }
     fold_cross_window(&tree, settings.limits, report);
     tree.order.fold(report);
+    fold_the_family(&tree, &windows, report);
+    Ok(())
+}
+
+/// Stamp the lines window `index`'s two journals hold now, for the
+/// family-held rows' liveness.
+fn note_the_journals(tree: &mut TreeState, windows: &[WindowState], index: usize, stamp: &str) {
+    let held = |lines: fn(&WindowState) -> usize| windows.get(index).map_or(0, lines);
+    tree.family
+        .note_journal_lines(index, held(|w| w.journal.lines().len()), stamp);
+    tree.uncommitted_family
+        .note_journal_lines(index, held(|w| w.uncommitted.lines().len()), stamp);
+}
+
+/// Fold the family-held rows over the journals the tree left, for the files a
+/// commit holds and for the ones none does.
+fn fold_the_family(tree: &TreeState, windows: &[WindowState], report: &mut Report) {
     let journals: Vec<&Journal> = windows.iter().map(|w| &w.journal).collect();
     fold_family(&tree.family, &journals, &mut report.family_held);
-    Ok(())
+    let counted_today = case_keys(&tree.family, &journals);
+    let held: Vec<&Journal> = windows.iter().map(|w| &w.uncommitted).collect();
+    fold_uncommitted_family(
+        &tree.uncommitted_family,
+        &held,
+        &counted_today,
+        &mut report.family_held_uncommitted,
+    );
 }
 
 /// Fold one event of one window into the replay.

@@ -10,6 +10,7 @@ use super::bucket::Bucket;
 use super::by_name_split::ByNameSplit;
 use super::census::{CensusRow, FirstSightSizes};
 use super::family_held::FamilyHeldPool;
+use super::family_held_uncommitted::UncommittedFamilyHeld;
 use super::first_contact::FirstContactPool;
 use super::first_sight_split::FirstSightSplit;
 use super::no_line_count_split::NoLineCountSplit;
@@ -117,6 +118,9 @@ pub struct Report {
     /// Of that split's unchanged re-reads, the ones the gate would decline,
     /// and why each of the others is not.
     pub uncommitted: UncommittedDeclines,
+    /// Of the unchanged re-reads the gate model leaves, the first reads of
+    /// bytes another window held, sized as family-held cases.
+    pub family_held_uncommitted: UncommittedFamilyHeld,
     /// What the output match would have booked from every shell result.
     pub output_recognition: OutputRecognition,
     /// Where the path facts came from.

@@ -27,6 +27,7 @@ use rift_core::Sha256Id;
 use serde_json::{json, Value};
 
 use super::classify::{charge_a_frame, frame_for};
+use super::first_contact::outline_facts;
 use super::render::row;
 use super::replay::Ctx;
 use super::report::{Report, Tally};
@@ -225,6 +226,11 @@ pub(super) fn fold_the_read(ctx: &mut Ctx<'_>, at: &Reread<'_>) {
     let on_a_write = journal.wrote_in_full(&read.path, read.hash).is_some();
     let line = window_journal::record(&read, &decision, slice, limits, ctx.state.turn, 0);
     ctx.state.uncommitted.push(line);
+    if !declined {
+        ctx.tree
+            .uncommitted_family
+            .note_ran_read(ctx.window, ctx.stamp, &read, at.tokens);
+    }
     if !at.unchanged {
         return;
     }
@@ -235,6 +241,9 @@ pub(super) fn fold_the_read(ctx: &mut Ctx<'_>, at: &Reread<'_>) {
             (true, false) => Left::LetThrough,
         };
         note_left(ctx.report, at, why);
+        if why == Left::NeverReadHere {
+            note_a_family_candidate(ctx, at, &read);
+        }
         return;
     };
     let report = &mut *ctx.report;
@@ -245,6 +254,20 @@ pub(super) fn fold_the_read(ctx: &mut Ctx<'_>, at: &Reread<'_>) {
     if on_a_write {
         report.declines_resting_on_a_write = report.declines_resting_on_a_write.saturating_add(1);
     }
+}
+
+/// Note a window's first read of bytes it never held, for the family-held
+/// share: the proven bytes give the outline a holder's read would have bound.
+fn note_a_family_candidate(ctx: &mut Ctx<'_>, at: &Reread<'_>, read: &ResolvedRead) {
+    let cwd = at.call.cwd.as_deref().unwrap_or_default();
+    let facts = ctx
+        .tree
+        .working
+        .proven_text(cwd, at.key)
+        .and_then(|text| outline_facts(at.key, text.as_bytes()));
+    ctx.tree
+        .uncommitted_family
+        .note_family_candidate(ctx.window, ctx.stamp, read, at.tokens, facts);
 }
 
 /// What a window's journal says of one revision of a file, before the read
