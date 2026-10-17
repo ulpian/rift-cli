@@ -30,6 +30,10 @@
 //! `--compare`, adds a third arm that reads only through the client's shell —
 //! the shape most of the field's traffic has — and prints it beside the on
 //! arm; `shell` holds that arm, and the calibration is unchanged by it.
+//! `--enforce <lever>[,…]` writes the named read levers at `enforce` in the
+//! checkouts the sessions play in — the off arm excepted — so a lever still
+//! at `observe` can be played as it would act; the report names what was
+//! written. Without it nothing is written.
 
 mod client;
 mod harness;
@@ -47,7 +51,7 @@ pub use measure::{
     classify_verb, parse_kinds, parse_savings, retries_after_deny, tally_kinds, unavailability,
     DecisionKind, LeverKind, RetryCounts, SavingsDeltas, SavingsSample,
 };
-pub use options::{parse_args, Options};
+pub use options::{parse_args, Lever, Options};
 pub use report::{
     fmt_share, render_table, report_json, share_of, utc_stamp, ClientRun, SessionOutcome, Status,
 };

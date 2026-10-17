@@ -12,10 +12,12 @@ use crate::dogfood::process::{capture, capture_with_path, must, release_binary, 
 use crate::dogfood::report::{
     fmt_share, render_table, report_json, utc_stamp, ClientRun, SessionOutcome, Status,
 };
-use crate::dogfood::scratch::{codex_config, ledger_lines, prepare, read_savings, tidy, Untouched};
+use crate::dogfood::scratch::{
+    codex_config, ledger_lines, prepare, read_savings, tidy, ArmOf, Untouched,
+};
 use crate::dogfood::sessions::{load_sessions, Session, SESSIONS_DIR};
 use crate::dogfood::shell::{arms_for, calibration, claude_code_transcript_dir, ShellRun};
-use crate::dogfood::{Client, ShellArm};
+use crate::dogfood::{Client, Lever, ShellArm};
 use crate::dogfood_compare::{Arm, CompareRun};
 
 /// What one client's sessions are played against.
@@ -282,7 +284,7 @@ pub fn run(root: &Path, opts: &Options) -> Result<(), String> {
             );
         }
     }
-    write_report(&out, &played.readings, &stamp)?;
+    write_report(&out, &played.readings, &stamp, &opts.enforce)?;
     if opts.compare {
         let shells = if opts.bypass_shell {
             Some(played.shells.as_slice())
@@ -353,6 +355,16 @@ fn announce(opts: &Options, sessions: usize, out: &Path, mine: &SavingsSample) {
         out.display(),
         mine.recall_db
     );
+    if !opts.enforce.is_empty() {
+        println!(
+            "dogfood: written at enforce in every arm but the off arm: {}",
+            opts.enforce
+                .iter()
+                .map(|l| l.key())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 }
 
 /// Play every client the run was asked for, one arm or two.
@@ -384,7 +396,12 @@ fn play_clients(
         let arms = arms_for(opts, *client);
         let mut played: Vec<ClientRun> = Vec::with_capacity(arms.len());
         for arm in arms {
-            match run_client(root, rift, *client, out, sessions, &seen, arm) {
+            let of = ArmOf {
+                client: *client,
+                arm,
+                enforce: &opts.enforce,
+            };
+            match run_client(root, rift, out, sessions, &seen, of) {
                 Ok(run) => {
                     seen.push((run.recall_db.clone(), run.projection_db.clone()));
                     played.push(run);
@@ -441,18 +458,18 @@ fn transcript_dir(scratch: &Path) -> Option<PathBuf> {
 fn run_client(
     root: &Path,
     rift: &Path,
-    client: Client,
     out: &Path,
     sessions: &[Session],
     seen: &[(String, String)],
-    arm: Option<Arm>,
+    of: ArmOf<'_>,
 ) -> Result<ClientRun, String> {
+    let ArmOf { client, arm, .. } = of;
     let base = arm_dir(out, client, arm);
     let scratch = base.join("repo");
     let log_dir = base.join("logs");
     std::fs::create_dir_all(&log_dir)
         .map_err(|e| format!("dogfood: {}: {e}", log_dir.display()))?;
-    let prepared = prepare(root, rift, client, &scratch, seen, arm)?;
+    let prepared = prepare(root, rift, &scratch, seen, of)?;
     let playing = Playing {
         client,
         arm,
@@ -502,13 +519,18 @@ fn run_client(
 ///
 /// # Errors
 /// Either file could not be written.
-fn write_report(out: &Path, runs: &[ClientRun], stamp: &str) -> Result<(), String> {
+fn write_report(
+    out: &Path,
+    runs: &[ClientRun],
+    stamp: &str,
+    enforced: &[Lever],
+) -> Result<(), String> {
     let table = render_table(runs);
     println!("\n{table}");
     let json_path = out.join("dogfood.json");
     std::fs::write(
         &json_path,
-        serde_json::to_string_pretty(&report_json(runs, stamp)).unwrap_or_default(),
+        serde_json::to_string_pretty(&report_json(runs, stamp, enforced)).unwrap_or_default(),
     )
     .map_err(|e| format!("dogfood: {}: {e}", json_path.display()))?;
     std::fs::write(out.join("dogfood.txt"), &table)

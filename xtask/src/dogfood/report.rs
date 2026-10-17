@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use crate::dogfood::measure::{
     tally_kinds, DecisionKind, LeverKind, RetryCounts, SavingsDeltas, SavingsSample,
 };
-use crate::dogfood::Client;
+use crate::dogfood::{Client, Lever};
 
 /// How one scripted session ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,7 +254,7 @@ pub fn share_of(avoided: u64, read: u64) -> Option<f64> {
 
 /// The same facts as the table, as one JSON document.
 #[must_use]
-pub fn report_json(runs: &[ClientRun], stamp: &str) -> serde_json::Value {
+pub fn report_json(runs: &[ClientRun], stamp: &str, enforced: &[Lever]) -> serde_json::Value {
     let clients: Vec<serde_json::Value> = runs
         .iter()
         .map(|r| {
@@ -327,6 +327,7 @@ pub fn report_json(runs: &[ClientRun], stamp: &str) -> serde_json::Value {
         "caveat": "a reading over ten scripted sessions through real clients — \
                    non-deterministic, not a gate, and not the class-sized fixture",
         "stamp": stamp,
+        "levers_enforced": enforced.iter().map(|lever| lever.key()).collect::<Vec<_>>(),
         "overall_share_pct": share_of(avoided, read),
         "clients": clients,
     })
@@ -461,9 +462,23 @@ mod tests {
             s,
             parse_kinds(REREAD_SAMPLE).unwrap(),
         )];
-        let json = report_json(&runs, "20260908-120000");
+        let json = report_json(&runs, "20260908-120000", &[]);
         assert_eq!(json["kind"], "dogfood-reading");
         assert_eq!(json["stamp"], "20260908-120000");
+        assert_eq!(
+            json["levers_enforced"],
+            serde_json::json!([]),
+            "a run with nothing written says so"
+        );
+        let written = report_json(
+            &runs,
+            "20260908-120000",
+            &[Lever::Narrow, Lever::FirstContact],
+        );
+        assert_eq!(
+            written["levers_enforced"],
+            serde_json::json!(["narrow", "first_contact"])
+        );
         assert!(json["caveat"]
             .as_str()
             .is_some_and(|c| c.contains("not a gate")));
@@ -485,7 +500,7 @@ mod tests {
         for s in &mut run.sessions {
             s.retries = RetryCounts::default();
         }
-        let json = report_json(&[run], "s");
+        let json = report_json(&[run], "s", &[]);
         assert_eq!(json["clients"][0]["retry_after_deny"]["observed"], false);
     }
     /// The run stamp, against instants whose civil date is known — including a
@@ -524,8 +539,8 @@ mod tests {
             "the calibration's figures do not reach the single-arm table"
         );
         assert_eq!(
-            report_json(std::slice::from_ref(&carrying), "20260909-000000"),
-            report_json(std::slice::from_ref(&plain), "20260909-000000"),
+            report_json(std::slice::from_ref(&carrying), "20260909-000000", &[]),
+            report_json(std::slice::from_ref(&plain), "20260909-000000", &[]),
             "nor its document"
         );
     }

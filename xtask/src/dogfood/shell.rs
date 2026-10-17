@@ -395,6 +395,7 @@ mod tests {
             keep: false,
             compare,
             bypass_shell,
+            enforce: Vec::new(),
         }
     }
 
