@@ -24,6 +24,7 @@ Available tasks (./skills.sh <task>):
   smoke        Quick smoke: rift + rift-memd report status
   coverage     Instrumented run + the per-crate >=95% gate (NEEDS +nightly)
   docs         Rustdoc at the zero-warning baseline (matches the CI docs job)
+  gc           Stop detached workers and prune stale/orphaned build caches
 EOF
 }
 
@@ -97,6 +98,32 @@ case "$task" in
     # Quick smoke: the two binaries report status and the recall plane is up.
     cargo run -q -p rift -- status
     cargo run -q -p rift-memd -- status
+    ;;
+  gc)
+    # Safe developer resource cleanup: stops only detached workers, removes
+    # nested vogon-e2e caches and stale incremental dirs, and prunes orphaned
+    # ~/.cargo-targets dirs that are not referenced by any git worktree.
+    # Never touches active open-file locks (.rift-capture-owner.lock) or
+    # unmerged worktrees.
+    pkill -f 'rift hooks worker' 2>/dev/null || true
+    target_root="${CARGO_TARGET_DIR:-target}"
+    rm -rf "$target_root/vogon-e2e"
+    find -L "$target_root" -type d -name "incremental" -exec find {} -mindepth 1 -maxdepth 1 -mtime +3 -exec rm -rf {} + 2>/dev/null || true
+    if [ -d "$HOME/.cargo-targets" ]; then
+      active_targets=$(
+        for wt in $(git worktree list --porcelain | sed -n 's/^worktree //p'); do
+          [ -L "$wt/target" ] && readlink "$wt/target"
+        done
+      )
+      for dir in "$HOME"/.cargo-targets/*; do
+        [ -d "$dir" ] || continue
+        rm -rf "$dir/vogon-e2e"
+        if ! printf '%s\n' "$active_targets" | grep -Fqx "$dir"; then
+          echo "Removing orphaned target cache: $dir"
+          rm -rf "$dir"
+        fi
+      done
+    fi
     ;;
   *)
     echo "unknown task: $task" >&2

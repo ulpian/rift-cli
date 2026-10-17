@@ -69,6 +69,9 @@ fn rift_bin() -> PathBuf {
         }
         let status = build
             .env("CARGO_TARGET_DIR", &target)
+            .env("CARGO_INCREMENTAL", "0")
+            .env("CARGO_PROFILE_DEV_DEBUG", "0")
+            .env("CARGO_PROFILE_DEV_STRIP", "debuginfo")
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .status()

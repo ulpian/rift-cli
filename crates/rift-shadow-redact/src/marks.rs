@@ -7,7 +7,7 @@
 
 use crate::builtin_tables::builtin_shape_tables;
 use crate::entropy::entropy_spans;
-use crate::shapes::shape_spans;
+use crate::shapes::{shape_spans, shape_spans_with_set};
 use crate::span::{MatchedAgainst, Span};
 use crate::{is_known_placeholder, placeholder_for, DetectorClass, RedactionReport, RulePackSet};
 
@@ -225,6 +225,33 @@ pub(crate) fn select_spans(text: &str, packs: &RulePackSet) -> Vec<Span> {
     coalesce(spans)
 }
 
+/// Fast O(1) gate for short JSON keys and enum identifiers (`"type"`, `"role"`,
+/// `"content"`, `"assistant"`, `"user"`, `"tool_use"`, `"id"`, `"name"`).
+///
+/// Every built-in shape detector and `entropy.high` requires at least one of:
+/// 1. `text.len() >= 20` (`ENTROPY_MIN_LEN` and vendor/provider token lengths),
+/// 2. An ASCII digit (`b'0'..=b'9'`, required by all unlabelled PII/IPv4/SSN/
+///    phone/card/address rules and `AKIA`), or
+/// 3. One of the delimiter bytes `:` / `=` / `@` / `-` / `.` (required by all
+///    URI, DSN, KV, PEM, email, and `xox*-` rules).
+fn is_short_benign_token(text: &str) -> bool {
+    text.len() < crate::entropy::ENTROPY_MIN_LEN
+        && !text
+            .bytes()
+            .any(|b| b.is_ascii_digit() || matches!(b, b':' | b'=' | b'@' | b'-' | b'.'))
+}
+
+#[allow(clippy::expect_used)] // built from already-compiled built-in Regex patterns
+fn builtin_regex_sets() -> &'static [regex::RegexSet; 4] {
+    static SETS: std::sync::OnceLock<[regex::RegexSet; 4]> = std::sync::OnceLock::new();
+    SETS.get_or_init(|| {
+        builtin_shape_tables().map(|table| {
+            regex::RegexSet::new(table.iter().map(|d| d.re.as_str()))
+                .expect("built-in ShapeDetector regexes compile into a RegexSet")
+        })
+    })
+}
+
 /// Every layer's proposal on one text, before any overlap is resolved.
 ///
 /// The emission order is load-bearing and is not a listing order:
@@ -232,13 +259,19 @@ pub(crate) fn select_spans(text: &str, packs: &RulePackSet) -> Vec<Span> {
 /// width and equal start are attributed — and therefore placeheld — in the
 /// order they were proposed here.
 pub(crate) fn propose(text: &str, packs: &RulePackSet) -> Vec<Span> {
+    if packs.extra.is_empty() && is_short_benign_token(text) {
+        return Vec::new();
+    }
     let [pass1, provider, credential, pii] = builtin_shape_tables();
-    let mut spans = shape_spans(text, pass1);
-    spans.extend(shape_spans(text, provider));
-    spans.extend(shape_spans(text, credential));
-    spans.extend(shape_spans(text, &packs.extra));
+    let [pass1_set, provider_set, credential_set, pii_set] = builtin_regex_sets();
+    let mut spans = shape_spans_with_set(text, pass1, pass1_set);
+    spans.extend(shape_spans_with_set(text, provider, provider_set));
+    spans.extend(shape_spans_with_set(text, credential, credential_set));
+    if !packs.extra.is_empty() {
+        spans.extend(shape_spans(text, &packs.extra));
+    }
     spans.extend(entropy_spans(text));
-    spans.extend(shape_spans(text, pii));
+    spans.extend(shape_spans_with_set(text, pii, pii_set));
     spans
 }
 

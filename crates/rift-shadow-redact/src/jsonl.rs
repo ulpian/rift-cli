@@ -216,6 +216,12 @@ fn try_structured(
     packs: &RulePackSet,
     report: &mut RedactionReport,
 ) -> Result<Option<String>> {
+    if !matches!(
+        parse_from.trim_start().as_bytes().first(),
+        Some(b'{' | b'[')
+    ) {
+        return Ok(None);
+    }
     let Some(value) = parse_faithfully(parse_from) else {
         return Ok(None);
     };
@@ -289,10 +295,8 @@ fn try_structured(
 /// enough to overflow [`walk`]'s stack is refused here before the walk sees it
 /// ([`a_document_too_deep_to_walk_is_refused_by_the_parse`]).
 fn parse_faithfully(text: &str) -> Option<Value> {
-    if !escapes_are_canonical(text) {
-        return None;
-    }
-    serde_json::from_str::<UniqueKeys>(text).ok().map(|v| v.0)
+    let v = serde_json::from_str::<UniqueKeys>(text).ok()?.0;
+    escapes_are_canonical(text).then_some(v)
 }
 
 /// Whether every escape in `text` is spelled the way `serde_json` would spell

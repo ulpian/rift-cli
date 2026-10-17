@@ -314,3 +314,37 @@ fn numeric_pii_detectors_do_not_fire_on_this_repositorys_own_text() {
         hits.join("\n")
     );
 }
+
+#[test]
+fn regex_set_and_short_token_fast_paths_match_direct_table_scans() {
+    let tables = builtin_shape_tables();
+    let sets = tables.map(|t| {
+        regex::RegexSet::new(t.iter().map(|d| d.re.as_str())).expect("valid built-in RegexSet")
+    });
+    let samples = [
+        "type",
+        "assistant",
+        "tool_use",
+        "content",
+        "SSN=123-45-6789 and ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "postgres://alice:s3cr3t@db.example.com:5432/app",
+        "contact alice@example.com or +1 415 555 2671 at 742 Evergreen Terrace",
+    ];
+    for sample in samples {
+        for (table, set) in tables.into_iter().zip(&sets) {
+            let direct = shape_spans(sample, table);
+            let prefiltered = crate::shapes::shape_spans_with_set(sample, table, set);
+            assert_eq!(
+                prefiltered.len(),
+                direct.len(),
+                "mismatch on {sample:?}: {prefiltered:?} vs {direct:?}"
+            );
+            for (a, b) in prefiltered.iter().zip(&direct) {
+                assert_eq!(
+                    (a.start, a.end, &a.id, a.parse),
+                    (b.start, b.end, &b.id, b.parse)
+                );
+            }
+        }
+    }
+}

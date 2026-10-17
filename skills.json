@@ -65,6 +65,11 @@
       "name": "docs",
       "description": "Build rustdoc for the workspace with warnings denied (the CI docs job's exact command).",
       "command": "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --all-features"
+    },
+    {
+      "name": "gc",
+      "description": "Stop detached workers and prune nested vogon-e2e sub-targets, stale incremental caches, and orphaned ~/.cargo-targets directories.",
+      "command": "skills.sh gc"
     }
   ]
 }

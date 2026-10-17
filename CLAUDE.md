@@ -65,6 +65,7 @@ Prefer the task runner; it is the single source of truth for common workflows:
 ./skills.sh lint        # cargo clippy --workspace --all-targets --all-features -D warnings
 ./skills.sh fmt         # cargo fmt --all
 ./skills.sh build       # cargo build --workspace
+./skills.sh gc          # sweep nested e2e targets, incremental caches, and stale queue locks
 ./skills.sh run -- status   # run the rift binary with args
 ```
 
@@ -274,3 +275,14 @@ reviewers enforce:
   on the standard terminal backend, and the `rift` binary enables it by default
   through its own `tui` feature. The 3D tier is a separate opt-in: the crate's
   `xre-3d` feature, reached from the binary as `tui-hires`.
+- **Worktree & resource hygiene:** keep `~/.local/bin/rift`, `.git/hooks/*`, and
+  agent hook manifests pointed at `target/release/rift` (`./skills.sh release`),
+  never `target/debug/rift` (do not hand-edit `.codex/hooks.json`, which hashes
+  exact command strings — use `rift enable --agent codex`). Before retiring a
+  worktree, verify `git status --porcelain` is empty and `git log main..HEAD` is
+  merged (never `git worktree remove --force` uninspected WIP), delete its
+  matching `~/.cargo-targets/rift-<stream>` cache alongside `git worktree remove`
+  + `git worktree prune`, and run `./skills.sh gc` to sweep nested E2E targets,
+  `incremental/` caches, and stale queue locks. Prefer focused `cargo test -p
+  <crate>` checks while iterating and serialize full `./skills.sh check` runs
+  across worktrees.
