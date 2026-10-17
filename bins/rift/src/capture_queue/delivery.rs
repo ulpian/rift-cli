@@ -123,12 +123,22 @@ fn invalid() -> RiftError {
     RiftError::validity("queue delivery: unsupported, malformed, or conflicting identity")
 }
 
-pub(crate) fn decode(bytes: &[u8]) -> Result<Value> {
+/// The structural half of [`decode`]: one JSON value with unique keys at every
+/// depth and nothing after it. The recovery cache reader shares it — a session
+/// cache is `schema: 1`, not a queue delivery — and validates its own closed
+/// shape afterwards; the queue's object, schema and attempts checks stay in
+/// [`decode`], so nothing a queue refuses is admitted by the split.
+pub(crate) fn decode_unique_value(bytes: &[u8]) -> Result<Value> {
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let value = UniqueValue::deserialize(&mut decoder)
         .map_err(|_| invalid())?
         .0;
     decoder.end().map_err(|_| invalid())?;
+    Ok(value)
+}
+
+pub(crate) fn decode(bytes: &[u8]) -> Result<Value> {
+    let value = decode_unique_value(bytes)?;
     if !value.is_object() || value.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err(invalid());
     }
