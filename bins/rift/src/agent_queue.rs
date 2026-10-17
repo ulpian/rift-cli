@@ -659,8 +659,8 @@ pub(crate) fn same_request(first: &serde_json::Value, second: &serde_json::Value
 
 /// The pending delivery of `stem` that already asks for `value`'s work, if one
 /// is journaled. Check-then-publish: two callers racing past the check leave
-/// two deliveries, which the worker runs as two passes of one idempotent
-/// request, so the race costs a pass and never loses one.
+/// two deliveries, which is what every changed instant left before this
+/// check, so a lost race costs the coalescing and never loses a delivery.
 fn pending_repeat(dir: &Path, stem: &str, value: &serde_json::Value) -> Option<PathBuf> {
     let versioned = format!("{stem}--");
     rift_shadow::hooks::run_state::list_entries(dir)
