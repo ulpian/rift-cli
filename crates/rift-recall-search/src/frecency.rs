@@ -200,7 +200,8 @@ fn touched(line: &Line) -> Option<(&str, u64)> {
         | Line::Edit { path, at_ms, .. }
         | Line::Hold { path, at_ms, .. }
         | Line::Prevented { path, at_ms, .. }
-        | Line::Family { path, at_ms, .. } => Some((path.as_str(), *at_ms)),
+        | Line::Family { path, at_ms, .. }
+        | Line::Matched { path, at_ms, .. } => Some((path.as_str(), *at_ms)),
         // Inherited rows are a claim the spawner made, and spawn and claim
         // rows link windows: none of them is something this window touched.
         Line::Evict { .. } | Line::Inherit { .. } | Line::Spawn { .. } | Line::Claim { .. } => None,

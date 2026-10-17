@@ -33,7 +33,9 @@ mod holds;
 mod inherit;
 mod intervals;
 mod line;
+mod matched;
 mod narrowing;
+pub mod output_match;
 
 use rift_core::Sha256Id;
 
@@ -55,6 +57,7 @@ pub use self::inherit::{
 };
 pub use self::intervals::{Interval, IntervalSet};
 pub use self::line::{EvictReason, Line};
+pub use self::matched::{matched_lines, MATCHED_MODE, MAX_MATCHED_RUNS, OUTPUT_MATCHED};
 pub use self::narrowing::{narrowing, Narrowing};
 
 /// The schema version every line this module writes carries, and the only one

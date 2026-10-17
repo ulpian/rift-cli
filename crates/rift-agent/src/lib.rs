@@ -141,7 +141,7 @@ pub enum ReadChannel {
 /// `Unknown` is not a small conservative range. It is a statement that no
 /// coverage claim can be made, so resolution must fail open without recording
 /// a read, observation, or denial.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadSpan {
     /// A 1-based line range with a pinned source for its inclusive end.
     Lines {
@@ -177,6 +177,11 @@ pub enum ReadSpan {
         /// Delivered byte count under the pinned result contract.
         length: u64,
     },
+    /// Scattered runs of lines, sorted and disjoint: what a filtered output
+    /// such as a search's delivers. Learned from the delivered bytes, never
+    /// from a request, so no command line resolves to it and it names no
+    /// single range a decision could act on.
+    Sparse(Vec<crate::window_journal::Interval>),
     /// Pagination or delivery semantics are not pinned on both sides.
     Unknown,
 }
@@ -196,8 +201,8 @@ impl ReadSpan {
     /// length resolves it; every caller that only has the request is right to
     /// treat it as a range it cannot name.
     #[must_use]
-    pub const fn conservative_lines(self) -> Option<(u32, u32)> {
-        match self {
+    pub const fn conservative_lines(&self) -> Option<(u32, u32)> {
+        match *self {
             Self::Lines { lo, hi_kind } => {
                 let hi = match hi_kind {
                     HiKind::Explicit(hi) | HiKind::DefaultWindow(hi) if hi > lo => hi,
@@ -205,7 +210,10 @@ impl ReadSpan {
                 };
                 Some((lo, hi))
             }
-            Self::LastLines { .. } | Self::VerifiedBytes { .. } | Self::Unknown => None,
+            Self::LastLines { .. }
+            | Self::VerifiedBytes { .. }
+            | Self::Sparse(_)
+            | Self::Unknown => None,
         }
     }
 }

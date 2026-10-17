@@ -25,7 +25,8 @@ mod common;
 mod hooks_fixture;
 use hooks_fixture::{
     agent_hook, agent_hook_out, declined_with, enable_recall, enforce_for, git_in, journal_kinds,
-    json_str, seed_live_session_repo, seed_live_session_repo_unborn, sync_env,
+    journal_kinds_of, journal_rows, json_str, seed_live_session_repo,
+    seed_live_session_repo_unborn, sync_env, window_key, DetachedHooks,
 };
 
 const SESSION: &str = "e2e-live-1";
@@ -253,4 +254,142 @@ fn an_uncommitted_file_the_window_edited_is_declined_with_its_delta() {
         "with the place and the shift: {delta}"
     );
     assert!(!delta.contains("line 7b"), "never a byte of it: {delta}");
+}
+
+/// The subagent the family walk spawns, under the coordinator's session id.
+const CHILD: &str = "a0e79504";
+
+/// A Rust file of `functions` functions, each a doc line, a signature, ten
+/// statements, the value and a close: 14 lines a function.
+fn functions_of(functions: u32) -> String {
+    use std::fmt::Write as _;
+    let mut body = String::new();
+    for f in 1..=functions {
+        let _ = writeln!(body, "/// Step {f} of the walk, spelled out line by line.");
+        let _ = writeln!(body, "pub fn step_{f}(input: u64) -> u64 {{");
+        for n in 1..=10 {
+            let _ = writeln!(
+                body,
+                "    let input = input.wrapping_mul({n}).wrapping_add({f});"
+            );
+        }
+        let _ = writeln!(body, "    input\n}}");
+    }
+    body
+}
+
+/// The repository asks for declines, the family-held one at enforce among
+/// them, and has Recall on, so the worker binds the outline of what was read.
+fn enforce_family_held(repo: &Path) {
+    enforce_for(repo, "claude-code");
+    let serve = repo.join(".rift").join("policies").join("serve.toml");
+    let policy = std::fs::read_to_string(&serve).unwrap().replacen(
+        "[interception]\n",
+        "[interception]\ndecline_family_held = \"enforce\"\n",
+        1,
+    );
+    std::fs::write(&serve, policy).unwrap();
+    enable_recall(repo);
+}
+
+/// The hook envelope Claude Code's command line carries, around `payload`.
+fn envelope(turn: u32, payload: &str) -> String {
+    format!(r#"{{"schema":1,"session":"{SESSION}","turn":{turn},"payload":{payload}}}"#)
+}
+
+/// The coordinator's whole read of `file` on the detached path, as the
+/// shipped hooks run it: the decision, the result, and the worker job behind
+/// them waited out — the job that binds and caches the outline of the bytes
+/// it read.
+fn coordinator_reads_on_the_detached_path(repo: &Path, file: &Path, env: &[(&str, &str)]) {
+    let detached: Vec<(&str, &str)> = env
+        .iter()
+        .copied()
+        .filter(|(key, _)| *key != "RIFT_CAPTURE_SYNC")
+        .collect();
+    let hooks = DetachedHooks::default();
+    let body = envelope(2, &read_of(file));
+    for verb in ["PreToolUse", "PostToolUse"] {
+        let (code, _) = hooks.run(repo, &["hooks", "claude-code", verb], &body, &detached);
+        assert_eq!(code, 0, "an agent hook never fails");
+    }
+    hooks.await_workers(|| true);
+}
+
+/// ★ A live subagent's first read of an untracked file its coordinator read
+/// whole, the bytes unchanged, is declined at enforce with the outline the
+/// coordinator's read bound, and the subagent's journal records one acted
+/// family decline on the outline route.
+#[test]
+fn a_live_subagents_first_read_of_an_untracked_file_its_coordinator_holds_is_declined_with_the_outline(
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    enforce_family_held(&repo);
+    let cache = tmp.path().join("cache");
+    let env = sync_env(&cache);
+    // 16 functions, 224 lines: past the outline frame's 95-line page floor,
+    // under first contact's 400-line floor, so the family route is the one
+    // that can answer.
+    let file = repo.join("walk.rs");
+    std::fs::write(&file, functions_of(16)).unwrap();
+
+    agent_hook_out(
+        &repo,
+        "claude-code",
+        "UserPromptSubmit",
+        SESSION,
+        1,
+        "{}",
+        &env,
+    );
+    coordinator_reads_on_the_detached_path(&repo, &file, &env);
+    let coordinator = format!("{}.jsonl", window_key(SESSION, ""));
+    assert_eq!(journal_kinds_of(&repo, &coordinator), vec!["read"]);
+
+    let opened = format!(r#"{{"agent_id":"{CHILD}","agent_type":"general-purpose"}}"#);
+    agent_hook_out(
+        &repo,
+        "claude-code",
+        "SubagentStart",
+        SESSION,
+        3,
+        &opened,
+        &env,
+    );
+    let child_read = format!(
+        r#"{{"tool_name":"Read","tool_input":{{"file_path":{},"offset":1,"limit":500}},"agent_id":"{CHILD}","agent_type":"general-purpose"}}"#,
+        json_str(&file)
+    );
+    let out = agent_hook_out(
+        &repo,
+        "claude-code",
+        "PreToolUse",
+        SESSION,
+        3,
+        &child_read,
+        &env,
+    );
+
+    let frame = declined_with(&out).expect("the subagent's first read is declined");
+    assert!(
+        frame.starts_with("[rift] Read outlined: walk.rs@"),
+        "{frame}"
+    );
+    assert!(
+        frame.contains("is held at this revision by another window of this repository"),
+        "{frame}"
+    );
+    assert!(
+        !frame.contains("input.wrapping_mul"),
+        "never a byte: {frame}"
+    );
+    let child = format!("{}.jsonl", window_key(SESSION, CHILD));
+    let family: Vec<serde_json::Value> = journal_rows(&repo, &child)
+        .into_iter()
+        .filter(|row| row["k"] == "family")
+        .collect();
+    assert_eq!(family.len(), 1, "one family decline: {family:?}");
+    assert_eq!(family[0]["route"], "outline", "{family:?}");
+    assert_eq!(family[0]["acted"], true, "{family:?}");
 }

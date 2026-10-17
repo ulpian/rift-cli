@@ -10,12 +10,15 @@ use super::bucket::Bucket;
 use super::by_name_split::ByNameSplit;
 use super::census::{CensusRow, FirstSightSizes};
 use super::family_held::FamilyHeldPool;
+use super::family_held_uncommitted::UncommittedFamilyHeld;
 use super::first_contact::FirstContactPool;
 use super::first_sight_split::FirstSightSplit;
 use super::no_line_count_split::NoLineCountSplit;
+use super::output_recognition::OutputRecognition;
 use super::post_compaction::PostCompaction;
 use super::pull_answers::PullPool;
 use super::shell_shape::{Shape, ShapeRow};
+use super::uncommitted_declines::UncommittedDeclines;
 use super::worktree::FactsSource;
 
 /// How many calls landed somewhere, and the tokens their results returned.
@@ -112,6 +115,14 @@ pub struct Report {
     /// The "no name or line count" bucket split by what the transcript proves
     /// about the working tree, and by file size.
     pub no_line_count_split: NoLineCountSplit,
+    /// Of that split's unchanged re-reads, the ones the gate would decline,
+    /// and why each of the others is not.
+    pub uncommitted: UncommittedDeclines,
+    /// Of the unchanged re-reads the gate model leaves, the first reads of
+    /// bytes another window held, sized as family-held cases.
+    pub family_held_uncommitted: UncommittedFamilyHeld,
+    /// What the output match would have booked from every shell result.
+    pub output_recognition: OutputRecognition,
     /// Where the path facts came from.
     pub facts: FactsSource,
     /// Shell calls that look like reads and that the grammar does not

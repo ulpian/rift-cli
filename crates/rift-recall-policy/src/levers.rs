@@ -205,6 +205,11 @@ pub struct InterceptionPolicy {
     /// `observe` until its own pool says otherwise: the decline rests on a
     /// window other than the one being declined.
     pub decline_family_held: Mode,
+    /// Recording the lines of a file a terminal result was found to carry,
+    /// matched against the file's bytes, whatever the command line was.
+    /// Never above the read lever; `enforce` lets a decline rest on those
+    /// lines, and it stays `observe` until its own pool says otherwise.
+    pub recognise_by_output: Mode,
     /// `[interception.agents]`.
     pub agents: AgentModes,
 }
@@ -223,6 +228,7 @@ impl Default for InterceptionPolicy {
             first_contact_min_lines: DEFAULT_FIRST_CONTACT_MIN_LINES,
             first_contact_min_bytes: DEFAULT_FIRST_CONTACT_MIN_BYTES,
             decline_family_held: Mode::Observe,
+            recognise_by_output: Mode::Observe,
             agents: AgentModes::default(),
         }
     }

@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use super::bucket::Bucket;
 use super::by_name_split::ByNameOrigin;
 use super::classify::classify_reads;
-use super::family_held::{fold_family, FamilyLog};
+use super::family_held::{case_keys, fold_family, fold_uncommitted_family, FamilyLog};
 use super::file_order::FileOrder;
 use super::history::History;
 use super::inheritance::{
@@ -26,11 +26,13 @@ use super::inheritance::{
 };
 use super::no_line_count_split::WorkingTree;
 use super::options::Options;
+use super::output_recognition::{fold_the_output, match_the_output, Before, OutputHoldings};
 use super::pull_answers::pull_invocations;
 use super::report::{finish, land, Report};
 use super::shell_shape::count_shape;
 use super::spawn_link::{note_the_spawn, open_the_window, openings, Opening, PendingSpawn};
 use super::transcript::{load_window, tree_stems, tree_windows, Call, Event, Window};
+use super::uncommitted_declines::note_an_edit;
 use super::worktree::{path_key, FileFacts, Worktree};
 
 /// The command words that mean a shell call was probably reading a file.
@@ -85,6 +87,8 @@ pub(super) struct TreeState {
     pub(super) openings: Vec<Opening>,
     /// What the family-held rows are folded from.
     pub(super) family: FamilyLog,
+    /// The same, over the journal of files no commit holds.
+    pub(super) uncommitted_family: FamilyLog,
     /// What the spawner handed down for each first read, by the window that
     /// made it, the path and the revision.
     pub(super) by_name_origin: BTreeMap<(usize, String, u32), ByNameOrigin>,
@@ -92,6 +96,8 @@ pub(super) struct TreeState {
     pub(super) order: FileOrder,
     /// The working tree the transcript proves.
     pub(super) working: WorkingTree,
+    /// What the output match would have shown each window.
+    pub(super) output: OutputHoldings,
 }
 
 /// The settings every call in one replay is decided under, spelled once.
@@ -117,6 +123,10 @@ pub(super) struct WindowState {
     /// Files this window's first contact would have been answered with an
     /// outline for, by the class it was counted in, until it reads them again.
     pub(super) outlined: BTreeMap<String, usize>,
+    /// The journal of files no commit holds, kept apart from the one above so
+    /// the rows built on that one read the same: it is fed only by what the
+    /// transcript proves of a file's bytes.
+    pub(super) uncommitted: Journal,
 }
 
 /// Everything one call is replayed against: the settings it is decided under,
@@ -211,6 +221,7 @@ fn replay_tree(
     tree.spawners = tree.leads.iter().filter_map(|lead| lead.parent).collect();
     let parents: Vec<Option<usize>> = tree.leads.iter().map(|lead| lead.parent).collect();
     tree.family = FamilyLog::new(&path_refs, &parents);
+    tree.uncommitted_family = FamilyLog::for_uncommitted(&path_refs, &parents);
     let mut windows: Vec<WindowState> = Vec::new();
     // One order over every window of the tree, so a revision advanced in
     // one window is the revision the next window's read is keyed by.
@@ -245,14 +256,37 @@ fn replay_tree(
             report,
         };
         replay_event(ctx, event);
-        let lines = windows.get(index).map_or(0, |w| w.journal.lines().len());
-        tree.family.note_journal_lines(index, lines, &stamp);
+        note_the_journals(&mut tree, &windows, index, &stamp);
     }
     fold_cross_window(&tree, settings.limits, report);
     tree.order.fold(report);
+    fold_the_family(&tree, &windows, report);
+    Ok(())
+}
+
+/// Stamp the lines window `index`'s two journals hold now, for the
+/// family-held rows' liveness.
+fn note_the_journals(tree: &mut TreeState, windows: &[WindowState], index: usize, stamp: &str) {
+    let held = |lines: fn(&WindowState) -> usize| windows.get(index).map_or(0, lines);
+    tree.family
+        .note_journal_lines(index, held(|w| w.journal.lines().len()), stamp);
+    tree.uncommitted_family
+        .note_journal_lines(index, held(|w| w.uncommitted.lines().len()), stamp);
+}
+
+/// Fold the family-held rows over the journals the tree left, for the files a
+/// commit holds and for the ones none does.
+fn fold_the_family(tree: &TreeState, windows: &[WindowState], report: &mut Report) {
     let journals: Vec<&Journal> = windows.iter().map(|w| &w.journal).collect();
     fold_family(&tree.family, &journals, &mut report.family_held);
-    Ok(())
+    let counted_today = case_keys(&tree.family, &journals);
+    let held: Vec<&Journal> = windows.iter().map(|w| &w.uncommitted).collect();
+    fold_uncommitted_family(
+        &tree.uncommitted_family,
+        &held,
+        &counted_today,
+        &mut report.family_held_uncommitted,
+    );
 }
 
 /// Fold one event of one window into the replay.
@@ -261,13 +295,21 @@ fn replay_event(ctx: &mut Ctx<'_>, event: Event) {
         Event::Turn => ctx.state.turn = ctx.state.turn.saturating_add(1),
         Event::Evict => {
             ctx.report.evictions = ctx.report.evictions.saturating_add(1);
-            ctx.state.journal.push(Line::Evict {
+            let line = Line::Evict {
                 turn: ctx.state.turn,
                 reason: EvictReason::Compact,
                 at_ms: 0,
-            });
+            };
+            ctx.state.uncommitted.push(line.clone());
+            ctx.state.journal.push(line);
+            ctx.tree.output.evict(ctx.window);
         }
-        Event::Call(call) => replay_call(ctx, &call),
+        Event::Call(call) => {
+            let before = Before::of(ctx.report);
+            let matched = match_the_output(ctx, &call);
+            replay_call(ctx, &call);
+            fold_the_output(ctx, &call, &before, matched);
+        }
     }
 }
 
@@ -444,7 +486,7 @@ fn apply_edit(ctx: &mut Ctx<'_>, edit: &rift_agent::EditRequest, call: &Call) {
     let Some(key) = path_key(&edit.path, call.cwd.as_deref()) else {
         return;
     };
-    ctx.tree.working.note_change(call, &key);
+    note_an_edit(ctx, call, &key);
     let before = ctx.tree.written_lines.get(&key).copied().or_else(|| {
         ctx.worktree
             .facts_at(ctx.state.commit, &key)

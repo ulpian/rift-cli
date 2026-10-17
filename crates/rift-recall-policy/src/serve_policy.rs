@@ -36,6 +36,7 @@ first_contact = "observe"      # a first read of a large file answered with its 
 first_contact_min_lines = 400  # a file this long, or
 first_contact_min_bytes = 16384 # this large, is large enough to outline
 decline_family_held = "observe" # a read another live window holds, declined once with a cheaper route; never above mode
+recognise_by_output = "observe" # lines a command's output was matched to a file as carrying; never above mode
 
 # Per-family overrides. Each is capped by what that family's pinned rows allow:
 # a family whose reason channel no recorded run has confirmed resolves to
@@ -560,6 +561,25 @@ mod tests {
         assert_eq!(DEFAULT_MIN_SLICE_LINES, 28);
         assert_eq!(DEFAULT_MAX_INLINE_HASH_BYTES, 1024 * 1024);
         assert_eq!(DEFAULT_MAX_INPUT_BYTES, 16 * 1024 * 1024);
+    }
+
+    /// ★ Recognising reads by their output ships at `observe`, a written
+    /// mode is read as written, and a mode that is not one shuts every lever.
+    #[test]
+    fn recognising_reads_by_output_ships_at_observe() {
+        assert_eq!(
+            InterceptionPolicy::default().recognise_by_output,
+            Mode::Observe
+        );
+        let (written, _d) = load_src("[interception]\nrecognise_by_output = \"enforce\"\n");
+        assert_eq!(
+            written.policy.interception.recognise_by_output,
+            Mode::Enforce
+        );
+        let (off, _d) = load_src("[interception]\nrecognise_by_output = \"off\"\n");
+        assert_eq!(off.policy.interception.recognise_by_output, Mode::Off);
+        let (unknown, _d) = load_src("[interception]\nrecognise_by_output = \"always\"\n");
+        assert!(unknown.policy.fail_closed);
     }
 
     /// Absent is the default, table by table and key by key — a file that

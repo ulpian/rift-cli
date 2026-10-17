@@ -219,6 +219,23 @@ impl Worktree {
         }
     }
 
+    /// The bytes a key names as a window replayed against `commit` sees
+    /// them, with the same fallback and refusals as [`Self::facts_at`].
+    pub(super) fn bytes_at(&mut self, commit: Option<usize>, key: &str) -> Option<Vec<u8>> {
+        let at_commit = match (commit, self.history.as_mut()) {
+            (Some(commit), Some(history)) => match history.blob(commit, key) {
+                Blob::Present(bytes) => Some(bytes),
+                Blob::Absent => None,
+            },
+            _ => None,
+        };
+        let bytes = match at_commit {
+            Some(bytes) => bytes,
+            None => read_bytes(&self.root, key)?,
+        };
+        facts_of(&bytes, key).map(|_| bytes)
+    }
+
     /// The file a key names, or `None` when this checkout has nothing to say
     /// about it — no such file, too large to hash inline, or not text.
     pub(super) fn facts(&mut self, key: &str) -> Option<&FileFacts> {
@@ -243,6 +260,20 @@ fn read_facts(root: &Path, key: &str) -> Option<FileFacts> {
     }
     let bytes = std::fs::read(&path).ok()?;
     facts_of(&bytes, key)
+}
+
+/// One file's bytes under the checkout, within the inline-hash cap.
+fn read_bytes(root: &Path, key: &str) -> Option<Vec<u8>> {
+    let path = if is_rooted(key) {
+        PathBuf::from(key)
+    } else {
+        root.join(key)
+    };
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_INLINE_HASH_BYTES {
+        return None;
+    }
+    std::fs::read(&path).ok()
 }
 
 /// One file's facts from its bytes, refusing what the gate refuses: a file too

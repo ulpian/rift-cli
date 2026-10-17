@@ -13,6 +13,7 @@
 //! outline is bound by then: the worker binds one at every read of an
 //! outlinable file, whatever its size, and the holder's read came first.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use rift_recall_validity::trust::{
 };
 use serde_json::{json, Value};
 
+use super::family_held_uncommitted::UncommittedFamilyHeld;
 use super::first_contact::{with_outline_facts, OutlineFacts};
 use super::history::unix_seconds;
 use super::render::{commas, row};
@@ -33,7 +35,7 @@ use super::report::{Report, Tally};
 const LIVE_FLOOR_SECONDS: i64 = 300;
 
 /// The routes, in the order the table prints them.
-const ROUTES: [(&str, &str); 3] = [
+pub(super) const ROUTES: [(&str, &str); 3] = [
     ("outline", "(a) outline bound by the holder's read"),
     ("held", "(i) held lines, no outline yet"),
     ("runs", "(c) no cheaper route: the read runs"),
@@ -50,6 +52,10 @@ pub(super) struct FamilyLog {
     candidates: Vec<Candidate>,
     /// Every read that ran, for the follow-ups.
     reads: Vec<RanRead>,
+    /// Whether a window's whole-file write or edit holds the bytes it wrote,
+    /// as a read does: true for the journal of files no commit holds, whose
+    /// bytes a window often put there itself.
+    writes_hold: bool,
 }
 
 /// A first sight a family decline may have answered.
@@ -73,7 +79,7 @@ struct RanRead {
 /// One first sight another live window held, with what each route would
 /// have cost.
 #[derive(Clone, Debug)]
-struct Case {
+pub(super) struct Case {
     tokens: u64,
     outline_frame: Option<u64>,
     held_frame: Option<u64>,
@@ -83,17 +89,31 @@ struct Case {
 /// What the replay saw of family-held first sights, folded at render time.
 #[derive(Clone, Debug, Default)]
 pub struct FamilyHeldPool {
-    cases: Vec<Case>,
+    pub(super) cases: Vec<Case>,
 }
 
 /// One route's figures.
 #[derive(Clone, Copy, Debug, Default)]
-struct RouteFigures {
-    pool: Tally,
-    frames: u64,
-    frame_max: u64,
-    follow_ups: Tally,
+pub(super) struct RouteFigures {
+    pub(super) pool: Tally,
+    pub(super) frames: u64,
+    pub(super) frame_max: u64,
+    pub(super) follow_ups: Tally,
 }
+
+/// Why a first sight is no family-held case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NoCase {
+    /// A mid-file range, or a first page under the outline floor.
+    Shape,
+    /// Windows held the bytes, none of them live.
+    QuietHolder,
+    /// No other window's journal holds all the lines asked for.
+    NoHolder,
+}
+
+/// A call, named by its window, its stamp and its path.
+pub(super) type CallKey = (usize, String, String);
 
 impl FamilyLog {
     /// A log for a tree whose windows are the files at `paths`, with their
@@ -108,6 +128,15 @@ impl FamilyLog {
             subagent,
             stamps: vec![Vec::new(); paths.len()],
             ..Self::default()
+        }
+    }
+
+    /// A log over the journals of files no commit holds, where a window's own
+    /// write is as good a hold of the bytes as a read of them.
+    pub(super) fn for_uncommitted(paths: &[&Path], parents: &[Option<usize>]) -> Self {
+        Self {
+            writes_hold: true,
+            ..Self::new(paths, parents)
         }
     }
 
@@ -171,7 +200,7 @@ pub(super) fn fold_family(log: &FamilyLog, journals: &[&Journal], pool: &mut Fam
 fn case_of(log: &FamilyLog, journals: &[&Journal], candidate: &Candidate) -> Option<Case> {
     let read = &candidate.read;
     let whole = read.range.hi >= read.total_lines;
-    if read.range.lo != 1 || (!whole && read.range.lines() < OUTLINE_FRAME_MIN_PAGE_LINES) {
+    if !has_case_shape(read) {
         return None;
     }
     let holders = live_holders(log, journals, candidate);
@@ -204,39 +233,63 @@ fn case_of(log: &FamilyLog, journals: &[&Journal], candidate: &Candidate) -> Opt
     })
 }
 
+/// Whether a read is shaped for a family decline: a whole file, or a first
+/// page long enough to be worth an outline.
+fn has_case_shape(read: &ResolvedRead) -> bool {
+    let whole = read.range.hi >= read.total_lines;
+    read.range.lo == 1 && (whole || read.range.lines() >= OUTLINE_FRAME_MIN_PAGE_LINES)
+}
+
+/// What one other window had written, and when it last wrote, strictly
+/// before a candidate was read, where it had touched the candidate's revision.
+struct Prior<'a> {
+    lines: &'a [Line],
+    last: Option<&'a String>,
+}
+
+fn prior_touching<'a>(
+    log: &'a FamilyLog,
+    journals: &[&'a Journal],
+    candidate: &Candidate,
+    window: usize,
+) -> Option<Prior<'a>> {
+    let read = &candidate.read;
+    let stamps = log
+        .stamps
+        .get(window)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let before = stamps
+        .iter()
+        .take_while(|stamp| stamp.as_str() < candidate.stamp.as_str())
+        .count();
+    let lines = journals.get(window)?.lines().get(..before)?;
+    let touches = lines.iter().any(|line| match line {
+        Line::Read { path, hash, .. } => *path == read.path && *hash == read.hash,
+        Line::Edit { path, hash_new, .. } => {
+            log.writes_hold && *path == read.path && *hash_new == read.hash
+        }
+        _ => false,
+    });
+    touches.then(|| Prior {
+        lines,
+        last: stamps.get(before.wrapping_sub(1)),
+    })
+}
+
 /// What the other live windows of the tree held of the candidate's revision
 /// when it was read: each window's lines written strictly before the read.
 fn live_holders(log: &FamilyLog, journals: &[&Journal], candidate: &Candidate) -> IntervalSet {
     let read = &candidate.read;
     let mut held = IntervalSet::new();
-    for (window, journal) in journals.iter().enumerate() {
-        if window == candidate.window {
+    for window in (0..journals.len()).filter(|window| *window != candidate.window) {
+        let Some(prior) = prior_touching(log, journals, candidate, window) else {
+            continue;
+        };
+        if !is_holder_live(log, window, prior.last, &candidate.stamp) {
             continue;
         }
-        let stamps = log
-            .stamps
-            .get(window)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let before = stamps
-            .iter()
-            .take_while(|stamp| stamp.as_str() < candidate.stamp.as_str())
-            .count();
-        let lines = journal.lines().get(..before).unwrap_or_default();
-        let touches = lines.iter().any(|line| {
-            matches!(line, Line::Read { path, hash, .. } if *path == read.path && *hash == read.hash)
-        });
-        if !touches
-            || !is_holder_live(
-                log,
-                window,
-                stamps.get(before.wrapping_sub(1)),
-                &candidate.stamp,
-            )
-        {
-            continue;
-        }
-        for run in Journal::from_lines(lines.to_vec())
+        for run in Journal::from_lines(prior.lines.to_vec())
             .coverage(&read.path, read.hash)
             .runs()
         {
@@ -244,6 +297,70 @@ fn live_holders(log: &FamilyLog, journals: &[&Journal], candidate: &Candidate) -
         }
     }
     held
+}
+
+/// Why a candidate is no case, or `None` where it is one.
+fn why_no_case(log: &FamilyLog, journals: &[&Journal], candidate: &Candidate) -> Option<NoCase> {
+    if !has_case_shape(&candidate.read) {
+        return Some(NoCase::Shape);
+    }
+    if !live_holders(log, journals, candidate).is_empty() {
+        return None;
+    }
+    let read = &candidate.read;
+    let whole_holder = (0..journals.len())
+        .filter(|window| *window != candidate.window)
+        .filter_map(|window| prior_touching(log, journals, candidate, window))
+        .any(|prior| {
+            Journal::from_lines(prior.lines.to_vec())
+                .coverage(&read.path, read.hash)
+                .contains(read.range)
+        });
+    Some(if whole_holder {
+        NoCase::QuietHolder
+    } else {
+        NoCase::NoHolder
+    })
+}
+
+/// The calls the family-held rows count as cases, by window, stamp and path.
+pub(super) fn case_keys(log: &FamilyLog, journals: &[&Journal]) -> BTreeSet<CallKey> {
+    log.candidates
+        .iter()
+        .filter(|candidate| case_of(log, journals, candidate).is_some())
+        .map(key_of)
+        .collect()
+}
+
+fn key_of(candidate: &Candidate) -> CallKey {
+    (
+        candidate.window,
+        candidate.stamp.clone(),
+        candidate.read.path.clone(),
+    )
+}
+
+/// Fold the first reads of the journal of uncommitted files into the cases
+/// and the reasons for no case, noting which of them today's rows count.
+pub(super) fn fold_uncommitted_family(
+    log: &FamilyLog,
+    journals: &[&Journal],
+    counted_today: &BTreeSet<CallKey>,
+    out: &mut UncommittedFamilyHeld,
+) {
+    for candidate in &log.candidates {
+        if counted_today.contains(&key_of(candidate)) {
+            out.counted_today.add(candidate.tokens);
+        }
+        match why_no_case(log, journals, candidate) {
+            Some(why) => out.note_no_case(why, candidate.tokens),
+            None => {
+                if let Some(case) = case_of(log, journals, candidate) {
+                    out.pool.cases.push(case);
+                }
+            }
+        }
+    }
 }
 
 /// Whether a window is live at `stamp`: a session's own window always is
@@ -270,7 +387,7 @@ fn is_subagent_file(path: &Path) -> bool {
 impl FamilyHeldPool {
     /// Each route's figures: the outline where one is bound, the held runs
     /// where none is, and the read that runs otherwise.
-    fn route_figures(&self) -> [RouteFigures; 3] {
+    pub(super) fn route_figures(&self) -> [RouteFigures; 3] {
         let mut out = [RouteFigures::default(); 3];
         for case in &self.cases {
             let (route, frame) = match (case.outline_frame, case.held_frame) {
@@ -300,7 +417,7 @@ impl FamilyHeldPool {
 impl RouteFigures {
     /// What a decline on this route would have kept out of context: the
     /// reads it answered, less the frames and every later read of the bytes.
-    fn net_kept(self) -> Tally {
+    pub(super) fn net_kept(self) -> Tally {
         Tally {
             calls: self.pool.calls,
             tokens: self

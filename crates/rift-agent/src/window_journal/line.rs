@@ -11,6 +11,7 @@ use serde_json::{json, Map, Value};
 
 use super::family::{family_line_from, insert_family_fields, FamilyRoute};
 use super::inherit::{class_at, inherited_line_from, insert_inherited_fields, InheritClass};
+use super::matched::{insert_matched_fields, matched_line_from};
 use super::{Interval, LINE_VERSION};
 
 /// Why a context window stopped holding what it had been given.
@@ -324,6 +325,32 @@ pub enum Line {
         /// When the line was written, in milliseconds.
         at_ms: u64,
     },
+    /// **Lines of a file this window was shown in a terminal result**, found
+    /// by matching the delivered lines against the file's own bytes at the
+    /// revision on disk when the result arrived.
+    ///
+    /// Sparse, because output such as a search's names scattered lines. Never
+    /// coverage by itself: a decision treats it as coverage only while its
+    /// lever is at `enforce`. A kind of its own, so a binary that predates it
+    /// drops the row rather than reading lines no grammar bounded as a read.
+    Matched {
+        /// The turn the result arrived in.
+        turn: u32,
+        /// The file, in the one spelling coverage is keyed by.
+        path: String,
+        /// The revision the bytes on disk hashed to.
+        hash: Sha256Id,
+        /// The runs of the file the output was found to carry, sorted and
+        /// disjoint.
+        runs: Vec<Interval>,
+        /// How many lines the file had.
+        total_lines: u32,
+        /// Which member of the command line the output was aligned to,
+        /// counted from zero.
+        member: u32,
+        /// When the line was written, in milliseconds.
+        at_ms: u64,
+    },
     /// The context window stopped holding what it had been given.
     Evict {
         /// The turn the signal arrived in.
@@ -353,6 +380,7 @@ impl Line {
             Self::Spawn { .. } => "spawn",
             Self::Claim { .. } => "claim",
             Self::Family { .. } => "family",
+            Self::Matched { .. } => "matched",
         }
     }
 
@@ -372,7 +400,8 @@ impl Line {
             | Self::Inherit { turn, .. }
             | Self::Spawn { turn, .. }
             | Self::Claim { turn, .. }
-            | Self::Family { turn, .. } => *turn,
+            | Self::Family { turn, .. }
+            | Self::Matched { turn, .. } => *turn,
         }
     }
 
@@ -449,6 +478,7 @@ impl Line {
                 insert_inherited_fields(self, object);
             }
             Self::Family { .. } => insert_family_fields(self, object),
+            Self::Matched { .. } => insert_matched_fields(self, object),
         }
     }
 
@@ -554,6 +584,7 @@ fn linking_line_from(
 ) -> Option<Line> {
     match kind {
         "family" => family_line_from(object, turn, at_ms),
+        "matched" => matched_line_from(object, turn, at_ms),
         kind => inherited_line_from(kind, object, turn, at_ms),
     }
 }
@@ -761,6 +792,8 @@ mod tests {
                             | "runs"
                             | "acted"
                             | "frame_bytes"
+                            | "member"
+                            | "basis"
                     ),
                     "an unexpected field {key} in {row}"
                 );

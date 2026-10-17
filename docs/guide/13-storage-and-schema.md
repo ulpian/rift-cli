@@ -57,6 +57,11 @@ contact, never an answer. `rift clean` collects each on its TTL.
   ([§7.4](07-serving-and-injection.md#a-first-read-of-a-large-file)). Its grammar is
   closed, under 64 KiB, and a moved file names another key, so a stale entry cannot
   be read. TTL: `basis_ttl_days`.
+- `rift-family/linehash/` — `<sha256>.lh`, one file per revision: a magic, the line
+  and byte counts and a 64-bit hash per line, so the output-matching step
+  ([§7.4](07-serving-and-injection.md#what-a-shell-result-showed-the-window)) compares a
+  shell result with no store open. It rebuilds from any copy of the bytes, and an
+  idle sweep collects entries older than seven days and any past 8,192 files.
 
 **New relations are tables, not widened columns**, because a migration may not drop
 or rename: `tool_result_tokens` is not a column of `file_read_tokens` (keyed
@@ -337,8 +342,8 @@ derive:** per-commit diff facts (they come from git history); sessions condensed
 before the usage artifact (their rows live only in a projection that holds them;
 `rift backfill --from` and `--recall-from` import them from a set-aside file through
 a READ_ONLY open); outline bindings until the next counted read or condense binds them again; and a window's
-inherited runs and family-held declines, which are counted
-(`window_rows_inherited`, `window_rows_family_held`) but written to no
+inherited runs, family-held declines and matched lines, which are counted
+(`window_rows_inherited`, `window_rows_family_held`, `window_rows_matched`) but written to no
 `n_window_row`, whose kinds are sealed by its migration ([§6.12](06-recall.md#612-what-a-context-window-already-holds)).
 
 **Governance records are not rebuildable.** Serve audit rows, outcome labels,

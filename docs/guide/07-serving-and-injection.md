@@ -235,6 +235,18 @@ bytes and 16 reads.
 be. One member not held lets the whole line run, because declining parts would
 mean amending a command line Rift did not write.
 
+### What a shell result showed the window
+
+A command line the grammar cannot read is still a delivery, and its output says what it was.
+At `PostToolUse` for a Claude Code `Bash` call whose result arrived inline, `[interception] recognise_by_output` cuts the line into members at `&&`, `||`, `;` and line breaks; a pipeline stays one member, because only what reaches the agent counts.
+It finds the delivered lines in the files those members name, at the bytes on disk when the result arrived, after stripping the prefixes `grep -n`, `cat -n` and `nl` add.
+A delivered line grounds coverage only where it cannot be a coincidence: a run of five distinct lines in order, a line found once among the files at hand, or a printed `path:N:` the file's own line confirms.
+Each stretch of grounded lines is booked to one member, in order: the first that names its file, or the next one when that member has already shown those lines; a `cd` owns nothing, and output nobody owns books nothing.
+What it books is a `matched` line: sparse runs of one revision and the member they came from, frozen into the checkpoint with the window's other rows.
+At `observe`, the default, the lines only size the pool and no decision leans on them; at `enforce` a re-read of them is decided like a re-read of anything the window was handed.
+The lever never sits above the read lever.
+The step opens no store and no tokenizer: it hashes the named files as the read gate does, and reads their line hashes from the family's cache ([13](13-storage-and-schema.md)), which the detached worker writes, or computes them from the bytes in hand.
+
 ### One decline per key, which is the loop breaker
 
 The identical repeat of a declined request is **allowed**, so a decline costs at

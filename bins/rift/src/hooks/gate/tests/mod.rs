@@ -16,6 +16,8 @@ mod family;
 mod fixtures;
 mod narrows;
 mod outlines;
+mod output_match;
+mod output_timing;
 mod paths;
 mod prevented;
 mod search_index;

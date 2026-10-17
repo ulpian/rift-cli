@@ -253,6 +253,10 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
         super::family_held::family_held_json(report),
     );
     map.insert(
+        "family_held_uncommitted".to_owned(),
+        super::family_held_uncommitted::family_held_uncommitted_json(report),
+    );
+    map.insert(
         "first_sight_split".to_owned(),
         super::first_sight_split::first_sight_split_json(report),
     );
@@ -271,6 +275,10 @@ pub(super) fn extend_document(document: &mut Value, report: &Report) {
     map.insert(
         "no_line_count_split".to_owned(),
         super::no_line_count_split::no_line_count_json(report),
+    );
+    map.insert(
+        "output_recognition".to_owned(),
+        super::output_recognition_rows::output_recognition_json(report),
     );
 }
 

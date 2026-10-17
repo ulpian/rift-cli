@@ -17,8 +17,10 @@ mod delivery;
 mod family;
 mod file;
 mod first_contact;
+mod linehash_cache;
 mod members;
 mod outline_cache;
+mod output_match;
 mod prevented;
 
 use std::path::Path;
@@ -27,6 +29,7 @@ use rift_shadow::hooks::AdapterRegistry;
 
 use self::delivery::stated_delivery;
 use self::members::{gate_decide_members, gate_record_members, settle_whole_call, GatePass};
+use self::output_match::output_match_record;
 use self::prevented::prevented_record;
 use super::doc_gate::{doc_gate, DocAnswer};
 use super::ingest::edit_record;
@@ -35,6 +38,7 @@ pub(in crate::hooks) use self::answer::GateOutcome;
 pub(crate) use self::answer::AUDIT_IDS;
 pub(crate) use self::file::payload_cwd;
 pub(in crate::hooks) use self::file::{gate_file, gate_rel_path};
+pub(in crate::hooks) use self::linehash_cache::{linehash_cache_dir, linehash_cache_name};
 pub(crate) use self::outline_cache::sweep_outline_cache;
 pub(in crate::hooks) use self::outline_cache::{
     write_outline_cache, CachedDefinition, CachedOutline,
@@ -122,6 +126,12 @@ pub(in crate::hooks) fn window_journal_step(
     // not.
     let prevented = guarded_phase(t, "prevented_record", || {
         prevented_record(&registry, raw, git_dir, work_tree, &effective)
+    });
+    // WHAT A TERMINAL RESULT SHOWED the window, whatever its command line
+    // was: the lines of the named files found in the delivered output. It
+    // records and decides nothing, so it never touches the answer above.
+    guarded_phase(t, "output_match", || {
+        output_match_record(&registry, raw, git_dir, work_tree, &effective)
     });
     // A SPAWN, from either end: the spawning call's line in the session's main
     // journal, or the opening subagent's claim on it and what it inherits.
@@ -444,6 +454,7 @@ fn gate_limits(effective: &rift_recall_policy::Effective) -> rift_agent::window_
             by_name: gate_mode(effective.inherit_by_name),
             ..rift_agent::window_journal::InheritModes::default()
         },
+        matched: gate_mode(effective.recognise_by_output),
         ..rift_agent::window_journal::Limits::default()
     }
 }

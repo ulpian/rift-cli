@@ -274,6 +274,8 @@ pub(crate) fn sweep_idle_family(git_dir: &Path, now: i64, floor_ms: Option<i64>)
             sweep_member_under_its_lock(&repo, now, now_ms(), floor, None, &mut sweep)
         };
     }
+    let ttl = super::worker::linehash::LINEHASH_TTL_MS;
+    super::worker::linehash::sweep_linehash_cache(&paths.common_dir, now, ttl);
     sweep
 }
 

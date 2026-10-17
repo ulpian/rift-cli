@@ -644,15 +644,20 @@ fn size_the_narrowing(report: &mut Report, slots: &[Slot], tokens: u64) {
     report.narrowed_frame_tokens = report.narrowed_frame_tokens.saturating_add(frames);
 }
 
+/// Charge the tokens one decline's reason frame costs the model.
+pub(super) fn charge_a_frame(report: &mut Report, frame: &str) {
+    report.frame_tokens = report
+        .frame_tokens
+        .saturating_add(u64::from(rift_tokens::count(frame)));
+}
+
 /// What this call's declines cost, and how many of them rest on the window's
 /// own whole-file write rather than on a read.
 fn charge_the_reason_frames(report: &mut Report, slots: &[Slot]) {
     for slot in slots {
         let Slot::Member(member) = slot else { continue };
         if let Some(frame) = &member.frame {
-            report.frame_tokens = report
-                .frame_tokens
-                .saturating_add(u64::from(rift_tokens::count(frame)));
+            charge_a_frame(report, frame);
         }
         if member.rests_on_a_write {
             report.declines_resting_on_a_write =
@@ -913,7 +918,7 @@ fn bucket_of(
 }
 
 /// The sentence a decline would carry, through the one sealed renderer.
-fn frame_for(
+pub(super) fn frame_for(
     held: &Journal,
     read: &ResolvedRead,
     decision: &Decision,

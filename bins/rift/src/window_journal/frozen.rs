@@ -188,7 +188,31 @@ fn archived_window_row(line: &Line) -> Option<ArchivedWindowRow> {
         // An outline line is written only where the first-contact lever acts,
         // which it does not below enforce; its frozen kind arrives with it.
         Line::Family { .. } => return family_held_row(line),
+        Line::Matched { .. } => return matched_row(line),
         Line::Outline { .. } | Line::Spawn { .. } | Line::Claim { .. } => return None,
+    })
+}
+
+/// The row a matched line freezes as: its runs, the file's length and the
+/// member of the command line they were aligned to.
+fn matched_row(line: &Line) -> Option<ArchivedWindowRow> {
+    let Line::Matched {
+        path,
+        hash,
+        runs,
+        total_lines,
+        member,
+        ..
+    } = line
+    else {
+        return None;
+    };
+    Some(ArchivedWindowRow::Matched {
+        path: path.clone(),
+        hash: hash.to_hex(),
+        runs: runs.iter().map(|run| (run.lo, run.hi)).collect(),
+        total_lines: *total_lines,
+        member: *member,
     })
 }
 
@@ -243,7 +267,8 @@ fn line_at_ms(line: &Line) -> u64 {
         | Line::Inherit { at_ms, .. }
         | Line::Spawn { at_ms, .. }
         | Line::Claim { at_ms, .. }
-        | Line::Family { at_ms, .. } => *at_ms,
+        | Line::Family { at_ms, .. }
+        | Line::Matched { at_ms, .. } => *at_ms,
     }
 }
 
@@ -398,6 +423,49 @@ mod tests {
         assert_eq!(value["acted"], false);
         assert_eq!(value["range"], serde_json::json!([1, 400]));
         assert!(value.get("runs").is_none() && value.get("frame_bytes").is_none());
+    }
+
+    /// ★ A matched line freezes into the checkpoint's artifact, and a rebuild
+    /// of the recall projection from nothing but that artifact counts it.
+    #[test]
+    fn a_matched_line_freezes_and_a_rebuild_from_nothing_counts_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, store) = projection(tmp.path());
+        WindowJournal::open(tmp.path(), SESSION, None)
+            .append(&Line::Matched {
+                turn: 2,
+                path: "src/a.rs".to_owned(),
+                hash: hash(1),
+                runs: vec![
+                    Interval::new(1, 40).unwrap(),
+                    Interval::new(90, 95).unwrap(),
+                ],
+                total_lines: 120,
+                member: 1,
+                at_ms: 5,
+            })
+            .unwrap();
+        let facts = session_window_facts(&rt, &store, tmp.path(), "claude-code", SESSION);
+        let bytes = rift_shadow::backend::window_journal_jsonl_bytes(&facts).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["kind"], "matched");
+        assert_eq!(value["runs"], serde_json::json!([[1, 40], [90, 95]]));
+        let shard = rift_recall_substrate::CheckpointShard {
+            checkpoint_id: "c1".into(),
+            dialect: rift_recall_substrate::Dialect::Rift,
+            prev: None,
+            ordinal: 1,
+        };
+        let substrate = rift_recall_substrate::MemorySubstrate::local()
+            .with_shard(shard)
+            .with_artifact("c1", "window_journal.jsonl", &bytes);
+        let recall = rift_store::SqliteStore::open_in_memory().unwrap();
+        rift_store::apply_migrations(&recall, &rift_store::recall_migrations()).unwrap();
+        let report = rt
+            .block_on(rift_recall_ledger::ingest::ingest(&recall, &substrate))
+            .unwrap();
+        assert!(report.issues.is_empty(), "{:?}", report.issues);
+        assert_eq!(report.window_rows_matched, 1);
     }
 
     /// A row with a revision that is not hex never parses; a row whose path is

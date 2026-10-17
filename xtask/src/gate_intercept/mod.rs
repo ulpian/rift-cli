@@ -15,8 +15,9 @@
 //! * `closed-rewrite-forms` — every tool-call rewrite is one of three pinned forms.
 //! * `family-keyed-caches` — a cache is keyed by the repository family, never
 //!   by which checkout happened to be open.
-//! * `one-cache-read` — the decision path reads one family cache, through one
-//!   named function, keyed by the common dir and the content address.
+//! * `one-cache-read` — the decision path reads only the admitted family
+//!   caches (the outline and the line hashes), each through one named
+//!   function, keyed by the common dir and the content address.
 //! * `regions-at-boundaries` — no hook and no detached worker reaches the
 //!   writer of a Rift-managed region.
 //! * `load-bearing` — not built; see [`load_bearing`].

@@ -41,6 +41,9 @@ use super::render::row;
 use super::replay::Ctx;
 use super::report::{Report, Tally};
 use super::transcript::Call;
+use super::uncommitted_declines::{
+    fold_the_read, uncommitted_json, uncommitted_rows, Left, Reread, Shape,
+};
 use super::worktree::path_key;
 
 /// The size bands, in the order the table prints them: the band's upper
@@ -254,6 +257,20 @@ impl WorkingTree {
         }
     }
 
+    /// The text the transcript proves for `key` under `cwd`, where it proves
+    /// a complete copy of the bytes.
+    pub(super) fn proven_text(&self, cwd: &str, key: &str) -> Option<&str> {
+        let known = self.files.get(&(cwd.to_owned(), key.to_owned()))?;
+        known.as_ref().map(|known| known.text.as_str())
+    }
+
+    /// The shape of the bytes the model holds for a file, where it holds them.
+    pub(super) fn shape(&self, call: &Call, key: &str) -> Option<Shape> {
+        let slot = (call.cwd.clone().unwrap_or_default(), key.to_owned());
+        let known = self.files.get(&slot)?.as_ref()?;
+        Some(Shape::of(&known.text))
+    }
+
     /// What one member's delivery proves: the whole file, a numbered range
     /// joined to bytes already known, or only that the path was seen.
     pub(super) fn note_delivery(
@@ -293,19 +310,26 @@ pub(super) fn note_the_working_tree(
     tokens: u64,
 ) {
     let several = requests.len() > 1;
+    let mut unchanged_key = None;
     if bucket == Bucket::NoLineCount {
         let request = blocker.and_then(|at| requests.get(at));
         let key = request.and_then(|request| path_key(&request.path, call.cwd.as_deref()));
-        let (standing, size) = match (request, key) {
+        let (standing, size) = match (request, key.as_deref()) {
             (Some(request), Some(key)) => {
                 let whole = !several && is_whole(call, request, text);
                 let delivered = delivered(call, text);
-                ctx.tree.working.standing(call, &key, &delivered, whole)
+                ctx.tree.working.standing(call, key, &delivered, whole)
             }
             _ => (Standing::FirstSight, None),
         };
         let size = size.unwrap_or_else(|| u64::try_from(text.len()).unwrap_or(u64::MAX));
         ctx.report.no_line_count_split.note(standing, size, tokens);
+        if standing == Standing::Unchanged {
+            unchanged_key = key;
+            if several {
+                ctx.report.uncommitted.note_left(Left::Several, tokens);
+            }
+        }
     }
     if text.contains("<tool_use_error>") || text.contains(PERSISTED_OUTPUT) {
         return;
@@ -321,6 +345,19 @@ pub(super) fn note_the_working_tree(
             delivered(call, text)
         };
         ctx.tree.working.note_delivery(call, &key, delivered, whole);
+        if several {
+            continue;
+        }
+        let unchanged = unchanged_key.as_deref() == Some(key.as_str());
+        let at = Reread {
+            call,
+            request,
+            key: &key,
+            text,
+            tokens,
+            unchanged,
+        };
+        fold_the_read(ctx, &at);
     }
 }
 
@@ -443,6 +480,7 @@ pub(super) fn no_line_count_rows(report: &Report, denominator: u64) -> String {
             out.push_str(&row(band, tally, denominator));
         }
     }
+    out.push_str(&uncommitted_rows(report, denominator));
     out
 }
 
@@ -465,5 +503,6 @@ pub(super) fn no_line_count_json(report: &Report) -> Value {
             json!({ "calls": total.calls, "tokens": total.tokens, "bands": bands }),
         );
     }
+    map.insert("uncommitted_declines".to_owned(), uncommitted_json(report));
     Value::Object(map)
 }

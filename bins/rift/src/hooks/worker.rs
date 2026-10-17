@@ -5,6 +5,7 @@
 //! deferred.
 
 mod boundary;
+pub(in crate::hooks) mod linehash;
 mod reads;
 
 use std::path::Path;
@@ -770,6 +771,7 @@ fn condense_agent_job(
         now,
     ));
     crate::agent_queue::mark_condensed(&repo.git_dir, session);
+    linehash::cache_window_line_hashes(&repo.work_tree, &repo.common_dir, session);
     Ok(Some((session.to_owned(), checkpoint.as_str().to_owned())))
 }
 
@@ -945,6 +947,9 @@ fn count_read_tokens_job(
     let read = [(rel_path.to_owned(), content_sha256.to_owned())];
     t.phase("bind_outline", || {
         bind_and_cache_outlines(&rt, &repo.work_tree, &read)
+    });
+    let _ = t.phase("cache_line_hashes", || {
+        linehash::cache_line_hashes(&repo.common_dir, content_sha256, &bytes)
     });
     if rift_tokens::provenance() != rift_tokens::TOKENIZER {
         // Only real BPE figures persist; the chars/4 fallback never lands.

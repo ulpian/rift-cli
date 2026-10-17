@@ -1,13 +1,15 @@
-//! The `one-cache-read` leg: the one family cache a decision reads, named,
-//! and no second one beside it.
+//! The `one-cache-read` leg: the family caches a decision reads, each named,
+//! and no other one beside them.
 //!
 //! A first contact is answered from a small file the detached worker writes,
-//! because a decision may open no store. That is a file read on the decision
-//! path, and it is admitted on two conditions this leg holds: it is the one
-//! named reader, and it is keyed by the family's common directory and the
-//! bytes' content address, so it can neither split per checkout nor serve a
-//! stale entry. A second family-cache read appearing on the path, or this one
-//! moving or losing its key, fails the leg rather than passing unnoticed.
+//! because a decision may open no store, and a terminal result is matched
+//! against another: the line hashes of the files it named. Each is a file
+//! read on the decision path, admitted on two conditions this leg holds: it
+//! is one of the named readers, and it is keyed by the family's common
+//! directory and the bytes' content address, so it can neither split per
+//! checkout nor serve a stale entry. A further family-cache read appearing on
+//! the path, or an admitted one moving or losing its key, fails the leg
+//! rather than passing unnoticed.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -16,19 +18,38 @@ use super::gate_path::{production_fns, walk_by_name, GATE_CRATES, GATE_ROOTS};
 use super::text::{token_offsets, FnBody};
 use super::{rust_corpus, Leg};
 
-/// The one admitted reader, and the file it is defined in.
-const ADMITTED: (&str, &str) = (
-    "load_outline_cache",
-    "bins/rift/src/hooks/gate/outline_cache.rs",
-);
+/// One admitted reader: its name, the file it is defined in, and what its
+/// key is built from — the family's common directory, from the git dir's own
+/// pointer file, and the content address.
+struct Admitted {
+    name: &'static str,
+    file: &'static str,
+    keyed_by: [&'static str; 2],
+}
 
-/// What the admitted reader's key is built from: the family's common
-/// directory, from the git dir's own pointer file, and the content address.
-const KEYED_BY: [&str; 2] = ["read_common_dir", "outline_cache_name"];
+/// The admitted readers.
+const ADMITTED: [Admitted; 2] = [
+    Admitted {
+        name: "load_outline_cache",
+        file: "bins/rift/src/hooks/gate/outline_cache.rs",
+        keyed_by: ["read_common_dir", "outline_cache_name"],
+    },
+    Admitted {
+        name: "load_linehash_cache",
+        file: "bins/rift/src/hooks/gate/linehash_cache.rs",
+        keyed_by: ["read_common_dir", "linehash_cache_name"],
+    },
+];
 
 /// The names a body uses to reach the family's own directory, as code (string
-/// bodies are masked): the constant, and the outline cache's directory.
-const FAMILY_STORE: [&str; 2] = ["FAMILY_DIR", "outline_cache_dir"];
+/// bodies are masked): the constant, the run-state directory every family
+/// store joins onto, and each cache's directory.
+const FAMILY_STORE: [&str; 4] = [
+    "FAMILY_DIR",
+    "family_state_dir",
+    "outline_cache_dir",
+    "linehash_cache_dir",
+];
 
 /// A read of a file's bytes, by any of the spellings a body would use.
 const FILE_READS: [&str; 4] = ["read_to_string", "read", "File::open", "OpenOptions"];
@@ -61,29 +82,35 @@ fn screen_cache_reads(corpus: &[(String, String)]) -> Leg {
         .collect();
     let mut v = Vec::new();
     for f in &readers {
-        if f.name != ADMITTED.0 || !f.site.starts_with(ADMITTED.1) {
+        let admitted = ADMITTED
+            .iter()
+            .any(|a| f.name == a.name && f.site.starts_with(a.file));
+        if !admitted {
             v.push(format!(
-                "{}: `{}` reads a family cache on the decision path — the one admitted read is \
-                 `{}` in {}",
-                f.site, f.name, ADMITTED.0, ADMITTED.1
+                "{}: `{}` reads a family cache on the decision path — the admitted reads are {}",
+                f.site,
+                f.name,
+                admitted_list()
             ));
         }
     }
-    let admitted: Vec<&&FnBody> = readers.iter().filter(|f| f.name == ADMITTED.0).collect();
-    if admitted.is_empty() {
-        v.push(format!(
-            "`{}` is no longer reached from a decision entry point as a family-cache read — \
-             re-read the gate and correct this leg, never let the read move unnamed",
-            ADMITTED.0
-        ));
-    }
-    for f in &admitted {
-        for key in KEYED_BY {
-            if token_offsets(&f.body, key).is_empty() {
-                v.push(format!(
-                    "{}: `{}` no longer builds its key from `{key}`",
-                    f.site, f.name
-                ));
+    for admitted in &ADMITTED {
+        let found: Vec<&&FnBody> = readers.iter().filter(|f| f.name == admitted.name).collect();
+        if found.is_empty() {
+            v.push(format!(
+                "`{}` is no longer reached from a decision entry point as a family-cache read — \
+                 re-read the gate and correct this leg, never let the read move unnamed",
+                admitted.name
+            ));
+        }
+        for f in found {
+            for key in admitted.keyed_by {
+                if token_offsets(&f.body, key).is_empty() {
+                    v.push(format!(
+                        "{}: `{}` no longer builds its key from `{key}`",
+                        f.site, f.name
+                    ));
+                }
             }
         }
     }
@@ -91,14 +118,22 @@ fn screen_cache_reads(corpus: &[(String, String)]) -> Leg {
     Leg::new(
         "one-cache-read",
         format!(
-            "{} family-cache read(s) on the decision path: {} in {}, keyed by the family's \
+            "{} family-cache read(s) on the decision path: {}, each keyed by the family's \
              common dir and the content address (no store, no tokenizer)",
             readers.len(),
-            names.into_iter().collect::<Vec<_>>().join(", "),
-            ADMITTED.1
+            names.into_iter().collect::<Vec<_>>().join(", ")
         ),
         v,
     )
+}
+
+/// The admitted readers as a finding names them.
+fn admitted_list() -> String {
+    ADMITTED
+        .iter()
+        .map(|a| format!("`{}` in {}", a.name, a.file))
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 /// Whether a body reaches the family's directory and reads a file.
@@ -116,14 +151,15 @@ fn reads_the_family_store(f: &FnBody) -> bool {
 mod tests {
     use super::*;
 
-    /// The roots and the admitted reader, as a gate file spells them.
+    /// The roots and both admitted readers, as the gate files spell them.
     fn corpus(extra: &str) -> Vec<(String, String)> {
         vec![
             (
                 "bins/rift/src/hooks/gate/mod.rs".to_owned(),
                 format!(
-                    "fn window_journal_step() {{ read_gate(); }}\n\
+                    "fn window_journal_step() {{ read_gate(); output_match_record(); }}\n\
                      fn read_gate() {{ load_outline_cache(); helper(); }}\n\
+                     fn output_match_record() {{ load_linehash_cache(); }}\n\
                      fn edit_record() {{}}\nfn gate_policy() {{}}\nfn gate_step() {{}}\n\
                      fn edit_step() {{}}\nfn gate() {{}}\nfn respond_with_decision() {{}}\n\
                      fn doc_gate() {{}}\nfn doc_gate_in() {{}}\nfn document_verify() {{}}\n\
@@ -131,23 +167,30 @@ mod tests {
                 ),
             ),
             (
-                ADMITTED.1.to_owned(),
+                ADMITTED[0].file.to_owned(),
                 "fn load_outline_cache() { let c = rift_git::read_common_dir(g); \
                  let f = outline_cache_dir(&c).join(outline_cache_name(h)); \
                  std::fs::read_to_string(&f); }\n"
                     .to_owned(),
             ),
+            (
+                ADMITTED[1].file.to_owned(),
+                "fn load_linehash_cache() { let c = rift_git::read_common_dir(g); \
+                 let f = linehash_cache_dir(&c).join(linehash_cache_name(h)); \
+                 std::fs::read(&f); }\n"
+                    .to_owned(),
+            ),
         ]
     }
 
-    /// ★ The admitted read is named, and a second family-cache read on the
-    /// path is caught.
+    /// ★ The admitted reads are named, and a further family-cache read on
+    /// the path is caught.
     #[test]
-    fn a_second_family_cache_read_on_the_decision_path_is_caught() {
+    fn a_further_family_cache_read_on_the_decision_path_is_caught() {
         let clean = screen_cache_reads(&corpus(""));
         assert!(clean.violations.is_empty(), "{:#?}", clean.violations);
         assert!(
-            clean.detail.starts_with("1 family-cache read(s)"),
+            clean.detail.starts_with("2 family-cache read(s)"),
             "{}",
             clean.detail
         );
@@ -163,35 +206,75 @@ mod tests {
         );
     }
 
-    /// The read moved to another file, or lost its content address, is a
-    /// finding; so is the read no longer being reached at all.
+    /// ★ A line-hash read the leg does not admit — before it was admitted,
+    /// or under another name — is caught: its directory is a family store.
     #[test]
-    fn a_moved_unkeyed_or_vanished_read_is_caught() {
-        let mut moved = corpus("");
-        moved[1].0 = "bins/rift/src/hooks/gate/mod2.rs".to_owned();
-        assert!(!screen_cache_reads(&moved).violations.is_empty());
-        let mut unkeyed = corpus("");
-        unkeyed[1].1 = unkeyed[1].1.replace("outline_cache_name(h)", "\"x\"");
-        let leg = screen_cache_reads(&unkeyed);
+    fn an_unadmitted_line_hash_read_is_caught() {
+        let mut renamed = corpus("");
+        for (_, text) in &mut renamed {
+            *text = text.replace("load_linehash_cache", "load_lines");
+        }
+        let leg = screen_cache_reads(&renamed);
         assert!(
             leg.violations
                 .iter()
-                .any(|v| v.contains("outline_cache_name")),
+                .any(|v| v.contains("`load_lines` reads a family cache")),
             "{:#?}",
             leg.violations
         );
-        let mut gone = corpus("");
-        gone[0].1 = gone[0].1.replace("load_outline_cache(); ", "");
-        assert!(!screen_cache_reads(&gone).violations.is_empty());
     }
 
-    /// The real tree's decision path holds exactly the admitted read.
+    /// ★ A read of any family run state, reached through the run-state
+    /// directory rather than a cache's own, is a family-cache read too.
     #[test]
-    fn the_real_decision_path_reads_one_family_cache() {
+    fn a_read_under_the_family_state_dir_is_caught() {
+        let planted = corpus(
+            "fn helper() { spooled(); }\n\
+             fn spooled() { std::fs::read(family_state_dir(&c).join(SPOOL_DIR)); }\n",
+        );
+        let leg = screen_cache_reads(&planted);
+        assert!(
+            leg.violations
+                .iter()
+                .any(|v| v.contains("`spooled` reads a family cache")),
+            "{:#?}",
+            leg.violations
+        );
+    }
+
+    /// Either read moved to another file, or lost its content address, is a
+    /// finding; so is either read no longer being reached at all.
+    #[test]
+    fn a_moved_unkeyed_or_vanished_read_is_caught() {
+        for (at, name, key) in [
+            (1, "load_outline_cache(); ", "outline_cache_name(h)"),
+            (2, "load_linehash_cache(); ", "linehash_cache_name(h)"),
+        ] {
+            let mut moved = corpus("");
+            moved[at].0 = "bins/rift/src/hooks/gate/mod2.rs".to_owned();
+            assert!(!screen_cache_reads(&moved).violations.is_empty());
+            let mut unkeyed = corpus("");
+            unkeyed[at].1 = unkeyed[at].1.replace(key, "\"x\"");
+            let leg = screen_cache_reads(&unkeyed);
+            let bare = key.trim_end_matches("(h)");
+            assert!(
+                leg.violations.iter().any(|v| v.contains(bare)),
+                "{:#?}",
+                leg.violations
+            );
+            let mut gone = corpus("");
+            gone[0].1 = gone[0].1.replace(name, "");
+            assert!(!screen_cache_reads(&gone).violations.is_empty());
+        }
+    }
+
+    /// The real tree's decision path holds exactly the admitted reads.
+    #[test]
+    fn the_real_decision_path_reads_the_admitted_family_caches() {
         let leg = one_cache_read(&crate::workspace_root()).expect("the corpus reads");
         assert!(leg.violations.is_empty(), "{:#?}", leg.violations);
         assert!(
-            leg.detail.starts_with("1 family-cache read(s)"),
+            leg.detail.starts_with("2 family-cache read(s)"),
             "{}",
             leg.detail
         );

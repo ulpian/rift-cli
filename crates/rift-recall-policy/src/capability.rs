@@ -100,6 +100,10 @@ pub struct Effective {
     /// declined with a cheaper route: the repository's `decline_family_held`,
     /// never above `read_deny`.
     pub decline_family_held: Mode,
+    /// How far a decision may lean on lines a command's output was matched
+    /// to a file as carrying: the repository's `recognise_by_output`, never
+    /// above `read_deny`.
+    pub recognise_by_output: Mode,
 
     /// Adding a head limit to a content search that carries none.
     pub grep_cap: Mode,
@@ -209,6 +213,7 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
         first_contact_min_lines: interception.first_contact_min_lines,
         first_contact_min_bytes: interception.first_contact_min_bytes,
         decline_family_held: interception.decline_family_held.min(read_deny),
+        recognise_by_output: interception.recognise_by_output.min(read_deny),
         grep_cap,
         grep_cap_off,
         search_answer,
@@ -669,6 +674,41 @@ mod tests {
         let (unknown, _d) = load_src("[interception]\ndecline_family_held = \"always\"\n");
         assert_eq!(
             resolve(&unknown.policy, "claude-code", FULL).decline_family_held,
+            Mode::Off
+        );
+    }
+
+    /// The output-match lever ships at `observe`, reads what is written, and
+    /// is never above the read lever: a family whose channel no run
+    /// confirmed, a repository at `off` and a value it does not know all hold
+    /// it there or below.
+    #[test]
+    fn the_output_match_lever_ships_observing_and_is_never_above_the_read_lever() {
+        let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
+        assert_eq!(shipped.recognise_by_output, Mode::Observe);
+        let (written, _d) = load_src("[interception]\nrecognise_by_output = \"enforce\"\n");
+        assert_eq!(
+            resolve(&written.policy, "claude-code", FULL).recognise_by_output,
+            Mode::Enforce
+        );
+        assert_eq!(
+            resolve(&written.policy, "codex", NO_CHANNEL).recognise_by_output,
+            Mode::Observe
+        );
+        let (off, _d) = load_src("[interception]\nrecognise_by_output = \"off\"\n");
+        assert_eq!(
+            resolve(&off.policy, "claude-code", FULL).recognise_by_output,
+            Mode::Off
+        );
+        let (shut, _d) =
+            load_src("[interception]\nmode = \"off\"\nrecognise_by_output = \"enforce\"\n");
+        assert_eq!(
+            resolve(&shut.policy, "claude-code", FULL).recognise_by_output,
+            Mode::Off
+        );
+        let (unknown, _d) = load_src("[interception]\nrecognise_by_output = \"always\"\n");
+        assert_eq!(
+            resolve(&unknown.policy, "claude-code", FULL).recognise_by_output,
             Mode::Off
         );
     }

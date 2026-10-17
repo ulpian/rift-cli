@@ -7,6 +7,7 @@
 
 use super::family::{family_line, FamilyRoute};
 use super::inherit::{enforced_view, inherited_observation, InheritClass, InheritModes};
+use super::matched::matched_view;
 use super::{
     narrowing, Interval, Journal, Line, Narrowing, ResolvedRead, DEFAULT_MAX_DELIVERED_BYTES,
     DEFAULT_MAX_SHELL_DELIVERED_BYTES,
@@ -137,6 +138,9 @@ pub struct Limits {
     /// inherited from the window that started it. Below `enforce` a class is
     /// never coverage; it only sizes what declining on it would be worth.
     pub inherit: InheritModes,
+    /// How far a decision may lean on lines matched in terminal output.
+    /// Below `enforce` they are never coverage; they only size the pool.
+    pub matched: Mode,
 }
 
 impl Default for Limits {
@@ -149,6 +153,7 @@ impl Default for Limits {
             max_shell_delivered_bytes: DEFAULT_MAX_SHELL_DELIVERED_BYTES,
             narrow_mode: NARROW_MODE,
             inherit: InheritModes::default(),
+            matched: super::MATCHED_MODE,
         }
     }
 }
@@ -341,7 +346,9 @@ pub fn decide(
     limits: Limits,
 ) -> Decision {
     let enforced = enforced_view(journal, limits);
-    let held = enforced.as_ref().unwrap_or(journal);
+    let inherited = enforced.as_ref().unwrap_or(journal);
+    let matched = matched_view(inherited, limits);
+    let held = matched.as_ref().unwrap_or(inherited);
     let own = decide_held(read, held, mode, channel, echo, slice_bytes, limits);
     if own != Decision::Allow || mode == Mode::Off {
         return own;
