@@ -15,6 +15,20 @@ pub(crate) fn shape_spans(text: &str, detectors: &[ShapeDetector]) -> Vec<Span> 
     spans
 }
 
+/// One table's spans, through its `RegexSet` prefilter when it has one and by
+/// the direct per-detector scan when it does not. Both return the same spans;
+/// the set only skips detectors that cannot match.
+pub(crate) fn table_spans(
+    text: &str,
+    detectors: &[ShapeDetector],
+    set: Option<&regex::RegexSet>,
+) -> Vec<Span> {
+    match set {
+        Some(set) => shape_spans_with_set(text, detectors, set),
+        None => shape_spans(text, detectors),
+    }
+}
+
 pub(crate) fn shape_spans_with_set(
     text: &str,
     detectors: &[ShapeDetector],

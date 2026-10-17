@@ -3465,6 +3465,7 @@ version = "0.0.1"
 dependencies = [
  "proptest",
  "regex",
+ "regex-syntax",
  "rift-core",
  "serde",
  "serde_json",

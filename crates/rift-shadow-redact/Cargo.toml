@@ -21,6 +21,9 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Reads each built-in pattern's syntax tree, so the short-token fast path's
+# safety claim is proven against the patterns rather than stated beside them.
+regex-syntax = { workspace = true }
 # A synthetic corpus on disk, so the false-positive guard's arms are calibrated
 # against a corpus whose every hit is known, instead of by mutating this
 # repository. Already pinned by the workspace; dev-only.

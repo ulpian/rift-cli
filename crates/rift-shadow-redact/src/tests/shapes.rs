@@ -2,13 +2,18 @@
 //! greedy match cannot, and the numeric ones fire on nothing in this
 //! repository's own text.
 
+use std::collections::BTreeSet;
+
 use super::fixtures::{masked, visit_text_files, workspace_root};
 use crate::builtin_tables::builtin_shape_tables;
+use crate::entropy::entropy_spans;
+use crate::marks::{is_short_benign_token, propose};
 use crate::shapes::{
     is_card_pan, is_e164_phone, is_labelled_taxpayer_id, is_nanp_phone, is_us_taxpayer_id, luhn_ok,
     shape_spans, split_number, stands_alone,
 };
-use crate::span::{ShapeDetector, SpanGate};
+use crate::span::{ShapeDetector, Span, SpanGate};
+use crate::RulePackSet;
 
 /// Every gate fails closed on an input it cannot read or was never shaped
 /// for. A gate is a security decision, so "cannot tell" resolves to "not a
@@ -315,6 +320,12 @@ fn numeric_pii_detectors_do_not_fire_on_this_repositorys_own_text() {
     );
 }
 
+/// **The fast paths change no proposal.** `propose` — with its per-table
+/// `RegexSet` prefilter and its short-token gate — must return exactly what the
+/// direct scan of every table returns, in the same order: on the hand-written
+/// samples, on every text file the census reads (real transcripts and this
+/// repository's own text, whole), and on every short benign leaf those files
+/// split into, which is where the gate fires.
 #[test]
 fn regex_set_and_short_token_fast_paths_match_direct_table_scans() {
     let tables = builtin_shape_tables();
@@ -335,16 +346,56 @@ fn regex_set_and_short_token_fast_paths_match_direct_table_scans() {
             let direct = shape_spans(sample, table);
             let prefiltered = crate::shapes::shape_spans_with_set(sample, table, set);
             assert_eq!(
-                prefiltered.len(),
-                direct.len(),
-                "mismatch on {sample:?}: {prefiltered:?} vs {direct:?}"
+                span_keys(&prefiltered),
+                span_keys(&direct),
+                "mismatch on {sample:?}"
             );
-            for (a, b) in prefiltered.iter().zip(&direct) {
-                assert_eq!(
-                    (a.start, a.end, &a.id, a.parse),
-                    (b.start, b.end, &b.id, b.parse)
-                );
-            }
         }
+        assert_propose_matches_the_direct_scan(sample);
     }
+    let mut leaves = BTreeSet::new();
+    let mut scanned = 0;
+    visit_text_files(&workspace_root(), &mut |_, contents| {
+        scanned += 1;
+        assert_propose_matches_the_direct_scan(contents);
+        leaves.extend(
+            contents
+                .split(|c: char| c.is_whitespace() || "\"',{}[]()`".contains(c))
+                .filter(|leaf| is_short_benign_token(leaf))
+                .map(str::to_owned),
+        );
+    });
+    assert!(scanned >= 400, "the walk read only {scanned} files");
+    assert!(leaves.len() >= 1000, "only {} short leaves", leaves.len());
+    for leaf in &leaves {
+        assert_propose_matches_the_direct_scan(leaf);
+    }
+}
+
+type SpanKey = (usize, usize, String, Option<(usize, usize)>);
+
+fn span_keys(spans: &[Span]) -> Vec<SpanKey> {
+    spans
+        .iter()
+        .map(|s| (s.start, s.end, s.id.clone(), s.parse))
+        .collect()
+}
+
+/// `propose`'s layer order, with neither fast path: every built-in table
+/// scanned detector by detector, and the entropy layer before the PII table.
+fn direct_propose(text: &str) -> Vec<Span> {
+    let [pass1, provider, credential, pii] = builtin_shape_tables();
+    let mut spans = shape_spans(text, pass1);
+    spans.extend(shape_spans(text, provider));
+    spans.extend(shape_spans(text, credential));
+    spans.extend(entropy_spans(text));
+    spans.extend(shape_spans(text, pii));
+    spans
+}
+
+fn assert_propose_matches_the_direct_scan(text: &str) {
+    let fast = propose(text, &RulePackSet::builtin());
+    let direct = direct_propose(text);
+    let at = text.get(..text.len().min(80)).unwrap_or_default();
+    assert_eq!(span_keys(&fast), span_keys(&direct), "mismatch on {at:?}…");
 }
