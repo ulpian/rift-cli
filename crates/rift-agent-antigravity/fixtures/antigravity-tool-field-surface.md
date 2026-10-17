@@ -167,6 +167,13 @@ One `view_file` call, verbatim from `bE1.hook.jsonl`:
 }
 ```
 
+`transcriptPath` is the session transcript's address — the client's
+`transcript_full.jsonl` under its `brain/<conversation id>/` directory. The
+bridge copies it to the session cache and the hook path never opens it; the
+archive reads the file and seals it as `transcript.jsonl` /
+`transcript.compact.jsonl` through the redaction gate, like every other agent's
+transcript.
+
 `toolAction` and `toolSummary` are on the wire and on no published list. They
 are the client's own description of what it is about to do, they say nothing
 about a range, and they arrive on **every** tool call the spike recorded:

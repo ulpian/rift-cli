@@ -302,17 +302,24 @@ pub(super) fn refresh_cache(
     // The transcript's ADDRESS, when this hook's payload names one — the
     // post-commit archive has no payload and reads it from here. Last
     // report wins (agents relocate transcripts across resumes); a hook without
-    // the field keeps the previous address rather than forgetting it.
-    let named = ctx
-        .raw
-        .payload
-        .get("transcript_path")
-        .and_then(|v| v.as_str());
-    match named {
-        Some(path) if !path.is_empty() => cache.transcript_path = Some(path.to_owned()),
-        _ => (),
+    // the field keeps the previous address rather than forgetting it. Only the
+    // address is copied: the hook path never opens the file it names, and the
+    // archive, off the decision path, is what reads and seals it.
+    if let Some(path) = named_transcript_path(&ctx.raw.payload) {
+        cache.transcript_path = Some(path.to_owned());
     }
     session_cache::write_cache(ctx.git_dir, &cache)
+}
+
+/// The non-empty transcript address a hook payload names, under either
+/// spelling: Claude Code's `transcript_path`, else Antigravity's
+/// `transcriptPath`. Snake case wins when a payload carries both, because
+/// only Antigravity sends the camelCase key and it sends nothing else.
+fn named_transcript_path(payload: &serde_json::Value) -> Option<&str> {
+    ["transcript_path", "transcriptPath"]
+        .iter()
+        .find_map(|key| payload.get(key).and_then(serde_json::Value::as_str))
+        .filter(|path| !path.is_empty())
 }
 
 /// Parse a cached state token back into a [`SessionState`].

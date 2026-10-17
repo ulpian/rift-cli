@@ -420,3 +420,126 @@ async fn a_transcript_shorter_than_the_offset_counts_nothing() {
     );
     assert!(usage_rows(&s).await.is_empty(), "nothing was re-counted");
 }
+
+// --- The transcript's address, whichever spelling the agent uses ---------
+//
+// Claude Code names it `transcript_path`; Antigravity names it
+// `transcriptPath` on every hook. Every payload below copies a recorded field
+// surface (`rift-agent-antigravity/fixtures/antigravity-tool-field-surface.md`,
+// O1), never an invented one.
+
+const CONVERSATION: &str = "f7c9fdf2-9408-405f-b657-c00c98593fa2";
+const ANTIGRAVITY_TRANSCRIPT: &str = "/Users/ulpian/.gemini/antigravity-cli/brain/f7c9fdf2-9408-405f-b657-c00c98593fa2/.system_generated/logs/transcript_full.jsonl";
+
+/// The O1 `view_file` payload, verbatim in shape, with `transcriptPath`
+/// bound to `transcript` (or left out when `None`).
+fn recorded_pre_tool_use(transcript: Option<&str>) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "artifactDirectoryPath": "/Users/ulpian/.gemini/antigravity-cli/brain/f7c9fdf2-9408-405f-b657-c00c98593fa2",
+        "conversationId": CONVERSATION,
+        "modelName": "gemini-3.6-flash-medium",
+        "stepIdx": 5,
+        "toolCall": {
+            "args": {
+                "AbsolutePath": "/Users/ulpian/rift-worktrees/imp-spikes/g/alpha.txt",
+                "toolAction": "Viewing alpha.txt first time",
+                "toolSummary": "View alpha.txt"
+            },
+            "name": "view_file"
+        },
+        "workspacePaths": ["/Users/ulpian/rift-worktrees/imp-spikes/g"]
+    });
+    if let (Some(path), Some(obj)) = (transcript, payload.as_object_mut()) {
+        obj.insert("transcriptPath".to_owned(), serde_json::json!(path));
+    }
+    payload
+}
+
+async fn antigravity_hook(
+    store: &SqliteStore,
+    git_dir: &Path,
+    verb: &str,
+    payload: serde_json::Value,
+    now_ms: i64,
+) {
+    let raw = RawHook {
+        agent: AgentId::ANTIGRAVITY,
+        verb: verb.into(),
+        session: CONVERSATION.into(),
+        turn: None,
+        occurred_at_ms: now_ms,
+        payload,
+    };
+    let reg = AdapterRegistry::with_builtin();
+    ingest_hook(
+        &raw,
+        &reg,
+        store,
+        git_dir,
+        "antigravity",
+        "repo-1",
+        now_ms,
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+fn cached_address(git_dir: &Path) -> Option<String> {
+    session_cache::read_cache(git_dir, CONVERSATION)
+        .unwrap()
+        .unwrap()
+        .transcript_path
+}
+
+#[tokio::test]
+async fn antigravitys_camel_case_transcript_path_is_copied_to_the_session_cache() {
+    let s = store();
+    let tmp = tempfile::tempdir().unwrap();
+    let payload = recorded_pre_tool_use(Some(ANTIGRAVITY_TRANSCRIPT));
+
+    antigravity_hook(&s, tmp.path(), "PreToolUse", payload, 10).await;
+
+    assert_eq!(
+        cached_address(tmp.path()).as_deref(),
+        Some(ANTIGRAVITY_TRANSCRIPT)
+    );
+}
+
+/// Only Antigravity sends the camelCase spelling, so a payload that somehow
+/// carries both is read as Claude Code's: the snake_case value wins.
+#[tokio::test]
+async fn a_payload_carrying_both_spellings_keeps_the_snake_case_address() {
+    let s = store();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut payload = recorded_pre_tool_use(Some("/elsewhere/camel.jsonl"));
+    payload.as_object_mut().unwrap().insert(
+        "transcript_path".to_owned(),
+        serde_json::json!("/elsewhere/snake.jsonl"),
+    );
+
+    antigravity_hook(&s, tmp.path(), "PreToolUse", payload, 10).await;
+
+    assert_eq!(
+        cached_address(tmp.path()).as_deref(),
+        Some("/elsewhere/snake.jsonl")
+    );
+}
+
+/// A later hook naming neither spelling keeps the remembered address rather
+/// than forgetting it — the rule Claude Code already had, now covering both.
+#[tokio::test]
+async fn a_later_hook_without_either_spelling_keeps_the_previous_address() {
+    let s = store();
+    let tmp = tempfile::tempdir().unwrap();
+    let named = recorded_pre_tool_use(Some(ANTIGRAVITY_TRANSCRIPT));
+    let unnamed = recorded_pre_tool_use(None);
+
+    antigravity_hook(&s, tmp.path(), "PreToolUse", named, 10).await;
+    antigravity_hook(&s, tmp.path(), "PostToolUse", unnamed, 11).await;
+
+    assert_eq!(
+        cached_address(tmp.path()).as_deref(),
+        Some(ANTIGRAVITY_TRANSCRIPT)
+    );
+}
