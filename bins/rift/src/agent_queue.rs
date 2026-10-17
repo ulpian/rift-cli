@@ -552,6 +552,25 @@ impl JobKind {
         }
     }
 
+    /// Whether two deliveries of this request that differ only in their
+    /// instant may stand side by side without conflict: running either is
+    /// running the other, so a move need not hold one back for the other.
+    pub(crate) fn is_repeatable(&self) -> bool {
+        matches!(
+            self,
+            Self::SearchIndex | Self::DocSweep | Self::SweepIdle { .. } | Self::MoveRunState
+        )
+    }
+
+    /// Whether a second ask for this work while one is pending is answered by
+    /// the pending one: a request that names nothing but its work tree (the
+    /// index rebuild, the run-state move), so one delivery answers every
+    /// caller that asks before the worker takes it, whatever instant each
+    /// stamped. Every other kind keeps the delivery a changed instant makes.
+    fn coalesces_while_pending(&self) -> bool {
+        matches!(self, Self::SearchIndex | Self::MoveRunState)
+    }
+
     /// Token jobs drain before condense and archive jobs, so the shard either
     /// writes carries every count the session's reads were owed; the sweep drains
     /// last, so a session whose own end is queued is condensed by that end
@@ -604,7 +623,44 @@ pub(crate) fn enqueue_in(dir: &Path, job: &AgentJob) -> Result<PathBuf> {
     };
     let value =
         serde_json::to_value(job).map_err(|_| RiftError::validity("agent queue: encode failed"))?;
+    if job.kind.coalesces_while_pending() {
+        if let Some(pending) = pending_repeat(dir, &stem, &value) {
+            return Ok(pending);
+        }
+    }
     crate::capture_queue::delivery::publish(dir, &stem, &value)
+}
+
+/// Whether two deliveries of one repeatable request ask for the same work:
+/// equal in everything but the instant each caller stamped and the attempts a
+/// worker spent.
+pub(crate) fn same_request(first: &serde_json::Value, second: &serde_json::Value) -> bool {
+    let request = |value: &serde_json::Value| {
+        let mut value = value.clone();
+        if let Some(fields) = value.as_object_mut() {
+            fields.remove("queued_at_ms");
+            fields.remove("attempts");
+        }
+        value
+    };
+    request(first) == request(second)
+}
+
+/// The pending delivery of `stem` that already asks for `value`'s work, if one
+/// is journaled. Check-then-publish: two callers racing past the check leave
+/// two deliveries, which the worker runs as two passes of one idempotent
+/// request, so the race costs a pass and never loses one.
+fn pending_repeat(dir: &Path, stem: &str, value: &serde_json::Value) -> Option<PathBuf> {
+    let versioned = format!("{stem}--");
+    rift_shadow::hooks::run_state::list_entries(dir)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|x| x == "json"))
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == stem || name.starts_with(&versioned))
+        })
+        .find(|path| read_job(path).is_ok_and(|(pending, _)| same_request(&pending, value)))
 }
 
 /// Every readable job: token counts first, then condenses, oldest first
@@ -963,6 +1019,42 @@ mod tests {
             jobs(tmp.path()).len(),
             5,
             "one file per complete context, nothing discarded"
+        );
+    }
+
+    /// An index rebuild or run-state move is one pending file however many
+    /// callers ask, each at its own instant; one for another work tree is a
+    /// second delivery, and a kind that is not such a request keeps the
+    /// delivery a changed instant makes.
+    #[test]
+    fn a_repeatable_request_asked_at_three_instants_is_one_pending_delivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ask = |kind: JobKind, at: i64| AgentJob {
+            kind,
+            ..condense("s", at)
+        };
+        for kind in [JobKind::SearchIndex, JobKind::MoveRunState] {
+            let first = enqueue(tmp.path(), &ask(kind.clone(), 1)).unwrap();
+            for at in [2, 3] {
+                assert_eq!(enqueue(tmp.path(), &ask(kind.clone(), at)).unwrap(), first);
+            }
+            let mut elsewhere = ask(kind, 4);
+            elsewhere.work_tree = PathBuf::from("/other");
+            assert_ne!(enqueue(tmp.path(), &elsewhere).unwrap(), first);
+        }
+        let pass = enqueue(tmp.path(), &ask(JobKind::DocSweep, 5)).unwrap();
+        assert_ne!(
+            enqueue(tmp.path(), &ask(JobKind::DocSweep, 6)).unwrap(),
+            pass
+        );
+        let listed: Vec<i64> = jobs(tmp.path())
+            .iter()
+            .map(|(_, j)| j.queued_at_ms)
+            .collect();
+        assert_eq!(
+            listed,
+            [1, 1, 4, 4, 5, 6],
+            "each kept delivery keeps its first clock"
         );
     }
 

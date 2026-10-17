@@ -114,11 +114,16 @@ fn own_hold_does_not_bypass_legacy_owner_mover_stage_or_complete_context_conflic
                 stage_mode = Some(permission_bits(&stage));
             }
             _ => {
+                // Planted under its own complete context, past the pending
+                // check a producer's enqueue makes for a repeatable request.
                 let mut job = crate::agent_queue::read_job(&old).unwrap().1;
                 job.attempts = 1;
-                let path =
-                    crate::agent_queue::enqueue_in(&RunRoot::AgentQueue.under(&f.member), &job)
-                        .unwrap();
+                let path = crate::capture_queue::delivery::publish(
+                    &RunRoot::AgentQueue.under(&f.member),
+                    &crate::agent_queue::logical_stem(&job).unwrap(),
+                    &serde_json::to_value(&job).unwrap(),
+                )
+                .unwrap();
                 let bytes = std::fs::read(&path).unwrap();
                 let mode = permission_bits(&path);
                 standing = Some((path, bytes, mode));

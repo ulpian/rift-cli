@@ -612,30 +612,12 @@ fn repeatable_request(
     first: &serde_json::Value,
     second: &serde_json::Value,
 ) -> bool {
-    use crate::agent_queue::{AgentJob, JobKind};
+    use crate::agent_queue::AgentJob;
     if !matches!(root, RunRoot::AgentQueue) {
         return false;
     }
-    let Ok(job) = serde_json::from_value::<AgentJob>(first.clone()) else {
-        return false;
-    };
-    if !matches!(
-        job.kind,
-        JobKind::SearchIndex
-            | JobKind::DocSweep
-            | JobKind::SweepIdle { .. }
-            | JobKind::MoveRunState
-    ) {
-        return false;
-    }
-    let normalize = |value: &serde_json::Value| {
-        let mut value = value.clone();
-        if let Some(fields) = value.as_object_mut() {
-            fields.remove("queued_at_ms");
-        }
-        value
-    };
-    normalize(first) == normalize(second)
+    serde_json::from_value::<AgentJob>(first.clone()).is_ok_and(|job| job.kind.is_repeatable())
+        && crate::agent_queue::same_request(first, second)
 }
 
 /// Readiness shares the already-held member guard; it never reacquires it.
@@ -835,9 +817,9 @@ fn owe_move(git_dir: &Path, resolved: &Resolved) {
         kind: crate::agent_queue::JobKind::MoveRunState,
     };
     let queue = RunRoot::AgentQueue.under(&resolved.member);
-    let journaled =
-        move_job_published(&queue) || crate::agent_queue::enqueue_in(&queue, &job).is_ok();
-    if !journaled {
+    // The move is a repeatable request: a delivery another process already
+    // journaled answers this one, whatever instant it carries.
+    if crate::agent_queue::enqueue_in(&queue, &job).is_err() {
         return;
     }
     if let Ok(mut m) = memo().lock() {
@@ -845,24 +827,6 @@ fn owe_move(git_dir: &Path, resolved: &Resolved) {
             entry.move_owed = true;
         }
     }
-}
-
-/// Whether a move delivery is already journaled: the job is repeatable, so
-/// one published context (whatever instant it carries) is the one the worker
-/// owes, and another process must not add a second.
-fn move_job_published(queue: &Path) -> bool {
-    rift_shadow::hooks::run_state::list_entries(queue)
-        .iter()
-        .any(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-                && path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name == "move-run-state" || name.starts_with("move-run-state--")
-                    })
-        })
 }
 
 /// Locate a member for the first time in this process, record its work tree
