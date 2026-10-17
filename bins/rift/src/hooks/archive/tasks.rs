@@ -211,13 +211,13 @@ fn candidates(src: &TaskSources<'_>, main: Option<&Path>) -> Vec<Candidate> {
 }
 
 /// `<dir of the session transcript>/<session id>/subagents`.
-fn subagents_dir(main: &Path, session_id: &str) -> Option<PathBuf> {
+pub(crate) fn subagents_dir(main: &Path, session_id: &str) -> Option<PathBuf> {
     Some(main.parent()?.join(session_id).join("subagents"))
 }
 
 /// The `agent-<id>.jsonl` files under `dir`, by agent id. Any other entry,
 /// and an id that could not name a subtree, is left out.
-fn list_subagent_files(dir: &Path) -> Vec<(String, PathBuf)> {
+pub(crate) fn list_subagent_files(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };

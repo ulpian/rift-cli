@@ -30,7 +30,7 @@ const MAX_PATH_BYTES: usize = 4096;
 
 /// One subagent's claim, as its stop hook stated it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct SubagentClaim {
+pub(crate) struct SubagentClaim {
     /// The marker's schema version.
     pub(super) schema_version: u32,
     /// The client's id for the subagent.
@@ -39,7 +39,7 @@ pub(super) struct SubagentClaim {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) agent_type: Option<String>,
     /// Where the client keeps the subagent's transcript.
-    pub(super) transcript_path: String,
+    pub(crate) transcript_path: String,
 }
 
 /// Record the claim a hook payload carries, if it carries one: an
@@ -59,7 +59,7 @@ pub(super) fn record_claim(git_dir: &Path, raw: &rift_shadow::hooks::RawHook) {
 
 /// Every claim recorded for `session`, keyed by agent id. Unreadable or
 /// malformed markers are skipped: the listing still finds their files.
-pub(super) fn read_claims(
+pub(crate) fn read_claims(
     git_dir: &Path,
     session: &str,
 ) -> std::collections::BTreeMap<String, SubagentClaim> {

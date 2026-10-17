@@ -18,11 +18,13 @@
 //! [`projection`] compares the stored chain against it and records the run,
 //! [`order`] checks the recorded order against the branch, [`artifacts`] reads
 //! a shard once for the passes in [`merkle`] and [`identity`], [`passes`]
-//! drives them over every shard, and [`verdict`] owns the vocabulary they all
-//! report in.
+//! drives them over every shard, [`completeness`] holds the newest shard of
+//! each session to the client's own file, and [`verdict`] owns the vocabulary
+//! they all report in.
 
 mod artifacts;
 mod boundary_gaps;
+pub(crate) mod completeness;
 pub(crate) mod fallback;
 mod identity;
 mod merkle;
@@ -38,6 +40,7 @@ use rift_core::Result;
 use rift_recall_substrate::GixSubstrate;
 use rift_store::paths::projection_db_under;
 
+use self::completeness::{ClientSources, CompletenessSummary};
 use self::order::chain_completeness;
 use self::passes::{shard_passes, ShardPasses};
 use self::projection::{projection_checkpoints, record_verification, verify_under, Seeding};
@@ -224,6 +227,8 @@ struct SourceOutcome {
     shards: ShardPasses,
     /// What the recorded order said about itself.
     order: Verdict,
+    /// The client-side completeness audit; empty when nothing was walked.
+    completeness: CompletenessSummary,
 }
 
 async fn run_async(
@@ -249,6 +254,7 @@ async fn run_async(
         held_unchecked: outcome.shards.held_unchecked,
         source: outcome.label,
         verdict: worse(worse(outcome.order, chain_verdict), outcome.shards.worst),
+        completeness: outcome.completeness,
     };
     if voice == Voice::Loud {
         println!("  repo_id:    {}", paths.repo);
@@ -296,15 +302,21 @@ async fn verify_against_the_checkpoint_branch(
         Some(verify_under(&paths.cache_root, &paths.repo, source, Seeding::Forbidden).await)
     };
     // The per-shard passes re-open the reader (cheap; object access only).
-    let shards = match GixSubstrate::open(&paths.cwd) {
-        Ok(reader) => shard_passes(&reader)?,
-        Err(_) => ShardPasses::nothing_walked(),
+    // The completeness audit follows them over the same reader: additive, and
+    // its findings never reach the verdict.
+    let (shards, completeness) = match GixSubstrate::open(&paths.cwd) {
+        Ok(reader) => (
+            shard_passes(&reader)?,
+            completeness::audit(&reader, &ClientSources::resolve(&paths.cwd)?)?,
+        ),
+        Err(_) => (ShardPasses::nothing_walked(), CompletenessSummary::empty()),
     };
     Ok(SourceOutcome {
         chain,
         label: "git",
         shards,
         order,
+        completeness,
     })
 }
 
@@ -324,6 +336,8 @@ async fn verify_against_the_fixture_skeleton(paths: &RunPaths) -> SourceOutcome 
         label: "fixture (no checkpoint branch yet)",
         shards: ShardPasses::nothing_walked(),
         order: Verdict::Ok,
+        // No shard, so no client evidence to hold one to.
+        completeness: CompletenessSummary::empty(),
     }
 }
 
