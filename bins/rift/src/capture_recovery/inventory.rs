@@ -147,7 +147,7 @@ fn list_entries(
             counts.refuse(Refusal::DuplicateName);
             continue;
         }
-        let entry = classify(ascii, kind);
+        let entry = classify_entry(ascii, kind);
         match &entry {
             Entry::Refused(reason) => counts.refuse(*reason),
             Entry::Ancillary => counts.ancillary += 1,
@@ -161,7 +161,7 @@ fn list_entries(
 /// The closed name and type classes: an executable `*.json` ticket, an
 /// understood immutable marker or note, a stage or temp, or a shape this
 /// selection does not understand.
-fn classify(name: &str, kind: EntryKind) -> Entry {
+fn classify_entry(name: &str, kind: EntryKind) -> Entry {
     match kind {
         EntryKind::Symlink => return Entry::Refused(Refusal::Symlink),
         EntryKind::Directory => return Entry::Refused(Refusal::Directory),
@@ -206,7 +206,7 @@ pub(crate) fn enumerate(queue: &ReadyQueue<'_>) -> Result<Inventory, Counts> {
 
 pub(crate) fn enumerate_with(
     queue: &ReadyQueue<'_>,
-    phase: &mut impl FnMut(Phase) -> Result<(), ()>,
+    observe: &mut impl FnMut(Phase) -> Result<(), ()>,
 ) -> Result<Inventory, Counts> {
     let mut counts = Counts::default();
     if queue.recheck().is_err() {
@@ -250,7 +250,7 @@ pub(crate) fn enumerate_with(
     for (index, name) in names.iter().enumerate() {
         let slot = u32::try_from(index).map_err(|_| Refusal::EntriesOverflow);
         let read = slot.and_then(|slot| {
-            if phase(Phase::BeforeRetain(slot)).is_err() {
+            if observe(Phase::BeforeRetain(slot)).is_err() {
                 return Err(Refusal::Resource);
             }
             reader.read_ticket(name)
