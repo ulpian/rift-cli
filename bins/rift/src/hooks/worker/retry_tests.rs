@@ -23,6 +23,7 @@ fn owed_interval(root: &Path) -> (rift_git::RepoPaths, AgentJob, std::path::Path
             session_id: "owed-interval".into(),
             agent: "claude-code".into(),
             reason: IntervalReason::SensitivePath,
+            interval_start_ms: None,
         }),
     };
     let path = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();

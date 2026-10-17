@@ -207,31 +207,30 @@ fn drive_scheduled_archive(
     let Some(reason) = IntervalReason::of(decision.reason) else {
         return Ok(false);
     };
-    queue_interval_archive(run.repo, session, agent, reason, now)?;
+    let archive = IntervalArchive {
+        session_id: session.to_owned(),
+        agent: agent.to_owned(),
+        reason,
+        interval_start_ms: last,
+    };
+    queue_interval_archive(run.repo, archive, now)?;
     Ok(true)
 }
 
 /// Journal one interval archive and hand it over.
 ///
-/// One archive is owed per session at a time: a job already pending is left
-/// as it is, so every hook inside one due interval asks for the same
-/// checkpoint on the clock of the hook that first found it due. The worker is
-/// dispatched either way, because the one a pending job's hook started may
-/// have gone. A deferred interval archive changes no lifecycle: the session
-/// stays live and the next activity asks again.
+/// One archive is owed per interval: the interval it closes is part of the
+/// job's identity, so a job already pending for it answers every later hook
+/// inside the interval, on the clock of the hook that first found it due. The
+/// worker is dispatched either way, because the one a pending job's hook
+/// started may have gone. A deferred interval archive changes no lifecycle:
+/// the session stays live and the next activity asks again.
 fn queue_interval_archive(
     repo: &rift_git::RepoPaths,
-    session: &str,
-    agent: &str,
-    reason: IntervalReason,
+    archive: IntervalArchive,
     now: i64,
 ) -> Result<()> {
-    let kind = JobKind::Archive(IntervalArchive {
-        session_id: session.to_owned(),
-        agent: agent.to_owned(),
-        reason,
-    });
-    journal_once(repo, kind, now)?;
+    journal_once(repo, JobKind::Archive(archive), now)?;
     dispatch_agent_worker(&repo.git_dir);
     Ok(())
 }

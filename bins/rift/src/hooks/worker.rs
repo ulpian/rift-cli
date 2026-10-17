@@ -1147,6 +1147,7 @@ mod tests {
             session_id: "s-interval".into(),
             agent: "claude-code".into(),
             reason: IntervalReason::Schedule,
+            interval_start_ms: None,
         };
         let job = AgentJob {
             schema_version: 1,
@@ -1429,6 +1430,7 @@ mod tests {
                 session_id: "s-1".into(),
                 agent: "claude-code".into(),
                 reason: IntervalReason::Schedule,
+                interval_start_ms: None,
             }),
         };
         let path = crate::agent_queue::enqueue(git_dir.path(), &job).unwrap();

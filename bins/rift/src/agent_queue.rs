@@ -240,6 +240,13 @@ pub(crate) struct IntervalArchive {
     pub agent: String,
     /// Why the hook decided the session had earned a checkpoint.
     pub reason: IntervalReason,
+    /// Which interval the checkpoint closes: the session's last archive
+    /// instant the hook read when it found the interval due, `None` before
+    /// the session's first. Part of the delivery's identity, so every hook
+    /// inside one due interval asks for the same checkpoint and a hook in the
+    /// next interval asks for another.
+    #[serde(default)]
+    pub interval_start_ms: Option<i64>,
 }
 
 /// Why an agent hook archives a live session between its commits: the two
@@ -564,11 +571,15 @@ impl JobKind {
 
     /// Whether a second ask for this work while one is pending is answered by
     /// the pending one: a request that names nothing but its work tree (the
-    /// index rebuild, the run-state move), so one delivery answers every
-    /// caller that asks before the worker takes it, whatever instant each
-    /// stamped. Every other kind keeps the delivery a changed instant makes.
+    /// index rebuild, the run-state move) or the interval it closes (an
+    /// interval archive), so one delivery answers every caller that asks
+    /// before the worker takes it, on the clock of the first. Every other kind
+    /// keeps the delivery a changed instant makes.
     fn coalesces_while_pending(&self) -> bool {
-        matches!(self, Self::SearchIndex | Self::MoveRunState)
+        matches!(
+            self,
+            Self::SearchIndex | Self::MoveRunState | Self::Archive(_)
+        )
     }
 
     /// Token jobs drain before condense and archive jobs, so the shard either
@@ -1115,19 +1126,30 @@ mod tests {
     #[test]
     fn an_interval_archive_is_one_job_per_session_ranked_with_the_condenses() {
         let tmp = tempfile::tempdir().unwrap();
-        let archive = |session: &str, at: i64| AgentJob {
+        let interval = |session: &str, at: i64, start: Option<i64>| AgentJob {
             kind: JobKind::Archive(IntervalArchive {
                 session_id: session.to_owned(),
                 agent: "claude-code".into(),
                 reason: IntervalReason::SensitivePath,
+                interval_start_ms: start,
             }),
             ..condense(session, at)
         };
+        let archive = |session: &str, at: i64| interval(session, at, None);
         assert!(jobs(tmp.path()).is_empty());
         let a = enqueue(tmp.path(), &archive("s", 1)).unwrap();
-        assert_ne!(a, enqueue(tmp.path(), &archive("s", 2)).unwrap());
-        assert_eq!(a, enqueue(tmp.path(), &archive("s", 1)).unwrap());
+        assert_eq!(
+            a,
+            enqueue(tmp.path(), &archive("s", 2)).unwrap(),
+            "a second due hook in one interval asks for the pending archive"
+        );
+        assert_ne!(
+            a,
+            enqueue(tmp.path(), &interval("s", 2, Some(1))).unwrap(),
+            "a due hook in the next interval owes a second"
+        );
         assert_eq!(jobs(tmp.path()).len(), 2);
+        assert_eq!(jobs(tmp.path())[0].1, archive("s", 1), "on the first clock");
         assert!(jobs(tmp.path()).iter().all(|(_, job)| matches!(&job.kind,
             JobKind::Archive(archive) if archive.session_id == "s")));
         assert_eq!(note_key(&archive("s", 1)), note_key(&archive("s", 9)));
