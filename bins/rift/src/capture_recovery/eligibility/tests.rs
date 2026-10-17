@@ -288,6 +288,7 @@ fn a_missing_or_unrecorded_receipt_and_a_foreign_owner_stay_owed() {
             Some("recorded"),
             CLAUDE,
             Verdict::Eligible(super::Eligible {
+                cache_sha256: String::new(),
                 session_row: ids::session_row_id(CLAUDE, "n-recorded"),
                 turn_id: ids::turn_row_id(&ids::session_row_id(CLAUDE, "n-recorded"), 1),
                 snapshot_id: ids::turn_boundary_snapshot_id(
@@ -320,6 +321,12 @@ fn a_missing_or_unrecorded_receipt_and_a_foreign_owner_stay_owed() {
         rig.seed_event(&end_event(native, STOP, TURN_END, GIT_FACT, 0));
         if let Some(outcome) = outcome {
             rig.seed_receipt(owner, STOP, native, 1, SHA, outcome);
+        }
+        // The eligible facts carry the digest of the cache bytes as written.
+        let mut expected = expected;
+        if let Verdict::Eligible(facts) = &mut expected {
+            let bytes = std::fs::read(rig.sessions_dir.join(format!("{native}.json"))).unwrap();
+            facts.cache_sha256 = rift_shadow::sha256_hex(&[&bytes]);
         }
         assert_eq!(
             rig.verdict(&hold, &job(CLAUDE, native, 1, End)),

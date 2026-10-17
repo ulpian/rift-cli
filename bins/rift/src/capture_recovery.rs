@@ -19,6 +19,8 @@ pub(crate) mod hold;
 mod inventory;
 pub(crate) mod pins;
 pub(crate) mod plan;
+#[cfg(unix)]
+mod selection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PinError;
