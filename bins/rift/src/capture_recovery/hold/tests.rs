@@ -221,3 +221,43 @@ fn existing_cold_intermediates_cannot_disappear_rebind_or_be_symlinks() {
         assert!(saved.exists());
     }
 }
+
+/// The journal capability is the sessions capability's sibling: the same
+/// marker, the same member, the same recheck; a journal replaced under it or a
+/// marker gone is noticed, and nothing is listed before readiness.
+#[test]
+fn the_agent_queue_capability_shares_the_marker_member_and_recheck_discipline() {
+    let f = Fixture::new();
+    let admitted = admit_own_hold(&f.owner, &f.evidence, "fixture-op").unwrap();
+    let queue_dir = rift_shadow::hooks::run_state::RunRoot::AgentQueue.under(&f.member);
+    assert!(admitted.agent_queue_namespace().is_err(), "no journal yet");
+    rift_shadow::hooks::run_state::create_private_dir(&queue_dir).unwrap();
+    let queue = admitted.agent_queue_namespace().unwrap();
+    queue.recheck().unwrap();
+    assert_eq!(queue.queue().path, queue_dir);
+    assert_eq!(queue.plan().operation(), "fixture-op");
+    assert_eq!(
+        queue.plan().reservation(),
+        "one-eligible-explicit-current-boundary@1"
+    );
+    assert_eq!(queue.private().unwrap().path, f.evidence);
+    let marker = f.member.join(rift_shadow::hooks::run_state::MOVED_MARKER);
+    let saved = f.member.join("marker-saved");
+    std::fs::rename(&marker, &saved).unwrap();
+    assert!(queue.recheck().is_err());
+    assert!(admitted.agent_queue_namespace().is_err());
+    std::fs::rename(&saved, &marker).unwrap();
+    let queue = admitted.agent_queue_namespace().unwrap();
+    let aside = f.member.join("queue-aside");
+    std::fs::rename(&queue_dir, &aside).unwrap();
+    std::fs::create_dir(&queue_dir).unwrap();
+    std::fs::set_permissions(&queue_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(queue.recheck().is_err(), "a replaced journal");
+    assert!(aside.exists());
+    let cold = Fixture::cold();
+    let cold_hold = admit_own_hold(&cold.owner, &cold.evidence, "fixture-op").unwrap();
+    assert!(
+        cold_hold.agent_queue_namespace().is_err(),
+        "unmoved: no capability"
+    );
+}

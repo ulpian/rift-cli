@@ -18,6 +18,9 @@ pub(crate) struct Fixture {
     pub(crate) plan_bytes: Vec<u8>,
 }
 
+/// The Plan maxima for one ticket and for all tickets together.
+const TICKET_BUDGETS: (u64, u64) = (65_536, 67_108_864);
+
 #[derive(Clone, Copy)]
 enum Setup {
     Warm,
@@ -26,14 +29,20 @@ enum Setup {
 
 impl Fixture {
     pub(crate) fn new() -> Self {
-        Self::build(Setup::Warm)
+        Self::build(Setup::Warm, TICKET_BUDGETS)
     }
 
     pub(crate) fn cold() -> Self {
-        Self::build(Setup::Cold)
+        Self::build(Setup::Cold, TICKET_BUDGETS)
     }
 
-    fn build(setup: Setup) -> Self {
+    /// A warm member whose Plan bounds tickets tighter than the maxima, so an
+    /// aggregate cap can be crossed with a handful of small files.
+    pub(crate) fn with_ticket_budgets(max_ticket_bytes: u64, max_total_ticket_bytes: u64) -> Self {
+        Self::build(Setup::Warm, (max_ticket_bytes, max_total_ticket_bytes))
+    }
+
+    fn build(setup: Setup, ticket_budgets: (u64, u64)) -> Self {
         let checkout = tempfile::tempdir().unwrap();
         let initial_owner = if matches!(setup, Setup::Cold) {
             let admin = checkout.path().join(".git");
@@ -97,7 +106,14 @@ impl Fixture {
                     .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound));
             }
         }
-        Self::with_records(checkout, owner, work_tree, member, family.family_id)
+        Self::with_records(
+            checkout,
+            owner,
+            work_tree,
+            member,
+            family.family_id,
+            ticket_budgets,
+        )
     }
 
     fn with_records(
@@ -106,6 +122,7 @@ impl Fixture {
         work_tree: PathBuf,
         member: PathBuf,
         repo_id: rift_core::RepoId,
+        (max_ticket_bytes, max_total_ticket_bytes): (u64, u64),
     ) -> Self {
         let private = tempfile::tempdir().unwrap();
         let evidence = private.path().join("operation");
@@ -115,7 +132,7 @@ impl Fixture {
             .unwrap();
         let evidence = evidence.canonicalize().unwrap();
         let key = member_key(&repo_id, owner.git_dir().to_str().unwrap()).unwrap();
-        let value = serde_json::json!({"schema_version":1,"operation_id":"fixture-op","repo_id":repo_id.as_str(),"member_key":key.to_hex(),"canonical_git_dir":owner.git_dir(),"canonical_work_tree":work_tree,"evidence_dir":evidence,"selector":{"kind":"boundary-snapshots-only","schema_version":1,"unknown_fields":"refuse","inventory":"complete-bounded","reservation":"one-eligible-explicit-current-boundary@1"},"budgets":{"max_inventory_entries":8192,"max_selected_tickets":8192,"max_ticket_bytes":65536,"max_total_ticket_bytes":67_108_864,"max_cut_bytes":8_388_608,"max_artifact_bytes":8_388_608}});
+        let value = serde_json::json!({"schema_version":1,"operation_id":"fixture-op","repo_id":repo_id.as_str(),"member_key":key.to_hex(),"canonical_git_dir":owner.git_dir(),"canonical_work_tree":work_tree,"evidence_dir":evidence,"selector":{"kind":"boundary-snapshots-only","schema_version":1,"unknown_fields":"refuse","inventory":"complete-bounded","reservation":"one-eligible-explicit-current-boundary@1"},"budgets":{"max_inventory_entries":8192,"max_selected_tickets":8192,"max_ticket_bytes":max_ticket_bytes,"max_total_ticket_bytes":max_total_ticket_bytes,"max_cut_bytes":8_388_608,"max_artifact_bytes":8_388_608}});
         let plan = Plan::decode(&serde_json::to_vec(&value).unwrap()).unwrap();
         let plan_bytes = plan.encode().unwrap();
         let hold = serde_json::json!({"schema_version":1,"operation_id":"fixture-op","member_key":key.to_hex(),"plan_sha256":plan.sha256().unwrap().as_str()});

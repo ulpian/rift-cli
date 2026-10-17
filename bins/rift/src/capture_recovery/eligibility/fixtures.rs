@@ -22,18 +22,18 @@ use crate::capture_recovery::test_support::Fixture;
 
 /// A member with its hold records, a migrated in-memory projection and the
 /// built-in adapters: everything one eligibility pass reads.
-pub(super) struct Rig {
-    pub(super) fixture: Fixture,
-    pub(super) store: Counting,
-    pub(super) registry: AdapterRegistry,
-    pub(super) rt: tokio::runtime::Runtime,
-    pub(super) repo_id: RepoId,
-    pub(super) sessions_dir: std::path::PathBuf,
+pub(crate) struct Rig {
+    pub(crate) fixture: Fixture,
+    pub(crate) store: Counting,
+    pub(crate) registry: AdapterRegistry,
+    pub(crate) rt: tokio::runtime::Runtime,
+    pub(crate) repo_id: RepoId,
+    pub(crate) sessions_dir: std::path::PathBuf,
 }
 
 /// The real store behind a query counter, so a test reads the actual call
 /// and row counts a pass cost rather than the pass's own tally alone.
-pub(super) struct Counting {
+pub(crate) struct Counting {
     inner: SqliteStore,
     calls: AtomicU32,
     rows: AtomicU32,
@@ -43,7 +43,7 @@ pub(super) struct Counting {
 type Boxed<'t, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 't>>;
 
 impl Counting {
-    pub(super) fn new(inner: SqliteStore) -> Self {
+    pub(crate) fn new(inner: SqliteStore) -> Self {
         Self {
             inner,
             calls: AtomicU32::new(0),
@@ -51,18 +51,18 @@ impl Counting {
             sql: Mutex::new(Vec::new()),
         }
     }
-    pub(super) fn calls(&self) -> u32 {
+    pub(crate) fn calls(&self) -> u32 {
         self.calls.load(Ordering::SeqCst)
     }
-    pub(super) fn rows(&self) -> u32 {
+    pub(crate) fn rows(&self) -> u32 {
         self.rows.load(Ordering::SeqCst)
     }
-    pub(super) fn reset(&self) {
+    pub(crate) fn reset(&self) {
         self.calls.store(0, Ordering::SeqCst);
         self.rows.store(0, Ordering::SeqCst);
         self.sql.lock().unwrap().clear();
     }
-    pub(super) fn queries_starting_with(&self, prefix: &str) -> usize {
+    pub(crate) fn queries_starting_with(&self, prefix: &str) -> usize {
         self.sql
             .lock()
             .unwrap()
@@ -163,11 +163,11 @@ impl CanonicalStore for Counting {
 }
 
 impl Rig {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::over(Fixture::new())
     }
 
-    pub(super) fn over(fixture: Fixture) -> Self {
+    pub(crate) fn over(fixture: Fixture) -> Self {
         let store = SqliteStore::open_in_memory().unwrap();
         rift_store::apply_migrations(&store, &rift_store::default_migrations()).unwrap();
         let plan = Plan::decode(&fixture.plan_bytes).unwrap();
@@ -185,12 +185,12 @@ impl Rig {
         }
     }
 
-    pub(super) fn admit(&self) -> OwnHold<'_> {
+    pub(crate) fn admit(&self) -> OwnHold<'_> {
         admit_own_hold(&self.fixture.owner, &self.fixture.evidence, "fixture-op").unwrap()
     }
 
     /// The member as the plan states it, which is what a truthful caller asserts.
-    pub(super) fn member(&self) -> Member {
+    pub(crate) fn member(&self) -> Member {
         Member::new(
             self.repo_id.clone(),
             self.fixture.owner.git_dir().to_str().unwrap(),
@@ -202,7 +202,7 @@ impl Rig {
     /// One native hook through the wire builder and the real ingest, into the
     /// member's current sessions tree. `at` is both the hook's instant and the
     /// receipt's clock; a caller wanting them apart passes a `RawHook`.
-    pub(super) fn ingest(&self, agent: &str, verb: &str, payload: &Json, at: i64) -> IngestOutcome {
+    pub(crate) fn ingest(&self, agent: &str, verb: &str, payload: &Json, at: i64) -> IngestOutcome {
         let raw = rift_shadow::hooks::build_raw_hook(
             agent,
             verb,
@@ -213,7 +213,7 @@ impl Rig {
         self.ingest_raw(&raw, agent, at + 5)
     }
 
-    pub(super) fn ingest_raw(&self, raw: &RawHook, label: &str, now_ms: i64) -> IngestOutcome {
+    pub(crate) fn ingest_raw(&self, raw: &RawHook, label: &str, now_ms: i64) -> IngestOutcome {
         self.rt
             .block_on(rift_shadow::bridge::ingest_hook(
                 raw,
@@ -228,7 +228,7 @@ impl Rig {
             .unwrap()
     }
 
-    pub(super) fn snapshot(
+    pub(crate) fn snapshot(
         agent: &str,
         native: &str,
         ordinal: u32,
@@ -244,7 +244,7 @@ impl Rig {
         }
     }
 
-    pub(super) fn pass(
+    pub(crate) fn pass(
         &self,
         hold: &OwnHold<'_>,
         jobs: &[BoundarySnapshot],
@@ -252,7 +252,7 @@ impl Rig {
         self.pass_with(hold, &self.registry, jobs)
     }
 
-    pub(super) fn pass_with(
+    pub(crate) fn pass_with(
         &self,
         hold: &OwnHold<'_>,
         registry: &AdapterRegistry,
@@ -280,7 +280,7 @@ impl Rig {
     }
 
     /// A pass asserting `member`, which need not be this rig's own.
-    pub(super) fn pass_as(
+    pub(crate) fn pass_as(
         &self,
         hold: &OwnHold<'_>,
         member: &Member,
@@ -309,12 +309,12 @@ impl Rig {
 
     /// A cache written as the hook path writes it: the member's own work tree
     /// is stamped from the directory, exactly as production fills it.
-    pub(super) fn write_cache(&self, cache: &SessionCache) {
+    pub(crate) fn write_cache(&self, cache: &SessionCache) {
         session_cache::write_cache(&self.sessions_dir, cache).unwrap();
     }
 
     /// An active cache at `ordinal`, open or closed.
-    pub(super) fn active_cache(
+    pub(crate) fn active_cache(
         agent: &str,
         native: &str,
         ordinal: u32,
@@ -328,7 +328,7 @@ impl Rig {
 
     /// The identity, session and turn rows a projected turn leaves, under this
     /// rig's repository unless `repo` says otherwise.
-    pub(super) fn seed_turn(&self, agent: &str, native: &str, ordinal: u32, repo: Option<&str>) {
+    pub(crate) fn seed_turn(&self, agent: &str, native: &str, ordinal: u32, repo: Option<&str>) {
         let session_row = ids::session_row_id(agent, native);
         self.rt.block_on(async {
             rift_store::record_capture_session_identity(
@@ -372,7 +372,7 @@ impl Rig {
 
     /// One captured event row at `(native, ordinal)` with the stated kind,
     /// trust and event ordinal, keyed as `verb` fired by `firing`.
-    pub(super) fn seed_event(&self, event: &SeededEvent<'_>) {
+    pub(crate) fn seed_event(&self, event: &SeededEvent<'_>) {
         let key = rift_agent::idempotency_key(
             &AgentId::new(event.firing),
             event.native,
@@ -400,7 +400,7 @@ impl Rig {
     }
 
     /// One hook receipt filed under `owner` for `verb`, as the ingest files it.
-    pub(super) fn seed_receipt(
+    pub(crate) fn seed_receipt(
         &self,
         owner: &str,
         verb: &str,
@@ -431,7 +431,7 @@ impl Rig {
             .unwrap();
     }
 
-    pub(super) fn verdict(&self, hold: &OwnHold<'_>, job: &BoundarySnapshot) -> Verdict {
+    pub(crate) fn verdict(&self, hold: &OwnHold<'_>, job: &BoundarySnapshot) -> Verdict {
         let pass = self.pass(hold, std::slice::from_ref(job)).unwrap();
         pass.classified.into_iter().next().unwrap().verdict
     }
@@ -439,24 +439,24 @@ impl Rig {
 
 /// A captured event to seed: the stored coordinates and the verb and agent its
 /// key is derived from, which need not agree with its kind.
-pub(super) struct SeededEvent<'a> {
-    pub(super) firing: &'a str,
-    pub(super) native: &'a str,
-    pub(super) verb: &'a str,
-    pub(super) ordinal: u32,
-    pub(super) event_ordinal: u32,
-    pub(super) kind: &'a str,
-    pub(super) trust: &'a str,
-    pub(super) sha: &'a str,
+pub(crate) struct SeededEvent<'a> {
+    pub(crate) firing: &'a str,
+    pub(crate) native: &'a str,
+    pub(crate) verb: &'a str,
+    pub(crate) ordinal: u32,
+    pub(crate) event_ordinal: u32,
+    pub(crate) kind: &'a str,
+    pub(crate) trust: &'a str,
+    pub(crate) sha: &'a str,
 }
 
 /// The payload hash the ingest derives for `payload`.
-pub(super) fn payload_sha(payload: &Json) -> String {
+pub(crate) fn payload_sha(payload: &Json) -> String {
     rift_shadow::sha256_hex(&[serde_json::to_vec(payload).unwrap().as_slice()])
 }
 
 /// The delivery's context identity, as the queue derives it for this job.
-pub(super) fn context_id(job: &BoundarySnapshot) -> String {
+pub(crate) fn context_id(job: &BoundarySnapshot) -> String {
     let value = serde_json::json!({
         "schema_version": 1,
         "work_tree": "/fixture",
@@ -468,7 +468,7 @@ pub(super) fn context_id(job: &BoundarySnapshot) -> String {
 
 /// A nested payload whose keys are not in lexical order, carrying the native
 /// session under the field the agent's wire uses.
-pub(super) fn payload(session_field: &str, native: &str) -> Json {
+pub(crate) fn payload(session_field: &str, native: &str) -> Json {
     serde_json::json!({
         session_field: native,
         "zeta": {"b": [3, 1, 2], "a": {"y": true, "x": null}},
@@ -478,13 +478,13 @@ pub(super) fn payload(session_field: &str, native: &str) -> Json {
 
 /// An adapter for `agent` that declares exactly `verbs` and maps nothing: what
 /// the receipt preflight sees, with no event history behind it.
-pub(super) struct Declaring {
+pub(crate) struct Declaring {
     agent: AgentId,
     verbs: &'static [&'static str],
 }
 
 impl Declaring {
-    pub(super) fn registry(agent: &str, verbs: Vec<String>) -> AdapterRegistry {
+    pub(crate) fn registry(agent: &str, verbs: Vec<String>) -> AdapterRegistry {
         let leaked: Vec<&'static str> = verbs
             .into_iter()
             .map(|verb| &*Box::leak(verb.into_boxed_str()))

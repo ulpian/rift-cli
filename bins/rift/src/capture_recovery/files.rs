@@ -6,17 +6,17 @@ use cap_fs_ext::{
     OpenOptionsSyncExt as _,
 };
 use cap_std::fs::{Dir, File, Metadata, OpenOptions, PermissionsExt as _};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct DirectoryIdentity {
     pub(super) dev: u64,
     pub(super) ino: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PhysicalIdentity {
     pub(super) dev: u64,
     pub(super) ino: u64,
@@ -213,6 +213,39 @@ pub(super) fn read_regular_with(
         metadata: after,
         bytes,
     })
+}
+
+/// The type of one direct entry, taken without following.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EntryKind {
+    Regular,
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// The direct entries of the namespace's own directory, descriptor-relative,
+/// each with its type taken without following; the iterator's own failure is
+/// yielded as an item, never swallowed. No recursion, no path.
+pub(super) fn read_dir(
+    namespace: &Namespace,
+) -> PinResult<impl Iterator<Item = PinResult<(OsString, EntryKind)>>> {
+    namespace.recheck()?;
+    let entries = namespace.dir.entries().map_err(|_| PinError)?;
+    Ok(entries.map(|entry| {
+        let entry = entry.map_err(|_| PinError)?;
+        let kind = entry.file_type().map_err(|_| PinError)?;
+        let kind = if kind.is_symlink() {
+            EntryKind::Symlink
+        } else if kind.is_dir() {
+            EntryKind::Directory
+        } else if kind.is_file() {
+            EntryKind::Regular
+        } else {
+            EntryKind::Other
+        };
+        Ok((entry.file_name(), kind))
+    }))
 }
 
 #[cfg(test)]

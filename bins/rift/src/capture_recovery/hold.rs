@@ -27,10 +27,15 @@ struct HoldWire {
 }
 
 #[cfg(unix)]
+pub(crate) use platform::queue::ReadyQueue;
+#[cfg(unix)]
 pub(crate) use platform::sessions::ReadySessions;
 /// Non-Unix builds hold no descriptors, so the capability is never admitted.
 #[cfg(not(unix))]
 pub(crate) struct ReadySessions<'h>(std::marker::PhantomData<&'h ()>);
+/// Non-Unix builds hold no descriptors, so the journal is never admitted.
+#[cfg(not(unix))]
+pub(crate) struct ReadyQueue<'h>(std::marker::PhantomData<&'h ()>);
 
 /// Borrows the actual owner and exact live evidence; it grants only readiness.
 pub(crate) struct OwnHold<'a> {
@@ -75,6 +80,22 @@ impl OwnHold<'_> {
         #[cfg(unix)]
         {
             ReadySessions::admit(self)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(EvidenceError)
+        }
+    }
+
+    /// The member's CURRENT agent-queue journal as read-only evidence: the
+    /// sibling of [`Self::sessions_namespace`], derived from the same bound
+    /// scope behind the same moved marker and rechecked the same way. It lists
+    /// and reads; it never publishes, retries, removes or moves.
+    pub(crate) fn agent_queue_namespace(&self) -> EvidenceResult<ReadyQueue<'_>> {
+        self.check_current()?;
+        #[cfg(unix)]
+        {
+            ReadyQueue::admit(self)
         }
         #[cfg(not(unix))]
         {
@@ -465,6 +486,7 @@ mod platform {
             member,
         ))
     }
+    pub(super) mod queue;
     pub(super) mod sessions;
     #[cfg(test)]
     mod tests;

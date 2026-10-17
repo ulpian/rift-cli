@@ -1,6 +1,7 @@
-//! The admitted member's CURRENT sessions tree, held by descriptor: read-only
+//! The admitted member's CURRENT run-state roots, held by descriptor: read-only
 //! evidence derived from the hold's own bound target scope, never from a
-//! resolver that could mint, record, adopt or move.
+//! resolver that could mint, record, adopt or move. The sessions tree and the
+//! agent-queue journal are two roots under one marker and one discipline.
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -10,43 +11,49 @@ use rift_shadow::hooks::run_state::{RunRoot, MOVED_MARKER};
 use super::{open_child_if_present, EvidenceError, EvidenceResult};
 use crate::capture_recovery::files::{self, Namespace, PhysicalIdentity};
 use crate::capture_recovery::hold::OwnHold;
+use crate::capture_recovery::plan::Plan;
 
 /// The marker holds a decimal instant; anything wider is not the marker.
 const MAX_MARKER_BYTES: usize = 64;
 
-/// The capability: the hold it was derived from, the exact bound member, the
-/// checked moved marker and the sessions child opened under it.
-pub(crate) struct ReadySessions<'h> {
+/// One root bound under the hold: the hold it was derived from, the exact
+/// bound member, the checked moved marker and the root opened under it.
+pub(super) struct BoundRoot<'h> {
     hold: &'h OwnHold<'h>,
     member: &'h Namespace,
     marker: Marker,
-    sessions: Namespace,
+    root: RunRoot,
+    dir: Namespace,
 }
+
+/// The capability over the sessions tree.
+pub(crate) struct ReadySessions<'h>(BoundRoot<'h>);
 
 struct Marker {
     identity: PhysicalIdentity,
     bytes: Vec<u8>,
 }
 
-impl<'h> ReadySessions<'h> {
-    pub(in crate::capture_recovery::hold) fn admit(hold: &'h OwnHold<'h>) -> EvidenceResult<Self> {
+impl<'h> BoundRoot<'h> {
+    pub(super) fn admit(hold: &'h OwnHold<'h>, root: RunRoot) -> EvidenceResult<Self> {
         hold.check_current()?;
         let member = hold.evidence.targets.bound_member()?;
         let marker = read_marker(member)?;
-        let sessions = open_sessions(member)?;
-        let ready = Self {
+        let dir = open_root(member, root)?;
+        let bound = Self {
             hold,
             member,
             marker,
-            sessions,
+            root,
+            dir,
         };
-        ready.recheck()?;
-        Ok(ready)
+        bound.recheck()?;
+        Ok(bound)
     }
 
     /// Every evidence pass rechecks the hold, the member, the marker and the
-    /// sessions directory before trusting a byte read under them.
-    pub(crate) fn recheck(&self) -> EvidenceResult<()> {
+    /// root directory before trusting a byte read under them.
+    pub(super) fn recheck(&self) -> EvidenceResult<()> {
         self.hold.check_current()?;
         let member = self.hold.evidence.targets.bound_member()?;
         if member.path != self.member.path || member.ancestry != self.member.ancestry {
@@ -57,32 +64,56 @@ impl<'h> ReadySessions<'h> {
         if marker.identity != self.marker.identity || marker.bytes != self.marker.bytes {
             return Err(EvidenceError);
         }
-        self.sessions.recheck().map_err(|_| EvidenceError)?;
-        let now = open_sessions(self.member)?;
-        if now.path != self.sessions.path
-            || now.ancestry != self.sessions.ancestry
+        self.dir.recheck().map_err(|_| EvidenceError)?;
+        let now = open_root(self.member, self.root)?;
+        if now.path != self.dir.path
+            || now.ancestry != self.dir.ancestry
             || now.identity().map_err(|_| EvidenceError)?
-                != self.sessions.identity().map_err(|_| EvidenceError)?
+                != self.dir.identity().map_err(|_| EvidenceError)?
         {
             return Err(EvidenceError);
         }
         Ok(())
     }
 
+    pub(super) fn dir(&self) -> &Namespace {
+        &self.dir
+    }
+
+    pub(super) fn plan(&self) -> &Plan {
+        &self.hold.evidence.plan
+    }
+
+    /// The hold's private operation directory, rechecked with the hold.
+    pub(super) fn private(&self) -> EvidenceResult<&Namespace> {
+        self.hold.check_current()?;
+        Ok(&self.hold.evidence.private)
+    }
+}
+
+impl<'h> ReadySessions<'h> {
+    pub(in crate::capture_recovery::hold) fn admit(hold: &'h OwnHold<'h>) -> EvidenceResult<Self> {
+        BoundRoot::admit(hold, RunRoot::Sessions).map(Self)
+    }
+
+    pub(crate) fn recheck(&self) -> EvidenceResult<()> {
+        self.0.recheck()
+    }
+
     pub(in crate::capture_recovery) fn sessions(&self) -> &Namespace {
-        &self.sessions
+        self.0.dir()
     }
 
     pub(crate) fn repo_id(&self) -> &RepoId {
-        self.hold.evidence.plan.repo_id()
+        self.0.plan().repo_id()
     }
 
     pub(crate) fn git_dir(&self) -> &Path {
-        self.hold.evidence.plan.git_dir()
+        self.0.plan().git_dir()
     }
 
     pub(crate) fn work_tree(&self) -> &Path {
-        self.hold.evidence.plan.work_tree()
+        self.0.plan().work_tree()
     }
 }
 
@@ -96,9 +127,8 @@ fn read_marker(member: &Namespace) -> EvidenceResult<Marker> {
     })
 }
 
-/// The sessions child of the bound member, present and a directory.
-fn open_sessions(member: &Namespace) -> EvidenceResult<Namespace> {
-    let path = RunRoot::Sessions.under(&member.path);
-    open_child_if_present(member, OsStr::new(RunRoot::Sessions.dir_name()), &path)?
-        .ok_or(EvidenceError)
+/// The root's child of the bound member, present and a directory.
+fn open_root(member: &Namespace, root: RunRoot) -> EvidenceResult<Namespace> {
+    let path = root.under(&member.path);
+    open_child_if_present(member, OsStr::new(root.dir_name()), &path)?.ok_or(EvidenceError)
 }
