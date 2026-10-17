@@ -1211,3 +1211,84 @@ fn a_held_members_namespace_refuses_another_members_input() {
     assert_eq!(rig_a.store.calls(), 0, "a refused member reads nothing");
     assert!(Member::new(rig_a.repo_id.clone(), "relative/git", "/tree").is_err());
 }
+
+/// A cache that names no work tree says nothing about the member: unknown is
+/// unavailable evidence, never "another tree" and never "this one". A cache
+/// that names a different tree was read whole and says this is not current.
+#[test]
+fn a_cache_without_a_work_tree_is_unknown_while_another_tree_is_unsupported() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    std::fs::create_dir_all(&rig.sessions_dir).unwrap();
+    let mut unknown = Rig::active_cache(CLAUDE, "u-native", 1, false);
+    unknown.work_tree = None;
+    std::fs::write(
+        rig.sessions_dir.join("u-native.json"),
+        serde_json::to_vec(&unknown).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        rig.verdict(&hold, &job(CLAUDE, "u-native", 1, End)),
+        Verdict::Unavailable(Reason::CacheWorkTreeUnknown)
+    );
+    let mut other = Rig::active_cache(CLAUDE, "o-native", 1, false);
+    other.work_tree = Some(
+        rig.fixture
+            .work_tree
+            .join("elsewhere")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    std::fs::write(
+        rig.sessions_dir.join("o-native.json"),
+        serde_json::to_vec(&other).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        rig.verdict(&hold, &job(CLAUDE, "o-native", 1, End)),
+        Verdict::Unsupported(Reason::CacheWorkTree)
+    );
+}
+
+/// A candidate whose context identity is not the queue's blake3 hex is refused
+/// before its cache is opened or a query is spent, even when the evidence
+/// behind it would otherwise classify eligible.
+#[test]
+fn an_invalid_context_identity_is_refused_before_any_cache_read_or_query() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    let native = "ctx-native";
+    let body = payload("session_id", native);
+    rig.ingest(CLAUDE, "SessionStart", &body, 10);
+    rig.ingest(CLAUDE, PROMPT, &body, 20);
+    let snapshot = job(CLAUDE, native, 1, Start);
+    assert!(matches!(
+        rig.verdict(&hold, &snapshot),
+        Verdict::Eligible(_)
+    ));
+    rig.store.reset();
+    let ready = hold.sessions_namespace().unwrap();
+    for context_id in ["", "not-hex", &"A".repeat(64), &"0".repeat(63)] {
+        let candidates = [super::Candidate {
+            snapshot: &snapshot,
+            context_id,
+        }];
+        let pass = rig
+            .rt
+            .block_on(super::load_evidence(
+                &rig.store,
+                &ready,
+                &rig.registry,
+                &rig.member(),
+                &candidates,
+            ))
+            .unwrap();
+        assert_eq!(
+            pass.classified[0].verdict,
+            Verdict::Unavailable(Reason::ContextInvalid)
+        );
+        assert_eq!(pass.cache_bytes, 0, "no cache read for {context_id:?}");
+        assert_eq!(pass.calls, 0);
+    }
+    assert_eq!(rig.store.calls(), 0, "an invalid context spends no query");
+}
