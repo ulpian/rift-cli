@@ -979,7 +979,8 @@ pub(super) fn line_slice(text: &str, lo: u32, hi: u32) -> String {
 /// read recorded — the working file while its SHA-256 still matches, else the
 /// git blob by oid, else the family's basis snapshot, each verified against
 /// the recorded hash — and append the `file_read_tokens` row at the read's own
-/// `tool_call` id. Insert-or-ignore, so a redelivered job writes no second row.
+/// `tool_call` id. A redelivery whose key's row is provably its own is
+/// discharged with a payload-free note, and writes no second row.
 ///
 /// Where no source holds those bytes any more the job is done, not failed:
 /// the read stays unmeasured ("measured or absent"), and it is counted as
@@ -1007,12 +1008,13 @@ fn count_read_tokens_job(
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
-    ownership::require_new_token_key(
-        &store,
-        &rt,
-        "SELECT tool_call_id FROM file_read_tokens WHERE tool_call_id = ?1",
-        tool_call_id,
-    )?;
+    let key = ownership::read_token_key(&store, &rt, tool_call_id, rel_path, content_sha256)?;
+    if key == ownership::ReadTokenKey::Recorded {
+        let note = crate::agent_queue::note_key(job);
+        let said = format!("{note}: redelivery discharged; the row at its key counts its bytes");
+        crate::capture_queue::mark_note(&repo.git_dir, &note, &said);
+        return Ok(());
+    }
     let Some(bytes) = t.phase("read_bytes", || {
         reads::recorded_revision_bytes(&repo.work_tree, rel_path, content_sha256, blob_oid)
     }) else {

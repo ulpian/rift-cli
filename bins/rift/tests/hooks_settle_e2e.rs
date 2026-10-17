@@ -16,9 +16,9 @@ mod common;
 #[path = "common/hooks_fixture.rs"]
 mod hooks_fixture;
 use hooks_fixture::{
-    agent_hook, agent_read_hook, capture_queue_leg, checkpoint_shards, doctor_fix_json, git_in,
-    rev_parse, run_rift_capture, run_rift_in, run_rift_stdout, seed_live_session_repo,
-    session_phase, sync_env, DetachedHooks,
+    agent_hook, agent_read_hook, capture_queue_leg, checkpoint_shards, doctor_fix_json,
+    doctor_json, git_in, rev_parse, run_rift_capture, run_rift_in, run_rift_stdout,
+    seed_live_session_repo, session_phase, sync_env, DetachedHooks,
 };
 
 // --- the deferred settle -----------------------------------------------------
@@ -421,8 +421,11 @@ fn doctor_drains_a_killed_workers_session_end_job() {
 
 /// A second `SessionEnd` for the same session — the agent redelivering, or a
 /// job found again after the work landed — condenses nothing twice: an end
-/// redelivered to an ended session asks the machine nothing, and the
-/// journal's done-marker refuses even a job planted by hand.
+/// redelivered to an ended session asks the machine nothing, and a job planted
+/// by hand under the pre-context name carries no proof of which delivery it
+/// is, so the done-marker cannot discharge it. It is never executed, spends
+/// no attempt, and stays owed where the doctor names it, until recovery
+/// admits it.
 #[test]
 fn a_redelivered_session_end_never_condenses_twice() {
     let tmp = tempfile::tempdir().unwrap();
@@ -453,8 +456,49 @@ fn a_redelivered_session_end_never_condenses_twice() {
         .or_else(|| doc.pointer("/data/sessions"))
         .unwrap();
     assert_eq!(sessions["finalized"], serde_json::json!([]), "{sessions}");
-    assert_eq!(checkpoint_shards(&repo).len(), 1, "the marker refused it");
-    assert_eq!(agent_queue_state(&repo, "e2e-live-1"), (true, 0));
+    assert_eq!(checkpoint_shards(&repo).len(), 1, "never condensed twice");
+    assert_eq!(
+        agent_queue_state(&repo, "e2e-live-1"),
+        (true, 1),
+        "still owed"
+    );
+    assert_eq!(
+        planted_condense_attempts(&repo),
+        [0],
+        "never executed, no attempt"
+    );
+    // Named by the doctor that tried it (a note is said once, and a later
+    // doctor's soak leg takes it), and still counted by the next report.
+    let fixed = capture_queue_leg(&doc);
+    assert!(
+        fixed["notes"].as_array().unwrap().iter().any(|note| note
+            .as_str()
+            .unwrap()
+            .ends_with(": legacy condense marker lacks delivery proof")),
+        "the doctor names it under its typed reason: {fixed}"
+    );
+    let queue = capture_queue_leg(&doctor_json(&repo, &env)).clone();
+    assert_eq!(queue["agent_jobs"]["pending"], 1, "{queue}");
+}
+
+/// The attempts of every condense job left in the agent queue.
+fn planted_condense_attempts(repo: &Path) -> Vec<u64> {
+    std::fs::read_dir(hooks_fixture::agent_queue_of(repo))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|x| x == "json")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("condense-"))
+        })
+        .map(|path| {
+            let job: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            job["attempts"].as_u64().unwrap()
+        })
+        .collect()
 }
 
 /// `(input_tokens, tokenizer)` rows of `file_read_tokens` for one read call.
@@ -478,7 +522,9 @@ async fn read_token_rows(cache: &Path, repo: &Path, call: &str) -> Vec<(i64, Str
 /// The read path, end to end: the hook records the read's
 /// identity and journals its BPE count; the worker appends the count at the
 /// read's own `tool_call` row (`file_read_tokens`, insert-or-ignore); a
-/// redelivered read writes no second row; and the archive that follows
+/// redelivered read writes no second row and is discharged with a note,
+/// because its key is minted over the bytes the row counts, while a delivery
+/// at that key naming other bytes stays owed; and the archive that follows
 /// carries the figure in the shard, so every downstream reader (Canopy, the
 /// recall journal, cost) sees it as if it had been measured inline.
 #[tokio::test]
@@ -510,6 +556,15 @@ async fn a_reads_token_count_lands_from_the_worker_at_the_reads_own_row() {
         );
     }
     assert_eq!(agent_queue_state(&repo, "e2e-live-1").1, 0, "drained");
+    let queue = capture_queue_leg(&doctor_json(&repo, &env)).clone();
+    assert!(
+        queue["notes"].as_array().unwrap().iter().any(|note| note
+            .as_str()
+            .unwrap()
+            .ends_with(": redelivery discharged; the row at its key counts its bytes")),
+        "the discharge is said: {queue}"
+    );
+    a_delivery_naming_other_bytes_at_the_key_stays_owed(&cache, &repo, &call, &env).await;
 
     let (code, stderr) = run_rift_capture(
         &repo,
@@ -549,6 +604,47 @@ async fn a_reads_token_count_lands_from_the_worker_at_the_reads_own_row() {
         jsonl.contains(&format!(r#""input_tokens":{expected}"#)),
         "the shard carries the late count: {jsonl}"
     );
+}
+
+/// A read-tokens job at a key whose row stands but whose read named other
+/// bytes is not the row's delivery: it is not discharged, spends no attempt,
+/// and the row stays as it was.
+async fn a_delivery_naming_other_bytes_at_the_key_stays_owed(
+    cache: &Path,
+    repo: &Path,
+    call: &str,
+    env: &[(&str, &str)],
+) {
+    let before = read_token_rows(cache, repo, call).await;
+    plant_read_tokens_job(repo, call, &"f".repeat(64), &"0".repeat(40));
+    let queue = capture_queue_leg(&doctor_fix_json(repo, env)).clone();
+    assert_eq!(queue["agent_jobs"]["pending"], 1, "not discharged: {queue}");
+    assert!(
+        queue["notes"].as_array().unwrap().iter().any(|note| note
+            .as_str()
+            .unwrap()
+            .ends_with(": token input cannot be proven from the existing row")),
+        "under its typed reason: {queue}"
+    );
+    // The repair's move gave the pre-context file its context name.
+    let stem = format!("tokens-{call}");
+    let planted: Vec<_> = std::fs::read_dir(hooks_fixture::agent_queue_of(repo))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&stem)
+        })
+        .collect();
+    assert_eq!(planted.len(), 1, "{planted:?}");
+    let job: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&planted[0]).unwrap()).unwrap();
+    assert_eq!(job["attempts"], 0, "no attempt spent");
+    assert_eq!(read_token_rows(cache, repo, call).await, before);
+    std::fs::remove_file(&planted[0]).unwrap();
 }
 
 /// A count is a count of the bytes the agent READ. When the working file has

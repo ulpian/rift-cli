@@ -79,6 +79,62 @@ pub(super) fn require_new_token_key(
     Ok(())
 }
 
+/// What a read's token delivery finds at the key it would write.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ReadTokenKey {
+    /// No row stands at the key: the delivery is owed its count.
+    Fresh,
+    /// The row this delivery would write already stands: the redelivery is
+    /// discharged, and its queue file goes.
+    Recorded,
+}
+
+/// Whether a read's token row already stands at `tool_call_id`, and if so
+/// whether it is this delivery's own.
+///
+/// The key is `read_call_row_id(session, turn, path, content_sha256)`, minted
+/// over the read's content hash, so a row at it counts this delivery's bytes
+/// only when the read the key names read this delivery's path at this
+/// delivery's hash. That is proven from the read's own `tool_reads_file` and
+/// `file_revision` rows, never from the job's word: a row at the key whose
+/// read names other bytes, or no read at all, stays owed as before.
+pub(super) fn read_token_key(
+    store: &rift_store::SqliteStore,
+    rt: &tokio::runtime::Runtime,
+    tool_call_id: &str,
+    rel_path: &str,
+    content_sha256: &str,
+) -> Result<ReadTokenKey> {
+    let key = [rift_store::Value::text(tool_call_id)];
+    let counted = rt
+        .block_on(store.query(
+            "SELECT tool_call_id FROM file_read_tokens WHERE tool_call_id = ?1",
+            &key,
+        ))
+        .map_err(|error| proof_read(error, "token prior-key proof is unavailable"))?;
+    if counted.is_empty() {
+        return Ok(ReadTokenKey::Fresh);
+    }
+    let read = rt
+        .block_on(store.query(
+            "SELECT r.path, r.content_sha256 FROM tool_reads_file f \
+             JOIN file_revision r ON r.file_revision_id = f.file_revision_id \
+             WHERE f.tool_call_id = ?1",
+            &key,
+        ))
+        .map_err(|error| proof_read(error, "token prior-key proof is unavailable"))?;
+    let bound = read.iter().any(|row| {
+        row.get_text(0).is_ok_and(|path| path == rel_path)
+            && row.get_text(1).is_ok_and(|sha| sha == content_sha256)
+    });
+    if !bound {
+        return Err(deferred(
+            "token input cannot be proven from the existing row",
+        ));
+    }
+    Ok(ReadTokenKey::Recorded)
+}
+
 /// Old lifecycle shortcuts cannot certify the exact current delivery.
 pub(super) fn require_condense_input(git_dir: &Path, sessions: &Path, session: &str) -> Result<()> {
     if crate::agent_queue::is_condensed(git_dir, session) {
