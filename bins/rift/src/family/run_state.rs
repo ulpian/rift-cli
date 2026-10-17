@@ -39,6 +39,13 @@ const QUEUE_LOCK: &str = ".lock";
 const MOVE_WAIT_STEPS_MS: [u64; 5] = [1, 2, 4, 8, 10];
 
 /// One member's resolution, memoized for the life of the process.
+/// Held while a report-only command runs on this thread (`rift doctor`
+/// without `--fix`): every run-state path it resolves is found without
+/// recording member metadata, journaling the move, or minting a family, so a
+/// report changes nothing it reports on. Dropping it restores what was held.
+#[must_use = "the report-only resolution ends when the guard drops"]
+pub(crate) struct ReportOnly(bool);
+
 #[derive(Clone, Debug)]
 struct Resolved {
     run_root: PathBuf,
@@ -377,19 +384,9 @@ pub(crate) fn agent_queue_dir(git_dir: &Path) -> PathBuf {
 /// An unavailable/unminted family leaves only its known legacy root visible.
 pub(crate) fn capture_queue_read_dirs(git_dir: &Path) -> Vec<PathBuf> {
     let legacy = RunRoot::CaptureQueue.legacy_under(git_dir);
-    let Some(work_tree) = session_cache::work_tree_of(git_dir) else {
+    let Some(member) = minted_member(git_dir) else {
         return vec![legacy];
     };
-    let Ok(repo) = rift_git::discover(&work_tree).or_else(|_| rift_git::discover(git_dir)) else {
-        return vec![legacy];
-    };
-    let Ok(rift_git::FamilyState::Minted(family)) =
-        rift_git::resolve_family(&repo, rift_git::MintPolicy::Never)
-    else {
-        return vec![legacy];
-    };
-    let family_dir = rift_store::projection_dir_under(&super::cache_root(), &family.family_id);
-    let member = layout::member_dir(&family_dir, &work_tree);
     let current = RunRoot::CaptureQueue.under(&member);
     // The dual read's rule: after the move, the old directory is read only
     // while it still stands, which is what an older binary wrote since.
@@ -757,15 +754,68 @@ fn settle(ctx: &MoveCtx<'_>, sleep: &mut dyn FnMut(Duration)) -> std::io::Result
     Ok(report)
 }
 
+/// Resolve run state for a report on this thread until the guard drops.
+pub(crate) fn report_only() -> ReportOnly {
+    ReportOnly(REPORTING.with(|reporting| reporting.replace(true)))
+}
+
+impl Drop for ReportOnly {
+    fn drop(&mut self) {
+        REPORTING.with(|reporting| reporting.set(self.0));
+    }
+}
+
+thread_local! {
+    /// Whether a [`ReportOnly`] guard is held on this thread.
+    static REPORTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Resolve `root` for the member whose git dir is `git_dir`: under the
 /// family's run directory, or in the git dir when no family can be resolved
 /// (outside a repository, or before one is minted), which is then the
-/// member's one home.
+/// member's one home. Under [`ReportOnly`], [`report_dir`].
 fn root_dir(git_dir: &Path, root: RunRoot) -> PathBuf {
+    if REPORTING.with(std::cell::Cell::get) {
+        return report_dir(git_dir, root);
+    }
     match member_of(git_dir) {
         Some(member) => root.under(&member),
         None => root.legacy_under(git_dir),
     }
+}
+
+/// [`root_dir`] for a report: the member found through a family that is
+/// never minted here, nothing recorded and no move journaled. A member a new
+/// binary has recorded is read as every reader reads it, the new tree with
+/// the dual read's fallback; an unrecorded one is read where its root stands,
+/// the new tree when it holds one and the old tree otherwise, because the
+/// fallback a recorded member gets is the record this resolver never writes.
+fn report_dir(git_dir: &Path, root: RunRoot) -> PathBuf {
+    let key = rift_git::family::canonical_or_lexical(git_dir);
+    let Some(member) = minted_member(&key) else {
+        return root.legacy_under(git_dir);
+    };
+    let current = root.under(&member);
+    if current.is_dir() {
+        return current;
+    }
+    layout::dir_for_read(root, &member, &key)
+}
+
+/// The member's run directory under an already-minted family, read without
+/// minting, recording or journaling anything.
+fn minted_member(git_dir: &Path) -> Option<PathBuf> {
+    let work_tree = session_cache::work_tree_of(git_dir)?;
+    let repo = rift_git::discover(&work_tree)
+        .or_else(|_| rift_git::discover(git_dir))
+        .ok()?;
+    let Ok(rift_git::FamilyState::Minted(family)) =
+        rift_git::resolve_family(&repo, rift_git::MintPolicy::Never)
+    else {
+        return None;
+    };
+    let family_dir = rift_store::projection_dir_under(&super::cache_root(), &family.family_id);
+    Some(layout::member_dir(&family_dir, &work_tree))
 }
 
 /// Resolved members, by canonical git dir. Only successes are kept, so a

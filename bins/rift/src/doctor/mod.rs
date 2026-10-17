@@ -89,6 +89,9 @@ impl DoctorReport {
 fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outcome {
     let root = &worktree_root(start);
     let repair = fix && !strict_read_only;
+    // A report publishes no job and moves no file: every run-state path a
+    // report-only leg resolves is found, never recorded or journaled.
+    let _report = (!fix).then(crate::family::run_state::report_only);
     let mut report = DoctorReport {
         human: String::from("rift doctor"),
         json: serde_json::Map::new(),
@@ -103,7 +106,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("stale_rewrite_toml", doctor_stale_rewrite_toml(root));
     report.leg("phantom_gitdirs", doctor_phantom_gitdirs(root, fix));
     report.leg("push_queue", doctor_push_queue(root, repair));
-    report.leg("prunable_worktrees", doctor_prunable_worktrees(root));
+    report.leg("prunable_worktrees", doctor_prunable_worktrees(root, fix));
     report.leg("orphan_projections", doctor_orphan_projections(root));
     report.leg("family_identity", doctor_family_identity(root));
     report.leg(
