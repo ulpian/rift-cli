@@ -7,9 +7,10 @@ use std::path::Path;
 use crate::ci_meta::production_half;
 
 use super::text::{
-    calls_within, fn_bodies, mask_code, qualified_calls_within, token_offsets, FnBody,
+    calls_within, fn_bodies, is_ident_byte, mask_code, qualified_calls_within, skip_balanced,
+    token_offsets, FnBody,
 };
-use super::{is_test_surface, rust_corpus, Leg};
+use super::{is_test_surface, line_of, rust_corpus, Leg};
 
 /// What [`walk_by_name`] reached from its roots.
 pub(super) struct Walk<'a> {
@@ -20,6 +21,15 @@ pub(super) struct Walk<'a> {
     /// Each reached definition that mentions a forbidden name, with the name.
     pub(super) hits: Vec<(&'a FnBody, &'static str)>,
 }
+
+/// The node a `drop` method in an `impl Drop for …` block is filed under.
+///
+/// Not its bare name: a bare `drop(x)` is the prelude's `std::mem::drop`, and
+/// resolving it to every destructor in the tree reached a dozen and more of
+/// them from one hook without one of them being called there. A trait method
+/// cannot be renamed, so the walk renames the node instead, and only a call
+/// spelled through the trait reaches it.
+const DROP_IMPL_NODE: &str = "Drop::drop";
 
 /// The crates a decision's call graph is walked through, and the crates the
 /// hook and worker entry points are walked through for the same reason: the
@@ -65,7 +75,7 @@ pub(super) const GATE_ROOTS: [&str; 11] = [
 /// child the binary re-spawns (`doc_helper`): a parser wedged on a hostile
 /// file inside the hook process could not be killed, and a container that
 /// decompresses past memory would take the hook with it.
-const FORBIDDEN_ON_GATE_PATH: [&str; 9] = [
+pub(super) const FORBIDDEN_ON_GATE_PATH: [&str; 9] = [
     "open_migrated",
     "open_capture_projection",
     "recall_db",
@@ -114,7 +124,9 @@ pub fn no_store_on_gate_path(root: &Path) -> Result<Leg, String> {
 /// uses to check the walk still arrives where it should. A tightening that
 /// quietly empties the walk is a green gate that guards nothing, so the
 /// waypoints are asserted rather than assumed.
-fn screen_gate_path(corpus: &[(String, String)]) -> Result<(Leg, BTreeSet<String>), String> {
+pub(super) fn screen_gate_path(
+    corpus: &[(String, String)],
+) -> Result<(Leg, BTreeSet<String>), String> {
     let fns = production_fns(corpus);
     if let Some(root_fn) = missing_root(&fns, &GATE_ROOTS) {
         return Err(format!(
@@ -241,6 +253,7 @@ fn walk<'a>(
         names: BTreeSet::new(),
         hits: Vec::new(),
     };
+    let drop_impls: Vec<&FnBody> = fns.iter().filter(|f| f.name == DROP_IMPL_NODE).collect();
     let mut visited: BTreeSet<&str> = BTreeSet::new();
     let mut queue: VecDeque<&FnBody> = VecDeque::new();
     for root_fn in roots {
@@ -258,13 +271,42 @@ fn walk<'a>(
                 walk.hits.push((f, needle));
             }
         }
-        for next in callees(f) {
+        let through_the_trait = calls_drop_through_the_trait(&f.body)
+            .then_some(drop_impls.iter().copied())
+            .into_iter()
+            .flatten();
+        for next in callees(f).into_iter().chain(through_the_trait) {
             if visited.insert(&next.site) {
                 queue.push_back(next);
             }
         }
     }
     walk
+}
+
+/// True when `body` calls a destructor through the trait, as
+/// `Drop::drop(` or `<… as Drop>::drop(`: the only spellings that reach a
+/// [`DROP_IMPL_NODE`].
+fn calls_drop_through_the_trait(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    token_offsets(body, "drop").into_iter().any(|at| {
+        let before = body.get(..at).unwrap_or("");
+        let Some(trait_at) = before
+            .strip_suffix("Drop::")
+            .or_else(|| before.strip_suffix("Drop>::"))
+            .map(str::len)
+        else {
+            return false;
+        };
+        let whole_trait = trait_at
+            .checked_sub(1)
+            .and_then(|i| bytes.get(i))
+            .is_none_or(|b| !is_ident_byte(*b));
+        let opens = body
+            .get(at + "drop".len()..)
+            .is_some_and(|rest| rest.trim_start().starts_with('('));
+        whole_trait && opens
+    })
 }
 
 /// True when the definition at `site` (`path:line`) lives in the module
@@ -291,9 +333,54 @@ pub(super) fn production_fns(corpus: &[(String, String)]) -> Vec<FnBody> {
         if is_test_surface(rel) || for_tests.contains(rel.as_str()) {
             continue;
         }
-        fns.extend(fn_bodies(rel, &mask_code(&production_half(text))));
+        let masked = mask_code(&production_half(text));
+        let destructors = drop_impl_lines(&masked);
+        fns.extend(fn_bodies(rel, &masked).into_iter().map(|mut f| {
+            let line = f
+                .site
+                .rsplit_once(':')
+                .and_then(|(_, line)| line.parse().ok());
+            let in_drop_impl = line
+                .is_some_and(|line: usize| destructors.iter().any(|lines| lines.contains(&line)));
+            if f.name == "drop" && in_drop_impl {
+                DROP_IMPL_NODE.clone_into(&mut f.name);
+            }
+            f
+        }));
     }
     fns
+}
+
+/// The line ranges of every `impl … Drop for …` block in `masked`, counted
+/// the way a definition's site is.
+pub(super) fn drop_impl_lines(masked: &str) -> Vec<std::ops::RangeInclusive<usize>> {
+    let bytes = masked.as_bytes();
+    let mut out = Vec::new();
+    for at in token_offsets(masked, "impl") {
+        let Some(brace) = masked
+            .get(at..)
+            .and_then(|rest| rest.find(['{', ';']))
+            .map(|offset| at + offset)
+        else {
+            continue;
+        };
+        if bytes.get(brace) != Some(&b'{') {
+            continue;
+        }
+        let header = masked.get(at + "impl".len()..brace).unwrap_or("");
+        let words: Vec<&str> = header.split_whitespace().collect();
+        let implements_drop = words
+            .windows(2)
+            .any(|pair| matches!(pair, [ty, "for"] if *ty == "Drop" || ty.ends_with("::Drop")));
+        if !implements_drop {
+            continue;
+        }
+        let end = skip_balanced(bytes, brace, b'{', b'}');
+        let first = line_of(masked, brace).saturating_sub(1);
+        let last = line_of(masked, end).saturating_sub(1);
+        out.push(first..=last);
+    }
+    out
 }
 
 /// The files in `corpus` the compiler builds only for tests: each one whose
@@ -303,7 +390,7 @@ pub(super) fn production_fns(corpus: &[(String, String)]) -> Vec<FnBody> {
 /// Read from the whole parent, not its production half: the declaration is
 /// itself the column-zero marker the production cut stops at. A parent that
 /// is not in the corpus ends the climb, and the file is walked.
-fn declared_for_tests(corpus: &[(String, String)]) -> BTreeSet<&str> {
+pub(super) fn declared_for_tests(corpus: &[(String, String)]) -> BTreeSet<&str> {
     let masked: BTreeMap<&str, String> = corpus
         .iter()
         .map(|(rel, text)| (rel.as_str(), mask_code(text)))
@@ -448,6 +535,54 @@ mod tests {
         assert_eq!(leg.violations.len(), 1, "{:#?}", leg.violations);
         assert!(
             leg.violations[0].contains("open_migrated"),
+            "{:#?}",
+            leg.violations
+        );
+    }
+
+    /// ★ A bare `drop(x)` is the prelude's, so it reaches no destructor; a
+    /// destructor that opens a store is still caught when a call through the
+    /// trait reaches it, and a free function named `drop` is still a node.
+    #[test]
+    fn a_bare_drop_call_reaches_no_destructor_and_a_trait_call_does() {
+        let fixture = |read_gate: &str| {
+            vec![(
+                "bins/rift/src/hooks/gate/mod.rs".to_owned(),
+                format!(
+                    "fn window_journal_step() {{}}\n{read_gate}\nfn edit_record() {{}}\n\
+                     fn gate_policy() {{}}\nfn gate_step() {{}}\nfn edit_step() {{}}\n\
+                     fn gate() {{}}\nfn respond_with_decision() {{}}\n\
+                     fn doc_gate() {{}}\nfn doc_gate_in() {{}}\nfn document_verify() {{}}\n\
+                     struct Guard;\nimpl Drop for Guard {{\n    fn drop(&mut self) {{\n        \
+                     open_migrated();\n    }}\n}}\n"
+                ),
+            )]
+        };
+        let bare = fixture("fn read_gate() { let g = Guard; drop(g); }");
+        let (leg, reached) = screen_gate_path(&bare).expect("the walk runs");
+        assert!(leg.violations.is_empty(), "{:#?}", leg.violations);
+        assert!(!reached.contains(DROP_IMPL_NODE), "{reached:?}");
+
+        for call in ["Drop::drop(&mut g)", "<Guard as Drop>::drop(&mut g)"] {
+            let through = fixture(&format!("fn read_gate() {{ let mut g = Guard; {call}; }}"));
+            let (leg, reached) = screen_gate_path(&through).expect("the walk runs");
+            assert_eq!(leg.violations.len(), 1, "{call}: {:#?}", leg.violations);
+            assert!(
+                leg.violations[0].contains("`Drop::drop` reaches `open_migrated`"),
+                "{call}: {:#?}",
+                leg.violations
+            );
+            assert!(reached.contains(DROP_IMPL_NODE), "{call}: {reached:?}");
+        }
+
+        let free = vec![(
+            bare[0].0.clone(),
+            format!("{}fn drop(g: Guard) {{ open_migrated(); }}\n", bare[0].1),
+        )];
+        let (leg, _) = screen_gate_path(&free).expect("the walk runs");
+        assert_eq!(leg.violations.len(), 1, "{:#?}", leg.violations);
+        assert!(
+            leg.violations[0].contains("`drop` reaches `open_migrated`"),
             "{:#?}",
             leg.violations
         );

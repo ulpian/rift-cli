@@ -19,6 +19,15 @@ pub struct FnBody {
     pub body: String,
 }
 
+/// A function as [`fn_spans`] finds it: its name, where `fn` stands, and the
+/// byte range of its body, braces included.
+#[derive(Debug)]
+pub(super) struct FnSpan {
+    pub(super) name: String,
+    pub(super) at: usize,
+    pub(super) body: std::ops::Range<usize>,
+}
+
 /// `text` with every comment, string literal body and character literal
 /// replaced by spaces, and every other byte left exactly where it was.
 ///
@@ -56,6 +65,21 @@ pub fn mask_comments(text: &str) -> String {
 /// skipped rather than guessed at.
 #[must_use]
 pub fn fn_bodies(rel: &str, masked: &str) -> Vec<FnBody> {
+    fn_spans(masked)
+        .into_iter()
+        .map(|span| FnBody {
+            site: format!("{rel}:{}", line_of(masked, span.at).saturating_sub(1)),
+            body: masked.get(span.body.clone()).unwrap_or("").to_owned(),
+            name: span.name,
+        })
+        .collect()
+}
+
+/// Every function defined in `masked`, with the byte range of its body.
+///
+/// The offsets are what a leg needs to name the function a given byte sits
+/// in; [`fn_bodies`] is this reading with the text copied out.
+pub(super) fn fn_spans(masked: &str) -> Vec<FnSpan> {
     let bytes = masked.as_bytes();
     let mut out = Vec::new();
     for at in token_offsets(masked, "fn ") {
@@ -93,10 +117,10 @@ pub fn fn_bodies(rel: &str, masked: &str) -> Vec<FnBody> {
             continue;
         }
         let end = skip_balanced(bytes, i, b'{', b'}');
-        out.push(FnBody {
+        out.push(FnSpan {
             name,
-            site: format!("{rel}:{}", line_of(masked, at).saturating_sub(1)),
-            body: masked.get(i..end).unwrap_or("").to_owned(),
+            at,
+            body: i..end,
         });
     }
     out

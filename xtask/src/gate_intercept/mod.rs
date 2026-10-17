@@ -11,6 +11,9 @@
 //! * `pinned-channels` — the channels Rift answers on are reviewable as a list.
 //! * `no-store-on-gate-path` — the decision path opens no store and loads no
 //!   tokenizer.
+//! * `no-store-in-destructors` — no destructor in a hook-path crate opens a
+//!   store or loads the tokenizer, read directly rather than by reachability,
+//!   since a destructor's caller is the scope its value dies in.
 //! * `one-reason-renderer` — one module writes the sentences a model reads.
 //! * `closed-rewrite-forms` — every tool-call rewrite is one of three pinned forms.
 //! * `family-keyed-caches` — a cache is keyed by the repository family, never
@@ -37,6 +40,7 @@
 mod cache_read;
 mod channels;
 mod chokepoint;
+mod destructors;
 mod family_caches;
 mod gate_path;
 mod managed_regions;
@@ -52,6 +56,7 @@ use crate::ci_meta::tracked_paths;
 pub use cache_read::one_cache_read;
 pub use channels::pinned_channels;
 pub use chokepoint::one_gate_chokepoint;
+pub use destructors::no_store_in_destructors;
 pub use family_caches::family_keyed_caches;
 pub use gate_path::no_store_on_gate_path;
 pub use managed_regions::regions_at_boundaries;
@@ -90,6 +95,7 @@ pub fn run_all(root: &Path) -> Result<Vec<Leg>, String> {
         one_gate_chokepoint(root)?,
         pinned_channels(root)?,
         no_store_on_gate_path(root)?,
+        no_store_in_destructors(root)?,
         one_reason_renderer(root)?,
         closed_rewrite_forms(root)?,
         family_keyed_caches(root)?,
@@ -107,12 +113,20 @@ pub fn run_all(root: &Path) -> Result<Vec<Leg>, String> {
 /// # Errors
 /// If `git ls-files` fails or a tracked file cannot be read.
 fn rust_corpus(root: &Path) -> Result<Vec<(String, String)>, String> {
+    rust_corpus_under(root, &["crates/", "bins/"])
+}
+
+/// Every tracked `.rs` file under one of `prefixes`, as `(path, text)`.
+///
+/// # Errors
+/// If `git ls-files` fails, a tracked file cannot be read, or nothing matches.
+fn rust_corpus_under(root: &Path, prefixes: &[&str]) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     for rel in tracked_paths(root)? {
         let is_rust = Path::new(&rel)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"));
-        if !is_rust || !(rel.starts_with("crates/") || rel.starts_with("bins/")) {
+        if !is_rust || !prefixes.iter().any(|prefix| rel.starts_with(prefix)) {
             continue;
         }
         let text = std::fs::read_to_string(root.join(&rel))
@@ -153,24 +167,22 @@ mod tests {
                 leg.violations
             );
         }
-        assert_eq!(legs.len(), 9, "every leg reports, built or not");
+        assert_eq!(legs.len(), 10, "every leg reports, built or not");
     }
 
-    /// The two call-graph walks are dispatched by the runner, not only
-    /// callable: their planting tests call the walks directly, so they would
-    /// stay green with a leg dropped from the command.
+    /// The two call-graph walks and the destructor screen are dispatched by
+    /// the runner, not only callable: their planting tests call the screens
+    /// directly, so they would stay green with a leg dropped from the command.
     #[test]
-    fn the_runner_dispatches_both_call_graph_walks() {
+    fn the_runner_dispatches_the_call_graph_walks_and_the_destructor_screen() {
         let legs = run_all(&crate::workspace_root()).expect("every leg runs");
-        assert!(
-            legs.iter().any(|leg| leg.name == "no-store-on-gate-path"),
-            "{:?}",
-            legs.iter().map(|leg| leg.name).collect::<Vec<_>>()
-        );
-        assert!(
-            legs.iter().any(|leg| leg.name == "regions-at-boundaries"),
-            "{:?}",
-            legs.iter().map(|leg| leg.name).collect::<Vec<_>>()
-        );
+        let names: Vec<&str> = legs.iter().map(|leg| leg.name).collect();
+        for expected in [
+            "no-store-on-gate-path",
+            "no-store-in-destructors",
+            "regions-at-boundaries",
+        ] {
+            assert!(names.contains(&expected), "{expected}: {names:?}");
+        }
     }
 }

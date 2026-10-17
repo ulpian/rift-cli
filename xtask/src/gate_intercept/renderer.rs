@@ -1,12 +1,16 @@
 //! The `one-reason-renderer` leg: one module writes the sentences a model
 //! reads.
 
+mod literals;
+
 use std::path::Path;
 
 use crate::ci_meta::production_half;
 
 use super::text::mask_comments;
-use super::{is_test_surface, line_of, rust_corpus, Leg};
+use super::{is_test_surface, line_of, rust_corpus, rust_corpus_under, Leg};
+
+use literals::{screen_marker_literals, RENDERER_ALLOW};
 
 /// Where every sentence a model reads from Rift is written.
 const RENDERER: &str = "crates/rift-recall-validity/src/trust/frames/mod.rs";
@@ -19,15 +23,35 @@ const RENDERER: &str = "crates/rift-recall-validity/src/trust/frames/mod.rs";
 /// phrases inherits none of it, and it is indistinguishable to a reader (and to
 /// a model) from the real thing.
 ///
-/// So: no production code outside the renderer may spell one of its openers.
+/// So: no production code outside the renderer may spell one of its openers,
+/// nor any literal holding the marker those openers share, unless the site is
+/// a reader pinned in `RENDERER_ALLOW`.
 /// Comments are masked and string literals are not, because a phrase written
 /// into an output IS a string literal, while a comment quoting one is how this
 /// codebase explains itself.
 ///
 /// # Errors
-/// If the corpus or the renderer cannot be read, or the openers stop parsing.
+/// If the corpus, the renderer or the allow-list cannot be read, or the
+/// openers or the allow-list stop parsing.
 pub fn one_reason_renderer(root: &Path) -> Result<Leg, String> {
-    Ok(screen_renderer(&rust_corpus(root)?, &frame_openers(root)?))
+    let openers = screen_renderer(&rust_corpus(root)?, &frame_openers(root)?);
+    let allow = std::fs::read_to_string(root.join(RENDERER_ALLOW))
+        .map_err(|e| format!("read {RENDERER_ALLOW}: {e}"))?;
+    // The tools are in this half's corpus: a measurer that recognises a
+    // marked line is a reader to pin, and one that wrote one would be a
+    // second renderer like any other.
+    let corpus = rust_corpus_under(root, &["crates/", "bins/", "xtask/"])?;
+    let markers = screen_marker_literals(&corpus, RENDERER, &allow)?;
+    let mut violations = openers.violations;
+    violations.extend(markers.violations);
+    Ok(Leg::new(
+        openers.name,
+        format!(
+            "{}; {} marked-line site(s) pinned as readers in {RENDERER_ALLOW} across {} file(s)",
+            openers.detail, markers.pinned, markers.screened
+        ),
+        violations,
+    ))
 }
 
 /// The screen over an explicit corpus and opener list — the seam a planted

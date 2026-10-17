@@ -1,0 +1,23 @@
+# Sites outside the renderer that hold a literal spelling Rift's line marker.
+#
+# One module writes the sentences a model reads:
+# `crates/rift-recall-validity/src/trust/frames/mod.rs`. The
+# `one-reason-renderer` leg of `cargo run -p xtask -- gate-intercept` reds on
+# any string or byte-string literal holding the marker in the production half
+# of any other tracked `.rs` file under `crates/`, `bins/` or `xtask/`. A site
+# that only READS a marked line (a parser, a recogniser, a measurer) is pinned
+# here; a site that WRITES one moves its sentence into the renderer instead and
+# is never listed.
+#
+# Format, one site per line, keyed by file and the enclosing fn, const or
+# static (never by line number):
+#
+#   <path>::<item>  parse-only | <what the site reads, in a sentence>
+#
+# A row whose site no longer holds such a literal is stale and reds the leg,
+# so this list shrinks with the sites it covers.
+
+bins/rift/src/verify/originals.rs::missing_originals  parse-only | Scans a sealed transcript for lines carrying the marker, to find a delivered rewrite that has no sealed original; it writes nothing a model reads.
+crates/rift-shadow/src/backend/rewrite.rs::FOLD_OPEN  parse-only | Recognises a fold line by its opening in `parse_fold_line`, which `is_fold_line` and `render_folded` consult; since the integration merge nothing in this crate renders one (`fold_line` is gone, the caller supplies the text), so the opener is read, never written.
+crates/rift-shadow/src/backend/rewrite.rs::HELD_FRAME_OPEN  parse-only | Recognises a held frame by its opening in `is_held_frame`; the frame itself is written by the renderer.
+xtask/src/dogfood/measure.rs::RIFT_MARKER  parse-only | The dogfood measurer searches a client's own log for lines Rift wrote, to count denials and retries.
