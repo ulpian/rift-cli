@@ -17,90 +17,19 @@
 //! the driver. This suite must never be able to write into the repository it
 //! runs in — that class already put one fixture session into this repository's
 //! immutable checkpoint history (see `bins/rift/tests/common/mod.rs`).
+//!
+//! The binary it drives is resolved by `common::rift_bin` — a gate-exported
+//! `RIFT_E2E_BIN` first, the lock-guarded nested build last — and the tests
+//! at the end of this file pin that order.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+mod common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The `rift` binary this suite drives, **rebuilt from the current source
-/// before it is driven**.
-///
-/// `CARGO_BIN_EXE_*` only names bins of *this* package, and the binary under
-/// test belongs to `bins/rift`, so it can only be found as vogon's sibling in
-/// the same target profile directory. Finding it is not enough, and the first
-/// draft of this suite learned that the expensive way: a defect planted in
-/// `dispatch` left all four tests **green**, because `cargo test -p
-/// rift-shadow-hooks` rebuilds this crate but has no reason to relink a binary
-/// belonging to another package — so the suite drove a stale `rift` compiled
-/// from the code before the plant. That is this fleet's recorded
-/// stale-`target/debug/rift` hazard, and a calibration that cannot redden is
-/// worse than no calibration.
-///
-/// So the build is unconditional — and it goes to **its own target directory**,
-/// which is not an optimization but the second half of the same correctness
-/// argument. Measured: building into the shared `target/` recompiled
-/// `rift-core`, `rift-agent`, `rift-recall-types` and `rift-hashchain` *during*
-/// the workspace test run, because the gate builds `--all-features` and a
-/// package-scoped `cargo build -p rift` does not — so the two invocations fight
-/// over the same fingerprints and every later `cargo test --workspace
-/// --all-features` pays to undo this one. A separate directory cannot collide
-/// with the outer build's artifacts, cannot relink a binary another suite is
-/// spawning, and is always current. The cost is one build of the binary the
-/// first time and a cargo no-op on every run after it, because the directory
-/// persists — stated as a shape rather than a duration, since every wall-clock
-/// number taken on this machine today is void (the Gatekeeper-assessment wedge
-/// the ledger records at 2026-08-16T14:40Z was live while they were taken).
-///
-/// Building rather than skipping also keeps this leg free of a per-item opt-out
-/// — an `#[ignore]`, a silent skip or an early `return` is exactly what a gate
-/// of last resort may not have.
-fn rift_bin() -> PathBuf {
-    static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BIN.get_or_init(|| {
-        // `<workspace>/target/vogon-e2e`, derived from where cargo put vogon
-        // (`<workspace>/target/<profile>/vogon`) so it follows a redirected
-        // `CARGO_TARGET_DIR` instead of guessing at the repository layout.
-        let vogon = PathBuf::from(env!("CARGO_BIN_EXE_vogon"));
-        let profile_dir = vogon.parent().expect("vogon has a parent dir");
-        let profile = profile_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("debug")
-            .to_owned();
-        let target = profile_dir
-            .parent()
-            .expect("a target dir above the profile dir")
-            .join("vogon-e2e");
-        let mut build = Command::new(env!("CARGO"));
-        build.args(["build", "-p", "rift", "--bin", "rift"]);
-        if profile == "release" {
-            build.arg("--release");
-        }
-        let status = build
-            .arg("--target-dir")
-            .arg(&target)
-            .env("CARGO_INCREMENTAL", "0")
-            .env("CARGO_PROFILE_DEV_DEBUG", "0")
-            .env("CARGO_PROFILE_DEV_STRIP", "debuginfo")
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()
-            .expect("spawn cargo to build the binary under test");
-        assert!(status.success(), "cargo build -p rift --bin rift failed");
-        let exe = target
-            .join(&profile)
-            .join(format!("rift{}", std::env::consts::EXE_SUFFIX));
-        assert!(
-            exe.is_file(),
-            "the rift binary is not at {} after building it",
-            exe.display()
-        );
-        exe
-    })
-    .clone()
-}
+use common::rift_bin;
 
 fn git(repo: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -460,4 +389,61 @@ fn the_commit_beat_condenses_the_live_session_onto_the_checkpoint_ref() {
         refs.contains("refs/heads/rift/checkpoints/v1"),
         "the commit beat condensed nothing; refs = {refs:?}"
     );
+}
+
+/// A resolver whose build step records being reached and never spawns cargo.
+fn counting_build(hits: &std::cell::Cell<usize>) -> impl FnMut() -> PathBuf + '_ {
+    move || {
+        hits.set(hits.get() + 1);
+        PathBuf::from("/never/built")
+    }
+}
+
+#[test]
+fn a_planted_binary_is_driven_without_reaching_the_build_step() {
+    let tmp = tempfile::tempdir().unwrap();
+    let planted = tmp.path().join("rift-planted");
+    std::fs::write(&planted, b"not a real binary").unwrap();
+    let env = |key: &str| (key == common::RIFT_E2E_BIN).then(|| planted.clone().into_os_string());
+    let hits = std::cell::Cell::new(0);
+    let own = tmp.path().join("own-package-rift");
+    std::fs::write(&own, b"would win without the plant").unwrap();
+
+    let (exe, source) = common::resolve_rift_bin(&env, own.to_str(), &mut counting_build(&hits));
+
+    assert_eq!(exe, planted);
+    assert_eq!(source, common::BinarySource::Planted);
+    assert_eq!(hits.get(), 0, "the build step must not be reached");
+    assert_eq!(
+        std::fs::read_dir(tmp.path()).unwrap().count(),
+        2,
+        "nothing was created beside the two planted files"
+    );
+}
+
+#[test]
+fn a_plant_that_names_no_file_falls_through_to_the_own_package_binary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("gone");
+    let env = |key: &str| (key == common::RIFT_E2E_BIN).then(|| missing.clone().into_os_string());
+    let own = tmp.path().join("own-package-rift");
+    std::fs::write(&own, b"the package's own bin").unwrap();
+    let hits = std::cell::Cell::new(0);
+
+    let (exe, source) = common::resolve_rift_bin(&env, own.to_str(), &mut counting_build(&hits));
+
+    assert_eq!((exe, source), (own, common::BinarySource::OwnPackage));
+    assert_eq!(hits.get(), 0);
+}
+
+#[test]
+fn with_neither_plant_nor_own_package_the_build_step_answers_exactly_once() {
+    let env = |_: &str| None;
+    let hits = std::cell::Cell::new(0);
+
+    let (exe, source) = common::resolve_rift_bin(&env, None, &mut counting_build(&hits));
+
+    assert_eq!(exe, PathBuf::from("/never/built"));
+    assert_eq!(source, common::BinarySource::Built);
+    assert_eq!(hits.get(), 1);
 }
