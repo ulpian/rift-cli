@@ -548,7 +548,7 @@ fn queue_value(root: RunRoot, path: &Path) -> std::io::Result<(serde_json::Value
 
 fn queue_conflict(ctx: &MoveCtx<'_>) -> std::io::Result<bool> {
     for root in [RunRoot::AgentQueue, RunRoot::CaptureQueue] {
-        let mut seen = BTreeMap::new();
+        let mut seen = Seen::default();
         for dir in [root.legacy_under(ctx.git_dir), root.under(ctx.member)] {
             for path in queue_paths(&dir)? {
                 if path.file_name().is_some_and(|name| name == ".lock") {
@@ -558,15 +558,53 @@ fn queue_conflict(ctx: &MoveCtx<'_>) -> std::io::Result<bool> {
                     continue;
                 }
                 let (value, stem) = queue_value(root, &path)?;
-                if let Some(previous) = seen.insert(stem, value.clone()) {
-                    if previous != value && !repeatable_request(root, &previous, &value) {
-                        return Ok(true);
-                    }
+                let versioned = crate::capture_queue::delivery::is_versioned(&path, &stem, &value)
+                    .map_err(|_| std::io::Error::other("queue context is unsupported"))?;
+                if seen.conflicts(root, stem, versioned, value) {
+                    return Ok(true);
                 }
             }
         }
     }
     Ok(false)
+}
+
+/// The copies of each logical delivery seen so far in one queue root.
+///
+/// A context-addressed file is a distinct delivery: two of one stem with
+/// different contexts both stay owed (a changed instant keeps both). A
+/// pre-context file names only its stem, so it conflicts with any other copy
+/// of that stem that differs, and the move then leaves every copy in place.
+#[derive(Default)]
+struct Seen {
+    legacy: BTreeMap<(&'static str, String), serde_json::Value>,
+    versioned: BTreeMap<(&'static str, String), Vec<serde_json::Value>>,
+}
+
+impl Seen {
+    fn conflicts(
+        &mut self,
+        root: RunRoot,
+        stem: String,
+        versioned: bool,
+        value: serde_json::Value,
+    ) -> bool {
+        let key = (root.dir_name(), stem);
+        let differs =
+            |other: &serde_json::Value| *other != value && !repeatable_request(root, other, &value);
+        let clash = self.legacy.get(&key).is_some_and(differs)
+            || (!versioned
+                && self
+                    .versioned
+                    .get(&key)
+                    .is_some_and(|copies| copies.iter().any(differs)));
+        if versioned {
+            self.versioned.entry(key).or_default().push(value);
+        } else {
+            self.legacy.insert(key, value);
+        }
+        clash
+    }
 }
 
 fn repeatable_request(
@@ -637,7 +675,7 @@ fn prepare_with(admission: Admission<'_>) -> rift_core::Result<()> {
         }
         return Ok(());
     }
-    let mut seen = BTreeMap::new();
+    let mut seen = Seen::default();
     for root in [RunRoot::AgentQueue, RunRoot::CaptureQueue] {
         let dir = root.legacy_under(git_dir);
         for path in queue_paths(&dir)
@@ -656,12 +694,11 @@ fn prepare_with(admission: Admission<'_>) -> rift_core::Result<()> {
             }
             let (value, stem) = queue_value(root, &path)
                 .map_err(|_| crate::capture_queue::deferred("queue context is unreadable"))?;
-            if let Some(previous) = seen.insert((root.dir_name(), stem.clone()), value.clone()) {
-                if previous != value && !repeatable_request(root, &previous, &value) {
-                    return Err(crate::capture_queue::deferred("queue contexts conflict"));
-                }
+            let versioned = crate::capture_queue::delivery::is_versioned(&path, &stem, &value)?;
+            if seen.conflicts(root, stem.clone(), versioned, value.clone()) {
+                return Err(crate::capture_queue::deferred("queue contexts conflict"));
             }
-            if crate::capture_queue::delivery::is_versioned(&path, &stem, &value)? {
+            if versioned {
                 continue;
             }
             admission.check()?;
@@ -798,8 +835,8 @@ fn owe_move(git_dir: &Path, resolved: &Resolved) {
         kind: crate::agent_queue::JobKind::MoveRunState,
     };
     let queue = RunRoot::AgentQueue.under(&resolved.member);
-    let journaled = queue.join("move-run-state.json").exists()
-        || crate::agent_queue::enqueue_in(&queue, &job).is_ok();
+    let journaled =
+        move_job_published(&queue) || crate::agent_queue::enqueue_in(&queue, &job).is_ok();
     if !journaled {
         return;
     }
@@ -808,6 +845,24 @@ fn owe_move(git_dir: &Path, resolved: &Resolved) {
             entry.move_owed = true;
         }
     }
+}
+
+/// Whether a move delivery is already journaled: the job is repeatable, so
+/// one published context (whatever instant it carries) is the one the worker
+/// owes, and another process must not add a second.
+fn move_job_published(queue: &Path) -> bool {
+    rift_shadow::hooks::run_state::list_entries(queue)
+        .iter()
+        .any(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+                && path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name == "move-run-state" || name.starts_with("move-run-state--")
+                    })
+        })
 }
 
 /// Locate a member for the first time in this process, record its work tree
