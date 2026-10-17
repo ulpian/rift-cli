@@ -613,7 +613,7 @@ pub(crate) fn enqueue_in(dir: &Path, job: &AgentJob) -> Result<PathBuf> {
 /// `capture_queue::entries` gives.
 pub(crate) fn jobs(git_dir: &Path) -> Vec<(PathBuf, AgentJob)> {
     let mut out: Vec<(PathBuf, AgentJob)> =
-        rift_shadow::hooks::run_state::list(&queue_dir(git_dir))
+        rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
             .into_iter()
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
             .filter_map(|p| {
@@ -653,7 +653,7 @@ pub(crate) fn logical_stem(job: &AgentJob) -> Option<String> {
 /// How many job FILES the journal holds, parseable or not (the doctor count;
 /// see `capture_queue::entry_file_count` for why it is not [`jobs`]`.len()`).
 pub(crate) fn job_file_count(git_dir: &Path) -> usize {
-    rift_shadow::hooks::run_state::list(&queue_dir(git_dir))
+    rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
         .iter()
         .filter(|path| path.extension().is_some_and(|x| x == "json"))
         .count()

@@ -554,7 +554,7 @@ pub fn read_cache_or_repair(sessions: &Path, session_id: &str, now_ms: i64) -> R
 /// defect. Empty when the directory is absent or unlistable.
 #[must_use]
 pub fn torn_caches(sessions: &Path) -> Vec<String> {
-    let mut names: Vec<String> = crate::run_state::list(sessions)
+    let mut names: Vec<String> = crate::run_state::list_entries(sessions)
         .iter()
         .filter_map(|path| path.file_name())
         .map(|name| name.to_string_lossy().into_owned())

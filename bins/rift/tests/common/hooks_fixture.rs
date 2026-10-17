@@ -899,7 +899,7 @@ pub(crate) fn archived_reasons(repo: &Path, cache: &Path, session: &str) -> Vec<
 /// The job files in this checkout's agent-hook journal whose names start
 /// with `prefix`, by name.
 pub(crate) fn agent_jobs_named(repo: &Path, prefix: &str) -> Vec<String> {
-    let mut names: Vec<String> = rift_shadow::hooks::run_state::list(&agent_queue_of(repo))
+    let mut names: Vec<String> = rift_shadow::hooks::run_state::list_entries(&agent_queue_of(repo))
         .into_iter()
         .filter(|path| path.extension().is_some_and(|x| x == "json"))
         .filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned()))

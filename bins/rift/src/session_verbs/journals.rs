@@ -30,7 +30,7 @@ fn read_journal(
     let dir = crate::family::run_state::sessions_dir(git_dir);
     let mut sessions = Vec::new();
     let mut unreadable = Vec::new();
-    for path in rift_shadow::hooks::run_state::list(&dir) {
+    for path in rift_shadow::hooks::run_state::list_entries(&dir) {
         let Some(name) = path.file_name() else {
             continue;
         };

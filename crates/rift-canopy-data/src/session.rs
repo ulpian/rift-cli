@@ -284,7 +284,7 @@ pub(crate) fn family_journal(members: &[FamilyMember]) -> Vec<SessionCache> {
     let mut sessions = Vec::new();
     for member in members {
         let dir = member_sessions(&member.git_dir, &member.work_tree);
-        for path in run_state::list(&dir) {
+        for path in run_state::list_entries(&dir) {
             let Some(name) = path.file_name() else {
                 continue;
             };

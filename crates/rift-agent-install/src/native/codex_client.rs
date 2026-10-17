@@ -86,7 +86,7 @@ fn sessions_of(families: &Path, work_tree: &Path, git_dir: &Path) -> Option<Path
 /// The newest Codex session cached in `sessions` that names its session
 /// file: `(updated_at_ms, file)`.
 fn newest_codex_session(sessions: &Path) -> Option<(i64, PathBuf)> {
-    let caches: Vec<_> = run_state::list(sessions)
+    let caches: Vec<_> = run_state::list_entries(sessions)
         .iter()
         .filter_map(|path| {
             let name = path.file_name()?.to_string_lossy().into_owned();

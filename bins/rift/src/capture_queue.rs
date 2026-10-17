@@ -100,7 +100,9 @@ pub(crate) fn enqueue(git_dir: &Path, entry: &QueueEntry) -> Result<PathBuf> {
 /// The filename must match the validated context or supported legacy stem.
 /// Owned retries replace only attempts at the same validated context path.
 pub(crate) fn entries(git_dir: &Path) -> Vec<(PathBuf, QueueEntry)> {
-    entries_from_paths(rift_shadow::hooks::run_state::list(&queue_dir(git_dir)))
+    entries_from_paths(rift_shadow::hooks::run_state::list_entries(&queue_dir(
+        git_dir,
+    )))
 }
 
 /// Advisory readable entries without resolving a writer or journaling migration.
@@ -154,7 +156,7 @@ pub(crate) fn read_entry(path: &Path) -> Result<(serde_json::Value, QueueEntry)>
 /// ones is indistinguishable from a healthy backlog, which is how a file this
 /// build cannot drain hides behind one it can.
 pub(crate) fn entry_file_count(git_dir: &Path) -> usize {
-    rift_shadow::hooks::run_state::list(&queue_dir(git_dir))
+    rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
         .iter()
         .filter(|path| path.extension().is_some_and(|x| x == "json"))
         .count()
@@ -216,7 +218,7 @@ pub(crate) fn peek_errors(git_dir: &Path) -> Vec<String> {
 }
 
 fn read_errors(git_dir: &Path, consume: bool) -> Vec<String> {
-    let mut out: Vec<String> = rift_shadow::hooks::run_state::list(&queue_dir(git_dir))
+    let mut out: Vec<String> = rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
         .into_iter()
         .filter(|p| p.extension().is_some_and(|x| x == "error"))
         .filter_map(|p| {

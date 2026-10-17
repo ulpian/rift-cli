@@ -67,7 +67,7 @@ pub(super) fn read_claims(
     let Some(dir) = claims_dir(git_dir, session) else {
         return out;
     };
-    for path in rift_shadow::hooks::run_state::list(&dir) {
+    for path in rift_shadow::hooks::run_state::list_entries(&dir) {
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }

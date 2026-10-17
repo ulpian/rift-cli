@@ -16,7 +16,7 @@
 //! dir belongs to the binary's worker and verbs, never to a hook. Until a
 //! member is marked moved, every read is a **dual read**, file by file: the
 //! new tree first, the git dir's old tree when the new one lacks that file
-//! ([`read_path`], [`list`]). One file is never read from both trees, and
+//! ([`read_path`], [`list_entries`]). One file is never read from both trees, and
 //! writes go to the new tree only, so a write made before the move stands
 //! after it. A member whose run directory records nothing yet (no new binary
 //! has resolved it) has only its old tree ([`dir_for_read`]).
@@ -196,7 +196,7 @@ pub fn is_moved(member: &Path) -> bool {
 
 /// Where a reader that resolves no family finds `root` for this member: the
 /// new tree once a new binary has recorded the member — read through
-/// [`read_path`] and [`list`], which fall back to the old tree file by file
+/// [`read_path`] and [`list_entries`], which fall back to the old tree file by file
 /// until the member is marked moved — and the git dir's old tree before.
 #[must_use]
 pub fn dir_for_read(root: RunRoot, member: &Path, git_dir: &Path) -> PathBuf {
@@ -256,7 +256,7 @@ pub fn read_dirs(dir: &Path) -> Vec<PathBuf> {
 /// the old tree's whose names the new tree lacks — each name once, from one
 /// tree. Sorted by name.
 #[must_use]
-pub fn list(dir: &Path) -> Vec<PathBuf> {
+pub fn list_entries(dir: &Path) -> Vec<PathBuf> {
     let mut seen = std::collections::BTreeMap::new();
     for source in read_dirs(dir) {
         let Ok(entries) = std::fs::read_dir(&source) else {
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(read("both.json"), "new");
         assert_eq!(read("old-only.json"), "old");
         assert_eq!(
-            list(&new),
+            list_entries(&new),
             [new.join("both.json"), old.join("old-only.json")]
         );
         let nested = new.join("s.subagents");
@@ -501,7 +501,7 @@ mod tests {
         std::fs::write(member.join(MOVED_MARKER), b"").unwrap();
         assert_eq!(fallback_dir(&new), None);
         assert_eq!(read_path(&new, "old-only.json"), new.join("old-only.json"));
-        assert_eq!(list(&new), [new.join("both.json")]);
+        assert_eq!(list_entries(&new), [new.join("both.json")]);
     }
 
     #[test]
