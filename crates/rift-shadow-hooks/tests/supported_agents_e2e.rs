@@ -25,6 +25,9 @@
 //! data root into it, and the keychain is off. This suite must never be able to
 //! write into the repository it runs in — that class already put one fixture
 //! session into this repository's immutable checkpoint history.
+//!
+//! The binary it drives is resolved by `common::rift_bin`, the same way and
+//! for the same reasons as `vogon_e2e.rs`.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -32,61 +35,15 @@
     clippy::indexing_slicing
 )]
 
+// The order tests in `vogon_e2e.rs` read the parts this suite never calls.
+#[allow(dead_code)]
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The `rift` binary this suite drives, **rebuilt from the current source
-/// before it is driven**, into its own target directory.
-///
-/// Both halves are load-bearing and both were paid for by `vogon_e2e.rs`, whose
-/// `rift_bin` docstring records the incidents: `CARGO_BIN_EXE_*` only names
-/// bins of *this* package, so the binary under test can only be found as a
-/// sibling in the same profile directory — and finding it is not enough,
-/// because `cargo test -p rift-shadow-hooks` has no reason to relink a binary
-/// belonging to `bins/rift`, so a suite that merely locates it can drive a
-/// stale one and stay green over a planted defect. Building into the shared
-/// `target/` instead fights the outer `--all-features` build over the same
-/// fingerprints. So: unconditional build, separate directory.
-fn rift_bin() -> PathBuf {
-    static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BIN.get_or_init(|| {
-        let vogon = PathBuf::from(env!("CARGO_BIN_EXE_vogon"));
-        let profile_dir = vogon.parent().expect("vogon has a parent dir");
-        let profile = profile_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("debug")
-            .to_owned();
-        let target = profile_dir
-            .parent()
-            .expect("a target dir above the profile dir")
-            .join("vogon-e2e");
-        let mut build = Command::new(env!("CARGO"));
-        build.args(["build", "-p", "rift", "--bin", "rift"]);
-        if profile == "release" {
-            build.arg("--release");
-        }
-        let status = build
-            .env("CARGO_TARGET_DIR", &target)
-            .env("CARGO_INCREMENTAL", "0")
-            .env("CARGO_PROFILE_DEV_DEBUG", "0")
-            .env("CARGO_PROFILE_DEV_STRIP", "debuginfo")
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()
-            .expect("cargo build -p rift");
-        assert!(status.success(), "building the rift binary failed");
-        // `EXE_SUFFIX` rather than a bare "rift": CI runs this leg on Windows
-        // too, and the sibling suite names it the same way for the same reason.
-        let exe = target
-            .join(&profile)
-            .join(format!("rift{}", std::env::consts::EXE_SUFFIX));
-        assert!(exe.is_file(), "no rift binary at {}", exe.display());
-        exe
-    })
-    .clone()
-}
+use common::rift_bin;
 
 fn git(repo: &Path, args: &[&str]) {
     let status = Command::new("git")
