@@ -14,12 +14,19 @@
 //!
 //! This module names paths and reads through them. The move out of the git
 //! dir belongs to the binary's worker and verbs, never to a hook. Until a
-//! member is marked moved, every read is a **dual read**, file by file: the
-//! new tree first, the git dir's old tree when the new one lacks that file
+//! member is marked moved, and after it for as long as an old directory is
+//! still there, every read is a **dual read**, file by file: the new tree
+//! first, the git dir's old tree when the new one lacks that file
 //! ([`read_path`], [`list_entries`]). One file is never read from both trees, and
 //! writes go to the new tree only, so a write made before the move stands
 //! after it. A member whose run directory records nothing yet (no new binary
 //! has resolved it) has only its old tree ([`dir_for_read`]).
+//!
+//! The read outlives the marker because an older binary still installed as a
+//! hook keeps writing the old tree after the move: a session it opened there
+//! must reach the next commit's hook, not only the worker's next move. The
+//! move removes each old directory it empties, so once the old tree is gone
+//! the fallback costs one `stat` and reads nothing.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -27,7 +34,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 /// The marker a member's directory carries once its run state was moved out of
-/// the git dir. Readers that cannot move read the new tree only after it.
+/// the git dir. Readers that cannot move keep falling back to an old
+/// directory after it only while that directory is still there.
 pub const MOVED_MARKER: &str = ".moved-v1";
 /// The family-wide move lock, created exclusively under the run root.
 pub const MOVE_LOCK: &str = ".moving";
@@ -209,21 +217,25 @@ pub fn dir_for_read(root: RunRoot, member: &Path, git_dir: &Path) -> PathBuf {
 /// The old-tree directory a read of `dir` falls back to: `dir` is a
 /// directory inside a recorded member's run directory (a root, or a
 /// directory within one such as a session's subagent claims), and the
-/// member is not marked moved. `None` otherwise.
+/// member is not marked moved or its old directory is still there (what an
+/// older binary wrote after the move). `None` otherwise.
 #[must_use]
 pub fn fallback_dir(dir: &Path) -> Option<PathBuf> {
     for member in dir.ancestors().skip(1).take(2) {
         let Some(git_dir) = recorded_git_dir(member) else {
             continue;
         };
-        if is_moved(member) {
-            return None;
-        }
         let rel = dir.strip_prefix(member).ok()?;
         let mut parts = rel.components();
         let first = parts.next()?.as_os_str();
         let root = RunRoot::ALL.into_iter().find(|r| first == r.dir_name())?;
-        return Some(root.legacy_under(&git_dir).join(parts.as_path()));
+        let old = root.legacy_under(&git_dir).join(parts.as_path());
+        // The one stat a moved member's reader pays: the move removed every
+        // old directory it emptied, so one that stands holds a late write.
+        if is_moved(member) && old.symlink_metadata().is_err() {
+            return None;
+        }
+        return Some(old);
     }
     None
 }
@@ -499,9 +511,39 @@ mod tests {
         assert_eq!(fallback_dir(&nested), Some(old.join("s.subagents")));
 
         std::fs::write(member.join(MOVED_MARKER), b"").unwrap();
+        assert_eq!(
+            fallback_dir(&new),
+            Some(old.clone()),
+            "an old directory standing after the move holds a late write"
+        );
+        assert_eq!(read("old-only.json"), "old");
+        assert_eq!(
+            list_entries(&new),
+            [new.join("both.json"), old.join("old-only.json")]
+        );
+    }
+
+    /// Once the move has emptied and removed the old directory, a moved
+    /// member's reader reads the new tree only: the fallback is the one stat
+    /// that finds the old directory gone, and nothing of it is listed.
+    #[test]
+    fn a_moved_member_whose_old_tree_is_gone_is_read_from_the_new_tree_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = tmp.path().join("run").join("abc");
+        let git_dir = tmp.path().join(".git");
+        record_git_dir(&member, &git_dir).unwrap();
+        let new = RunRoot::Sessions.under(&member);
+        let old = RunRoot::Sessions.legacy_under(&git_dir);
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("s.json"), "new").unwrap();
+        std::fs::write(member.join(MOVED_MARKER), b"").unwrap();
+        assert!(!old.exists());
+
         assert_eq!(fallback_dir(&new), None);
-        assert_eq!(read_path(&new, "old-only.json"), new.join("old-only.json"));
-        assert_eq!(list_entries(&new), [new.join("both.json")]);
+        assert_eq!(fallback_dir(&new.join("s.subagents")), None);
+        assert_eq!(read_path(&new, "gone.json"), new.join("gone.json"));
+        assert_eq!(read_dirs(&new), [new.clone()]);
+        assert_eq!(list_entries(&new), [new.join("s.json")]);
     }
 
     #[test]

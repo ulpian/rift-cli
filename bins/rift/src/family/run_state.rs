@@ -391,7 +391,9 @@ pub(crate) fn capture_queue_read_dirs(git_dir: &Path) -> Vec<PathBuf> {
     let family_dir = rift_store::projection_dir_under(&super::cache_root(), &family.family_id);
     let member = layout::member_dir(&family_dir, &work_tree);
     let current = RunRoot::CaptureQueue.under(&member);
-    if layout::is_moved(&member) {
+    // The dual read's rule: after the move, the old directory is read only
+    // while it still stands, which is what an older binary wrote since.
+    if layout::is_moved(&member) && legacy.symlink_metadata().is_err() {
         vec![current]
     } else {
         vec![current, legacy]
