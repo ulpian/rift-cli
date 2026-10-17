@@ -22,10 +22,9 @@ use std::path::{Path, PathBuf};
 
 use rift_recall_serve::DefinitionKind;
 
-/// The family's own directory inside the git common dir.
-const FAMILY_DIR: &str = "rift-family";
+use crate::hooks::family_state::family_state_dir;
 
-/// The cache's subdirectory under it.
+/// The cache's subdirectory of the family's run-state directory.
 const OUTLINE_DIR: &str = "outline";
 
 /// The first line of every cache file: the grammar and its version. A file
@@ -80,7 +79,7 @@ pub(in crate::hooks) struct CachedDefinition {
 /// The common dir, never a checkout: every member of the family reads the
 /// outlines any member's read bound.
 pub(in crate::hooks) fn outline_cache_dir(common_dir: &Path) -> PathBuf {
-    common_dir.join(FAMILY_DIR).join(OUTLINE_DIR)
+    family_state_dir(common_dir).join(OUTLINE_DIR)
 }
 
 /// The file one revision's outline is cached under: the content hash and
@@ -464,5 +463,15 @@ mod tests {
         assert!(text.contains("shape 637 23449 2000 5704\n"));
         let kept = text.lines().filter(|line| line.starts_with("def ")).count();
         assert!(kept > 0 && kept < 2_000, "{kept}");
+    }
+
+    /// The directory is the family's, under the common dir: the spelling the
+    /// worker, the gate and the sweep have always met at.
+    #[test]
+    fn the_cache_lives_under_the_family_directory() {
+        assert_eq!(
+            outline_cache_dir(Path::new("/repo/.git")),
+            Path::new("/repo/.git/rift-family/outline")
+        );
     }
 }

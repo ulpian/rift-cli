@@ -13,10 +13,9 @@ use std::path::{Path, PathBuf};
 
 use rift_agent::window_journal::output_match::{decode_line_hashes, MAX_LINE_HASH_FILE_BYTES};
 
-/// The family's own directory inside the git common dir.
-const FAMILY_DIR: &str = "rift-family";
+use crate::hooks::family_state::family_state_dir;
 
-/// The cache's subdirectory under it.
+/// The cache's subdirectory of the family's run-state directory.
 const LINEHASH_DIR: &str = "linehash";
 
 /// The cache directory of the family whose git common dir is `common_dir`.
@@ -24,7 +23,7 @@ const LINEHASH_DIR: &str = "linehash";
 /// The one place the path is spelled: the worker writes through it, the hook
 /// reads through it, and the sweep collects under it.
 pub(in crate::hooks) fn linehash_cache_dir(common_dir: &Path) -> PathBuf {
-    common_dir.join(FAMILY_DIR).join(LINEHASH_DIR)
+    family_state_dir(common_dir).join(LINEHASH_DIR)
 }
 
 /// The file one revision's line hashes are cached under.
