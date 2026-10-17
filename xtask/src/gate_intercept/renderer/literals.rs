@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ci_meta::production_half;
 
+use super::super::gate_path::declared_for_tests;
 use super::super::text::{fn_spans, is_ident_byte, mask_code, mask_comments, token_offsets};
 use super::super::{is_test_surface, line_of};
 
@@ -46,14 +47,16 @@ pub(super) fn screen_marker_literals(
     allow_text: &str,
 ) -> Result<MarkerScreen, String> {
     let mut allow = read_allow_list(allow_text)?;
+    // A test module split into a file of its own carries no `#[cfg(test)]`
+    // marker for the production cut to find; its parent's declaration is what
+    // makes it test code to the compiler, so that declaration is read rather
+    // than the file's name, which says only what its author meant.
+    let for_tests = declared_for_tests(corpus);
     let mut violations = Vec::new();
     let mut pinned = 0_usize;
     let mut screened = 0_usize;
     for (rel, text) in corpus {
-        // A file named `tests.rs` or `<subject>_tests.rs` is a `#[cfg(test)]`
-        // module split out of its parent, so its whole text is the test half
-        // `production_half` would have cut from an inline module.
-        if rel == renderer || is_test_surface(rel) || is_test_module_file(rel) {
+        if rel == renderer || is_test_surface(rel) || for_tests.contains(rel.as_str()) {
             continue;
         }
         screened += 1;
@@ -84,11 +87,6 @@ pub(super) fn screen_marker_literals(
         pinned,
         screened,
     })
-}
-
-/// Whether `rel` names a test module kept in a file of its own.
-fn is_test_module_file(rel: &str) -> bool {
-    rel.ends_with("/tests.rs") || rel.ends_with("_tests.rs")
 }
 
 /// The two spellings of the marker, assembled so this file never matches
@@ -262,17 +260,19 @@ mod tests {
         );
     }
 
-    /// A comment quoting the marker, a test module, a test file (named
-    /// `tests.rs` or `<subject>_tests.rs`) and the renderer itself are all
-    /// outside the screen.
+    /// A comment quoting the marker, an inline test module, a test module
+    /// its parent declares under `#[cfg(test)]` (whatever the file is called)
+    /// and the renderer itself are all outside the screen.
     #[test]
     fn comments_tests_and_the_renderer_are_not_screened() {
         let commented = "/// Writes `[rift] x` nowhere.\nfn f() {}\n";
         let tested =
             "fn f() {}\n\n#[cfg(test)]\nmod tests {\n    const X: &str = \"[rift] x\";\n}\n";
+        let parent = "fn c() {}\n\n#[cfg(test)]\nmod emission_tests;\n#[cfg(test)]\nmod tests;\n";
         let files = vec![
             ("bins/rift/src/a.rs".to_owned(), commented.to_owned()),
             ("bins/rift/src/b.rs".to_owned(), tested.to_owned()),
+            ("bins/rift/src/c.rs".to_owned(), parent.to_owned()),
             ("bins/rift/src/c/tests.rs".to_owned(), WRITER.to_owned()),
             (
                 "bins/rift/src/c/emission_tests.rs".to_owned(),
@@ -282,6 +282,24 @@ mod tests {
         ];
         let screen = screen_marker_literals(&files, RENDERER, "").expect("the screen runs");
         assert!(screen.violations.is_empty(), "{:#?}", screen.violations);
+    }
+
+    /// ★ The declaration decides, not the name: a file called `x_tests.rs`
+    /// that its parent declares as a plain `mod x_tests;` ships, so its marked
+    /// literal is caught.
+    #[test]
+    fn a_shipped_module_named_like_a_test_file_is_screened() {
+        let files = vec![
+            ("bins/rift/src/c.rs".to_owned(), "mod x_tests;\n".to_owned()),
+            ("bins/rift/src/c/x_tests.rs".to_owned(), WRITER.to_owned()),
+        ];
+        let screen = screen_marker_literals(&files, RENDERER, "").expect("the screen runs");
+        assert_eq!(screen.violations.len(), 1, "{:#?}", screen.violations);
+        assert!(
+            screen.violations[0].contains("bins/rift/src/c/x_tests.rs:2: `say`"),
+            "{:#?}",
+            screen.violations
+        );
     }
 
     /// A const or a byte string is keyed by its own name, and a const fn is
