@@ -206,9 +206,10 @@ The lever that declines a re-read of lines a context window already holds
 | `first_contact` | `observe` | Answer a window's first read of a large file once with its bound outline. |
 | `first_contact_min_lines` / `_min_bytes` | `400` / `16384` | "Large": either floor is enough. |
 | `decline_family_held` | `observe` | Decline once a read of bytes another live window holds, offering a cheaper route. |
+| `recognise_by_output` | `observe` | Book the lines a Claude Code shell result showed the window, whatever the command line was; never above the read lever. |
 | `[interception.agents]` | absent | One mode per family (`claude-code`, `codex`, `antigravity`). |
 
-The three levers are never above `mode` or the family's cap.
+The levers above are never above `mode` or the family's cap.
 `[interception.agents]` replaces `mode` for that family, and the pinned channel
 caps the result: a family whose reason channel no recorded run has confirmed
 resolves to `observe` however the table is written, and nothing lifts a family
@@ -228,7 +229,9 @@ At `observe`, `inherit_by_name` records lines a subagent was *pointed at*
 ([07 §7.4](07-serving-and-injection.md#a-first-read-of-a-large-file)) — the build
 caps it at `observe`, so `enforce` behaves as `observe` — and
 `decline_family_held` the decline it would have made
-([07 §7.4](07-serving-and-injection.md#a-read-another-window-holds)). No read is
+([07 §7.4](07-serving-and-injection.md#a-read-another-window-holds)), and
+`recognise_by_output` the lines a shell result showed
+([07 §7.4](07-serving-and-injection.md#what-a-shell-result-showed-the-window)). No read is
 declined on any of them. `basis_ttl_days` governs the one durable artifact: a
 revision edited after reading has no blob, so the delta frame needs its
 **redacted** bytes kept; thirty days matches converted documents, since losing
