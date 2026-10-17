@@ -5,6 +5,9 @@ expression: schema_dump(&default_migrations())
 -- index idx_agent_hook_event_identity
 CREATE INDEX idx_agent_hook_event_identity ON agent_hook_event(agent, session_id) WHERE session_id IS NOT NULL
 
+-- index idx_captured_event_session_turn_kind
+CREATE INDEX idx_captured_event_session_turn_kind ON captured_event(session_id, turn_ordinal, kind)
+
 -- index idx_turn_boundary_gap_context
 CREATE INDEX idx_turn_boundary_gap_context ON turn_boundary_gap_ticket(context_sha256, gap_id)
 

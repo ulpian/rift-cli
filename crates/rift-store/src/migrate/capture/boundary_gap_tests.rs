@@ -108,7 +108,7 @@ const FROZEN: &[(u32, &str, &str)] = &[
 #[test]
 fn capture_gap_migration_preserves_the_frozen_twenty_sql_bodies() {
     let migrations = default_migrations();
-    assert_eq!(migrations.len(), 21);
+    assert_eq!(migrations.len(), 22);
     let saved = std::env::var_os("RIFT_GAP_MIGRATION_BASELINE").map(std::path::PathBuf::from);
     for (actual, (version, name, checksum)) in migrations.iter().zip(FROZEN) {
         assert_eq!((actual.version, actual.name), (*version, *name));
@@ -152,7 +152,8 @@ fn a_v20_projection_gains_only_gap_schema_and_preserves_old_rows_and_checksums()
     use crate::migrate::apply_migrations;
     let store = SqliteStore::open_in_memory().unwrap();
     let all = default_migrations();
-    apply_migrations(&store, &all[..20]).unwrap();
+    let historical = &all[..21];
+    apply_migrations(&store, &historical[..20]).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -178,7 +179,7 @@ fn a_v20_projection_gains_only_gap_schema_and_preserves_old_rows_and_checksums()
     let old_rows = rt
         .block_on(store.query("SELECT * FROM turn_boundary_snapshot", &[]))
         .unwrap();
-    let outcome = apply_migrations(&store, &all).unwrap();
+    let outcome = apply_migrations(&store, historical).unwrap();
     assert_eq!(
         (outcome.applied, outcome.skipped, outcome.high_water),
         (1, 20, 21)
@@ -199,5 +200,5 @@ fn a_v20_projection_gains_only_gap_schema_and_preserves_old_rows_and_checksums()
     for name in ["turn_boundary_gap_batch", "turn_boundary_gap_ticket"] {
         assert_eq!(rt.block_on(store.count(name)).unwrap(), 0);
     }
-    assert_eq!(apply_migrations(&store, &all).unwrap().applied, 0);
+    assert_eq!(apply_migrations(&store, historical).unwrap().applied, 0);
 }

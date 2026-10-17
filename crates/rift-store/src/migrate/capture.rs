@@ -152,6 +152,16 @@ INSERT INTO price_table (price_id, model, token_class, unit_price_micros, curren
 /// One row per version, in order; a new version is a new last row.
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
+    let mut migrations = migrations_through_twenty_one();
+    migrations.push(Migration {
+        version: 22,
+        name: "capture_event_session_turn_kind_index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_captured_event_session_turn_kind ON captured_event(session_id, turn_ordinal, kind);\n".to_string(),
+    });
+    migrations
+}
+
+fn migrations_through_twenty_one() -> Vec<Migration> {
     let set: [(u32, &'static str, String); 21] = [
         (1, "init_meta", META_SQL.to_string()),
         (2, "canonical_core", canonical_schema_sql()),
@@ -1312,3 +1322,6 @@ mod worktree_cd_tests {
 
 #[cfg(test)]
 mod boundary_gap_tests;
+
+#[cfg(test)]
+mod recovery_index_tests;
