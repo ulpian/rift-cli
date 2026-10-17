@@ -41,7 +41,25 @@ pub(super) fn validate_capture(
     owner
         .check_path(path)
         .map_err(|_| deferred("queue ownership changed or is unavailable"))?;
-    let work_tree = std::fs::canonicalize(&entry.work_tree)
+    if entry.work_tree.symlink_metadata().is_err() {
+        // A removed checkout cannot be discovered; its member's own admin dir
+        // still names it, which proves the entry is this owner's to settle
+        // commit-only (the condense routes a missing tree there).
+        if !names_removed_checkout(owner, &entry.work_tree) {
+            return Err(deferred("capture repository is unavailable"));
+        }
+    } else {
+        admit_capture_checkout(owner, &entry.work_tree)?;
+    }
+    let (_, retained) = crate::capture_queue::read_entry(path)?;
+    if retained != *entry {
+        return Err(deferred("capture delivery changed before execution"));
+    }
+    Ok(())
+}
+
+fn admit_capture_checkout(owner: &QueueLock, work_tree: &Path) -> Result<()> {
+    let work_tree = std::fs::canonicalize(work_tree)
         .map_err(|_| deferred("capture repository is unavailable"))?;
     if !work_tree.is_dir() {
         return Err(deferred("capture repository is unavailable"));
@@ -51,11 +69,22 @@ pub(super) fn validate_capture(
     if !owner.matches_git_dir(&repo.git_dir) {
         return Err(deferred("capture repository differs from queue owner"));
     }
-    let (_, retained) = crate::capture_queue::read_entry(path)?;
-    if retained != *entry {
-        return Err(deferred("capture delivery changed before execution"));
-    }
     Ok(())
+}
+
+/// Whether the owner's git dir records `work_tree` as its (now absent) checkout.
+fn names_removed_checkout(owner: &QueueLock, work_tree: &Path) -> bool {
+    let anchored = |path: &Path| {
+        let parent = path
+            .parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok());
+        match (parent, path.file_name()) {
+            (Some(parent), Some(name)) => parent.join(name),
+            _ => path.to_path_buf(),
+        }
+    };
+    rift_shadow::hooks::session_cache::work_tree_of(owner.git_dir())
+        .is_some_and(|recorded| anchored(&recorded) == anchored(work_tree))
 }
 
 pub(super) use crate::capture_queue::proof_read;
