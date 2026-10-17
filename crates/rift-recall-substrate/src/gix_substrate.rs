@@ -13,8 +13,12 @@ use rift_core::Result;
 use crate::{parse, CheckpointOrigin, CheckpointShard, CommitMeta, ShardWalker, SubstrateReader};
 
 /// A read-only, local-only substrate over one repository, backed by `gix`.
+/// Native-only reads lazily pin one immutable tree (including initial absence)
+/// for this reader's lifetime. Reopen to observe a later native publication.
+/// Ordinary compatibility reads and checkpoint enumeration remain live.
 pub struct GixSubstrate {
     walker: ShardWalker,
+    native_tree: std::cell::OnceCell<Option<String>>,
 }
 
 impl GixSubstrate {
@@ -25,6 +29,7 @@ impl GixSubstrate {
     pub fn open(repo_root: &Path) -> Result<Self> {
         Ok(Self {
             walker: ShardWalker::open(repo_root)?,
+            native_tree: std::cell::OnceCell::new(),
         })
     }
 
@@ -53,6 +58,29 @@ impl SubstrateReader for GixSubstrate {
     }
     fn read_artifact(&self, checkpoint_id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
         self.walker.read_artifact_any(checkpoint_id, rel)
+    }
+    fn read_native_artifact(&self, checkpoint_id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+        if self.native_tree.get().is_none() {
+            let root = match self.walker.capture_native_tree() {
+                Ok(root) => root,
+                Err(error) => {
+                    let _ = self.native_tree.set(None);
+                    return Err(error);
+                }
+            };
+            self.native_tree.set(root).map_err(|_| {
+                rift_core::RiftError::substrate("native tree snapshot is already initialized")
+            })?;
+        }
+        match self.native_tree.get() {
+            Some(Some(tree)) => self
+                .walker
+                .read_native_artifact_at_tree(tree, checkpoint_id, rel),
+            Some(None) => Ok(None),
+            None => Err(rift_core::RiftError::substrate(
+                "native tree snapshot is unavailable",
+            )),
+        }
     }
     fn integration_tips(&self) -> Result<Vec<String>> {
         self.walker.integration_tips()

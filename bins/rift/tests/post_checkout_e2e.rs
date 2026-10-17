@@ -195,13 +195,14 @@ impl Family {
 
     /// The notes the hook left in the member's own admin-dir capture queue.
     fn member_notes(&self) -> Vec<String> {
-        notes_in(&self.admin)
+        notes_in(&self.admin, &self.home.join("cache"))
     }
 }
 
-/// Every `*.error` note in a gitdir's capture queue.
-fn notes_in(git_dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(git_dir.join("rift-capture-queue")) else {
+/// Every `*.error` note in the capture queue of the member whose git dir is
+/// `git_dir`.
+fn notes_in(git_dir: &Path, cache: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(common::capture_queue_dir(git_dir, cache)) else {
         return Vec::new();
     };
     let mut out: Vec<String> = entries
@@ -549,7 +550,7 @@ fn post_checkout_ignores_the_forwarded_git_dir_and_discovers_from_cwd() {
         f.admin.display()
     );
     assert!(
-        notes_in(&main_git_dir).is_empty(),
+        notes_in(&main_git_dir, &f.home.join("cache")).is_empty(),
         "and never in the queue the forwarded --git-dir names"
     );
 
@@ -611,7 +612,7 @@ fn post_checkout_in_the_main_work_tree_takes_the_fast_path() {
     );
     assert!(!main.join(PROVISIONED).exists(), "and nothing was wired");
     assert!(
-        notes_in(&main.join(".git")).is_empty(),
+        notes_in(&main.join(".git"), &f.home.join("cache")).is_empty(),
         "nor is the main tree's own queue given a failure to report"
     );
 }

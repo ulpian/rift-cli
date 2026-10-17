@@ -62,7 +62,7 @@
 use rift_core::{Result, SecretBytes};
 use serde_json::{Map, Value};
 
-use crate::backend::ArchivedTranscript;
+use crate::backend::{ArchivedTranscript, RedactionFallback};
 
 /// The compact-line schema version, carried on every emitted line as `v`.
 ///
@@ -173,9 +173,14 @@ pub fn compact_jsonl(raw: &SecretBytes, start_line: usize) -> CompactTranscript 
 /// counter reintroduces), which is why this function hands it out rather than
 /// letting the caller re-count.
 ///
+/// A line the gate could not settle costs that line and not the pair: it is
+/// sealed flat or replaced by a placeholder record, and the pair carries the
+/// count ([`ArchivedTranscript::redaction_fallback`]) its metadata records.
+///
 /// # Errors
-/// [`rift_core::RiftError`] if redaction fails; the compactor itself cannot
-/// fail (every malformed input is counted, not raised).
+/// [`rift_core::RiftError`] if the gate returns one, which it does for no
+/// input; the compactor itself cannot fail (every malformed input is counted,
+/// not raised).
 pub fn archived_transcript(
     raw: &SecretBytes,
     start_line: usize,
@@ -191,6 +196,7 @@ pub fn archived_transcript(
             compact_start: compacted.compact_transcript_start,
             spills: Vec::new(),
             originals: Vec::new(),
+            redaction_fallback: RedactionFallback::of(&[&full.report, &compact.report]),
         },
         compacted.raw_lines,
     ))
@@ -202,7 +208,8 @@ pub fn archived_transcript(
 /// own bytes, and the compact transcript already elides results.
 ///
 /// # Errors
-/// [`rift_core::RiftError`] if redaction fails.
+/// [`rift_core::RiftError`] if the gate returns one, which it does for no
+/// input: a line it cannot settle is sealed flat or replaced, never refused.
 pub fn sealed_spill(
     raw: &SecretBytes,
     packs: &rift_shadow_redact::RulePackSet,
@@ -219,12 +226,24 @@ pub fn sealed_spill(
 /// passes the gate again, through its one constructor.
 ///
 /// # Errors
-/// [`rift_core::RiftError`] if redaction fails.
+/// [`rift_core::RiftError`] if a valid owned envelope loses its shape or
+/// interrupted flag through redaction. A fallback record is not an original.
 pub fn sealed_original(
     raw: &SecretBytes,
     packs: &rift_shadow_redact::RulePackSet,
 ) -> Result<rift_core::RedactedBytes> {
-    Ok(rift_shadow_redact::redact_with(raw, packs)?.redacted)
+    let expected = crate::backend::rewrite::parse_original_record(raw.as_slice());
+    let sealed = rift_shadow_redact::redact_with(raw, packs)?.redacted;
+    if let Some((_, _, interrupted)) = expected {
+        if crate::backend::rewrite::parse_original_record(sealed.as_slice())
+            .is_none_or(|(_, _, actual)| actual != interrupted)
+        {
+            return Err(rift_core::RiftError::Other(
+                "redaction did not preserve the original record envelope".into(),
+            ));
+        }
+    }
+    Ok(sealed)
 }
 
 /// The compaction of one slice: its lines and what it could not read.
@@ -772,6 +791,67 @@ mod tests {
 
     /// An empty transcript compacts to nothing without a boundary of its own —
     /// the empty-transcript bug class (legacy backend 0x0011) starts here.
+    /// The metadata document the writer records beside a task's pair.
+    fn task_metadata(pair: ArchivedTranscript) -> Value {
+        let meta = crate::backend::ArchivedTask {
+            tool_use_id: "toolu_t".into(),
+            agent_id: String::new(),
+            started_at_ms: 0,
+            ended_at_ms: 0,
+            input_tokens: None,
+            output_tokens: None,
+            transcript: Some(pair),
+            provenance: None,
+        }
+        .metadata_json();
+        serde_json::from_slice(&meta).unwrap()
+    }
+
+    /// A line the gate cannot settle costs that line, not the pair: the
+    /// transcript is sealed, the line is a placeholder record, and the count
+    /// reaches the metadata document beside the pair under its two keys.
+    #[test]
+    fn a_line_the_gate_cannot_settle_is_counted_on_the_pair_and_its_metadata() {
+        let packs = rift_shadow_redact::RulePackSet::builtin()
+            .with_vendor_pattern("osc", "REDACTED", "acme@1")
+            .unwrap();
+        let raw = jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":"hello"}}"#.to_owned(),
+            r#"{"type":"user","message":{"role":"user","content":"start REDACTED end"}}"#
+                .to_owned(),
+        ]);
+        let (pair, _) = archived_transcript(&raw, 0, &packs).expect("sealed, not refused");
+        let full = String::from_utf8_lossy(pair.full.as_slice()).into_owned();
+        assert!(full.contains("hello"), "{full}");
+        assert!(!full.contains("start"), "{full}");
+        assert_eq!(
+            rift_shadow_redact::count_fallback_placeholders(pair.full.as_slice()),
+            1
+        );
+        assert!(pair.redaction_fallback.lines >= 1);
+        assert!(pair.redaction_fallback.placeholders >= 1);
+        let counts = pair.redaction_fallback;
+        let meta = task_metadata(pair);
+        assert_eq!(meta["redaction_flat_fallback"], counts.lines);
+        assert_eq!(meta["redaction_fallback_placeholders"], counts.placeholders);
+    }
+
+    /// The normal path writes neither key, so every shard written before the
+    /// fallback keeps its bytes.
+    #[test]
+    fn a_settled_pair_records_no_fallback_keys() {
+        let packs = rift_shadow_redact::RulePackSet::builtin();
+        let raw = jsonl(&[r#"{"type":"user","message":{"content":"hi"}}"#.to_owned()]);
+        let (pair, _) = archived_transcript(&raw, 0, &packs).unwrap();
+        assert_eq!(pair.redaction_fallback, RedactionFallback::default());
+        let meta = task_metadata(pair);
+        assert!(meta.get("redaction_flat_fallback").is_none(), "{meta}");
+        assert!(
+            meta.get("redaction_fallback_placeholders").is_none(),
+            "{meta}"
+        );
+    }
+
     #[test]
     fn an_empty_transcript_is_empty_and_not_an_error() {
         let out = compact_jsonl(&SecretBytes::new(Vec::new()), 0);
@@ -779,5 +859,23 @@ mod tests {
         assert_eq!(out.raw_lines, 0);
         assert_eq!(out.compact_transcript_start, 0);
         assert!(out.compact().is_empty());
+    }
+    #[test]
+    fn an_original_fallback_cannot_impersonate_the_owned_envelope() {
+        let packs = rift_shadow_redact::RulePackSet::builtin()
+            .with_vendor_pattern("osc", r"^\[?REDACTED", "acme@1")
+            .unwrap();
+        let raw = SecretBytes::new(crate::backend::rewrite::original_record_json(
+            "REDACTED ssn=\n123456789",
+            "",
+            true,
+        ));
+        assert!(sealed_original(&raw, &packs).is_err());
+        let ordinary = sealed_original(&raw, &rift_shadow_redact::RulePackSet::builtin()).unwrap();
+        let (stdout, stderr, interrupted) =
+            crate::backend::rewrite::parse_original_record(ordinary.as_slice()).unwrap();
+        assert!(!stdout.contains("123456789"));
+        assert!(stderr.is_empty());
+        assert!(interrupted);
     }
 }

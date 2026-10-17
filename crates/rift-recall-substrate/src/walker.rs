@@ -576,6 +576,43 @@ impl ShardWalker {
         }
     }
 
+    /// Capture one immutable native tree without exposing gix types.
+    pub(crate) fn capture_native_tree(&self) -> Result<Option<String>> {
+        Ok(self
+            .root_tree(Dialect::Rift)?
+            .map(|tree| tree.id.to_string()))
+    }
+
+    /// Read only the captured native tree; never consult a ref or legacy origin.
+    pub(crate) fn read_native_artifact_at_tree(
+        &self,
+        tree_oid: &str,
+        checkpoint_id: &str,
+        rel: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        if checkpoint_id.len() < 3 || !is_hex(checkpoint_id) {
+            return Ok(None);
+        }
+        let invalid = || RiftError::substrate("captured native tree is unavailable or invalid");
+        let oid = gix::ObjectId::from_hex(tree_oid.as_bytes()).map_err(|_| invalid())?;
+        let root = self
+            .repo
+            .find_object(oid)
+            .map_err(|_| invalid())?
+            .try_into_tree()
+            .map_err(|_| invalid())?;
+        let path = Path::new(&checkpoint_id[..2])
+            .join(&checkpoint_id[2..])
+            .join(rel);
+        let entry = root.lookup_entry_by_path(&path).map_err(|_| invalid())?;
+        match entry {
+            Some(entry) if entry.mode().is_blob() => {
+                Ok(Some(entry.object().map_err(|_| invalid())?.data.clone()))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Read an artifact across whichever present dialect carries the checkpoint
     /// (Rift preferred). Used by the trait impl, which has no dialect context.
     ///

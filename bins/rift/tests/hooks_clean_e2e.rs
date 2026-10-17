@@ -132,10 +132,9 @@ fn doctor_findings_have_broken_fixtures_and_safe_fixes() {
         d["capture_queue"]["pending"].as_i64().unwrap_or(0) >= 1,
         "the queue entry is a finding: {d}"
     );
+    // Where it was seeded: a report-only doctor moves no run state either.
     let journal = std::fs::read_to_string(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join("e2e-live-1.json"),
+        common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json"),
     )
     .unwrap();
     assert!(
@@ -203,7 +202,7 @@ fn rewind_chain_by_one(repo: &Path) {
 /// A capture-queue entry for `head` in the shape the hook journals one,
 /// queued at `queued_at_ms`. Returns the entry's path.
 fn plant_queue_entry(repo: &Path, head: &str, queued_at_ms: i64) -> PathBuf {
-    let qdir = repo.join(".git").join("rift-capture-queue");
+    let qdir = hooks_fixture::capture_queue_of(repo);
     std::fs::create_dir_all(&qdir).unwrap();
     let entry = qdir.join(format!("{head}.json"));
     std::fs::write(
@@ -344,7 +343,7 @@ fn doctor_says_and_consumes_a_pending_capture_marker() {
     ];
 
     // A marker left behind exactly as the worker leaves one.
-    let queue = repo.join(".git").join("rift-capture-queue");
+    let queue = common::capture_queue_dir(&repo.join(".git"), &cache);
     std::fs::create_dir_all(&queue).unwrap();
     std::fs::write(
         queue.join("stale-entry.error"),
@@ -400,7 +399,7 @@ fn a_planted_capture_note_is_reported_by_doctor_as_a_finding_and_said_once() {
     ];
     // The note channel's shape, planted by hand: `<key>.error` under the
     // capture queue, one line, the body a boundary-snapshot failure would leave.
-    let qdir = repo.join(".git").join("rift-capture-queue");
+    let qdir = common::capture_queue_dir(&repo.join(".git"), &cache);
     std::fs::create_dir_all(&qdir).unwrap();
     let marker = qdir.join("boundary-0123456789abcdef.error");
     let body =

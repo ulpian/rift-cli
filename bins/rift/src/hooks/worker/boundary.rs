@@ -1,24 +1,32 @@
 //! The turn-boundary snapshot a hook journaled, taken by the detached worker.
 //!
-//! Separate from the drain because it is the one job whose answer depends on
-//! *when* it describes: the snapshot is held to the boundary's own instant and
-//! `HEAD`, which the hook recorded, not to the moment the worker runs.
+//! The hook's HEAD/time identify the event; the collection interval audits
+//! later current bytes and cannot establish event-time content or writers.
+//! Queue ownership controls mutation, not historical authorship.
 
 use rift_core::Result;
 
 use crate::agent_queue::{AgentJob, BoundaryEdge, BoundarySnapshot};
 use crate::hooks::projection_db_at;
 
-/// Take one journaled boundary snapshot: the same capture the hook once ran
-/// inline, given the hook's `HEAD` and instant.
-///
-/// A failure goes back to the drain, which keeps the job and counts the
-/// attempt (or drops it on a refused row): the boundary is then missing from
-/// the session, which the replay already reads as an unanchored window.
+/// Collect bounded current bytes for queued boundary metadata under the owner.
+/// The event HEAD/time remain separate from the later collection audit.
+/// Execution failures return to the bounded retry path; unavailable admission
+/// evidence stays owed without spending execution attempts. Missing or incomplete
+/// observations stay missing; neither collection nor retry certifies authorship.
 pub(super) fn boundary_snapshot_job(
     t: &crate::hooktime::HookTimer,
     job: &AgentJob,
     snapshot: &BoundarySnapshot,
+) -> Result<()> {
+    boundary_snapshot_job_with_clock(t, job, snapshot, rift_shadow::boundary_collection_time)
+}
+
+fn boundary_snapshot_job_with_clock(
+    t: &crate::hooktime::HookTimer,
+    job: &AgentJob,
+    snapshot: &BoundarySnapshot,
+    clock: impl FnMut() -> Result<i64>,
 ) -> Result<()> {
     let repo = rift_git::discover(&job.work_tree)?;
     let reader = t.phase("gix_open", || {
@@ -32,7 +40,7 @@ pub(super) fn boundary_snapshot_job(
         .build()
         .map_err(rift_core::RiftError::from)?;
     t.phase(phase_name(snapshot.boundary), || {
-        rt.block_on(rift_shadow::capture_boundary(
+        rt.block_on(rift_shadow::capture_boundary_with_clock(
             &store,
             &repo,
             &reader,
@@ -42,6 +50,7 @@ pub(super) fn boundary_snapshot_job(
             snapshot.ordinal,
             snapshot.boundary.boundary(),
             snapshot.captured_at_ms,
+            clock,
         ))
     })
 }
@@ -81,8 +90,9 @@ mod tests {
 
     const SESSION: &str = "s-boundary";
     const AGENT: &str = "claude-code";
-    /// An instant after every edit these fixtures make, fixed so no verdict
-    /// reads the clock: 2100-01-01.
+    /// Fixed event time for fixtures. Direct collection tests inject separate
+    /// read intervals; drain tests use the production clock without comparing
+    /// it to this synthetic event time: 2100-01-01.
     const AFTER_THE_EDITS: i64 = 4_102_444_800_000;
 
     /// A committed checkout whose family is minted, with `a.txt` edited and
@@ -152,6 +162,8 @@ mod tests {
              FROM turn_boundary_file ORDER BY 1",
             "SELECT hunk_id || '|' || edit_kind || '|' || path || '|' || old_start || '|' \
              || old_len || '|' || new_start || '|' || new_len FROM turn_diff_hunk ORDER BY 1",
+            "SELECT snapshot_id || '|' || worktree_hash || '|' || collection_started_at || '|' \
+             || collection_finished_at FROM turn_boundary_observation ORDER BY 1",
         ];
         let mut lines = Vec::new();
         for sql in queries {
@@ -179,7 +191,13 @@ mod tests {
             panic!("a boundary job");
         };
         let t = crate::hooktime::HookTimer::new("test", false);
-        boundary_snapshot_job(&t, &job, snapshot).unwrap();
+        let mut worker_tick = AFTER_THE_EDITS + 60_000;
+        boundary_snapshot_job_with_clock(&t, &job, snapshot, || {
+            let at = worker_tick;
+            worker_tick += 1;
+            Ok(at)
+        })
+        .unwrap();
         let db = crate::family::projection_db(checkout.path()).unwrap();
         let worker = boundary_rows(&rift_store::SqliteStore::open_read_only(&db).unwrap());
 
@@ -189,7 +207,8 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        rt.block_on(rift_shadow::capture_boundary(
+        let mut inline_tick = AFTER_THE_EDITS + 60_000;
+        rt.block_on(rift_shadow::capture_boundary_with_clock(
             &inline,
             &repo,
             &reader,
@@ -199,14 +218,19 @@ mod tests {
             1,
             rift_shadow::Boundary::Start,
             AFTER_THE_EDITS,
+            || {
+                let at = inline_tick;
+                inline_tick += 1;
+                Ok(at)
+            },
         ))
         .unwrap();
 
         assert_eq!(worker, boundary_rows(&inline));
         assert_eq!(
             worker.len(),
-            5,
-            "one snapshot, two files, two hunks: {worker:?}"
+            4,
+            "one event, two current files, one collection audit, no actor hunks: {worker:?}"
         );
     }
 
@@ -246,7 +270,13 @@ mod tests {
         crate::agent_queue::enqueue(&repo.git_dir, &end).unwrap();
 
         let t = crate::hooktime::HookTimer::new("test", true);
-        drain_locked(&t, &repo.git_dir);
+        let owner = crate::capture_queue::acquire_owner(&repo.git_dir).unwrap();
+        drain_locked(
+            &t,
+            &repo.git_dir,
+            &owner,
+            &mut std::collections::BTreeSet::new(),
+        );
 
         let order: Vec<&str> = t
             .records()
@@ -260,23 +290,155 @@ mod tests {
             order,
             ["boundary_end", "boundary_start", "enrich_attribution"]
         );
+        // Drain uses the checked production clock. Validate the audit shape,
+        // without comparing real collection time to the synthetic event time.
+        let store = rift_store::open_capture_projection(
+            crate::family::projection_db(checkout.path()).unwrap(),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let id = rift_shadow::ids::session_row_id(AGENT, SESSION);
+        let last = rt
+            .block_on(rift_store::latest_turn_boundary_snapshot(&store, &id))
+            .unwrap()
+            .unwrap();
+        let audit = rt
+            .block_on(rift_store::turn_boundary_observation_for_snapshot(
+                &store,
+                &last.snapshot_id,
+            ))
+            .unwrap()
+            .unwrap();
+        assert!(audit.interval.started_at >= 0);
+        assert!(audit.interval.finished_at >= audit.interval.started_at);
     }
 
-    /// A journaled boundary the worker cannot take (its checkout is gone) is
-    /// kept with the attempt counted, like every other job.
     #[test]
-    fn a_boundary_job_that_fails_is_kept_with_its_attempt_counted() {
+    fn collection_clock_failure_or_reversal_does_not_persist_an_event_or_audit() {
+        use rift_store::CanonicalStore as _;
+        let checkout = tempfile::tempdir().unwrap();
+        let (_, head) = edited_checkout(checkout.path());
+        let job = snapshot_job(
+            checkout.path(),
+            &head,
+            1,
+            BoundaryEdge::Start,
+            AFTER_THE_EDITS,
+        );
+        let JobKind::BoundarySnapshot(snapshot) = &job.kind else {
+            panic!("boundary fixture");
+        };
+        let t = crate::hooktime::HookTimer::new("test", false);
+        assert!(boundary_snapshot_job_with_clock(&t, &job, snapshot, || Err(
+            rift_core::RiftError::storage("fixture collection clock unavailable")
+        ),)
+        .is_err());
+        let mut at = 30;
+        assert!(boundary_snapshot_job_with_clock(&t, &job, snapshot, || {
+            let current = at;
+            at -= 1;
+            Ok(current)
+        })
+        .is_err());
+        let store = rift_store::open_capture_projection(
+            crate::family::projection_db(checkout.path()).unwrap(),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert_eq!(
+            rt.block_on(store.count("turn_boundary_snapshot")).unwrap(),
+            0
+        );
+        assert_eq!(
+            rt.block_on(store.count("turn_boundary_observation"))
+                .unwrap(),
+            0
+        );
+    }
+
+    /// A missing checkout leaves the original boundary delivery unattempted.
+    #[test]
+    fn a_gone_boundary_checkout_stays_owed_without_spending_an_attempt() {
         let git_dir = tempfile::tempdir().unwrap();
         let gone = git_dir.path().join("gone");
         let job = snapshot_job(&gone, "0".repeat(40).as_str(), 1, BoundaryEdge::End, 1);
         let path = crate::agent_queue::enqueue(git_dir.path(), &job).unwrap();
+        let before = std::fs::read(&path).unwrap();
         let t = crate::hooktime::HookTimer::new("test", false);
 
         assert_eq!(
-            run_agent_job(&t, git_dir.path(), &path, &job),
+            run_agent_job(
+                &t,
+                git_dir.path(),
+                &path,
+                &job,
+                &crate::capture_queue::acquire_owner(git_dir.path()).unwrap()
+            ),
             Landed::Nothing
         );
         let (_, kept) = crate::agent_queue::jobs(git_dir.path()).pop().unwrap();
-        assert_eq!(kept.attempts, 1);
+        assert_eq!(kept.attempts, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    #[test]
+    fn an_admitted_boundary_blob_write_failure_spends_exactly_three_attempts() {
+        use rift_store::CanonicalStore as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, head) = edited_checkout(tmp.path());
+        let mut obstruction = None;
+        for candidate in 0..256 {
+            let bytes = format!("fresh boundary payload {candidate}\n");
+            let oid = rift_recall_substrate::worktree::git_blob_oid(bytes.as_bytes());
+            let fanout = repo.common_dir.join("objects").join(&oid[..2]);
+            if !fanout.exists() {
+                std::fs::write(tmp.path().join("new.txt"), bytes).unwrap();
+                std::fs::write(&fanout, b"blob-write-obstruction").unwrap();
+                obstruction = Some(fanout);
+                break;
+            }
+        }
+        let obstruction = obstruction.expect("unused fanout in bounded fixture");
+        let job = snapshot_job(tmp.path(), &head, 1, BoundaryEdge::Start, 1);
+        let path = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();
+        let crate::agent_queue::JobKind::BoundarySnapshot(snapshot) = &job.kind else {
+            panic!("boundary fixture")
+        };
+        crate::hooks::worker::ownership::require_new_boundary(&job, snapshot).unwrap();
+        let db = projection_db_at(tmp.path()).unwrap();
+        let store = rift_store::open_capture_projection(&db).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let facts = || {
+            rt.block_on(store.query(
+                "SELECT * FROM turn_boundary_snapshot ORDER BY snapshot_id",
+                &[],
+            ))
+            .unwrap()
+        };
+        let before = facts();
+        for attempt in 1..=crate::capture_queue::MAX_ATTEMPTS {
+            crate::hooks::worker::drain_jobs(
+                repo.git_dir.to_str(),
+                crate::hooks::worker::LockWait::None,
+            );
+            if attempt < crate::capture_queue::MAX_ATTEMPTS {
+                assert_eq!(
+                    crate::agent_queue::read_job(&path).unwrap().1.attempts,
+                    attempt
+                );
+            } else {
+                assert!(!path.exists());
+            }
+            assert_eq!(
+                std::fs::read(&obstruction).unwrap(),
+                b"blob-write-obstruction"
+            );
+            assert_eq!(facts(), before);
+        }
     }
 }

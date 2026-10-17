@@ -55,6 +55,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "redact_fallback"
+path = "fuzz_targets/redact_fallback.rs"
+test = false
+doc = false
+bench = false
+
 # The rule-pack path, fuzzed by owner decision: user-authored policy files off
 # disk,
 # through the loader and the compiler, into the pipeline.

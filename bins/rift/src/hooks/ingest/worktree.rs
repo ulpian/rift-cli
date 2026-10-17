@@ -129,10 +129,11 @@ pub(in crate::hooks) fn observe_worktree(
         subagent: subagent_id.map(str::to_owned),
     };
 
-    // The memo lives beside the session's own state, under the gitdir the
-    // ingest just wrote the cache to — never under the OBSERVED worktree's,
-    // which may be a different member of the same family.
-    let cached = session_cache::read_cache(&repo.git_dir, native_session)
+    // The memo lives beside the session's own state, in the member's sessions
+    // directory the ingest just wrote the cache to — never the OBSERVED
+    // worktree's, which may be a different member of the same family.
+    let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
+    let cached = session_cache::read_cache(&sessions, native_session)
         .ok()
         .flatten();
     if cached
@@ -174,7 +175,7 @@ pub(in crate::hooks) fn observe_worktree(
     // cache is not one this path should conjure state for.
     if let Some(mut cache) = cached {
         cache.last_worktree = Some(seen);
-        session_cache::write_cache(&repo.git_dir, &cache)?;
+        session_cache::write_cache(&sessions, &cache)?;
     }
     Ok(wrote)
 }
@@ -406,10 +407,13 @@ mod shell_cd_tests {
         };
         observe_hook_worktree(&run, "claude-code");
         let memo = || {
-            read_cache(&repo.git_dir, "s-cd")
-                .unwrap()
-                .unwrap()
-                .last_worktree
+            read_cache(
+                &crate::family::run_state::sessions_dir(&repo.git_dir),
+                "s-cd",
+            )
+            .unwrap()
+            .unwrap()
+            .last_worktree
         };
         assert_eq!(memo(), None, "a refused row is never memoized");
         let again = observe_payload_worktree(&run, "claude-code", 20);

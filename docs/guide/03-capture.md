@@ -46,7 +46,7 @@ dispatch table, so name and behaviour cannot drift apart.
 
 | Hook | What Rift does |
 |---|---|
-| `prepare-commit-msg` | Adds the `Rift-Checkpoint` and `Rift-Attribution` trailers when a session is live; never rejects. |
+| `prepare-commit-msg` | Adds the `Rift-Checkpoint` trailer when a session is live and preserves an existing attribution trailer; never rejects. |
 | `commit-msg` | Normalizes those trailers idempotently; never rejects. |
 | `post-commit` | The main capture beat: records the commit and session, hands heavy work to a detached worker. |
 | `pre-push` | Refuses Rift's internal refs, signals "work is leaving" for `on-pr`, drains the push queue. |
@@ -236,6 +236,12 @@ importable or projectable), the transcript and its compaction, the tool calls
 including files read, and four mechanical digests; [05](05-ledger-and-verification.md)
 walks the anatomy.
 
+An optional `turn_boundary_gaps.jsonl` records a checked repository/member recovery
+assertion. A genuine checkpoint session carries it; other subject session digests
+create no sessions, usage, lifecycle or attribution facts. Its commitments describe
+source provenance, not destination paths, possession of old bytes or permission to
+retire queued work. It does not restore missing historical observations.
+
 **The compaction is deterministic, not a summary**: tool calls reduce to identifiers,
 file reads to handles, no model runs in capture, and the "intent and outcome" slot is
 your redacted prompt plus mechanical outcome facts. **Re-condensing an unchanged session is a no-op.** Each subagent gets its own subtree, its tokens roll up to the
@@ -249,6 +255,11 @@ lands, it binds any the session read and left unbound, at most 64. That needs th
 open for writing and the tokenizer, so a hook never does it: an archive made in a hook,
 including one drained under `RIFT_CAPTURE_SYNC`, binds nothing and the next worker
 condense does. A failed binding is counted and never fails the condense.
+
+A rule that cannot reach the bounded redaction fixpoint costs the affected
+records and their required context. Failed parsed records become fixed fallback
+records; failed flat runs also replace lines whose protection depends on their
+neighbours, preserving safe independent lines ([§4.6](04-redaction-and-secrets.md#46-the-json-aware-walker)).
 
 ### When does a condense happen?
 
@@ -321,30 +332,52 @@ Four jobs do not fit a hook. **The session-end condense** measured about 648 ms 
 median. **Counting a read file's tokens** measured about 102 ms on 120 lines because the
 tokenizer takes about 234 ms to initialise. **The `scheduled` archive** redacts a whole
 multi-megabyte transcript; on the hook it outlasted the client's timeout and was
-restarted by the next hook, so the checkpoint never landed. **The turn-boundary snapshot** (diffing every path that differs from `HEAD` against the
-previous boundary) costs a `git status` plus a read and diff per changed path; the hook
-records only `HEAD` and the instant, and the worker snapshots as of that instant, so a
-late edit costs that file's human/agent split for one window rather than crediting the
-wrong one.
+restarted by the next hook, so the checkpoint never landed. **Turn-boundary collection**
+costs a `git status`, bounded reads and object writes for changed paths. The hook
+records a boundary event's `HEAD` and time. The worker later collects current bytes;
+a separate collection-attempt interval records that later work. Collection is not
+an atomic snapshot and does not reconstruct bytes at the event time.
 
-With no daemon, the hook writes what is owed to a job journal under the git directory
-(identifier-only jobs, the file name being the job's identity so a redelivered hook
-overwrites its own), spawns one detached one-shot child with its streams going nowhere
-(so it never writes over git's terminal) and does not wait. The child drains under one
-lock until a pass finds nothing. **`rift doctor` is the backstop**: its sweep drains the
-journal *first*, since a condense nobody finished is what it exists to rescue. The path
-index walk rides the same journal; an index nobody rebuilt is merely absent, so the
-agent's own tools run.
+Turn-boundary capture preserves a symlink's target spelling without reading its
+referent. Rift trusts the directories above the configured worktree root; the root
+and every repository-relative component are opened without following links. Regular
+reads are capped at 5 MiB; directories, special files, unstable replacements and
+larger files produce unknown observations. The object writer receives only the
+captured bytes, so a replaced path cannot redirect a second read.
 
-A job carries **identifiers only**, never capture bytes, so the worker re-reads those
-bytes or none; it re-asks the strategy under its lock, so a commit in between is not
-followed by a second checkpoint. Three properties hold it together. The entry is
-**durable before the spawn**, so a worker that never starts leaves the job for the next
-worker or doctor run (inputs durable, outputs idempotent appends). Failure is **bounded
-and loud once**: after a bounded number of attempts a marker channel reports it until it
-stops being true, named by the *next* commit; a job whose row the schema refuses is
-dropped at once, since no retry can change a refusal. And **a session claims to be ended
-only when a checkpoint exists**: a failed archive leaves it `ending`, retryable.
+Append-only companion facts distinguish regular files, links, confirmed absence and
+unknown observations. A boundary without a file-kind fact supplies no type evidence.
+File-kind and collection facts describe observations. They do not establish who
+wrote the changes. Rift does not record closed-window hunks that assign those
+changes to a writer. Commit-diff attribution stays unchanged, and Rift generates
+no new attribution preview percentages from these observations. Existing stored attributions remain unchanged and may be
+incorrect; a retry does not repair them. Kind and collection facts share the existing
+boundary rows' projection-only lifecycle; checkpoint shards do not carry them.
+
+With no daemon, the hook writes an identifier-only job into its checkout's family
+run state, spawns one detached child with its streams going nowhere, and does not
+wait. Doctor can attempt the pending work too. Each checkout’s worker holds an
+open-file lock at its canonical Git directory. Elapsed time never releases a live
+owner. Legacy lock markers defer work until a controlled handoff; the new owner
+file does not exclude older installed workers.
+
+An owner-controlled recovery hold keeps normal worker execution, migration,
+and owned ticket removal or retry owed. Hooks may still queue new work. Any
+hold entry, or uncertainty about its absence, blocks those normal mutations;
+its age never expires it.
+
+Queue context includes the full payload apart from its attempt counter. An
+identical context stays queued without resetting retries; a changed session,
+worktree or queue time remains separate. Migration removes an old ticket only
+when its complete payload, including attempts, matches the installed copy.
+Actual execution failures have three attempts. Ownership barriers and unproved
+input or completion facts stay owed without spending that budget, and doctor
+reports the available reason.
+
+An exact-context condense marker also names an existing checkpoint. Legacy
+markers, ended caches and token counts without their original inputs cannot
+certify a retry, so some work remains pending. A session claims to be ended only
+when a checkpoint exists.
 
 `RIFT_CAPTURE_SYNC=1` drains inline (tests, CI); it changes **who** drains, never
 **whether**.
@@ -392,8 +425,11 @@ any without a valid redaction report, re-derives events from the shard's own tra
 through the same writers and identity derivations as the live path, and advances an
 append-only watermark. Git is the record, so the bridge's view wins and the hook path is
 an optimisation over it. `rift rebuild` runs it (delete `projection.db` first for a
-from-scratch rebuild; over a live projection it is a set-union no-op). Hooks alone cannot
-be authoritative: they miss sessions run before installation. The bridge never reads raw session bytes.
+from-scratch rebuild; ordinary existing checkpoints are skipped). A present recovery
+audit is authenticated and its exact projection rechecked even for an existing
+checkpoint. Refusal preserves that checkpoint and adds no unauthenticated gap
+facts. Hooks alone cannot be authoritative: they miss sessions run before
+installation. The bridge never reads raw session bytes.
 
 A read-only importer lands another tool's checkpoints under their own chain era, never as
 a chain anchor ([05](05-ledger-and-verification.md)).

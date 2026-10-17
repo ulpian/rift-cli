@@ -8,7 +8,7 @@
 //! the one conversation split into two sessions — turns divided between them,
 //! spend counted under both, neither history complete.
 //!
-//! The fix is an exclusive marker file, `<git_dir>/rift-sessions/<id>.agent`,
+//! The fix is an exclusive marker file, `<sessions>/<id>.agent`,
 //! published whole and never clobbered (see `publish_marker`): whichever
 //! agent's hook lands first writes its label and every later hook for that
 //! session reads it back. The winner does not
@@ -35,7 +35,6 @@ use std::path::{Path, PathBuf};
 
 use rift_core::AgentId;
 
-use crate::session_cache::sessions_dir;
 use crate::session_id::is_safe_session_id;
 
 /// Marker suffix for the ownership file.
@@ -94,9 +93,8 @@ impl Claim {
 /// The ownership marker's path, or `None` when the session id may not name a
 /// file (see [`is_safe_session_id`]).
 #[must_use]
-pub fn claim_path(git_dir: &Path, session_id: &str) -> Option<PathBuf> {
-    is_safe_session_id(session_id)
-        .then(|| sessions_dir(git_dir).join(format!("{session_id}{CLAIM_SUFFIX}")))
+pub fn claim_path(sessions: &Path, session_id: &str) -> Option<PathBuf> {
+    is_safe_session_id(session_id).then(|| sessions.join(format!("{session_id}{CLAIM_SUFFIX}")))
 }
 
 /// Claim `session_id` for `agent`, first writer wins.
@@ -106,26 +104,29 @@ pub fn claim_path(git_dir: &Path, session_id: &str) -> Option<PathBuf> {
 /// (this agent then claims it by overwriting nothing — it simply owns the
 /// session for want of a better answer).
 #[must_use]
-pub fn claim_session_agent(git_dir: &Path, session_id: &str, agent: &str) -> Claim {
-    let Some(path) = claim_path(git_dir, session_id) else {
+pub fn claim_session_agent(sessions: &Path, session_id: &str, agent: &str) -> Claim {
+    let Some(path) = claim_path(sessions, session_id) else {
         return Claim::Unavailable;
     };
     if !AgentId::new(agent).is_well_formed() {
         return Claim::Unavailable;
     }
     // The common case is a session already claimed, so look before leaping.
-    if let Some(owner) = read_owner(&path) {
+    // The first claim may still sit in an unmoved member's old tree.
+    let standing = path
+        .file_name()
+        .map(|name| crate::run_state::read_path(sessions, &name.to_string_lossy()));
+    if let Some(owner) = standing.as_deref().and_then(read_owner) {
         return if owner == agent {
             Claim::Won
         } else {
             Claim::Held(owner)
         };
     }
-    let dir = sessions_dir(git_dir);
-    if std::fs::create_dir_all(&dir).is_err() {
+    if std::fs::create_dir_all(sessions).is_err() {
         return Claim::Unavailable;
     }
-    match publish_marker(&dir, &path, agent) {
+    match publish_marker(sessions, &path, agent) {
         Some(true) => Claim::Won,
         // Another hook got there first — and because the marker is published
         // whole, the loser reads a *complete* label, never a half-written one.
@@ -191,8 +192,12 @@ fn publish_marker(dir: &Path, path: &Path, agent: &str) -> Option<bool> {
 
 /// The agent that owns `session_id`, if the session has been claimed.
 #[must_use]
-pub fn session_owner(git_dir: &Path, session_id: &str) -> Option<String> {
-    read_owner(&claim_path(git_dir, session_id)?)
+pub fn session_owner(sessions: &Path, session_id: &str) -> Option<String> {
+    let path = claim_path(sessions, session_id)?;
+    read_owner(&crate::run_state::read_path(
+        sessions,
+        &path.file_name()?.to_string_lossy(),
+    ))
 }
 
 /// The bytes a marker holds for `agent`, at the current schema version.
@@ -289,7 +294,7 @@ mod tests {
     fn a_corrupt_marker_reads_as_unclaimed_rather_than_as_an_agent() {
         let tmp = tempfile::tempdir().unwrap();
         let git_dir = tmp.path();
-        std::fs::create_dir_all(sessions_dir(git_dir)).unwrap();
+        std::fs::create_dir_all(git_dir).unwrap();
         let path = claim_path(git_dir, SESSION).unwrap();
         for corrupt in [
             String::new(),
@@ -333,7 +338,7 @@ mod tests {
     fn a_marker_from_a_future_version_reads_as_unclaimed() {
         let tmp = tempfile::tempdir().unwrap();
         let git_dir = tmp.path();
-        std::fs::create_dir_all(sessions_dir(git_dir)).unwrap();
+        std::fs::create_dir_all(git_dir).unwrap();
         let path = claim_path(git_dir, SESSION).unwrap();
         std::fs::write(
             &path,
@@ -355,7 +360,7 @@ mod tests {
     fn a_pre_versioning_marker_still_names_its_owner() {
         let tmp = tempfile::tempdir().unwrap();
         let git_dir = tmp.path();
-        std::fs::create_dir_all(sessions_dir(git_dir)).unwrap();
+        std::fs::create_dir_all(git_dir).unwrap();
         std::fs::write(claim_path(git_dir, SESSION).unwrap(), b"cursor").unwrap();
         assert_eq!(session_owner(git_dir, SESSION).unwrap(), "cursor");
         assert_eq!(
@@ -369,7 +374,7 @@ mod tests {
     fn only_one_of_many_concurrent_claimants_wins() {
         let tmp = tempfile::tempdir().unwrap();
         let git_dir = tmp.path().to_path_buf();
-        std::fs::create_dir_all(sessions_dir(&git_dir)).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
         let agents = ["cursor", "claude-code", "codex", "gemini", "copilot"];
         let claims: Vec<(&str, Claim)> = std::thread::scope(|scope| {
             let handles: Vec<_> = agents

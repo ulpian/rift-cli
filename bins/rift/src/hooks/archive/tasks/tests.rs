@@ -15,7 +15,7 @@ impl Session {
     fn new(main_body: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let git_dir = tmp.path().join("git");
-        let sessions = rift_shadow::hooks::session_cache::sessions_dir(&git_dir);
+        let sessions = crate::family::run_state::sessions_dir(&git_dir);
         std::fs::create_dir_all(&sessions).unwrap();
         let main = tmp.path().join("projects").join(format!("{SESSION}.jsonl"));
         let subagents = tmp.path().join("projects").join(SESSION).join("subagents");
@@ -111,7 +111,7 @@ fn the_claimed_address_wins_over_the_listing_and_carries_the_type() {
     s.subagent("a1", &line("2026-10-11T10:00:01Z", "stale copy"));
     let moved = s.main.with_file_name("moved-a1.jsonl");
     std::fs::write(&moved, line("2026-10-11T10:00:02Z", "the stated file")).unwrap();
-    let dir = rift_shadow::hooks::session_cache::sessions_dir(&s.git_dir).join("s-1.subagents");
+    let dir = crate::family::run_state::sessions_dir(&s.git_dir).join("s-1.subagents");
     std::fs::create_dir_all(&dir).unwrap();
     let claim = serde_json::json!({
         "schema_version": 1, "agent_id": "a1", "agent_type": "Explore",
@@ -263,7 +263,7 @@ fn a_claimed_symlink_or_non_jsonl_address_is_never_read() {
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let not_jsonl = s.main.with_file_name("notes.txt");
     std::fs::write(&not_jsonl, "secret notes").unwrap();
-    let dir = rift_shadow::hooks::session_cache::sessions_dir(&s.git_dir).join("s-1.subagents");
+    let dir = crate::family::run_state::sessions_dir(&s.git_dir).join("s-1.subagents");
     std::fs::create_dir_all(&dir).unwrap();
     for (agent, path) in [("a1", &link), ("a2", &not_jsonl)] {
         let claim = serde_json::json!({

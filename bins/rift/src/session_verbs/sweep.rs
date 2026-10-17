@@ -20,7 +20,10 @@ pub(crate) fn stop(root: &Path, target: Option<&str>) -> Result<Outcome> {
     use rift_shadow::hooks::session_cache::read_cache;
     let repo = rift_git::discover(root)?;
     if let Some(id) = target {
-        match read_cache(&repo.git_dir, id).ok().flatten() {
+        match read_cache(&crate::family::run_state::sessions_dir(&repo.git_dir), id)
+            .ok()
+            .flatten()
+        {
             None => {
                 return Ok(Outcome::coded(
                     exit::PRECONDITION,
@@ -126,7 +129,10 @@ fn close_idle_caches(root: &Path, now: i64, target: Option<&str>) -> Result<Vec<
     let mut closed = Vec::new();
     for mut cache in caches {
         "ended".clone_into(&mut cache.state);
-        write_cache(&repo.git_dir, &cache)?;
+        write_cache(
+            &crate::family::run_state::sessions_dir(&repo.git_dir),
+            &cache,
+        )?;
         closed.push(cache.session_id);
     }
     Ok(closed)
@@ -292,27 +298,36 @@ fn pruned_shadow_refs(
     (pruned_refs, kept.len())
 }
 
-/// Queue entries past TTL, plus the stale temp files every drain sweeps.
+/// Queue entries past TTL. Private queue stages are retained.
 fn pruned_queue_entries(
     repo: &rift_git::RepoPaths,
     now: i64,
     ttl_ms: i64,
     dry_run: bool,
 ) -> (usize, usize) {
+    // Advisory queue-only preview: no ownership file, migration or cleanup.
+    if dry_run {
+        let expired = crate::capture_queue::entries_read_only(&repo.git_dir)
+            .into_iter()
+            .filter(|(_, entry)| now.saturating_sub(entry.queued_at_ms) > ttl_ms)
+            .count();
+        return (expired, 0);
+    }
+    let Ok(owner) = crate::capture_queue::acquire_owner(&repo.git_dir) else {
+        return (0, 0);
+    };
+    if crate::family::run_state::prepare_owned(&owner).is_err() {
+        return (0, 0);
+    }
     let mut pruned_queue = 0usize;
     for (path, entry) in crate::capture_queue::entries(&repo.git_dir) {
-        if now.saturating_sub(entry.queued_at_ms) > ttl_ms {
-            if !dry_run {
-                crate::capture_queue::remove(&path);
-            }
+        if now.saturating_sub(entry.queued_at_ms) > ttl_ms
+            && crate::capture_queue::remove_owned(&path, &owner).is_ok()
+        {
             pruned_queue += 1;
         }
     }
-    let swept_tmps = if dry_run {
-        0
-    } else {
-        crate::capture_queue::sweep_stale_tmps(&repo.git_dir, now)
-    };
+    let swept_tmps = crate::capture_queue::sweep_stale_tmps(&repo.git_dir, now);
     (pruned_queue, swept_tmps)
 }
 
@@ -565,6 +580,103 @@ fn sweep_window_state(
 mod tests {
     use super::*;
 
+    #[test]
+    fn queue_dry_run_counts_expired_dual_root_tickets_without_ownership_or_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        let repo = rift_git::discover(tmp.path()).unwrap();
+        crate::family::resolve_at(tmp.path()).unwrap();
+        let current = crate::capture_queue::queue_dir(&repo.git_dir);
+        let legacy = repo.git_dir.join("rift-capture-queue");
+        let ticket = |commit: &str| crate::capture_queue::QueueEntry {
+            schema_version: 1,
+            commit: commit.into(),
+            work_tree: tmp.path().to_owned(),
+            session_id: None,
+            agent: None,
+            session_state: None,
+            queued_at_ms: 1,
+            attempts: 2,
+        };
+        let old = ticket(&"a".repeat(40));
+        std::fs::create_dir_all(&legacy).unwrap();
+        let old_path = legacy.join(format!("{}.json", old.commit));
+        std::fs::write(&old_path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let new_path =
+            crate::capture_queue::enqueue(&repo.git_dir, &ticket(&"b".repeat(40))).unwrap();
+        let stage = legacy.join(".publication.stage");
+        let marker = legacy.join(".lock");
+        std::fs::write(&stage, b"unfinished-publication").unwrap();
+        std::fs::write(&marker, b"legacy-unknown-owner").unwrap();
+        let paths = [old_path, new_path, stage, marker];
+        let before: Vec<_> = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        let owner = repo.git_dir.join(".rift-capture-owner.lock");
+        let moved = current.parent().unwrap().join(".moved-v1");
+        assert!(!owner.exists() && !moved.exists());
+        assert_eq!(pruned_queue_entries(&repo, 1000, 10, true), (2, 0));
+        for (path, bytes) in paths.iter().zip(before) {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert!(!owner.exists() && !moved.exists());
+    }
+
+    #[test]
+    fn a_cold_queue_preview_does_not_journal_migration_or_record_member_metadata() {
+        use rift_shadow::hooks::run_state::{self as layout, RunRoot};
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        let repo = rift_git::discover(tmp.path()).unwrap();
+        let family = crate::family::resolve_at(tmp.path()).unwrap();
+        let family_dir =
+            rift_store::projection_dir_under(&crate::family::cache_root(), &family.family_id);
+        let member = layout::member_dir(&family_dir, &repo.work_tree);
+        let current = RunRoot::CaptureQueue.under(&member);
+        let legacy = RunRoot::CaptureQueue.legacy_under(&repo.git_dir);
+        let ticket = |commit: &str| crate::capture_queue::QueueEntry {
+            schema_version: 1,
+            commit: commit.into(),
+            work_tree: repo.work_tree.clone(),
+            session_id: None,
+            agent: None,
+            session_state: None,
+            queued_at_ms: 1,
+            attempts: 2,
+        };
+        std::fs::create_dir_all(&legacy).unwrap();
+        let old = ticket(&"a".repeat(40));
+        let old_path = legacy.join(format!("{}.json", old.commit));
+        std::fs::write(&old_path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let new = ticket(&"b".repeat(40));
+        let new_path = crate::capture_queue::delivery::publish(
+            &current,
+            &new.commit,
+            &serde_json::to_value(&new).unwrap(),
+        )
+        .unwrap();
+        let watched = [
+            member.join("work_tree"),
+            member.join("git_dir"),
+            member.join(".moved-v1"),
+            RunRoot::AgentQueue.under(&member),
+            repo.git_dir.join(".rift-capture-owner.lock"),
+        ];
+        assert!(watched.iter().all(|path| !path.exists()));
+        let old_bytes = std::fs::read(&old_path).unwrap();
+        let new_bytes = std::fs::read(&new_path).unwrap();
+        assert_eq!(pruned_queue_entries(&repo, 1000, 10, true), (2, 0));
+        assert_eq!(std::fs::read(&old_path).unwrap(), old_bytes);
+        assert_eq!(std::fs::read(&new_path).unwrap(), new_bytes);
+        assert!(
+            watched.iter().all(|path| !path.exists()),
+            "cold preview must not create records, queue work, owner or moved markers"
+        );
+        assert_eq!(std::fs::read_dir(&current).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&legacy).unwrap().count(), 1);
+    }
+
     /// An `idle` journal cache is the machine's pre-session
     /// state — no live-state sweep reaches it and no legal transition ends it,
     /// so five sat STUCK for weeks. The explicit verb closes them at the
@@ -576,6 +688,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("repo");
         let git_dir = rift_git::test_support::fake_repo(&root).unwrap();
+        let git_dir = crate::family::run_state::sessions_dir(&git_dir);
         let cache = |id: &str, updated_at_ms: i64| {
             SessionCache::new(id, "claude-code", "idle", updated_at_ms)
         };

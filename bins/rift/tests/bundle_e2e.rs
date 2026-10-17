@@ -25,6 +25,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "bundle_e2e/boundary_gaps.rs"]
+mod boundary_gaps;
 mod common;
 use common::rift_cmd;
 
@@ -103,7 +105,7 @@ fn seeded_repo(tmp: &Path) -> (PathBuf, PathBuf) {
     git_in(&repo, &["init", "-q", "-b", "main"]);
     std::fs::write(repo.join("a.txt"), "one\n").unwrap();
     git_in(&repo, &["add", "a.txt"]);
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
         sessions.join("bundle-live-1.json"),

@@ -192,7 +192,12 @@ impl HealthStamp {
         let journals = sources
             .members
             .iter()
-            .map(|member| JournalStamp::read(&member.git_dir.join(crate::session::SESSIONS_DIR)))
+            .map(|member| {
+                JournalStamp::read(&crate::session::member_sessions(
+                    &member.git_dir,
+                    &member.work_tree,
+                ))
+            })
             .collect();
         Self {
             files,

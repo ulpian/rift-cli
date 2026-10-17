@@ -25,7 +25,8 @@ const PHANTOM_SCAN_SKIP: &[&str] = &["target", "node_modules", ".git"];
 struct PhantomGitdir {
     /// The directory itself — what the printed `rm -rf` line names.
     path: std::path::PathBuf,
-    /// How many session-cache files it swallowed (`rift-sessions/*.json`).
+    /// How many session-cache files it swallowed (`rift-sessions/*.json`, the
+    /// name an older binary wrote them under).
     /// Non-zero means captured work was written under a second identity.
     sessions: usize,
 }
@@ -33,7 +34,10 @@ struct PhantomGitdir {
 /// Session-cache files under a gitdir — the evidence a phantom actually took
 /// capture, rather than merely existing.
 fn phantom_session_count(git_dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(git_dir.join("rift-sessions")) else {
+    // A phantom is no member of any family, so its sessions only ever lived
+    // in the git dir's old tree.
+    let sessions = rift_shadow::hooks::run_state::RunRoot::Sessions.legacy_under(git_dir);
+    let Ok(entries) = std::fs::read_dir(sessions) else {
         return 0;
     };
     entries
@@ -146,24 +150,26 @@ pub(super) fn doctor_phantom_gitdirs(repo: &Path, fix: bool) -> (String, serde_j
 /// prunable member is not inert: its admin dir can still hold a capture queue
 /// whose entries now condense commit-only, and the capture-queue leg
 /// drains exactly those.
-pub(super) fn doctor_prunable_worktrees(repo: &Path) -> (String, serde_json::Value) {
+pub(super) fn doctor_prunable_worktrees(repo: &Path, fix: bool) -> (String, serde_json::Value) {
     let Ok(paths) = rift_git::discover(repo) else {
         return (String::new(), serde_json::json!({ "readable": false }));
     };
     let members = rift_git::family_members(&paths);
+    let (run_human, run_json) = run_state_leftovers(&members, fix);
     let gone: Vec<&rift_git::FamilyMember> = members.iter().filter(|m| m.prunable).collect();
     if gone.is_empty() {
         return (
-            String::new(),
-            serde_json::json!({ "members": members.len(), "prunable": 0 }),
+            run_human,
+            serde_json::json!({ "members": members.len(), "prunable": 0, "run_state": run_json }),
         );
     }
-    let mut human = format!(
+    let mut human = run_human;
+    human.push_str(&format!(
         "\n  worktrees:      {} of {} member(s) have no checkout left \
          (rift never prunes one)",
         gone.len(),
         members.len()
-    );
+    ));
     for m in &gone {
         human.push_str(&format!("\n    {} → {}", m.name, m.work_tree.display()));
     }
@@ -171,6 +177,7 @@ pub(super) fn doctor_prunable_worktrees(repo: &Path) -> (String, serde_json::Val
     let json = serde_json::json!({
         "members": members.len(),
         "prunable": gone.len(),
+        "run_state": run_json,
         "pruned": false,
         "found": gone
             .iter()
@@ -182,6 +189,81 @@ pub(super) fn doctor_prunable_worktrees(repo: &Path) -> (String, serde_json::Val
             .collect::<Vec<_>>(),
     });
     (human, json)
+}
+
+/// Run state still in a member's git dir — files from before the move, or
+/// files an older binary, still installed as a hook, wrote after it — and the
+/// copies such a binary wrote that a move preserved beside the new tree's.
+///
+/// `--fix` makes the doctor one of the movers: it reports first, then moves,
+/// so what it found is what it says. A report moves nothing and says the fix
+/// would. The finding that matters is the old binary: no file is lost, but
+/// every write it makes reads no session the new tree holds.
+fn run_state_leftovers(
+    members: &[rift_git::FamilyMember],
+    fix: bool,
+) -> (String, serde_json::Value) {
+    let mut human = String::new();
+    let mut found = Vec::new();
+    for member in members.iter().filter(|m| !m.prunable) {
+        let Some(left) = crate::family::run_state::leftovers(&member.git_dir) else {
+            continue;
+        };
+        let movement = fix
+            .then(|| crate::family::run_state::move_now(&member.git_dir))
+            .flatten();
+        if left.files == 0 && left.late_writes == 0 && left.preserved == 0 {
+            continue;
+        }
+        human.push_str(&leftover_line(member, left, fix, movement));
+        found.push(serde_json::json!({
+            "member": member.name,
+            "git_dir": member.git_dir.display().to_string(),
+            "files": left.files,
+            "moved_since": left.late_writes,
+            "preserved_late": left.preserved,
+            "old_binary_writing": serde_json::Value::Null,
+            "legacy_files_after_move": left.old_binary_writing(),
+            "migration": migration_status(fix, movement),
+            "moved_now": movement.map(|report| report.moved),
+            "preserved_now": movement.map(|report| report.preserved),
+        }));
+    }
+    (human, serde_json::Value::Array(found))
+}
+
+/// The human line for one member's leftovers.
+fn leftover_line(
+    member: &rift_git::FamilyMember,
+    left: crate::family::run_state::Leftovers,
+    fix: bool,
+    movement: Option<crate::family::run_state::MoveReport>,
+) -> String {
+    let status = migration_status(fix, movement);
+    let moved = movement.map_or(0, |report| report.moved);
+    let preserved = movement.map_or(0, |report| report.preserved);
+    format!(
+        "\n  run state:      {} legacy file(s) in {}; migration {status} \
+         ({moved} moved now, {preserved} preserved now; {} earlier late copy/copies). \
+         Old process liveness is unknown",
+        left.files,
+        member.git_dir.join("rift-*").display(),
+        left.preserved
+    )
+}
+
+/// What the leg says of the move: a report never runs it and names the
+/// repair that would; the repair says how its own move went.
+fn migration_status(
+    fix: bool,
+    movement: Option<crate::family::run_state::MoveReport>,
+) -> &'static str {
+    match (fix, movement) {
+        (false, _) => "not run (report only; `rift doctor --fix` moves it)",
+        (true, None) => "unavailable",
+        (true, Some(report)) if report.busy => "deferred",
+        (true, Some(_)) => "completed",
+    }
 }
 
 /// Which members of this family are wired for the agents the family enabled —
@@ -577,5 +659,104 @@ mod tests {
         let (human, json) = doctor_phantom_gitdirs(&repo, true);
         assert!(human.is_empty(), "{human}");
         assert_eq!(json["phantoms"], 0);
+    }
+
+    #[test]
+    fn doctor_reports_unreadable_legacy_debt_without_claiming_it_moved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&repo).unwrap();
+        crate::family::resolve_at(&repo).unwrap();
+        let legacy = git_dir.join("rift-agent-queue");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let malformed = legacy.join("tokens-a.json");
+        std::fs::write(&malformed, b"{}").unwrap();
+        for _ in 0..2 {
+            let (human, json) = doctor_prunable_worktrees(&repo, true);
+            let row = &json["run_state"][0];
+            assert!(human.contains("migration unavailable"), "{human}");
+            assert!(human.contains("liveness is unknown"), "{human}");
+            assert_eq!(row["files"], 1);
+            assert_eq!(row["migration"], "unavailable");
+            assert!(row["old_binary_writing"].is_null());
+            assert_eq!(row["legacy_files_after_move"], false);
+            assert_eq!(std::fs::read(&malformed).unwrap(), b"{}");
+        }
+    }
+
+    #[test]
+    fn doctor_reports_actual_migration_counts_without_inventing_a_live_legacy_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&repo).unwrap();
+        crate::family::resolve_at(&repo).unwrap();
+        let legacy = git_dir.join("rift-agent-queue");
+        let job = |at| crate::agent_queue::AgentJob {
+            schema_version: 1,
+            work_tree: repo.clone(),
+            queued_at_ms: at,
+            attempts: 0,
+            kind: crate::agent_queue::JobKind::SearchIndex,
+        };
+        let first = crate::agent_queue::enqueue_in(&legacy, &job(1000)).unwrap();
+        let (_, initial) = doctor_prunable_worktrees(&repo, true);
+        assert_eq!(initial["run_state"][0]["migration"], "completed");
+        assert_eq!(initial["run_state"][0]["moved_now"], 1);
+        assert!(!first.exists());
+        let next = crate::agent_queue::enqueue_in(&legacy, &job(2000)).unwrap();
+        let (human, later) = doctor_prunable_worktrees(&repo, true);
+        let row = &later["run_state"][0];
+        assert!(human.contains("liveness is unknown"), "{human}");
+        assert_eq!(row["legacy_files_after_move"], true);
+        assert!(row["old_binary_writing"].is_null());
+        assert_eq!(row["migration"], "completed");
+        assert_eq!(row["moved_now"], 1);
+        assert!(!next.exists());
+        let listed = crate::agent_queue::jobs(&git_dir);
+        assert!(listed.iter().any(|(_, pending)| *pending == job(1000)));
+        assert!(listed.iter().any(|(_, pending)| *pending == job(2000)));
+    }
+
+    /// A report-only doctor changes nothing it reports on: the old tree's job
+    /// stays where it is under its own name, no move job is journaled, and
+    /// the leg names the repair that would move it. Outside the report the
+    /// same resolution journals the move, which is what the guard withholds.
+    #[test]
+    fn a_report_only_doctor_moves_nothing_and_journals_no_move() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&repo).unwrap();
+        crate::family::resolve_at(&repo).unwrap();
+        let job = crate::agent_queue::AgentJob {
+            schema_version: 1,
+            work_tree: repo.clone(),
+            queued_at_ms: 1000,
+            attempts: 0,
+            kind: crate::agent_queue::JobKind::SearchIndex,
+        };
+        let legacy = git_dir.join("rift-agent-queue");
+        let planted = crate::agent_queue::enqueue_in(&legacy, &job).unwrap();
+        let planted = std::fs::canonicalize(planted).unwrap();
+        let kinds = || -> Vec<_> {
+            crate::agent_queue::jobs(&git_dir)
+                .into_iter()
+                .map(|(path, job)| (std::fs::canonicalize(path).unwrap(), job.kind))
+                .collect()
+        };
+        let report = crate::family::run_state::report_only();
+        for _ in 0..2 {
+            let (human, json) = doctor_prunable_worktrees(&repo, false);
+            assert!(human.contains("doctor --fix` moves it"), "{human}");
+            assert_eq!(json["run_state"][0]["moved_now"], serde_json::Value::Null);
+            assert_eq!(kinds(), [(planted.clone(), job.kind.clone())]);
+        }
+        drop(report);
+        assert!(planted.is_file(), "the report renamed nothing");
+        assert!(
+            kinds()
+                .iter()
+                .any(|(_, kind)| *kind == crate::agent_queue::JobKind::MoveRunState),
+            "a resolution outside the report journals the move"
+        );
     }
 }

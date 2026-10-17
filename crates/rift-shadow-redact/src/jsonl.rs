@@ -90,7 +90,7 @@ use rift_core::Result;
 use serde::de::{Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
-use crate::{redact_fragment, RedactionReport, RulePackSet};
+use crate::{fallback, redact_fragment, RedactionReport, RulePackSet};
 
 /// One (key, original → redacted) substitution collected from the walk.
 struct Replacement {
@@ -129,68 +129,99 @@ struct Collected {
     seen_keys: BTreeSet<String>,
 }
 
+/// How one line will be redacted — the test that decides where a flat-text
+/// run ends, and whether a line is in that run because its walk diverged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// Walked: the line is sealed on its own, byte-faithfully.
+    Structural,
+    /// Not walkable (not JSON, unfaithful, or refused by the closure check):
+    /// the line joins the flat-text run.
+    Flat,
+    /// Walkable, but a fixpoint inside the walk did not converge: the line
+    /// joins the flat-text run, and the fallback counts it.
+    Diverged,
+}
+
 /// Redact `text`, using its JSON structure when it has one.
+///
+/// Total: failed decoded values close their physical line slots. Failed flat
+/// runs retain full-context protection before independently safe sub-runs seal.
 pub(crate) fn redact_content(
     text: &str,
     packs: &RulePackSet,
     report: &mut RedactionReport,
-) -> Result<String> {
+) -> String {
     // A single JSON value covering the whole content (a pretty-printed export)
     // must be walked as one document — splitting it on newlines first would put
     // the flat-text path back in charge of every leaf.
-    if let Some(out) = try_structured(text, text, packs, report)? {
-        return Ok(out);
-    }
-
-    // Lines that go structural are handled one at a time; everything else is
-    // gathered into maximal contiguous runs and redacted as a block. The run
-    // matters: detectors that span lines (a PEM private-key block is the one
-    // that bites) only see their subject if the lines stay together, so naive
-    // per-line redaction would quietly stop sealing private keys.
     let lines: Vec<&str> = text.split('\n').collect();
+    match try_structured(text, text, packs, report) {
+        Ok(Some(out)) => out,
+        Ok(None) => redact_lines(&lines, packs, report),
+        Err(_) => fallback::replace_record(&lines, 0, report),
+    }
+}
+
+/// The per-line loop. Lines that go structural are handled one at a time;
+/// everything else is gathered into maximal contiguous runs and redacted as a
+/// block. The run matters: detectors that span lines (a PEM private-key block
+/// is the one that bites) only see their subject if the lines stay together,
+/// so naive per-line redaction would quietly stop sealing private keys.
+fn redact_lines(lines: &[&str], packs: &RulePackSet, report: &mut RedactionReport) -> String {
     let mut segments: Vec<String> = Vec::new();
     let mut i = 0usize;
     while let Some(line) = lines.get(i) {
-        if let Some(redacted) = try_structured(line, line.trim(), packs, report)? {
-            segments.push(redacted);
-            i += 1;
-            continue;
-        }
+        let failed = match try_structured(line, line.trim(), packs, report) {
+            Ok(Some(redacted)) => {
+                segments.push(redacted);
+                i += 1;
+                continue;
+            }
+            Ok(None) => false,
+            Err(_) => true,
+        };
         let start = i;
-        // Always consume the line that failed to go structural, so a parsable
-        // line whose substitution could not be verified cannot stall the walk.
+        let mut forced = vec![failed];
         i += 1;
-        while lines.get(i).is_some_and(|l| !goes_structural(l, packs)) {
+        while let Some(route) = lines.get(i).map(|l| route(l, packs)) {
+            match route {
+                Route::Structural => break,
+                Route::Flat => forced.push(false),
+                Route::Diverged => forced.push(true),
+            }
             i += 1;
         }
-        let run = lines.get(start..i).unwrap_or_default().join("\n");
-        segments.push(redact_fragment(&run, packs, report)?);
+        // Keep failed parsed records inside the raw context analysis: a block
+        // detector may span them. Forced slots close even if raw JSON settles.
+        let run = lines.get(start..i).unwrap_or_default();
+        segments.push(fallback::seal_run(run, start, forced, packs, report));
     }
-    Ok(segments.join("\n"))
+    segments.join("\n")
 }
 
-/// Whether a line will actually be walked — the test that decides where a
-/// flat-text run ends.
+/// Which way a line will go.
 ///
 /// It has to agree with [`try_structured`] or a line that ends a run and is then
 /// refused would be redacted twice (once inside the run, once on its own). A
 /// plain parse is not enough for that agreement, so this asks the same two
 /// questions [`try_structured`] asks: does the parse model the raw bytes, and
 /// does the assembled output stand up. Only the report is thrown away.
-fn goes_structural(line: &str, packs: &RulePackSet) -> bool {
+fn route(line: &str, packs: &RulePackSet) -> Route {
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return false;
+        return Route::Flat;
     }
     let mut scratch = blank_report();
-    try_structured(line, trimmed, packs, &mut scratch)
-        .ok()
-        .flatten()
-        .is_some()
+    match try_structured(line, trimmed, packs, &mut scratch) {
+        Ok(Some(_)) => Route::Structural,
+        Ok(None) => Route::Flat,
+        Err(_) => Route::Diverged,
+    }
 }
 
 /// A throwaway report for a probe whose counts must never reach the real one.
-fn blank_report() -> RedactionReport {
+pub(crate) fn blank_report() -> RedactionReport {
     RedactionReport {
         total_spans: 0,
         by_detector: std::collections::BTreeMap::new(),
@@ -199,6 +230,8 @@ fn blank_report() -> RedactionReport {
         allowlisted: 0,
         rule_pack_versions: Vec::new(),
         input_sha256: crate::sha256(&[]),
+        redaction_flat_fallback: 0,
+        redaction_fallback_placeholders: 0,
     }
 }
 
@@ -874,7 +907,8 @@ mod tests {
         assert!(parse_faithfully(&deep).is_none());
         // …and the content path answers with flat redaction rather than a walk.
         let mut report = blank_report();
-        assert!(redact_content(&deep, &RulePackSet::builtin(), &mut report).is_ok());
+        let out = redact_content(&deep, &RulePackSet::builtin(), &mut report);
+        assert_eq!(report.redaction_flat_fallback, 0, "{}", out.len());
     }
 
     /// The last line of defence, kept even though the faithful-parse guard now

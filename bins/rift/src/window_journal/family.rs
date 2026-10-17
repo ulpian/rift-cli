@@ -249,10 +249,11 @@ fn marker_session(work_tree: &Path, window_key: &str) -> Option<String> {
     Some(session.to_owned())
 }
 
-/// Whether `session`'s cache in this git dir says it is working and was
+/// Whether `session`'s cache in this git dir's member says it is working and was
 /// written within the floor. A cache stamped in the future reads as age zero.
 fn session_is_live(git_dir: &Path, session: &str, query: &FamilyQuery<'_>) -> bool {
-    let Ok(Some(cache)) = rift_shadow::hooks::session_cache::read_cache(git_dir, session) else {
+    let sessions = crate::family::run_state::sessions_dir(git_dir);
+    let Ok(Some(cache)) = rift_shadow::hooks::session_cache::read_cache(&sessions, session) else {
         return false;
     };
     let working = matches!(cache.state.as_str(), "active" | "compacting");

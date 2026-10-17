@@ -35,7 +35,16 @@ fn a_refused_tool_result_job_is_dropped_with_one_note_and_never_requeued() {
     };
     let path = crate::agent_queue::enqueue(&git_dir, &job).unwrap();
     let t = crate::hooktime::HookTimer::new("test", false);
-    assert_eq!(run_agent_job(&t, &git_dir, &path, &job), Landed::Nothing);
+    assert_eq!(
+        run_agent_job(
+            &t,
+            &git_dir,
+            &path,
+            &job,
+            &crate::capture_queue::acquire_owner(&git_dir).unwrap()
+        ),
+        Landed::Nothing
+    );
     assert!(!path.exists(), "the job file is consumed");
     assert!(
         crate::agent_queue::jobs(&git_dir).is_empty(),

@@ -16,9 +16,9 @@ mod common;
 #[path = "common/hooks_fixture.rs"]
 mod hooks_fixture;
 use hooks_fixture::{
-    agent_hook, agent_read_hook, capture_queue_leg, checkpoint_shards, doctor_fix_json, git_in,
-    rev_parse, run_rift_capture, run_rift_in, run_rift_stdout, seed_live_session_repo,
-    session_phase, sync_env, DetachedHooks,
+    agent_hook, agent_read_hook, capture_queue_leg, checkpoint_shards, doctor_fix_json,
+    doctor_json, git_in, rev_parse, run_rift_capture, run_rift_in, run_rift_stdout,
+    seed_live_session_repo, session_phase, sync_env, DetachedHooks,
 };
 
 // --- the deferred settle -----------------------------------------------------
@@ -126,12 +126,9 @@ async fn settled_usage(
 
 /// The `.usage` sidecar the hook path owns: `(byte_offset, settled_turn)`.
 fn usage_sidecar(repo: &Path, session: &str) -> (u64, u32) {
-    let raw = std::fs::read_to_string(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join(format!("{session}.usage")),
-    )
-    .expect("the hook path wrote its usage sidecar");
+    let raw =
+        std::fs::read_to_string(hooks_fixture::sessions_of(repo).join(format!("{session}.usage")))
+            .expect("the hook path wrote its usage sidecar");
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     (
         v["byte_offset"].as_u64().unwrap(),
@@ -210,12 +207,8 @@ async fn the_doctor_sweep_settles_the_last_turn_of_a_session_no_hook_will_end() 
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
     // The seeded live session is not this test's; the sweep must see one.
-    std::fs::remove_file(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join("e2e-live-1.json"),
-    )
-    .unwrap();
+    std::fs::remove_file(common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json"))
+        .unwrap();
     let cache = tmp.path().join("cache");
     let env = [
         ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
@@ -231,10 +224,7 @@ async fn the_doctor_sweep_settles_the_last_turn_of_a_session_no_hook_will_end() 
 
     // The agent is gone: back-date the session's last touch past the idle
     // window so the sweep finalizes it. Only the stamp changes.
-    let cache_file = repo
-        .join(".git")
-        .join("rift-sessions")
-        .join(format!("{session}.json"));
+    let cache_file = hooks_fixture::sessions_of(&repo).join(format!("{session}.json"));
     let mut v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache_file).unwrap()).unwrap();
     v["updated_at_ms"] = serde_json::json!(0);
@@ -272,7 +262,7 @@ async fn the_doctor_sweep_settles_the_last_turn_of_a_session_no_hook_will_end() 
 /// `condensed-<sha256(session)>` done-marker, and whether any job is still
 /// queued.
 fn agent_queue_state(repo: &Path, session: &str) -> (bool, usize) {
-    let dir = repo.join(".git").join("rift-agent-queue");
+    let dir = hooks_fixture::agent_queue_of(repo);
     let marker = dir.join(format!(
         "condensed-{}",
         rift_shadow::sha256_hex(&[session.as_bytes()])
@@ -288,7 +278,7 @@ fn agent_queue_state(repo: &Path, session: &str) -> (bool, usize) {
 /// A hand-written session-end condense job, exactly as the hook journals it —
 /// what a worker killed before it ran leaves behind.
 fn plant_condense_job(repo: &Path, session: &str) {
-    let dir = repo.join(".git").join("rift-agent-queue");
+    let dir = hooks_fixture::agent_queue_of(repo);
     std::fs::create_dir_all(&dir).unwrap();
     let repo_id = rift_git::repo_id_for(repo).unwrap().to_string();
     let job = serde_json::json!({
@@ -319,12 +309,8 @@ fn plant_condense_job(repo: &Path, session: &str) {
 async fn a_session_end_returns_and_the_detached_worker_condenses_and_settles() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
-    std::fs::remove_file(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join("e2e-live-1.json"),
-    )
-    .unwrap();
+    std::fs::remove_file(common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json"))
+        .unwrap();
     let cache = tmp.path().join("cache");
     let env = [
         ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
@@ -346,7 +332,7 @@ async fn a_session_end_returns_and_the_detached_worker_condenses_and_settles() {
     let (code, _) = hooks.run(&repo, &args, &body.to_string(), &env);
     assert_eq!(code, 0, "a capture hook never fails the agent");
     assert!(
-        repo.join(".git").join("rift-agent-queue").is_dir(),
+        hooks_fixture::agent_queue_of(&repo).is_dir(),
         "the hook left a durable record of the condense it owes"
     );
 
@@ -389,10 +375,8 @@ fn doctor_drains_a_killed_workers_session_end_job() {
         ("RIFT_CAPTURE_SYNC", "1"),
     ];
     // The hook's own half ran: the machine is in `ending`, touched just now.
-    let cache_file = repo
-        .join(".git")
-        .join("rift-sessions")
-        .join("e2e-live-1.json");
+    // No binary has run yet, so the seeded cache is still where it was seeded.
+    let cache_file = common::seed_sessions_dir(&repo.join(".git")).join("e2e-live-1.json");
     let mut v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache_file).unwrap()).unwrap();
     v["state"] = serde_json::json!("ending");
@@ -437,8 +421,11 @@ fn doctor_drains_a_killed_workers_session_end_job() {
 
 /// A second `SessionEnd` for the same session — the agent redelivering, or a
 /// job found again after the work landed — condenses nothing twice: an end
-/// redelivered to an ended session asks the machine nothing, and the
-/// journal's done-marker refuses even a job planted by hand.
+/// redelivered to an ended session asks the machine nothing, and a job planted
+/// by hand under the pre-context name carries no proof of which delivery it
+/// is, so the done-marker cannot discharge it. It is never executed, spends
+/// no attempt, and stays owed where the doctor names it, until recovery
+/// admits it.
 #[test]
 fn a_redelivered_session_end_never_condenses_twice() {
     let tmp = tempfile::tempdir().unwrap();
@@ -469,8 +456,49 @@ fn a_redelivered_session_end_never_condenses_twice() {
         .or_else(|| doc.pointer("/data/sessions"))
         .unwrap();
     assert_eq!(sessions["finalized"], serde_json::json!([]), "{sessions}");
-    assert_eq!(checkpoint_shards(&repo).len(), 1, "the marker refused it");
-    assert_eq!(agent_queue_state(&repo, "e2e-live-1"), (true, 0));
+    assert_eq!(checkpoint_shards(&repo).len(), 1, "never condensed twice");
+    assert_eq!(
+        agent_queue_state(&repo, "e2e-live-1"),
+        (true, 1),
+        "still owed"
+    );
+    assert_eq!(
+        planted_condense_attempts(&repo),
+        [0],
+        "never executed, no attempt"
+    );
+    // Named by the doctor that tried it (a note is said once, and a later
+    // doctor's soak leg takes it), and still counted by the next report.
+    let fixed = capture_queue_leg(&doc);
+    assert!(
+        fixed["notes"].as_array().unwrap().iter().any(|note| note
+            .as_str()
+            .unwrap()
+            .ends_with(": legacy condense marker lacks delivery proof")),
+        "the doctor names it under its typed reason: {fixed}"
+    );
+    let queue = capture_queue_leg(&doctor_json(&repo, &env)).clone();
+    assert_eq!(queue["agent_jobs"]["pending"], 1, "{queue}");
+}
+
+/// The attempts of every condense job left in the agent queue.
+fn planted_condense_attempts(repo: &Path) -> Vec<u64> {
+    std::fs::read_dir(hooks_fixture::agent_queue_of(repo))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|x| x == "json")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("condense-"))
+        })
+        .map(|path| {
+            let job: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            job["attempts"].as_u64().unwrap()
+        })
+        .collect()
 }
 
 /// `(input_tokens, tokenizer)` rows of `file_read_tokens` for one read call.
@@ -494,7 +522,9 @@ async fn read_token_rows(cache: &Path, repo: &Path, call: &str) -> Vec<(i64, Str
 /// The read path, end to end: the hook records the read's
 /// identity and journals its BPE count; the worker appends the count at the
 /// read's own `tool_call` row (`file_read_tokens`, insert-or-ignore); a
-/// redelivered read writes no second row; and the archive that follows
+/// redelivered read writes no second row and is discharged with a note,
+/// because its key is minted over the bytes the row counts, while a delivery
+/// at that key naming other bytes stays owed; and the archive that follows
 /// carries the figure in the shard, so every downstream reader (Canopy, the
 /// recall journal, cost) sees it as if it had been measured inline.
 #[tokio::test]
@@ -526,6 +556,15 @@ async fn a_reads_token_count_lands_from_the_worker_at_the_reads_own_row() {
         );
     }
     assert_eq!(agent_queue_state(&repo, "e2e-live-1").1, 0, "drained");
+    let queue = capture_queue_leg(&doctor_json(&repo, &env)).clone();
+    assert!(
+        queue["notes"].as_array().unwrap().iter().any(|note| note
+            .as_str()
+            .unwrap()
+            .ends_with(": redelivery discharged; the row at its key counts its bytes")),
+        "the discharge is said: {queue}"
+    );
+    a_delivery_naming_other_bytes_at_the_key_stays_owed(&cache, &repo, &call, &env).await;
 
     let (code, stderr) = run_rift_capture(
         &repo,
@@ -565,6 +604,47 @@ async fn a_reads_token_count_lands_from_the_worker_at_the_reads_own_row() {
         jsonl.contains(&format!(r#""input_tokens":{expected}"#)),
         "the shard carries the late count: {jsonl}"
     );
+}
+
+/// A read-tokens job at a key whose row stands but whose read named other
+/// bytes is not the row's delivery: it is not discharged, spends no attempt,
+/// and the row stays as it was.
+async fn a_delivery_naming_other_bytes_at_the_key_stays_owed(
+    cache: &Path,
+    repo: &Path,
+    call: &str,
+    env: &[(&str, &str)],
+) {
+    let before = read_token_rows(cache, repo, call).await;
+    plant_read_tokens_job(repo, call, &"f".repeat(64), &"0".repeat(40));
+    let queue = capture_queue_leg(&doctor_fix_json(repo, env)).clone();
+    assert_eq!(queue["agent_jobs"]["pending"], 1, "not discharged: {queue}");
+    assert!(
+        queue["notes"].as_array().unwrap().iter().any(|note| note
+            .as_str()
+            .unwrap()
+            .ends_with(": token input cannot be proven from the existing row")),
+        "under its typed reason: {queue}"
+    );
+    // The repair's move gave the pre-context file its context name.
+    let stem = format!("tokens-{call}");
+    let planted: Vec<_> = std::fs::read_dir(hooks_fixture::agent_queue_of(repo))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&stem)
+        })
+        .collect();
+    assert_eq!(planted.len(), 1, "{planted:?}");
+    let job: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&planted[0]).unwrap()).unwrap();
+    assert_eq!(job["attempts"], 0, "no attempt spent");
+    assert_eq!(read_token_rows(cache, repo, call).await, before);
+    std::fs::remove_file(&planted[0]).unwrap();
 }
 
 /// A count is a count of the bytes the agent READ. When the working file has
@@ -670,7 +750,7 @@ async fn assert_vanished_read_settled(
     let queue = capture_queue_leg(doc);
     assert_eq!(queue["agent_jobs"]["pending"], 0, "{delivery}: {queue}");
     assert_eq!(queue["notes"], serde_json::json!([]), "{delivery}: {queue}");
-    let queued = std::fs::read_dir(repo.join(".git").join("rift-agent-queue"))
+    let queued = std::fs::read_dir(hooks_fixture::agent_queue_of(repo))
         .unwrap()
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
@@ -694,7 +774,7 @@ async fn assert_vanished_read_settled(
 /// A read-tokens job in the agent queue, exactly as the hook journals one:
 /// the read `call` over `a.txt` at `sha`, whose bytes the git blob `oid` holds.
 fn plant_read_tokens_job(repo: &Path, call: &str, sha: &str, oid: &str) {
-    let dir = repo.join(".git").join("rift-agent-queue");
+    let dir = hooks_fixture::agent_queue_of(repo);
     std::fs::create_dir_all(&dir).unwrap();
     let job = serde_json::json!({
         "schema_version": 1,

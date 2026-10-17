@@ -149,10 +149,20 @@ INSERT INTO price_table (price_id, model, token_class, unit_price_micros, curren
 /// worktree-provenance relations, the v15 tool-result tokens, the v16
 /// observed-model price append, the v17 relation for observations a
 /// leading `cd` decided and the v18 Opus 5.5 price append.
+/// One row per version, in order; a new version is a new last row.
 #[must_use]
 pub fn default_migrations() -> Vec<Migration> {
-    // One row per version, in order; a new version is a new last row.
-    let set: [(u32, &'static str, String); 18] = [
+    let mut migrations = migrations_through_twenty_one();
+    migrations.push(Migration {
+        version: 22,
+        name: "capture_event_session_turn_kind_index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_captured_event_session_turn_kind ON captured_event(session_id, turn_ordinal, kind);\n".to_string(),
+    });
+    migrations
+}
+
+fn migrations_through_twenty_one() -> Vec<Migration> {
+    let set: [(u32, &'static str, String); 21] = [
         (1, "init_meta", META_SQL.to_string()),
         (2, "canonical_core", canonical_schema_sql()),
         (3, "capture_identity", capture_identity_schema_sql()),
@@ -219,6 +229,13 @@ pub fn default_migrations() -> Vec<Migration> {
             "capture_price_seed_opus_5_5",
             capture_price_seed_opus_5_5_sql(),
         ),
+        (
+            19,
+            "capture_boundary_file_kind",
+            capture_boundary_file_kind_schema_sql(),
+        ),
+        (20, "capture_boundary_observation", observation_schema_sql()),
+        (21, "capture_boundary_gaps", boundary_gap_schema_sql()),
     ];
     set.into_iter()
         .map(|(version, name, sql)| Migration { version, name, sql })
@@ -484,6 +501,31 @@ fn capture_price_seed_opus_5_5_sql() -> String {
     PRICE_SEED_OPUS_5_5_SQL.to_string()
 }
 
+fn capture_boundary_file_kind_tables() -> &'static [crate::schema::CanonicalTable] {
+    match crate::schema::canonical_table("turn_boundary_file_kind") {
+        Some(table) => std::slice::from_ref(table),
+        None => &[],
+    }
+}
+
+fn capture_boundary_file_kind_schema_sql() -> String {
+    capture_slice_sql(capture_boundary_file_kind_tables())
+}
+
+fn capture_boundary_observation_tables() -> &'static [crate::schema::CanonicalTable] {
+    std::slice::from_ref(&crate::schema::BOUNDARY_OBSERVATION_TABLE)
+}
+
+fn observation_schema_sql() -> String {
+    capture_slice_sql(capture_boundary_observation_tables())
+}
+
+fn boundary_gap_schema_sql() -> String {
+    let mut sql = capture_slice_sql(&crate::schema::BOUNDARY_GAP_TABLES);
+    sql.push_str(crate::schema::BOUNDARY_GAP_CONTEXT_INDEX_SQL);
+    sql
+}
+
 /// Render one additive capture migration from a registry slice: DDL + guard
 /// triggers + the per-table `_schema_version` seed rows.
 fn capture_slice_sql(tables: &'static [crate::schema::CanonicalTable]) -> String {
@@ -501,6 +543,49 @@ fn capture_slice_sql(tables: &'static [crate::schema::CanonicalTable]) -> String
         ));
     }
     sql
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use crate::migrate::{apply_migrations, checksum_hex};
+    use crate::SqliteStore;
+
+    #[test]
+    fn a_v19_projection_gains_only_v20_and_keeps_all_prior_checksums() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        let all = default_migrations()
+            .into_iter()
+            .take(20)
+            .collect::<Vec<_>>();
+        apply_migrations(&s, &all[..19]).unwrap();
+        let prior = s
+            .with_conn(|conn| {
+                let mut query =
+                    conn.prepare("SELECT version, checksum FROM _migrations ORDER BY version")?;
+                let rows = query
+                    .query_map([], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>();
+                rows
+            })
+            .unwrap();
+        let outcome = apply_migrations(&s, &all).unwrap();
+        assert_eq!(
+            (outcome.applied, outcome.skipped, outcome.high_water),
+            (1, 19, 20)
+        );
+        for ((version, before), migration) in prior.iter().zip(&all) {
+            assert_eq!(*version, i64::from(migration.version));
+            assert_eq!(before, &checksum_hex(&migration.sql));
+        }
+        assert!(s
+            .with_conn(|conn| conn
+                .prepare("SELECT * FROM turn_boundary_observation")
+                .map(|_| ()))
+            .is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -885,7 +970,22 @@ mod tests {
     /// checksum-locked SQL on every deployed projection.
     #[test]
     fn capture_registry_growth_lands_past_frozen_boundaries() {
-        let slices = shipped_capture_slices();
+        let mut slices = shipped_capture_slices().to_vec();
+        slices.push((
+            "v19 capture_boundary_file_kind",
+            capture_boundary_file_kind_tables(),
+            "turn_boundary_file_kind",
+        ));
+        slices.push((
+            "v20 capture_boundary_observation",
+            capture_boundary_observation_tables(),
+            "turn_boundary_observation",
+        ));
+        slices.push((
+            "v21 capture_boundary_gaps",
+            &crate::schema::BOUNDARY_GAP_TABLES,
+            "turn_boundary_gap_ticket",
+        ));
         let n_sliced_tables: usize = slices.iter().map(|(_, tables, _)| tables.len()).sum();
         assert_eq!(
             n_sliced_tables,
@@ -1219,3 +1319,9 @@ mod worktree_cd_tests {
         assert_eq!(rt.block_on(store.count("session_worktree_cd")).unwrap(), 1);
     }
 }
+
+#[cfg(test)]
+mod boundary_gap_tests;
+
+#[cfg(test)]
+mod recovery_index_tests;

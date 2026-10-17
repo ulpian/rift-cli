@@ -83,8 +83,9 @@ use rift_core::{Result, RiftError};
 /// Contract version for a queue entry line.
 pub(crate) const PUSH_QUEUE_SCHEMA_VERSION: u32 = 1;
 
-/// The queue directory under `<common_dir>` — a **family** artifact, unlike
-/// the `rift-capture-queue` / `rift-agent-queue` siblings that stay per member.
+/// The queue directory under `<common_dir>` — a **family** artifact that
+/// names git refs, unlike the capture and agent queues, which stay per member
+/// in the family's run state.
 const QUEUE_DIR: &str = "rift-push-queue";
 /// The live queue: one JSON object per line, append-only until a drain claims it.
 const QUEUE_FILE: &str = "queue.jsonl";

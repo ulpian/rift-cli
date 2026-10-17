@@ -152,11 +152,12 @@ bytes, so masked length never reveals secret length. **Whole-token granularity**
 
 Masking substitutes placeholder *text*, so its output is a document no detector has seen
 (`password=[REDACTED:jdbc]` matches only after the first pass). Detect-and-mask repeats
-until stable, so `redact(redact(x))` equals `redact(x)`; a placeholder already written
+until stable, so a converging output is a fixpoint; a placeholder already written
 suppresses both count and rewrite, tested against the **whole** emitted set, since a
 family-scoped check would let one detector relabel another's placeholder and make output
-depend on firing order. The loop is bounded at eight passes and **fails closed**: if masking has not stabilized the
-call errors and returns no partially-redacted bytes.
+depend on firing order. The loop is bounded at eight passes and **fails closed**:
+nonconvergence takes the record/context fallback below instead of returning
+partially redacted bytes.
 
 ---
 
@@ -183,6 +184,25 @@ flat and accepted only if nothing more would be masked. Without that check, 1,50
 6,000 seeded needles; with it, zero. A line that cannot be modelled faithfully (repeated
 key, non-canonical escape) goes flat.
 
+The detect–mask loop has an eight-pass bound. If a parsed record's decoded walk
+cannot settle, raw JSON convergence cannot certify the decoded content: the whole
+record becomes `{"line":N,"reason":"did_not_converge","rift_redaction":"placeholder"}`
+records, one per nonempty physical source line, keeping blank slots. Independent
+JSONL records remain independent. A failed flat run is replayed through the same
+selection and allowlist on every bounded pass to retain original line provenance.
+Lines whose protection depends on context are replaced together; other sub-runs
+use the normal gate. Failed attempts and probes contribute no masking counts.
+Ordinary multiline masking can still collapse lines. Re-sealing fallback output
+runs every detector again: vendor rules may transform a fallback record, so this
+is a safety guarantee, not universal byte idempotence for arbitrary rule packs.
+
+An original result has an owned `stdout`/`stderr`/`interrupted` envelope. A
+fallback record cannot authorize a rewrite or count as a sealed original: the
+post-gate envelope must parse and preserve `interrupted`. An archive records a
+valid original that loses that envelope as unsealed, retaining its spool file;
+corrupt spool evidence keeps its separate incomplete state and redacted body
+where available.
+
 ---
 
 ## 4.7 The redaction report
@@ -196,6 +216,15 @@ freeze and print. `allowlisted` counts values serve policy deliberately keeps (a
 example key): **subtract-only**, it can keep a found value and never add a leak, and the
 kept value is still **counted**, proving it was seen rather than missed. `rift verify`
 refuses a shard whose report is missing or invalid (§4.2).
+
+Two optional u32 counts describe the parent transcript's full and compact pair,
+summed with saturation: `redaction_flat_fallback` counts fallback source lines and
+`redaction_fallback_placeholders` counts the replaced subset. Both fields appear
+when the first is positive, including a zero subset; neither appears at zero.
+They come from the transcript pair, separate from the capture masking statistics.
+The hash-bound report is authoritative; parent metadata mirrors these counts.
+Each task's own pair is counted separately in its hash-bound task metadata.
+Spills and originals do not contribute to these transcript-pair counts.
 
 ---
 

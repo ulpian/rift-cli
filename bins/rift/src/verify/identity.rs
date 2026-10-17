@@ -180,6 +180,33 @@ mod tests {
         task_bound_shard, writer_root, FIXTURE_SESSION, VACUOUS_ERA_ROOT,
     };
 
+    fn content_artifacts(content: Option<Vec<u8>>, full: Option<Vec<u8>>) -> NativeArtifacts {
+        NativeArtifacts {
+            recorded_merkle_leaf: None,
+            boundary_gaps: None,
+            session_meta_presence: std::collections::BTreeSet::new(),
+            content,
+            full,
+            tool_calls: None,
+            serve_audit: None,
+            sessions: None,
+            usage: None,
+            window_journal: None,
+            session_worktrees: None,
+            tool_results: None,
+            transcript_compact: None,
+            transcript_full: None,
+            tasks: Vec::new(),
+            session_metas: Vec::new(),
+            digest_failures: None,
+            digest_intent: None,
+            digest_log: None,
+            digest_shape: None,
+            spills: Vec::new(),
+            originals: Vec::new(),
+        }
+    }
+
     /// **PLANTED — the attack the strict Merkle pass could not see.**
     ///
     /// The recorded root lives in `metadata.json`, which the tamperer is already
@@ -207,27 +234,7 @@ mod tests {
             strict_merkle_pass(
                 &sub,
                 &id,
-                &NativeArtifacts {
-                    content: sub.read_artifact(&id, "content.redacted").unwrap(),
-                    tool_calls: None,
-                    serve_audit: None,
-                    sessions: None,
-                    usage: None,
-                    window_journal: None,
-                    session_worktrees: None,
-                    tool_results: None,
-                    full: None,
-                    transcript_compact: None,
-                    transcript_full: None,
-                    tasks: Vec::new(),
-                    session_metas: Vec::new(),
-                    digest_failures: None,
-                    digest_intent: None,
-                    digest_log: None,
-                    digest_shape: None,
-                    spills: Vec::new(),
-                    originals: Vec::new(),
-                },
+                &content_artifacts(sub.read_artifact(&id, "content.redacted").unwrap(), None),
                 sub.read_artifact(&id, "redaction_report.json")
                     .unwrap()
                     .as_deref(),
@@ -325,6 +332,7 @@ mod tests {
         let (_, id) = root_bound_shard(content, full);
         let report = fixture_report();
         let root = rift_shadow::backend::shard_merkle_root(&rift_shadow::backend::ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             full_jsonl: Some(full),
             redaction_report: report.as_bytes(),
@@ -463,6 +471,7 @@ mod tests {
             transcript_full: None,
         }];
         let leaves = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             full_jsonl: None,
             redaction_report: report.as_bytes(),
@@ -573,6 +582,7 @@ mod tests {
             let shape = rift_shadow::digest::shape_json(&[read_fact()]).unwrap();
             let tool_calls = rift_shadow::backend::tool_calls_jsonl_bytes(&[read_fact()]).unwrap();
             let leaves = ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: content,
                 full_jsonl: None,
                 redaction_report: report.as_bytes(),
@@ -637,6 +647,7 @@ mod tests {
         fn root_over(&self, shape_bytes: &[u8]) -> String {
             use rift_shadow::backend::{shard_merkle_root, DigestLeafBytes, ShardLeafBytes};
             shard_merkle_root(&ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: self.content,
                 full_jsonl: None,
                 redaction_report: self.report.as_bytes(),
@@ -748,6 +759,7 @@ mod tests {
         let report = fixture_report();
         let forged_root =
             rift_shadow::backend::shard_merkle_root(&rift_shadow::backend::ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: content,
                 full_jsonl: Some(edited),
                 redaction_report: report.as_bytes(),
@@ -771,27 +783,10 @@ mod tests {
             strict_merkle_pass(
                 &forged,
                 &id,
-                &NativeArtifacts {
-                    content: forged.read_artifact(&id, "content.redacted").unwrap(),
-                    tool_calls: None,
-                    serve_audit: None,
-                    sessions: None,
-                    usage: None,
-                    window_journal: None,
-                    session_worktrees: None,
-                    tool_results: None,
-                    full: forged.read_artifact(&id, "full.jsonl").unwrap(),
-                    transcript_compact: None,
-                    transcript_full: None,
-                    tasks: Vec::new(),
-                    session_metas: Vec::new(),
-                    digest_failures: None,
-                    digest_intent: None,
-                    digest_log: None,
-                    digest_shape: None,
-                    spills: Vec::new(),
-                    originals: Vec::new(),
-                },
+                &content_artifacts(
+                    forged.read_artifact(&id, "content.redacted").unwrap(),
+                    forged.read_artifact(&id, "full.jsonl").unwrap()
+                ),
                 forged
                     .read_artifact(&id, "redaction_report.json")
                     .unwrap()
@@ -825,6 +820,7 @@ mod tests {
         let tfull = br#"{"type":"user","message":"hi"}"#.as_slice();
         let report = fixture_report();
         let leaves = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             full_jsonl: None,
             redaction_report: report.as_bytes(),
@@ -878,6 +874,7 @@ mod tests {
         // is not.
         let edited = br#"{"type":"user","message":"hi, forged"}"#.as_slice();
         let forged_root = shard_merkle_root(&ShardLeafBytes {
+            boundary_gaps: None,
             transcript_full: Some(edited),
             ..leaves
         })
@@ -914,6 +911,7 @@ mod tests {
         let report = fixture_report();
         let relabelled_root =
             rift_shadow::backend::shard_merkle_root(&rift_shadow::backend::ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: content,
                 full_jsonl: Some(edited),
                 redaction_report: report.as_bytes(),
@@ -981,6 +979,7 @@ mod tests {
             })
             .collect();
         let leaves = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             full_jsonl: None,
             redaction_report: report.as_bytes(),
@@ -1120,6 +1119,7 @@ mod tests {
         use rift_shadow::backend::{shard_merkle_root, ShardLeafBytes};
         let report = fixture_report();
         let leaves = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             redaction_report: report.as_bytes(),
             serve_audit: (name == "serve_audit.jsonl").then_some(bytes),
@@ -1364,6 +1364,7 @@ mod tests {
             transcript_full: Some(&full),
         }];
         let leaves = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             redaction_report: report.as_bytes(),
             tasks: &task_leaves,

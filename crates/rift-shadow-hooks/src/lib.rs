@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 pub mod claim;
 pub mod install;
 pub mod push;
+pub mod run_state;
 pub mod session_cache;
 pub mod session_id;
 pub mod strategy;

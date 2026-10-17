@@ -7,46 +7,32 @@
 //! processes and measured 103–204 ms on its own, so it does not fit and cannot
 //! be made to fit; it is queued instead.
 //!
-//! **An entry carries no capture bytes of either kind.** Not raw (`SecretBytes`
-//! must never persist) and not redacted: everything the worker needs is
-//! re-derivable from the commit oid and the session cache, so the entry holds
-//! identifiers and a timestamp. That is not only the safer shape, it is the only
-//! available one — `RedactedBytes` has a single constructor
-//! (`RedactedBytes::seal`, one call site, CI-enforced), so bytes written to a
-//! file could not be read back into one without a second constructor, which the
-//! redaction invariant forbids.
+//! Entries carry identifiers and queued context, not transcript or capture bytes.
+//! The queue durably records intent. Execution uses the inputs still available
+//! when a worker owns the checkout; missing historical or input proof can leave
+//! a delivery owed rather than authorize a guessed completion.
 //!
-//! Durability posture, stated because it is a trade taken on purpose: the
-//! capture *input* is never lost (the commit is in git, the session cache is on
-//! disk), but condensation can be *deferred* by a crash or a killed worker until
-//! the next commit's sweep or `rift doctor` drains the queue.
+//! Execution failures have a bounded retry budget. Uncertain input and ownership
+//! remain visible debt without spending that budget. Queue publication syncs
+//! file contents; directory updates are not guaranteed durable across power loss.
+
+pub(crate) mod delivery;
 
 use std::path::{Path, PathBuf};
 
 use rift_core::{Result, RiftError};
 
-/// The queue directory under `<git_dir>` (sibling of `rift-sessions`).
-const QUEUE_DIR: &str = "rift-capture-queue";
-/// The worker's mutual-exclusion file inside the queue directory.
+/// Legacy worker marker; its presence blocks the new ownership protocol.
 const LOCK_FILE: &str = ".lock";
-/// How long a lock may live before a later worker steals it. A worker killed
-/// mid-drain must not wedge the queue forever; the work is idempotent, so the
-/// cost of stealing too early is duplicated effort, never a lost or double
-/// checkpoint. The age is the session cache's stale-writer age, read from the
-/// crate below this one, so the lock and the cache's temp sweep keep one
-/// number with one meaning.
-const LOCK_STALE_MS: i64 = rift_shadow::hooks::STALE_WRITER_MS;
-
 /// One queued commit: what the worker needs to condense it later.
 ///
-/// Unknown fields are deliberately **ignored** rather than rejected: a newer
-/// writer's entry must still be drainable by an older worker, and the fields
-/// here are all that a condense needs.
+/// Supported fields drive execution. The complete validated JSON value retains
+/// unknown fields in its context identity and through owned retries.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct QueueEntry {
     /// Contract schema version.
     pub schema_version: u32,
-    /// The anchoring commit (HEAD when the hook ran). Also the file name.
+    /// The anchoring commit (HEAD when the hook ran); part of the logical stem.
     pub commit: String,
     /// The working tree whose facts this commit is keyed by.
     pub work_tree: PathBuf,
@@ -78,19 +64,14 @@ pub(crate) struct QueueEntry {
 pub(crate) const MAX_ATTEMPTS: u32 = 3;
 
 /// The queue directory for `git_dir`.
+///
+/// The member directory when recorded, or the legacy Git-directory location.
+/// Resolution does not migrate; migration requires the matching owner.
 pub(crate) fn queue_dir(git_dir: &Path) -> PathBuf {
-    git_dir.join(QUEUE_DIR)
+    crate::family::run_state::capture_queue_dir(git_dir)
 }
 
-/// Whether `oid` is a full **lowercase**-hex commit id.
-///
-/// The entry's file name **is** the oid, so this is the one place an oid becomes
-/// a path component — the same discipline the session cache applies to session
-/// ids, and for the same reason. Lowercase is required rather than merely
-/// expected: git writes oids lowercase, and on a case-insensitive filesystem
-/// (the macOS default) an uppercase spelling of the same commit would name the
-/// same file while comparing unequal to it — one commit, two identities, one of
-/// which silently overwrites the other.
+/// Whether `oid` is a full lowercase-hex commit id safe for a logical stem.
 fn is_commit_oid(oid: &str) -> bool {
     oid.len() == 40
         && oid
@@ -98,7 +79,7 @@ fn is_commit_oid(oid: &str) -> bool {
             .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase() && c.is_ascii_hexdigit())
 }
 
-/// Append one entry (atomically: temp file + rename, owner-only).
+/// Publish a complete context through a private stage and no-clobber install.
 ///
 /// # Errors
 /// [`RiftError::Validity`] if `commit` is not a full hex oid;
@@ -107,57 +88,45 @@ pub(crate) fn enqueue(git_dir: &Path, entry: &QueueEntry) -> Result<PathBuf> {
     if !is_commit_oid(&entry.commit) {
         return Err(RiftError::validity("capture queue: commit is not an oid"));
     }
-    let dir = queue_dir(git_dir);
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.json", entry.commit));
-    let tmp = dir.join(format!("{}.json.tmp", entry.commit));
-    let body = serde_json::to_vec(entry)
-        .map_err(|e| RiftError::validity(format!("capture queue: encode: {e}")))?;
-    std::fs::write(&tmp, body)?;
-    restrict(&tmp)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(path)
-}
-
-/// Owner-only permissions on a queue file (unix).
-fn restrict(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    let value = serde_json::to_value(entry)
+        .map_err(|_| RiftError::validity("capture queue: encode failed"))?;
+    delivery::publish(&queue_dir(git_dir), &entry.commit, &value)
 }
 
 /// Every readable entry, oldest first. A file this reader cannot understand is
 /// **skipped and left in place** — it may be a newer writer's — and reported by
 /// `rift doctor` rather than deleted.
 ///
-/// "Understand" includes **the file name agreeing with the `commit` field**,
-/// and that is not tidiness. The name is the entry's identity: `record_failure`
-/// rewrites an entry by enqueueing it again, which writes `<commit>.json`. So a
-/// file named for one commit whose content names another is not a stale entry —
-/// it is an entry that **cannot be updated or removed by its own retry path**,
-/// because every write lands beside it. Left unscreened it re-condenses on every
-/// drain with `attempts` frozen at 0, which is the one shape that escapes the
-/// [`MAX_ATTEMPTS`] bound fully. Nothing this crate writes can produce it;
-/// the reader screens it anyway, because that is what makes "an entry is
-/// rewritten in place" a property of the format rather than of its only writer.
+/// The filename must match the validated context or supported legacy stem.
+/// Owned retries replace only attempts at the same validated context path.
 pub(crate) fn entries(git_dir: &Path) -> Vec<(PathBuf, QueueEntry)> {
-    let Ok(rd) = std::fs::read_dir(queue_dir(git_dir)) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(PathBuf, QueueEntry)> = rd
-        .flatten()
-        .map(|e| e.path())
+    entries_from_paths(rift_shadow::hooks::run_state::list_entries(&queue_dir(
+        git_dir,
+    )))
+}
+
+/// Advisory readable entries without resolving a writer or journaling migration.
+pub(crate) fn entries_read_only(git_dir: &Path) -> Vec<(PathBuf, QueueEntry)> {
+    let mut paths = std::collections::BTreeMap::new();
+    for dir in crate::family::run_state::capture_queue_read_dirs(git_dir) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                paths
+                    .entry(entry.file_name())
+                    .or_insert_with(|| entry.path());
+            }
+        }
+    }
+    entries_from_paths(paths.into_values().collect())
+}
+
+fn entries_from_paths(paths: Vec<PathBuf>) -> Vec<(PathBuf, QueueEntry)> {
+    let mut out: Vec<(PathBuf, QueueEntry)> = paths
+        .into_iter()
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .filter_map(|p| {
-            let stem = p.file_stem()?.to_str()?.to_owned();
-            let bytes = std::fs::read(&p).ok()?;
-            let entry: QueueEntry = serde_json::from_slice(&bytes).ok()?;
-            (is_commit_oid(&entry.commit) && stem == entry.commit).then_some((p, entry))
+            let (_, entry) = read_entry(&p).ok()?;
+            Some((p, entry))
         })
         .collect();
     out.sort_by(|a, b| {
@@ -168,6 +137,18 @@ pub(crate) fn entries(git_dir: &Path) -> Vec<(PathBuf, QueueEntry)> {
     out
 }
 
+pub(crate) fn read_entry(path: &Path) -> Result<(serde_json::Value, QueueEntry)> {
+    let value = delivery::decode(&std::fs::read(path)?)?;
+    let entry: QueueEntry = serde_json::from_value(value.clone())
+        .map_err(|_| RiftError::validity("capture queue: unsupported entry"))?;
+    if !is_commit_oid(&entry.commit) || !delivery::matches_name(path, &entry.commit, &value)? {
+        return Err(RiftError::validity(
+            "capture queue: name and context disagree",
+        ));
+    }
+    Ok((value, entry))
+}
+
 /// How many entry FILES the queue holds, parseable or not.
 ///
 /// Deliberately separate from [`entries`], and the difference between the two is
@@ -175,18 +156,10 @@ pub(crate) fn entries(git_dir: &Path) -> Vec<(PathBuf, QueueEntry)> {
 /// ones is indistinguishable from a healthy backlog, which is how a file this
 /// build cannot drain hides behind one it can.
 pub(crate) fn entry_file_count(git_dir: &Path) -> usize {
-    std::fs::read_dir(queue_dir(git_dir)).map_or(0, |rd| {
-        rd.flatten()
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .count()
-    })
-}
-
-/// Drop one drained entry. Any marker it left behind outlives it deliberately:
-/// the marker is a message to the developer and is cleared by being *said*
-/// ([`take_errors`]), not by the work that produced it finishing.
-pub(crate) fn remove(path: &Path) {
-    let _ = std::fs::remove_file(path);
+    rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
+        .iter()
+        .filter(|path| path.extension().is_some_and(|x| x == "json"))
+        .count()
 }
 
 /// Record why an entry could not be drained, or why it drained without a
@@ -231,38 +204,6 @@ pub(crate) fn mark_note(git_dir: &Path, key: &str, reason: &str) {
     mark_error(&dir.join(key), reason);
 }
 
-/// Record a failed attempt: keep the entry with its attempt count raised, or —
-/// once it has spent [`MAX_ATTEMPTS`] — drop it. Either way the reason is left
-/// as a marker, so the next hook says it out loud exactly once.
-///
-/// Returns whether the entry survives for another try, which is the only thing
-/// the caller can act on and the only thing worth asserting about.
-pub(crate) fn record_failure(
-    path: &Path,
-    entry: &QueueEntry,
-    git_dir: &Path,
-    reason: &str,
-) -> bool {
-    let attempts = entry.attempts.saturating_add(1);
-    if attempts >= MAX_ATTEMPTS {
-        mark_error(
-            path,
-            &format!("{reason} (gave up after {attempts} attempts)"),
-        );
-        remove(path);
-        return false;
-    }
-    mark_error(path, reason);
-    let _ = enqueue(
-        git_dir,
-        &QueueEntry {
-            attempts,
-            ..entry.clone()
-        },
-    );
-    true
-}
-
 /// Read every marker and **delete it**, so the sweep that prints it says it
 /// exactly once. A marker that survived being reported would print on every
 /// commit forever, and a warning that always fires is a warning nobody reads.
@@ -277,12 +218,8 @@ pub(crate) fn peek_errors(git_dir: &Path) -> Vec<String> {
 }
 
 fn read_errors(git_dir: &Path, consume: bool) -> Vec<String> {
-    let Ok(rd) = std::fs::read_dir(queue_dir(git_dir)) else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = rd
-        .flatten()
-        .map(|e| e.path())
+    let mut out: Vec<String> = rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
+        .into_iter()
         .filter(|p| p.extension().is_some_and(|x| x == "error"))
         .filter_map(|p| {
             let body = std::fs::read_to_string(&p).ok()?;
@@ -296,115 +233,333 @@ fn read_errors(git_dir: &Path, consume: bool) -> Vec<String> {
     out
 }
 
-/// The suffix [`enqueue`] writes before its rename.
-const TMP_SUFFIX: &str = ".json.tmp";
-
-/// A file's mtime as epoch ms, or `None` if the filesystem will not say.
-fn modified_ms(path: &Path) -> Option<i64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
-    i64::try_from(since.as_millis()).ok()
+/// Queue stages have no age-based cleanup: only their publishing owner removes
+/// its own stage. Abandoned stages remain visible debt for explicit recovery.
+pub(crate) fn sweep_stale_tmps(_git_dir: &Path, _now_ms: i64) -> usize {
+    // Only a producer can clean its own staging path. Age is not ownership.
+    0
 }
 
-/// Delete the `<oid>.json.tmp` corpses a dead writer left behind — and only
-/// those.
-///
-/// [`enqueue`] writes `<oid>.json.tmp` and renames it into place, so a process
-/// killed between the two leaves the temp file forever. Nothing else ever looks
-/// at it: [`entries`] and [`entry_file_count`] both filter on the `json`
-/// extension, which `<oid>.json.tmp` does not have. So it is invisible, it is
-/// not garbage-collected by the drain that removes real entries, and it
-/// accumulates one file per crashed write — the leak a review of this path
-/// found.
-///
-/// **A FRESH temp file is never touched**, and that direction matters more than
-/// the sweep does: a young temp file is far more likely to be a write in flight
-/// than a corpse, and deleting one under a live writer turns its rename into an
-/// error — a cleanup that loses a capture entry. The bound is [`LOCK_STALE_MS`],
-/// the age at which this queue already declares a lock holder dead; a second
-/// invented constant would just be another number to keep in agreement.
-///
-/// **The stem must be an oid**, so the sweep can only ever remove a file this
-/// module could itself have written. Deleting is the direction where being
-/// wrong is expensive, so it is the direction that fails closed.
-///
-/// Returns how many were removed.
-pub(crate) fn sweep_stale_tmps(git_dir: &Path, now_ms: i64) -> usize {
-    let Ok(rd) = std::fs::read_dir(queue_dir(git_dir)) else {
-        return 0;
-    };
-    let mut removed = 0usize;
-    for path in rd.flatten().map(|e| e.path()) {
-        let is_ours = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(TMP_SUFFIX))
-            .is_some_and(is_commit_oid);
-        if !is_ours {
-            continue;
-        }
-        // An unknown age is not an old age: leave it and let the next sweep,
-        // on a filesystem that answers, decide.
-        let Some(written_ms) = modified_ms(&path) else {
-            continue;
-        };
-        if now_ms.saturating_sub(written_ms) >= LOCK_STALE_MS && std::fs::remove_file(&path).is_ok()
-        {
-            removed += 1;
-        }
+#[derive(Debug)]
+pub(crate) struct QueueDeferred(&'static str);
+
+impl std::fmt::Display for QueueDeferred {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
     }
-    removed
 }
 
-/// The worker's lock: present means a worker is draining. Removed on drop.
+impl std::error::Error for QueueDeferred {}
+
+pub(crate) fn deferred(reason: &'static str) -> RiftError {
+    RiftError::Io(std::io::Error::other(QueueDeferred(reason)))
+}
+
+/// Proof reads preserve lock contention; other unavailable evidence stays owed.
+pub(crate) fn proof_read(
+    error: rift_core::RiftError,
+    reason: &'static str,
+) -> rift_core::RiftError {
+    if matches!(error, rift_core::RiftError::ProjectionBusy { .. }) {
+        error
+    } else {
+        deferred(reason)
+    }
+}
+
+pub(crate) fn is_deferred(error: &(dyn std::error::Error + 'static)) -> bool {
+    defer_reason(error).is_some()
+}
+
+pub(crate) fn defer_reason(error: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if let Some(deferred) = error.downcast_ref::<QueueDeferred>() {
+            return Some(deferred.0);
+        }
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            if let Some(deferred) = io
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<QueueDeferred>())
+            {
+                return Some(deferred.0);
+            }
+        }
+        cause = error.source();
+    }
+    None
+}
+
+pub(crate) fn remove_owned(path: &Path, owner: &QueueLock) -> Result<()> {
+    owner.check_path(path)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn record_failure_owned(
+    path: &Path,
+    entry: &QueueEntry,
+    reason: &str,
+    owner: &QueueLock,
+) -> Result<bool> {
+    owner.check_path(path)?;
+    let (value, actual) = read_entry(path)?;
+    if actual != *entry {
+        return Err(deferred("capture delivery changed before retry"));
+    }
+    let attempts = entry.attempts.saturating_add(1);
+    if attempts >= MAX_ATTEMPTS {
+        mark_error(
+            path,
+            &format!("{reason} (gave up after {attempts} attempts)"),
+        );
+        remove_owned(path, owner)?;
+        return Ok(false);
+    }
+    delivery::replace_attempts(path, &entry.commit, &value, attempts, owner)?;
+    mark_error(path, reason);
+    Ok(true)
+}
+
+/// Why ownership could not be established. No queue payload belongs in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnerBlock {
+    ActiveOwner,
+    LegacyBarrier,
+    Unavailable,
+}
+
+/// One member's stable descriptor owner, independent of queue migration.
 pub(crate) struct QueueLock {
-    path: PathBuf,
+    file: std::fs::File,
+    git_dir: PathBuf,
 }
 
 impl Drop for QueueLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = self.file.unlock();
     }
 }
 
-/// Take the drain lock, stealing one older than [`LOCK_STALE_MS`].
-///
-/// `None` means another worker holds it and is recent — the caller exits
-/// without draining, because that worker will drain what this one would have.
-pub(crate) fn acquire_lock(git_dir: &Path, now_ms: i64) -> Option<QueueLock> {
-    let dir = queue_dir(git_dir);
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(LOCK_FILE);
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut f) => {
-            use std::io::Write as _;
-            let _ = write!(f, "{now_ms}");
-            Some(QueueLock { path })
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let held_at: i64 = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0);
-            if now_ms.saturating_sub(held_at) < LOCK_STALE_MS {
-                return None;
-            }
-            // Stale: the holder is gone. Steal it — draining twice is safe
-            // (every write the worker makes is idempotent), wedging is not.
-            std::fs::write(&path, now_ms.to_string()).ok()?;
-            Some(QueueLock { path })
-        }
-        Err(_) => None,
+impl QueueLock {
+    pub(crate) fn git_dir(&self) -> &Path {
+        &self.git_dir
     }
+
+    pub(crate) fn check_current(&self) -> Result<()> {
+        let current = std::fs::symlink_metadata(owner_path(&self.git_dir)?)?;
+        if !current.file_type().is_file() {
+            return Err(RiftError::validity("queue owner: marker was replaced"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let held = self.file.metadata()?;
+            if (held.dev(), held.ino()) != (current.dev(), current.ino()) {
+                return Err(RiftError::validity("queue owner: marker was replaced"));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn matches_git_dir(&self, git_dir: &Path) -> bool {
+        std::fs::canonicalize(git_dir).is_ok_and(|path| path == self.git_dir)
+    }
+
+    /// Ordinary work requires absence of any recovery hold, without parsing it.
+    pub(crate) fn check_recovery_hold(&self) -> Result<()> {
+        match self
+            .git_dir
+            .join(".rift-capture-recovery.hold")
+            .symlink_metadata()
+        {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(deferred("capture recovery hold is present or unavailable")),
+        }
+    }
+
+    pub(crate) fn check_path(&self, path: &Path) -> Result<()> {
+        self.check_current()?;
+        self.check_recovery_hold()?;
+        if legacy_barrier(self.git_dir()) {
+            return Err(deferred("legacy ownership remains unresolved"));
+        }
+        let parent = path.parent().and_then(|p| std::fs::canonicalize(p).ok());
+        let roots = [
+            queue_dir(&self.git_dir),
+            crate::agent_queue::queue_dir(&self.git_dir),
+            rift_shadow::hooks::run_state::RunRoot::CaptureQueue.legacy_under(&self.git_dir),
+            rift_shadow::hooks::run_state::RunRoot::AgentQueue.legacy_under(&self.git_dir),
+        ];
+        if !roots
+            .iter()
+            .any(|root| std::fs::canonicalize(root).ok() == parent)
+            || parent.is_none()
+        {
+            return Err(RiftError::validity(
+                "queue owner: path belongs to another member",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn owner_path(git_dir: &Path) -> std::io::Result<PathBuf> {
+    Ok(std::fs::canonicalize(git_dir)?.join(".rift-capture-owner.lock"))
+}
+
+pub(crate) fn acquire_owner(git_dir: &Path) -> std::result::Result<QueueLock, OwnerBlock> {
+    let git_dir = std::fs::canonicalize(git_dir).map_err(|_| OwnerBlock::Unavailable)?;
+    let path = owner_path(&git_dir).map_err(|_| OwnerBlock::Unavailable)?;
+    if path
+        .symlink_metadata()
+        .is_ok_and(|meta| !meta.file_type().is_file())
+    {
+        return Err(OwnerBlock::Unavailable);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.share_mode(3); // readers/writers, never delete-sharing while owned
+    }
+    let file = options.open(path).map_err(|_| OwnerBlock::Unavailable)?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => OwnerBlock::ActiveOwner,
+        std::fs::TryLockError::Error(_) => OwnerBlock::Unavailable,
+    })?;
+    let owner = QueueLock { file, git_dir };
+    owner.check_current().map_err(|_| OwnerBlock::Unavailable)?;
+    if legacy_barrier(owner.git_dir()) {
+        return Err(OwnerBlock::LegacyBarrier);
+    }
+    Ok(owner)
+}
+
+fn legacy_barrier(git_dir: &Path) -> bool {
+    let mut markers = vec![
+        rift_shadow::hooks::run_state::RunRoot::CaptureQueue
+            .legacy_under(git_dir)
+            .join(LOCK_FILE),
+        queue_dir(git_dir).join(LOCK_FILE),
+    ];
+    markers.extend(crate::family::run_state::legacy_move_marker(git_dir));
+    markers.iter().any(|marker| !matches!(marker.symlink_metadata(), Err(error) if error.kind() == std::io::ErrorKind::NotFound))
+}
+
+/// Compatibility clock parameter carries no ownership or expiry authority.
+pub(crate) fn acquire_lock(git_dir: &Path, _now_ms: i64) -> Option<QueueLock> {
+    acquire_owner(git_dir).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomicity_an_old_capture_completion_does_not_remove_a_new_delivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owner = acquire_lock(tmp.path(), 1_000).unwrap();
+        let first = entry(A, 1_000);
+        enqueue(tmp.path(), &first).unwrap();
+        let observed = entries(tmp.path());
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].1, first);
+        let mut second = entry(A, 2_000);
+        second.session_id = Some("replacement-session".into());
+        let published = enqueue(tmp.path(), &second).unwrap();
+        assert!(entries(tmp.path()).contains(&(published.clone(), second.clone())));
+        eprintln!("capture old/new share path: {}", observed[0].0 == published);
+        remove_owned(&observed[0].0, &owner).unwrap();
+        assert!(
+            entries(tmp.path()).contains(&(published, second)),
+            "completing observed A must leave successfully published B owed"
+        );
+    }
+
+    #[test]
+    fn simultaneous_os_lock_contenders_hold_at_most_one_queue_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(3);
+        let held = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                barrier.wait();
+                acquire_lock(tmp.path(), 601_000)
+            });
+            let b = scope.spawn(|| {
+                barrier.wait();
+                acquire_lock(tmp.path(), 601_000)
+            });
+            barrier.wait();
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(held.iter().filter(|owner| owner.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn ownership_a_live_queue_owner_is_not_stolen_after_ten_minutes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owner = acquire_lock(tmp.path(), 1_000).unwrap();
+        let contender = acquire_lock(tmp.path(), 601_000);
+        assert!(
+            contender.is_none(),
+            "elapsed time does not release a live owner"
+        );
+        drop(owner);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_dropping_a_queue_predecessor_preserves_its_successor() {
+        use std::os::unix::fs::MetadataExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let predecessor = acquire_lock(tmp.path(), 1_000).unwrap();
+        let marker = owner_path(tmp.path()).unwrap();
+        std::fs::rename(&marker, tmp.path().join("replaced-owner")).unwrap();
+        assert!(predecessor.check_current().is_err());
+        let successor = acquire_lock(tmp.path(), 2_000).unwrap();
+        let identity = std::fs::metadata(&marker).unwrap().ino();
+        assert!(acquire_lock(tmp.path(), 2_001).is_none());
+        drop(predecessor);
+        assert_eq!(std::fs::metadata(&marker).unwrap().ino(), identity);
+        assert!(acquire_lock(tmp.path(), 2_002).is_none());
+        drop(successor);
+    }
+
+    #[test]
+    fn ownership_an_empty_legacy_queue_marker_is_not_proof_of_abandonment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = queue_dir(tmp.path()).join(LOCK_FILE);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"").unwrap();
+        let contender = acquire_lock(tmp.path(), 601_000);
+        assert!(
+            contender.is_none(),
+            "an old worker may be publishing its marker"
+        );
+        assert_eq!(std::fs::read(marker).unwrap(), b"");
+    }
+
+    /// A serial control, not a deterministic simultaneous stale-read schedule.
+    #[test]
+    fn ownership_two_serial_queue_contenders_preserve_unknown_legacy_debt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = queue_dir(tmp.path()).join(LOCK_FILE);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"0").unwrap();
+        assert!(acquire_lock(tmp.path(), 601_000).is_none());
+        assert!(acquire_lock(tmp.path(), 601_001).is_none());
+        assert_eq!(std::fs::read(marker).unwrap(), b"0");
+    }
 
     fn entry(commit: &str, at: i64) -> QueueEntry {
         QueueEntry {
@@ -461,28 +616,15 @@ mod tests {
     /// the file survives, and it survives having been *looked at* — the sweep
     /// reports 0 rather than reporting a removal it did not make.
     #[test]
-    fn a_temp_file_is_swept_only_once_it_is_older_than_the_lock_steal_age() {
+    fn a_queue_stage_is_retained_regardless_of_an_invented_death_age() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(queue_dir(dir.path())).unwrap();
-        let tmp = queue_dir(dir.path()).join(format!("{A}{TMP_SUFFIX}"));
-        std::fs::write(&tmp, b"{}").unwrap();
-        let written = modified_ms(&tmp).expect("the filesystem answers mtime");
-
-        assert_eq!(sweep_stale_tmps(dir.path(), written), 0, "same instant");
-        assert_eq!(
-            sweep_stale_tmps(dir.path(), written + LOCK_STALE_MS - 1),
-            0,
-            "one millisecond under the bound is still an in-flight write"
-        );
-        assert!(tmp.exists(), "a fresh temp file must survive the sweep");
-
-        assert_eq!(
-            sweep_stale_tmps(dir.path(), written + LOCK_STALE_MS),
-            1,
-            "at the bound it is a corpse"
-        );
-        assert!(!tmp.exists());
-        assert_eq!(sweep_stale_tmps(dir.path(), written + LOCK_STALE_MS), 0);
+        let path = queue_dir(dir.path()).join(format!("{A}.json.tmp"));
+        std::fs::write(&path, b"in-flight bytes").unwrap();
+        for instant in [0, 601_000, i64::MAX / 2] {
+            assert_eq!(sweep_stale_tmps(dir.path(), instant), 0);
+            assert_eq!(std::fs::read(&path).unwrap(), b"in-flight bytes");
+        }
     }
 
     /// The false-positive direction, which is the expensive one: the sweep
@@ -495,17 +637,14 @@ mod tests {
         let path = enqueue(dir.path(), &entry(A, 7)).unwrap();
         mark_error(&path, "boom");
         let held = acquire_lock(dir.path(), 1_000).unwrap();
-        let foreign = queue_dir(dir.path()).join(format!("not-an-oid{TMP_SUFFIX}"));
+        let foreign = queue_dir(dir.path()).join("not-an-oid.json.tmp");
         std::fs::write(&foreign, b"{}").unwrap();
 
         // Far past any bound: everything below is exempt by KIND, not by age.
         assert_eq!(sweep_stale_tmps(dir.path(), i64::MAX / 2), 0);
         assert!(path.exists(), "a queued entry is not a temp file");
         assert!(path.with_extension("error").exists(), "nor is its marker");
-        assert!(
-            queue_dir(dir.path()).join(LOCK_FILE).exists(),
-            "nor the lock"
-        );
+        assert!(owner_path(dir.path()).unwrap().exists(), "nor the lock");
         assert!(
             foreign.exists(),
             "nor a temp file we could not have written"
@@ -590,7 +729,7 @@ mod tests {
         assert!(take_errors(tmp.path()).is_empty(), "said once, not twice");
         assert_eq!(entries(tmp.path()).len(), 1, "the entry still retries");
 
-        remove(&path);
+        remove_owned(&path, &acquire_owner(tmp.path()).unwrap()).unwrap();
         assert!(entries(tmp.path()).is_empty());
     }
 
@@ -602,7 +741,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = enqueue(tmp.path(), &entry(A, 1)).unwrap();
         mark_error(&path, "no commit to anchor a checkpoint to");
-        remove(&path);
+        remove_owned(&path, &acquire_owner(tmp.path()).unwrap()).unwrap();
         assert!(entries(tmp.path()).is_empty());
         assert_eq!(take_errors(tmp.path()).len(), 1, "the reason survives");
     }
@@ -612,7 +751,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let held = acquire_lock(tmp.path(), 1_000).unwrap();
         assert!(
-            acquire_lock(tmp.path(), 1_000 + LOCK_STALE_MS - 1).is_none(),
+            acquire_lock(tmp.path(), 601_000).is_none(),
             "a live holder excludes"
         );
         drop(held);
@@ -623,14 +762,18 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_lock_is_stolen_rather_than_wedging_the_queue() {
-        // A killed worker must not stop condensation forever. Every write the
-        // worker makes is idempotent, so stealing costs duplicated effort at
-        // worst — wedging costs every future checkpoint.
+    fn an_unheld_persistent_owner_file_is_reusable_without_an_age_guess() {
         let tmp = tempfile::tempdir().unwrap();
-        let held = acquire_lock(tmp.path(), 1_000).unwrap();
-        std::mem::forget(held); // simulate a worker killed before Drop ran
-        assert!(acquire_lock(tmp.path(), 1_000 + LOCK_STALE_MS).is_some());
+        let marker = owner_path(tmp.path()).unwrap();
+        std::fs::write(&marker, b"old owner metadata").unwrap();
+        let owner = acquire_lock(tmp.path(), 1).unwrap();
+        assert!(acquire_lock(tmp.path(), 601_000).is_none());
+        drop(owner);
+        assert!(
+            marker.exists(),
+            "descriptor release never unlinks the owner file"
+        );
+        assert!(acquire_lock(tmp.path(), 2).is_some());
     }
 
     #[test]
@@ -640,11 +783,12 @@ mod tests {
         // commit re-attempted all of them — the deferred work went quadratic
         // in a repository that was never going to succeed.
         let tmp = tempfile::tempdir().unwrap();
+        let owner = acquire_owner(tmp.path()).unwrap();
         let mut e = entry(A, 1);
         let mut path = enqueue(tmp.path(), &e).unwrap();
         for attempt in 1..MAX_ATTEMPTS {
             assert!(
-                record_failure(&path, &e, tmp.path(), "boom"),
+                record_failure_owned(&path, &e, "boom", &owner).unwrap(),
                 "attempt {attempt} keeps the entry"
             );
             let back = entries(tmp.path());
@@ -654,7 +798,7 @@ mod tests {
             assert_eq!(e.attempts, attempt, "the count is durable");
         }
         assert!(
-            !record_failure(&path, &e, tmp.path(), "boom"),
+            !record_failure_owned(&path, &e, "boom", &owner).unwrap(),
             "the last attempt gives up"
         );
         assert!(entries(tmp.path()).is_empty(), "queue stays bounded");
@@ -689,21 +833,13 @@ mod tests {
         assert_eq!(entry_file_count(tmp.path()), 0, "no directory at all");
         let path = enqueue(tmp.path(), &entry(A, 1)).unwrap();
         assert_eq!(entry_file_count(tmp.path()), 1);
-        remove(&path);
+        remove_owned(&path, &acquire_owner(tmp.path()).unwrap()).unwrap();
         assert_eq!(entry_file_count(tmp.path()), 0, "drained");
     }
 
     #[test]
-    fn the_two_values_the_registry_publishes_are_pinned_to_their_literals() {
-        // `docs/sync-format.md` states these as a contract a second
-        // implementation must match: a lock "stolen after 10 minutes", an entry
-        // "dropped at 3". Every other test names them symbolically, so both can
-        // be changed to anything at all and the whole suite stays green — which
-        // is exactly what a verifier demonstrated (1 s and 7, both green). A
-        // published constant needs one assertion that fails when the published
-        // number stops being true.
-        assert_eq!(LOCK_STALE_MS, 600_000, "sync-format says ten minutes");
-        assert_eq!(MAX_ATTEMPTS, 3, "sync-format says three attempts");
+    fn the_retry_bound_remains_three_actual_execution_failures() {
+        assert_eq!(MAX_ATTEMPTS, 3, "sync-format says three execution failures");
     }
 
     #[test]

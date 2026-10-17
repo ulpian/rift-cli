@@ -466,8 +466,9 @@ fn absorb_viewer_message(message: WorkerMsg, requests: &mut Vec<ViewerRequest>) 
     }
 }
 
-/// Every session-cache dir of the active project's **family**
-/// (`<git_dir>/rift-sessions` per member) — the narrow second watch set
+/// Every session-cache dir of the active project's **family** (each member's
+/// sessions directory, [`crate::session::member_sessions`]) — the narrow
+/// second watch set
 /// (the family view). Empty for a non-git project (nothing to watch; the status
 /// path reads the same absence).
 ///
@@ -483,7 +484,10 @@ fn session_dirs_for(path: &str) -> Vec<PathBuf> {
         .members
         .iter()
         .filter(|m| !m.prunable)
-        .map(|m| m.git_dir.join("rift-sessions"))
+        .map(|m| crate::session::member_sessions(&m.git_dir, &m.work_tree))
+        // An unmoved member is watched in both trees: a new hook writes the
+        // new one while an older binary still writes the old one.
+        .flat_map(|dir| rift_shadow_hooks::run_state::read_dirs(&dir))
         .collect()
 }
 

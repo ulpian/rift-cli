@@ -154,6 +154,7 @@ pub struct IngestOutcome {
 struct IngestCtx<'a> {
     raw: &'a RawHook,
     registry: &'a AdapterRegistry,
+    /// The member's sessions directory: the session cache and claim markers.
     git_dir: &'a Path,
     /// The session's owner: the first agent to claim the id, which is not
     /// necessarily the agent that fired this hook.
@@ -170,6 +171,8 @@ struct IngestCtx<'a> {
 /// / tool-call / token-usage / cost — the same projector the artifact bridge
 /// replays), and the session state machine. Returns the resulting
 /// session phase, effects, and any turn boundaries the caller must snapshot.
+/// `git_dir` is the member's sessions directory, where the session cache and
+/// the claim markers live.
 ///
 /// # Errors
 /// [`rift_core::RiftError`] only on a storage failure or a malformed payload that
@@ -829,7 +832,7 @@ mod tests {
 
         // The phantom leaves no marker, no cache and no session row, while
         // the real one keeps all three.
-        let names: Vec<String> = std::fs::read_dir(git_dir.join("rift-sessions"))
+        let names: Vec<String> = std::fs::read_dir(git_dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
@@ -1124,8 +1127,7 @@ mod tests {
 
         // Even if transient cache state disappears, canonical history prevents
         // a second synthetic start.
-        let cache_dir = git_dir.join("rift-sessions");
-        for entry in std::fs::read_dir(cache_dir).unwrap().flatten() {
+        for entry in std::fs::read_dir(git_dir).unwrap().flatten() {
             std::fs::remove_file(entry.path()).unwrap();
         }
         let mut second = first;

@@ -335,12 +335,18 @@ fn resume_fetch_ladder_pulls_the_shard_from_a_path_remote() {
 /// post-commit archive, and put the landed id in a trailer-carrying commit.
 /// Returns the checkpoint id. (The resume-regression fixture's generator.)
 fn land_server_checkpoint(repo: &Path, tmp: &Path, n: u32, env: &[(&str, &str)]) -> String {
-    let sessions = repo.join(".git").join("rift-sessions");
-    for entry in std::fs::read_dir(&sessions).into_iter().flatten().flatten() {
-        let p = entry.path();
-        if p.extension().is_some_and(|e| e == "json") {
-            if let Ok(s) = std::fs::read_to_string(&p) {
-                let _ = std::fs::write(&p, s.replace("\"active\"", "\"ended\""));
+    let sessions = common::sessions_dir(&repo.join(".git"), &tmp.join("cache"));
+    std::fs::create_dir_all(&sessions).unwrap();
+    // The seeded session sits where a fixture seeds one until the binary's
+    // first run moves it, so both places are ended.
+    let seeded = common::seed_sessions_dir(&repo.join(".git"));
+    for dir in [&seeded, &sessions] {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = entry.path();
+            if p.extension().is_some_and(|e| e == "json") {
+                if let Ok(s) = std::fs::read_to_string(&p) {
+                    let _ = std::fs::write(&p, s.replace("\"active\"", "\"ended\""));
+                }
             }
         }
     }

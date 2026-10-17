@@ -246,6 +246,19 @@ pub trait SubstrateReader {
     /// Implementation-defined read errors.
     fn read_artifact(&self, checkpoint_id: &str, rel: &str) -> Result<Option<Vec<u8>>>;
 
+    /// Fetch an artifact exclusively from the native Rift checkpoint origin.
+    /// A supported reader must retain one immutable native snapshot for its
+    /// lifetime, including initial absence; reopen it to observe later writes.
+    /// Ordinary any-origin reads keep their historical compatibility behavior.
+    ///
+    /// # Errors
+    /// Refuses readers without explicit native-origin support or read failures.
+    fn read_native_artifact(&self, _checkpoint_id: &str, _rel: &str) -> Result<Option<Vec<u8>>> {
+        Err(rift_core::RiftError::substrate(
+            "native artifact origin is unavailable",
+        ))
+    }
+
     /// The integration-branch tip commit oid(s) (e.g. `main`/`master`), hex.
     /// Reachability from one of these is the **merged** signal. Default:
     /// none (no integration branch discoverable ⇒ nothing merges).
@@ -447,6 +460,7 @@ pub struct MemorySubstrate {
     shards: Vec<CheckpointShard>,
     blobs: BTreeMap<String, Vec<u8>>,
     artifacts: BTreeMap<(String, String), Vec<u8>>,
+    native_artifacts: BTreeMap<(String, String), Vec<u8>>,
     commits: BTreeMap<String, CommitMeta>,
     integration_tips: Vec<String>,
     branches: Vec<(String, String)>,
@@ -488,6 +502,14 @@ impl MemorySubstrate {
     pub fn with_artifact(mut self, checkpoint_id: &str, rel: &str, bytes: &[u8]) -> Self {
         self.artifacts
             .insert((checkpoint_id.to_string(), rel.to_string()), bytes.to_vec());
+        self
+    }
+
+    /// Add explicitly native-origin artifact bytes, independently of fallback bytes.
+    #[must_use]
+    pub fn with_native_artifact(mut self, checkpoint_id: &str, rel: &str, bytes: &[u8]) -> Self {
+        self.native_artifacts
+            .insert((checkpoint_id.to_owned(), rel.to_owned()), bytes.to_vec());
         self
     }
 
@@ -570,6 +592,13 @@ impl MemorySubstrate {
 }
 
 impl SubstrateReader for MemorySubstrate {
+    fn read_native_artifact(&self, id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .native_artifacts
+            .get(&(id.to_owned(), rel.to_owned()))
+            .cloned())
+    }
+
     fn is_local_only(&self) -> bool {
         self.local
     }

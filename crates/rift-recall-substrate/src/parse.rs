@@ -7,6 +7,9 @@
 //! allocation; [`redact_err`] surfaces only position/category, never raw payload
 //! — a parse error never leaks the bytes that caused it.
 
+/// Strict checked repository recovery-audit artifact; unlike ordinary parsers,
+/// one invalid record refuses the whole stream.
+pub mod boundary_gaps;
 mod window_journal;
 
 use rift_recall_types::checkpoint::{

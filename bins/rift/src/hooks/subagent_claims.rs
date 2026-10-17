@@ -2,7 +2,7 @@
 //! the subagent's own transcript is, kept until the archive reads it.
 //!
 //! Run state, not a record (Q37.3): one small file per subagent at
-//! `<git_dir>/rift-sessions/<session>.subagents/<agent_id>.json`, holding an
+//! `<sessions>/<session>.subagents/<agent_id>.json` in the member's run state, holding an
 //! address and a type and no fact the sealed shard will not hold. One file per
 //! subagent rather than a member of the session cache because subagents stop
 //! concurrently, and the cache is rewritten whole by every hook: two stops
@@ -64,11 +64,10 @@ pub(super) fn read_claims(
     session: &str,
 ) -> std::collections::BTreeMap<String, SubagentClaim> {
     let mut out = std::collections::BTreeMap::new();
-    let Some(entries) = claims_dir(git_dir, session).and_then(|d| std::fs::read_dir(d).ok()) else {
+    let Some(dir) = claims_dir(git_dir, session) else {
         return out;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in rift_shadow::hooks::run_state::list_entries(&dir) {
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
@@ -105,7 +104,7 @@ fn claim_of(payload: &serde_json::Value) -> Option<SubagentClaim> {
 /// Whether `id` may name a file and a shard subtree: ASCII letters, digits,
 /// `_` and `-`, bounded. Shared with the archive, whose subtree names the same
 /// rule guards.
-pub(super) fn is_safe_id(id: &str) -> bool {
+pub(crate) fn is_safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID_BYTES
         && id
@@ -129,7 +128,7 @@ fn claims_dir(git_dir: &Path, session: &str) -> Option<PathBuf> {
     if !rift_shadow::hooks::is_safe_session_id(session) {
         return None;
     }
-    let sessions = rift_shadow::hooks::session_cache::sessions_dir(git_dir);
+    let sessions = crate::family::run_state::sessions_dir(git_dir);
     Some(sessions.join(format!("{session}.{CLAIMS_SUFFIX}")))
 }
 

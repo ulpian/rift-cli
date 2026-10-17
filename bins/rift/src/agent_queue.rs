@@ -19,21 +19,18 @@
 //! under a stale identity. No capture bytes of either kind are journaled, for
 //! the reason `capture_queue` gives.
 //!
-//! **The file name is the job's identity**, so a redelivered hook overwrites
-//! its own job rather than queueing a second one, and a worker killed after
-//! the work but before the `remove` finds the done-marker and skips.
+//! Filenames bind the complete context except attempts. Identical publication
+//! keeps the retained retry count; distinct context remains a separate delivery.
+//! Completion requires the worker's per-kind proof, not the filename alone.
 
 use std::path::{Path, PathBuf};
 
 use rift_core::{Result, RiftError};
 
-/// The journal directory under `<git_dir>` (sibling of `rift-capture-queue`).
-const QUEUE_DIR: &str = "rift-agent-queue";
-
 /// One journaled job: what the worker needs to do it later.
 ///
-/// Unknown fields are ignored on read, for the reason `capture_queue`'s entry
-/// gives: a newer writer's job must still be drainable by an older worker.
+/// Typed execution reads supported fields. The full validated JSON value,
+/// including unknown fields, remains bound to delivery identity and retries.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AgentJob {
     /// Contract schema version.
@@ -186,20 +183,21 @@ pub(crate) enum JobKind {
         /// The idle floor the requesting hook read from the family's config.
         floor_ms: i64,
     },
-    /// The working-tree snapshot one turn boundary owes: the hook that closed
-    /// the boundary records only `HEAD` and the instant, and the worker
-    /// observes the working set as of that instant.
+    /// Queued boundary metadata and a request for later current-byte collection.
+    /// The hook records HEAD and event time, not immutable event-time bytes.
     BoundarySnapshot(BoundarySnapshot),
+    /// The member's run state still has files in its git dir's old tree, and
+    /// a hook found them. A hook never moves anything — the move takes a lock
+    /// and renames, which is no hook's to pay for — so it asks the worker,
+    /// which moves before it drains.
+    MoveRunState,
 }
 
 /// One turn boundary a hook closed and the worker owes a snapshot of.
 ///
-/// Journaled because the observation (a `git status`, a read and a diff per
-/// changed path, a batched object write) costs more than an agent hook has,
-/// and grows with what the user has left dirty. The hook keeps the two facts
-/// only it can have: which commit `HEAD` named and when the boundary fell.
-/// The worker takes the snapshot as of that instant, and a path written
-/// after it is not this boundary's to describe.
+/// The hook records HEAD and event time within its latency budget. The worker
+/// later collects current bounded bytes. Event time does not prove when those
+/// bytes were written or who wrote them.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct BoundarySnapshot {
     /// The agent-supplied session id.
@@ -242,6 +240,13 @@ pub(crate) struct IntervalArchive {
     pub agent: String,
     /// Why the hook decided the session had earned a checkpoint.
     pub reason: IntervalReason,
+    /// Which interval the checkpoint closes: the session's last archive
+    /// instant the hook read when it found the interval due, `None` before
+    /// the session's first. Part of the delivery's identity, so every hook
+    /// inside one due interval asks for the same checkpoint and a hook in the
+    /// next interval asks for another.
+    #[serde(default)]
+    pub interval_start_ms: Option<i64>,
 }
 
 /// Why an agent hook archives a live session between its commits: the two
@@ -465,8 +470,12 @@ pub(crate) struct AuditLines {
 }
 
 /// The journal directory for `git_dir`.
+///
+/// The member's run directory under the family's cache directory, resolved
+/// (and moved out of the git dir on the first resolution) by
+/// [`crate::family::run_state`]; every path in this module derives from it.
 pub(crate) fn queue_dir(git_dir: &Path) -> PathBuf {
-    git_dir.join(QUEUE_DIR)
+    crate::family::run_state::agent_queue_dir(git_dir)
 }
 
 /// Whether `s` is lowercase hex of exactly `len` characters — the only shape
@@ -544,7 +553,33 @@ impl JobKind {
                 snapshot.ordinal,
                 snapshot.boundary.position()
             )),
+            // One move is owed per member: every hook that finds the old
+            // tree asks for the same move.
+            Self::MoveRunState => Some("move-run-state".to_owned()),
         }
+    }
+
+    /// Whether two deliveries of this request that differ only in their
+    /// instant may stand side by side without conflict: running either is
+    /// running the other, so a move need not hold one back for the other.
+    pub(crate) fn is_repeatable(&self) -> bool {
+        matches!(
+            self,
+            Self::SearchIndex | Self::DocSweep | Self::SweepIdle { .. } | Self::MoveRunState
+        )
+    }
+
+    /// Whether a second ask for this work while one is pending is answered by
+    /// the pending one: a request that names nothing but its work tree (the
+    /// index rebuild, the run-state move) or the interval it closes (an
+    /// interval archive), so one delivery answers every caller that asks
+    /// before the worker takes it, on the clock of the first. Every other kind
+    /// keeps the delivery a changed instant makes.
+    fn coalesces_while_pending(&self) -> bool {
+        matches!(
+            self,
+            Self::SearchIndex | Self::MoveRunState | Self::Archive(_)
+        )
     }
 
     /// Token jobs drain before condense and archive jobs, so the shard either
@@ -564,57 +599,79 @@ impl JobKind {
             | Self::BasisSnapshot { .. }
             | Self::ToolResultTokens { .. }
             | Self::DocSweep
-            | Self::BoundarySnapshot(_) => 0,
+            | Self::BoundarySnapshot(_)
+            | Self::MoveRunState => 0,
             Self::Condense { .. } | Self::Archive(_) => 1,
             Self::SweepIdle { .. } => 2,
         }
     }
 }
 
-/// Journal one job (atomically: temp file + rename, owner-only). Enqueueing
-/// the same identity again overwrites — one file per job identity.
+/// Publish through an exclusive private stage and no-clobber install.
+/// Identical context keeps retained attempts; distinct context stays separate.
 ///
 /// # Errors
 /// [`RiftError::Validity`] if the job's identity is not path-safe;
 /// [`RiftError::Io`] on a filesystem failure.
 pub(crate) fn enqueue(git_dir: &Path, job: &AgentJob) -> Result<PathBuf> {
+    enqueue_in(&queue_dir(git_dir), job)
+}
+
+/// [`enqueue`] into an explicit journal directory.
+///
+/// The resolution of a member's run state journals the move job through
+/// this, with the directory it has just resolved: going through
+/// [`queue_dir`] would resolve the member again from inside its own
+/// resolution.
+///
+/// # Errors
+/// As [`enqueue`].
+pub(crate) fn enqueue_in(dir: &Path, job: &AgentJob) -> Result<PathBuf> {
     let Some(stem) = job.kind.stem() else {
         return Err(RiftError::validity(
             "agent queue: job identity is not path-safe",
         ));
     };
-    let dir = queue_dir(git_dir);
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{stem}.json"));
-    let tmp = dir.join(format!("{stem}.json.tmp"));
-    let body = serde_json::to_vec(job)
-        .map_err(|e| RiftError::validity(format!("agent queue: encode: {e}")))?;
-    std::fs::write(&tmp, body)?;
-    restrict(&tmp)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(path)
-}
-
-/// Whether a job of this identity is already journaled.
-///
-/// A hook that owes the same work again leaves the pending job as it is, so
-/// its clock stays the moment the work was first owed and its attempt count
-/// keeps counting toward the bound instead of starting over at every hook.
-pub(crate) fn is_queued(git_dir: &Path, kind: &JobKind) -> bool {
-    kind.stem()
-        .is_some_and(|stem| queue_dir(git_dir).join(format!("{stem}.json")).exists())
-}
-
-/// Owner-only permissions on a journal file (unix).
-fn restrict(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    let value =
+        serde_json::to_value(job).map_err(|_| RiftError::validity("agent queue: encode failed"))?;
+    if job.kind.coalesces_while_pending() {
+        if let Some(pending) = pending_repeat(dir, &stem, &value) {
+            return Ok(pending);
+        }
     }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    crate::capture_queue::delivery::publish(dir, &stem, &value)
+}
+
+/// Whether two deliveries of one repeatable request ask for the same work:
+/// equal in everything but the instant each caller stamped and the attempts a
+/// worker spent.
+pub(crate) fn same_request(first: &serde_json::Value, second: &serde_json::Value) -> bool {
+    let request = |value: &serde_json::Value| {
+        let mut value = value.clone();
+        if let Some(fields) = value.as_object_mut() {
+            fields.remove("queued_at_ms");
+            fields.remove("attempts");
+        }
+        value
+    };
+    request(first) == request(second)
+}
+
+/// The pending delivery of `stem` that already asks for `value`'s work, if one
+/// is journaled. Check-then-publish: two callers racing past the check leave
+/// two deliveries, which is what every changed instant left before this
+/// check, so a lost race costs the coalescing and never loses a delivery.
+fn pending_repeat(dir: &Path, stem: &str, value: &serde_json::Value) -> Option<PathBuf> {
+    let versioned = format!("{stem}--");
+    rift_shadow::hooks::run_state::list_entries(dir)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|x| x == "json"))
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == stem || name.starts_with(&versioned))
+        })
+        .find(|path| read_job(path).is_ok_and(|(pending, _)| same_request(&pending, value)))
 }
 
 /// Every readable job: token counts first, then condenses, oldest first
@@ -622,20 +679,15 @@ fn restrict(path: &Path) -> Result<()> {
 /// disagrees with its content — is skipped and left in place, for the reason
 /// `capture_queue::entries` gives.
 pub(crate) fn jobs(git_dir: &Path) -> Vec<(PathBuf, AgentJob)> {
-    let Ok(rd) = std::fs::read_dir(queue_dir(git_dir)) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(PathBuf, AgentJob)> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .filter_map(|p| {
-            let stem = p.file_stem()?.to_str()?.to_owned();
-            let bytes = std::fs::read(&p).ok()?;
-            let job: AgentJob = serde_json::from_slice(&bytes).ok()?;
-            (job.kind.stem().as_deref() == Some(stem.as_str())).then_some((p, job))
-        })
-        .collect();
+    let mut out: Vec<(PathBuf, AgentJob)> =
+        rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .filter_map(|p| {
+                let (_, job) = read_job(&p).ok()?;
+                Some((p, job))
+            })
+            .collect();
     out.sort_by(|a, b| {
         a.1.kind
             .rank()
@@ -646,19 +698,65 @@ pub(crate) fn jobs(git_dir: &Path) -> Vec<(PathBuf, AgentJob)> {
     out
 }
 
+pub(crate) fn read_job(path: &Path) -> Result<(serde_json::Value, AgentJob)> {
+    let value = crate::capture_queue::delivery::decode(&std::fs::read(path)?)?;
+    let job: AgentJob = serde_json::from_value(value.clone())
+        .map_err(|_| RiftError::validity("agent queue: unsupported job"))?;
+    let Some(stem) = job.kind.stem() else {
+        return Err(RiftError::validity("agent queue: invalid logical identity"));
+    };
+    if !crate::capture_queue::delivery::matches_name(path, &stem, &value)? {
+        return Err(RiftError::validity(
+            "agent queue: name and context disagree",
+        ));
+    }
+    Ok((value, job))
+}
+
+pub(crate) fn logical_stem(job: &AgentJob) -> Option<String> {
+    job.kind.stem()
+}
+
 /// How many job FILES the journal holds, parseable or not (the doctor count;
 /// see `capture_queue::entry_file_count` for why it is not [`jobs`]`.len()`).
 pub(crate) fn job_file_count(git_dir: &Path) -> usize {
-    std::fs::read_dir(queue_dir(git_dir)).map_or(0, |rd| {
-        rd.flatten()
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .count()
-    })
+    rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
+        .iter()
+        .filter(|path| path.extension().is_some_and(|x| x == "json"))
+        .count()
 }
 
-/// Drop one drained job.
-pub(crate) fn remove(path: &Path) {
-    let _ = std::fs::remove_file(path);
+/// Record a failed attempt: keep the job with its count raised, or — once it
+/// has spent `capture_queue::MAX_ATTEMPTS` — drop it. Either way the reason
+/// lands on the said-once channel. Returns whether the job survives.
+pub(crate) fn record_failure_owned(
+    path: &Path,
+    job: &AgentJob,
+    reason: &str,
+    owner: &crate::capture_queue::QueueLock,
+) -> Result<bool> {
+    owner.check_path(path)?;
+    let (value, actual) = read_job(path)?;
+    if actual != *job {
+        return Err(crate::capture_queue::deferred(
+            "agent delivery changed before retry",
+        ));
+    }
+    let stem = logical_stem(job)
+        .ok_or_else(|| crate::capture_queue::deferred("agent identity unavailable"))?;
+    let attempts = job.attempts.saturating_add(1);
+    if attempts >= crate::capture_queue::MAX_ATTEMPTS {
+        crate::capture_queue::mark_note(
+            owner.git_dir(),
+            &note_key(job),
+            &format!("{reason} (gave up after {attempts} attempts)"),
+        );
+        crate::capture_queue::remove_owned(path, owner)?;
+        return Ok(false);
+    }
+    crate::capture_queue::delivery::replace_attempts(path, &stem, &value, attempts, owner)?;
+    crate::capture_queue::mark_note(owner.git_dir(), &note_key(job), reason);
+    Ok(true)
 }
 
 /// The marker a finished condense leaves, keyed by session: the worker that
@@ -686,7 +784,8 @@ pub(crate) fn clear_condensed(git_dir: &Path, session_id: &str) {
 
 /// Whether `session_id`'s condense already landed.
 pub(crate) fn is_condensed(git_dir: &Path, session_id: &str) -> bool {
-    done_marker(git_dir, session_id).exists()
+    let name = format!("condensed-{}", session_key(session_id));
+    rift_shadow::hooks::run_state::read_path(&queue_dir(git_dir), &name).exists()
 }
 
 /// A short, path-safe key for the said-once note a failing job leaves on the
@@ -696,32 +795,6 @@ pub(crate) fn note_key(job: &AgentJob) -> String {
     let stem = job.kind.stem().unwrap_or_else(|| "agent-job".to_owned());
     let short: String = stem.chars().take(40).collect();
     format!("agent-{short}")
-}
-
-/// Record a failed attempt: keep the job with its count raised, or — once it
-/// has spent `capture_queue::MAX_ATTEMPTS` — drop it. Either way the reason
-/// lands on the said-once channel. Returns whether the job survives.
-pub(crate) fn record_failure(path: &Path, job: &AgentJob, git_dir: &Path, reason: &str) -> bool {
-    let attempts = job.attempts.saturating_add(1);
-    let key = note_key(job);
-    if attempts >= crate::capture_queue::MAX_ATTEMPTS {
-        crate::capture_queue::mark_note(
-            git_dir,
-            &key,
-            &format!("{reason} (gave up after {attempts} attempts)"),
-        );
-        remove(path);
-        return false;
-    }
-    crate::capture_queue::mark_note(git_dir, &key, reason);
-    let _ = enqueue(
-        git_dir,
-        &AgentJob {
-            attempts,
-            ..job.clone()
-        },
-    );
-    true
 }
 
 #[cfg(test)]
@@ -761,14 +834,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn atomicity_an_old_agent_completion_does_not_remove_a_new_delivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owner = crate::capture_queue::acquire_lock(tmp.path(), 1_000).unwrap();
+        let first = condense("session", 1_000);
+        enqueue(tmp.path(), &first).unwrap();
+        let observed = jobs(tmp.path());
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].1, first);
+        let mut second = condense("session", 2_000);
+        second.work_tree = PathBuf::from("/replacement-worktree");
+        let published = enqueue(tmp.path(), &second).unwrap();
+        assert!(jobs(tmp.path()).contains(&(published.clone(), second.clone())));
+        eprintln!("agent old/new share path: {}", observed[0].0 == published);
+        crate::capture_queue::remove_owned(&observed[0].0, &owner).unwrap();
+        assert!(
+            jobs(tmp.path()).contains(&(published, second)),
+            "completing observed A must leave successfully published B owed"
+        );
+    }
+
     /// The same work enqueued twice is one file, and a session id — agent
     /// text — never becomes a path component itself.
     #[test]
-    fn a_redelivered_job_overwrites_its_own_file() {
+    fn exact_redelivery_coalesces_and_changed_context_remains_separate() {
         let tmp = tempfile::tempdir().unwrap();
         let a = enqueue(tmp.path(), &condense("../evil session", 1)).unwrap();
         let b = enqueue(tmp.path(), &condense("../evil session", 2)).unwrap();
-        assert_eq!(a, b);
+        assert_ne!(a, b);
+        assert_eq!(
+            a,
+            enqueue(tmp.path(), &condense("../evil session", 1)).unwrap()
+        );
         assert!(a
             .file_name()
             .unwrap()
@@ -777,8 +875,9 @@ mod tests {
             .starts_with("condense-"));
         assert!(!a.to_string_lossy().contains("evil"));
         let listed = jobs(tmp.path());
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].1.queued_at_ms, 2, "the later delivery's clock");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].1, condense("../evil session", 1));
+        assert_eq!(listed[1].1, condense("../evil session", 2));
     }
 
     /// Token counts drain before the condense that would freeze them into a
@@ -824,17 +923,20 @@ mod tests {
     #[test]
     fn a_failing_job_is_said_once_and_bounded() {
         let tmp = tempfile::tempdir().unwrap();
-        let job = condense("s", 1);
+        let owner = crate::capture_queue::acquire_owner(tmp.path()).unwrap();
+        let mut job = condense("s", 1);
         let path = enqueue(tmp.path(), &job).unwrap();
-        assert!(record_failure(&path, &job, tmp.path(), "no head"));
-        let notes = crate::capture_queue::take_errors(tmp.path());
-        assert_eq!(notes, vec!["no head"]);
-        let (_, retried) = jobs(tmp.path()).pop().unwrap();
-        assert_eq!(retried.attempts, 1);
-        let mut j = retried;
-        j.attempts = crate::capture_queue::MAX_ATTEMPTS - 1;
-        assert!(!record_failure(&path, &j, tmp.path(), "no head"));
-        assert!(jobs(tmp.path()).is_empty(), "spent its attempts");
+        for attempt in 1..crate::capture_queue::MAX_ATTEMPTS {
+            assert!(record_failure_owned(&path, &job, "no head", &owner).unwrap());
+            assert_eq!(
+                crate::capture_queue::take_errors(tmp.path()),
+                vec!["no head"]
+            );
+            job = read_job(&path).unwrap().1;
+            assert_eq!(job.attempts, attempt);
+        }
+        assert!(!record_failure_owned(&path, &job, "no head", &owner).unwrap());
+        assert!(jobs(tmp.path()).is_empty(), "spent its actual attempts");
         assert!(crate::capture_queue::take_errors(tmp.path())[0].contains("gave up"));
     }
 
@@ -871,8 +973,13 @@ mod tests {
         let call = "0123456789abcdef0123456789abcdef";
         let a = enqueue(tmp.path(), &audit(call, 1)).unwrap();
         let b = enqueue(tmp.path(), &audit(call, 2)).unwrap();
-        assert_eq!(a, b, "one decision is one file");
-        assert!(a.ends_with(format!("audit-{call}.json")));
+        assert_ne!(a, b, "changed queue times retain separate deliveries");
+        assert!(a
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with(&format!("audit-{call}--")));
         assert!(enqueue(tmp.path(), &audit("../x", 1)).is_err());
         assert!(enqueue(tmp.path(), &audit(&call.to_uppercase(), 1)).is_err());
 
@@ -882,7 +989,11 @@ mod tests {
         };
         assert!(enqueue(tmp.path(), &index)
             .unwrap()
-            .ends_with("search-index.json"));
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("search-index--"));
         let doc = |sha: &str| AgentJob {
             kind: JobKind::DocConvert {
                 rel_path: "docs/spec.docx".into(),
@@ -893,7 +1004,11 @@ mod tests {
         let sha = "ab".repeat(32);
         assert!(enqueue(tmp.path(), &doc(&sha))
             .unwrap()
-            .ends_with(format!("doc-{sha}.json")));
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with(&format!("doc-{sha}--")));
         assert!(enqueue(tmp.path(), &doc("../evil")).is_err());
         let sweep = AgentJob {
             kind: JobKind::DocSweep,
@@ -901,7 +1016,11 @@ mod tests {
         };
         assert!(enqueue(tmp.path(), &sweep)
             .unwrap()
-            .ends_with("doc-sweep.json"));
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("doc-sweep--"));
         assert_eq!(
             enqueue(tmp.path(), &sweep).unwrap(),
             enqueue(tmp.path(), &sweep).unwrap(),
@@ -909,8 +1028,44 @@ mod tests {
         );
         assert_eq!(
             jobs(tmp.path()).len(),
-            4,
-            "one file per identity, nothing else"
+            5,
+            "one file per complete context, nothing discarded"
+        );
+    }
+
+    /// An index rebuild or run-state move is one pending file however many
+    /// callers ask, each at its own instant; one for another work tree is a
+    /// second delivery, and a kind that is not such a request keeps the
+    /// delivery a changed instant makes.
+    #[test]
+    fn a_repeatable_request_asked_at_three_instants_is_one_pending_delivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ask = |kind: JobKind, at: i64| AgentJob {
+            kind,
+            ..condense("s", at)
+        };
+        for kind in [JobKind::SearchIndex, JobKind::MoveRunState] {
+            let first = enqueue(tmp.path(), &ask(kind.clone(), 1)).unwrap();
+            for at in [2, 3] {
+                assert_eq!(enqueue(tmp.path(), &ask(kind.clone(), at)).unwrap(), first);
+            }
+            let mut elsewhere = ask(kind, 4);
+            elsewhere.work_tree = PathBuf::from("/other");
+            assert_ne!(enqueue(tmp.path(), &elsewhere).unwrap(), first);
+        }
+        let pass = enqueue(tmp.path(), &ask(JobKind::DocSweep, 5)).unwrap();
+        assert_ne!(
+            enqueue(tmp.path(), &ask(JobKind::DocSweep, 6)).unwrap(),
+            pass
+        );
+        let listed: Vec<i64> = jobs(tmp.path())
+            .iter()
+            .map(|(_, j)| j.queued_at_ms)
+            .collect();
+        assert_eq!(
+            listed,
+            [1, 1, 4, 4, 5, 6],
+            "each kept delivery keeps its first clock"
         );
     }
 
@@ -949,14 +1104,16 @@ mod tests {
         };
         let a = enqueue(tmp.path(), &sweep(3)).unwrap();
         let b = enqueue(tmp.path(), &sweep(9)).unwrap();
-        assert_eq!(a, b, "a second request is the same request");
+        assert_ne!(a, b, "changed queue time is separate context");
+        assert_eq!(a, enqueue(tmp.path(), &sweep(3)).unwrap());
         enqueue(tmp.path(), &condense("s", 1)).unwrap();
         let drained = jobs(tmp.path());
-        assert_eq!(drained.len(), 2);
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained[1].1, sweep(3));
         assert_eq!(
-            drained[1].1,
+            drained[2].1,
             sweep(9),
-            "the sweep drains last, floor intact"
+            "both sweeps drain last with their floor intact"
         );
         assert_eq!(note_key(&sweep(3)), note_key(&sweep(4)));
         assert_eq!(note_key(&sweep(3)), "agent-sweep-idle");
@@ -969,19 +1126,32 @@ mod tests {
     #[test]
     fn an_interval_archive_is_one_job_per_session_ranked_with_the_condenses() {
         let tmp = tempfile::tempdir().unwrap();
-        let archive = |session: &str, at: i64| AgentJob {
+        let interval = |session: &str, at: i64, start: Option<i64>| AgentJob {
             kind: JobKind::Archive(IntervalArchive {
                 session_id: session.to_owned(),
                 agent: "claude-code".into(),
                 reason: IntervalReason::SensitivePath,
+                interval_start_ms: start,
             }),
             ..condense(session, at)
         };
-        assert!(!is_queued(tmp.path(), &archive("s", 1).kind));
+        let archive = |session: &str, at: i64| interval(session, at, None);
+        assert!(jobs(tmp.path()).is_empty());
         let a = enqueue(tmp.path(), &archive("s", 1)).unwrap();
-        assert_eq!(a, enqueue(tmp.path(), &archive("s", 2)).unwrap());
-        assert!(is_queued(tmp.path(), &archive("s", 3).kind));
-        assert!(!is_queued(tmp.path(), &archive("t", 3).kind));
+        assert_eq!(
+            a,
+            enqueue(tmp.path(), &archive("s", 2)).unwrap(),
+            "a second due hook in one interval asks for the pending archive"
+        );
+        assert_ne!(
+            a,
+            enqueue(tmp.path(), &interval("s", 2, Some(1))).unwrap(),
+            "a due hook in the next interval owes a second"
+        );
+        assert_eq!(jobs(tmp.path()).len(), 2);
+        assert_eq!(jobs(tmp.path())[0].1, archive("s", 1), "on the first clock");
+        assert!(jobs(tmp.path()).iter().all(|(_, job)| matches!(&job.kind,
+            JobKind::Archive(archive) if archive.session_id == "s")));
         assert_eq!(note_key(&archive("s", 1)), note_key(&archive("s", 9)));
         assert_ne!(note_key(&archive("s", 1)), note_key(&archive("t", 1)));
         enqueue(tmp.path(), &tokens(CALL, 5)).unwrap();
@@ -989,7 +1159,7 @@ mod tests {
             .iter()
             .map(|(_, j)| j.kind.rank())
             .collect();
-        assert_eq!(ranks, vec![0, 1]);
+        assert_eq!(ranks, vec![0, 1, 1]);
         let body = std::fs::read_to_string(&a).unwrap();
         assert!(body.contains(r#""reason":"sensitive-path""#), "{body}");
     }
@@ -1014,16 +1184,20 @@ mod tests {
         enqueue(tmp.path(), &boundary(10, BoundaryEdge::Start, 7)).unwrap();
         enqueue(tmp.path(), &boundary(9, BoundaryEdge::End, 7)).unwrap();
         let first = enqueue(tmp.path(), &boundary(9, BoundaryEdge::Start, 7)).unwrap();
+        assert_ne!(
+            first,
+            enqueue(tmp.path(), &boundary(9, BoundaryEdge::Start, 8)).unwrap()
+        );
         assert_eq!(
             first,
-            enqueue(tmp.path(), &boundary(9, BoundaryEdge::Start, 8)).unwrap(),
-            "a redelivered boundary is the same job"
+            enqueue(tmp.path(), &boundary(9, BoundaryEdge::Start, 7)).unwrap()
         );
         assert!(!first.to_string_lossy().contains("../s"));
         let listed: Vec<AgentJob> = jobs(tmp.path()).into_iter().map(|(_, j)| j).collect();
         assert_eq!(
             listed,
             vec![
+                boundary(9, BoundaryEdge::Start, 7),
                 boundary(9, BoundaryEdge::End, 7),
                 boundary(10, BoundaryEdge::Start, 7),
                 boundary(9, BoundaryEdge::Start, 8),
@@ -1065,7 +1239,12 @@ mod tests {
             ..condense("s", 2)
         };
         let path = enqueue(tmp.path(), &job).unwrap();
-        assert!(path.ends_with(format!("attribute-{}.json", "0".repeat(32))));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with(&format!("attribute-{}--", "0".repeat(32))));
         enqueue(tmp.path(), &condense("s", 1)).unwrap();
         let drained: Vec<AgentJob> = jobs(tmp.path()).into_iter().map(|(_, j)| j).collect();
         assert_eq!(drained.first(), Some(&job), "attribution drains first");
@@ -1089,13 +1268,35 @@ mod tests {
 
     /// Unknown fields are ignored on read: a newer writer's job still drains.
     #[test]
-    fn a_newer_writers_job_still_reads() {
+    fn unknown_fields_survive_legacy_read_and_owned_retry_and_context_tampering_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = enqueue(tmp.path(), &condense("s", 1)).unwrap();
-        let mut v: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        v["future"] = serde_json::json!(true);
-        std::fs::write(&path, v.to_string()).unwrap();
-        assert_eq!(jobs(tmp.path()).len(), 1);
+        let owner = crate::capture_queue::acquire_owner(tmp.path()).unwrap();
+        let job = condense("s", 1);
+        let mut value = serde_json::to_value(&job).unwrap();
+        value["future"] = serde_json::json!({"nested":[true,42]});
+        let dir = queue_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let stem = logical_stem(&job).unwrap();
+        let legacy = dir.join(format!("{stem}.json"));
+        std::fs::write(&legacy, value.to_string()).unwrap();
+        assert_eq!(
+            jobs(tmp.path()).len(),
+            1,
+            "plain legacy unknown fields remain readable"
+        );
+        std::fs::remove_file(legacy).unwrap();
+        let path = crate::capture_queue::delivery::publish(&dir, &stem, &value).unwrap();
+        assert!(record_failure_owned(&path, &job, "test execution failure", &owner).unwrap());
+        let (retained, retried) = read_job(&path).unwrap();
+        assert_eq!(retained["future"], value["future"]);
+        assert_eq!(retried.attempts, 1);
+        let mut tampered = retained;
+        tampered["future"] = false.into();
+        std::fs::write(&path, tampered.to_string()).unwrap();
+        assert!(
+            jobs(tmp.path()).is_empty(),
+            "in-place context mutation is not a valid producer"
+        );
+        assert!(path.exists());
     }
 }

@@ -5,6 +5,9 @@
 
 use super::{CanonicalTable, Column, NO_UNIQUE};
 
+mod boundary_gaps;
+pub(crate) use boundary_gaps::{BOUNDARY_GAP_CONTEXT_INDEX_SQL, BOUNDARY_GAP_TABLES};
+
 // --- The registry of canonical tables -------------------------------------
 // All hashes/oids are stored as lowercase hex `TEXT` (matching the integrity
 // store's `Sha256Id::to_hex`/`parse_hex`); timestamps are epoch-ms `INTEGER`.
@@ -214,7 +217,7 @@ const SHADOW_BRANCH_EVENT_COLUMNS: &[Column] = &[
 // ----- Hook / lifecycle audit ----------------------------------------------
 
 // Session state transitions as event rows (current phase = latest row). The
-// `.git/rift-sessions/<id>.json` file is a cache of this; these rows are truth.
+// `<sessions>/<id>.json` run-state file is a cache of this; these rows are truth.
 const SESSION_TRANSITION_COLUMNS: &[Column] = &[
     Column::text("transition_id"),
     Column::text("session_id"), // FK: session
@@ -832,6 +835,38 @@ const TABLES: &[CanonicalTable] = &[
         primary_key: &["observation_id"],
         unique: NO_UNIQUE,
     },
+    // v19: sparse knowledge, never inferred from legacy blob contents.
+    CanonicalTable {
+        name: "turn_boundary_file_kind",
+        columns: TURN_BOUNDARY_FILE_KIND_COLUMNS,
+        primary_key: &["snapshot_id", "path"],
+        unique: NO_UNIQUE,
+    }, // v20: collection audit only, never event-time or authorship proof.
+    BOUNDARY_OBSERVATION_TABLE,
+    boundary_gaps::BATCH,
+    boundary_gaps::TICKET,
+];
+
+pub(crate) const BOUNDARY_OBSERVATION_TABLE: CanonicalTable = CanonicalTable {
+    name: "turn_boundary_observation",
+    columns: TURN_BOUNDARY_OBSERVATION_COLUMNS,
+    primary_key: &["snapshot_id"],
+    unique: NO_UNIQUE,
+};
+
+const TURN_BOUNDARY_OBSERVATION_COLUMNS: &[Column] = &[
+    Column::text("snapshot_id"),
+    Column::text("worktree_hash"),
+    Column::int("collection_started_at"),
+    Column::int("collection_finished_at"),
+    Column::int("schema_version"),
+];
+
+const TURN_BOUNDARY_FILE_KIND_COLUMNS: &[Column] = &[
+    Column::text("snapshot_id"),
+    Column::text("path"),
+    Column::text_one_of("kind", &["regular", "link", "absent", "unknown"]),
+    Column::int("schema_version"),
 ];
 
 /// Columns for the v11 `checkpoint_commit` linkage.
@@ -1266,6 +1301,23 @@ mod tests {
     }
 
     #[test]
+    fn boundary_collection_attempt_has_an_append_only_registry_entry() {
+        let table =
+            canonical_table("turn_boundary_observation").expect("audit relation registered");
+        assert_eq!(table.primary_key, &["snapshot_id"]);
+        assert_eq!(
+            table.columns.iter().map(|c| c.name).collect::<Vec<_>>(),
+            vec![
+                "snapshot_id",
+                "worktree_hash",
+                "collection_started_at",
+                "collection_finished_at",
+                "schema_version",
+            ]
+        );
+    }
+
+    #[test]
     fn full_capture_schema_is_registered() {
         // A regression guard: every capture relation must be in the registry
         // (so it gets immutability triggers + the property test).
@@ -1335,9 +1387,9 @@ mod worktree_cd_tests {
             names(SESSION_WORKTREE_COLUMNS)
         );
         assert_eq!(
-            TABLES.last().map(|t| t.name),
+            TABLES.get(CAPTURE_TOOL_RESULT_TABLE_COUNT).map(|t| t.name),
             Some("session_worktree_cd"),
-            "the v17 relation is the end of the registry"
+            "the v17 relation stays at its shipped registry position"
         );
     }
 }

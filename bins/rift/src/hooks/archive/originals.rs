@@ -279,16 +279,27 @@ fn record_of(stem: String, bytes: Option<Vec<u8>>, packs: &RulePackSet) -> Spool
             && rift_shadow::sha256_hex(&[body]) == h.sha256
     }) && parse_original_record(body).is_some();
     let raw = SecretBytes::new(body.to_vec());
-    match rift_shadow::transcript::sealed_original(&raw, packs) {
+    // Corrupt spool evidence stays partial evidence; only an intact owned
+    // envelope may become Sealed, and its post-gate shape must still hold.
+    let sealed = if whole {
+        rift_shadow::transcript::sealed_original(&raw, packs)
+    } else {
+        rift_shadow::transcript::sealed_spill(&raw, packs)
+    };
+    match sealed {
         Ok(sealed) => {
             record.body = Some(sealed);
             if whole {
                 record.state = OriginalState::Sealed;
             }
         }
+        // A fallback record cannot stand in for the owned original envelope.
+        // Preserve the refusal explicitly rather than claim a sealed original.
         Err(e) => {
             tracing::warn!(error = %e, tool_use_id = %record.tool_use_id, "spooled original not sealed");
-            record.state = OriginalState::Unsealed;
+            if whole {
+                record.state = OriginalState::Unsealed;
+            }
         }
     }
     record

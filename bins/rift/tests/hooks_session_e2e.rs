@@ -207,12 +207,10 @@ fn attach_adopts_a_session_idempotently_and_amend_needs_an_explicit_yes() {
         "no amend happened"
     );
     // Adopted: the journal now records the session as ended work.
-    let journal = std::fs::read_to_string(
-        fx.repo
-            .join(".git")
-            .join("rift-sessions")
-            .join("oob-1.json"),
-    )
+    let journal = std::fs::read_to_string(common::read_path(
+        &common::sessions_dir(&fx.repo.join(".git"), &fx.cache),
+        "oob-1.json",
+    ))
     .expect("attach adopted the session into the journal");
     assert!(journal.contains(r#""state": "ended""#), "{journal}");
     // The shard is real and readable.
@@ -232,6 +230,110 @@ fn attach_adopts_a_session_idempotently_and_amend_needs_an_explicit_yes() {
         ref_before,
         "an unchanged re-attach is a no-op on the checkpoint ref"
     );
+}
+
+fn attached_full_transcript(fx: &OutOfBand, id: &str) -> String {
+    let names = hooks_fixture::shard_tree_names(&fx.repo);
+    let metadata = names
+        .lines()
+        .find(|path| path.ends_with("/metadata.json") && path.replace('/', "").starts_with(id))
+        .unwrap_or_else(|| panic!("missing metadata for {id}; artifacts: {names}"));
+    let meta: serde_json::Value =
+        serde_json::from_str(&hooks_fixture::shard_blob(&fx.repo, metadata)).unwrap();
+    assert_eq!(
+        meta["compact_transcript"],
+        rift_shadow::backend::TRANSCRIPT_COMPACT_NAME
+    );
+    assert_eq!(
+        meta["compact_transcript_start"], 0,
+        "attach must start from the whole transcript"
+    );
+    let parent = metadata.rsplit_once('/').unwrap().0;
+    let compact = hooks_fixture::shard_blob(
+        &fx.repo,
+        &format!("{parent}/{}", rift_shadow::backend::TRANSCRIPT_COMPACT_NAME),
+    );
+    assert!(
+        compact.contains("out of band work"),
+        "complete compact transcript: {compact}"
+    );
+    let path = format!("{parent}/{}", rift_shadow::backend::TRANSCRIPT_FULL_NAME);
+    assert!(
+        names.lines().any(|name| name == path),
+        "missing native full artifact: {names}"
+    );
+    hooks_fixture::shard_blob(&fx.repo, &path)
+}
+
+fn supported_oob_record(fx: &OutOfBand) {
+    std::fs::write(
+        &fx.native,
+        concat!(
+            r#"{"type":"user","uuid":"oob-user-1","timestamp":"2026-10-15T10:00:00Z","message":{"role":"user","content":"out of band work"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// Attach must discard progress found through an unmoved legacy fallback,
+/// then archive the complete transcript on both identical invocations.
+#[test]
+fn attach_with_legacy_progress_preserves_full_content_and_the_checkpoint_ref_twice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = OutOfBand::seed(tmp.path());
+    supported_oob_record(&fx);
+    let control_tmp = tempfile::tempdir().unwrap();
+    let control = OutOfBand::seed(control_tmp.path());
+    supported_oob_record(&control);
+    let control_result = control.attach();
+    let control_id = control_result["checkpoint_id"].as_str().unwrap();
+    assert!(
+        attached_full_transcript(&control, control_id).contains("out of band work"),
+        "normal control must archive the supported record"
+    );
+    eprintln!("no-progress control: full and compact content verified");
+    let git_dir = fx.repo.join(".git").canonicalize().unwrap();
+    let sessions = common::sessions_dir(&git_dir, &fx.cache);
+    let member = sessions.parent().unwrap();
+    rift_shadow::hooks::run_state::record_git_dir(member, &git_dir).unwrap();
+    rift_shadow::hooks::run_state::record_work_tree(member, &fx.repo).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let old = common::seed_sessions_dir(&git_dir);
+    rift_shadow::hooks::session_cache::write_transcript_progress(
+        &old,
+        &rift_shadow::hooks::session_cache::TranscriptProgress {
+            schema: 1,
+            session_id: "oob-1".into(),
+            raw_lines: 1,
+            updated_at_ms: 1000,
+        },
+    )
+    .unwrap();
+    assert!(!rift_shadow::hooks::run_state::is_moved(member));
+    assert_eq!(
+        rift_shadow::hooks::session_cache::read_transcript_progress(&sessions, "oob-1")
+            .unwrap()
+            .unwrap()
+            .raw_lines,
+        1
+    );
+    let mut previous = None;
+    for _ in 0..2 {
+        let value = fx.attach();
+        let id = value["checkpoint_id"].as_str().unwrap();
+        let full = attached_full_transcript(&fx, id);
+        assert!(
+            full.contains("out of band work"),
+            "complete native transcript: {full}"
+        );
+        let tip = rev_parse(&fx.repo, "refs/heads/rift/checkpoints/v1");
+        if let Some((prior_id, prior_tip)) = &previous {
+            assert_eq!(id, prior_id);
+            assert_eq!(&tip, prior_tip);
+        }
+        previous = Some((id.to_owned(), tip));
+    }
 }
 
 /// Only on an explicit yes does `attach` amend the commit to carry the

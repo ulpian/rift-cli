@@ -61,6 +61,8 @@ pub(crate) enum DeferCause {
     /// A capture worker holds the member's queue lock; its own tail sweep
     /// condenses the session under that lock.
     WorkerHoldsLock,
+    /// Legacy ownership or unresolved run-state debt prevents mutation.
+    OwnershipUnready,
     /// The machine answered the idle timeout without asking for a condense.
     NoIdleEdge,
     /// HEAD is unborn: there is no commit to anchor a checkpoint to.
@@ -95,6 +97,7 @@ impl DeferCause {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::WorkerHoldsLock => "worker-holds-lock",
+            Self::OwnershipUnready => "ownership-unready",
             Self::NoIdleEdge => "no-idle-edge",
             Self::NoCommitToAnchor => "no-commit-to-anchor",
             Self::ArchiveProducedNothing => "archive-produced-nothing",
@@ -112,6 +115,7 @@ impl DeferCause {
     pub(crate) fn reason(self) -> &'static str {
         match self {
             Self::WorkerHoldsLock => "a capture worker holds the member's queue lock",
+            Self::OwnershipUnready => "run-state ownership or migration remains unresolved",
             Self::NoIdleEdge => "the session machine did not ask for a condense",
             Self::NoCommitToAnchor => "no commit to anchor to, nothing archived",
             Self::ArchiveProducedNothing => "the archive ran and minted no checkpoint",
@@ -248,7 +252,12 @@ pub(crate) fn sweep_stale_sessions(
 /// sibling whose worker holds it may be archiving the very commit this pass
 /// would condense against, and that worker's tail sweep reaches the
 /// sibling's idle sessions anyway, so the sibling is left to it.
-pub(crate) fn sweep_idle_family(git_dir: &Path, now: i64, floor_ms: Option<i64>) -> SessionSweep {
+pub(crate) fn sweep_idle_family(
+    owner: &crate::capture_queue::QueueLock,
+    now: i64,
+    floor_ms: Option<i64>,
+) -> SessionSweep {
+    let git_dir = owner.git_dir();
     let mut sweep = SessionSweep::default();
     let Some(work_tree) = rift_shadow::hooks::session_cache::work_tree_of(git_dir) else {
         return sweep;
@@ -267,10 +276,14 @@ pub(crate) fn sweep_idle_family(git_dir: &Path, now: i64, floor_ms: Option<i64>)
             continue;
         };
         let _ = if canonical_git_dir(&repo.git_dir) == held {
-            sweep_member(&repo, now, floor, None, &mut sweep)
+            if crate::family::run_state::prepare_owned(owner).is_ok() {
+                sweep_member(&repo, now, floor, None, &mut sweep)
+            } else {
+                defer_unready_member(&repo, now, floor, None, &mut sweep)
+            }
         } else {
-            // `now` may be a job's queue time; a lock is stamped and judged
-            // stale on the wall clock alone.
+            // A sibling requires its own open-file owner, regardless of the
+            // decision clock or the age of any legacy marker.
             sweep_member_under_its_lock(&repo, now, now_ms(), floor, None, &mut sweep)
         };
     }
@@ -306,11 +319,12 @@ fn canonical_git_dir(git_dir: &Path) -> std::path::PathBuf {
 /// sweep runs this for every sibling on every worker pass, and a held lock
 /// is a sibling's hook drain that finds the queue busy. The sessions are
 /// read again under the lock: the worker that held it may have ended them.
-/// `lock_now` stamps the lock and judges a held one stale.
+/// `lock_now` is passed through for compatibility; ownership is an open-file
+/// lock, and a legacy marker blocks regardless of age.
 fn sweep_member_under_its_lock(
     repo: &rift_git::RepoPaths,
     now: i64,
-    lock_now: i64,
+    _lock_now: i64,
     timeout_ms: i64,
     only: Option<&str>,
     sweep: &mut SessionSweep,
@@ -320,14 +334,44 @@ fn sweep_member_under_its_lock(
         sweep.live.extend(live.into_iter().map(|c| c.session_id));
         return Ok(());
     }
-    let Some(_lock) = crate::capture_queue::acquire_lock(&repo.git_dir, lock_now) else {
-        sweep.live.extend(live.into_iter().map(|c| c.session_id));
-        for cache in idle {
-            sweep.defer(cache.session_id, DeferCause::WorkerHoldsLock);
+    let owner = match crate::capture_queue::acquire_owner(&repo.git_dir) {
+        Ok(owner) => owner,
+        Err(block) => {
+            let cause = if block == crate::capture_queue::OwnerBlock::ActiveOwner {
+                DeferCause::WorkerHoldsLock
+            } else {
+                DeferCause::OwnershipUnready
+            };
+            sweep
+                .live
+                .extend(live.into_iter().map(|cache| cache.session_id));
+            for cache in idle {
+                sweep.defer(cache.session_id, cause);
+            }
+            return Ok(());
         }
-        return Ok(());
     };
+    if crate::family::run_state::prepare_owned(&owner).is_err() {
+        return defer_unready_member(repo, now, timeout_ms, only, sweep);
+    }
     sweep_member(repo, now, timeout_ms, only, sweep)
+}
+
+fn defer_unready_member(
+    repo: &rift_git::RepoPaths,
+    now: i64,
+    timeout_ms: i64,
+    only: Option<&str>,
+    sweep: &mut SessionSweep,
+) -> Result<()> {
+    let (idle, live) = idle_and_live(repo, now, timeout_ms, only)?;
+    sweep
+        .live
+        .extend(live.into_iter().map(|cache| cache.session_id));
+    for cache in idle {
+        sweep.defer(cache.session_id, DeferCause::OwnershipUnready);
+    }
+    Ok(())
 }
 
 /// Sweep one member's live sessions under the member's capture-queue lock,
@@ -365,7 +409,11 @@ fn idle_and_live(
 ) -> Result<(Vec<SessionCache>, Vec<SessionCache>)> {
     use rift_shadow::hooks::session_cache::{is_idle_past, live_sessions_for};
 
-    let mut sessions = live_sessions_for(&repo.git_dir, &repo.common_dir, &repo.work_tree)?;
+    let mut sessions = live_sessions_for(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        &crate::family::run_state::sessions_dir(&repo.common_dir),
+        &repo.work_tree,
+    )?;
     // `rift session stop ID` finalizes one session; the others are not even
     // looked at, so a targeted stop can never sweep a neighbour.
     if let Some(target) = only {
@@ -392,7 +440,7 @@ fn finalize_idle_session(ctx: &SweepCtx<'_>, cache: &SessionCache, sweep: &mut S
     if cache.state != SessionState::Ending.as_str() {
         let timed_out = ctx.rt.block_on(rift_shadow::bridge::timeout_idle_session(
             &ctx.store,
-            &ctx.repo.git_dir,
+            &crate::family::run_state::sessions_dir(&ctx.repo.git_dir),
             &id,
             ctx.now,
         ));
@@ -477,7 +525,7 @@ fn settle_last_turn(ctx: &SweepCtx<'_>, cache: &SessionCache) {
         .rt
         .block_on(rift_shadow::bridge::settle_closed_turn_usage(
             &ctx.store,
-            &ctx.repo.git_dir,
+            &crate::family::run_state::sessions_dir(&ctx.repo.git_dir),
             &cache.session_id,
             &cache.agent,
             &ctx.repo_id,
@@ -527,7 +575,7 @@ fn mark_swept_condensed(ctx: &SweepCtx<'_>, cache: &SessionCache) -> bool {
     ctx.rt
         .block_on(rift_shadow::bridge::mark_condense_done(
             &ctx.store,
-            &ctx.repo.git_dir,
+            &crate::family::run_state::sessions_dir(&ctx.repo.git_dir),
             &cache.session_id,
             &cache.agent,
             ctx.now,
@@ -539,12 +587,12 @@ fn mark_swept_condensed(ctx: &SweepCtx<'_>, cache: &SessionCache) -> bool {
 mod tests {
     use super::*;
 
-    /// The sweep's clock and the lock's stamp, both injected.
+    /// The injected decision clock; ownership does not depend on age.
     const NOW: i64 = 1_790_000_000_000;
 
     /// An `active` session cache last touched at `updated_at_ms`.
     fn seed_session(git_dir: &Path, id: &str, updated_at_ms: i64) {
-        let sessions = git_dir.join("rift-sessions");
+        let sessions = crate::family::run_state::sessions_dir(git_dir);
         std::fs::create_dir_all(&sessions).unwrap();
         std::fs::write(
             sessions.join(format!("{id}.json")),
@@ -582,9 +630,35 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_barrier_defers_an_idle_session_without_claiming_an_active_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        let repo = rift_git::discover(tmp.path()).unwrap();
+        seed_session(&repo.git_dir, "idle-legacy", 0);
+        let cache = crate::family::run_state::sessions_dir(&repo.git_dir).join("idle-legacy.json");
+        let before = std::fs::read(&cache).unwrap();
+        let legacy = repo.git_dir.join("rift-capture-queue/.lock");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"unknown-legacy-liveness").unwrap();
+        let mut sweep = SessionSweep::default();
+        sweep_member_under_its_lock(&repo, NOW, NOW, 60_000, None, &mut sweep).unwrap();
+        assert_eq!(
+            sweep.condense_deferred,
+            vec![Deferred {
+                session_id: "idle-legacy".into(),
+                cause: DeferCause::OwnershipUnready
+            }]
+        );
+        assert!(sweep.finalized.is_empty() && sweep.condensed_checkpoints.is_empty());
+        assert_eq!(std::fs::read(&cache).unwrap(), before);
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"unknown-legacy-liveness");
+    }
+
+    #[test]
     fn every_defer_cause_has_its_own_token_and_only_the_lock_is_left_to_a_worker() {
         let all = [
             DeferCause::WorkerHoldsLock,
+            DeferCause::OwnershipUnready,
             DeferCause::NoIdleEdge,
             DeferCause::NoCommitToAnchor,
             DeferCause::ArchiveProducedNothing,

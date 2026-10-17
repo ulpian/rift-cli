@@ -195,19 +195,23 @@ fn a_pattern_that_matches_nothing_seals_nothing() {
 /// A rule matching a *substring* of a placeholder is the wedge: masking
 /// `REDACTED` writes `[REDACTED:vendor]`, which contains `REDACTED`, so the
 /// next pass masks it again and the text grows without bound. The pipeline
-/// stops after eight passes and returns an **error**, never partially
-/// redacted bytes — which is the only fail-safe answer, since a partial
-/// result here is a leak and a loop is a hang.
+/// stops after eight passes, and what it then seals is the line's
+/// placeholder record — never partially redacted bytes, since a partial
+/// result here is a leak and a loop is a hang, and never an error, since an
+/// error loses the whole document the line sat in.
 #[test]
-fn an_oscillating_rule_is_bounded_and_fails_safe() {
+fn an_oscillating_rule_is_bounded_and_seals_a_placeholder() {
     let packs = RulePackSet::builtin()
         .with_vendor_pattern("osc", "REDACTED", "acme@1")
         .unwrap();
-    let Err(err) = redact_with(&SecretBytes::from("start REDACTED end"), &packs) else {
-        panic!("an unbounded rewrite must fail rather than loop");
-    };
-    assert!(err.to_string().contains("did not stabilize"), "{err}");
+    let out = redact_with(&SecretBytes::from("start REDACTED end"), &packs).unwrap();
+    assert_eq!(
+        out.redacted.as_slice(),
+        br#"{"line":1,"reason":"did_not_converge","rift_redaction":"placeholder"}"#
+    );
+    assert_eq!(out.report.redaction_fallback_placeholders, 1);
     // and the ordinary case still converges through the same loop
     let ok = redact_with(&SecretBytes::from("start plain end"), &packs).unwrap();
     assert_eq!(ok.redacted.as_slice(), b"start plain end");
+    assert_eq!(ok.report.redaction_flat_fallback, 0);
 }

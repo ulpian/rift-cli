@@ -209,8 +209,8 @@ mod tests {
         std::fs::create_dir(root.join(".rift")).unwrap();
         let projection = hooks::projection_db_at(root).unwrap();
         assert!(!projection.exists());
-        let marker_dir = root.join(".git/rift-capture-queue");
-        std::fs::create_dir(&marker_dir).unwrap();
+        let marker_dir = crate::capture_queue::queue_dir(&root.join(".git"));
+        std::fs::create_dir_all(&marker_dir).unwrap();
         let marker = marker_dir.join("viewer-read-only.error");
         std::fs::write(&marker, "planted viewer marker").unwrap();
 

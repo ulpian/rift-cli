@@ -1,5 +1,5 @@
-//! A levelling walk projects only what the last completed walk did not: the
-//! shard count it projects, the artifacts it reads, and the rows it ends with.
+//! A levelling walk probes for optional recovery audits before resume.
+//! With those absent, only new shard content is read and projected.
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -23,22 +23,59 @@ const DUMPS: &[&str] = &[
     "SELECT tool_call_id, turn_id, tool_name, started_at FROM tool_call ORDER BY tool_call_id",
 ];
 
-/// A reader that records which shards a walk opened an artifact of.
+/// Record exact artifact requests so resume probes cannot hide content reads.
 struct CountingReader {
     inner: MemorySubstrate,
-    opened: Mutex<BTreeSet<String>>,
+    reads: Mutex<Vec<(String, String)>>,
 }
 
 impl CountingReader {
     fn new(inner: MemorySubstrate) -> Self {
         Self {
             inner,
-            opened: Mutex::new(BTreeSet::new()),
+            reads: Mutex::new(Vec::new()),
         }
     }
 
     fn opened(&self) -> BTreeSet<String> {
-        self.opened.lock().unwrap().clone()
+        self.reads
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn content_opened(&self) -> BTreeSet<String> {
+        self.reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, path)| path != crate::backend::BOUNDARY_GAPS_NAME)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn assert_only_one_absence_probe_for(&self, old_ids: &[String]) {
+        let reads = self.reads.lock().unwrap();
+        for id in old_ids {
+            let actual: Vec<&str> = reads
+                .iter()
+                .filter(|(read_id, _)| read_id == id)
+                .map(|(_, path)| path.as_str())
+                .collect();
+            assert_eq!(
+                actual,
+                vec![crate::backend::BOUNDARY_GAPS_NAME],
+                "each projected old id receives exactly one absence probe and no content read"
+            );
+            assert_eq!(
+                self.inner
+                    .read_artifact(id, crate::backend::BOUNDARY_GAPS_NAME)
+                    .unwrap(),
+                None
+            );
+        }
     }
 }
 
@@ -53,7 +90,10 @@ impl SubstrateReader for CountingReader {
         self.inner.blob(id)
     }
     fn read_artifact(&self, id: &str, rel: &str) -> rift_core::Result<Option<Vec<u8>>> {
-        self.opened.lock().unwrap().insert(id.to_owned());
+        self.reads
+            .lock()
+            .unwrap()
+            .push((id.to_owned(), rel.to_owned()));
         self.inner.read_artifact(id, rel)
     }
 }
@@ -127,10 +167,22 @@ async fn a_second_walk_reads_and_projects_only_the_new_shards() {
     assert_eq!(second.shards_projected, 2);
     assert_eq!(second.shards_skipped, 3);
     let new: BTreeSet<String> = [shard_id(4), shard_id(5)].into();
+    grown.assert_only_one_absence_probe_for(&[shard_id(1), shard_id(2), shard_id(3)]);
     assert_eq!(
         grown.opened(),
+        [
+            shard_id(1),
+            shard_id(2),
+            shard_id(3),
+            shard_id(4),
+            shard_id(5)
+        ]
+        .into()
+    );
+    assert_eq!(
+        grown.content_opened(),
         new,
-        "no artifact of a projected shard is read"
+        "no content artifact of a projected shard is read"
     );
 }
 
@@ -148,7 +200,12 @@ async fn a_second_walk_over_an_unchanged_branch_projects_nothing() {
 
     assert_eq!(second.shards_projected, 0);
     assert_eq!(second.shards_skipped, 3);
-    assert!(same.opened().is_empty());
+    same.assert_only_one_absence_probe_for(&[shard_id(1), shard_id(2), shard_id(3)]);
+    assert_eq!(
+        same.opened(),
+        [shard_id(1), shard_id(2), shard_id(3)].into()
+    );
+    assert!(same.content_opened().is_empty());
     assert_eq!(
         second.tip,
         Some(shard_id(3)),
@@ -201,7 +258,12 @@ async fn a_new_shard_that_sorts_before_the_watermark_is_still_projected() {
         .unwrap();
 
     assert_eq!(second.shards_projected, 1);
-    assert_eq!(reordered.opened(), [shard_id(2)].into());
+    reordered.assert_only_one_absence_probe_for(&[shard_id(1), shard_id(9)]);
+    assert_eq!(
+        reordered.opened(),
+        [shard_id(1), shard_id(2), shard_id(9)].into()
+    );
+    assert_eq!(reordered.content_opened(), [shard_id(2)].into());
     let full = store();
     ingest_from_substrate(&full, &branch(&[1, 2, 9]), "repo", "claude-code", 20)
         .await

@@ -107,23 +107,25 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
         failure = Some("response encoding panicked");
     }
     if let Ok(Some(response)) = encoded {
-        // `process::exit` below does not run destructors. Flush the native
-        // response before best-effort bookkeeping so the client receives it
-        // even when that bookkeeping fails.
-        if write_response(&response).is_err() {
-            failure = Some("hook response write failed");
-        }
-        let replacement_delivered = context.kind()
-            == Some(rift_recall_types::ContextKind::ReadReplacement)
-            && rift_agent::respond::delivers_read_replacement(&response);
-        if matches!(decision, rift_agent::respond::GateDecision::Allow) || replacement_delivered {
-            let bookkeeping = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                record_context_delivery(agent, verb, &body, &context);
-                complete_pending_replacement(agent, &body, &context);
-            }));
-            if bookkeeping.is_err() && failure.is_none() {
-                failure = Some("hook completion bookkeeping panicked");
+        // `process::exit` does not run destructors. Complete local output
+        // before bookkeeping; a successful flush does not prove client use.
+        let emitted = emit_response(&response, std::io::stdout().lock(), || {
+            let replacement_delivered = context.kind()
+                == Some(rift_recall_types::ContextKind::ReadReplacement)
+                && rift_agent::respond::delivers_read_replacement(&response);
+            if matches!(decision, rift_agent::respond::GateDecision::Allow) || replacement_delivered
+            {
+                let bookkeeping = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    record_context_delivery(agent, verb, &body, &context);
+                    complete_pending_replacement(agent, &body, &context);
+                }));
+                if bookkeeping.is_err() && failure.is_none() {
+                    failure = Some("hook completion bookkeeping panicked");
+                }
             }
+        });
+        if emitted.is_err() {
+            failure = Some("hook response write failed");
         }
     }
     record_hook_health(agent, failure);
@@ -166,16 +168,20 @@ fn tool_call_decision<'a>(
     }
 }
 
-/// Write the native response and flush it.
+/// Write and flush the native response before successful-emission bookkeeping.
 ///
-/// `process::exit` does not run destructors, so the flush is explicit: the
-/// response reaches the client before the best-effort bookkeeping that follows
-/// it, even when that bookkeeping fails.
-fn write_response(response: &serde_json::Value) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut stdout = std::io::stdout().lock();
-    writeln!(stdout, "{response}")?;
-    stdout.flush()
+/// This proves local output only. A flush error may follow complete escaped
+/// bytes, so failure leaves delivery unknown and skips completion.
+fn emit_response(
+    response: &serde_json::Value,
+    mut output: impl std::io::Write,
+    complete: impl FnOnce(),
+) -> std::io::Result<()> {
+    writeln!(output, "{response}")?;
+    output.flush()?;
+    drop(output);
+    complete();
+    Ok(())
 }
 
 pub(super) fn hook_health_path(repo: &Path, agent: &str) -> PathBuf {
@@ -398,8 +404,8 @@ fn antigravity_content_offset_plan(
 /// Arm Antigravity's documented persistent-message fallback. The preferred
 /// native tool-call step is intentionally not used: execution and
 /// result delivery are not pinned. This bounded state is consumed only after
-/// a native response was actually encoded; if anything fails, the existing
-/// one-deny guard allows the identical raw call once.
+/// its native response is locally written and flushed; if anything fails,
+/// the existing one-deny guard allows the identical raw call once.
 fn arm_pending_replacement(repo: &Path, raw: &rift_shadow::hooks::RawHook, message: &str) {
     if raw.agent != rift_core::AgentId::ANTIGRAVITY || raw.session.is_empty() {
         return;
@@ -489,7 +495,7 @@ fn pending_replacement_candidate(
     })
 }
 
-/// Consume a pending replacement only after its native response exists.
+/// Consume a pending replacement after its native response is locally flushed.
 fn complete_pending_replacement(agent: &str, body: &[u8], plan: &rift_recall_types::ContextPlan) {
     if agent != rift_core::AgentId::ANTIGRAVITY.as_str()
         || plan.kind() != Some(rift_recall_types::ContextKind::ReadReplacement)
@@ -1146,8 +1152,14 @@ mod injection_tests {
             .is_some_and(|text| text.contains("lines 4-20 are unchanged")));
         let marker = pending_replacement_path(repo.path(), "s-replacement");
         assert!(marker.exists(), "planning alone does not consume delivery");
-        complete_pending_replacement_in(repo.path(), "s-replacement", &plan);
-        assert!(!marker.exists(), "successful encoding consumes it once");
+        emit_response(&response, Vec::new(), || {
+            complete_pending_replacement_in(repo.path(), "s-replacement", &plan);
+        })
+        .unwrap();
+        assert!(
+            !marker.exists(),
+            "successful local emission consumes it once"
+        );
     }
 
     #[test]
@@ -1435,3 +1447,6 @@ mod injection_tests {
         drop_recall_repo(&repo, &db);
     }
 }
+
+#[cfg(test)]
+mod emission_tests;

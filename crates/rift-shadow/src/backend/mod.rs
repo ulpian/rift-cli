@@ -21,9 +21,11 @@
 
 mod archive;
 mod artifacts;
+pub mod boundary_gaps;
 #[cfg(test)]
 mod fixtures;
 mod leaves;
+pub mod native_read;
 mod originals;
 pub mod rewrite;
 mod shard;
@@ -40,13 +42,15 @@ use rift_git::{GitIdent, MemoryGitWrite, NativeGitWrite};
 pub use archive::{
     sessions_jsonl_bytes, tool_calls_jsonl_bytes, usage_jsonl_bytes, ArchivedEvent,
     ArchivedReadFact, ArchivedTask, ArchivedTranscript, ArchivedUsageFact, CheckpointArchive,
-    RedactionReportView, WorktreeLabel, SESSIONS_SCHEMA_VERSION, USAGE_SCHEMA_VERSION,
+    RedactionFallback, RedactionReportView, WorktreeLabel, SESSIONS_SCHEMA_VERSION,
+    USAGE_SCHEMA_VERSION,
 };
 // The bridge's round-trip test pins `parse(format(ms)) == ms`; nothing else
 // outside this module formats an instant.
 #[cfg(test)]
 pub(crate) use artifacts::rfc3339_utc_ms;
 pub use artifacts::session_meta_json;
+pub use boundary_gaps::{FrozenBoundaryGaps, BOUNDARY_GAPS_NAME};
 pub use leaves::{
     shard_merkle_leaves, shard_merkle_root, DigestLeafBytes, OriginalLeafBytes, SessionMetaLeaf,
     ShardLeafBytes, SpillLeafBytes, TaskLeafBytes,

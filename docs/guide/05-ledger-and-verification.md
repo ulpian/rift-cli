@@ -39,6 +39,12 @@ compares the database against it, so a disagreement means the database is wrong 
 somebody edited git. Losing the database is an inconvenience; losing the git refs is
 data loss ([Chapter 14](14-sync-readiness.md)).
 
+Boundary file-kind and collection-attempt companions are local projection facts.
+Checkpoint shards do not transport them, so clone and rebuild cannot restore this
+evidence. Event and collection timestamps, and successful structural verification,
+do not establish historical authorship. Existing stored attributions may be
+incorrect; preserving or retrying those rows does not correct them.
+
 | Ref | Holds | Pushed? |
 |---|---|---|
 | `rift/<short-commit>-<worktree-hash>` | in-progress, **un-redacted** session state | never |
@@ -75,6 +81,7 @@ planted under an undeclared name changed no compared byte.
 | `sessions.jsonl` | each covered session's native id and agent token |
 | `tool_calls.jsonl` | each read's call id, tool, path, content hash, token count, and when held its instant, turn, blob oid, tokenizer |
 | `tool_results.jsonl` | measured tool results, the search half of the savings denominator |
+| `turn_boundary_gaps.jsonl` | optional repository/member recovery audit with an explicit checkpoint-session carrier |
 | `usage.jsonl` | settled model calls: token classes, counting method, model, call key |
 | `session_worktrees.jsonl` | one line per distinct worktree state a session was seen in |
 | `serve_audit.jsonl` | the serves attributed to the session, as canonical envelopes |
@@ -85,12 +92,25 @@ would be an opinion, a compaction is arithmetic, and a verifier can re-derive it
 redaction report is re-verified on every `rift verify`, and the artifact bridge
 refuses a checkpoint whose report is missing.
 
-The sibling artifacts (from `sessions.jsonl` down) are separate files, not
-`metadata.json` members, because `metadata.json` is in `content_hash.txt`'s preimage
-and the digest's definition does not move. Each is built at archive time from
-identifiers, counts, instants and closed words only; a value outside its grammar is
-frozen as `withheld` or its line dropped, never rewritten; each is cumulative per
-session, so re-archiving an unchanged session derives the same id.
+Fallback counts live in `redaction_report.json` for the parent transcript pair,
+with a checked mirror in parent metadata, and in each task's metadata for that
+pair. Missing both keys means zero; a present pair must contain u32 integers,
+positive fallback lines, and no more placeholders than lines. Malformed counts or
+a contradictory parent mirror are structure findings. Removing recorded
+placeholder lines is a redaction finding: the sealed pair must hold at least the
+recorded number, because literal placeholder records can already occur in input.
+`rift doctor` names affected checkpoints and unreadable or inconsistent count
+facts, reading the bound report and task metadata once per pair; doctor alone
+does not certify their Merkle root or checkpoint identity.
+
+The sibling artifacts are separate files, not `metadata.json` members, because
+`metadata.json` is in `content_hash.txt`'s preimage and that digest does not move.
+Ordinary session artifacts contain identifiers, counts, instants and closed words;
+unsupported values are withheld or their lines dropped, and their cumulative
+session facts preserve unchanged-session identity. The recovery audit is different:
+its bounded grammar is all-or-nothing and describes a repository/member assertion,
+not cumulative facts about its carrier session. An explicit session-agent mapping
+must cover exactly the header's sessions, with no duplicates or fallback agent.
 
 - **Sessions:** `metadata.json` names only a native id; without this file a rebuild
   would guess the agent.
@@ -141,8 +161,8 @@ vectors cross-checked against an independent implementation pin all of it.
 **Leaf order is the shard's own file order**: content artifacts in bytewise
 full-path order, as git sorts the tree, each `full.jsonl` line its own leaf
 (`sessions/<index>/…` bytewise, so "10" precedes "2"; `tasks/<id>/…` between
-`redaction_report.json` and `tool_calls.jsonl`; `usage.jsonl` and
-`window_journal.jsonl` last).
+`redaction_report.json` and `tool_calls.jsonl`; `turn_boundary_gaps.jsonl` after
+transcripts and before `usage.jsonl`, then `window_journal.jsonl`).
 
 **Absence is the compatibility contract.** A checkpoint lacking an artifact derives,
 leaf for leaf, the sequence it would have had the artifact never existed, so an
@@ -174,6 +194,13 @@ second commit lands in the same session and would mint a spurious checkpoint. Th
 binds the *root* rather than per-artifact digests because each digest would need a new
 formula and accepted-derivation entry whenever an artifact is added; the root already
 commits to all of them, in order.
+
+A recovery audit requires native canon3 bytes from one immutable native tree, a valid
+redaction report, complete artifact root and path-ID binding, and a valid explicit
+carrier mapping before projection. Subject digests create only gap facts. Older
+readers that do not know this leaf cannot authenticate a gap-bearing checkpoint;
+absence preserves historical roots and IDs. Imported source commitments remain
+source provenance, never executable destination identities or retirement proof.
 
 ---
 

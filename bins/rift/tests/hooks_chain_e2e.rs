@@ -474,7 +474,7 @@ fn a_chain_refusal_and_the_soak_verdict_both_survive_to_be_read() {
     commit_with_live_session(&repo, "clob", 3);
     archive_head(&repo, &env);
 
-    let qdir = repo.join(".git").join("rift-capture-queue");
+    let qdir = common::capture_queue_dir(&repo.join(".git"), &cache);
     let chain_note = std::fs::read_to_string(qdir.join("chain.error"))
         .or_else(|_| std::fs::read_to_string(qdir.join("chain")))
         .expect("the chain refusal has its own file on the repository channel");
@@ -494,10 +494,11 @@ fn a_chain_refusal_and_the_soak_verdict_both_survive_to_be_read() {
 /// `e2e-<label>-<n>` is planted in the journal and `a.txt` changes, then git
 /// commits under an explicit identity.
 fn commit_with_live_session(repo: &Path, label: &str, n: u32) {
+    // Seeded where an older binary would leave it; the next hook moves it.
+    let sessions = common::seed_sessions_dir(&repo.join(".git"));
+    std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join(format!("e2e-{label}-{n}.json")),
+        sessions.join(format!("e2e-{label}-{n}.json")),
         format!(
             "{{\"schema\":1,\"session_id\":\"e2e-{label}-{n}\",\"state\":\"active\",\
              \"agent\":\"claude-code\",\"current_turn_ordinal\":1,\"turn_open\":true,\

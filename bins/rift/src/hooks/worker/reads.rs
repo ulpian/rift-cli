@@ -171,6 +171,23 @@ pub(super) fn count_tool_result_tokens_job(
     tree_key: Option<&crate::agent_queue::TreeKey>,
 ) -> Result<()> {
     let repo = rift_git::discover(&job.work_tree)?;
+
+    let store = t
+        .phase("open_projection", || {
+            rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
+        })
+        .map_err(|error| {
+            super::ownership::proof_read(error, "token prior-key proof is unavailable")
+        })?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(rift_core::RiftError::from)?;
+    super::ownership::require_new_token_key(
+        &store,
+        &rt,
+        "SELECT tool_result_id FROM tool_result_tokens WHERE tool_result_id = ?1",
+        tool_result_id,
+    )?;
     let before = tree_key_now(&repo.work_tree);
     let stale = tree_key.is_some_and(|asked| Some(asked) != before.as_ref());
     // Only a real BPE figure is ever persisted, exactly as a read's count is:
@@ -193,13 +210,7 @@ pub(super) fn count_tool_result_tokens_job(
         ),
         None => (0, "unmeasured"),
     };
-    let store = t.phase("open_projection", || {
-        rift_store::open_capture_projection(projection_db_at(&repo.work_tree)?)
-    })?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .map_err(rift_core::RiftError::from)?;
-    rt.block_on(rift_store::record_tool_result_tokens(
+    let inserted = rt.block_on(rift_store::record_tool_result_tokens(
         &store,
         tool_result_id,
         session_id,
@@ -213,6 +224,11 @@ pub(super) fn count_tool_result_tokens_job(
         job.queued_at_ms,
         1,
     ))?;
+    if !inserted {
+        return Err(crate::capture_queue::deferred(
+            "token key was concurrently recorded",
+        ));
+    }
     Ok(())
 }
 
@@ -324,9 +340,7 @@ mod tests {
     fn drain_once(work_tree: &Path, job: &AgentJob) -> bool {
         let git_dir = work_tree.join(".git");
         let path = crate::agent_queue::enqueue(&git_dir, job).unwrap();
-        let timer = crate::hooktime::HookTimer::from_env("test");
-        let landed = super::super::run_agent_job(&timer, &git_dir, &path, job);
-        assert_eq!(landed, super::super::Landed::Nothing);
+        super::super::drain_jobs(git_dir.to_str(), super::super::LockWait::None);
         path.exists()
     }
 
@@ -452,6 +466,138 @@ mod tests {
             );
             assert!(recorded_tokens(work_tree, &call).is_empty(), "{delivery}");
             assert_eq!(reads_unmeasured(work_tree), 1, "{delivery}");
+        }
+    }
+
+    fn retained_collision(work_tree: &Path, job: &AgentJob) {
+        let git_dir = work_tree.join(".git");
+        let path = crate::agent_queue::enqueue(&git_dir, job).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        for _ in 0..2 {
+            super::super::drain_jobs(git_dir.to_str(), super::super::LockWait::None);
+            assert!(
+                path.exists(),
+                "unproved input remains owed after each drain"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            let (_, pending) = crate::agent_queue::read_job(&path).unwrap();
+            assert_eq!(pending.attempts, 0);
+        }
+    }
+
+    fn file_token_collision(second_line: u32) {
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        let body = "alpha\nalpha\nvery different tokens and many other words here\n";
+        std::fs::write(tmp.path().join("lib.rs"), body).unwrap();
+        let call = "c".repeat(64);
+        let mut first = read_tokens_job(tmp.path(), &call);
+        if let JobKind::ReadTokens {
+            content_sha256,
+            blob_oid,
+            lines,
+            ..
+        } = &mut first.kind
+        {
+            *content_sha256 = rift_recall_substrate::worktree::sha256_hex(body.as_bytes());
+            *blob_oid = rift_recall_substrate::worktree::git_blob_oid(body.as_bytes());
+            *lines = Some((1, 1));
+        }
+        assert!(!drain_once(tmp.path(), &first), "fresh insertion succeeds");
+        let before = recorded_tokens(tmp.path(), &call);
+        assert_eq!(before, vec![i64::from(rift_tokens::count("alpha\n"))]);
+        let mut second = first.clone();
+        second.queued_at_ms += 1;
+        if let JobKind::ReadTokens { lines, .. } = &mut second.kind {
+            *lines = Some((second_line, second_line));
+        }
+        let other = super::super::line_slice(body, second_line, second_line);
+        assert_eq!(
+            rift_tokens::count(&other) == rift_tokens::count("alpha\n"),
+            second_line == 2
+        );
+        retained_collision(tmp.path(), &second);
+        assert_eq!(recorded_tokens(tmp.path(), &call), before);
+    }
+
+    #[test]
+    fn pending_context_file_tokens_cannot_consume_different_lines() {
+        file_token_collision(3);
+    }
+
+    #[test]
+    fn pending_context_file_tokens_cannot_certify_equal_counts_for_different_lines() {
+        file_token_collision(2);
+    }
+
+    #[test]
+    fn pending_context_tool_result_tokens_cannot_consume_changed_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
+        let id = "d".repeat(64);
+        let first = AgentJob {
+            schema_version: 1,
+            work_tree: tmp.path().to_path_buf(),
+            queued_at_ms: 1000,
+            attempts: 0,
+            kind: JobKind::ToolResultTokens {
+                tool_result_id: id.clone(),
+                session_id: "session-a".into(),
+                tool_name: "Grep".into(),
+                channel: "search".into(),
+                search: crate::search_measure::MeasuredSearch::Unmeasured,
+                tree_key: None,
+            },
+        };
+        assert!(!drain_once(tmp.path(), &first), "fresh insertion succeeds");
+        let query = || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(projection(tmp.path()).query(
+                "SELECT session_id, channel, output_tokens, recorded_at FROM tool_result_tokens WHERE tool_result_id = ?1",
+                &[rift_store::Value::text(id.clone())],
+            )).unwrap()
+        };
+        let before = query();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].get_text(0).unwrap(), "session-a");
+        assert_eq!(before[0].get_i64(2).unwrap(), 0);
+        let mut second = first.clone();
+        second.queued_at_ms = 2000;
+        if let JobKind::ToolResultTokens {
+            session_id,
+            channel,
+            search,
+            tree_key,
+            ..
+        } = &mut second.kind
+        {
+            *session_id = "session-b".into();
+            *channel = "shell_read".into();
+            *search = crate::search_measure::MeasuredSearch::Content {
+                needle: "different".into(),
+                ignore_case: true,
+            };
+            *tree_key = Some(crate::agent_queue::TreeKey {
+                head_oid: "f".repeat(40),
+                newest_dir_mtime_ms: 1,
+            });
+        }
+        retained_collision(tmp.path(), &second);
+        let after = query();
+        assert_eq!(after.len(), 1);
+        for column in [0, 1] {
+            assert_eq!(
+                after[0].get_text(column).unwrap(),
+                before[0].get_text(column).unwrap()
+            );
+        }
+        for column in [2, 3] {
+            assert_eq!(
+                after[0].get_i64(column).unwrap(),
+                before[0].get_i64(column).unwrap()
+            );
         }
     }
 }

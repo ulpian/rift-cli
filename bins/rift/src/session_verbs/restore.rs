@@ -359,7 +359,12 @@ async fn restore_session(
     force: bool,
 ) -> RestoredSession {
     use rift_shadow::hooks::session_cache::read_cache;
-    let journal = read_cache(&repo.git_dir, session_id).ok().flatten();
+    let journal = read_cache(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        session_id,
+    )
+    .ok()
+    .flatten();
     let agent = match &journal {
         Some(c) => c.agent.clone(),
         None => projection_session_agent(store, session_id)

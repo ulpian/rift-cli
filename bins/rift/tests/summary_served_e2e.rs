@@ -448,7 +448,7 @@ fn session_fixture() -> Fixture {
     std::fs::write(repo.join(".rift/config.toml"), POLICY).unwrap();
     git_in(&repo, &["add", "."]);
     git_in(&repo, &["commit", "-q", "-m", "seed"]);
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(sessions.join("s-outline.json"), JOURNAL).unwrap();
     let f = Fixture {

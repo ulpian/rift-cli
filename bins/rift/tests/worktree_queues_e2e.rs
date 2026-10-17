@@ -134,8 +134,8 @@ fn doctor_json(f: &Family, cwd: &Path, fix: bool) -> serde_json::Value {
     serde_json::from_str(&out).unwrap_or_else(|e| panic!("doctor json: {e}: {out}"))
 }
 
-/// A commit made in the member, and a capture-queue entry for it planted under
-/// the member's own gitdir — the shape `post-commit` leaves behind when it
+/// A commit made in the member, and a capture-queue entry for it planted in
+/// the member's own run state — the shape `post-commit` leaves behind when it
 /// defers the condense to the detached worker.
 fn plant_member_commit(f: &Family) -> String {
     std::fs::write(f.member.join("w.txt"), "work\n").unwrap();
@@ -143,7 +143,7 @@ fn plant_member_commit(f: &Family) -> String {
     git_in(&f.member, &["commit", "-q", "-m", "member work"]);
     let commit = git_in(&f.member, &["rev-parse", "HEAD"]).trim().to_owned();
 
-    let dir = f.admin.join("rift-capture-queue");
+    let dir = common::capture_queue_dir(&f.admin, &f.cache);
     std::fs::create_dir_all(&dir).unwrap();
     let entry = serde_json::json!({
         "schema_version": 1,
@@ -190,10 +190,7 @@ fn main_projection_i64(f: &Family, sql: &str) -> i64 {
 fn doctor_fix_drains_a_siblings_capture_queue() {
     let f = family();
     let commit = plant_member_commit(&f);
-    let queued = f
-        .admin
-        .join("rift-capture-queue")
-        .join(format!("{commit}.json"));
+    let queued = common::capture_queue_dir(&f.admin, &f.cache).join(format!("{commit}.json"));
     assert!(queued.is_file(), "the entry is planted under the member");
 
     // Report first: doctor run from MAIN sees the member's backlog and leaves
@@ -234,10 +231,7 @@ fn doctor_fix_drains_a_siblings_capture_queue() {
 fn a_removed_worktrees_queued_condense_degrades_to_commit_only_and_records_completeness() {
     let f = family();
     let commit = plant_member_commit(&f);
-    let queued = f
-        .admin
-        .join("rift-capture-queue")
-        .join(format!("{commit}.json"));
+    let queued = common::capture_queue_dir(&f.admin, &f.cache).join(format!("{commit}.json"));
 
     // The worktree goes; its administrative entry (and its queue) stay, which
     // is exactly what `rm -rf` on a checkout leaves behind.

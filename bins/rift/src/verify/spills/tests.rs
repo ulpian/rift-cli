@@ -100,6 +100,7 @@ fn spill_shard(target: Target, tamper: impl Fn(&mut Vec<u8>)) -> (MemorySubstrat
         },
     ];
     let leaves = ShardLeafBytes {
+        boundary_gaps: None,
         content_redacted: content,
         redaction_report: report.as_bytes(),
         tasks: &task_leaves,

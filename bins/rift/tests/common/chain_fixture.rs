@@ -134,7 +134,7 @@ pub(crate) fn seeded_chain(tmp: &Path, name: &str, commits: usize) -> ChainFixtu
     .unwrap();
     let cache = tmp.join(format!("{name}-cache"));
     std::fs::create_dir_all(&cache).unwrap();
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = super::common::sessions_dir(&repo.join(".git"), &cache);
     std::fs::create_dir_all(&sessions).unwrap();
     let gd = repo.join(".git");
 

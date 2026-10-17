@@ -1,12 +1,16 @@
 //! The out-of-tree transient session cache.
 //!
-//! A small JSON file at `<git_dir>/rift-sessions/<session_id>.json` holds the
-//! session's **current** phase so Canopy and the strategy layer can read it
-//! without a DB round-trip. It is a *cache*: the append-only `session_transition`
-//! rows are the source of truth (a crash leaves a stale file, reconciled on the
-//! next event). It lives under the git dir — outside the working tree, so it never
-//! shows up as a dirty file — and carries **no raw content**: only ids, the phase,
-//! ordinals, and the native→Rift id map.
+//! A small JSON file at `<sessions>/<session_id>.json` holds the session's
+//! **current** phase so Canopy and the strategy layer can read it without a DB
+//! round-trip. It is a *cache*: the append-only `session_transition` rows are
+//! the source of truth (a crash leaves a stale file, reconciled on the next
+//! event). `<sessions>` is the member's sessions root,
+//! [`RunRoot::Sessions`](crate::run_state::RunRoot::Sessions) under the
+//! family's run state — outside the working tree, so it never shows up as a
+//! dirty file. Every function here takes that directory itself; resolving it
+//! is the caller's, which is what keeps this crate free of the cache root. The
+//! file carries **no raw content**: only ids, the phase, ordinals, and the
+//! native→Rift id map.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,8 +21,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::session_id::is_safe_session_id;
 
-/// Directory (under the git dir) holding per-session cache files.
-const SESSIONS_DIR: &str = "rift-sessions";
 /// Cache file schema version.
 pub const SCHEMA: u32 = 1;
 /// How long a writer may leave its work unfinished before a later writer
@@ -74,18 +76,18 @@ pub struct SessionCache {
     /// The canonical working tree this session was observed in. Absent in
     /// every cache file written before worktrees became family members.
     ///
-    /// **This is a DISCRIMINATOR, not a convenience.** Session files live under
-    /// the git dir the agent's hook resolved, which for a linked worktree is
-    /// that worktree's admin dir and for the main one is the shared `.git` —
-    /// so a reader that consults the shared registry to find sessions its own
-    /// admin dir does not hold must be able to tell whose they are. Without it
+    /// **This is a DISCRIMINATOR, not a convenience.** Session files live in
+    /// the sessions directory of the member the agent's hook resolved, and the
+    /// main work tree's is the shared registry — so a reader that consults the
+    /// shared registry to find sessions its own directory does not hold must be
+    /// able to tell whose they are. Without it
     /// a session driven in worktree A could be credited with a commit made in
     /// worktree B, and the archive would attribute one developer's work to
     /// another's session.
     ///
     /// `None` means UNKNOWN, and unknown never matches a linked worktree —
-    /// see [`live_sessions_for`]. It is filled by [`write_cache`] from the git
-    /// dir it is already given, so no caller can forget it.
+    /// see [`live_sessions_for`]. It is filled by [`write_cache`] from the
+    /// directory it is already given, so no caller can forget it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_tree: Option<String>,
     /// The LAST worktree state this session was observed in — the cheap
@@ -145,7 +147,7 @@ pub struct WorktreeObservation {
 /// What [`read_cache_or_repair`] found where a session's cache belongs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CacheRead {
-    /// No cache file: a session this git dir has not seen yet.
+    /// No cache file: a session this member has not seen yet.
     Absent,
     /// The cache, whole.
     Read(Box<SessionCache>),
@@ -195,6 +197,15 @@ pub fn work_tree_of(git_dir: &Path) -> Option<PathBuf> {
     Some(raw)
 }
 
+/// The work tree a sessions directory belongs to: the one its member's run
+/// directory recorded, or, for a sessions directory still inside a git dir,
+/// [`work_tree_of`] that git dir.
+#[must_use]
+pub fn work_tree_of_sessions(sessions: &Path) -> Option<PathBuf> {
+    let owner = sessions.parent()?;
+    crate::run_state::recorded_work_tree(owner).or_else(|| work_tree_of(owner))
+}
+
 impl CacheRead {
     /// The cache, when one was read whole. A cache moved aside reads as no
     /// cache at all, which is what lets the hook re-open its session.
@@ -227,7 +238,7 @@ impl SessionCache {
             updated_at_ms: now_ms,
             native_id_map: BTreeMap::new(),
             transcript_path: None,
-            // Filled by `write_cache` from the git dir the write is addressed
+            // Filled by `write_cache` from the directory the write is addressed
             // to, so a constructor cannot get it wrong by omission.
             work_tree: None,
             // Unknown until the first observation, and unknown is the honest
@@ -262,7 +273,7 @@ pub struct TranscriptProgress {
     pub updated_at_ms: i64,
 }
 
-/// A session's sidecar path under [`sessions_dir`]: `<session_id>.<suffix>`.
+/// A session's sidecar path in the sessions directory: `<session_id>.<suffix>`.
 ///
 /// Every sidecar shares the one unsafe-id guard: a session id is agent-written
 /// text, and this is the only place it becomes part of a filename beside
@@ -271,21 +282,21 @@ pub struct TranscriptProgress {
 ///
 /// # Errors
 /// [`RiftError::Validity`] if `session_id` is not usable as a path component.
-fn sidecar_path(git_dir: &Path, session_id: &str, suffix: &str) -> Result<PathBuf> {
+fn sidecar_path(sessions: &Path, session_id: &str, suffix: &str) -> Result<PathBuf> {
     if !is_safe_session_id(session_id) {
         return Err(RiftError::validity(format!(
             "{suffix} sidecar: unsafe session id"
         )));
     }
-    Ok(sessions_dir(git_dir).join(format!("{session_id}.{suffix}")))
+    Ok(sessions.join(format!("{session_id}.{suffix}")))
 }
 
 /// The transcript-progress sidecar path for `session_id`.
 ///
 /// # Errors
 /// [`RiftError::Validity`] if `session_id` is not usable as a path component.
-fn transcript_progress_path(git_dir: &Path, session_id: &str) -> Result<PathBuf> {
-    sidecar_path(git_dir, session_id, "transcript")
+fn transcript_progress_path(sessions: &Path, session_id: &str) -> Result<PathBuf> {
+    sidecar_path(sessions, session_id, "transcript")
 }
 
 /// The **hook-owned** usage-progress sidecar for one session
@@ -328,8 +339,8 @@ pub struct UsageProgress {
 ///
 /// # Errors
 /// [`RiftError::Validity`] if `session_id` is not usable as a path component.
-fn usage_progress_path(git_dir: &Path, session_id: &str) -> Result<PathBuf> {
-    sidecar_path(git_dir, session_id, "usage")
+fn usage_progress_path(sessions: &Path, session_id: &str) -> Result<PathBuf> {
+    sidecar_path(sessions, session_id, "usage")
 }
 
 /// Atomically record the hook path's usage progress.
@@ -337,8 +348,8 @@ fn usage_progress_path(git_dir: &Path, session_id: &str) -> Result<PathBuf> {
 /// # Errors
 /// [`RiftError::Io`] on a filesystem failure, [`RiftError::Validity`] on an
 /// unserializable value or unsafe session id.
-pub fn write_usage_progress(git_dir: &Path, p: &UsageProgress) -> Result<()> {
-    let path = usage_progress_path(git_dir, &p.session_id)?;
+pub fn write_usage_progress(sessions: &Path, p: &UsageProgress) -> Result<()> {
+    let path = usage_progress_path(sessions, &p.session_id)?;
     let json = serde_json::to_vec_pretty(p)
         .map_err(|e| RiftError::validity(format!("usage progress serialize: {e}")))?;
     publish(&path, &json)
@@ -349,8 +360,11 @@ pub fn write_usage_progress(git_dir: &Path, p: &UsageProgress) -> Result<()> {
 /// # Errors
 /// [`RiftError::Io`] on a filesystem failure, [`RiftError::Validity`] on a
 /// malformed file or unsafe session id.
-pub fn read_usage_progress(git_dir: &Path, session_id: &str) -> Result<Option<UsageProgress>> {
-    match std::fs::read(usage_progress_path(git_dir, session_id)?) {
+pub fn read_usage_progress(sessions: &Path, session_id: &str) -> Result<Option<UsageProgress>> {
+    match std::fs::read(dual_read(
+        sessions,
+        &usage_progress_path(sessions, session_id)?,
+    )) {
         Ok(bytes) => {
             let p = serde_json::from_slice(&bytes)
                 .map_err(|e| RiftError::validity(format!("usage progress parse: {e}")))?;
@@ -366,8 +380,8 @@ pub fn read_usage_progress(git_dir: &Path, session_id: &str) -> Result<Option<Us
 /// # Errors
 /// [`RiftError::Io`] on a filesystem failure, [`RiftError::Validity`] on an
 /// unserializable value or unsafe session id.
-pub fn write_transcript_progress(git_dir: &Path, p: &TranscriptProgress) -> Result<()> {
-    let path = transcript_progress_path(git_dir, &p.session_id)?;
+pub fn write_transcript_progress(sessions: &Path, p: &TranscriptProgress) -> Result<()> {
+    let path = transcript_progress_path(sessions, &p.session_id)?;
     let json = serde_json::to_vec_pretty(p)
         .map_err(|e| RiftError::validity(format!("transcript progress serialize: {e}")))?;
     publish(&path, &json)
@@ -380,10 +394,13 @@ pub fn write_transcript_progress(git_dir: &Path, p: &TranscriptProgress) -> Resu
 /// [`RiftError::Io`] on a filesystem failure, [`RiftError::Validity`] on a
 /// malformed file or unsafe session id.
 pub fn read_transcript_progress(
-    git_dir: &Path,
+    sessions: &Path,
     session_id: &str,
 ) -> Result<Option<TranscriptProgress>> {
-    match std::fs::read(transcript_progress_path(git_dir, session_id)?) {
+    match std::fs::read(dual_read(
+        sessions,
+        &transcript_progress_path(sessions, session_id)?,
+    )) {
         Ok(bytes) => {
             let p = serde_json::from_slice(&bytes)
                 .map_err(|e| RiftError::validity(format!("transcript progress parse: {e}")))?;
@@ -421,27 +438,21 @@ pub fn is_idle_past(cache: &SessionCache, now_ms: i64, timeout_ms: i64) -> bool 
     now_ms.saturating_sub(cache.updated_at_ms) > timeout_ms
 }
 
-/// The directory holding session cache files for `git_dir`.
-#[must_use]
-pub fn sessions_dir(git_dir: &Path) -> PathBuf {
-    git_dir.join(SESSIONS_DIR)
-}
-
 /// The cache file path for `session_id`.
 ///
 /// The id comes from a hook payload the agent wrote, so it is checked here as
 /// well as at the wire ([`is_safe_session_id`]): this function is the only
 /// place a session id becomes a filename, which makes it the one place that can
-/// guarantee the path stays inside [`sessions_dir`].
+/// guarantee the path stays inside the sessions directory.
 ///
 /// # Errors
 /// [`RiftError::Validity`] if `session_id` is not usable as a path component
 /// (empty, over-long, or carrying path punctuation such as `../`).
-pub fn cache_path(git_dir: &Path, session_id: &str) -> Result<PathBuf> {
+pub fn cache_path(sessions: &Path, session_id: &str) -> Result<PathBuf> {
     if !is_safe_session_id(session_id) {
         return Err(RiftError::validity("session cache: unsafe session id"));
     }
-    Ok(sessions_dir(git_dir).join(format!("{session_id}.json")))
+    Ok(sessions.join(format!("{session_id}.json")))
 }
 
 /// Atomically write the cache (a temp file of this writer's own, then a rename)
@@ -450,8 +461,8 @@ pub fn cache_path(git_dir: &Path, session_id: &str) -> Result<PathBuf> {
 /// # Errors
 /// [`RiftError::Io`] on a filesystem failure, [`RiftError::Validity`] if the
 /// value cannot be serialized or its session id is not filename-safe.
-pub fn write_cache(git_dir: &Path, c: &SessionCache) -> Result<()> {
-    // The discriminator is derived HERE, from the git dir this write is already
+pub fn write_cache(sessions: &Path, c: &SessionCache) -> Result<()> {
+    // The discriminator is derived HERE, from the directory this write is already
     // addressed to, rather than being passed in by each caller. Three
     // production writers reach this function and a fourth is the attach verb;
     // asking each to remember a field is how the last two defects in this area
@@ -460,11 +471,12 @@ pub fn write_cache(git_dir: &Path, c: &SessionCache) -> Result<()> {
     let c = &{
         let mut owned = c.clone();
         if owned.work_tree.is_none() {
-            owned.work_tree = work_tree_of(git_dir).map(|p| p.to_string_lossy().into_owned());
+            owned.work_tree =
+                work_tree_of_sessions(sessions).map(|p| p.to_string_lossy().into_owned());
         }
         owned
     };
-    let path = cache_path(git_dir, &c.session_id)?;
+    let path = cache_path(sessions, &c.session_id)?;
     let json = serde_json::to_vec_pretty(c)
         .map_err(|e| RiftError::validity(format!("session cache serialize: {e}")))?;
     publish(&path, &json)
@@ -477,8 +489,8 @@ pub fn write_cache(git_dir: &Path, c: &SessionCache) -> Result<()> {
 /// is not valid cache JSON or the session id is not filename-safe. An unsafe id
 /// is an error rather than "no session": the caller must defer the hook, not
 /// carry on and open a second session under a name it could not address.
-pub fn read_cache(git_dir: &Path, session_id: &str) -> Result<Option<SessionCache>> {
-    match std::fs::read(cache_path(git_dir, session_id)?) {
+pub fn read_cache(sessions: &Path, session_id: &str) -> Result<Option<SessionCache>> {
+    match std::fs::read(dual_read(sessions, &cache_path(sessions, session_id)?)) {
         Ok(bytes) => {
             let c = serde_json::from_slice(&bytes)
                 .map_err(|e| RiftError::validity(format!("session cache parse: {e}")))?;
@@ -515,9 +527,11 @@ pub fn read_cache(git_dir: &Path, session_id: &str) -> Result<Option<SessionCach
 /// [`RiftError::Validity`] if the session id is not filename-safe — the caller
 /// must defer the hook, exactly as with [`read_cache`]. [`RiftError::Io`] on a
 /// filesystem failure other than the file being absent.
-pub fn read_cache_or_repair(git_dir: &Path, session_id: &str, now_ms: i64) -> Result<CacheRead> {
-    let path = cache_path(git_dir, session_id)?;
-    sweep_dead_writer_temps(&sessions_dir(git_dir), session_id, now_ms);
+pub fn read_cache_or_repair(sessions: &Path, session_id: &str, now_ms: i64) -> Result<CacheRead> {
+    // The torn cache is moved aside where it was read, so an unmoved
+    // member's old-tree cache is moved aside in the old tree.
+    let path = dual_read(sessions, &cache_path(sessions, session_id)?);
+    sweep_dead_writer_temps(sessions, session_id, now_ms);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(CacheRead::Absent),
@@ -535,17 +549,15 @@ pub fn read_cache_or_repair(git_dir: &Path, session_id: &str, now_ms: i64) -> Re
     }
 }
 
-/// The file names of every cache moved aside under `git_dir`, sorted: the
+/// The file names of every cache moved aside in `sessions`, sorted: the
 /// trace [`read_cache_or_repair`] leaves, which doctor reports as Rift's own
 /// defect. Empty when the directory is absent or unlistable.
 #[must_use]
-pub fn torn_caches(git_dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir(git_dir)) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+pub fn torn_caches(sessions: &Path) -> Vec<String> {
+    let mut names: Vec<String> = crate::run_state::list_entries(sessions)
+        .iter()
+        .filter_map(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| name.contains(TORN_MARKER))
         .collect();
     names.sort();
@@ -556,8 +568,8 @@ pub fn torn_caches(git_dir: &Path) -> Vec<String> {
 /// registry and the repository's shared one.
 ///
 /// **The defect, measured 2026-08-18 — and READ THE NEXT PARAGRAPH, because
-/// this function does not close it.** A session file lives under the git dir
-/// the agent's hook resolved. An agent whose process runs in one checkout
+/// this function does not close it.** A session file lives in the sessions
+/// directory of the checkout the agent's hook resolved. An agent whose process runs in one checkout
 /// registers its session there, while commits made in a *different* checkout of
 /// the same repository fire their hooks against that checkout's admin dir —
 /// which holds no sessions at all. Neither side ever has both halves of a
@@ -599,20 +611,20 @@ pub fn torn_caches(git_dir: &Path) -> Vec<String> {
 /// # Errors
 /// [`rift_core::RiftError`] if a registry directory cannot be read.
 pub fn live_sessions_for(
-    git_dir: &Path,
-    common_dir: &Path,
+    sessions: &Path,
+    shared_sessions: &Path,
     work_tree: &Path,
 ) -> Result<Vec<SessionCache>> {
-    let mut out = live_sessions(git_dir)?;
+    let mut out = live_sessions(sessions)?;
     // The main working tree's own registry IS the shared one; reading it twice
     // would double every session it holds.
-    if git_dir == common_dir {
+    if sessions == shared_sessions {
         return Ok(out);
     }
     let mine = std::fs::canonicalize(work_tree).unwrap_or_else(|_| work_tree.to_path_buf());
     let known: Vec<String> = out.iter().map(|c| c.session_id.clone()).collect();
     let before = out.len();
-    for cache in live_sessions(common_dir)? {
+    for cache in live_sessions(shared_sessions)? {
         // Canonicalise BOTH sides at the comparison, not at the stamp: a claim
         // written before a checkout was moved, or through a symlinked path,
         // still has to match the tree it names.
@@ -641,7 +653,7 @@ pub fn live_sessions_for(
     Ok(out)
 }
 
-/// Read every session cache under ONE `git_dir` whose phase is **live**
+/// Read every session cache in ONE sessions directory whose phase is **live**
 /// (active, compacting, or ending). A missing/empty sessions dir yields an
 /// empty list; an unreadable individual file is skipped (never fatal — capture
 /// must not abort a git op).
@@ -652,17 +664,13 @@ pub fn live_sessions_for(
 ///
 /// # Errors
 /// [`RiftError::Io`] only if the sessions directory exists but cannot be listed.
-pub fn live_sessions(git_dir: &Path) -> Result<Vec<SessionCache>> {
+pub fn live_sessions(sessions: &Path) -> Result<Vec<SessionCache>> {
     const LIVE: &[&str] = &["active", "compacting", "ending"];
-    let dir = sessions_dir(git_dir);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
-    };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
+    for path in crate::run_state::list_checked(sessions)? {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         let Some(stem) = name
             .to_string_lossy()
             .strip_suffix(".json")
@@ -670,7 +678,7 @@ pub fn live_sessions(git_dir: &Path) -> Result<Vec<SessionCache>> {
         else {
             continue; // skip temp files / non-cache entries
         };
-        if let Ok(Some(cache)) = read_cache(git_dir, &stem) {
+        if let Ok(Some(cache)) = read_cache(sessions, &stem) {
             if LIVE.contains(&cache.state.as_str()) {
                 out.push(cache);
             }
@@ -684,6 +692,16 @@ pub fn live_sessions(git_dir: &Path) -> Result<Vec<SessionCache>> {
             .then(a.session_id.cmp(&b.session_id))
     });
     Ok(out)
+}
+
+/// The file a reader of `sessions` reads for `path`, one of its files: the
+/// dual read of [`crate::run_state::read_path`], so an unmoved member's
+/// caches are read from the old tree until the new tree has its own.
+fn dual_read(sessions: &Path, path: &Path) -> PathBuf {
+    match path.file_name() {
+        Some(name) => crate::run_state::read_path(sessions, &name.to_string_lossy()),
+        None => path.to_path_buf(),
+    }
 }
 
 /// Publish `json` at `path` whole: written to a temp file of this writer's
@@ -779,6 +797,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_broken_unmoved_fallback_is_not_a_quiet_empty_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_dir = tmp.path().join("repo/.git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let member = tmp.path().join("cache/run/member");
+        crate::run_state::record_work_tree(&member, &git_dir).unwrap();
+        crate::run_state::record_git_dir(&member, &git_dir).unwrap();
+        let sessions = crate::run_state::RunRoot::Sessions.under(&member);
+        std::fs::create_dir_all(&sessions).unwrap();
+        let legacy = crate::run_state::RunRoot::Sessions.legacy_under(&git_dir);
+        std::fs::write(&legacy, b"a file cannot be a session registry").unwrap();
+        assert!(!crate::run_state::is_moved(&member));
+        assert_eq!(
+            crate::run_state::read_dirs(&sessions),
+            vec![sessions.clone(), legacy]
+        );
+        assert!(live_sessions(&sessions).is_err());
+    }
+
+    #[test]
     fn round_trips_through_disk() {
         let tmp = tempfile::tempdir().unwrap();
         let mut c = SessionCache::new("01JSESSION", "claude-code", "active", 42);
@@ -787,13 +825,13 @@ mod tests {
         write_cache(tmp.path(), &c).unwrap();
         let read = read_cache(tmp.path(), "01JSESSION").unwrap().unwrap();
 
-        // The discriminator is derived by `write_cache` from the git dir it is
+        // The discriminator is derived by `write_cache` from the directory it is
         // addressed to, so what comes back is the record PLUS the
         // worktree claim — that difference is the feature, and asserting it here
         // is what pins the derivation happening at all.
         assert_eq!(
             read.work_tree,
-            work_tree_of(tmp.path()).map(|p| p.to_string_lossy().into_owned()),
+            work_tree_of_sessions(tmp.path()).map(|p| p.to_string_lossy().into_owned()),
             "write_cache stamps the working tree the session was observed in"
         );
         assert!(read.work_tree.is_some(), "and it resolved to something");
@@ -804,6 +842,25 @@ mod tests {
             },
             c,
             "every other field round-trips byte-identically"
+        );
+    }
+
+    #[test]
+    fn a_cache_written_in_a_run_directory_claims_the_work_tree_it_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = tmp.path().join("run").join("abc");
+        crate::run_state::record_work_tree(&member, tmp.path()).unwrap();
+        let sessions = crate::run_state::RunRoot::Sessions.under(&member);
+        write_cache(
+            &sessions,
+            &SessionCache::new("s", "claude-code", "active", 1),
+        )
+        .unwrap();
+        let read = read_cache(&sessions, "s").unwrap().unwrap();
+        let recorded = std::fs::canonicalize(tmp.path()).unwrap();
+        assert_eq!(
+            read.work_tree,
+            Some(recorded.to_string_lossy().into_owned())
         );
     }
 
@@ -870,7 +927,7 @@ mod tests {
 
         // A safe id stays one component inside the sessions directory.
         let path = cache_path(&git_dir, "01JSESSION").unwrap();
-        assert_eq!(path.parent(), Some(sessions_dir(&git_dir).as_path()));
+        assert_eq!(path.parent(), Some(git_dir.as_path()));
     }
 
     #[test]
@@ -885,7 +942,7 @@ mod tests {
             "ending"
         );
         // no leftover temp file
-        let leftovers: Vec<_> = std::fs::read_dir(sessions_dir(tmp.path()))
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
             .filter_map(std::result::Result::ok)
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
@@ -948,7 +1005,7 @@ mod tests {
     }
 
     fn temps_left(git_dir: &Path) -> Vec<String> {
-        std::fs::read_dir(sessions_dir(git_dir))
+        std::fs::read_dir(git_dir)
             .unwrap()
             .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -1028,12 +1085,12 @@ mod tests {
             serde_json::to_vec_pretty(&SessionCache::new("torn", "claude-code", "active", 1))
                 .unwrap();
         whole.extend_from_slice(b"\"subagent\": \"affb8b381701b8ee6\"\n  }\n}");
-        std::fs::create_dir_all(sessions_dir(gd)).unwrap();
+        std::fs::create_dir_all(gd).unwrap();
         std::fs::write(cache_path(gd, "torn").unwrap(), &whole).unwrap();
         assert!(read_cache(gd, "torn").is_err(), "the plain read reports it");
 
         let read = read_cache_or_repair(gd, "torn", 1_790_416_696_000).unwrap();
-        let aside = sessions_dir(gd).join("torn.json.torn-1790416696000");
+        let aside = gd.join("torn.json.torn-1790416696000");
         assert_eq!(read, CacheRead::MovedAside(aside.clone()));
         assert_eq!(std::fs::read(&aside).unwrap(), whole, "nothing is lost");
         assert!(!cache_path(gd, "torn").unwrap().exists());
@@ -1073,7 +1130,7 @@ mod tests {
     fn a_dead_writers_temp_is_removed_once_stale_and_only_for_its_own_session() {
         let tmp = tempfile::tempdir().unwrap();
         let gd = tmp.path();
-        let dir = sessions_dir(gd);
+        let dir = gd.to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let ours = [".s.json.41-0.tmp", ".s.usage.41-1.tmp"];
         let kept = [
@@ -1242,7 +1299,7 @@ mod tests {
         };
         write_usage_progress(gd, &p).unwrap();
         assert_eq!(read_usage_progress(gd, "s1").unwrap().unwrap(), p);
-        assert!(gd.join("rift-sessions").join("s1.usage").is_file());
+        assert!(gd.join("s1.usage").is_file());
 
         write_cache(gd, &SessionCache::new("s1", "claude-code", "active", 1)).unwrap();
         write_transcript_progress(

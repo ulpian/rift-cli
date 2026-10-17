@@ -149,7 +149,7 @@ pub async fn record_turn_boundary_snapshot(
 
 /// A `turn_boundary_file` row: one file's content hash at a boundary. Only
 /// hashes/oids are durable — the bytes stay in the local git object store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnBoundaryFileRow {
     /// The boundary snapshot (FK).
     pub snapshot_id: String,

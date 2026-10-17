@@ -22,6 +22,8 @@
 //! report in.
 
 mod artifacts;
+mod boundary_gaps;
+pub(crate) mod fallback;
 mod identity;
 mod merkle;
 mod order;
@@ -526,6 +528,7 @@ mod tests {
             &[FIXTURE_SESSION.to_owned()],
             canon_version,
             &ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: content,
                 full_jsonl: None,
                 redaction_report: report.as_bytes(),
@@ -599,6 +602,7 @@ mod tests {
         use rift_shadow::backend::{shard_merkle_root, ShardLeafBytes};
         let report = fixture_report();
         shard_merkle_root(&ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             full_jsonl: None,
             redaction_report: report.as_bytes(),
@@ -628,6 +632,7 @@ mod tests {
         };
         let report = fixture_report();
         let leaves = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             full_jsonl: Some(full),
             redaction_report: report.as_bytes(),
@@ -703,6 +708,7 @@ mod tests {
             transcript_full: None,
         }];
         let leaves = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             full_jsonl: None,
             redaction_report: report.as_bytes(),
@@ -753,3 +759,9 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+mod boundary_gaps_tests;
+
+#[cfg(test)]
+mod native_read_tests;

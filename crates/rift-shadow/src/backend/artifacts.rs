@@ -98,6 +98,10 @@ impl CheckpointArchive {
         let spill_leaves = self.spill_leaves();
         let original_leaves = self.original_leaves();
         shard_merkle_root(&ShardLeafBytes {
+            boundary_gaps: self
+                .boundary_gaps
+                .as_ref()
+                .map(super::FrozenBoundaryGaps::as_bytes),
             content_redacted: self.content.as_slice(),
             full_jsonl: full.as_deref(),
             redaction_report: &report,
@@ -239,7 +243,7 @@ impl CheckpointArchive {
     #[must_use]
     pub fn redaction_report_json(&self) -> Vec<u8> {
         let r = &self.report;
-        let obj = serde_json::json!({
+        let mut obj = serde_json::json!({
             "total_spans": r.total_spans,
             "bytes_masked": r.bytes_masked,
             "allowlisted": r.allowlisted,
@@ -248,6 +252,11 @@ impl CheckpointArchive {
             "by_detector": r.by_detector,
             "by_class": r.by_class,
         });
+        if let Some(fields) = obj.as_object_mut() {
+            if let Some(transcript) = &self.transcript {
+                insert_fallback_counts(fields, transcript.redaction_fallback);
+            }
+        }
         canonical_json(&obj)
     }
 
@@ -429,6 +438,7 @@ impl CheckpointArchive {
             );
             out.insert(TRANSCRIPT_FULL_NAME.to_owned(), t.full.as_slice().to_vec());
         }
+        self.insert_boundary_gap_artifact(&mut out);
         if let Some(usage) = self.usage_jsonl() {
             out.insert(USAGE_NAME.to_owned(), usage);
         }
@@ -627,6 +637,21 @@ pub(super) fn insert_compact_boundary(
     );
     super::spills::insert_spill_manifest(obj, &transcript.spills);
     super::originals::insert_original_manifest(obj, &transcript.originals);
+    insert_fallback_counts(obj, transcript.redaction_fallback);
+}
+
+/// The same optional paired grammar in the bound report and metadata mirrors.
+fn insert_fallback_counts(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    fallback: super::RedactionFallback,
+) {
+    if fallback.lines > 0 || fallback.placeholders > 0 {
+        obj.insert("redaction_flat_fallback".into(), fallback.lines.into());
+        obj.insert(
+            "redaction_fallback_placeholders".into(),
+            fallback.placeholders.into(),
+        );
+    }
 }
 
 /// Serialize a JSON value to canonical bytes: `serde_json`'s default `Map` is a
@@ -834,6 +859,7 @@ mod tests {
             })
             .collect();
         let leaves = shard_merkle_leaves(&ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: b"c",
             redaction_report: b"r",
             session_metas: &metas,
@@ -890,6 +916,7 @@ mod tests {
         // bytewise position — after content_hash.txt, before full.jsonl),
         // then report, then tool_calls.
         let leaves = shard_merkle_leaves(&ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: with_facts.content.as_slice(),
             redaction_report: &report,
             tool_calls: Some(&tool_calls),
@@ -913,6 +940,7 @@ mod tests {
         // artifacts minus the digest leaf address a different path.
         let with_digest_root = with_facts.merkle_root();
         let without_digest_root = shard_merkle_root(&ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: with_facts.content.as_slice(),
             redaction_report: &report,
             tool_calls: Some(&tool_calls),
@@ -946,6 +974,7 @@ mod tests {
         let report = bare.redaction_report_json();
         assert_eq!(
             shard_merkle_leaves(&ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: bare.content.as_slice(),
                 redaction_report: &report,
                 ..ShardLeafBytes::default()
@@ -1106,6 +1135,7 @@ mod tests {
         let full = a.full_jsonl().unwrap();
         let report = a.redaction_report_json();
         let leaves = shard_merkle_leaves(&ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: a.content.as_slice(),
             full_jsonl: Some(&full),
             redaction_report: &report,
@@ -1144,6 +1174,7 @@ mod tests {
         terminated.push(b'\n');
         assert_eq!(
             shard_merkle_root(&ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: a.content.as_slice(),
                 full_jsonl: Some(&terminated),
                 redaction_report: &report,
@@ -1227,6 +1258,7 @@ mod tests {
             &a.sessions,
             NATIVE_CANON_VERSION,
             &ShardLeafBytes {
+                boundary_gaps: None,
                 content_redacted: a.content.as_slice(),
                 full_jsonl: None,
                 redaction_report: &a.redaction_report_json(),
@@ -1372,5 +1404,56 @@ mod tests {
         assert_eq!(moved.merkle_root(), agreed.merkle_root());
         // …nor the per-session LEAF, which is a Merkle leaf and must not move.
         assert_eq!(moved.session_meta_docs(), agreed.session_meta_docs());
+    }
+    #[test]
+    fn parent_transcript_fallback_counts_are_bound_by_the_report() {
+        let mut a = archive();
+        let normal_report = a.redaction_report_json();
+        let packs = rift_shadow_redact::RulePackSet::builtin()
+            .with_vendor_pattern("osc", "WEDGE|REDACTED:vendor", "acme@1")
+            .unwrap();
+        let (pair, _) =
+            crate::archived_transcript(&SecretBytes::from("WEDGE ssn=\n123456789"), 0, &packs)
+                .unwrap();
+        let counts = pair.redaction_fallback;
+        assert!(counts.lines > 0);
+        a.transcript = Some(pair);
+        let report: serde_json::Value = serde_json::from_slice(&a.redaction_report_json()).unwrap();
+        assert_eq!(report["redaction_flat_fallback"], counts.lines);
+        assert_eq!(
+            report["redaction_fallback_placeholders"],
+            counts.placeholders
+        );
+        let meta: serde_json::Value = serde_json::from_slice(&a.metadata_json()).unwrap();
+        assert_eq!(
+            meta["redaction_flat_fallback"],
+            report["redaction_flat_fallback"]
+        );
+        let mut task = super::super::fixtures::task("fallback_task");
+        task.transcript = a.transcript.clone();
+        a.tasks.push(task);
+        a.transcript.as_mut().unwrap().redaction_fallback =
+            super::super::RedactionFallback::default();
+        assert_eq!(
+            a.redaction_report_json(),
+            normal_report,
+            "zero-fallback bytes stay unchanged"
+        );
+        let task: serde_json::Value =
+            serde_json::from_slice(&a.tasks.last().unwrap().metadata_json()).unwrap();
+        assert_eq!(
+            task["redaction_flat_fallback"], counts.lines,
+            "tasks are not added to parent report"
+        );
+        let mut fields = serde_json::Map::new();
+        insert_fallback_counts(
+            &mut fields,
+            super::super::RedactionFallback {
+                lines: 0,
+                placeholders: 1,
+            },
+        );
+        assert_eq!(fields["redaction_fallback_placeholders"], 1);
+        assert_eq!(fields["redaction_flat_fallback"], 0);
     }
 }

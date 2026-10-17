@@ -393,6 +393,7 @@ mod tests {
         );
         let predict = |observations| {
             let facts = SessionFacts {
+                boundary_gaps: None,
                 worktree_observations: observations,
                 ..SessionFacts::default()
             };
@@ -429,6 +430,7 @@ mod tests {
         );
         let predict = |observations| {
             let facts = SessionFacts {
+                boundary_gaps: None,
                 worktree_observations: observations,
                 ..SessionFacts::default()
             };

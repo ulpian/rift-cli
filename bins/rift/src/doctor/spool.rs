@@ -57,7 +57,11 @@ fn has_live_state(common_dir: &Path, session_id: &str) -> bool {
     std::iter::once(common_dir.to_path_buf())
         .chain(members)
         .any(|git_dir| {
-            rift_shadow::hooks::read_cache(&git_dir, session_id).is_ok_and(|c| c.is_some())
+            rift_shadow::hooks::read_cache(
+                &crate::family::run_state::sessions_dir(&git_dir),
+                session_id,
+            )
+            .is_ok_and(|c| c.is_some())
         })
 }
 
@@ -83,7 +87,8 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("toolu_a.original"), b"x").unwrap();
         }
-        let cache = rift_shadow::hooks::session_cache::cache_path(&common, "live-1").unwrap();
+        let sessions = crate::family::run_state::sessions_dir(&common);
+        let cache = rift_shadow::hooks::session_cache::cache_path(&sessions, "live-1").unwrap();
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         let live = serde_json::json!({
             "schema": rift_shadow::hooks::session_cache::SCHEMA, "session_id": "live-1",

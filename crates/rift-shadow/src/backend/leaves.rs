@@ -15,6 +15,8 @@ use rift_core::Sha256Id;
 /// two writers of one fact, not a wrong hash function.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ShardLeafBytes<'a> {
+    /// Optional whole-file recovery audit; absence preserves all prior leaves.
+    pub boundary_gaps: Option<&'a [u8]>,
     /// `content.redacted` — the redacted capture. Always present; may be empty
     /// (an empty capture still contributes a leaf, and `leaf_hash(&[])` is a
     /// real digest, not the empty-tree root).
@@ -339,6 +341,7 @@ fn push_trailing_leaves(bytes: &ShardLeafBytes<'_>, leaves: &mut Vec<Sha256Id>) 
         bytes.tool_results,
         bytes.transcript_compact,
         bytes.transcript_full,
+        bytes.boundary_gaps,
         bytes.usage,
         bytes.window_journal,
     ];
@@ -371,6 +374,7 @@ mod tests {
 
         let (content, report, tool_calls) = (b"c".as_slice(), b"r".as_slice(), b"t".as_slice());
         let taskless = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             redaction_report: report,
             tool_calls: Some(tool_calls),
@@ -387,6 +391,7 @@ mod tests {
         // between the report and the read facts, in bytewise id order.
         let (meta_a, meta_b) = (b"task a meta".as_slice(), b"task b meta".as_slice());
         let with_tasks = ShardLeafBytes {
+            boundary_gaps: None,
             tasks: &[
                 TaskLeafBytes {
                     tool_use_id: "toolu_b",
@@ -427,6 +432,7 @@ mod tests {
     fn a_shard_without_a_transcript_derives_the_same_root_it_did_before() {
         let report = br#"{"x":1}"#.as_slice();
         let without = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: b"capture",
             full_jsonl: Some(br#"{"e":0}"#),
             redaction_report: report,
@@ -446,6 +452,7 @@ mod tests {
             digests: DigestLeafBytes::default(),
         };
         let with = ShardLeafBytes {
+            boundary_gaps: None,
             transcript_compact: Some(b"compact line"),
             transcript_full: Some(b"full line"),
             ..without
@@ -484,6 +491,7 @@ mod tests {
             metadata: b"session zero",
         }];
         let without = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             redaction_report: report,
             tool_calls: Some(tool_calls),
@@ -501,6 +509,7 @@ mod tests {
             "a shard without the artifact keeps its old sequence"
         );
         let with = ShardLeafBytes {
+            boundary_gaps: None,
             serve_audit: Some(b"serve line"),
             ..without
         };
@@ -532,6 +541,7 @@ mod tests {
             b"full".as_slice(),
         );
         let without = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: content,
             redaction_report: report,
             transcript_compact: Some(compact),
@@ -550,6 +560,7 @@ mod tests {
             "no artifact, old sequence"
         );
         let with = ShardLeafBytes {
+            boundary_gaps: None,
             usage: Some(b"usage line"),
             ..without
         };
@@ -570,6 +581,7 @@ mod tests {
             metadata: b"meta",
         }];
         let without = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: b"c",
             redaction_report: b"r",
             serve_audit: Some(b"serves"),
@@ -588,6 +600,7 @@ mod tests {
             "no artifact, old sequence"
         );
         let with = ShardLeafBytes {
+            boundary_gaps: None,
             sessions: Some(b"agents"),
             ..without
         };
@@ -606,6 +619,7 @@ mod tests {
         use rift_hashchain::leaf_hash;
 
         let without = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: b"c",
             redaction_report: b"r",
             serve_audit: Some(b"serves"),
@@ -620,6 +634,7 @@ mod tests {
         ];
         assert_eq!(shard_merkle_leaves(&without), old, "old sequence");
         let with = ShardLeafBytes {
+            boundary_gaps: None,
             session_worktrees: Some(b"observations"),
             ..without
         };
@@ -639,6 +654,7 @@ mod tests {
         use rift_hashchain::leaf_hash;
 
         let without = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: b"c",
             redaction_report: b"r",
             tool_calls: Some(b"reads"),
@@ -655,6 +671,7 @@ mod tests {
         ];
         assert_eq!(shard_merkle_leaves(&without), old, "old sequence");
         let with = ShardLeafBytes {
+            boundary_gaps: None,
             tool_results: Some(b"results"),
             ..without
         };
@@ -674,6 +691,7 @@ mod tests {
         use rift_hashchain::leaf_hash;
 
         let without = ShardLeafBytes {
+            boundary_gaps: None,
             content_redacted: b"c",
             redaction_report: b"r",
             usage: Some(b"usage"),
@@ -682,6 +700,7 @@ mod tests {
         let old = vec![leaf_hash(b"c"), leaf_hash(b"r"), leaf_hash(b"usage")];
         assert_eq!(shard_merkle_leaves(&without), old, "old sequence");
         let with = ShardLeafBytes {
+            boundary_gaps: None,
             window_journal: Some(b"rows"),
             ..without
         };

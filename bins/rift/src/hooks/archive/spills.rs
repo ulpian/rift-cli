@@ -232,6 +232,9 @@ fn spill(scope: &SpillScope<'_>, id: String, address: &str, budget: &mut u64) ->
             body: Some(body),
             source_bytes: read.cut_from,
         },
+        // `unsealed` is unreachable for any body: the gate seals a line it
+        // cannot settle flat or as a placeholder record instead of refusing
+        // the body. Kept for the fallible signature, never as a silent drop.
         Err(e) => {
             tracing::warn!(error = %e, tool_use_id = %id, "spilled tool output not sealed");
             lost(id, SpillState::Unsealed)

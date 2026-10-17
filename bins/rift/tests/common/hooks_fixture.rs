@@ -155,6 +155,29 @@ pub(crate) fn query_env(cache: &Path) -> [(&'static str, &str); 2] {
     ]
 }
 
+/// The cache root a fixture hands the binary for `repo`: `<tmp>/cache`,
+/// beside the `<tmp>/repo` the seeding helpers create.
+pub(crate) fn fixture_cache(repo: &Path) -> PathBuf {
+    repo.parent()
+        .expect("a fixture repository has a parent")
+        .join("cache")
+}
+
+/// `repo`'s sessions directory under [`fixture_cache`].
+pub(crate) fn sessions_of(repo: &Path) -> PathBuf {
+    super::common::sessions_dir(&repo.join(".git"), &fixture_cache(repo))
+}
+
+/// `repo`'s agent-hook job journal under [`fixture_cache`].
+pub(crate) fn agent_queue_of(repo: &Path) -> PathBuf {
+    super::common::agent_queue_dir(&repo.join(".git"), &fixture_cache(repo))
+}
+
+/// `repo`'s capture queue under [`fixture_cache`].
+pub(crate) fn capture_queue_of(repo: &Path) -> PathBuf {
+    super::common::capture_queue_dir(&repo.join(".git"), &fixture_cache(repo))
+}
+
 /// Run `rift <args>` from `cwd` with optional stdin; return the exit code.
 /// The cwd is MANDATORY and hermetic (see `common::rift_cmd`): the agent-hook
 /// surface resolves its repository from the process working directory, so an
@@ -399,7 +422,7 @@ pub(crate) fn seed_live_session_repo_unborn(tmp: &Path) -> PathBuf {
     git(&["init", "-q"]);
     std::fs::write(repo.join("a.txt"), "one\n").unwrap();
     git(&["add", "a.txt"]);
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = super::common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     // Stamped NOW: a live session is one touched inside the idle sweep's
     // floor, and every worker pass sweeps past it, so a seed stamped in the
@@ -438,9 +461,10 @@ pub(crate) fn seed_plain_repo(tmp: &Path) -> PathBuf {
     repo
 }
 
-/// Write a live session cache under `<repo>/.git/rift-sessions`.
+/// Write a live session cache where a fixture seeds one
+/// (`common::seed_sessions_dir`).
 pub(crate) fn seed_session(repo: &Path, id: &str, updated_at_ms: i64) {
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = super::common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
         sessions.join(format!("{id}.json")),
@@ -456,7 +480,7 @@ pub(crate) fn seed_session(repo: &Path, id: &str, updated_at_ms: i64) {
 /// A live session cache whose turn is closed and which remembers the agent
 /// transcript's ADDRESS — the way a hook payload would have left it.
 pub(crate) fn seed_session_with_transcript(repo: &Path, id: &str, transcript: &Path) {
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = super::common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
         sessions.join(format!("{id}.json")),
@@ -725,12 +749,8 @@ pub(crate) fn checkpoint_ref_exists(repo: &Path) -> bool {
 
 /// The state of one session cache on disk.
 pub(crate) fn session_phase(repo: &Path, id: &str) -> String {
-    let raw = std::fs::read_to_string(
-        repo.join(".git")
-            .join("rift-sessions")
-            .join(format!("{id}.json")),
-    )
-    .unwrap();
+    let path = super::common::read_path(&sessions_of(repo), &format!("{id}.json"));
+    let raw = std::fs::read_to_string(path).unwrap();
     serde_json::from_str::<serde_json::Value>(&raw).unwrap()["state"]
         .as_str()
         .unwrap()
@@ -879,12 +899,10 @@ pub(crate) fn archived_reasons(repo: &Path, cache: &Path, session: &str) -> Vec<
 /// The job files in this checkout's agent-hook journal whose names start
 /// with `prefix`, by name.
 pub(crate) fn agent_jobs_named(repo: &Path, prefix: &str) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(repo.join(".git").join("rift-agent-queue"))
+    let mut names: Vec<String> = rift_shadow::hooks::run_state::list_entries(&agent_queue_of(repo))
         .into_iter()
-        .flatten()
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|x| x == "json"))
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|path| path.extension().is_some_and(|x| x == "json"))
+        .filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
         .filter(|name| name.starts_with(prefix))
         .collect();
     names.sort();
@@ -895,7 +913,7 @@ pub(crate) fn agent_jobs_named(repo: &Path, prefix: &str) -> Vec<String> {
 /// the returned guard is dropped: how a fixture sees what a hook left for
 /// the worker before any worker has taken it.
 pub(crate) fn hold_drain_lock(repo: &Path) -> DrainLock {
-    let dir = repo.join(".git").join("rift-capture-queue");
+    let dir = capture_queue_of(repo);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(".lock");
     std::fs::write(&path, now_ms().to_string()).unwrap();

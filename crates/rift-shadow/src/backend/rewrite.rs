@@ -5,10 +5,11 @@
 //! the one the tool produced. The original is spooled before the rewrite is
 //! delivered and sealed beside the transcript at archive
 //! ([`super::ArchivedOriginal`]); what binds the two is this module: a closed
-//! set of forms, line ranges that name the stream they cut, and one rendering
-//! per form that turns the original into the text the model was given. The
-//! rewriter renders with it, and verify re-renders with it, so the two cannot
-//! hold the delivered text to two different contracts.
+//! set of forms, line ranges that name the stream they cut, and one check per
+//! form of the text the model was given against the original
+//! ([`check_rendering`]). The rewriter tests its output against the same
+//! predicates verify holds the delivered text to, so the two cannot hold it to
+//! two different contracts.
 //!
 //! **The rendering contract.** A stream's lines are its text split on `\n`
 //! (a trailing newline leaves a last, empty line, and joining on `\n` gives the
@@ -16,8 +17,12 @@
 //! lines. Every line outside the ranges is delivered verbatim and in order;
 //! each range is delivered as exactly one marker line:
 //!
-//! * `folded_output` — the fold line `[rift fold: <n> lines]`, `<n>` the
-//!   range's length; the delivered text is fully determined by the original.
+//! * `folded_output` — a fold line ([`parse_fold_line`]): one whole line
+//!   that opens `[rift fold: `, whose first token is `<n>`, the range's
+//!   length, and whose last character is `]`. The words between the count and
+//!   the closer are the rewriter's, written where the sentences a model reads
+//!   are written; this contract fixes only the shape and the count, so
+//!   rift-shadow renders no fold prose of its own.
 //! * `held_output_substitution` — a held frame, `[rift held: …]`, whose words
 //!   name the revision the replaced lines are held as. The frame's words are
 //!   the rewriter's; this contract fixes only that it is one line in that
@@ -32,10 +37,11 @@
 pub const MAX_REPLACED_RANGES: usize = 1024;
 
 /// What opens a fold line.
-const FOLD_OPEN: &str = "[rift fold: ";
+pub const FOLD_OPEN: &str = "[rift fold: ";
 
-/// What closes a fold line.
-const FOLD_CLOSE: &str = " lines]";
+/// What closes a fold line: its last character, so the rewriter's words may
+/// themselves hold a `]`.
+const FOLD_CLOSE: char = ']';
 
 /// What opens a held frame.
 pub const HELD_FRAME_OPEN: &str = "[rift held: ";
@@ -203,25 +209,23 @@ pub enum RenderCheck {
     Mismatch,
 }
 
-/// The fold line a range of `lines` lines is delivered as.
+/// The count a whole line folds, `None` when the line is not a fold line.
+///
+/// The one predicate both sides call: the rewriter tests the fold text it
+/// writes against it, and verify holds a delivered fold to it. The shape is
+/// [`FOLD_OPEN`], then the count — a positive decimal without a leading zero
+/// or sign, ended by a space or by the closer — then the rewriter's words,
+/// then `]` as the line's last character. A line holding a newline is not one
+/// line, so it is never a fold line.
 #[must_use]
-pub fn fold_line(lines: u32) -> String {
-    format!("{FOLD_OPEN}{lines}{FOLD_CLOSE}")
-}
-
-/// Whether a whole line is a fold line: the grammar exactly, a positive
-/// count written without a leading zero.
-#[must_use]
-pub fn is_fold_line(line: &str) -> bool {
-    let Some(count) = line
-        .strip_prefix(FOLD_OPEN)
-        .and_then(|rest| rest.strip_suffix(FOLD_CLOSE))
-    else {
-        return false;
-    };
-    count
-        .parse::<u32>()
-        .is_ok_and(|n| n > 0 && n.to_string() == count)
+pub fn parse_fold_line(line: &str) -> Option<u32> {
+    if line.contains('\n') {
+        return None;
+    }
+    let inner = line.strip_prefix(FOLD_OPEN)?.strip_suffix(FOLD_CLOSE)?;
+    let count = inner.split(' ').next()?;
+    let n = count.parse::<u32>().ok()?;
+    (n > 0 && n.to_string() == count).then_some(n)
 }
 
 /// Whether a whole line is a held frame.
@@ -234,7 +238,7 @@ pub fn is_held_frame(line: &str) -> bool {
 /// Whether a whole line is a Rift rewrite marker of either form.
 #[must_use]
 pub fn is_rift_marker_line(line: &str) -> bool {
-    is_fold_line(line) || is_held_frame(line)
+    parse_fold_line(line).is_some() || is_held_frame(line)
 }
 
 /// Whether `ranges` are a replacement set for `original`: at least one and at
@@ -257,23 +261,43 @@ pub fn ranges_fit(original: ResultText<'_>, ranges: &[LineRange]) -> bool {
     })
 }
 
-/// The original as a `folded_output` rewrite delivers it, `None` when the
-/// ranges do not fit it.
+/// The original as a `folded_output` rewrite delivers it, each range replaced
+/// by the line `fold_line` writes for its length; `None` when the ranges do
+/// not fit it, or when a fold line does not read back as its own count. The
+/// fold line's words are the caller's, so the second refusal is what holds
+/// them to the shape the checker reads: a bad frames text fails here and the
+/// original goes through unchanged, rather than becoming a fold the record
+/// would misread. Each marker is generated once, checked, and retained for
+/// emission, including when the callback carries interior state.
 #[must_use]
-pub fn render_folded(original: ResultText<'_>, ranges: &[LineRange]) -> Option<(String, String)> {
+pub fn render_folded(
+    original: ResultText<'_>,
+    ranges: &[LineRange],
+    fold_line: impl Fn(u32) -> String,
+) -> Option<(String, String)> {
     if !ranges_fit(original, ranges) {
         return None;
     }
-    let fold = |stream| fold_stream(original.stream(stream), ranges, stream);
+    // A Fn can carry interior state: retain the exact bytes we validate,
+    // rather than invoking it again when emitting a stream.
+    let markers = ranges
+        .iter()
+        .map(|r| {
+            let n = r.end - r.start;
+            let marker = fold_line(n);
+            (parse_fold_line(&marker) == Some(n)).then_some((*r, marker))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let fold = |stream| fold_stream(original.stream(stream), &markers, stream);
     Some((fold(Stream::Stdout), fold(Stream::Stderr)))
 }
 
 /// One stream with each of its ranges folded to one line.
-fn fold_stream(text: &str, ranges: &[LineRange], stream: Stream) -> String {
+fn fold_stream(text: &str, markers: &[(LineRange, String)], stream: Stream) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut at = 0usize;
-    for r in ranges.iter().filter(|r| r.stream == stream) {
+    for (r, marker) in markers.iter().filter(|(r, _)| r.stream == stream) {
         let (start, end) = (r.start as usize, r.end as usize);
         out.extend(
             lines
@@ -282,7 +306,7 @@ fn fold_stream(text: &str, ranges: &[LineRange], stream: Stream) -> String {
                 .iter()
                 .map(|l| (*l).to_owned()),
         );
-        out.push(fold_line(r.end - r.start));
+        out.push(marker.clone());
         at = end;
     }
     out.extend(
@@ -306,38 +330,47 @@ pub fn check_rendering(
     if !ranges_fit(original, ranges) {
         return RenderCheck::Mismatch;
     }
-    match form {
-        RewriteForm::FoldedOutput => match render_folded(original, ranges) {
-            Some((out, err)) if out == delivered.stdout && err == delivered.stderr => {
-                RenderCheck::Matches
-            }
-            _ => RenderCheck::Mismatch,
-        },
-        RewriteForm::HeldOutputSubstitution => {
-            let held = [Stream::Stdout, Stream::Stderr].into_iter().all(|stream| {
-                held_stream_matches(
-                    original.stream(stream),
-                    delivered.stream(stream),
-                    ranges,
-                    stream,
-                )
-            });
-            if held {
-                RenderCheck::HeldUnchecked(ranges.len())
-            } else {
-                RenderCheck::Mismatch
-            }
-        }
+    let marker_fits = |line: &str, r: &LineRange| match form {
+        RewriteForm::FoldedOutput => parse_fold_line(line) == Some(r.end - r.start),
+        RewriteForm::HeldOutputSubstitution => is_held_frame(line),
+    };
+    let fits = [Stream::Stdout, Stream::Stderr].into_iter().all(|stream| {
+        stream_matches(
+            StreamPair {
+                original: original.stream(stream),
+                delivered: delivered.stream(stream),
+                stream,
+            },
+            ranges,
+            marker_fits,
+        )
+    });
+    match (fits, form) {
+        (false, _) => RenderCheck::Mismatch,
+        (true, RewriteForm::FoldedOutput) => RenderCheck::Matches,
+        (true, RewriteForm::HeldOutputSubstitution) => RenderCheck::HeldUnchecked(ranges.len()),
     }
 }
 
-/// Whether one delivered stream is its original with each range replaced by
-/// exactly one held frame and every other line verbatim.
-fn held_stream_matches(
-    original: &str,
-    delivered: &str,
-    ranges: &[LineRange],
+/// One stream's original and delivered text.
+#[derive(Clone, Copy)]
+struct StreamPair<'a> {
+    original: &'a str,
+    delivered: &'a str,
     stream: Stream,
+}
+
+/// Whether one delivered stream is its original with each range replaced by
+/// exactly one marker line `marker_fits` accepts for that range, and every
+/// other line verbatim and in order.
+fn stream_matches(
+    StreamPair {
+        original,
+        delivered,
+        stream,
+    }: StreamPair<'_>,
+    ranges: &[LineRange],
+    marker_fits: impl Fn(&str, &LineRange) -> bool,
 ) -> bool {
     let original: Vec<&str> = original.split('\n').collect();
     let mut delivered = delivered.split('\n');
@@ -347,7 +380,7 @@ fn held_stream_matches(
         if !kept.iter().all(|line| delivered.next() == Some(*line)) {
             return false;
         }
-        if !delivered.next().is_some_and(is_held_frame) {
+        if !delivered.next().is_some_and(|line| marker_fits(line, r)) {
             return false;
         }
         at = r.end as usize;

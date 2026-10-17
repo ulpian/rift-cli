@@ -9,7 +9,11 @@
 //! * **Rendering.** The delivered text on the transcript line the entry names
 //!   must be the form's rendering of the original
 //!   ([`rift_shadow::backend::rewrite::check_rendering`]), or the original
-//!   itself when the entry says `spooled_not_delivered`. A held substitution's
+//!   itself when the entry says `spooled_not_delivered`. A fold is held to its
+//!   shape, not its words: every fold line passes
+//!   [`rift_shadow::backend::rewrite::parse_fold_line`], its count equals the
+//!   length of the range it stands for, and every line outside the ranges is
+//!   verbatim. A held substitution's
 //!   replaced lines need the held revision, which this pass does not read:
 //!   each such range is counted `held_unchecked`, reported, never passed.
 //! * **The reverse.** A transcript line whose delivered text carries a Rift
@@ -18,14 +22,17 @@
 //!   tamper: the shard is what its writer wrote, and what it lacks is a capture.
 
 use rift_core::Result;
-use rift_recall_substrate::SubstrateReader;
+#[cfg(test)]
+use rift_shadow::backend::native_read::manifests::original_claims as claims;
+pub(super) use rift_shadow::backend::native_read::manifests::original_leaves as leaves;
+use rift_shadow::backend::native_read::manifests::{task_dir, OriginalBytes};
 use rift_shadow::backend::rewrite::{
-    check_rendering, delivered_result, is_rift_marker_line, parse_original_record, LineRange,
-    RenderCheck, ResultText, RewriteForm, Rewritten,
+    check_rendering, delivered_result, is_rift_marker_line, parse_original_record, RenderCheck,
+    ResultText, RewriteForm, Rewritten,
 };
-use rift_shadow::backend::{
-    OriginalLeafBytes, ORIGINALS_DIR, ORIGINAL_SUFFIX, TRANSCRIPT_FULL_NAME,
-};
+#[cfg(test)]
+use rift_shadow::backend::OriginalLeafBytes;
+use rift_shadow::backend::TRANSCRIPT_FULL_NAME;
 
 use super::artifacts::NativeArtifacts;
 use super::verdict::Verdict;
@@ -36,126 +43,6 @@ const STATE_WORDS: [&str; 3] = [
     "original_spool_corrupt",
     "original_unsealed",
 ];
-
-/// One manifest entry.
-#[derive(Clone)]
-pub(super) struct OriginalClaim {
-    pub(super) tool_use_id: String,
-    sha256: Option<String>,
-    bytes: Option<u64>,
-    form: Option<String>,
-    replaced: Option<Vec<LineRange>>,
-    line: Option<usize>,
-    rewritten: Option<String>,
-    state: Option<String>,
-}
-
-impl OriginalClaim {
-    /// Whether the entry claims a sealed body.
-    fn claims_body(&self) -> bool {
-        self.sha256.is_some() || self.bytes.is_some()
-    }
-}
-
-/// One manifest entry with its body as read back out of the shard.
-pub(super) struct OriginalBytes {
-    /// The task subtree it sits in, `None` for the session's own transcript.
-    pub(super) task: Option<String>,
-    pub(super) claim: OriginalClaim,
-    /// The stored body; `None` when none is claimed or the file is absent.
-    pub(super) body: Option<Vec<u8>>,
-}
-
-impl OriginalBytes {
-    /// The shard-relative path the body is sealed at.
-    fn path(&self) -> String {
-        format!(
-            "{}{ORIGINALS_DIR}/{}{ORIGINAL_SUFFIX}",
-            task_dir(self.task.as_deref()),
-            self.claim.tool_use_id
-        )
-    }
-}
-
-/// `tasks/<task>/` for a subagent's transcript, nothing for the session's.
-fn task_dir(task: Option<&str>) -> String {
-    task.map_or_else(String::new, |t| format!("tasks/{t}/"))
-}
-
-/// Every entry of a metadata document's `originals` manifest that names a
-/// call.
-pub(super) fn claims(doc: Option<&serde_json::Value>) -> Vec<OriginalClaim> {
-    doc.and_then(|d| d.get("originals"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let text = |k: &str| {
-                entry
-                    .get(k)
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            };
-            let replaced = entry
-                .get("replaced")
-                .and_then(serde_json::Value::as_array)
-                .map(|rs| {
-                    rs.iter()
-                        .map(LineRange::from_json)
-                        .collect::<Option<Vec<_>>>()
-                });
-            Some(OriginalClaim {
-                tool_use_id: text("tool_use_id")?,
-                sha256: text("sha256"),
-                bytes: entry.get("bytes").and_then(serde_json::Value::as_u64),
-                form: text("form"),
-                replaced: replaced.flatten(),
-                line: entry
-                    .get("line")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|l| usize::try_from(l).ok()),
-                rewritten: text("rewritten"),
-                state: text("original"),
-            })
-        })
-        .collect()
-}
-
-/// Read every claimed body beside one transcript.
-pub(super) fn read(
-    reader: &impl SubstrateReader,
-    id: &str,
-    task: Option<&str>,
-    claims: Vec<OriginalClaim>,
-) -> Result<Vec<OriginalBytes>> {
-    let mut out = Vec::with_capacity(claims.len());
-    for claim in claims {
-        let mut original = OriginalBytes {
-            task: task.map(str::to_owned),
-            claim,
-            body: None,
-        };
-        if original.claim.claims_body() {
-            original.body = reader.read_artifact(id, &original.path())?;
-        }
-        out.push(original);
-    }
-    Ok(out)
-}
-
-/// The leaf views of the bodies claimed. A claimed body that is not in the
-/// shard reads as empty bytes, which cannot reproduce the writer's leaf.
-pub(super) fn leaves(originals: &[OriginalBytes]) -> Vec<OriginalLeafBytes<'_>> {
-    originals
-        .iter()
-        .filter(|o| o.claim.claims_body())
-        .map(|o| OriginalLeafBytes {
-            task: o.task.as_deref(),
-            tool_use_id: &o.claim.tool_use_id,
-            body: o.body.as_deref().unwrap_or_default(),
-        })
-        .collect()
-}
 
 /// What the three checks found: findings, and the held ranges left unchecked.
 pub(super) struct OriginalFindings {

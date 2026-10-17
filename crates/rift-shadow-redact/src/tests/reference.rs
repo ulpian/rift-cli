@@ -509,6 +509,8 @@ pub(super) fn masked_dropping_the_loser(raw: &str, packs: &RulePackSet) -> Strin
         allowlisted: 0,
         rule_pack_versions: packs.version_set(),
         input_sha256: sha256(raw.as_bytes()),
+        redaction_flat_fallback: 0,
+        redaction_fallback_placeholders: 0,
     };
     for _ in 0..MAX_PASSES {
         let mut proposed = propose(&text, packs);

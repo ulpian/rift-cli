@@ -1,7 +1,7 @@
 //! The **session-id trust boundary**.
 //!
 //! A session id arrives on hook stdin, written by the agent, and Rift turns it
-//! into filenames: `<git_dir>/rift-sessions/<id>.json` for the transient
+//! into filenames: `<sessions>/<id>.json` for the transient
 //! session cache, `.<id>.json.<pid>-<seq>.tmp` for each writer's atomic write,
 //! and the
 //! first-writer-wins claim markers beside them. Nothing validated the string,

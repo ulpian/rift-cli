@@ -20,6 +20,7 @@ jobs:
             run_hook,
             redact,
             redact_jsonl,
+            redact_fallback,
             fuzz_pack_load,
             diff,
             glob_match,

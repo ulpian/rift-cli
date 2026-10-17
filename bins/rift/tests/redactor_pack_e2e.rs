@@ -109,7 +109,7 @@ fn seed_repo(tmp: &Path) -> std::path::PathBuf {
     git(&repo, &["init", "-q"]);
     std::fs::write(repo.join("a.txt"), "one\n").unwrap();
     git(&repo, &["add", "a.txt"]);
-    let sessions = repo.join(".git").join("rift-sessions");
+    let sessions = common::seed_sessions_dir(&repo.join(".git"));
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
         sessions.join("pack-e2e-1.json"),

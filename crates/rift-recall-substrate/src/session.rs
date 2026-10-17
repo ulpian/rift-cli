@@ -1,13 +1,16 @@
-//! The out-of-tree session phase machine (`.git/rift-sessions/*.json`).
+//! The out-of-tree session phase machine (`<sessions>/*.json`, the member's
+//! sessions directory in the family's run state).
 //!
 //! The local-only, non-canonical half of the session view. This state lives
 //! **outside** the working tree so file watchers never fire and capture never
 //! blocks a commit. It is a *hint* for `status`/`doctor`, never a
 //! canonical fact — the authoritative lifecycle is reconstructed from immutable
 //! events at ingest. Reading is lenient (skip-and-report), bounded to the
-//! `rift-sessions/` directory, and **never follows a symlink** out of it.
+//! sessions directory, and **never follows a symlink** out of it. Which
+//! directory that is belongs to the caller, which can resolve the family;
+//! this crate cannot.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -32,7 +35,7 @@ pub enum Phase {
     Unknown,
 }
 
-/// One `.git/rift-sessions/<id>.json` file. Informational only.
+/// One `<sessions>/<id>.json` file. Informational only.
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SessionPhaseFile {
     /// The session id.
@@ -57,19 +60,24 @@ pub struct SessionIssue {
     pub detail: String,
 }
 
-/// Read every `<git_dir>/rift-sessions/*.json` phase file. Missing dir → empty.
+/// Read every `<sessions>/*.json` phase file, over the directories a dual
+/// read names (new tree first). Missing dirs → empty.
 /// Symlinks (and anything not a regular file) are skipped and reported — never
 /// followed (prevents reading outside the sessions dir). Corrupt JSON is one
 /// `SessionIssue`, not an abort.
 #[must_use]
-pub fn read_session_phases(git_dir: &Path) -> (Vec<SessionPhaseFile>, Vec<SessionIssue>) {
-    let dir = git_dir.join("rift-sessions");
+pub fn read_session_phases(sessions: &[PathBuf]) -> (Vec<SessionPhaseFile>, Vec<SessionIssue>) {
     let mut ok = Vec::new();
     let mut issues = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return (ok, issues); // no sessions yet → empty, not error
-    };
-    for entry in entries.flatten() {
+    let mut seen = std::collections::BTreeSet::new();
+    // Each name once, from the first directory that holds it: the caller's
+    // order is the dual read's, new tree first.
+    let entries = sessions
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flat_map(Iterator::flatten)
+        .filter(|entry| seen.insert(entry.file_name()));
+    for entry in entries {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -118,7 +126,7 @@ mod tests {
     #[test]
     fn missing_dir_yields_empty() {
         let d = tempfile::tempdir().unwrap();
-        let (ok, issues) = read_session_phases(d.path());
+        let (ok, issues) = read_session_phases(&[d.path().join("sessions")]);
         assert!(ok.is_empty() && issues.is_empty());
     }
 
@@ -135,7 +143,7 @@ mod tests {
             br#"{"session_id":"s1","phase":"weird_future_phase"}"#,
         )
         .unwrap();
-        let (ok, issues) = read_session_phases(&root);
+        let (ok, issues) = read_session_phases(&[root.join("rift-sessions")]);
         assert!(issues.is_empty());
         assert_eq!(ok.len(), 2);
         assert_eq!(ok[0].session_id, "s1");
@@ -156,7 +164,7 @@ mod tests {
             br#"{"session_id":"ok"}"#,
         )
         .unwrap();
-        let (ok, issues) = read_session_phases(&root);
+        let (ok, issues) = read_session_phases(&[root.join("rift-sessions")]);
         assert_eq!(ok.len(), 1);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].file, "bad.json");
@@ -171,11 +179,44 @@ mod tests {
         std::fs::write(&secret, br#"{"session_id":"LEAK"}"#).unwrap();
         // A symlink inside the sessions dir pointing at it.
         std::os::unix::fs::symlink(&secret, root.join("rift-sessions/eviltrap.json")).unwrap();
-        let (ok, issues) = read_session_phases(&root);
+        let (ok, issues) = read_session_phases(&[root.join("rift-sessions")]);
         assert!(
             ok.iter().all(|s| s.session_id != "LEAK"),
             "symlinked file outside the dir must never be read"
         );
         assert!(issues.iter().any(|i| i.file == "eviltrap.json"));
+    }
+
+    #[test]
+    fn split_roots_keep_old_only_phases_and_report_a_corrupt_new_shadow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let member = tmp.path().join("family/run/member");
+        let new = member.join("sessions");
+        let old = git_dir.join("rift-sessions");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            old.join("old-only.json"),
+            br#"{"session_id":"old-only","phase":"capturing"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            old.join("same.json"),
+            br#"{"session_id":"same","phase":"archived"}"#,
+        )
+        .unwrap();
+        std::fs::write(new.join("same.json"), b"{broken").unwrap();
+        // The production caller supplies these candidates in precedence order.
+        let dirs = vec![new, old];
+        let (phases, issues) = read_session_phases(&dirs);
+        assert_eq!(phases.len(), 1);
+        assert_eq!(phases[0].session_id, "old-only");
+        assert_eq!(phases[0].phase, Phase::Capturing);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].file, "same.json");
+        assert!(!issues[0].detail.is_empty());
     }
 }

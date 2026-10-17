@@ -51,7 +51,13 @@ pub(crate) fn attach(
             serde_json::json!({ "error": "unborn_head" }),
         ));
     };
-    let journal = read_cache(&repo.git_dir, session_id).ok().flatten();
+    let owner = attach_owner(&repo.git_dir)?;
+    let journal = read_cache(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        session_id,
+    )
+    .ok()
+    .flatten();
     let candidates = transcript_candidates(journal.as_ref(), agent, &repo.work_tree, session_id);
     let Some(transcript_path) = candidates.iter().find(|p| p.exists()).cloned() else {
         return Ok(refuse_missing_transcript(session_id, &candidates));
@@ -59,16 +65,13 @@ pub(crate) fn attach(
 
     let now = crate::hooks::now_ms();
     adopt_as_ended(&repo, journal, session_id, agent, &transcript_path, now)?;
-    forget_compaction_progress(&repo.git_dir, session_id);
+    forget_compaction_progress(&repo.git_dir, session_id)?;
     // Archive through the one machinery. Idempotent by construction: the id
     // derives from the capture content, so an unchanged re-attach lands on
     // the same shard and the write is a no-op.
     let checkpoint = crate::hooks::attach_archive(&repo, store, rt, &head, session_id, agent, now)?;
-    // The `attach` provenance basis: the session is
-    // recorded as observed in the checkout the operator attached it from.
-    // AFTER the archive, so the row exists only for a session the projection
-    // now has — the observation is provenance about a captured session, not a
-    // note about an attempt.
+    // Record the checkout observation only after the archive supplies the
+    // captured session; this is provenance, not a note about an attempt.
     rt.block_on(crate::provenance::record_worktree_observation(
         store,
         &repo,
@@ -84,6 +87,7 @@ pub(crate) fn attach(
         ));
     };
 
+    drop(owner);
     // The trailer: already claimed, amended on an explicit yes, or printed.
     let claims = commit_claims(&repo, &head)?;
     let already = claims.ids().iter().any(|id| *id == checkpoint_id);
@@ -104,6 +108,20 @@ pub(crate) fn attach(
         already,
         amended_commit,
     }))
+}
+
+/// Acquire and ready the checkout before changing its session sidecars.
+fn attach_owner(git_dir: &Path) -> Result<AttachOwner> {
+    let owner = crate::capture_queue::acquire_owner(git_dir)
+        .map_err(|_| crate::capture_queue::deferred("attach run-state ownership is unavailable"))?;
+    let owner = AttachOwner(Some(owner));
+    crate::family::run_state::prepare_owned(
+        owner
+            .0
+            .as_ref()
+            .ok_or_else(|| crate::capture_queue::deferred("attach owner is unavailable"))?,
+    )?;
+    Ok(owner)
 }
 
 /// The two refusals that precede any work: attach is an interactive verb and
@@ -181,26 +199,51 @@ fn adopt_as_ended(
     agent.clone_into(&mut cache.agent);
     cache.updated_at_ms = now;
     cache.transcript_path = Some(transcript_path.display().to_string());
-    write_cache(&repo.git_dir, &cache)?;
+    write_cache(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        &cache,
+    )?;
     Ok(())
 }
 
 /// Drop the compaction-progress sidecar, so attach archives the WHOLE
 /// transcript every time.
 ///
-/// The sidecar (`<git_dir>/rift-sessions/<id>.transcript`) is
+/// The sidecar (`<sessions>/<id>.transcript`) is
 /// worker-transient state for LIVE hook flows, and honoring it here would
 /// make a re-attach compact from a shifted boundary — an empty or
 /// truncated pair, a different content-derived id — instead of no-ooping
 /// on identical content. Removing it is safe (derived, non-canonical) and
 /// is what makes attach idempotent BY CONTENT; the e2e pins the ref tip
 /// across a re-attach.
-fn forget_compaction_progress(git_dir: &Path, session_id: &str) {
-    let _ = std::fs::remove_file(
-        git_dir
-            .join("rift-sessions")
-            .join(format!("{session_id}.transcript")),
-    );
+fn forget_compaction_progress(git_dir: &Path, session_id: &str) -> Result<()> {
+    let sessions = crate::family::run_state::sessions_dir(git_dir);
+    let path = rift_shadow::hooks::session_cache::cache_path(&sessions, session_id)?
+        .with_extension("transcript");
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Release before the prompt, then give pending deliveries one ordinary wakeup.
+/// A failed spawn leaves their existing debt for the next hook or doctor.
+struct AttachOwner(Option<crate::capture_queue::QueueLock>);
+
+impl Drop for AttachOwner {
+    fn drop(&mut self) {
+        let Some(owner) = self.0.take() else {
+            return;
+        };
+        let git_dir = owner.git_dir().to_path_buf();
+        drop(owner);
+        if !crate::agent_queue::jobs(&git_dir).is_empty()
+            || !crate::capture_queue::entries(&git_dir).is_empty()
+        {
+            crate::hooks::spawn_capture_worker(&git_dir);
+        }
+    }
 }
 
 /// Amend the last commit to carry the trailer, and answer with the new head.

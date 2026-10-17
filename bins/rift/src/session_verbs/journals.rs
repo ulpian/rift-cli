@@ -27,11 +27,13 @@ fn read_journal(
     Vec<String>,
 ) {
     use rift_shadow::hooks::session_cache::read_cache;
-    let dir = git_dir.join("rift-sessions");
+    let dir = crate::family::run_state::sessions_dir(git_dir);
     let mut sessions = Vec::new();
     let mut unreadable = Vec::new();
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let name = entry.file_name();
+    for path in rift_shadow::hooks::run_state::list_entries(&dir) {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         let Some(stem) = name
             .to_string_lossy()
             .strip_suffix(".json")
@@ -39,7 +41,7 @@ fn read_journal(
         else {
             continue;
         };
-        match read_cache(git_dir, &stem) {
+        match read_cache(&dir, &stem) {
             Ok(Some(cache)) => sessions.push(cache),
             Ok(None) => (),
             Err(_) => unreadable.push(stem),
@@ -171,12 +173,12 @@ fn canonical_or_lexical(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// Plant a session cache file directly under `git_dir` — the shape the
-    /// hook writes, and (with an explicit `work_tree`) the shape only a
+    /// Plant a session cache file in `git_dir`'s member's sessions directory
+    /// — the shape the hook writes, and (with an explicit `work_tree`) the shape only a
     /// hand-written file has, which is exactly what the credit discriminator
     /// exists to adjudicate.
     fn plant(git_dir: &Path, id: &str, state: &str, work_tree: Option<&Path>, updated_at_ms: i64) {
-        let dir = git_dir.join("rift-sessions");
+        let dir = crate::family::run_state::sessions_dir(git_dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cache = rift_shadow::hooks::session_cache::SessionCache {
             schema: rift_shadow::hooks::session_cache::SCHEMA,
