@@ -13,14 +13,16 @@ use super::decision::act_on;
 use super::{Decision, DenyShape, Journal, Mode, ResolvedRead};
 use crate::respond::Channel;
 
-/// How far a first-contact outline may go, before the family's own mode caps
-/// it.
+/// The mode the first-contact lever ships at: the documented default, which
+/// the repository's `first_contact` policy key stands in for.
 ///
 /// Observe: every first read the lever would answer is decided and recorded,
 /// and none is answered. Whether a model given the outline reads less, or
 /// simply repeats the call, is the figure the observe period publishes
-/// before any session meets the frame; the move to enforce is a change to
-/// this one constant, made on its own when that figure is in.
+/// before any session meets the frame. The move to enforce is a line written
+/// in the policy, not a change here: this constant caps nothing, and the
+/// mode [`decide_first_contact`] is handed is the mode it acts on, under the
+/// family's channel alone.
 pub const FIRST_CONTACT_MODE: Mode = Mode::Observe;
 
 /// The size at which a file is large enough for its first read to be worth
@@ -51,9 +53,10 @@ pub struct FirstContactFloor {
 ///   contact;
 /// * this exact request was already answered once, so the repeat is honoured.
 ///
-/// Only then do the mode, capped at [`FIRST_CONTACT_MODE`], and the family's
-/// channel decide between acting and recording. `file_bytes` is the whole
-/// file's size, which the caller has in hand from hashing it.
+/// Only then do the mode — the lever as the policy resolved it, which ships
+/// at [`FIRST_CONTACT_MODE`] — and the family's channel decide between acting
+/// and recording. `file_bytes` is the whole file's size, which the caller has
+/// in hand from hashing it.
 #[must_use]
 pub fn decide_first_contact(
     read: &ResolvedRead,
@@ -63,7 +66,6 @@ pub fn decide_first_contact(
     floor: FirstContactFloor,
     file_bytes: u64,
 ) -> Decision {
-    let mode = mode.min(FIRST_CONTACT_MODE);
     if mode == Mode::Off || read.range.lo != 1 {
         return Decision::Allow;
     }
@@ -114,14 +116,21 @@ mod tests {
         confirmed: true,
     });
 
+    /// The same channel before anyone watched a model receive it.
+    const UNCONFIRMED: Option<Channel> = Some(Channel::DenyWithReason {
+        reason_field: "permissionDecisionReason",
+        confirmed: false,
+    });
+
     fn first(read: &ResolvedRead, journal: &Journal, mode: Mode, bytes: u64) -> Decision {
         decide_first_contact(read, journal, mode, CONFIRMED, FLOOR, bytes)
     }
 
-    /// ★ A first whole read and a first page of a large file are outlined —
-    /// observed, never answered, whatever the family's mode.
+    /// ★ Under the default lever a first whole read and a first page of a
+    /// large file are outlined — observed, never answered.
     #[test]
-    fn a_first_read_of_a_large_file_is_an_observed_outline() {
+    fn under_the_default_a_first_read_of_a_large_file_is_an_observed_outline() {
+        assert_eq!(FIRST_CONTACT_MODE, Mode::Observe, "the documented default");
         let empty = Journal::default();
         for (read, bytes) in [
             (whole(400), 9_000),
@@ -129,14 +138,34 @@ mod tests {
             (read(1, HiKind::Explicit(2_000), 900), 40_000),
             (read(1, HiKind::Explicit(90), 900), 40_000),
         ] {
-            for mode in [Mode::Observe, Mode::Enforce] {
-                assert_eq!(
-                    first(&read, &empty, mode, bytes),
-                    Decision::Observe(DenyShape::Outlined),
-                    "{read:?}"
-                );
-            }
+            assert_eq!(
+                first(&read, &empty, FIRST_CONTACT_MODE, bytes),
+                Decision::Observe(DenyShape::Outlined),
+                "{read:?}"
+            );
         }
+    }
+
+    /// ★ The written lever decides, and the family's channel is the only
+    /// cap: `enforce` on a confirmed channel answers the first read with the
+    /// outline; the same lever on an unconfirmed channel, or on none, only
+    /// observes it.
+    #[test]
+    fn a_first_read_is_answered_only_where_enforce_is_written_and_the_channel_confirmed() {
+        let empty = Journal::default();
+        let big = whole(900);
+        assert_eq!(
+            decide_first_contact(&big, &empty, Mode::Enforce, CONFIRMED, FLOOR, 40_000),
+            Decision::Deny(DenyShape::Outlined)
+        );
+        assert_eq!(
+            decide_first_contact(&big, &empty, Mode::Enforce, UNCONFIRMED, FLOOR, 40_000),
+            Decision::Observe(DenyShape::Outlined)
+        );
+        assert_eq!(
+            decide_first_contact(&big, &empty, Mode::Enforce, None, FLOOR, 40_000),
+            Decision::Observe(DenyShape::Outlined)
+        );
     }
 
     /// A small file, a mid-file range, a short first page and a lever that
@@ -230,15 +259,21 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// ★ While the lever is at most observe — and in this build whatever
-        /// it is — no decision carries an answered outline.
+        /// ★ Below enforce — the default among them — no decision carries an
+        /// answered outline, and neither does enforce on a channel no run has
+        /// confirmed.
         #[test]
-        fn no_outline_is_ever_answered_below_enforce(
+        fn no_outline_is_answered_below_enforce_or_on_an_unconfirmed_channel(
             lo in 1u32..50,
             span in 0u32..3_000,
             total in 1u32..5_000,
             bytes in 0u64..100_000,
-            mode in proptest::sample::select(vec![Mode::Off, Mode::Observe, Mode::Enforce]),
+            (mode, channel) in proptest::sample::select(vec![
+                (Mode::Off, CONFIRMED),
+                (Mode::Observe, CONFIRMED),
+                (Mode::Enforce, UNCONFIRMED),
+                (Mode::Enforce, None),
+            ]),
             held in proptest::bool::ANY,
         ) {
             let lo = lo.min(total);
@@ -255,7 +290,7 @@ mod tests {
             } else {
                 Journal::default()
             };
-            let decision = first(&read, &journal, mode, bytes);
+            let decision = decide_first_contact(&read, &journal, mode, channel, FLOOR, bytes);
             proptest::prop_assert!(!matches!(decision, Decision::Deny(_)), "{decision:?}");
         }
     }

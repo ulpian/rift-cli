@@ -80,8 +80,14 @@ mod tests {
         confirmed: true,
     };
 
-    /// The settings with narrowing let as far as the family's mode goes, which
-    /// is what the shape table is about; the shipped cap has its own test.
+    /// The same channel before anyone watched a model receive it.
+    const UNCONFIRMED: Channel = Channel::DenyWithReason {
+        reason_field: "permissionDecisionReason",
+        confirmed: false,
+    };
+
+    /// The settings with the narrowing lever written `enforce`, which is what
+    /// the shape table is about; the default has its own test.
     fn narrowing_enforced() -> Limits {
         Limits {
             narrow_mode: Mode::Enforce,
@@ -272,11 +278,14 @@ mod tests {
         );
     }
 
-    /// ★ Narrowing ships in observe, and the cap holds over an enforcing
-    /// family: the decision is reached, recorded, and the call runs.
+    /// ★ Under the default policy an enforcing family only observes a
+    /// narrowing: the lever's default is observe, the default settings carry
+    /// it, and the family's own mode does not lift it — the decision is
+    /// reached, recorded, and the call runs.
     #[test]
-    fn narrowing_ships_observed_whatever_the_family_enforces() {
-        assert_eq!(NARROW_MODE, Mode::Observe);
+    fn under_the_default_policy_an_enforcing_family_only_observes_a_narrowing() {
+        assert_eq!(NARROW_MODE, Mode::Observe, "the documented default");
+        assert_eq!(Limits::default().narrow_mode, NARROW_MODE);
         let read = resolved("src/lib.rs", 0x3f, 101, 400, 900);
         assert_eq!(
             decide_enforcing(&read, &held(1, 200), Limits::default()),
@@ -294,6 +303,33 @@ mod tests {
             Decision::Allow,
             "with narrowing off the decision is the build without it"
         );
+    }
+
+    /// ★ The written lever decides, and the family's channel is the only
+    /// cap: narrowing at `enforce` declines on a confirmed channel and only
+    /// observes on an unconfirmed one, or on none.
+    #[test]
+    fn a_narrowing_is_declined_only_where_enforce_is_written_and_the_channel_confirmed() {
+        let read = resolved("src/lib.rs", 0x3f, 101, 400, 900);
+        let journal = held(1, 200);
+        let shape = DenyShape::Narrow {
+            held: run(101, 200),
+            read: run(201, 400),
+        };
+        let under = |channel: Option<Channel>| {
+            decide(
+                &read,
+                &journal,
+                Mode::Enforce,
+                channel,
+                EditEcho::Pinned,
+                64,
+                narrowing_enforced(),
+            )
+        };
+        assert_eq!(under(Some(CONFIRMED)), Decision::Deny(shape.clone()));
+        assert_eq!(under(Some(UNCONFIRMED)), Decision::Observe(shape.clone()));
+        assert_eq!(under(None), Decision::Observe(shape));
     }
 
     /// ★ **An observed narrowing leaves the window holding what it was handed

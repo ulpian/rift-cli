@@ -96,6 +96,9 @@ pub struct Effective {
     pub first_contact_min_lines: u32,
     /// The fewest bytes a file has for `first_contact` to consider it.
     pub first_contact_min_bytes: u64,
+    /// How far the held part of a partly held read may be declined for the
+    /// unheld range: the repository's `narrow`, never above `read_deny`.
+    pub narrow: Mode,
     /// How far a read another live window of the repository holds may be
     /// declined with a cheaper route: the repository's `decline_family_held`,
     /// never above `read_deny`.
@@ -212,6 +215,7 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
         first_contact: interception.first_contact.min(read_deny),
         first_contact_min_lines: interception.first_contact_min_lines,
         first_contact_min_bytes: interception.first_contact_min_bytes,
+        narrow: interception.narrow.min(read_deny),
         decline_family_held: interception.decline_family_held.min(read_deny),
         recognise_by_output: interception.recognise_by_output.min(read_deny),
         grep_cap,
@@ -639,6 +643,41 @@ mod tests {
         let (unknown, _d) = load_src("[interception]\nfirst_contact = \"always\"\n");
         assert_eq!(
             resolve(&unknown.policy, "claude-code", FULL).first_contact,
+            Mode::Off
+        );
+    }
+
+    /// The narrowing lever ships at `observe`, reads what is written, and is
+    /// never above the read lever: a family whose channel no run confirmed, a
+    /// repository at `off` and a value it does not know all hold it there or
+    /// below. An enforcing family that leaves the key unwritten observes: the
+    /// family's mode caps the lever and never lifts it.
+    #[test]
+    fn the_narrowing_lever_ships_observing_and_is_never_above_the_read_lever() {
+        let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
+        assert_eq!(shipped.read_deny, Mode::Enforce);
+        assert_eq!(
+            shipped.narrow,
+            Mode::Observe,
+            "an enforcing family, unwritten"
+        );
+        let (written, _d) = load_src("[interception]\nnarrow = \"enforce\"\n");
+        assert_eq!(
+            resolve(&written.policy, "claude-code", FULL).narrow,
+            Mode::Enforce
+        );
+        assert_eq!(
+            resolve(&written.policy, "codex", NO_CHANNEL).narrow,
+            Mode::Observe,
+            "a family whose reason channel no run confirmed"
+        );
+        let (off, _d) = load_src("[interception]\nnarrow = \"off\"\n");
+        assert_eq!(resolve(&off.policy, "claude-code", FULL).narrow, Mode::Off);
+        let (shut, _d) = load_src("[interception]\nmode = \"off\"\nnarrow = \"enforce\"\n");
+        assert_eq!(resolve(&shut.policy, "claude-code", FULL).narrow, Mode::Off);
+        let (unknown, _d) = load_src("[interception]\nnarrow = \"always\"\n");
+        assert_eq!(
+            resolve(&unknown.policy, "claude-code", FULL).narrow,
             Mode::Off
         );
     }

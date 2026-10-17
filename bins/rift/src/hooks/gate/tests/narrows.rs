@@ -47,36 +47,50 @@ fn the_narrowing_frame_pays_for_itself_at_its_floor() {
     );
 }
 
-/// ★ While narrowing is observed, an enforcing family's partly held read
-/// runs: the decision is recorded, the lines the call delivered become
-/// coverage, and the row it owes is priced over the held run alone.
-#[test]
-fn a_partly_held_read_runs_is_recorded_and_books_its_held_lines() {
-    let (tmp, file) = checkout(300);
-    let here = tmp.path();
-    let enforce = enforcing();
+/// A read of the first hundred lines of `file`, then of lines 51 to 150, in
+/// one window, under `levers`: what the second one was answered with.
+fn second_read_overlapping_the_first(
+    here: &std::path::Path,
+    file: &std::path::Path,
+    levers: &rift_recall_policy::Effective,
+) -> Option<String> {
     gate_under(
         &hook(
             "claude-code",
             "PreToolUse",
             "s-n",
-            read_call(&file, Some(1), Some(100)),
+            read_call(file, Some(1), Some(100)),
         ),
         here,
-        &enforce,
+        levers,
     );
-    let later = gate_under(
+    gate_under(
         &hook(
             "claude-code",
             "PreToolUse",
             "s-n",
-            read_call(&file, Some(51), Some(100)),
+            read_call(file, Some(51), Some(100)),
         ),
         here,
-        &enforce,
-    );
+        levers,
+    )
+    .deny_reason
+}
+
+/// ★ Under the default policy an enforcing family's partly held read runs —
+/// the `narrow` key is unwritten, so the family's mode alone narrows
+/// nothing: the decision is recorded, the lines the call delivered become
+/// coverage, and the row it owes is priced over the held run alone.
+#[test]
+fn under_the_default_policy_a_partly_held_read_runs_is_recorded_and_books_its_held_lines() {
+    let (tmp, file) = checkout(300);
+    let here = tmp.path();
+    let enforce = enforcing();
+    assert_eq!(enforce.read_deny, rift_recall_policy::Mode::Enforce);
+    assert_eq!(enforce.narrow, rift_recall_policy::Mode::Observe);
     assert_eq!(
-        later.deny_reason, None,
+        second_read_overlapping_the_first(here, &file, &enforce),
+        None,
         "nothing is declined while observed"
     );
     let lines = lines_of(here, "s-n", None);
@@ -102,6 +116,54 @@ fn a_partly_held_read_runs_is_recorded_and_books_its_held_lines() {
         Some(crate::agent_queue::AuditLines { lo: 51, hi: 100 }),
         "the held run is what a narrowing spares"
     );
+}
+
+/// ★ With `narrow` written `enforce` the same second read is declined for
+/// its unheld range: the frame travels, the decline is the line it leaves,
+/// and the identical repeat runs. The written key is what moved — the family
+/// enforced in the test above too.
+#[test]
+fn a_partly_held_read_is_narrowed_once_narrow_is_written_enforce() {
+    let (tmp, file) = checkout(300);
+    let here = tmp.path();
+    let mut written = enforcing();
+    written.narrow = rift_recall_policy::Mode::Enforce;
+    let reason = second_read_overlapping_the_first(here, &file, &written)
+        .expect("the held half is declined");
+    assert_eq!(
+        reason,
+        rift_recall_serve::render_narrow_frame(
+            "src.rs",
+            &revision(here, "src.rs").to_hex(),
+            (51, 100),
+            (101, 150),
+            Some(4)
+        )
+    );
+    assert_eq!(
+        lines_of(here, "s-n", None)
+            .iter()
+            .map(Line::kind)
+            .collect::<Vec<_>>(),
+        ["read", "deny"]
+    );
+    let rows = audits(here);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].decision,
+        crate::agent_queue::ServeAuditKind::ReadIntercepted
+    );
+    let repeat = gate_under(
+        &hook(
+            "claude-code",
+            "PreToolUse",
+            "s-n",
+            read_call(&file, Some(51), Some(100)),
+        ),
+        here,
+        &written,
+    );
+    assert_eq!(repeat.deny_reason, None, "a key declined once is honoured");
 }
 
 /// A narrowing that is enforced travels with the sealed renderer's frame,

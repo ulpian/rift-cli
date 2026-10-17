@@ -4,20 +4,20 @@
 
 use std::path::Path;
 
-use rift_agent::window_journal::{Interval, Limits, Line, Mode};
-use rift_shadow::hooks::{AdapterRegistry, RawHook};
+use rift_agent::window_journal::{Interval, Line, Mode};
+use rift_shadow::hooks::RawHook;
 
 use super::fixtures::*;
-use crate::hooks::gate::members::{
-    gate_decide_members, gate_record_members, settle_whole_call, GatePass,
-};
-use crate::hooks::gate::{gate_limits, gate_turn, payload_cwd, GateOutcome, GateStep};
+use crate::hooks::gate::gate_limits;
 
 /// One Codex checkout of two sixty-line files, `src.rs` and `other.rs`, and a
 /// third, `third.rs`, that no walk here reads before the call it is about.
 struct Chain {
     tmp: tempfile::TempDir,
+    /// The family enforcing, with every per-lever key left as it ships.
     enforce: rift_recall_policy::Effective,
+    /// The same family with the narrowing lever written `enforce`.
+    narrowing: rift_recall_policy::Effective,
 }
 
 impl Chain {
@@ -35,12 +35,13 @@ impl Chain {
         hook("codex", "PreToolUse", "s-chain", shell_of(&command))
     }
 
-    /// The gate with narrowing let as far as the family's mode goes.
+    /// The gate with the narrowing lever written `enforce`.
     fn enforced(&self, members: &[&str]) -> Option<String> {
-        gate_narrowing_enforced(&self.line(members), self.here(), &self.enforce).deny_reason
+        gate_under(&self.line(members), self.here(), &self.narrowing).deny_reason
     }
 
-    /// The gate as it ships, narrowing capped at the shipped constant.
+    /// The gate under the default policy: the family enforcing, the
+    /// narrowing lever unwritten.
     fn shipped(&self, members: &[&str]) -> Option<String> {
         gate_under(&self.line(members), self.here(), &self.enforce).deny_reason
     }
@@ -78,45 +79,12 @@ fn chain() -> Chain {
     beside(tmp.path(), "other.rs", 60);
     beside(tmp.path(), "third.rs", 60);
     let enforce = levers_for("codex", rift_recall_policy::Mode::Enforce);
-    Chain { tmp, enforce }
-}
-
-/// The gate exactly as `read_gate` runs a call about to be made, but with
-/// [`Limits::narrow_mode`] at enforce: the field the shipped constant feeds,
-/// set here because the constant itself is not this test's to move.
-fn gate_narrowing_enforced(
-    raw: &RawHook,
-    work_tree: &Path,
-    effective: &rift_recall_policy::Effective,
-) -> GateOutcome {
-    let registry = AdapterRegistry::with_builtin();
-    let adapter = registry.get(&raw.agent).expect("a built-in family");
-    let git_dir = work_tree.join(".git");
-    let cwd = payload_cwd(&adapter.facts(&raw.verb, &raw.payload));
-    let journal = crate::window_journal::WindowJournal::open(work_tree, &raw.session, None);
-    let held = journal.load().journal;
-    let requests = adapter.read_requests(&raw.verb, &raw.payload);
-    let window_key = crate::window_journal::key(&raw.session, None);
-    let pass = GatePass {
-        step: GateStep::Decide,
-        git_dir: &git_dir,
-        held: &held,
-        journal: &journal,
-        window_key: &window_key,
-        stated: None,
-        limits: Limits {
-            narrow_mode: Mode::Enforce,
-            ..gate_limits(effective)
-        },
-        turn: gate_turn(raw, &git_dir),
-        at_ms: u64::try_from(raw.occurred_at_ms).expect("a moment"),
-    };
-    let mut members =
-        gate_decide_members(raw, work_tree, cwd.as_deref(), effective, &pass, &requests);
-    let deny_reason = settle_whole_call(&mut members, requests.len());
-    GateOutcome {
-        journaled: gate_record_members(&git_dir, work_tree, raw, &members, &pass),
-        deny_reason,
+    let mut narrowing = enforce;
+    narrowing.narrow = rift_recall_policy::Mode::Enforce;
+    Chain {
+        tmp,
+        enforce,
+        narrowing,
     }
 }
 
@@ -257,13 +225,19 @@ fn a_chain_of_two_narrowable_members_is_two_narrowing_sentences() {
     );
 }
 
-/// ★ Under the shipped constant a narrowable member is only observed, so a
+/// ★ Under the default policy a narrowable member is only observed, so a
 /// chain holding one runs whole — its held member included — and the window
-/// is credited with what the call delivered.
+/// is credited with what the call delivered. The family enforces and the
+/// narrowing key is unwritten: the per-lever key decides, and the family's
+/// mode alone never narrows.
 #[test]
-fn under_the_shipped_constant_a_chain_with_a_narrowable_member_runs_whole() {
+fn under_the_default_policy_a_chain_with_a_narrowable_member_runs_whole() {
     assert_eq!(rift_agent::window_journal::NARROW_MODE, Mode::Observe);
     let chain = chain();
+    assert_eq!(chain.enforce.read_deny, rift_recall_policy::Mode::Enforce);
+    assert_eq!(chain.enforce.narrow, rift_recall_policy::Mode::Observe);
+    assert_eq!(gate_limits(&chain.enforce).narrow_mode, Mode::Observe);
+    assert_eq!(gate_limits(&chain.narrowing).narrow_mode, Mode::Enforce);
     assert_eq!(chain.shipped(&[CAT_SRC, OTHER_HEAD]), None);
     assert_eq!(chain.shipped(&[CAT_SRC, OTHER_ALL]), None);
     assert_eq!(chain.kinds(), ["read", "read", "read", "read"]);
