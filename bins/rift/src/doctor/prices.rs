@@ -186,9 +186,14 @@ mod tests {
     fn the_opus_5_5_append_takes_the_model_off_the_unpriced_list() {
         let tmp = tempfile::tempdir().unwrap();
         let migrations = rift_store::default_migrations();
-        let previous = migrations.len() - 1;
+        // Later migrations append after v18, so the price seed is found by
+        // name rather than assumed to be the last one.
+        let v18 = migrations
+            .iter()
+            .position(|m| m.name == "capture_price_seed_opus_5_5")
+            .unwrap();
         let store = SqliteStore::open(tmp.path().join("p.db")).unwrap();
-        rift_store::apply_migrations(&store, &migrations[..previous]).unwrap();
+        rift_store::apply_migrations(&store, &migrations[..v18]).unwrap();
         let rt = runtime().unwrap();
         for (idx, model) in ["claude-opus-5-5", "Gemini 3.7 Flash (Low)"]
             .iter()
@@ -208,7 +213,7 @@ mod tests {
             ["Gemini 3.7 Flash (Low)", "claude-opus-5-5"]
         );
 
-        let upgrade = rift_store::apply_migrations(&store, &migrations).unwrap();
+        let upgrade = rift_store::apply_migrations(&store, &migrations[..=v18]).unwrap();
         assert_eq!(upgrade.applied, 1);
         assert_eq!(unpriced_names(&store), ["Gemini 3.7 Flash (Low)"]);
     }
