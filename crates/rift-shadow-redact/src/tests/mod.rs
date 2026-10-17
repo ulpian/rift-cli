@@ -6,6 +6,7 @@ mod census;
 mod corpus;
 mod detectors;
 mod entropy;
+mod fast_paths;
 mod fixtures;
 mod marks;
 mod mint_guard;

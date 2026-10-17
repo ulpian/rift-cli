@@ -651,6 +651,21 @@ pub(super) fn spawn_capture_worker(git_dir: &Path) {
     // before spawning the detached CLI subcommand; fall back only if the
     // executable disappeared between lookup and resolution.
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    #[cfg(unix)]
+    if Path::new("/usr/bin/nice").is_file()
+        && std::process::Command::new("/usr/bin/nice")
+            .args(["-n", "10"])
+            .arg(&exe)
+            .args(["hooks", "worker", "--git-dir"])
+            .arg(git_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    {
+        return;
+    }
     let _ = std::process::Command::new(exe)
         .arg("hooks")
         .arg("worker")

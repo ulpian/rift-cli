@@ -141,9 +141,13 @@ impl CompactTranscript {
 #[must_use]
 pub fn compact_jsonl(raw: &SecretBytes, start_line: usize) -> CompactTranscript {
     let full = compact_lines(raw.as_slice(), 0);
-    let delta = compact_lines(raw.as_slice(), start_line);
     // The subtraction IS the rounding rule — see the module header.
-    let boundary = full.lines.len().saturating_sub(delta.lines.len());
+    let boundary = if start_line == 0 {
+        0
+    } else {
+        let delta = compact_lines(raw.as_slice(), start_line);
+        full.lines.len().saturating_sub(delta.lines.len())
+    };
 
     let mut out = Vec::new();
     for line in &full.lines {
@@ -236,8 +240,8 @@ struct Compacted {
 /// Compact the raw lines from `start_line` on, merging streamed assistant
 /// fragments that share a message id.
 fn compact_lines(raw: &[u8], start_line: usize) -> Compacted {
-    let mut lines: Vec<Vec<u8>> = Vec::new();
-    // Message id → index in `lines`, so a later fragment of the same assistant
+    let mut records: Vec<Map<String, Value>> = Vec::new();
+    // Message id → index in `records`, so a later fragment of the same assistant
     // message extends the line it already produced instead of adding one.
     let mut by_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut unparsed = 0usize;
@@ -269,18 +273,21 @@ fn compact_lines(raw: &[u8], start_line: usize) -> Compacted {
             // overlap, and dropping it would not make the boundary exact — it
             // would split one message across two checkpoints with nothing
             // saying so.
-            let merged = lines.get(at).and_then(|line| merge_content(line, &obj));
-            if let (Some(merged), Some(slot)) = (merged, lines.get_mut(at)) {
-                *slot = merged;
+            if let Some(existing) = records.get_mut(at) {
+                merge_content(existing, &obj);
             }
         } else {
             if let Some(i) = id {
-                by_id.insert(i, lines.len());
+                by_id.insert(i, records.len());
             }
             obj.insert("v".to_owned(), COMPACT_SCHEMA_VERSION.into());
-            lines.push(canonical(&Value::Object(obj)));
+            records.push(obj);
         }
     }
+    let lines = records
+        .into_iter()
+        .map(|obj| canonical(&Value::Object(obj)))
+        .collect();
     Compacted {
         lines,
         raw_lines,
@@ -289,20 +296,18 @@ fn compact_lines(raw: &[u8], start_line: usize) -> Compacted {
     }
 }
 
-/// Append `next`'s content blocks to the already-emitted `line`'s.
-fn merge_content(line: &[u8], next: &Map<String, Value>) -> Option<Vec<u8>> {
-    let mut existing: Map<String, Value> = serde_json::from_slice(line).ok()?;
-    let mut blocks = match existing.get("content") {
-        Some(Value::Array(a)) => a.clone(),
-        _ => return None,
+/// Append `next`'s content blocks to the already-emitted `existing` record's.
+fn merge_content(existing: &mut Map<String, Value>, next: &Map<String, Value>) {
+    let Some(next_content) = next.get("content") else {
+        return;
     };
-    match next.get("content") {
-        Some(Value::Array(a)) => blocks.extend(a.iter().cloned()),
-        Some(other) => blocks.push(other.clone()),
-        None => return None,
+    let Some(Value::Array(blocks)) = existing.get_mut("content") else {
+        return;
+    };
+    match next_content {
+        Value::Array(a) => blocks.extend(a.iter().cloned()),
+        other => blocks.push(other.clone()),
     }
-    existing.insert("content".to_owned(), Value::Array(blocks));
-    Some(canonical(&Value::Object(existing)))
 }
 
 /// Reduce one transcript record. Returns the compact object and whether its

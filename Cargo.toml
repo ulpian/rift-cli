@@ -165,6 +165,9 @@ toml = "0.8"
 toml_edit = { version = "0.22", features = ["serde"] }
 # Redaction (linear-time, no backreferences → ReDoS-safe)
 regex = "1"
+# The parser `regex` itself builds on, already in the lock; dev-only, so a
+# test can read a built-in pattern's structure instead of trusting its comment.
+regex-syntax = "0.8"
 # Security / secrets hygiene
 zeroize = { version = "1", features = ["derive"] }
 secrecy = "0.10"
@@ -238,3 +241,15 @@ strip = true
 
 [profile.dev]
 panic = "unwind"
+split-debuginfo = "unpacked"
+
+[profile.dev.package.regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.regex-syntax]
+opt-level = 3
+[profile.dev.package.aho-corasick]
+opt-level = 3
+[profile.dev.package.memchr]
+opt-level = 3

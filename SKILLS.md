@@ -28,6 +28,7 @@ the [`skills.sh`](skills.sh) wrapper and described machine-readably in
 | `smoke`     | Quick smoke: `rift` + `rift-memd` report status          | — |
 | `coverage`  | Instrumented run + per-crate ≥95% gate — **needs `+nightly`** | `cargo +nightly llvm-cov … && xtask check-coverage` |
 | `docs`      | Rustdoc for the workspace, warnings denied (the CI `docs` job) | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` |
+| `gc`        | Stop detached workers and prune stale/orphaned build caches | — |
 
 ## Conventions
 

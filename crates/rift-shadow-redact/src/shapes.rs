@@ -10,10 +10,46 @@ use crate::span::{MatchedAgainst, ShapeDetector, Span};
 pub(crate) fn shape_spans(text: &str, detectors: &[ShapeDetector]) -> Vec<Span> {
     let mut spans = Vec::new();
     for d in detectors {
-        for caps in d.re.captures_iter(text) {
-            let Some(m) = caps.get(d.group) else {
-                continue;
-            };
+        shape_spans_for_detector(text, d, &mut spans);
+    }
+    spans
+}
+
+/// One table's spans, through its `RegexSet` prefilter when it has one and by
+/// the direct per-detector scan when it does not. Both return the same spans;
+/// the set only skips detectors that cannot match.
+pub(crate) fn table_spans(
+    text: &str,
+    detectors: &[ShapeDetector],
+    set: Option<&regex::RegexSet>,
+) -> Vec<Span> {
+    match set {
+        Some(set) => shape_spans_with_set(text, detectors, set),
+        None => shape_spans(text, detectors),
+    }
+}
+
+pub(crate) fn shape_spans_with_set(
+    text: &str,
+    detectors: &[ShapeDetector],
+    set: &regex::RegexSet,
+) -> Vec<Span> {
+    let matches = set.matches(text);
+    if !matches.matched_any() {
+        return Vec::new();
+    }
+    let mut spans = Vec::new();
+    for (idx, d) in detectors.iter().enumerate() {
+        if matches.matched(idx) {
+            shape_spans_for_detector(text, d, &mut spans);
+        }
+    }
+    spans
+}
+
+fn shape_spans_for_detector(text: &str, d: &ShapeDetector, spans: &mut Vec<Span>) {
+    if d.group == 0 {
+        for m in d.re.find_iter(text) {
             let Some((start, end)) = gated_range(d, text, m) else {
                 continue;
             };
@@ -22,18 +58,31 @@ pub(crate) fn shape_spans(text: &str, detectors: &[ShapeDetector]) -> Vec<Span> 
                 end,
                 class: d.class,
                 id: d.id.to_string(),
-                // A group detector keeps the rest of its match as context.
-                parse: match d.group {
-                    0 => None,
-                    _ => caps.get(0).map(|w| (w.start(), w.end())),
-                },
-                // Every proposal starts as a read of the text it was handed;
-                // `select_spans` re-stamps the ones it handed blanked text.
+                parse: None,
                 matched: MatchedAgainst::Input,
             });
         }
+        return;
     }
-    spans
+    for caps in d.re.captures_iter(text) {
+        let Some(m) = caps.get(d.group) else {
+            continue;
+        };
+        let Some((start, end)) = gated_range(d, text, m) else {
+            continue;
+        };
+        spans.push(Span {
+            start,
+            end,
+            class: d.class,
+            id: d.id.to_string(),
+            // A group detector keeps the rest of its match as context.
+            parse: caps.get(0).map(|w| (w.start(), w.end())),
+            // Every proposal starts as a read of the text it was handed;
+            // `select_spans` re-stamps the ones it handed blanked text.
+            matched: MatchedAgainst::Input,
+        });
+    }
 }
 
 /// Narrow a credential **value** span past one matching pair of quotes.
