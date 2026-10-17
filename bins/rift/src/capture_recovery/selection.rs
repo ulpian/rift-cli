@@ -264,7 +264,7 @@ struct Attempt<'a> {
 impl Attempt<'_> {
     /// Candidates from the boundary tickets, ONE pass under the same hold's
     /// sessions capability, then the ruling's partition.
-    async fn classify(
+    async fn classify_sources(
         &self,
         store: &impl CanonicalStore,
         hold: &OwnHold<'_>,
@@ -462,7 +462,7 @@ fn counts_of(counts: &Counts) -> intent::InventoryCounts {
 fn publish(
     private: &Namespace,
     bytes: &[u8],
-    phase: &mut impl FnMut(Phase) -> Result<(), ()>,
+    observe: &mut impl FnMut(Phase) -> Result<(), ()>,
 ) -> Result<Publication, Owed> {
     private.recheck().map_err(|_| Owed::HoldUnavailable)?;
     let mut options = OpenOptions::new();
@@ -479,7 +479,7 @@ fn publish(
         Err(_) => return Err(Owed::PublishFailed),
     };
     file.write_all(bytes).map_err(|_| Owed::PublishFailed)?;
-    phase(Phase::Written).map_err(|()| Owed::Resource)?;
+    observe(Phase::Written).map_err(|()| Owed::Resource)?;
     file.sync_all().map_err(|_| Owed::PublishFailed)?;
     private
         .dir
@@ -488,7 +488,7 @@ fn publish(
         .into_std_file()
         .sync_all()
         .map_err(|_| Owed::PublishFailed)?;
-    phase(Phase::Synced).map_err(|()| Owed::Resource)?;
+    observe(Phase::Synced).map_err(|()| Owed::Resource)?;
     if read_record(private)? != bytes {
         return Err(Owed::PublishFailed);
     }
@@ -551,7 +551,7 @@ pub(crate) async fn select_with(
     store: &impl CanonicalStore,
     hold: &OwnHold<'_>,
     registry: &AdapterRegistry,
-    phase: &mut impl FnMut(Phase) -> Result<(), ()>,
+    observe: &mut impl FnMut(Phase) -> Result<(), ()>,
 ) -> Result<Selected, Deferred> {
     let owed = |owed: Owed| Deferred {
         owed,
@@ -567,13 +567,13 @@ pub(crate) async fn select_with(
         return Err(owed(Owed::PolicyMismatch));
     }
     let inventory = inventory::enumerate_with(&queue, &mut |point| match point {
-        inventory::Phase::BeforeRetain(slot) => phase(Phase::BeforeRetain(slot)),
+        inventory::Phase::BeforeRetain(slot) => observe(Phase::BeforeRetain(slot)),
     })
     .map_err(|counts| Deferred {
         owed: Owed::Inventory,
         counts,
     })?;
-    phase(Phase::Inventoried).map_err(|()| owed(Owed::Resource))?;
+    observe(Phase::Inventoried).map_err(|()| owed(Owed::Resource))?;
     let attempt = Attempt { plan, inventory };
     let counts = attempt.inventory.counts.clone();
     let deferred = |owed: Owed| Deferred {
@@ -581,10 +581,10 @@ pub(crate) async fn select_with(
         counts: counts.clone(),
     };
     let part = attempt
-        .classify(store, hold, registry)
+        .classify_sources(store, hold, registry)
         .await
         .map_err(deferred)?;
-    phase(Phase::Classified).map_err(|()| deferred(Owed::Resource))?;
+    observe(Phase::Classified).map_err(|()| deferred(Owed::Resource))?;
     let frozen = attempt.freeze(part).map_err(deferred)?;
     let private = queue
         .private()
@@ -596,8 +596,8 @@ pub(crate) async fn select_with(
     queue
         .recheck()
         .map_err(|_| deferred(Owed::QueueUnavailable))?;
-    phase(Phase::BeforePublish).map_err(|()| deferred(Owed::Resource))?;
-    let publication = publish(private, &bytes, phase).map_err(deferred)?;
+    observe(Phase::BeforePublish).map_err(|()| deferred(Owed::Resource))?;
+    let publication = publish(private, &bytes, observe).map_err(deferred)?;
     let cut = if frozen.retained.is_empty() {
         Cut::NoHistoricalCut
     } else {
