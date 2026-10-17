@@ -287,3 +287,169 @@ fn a_new_producer_delivery_can_publish_under_a_hold_and_remains_owed() {
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     assert_eq!(crate::agent_queue::read_job(&path).unwrap().1, job);
 }
+
+#[cfg(unix)]
+fn physical_identity(path: &Path) -> (u64, u64, u32) {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = path.symlink_metadata().unwrap();
+    (metadata.dev(), metadata.ino(), metadata.mode())
+}
+
+#[cfg(unix)]
+fn pin_delivery(
+    owner: &crate::capture_queue::QueueLock,
+    source: &Path,
+    private: &Path,
+) -> (
+    std::fs::File,
+    PathBuf,
+    crate::capture_recovery::pins::LivePin,
+) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(physical_identity(private).2 & 0o7777, 0o700);
+    let file = std::fs::File::open(source).unwrap();
+    let pin = private.join("original-delivery.pin");
+    let live = crate::capture_recovery::pins::preserve(
+        owner,
+        &source.canonicalize().unwrap(),
+        &private.canonicalize().unwrap(),
+        std::ffi::OsStr::new("original-delivery.pin"),
+    )
+    .unwrap();
+    assert_eq!(physical_identity(source), physical_identity(&pin));
+    (file, pin, live)
+}
+
+#[cfg(unix)]
+fn remove_matching_fixture(
+    owner: &crate::capture_queue::QueueLock,
+    replacement: &Path,
+    live_pin: &crate::capture_recovery::pins::LivePin,
+) {
+    let classification = crate::capture_recovery::pins::classify(
+        owner,
+        &replacement.canonicalize().unwrap(),
+        live_pin,
+    );
+    assert_eq!(
+        classification,
+        crate::capture_recovery::pins::DeliveryMatch::Different
+    );
+    if classification == crate::capture_recovery::pins::DeliveryMatch::OriginalPresent {
+        crate::capture_queue::remove_owned(replacement, owner).unwrap();
+    }
+}
+
+/// This is a resumed physical-cut requirement, not the ordinary completion
+/// contract: equal context and bytes cannot identify a previously selected file.
+#[cfg(unix)]
+#[test]
+fn a_resumed_physical_cut_must_not_unlink_an_identical_redelivery_at_a_new_inode() {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let checkout = tempfile::tempdir().unwrap();
+    let private = tempfile::tempdir().unwrap();
+    let (repo, owner, frozen) = prepared_checkout(checkout.path());
+    let original = &frozen[0];
+    assert!(!private.path().starts_with(checkout.path()));
+    assert!(!private
+        .path()
+        .starts_with(original.path.parent().unwrap().parent().unwrap()));
+    let (mut live_source, pin, live_pin) = pin_delivery(&owner, &original.path, private.path());
+    let original_identity = physical_identity(&original.path);
+    let (_, job) = crate::agent_queue::read_job(&original.path).unwrap();
+    let original_context = crate::capture_queue::delivery::decode(&original.bytes).unwrap();
+    owner.check_recovery_hold().unwrap();
+    crate::capture_queue::remove_owned(&original.path, &owner).unwrap();
+    assert!(!original.path.exists());
+    let replacement = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();
+    let replacement_bytes = std::fs::read(&replacement).unwrap();
+    let replacement_context = crate::capture_queue::delivery::decode(&replacement_bytes).unwrap();
+    let replacement_identity = physical_identity(&replacement);
+    let same_path = replacement == original.path;
+    let same_bytes = replacement_bytes == original.bytes;
+    let same_context = replacement_context == original_context;
+    eprintln!(
+        "PHYSICAL_CUT_REDELIVERY same_path={same_path} same_bytes={same_bytes} same_context={same_context} original={original_identity:?} pin={:?} replacement={replacement_identity:?} attempts={}",
+        physical_identity(&pin), job.attempts
+    );
+    assert!(same_path && same_bytes && same_context);
+    assert_eq!(original_identity, physical_identity(&pin));
+    assert_eq!(original_identity.0, replacement_identity.0);
+    assert_ne!(original_identity.1, replacement_identity.1);
+    assert_eq!(original_identity.2, replacement_identity.2);
+    assert_eq!(live_source.metadata().unwrap().ino(), original_identity.1);
+    let mut retained_bytes = Vec::new();
+    live_source.read_to_end(&mut retained_bytes).unwrap();
+    assert_eq!(retained_bytes, original.bytes);
+    assert_eq!(crate::agent_queue::read_job(&replacement).unwrap().1, job);
+    remove_matching_fixture(&owner, &original.path, &live_pin);
+    eprintln!(
+        "PHYSICAL_CUT_AFTER_CLASSIFICATION replacement_present={}",
+        replacement.exists()
+    );
+    assert!(
+        replacement.exists(),
+        "the newly delivered physical file remains owed"
+    );
+    assert_eq!(std::fs::read(replacement).unwrap(), replacement_bytes);
+    assert_eq!(std::fs::read(pin).unwrap(), original.bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unchanged_selected_physical_delivery_can_be_unlinked_without_changing_its_pin() {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let checkout = tempfile::tempdir().unwrap();
+    let private = tempfile::tempdir().unwrap();
+    let (_, owner, frozen) = prepared_checkout(checkout.path());
+    let original = &frozen[0];
+    assert!(!private.path().starts_with(checkout.path()));
+    assert!(!private
+        .path()
+        .starts_with(original.path.parent().unwrap().parent().unwrap()));
+    let (mut live_source, pin, live_pin) = pin_delivery(&owner, &original.path, private.path());
+    let selected = physical_identity(&original.path);
+    assert_eq!(
+        live_pin.original_identity(),
+        (selected.0, selected.1, selected.2 & 0o7777)
+    );
+    assert_eq!(
+        crate::capture_recovery::pins::classify(
+            &owner,
+            &original.path.canonicalize().unwrap(),
+            &live_pin,
+        ),
+        crate::capture_recovery::pins::DeliveryMatch::OriginalPresent
+    );
+    assert_eq!(physical_identity(&pin), selected);
+    assert_eq!(live_source.metadata().unwrap().ino(), selected.1);
+    owner.check_recovery_hold().unwrap();
+    crate::capture_queue::remove_owned(&original.path, &owner).unwrap();
+    let mut retained_bytes = Vec::new();
+    live_source.read_to_end(&mut retained_bytes).unwrap();
+    eprintln!(
+        "PHYSICAL_CUT_UNCHANGED selected={selected:?} pin={:?} source_present={} attempts={}",
+        physical_identity(&pin),
+        original.path.exists(),
+        original.attempts
+    );
+    assert!(!original.path.exists());
+    assert_eq!(physical_identity(&pin), selected);
+    assert_eq!(retained_bytes, original.bytes);
+    assert_eq!(std::fs::read(pin).unwrap(), original.bytes);
+    for other in &frozen[1..] {
+        assert_eq!(std::fs::read(&other.path).unwrap(), other.bytes);
+        assert_eq!(
+            crate::agent_queue::read_job(&other.path)
+                .unwrap()
+                .1
+                .attempts,
+            other.attempts
+        );
+    }
+}

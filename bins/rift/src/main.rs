@@ -52,6 +52,7 @@ mod agents;
 mod backfill;
 mod bundle;
 mod capture_queue;
+mod capture_recovery;
 mod chain;
 mod cli;
 mod configure;

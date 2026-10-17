@@ -32,6 +32,8 @@ doc = ["dep:rift-recall-doc"]
 tui-hires = ["tui", "rift-canopy/xre-3d"]
 
 [dependencies]
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
 rift-core = { version = "0.0.1", path = "../../crates/rift-core" }
 rift-shadow = { version = "0.0.1", path = "../../crates/rift-shadow" }
 rift-canopy = { version = "0.0.1", path = "../../crates/rift-canopy" }

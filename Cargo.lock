@@ -2986,6 +2986,8 @@ name = "rift"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "cap-fs-ext",
+ "cap-std",
  "clap",
  "getrandom 0.2.17",
  "proptest",
