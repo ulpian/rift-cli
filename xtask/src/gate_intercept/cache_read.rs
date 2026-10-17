@@ -42,8 +42,14 @@ const ADMITTED: [Admitted; 2] = [
 ];
 
 /// The names a body uses to reach the family's own directory, as code (string
-/// bodies are masked): the constant, and each cache's directory.
-const FAMILY_STORE: [&str; 3] = ["FAMILY_DIR", "outline_cache_dir", "linehash_cache_dir"];
+/// bodies are masked): the constant, the run-state directory every family
+/// store joins onto, and each cache's directory.
+const FAMILY_STORE: [&str; 4] = [
+    "FAMILY_DIR",
+    "family_state_dir",
+    "outline_cache_dir",
+    "linehash_cache_dir",
+];
 
 /// A read of a file's bytes, by any of the spellings a body would use.
 const FILE_READS: [&str; 4] = ["read_to_string", "read", "File::open", "OpenOptions"];
@@ -213,6 +219,24 @@ mod tests {
             leg.violations
                 .iter()
                 .any(|v| v.contains("`load_lines` reads a family cache")),
+            "{:#?}",
+            leg.violations
+        );
+    }
+
+    /// ★ A read of any family run state, reached through the run-state
+    /// directory rather than a cache's own, is a family-cache read too.
+    #[test]
+    fn a_read_under_the_family_state_dir_is_caught() {
+        let planted = corpus(
+            "fn helper() { spooled(); }\n\
+             fn spooled() { std::fs::read(family_state_dir(&c).join(SPOOL_DIR)); }\n",
+        );
+        let leg = screen_cache_reads(&planted);
+        assert!(
+            leg.violations
+                .iter()
+                .any(|v| v.contains("`spooled` reads a family cache")),
             "{:#?}",
             leg.violations
         );
