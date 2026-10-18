@@ -374,15 +374,20 @@ fn the_witness_needs_a_complete_word_or_a_named_leading_directory() {
         ("dir/1:a.rs", "cd dir&&cat 1:a.rs"),
         (".", "rg --files"),
         ("dir/.", "cd dir&&rg --files"),
+        // A `cd` after a read moves the reads after it.
+        ("dir/a.rs", "cat first&&cd dir&&cat a.rs"),
+        ("dir/a.rs", "cat first;cd dir;cat a.rs"),
+        ("dir/sub/a.rs", "cd dir&&cd sub&&cat a.rs"),
+        ("/abs/a.rs", "cd dir;cd /abs;cat a.rs"),
     ] {
         assert!(names_a_word(target, command), "{target:?} in {command:?}");
     }
     for (target, command) in [
         ("invented/a.rs", "cat a.rs"),
         ("invented/.", "rg --files"),
-        ("dir/a.rs", "cat first&&cd dir&&cat a.rs"),
-        ("dir/a.rs", "cat first;cd dir;cat a.rs"),
         ("dir/a.rs", "cd dir|cat a.rs"),
+        ("dir/a.rs", "cd dir"),
+        ("dir/abs/a.rs", "cd dir;cd /abs;cat a.rs"),
         ("dir//a.rs", "cd dir&&cat /a.rs"),
         ("dir/C:/a.rs", "cd dir&&cat C:/a.rs"),
         ("a.rs", "cat larger-a.rs"),

@@ -21,8 +21,9 @@
 //!
 //! A target is witnessed in exactly three ways: it is the value of one
 //! whole word of the line; it is the `.` of a member that is exactly
-//! `rg --files`; or it is the lexical join of the directory a genuinely
-//! leading `cd` named with one of those. A substring, a suffix of a word, a
+//! `rg --files`; or it is the lexical join of one of those under a directory
+//! the line's `cd`s compose to — each `cd` of one word moving the one before
+//! it, so a target may sit under any prefix of them. A substring, a suffix of a word, a
 //! piece of a quoted pattern or an operator is never a witness — the earlier
 //! check accepted any target that ended in `/` plus a word, which let
 //! `invented/a.rs` pass for `cat a.rs`. Neither is a search's pattern or the
@@ -83,16 +84,14 @@ pub(super) fn names_a_word(target: &str, command: &str) -> bool {
     if witnesses.contains(&target) || (target == "." && lists_implicitly(&tokens)) {
         return true;
     }
-    let Some(dir) = leading_directory(&tokens) else {
-        return false;
-    };
-    let under = |path: &str| format!("{}/{path}", dir.trim_end_matches('/'));
-    if lists_implicitly(&tokens) && target == under(".") {
-        return true;
-    }
-    witnesses
-        .into_iter()
-        .any(|path| !is_rooted(path) && target == under(path))
+    let listed = lists_implicitly(&tokens);
+    cd_directories(&tokens).iter().any(|dir| {
+        let under = |path: &str| format!("{}/{path}", dir.trim_end_matches('/'));
+        (listed && target == under("."))
+            || witnesses
+                .iter()
+                .any(|path| !is_rooted(path) && target == under(path))
+    })
 }
 
 /// Split a line into whole words and the three unquoted operators, or
@@ -319,34 +318,37 @@ fn value_option(option: &str, value_letters: &str) -> Option<(char, bool)> {
     Some((letter, letters.len() == at + letter.len_utf8()))
 }
 
-/// The directory a genuinely leading `cd` named, stepping over the `echo`
-/// and `printf` labels that may stand in front of it, each joined by `&&` or
-/// `;`. A `cd` joined by `;` still names the directory every relative word
-/// after it is opened from whenever that `cd` succeeded, and when it failed
-/// the joined name is one no file answers to.
-fn leading_directory(tokens: &[Token]) -> Option<&str> {
+/// Every directory the line's `cd`s compose to, in the order they run. Each
+/// member that is exactly `cd` and one known word moves the directory before
+/// it — a relative one under it, a rooted one from the root — wherever in the
+/// line it stands, when an `&&` or a `;` follows it. A `cd` that failed names a directory
+/// no joined path answers to, so the widest reading is still no invention.
+fn cd_directories(tokens: &[Token]) -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
     let mut rest = tokens;
-    loop {
-        let end = rest
-            .iter()
-            .position(|token| !matches!(token, Token::Word { .. }))?;
-        let (head, tail) = rest.split_at(end);
-        if !matches!(tail.first(), Some(Token::And | Token::Semi)) {
-            return None;
+    while let Some(end) = rest
+        .iter()
+        .position(|token| !matches!(token, Token::Word { .. }))
+    {
+        let (member, tail) = rest.split_at(end);
+        rest = tail.get(1..).unwrap_or_default();
+        // Only a `cd` the line goes on from: one a pipe feeds moves nothing.
+        let ([cd, dir], Some(Token::And | Token::Semi)) = (member, tail.first()) else {
+            continue;
+        };
+        let Some(dir) = word_value(dir).filter(|_| bare_word(cd) == Some("cd")) else {
+            continue;
+        };
+        if dir.is_empty() || dir.starts_with('-') {
+            continue;
         }
-        let command = head.first().and_then(bare_word);
-        match (command, head.get(1..)) {
-            (Some("cd"), Some([dir])) => {
-                let dir = word_value(dir)?;
-                if dir.is_empty() || dir.starts_with('-') {
-                    return None;
-                }
-                return Some(dir);
-            }
-            (Some("echo" | "printf"), _) => rest = tail.get(1..)?,
-            _ => return None,
-        }
+        let joined = match dirs.last() {
+            Some(before) if !is_rooted(dir) => format!("{}/{dir}", before.trim_end_matches('/')),
+            _ => dir.to_owned(),
+        };
+        dirs.push(joined);
     }
+    dirs
 }
 
 /// Whether some member of the line is exactly `rg --files`, the one form

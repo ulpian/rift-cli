@@ -34,6 +34,14 @@
 //! a run is sure either. Each of those reads is [`ShellSpan::MayNotRun`]:
 //! counted, so a caller weighing the line sees it, and never coverage.
 //!
+//! A `cd` may stand anywhere in the sequence, and each one moves the reads
+//! after it: a relative directory under the one before, a rooted one from the
+//! root. The directory is only as sure as the `cd`s that made it — one the
+//! line may never reach leaves every later read [`ShellSpan::MayNotRun`],
+//! whatever joins follow, because which directory it opened from depends on
+//! whether that `cd` ran. A `cd` whose directory is not one plain word, and a
+//! `||` anywhere after a `cd`, take the line out of the grammar.
+//!
 //! Only output that reaches the agent costs anything, so a stage inside a
 //! pipeline is never a unit of its own: the pipeline as a whole is.
 
@@ -51,13 +59,21 @@ const QUIET_FAILURES: &[&str] = &["grep", "egrep", "fgrep", "rg"];
 /// `||` or `;`, in the order they run.
 struct Sequence<'a> {
     steps: Vec<Step<'a>>,
-    /// Whether any member was joined by `||`.
-    fallback: bool,
 }
 
 /// One member of a sequence, and whether the line is sure to reach it.
 struct Step<'a> {
     pipeline: Pipeline<'a>,
+    sure: bool,
+    /// Whether this member is joined to the one before it by `||`.
+    alternative: bool,
+}
+
+/// Where the shell stands when a member runs, as far as the line says.
+struct Place {
+    /// Every `cd` so far, joined; [`None`] where the shell started.
+    dir: Option<String>,
+    /// Whether every one of those `cd`s is sure to have run.
     sure: bool,
 }
 
@@ -80,41 +96,49 @@ impl<'a> Sequence<'a> {
     /// cannot read is refused there, where its reason is known.
     fn parse(body: &'a str) -> Self {
         let mut steps = Vec::new();
-        let mut fallback = false;
         for run in split_on(body, &[";"], usize::MAX) {
             let mut sure = true;
             for (at, alternative) in split_on(run, &["||"], usize::MAX).into_iter().enumerate() {
                 // Past a run's first `||`, a member runs or not by whether
                 // something before it failed, which no command line says.
-                fallback |= at > 0;
                 sure &= at == 0;
-                for member in split_on(alternative, &["&&"], usize::MAX) {
+                for (index, member) in split_on(alternative, &["&&"], usize::MAX)
+                    .into_iter()
+                    .enumerate()
+                {
                     let pipeline = Pipeline::parse(member);
                     let quiet = pipeline.may_fail_quietly();
-                    steps.push(Step { pipeline, sure });
+                    let alternative = at > 0 && index == 0;
+                    steps.push(Step {
+                        pipeline,
+                        sure,
+                        alternative,
+                    });
                     sure &= !quiet;
                 }
             }
         }
-        Self { steps, fallback }
+        Self { steps }
     }
 
     /// The call this sequence is, its relative paths under `dir`.
-    fn compose(&self, dir: Option<&str>) -> Option<ShellCall> {
-        // A `cd` that failed leaves the shell where it was, and a `||` after
-        // it would then read a fallback the paths below misplace.
-        if dir.is_some() && self.fallback {
-            return None;
-        }
+    fn compose(&self, dir: Option<String>) -> Option<ShellCall> {
+        let mut place = Place { dir, sure: true };
         let mut reads: Vec<ShellRead> = Vec::new();
         for step in &self.steps {
+            // A `cd` that failed leaves the shell where it was, and a `||`
+            // after it would then read a fallback the paths below misplace.
+            if step.alternative && place.dir.is_some() {
+                return None;
+            }
+            if let Some(target) = step.pipeline.cd_target() {
+                place.enter(target, step.sure);
+                continue;
+            }
             match step.pipeline.effect()? {
-                Member::Reads(found) if step.sure => reads.extend(found),
-                Member::Reads(found) => reads.extend(found.into_iter().map(|read| ShellRead {
-                    span: ShellSpan::MayNotRun,
-                    narrowing: None,
-                    ..read
-                })),
+                Member::Reads(found) => {
+                    reads.extend(found.into_iter().map(|read| place.locate(read, step.sure)));
+                }
                 // A label read no file, so it adds no request, and it is no
                 // reason to leave the rest of the line unaccounted for.
                 Member::Label => {}
@@ -122,9 +146,9 @@ impl<'a> Sequence<'a> {
                 // included, a shape nobody has measured — it would put a
                 // question about names inside a decision about content, which
                 // rule 3 exists to prevent.
-                Member::Listing(listing) if self.steps.len() == 1 => {
+                Member::Listing(listing) if place.sure && self.only_reader_is(step) => {
                     return Some(ShellCall::Listing(ShellListing {
-                        dir: under(dir, listing.dir),
+                        dir: under(place.dir.as_deref(), listing.dir),
                         pattern: listing.pattern,
                     }));
                 }
@@ -138,14 +162,38 @@ impl<'a> Sequence<'a> {
         if reads.is_empty() {
             return None;
         }
-        let reads = reads
-            .into_iter()
-            .map(|read| ShellRead {
-                path: under(dir, read.path),
-                ..read
-            })
-            .collect();
         Some(ShellCall::Read(reads))
+    }
+
+    /// Whether every member but `step` is a `cd`, which a listing may stand
+    /// beside because it only says where the listing looked.
+    fn only_reader_is(&self, step: &Step<'_>) -> bool {
+        self.steps
+            .iter()
+            .all(|other| std::ptr::eq(other, step) || other.pipeline.cd_target().is_some())
+    }
+}
+
+impl Place {
+    /// Move to `target`, by a `cd` the line reaches for sure when `ran`.
+    fn enter(&mut self, target: String, ran: bool) {
+        self.dir = Some(under(self.dir.as_deref(), target));
+        self.sure &= ran;
+    }
+
+    /// `read` as opened from here, by a member the line reaches for sure when
+    /// `ran`: counted and never coverage unless both it and every `cd` before
+    /// it are sure.
+    fn locate(&self, read: ShellRead, ran: bool) -> ShellRead {
+        let path = under(self.dir.as_deref(), read.path);
+        if ran && self.sure {
+            return ShellRead { path, ..read };
+        }
+        ShellRead {
+            path,
+            span: ShellSpan::MayNotRun,
+            narrowing: None,
+        }
     }
 }
 
@@ -155,6 +203,15 @@ impl<'a> Pipeline<'a> {
     fn parse(member: &'a str) -> Self {
         Self {
             stages: split_on(member, &["|"], usize::MAX),
+        }
+    }
+
+    /// The directory this pipeline moves to, when it is exactly one `cd` of
+    /// one plain directory.
+    fn cd_target(&self) -> Option<String> {
+        match self.stages.as_slice() {
+            [stage] => cd_dir(stage),
+            _ => None,
         }
     }
 
@@ -261,7 +318,7 @@ fn cd_prefix(command: &str) -> (Option<String>, &str) {
 /// The only entry point. The line is parsed into a sequence of pipelines and
 /// its reads composed over them (see the module documentation): a leading
 /// `cd <dir> &&` or `cd <dir>;` puts every relative path under its
-/// directory, members joined by `&&` or `;` contribute their reads in order
+/// directory, a later `cd` moves every read after it, members joined by `&&` or `;` contribute their reads in order
 /// and labels contribute none, a member the line may never reach is read as
 /// [`ShellSpan::MayNotRun`], and a pipeline's later stages narrow or filter
 /// what its first stage read.
@@ -269,7 +326,7 @@ fn cd_prefix(command: &str) -> (Option<String>, &str) {
 /// Everything else is what it always was — no redirection, no substitution,
 /// no variable, no glob outside a pattern argument, no environment
 /// assignment, no `sudo`, no `xargs`, no background `&`, no `||` after a
-/// `cd`, no second `cd`, no `cd` anywhere but the front, no listing mixed in among reads or
+/// `cd`, no `cd` but of one plain directory, no listing mixed in among reads or
 /// piped onward — and every one of those is a character, a word or a member
 /// the walk never accepts.
 #[must_use]
@@ -278,7 +335,7 @@ pub fn recognise(command: &str) -> Option<ShellCall> {
         return None;
     }
     let (dir, body) = cd_prefix(command);
-    Sequence::parse(body).compose(dir.as_deref())
+    Sequence::parse(body).compose(dir)
 }
 
 /// The directory a recognised line's leading `cd` moved to, exactly as the
