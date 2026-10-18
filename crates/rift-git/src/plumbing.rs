@@ -4,6 +4,8 @@
 //! chain, so BYTE parity is *inherited* — there is no second
 //! canonicalization to audit. All writes go through the same argv-safe seam.
 
+use std::path::{Path, PathBuf};
+
 use rift_core::{RedactedBytes, Result, RiftError, SecretBytes};
 
 use crate::{
@@ -445,13 +447,35 @@ fn existing_shard_tip(
     ))
 }
 
+/// The name every graft's scratch index wears inside the git dir, and the
+/// prefix [`sweep_stale_graft_indexes`] lists by.
+const GRAFT_INDEX_PREFIX: &str = "rift-graft-index-";
+
+/// The suffix of the lock file a live graft holds beside its index.
+const GRAFT_HELD_SUFFIX: &str = "-held";
+
+/// How old an unheld graft index must be before the sweep removes it: a
+/// graft lasts seconds, and a file this old was left by a killed worker or
+/// written by a binary from before the lock existed.
+const GRAFT_INDEX_STALE_MS: i64 = 86_400_000;
+
 /// Build the merged root tree in a scratch index seeded from the current tip,
 /// then graft the checkpoint tree at the shard path. Git owns the merge +
 /// canonical framing, so no ancestor tree is rebuilt by hand. The scratch
 /// index is removed whether or not the graft succeeds.
+///
+/// A killed worker leaves its index behind, and the only safe remover is one
+/// that can tell a dead graft from a live one without a pid probe (no
+/// `kill(pid, 0)`, no `lsof`, no `unsafe`). So a live graft is a **locked
+/// file**: the `-held` sibling is opened and `try_lock`ed here and the handle
+/// lives for the graft, released by the OS when the process dies. The lock
+/// sits beside the index rather than on it because git replaces the index by
+/// renaming its own `.lock` over it on every write and refuses a pre-created
+/// empty index, so a handle on the index path would name an orphaned inode
+/// after the first `read-tree`.
 fn graft_root_tree(repo: &RepoPaths, tip: Option<&str>, spec: &OrphanCommit<'_>) -> Result<String> {
     let index_path = repo.git_dir.join(format!(
-        "rift-graft-index-{}-{}",
+        "{GRAFT_INDEX_PREFIX}{}-{}",
         std::process::id(),
         &spec.shard_path.replace('/', "")
     ));
@@ -463,9 +487,86 @@ fn graft_root_tree(repo: &RepoPaths, tip: Option<&str>, spec: &OrphanCommit<'_>)
         .into_owned();
     let env = [("GIT_INDEX_FILE", index_str.as_str())];
     let _ = std::fs::remove_file(&index_path); // start clean
+    let held_path = graft_held_path(&index_path);
+    let held = hold_graft_index(&held_path);
     let root_tree = graft_in_index(repo, tip, spec, &env);
     let _ = std::fs::remove_file(&index_path); // best-effort cleanup
+    drop(held);
+    let _ = std::fs::remove_file(&held_path);
     root_tree
+}
+
+/// The lock file a graft holds beside `index_path`.
+fn graft_held_path(index_path: &Path) -> PathBuf {
+    let mut name = index_path.as_os_str().to_owned();
+    name.push(GRAFT_HELD_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Open and lock the graft's `-held` file. Best-effort: a graft that cannot
+/// take its lock still runs — the age guard then covers its index — because
+/// refusing to archive over a lock file would strand capture.
+fn hold_graft_index(held_path: &Path) -> Option<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(held_path)
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(file)
+}
+
+/// Remove the scratch indexes under `git_dir` that no graft holds and that
+/// are older than a day at `now_ms`; the count removed. Never a hook's
+/// work — the idle sweep's — and never a file a process holds open: a
+/// `-held` sibling whose lock cannot be taken is a live graft, and its index
+/// is kept however old it looks. A pre-lock binary's index has no sibling,
+/// which is what the age is for.
+#[must_use]
+pub fn sweep_stale_graft_indexes(git_dir: &Path, now_ms: i64) -> usize {
+    let Ok(entries) = std::fs::read_dir(git_dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(GRAFT_INDEX_PREFIX) || name.ends_with(GRAFT_HELD_SUFFIX) {
+            continue;
+        }
+        if !graft_index_is_stale(&path, now_ms) {
+            continue;
+        }
+        let held_path = graft_held_path(&path);
+        let Some(unheld) = hold_graft_index(&held_path) else {
+            continue; // `WouldBlock` or unopenable: somebody's, or not ours to say
+        };
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+        drop(unheld);
+        let _ = std::fs::remove_file(&held_path);
+    }
+    removed
+}
+
+/// Whether `path` was last written more than [`GRAFT_INDEX_STALE_MS`] before
+/// `now_ms`; an unreadable or future mtime is not stale.
+fn graft_index_is_stale(path: &Path, now_ms: i64) -> bool {
+    let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return false;
+    };
+    let Ok(modified_ms) = i64::try_from(since_epoch.as_millis()) else {
+        return false;
+    };
+    now_ms.saturating_sub(modified_ms) > GRAFT_INDEX_STALE_MS
 }
 
 /// Seed the scratch index named by `env` from the tip's root tree (when the
@@ -506,8 +607,6 @@ fn advance_branch(repo: &RepoPaths, branch: &str, commit: &str, tip: Option<&str
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     #[cfg(feature = "gix")]
     use crate::discover;
@@ -848,5 +947,50 @@ mod tests {
         let (_tmp, repo) = init_repo();
         assert!(hash_files_write(&repo, &["a\nb"]).is_err());
         assert_eq!(hash_files_write(&repo, &[]).unwrap(), Vec::<String>::new());
+    }
+
+    /// The sweep's two refusals and its one removal, with the clock injected:
+    /// an index a day old that nobody holds goes; one whose `-held` sibling is
+    /// locked (here, by this test) stays however old; a fresh one stays.
+    #[test]
+    fn a_stale_graft_index_nobody_holds_is_swept_and_a_held_one_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_dir = tmp.path();
+        let now_ms: i64 = 1_790_000_000_000;
+        let two_days_ago = std::time::UNIX_EPOCH
+            + std::time::Duration::from_millis(u64::try_from(now_ms).unwrap() - 2 * 86_400_000);
+        let age = |path: &Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(two_days_ago)
+                .unwrap();
+        };
+        let stale = git_dir.join("rift-graft-index-4242-abcd");
+        std::fs::write(&stale, b"index").unwrap();
+        age(&stale);
+        let held = git_dir.join("rift-graft-index-4343-ef01");
+        std::fs::write(&held, b"index").unwrap();
+        age(&held);
+        let held_lock = hold_graft_index(&graft_held_path(&held)).expect("the test holds it");
+        age(&graft_held_path(&held));
+        let fresh = git_dir.join("rift-graft-index-4444-2345");
+        std::fs::write(&fresh, b"index").unwrap();
+        let unrelated = git_dir.join("index");
+        std::fs::write(&unrelated, b"not ours").unwrap();
+        age(&unrelated);
+
+        assert_eq!(sweep_stale_graft_indexes(git_dir, now_ms), 1);
+        assert!(!stale.exists(), "a day-old index nobody holds is swept");
+        assert!(held.exists(), "a held index is kept however old");
+        assert!(graft_held_path(&held).exists());
+        assert!(fresh.exists(), "a fresh index is a graft in progress");
+        assert!(unrelated.exists(), "only the graft prefix is listed");
+
+        drop(held_lock);
+        assert_eq!(sweep_stale_graft_indexes(git_dir, now_ms), 1);
+        assert!(!held.exists() && !graft_held_path(&held).exists());
+        assert_eq!(sweep_stale_graft_indexes(git_dir, now_ms), 0);
     }
 }

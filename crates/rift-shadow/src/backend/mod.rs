@@ -23,7 +23,7 @@ mod archive;
 mod artifacts;
 pub mod boundary_gaps;
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 mod leaves;
 pub mod native_read;
 mod originals;

@@ -103,6 +103,12 @@ fn checkpoint_summary_segment(
     }
 }
 
+/// The one spelling of a missing anchor, shared word for word with the
+/// catalogue row (`rift-canopy`): a checkpoint minted on an unborn HEAD names
+/// no commit, and the detail says so rather than "unavailable", which reads
+/// as a read failure.
+pub(crate) const NO_ANCHOR_LABEL: &str = "no commit anchor";
+
 fn checkpoint_fact_lines(
     entry: &CheckpointCatalogueEntry,
     timestamp: Option<i64>,
@@ -127,7 +133,7 @@ fn checkpoint_fact_lines(
         fact_line("checkpoint", &entry.checkpoint_id),
         fact_line(
             "anchor commit",
-            entry.anchor_commit.as_deref().unwrap_or("unavailable"),
+            entry.anchor_commit.as_deref().unwrap_or(NO_ANCHOR_LABEL),
         ),
         fact_line("chain", &chain),
         fact_line("timestamp", &timestamp),
@@ -526,6 +532,27 @@ mod tests {
 
     use super::super::fixtures::{entry, item_text, rich_entry};
     use super::*;
+
+    /// An anchorless checkpoint's fact line names the absence with the one
+    /// label the catalogue row uses, never "unavailable".
+    #[test]
+    fn an_anchorless_checkpoint_names_no_commit_anchor() {
+        let mut anchorless = entry(&"e".repeat(64), &"d".repeat(40));
+        anchorless.anchor_commit = None;
+        let lines = checkpoint_fact_lines(&anchorless, None, TimestampProvenance::Recorded, &[]);
+        let anchor = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>()
+            })
+            .find(|text| text.contains("anchor commit"))
+            .expect("the anchor fact line");
+        assert!(anchor.contains("no commit anchor"), "{anchor}");
+        assert!(!anchor.contains("unavailable"), "{anchor}");
+    }
 
     #[test]
     fn summary_facts_name_the_chain_position_and_absent_sessions() {
