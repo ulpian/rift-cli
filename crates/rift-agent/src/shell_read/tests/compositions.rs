@@ -296,16 +296,14 @@ fn a_composed_line_yields_one_request_per_read() {
                 ReadSpan::lines(1, HiKind::DefaultWindow(HiKind::END_OF_FILE))
             ),
             ("crates/b.rs".to_owned(), ReadSpan::Unknown),
-            (
-                "crates/c.rs".to_owned(),
-                ReadSpan::lines(1, HiKind::Explicit(9))
-            ),
+            // A search that matched nothing stops the `&&` run before `c.rs`.
+            ("crates/c.rs".to_owned(), ReadSpan::Unknown),
         ]
     );
     // The singular answer is the first read that supports coverage, which
     // for a one-command line is the only one it ever was.
     assert_eq!(
-        read_of("cd crates && grep needle b.rs && sed -n '1,9p' c.rs"),
+        read_of("cd crates && grep needle b.rs; sed -n '1,9p' c.rs"),
         Some((
             "crates/c.rs".to_owned(),
             ReadSpan::lines(1, HiKind::Explicit(9))

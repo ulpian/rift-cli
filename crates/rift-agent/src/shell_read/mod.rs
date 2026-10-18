@@ -162,6 +162,12 @@ pub enum ShellSpan {
     /// opened the file, so the read is counted; which lines arrived is
     /// nothing the command line names, so it is never coverage.
     Filtered,
+    /// A read the line may never have reached: a member after a `||`, or
+    /// after an `&&` that follows a search, which exits non-zero when nothing
+    /// matched without anything having gone wrong. It stays on the list a
+    /// caller weighs the whole line by, and it is never coverage, because
+    /// the command line cannot say it ran.
+    MayNotRun,
 }
 
 /// A trailing `| head -N`, `| tail -N` or `| sed -n 'A,Bp'` that narrows
@@ -280,7 +286,8 @@ impl ShellRead {
                 | ShellSpan::FromBottom { limit: None }
                 | ShellSpan::Matching
                 | ShellSpan::OneOfSeveralRuns { .. }
-                | ShellSpan::Filtered,
+                | ShellSpan::Filtered
+                | ShellSpan::MayNotRun,
                 _,
             ) => ReadSpan::Unknown,
         }
