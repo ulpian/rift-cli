@@ -1,0 +1,1 @@
+gr rep -rn needle a.rs b.rs  sed n '1,,9p' a.rs; ca.rs

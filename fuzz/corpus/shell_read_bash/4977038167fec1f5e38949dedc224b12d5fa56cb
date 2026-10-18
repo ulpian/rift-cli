@@ -1,0 +1,1 @@
+grep -nA3 needle src/lib-An needle src/lib.rs

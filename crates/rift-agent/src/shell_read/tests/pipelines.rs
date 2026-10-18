@@ -106,6 +106,33 @@ fn the_refused_pipelines_this_slice_admits_are_each_counted() {
     }
 }
 
+/// **`awk` printing fields of its input, and `wc` counting it, are filters.**
+///
+/// Each reads the pipe when given no operand, and the program is a print of
+/// fields and nothing else — no redirection, no command, no `getline` — so
+/// the read before it is counted and never coverage.
+#[test]
+fn awk_printing_fields_and_wc_counting_its_input_are_filters() {
+    for command in [
+        "cat src/lib.rs | wc -l",
+        "cat src/lib.rs | wc",
+        "cat src/lib.rs | wc -lw -c",
+        "cat src/lib.rs | grep needle | wc -l",
+        "cat src/lib.rs | awk '{print}'",
+        "cat src/lib.rs | awk '{ print $1, $3 }'",
+        "cat src/lib.rs | awk '{print NR, $NF;}'",
+        "cat src/lib.rs | awk -F: '{print $2}'",
+        "cat src/lib.rs | awk -F ',' '{print $1}'",
+        "cat src/lib.rs | awk \"{print}\" | sort -u",
+    ] {
+        let Some(ShellCall::Read(reads)) = recognise(command) else {
+            panic!("{command:?} is a filtered read");
+        };
+        assert_eq!(reads.len(), 1, "{command}");
+        assert_eq!(reads.first().map(|r| r.span), Some(ShellSpan::Filtered), "{command}");
+    }
+}
+
 /// **A filtered read supports no coverage and is no search** (rules 2, 3).
 #[test]
 fn a_filtered_read_records_nothing_and_answers_no_search() {
@@ -148,7 +175,6 @@ fn a_stage_that_is_no_filter_still_refuses_the_line() {
         "cat src/lib.rs | uniq in.txt out.txt",
         "cat src/lib.rs | cut -c1-80 other.rs",
         "cat src/lib.rs | cut -d:",
-        "cat src/lib.rs | wc -l",
         "cat src/lib.rs | less",
         "cat src/lib.rs | cat",
         "cat src/lib.rs | xargs grep x",
@@ -160,6 +186,23 @@ fn a_stage_that_is_no_filter_still_refuses_the_line() {
         "ls crates | grep rift",
         "ls crates | head -n 5",
         "echo hi | grep h",
+        "cat src/lib.rs | wc -l other.rs",
+        "cat src/lib.rs | wc --lines",
+        "cat src/lib.rs | wc -L",
+        "cat src/lib.rs | wc -l > out.txt",
+        "ls crates | wc -l",
+        "cat src/lib.rs | awk '{print}' other.rs",
+        "cat src/lib.rs | awk '{print > \"out\"}'",
+        "cat src/lib.rs | awk '{print $1 | \"sh\"}'",
+        "cat src/lib.rs | awk '{system(\"rm x\")}'",
+        "cat src/lib.rs | awk '{getline; print}'",
+        "cat src/lib.rs | awk 'BEGIN {print}'",
+        "cat src/lib.rs | awk '{print $(NF-1)}'",
+        "cat src/lib.rs | awk -f prog.awk",
+        "cat src/lib.rs | awk -v x=1 '{print}'",
+        "cat src/lib.rs | awk -F '{print}'",
+        "cat src/lib.rs | awk {print}",
+        "cat src/lib.rs | awk",
     ] {
         assert!(
             recognise(command).is_none(),

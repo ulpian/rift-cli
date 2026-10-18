@@ -1,0 +1,1 @@
+cd crates && /usr/bin/sed -n '0,9p' a.rs && /bin/& /usr/b

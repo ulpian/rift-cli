@@ -1,0 +1,1 @@
+grep -i -- nawk 'NR>=1 && NR<=eedle5 {print NR": "$0}' src /l

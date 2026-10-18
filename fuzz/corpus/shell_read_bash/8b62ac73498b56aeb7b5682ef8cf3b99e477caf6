@@ -1,0 +1,1 @@
+grep -n "a\"; cat x" src/lib.rs && cgrep -n neeat "dle src/libsrc/a\"

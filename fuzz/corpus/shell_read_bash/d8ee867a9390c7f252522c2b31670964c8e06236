@@ -1,0 +1,1 @@
+cd crates && echo '== a =grep .r=' && sed -n ' 100,200p' src/lisb

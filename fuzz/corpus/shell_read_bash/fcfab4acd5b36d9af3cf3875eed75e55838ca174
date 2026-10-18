@@ -1,0 +1,1 @@
+sed on '5p;$p$p' s/li,5p;$p$p' s.rs

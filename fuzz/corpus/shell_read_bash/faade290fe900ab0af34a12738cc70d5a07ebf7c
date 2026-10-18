@@ -1,0 +1,1 @@
+sed on '1,5p;$p' src/lib.rs

@@ -1,0 +1,1 @@
+awk 'N?R>=1 && NR<=5 {p: "$0}' sc- crates 1&& g2ep -n -A 2 'f a' a

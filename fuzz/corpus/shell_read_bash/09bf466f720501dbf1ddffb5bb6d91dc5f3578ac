@@ -1,0 +1,1 @@
+head | |cd crates && grep -in -e needl | heae sr

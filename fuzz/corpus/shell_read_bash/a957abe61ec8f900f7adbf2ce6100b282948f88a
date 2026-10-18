@@ -1,0 +1,1 @@
+cd/lib.rs |& se crates && sed -n 'p' src/lib.rs |& sezl-n 0

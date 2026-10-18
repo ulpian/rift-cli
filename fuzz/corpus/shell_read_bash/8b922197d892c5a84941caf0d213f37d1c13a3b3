@@ -1,0 +1,1 @@
+sed -n '1,0;$p' p;$p' secho a; cd 'my crate' ; sed -n '1,9prc

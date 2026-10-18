@@ -1,0 +1,1 @@
+grep c/liawk 'N?R>=1 && NR<=5 {print NR' sc6 crbate

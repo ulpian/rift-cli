@@ -16,6 +16,12 @@
 //! operands) — so a list can only be short of an option, which costs a
 //! saving, and never wrong about one, which would cost a claim. Long options
 //! and `--` are absent for the same reason.
+//!
+//! `awk` is the one filter whose program is a language, so its program is
+//! admitted by shape rather than by option: a single `print` of fields and
+//! counters inside one action. Everything that lets `awk` open, write or run
+//! something — a redirection, a pipe, `getline`, `system`, a `BEGIN` block, a
+//! computed field — sits outside that shape, and `-f` and `-v` are absent.
 
 use super::{bare, pattern_arg, Word};
 
@@ -33,6 +39,9 @@ const SORT_LETTERS: &str = "nrufbdV";
 /// operand: its second operand is a file it *writes*.
 const UNIQ_LETTERS: &str = "cdui";
 
+/// The `wc` letters a filter may bundle: lines, words, bytes and characters.
+const WC_LETTERS: &str = "lwcm";
+
 /// The `cut` letters that take a list of positions.
 const CUT_LIST_LETTERS: &str = "bcf";
 
@@ -46,6 +55,8 @@ pub(super) fn is_filter(words: &[Word]) -> bool {
         Some("cut") => cut_filter(rest),
         Some("sort") => sort_filter(rest),
         Some("uniq") => rest.iter().all(|word| bundle(word, UNIQ_LETTERS)),
+        Some("wc") => rest.iter().all(|word| bundle(word, WC_LETTERS)),
+        Some("awk") => awk_filter(rest),
         _ => false,
     }
 }
@@ -144,6 +155,56 @@ fn sort_filter(rest: &[Word]) -> bool {
         }
     }
     true
+}
+
+/// An `awk` that reads its input: an optional one-character `-F`, then one
+/// quoted program that prints fields, and nothing after — a word after the
+/// program is a file `awk` would read in place of the pipe.
+fn awk_filter(rest: &[Word]) -> bool {
+    let mut words = rest.iter();
+    let Some(mut program) = words.next() else {
+        return false;
+    };
+    if let Some(attached) = bare(program).and_then(|text| text.strip_prefix("-F")) {
+        if !value(attached, &mut words, |text| text.chars().count() == 1) {
+            return false;
+        }
+        let Some(next) = words.next() else {
+            return false;
+        };
+        program = next;
+    }
+    program.quoted && is_print_program(&program.text) && words.next().is_none()
+}
+
+/// A program that is one action printing fields and counters: `{print}`,
+/// `{ print $1, $NF; }`. The shape is the whole admission, so whitespace is
+/// the only freedom it leaves.
+fn is_print_program(text: &str) -> bool {
+    let Some(body) = text
+        .trim()
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+    else {
+        return false;
+    };
+    let body = body.trim();
+    let body = body.strip_suffix(';').unwrap_or(body).trim_end();
+    let Some(items) = body.strip_prefix("print") else {
+        return false;
+    };
+    if items.is_empty() {
+        return true;
+    }
+    items.starts_with([' ', '\t']) && items.split(',').all(|item| is_print_item(item.trim()))
+}
+
+/// A field or a counter: `$0`, `$3`, `$NF`, `NR`, `NF`.
+fn is_print_item(item: &str) -> bool {
+    match item.strip_prefix('$') {
+        Some(field) => field == "NF" || is_number(field),
+        None => matches!(item, "NR" | "NF"),
+    }
 }
 
 /// An option's value, attached to it or as the next word, checked by `valid`.

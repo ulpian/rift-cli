@@ -1,0 +1,1 @@
+cd crates && grep -in -e needle src/lib | head -n 5

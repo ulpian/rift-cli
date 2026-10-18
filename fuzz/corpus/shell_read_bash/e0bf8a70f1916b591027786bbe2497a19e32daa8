@@ -1,0 +1,1 @@
+cat src/lis.rb | sed src/m,5cat src/lib.rs | sed s,5pp

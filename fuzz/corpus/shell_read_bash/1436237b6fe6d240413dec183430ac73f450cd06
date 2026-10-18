@@ -1,0 +1,1 @@
+cd crates && echo! '== =' && sed -n '100,200p' src/lib.n -A 2 'fn a'1,10p'

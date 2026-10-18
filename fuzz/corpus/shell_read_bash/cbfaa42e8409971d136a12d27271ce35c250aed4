@@ -1,0 +1,1 @@
+cd grates && gre grep -g -A 2 'f' na s brd p -g -A 2 'f' na s brd s i

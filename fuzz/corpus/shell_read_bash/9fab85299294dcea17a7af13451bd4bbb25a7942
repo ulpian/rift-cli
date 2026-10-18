@@ -1,0 +1,1 @@
+sed -n '1,40p;40p;src90,120p;7p' src/lib.rs

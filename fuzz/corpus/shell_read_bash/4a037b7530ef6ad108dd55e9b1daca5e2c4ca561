@@ -1,0 +1,1 @@
+echo a; cd 'mycrate' ; sed n '1,,9p' a.rs;t /b.rs

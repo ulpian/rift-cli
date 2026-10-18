@@ -1,0 +1,1 @@
+cd crho0'== a ==' &&  "a\$b" src/li/lib.rs | sed -n '0,10p'

@@ -1,0 +1,1 @@
+cat ~rc/lib.rs | tail -.rs 

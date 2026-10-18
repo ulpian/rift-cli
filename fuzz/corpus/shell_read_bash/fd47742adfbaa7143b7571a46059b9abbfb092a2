@@ -1,0 +1,1 @@
+g:sed -n '1, 0,  nl nesed -p;9:n '1,40p;9:::j:,p

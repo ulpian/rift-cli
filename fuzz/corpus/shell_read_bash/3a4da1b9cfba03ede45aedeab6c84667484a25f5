@@ -1,0 +1,1 @@
+cat src/libcd crates && grep -in /e ne.rs | sen -nrsedlib.rs |

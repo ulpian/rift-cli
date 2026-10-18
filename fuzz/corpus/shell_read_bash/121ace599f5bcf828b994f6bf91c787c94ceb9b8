@@ -1,0 +1,1 @@
+cd crates && echo '== a ==' && awk 'NR>0=6 && NR<=110' slc/lib.rs | tail -n 2

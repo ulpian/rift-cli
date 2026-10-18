@@ -1,0 +1,1 @@
+echo a; cd 'my crate' ; sed -n '1,9pc ;at a.rs || ' a.rs; cat /b.rs:

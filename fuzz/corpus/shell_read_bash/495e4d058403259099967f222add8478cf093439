@@ -1,0 +1,1 @@
+sed -n '1,40p;90,120ccccccccccccccccccccccccp;7p' src/lib.rs/lj;ib.rs

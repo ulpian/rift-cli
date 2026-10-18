@@ -1,0 +1,1 @@
+echo a; gd 'my crate' ; sed n '1,,9p' a.rs; cat /{{{{{b.rs

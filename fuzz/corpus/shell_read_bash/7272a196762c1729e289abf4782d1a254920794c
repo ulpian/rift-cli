@@ -1,0 +1,1 @@
+cd cratev && echo '== a ==' && awk '>NR=60 && NR<=110' src/lib.rsat  |idsrc 5

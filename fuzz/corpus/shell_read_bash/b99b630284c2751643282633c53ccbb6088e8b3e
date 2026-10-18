@@ -1,0 +1,1 @@
+cd crates && echo '== a ==' sd_te NR<=220' srcNR<=220' src/lib.rs | tail -n 5

@@ -1,0 +1,1 @@
+sed -n '1,+3p' s:ez:gej;/lib.rs

@@ -1,0 +1,1 @@
+cd cvates && sed -n '112p' src/lib.rs | tail -n 1

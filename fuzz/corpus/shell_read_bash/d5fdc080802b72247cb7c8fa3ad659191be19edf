@@ -1,0 +1,1 @@
+cd 00,'00p' s=c/lib.rs | sed -n '1,10p'
