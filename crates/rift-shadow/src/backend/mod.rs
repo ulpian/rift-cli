@@ -28,6 +28,7 @@ mod leaves;
 pub mod native_read;
 mod originals;
 pub mod rewrite;
+mod segments;
 mod shard;
 mod spills;
 mod spool;
@@ -56,6 +57,7 @@ pub use leaves::{
     ShardLeafBytes, SpillLeafBytes, TaskLeafBytes,
 };
 pub use originals::{ArchivedOriginal, OriginalState, ORIGINALS_DIR, ORIGINAL_SUFFIX};
+pub use segments::{Segments, TranscriptBody};
 pub use spills::{ArchivedSpill, SpillState, SPILLS_DIR, SPILL_SUFFIX};
 pub use spool::{parse_spool_record, SpoolHeader, SPOOL_RECORD_VERSION};
 pub use tasks::{TaskProvenance, TaskTranscriptState, TaskWorktree};

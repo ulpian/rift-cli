@@ -276,8 +276,9 @@ pub struct CheckpointArchive {
 /// No `Debug`: both fields are [`RedactedBytes`], which withholds it.
 #[derive(Clone)]
 pub struct ArchivedTranscript {
-    /// `transcript.jsonl` — the redacted full transcript, self-contained.
-    pub full: RedactedBytes,
+    /// `transcript.jsonl` — the redacted full transcript, self-contained:
+    /// one blob, or the parts a per-turn seal wrote ([`super::TranscriptBody`]).
+    pub full: super::TranscriptBody,
     /// `transcript.compact.jsonl` — the redacted deterministic compaction,
     /// also self-contained (a reader with one shard needs no other shard).
     pub compact: RedactedBytes,

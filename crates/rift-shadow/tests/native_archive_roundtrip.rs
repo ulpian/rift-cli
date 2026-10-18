@@ -629,6 +629,55 @@ fn the_committed_shard_tree_is_exactly_the_declared_artifact_set() {
     }
 }
 
+/// **A segmented transcript on real git objects.** The parts land as the
+/// `transcript.segments` tree the map names, every path is declared, no
+/// `transcript.jsonl` blob is written, and the one resolver reads the parts
+/// back through gix — on both origins — as the whole document the root binds.
+#[test]
+fn a_segmented_transcript_commits_its_parts_and_reads_back_whole() {
+    use rift_shadow::backend::{Segments, TranscriptBody};
+    use std::collections::BTreeSet;
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let doc = b"{\"type\":\"user\",\"text\":\"one\"}\n{\"type\":\"user\",\"text\":\"two\"}\n";
+    let mut pair = sealed_transcript(doc);
+    let whole = pair.full.as_slice().to_vec();
+    let seal_line = |line: &[u8]| {
+        rift_shadow_redact::redact(&SecretBytes::new(line.to_vec()))
+            .unwrap()
+            .redacted
+    };
+    let parts = doc
+        .split_inclusive(|b| *b == b'\n')
+        .map(seal_line)
+        .collect();
+    pair.full = TranscriptBody::Segments(Segments::new(parts).unwrap());
+    let archive = archive_with_transcript(tmp.path(), b"capture", Some(pair));
+    native_backend(tmp.path())
+        .archive_checkpoint(&archive)
+        .unwrap();
+
+    let committed = shard_tree_paths(tmp.path(), &archive.shard_path());
+    let mapped: BTreeSet<String> = archive.artifact_map().keys().cloned().collect();
+    assert_eq!(committed, mapped, "the tree git holds and the map agree");
+    assert!(
+        committed.contains("transcript.segments/000001"),
+        "{committed:?}"
+    );
+    assert!(!committed.contains("transcript.jsonl"), "{committed:?}");
+    for path in &committed {
+        let declared = rift_shadow::artifact_registry::is_declared(path);
+        assert!(declared.is_some(), "{path} declared nowhere");
+    }
+    let sub = GixSubstrate::open(tmp.path()).unwrap();
+    let id = archive.checkpoint_id.as_str();
+    let any = sub.read_artifact(id, "transcript.jsonl").unwrap();
+    assert_eq!(any.as_deref(), Some(whole.as_slice()));
+    let native = sub.read_native_artifact(id, "transcript.jsonl").unwrap();
+    assert_eq!(native.as_deref(), Some(whole.as_slice()));
+}
+
 /// **The planted-garbage case, on real git objects.** A blob written into the
 /// shard subtree under a name the enumeration does not carry is exactly what an
 /// attacker (or a careless writer) adds: it changes no Merkle leaf, so the

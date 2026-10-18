@@ -70,8 +70,8 @@ pub enum VersionField {
 #[derive(Debug, Clone, Copy)]
 pub struct ShardArtifact {
     /// The shard-relative path. `<id>` stands for a tool-use id and `<index>`
-    /// for a 0-based session index — the only two variable components a shard
-    /// tree has.
+    /// for a 0-based session or transcript-segment index — the only two
+    /// variable components a shard tree has.
     pub path: &'static str,
     /// The version its serialized form declares.
     pub version: VersionField,
@@ -183,6 +183,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
         sync_format_row: "Capture document (`content.redacted`)",
     },
     ShardArtifact {
+        path: "tasks/<id>/transcript.segments/<index>",
+        version: VersionField::None,
+        sync_format_row: "Capture document (`content.redacted`)",
+    },
+    ShardArtifact {
         path: "tool-originals/<id>.json",
         version: VersionField::None,
         sync_format_row: "Rewritten result original (`tool-originals/<id>.json`)",
@@ -209,6 +214,11 @@ pub const SHARD_ARTIFACTS: &[ShardArtifact] = &[
     },
     ShardArtifact {
         path: "transcript.jsonl",
+        version: VersionField::None,
+        sync_format_row: "Capture document (`content.redacted`)",
+    },
+    ShardArtifact {
+        path: "transcript.segments/<index>",
         version: VersionField::None,
         sync_format_row: "Capture document (`content.redacted`)",
     },

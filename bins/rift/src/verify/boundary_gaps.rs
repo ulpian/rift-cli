@@ -46,6 +46,13 @@ pub(super) fn present_gap_pass(
     for verdict in super::merkle::recorded_leaf_pass(&view, id)? {
         found.worst.keep_worse(verdict);
     }
+    // The parts are read from the native origin the audit was authenticated
+    // against; the retained view holds only the resolved transcript.
+    for verdict in
+        super::segments::segments_pass(&|name| reader.read_native_artifact(id, name), id)?
+    {
+        found.worst.keep_worse(verdict);
+    }
     super::passes::native_shard_passes(
         &view,
         id,

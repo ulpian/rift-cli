@@ -593,10 +593,12 @@ impl MemorySubstrate {
 
 impl SubstrateReader for MemorySubstrate {
     fn read_native_artifact(&self, id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .native_artifacts
-            .get(&(id.to_owned(), rel.to_owned()))
-            .cloned())
+        parse::segments::resolve_transcript(rel, |name| {
+            Ok(self
+                .native_artifacts
+                .get(&(id.to_owned(), name.to_owned()))
+                .cloned())
+        })
     }
 
     fn is_local_only(&self) -> bool {
@@ -628,10 +630,12 @@ impl SubstrateReader for MemorySubstrate {
         Ok(self.blobs.get(content_id).cloned())
     }
     fn read_artifact(&self, checkpoint_id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .artifacts
-            .get(&(checkpoint_id.to_string(), rel.to_string()))
-            .cloned())
+        parse::segments::resolve_transcript(rel, |name| {
+            Ok(self
+                .artifacts
+                .get(&(checkpoint_id.to_string(), name.to_string()))
+                .cloned())
+        })
     }
     fn integration_tips(&self) -> Result<Vec<String>> {
         Ok(self.integration_tips.clone())

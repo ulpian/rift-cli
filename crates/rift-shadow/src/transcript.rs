@@ -191,7 +191,7 @@ pub fn archived_transcript(
     let compact = rift_shadow_redact::redact_with(compacted.compact(), packs)?;
     Ok((
         ArchivedTranscript {
-            full: full.redacted,
+            full: full.redacted.into(),
             compact: compact.redacted,
             compact_start: compacted.compact_transcript_start,
             spills: Vec::new(),
