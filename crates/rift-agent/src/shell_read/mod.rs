@@ -45,11 +45,20 @@
 //! and a chain of reads and labels is decided on its reads alone. A line that
 //! is labels and nothing else is not a read at all.
 //!
+//! **Then the line is parsed and composed.** The shapes stopped paying once
+//! the census showed fifty of them refused with none above an eighth of the
+//! tokens, so the composition now lives in `tree.rs`: the line is parsed —
+//! with this module's own lexer, no shell parser — into a sequence of
+//! pipelines, and each node's reads are composed over it. A read piped into
+//! a *filter* (`filter.rs`: a `grep`, `cut`, `sort` or `uniq` that opens
+//! nothing of its own) is counted as a read of its file and spans
+//! [`ShellSpan::Filtered`], so it is never coverage.
+//!
 //! Three rules hold everywhere below.
 //!
 //! 1. **A non-match is never touched.** Every ambiguity — an option the list
 //!    does not name, a quote the grammar does not pin, a pipe into anything
-//!    but the three narrowing commands, a member that is not itself a read, a
+//!    but a narrowing command or a filter, a member that is not itself a read, a
 //!    character the shell would act on — ends in [`None`]. The cost of a
 //!    missed recognition is a saving; the cost of a wrong one is a decision
 //!    taken about content an agent never received.
@@ -69,7 +78,14 @@
 //!    is what keeps a name index from ever answering a question about
 //!    content.
 
+mod filter;
+mod tree;
+
 use crate::{HiKind, ReadChannel, ReadRequest, ReadSpan, SearchKind, SearchRequest};
+
+// The entry points moved with the composition they run; callers keep the
+// paths they always named.
+pub use tree::{leading_cd, recognise};
 
 /// The longest command line this recogniser will even look at.
 ///
@@ -140,6 +156,12 @@ pub enum ShellSpan {
         /// The last line of the run.
         hi: u32,
     },
+    /// Lines of the file that reached the agent only through a later
+    /// pipeline stage that chose or reshaped them — a `grep`, a `cut`, a
+    /// `sort`, or a narrowing over several reads joined together. The shell
+    /// opened the file, so the read is counted; which lines arrived is
+    /// nothing the command line names, so it is never coverage.
+    Filtered,
 }
 
 /// A trailing `| head -N`, `| tail -N` or `| sed -n 'A,Bp'` that narrows
@@ -148,10 +170,11 @@ pub enum ShellSpan {
 /// The three commands are in the grammar as *readers* already, and in this
 /// position they are doing the same arithmetic on the run of lines the member
 /// before them produced rather than on a file. That is why they are the only
-/// pipe targets admitted: every other one — a `grep`, a `wc`, a pager, a
-/// `sed` that edits — either changes what the lines are or hands the window
-/// something other than lines, and a member piped into one of those is not a
-/// read this module will name.
+/// pipe targets that keep a span exact: a filter (`grep`, `cut`, `sort`,
+/// `uniq`) changes which lines arrive, so a read behind one is
+/// [`ShellSpan::Filtered`], and every other target — a `wc`, a pager, a `sed`
+/// that edits — hands the window something no read names, so a member piped
+/// into one is not a read this module will name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Narrowing {
     /// `| head -N`: the first `N` lines of the run that was produced.
@@ -256,7 +279,8 @@ impl ShellRead {
                 | ShellSpan::FromTop { limit: None }
                 | ShellSpan::FromBottom { limit: None }
                 | ShellSpan::Matching
-                | ShellSpan::OneOfSeveralRuns { .. },
+                | ShellSpan::OneOfSeveralRuns { .. }
+                | ShellSpan::Filtered,
                 _,
             ) => ReadSpan::Unknown,
         }
@@ -923,156 +947,6 @@ const LABEL_COMMANDS: &[&str] = &["echo", "printf"];
 /// directory is one a user or a package manager writes into, and a program
 /// found there is whatever was put there.
 const SYSTEM_COMMAND_DIRS: &[&str] = &["/usr/bin/", "/bin/"];
-
-/// Recognise one member: a simple command, and at most one trailing pipe into
-/// a narrowing command.
-///
-/// A narrowing is attached only to a member that is exactly one read. `cat a
-/// b | head -n 5` prints the first five lines of the two files *joined*, which
-/// is a run of neither of them, so the member is refused rather than
-/// described wrongly — and refusing a member refuses the whole line. A label
-/// piped onward is refused for the narrower version of the same reason: the
-/// narrowing rule is arithmetic on the lines a *read* produced, and a pipe out
-/// of something that read nothing is a shape nobody has measured.
-fn recognise_member(member: &str) -> Option<Member> {
-    let parts = split_on(member, &["|"], usize::MAX);
-    let (simple, narrowing) = match parts.as_slice() {
-        [simple] => (*simple, None),
-        [simple, narrow] => (*simple, Some(narrowing(narrow)?)),
-        _ => return None,
-    };
-    let member = recognise_simple(simple)?;
-    match (member, narrowing) {
-        (member, None) => Some(member),
-        (Member::Reads(mut reads), Some(narrowing)) => match reads.as_mut_slice() {
-            [read] => {
-                read.narrowing = Some(narrowing);
-                Some(Member::Reads(reads))
-            }
-            _ => None,
-        },
-        (Member::Listing(_) | Member::Label, Some(_)) => None,
-    }
-}
-
-/// Peel the optional leading `cd <dir> &&` or `cd <dir>;`, and say what is
-/// left of the line.
-///
-/// `&&` makes the directory a precondition of the reads. A `;` does not — the
-/// reads run even when the `cd` fails — and it is admitted all the same,
-/// because a `cd` fails only where its directory cannot be entered, and then
-/// every relative path this module puts under that directory names a file
-/// nobody can open either: the caller that resolves it finds nothing and
-/// records nothing. Where the `cd` succeeds the two joins deliver the same
-/// lines. So the difference costs at most a saving and never makes a claim,
-/// and a rooted path is read the same either way. `||`, a background `&` and
-/// a line break are not peeled.
-///
-/// Labels in front of the `cd` are stepped over, because a label is a member
-/// that does nothing and a rule that said otherwise here would mean an `echo`
-/// at the head of a line silently cost every path after it its directory. The
-/// labels are dropped with the `cd` for the same reason they are dropped
-/// anywhere else: they contribute no read.
-///
-/// The whole line comes back untouched when no `cd` is found, labels included,
-/// so an unpeeled label is still an ordinary member below.
-fn cd_prefix(command: &str) -> (Option<String>, &str) {
-    let mut rest = command;
-    loop {
-        let split = split_on(rest, &["&&", ";"], 1);
-        let [head, tail] = split.as_slice() else {
-            return (None, command);
-        };
-        if let Some(dir) = cd_dir(head) {
-            return (Some(dir), tail);
-        }
-        if !matches!(recognise_simple(head), Some(Member::Label)) {
-            return (None, command);
-        }
-        // Each step consumes one join, so this walks the line once at most.
-        rest = tail;
-    }
-}
-
-/// Recognise one command line, or leave it alone.
-///
-/// The only entry point. Above the published vocabulary it admits exactly
-/// three compositions, each one a shape whose delivered lines still follow
-/// from the line alone: a single leading `cd <dir> &&` or `cd <dir>;`, one
-/// trailing `| head -N` or `| tail -N` on a read, and members joined by `&&`
-/// or `;` of which every one is itself a read — **or a label**, which is a
-/// member that read nothing and so neither contributes a read nor takes the
-/// line out of the grammar.
-///
-/// Everything else is what it always was — no redirection, no substitution,
-/// no variable, no glob outside a pattern argument, no environment
-/// assignment, no `sudo`, no `xargs`, no background `&`, no second `cd`, no
-/// `cd` anywhere but the front, no listing mixed in among reads — and every
-/// one of those is a character, a word or a member the walk below never
-/// accepts.
-#[must_use]
-pub fn recognise(command: &str) -> Option<ShellCall> {
-    if command.len() > MAX_COMMAND_BYTES {
-        return None;
-    }
-    let (dir, body) = cd_prefix(command);
-    let dir = dir.as_deref();
-    let members = split_on(body, &["&&", ";"], usize::MAX);
-    let mut reads: Vec<ShellRead> = Vec::new();
-    for member in &members {
-        match recognise_member(member)? {
-            Member::Reads(found) => reads.extend(found),
-            // A label is a member with nothing to say for itself and nothing
-            // to answer for: it read no file, so it adds no request, and it
-            // is no reason to leave the rest of the line unaccounted for.
-            Member::Label => {}
-            // A listing stands alone. Beside anything else it would put a
-            // question about names inside a decision about content, which is
-            // the one substitution rule 3 exists to prevent — and "anything
-            // else" includes a label, because a listing among labels is a
-            // shape nobody has measured and refusing it costs one saving.
-            Member::Listing(listing) if members.len() == 1 => {
-                return Some(ShellCall::Listing(ShellListing {
-                    dir: under(dir, listing.dir),
-                    pattern: listing.pattern,
-                }));
-            }
-            Member::Listing(_) => return None,
-        }
-        if reads.len() > MAX_CHAIN_READS {
-            return None;
-        }
-    }
-    // A line that labelled its own output and read nothing is not a read.
-    if reads.is_empty() {
-        return None;
-    }
-    Some(ShellCall::Read(
-        reads
-            .into_iter()
-            .map(|read| ShellRead {
-                path: under(dir, read.path),
-                ..read
-            })
-            .collect(),
-    ))
-}
-
-/// The directory a recognised line's leading `cd` moved to, exactly as the
-/// line spelled it.
-///
-/// [`recognise`] folds that directory into every path it returns, which is
-/// what a read needs; the checkout an agent read *in* needs the directory
-/// itself, because a read path may be absolute and say nothing about where the
-/// shell stood. Only a line the grammar recognises answers, so a `cd` in front
-/// of a command nothing here can read never moves an observation.
-#[must_use]
-pub fn leading_cd(command: &str) -> Option<String> {
-    match recognise(command) {
-        Some(_) => cd_prefix(command).0,
-        None => None,
-    }
-}
 
 /// Recognise one *simple* command — the published vocabulary, and nothing
 /// composed.

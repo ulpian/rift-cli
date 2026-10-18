@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn a_pipe_and_a_chain_are_named_by_what_follows_the_read() {
         assert_eq!(
-            shape_of("cat a | grep x"),
+            shape_of("cat a | grep -l x"),
             Shape::PipedIntoFilter(Filter::Grep)
         );
         assert_eq!(
@@ -700,7 +700,7 @@ mod tests {
     fn the_shell_itself_is_named_where_it_is_the_whole_reason() {
         assert_eq!(shape_of("cat a 2>&1"), Shape::Redirect);
         assert_eq!(
-            shape_of("cat a 2>/dev/null | grep x"),
+            shape_of("cat a 2>/dev/null | grep -l x"),
             Shape::PipedIntoFilter(Filter::Grep)
         );
         assert_eq!(shape_of("cat $F"), Shape::QuotingOrShellCharacter);

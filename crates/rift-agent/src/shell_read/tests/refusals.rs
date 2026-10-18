@@ -52,15 +52,15 @@ fn a_shell_that_would_do_more_than_read_is_left_alone() {
 /// **The compositions stop exactly where they are spelled.**
 ///
 /// Each line here is one step outside one of the three rules — a pipe into
-/// something that is not a narrowing, a member that is not a read, a `cd`
+/// something that is neither a narrowing nor a filter, a stage that is a
+/// narrowing in name but states no count, a member that is not a read, a `cd`
 /// that is not the only one or not at the front, a separator the grammar
 /// does not join with — and every one of them takes the whole command line
 /// out of the grammar rather than costing only the part that stepped out.
 #[test]
 fn a_composition_the_grammar_does_not_spell_is_left_alone() {
     for command in [
-        // A pipe target that is not one of the two narrowing commands.
-        "cat src/lib.rs | grep needle",
+        // A pipe target that is neither a narrowing nor a filter.
         "cat src/lib.rs | wc -l",
         "cat src/lib.rs | less",
         "cat src/lib.rs | cat",
@@ -71,10 +71,7 @@ fn a_composition_the_grammar_does_not_spell_is_left_alone() {
         "cat src/lib.rs | head -0",
         "cat src/lib.rs | head -n x",
         "cat src/lib.rs | tail -n -5",
-        // One narrowing, not two, and never on a member that is several
-        // reads or a listing.
-        "cat src/lib.rs | head -n 20 | tail -n 5",
-        "cat a.rs b.rs | head -n 5",
+        // Never a pipe out of a listing, nor an empty stage or `||`.
         "ls crates | head -n 5",
         "cat src/lib.rs |",
         "| cat src/lib.rs",
@@ -387,10 +384,10 @@ fn a_command_spelled_from_any_other_directory_is_left_alone() {
 /// **Several named files are searched only as one search, whole.**
 ///
 /// The several-file search stops where the one-file search does — no flag
-/// the set does not pin, wherever it stands — and at three places of its
-/// own: a narrowing pipe, which cuts the files' matches *joined* and so is a
-/// run of none of them; a file list past the cap on reads one line may make;
-/// and a word after the pattern that the tool would take for an option.
+/// the set does not pin, wherever it stands — and at two places of its own:
+/// a file list past the cap on reads one line may make, and a word after the
+/// pattern that the tool would take for an option. A narrowing pipe after it
+/// is admitted and leaves each file filtered (`pipelines.rs`).
 #[test]
 fn a_several_file_search_stops_where_the_one_file_search_does() {
     let over_the_cap = (0..=MAX_CHAIN_READS)
@@ -398,9 +395,6 @@ fn a_several_file_search_stops_where_the_one_file_search_does() {
         .collect::<Vec<_>>()
         .join(" ");
     for command in [
-        "grep -n needle src/lib.rs src/main.rs | head -n 5",
-        "grep -n needle src/lib.rs src/main.rs | tail -5",
-        "rg -n needle src/lib.rs src/main.rs | head -n 5",
         "grep -rn needle src/lib.rs src/main.rs",
         "grep -ln needle src/lib.rs src/main.rs",
         "grep -hn needle src/lib.rs src/main.rs",
