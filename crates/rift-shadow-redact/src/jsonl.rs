@@ -147,8 +147,11 @@ enum Route {
 ///
 /// Total: failed decoded values close their physical line slots. Failed flat
 /// runs retain full-context protection before independently safe sub-runs seal.
+/// `first_line` is the 0-based document index of `text`'s first line, which
+/// numbers any placeholder record (0 for a whole document).
 pub(crate) fn redact_content(
     text: &str,
+    first_line: usize,
     packs: &RulePackSet,
     report: &mut RedactionReport,
 ) -> String {
@@ -158,8 +161,8 @@ pub(crate) fn redact_content(
     let lines: Vec<&str> = text.split('\n').collect();
     match try_structured(text, text, packs, report) {
         Ok(Some(out)) => out,
-        Ok(None) => redact_lines(&lines, packs, report),
-        Err(_) => fallback::replace_record(&lines, 0, report),
+        Ok(None) => redact_lines(&lines, first_line, packs, report),
+        Err(_) => fallback::replace_record(&lines, first_line, report),
     }
 }
 
@@ -168,7 +171,12 @@ pub(crate) fn redact_content(
 /// block. The run matters: detectors that span lines (a PEM private-key block
 /// is the one that bites) only see their subject if the lines stay together,
 /// so naive per-line redaction would quietly stop sealing private keys.
-fn redact_lines(lines: &[&str], packs: &RulePackSet, report: &mut RedactionReport) -> String {
+fn redact_lines(
+    lines: &[&str],
+    first_line: usize,
+    packs: &RulePackSet,
+    report: &mut RedactionReport,
+) -> String {
     let mut segments: Vec<String> = Vec::new();
     let mut i = 0usize;
     while let Some(line) = lines.get(i) {
@@ -195,7 +203,13 @@ fn redact_lines(lines: &[&str], packs: &RulePackSet, report: &mut RedactionRepor
         // Keep failed parsed records inside the raw context analysis: a block
         // detector may span them. Forced slots close even if raw JSON settles.
         let run = lines.get(start..i).unwrap_or_default();
-        segments.push(fallback::seal_run(run, start, forced, packs, report));
+        segments.push(fallback::seal_run(
+            run,
+            first_line + start,
+            forced,
+            packs,
+            report,
+        ));
     }
     segments.join("\n")
 }
@@ -218,6 +232,25 @@ fn route(line: &str, packs: &RulePackSet) -> Route {
         Ok(None) => Route::Flat,
         Err(_) => Route::Diverged,
     }
+}
+
+/// Whether a document may be cut between `prev_line` and `next_line` with the
+/// two sides sealed apart — rule R1 of the segmented seal.
+///
+/// Admitted only when both lines are sealed alone (each walks as a structure
+/// and settles), because every pass that is not line-local acts inside a flat
+/// run: a private-key block pasted as raw lines, a label and its value on two
+/// lines, a run's fixpoint and its fallback counts. A cut beside a flat or a
+/// diverged line could hand one run to two seals, so it is refused and the
+/// caller extends the segment to the next admitted cut. The lines are judged
+/// as the gate normalises them, and the probes' counts are thrown away.
+#[must_use]
+pub fn cut_is_safe(prev_line: &str, next_line: &str, packs: &RulePackSet) -> bool {
+    let structural = |line: &str| {
+        let text = crate::normalize(line.as_bytes());
+        route(&text, packs) == Route::Structural
+    };
+    structural(prev_line) && structural(next_line)
 }
 
 /// A throwaway report for a probe whose counts must never reach the real one.
@@ -907,7 +940,7 @@ mod tests {
         assert!(parse_faithfully(&deep).is_none());
         // …and the content path answers with flat redaction rather than a walk.
         let mut report = blank_report();
-        let out = redact_content(&deep, &RulePackSet::builtin(), &mut report);
+        let out = redact_content(&deep, 0, &RulePackSet::builtin(), &mut report);
         assert_eq!(report.redaction_flat_fallback, 0, "{}", out.len());
     }
 

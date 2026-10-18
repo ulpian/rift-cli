@@ -90,6 +90,7 @@ use crate::marks::{mask, select_spans};
 use crate::span::Span;
 
 pub use crate::fallback::{count_fallback_placeholders, is_fallback_placeholder};
+pub use crate::jsonl::cut_is_safe;
 pub use crate::packs::{PackRule, PackSample, PackSpec, PackWarning};
 pub(crate) use crate::shapes::{
     is_card_pan, is_e164_phone, is_exit_code_phone, is_labelled_taxpayer_id, is_nanp_phone,
@@ -331,6 +332,25 @@ pub fn redact(raw: &SecretBytes) -> Result<RedactionOutput> {
 /// The `Result` is the gate's stated contract with its callers, kept so a
 /// future failure mode has a channel that is not a panic.
 pub fn redact_with(raw: &SecretBytes, packs: &RulePackSet) -> Result<RedactionOutput> {
+    redact_with_at(raw, packs, 0)
+}
+
+/// Redact one **segment** of a line-oriented document: `raw` is the document's
+/// lines from 0-based index `first_line` on, each ending in its `\n`.
+///
+/// The pipeline is [`redact_with`]'s, with one difference: a placeholder record
+/// carries its line's index in the whole document rather than in the segment,
+/// so segments cut where [`cut_is_safe`] admits concatenate to exactly the bytes
+/// and counts of the whole document sealed at once. That equality is why a
+/// transcript may be sealed one turn at a time; it holds only at admitted cuts.
+///
+/// # Errors
+/// As [`redact_with`]: none for any input.
+pub fn redact_with_at(
+    raw: &SecretBytes,
+    packs: &RulePackSet,
+    first_line: usize,
+) -> Result<RedactionOutput> {
     let input_sha256 = sha256(raw.as_slice());
     let text = normalize(raw.as_slice());
     let mut report = RedactionReport {
@@ -344,7 +364,7 @@ pub fn redact_with(raw: &SecretBytes, packs: &RulePackSet) -> Result<RedactionOu
         redaction_flat_fallback: 0,
         redaction_fallback_placeholders: 0,
     };
-    let masked = jsonl::redact_content(&text, packs, &mut report);
+    let masked = jsonl::redact_content(&text, first_line, packs, &mut report);
     let redacted_sha256 = sha256(masked.as_bytes());
     let provenance = RedactionProvenance {
         rule_pack_versions: packs.version_set(),
@@ -520,7 +540,7 @@ fn sha256(bytes: &[u8]) -> Sha256Id {
 
 /// Normalize raw bytes to text: lossy UTF-8 + strip zero-width characters that
 /// could smuggle a secret past shape detectors.
-fn normalize(raw: &[u8]) -> String {
+pub(crate) fn normalize(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw)
         .chars()
         .filter(|c| !matches!(*c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'))
