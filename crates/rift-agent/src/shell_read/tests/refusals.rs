@@ -94,10 +94,8 @@ fn a_composition_the_grammar_does_not_spell_is_left_alone() {
         "cat src/lib.rs &&",
         "cat src/lib.rs ;",
         "cat src/lib.rs && && cat src/main.rs",
-        // A `cd` is one, and it is first.
+        // A `cd` of one plain directory, and reads after it (`cd_chains.rs`).
         "cd crates",
-        "cd crates && cd rift-core && cat src/lib.rs",
-        "cat src/lib.rs && cd crates && cat src/main.rs",
         "cd && cat src/lib.rs",
         "cd -P crates && cat src/lib.rs",
         "cd crates other && cat src/lib.rs",
@@ -315,16 +313,13 @@ fn a_late_option_the_grammar_does_not_pin_is_left_alone() {
 
 /// **A `cd` joined by `;` stops exactly where the `&&` one does.**
 ///
-/// The `;` admits the same one leading `cd` and nothing more: a second `cd`,
-/// one after a read, one with no directory, an option or two operands, a
+/// The `;` admits a `cd` as `&&` does — a second one and one after a read
+/// are `cd_chains.rs`'s — and nothing more: one with no directory, an option or two operands, a
 /// `cd` that ends the line, and the other joins a shell has — `||`, a
 /// background `&`, a line break — are each left alone.
 #[test]
-fn a_cd_joined_by_a_semicolon_is_admitted_only_at_the_front() {
+fn a_cd_joined_by_a_semicolon_is_admitted_only_with_a_plain_directory() {
     for command in [
-        "cd crates; cd rift-core; cat src/lib.rs",
-        "cd crates; cd rift-core && cat src/lib.rs",
-        "cat src/lib.rs; cd crates; cat src/main.rs",
         "cd; cat src/lib.rs",
         "cd -P crates; cat src/lib.rs",
         "cd crates other; cat src/lib.rs",
