@@ -13,7 +13,7 @@ use rift_store::Row;
 use super::Reason;
 
 /// `claude-code` and `antigravity`, the longest closed owner tokens.
-pub(super) const MAX_AGENT_BYTES: usize = 11;
+pub(in crate::capture_recovery) const MAX_AGENT_BYTES: usize = 11;
 /// `session_compaction`, the longest `EventKind` token.
 const MAX_KIND_BYTES: usize = 18;
 /// `tool_output_untrusted`, the longest `Trust` token.
@@ -225,7 +225,11 @@ pub(super) struct SameTurnFact {
 }
 
 /// A guarded text cell: present, text and within `max` bytes.
-pub(super) fn text(row: &Row, index: usize, max: usize) -> Result<String, Reason> {
+pub(in crate::capture_recovery) fn text(
+    row: &Row,
+    index: usize,
+    max: usize,
+) -> Result<String, Reason> {
     match row.get_opt_text(index) {
         Ok(Some(value)) if value.len() <= max => Ok(value),
         _ => Err(Reason::CellInvalid),
@@ -249,7 +253,7 @@ fn schema_one(row: &Row, index: usize) -> Result<(), Reason> {
 }
 
 /// A 64-character lowercase hex id or digest.
-pub(super) fn hex64(row: &Row, index: usize) -> Result<String, Reason> {
+pub(in crate::capture_recovery) fn hex64(row: &Row, index: usize) -> Result<String, Reason> {
     let value = text(row, index, 64)?;
     if value.len() != 64
         || !value

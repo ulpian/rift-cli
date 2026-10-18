@@ -14,6 +14,7 @@
 //! spells its expectations with live here.
 
 mod awk_line_pick;
+mod cd_chains;
 mod compositions;
 mod labels;
 mod piped_line_pick;

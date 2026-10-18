@@ -10,6 +10,7 @@
 //! the gap owed and visible — never a choice by time, by order or by a
 //! synthesized event, because a fabricated end would be historical
 //! attribution the evidence does not carry.
+pub(crate) mod load;
 #[cfg(test)]
 mod tests;
 

@@ -14,8 +14,8 @@
 //!
 //! What is asserted beyond "no panic": a recognised call never invents a
 //! target. Every path or directory it reports is either the value the shell
-//! passes for a complete word of the line, one such value read from under the
-//! directory a genuinely leading `cd` named (the only thing a `cd` may do to a
+//! passes for a complete word of the line, one such value read from under a
+//! directory the line's `cd`s compose to (the only thing a `cd` may do to a
 //! path), or the one directory `rg --files` implies — the property a mangled
 //! input could otherwise break silently. The words are cut by a quote-aware
 //! lexer of its own that also splits on `&&`, `;` and `|`, so a target joined
