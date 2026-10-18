@@ -3,6 +3,7 @@
 //! projection levelling and soak accrual that keep the binary of record
 //! honest. Separate because it is the one place a checkpoint is minted.
 
+mod assembly;
 mod originals;
 mod outlines;
 mod spills;
@@ -18,10 +19,11 @@ use super::audit::session_serve_lines;
 use super::git::{effective_config, session_raw_capture, state_from_token, strategy_kind};
 use super::{now_ms, projection_db_at};
 
+pub(crate) use self::assembly::assemble_session;
+use self::assembly::SessionAssembly;
 pub(super) use self::outlines::bind_and_cache_outlines;
 use self::outlines::bind_session_outlines;
 pub(crate) use self::spills::contained;
-use self::tasks::TaskSources;
 pub(crate) use self::tasks::{list_subagent_files, spawned_agents, subagents_dir};
 
 /// One archive of one commit, with what its caller opened for it: every step
@@ -115,24 +117,20 @@ pub(super) fn archive_in_git_hook(
 
     let repo = rift_git::discover(work_tree)?;
     let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
-    let raw = session_raw_capture(&repo.work_tree);
-    let facts = session_facts_for_archive(rt, store, &repo.work_tree, agent, session)?;
-    let (packs, notes) = crate::redactor_packs::capture_rule_packs(&repo.work_tree);
+    // A session-end/sweep condense archives the transcript too — same
+    // assembly, same boundary discipline as the post-commit worker. A git hook
+    // keeps no phase timings, so its timer is the disabled one.
+    let untimed = crate::hooktime::HookTimer::new("archive-now", false);
+    let SessionAssembly {
+        raw,
+        facts,
+        packs,
+        notes,
+        transcript,
+        transcript_raw_lines,
+        tasks,
+    } = assemble_session(&untimed, rt, store, &repo, agent, session)?;
     report_pack_notes(&notes);
-    // A session-end/sweep condense archives the transcript too — same source,
-    // same boundary discipline as the post-commit worker.
-    let spool = originals::Spool::load(&repo.common_dir, session, &packs);
-    let transcript = session_transcript(&repo.git_dir, session, &packs, &spool);
-    let (mut transcript, transcript_raw_lines) = match transcript {
-        Some((pair, raw_lines)) => (Some(pair), Some(raw_lines)),
-        None => (None, None),
-    };
-    let sources = TaskSources {
-        spool: Some(&spool),
-        ..TaskSources::of(&repo.git_dir, session, &packs, &facts)
-    };
-    let mut tasks = tasks::session_tasks(&sources);
-    spool.attach_orphans(transcript.as_mut(), &mut tasks);
 
     let archived = rt.block_on(rift_shadow::run_decision(
         &native, store, work_tree, session, &raw, decision, commit, now, facts, &packs, transcript,
@@ -1004,40 +1002,15 @@ fn run_archive(
         ..
     } = *ctx;
     let native = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
-    let raw = t.phase("archive_raw_capture", || {
-        session_raw_capture(&repo.work_tree)
-    });
-    let facts = t.phase("archive_read_facts", || {
-        session_facts_for_archive(rt, store, &repo.work_tree, agent, session_id)
-    })?;
-    // The repository's own redactor packs, folded in beside the built-ins. Any
-    // note is recorded as a queue marker rather than printed — the worker's
-    // stderr is /dev/null, so the next hook is what says it. (This comment used
-    // to describe the intent while the code called `report_pack_notes`, i.e.
-    // printed into the void; see `record_pack_notes`.)
-    let (packs, notes) = t.phase("rule_packs", || {
-        crate::redactor_packs::capture_rule_packs(&repo.work_tree)
-    });
-    // The session transcript: its ADDRESS was remembered off
-    // the hook payload in the session cache; the bytes are read here — in the
-    // detached worker, off git's latency budget — compacted on the raw side and
-    // sealed once per artifact. Best-effort like the capture itself: a missing
-    // or unreadable file archives a transcript-less checkpoint, never an error,
-    // because the agent owns that file and may have moved or pruned it.
-    let spool = originals::Spool::load(&repo.common_dir, session_id, &packs);
-    let transcript = t.phase("archive_transcript", || {
-        session_transcript(&repo.git_dir, session_id, &packs, &spool)
-    });
-    let (mut transcript, transcript_raw_lines) = match transcript {
-        Some((pair, raw_lines)) => (Some(pair), Some(raw_lines)),
-        None => (None, None),
-    };
-    let sources = TaskSources {
-        spool: Some(&spool),
-        ..TaskSources::of(&repo.git_dir, session_id, &packs, &facts)
-    };
-    let mut tasks = t.phase("archive_tasks", || tasks::session_tasks(&sources));
-    spool.attach_orphans(transcript.as_mut(), &mut tasks);
+    let SessionAssembly {
+        raw,
+        facts,
+        packs,
+        notes,
+        transcript,
+        transcript_raw_lines,
+        tasks,
+    } = assemble_session(t, rt, store, repo, agent, session_id)?;
 
     let archived = t.phase("archive_native", || {
         rt.block_on(rift_shadow::archive_and_capture_with(
