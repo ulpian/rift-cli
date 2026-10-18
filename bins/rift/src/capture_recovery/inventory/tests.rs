@@ -321,7 +321,8 @@ fn top_level_attempts_change_the_ticket_digest_and_never_the_context_digest() {
         second.sources[0].ticket_sha256
     );
     // S8's retry members ride a ticket named by its bare stem (a name the queue
-    // accepts); the gate tolerates them and the context digest commits them.
+    // accepts); the gate tolerates them and, like `attempts`, the context
+    // digest strips them while the ticket digest still sees the rewrite.
     let stem = crate::agent_queue::logical_stem(&boundary_job(
         &rig.fixture,
         "n-1",
@@ -339,9 +340,13 @@ fn top_level_attempts_change_the_ticket_digest_and_never_the_context_digest() {
     .unwrap();
     let third = enumerate(&queue).unwrap();
     assert_eq!(third.sources[0].attempts, 2);
-    assert_ne!(
+    assert_eq!(
         third.sources[0].context_sha256,
         second.sources[0].context_sha256
+    );
+    assert_ne!(
+        third.sources[0].ticket_sha256,
+        second.sources[0].ticket_sha256
     );
 }
 

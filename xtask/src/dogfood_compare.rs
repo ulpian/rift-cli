@@ -130,7 +130,7 @@ pub fn levers_enforced(text: &str, levers: &[Lever]) -> Result<String, String> {
 /// Switch every read lever off in one scratch checkout, and say where.
 ///
 /// # Errors
-/// What [`write_overlay`] refuses, or a document the lever rewrite could not
+/// What `write_overlay` refuses, or a document the lever rewrite could not
 /// apply.
 pub fn write_levers_off(scratch: &Path) -> Result<PathBuf, String> {
     write_overlay(scratch, levers_off)
@@ -139,7 +139,7 @@ pub fn write_levers_off(scratch: &Path) -> Result<PathBuf, String> {
 /// Write the named levers at `enforce` in one scratch checkout, and say where.
 ///
 /// # Errors
-/// What [`write_overlay`] refuses, or a document the lever rewrite could not
+/// What `write_overlay` refuses, or a document the lever rewrite could not
 /// apply.
 pub fn write_levers_enforced(scratch: &Path, levers: &[Lever]) -> Result<PathBuf, String> {
     write_overlay(scratch, |text| levers_enforced(text, levers))
