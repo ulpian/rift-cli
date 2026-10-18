@@ -57,7 +57,9 @@ impl SubstrateReader for GixSubstrate {
         self.walker.blob_by_oid(content_id)
     }
     fn read_artifact(&self, checkpoint_id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
-        self.walker.read_artifact_any(checkpoint_id, rel)
+        crate::parse::segments::resolve_transcript(rel, |name| {
+            self.walker.read_artifact_any(checkpoint_id, name)
+        })
     }
     fn read_native_artifact(&self, checkpoint_id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
         if self.native_tree.get().is_none() {
@@ -73,9 +75,10 @@ impl SubstrateReader for GixSubstrate {
             })?;
         }
         match self.native_tree.get() {
-            Some(Some(tree)) => self
-                .walker
-                .read_native_artifact_at_tree(tree, checkpoint_id, rel),
+            Some(Some(tree)) => crate::parse::segments::resolve_transcript(rel, |name| {
+                self.walker
+                    .read_native_artifact_at_tree(tree, checkpoint_id, name)
+            }),
             Some(None) => Ok(None),
             None => Err(rift_core::RiftError::substrate(
                 "native tree snapshot is unavailable",

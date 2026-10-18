@@ -28,7 +28,7 @@ pub(super) fn redacted_of(bytes: &[u8]) -> RedactedBytes {
 pub(super) fn transcript_of(raw: &[u8]) -> ArchivedTranscript {
     let compacted = crate::transcript::compact_jsonl(&SecretBytes::new(raw.to_vec()), 0);
     ArchivedTranscript {
-        full: redacted_of(raw),
+        full: redacted_of(raw).into(),
         compact: redacted_of(compacted.compact().as_slice()),
         compact_start: compacted.compact_transcript_start,
         spills: Vec::new(),

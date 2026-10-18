@@ -1,12 +1,14 @@
 //! The tests of the shell recogniser, one file per subject.
 //!
-//! The production half stays one file (`../mod.rs`) because the intercept
-//! gate walks it function by function as part of the decision path; the tests
+//! The production half is the vocabulary (`../mod.rs`), the tree it is
+//! composed over (`../tree.rs`) and the filter stage (`../filter.rs`), all
+//! walked by the intercept gate as part of the decision path; the tests
 //! it once carried in two trailing modules are split here by what they are
 //! about: the published vocabulary and the range each form supports, the
 //! three compositions and what each one reads, the labels a chain writes
 //! between its reads, the `sed` print scripts beyond one range, the line
-//! pick written in `awk`, the line pick after a pipe, the shapes left alone,
+//! pick written in `awk`, the line pick after a pipe, the pipelines composed
+//! over a filter, the shapes left alone,
 //! the properties a generated line has to hold, and the witness the fuzz
 //! target checks every recognised target against. The helpers every file
 //! spells its expectations with live here.
@@ -15,6 +17,7 @@ mod awk_line_pick;
 mod compositions;
 mod labels;
 mod piped_line_pick;
+mod pipelines;
 mod properties;
 mod quoting;
 mod refusals;

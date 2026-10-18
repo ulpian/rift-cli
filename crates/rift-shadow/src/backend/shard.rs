@@ -8,9 +8,10 @@ use rift_core::{RedactedBytes, Result};
 use rift_git::{GitFileMode, NativeGitWrite, OrphanCommit, TreeWriteEntry};
 
 use super::{
-    ArchivedTask, ArchivedTranscript, CheckpointArchive, NativeBackend, NATIVE_CHECKPOINT_REF,
-    TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
+    ArchivedTask, ArchivedTranscript, CheckpointArchive, NativeBackend, TranscriptBody,
+    NATIVE_CHECKPOINT_REF, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
 };
+use rift_recall_substrate::parse::segments::TRANSCRIPT_SEGMENTS_DIR;
 
 impl<W: NativeGitWrite> NativeBackend<W> {
     /// Write the checkpoint shard: structural artifacts + the durable content blob,
@@ -148,9 +149,23 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         entries: &mut Vec<TreeWriteEntry>,
     ) -> Result<()> {
         entries.push(self.durable_entry(TRANSCRIPT_COMPACT_NAME, &transcript.compact)?);
-        entries.push(self.durable_entry(TRANSCRIPT_FULL_NAME, &transcript.full)?);
+        entries.push(self.full_body_entry(&transcript.full)?);
         self.push_original_tree(transcript, entries)?;
         self.push_spill_tree(transcript, entries)
+    }
+
+    /// The full transcript's entry: its one blob, or the `transcript.segments`
+    /// tree of its parts — each part through the durable door like the blob.
+    fn full_body_entry(&self, body: &TranscriptBody) -> Result<TreeWriteEntry> {
+        let segments = match body {
+            TranscriptBody::Whole(whole) => return self.durable_entry(TRANSCRIPT_FULL_NAME, whole),
+            TranscriptBody::Segments(segments) => segments,
+        };
+        let mut parts = Vec::with_capacity(segments.parts().len());
+        for (index, part) in segments.parts().iter().enumerate() {
+            parts.push(self.durable_entry(&format!("{index:06}"), part)?);
+        }
+        self.tree_entry(TRANSCRIPT_SEGMENTS_DIR.into(), &parts)
     }
 
     /// Write a transcript's sealed originals as the `tool-originals` tree

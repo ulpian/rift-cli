@@ -14,7 +14,6 @@ use super::{
     session_worktrees_jsonl_bytes, sessions_jsonl_bytes, shard_merkle_root, tool_calls_jsonl_bytes,
     tool_results_jsonl_bytes, usage_jsonl_bytes, window_journal_jsonl_bytes, ArchivedTask,
     ArchivedTranscript, CheckpointArchive, NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME,
-    TRANSCRIPT_FULL_NAME,
 };
 use crate::sha256_hex;
 
@@ -441,7 +440,7 @@ impl CheckpointArchive {
                 TRANSCRIPT_COMPACT_NAME.to_owned(),
                 t.compact.as_slice().to_vec(),
             );
-            out.insert(TRANSCRIPT_FULL_NAME.to_owned(), t.full.as_slice().to_vec());
+            super::segments::insert_body_artifacts(&mut out, "", &t.full);
         }
         self.insert_boundary_gap_artifact(&mut out);
         if let Some(usage) = self.usage_jsonl() {
@@ -480,10 +479,7 @@ impl CheckpointArchive {
                     format!("tasks/{id}/{TRANSCRIPT_COMPACT_NAME}"),
                     t.compact.as_slice().to_vec(),
                 );
-                out.insert(
-                    format!("tasks/{id}/{TRANSCRIPT_FULL_NAME}"),
-                    t.full.as_slice().to_vec(),
-                );
+                super::segments::insert_body_artifacts(&mut out, &format!("tasks/{id}/"), &t.full);
             }
         }
         self.insert_spill_artifacts(&mut out);
@@ -643,6 +639,7 @@ pub(super) fn insert_compact_boundary(
     super::spills::insert_spill_manifest(obj, &transcript.spills);
     super::originals::insert_original_manifest(obj, &transcript.originals);
     insert_fallback_counts(obj, transcript.redaction_fallback);
+    super::segments::insert_segment_members(obj, &transcript.full);
 }
 
 /// The same optional paired grammar in the bound report and metadata mirrors.
