@@ -100,8 +100,9 @@ fn a_carried_part_enters_the_tree_by_its_oid_and_writes_no_blob() {
     let carried = CarriedPart::verified(git_blob_oid(head), head.to_vec()).unwrap();
     assert!(CarriedPart::verified(git_blob_oid(tail), head.to_vec()).is_none());
     let mut pair = transcript_of(DOC);
-    pair.full =
-        TranscriptBody::Segments(Segments::carrying(vec![carried], redacted_of(tail)).unwrap());
+    pair.full = TranscriptBody::Segments(
+        Segments::carrying(vec![carried], redacted_of(tail), "f".repeat(64)).unwrap(),
+    );
     let mut a = archive();
     a.transcript = Some(pair);
     a.checkpoint_id = a.derived_checkpoint_id().unwrap();
@@ -113,4 +114,7 @@ fn a_carried_part_enters_the_tree_by_its_oid_and_writes_no_blob() {
         resolved(&a.artifact_map(), "transcript.jsonl").unwrap(),
         DOC
     );
+    let meta = String::from_utf8(a.metadata_json()).unwrap();
+    let packs = format!(r#""segment_packs":"{}""#, "f".repeat(64));
+    assert!(meta.contains(&packs), "{meta}");
 }
