@@ -162,7 +162,7 @@ async fn load_one(
         Err(ReadReason::CacheAbsent) => None,
         Err(reason) => return Err(reason),
     };
-    let completion = completion(sources.queue, &ticket.context_id);
+    let completion = completion(sources.queue, &ticket.context_id, native);
     let param = [Value::text(native.clone())];
     let agents = query(store, IDENTITY_AGENTS, &param, budget).await?;
     let agents = agents
@@ -179,17 +179,34 @@ async fn load_one(
     })
 }
 
-/// The delivery's completion marker in the queue: only a true absence is no
-/// completion, and any other answer is unknown, never "not completed".
-fn completion(queue: &Namespace, context_id: &str) -> Completion {
-    let name = format!("completed-{context_id}.done");
+/// The delivery's completion: its marker in the queue, then the legacy
+/// per-session marker `agent_queue::mark_condensed` writes beside it, both
+/// read descriptor-relative. Only a true absence of both is no completion;
+/// any other answer is unknown, never "not completed".
+fn completion(queue: &Namespace, context_id: &str, native_session: &str) -> Completion {
     if queue.recheck().is_err() {
         return Completion::Unknown;
     }
-    match queue.dir.symlink_metadata(&name) {
-        Ok(_) => Completion::Completed,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Completion::None,
-        Err(_) => Completion::Unknown,
+    let delivery = format!("completed-{context_id}.done");
+    let legacy = format!(
+        "condensed-{}",
+        rift_shadow::sha256_hex(&[native_session.as_bytes()])
+    );
+    match (marker(queue, &delivery), marker(queue, &legacy)) {
+        (Some(true), _) => Completion::Completed,
+        (_, Some(true)) => Completion::LegacyCondensed,
+        (Some(false), Some(false)) => Completion::None,
+        _ => Completion::Unknown,
+    }
+}
+
+/// Whether one marker name is present; `None` when the answer is not a
+/// clean presence or absence.
+fn marker(queue: &Namespace, name: &str) -> Option<bool> {
+    match queue.dir.symlink_metadata(name) {
+        Ok(_) => Some(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
     }
 }
 

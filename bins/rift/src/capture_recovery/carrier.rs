@@ -34,6 +34,9 @@ pub(crate) enum Reason {
     /// A completion marker, an `ended` cache: the carrier is finished and a
     /// gap is never grafted onto it.
     Completed,
+    /// The legacy `condensed-<key>` marker: the session's condense already
+    /// landed the old way, so it is finished and never a carrier either.
+    LegacyCondensed,
     CompletionUnknown,
     IdentityMissing,
     IdentityMismatch,
@@ -65,6 +68,7 @@ pub(crate) enum CarrierOwed {
 pub(crate) enum Completion {
     None,
     Completed,
+    LegacyCondensed,
     Unknown,
 }
 
@@ -159,6 +163,7 @@ fn check_completion(completion: Completion) -> Result<(), Reason> {
     match completion {
         Completion::None => Ok(()),
         Completion::Completed => Err(Reason::Completed),
+        Completion::LegacyCondensed => Err(Reason::LegacyCondensed),
         Completion::Unknown => Err(Reason::CompletionUnknown),
     }
 }

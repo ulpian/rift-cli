@@ -44,7 +44,9 @@ pub(crate) use agent::hook_degradation;
 pub(crate) use archive::{
     accrue_soak, attach_archive, import_archive, level_projection, STALE_REWRITE_TOML,
 };
-pub(crate) use archive::{contained, list_subagent_files, spawned_agents, subagents_dir};
+pub(crate) use archive::{
+    assemble_session, contained, list_subagent_files, spawned_agents, subagents_dir,
+};
 pub(crate) use audit::append_memd_audit;
 #[cfg(feature = "search")]
 pub(crate) use gate::payload_cwd;

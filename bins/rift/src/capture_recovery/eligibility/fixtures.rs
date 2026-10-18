@@ -51,6 +51,11 @@ impl Counting {
             sql: Mutex::new(Vec::new()),
         }
     }
+    /// The real store, for a caller that takes it by type.
+    pub(crate) fn inner(&self) -> &SqliteStore {
+        &self.inner
+    }
+
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(Ordering::SeqCst)
     }

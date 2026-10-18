@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use rift_shadow::backend::NativeBackend;
 use sha2::{Digest as _, Sha256};
 
+use super::run::{archive_recovered, RecoveryRun};
 use super::*;
 use crate::agent_queue::BoundaryEdge::{End, Start};
 use crate::capture_recovery::cut::pin_all;
@@ -205,4 +206,38 @@ fn a_carrier_with_a_malformed_digest_or_agent_is_refused() {
     assert!(Carrier::new(AGENT, native, "nothex", &"b2".repeat(32)).is_err());
     assert!(Carrier::new(AGENT, native, &"a1".repeat(32), &"B2".repeat(32)).is_err());
     assert!(Carrier::new("", native, &"a1".repeat(32), &"b2".repeat(32)).is_err());
+}
+
+#[test]
+fn the_shared_assembly_builds_the_carrier_archive_and_the_wrapper_delegates_it_once() {
+    use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason, StrategyKind};
+    let rig = Rig::new();
+    let hold = rig.admit();
+    let batch = batch(&rig, &hold);
+    let spy = spy(&rig);
+    let native = "carrier-native";
+    rig.seed_turn(AGENT, native, 1, None);
+    let carrier = Carrier::new(AGENT, native, &"a1".repeat(32), &"b2".repeat(32)).unwrap();
+    let backend = RecoveryBackend::new(&spy, &hold, carrier, batch).unwrap();
+    let repo = rift_git::discover(&rig.fixture.work_tree).unwrap();
+    let run = RecoveryRun {
+        rt: &rig.rt,
+        store: rig.store.inner(),
+        repo: &repo,
+        commit: None,
+        now: 1_760_000_000_000,
+    };
+    let decision = ArchiveDecision {
+        archive: true,
+        reason: ArchiveReason::Commit,
+        strategy: StrategyKind::ManualCommit,
+    };
+    let id = archive_recovered(&run, &backend, decision).unwrap();
+    assert!(id.is_some());
+    assert_eq!(spy.calls.get(), 1);
+    assert!(spy.intent_was_there.get());
+    assert!(matches!(
+        backend.delegation(),
+        Some(Delegation::Delegated { .. })
+    ));
 }
