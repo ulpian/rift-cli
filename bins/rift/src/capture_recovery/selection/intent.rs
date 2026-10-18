@@ -147,7 +147,7 @@ pub(crate) fn hex64(value: &str) -> WireResult<()> {
     Ok(())
 }
 
-fn encode_part<T: Serialize>(value: &T) -> WireResult<Vec<u8>> {
+pub(crate) fn encode_part<T: Serialize>(value: &T) -> WireResult<Vec<u8>> {
     let value = serde_json::to_value(value).map_err(|_| WireError)?;
     crate::capture_queue::delivery::encode(&value).map_err(|_| WireError)
 }
@@ -260,7 +260,7 @@ impl SelectionIntent {
 }
 
 impl Expectation {
-    fn check(&self) -> WireResult<()> {
+    pub(crate) fn check(&self) -> WireResult<()> {
         codec::basename(OsStr::new(&self.source_name)).map_err(|_| WireError)?;
         codec::basename(OsStr::new(&self.pin_name)).map_err(|_| WireError)?;
         hex64(&self.source_key)?;
