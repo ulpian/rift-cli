@@ -833,6 +833,20 @@ pub(crate) enum SessionCmd {
     /// trailer requires an explicit yes (a TTY confirm, or --force in a
     /// pipe). Never runs from hooks.
     Attach(AttachArgs),
+    /// Retry a session's parked jobs (parked after three failed attempts):
+    /// reset their backoff, keep their attempt count, and drain them now.
+    Retry(RetryArgs),
+}
+
+/// `rift session retry [--session <id> | --all]`.
+#[derive(Args, Debug)]
+pub(crate) struct RetryArgs {
+    /// The session whose parked jobs are retried.
+    #[arg(long, conflicts_with = "all")]
+    pub(crate) session: Option<String>,
+    /// Retry every parked job of this checkout.
+    #[arg(long)]
+    pub(crate) all: bool,
 }
 
 /// `rift session stop [ID]`.

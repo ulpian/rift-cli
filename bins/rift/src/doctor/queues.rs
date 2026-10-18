@@ -104,7 +104,7 @@ pub(super) fn doctor_capture_queue(repo: &Path, fix: bool) -> (String, serde_jso
     let drainable = capture_queue::entries(&paths.git_dir).len();
     let unreadable = files.saturating_sub(drainable);
     let notes = capture_queue::peek_errors(&paths.git_dir);
-    let agent_jobs = AgentJobs::at(&paths.git_dir);
+    let agent_jobs = AgentJobs::at(&paths.git_dir, hooks::now_ms());
     let mut human = queue_headline(drainable, unreadable);
     human.push_str(&agent_jobs.line());
     if !notes.is_empty() {
@@ -122,7 +122,7 @@ pub(super) fn doctor_capture_queue(repo: &Path, fix: bool) -> (String, serde_jso
             "pending": drainable,
             "unreadable": unreadable,
             "files": files,
-            "agent_jobs": { "pending": agent_jobs.pending, "unreadable": agent_jobs.unreadable },
+            "agent_jobs": agent_jobs.json(),
             "notes": notes,
             "siblings": siblings.iter().map(SiblingQueue::json).collect::<Vec<_>>(),
         }),
@@ -162,16 +162,45 @@ struct AgentJobs {
     files: usize,
     pending: usize,
     unreadable: usize,
+    /// Jobs parked after `PARK_AFTER` failures: kept, skipped by the ordinary
+    /// pass, retried by `--fix` or `rift session retry` (L-0A §4.2).
+    parked: Vec<ParkedJob>,
+    /// Jobs whose backoff has not elapsed at the report's clock.
+    due_later: usize,
+}
+
+/// One parked job as the report names it: its session and its last note,
+/// read without consuming (`peek_note`, the CFX-7 rule — a second report
+/// prints the same text).
+struct ParkedJob {
+    session: String,
+    note: Option<String>,
 }
 
 impl AgentJobs {
-    fn at(git_dir: &Path) -> Self {
+    fn at(git_dir: &Path, now_ms: i64) -> Self {
         let files = agent_queue::job_file_count(git_dir);
-        let pending = agent_queue::jobs(git_dir).len();
+        let states = agent_queue::retry_states(git_dir);
+        let pending = states.len();
+        let parked = states
+            .iter()
+            .filter(|(_, _, state)| state.parked)
+            .map(|(_, job, _)| ParkedJob {
+                session: job.kind.session_id().unwrap_or("(no session)").to_owned(),
+                note: capture_queue::peek_note(git_dir, &agent_queue::note_key(job))
+                    .or_else(|| capture_queue::last_reason(git_dir, &agent_queue::note_key(job))),
+            })
+            .collect();
+        let due_later = states
+            .iter()
+            .filter(|(_, _, state)| !state.parked && !state.is_due(now_ms))
+            .count();
         Self {
             files,
             pending,
             unreadable: files.saturating_sub(pending),
+            parked,
+            due_later,
         }
     }
 
@@ -180,17 +209,44 @@ impl AgentJobs {
         if self.files == 0 {
             return String::new();
         }
-        let mut line = format!(
-            "\n  agent jobs:     {} owed job(s) (safe --fix attempts ready work; unproved inputs remain pending)",
-            self.pending
-        );
+        let mut line = format!("\n  agent jobs:     {} owed", self.pending);
+        if !self.parked.is_empty() || self.due_later > 0 {
+            line.push_str(&format!(
+                " ({} parked after {} attempts — retry with `rift doctor --fix` or \
+                 `rift session retry <session>`; {} due later)",
+                self.parked.len(),
+                capture_queue::PARK_AFTER,
+                self.due_later
+            ));
+        } else {
+            line.push_str(" (safe --fix attempts ready work; unproved inputs remain pending)");
+        }
         if self.unreadable > 0 {
             line.push_str(&format!(
                 ", and {} job file(s) this build cannot read (left in place)",
                 self.unreadable
             ));
         }
+        for parked in &self.parked {
+            line.push_str(&format!(
+                "\n    parked:       session {} — {}",
+                parked.session,
+                parked.note.as_deref().unwrap_or("(no note)")
+            ));
+        }
         line
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "pending": self.pending,
+            "unreadable": self.unreadable,
+            "parked": self.parked.iter().map(|p| serde_json::json!({
+                "session": p.session,
+                "note": p.note,
+            })).collect::<Vec<_>>(),
+            "due_later": self.due_later,
+        })
     }
 }
 

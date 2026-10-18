@@ -1,4 +1,6 @@
-//! Context-addressed queue publication. Attempts are the sole mutable field.
+//! Context-addressed queue publication. The retry state — `attempts`,
+//! `next_due_ms`, `parked` — is the sole mutable part of a delivery, read
+//! through one accessor and written only under the member owner.
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -132,7 +134,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Value> {
     if !value.is_object() || value.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err(invalid());
     }
-    attempts(&value)?;
+    retry_state(&value)?;
     Ok(value)
 }
 
@@ -146,16 +148,92 @@ pub(crate) fn attempts(value: &Value) -> Result<u32> {
     }
 }
 
+/// The members of a delivery that change on a retry, and nothing else does.
+///
+/// They live **beside** the typed job in the retained JSON (L-0A §4.1 as
+/// amended 2026-10-17, "RetryState beside the struct"): two top-level
+/// siblings of `attempts` — `next_due_ms` (epoch ms; 0 or absent = due now)
+/// and `parked` (absent = false) — read through [`retry_state`] alone and
+/// written through [`replace_retry_state`] alone. All three are stripped from
+/// the context ([`context`]), so a retry never renames the file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RetryState {
+    /// Execution failures so far; defers and a busy projection spend none.
+    pub attempts: u32,
+    /// The instant the next ordinary pass may run the delivery.
+    pub next_due_ms: i64,
+    /// Set once `attempts` reaches [`super::PARK_AFTER`]: kept, skipped by the
+    /// ordinary pass, named by doctor, drained only by a repair road.
+    pub parked: bool,
+}
+
+impl RetryState {
+    /// Whether an ordinary pass runs the delivery at `now_ms`.
+    pub(crate) fn is_due(self, now_ms: i64) -> bool {
+        !self.parked && self.next_due_ms <= now_ms
+    }
+
+    /// The state after one more execution failure at `failed_at_ms`: the
+    /// backoff doubles from 30 s and is capped at an hour, and the third
+    /// failure parks (§4.1).
+    pub(crate) fn after_failure(self, failed_at_ms: i64) -> Self {
+        let attempts = self.attempts.saturating_add(1);
+        let doublings = attempts.saturating_sub(1).min(16);
+        let backoff = BACKOFF_FIRST_MS
+            .saturating_mul(1_i64 << doublings)
+            .min(BACKOFF_CAP_MS);
+        Self {
+            attempts,
+            next_due_ms: failed_at_ms.saturating_add(backoff),
+            parked: attempts >= super::PARK_AFTER,
+        }
+    }
+
+    /// The state a retry verb leaves: due now and unparked, the failure
+    /// history kept.
+    pub(crate) fn unparked(self) -> Self {
+        Self {
+            attempts: self.attempts,
+            next_due_ms: 0,
+            parked: false,
+        }
+    }
+}
+
+/// The first backoff after a failure.
+const BACKOFF_FIRST_MS: i64 = 30_000;
+/// The longest backoff a failure earns.
+const BACKOFF_CAP_MS: i64 = 3_600_000;
+
+/// The retry members of a delivery, as they stand in `value`. A legacy
+/// delivery without them is due now and unparked.
+pub(crate) fn retry_state(value: &Value) -> Result<RetryState> {
+    let next_due_ms = match value.get("next_due_ms") {
+        None => 0,
+        Some(value) => value.as_i64().ok_or_else(invalid)?,
+    };
+    let parked = match value.get("parked") {
+        None => false,
+        Some(value) => value.as_bool().ok_or_else(invalid)?,
+    };
+    Ok(RetryState {
+        attempts: attempts(value)?,
+        next_due_ms,
+        parked,
+    })
+}
+
 pub(crate) fn encode(value: &Value) -> Result<Vec<u8>> {
     serde_json::to_vec(&Canonical(value)).map_err(|_| invalid())
 }
 
+/// The delivery minus its retry state: what the file name is derived from.
 pub(crate) fn context(value: &Value) -> Result<Value> {
     let mut value = value.clone();
-    value
-        .as_object_mut()
-        .ok_or_else(invalid)?
-        .remove("attempts");
+    let object = value.as_object_mut().ok_or_else(invalid)?;
+    for member in ["attempts", "next_due_ms", "parked"] {
+        object.remove(member);
+    }
     Ok(value)
 }
 
@@ -301,12 +379,14 @@ pub(crate) fn publish_completion(dir: &Path, name: &str, value: &Value) -> Resul
     }
 }
 
-/// The caller holds the member owner; producers never replace final files.
-pub(crate) fn replace_attempts(
+/// Rewrite the retry state of the delivery at `path`, and nothing else of it:
+/// the same stage-and-rename over the same context-addressed name. The
+/// caller holds the member owner; producers never replace final files.
+pub(crate) fn replace_retry_state(
     path: &Path,
     stem: &str,
     expected: &Value,
-    next: u32,
+    next: RetryState,
     owner: &super::QueueLock,
 ) -> Result<()> {
     owner.check_path(path)?;
@@ -318,10 +398,10 @@ pub(crate) fn replace_attempts(
         return Err(invalid());
     }
     let mut updated = retained;
-    updated
-        .as_object_mut()
-        .ok_or_else(invalid)?
-        .insert("attempts".into(), next.into());
+    let object = updated.as_object_mut().ok_or_else(invalid)?;
+    object.insert("attempts".into(), next.attempts.into());
+    object.insert("next_due_ms".into(), next.next_due_ms.into());
+    object.insert("parked".into(), next.parked.into());
     let dir = path.parent().ok_or_else(invalid)?;
     let staged = stage(dir, &encode(&updated)?)?;
     std::fs::rename(&staged.0, path)?;

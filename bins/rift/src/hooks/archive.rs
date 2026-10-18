@@ -1286,7 +1286,7 @@ mod projection_replacement_tests {
     ) {
         use super::super::worker::{drain_jobs, LockWait};
         let before = std::fs::read(path).unwrap();
-        for _ in 0..crate::capture_queue::MAX_ATTEMPTS + 2 {
+        for _ in 0..crate::capture_queue::PARK_AFTER + 2 {
             assert!(drain_jobs(repo.git_dir.to_str(), LockWait::None).is_empty());
             assert_eq!(std::fs::read(path).unwrap(), before);
             assert!(crate::capture_queue::peek_errors(&repo.git_dir).is_empty());
@@ -1375,7 +1375,7 @@ mod projection_replacement_tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        for _ in 0..crate::capture_queue::MAX_ATTEMPTS + 2 {
+        for _ in 0..crate::capture_queue::PARK_AFTER + 2 {
             assert_eq!(
                 serve_audit_for_archive(&rt, checkout.path(), "s-1").unwrap(),
                 None

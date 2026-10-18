@@ -18,9 +18,10 @@ mod common;
 #[path = "common/hooks_fixture.rs"]
 mod hooks_fixture;
 use hooks_fixture::{
-    checkpoint_ref_exists, checkpoint_shards, doctor_fix_json, git_in, now_ms, run_rift_in,
-    run_rift_stdout, seed_live_session_repo, seed_live_session_repo_unborn, seed_session,
-    session_phase, sessions_leg, sync_env, sync_env_with_data,
+    agent_queue_of, checkpoint_ref_exists, checkpoint_shards, doctor_fix_json, doctor_json, git_in,
+    now_ms, rift_json, run_rift_in, run_rift_stdout, seed_live_session_repo,
+    seed_live_session_repo_unborn, seed_session, session_phase, sessions_leg, shard_blob,
+    shard_path_of, sync_env, sync_env_with_data,
 };
 
 /// "Crashed-session auto-finalize (doctor hook)" **and**
@@ -134,17 +135,6 @@ fn the_doctor_fix_on_an_unborn_repo_finalizes_without_a_deferral_line() {
     );
 }
 
-/// Rewind (or advance) a session cache's last-touch stamp on disk. The sweep's
-/// input is this recorded number, never the clock, so a fixture can age a
-/// session by a day without sleeping for one or reaching for a fake clock.
-fn set_session_touched(repo: &Path, id: &str, updated_at_ms: i64) {
-    let path = common::read_path(&hooks_fixture::sessions_of(repo), &format!("{id}.json"));
-    let mut cache: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    cache["updated_at_ms"] = serde_json::json!(updated_at_ms);
-    std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
-}
-
 /// The unborn-HEAD sibling below never reaches the archive guard
 /// (`drive_post_ingest` returns before `RequestCondense` when there is no
 /// commit), so replacing the guard with a tautology left 197 tests green.
@@ -195,6 +185,47 @@ fn a_failing_archive_with_a_commit_present_still_defers_the_close() {
         "a SessionEnd whose archive FAILED must not close the session — \
          this is the guard the unborn-HEAD tests cannot reach"
     );
+    // The failure is recorded as retry state on the job, not as a removal:
+    // one attempt spent, a backoff set, not yet parked (L-0A §4.1).
+    let (job, state) = only_condense_job(&repo);
+    assert_eq!(job["attempts"], 1, "{job}");
+    assert_eq!(state.attempts, 1);
+    assert!(state.next_due_ms > 0, "a backoff is recorded: {job}");
+    assert!(!state.parked, "one failure does not park: {job}");
+}
+
+/// A journaled job's retry state as the file carries it (`attempts`,
+/// `next_due_ms`, `parked` are top-level siblings; absent reads as zero and
+/// false), and the whole document for the assertion message.
+fn only_condense_job(repo: &Path) -> (serde_json::Value, RetryState) {
+    let dir = agent_queue_of(repo);
+    let mut jobs: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "json")
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("condense-"))
+        })
+        .collect();
+    assert_eq!(jobs.len(), 1, "one condense job: {jobs:?}");
+    let job: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(jobs.remove(0)).unwrap()).unwrap();
+    let state = RetryState {
+        attempts: job["attempts"].as_u64().unwrap_or(0),
+        next_due_ms: job["next_due_ms"].as_i64().unwrap_or(0),
+        parked: job["parked"].as_bool().unwrap_or(false),
+    };
+    (job, state)
+}
+
+/// The retry state the two sibling members spell.
+#[derive(Debug, PartialEq, Eq)]
+struct RetryState {
+    attempts: u64,
+    next_due_ms: i64,
+    parked: bool,
 }
 
 /// Every directory under `root`, including itself — the minimal walker the
@@ -217,93 +248,66 @@ fn walkdir_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-/// The lifecycle rule settled 2026-08-07, end to end through the real binary: a
-/// `SessionEnd` whose archive could not run must land in `ending`, not `ended`.
+/// A condense never needs a commit, end to end through the real binary: a
+/// `SessionEnd` on an **unborn HEAD** closes the session at once, on a
+/// checkpoint under `refs/heads/rift/checkpoints/v1` whose metadata names no
+/// `commit`, and the user's HEAD stays unborn (L-0A §1.1, Q78/Q81).
 ///
-/// The hole this closes was the worst kind — ordinary inputs, no error, total
-/// loss. When the archive could not run, the hook path used to close the session
-/// anyway. `Ended` is left only by the session's own next hook, and an agent
-/// that is gone sends none, so that session's work could never be condensed by
-/// anything afterwards: not the sweep, not doctor. Everything the agent did in
-/// it was captured and then orphaned.
-///
-/// The rescue is the other half of the rule and is what makes deferral honest
-/// rather than merely cautious: the session is still `ending`, so the moment the
-/// repository has an archive it can reach, the sweep finishes the condense the
-/// hook could not.
-///
-/// **How the deferral is reproduced changed with the wrapper.** It used to be a
-/// repository pinned to the wrapper route on a machine with no capture backend
-/// installed; that route and that backend are gone (2026-08-11). The condition
-/// left is the one the archive genuinely cannot work around: an **unborn HEAD**
-/// — no commit to anchor a checkpoint to. Same property, reproduced by the same
-/// mechanism the product will actually meet.
+/// This test used to pin the opposite: the unborn HEAD was, after the wrapper
+/// route died (2026-08-11), the one condition left under which the archive
+/// "genuinely could not work around" a missing anchor, and a `SessionEnd`
+/// then landed in `ending` for the sweep to rescue once a commit existed. The
+/// anchor was never part of the id, so the record now lands without it; the
+/// rule that still binds is the one the failed-archive test above keeps — a
+/// `SessionEnd` whose archive did not mint a checkpoint must not reach `ended`.
 #[test]
-fn a_session_end_that_could_not_archive_defers_instead_of_closing() {
+fn a_session_end_without_a_commit_closes_with_a_checkpoint() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo_unborn(tmp.path());
     let cache = tmp.path().join("cache");
     let data = tmp.path().join("data");
-    let env = [
-        ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
-        ("XDG_DATA_HOME", data.to_str().unwrap()),
-        ("LOCALAPPDATA", data.to_str().unwrap()),
-        ("RIFT_NO_KEYCHAIN", "1"),
-        ("RIFT_CAPTURE_SYNC", "1"),
-    ];
+    let env = sync_env_with_data(&cache, &data);
 
     let body = r#"{"schema":1,"session":"e2e-live-1","turn":1,"payload":{"reason":"exit"}}"#;
     assert_eq!(
         run_rift_in(&repo, &["hooks", "claude-code", "SessionEnd"], body, &env),
         0,
-        "a capture hook never fails the agent, deferral or not"
+        "a capture hook never fails the agent"
     );
 
-    // Nothing was archived…
-    let refs = Command::new("git")
-        .args(["for-each-ref", "refs/heads/rift/checkpoints/v1"])
-        .current_dir(&repo)
-        .output()
-        .unwrap();
-    assert!(
-        String::from_utf8_lossy(&refs.stdout).trim().is_empty(),
-        "nothing to anchor to: no checkpoint exists"
-    );
-    // …so the session is NOT closed. `ended` would be a false record of the one
-    // fact the phase exists to carry, and an unrecoverable one.
     assert_eq!(
         session_phase(&repo, "e2e-live-1"),
-        "ending",
-        "a SessionEnd that archived nothing leaves the session sweep-retryable"
+        "ended",
+        "the condense landed, so the session closed at the hook: no sweep needed"
     );
-
-    // A day passes with the agent gone, and the repository gains the commit the
-    // archive needs. The sweep must finish what the hook could not.
-    git_in(&repo, &["commit", "-q", "-m", "seed"]);
-    set_session_touched(&repo, "e2e-live-1", 0);
-    // `--fix` because the sweep is doctor's repair arm: the rescue is a repair, and bare doctor
-    // only reports it as stuck.
-    let (code, stdout) = run_rift_stdout(&repo, &["--json", "doctor", "--fix"], &env);
-    assert_eq!(code, 0, "doctor reports, it never fails: {stdout}");
-    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let sessions = doc
-        .pointer("/sessions")
-        .or_else(|| doc.pointer("/data/sessions"))
-        .expect("doctor json carries a sessions leg");
-    assert_eq!(
-        sessions["finalized"],
-        serde_json::json!(["e2e-live-1"]),
-        "the sweep rescued the condense the hook deferred: {sessions}"
-    );
-    assert_eq!(session_phase(&repo, "e2e-live-1"), "ended");
-    let refs = Command::new("git")
-        .args(["for-each-ref", "refs/heads/rift/checkpoints/v1"])
-        .current_dir(&repo)
-        .output()
-        .unwrap();
     assert!(
-        !String::from_utf8_lossy(&refs.stdout).trim().is_empty(),
-        "the rescue condensed real work"
+        checkpoint_ref_exists(&repo),
+        "an anchorless checkpoint exists on the checkpoint branch"
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_str(&shard_blob(&repo, &shard_path_of(&repo, "metadata.json"))).unwrap();
+    assert!(
+        metadata.get("commit").is_none(),
+        "the shard names no anchor — the member is absent, never empty: {metadata}"
+    );
+    assert!(
+        !Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success(),
+        "the user's HEAD is still unborn: capture never commits for the user"
+    );
+    let dir = agent_queue_of(&repo);
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("condense-"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the condense job was removed by its success"
     );
 }
 
@@ -472,4 +476,233 @@ fn an_archive_that_mints_nothing_defers_with_its_own_cause() {
         "{human}"
     );
     assert!(!deferred[0].contains("queue lock"), "{human}");
+
+    // The same blocked namespace through the hook road: the live session's
+    // `SessionEnd` journals a condense whose archive fails, and the job is
+    // kept with its retry state — one attempt, a backoff, not parked.
+    let body = r#"{"schema":1,"session":"e2e-live-1","turn":1,"payload":{"reason":"exit"}}"#;
+    assert_eq!(
+        run_rift_in(&repo, &["hooks", "claude-code", "SessionEnd"], body, &env),
+        0
+    );
+    assert_ne!(session_phase(&repo, "e2e-live-1"), "ended");
+    let (job, state) = only_condense_job(&repo);
+    assert_eq!(state.attempts, 1, "{job}");
+    assert!(state.next_due_ms > 0 && !state.parked, "{job}");
+}
+
+/// A blocked checkpoint namespace, so every archive of the session fails.
+fn block_checkpoint_namespace(repo: &Path) {
+    std::fs::write(
+        repo.join(".git").join("refs").join("heads").join("rift"),
+        "",
+    )
+    .unwrap();
+}
+
+/// Every file under `dir` with its bytes, sorted: what report mode must leave
+/// exactly as it found it.
+fn queue_listing(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The report's lines that name parked work.
+fn parked_lines(report: &str) -> Vec<String> {
+    report
+        .lines()
+        .filter(|l| l.contains("parked"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Three execution failures **park** the condense job: it stays in the
+/// journal with `parked: true` and its backoff, the ordinary worker runs it
+/// no more, and report-only `rift doctor` names the parked session with its
+/// last note — twice, identically, publishing, renaming and moving nothing
+/// (R2; CFX-7: `peek_errors`, never `take_errors`).
+#[test]
+fn three_failures_park_the_job_and_doctor_names_it_twice_identically() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    block_checkpoint_namespace(&repo);
+    let cache = tmp.path().join("cache");
+    let data = tmp.path().join("data");
+    let env = sync_env_with_data(&cache, &data);
+
+    let body = r#"{"schema":1,"session":"e2e-live-1","turn":1,"payload":{"reason":"exit"}}"#;
+    assert_eq!(
+        run_rift_in(&repo, &["hooks", "claude-code", "SessionEnd"], body, &env),
+        0
+    );
+    assert_eq!(only_condense_job(&repo).1.attempts, 1);
+    // The repair road ignores the backoff: two more `--fix` passes, two more
+    // failures, and the third parks.
+    let _ = doctor_fix_json(&repo, &env);
+    assert_eq!(only_condense_job(&repo).1.attempts, 2);
+    let _ = doctor_fix_json(&repo, &env);
+    let (job, state) = only_condense_job(&repo);
+    assert_eq!(state.attempts, 3, "{job}");
+    assert!(state.parked, "the third failure parks: {job}");
+    assert!(state.next_due_ms > 0, "{job}");
+    assert_ne!(session_phase(&repo, "e2e-live-1"), "ended");
+
+    let queue_dir = agent_queue_of(&repo);
+    let before = queue_listing(&queue_dir);
+    let (code, first) = run_rift_stdout(&repo, &["doctor"], &env);
+    assert_eq!(code, 0, "{first}");
+    let (code, second) = run_rift_stdout(&repo, &["doctor"], &env);
+    assert_eq!(code, 0, "{second}");
+    assert_eq!(
+        parked_lines(&first),
+        parked_lines(&second),
+        "a second report prints the same parked lines"
+    );
+    assert!(
+        first.contains(
+            "agent jobs:     1 owed (1 parked after 3 attempts — retry with \
+                        `rift doctor --fix` or `rift session retry <session>`; 0 due later)"
+        ),
+        "{first}"
+    );
+    assert!(
+        first.contains("parked:       session e2e-live-1 — ")
+            && first.contains("parked after 3 attempts"),
+        "the parked session is named with its last note: {first}"
+    );
+    assert_eq!(
+        queue_listing(&queue_dir),
+        before,
+        "report mode published, renamed and moved nothing"
+    );
+    let doc = doctor_json(&repo, &env);
+    let jobs = doc
+        .pointer("/capture_queue/agent_jobs")
+        .or_else(|| doc.pointer("/data/capture_queue/agent_jobs"))
+        .expect("the agent-jobs leg");
+    assert_eq!(jobs["parked"][0]["session"], "e2e-live-1", "{jobs}");
+}
+
+/// `rift session retry` resets the parked job's backoff and park, keeps its
+/// attempt count, and drains it: with the namespace unblocked the archive
+/// lands, the session closes and the job is gone.
+#[test]
+fn rift_session_retry_unparks_and_the_unblocked_archive_lands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    block_checkpoint_namespace(&repo);
+    let cache = tmp.path().join("cache");
+    let data = tmp.path().join("data");
+    let env = sync_env_with_data(&cache, &data);
+    let body = r#"{"schema":1,"session":"e2e-live-1","turn":1,"payload":{"reason":"exit"}}"#;
+    assert_eq!(
+        run_rift_in(&repo, &["hooks", "claude-code", "SessionEnd"], body, &env),
+        0
+    );
+    let _ = doctor_fix_json(&repo, &env);
+    let _ = doctor_fix_json(&repo, &env);
+    assert!(only_condense_job(&repo).1.parked);
+
+    // A retry with the namespace still blocked unparks, fails again and the
+    // history is kept: attempts climb to four, the job is parked again.
+    let retried = rift_json(
+        &repo,
+        &["--json", "session", "retry", "--session", "e2e-live-1"],
+        &env,
+    );
+    assert_eq!(
+        retried["unparked"],
+        serde_json::json!(["e2e-live-1"]),
+        "{retried}"
+    );
+    let (job, state) = only_condense_job(&repo);
+    assert_eq!(
+        state.attempts, 4,
+        "attempts are history, never reset: {job}"
+    );
+    assert!(state.parked, "{job}");
+
+    std::fs::remove_file(repo.join(".git").join("refs").join("heads").join("rift")).unwrap();
+    let retried = rift_json(
+        &repo,
+        &["--json", "session", "retry", "--session", "e2e-live-1"],
+        &env,
+    );
+    assert_eq!(
+        retried["unparked"],
+        serde_json::json!(["e2e-live-1"]),
+        "{retried}"
+    );
+    assert_eq!(retried["landed"][0]["session"], "e2e-live-1", "{retried}");
+    assert_eq!(session_phase(&repo, "e2e-live-1"), "ended");
+    assert!(checkpoint_ref_exists(&repo));
+    let left: Vec<_> = std::fs::read_dir(agent_queue_of(&repo))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("condense-"))
+        .collect();
+    assert!(left.is_empty(), "the job was removed by its success");
+}
+
+/// A worker killed mid-wait leaves the job untouched — no attempt spent, no
+/// marker — and the next worker takes it. The worker is this test's own
+/// child, killed by the pid the test spawned; it is held off the queue by the
+/// owner lock this test holds, so the kill lands while it waits.
+#[test]
+fn a_killed_worker_leaves_the_job_and_the_next_worker_takes_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = seed_live_session_repo(tmp.path());
+    let cache = tmp.path().join("cache");
+    let data = tmp.path().join("data");
+    let env = sync_env_with_data(&cache, &data);
+    let git_dir = repo.join(".git");
+
+    // Journal the condense without draining it: the lock is held, so the
+    // hook's own worker finds the queue busy and leaves.
+    let held = hold_owner_lock(&git_dir);
+    let body = r#"{"schema":1,"session":"e2e-live-1","turn":1,"payload":{"reason":"exit"}}"#;
+    assert_eq!(
+        run_rift_in(&repo, &["hooks", "claude-code", "SessionEnd"], body, &env),
+        0
+    );
+    let (job_before, state) = only_condense_job(&repo);
+    assert_eq!(state.attempts, 0);
+    assert_ne!(session_phase(&repo, "e2e-live-1"), "ended");
+
+    let mut worker = common::rift_cmd(&repo)
+        .args(["hooks", "worker", "--git-dir", git_dir.to_str().unwrap()])
+        .envs(env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // The worker waits briefly for the lock this test holds; kill it there.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    worker.kill().unwrap();
+    let _ = worker.wait().unwrap();
+
+    let (job_after, state) = only_condense_job(&repo);
+    assert_eq!(job_after, job_before, "a killed worker rewrote nothing");
+    assert_eq!(state.attempts, 0);
+    drop(held);
+
+    let (code, _) = run_rift_stdout(
+        &repo,
+        &["hooks", "worker", "--git-dir", git_dir.to_str().unwrap()],
+        &env,
+    );
+    assert_eq!(code, 0);
+    assert_eq!(session_phase(&repo, "e2e-live-1"), "ended");
+    assert!(checkpoint_ref_exists(&repo));
 }

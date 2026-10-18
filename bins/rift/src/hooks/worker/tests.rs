@@ -101,7 +101,7 @@ fn a_busy_interval_archive_preserves_its_typed_cause_and_existing_retry_budget()
     let path = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();
     let before = std::fs::read(&path).unwrap();
     let git_dir = repo.git_dir.to_str().unwrap();
-    for _ in 0..crate::capture_queue::MAX_ATTEMPTS + 2 {
+    for _ in 0..crate::capture_queue::PARK_AFTER + 2 {
         assert!(drain_jobs(Some(git_dir), LockWait::None).is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(crate::capture_queue::peek_errors(&repo.git_dir).is_empty());
@@ -128,7 +128,7 @@ fn busy_attribution_keeps_the_existing_job_even_after_the_retry_budget() {
     let db = crate::family::recall_db(checkout.path()).unwrap();
     let guard = rift_store::ProjectionReplacementGuard::acquire(&db).unwrap();
     let git_dir = repo.git_dir.to_str().unwrap();
-    for attempts in [0, crate::capture_queue::MAX_ATTEMPTS, 7] {
+    for attempts in [0, crate::capture_queue::PARK_AFTER, 7] {
         let job = AgentJob {
             schema_version: 1,
             work_tree: checkout.path().to_owned(),
@@ -143,7 +143,7 @@ fn busy_attribution_keeps_the_existing_job_even_after_the_retry_budget() {
         };
         let path = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();
         let before = std::fs::read(&path).unwrap();
-        for _ in 0..crate::capture_queue::MAX_ATTEMPTS + 2 {
+        for _ in 0..crate::capture_queue::PARK_AFTER + 2 {
             assert!(drain_jobs(Some(git_dir), LockWait::None).is_empty());
             assert_eq!(std::fs::read(&path).unwrap(), before);
         }
@@ -210,7 +210,7 @@ fn repeated_busy_commit_drains_keep_the_job_then_record_its_facts_once() {
     let path = crate::capture_queue::enqueue(&repo.git_dir, &entry).unwrap();
     let before = std::fs::read(&path).unwrap();
     let git_dir = repo.git_dir.to_str().unwrap();
-    for _ in 0..crate::capture_queue::MAX_ATTEMPTS + 2 {
+    for _ in 0..crate::capture_queue::PARK_AFTER + 2 {
         assert!(drain_jobs(Some(git_dir), LockWait::None).is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(crate::capture_queue::peek_errors(&repo.git_dir).is_empty());
@@ -278,7 +278,7 @@ fn a_busy_projection_defers_the_condense_and_its_levelling_without_spending_an_a
     let guard = rift_store::ProjectionReplacementGuard::acquire(&db).unwrap();
     let before = std::fs::read(&path).unwrap();
     let git_dir = repo.git_dir.to_str().unwrap();
-    for _ in 0..crate::capture_queue::MAX_ATTEMPTS + 2 {
+    for _ in 0..crate::capture_queue::PARK_AFTER + 2 {
         assert!(drain_queues(Some(git_dir), LockWait::None)
             .unwrap()
             .is_empty());
@@ -393,4 +393,244 @@ fn a_gone_interval_checkout_stays_owed_without_spending_an_attempt() {
             .any(|n| n.contains("job repository is unavailable")),
         "{notes:?}"
     );
+}
+
+/// A session with everything the final archive cleans up (§4.3): a subagent
+/// claim marker, a spooled original, and the two sidecars.
+fn seed_session_leftovers(repo: &rift_git::RepoPaths, session: &str) -> [std::path::PathBuf; 4] {
+    let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
+    let claims = sessions.join(format!("{session}.subagents"));
+    std::fs::create_dir_all(&claims).unwrap();
+    std::fs::write(claims.join("agent-1.json"), b"{}").unwrap();
+    let spool = repo
+        .common_dir
+        .join("rift-family")
+        .join("spool")
+        .join(session);
+    std::fs::create_dir_all(&spool).unwrap();
+    std::fs::write(spool.join("toolu_1.original"), b"spooled").unwrap();
+    let transcript = sessions.join(format!("{session}.transcript"));
+    std::fs::write(&transcript, b"{}").unwrap();
+    let usage = sessions.join(format!("{session}.usage"));
+    std::fs::write(&usage, b"{}").unwrap();
+    [claims, spool, transcript, usage]
+}
+
+/// The final archive (a session-end condense) removes the claims, the spool
+/// and both sidecars, and keeps the `condensed-` marker and the cache; an
+/// interval archive of a live session — a seal that is not final — removes
+/// nothing (L-0A §4.3).
+#[test]
+fn the_final_archive_removes_claims_spool_and_sidecars_and_a_turn_seal_removes_nothing() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, path) = queue_session_end(checkout.path(), "s-final");
+    let leftovers = seed_session_leftovers(&repo, "s-final");
+    let git_dir = repo.git_dir.to_str().unwrap();
+    assert_eq!(drain_jobs(Some(git_dir), LockWait::None).len(), 1);
+    assert!(!path.exists());
+    for left in &leftovers {
+        assert!(
+            !left.exists(),
+            "{} is gone after the final archive",
+            left.display()
+        );
+    }
+    assert!(
+        crate::agent_queue::is_condensed(&repo.git_dir, "s-final"),
+        "the proof marker stays"
+    );
+    let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
+    assert!(
+        sessions.join("s-final.json").exists(),
+        "the cache is retained as ended"
+    );
+
+    // Not final: an interval archive of a live session leaves everything.
+    let interval = tempfile::tempdir().unwrap();
+    let (repo, _job, path) = super::retry_tests::owed_interval(interval.path());
+    let leftovers = seed_session_leftovers(&repo, "owed-interval");
+    drain_jobs(repo.git_dir.to_str(), LockWait::None);
+    assert!(!path.exists(), "the interval archive landed");
+    for left in &leftovers {
+        assert!(
+            left.exists(),
+            "{} survives a seal that is not final",
+            left.display()
+        );
+    }
+}
+
+/// S9 condition 1: a cache that reads `active` after the completion is the
+/// re-activation window, and the cleanup must not run — claims, spool and
+/// sidecars stay — however the condense came out.
+#[test]
+fn a_cache_that_reads_active_after_completion_keeps_claims_spool_and_sidecars() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, _path) = queue_session_end(checkout.path(), "s-reactivated");
+    let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
+    let cache = rift_shadow::hooks::SessionCache::new("s-reactivated", "claude-code", "active", 2);
+    rift_shadow::hooks::write_cache(&sessions, &cache).unwrap();
+    let leftovers = seed_session_leftovers(&repo, "s-reactivated");
+    drain_jobs(repo.git_dir.to_str(), LockWait::None);
+    for left in &leftovers {
+        assert!(
+            left.exists(),
+            "{} is kept for the reactivated session",
+            left.display()
+        );
+    }
+    assert_ne!(
+        rift_shadow::hooks::session_cache::read_cache(&sessions, "s-reactivated")
+            .unwrap()
+            .unwrap()
+            .state,
+        "ended"
+    );
+}
+
+/// Q10: an interval archive lands with the anchor absent on an unborn HEAD,
+/// and `Ok(true)` means a real publication.
+#[test]
+fn an_interval_archive_lands_without_a_commit() {
+    let checkout = tempfile::tempdir().unwrap();
+    fixture_git(checkout.path(), &["init", "--quiet"]);
+    let repo = rift_git::discover(checkout.path()).unwrap();
+    let cache = rift_shadow::hooks::SessionCache::new("s-unborn", "claude-code", "active", 1);
+    rift_shadow::hooks::write_cache(
+        &crate::family::run_state::sessions_dir(&repo.git_dir),
+        &cache,
+    )
+    .unwrap();
+    let archive = IntervalArchive {
+        session_id: "s-unborn".into(),
+        agent: "claude-code".into(),
+        reason: IntervalReason::SensitivePath,
+        interval_start_ms: None,
+    };
+    let job = AgentJob {
+        schema_version: 1,
+        work_tree: checkout.path().to_owned(),
+        queued_at_ms: 1_000,
+        attempts: 0,
+        kind: JobKind::Archive(archive.clone()),
+    };
+    let timer = crate::hooktime::HookTimer::new("test", false);
+    assert!(
+        archive_if_still_owed(&timer, &job, &archive).unwrap(),
+        "the interval archive landed, anchorless"
+    );
+    let shards = rift_git::resolve_commit(&repo, "refs/heads/rift/checkpoints/v1").unwrap();
+    assert!(
+        shards.is_some(),
+        "a checkpoint exists on an unborn repository"
+    );
+}
+
+/// A `Due` drain before the due instant spends no attempt; the repair road
+/// (`drain_jobs`, `Everything`) runs the same job and spends one.
+#[test]
+fn a_second_drain_before_the_due_instant_spends_no_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, job, path) = super::retry_tests::owed_interval(tmp.path());
+    let owner = crate::capture_queue::acquire_owner(&repo.git_dir).unwrap();
+    let (value, _) = crate::agent_queue::read_job(&path).unwrap();
+    let stem = crate::agent_queue::logical_stem(&job).unwrap();
+    let far = crate::capture_queue::delivery::RetryState {
+        attempts: 1,
+        next_due_ms: i64::MAX,
+        parked: false,
+    };
+    crate::capture_queue::delivery::replace_retry_state(&path, &stem, &value, far, &owner).unwrap();
+    drop(owner);
+    let obstruction = repo.common_dir.join("refs/heads/rift/checkpoints/v1.lock");
+    std::fs::create_dir_all(obstruction.parent().unwrap()).unwrap();
+    std::fs::write(&obstruction, b"publication-obstruction").unwrap();
+
+    let before = std::fs::read(&path).unwrap();
+    assert!(drain_queues(repo.git_dir.to_str(), LockWait::None)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a not-due job is skipped whole"
+    );
+    assert!(crate::capture_queue::peek_errors(&repo.git_dir).is_empty());
+    drain_jobs(repo.git_dir.to_str(), LockWait::None);
+    let (_, _, state) = crate::agent_queue::retry_states(&repo.git_dir).remove(0);
+    assert_eq!(
+        state.attempts, 2,
+        "the repair road ran it and it failed once more"
+    );
+}
+
+/// Two `SessionEnd`s for one session publish one delivery when their context
+/// is the same, and two when it changed (round 28). One condense lands; the
+/// changed-context delivery found after it carries no proof of its own, so it
+/// stays owed with its typed reason and spends no attempt (R1's legacy arm,
+/// until CFX-4 recovery admits it) — never a second checkpoint.
+#[test]
+fn two_session_ends_for_one_session_publish_one_condense_delivery() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, path) = queue_session_end(checkout.path(), "s-twice");
+    let (_, job) = crate::agent_queue::read_job(&path).unwrap();
+    assert_eq!(
+        crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap(),
+        path
+    );
+    assert_eq!(
+        crate::agent_queue::jobs(&repo.git_dir).len(),
+        1,
+        "same context, one file"
+    );
+    let later = AgentJob {
+        queued_at_ms: job.queued_at_ms + 1,
+        ..job.clone()
+    };
+    let second = crate::agent_queue::enqueue(&repo.git_dir, &later).unwrap();
+    assert_ne!(second, path, "a changed instant is a second delivery");
+    assert_eq!(crate::agent_queue::jobs(&repo.git_dir).len(), 2);
+
+    let condensed = drain_jobs(repo.git_dir.to_str(), LockWait::None);
+    assert_eq!(condensed.len(), 1, "one condense lands: {condensed:?}");
+    assert!(!path.exists(), "the first delivery is done and removed");
+    assert!(second.exists(), "the second has no proof of its own: owed");
+    let (_, _, state) = crate::agent_queue::retry_states(&repo.git_dir).remove(0);
+    assert_eq!(state.attempts, 0, "a typed defer spends no attempt");
+    let notes = crate::capture_queue::peek_errors(&repo.git_dir);
+    assert!(
+        notes.iter().any(|n| n.contains("lacks delivery proof")),
+        "and it says why: {notes:?}"
+    );
+}
+
+/// R1: a delivery of the final condense found again **after** it landed — the
+/// same context republished, as a hook retried by its client would — is
+/// discharged by its fact: the exact-context completion and the checkpoint
+/// it names exist, so the file is removed, no second checkpoint is minted and
+/// no attempt is spent. (L-5's turn seal joins this rule with its own job.)
+#[test]
+fn a_seal_or_condense_job_found_after_the_final_archive_is_discharged_by_its_fact() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, path) = queue_session_end(checkout.path(), "s-again");
+    let (_, job) = crate::agent_queue::read_job(&path).unwrap();
+    let condensed = drain_jobs(repo.git_dir.to_str(), LockWait::None);
+    assert_eq!(condensed.len(), 1, "{condensed:?}");
+    assert!(!path.exists());
+    let tip = |repo: &rift_git::RepoPaths| {
+        std::process::Command::new("git")
+            .args(["rev-parse", "refs/heads/rift/checkpoints/v1"])
+            .current_dir(&repo.work_tree)
+            .output()
+            .unwrap()
+            .stdout
+    };
+    let before = tip(&repo);
+
+    let again = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();
+    assert_eq!(again, path, "the same context is the same file");
+    assert!(drain_jobs(repo.git_dir.to_str(), LockWait::None).is_empty());
+    assert!(!again.exists(), "discharged by its fact, not left owed");
+    assert_eq!(tip(&repo), before, "no second checkpoint");
+    assert!(crate::agent_queue::retry_states(&repo.git_dir).is_empty());
 }

@@ -501,6 +501,13 @@ fn finalize_idle_session(ctx: &SweepCtx<'_>, cache: &SessionCache, sweep: &mut S
     };
     sweep.condensed_checkpoints.push(checkpoint);
     if mark_swept_condensed(ctx, cache) {
+        // The final archive landed and the session closed: what it left
+        // behind goes now, never on a turn seal or an interval (§4.3).
+        let _ = crate::family::run_state::cleanup_session(
+            &crate::family::run_state::sessions_dir(&ctx.repo.git_dir),
+            &super::family_state::family_state_dir(&ctx.repo.common_dir),
+            &id,
+        );
         sweep.finalized.push(id);
     } else {
         sweep.defer(id, DeferCause::DoneMarkFailed);

@@ -266,13 +266,15 @@ mod tests {
         let initial = crate::agent_queue::jobs(&repo.git_dir);
         assert_eq!(initial.len(), 1);
         let owner = crate::capture_queue::acquire_owner(&repo.git_dir).unwrap();
-        assert!(crate::agent_queue::record_failure_owned(
+        let state = crate::agent_queue::record_failure_owned(
             &initial[0].0,
             &initial[0].1,
             "fixture execution failure",
-            &owner
+            &owner,
+            1,
         )
-        .unwrap());
+        .unwrap();
+        assert!(!state.parked && state.attempts == 1, "kept, due later");
         let retained = std::fs::read(&initial[0].0).unwrap();
         journal_once(&repo, kind(100), 100).unwrap();
         assert_eq!(
