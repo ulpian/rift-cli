@@ -57,7 +57,7 @@ pub use leaves::{
     ShardLeafBytes, SpillLeafBytes, TaskLeafBytes,
 };
 pub use originals::{ArchivedOriginal, OriginalState, ORIGINALS_DIR, ORIGINAL_SUFFIX};
-pub use segments::{Segments, TranscriptBody};
+pub use segments::{CarriedPart, SegmentPart, Segments, TranscriptBody};
 pub use spills::{ArchivedSpill, SpillState, SPILLS_DIR, SPILL_SUFFIX};
 pub use spool::{parse_spool_record, SpoolHeader, SPOOL_RECORD_VERSION};
 pub use tasks::{TaskProvenance, TaskTranscriptState, TaskWorktree};

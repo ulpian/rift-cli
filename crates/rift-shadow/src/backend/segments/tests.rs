@@ -92,3 +92,25 @@ fn the_writer_takes_every_part_through_the_durable_door() {
     // content.redacted + transcript.compact.jsonl + two parts.
     assert_eq!(n.writer().durable_count(), 4);
 }
+
+#[test]
+fn a_carried_part_enters_the_tree_by_its_oid_and_writes_no_blob() {
+    let cut = DOC.iter().position(|b| *b == b'\n').unwrap() + 1;
+    let (head, tail) = DOC.split_at(cut);
+    let carried = CarriedPart::verified(git_blob_oid(head), head.to_vec()).unwrap();
+    assert!(CarriedPart::verified(git_blob_oid(tail), head.to_vec()).is_none());
+    let mut pair = transcript_of(DOC);
+    pair.full =
+        TranscriptBody::Segments(Segments::carrying(vec![carried], redacted_of(tail)).unwrap());
+    let mut a = archive();
+    a.transcript = Some(pair);
+    a.checkpoint_id = a.derived_checkpoint_id().unwrap();
+    let n = NativeBackend::in_memory();
+    n.archive_checkpoint(&a).unwrap();
+    // content.redacted + transcript.compact.jsonl + the one new part.
+    assert_eq!(n.writer().durable_count(), 3);
+    assert_eq!(
+        resolved(&a.artifact_map(), "transcript.jsonl").unwrap(),
+        DOC
+    );
+}

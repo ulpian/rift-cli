@@ -43,6 +43,7 @@ pub mod shard_fixture;
 pub mod soak;
 pub mod transcript;
 pub mod turn_boundary;
+pub mod turn_seal;
 
 pub use artifact_bridge::{
     ingest_dialect, ingest_from_substrate, BridgeReport, RefusedShard, CHECKPOINT_BRANCH,
