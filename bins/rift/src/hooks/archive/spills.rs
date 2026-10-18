@@ -245,7 +245,7 @@ fn spill(scope: &SpillScope<'_>, id: String, address: &str, budget: &mut u64) ->
 /// The address as a path, when it names a file directly inside
 /// `<session dir>/tool-results` by a safe stem and the client's suffix, spelled
 /// canonically — the check is on the spelling, before anything is opened.
-fn contained(session_dir: &Path, address: &str) -> Option<PathBuf> {
+pub(crate) fn contained(session_dir: &Path, address: &str) -> Option<PathBuf> {
     if address.len() > MAX_ADDRESS_BYTES || address.contains('\0') {
         return None;
     }

@@ -96,6 +96,18 @@ impl<'a> TaskSources<'a> {
     }
 }
 
+/// Agent id → the tool-use id that spawned it, for every spawn `transcript`
+/// records, read by the same index the archive matches files with: a
+/// structured result before a text one. The completeness audit asks it which
+/// subagents a sealed prefix owes the shard.
+pub(crate) fn spawned_agents(transcript: &[u8]) -> BTreeMap<String, String> {
+    let mut index = SpawnIndex::default();
+    index.scan(transcript);
+    let mut spawned = index.by_text;
+    spawned.extend(index.by_agent);
+    spawned
+}
+
 impl SpawnIndex {
     /// Index every spawn and spawn result one transcript records. Only lines
     /// that can carry one are parsed.
@@ -211,13 +223,13 @@ fn candidates(src: &TaskSources<'_>, main: Option<&Path>) -> Vec<Candidate> {
 }
 
 /// `<dir of the session transcript>/<session id>/subagents`.
-fn subagents_dir(main: &Path, session_id: &str) -> Option<PathBuf> {
+pub(crate) fn subagents_dir(main: &Path, session_id: &str) -> Option<PathBuf> {
     Some(main.parent()?.join(session_id).join("subagents"))
 }
 
 /// The `agent-<id>.jsonl` files under `dir`, by agent id. Any other entry,
 /// and an id that could not name a subtree, is left out.
-fn list_subagent_files(dir: &Path) -> Vec<(String, PathBuf)> {
+pub(crate) fn list_subagent_files(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };

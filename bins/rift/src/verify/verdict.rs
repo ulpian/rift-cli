@@ -59,6 +59,11 @@ pub(crate) struct VerifySummary {
     pub(crate) source: &'static str,
     /// The worst finding.
     pub(crate) verdict: Verdict,
+    /// What the client still holds against what the newest shard of each
+    /// session sealed. Reported beside the verdict and never folded into it:
+    /// a finding here is about evidence the shard never had, which no hash
+    /// can convict, and the exit code stays the verdict's.
+    pub(crate) completeness: super::completeness::CompletenessSummary,
 }
 
 impl VerifySummary {

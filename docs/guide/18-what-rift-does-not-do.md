@@ -20,6 +20,12 @@ costs more than it buys.
   ([08](08-cost-and-savings.md))
 - **Two instruments disagree on redaction cost.** Re-measure; never quote an
   absolute figure across sessions.
+- **OpenCode and Ollama give Rift no transcript to seal:** OpenCode names no
+  transcript file on its hooks and keeps its sessions in its own store, readable
+  only through `opencode export`, and Ollama is a model runner that records no
+  conversation for the programs that call it, so Rift captures neither and does
+  not rebuild one from hook events.
+  ([10](10-agent-integrations.md#106-the-six-that-are-refused-and-exactly-why))
 
 ## 18.2 Recall and serving
 

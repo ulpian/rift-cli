@@ -77,7 +77,10 @@ planted under an undeclared name changed no compared byte.
 | `metadata.json` | header: sessions, recorded Merkle root, `canon_version`, task list, token rollups |
 | `redaction_report.json` | counts only — what redaction removed, never what |
 | `transcript.jsonl`, `transcript.compact.jsonl` | the transcript, full and compacted |
-| `sessions/<index>/metadata.json`, `tasks/<tool-use-id>/…` | per-session headers (2+ sessions); one subtree per subagent |
+| `sessions/<index>/metadata.json` | per-session headers (2+ sessions) |
+| `tasks/<tool-use-id>/{metadata.json, transcript.jsonl, transcript.compact.jsonl}` | one subtree per subagent, sealed through the same gate; its metadata names the agent, the spawn (`matched`, or `unmatched` when no dispatching call was found), the subagent type, the parent session, worktree provenance, start and end instants, and the `bytes` and `sha256` of the sealed transcript — or `task_transcript`: `missing`, `unreadable` or `unsealed` |
+| `tool-results/<tool-use-id>.txt` | a tool result the client spilled to a file of its own, redacted and sealed beside the transcript that names it (a subagent's inside its `tasks/<id>/`) |
+| `tool-originals/<tool-use-id>.json` | the original of a tool result a Rift hook rewrote, sealed beside the transcript whose line holds the delivered result |
 | `sessions.jsonl` | each covered session's native id and agent token |
 | `tool_calls.jsonl` | each read's call id, tool, path, content hash, token count, and when held its instant, turn, blob oid, tokenizer |
 | `tool_results.jsonl` | measured tool results, the search half of the savings denominator |
@@ -91,6 +94,16 @@ The compact transcript is deterministic, with no model at capture time: a summar
 would be an opinion, a compaction is arithmetic, and a verifier can re-derive it. The
 redaction report is re-verified on every `rift verify`, and the artifact bridge
 refuses a checkpoint whose report is missing.
+
+**The transcript is redacted-complete.** `transcript.jsonl` is the client's own
+file at archive, line for line through the gate: every prompt, every assistant
+text and thinking block, every tool call's full input and every tool result in
+full — `full.jsonl` beside it is the canonical-event log, not the transcript.
+"Complete" means redacted-complete, not byte-identical, for two reasons kept by
+design: a secret never reaches durable storage, so a masked value is the record
+and not a loss; and a thinking block's `signature` is an opaque replay token
+rather than content, so the gate masks it as high-entropy text while the
+thinking text itself is kept.
 
 Fallback counts live in `redaction_report.json` for the parent transcript pair,
 with a checked mirror in parent metadata, and in each task's metadata for that
@@ -116,6 +129,25 @@ must cover exactly the header's sessions, with no duplicates or fallback agent.
   would guess the agent.
 - **Tool results:** a search resolves to no file, so no `tool_calls.jsonl` line
   (path and content hash required) can hold it.
+- **Spills:** a result over the client's inline threshold leaves the transcript a
+  preview and a file address, so the named file is read at archive, up to 4 MiB
+  per file and 32 MiB per transcript, through the same gate and packs. Only
+  addresses the transcript names are read, each contained in the session's own
+  `tool-results` directory with no link followed. The `spills` manifest on the
+  metadata beside the transcript records each body's digest and size, or one
+  closed word — `spill_truncated`, `spill_missing`, `spill_unreadable`,
+  `spill_refused`, `spill_unsealed`, `spill_over_budget` — never silence, since
+  the manifest is also the reader's enumeration and an absence it did not record
+  would be indistinguishable from "there was none".
+- **Originals:** a hook may deliver a rewrite in place of a tool result only once
+  the original is spooled — redacted on the hook path into a per-session spool
+  under `rift-family/spool/` in the family's common dir, where a subagent in a
+  temporary worktree and its parent's archive agree. Every archive re-seals the
+  whole spool beside the transcript whose line records the call, with an
+  `originals` manifest naming the form, the replaced ranges, the line and the
+  body's digest, or `original_line_absent`, `original_spool_corrupt` or
+  `original_unsealed` ([§4.6](04-redaction-and-secrets.md#46-the-json-aware-walker)
+  has the envelope rule). The transcript itself stays the client's bytes.
 - **Worktrees** ([§9](09-worktrees-and-families.md)): only agent-hook observations
   freeze; `commit`, `attach` and `import` record a verb's act after its archive, and
   freezing one would mint a new checkpoint for an unchanged session. The head (every
@@ -234,7 +266,7 @@ what the next verify refuses.
 
 ## 5.7 What `rift verify` actually checks
 
-Three parts, ordered because an earlier failure makes the later ones meaningless.
+Four parts, ordered because an earlier failure makes the later ones meaningless.
 
 **First — the order is complete, both directions.** Every checkpoint on the
 branch has one chain position and every position names a checkpoint on it.
@@ -252,9 +284,17 @@ exist, parse and be valid; (2) **recorded-leaf recompute** for a checkpoint that
 writes its own leaf list (the older dialect's `merkle_leaf.txt`); the rest is
 native-only, skipped for checkpoints read from the pre-Rift ref — gated on the
 **dialect** (which ref it came from), never on what the checkpoint says about itself,
-because where it *is* cannot be rewritten by editing it; (3) **subagent subtrees**:
-directory name and header `tool_use_id` agree, and the parent's token rollup is
-**re-summed** from the leaf-bound headers (a stripped rollup hides spend); (4) **strict Merkle**: re-derive the root with
+because where it *is* cannot be rewritten by editing it; (3) **subagent subtrees,
+spills and originals**: directory name and header `tool_use_id` agree, a collected
+subtree's recorded `bytes` and `sha256` describe the `transcript.jsonl` beside it,
+and the parent's token rollup is **re-summed** from the leaf-bound headers (a
+stripped rollup hides spend); each body a `spills` or `originals` manifest claims
+is in the shard at its recorded digest and size, named by path when not — the
+root already refuses an edited body, this is what says *which*; a delivered
+result is held to its form's rendering of the sealed original, a Rift marker
+line with no sealed original is `original_missing` (structure: what the shard
+lacks is a capture), and a held substitution's replaced lines are counted
+`held_unchecked`, reported and never passed; (4) **strict Merkle**: re-derive the root with
 *the function the writer calls*, so they cannot drift (vacuous-root exception:
 §5.11); (5) **checkpoint id**: re-derive the accepted ids for the declared
 `canon_version` and require the checkpoint's own path to be one. A missing artifact
@@ -268,6 +308,29 @@ skip it. And it **may not seed what it compares**: filling an empty projection f
 `source` and comparing to `source` would make every fresh repository "verify clean";
 seeding is allowed only on the fixture path, which says so.
 
+**Fourth — what the client still holds.** Hash and Merkle passes cannot see
+content that never entered a shard: a transcript sealed short is a shard whose
+every leaf matches. So for the newest checkpoint naming each session (an older
+shard's transcript is a prefix of the newer one), verify re-redacts the client's
+transcript file with the repository's current packs where the archive found it
+and compares it with the sealed bytes line by line, reporting one closed word per
+source: `complete`, `client_file_gone`, `client_appended_after_seal` (the sealed
+bytes are a strict prefix — the client wrote on, not a capture omission),
+`mismatch`, `not_sealed` (the client holds a file the shard owed and has no
+artifact for — a main transcript the session cache names, or a subagent or spill
+the sealed prefix records; missing is reported apart from corrupt), or
+`unverifiable` with a reason — `no_address`, `packs_changed` (a
+different pack list makes the comparison meaningless rather than a finding),
+`over_budget`, `unreadable`. Subagent transcripts and spills are audited the same
+way; originals are not, since once sealed no client evidence of the original
+remains. The read is bounded in bytes and sources, never in time: 32 MiB per
+file, 128 MiB and 256 sources per run, each file opened read-only and once. The
+addresses are asked of every family member's run state, because a session cache
+belongs to the member whose hooks captured the session while the chain is the
+family's. **None of these words moves the exit code**: they describe evidence the
+shard never held, so a mismatch is reported, not convicted. `rift doctor` prints
+the same counts through the same function.
+
 | Exit | Verdict | Meaning |
 |---|---|---|
 | 0 | OK | everything checked and agreed |
@@ -276,8 +339,9 @@ seeding is allowed only on the fixture path, which says so.
 | 5 | STRUCTURE | incomplete, not falsified |
 | 70 | internal | projection could not be opened or migrated — never a silent 0 |
 
-A run reports its **worst** finding (tamper over redaction over structure).
-Exit 3 is also what `rift verify` returns outside a repository family. `rift verify --quiet`
+A run reports its **worst** finding (tamper over redaction over structure); the
+`completeness:` line after it changes none of these codes. Exit 3 is also what
+`rift verify` returns outside a repository family. `rift verify --quiet`
 suffices in CI.
 
 ---

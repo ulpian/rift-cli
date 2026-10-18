@@ -16,6 +16,7 @@
 //! in the order the legs print.
 
 mod capture;
+mod completeness;
 mod family;
 mod git_hooks;
 pub(crate) mod health;
@@ -37,6 +38,7 @@ use capture::{
     doctor_capture_chain, doctor_shadow_refs, doctor_soak, doctor_stale_rewrite_toml,
     doctor_turn_boundaries, doctor_watermark,
 };
+use completeness::doctor_capture_completeness;
 use family::doctor_family_identity;
 use git_hooks::{doctor_binary_of_record, doctor_hooks_target};
 use health::doctor_integration_health;
@@ -125,6 +127,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("basis_store", doctor_basis_store(root));
     report.leg("original_spool", doctor_original_spool(root));
     report.leg("redaction_fallback", doctor_redaction_fallback(root));
+    report.leg("completeness", doctor_capture_completeness(root));
     report.leg("recall_set_asides", doctor_recall_set_asides(root));
     report.leg("sibling_tool_hooks", doctor_sibling_tool_hooks(root));
     report.json.insert("fix".to_owned(), serde_json::json!(fix));

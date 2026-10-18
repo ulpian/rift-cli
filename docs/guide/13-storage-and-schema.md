@@ -345,6 +345,11 @@ a READ_ONLY open); outline bindings until the next counted read or condense bind
 inherited runs, family-held declines and matched lines, which are counted
 (`window_rows_inherited`, `window_rows_family_held`, `window_rows_matched`) but written to no
 `n_window_row`, whose kinds are sealed by its migration ([§6.12](06-recall.md#612-what-a-context-window-already-holds)).
+Nor can any rebuild restore content that never entered a shard — a transcript
+sealed short, a spilled result gone before its archive: every leaf of such a
+shard matches, and only `rift verify`'s completeness audit against the client's
+own files can say so
+([§5.7](05-ledger-and-verification.md#57-what-rift-verify-actually-checks)).
 
 **Governance records are not rebuildable.** Serve audit rows, outcome labels,
 evaluation runs and key metadata record what this machine did, not what git

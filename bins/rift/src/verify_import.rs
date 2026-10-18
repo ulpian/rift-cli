@@ -42,17 +42,24 @@ pub(crate) fn verify_outcome(root: &Path) -> Outcome {
 }
 
 /// The verdict as an outcome, each carrying its own exit code.
+///
+/// The completeness audit rides along in every arm — in the line after the
+/// verdict's own facts and in the JSON under `completeness` — and moves the
+/// exit code in none: its words are about evidence the shard never held, and
+/// a mismatch there is reported, not convicted.
 fn verdict_outcome(summary: &verify::VerifySummary) -> Outcome {
     use verify::Verdict;
     let base = format!(
-        "re-derived {} checkpoint(s) from {}; {} shard(s) redaction/Merkle-checked{}",
+        "re-derived {} checkpoint(s) from {}; {} shard(s) redaction/Merkle-checked{}; \
+         completeness: {}",
         summary.checkpoints,
         summary.source,
         summary.shards_checked,
-        verify_exemptions(summary)
+        verify_exemptions(summary),
+        summary.completeness.human()
     );
-    match &summary.verdict {
-        Verdict::Ok => Outcome::coded(
+    let (code, human, mut json) = match &summary.verdict {
+        Verdict::Ok => (
             exit::OK,
             format!("verify: OK — {base}"),
             serde_json::json!({ "verify": "ok", "checkpoints": summary.checkpoints,
@@ -61,22 +68,26 @@ fn verdict_outcome(summary: &verify::VerifySummary) -> Outcome {
                                 "pre_rift_shards": summary.pre_rift_shards,
                                 "held_unchecked": summary.held_unchecked }),
         ),
-        Verdict::Tamper(d) => Outcome::coded(
+        Verdict::Tamper(d) => (
             1,
             format!("verify: TAMPER — {d} ({base})"),
             serde_json::json!({ "verify": "tamper", "detail": d }),
         ),
-        Verdict::Redaction(d) => Outcome::coded(
+        Verdict::Redaction(d) => (
             3,
             format!("verify: REDACTION — {d} ({base})"),
             serde_json::json!({ "verify": "redaction", "detail": d }),
         ),
-        Verdict::Structure(d) => Outcome::coded(
+        Verdict::Structure(d) => (
             5,
             format!("verify: STRUCTURE — {d} ({base})"),
             serde_json::json!({ "verify": "structure", "detail": d }),
         ),
+    };
+    if let Some(doc) = json.as_object_mut() {
+        doc.insert("completeness".to_owned(), summary.completeness.to_json());
     }
+    Outcome::coded(code, human, json)
 }
 
 /// Every exemption is named in the line, never merely counted in the JSON:

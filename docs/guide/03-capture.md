@@ -105,6 +105,14 @@ groups are preserved), **symlinks are refused**, and **a tracked file is never
 written** — Antigravity's `.agents/hooks.json` is commonly committed, so enabling it
 owns only `.rift/agents/<agent>.json` and adoption verifies the tracked file.
 
+Antigravity names its transcript on every hook as `transcriptPath` — the client's
+`transcript_full.jsonl`; the bridge copies only that address into the session
+cache, nothing on the hook path opens the file, and the archive seals it like
+every other agent's. Its records are not the shapes the compactor reduces, so
+for it the full copy is the record and the compaction saves little. The same holds
+for Codex: its rollout's records are not those shapes either, its compact form is
+nearly empty, and the full rollout sealed beside it is the record — nothing is lost.
+
 ### The wire
 
 A hook reads **one JSON object from stdin — never from arguments**, which leak into
@@ -234,7 +242,12 @@ and a chain entry behind it. A shard holds its metadata, the opted-in working-tr
 capture after the gate, `redaction_report.json` (required before a shard is
 importable or projectable), the transcript and its compaction, the tool calls
 including files read, and four mechanical digests; [05](05-ledger-and-verification.md)
-walks the anatomy.
+walks the anatomy. The sealed transcript is **redacted-complete**: everything the
+agent recorded or produced — prompts, assistant text and thinking, every tool
+call's full input, every tool result in full — with secrets and the opaque
+thinking signatures masked
+([§5.3](05-ledger-and-verification.md#53-anatomy-of-a-checkpoint) says why that,
+and not byte-identity, is the standard).
 
 An optional `turn_boundary_gaps.jsonl` records a checked repository/member recovery
 assertion. A genuine checkpoint session carries it; other subject session digests
@@ -242,11 +255,17 @@ create no sessions, usage, lifecycle or attribution facts. Its commitments descr
 source provenance, not destination paths, possession of old bytes or permission to
 retire queued work. It does not restore missing historical observations.
 
-**The compaction is deterministic, not a summary**: tool calls reduce to identifiers,
-file reads to handles, no model runs in capture, and the "intent and outcome" slot is
-your redacted prompt plus mechanical outcome facts. **Re-condensing an unchanged session is a no-op.** Each subagent gets its own subtree, its tokens roll up to the
-parent, and the parent's metadata enumerates the task ids so hiding one is detected,
-not merely absent.
+**The compaction is deterministic, not a summary**: in the *compact* transcript
+only, tool calls reduce to identifiers and tool results keep their shape and lose
+their payload (the full transcript beside it keeps every input and result), no
+model runs in capture, and the "intent and outcome" slot is your redacted prompt
+plus mechanical outcome facts. **Re-condensing an unchanged session is a no-op.**
+Each subagent gets its own subtree — its transcript found through the address its
+stop hook claimed or the client's `subagents/` listing, sealed through the same
+gate — its tokens roll up to the parent, and the parent's metadata enumerates the
+task ids so hiding one is detected, not merely absent. A tool result the client
+spilled to a file of its own is read at archive, redacted and sealed beside the
+transcript that names it, so the record holds the result and not its preview.
 
 The worker job that counts a read binds that file's outline (code or Markdown,
 redacted, policy-gated) into the recall projection

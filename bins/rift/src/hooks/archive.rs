@@ -20,7 +20,9 @@ use super::{now_ms, projection_db_at};
 
 pub(super) use self::outlines::bind_and_cache_outlines;
 use self::outlines::bind_session_outlines;
+pub(crate) use self::spills::contained;
 use self::tasks::TaskSources;
+pub(crate) use self::tasks::{list_subagent_files, spawned_agents, subagents_dir};
 
 /// One archive of one commit, with what its caller opened for it: every step
 /// after the open reads these rather than reopening them.

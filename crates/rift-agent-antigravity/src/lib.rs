@@ -426,7 +426,10 @@ impl AgentAdapter for AntigravityAdapter {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         // Future-compatible: accept an explicit documented-looking runtime
-        // field if Antigravity adds it, but never inspect transcript/private DB.
+        // field if Antigravity adds it. The hook path reads neither the
+        // transcript nor the client's private DB — nothing a hook decides with
+        // may open either; the archive, off the decision path, seals the
+        // transcript the payload's `transcriptPath` names.
         let runtime_model = native
             .get("model")
             .and_then(serde_json::Value::as_str)
