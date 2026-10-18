@@ -12,12 +12,12 @@
 //! callers.
 
 #[cfg(unix)]
-mod cache;
+pub(in crate::capture_recovery) mod cache;
 #[cfg(all(test, unix))]
 pub(in crate::capture_recovery) mod fixtures;
 #[cfg(all(test, unix))]
 mod query_tests;
-mod rows;
+pub(in crate::capture_recovery) mod rows;
 #[cfg(all(test, unix))]
 mod tests;
 

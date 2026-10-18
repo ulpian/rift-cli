@@ -13,6 +13,7 @@ use std::ffi::OsStr;
 use cap_std::fs::File;
 use sha2::{Digest as _, Sha256};
 
+use super::carrier::QueuedCondense;
 use super::codec::{self, Shape, MAX_BYTES};
 use super::files::{self, EntryKind, PhysicalIdentity};
 use super::hold::ReadyQueue;
@@ -69,6 +70,17 @@ pub(crate) struct Source {
 pub(crate) struct Inventory {
     pub(crate) counts: Counts,
     pub(crate) sources: Vec<Source>,
+    /// The queued Condense tickets of this work tree, still owed to their own
+    /// executor: read here only so a carrier can be chosen among them.
+    pub(crate) condenses: Vec<CondenseTicket>,
+}
+
+/// One queued Condense ticket: its name, its delivery identity and its facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CondenseTicket {
+    pub(crate) name: String,
+    pub(crate) context_id: String,
+    pub(crate) job: QueuedCondense,
 }
 
 /// One direct entry after classification by type and name.
@@ -246,6 +258,7 @@ pub(crate) fn enumerate_with(
         total: 0,
         aliases: BTreeSet::new(),
         sources: Vec::new(),
+        condenses: Vec::new(),
     };
     for (index, name) in names.iter().enumerate() {
         let slot = u32::try_from(index).map_err(|_| Refusal::EntriesOverflow);
@@ -274,6 +287,7 @@ pub(crate) fn enumerate_with(
     Ok(Inventory {
         counts,
         sources: reader.sources,
+        condenses: reader.condenses,
     })
 }
 
@@ -288,6 +302,7 @@ struct Reader<'q, 'h> {
     total: u64,
     aliases: BTreeSet<(u64, u64)>,
     sources: Vec<Source>,
+    condenses: Vec<CondenseTicket>,
 }
 
 impl Reader<'_, '_> {
@@ -315,7 +330,10 @@ impl Reader<'_, '_> {
         let decoded = codec::decode(os_name, &read.bytes).map_err(|_| Refusal::TicketMalformed)?;
         let facts = match codec::recovery_gate(&decoded, self.queue.plan().work_tree()) {
             Ok(Shape::Boundary(facts)) => facts,
-            Ok(Shape::Other) => return Ok(None),
+            Ok(Shape::Other) => {
+                self.retain_condense(name, &read.bytes, &decoded)?;
+                return Ok(None);
+            }
             Err(_) => return Err(Refusal::TicketShape),
         };
         let identity = files::physical_identity(&read.metadata);
@@ -338,6 +356,34 @@ impl Reader<'_, '_> {
             snapshot: facts.snapshot,
             file: read.file,
         }))
+    }
+
+    /// Keep a queued Condense's facts and digests; any other job is skipped.
+    fn retain_condense(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+        decoded: &codec::Decoded,
+    ) -> Result<(), Refusal> {
+        let Some(job) = codec::condense(decoded, self.queue.plan().work_tree()) else {
+            return Ok(());
+        };
+        let context_sha256 =
+            codec::context_sha256(decoded).map_err(|_| Refusal::TicketMalformed)?;
+        let context_id = crate::capture_queue::delivery::context_id(&decoded.full)
+            .map_err(|_| Refusal::TicketMalformed)?;
+        self.condenses.push(CondenseTicket {
+            name: name.to_owned(),
+            context_id,
+            job: QueuedCondense {
+                agent: job.agent,
+                session_id: job.session_id,
+                repo_id: job.repo_id,
+                context_sha256,
+                ticket_sha256: format!("{:x}", Sha256::digest(bytes)),
+            },
+        });
+        Ok(())
     }
 }
 
