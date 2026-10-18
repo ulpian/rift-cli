@@ -421,3 +421,43 @@ fn the_aggregate_ticket_budget_refuses_before_the_read_that_would_cross_it() {
         [(Refusal::AggregateOverflow, 1)].into_iter().collect()
     );
 }
+
+#[test]
+fn a_queued_condense_of_this_work_tree_is_retained_with_its_digests_and_another_members_is_not() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    let condense = |work_tree: std::path::PathBuf| AgentJob {
+        schema_version: 1,
+        work_tree,
+        queued_at_ms: 1_000,
+        attempts: 0,
+        kind: JobKind::Condense {
+            session_id: "n-1".into(),
+            agent: CLAUDE.into(),
+            repo_id: "repo".into(),
+        },
+    };
+    let path = crate::agent_queue::enqueue_in(
+        &queue_dir(&rig.fixture),
+        &condense(rig.fixture.work_tree.clone()),
+    )
+    .unwrap();
+    crate::agent_queue::enqueue_in(&queue_dir(&rig.fixture), &condense("/elsewhere".into()))
+        .unwrap();
+    let inventory = enumerate(&hold.agent_queue_namespace().unwrap()).unwrap();
+    assert_eq!(inventory.counts.understood_other, 2);
+    let [ticket] = inventory.condenses.as_slice() else {
+        panic!("exactly one condense of this work tree was expected");
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(ticket.name, path.file_name().unwrap().to_str().unwrap());
+    assert_eq!(
+        ticket.job.ticket_sha256,
+        format!("{:x}", Sha256::digest(&bytes))
+    );
+    assert_eq!(
+        (ticket.job.agent.as_str(), ticket.job.session_id.as_str()),
+        (CLAUDE, "n-1")
+    );
+    assert_eq!(ticket.context_id.len(), 64);
+}

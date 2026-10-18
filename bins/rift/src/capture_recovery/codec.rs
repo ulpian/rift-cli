@@ -179,6 +179,33 @@ pub(super) fn recovery_gate(decoded: &Decoded, work_tree: &Path) -> PinResult<Sh
     }))
 }
 
+/// The job a queued session-end Condense of this work tree names.
+pub(super) struct CondenseJob {
+    pub(super) agent: String,
+    pub(super) session_id: String,
+    pub(super) repo_id: String,
+}
+
+/// A queued Condense of the Plan's work tree, if the ticket is one: another
+/// job kind, or another member's condense, is never a carrier here.
+pub(super) fn condense(decoded: &Decoded, work_tree: &Path) -> Option<CondenseJob> {
+    let job: crate::agent_queue::AgentJob = serde_json::from_value(decoded.full.clone()).ok()?;
+    let crate::agent_queue::JobKind::Condense {
+        session_id,
+        agent,
+        repo_id,
+    } = job.kind
+    else {
+        return None;
+    };
+    let tree = decoded.full.get("work_tree").and_then(Value::as_str)?;
+    (Path::new(tree) == work_tree).then_some(CondenseJob {
+        agent,
+        session_id,
+        repo_id,
+    })
+}
+
 pub(super) fn is_git_oid(value: &str) -> bool {
     value.len() == 40
         && value

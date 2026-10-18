@@ -16,7 +16,7 @@ use crate::capture_recovery::files::{self, Namespace};
 
 /// Read and project `<native>.json` from the admitted sessions tree, charging
 /// the pass's cache budget for every byte the attempt cost, sentinel included.
-pub(super) fn read_projection(
+pub(in crate::capture_recovery) fn read_projection(
     sessions: &Namespace,
     native: &str,
     budget: &mut Budget,
