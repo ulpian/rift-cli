@@ -10,6 +10,8 @@
     )
 )]
 
+#[cfg(unix)]
+mod archive;
 mod codec;
 #[cfg(unix)]
 mod cut;
