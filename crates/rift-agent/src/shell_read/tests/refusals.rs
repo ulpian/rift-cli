@@ -3,7 +3,9 @@
 
 use crate::shell_read::{recognise, ShellSpan, MAX_CHAIN_READS};
 
-use super::{listing, read};
+use crate::ReadSpan;
+
+use super::{listing, read, read_of, reads_of};
 
 /// The shapes a shell would act on, each one refused.
 ///
@@ -75,7 +77,16 @@ fn a_composition_the_grammar_does_not_spell_is_left_alone() {
         "ls crates | head -n 5",
         "cat src/lib.rs |",
         "| cat src/lib.rs",
-        "cat src/lib.rs || cat src/main.rs",
+        "cat src/lib.rs ||",
+        "|| cat src/lib.rs",
+        "cat src/lib.rs ||| cat src/main.rs",
+        // A `||` after a peeled `cd` would put the fallback under a directory
+        // the shell may never have entered.
+        "cd crates && cat a.rs || cat b.rs",
+        "cd crates; cat a.rs || cat b.rs",
+        // A test of a file is no read, however it is spelled.
+        "test -f a.rs && cat a.rs",
+        "[ -f a.rs ] && cat a.rs",
         // A member that is not a read takes the line with it.
         "cat src/lib.rs && cargo build",
         "cat src/lib.rs && touch done",
@@ -440,4 +451,48 @@ fn a_control_character_in_a_bare_word_is_left_alone() {
         recognise("cat \u{e9}t\u{e9}.rs").is_some(),
         "a letter is a letter"
     );
+}
+
+/// **A read the line may never reach is counted, never coverage.** A search
+/// exits non-zero when nothing matched, which is no error, and an `&&` after
+/// it then skips the rest of its run; a member after a `||` runs only when
+/// the one before it failed. Either way the command line cannot say the
+/// read happened, so it is an unknown span — still on the list a caller
+/// decides the whole line by, never the read it records coverage from. A
+/// `;` runs what follows whatever came before, so it restores certainty.
+#[test]
+fn a_read_the_line_may_never_reach_is_never_coverage() {
+    for (command, unsure) in [
+        ("grep x a.rs && cat b.rs", "b.rs"),
+        ("rg x a.rs && cat b.rs", "b.rs"),
+        ("egrep x a.rs && sed -n '1,9p' b.rs", "b.rs"),
+        ("cat a.rs | grep x && cat b.rs", "b.rs"),
+        ("grep -n x a.rs | head -n 5 && cat b.rs", "b.rs"),
+        ("grep x a.rs && cat c.rs && cat b.rs", "b.rs"),
+        ("cd crates && grep x a.rs && cat b.rs", "crates/b.rs"),
+        ("cat a.rs || cat b.rs", "b.rs"),
+        ("cat a.rs || cat c.rs && cat b.rs", "b.rs"),
+        ("cat c.rs; grep x d.rs || cat b.rs", "b.rs"),
+    ] {
+        let span = reads_of(command)
+            .into_iter()
+            .find_map(|(path, span)| (path == unsure).then_some(span));
+        assert_eq!(span, Some(ReadSpan::Unknown), "{command:?} reads {unsure}");
+        assert_ne!(
+            read_of(command).map(|(path, _)| path),
+            Some(unsure.to_owned()),
+            "{command:?} grants {unsure} no coverage"
+        );
+    }
+    for command in [
+        "cat a.rs && cat b.rs",
+        "grep x a.rs; cat b.rs",
+        "cat a.rs || cat c.rs; cat b.rs",
+        "cat b.rs || cat a.rs",
+    ] {
+        let exact = reads_of(command)
+            .into_iter()
+            .any(|(path, span)| path == "b.rs" && span != ReadSpan::Unknown);
+        assert!(exact, "{command:?} still reads b.rs exactly");
+    }
 }
