@@ -32,6 +32,7 @@ mod order;
 mod originals;
 mod passes;
 mod projection;
+mod segments;
 mod source;
 mod spills;
 mod verdict;

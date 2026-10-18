@@ -10,6 +10,8 @@
 /// Strict checked repository recovery-audit artifact; unlike ordinary parsers,
 /// one invalid record refuses the whole stream.
 pub mod boundary_gaps;
+/// The segmented transcript layout and the one resolver that reads it whole.
+pub mod segments;
 mod window_journal;
 
 use rift_recall_types::checkpoint::{

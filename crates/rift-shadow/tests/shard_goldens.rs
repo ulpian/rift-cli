@@ -158,9 +158,11 @@ fn the_fixture_exercises_every_declared_artifact() {
     let present = rift_shadow::parity::boundary_gap_fixture_archive()
         .unwrap()
         .artifact_map();
+    let segmented = segmented_archive().artifact_map();
     let matched: BTreeSet<&str> = live
         .keys()
         .chain(present.keys())
+        .chain(segmented.keys())
         .filter_map(|p| is_declared(p).map(|row| row.path))
         .collect();
     let missing: Vec<&str> = SHARD_ARTIFACTS
@@ -172,6 +174,29 @@ fn the_fixture_exercises_every_declared_artifact() {
         missing.is_empty(),
         "the maximal fixture writes nothing for these declared artifacts: {missing:?}"
     );
+}
+
+/// The maximal fixture with every transcript it carries re-cut into one part
+/// per line — the layout a per-turn seal writes, which the frozen maximal
+/// fixture (pinned before L-5) never exercises. Each line passes the gate
+/// again, which is the identity on gate output for the builtin packs.
+fn segmented_archive() -> rift_shadow::backend::CheckpointArchive {
+    use rift_shadow::backend::{ArchivedTranscript, Segments, TranscriptBody};
+    let recut = |pair: &mut ArchivedTranscript| {
+        let lines = pair.full.as_slice().split_inclusive(|b| *b == b'\n');
+        let seal = |line: &[u8]| {
+            let raw = rift_core::SecretBytes::new(line.to_vec());
+            rift_shadow_redact::redact(&raw).unwrap().redacted
+        };
+        let parts = lines.map(seal).collect();
+        pair.full = TranscriptBody::Segments(Segments::new(parts).unwrap());
+    };
+    let mut archive = every_artifact_archive().expect("the maximal fixture builds");
+    archive.transcript.iter_mut().for_each(recut);
+    for task in &mut archive.tasks {
+        task.transcript.iter_mut().for_each(recut);
+    }
+    archive
 }
 
 /// **The planted-garbage case, on the set the writer actually produced.** An

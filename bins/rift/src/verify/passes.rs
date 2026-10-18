@@ -113,6 +113,9 @@ pub(super) fn shard_passes(reader: &impl SubstrateReader) -> Result<ShardPasses>
             continue;
         }
         native_shard_passes(reader, id, report_bytes.as_deref(), None, &mut found)?;
+        for v in super::segments::segments_pass(&|name| reader.read_artifact(id, name), id)? {
+            found.worst.keep_worse(v);
+        }
     }
     Ok(found)
 }
